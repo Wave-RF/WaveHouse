@@ -51,6 +51,35 @@ func CanonicalizeTimestamps(schema *TableSchema, data map[string]any) {
 	}
 }
 
+// TimeParser returns the mapping from one rendering of this DateTime/DateTime64
+// column's value to the instant ClickHouse would store: the same grammar and
+// zone rule ingest canonicalization applies (parseTimestamp), the same range
+// guard (rewritable — an out-of-range operand, which insert-time saturation
+// would move, is refused), truncated to the column's precision exactly like the
+// canonical wire form. nil when the column isn't a timestamp column with a
+// resolved spec; such columns keep byte-equality semantics on the stream. The
+// stream row-filter uses it (policy.ColumnSpec.ParseTime) so a filter constant
+// in any accepted spelling — zone-less read in the column's zone, RFC 3339,
+// Unix seconds — and the canonicalized payload compare as instants (#381),
+// through one grammar that can't drift from ingest's.
+func (c *Column) TimeParser() func(v any) (time.Time, bool) {
+	spec := c.tsSpec
+	if spec == nil {
+		return nil
+	}
+	unit := time.Second
+	for range spec.precision {
+		unit /= 10
+	}
+	return func(v any) (time.Time, bool) {
+		t, err := parseTimestamp(v, spec)
+		if err != nil || !spec.rewritable(t) {
+			return time.Time{}, false
+		}
+		return t.Truncate(unit), true
+	}
+}
+
 // timestampSpec is a timestamp column's precomputed canonicalization inputs:
 // sub-second precision (0 for DateTime), the column kind (ClickHouse reads
 // numbers and Unix-string fractions differently for DateTime64), and the zone

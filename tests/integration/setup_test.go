@@ -312,7 +312,7 @@ func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discover
 	js := embeddedMQ.JetStream()
 
 	policyStore := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
-	streamHub := stream.NewHub(policyStore, nil)
+	streamHub := stream.NewHub(policyStore, registry, nil)
 
 	deps := api.Dependencies{
 		Ingest: api.NewIngestHandler(registry, embeddedMQ, logger),

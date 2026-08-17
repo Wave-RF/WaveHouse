@@ -28,7 +28,8 @@ export type {
   Database,
   // DLQ
   DLQStats,
-  FetchOptions,
+  // HTTP
+  FetchLike,
   // Query
   FilterOp,
   // Ingest
@@ -38,10 +39,12 @@ export type {
   ParamDef,
   // Pipes
   Pipe,
+  PipeRequestOptions,
   // Policy
   Policy,
   PolicyFilter,
   QueryFilter,
+  RequestOptions,
   Result,
   RolePermissions,
   Schemas,

@@ -8,7 +8,7 @@ import (
 
 func TestSubscriber_SendDeliversThenDropsWhenFull(t *testing.T) {
 	t.Parallel()
-	sub := newSubscriber(1) // cap-1 so the second Send has nowhere to go
+	sub := newSubscriber(1, nil) // cap-1 so the second Send has nowhere to go
 	frame := Frame{Kind: KindKeepalive, Data: []byte(":\n\n")}
 
 	// The cap-1 queue takes the first frame; the second has nowhere to go, so it's
@@ -29,7 +29,7 @@ func TestSubscriber_SendDeliversThenDropsWhenFull(t *testing.T) {
 
 func TestSubscriber_EvictedIsOpenUntilClosed(t *testing.T) {
 	t.Parallel()
-	sub := NewSubscriber()
+	sub := NewSubscriber(nil, nil)
 
 	// The eviction seam is inert until the slow-consumer follow-up closes it: the
 	// channel stays open, so a non-blocking read finds nothing.

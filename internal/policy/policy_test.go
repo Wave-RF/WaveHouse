@@ -1,7 +1,9 @@
 package policy
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,6 +159,32 @@ func TestEvaluate_CheckClauses(t *testing.T) {
 	assert.True(t, perms.Allowed)
 	require.Contains(t, perms.CheckClauses, "org_id")
 	assert.Equal(t, "org-456", perms.CheckClauses["org_id"])
+}
+
+// TestEvaluate_CheckClauses_StaticLiteralTyped: a placeholder-free check
+// value is wrapped as LiteralValue — the marker that lets the ingest
+// comparison accept its numeric reading — while a claim-derived value (above)
+// stays a plain string, so a string-typed claim can never gain that reading.
+func TestEvaluate_CheckClauses_StaticLiteralTyped(t *testing.T) {
+	t.Parallel()
+	eqVal := "1.0"
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Insert: map[string]RolePermissions{
+					"user": {
+						Check: map[string]Filter{
+							"count": {Eq: &eqVal},
+						},
+					},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "user", "clicks", "insert", map[string]any{})
+	assert.True(t, perms.Allowed)
+	require.Contains(t, perms.CheckClauses, "count")
+	assert.Equal(t, LiteralValue("1.0"), perms.CheckClauses["count"])
 }
 
 func TestEvaluate_AggregationLimits(t *testing.T) {
@@ -393,25 +421,191 @@ func TestNavigateClaims(t *testing.T) {
 func TestResolveTemplate(t *testing.T) {
 	t.Parallel()
 	claims := map[string]any{
-		"org_id": "org-123",
-		"nested": map[string]any{"val": "deep"},
+		"org_id":   "org-123",
+		"nested":   map[string]any{"val": "deep"},
+		"tids":     []any{"a", "b"},
+		"is_admin": true,
+		"big":      json.Number("12345678901234567890"),
+		"price":    json.Number("1.0"),
+		"exp3":     json.Number("1e3"),
+		"huge":     json.Number("1e400"),
 	}
-	assert.Equal(t, "org-123", resolveTemplate("{{ jwt.org_id }}", claims))
-	assert.Equal(t, "deep", resolveTemplate("{{ jwt.nested.val }}", claims))
-	assert.Equal(t, "", resolveTemplate("{{ jwt.missing }}", claims))
-	assert.Equal(t, "literal", resolveTemplate("literal", claims))
+	tests := []struct {
+		name   string
+		tmpl   string
+		want   string
+		wantOK bool
+	}{
+		{"single claim", "{{ jwt.org_id }}", "org-123", true},
+		{"nested claim", "{{ jwt.nested.val }}", "deep", true},
+		{"missing claim", "{{ jwt.missing }}", "", false},
+		{"literal value", "literal", "literal", true},
+		// A template-free empty string is the policy author's literal value, not
+		// an unresolvable claim — it must stay ok so `_eq: ""` binds as written.
+		{"empty literal", "", "", true},
+		// One unresolvable claim poisons the whole template, even alongside a
+		// resolvable one or surrounding text.
+		{"mixed resolvable and missing", "{{ jwt.org_id }}-{{ jwt.missing }}", "org-123-", false},
+		// A structured claim value fails closed: an object usually means a
+		// dropped path segment ({{ jwt.nested }} for {{ jwt.nested.val }}), and
+		// its "map[…]"/"[…]" stringification is never a sensible bound value.
+		{"object claim fails closed", "{{ jwt.nested }}", "", false},
+		{"array claim fails closed", "{{ jwt.tids }}", "", false},
+		{"array claim with surrounding text fails closed", "t-{{ jwt.tids }}", "t-", false},
+		// Scalars stay bound as today — booleans stringify, and a json.Number
+		// keeps every digit (the >2^53 case float64 would silently round).
+		{"boolean claim binds", "{{ jwt.is_admin }}", "true", true},
+		{"large integer claim binds exactly", "{{ jwt.big }}", "12345678901234567890", true},
+		// Numeric claims bind in canonical decimal form, not the token's
+		// spelling — "1.0"/"1e3" error as TYPE_MISMATCH against a numeric
+		// column if bound verbatim. A magnitude only JSON can hold fails
+		// closed like any other unresolvable claim.
+		{"float spelling binds canonically", "{{ jwt.price }}", "1", true},
+		{"exponent spelling binds canonically", "{{ jwt.exp3 }}", "1000", true},
+		{"beyond-float64 number fails closed", "{{ jwt.huge }}", "", false},
+		// A static literal binds exactly as written even when it spells a JSON
+		// number: canonicalizing it here would move read filters on String
+		// columns (`_neq: "1.0"` on a version column would stop excluding rows
+		// storing "1.0"). The insert-check comparison accepts the numeric
+		// reading at compare time instead (CanonicalNumericLiteral).
+		{"numeric-spelled literal binds as written", "1.0", "1.0", true},
+		{"exponent-spelled literal binds as written", "1e400", "1e400", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := resolveTemplate(tt.tmpl, claims)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantOK, ok)
+		})
+	}
 }
 
 func TestResolveTemplate_NilClaims(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, "", resolveTemplate("{{ jwt.org_id }}", nil))
+	got, ok := resolveTemplate("{{ jwt.org_id }}", nil)
+	assert.Equal(t, "", got)
+	assert.False(t, ok)
 }
 
 func TestResolveTemplate_MultipleTemplates(t *testing.T) {
 	t.Parallel()
 	claims := map[string]any{"a": "1", "b": "2"}
-	result := resolveTemplate("{{ jwt.a }}-{{ jwt.b }}", claims)
+	result, ok := resolveTemplate("{{ jwt.a }}-{{ jwt.b }}", claims)
 	assert.Equal(t, "1-2", result)
+	assert.True(t, ok)
+}
+
+// TestCanonicalScalar pins the one rule every bound value flows through — claim
+// templates, _in elements, and the ingest check comparison alike. The canonical
+// form is exact at every width and precision (integers via big.Int, fractions
+// and exponents via canonicalDecimal — never a float64 round-trip, which would
+// collapse "1e-400" to "0" and round wide decimals onto their neighbors), and
+// a literal or exact form past the 100-digit bound fails closed in both
+// directions.
+func TestCanonicalScalar(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		v    any
+		want string
+		ok   bool
+	}{
+		{"string passes through", "org-123", "org-123", true},
+		{"empty string passes through", "", "", true},
+		{"boolean", true, "true", true},
+		{"go int from a hand-built claims map", 42, "42", true},
+		{"integer literal", json.Number("7"), "7", true},
+		{"negative integer literal", json.Number("-7"), "-7", true},
+		{"large integer exact at any width", json.Number("12345678901234567890"), "12345678901234567890", true},
+		{"float spelling of an integer", json.Number("1.0"), "1", true},
+		{"exponent spelling", json.Number("1e3"), "1000", true},
+		{"uppercase exponent spelling", json.Number("1E3"), "1000", true},
+		{"fraction kept", json.Number("1.5"), "1.5", true},
+		{"trailing fraction zeros trim", json.Number("2.50"), "2.5", true},
+		// The sign must survive the non-integer path: dropping it would bind a
+		// value on the other side of zero, so `_lt` against a claim of -1.5
+		// would match everything below 1.5 — this PR's whole bug class.
+		{"negative fraction keeps sign", json.Number("-2.50"), "-2.5", true},
+		{"negative exponent expands exactly", json.Number("25e-4"), "0.0025", true},
+		{"negative exponent keeps sign through the 0. prefix", json.Number("-25e-4"), "-0.0025", true},
+		{"high-precision fraction stays exact", json.Number("0.1000000000000000000001"), "0.1000000000000000000001", true},
+		{"wide decimal stays exact", json.Number("12345678901234567890.5"), "12345678901234567890.5", true},
+		{"negative zero folds to zero", json.Number("-0.0"), "0", true},
+		{"underflow has no canonical form", json.Number("1e-400"), "", false},
+		{"overflow has no canonical form", json.Number("1e400"), "", false},
+		{"negative overflow has no canonical form", json.Number("-1e400"), "", false},
+		{"wide finite magnitude has no canonical form", json.Number("1.5e200"), "", false},
+		// A zero mantissa reaches the exponent bound before anything else can
+		// reject it — the exact-form length check can't (every spelling of zero
+		// is one character), and that bound is what stops a short literal from
+		// allocating a gigabyte-scale expansion before the length check runs.
+		{"zero mantissa with out-of-range exponent", json.Number("0e201"), "", false},
+		// The 100-digit literal bound: big.Int work is superlinear in digit
+		// count and the ingest path hands this function client-controlled
+		// literals, so anything longer fails closed before any parsing. The
+		// bound counts digits, not bytes — sign and exponent markers ride free —
+		// so two spellings of one value pass or fail together.
+		{"100-digit integer at the bound stays exact", json.Number(strings.Repeat("9", 100)), strings.Repeat("9", 100), true},
+		{"101-digit literal has no canonical form", json.Number(strings.Repeat("9", 101)), "", false},
+		{"digit bound ignores sign and exponent bytes", json.Number("-1e99"), "-1" + strings.Repeat("0", 99), true},
+		{"written-out spelling of -1e99 binds identically", json.Number("-1" + strings.Repeat("0", 99)), "-1" + strings.Repeat("0", 99), true},
+		{"null has no canonical form", nil, "", false},
+		{"object has no canonical form", map[string]any{"id": 1}, "", false},
+		{"array has no canonical form", []any{"a"}, "", false},
+		// float64 is what a plain json.Unmarshal hands a hand-built claims map
+		// (production claims are json.Number via jwt.WithJSONNumber). At/past
+		// 2^53 the decode already collapsed neighboring integers, so any digits
+		// rendered could be another principal's ID — refuse; below it, render
+		// positionally, never fmt.Sprint's "1e+06" exponent spelling.
+		{"float64 below 2^53 renders positionally", float64(1_000_000), "1000000", true},
+		{"float64 fraction", float64(1.5), "1.5", true},
+		{"float64 at 2^53 refused — digits lost at decode", float64(1 << 53), "", false},
+		{"float64 past 2^53 refused", float64(10000000000000001), "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := CanonicalScalar(tt.v)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.ok, ok)
+		})
+	}
+}
+
+// TestCanonicalNumericLiteral pins the numeric reading of a policy-authored
+// check literal: only spellings JSON itself can produce canonicalize — the
+// json.Valid gate rejects big.Int-acceptable forms like "+5" and "007" that
+// no decoded claim or payload value ever carries, so the check comparison's
+// second reading can't accept a spelling the first side can't produce.
+func TestCanonicalNumericLiteral(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		lit  string
+		want string
+		ok   bool
+	}{
+		{"float spelling of an integer", "1.0", "1", true},
+		{"exponent spelling", "25e-4", "0.0025", true},
+		{"negative fraction", "-2.50", "-2.5", true},
+		{"integer passes through", "7", "7", true},
+		{"leading plus is not JSON", "+5", "", false},
+		{"leading zero is not JSON", "007", "", false},
+		{"whitespace-padded number is not a bare literal", " 5", "", false},
+		{"non-numeric literal", "org-123", "", false},
+		{"boolean literal is valid JSON but not a number", "true", "", false},
+		{"empty literal", "", "", false},
+		{"no canonical form past the bound", "1e400", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := CanonicalNumericLiteral(tt.lit)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.ok, ok)
+		})
+	}
 }
 
 func TestValidate(t *testing.T) {
@@ -627,6 +821,171 @@ func TestResolveFilters_LtOperator(t *testing.T) {
 	assert.Equal(t, "100", params[0])
 }
 
+// TestResolveFilters_UnresolvableClaim_FailsClosed: the #385 fix — a row-filter
+// template referencing a claim the token doesn't carry emits a constant-false
+// predicate for EVERY operator, never a real comparison against the empty
+// string it renders to (where not-equals / greater-than on a string column
+// would match essentially all rows).
+func TestResolveFilters_UnresolvableClaim_FailsClosed(t *testing.T) {
+	t.Parallel()
+	tmpl := "{{ jwt.tenant_id }}"
+	partial := "t-{{ jwt.tenant_id }}"
+	claims := map[string]any{"role": "user"} // validly-signed token, no tenant_id
+	tests := []struct {
+		name   string
+		filter Filter
+	}{
+		{"_eq", Filter{Eq: &tmpl}},
+		{"_neq", Filter{Neq: &tmpl}},
+		{"_gt", Filter{Gt: &tmpl}},
+		{"_lt", Filter{Lt: &tmpl}},
+		{"_eq partial", Filter{Eq: &partial}},
+		{"_in template text", Filter{In: &partial}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clauses, params := resolveFilters(map[string]Filter{"tenant_id": tt.filter}, claims)
+			require.Len(t, clauses, 1)
+			assert.Equal(t, "1 = 0", clauses[0])
+			assert.Empty(t, params)
+		})
+	}
+}
+
+// TestResolveFilters_StructuredClaim_FailsClosed: a claim that resolves to a
+// JSON object or array — usually a policy typo that dropped the final path
+// segment ({{ jwt.meta }} for {{ jwt.meta.tenant_id }}) — fails closed on every
+// operator instead of binding its "map[…]"/"[…]" stringification, which _neq
+// would match against essentially every row. The one legitimate structured
+// shape is unaffected: a bare-claim _in against an ARRAY binds its elements
+// (TestResolveFilters_InArrayClaim).
+func TestResolveFilters_StructuredClaim_FailsClosed(t *testing.T) {
+	t.Parallel()
+	obj := "{{ jwt.meta }}"
+	arr := "{{ jwt.tids }}"
+	arrText := "t-{{ jwt.tids }}"
+	claims := map[string]any{
+		"meta": map[string]any{"tenant_id": "acme"},
+		"tids": []any{"a", "b"},
+	}
+	tests := []struct {
+		name   string
+		filter Filter
+	}{
+		{"_eq object", Filter{Eq: &obj}},
+		{"_neq object", Filter{Neq: &obj}},
+		{"_gt array", Filter{Gt: &arr}},
+		{"_in object", Filter{In: &obj}},
+		{"_in array with text", Filter{In: &arrText}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clauses, params := resolveFilters(map[string]Filter{"tenant_id": tt.filter}, claims)
+			require.Len(t, clauses, 1)
+			assert.Equal(t, "1 = 0", clauses[0])
+			assert.Empty(t, params)
+		})
+	}
+}
+
+// TestResolveFilters_LiteralEmptyValue_Binds: a template-free literal "" is the
+// policy author's chosen value, not a resolution failure — it must keep binding
+// an equality against the empty string rather than be mistaken for the #385
+// fail-closed case.
+func TestResolveFilters_LiteralEmptyValue_Binds(t *testing.T) {
+	t.Parallel()
+	empty := ""
+	clauses, params := resolveFilters(map[string]Filter{"status": {Eq: &empty}}, nil)
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "`status` = ?", clauses[0])
+	assert.Equal(t, []any{""}, params)
+}
+
+// TestResolveFilters_EmptyStringClaim_Binds: the boundary of the #385
+// fail-closed rule — only an ABSENT or null claim fails closed. A claim present
+// as an empty string resolves and binds normally, so `_neq` against an
+// empty-string claim still emits a real `col != ?` predicate bound to the
+// empty string, never a constant-false predicate.
+func TestResolveFilters_EmptyStringClaim_Binds(t *testing.T) {
+	t.Parallel()
+	neq := "{{ jwt.tenant_id }}"
+	claims := map[string]any{"tenant_id": ""}
+	clauses, params := resolveFilters(map[string]Filter{"tenant_id": {Neq: &neq}}, claims)
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "`tenant_id` != ?", clauses[0])
+	assert.Equal(t, []any{""}, params)
+}
+
+// TestResolveFilters_InEmptyStringClaim_Binds: an _in whose claim is present as
+// an empty STRING is a scalar, not an empty set — it binds as the one-element
+// set `IN (?)` bound to the empty string. Failing closed is reserved for
+// absent/null claims and empty arrays (TestResolveFilters_InEmptyClaim_FailsClosed).
+func TestResolveFilters_InEmptyStringClaim_Binds(t *testing.T) {
+	t.Parallel()
+	in := "{{ jwt.tenant_id }}"
+	claims := map[string]any{"tenant_id": ""}
+	clauses, params := resolveFilters(map[string]Filter{"tenant_id": {In: &in}}, claims)
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "`tenant_id` IN (?)", clauses[0])
+	assert.Equal(t, []any{""}, params)
+}
+
+// TestResolveFilters_InTemplateWithText_Binds: the resolvable half of the _in
+// surrounding-text branch — a template with literal text AND a claim the token
+// carries binds the rendered one-element set `IN (?)`. Its fail-closed twin
+// (unresolvable claim → 1 = 0) is TestResolveFilters_UnresolvableClaim_FailsClosed;
+// this guards against a regression to an unconditional nil, which would deny every
+// row for a policy of this shape while the whole suite still passed.
+func TestResolveFilters_InTemplateWithText_Binds(t *testing.T) {
+	t.Parallel()
+	in := "t-{{ jwt.tenant_id }}"
+	claims := map[string]any{"tenant_id": "x"}
+	clauses, params := resolveFilters(map[string]Filter{"tenant_id": {In: &in}}, claims)
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "`tenant_id` IN (?)", clauses[0])
+	assert.Equal(t, []any{"t-x"}, params)
+}
+
+// TestEvaluate_CheckUnresolvableClaim_ResolvesEmptyString: the deliberate
+// read/write asymmetry of #385 — a check _eq keeps the resolved scalar even
+// when the claim is unresolvable, so an omitted column auto-injects the empty
+// string and any other supplied value is rejected at ingest. Whether the write
+// path should instead reject the insert is tracked in #463; this pins today's
+// behavior so neither path drifts silently.
+func TestEvaluate_CheckUnresolvableClaim_ResolvesEmptyString(t *testing.T) {
+	t.Parallel()
+	eq := "{{ jwt.org_id }}"
+	p := &Policy{Tables: map[string]TablePolicy{
+		"clicks": {Insert: map[string]RolePermissions{
+			"user": {Check: map[string]Filter{"org_id": {Eq: &eq}}},
+		}},
+	}}
+	perms := Evaluate(p, "user", "clicks", "insert", map[string]any{"role": "user"}) // no org_id claim
+	require.True(t, perms.Allowed)
+	require.Contains(t, perms.CheckClauses, "org_id")
+	assert.Equal(t, "", perms.CheckClauses["org_id"])
+}
+
+// TestEvaluate_FilterUnresolvableClaim_FailsClosed: the issue #385 scenario
+// end-to-end — a select policy scoping tenant_id to {{ jwt.tenant_id }} against
+// a token without that claim yields a constant-false WHERE, never an equality
+// binding the empty string.
+func TestEvaluate_FilterUnresolvableClaim_FailsClosed(t *testing.T) {
+	t.Parallel()
+	eq := "{{ jwt.tenant_id }}"
+	p := &Policy{Tables: map[string]TablePolicy{
+		"clicks": {Select: map[string]RolePermissions{
+			"user": {Filter: map[string]Filter{"tenant_id": {Eq: &eq}}},
+		}},
+	}}
+	perms := Evaluate(p, "user", "clicks", "select", map[string]any{"role": "user"})
+	require.True(t, perms.Allowed)
+	assert.Equal(t, "1 = 0", perms.WhereClause)
+	assert.Empty(t, perms.WhereParams)
+}
+
 // TestValidate_RejectsBindUnsafeFilterColumn: a policy whose row-filter column
 // contains '?' is refused at write time — it would shift clickhouse-go's
 // positional value binding when interpolated into the WHERE clause.
@@ -641,6 +1000,67 @@ func TestValidate_RejectsBindUnsafeFilterColumn(t *testing.T) {
 	err := Validate(p)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "contains '?'")
+}
+
+// TestValidate_RejectsMalformedClaimTemplate: a filter or check value whose
+// {{ … }} claim path is outside the grammar (hyphenated, a namespaced OIDC URL, a
+// wrong-case prefix, indexing, or unterminated) is bound as literal text by
+// resolveTemplate — a fail-open on the filter path (`_neq`/`_lt` match ~every row)
+// and silent row corruption on the check path — so it is refused at write time
+// (#385/#457), on both the select/filter and insert/check sides.
+func TestValidate_RejectsMalformedClaimTemplate(t *testing.T) {
+	t.Parallel()
+	for _, tmpl := range []string{
+		"{{ jwt.tenant-id }}",                         // hyphen
+		"{{ jwt.https://app.example.com/tenant_id }}", // namespaced OIDC claim
+		"{{ JWT.tenant_id }}",                         // wrong-case prefix
+		"{{ jwt.tenant_id[0] }}",                      // indexing
+		"{{ jwt. }}",                                  // empty path
+		"{{ jwt.tenant_id",                            // unterminated
+	} {
+		t.Run(tmpl, func(t *testing.T) {
+			t.Parallel()
+			val := tmpl
+			filterPolicy := &Policy{Tables: map[string]TablePolicy{
+				"clicks": {Select: map[string]RolePermissions{
+					"viewer": {Filter: map[string]Filter{"tenant_id": {Neq: &val}}},
+				}},
+			}}
+			require.Error(t, Validate(filterPolicy), "malformed template must be rejected on the filter path")
+
+			checkPolicy := &Policy{Tables: map[string]TablePolicy{
+				"clicks": {Insert: map[string]RolePermissions{
+					"writer": {Check: map[string]Filter{"tenant_id": {Eq: &val}}},
+				}},
+			}}
+			require.Error(t, Validate(checkPolicy), "malformed template must be rejected on the check path")
+		})
+	}
+}
+
+// TestValidate_AcceptsWellFormedTemplates: the boundary of the write-time guard —
+// a bare template, a nested template, a template with surrounding literal text, a
+// plain literal, and an empty literal all remain valid.
+func TestValidate_AcceptsWellFormedTemplates(t *testing.T) {
+	t.Parallel()
+	for _, tmpl := range []string{
+		"{{ jwt.tenant_id }}",
+		"{{ jwt.app_metadata.tenant_id }}",
+		"acct-{{ jwt.org_id }}",
+		"literal-value",
+		"",
+	} {
+		t.Run(tmpl, func(t *testing.T) {
+			t.Parallel()
+			val := tmpl
+			p := &Policy{Tables: map[string]TablePolicy{
+				"clicks": {Select: map[string]RolePermissions{
+					"viewer": {Filter: map[string]Filter{"tenant_id": {Eq: &val}}},
+				}},
+			}}
+			require.NoError(t, Validate(p))
+		})
+	}
 }
 
 // TestResolveFilters_InArrayClaim: the headline #224 fix — an _in filter whose
@@ -671,12 +1091,119 @@ func TestResolveFilters_InScalarClaim(t *testing.T) {
 	assert.Equal(t, []any{"solo"}, params)
 }
 
+// TestResolveFilters_InNonScalarElement_FailsClosed: the structured-claim rule
+// (TestResolveFilters_StructuredClaim_FailsClosed) extends INSIDE a bare-claim
+// _in array — one object, null, nested-array, or canonical-form-less numeric
+// element fails the WHOLE set closed. Binding such an element's
+// "map[…]"/"<nil>" rendering would bind a value no row legitimately carries,
+// and binding only the clean remainder would silently shrink the set the
+// policy author declared.
+func TestResolveFilters_InNonScalarElement_FailsClosed(t *testing.T) {
+	t.Parallel()
+	in := "{{ jwt.tenants }}"
+	filters := map[string]Filter{"tenant_id": {In: &in}}
+	tests := []struct {
+		name    string
+		tenants []any
+	}{
+		{"object element", []any{map[string]any{"id": 1}, map[string]any{"id": 2}}},
+		{"null element", []any{"a", nil}},
+		{"nested array element", []any{[]any{"1", "2"}, []any{"3"}}},
+		{"beyond-float64 numeric element", []any{"a", json.Number("1e400")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clauses, params := resolveFilters(filters, map[string]any{"tenants": tt.tenants})
+			require.Len(t, clauses, 1)
+			assert.Equal(t, "1 = 0", clauses[0])
+			assert.Empty(t, params)
+		})
+	}
+}
+
+// TestResolveFilters_InNumericElements_BindCanonically: scalar elements of a
+// bare-claim _in array bind through the same CanonicalScalar rule as every
+// other operator — numeric spellings canonicalize, large integers keep exact
+// digits, strings pass through.
+func TestResolveFilters_InNumericElements_BindCanonically(t *testing.T) {
+	t.Parallel()
+	in := "{{ jwt.tenants }}"
+	filters := map[string]Filter{"tenant_id": {In: &in}}
+	claims := map[string]any{"tenants": []any{json.Number("1.0"), json.Number("12345678901234567890"), "b"}}
+	clauses, params := resolveFilters(filters, claims)
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "`tenant_id` IN (?,?,?)", clauses[0])
+	assert.Equal(t, []any{"1", "12345678901234567890", "b"}, params)
+}
+
+// TestResolveFilters_NumericClaimBinding pins the SQL surface of numeric claim
+// rendering for a hand-built claims map: a json.Number claim binds its canonical
+// exact digits; a float64 below 2^53 binds positionally (never the "1e+06"
+// spelling ClickHouse integer columns reject); a float64 at or past 2^53 lost
+// its digits at decode, so the predicate renders `1 = 0` — matching no rows, the
+// same verdict RowVisible reaches in memory — alone or as one _in element.
+func TestResolveFilters_NumericClaimBinding(t *testing.T) {
+	t.Parallel()
+	tmpl := "{{ jwt.tenant }}"
+	eq := map[string]Filter{"tenant_id": {Eq: &tmpl}}
+
+	clauses, params := resolveFilters(eq, map[string]any{"tenant": json.Number("10000000000000001")})
+	require.Equal(t, []string{"`tenant_id` = ?"}, clauses)
+	assert.Equal(t, []any{"10000000000000001"}, params, "json.Number binds exact digits")
+
+	clauses, params = resolveFilters(eq, map[string]any{"tenant": float64(1_000_000)})
+	require.Equal(t, []string{"`tenant_id` = ?"}, clauses)
+	assert.Equal(t, []any{"1000000"}, params, "small float binds positionally, not 1e+06")
+
+	clauses, params = resolveFilters(eq, map[string]any{"tenant": float64(10000000000000001)})
+	assert.Equal(t, []string{"1 = 0"}, clauses, "lossy float64 claim matches no rows")
+	assert.Empty(t, params)
+
+	in := "{{ jwt.tenants }}"
+	clauses, params = resolveFilters(map[string]Filter{"tenant_id": {In: &in}},
+		map[string]any{"tenants": []any{"a", float64(1 << 60)}})
+	assert.Equal(t, []string{"1 = 0"}, clauses, "one poisoned element resolves the whole set empty")
+	assert.Empty(t, params)
+}
+
+// TestCompareCanonicalDecimals pins the digit-string ordering over canonical
+// forms — the comparison twin of canonicalDecimal, exact at any width, never a
+// float round-trip. Each pair is asserted in both directions.
+func TestCompareCanonicalDecimals(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"0", "0", 0},
+		{"1", "2", -1},
+		{"9", "100", -1},
+		{"-1", "1", -1},
+		{"-2", "-1", -1},
+		{"-100", "-9", -1},
+		{"1.5", "1.5", 0},
+		{"1.05", "1.5", -1},
+		{"0.5", "0.55", -1},
+		{"2", "2.5", -1},
+		{"-1.5", "-1", -1},
+		{"0.0025", "0.003", -1},
+		{"12345678901234567890", "12345678901234567891", -1},
+		{"9007199254740992", "9007199254740993", -1},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, compareCanonicalDecimals(tt.a, tt.b), "%s vs %s", tt.a, tt.b)
+		assert.Equal(t, -tt.want, compareCanonicalDecimals(tt.b, tt.a), "%s vs %s reversed", tt.b, tt.a)
+	}
+}
+
 // TestResolveFilters_InEmptyClaim_FailsClosed: an empty set makes the predicate
 // match no rows (a constant-false predicate) rather than widen to all rows — the
 // fail-closed direction. `IN ()` is invalid SQL. Two distinct branches of
-// resolveInValues reach this: an absent claim (navigateClaims returns nil → the
-// `case nil` branch) and a present-but-empty array (the `case []any` branch with
-// zero elements). Both must fail closed.
+// resolveInValues reach this: an absent claim (navigateClaims returns nil, which
+// CanonicalScalar rejects in its nil/object/array case, so resolveInValues'
+// `default` branch fails the set closed) and a present-but-empty array (the
+// `case []any` branch with zero elements). Both must fail closed.
 func TestResolveFilters_InEmptyClaim_FailsClosed(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.tenants }}"
@@ -747,7 +1274,7 @@ func TestValidate_AllowsFilterIn(t *testing.T) {
 
 // TestValidate_RejectsComparisonCheckOps: check honors only _eq and _in; the
 // comparison operators have no insert-time semantics, so each stays a loud
-// config-load error (#224). _in and _eq are accepted (covered elsewhere).
+// write-time error (#224). _in and _eq are accepted (covered elsewhere).
 func TestValidate_RejectsComparisonCheckOps(t *testing.T) {
 	t.Parallel()
 	v := "{{ jwt.sub }}"
@@ -773,7 +1300,7 @@ func TestValidate_RejectsComparisonCheckOps(t *testing.T) {
 
 // TestValidate_RejectsMixedCheckOps: a check column may carry only one
 // required-value operator. Setting both _eq and _in is ambiguous — Evaluate's
-// switch honors _eq and silently drops _in — so it is rejected at config load
+// switch honors _eq and silently drops _in — so it is rejected at write time
 // rather than enforcing an arbitrary branch (the accept-but-ignore gap #224
 // closes).
 func TestValidate_RejectsMixedCheckOps(t *testing.T) {

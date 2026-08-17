@@ -145,9 +145,10 @@ WH_AUTH_ROLE_CLAIM=app_metadata.role
 WH_AUTH_OPERATOR_KEY=<strong-random-operator-key>
 
 # Access control & pipes — both bootstrap paths are opt-in (no default). When
-# WH_POLICY_FILE_PATH is set, the file MUST exist and parse or the process
-# refuses to boot (silent fail-closed is the alternative). Leave unset to skip
-# bootstrap and seed via PUT /v1/admin/policy.
+# WH_POLICY_FILE_PATH is set, the file MUST exist, parse, and pass policy
+# validation (including the {{ jwt.… }} claim-path grammar) when the store is
+# seeded from it, or the process refuses to boot (silent fail-closed is the
+# alternative). Leave unset to skip bootstrap and seed via PUT /v1/admin/policy.
 WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
 WH_PIPES_DIR=/etc/wavehouse/pipes
 
