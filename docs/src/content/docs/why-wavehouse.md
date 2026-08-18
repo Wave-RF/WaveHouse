@@ -50,7 +50,7 @@ Even if you remember to batch client-side, a naive ingest path has no safe way t
 - **No backpressure channel.** If the merger falls behind, ClickHouse raises an error at the *next* insert. The client has already left.
 - **No DLQ.** Bad events that fail to insert are either lost or logged into ClickHouse's error log. Good luck replaying yesterday's dropped rows.
 
-WaveHouse fixes all three at the gateway: validates every payload against the real `system.columns` schema before accepting, returns `503 Service Unavailable` with a `Retry-After` header when the NATS WAL fills, and routes failed batch inserts to a dedicated `WAVEHOUSE_DLQ` stream you can inspect via `GET /v1/dlq/stats`.
+WaveHouse fixes all three at the gateway: validates every payload against the real `system.columns` schema before accepting, returns `503 Service Unavailable` with a `Retry-After` header when the NATS WAL fills, and routes failed batch inserts to a dedicated `WAVEHOUSE_DLQ` stream you can inspect via `GET /v1/ops/dlq/stats`.
 
 ### No real-time push
 

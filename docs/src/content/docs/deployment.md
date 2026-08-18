@@ -81,15 +81,25 @@ Production images are published to GitHub Container Registry via GoReleaser:
 ghcr.io/wave-rf/wavehouse:<tag>
 ```
 
-Published images carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation (stored in the registry). Verify one before deploying:
+`:vX.Y.Z` and `:latest` track tagged releases; `:dev` is the rolling `main`-branch build, and `:dev-<full-commit-sha>` (immutable, pruned after 30 days) captures a single commit. To pin (see the [alpha-stage caution](https://github.com/Wave-RF/WaveHouse#-project-status) in the README), use a `:dev-<full-commit-sha>` tag — the full 40-character commit SHA, not the short form — or an image digest.
+
+Published images carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation (stored in the registry). Verify one before deploying, pinning the signer to the workflow that publishes the tag — `--repo` alone accepts an attestation from any workflow in the repo:
 
 ```bash
-gh attestation verify oci://ghcr.io/wave-rf/wavehouse:<tag> --repo Wave-RF/WaveHouse
+# :dev and :dev-<sha> images are published by publish-dev.yml
+gh attestation verify oci://ghcr.io/wave-rf/wavehouse:dev \
+  --repo Wave-RF/WaveHouse \
+  --signer-workflow Wave-RF/WaveHouse/.github/workflows/publish-dev.yml
+
+# :vX.Y.Z and :latest release images are published by release.yml
+gh attestation verify oci://ghcr.io/wave-rf/wavehouse:vX.Y.Z \
+  --repo Wave-RF/WaveHouse \
+  --signer-workflow Wave-RF/WaveHouse/.github/workflows/release.yml
 ```
 
 ## Releases
 
-Releases are built with [GoReleaser](https://goreleaser.com/). The configuration is in `.goreleaser.yaml`. The release archives attached to each GitHub Release carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify a downloaded archive with `gh attestation verify <file> --repo Wave-RF/WaveHouse`. (This covers the prebuilt archives, not `go install`, which compiles from source.)
+Releases are built with [GoReleaser](https://goreleaser.com/). The configuration is in `.goreleaser.yaml`. The release archives attached to each GitHub Release carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify a downloaded archive with `gh attestation verify <file> --repo Wave-RF/WaveHouse --signer-workflow Wave-RF/WaveHouse/.github/workflows/release.yml`. (This covers the prebuilt archives, not `go install`, which compiles from source.)
 
 ### Supported Platforms
 
@@ -118,7 +128,7 @@ Key variables for production:
 ```bash
 # Required
 WH_CH_ADDR=clickhouse:9000
-# Port for HTTP inserts + /v1/admin/query proxy (default: 8123)
+# Port for HTTP inserts + /v1/ops/query proxy (default: 8123)
 WH_CH_HTTP_PORT=8123
 WH_CH_HTTP_SCHEME=http              # Scheme for the same (http/https)
 
@@ -146,7 +156,7 @@ WH_AUTH_OPERATOR_KEY=<strong-random-operator-key>
 # WH_POLICY_FILE_PATH is set, the file MUST exist, parse, and pass policy
 # validation (including the {{ jwt.… }} claim-path grammar) when the store is
 # seeded from it, or the process refuses to boot (silent fail-closed is the
-# alternative). Leave unset to skip bootstrap and seed via PUT /v1/admin/policy.
+# alternative). Leave unset to skip bootstrap and seed via PUT /v1/ops/policy.
 WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
 WH_PIPES_DIR=/etc/wavehouse/pipes
 
@@ -252,7 +262,7 @@ services:
       - ./my-pipes:/app/pipes:ro     # ← read-only seed
 ```
 
-The directory is a *seed*, not authoritative storage: after bootstrap, the API + KV are the source of truth. Runtime pipe edits go through `PUT /v1/admin/pipes/{name}`, not by editing the files. The `:ro` mount makes that contract explicit and prevents accidental writes from confusing future readers. Empty default (`WH_PIPES_DIR=""`) skips bootstrap entirely — most users will create pipes via the API.
+The directory is a *seed*, not authoritative storage: after bootstrap, the API + KV are the source of truth. Runtime pipe edits go through `PUT /v1/ops/pipes/{name}`, not by editing the files. The `:ro` mount makes that contract explicit and prevents accidental writes from confusing future readers. Empty default (`WH_PIPES_DIR=""`) skips bootstrap entirely — most users will create pipes via the API.
 
 ## Health Checks
 
@@ -356,11 +366,11 @@ CREATE TABLE IF NOT EXISTS clicks (
 ORDER BY (page);
 ```
 
-WaveHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (default: 60). You can also trigger an immediate refresh via `POST /v1/schema/refresh` (admin-only).
+WaveHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (default: 60). You can also trigger an immediate refresh via `POST /v1/ops/schema/refresh` (admin-only).
 
 ## Dead Letter Queue (DLQ)
 
-When `dlq.enabled` is `true` (default), a failed batch insert is retried row by row and the rows that fail again are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}`. This prevents infinite retry loops. Monitor DLQ depth via `GET /v1/dlq/stats`.
+When `dlq.enabled` is `true` (default), a failed batch insert is retried row by row and the rows that fail again are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}`. This prevents infinite retry loops. Monitor DLQ depth via `GET /v1/ops/dlq/stats`.
 
 ## Observability
 

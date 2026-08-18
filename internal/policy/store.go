@@ -122,7 +122,7 @@ func (s *Store) Put(ctx context.Context, p *Policy) error {
 // Watch update from a peer node.
 func (s *Store) warnIfDefaultRoleGrantsAdmin(p *Policy) {
 	if DefaultRoleGrantsAdmin(p) {
-		s.logger.Warn("default_role equals admin_role: every unauthenticated/roleless request is granted full admin access, including /v1/admin/* — intended for local/dev only, do NOT use in production",
+		s.logger.Warn("default_role equals admin_role: every unauthenticated/roleless request is granted full admin access, including /v1/ops/* — intended for local/dev only, do NOT use in production",
 			"default_role", p.DefaultRole)
 	}
 }

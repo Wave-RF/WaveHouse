@@ -164,7 +164,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// TODO: set a scope (e.g., "org_id:123") – but scope requires us to know if a table is globally shared or scoped fully by roles/org/tenant. Currently we have no real way to set this, so scopes will be empty.
 	scope := ""
 
-	// Bound the inbound body (parity with /v1/admin/query; also caps the
+	// Bound the inbound body (parity with /v1/ops/query; also caps the
 	// array/stream decode vectors). See query.go for maxRequestBodyBytes.
 	reqCap := int64(maxRequestBodyBytes)
 	if h.maxRequestBytes > 0 {
