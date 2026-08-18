@@ -13,6 +13,16 @@ updates:
       prefix: "deps"
 
   # GitHub Actions
+  #
+  # TWO entries, because `directory: /` does NOT mean "the whole repo" for
+  # this ecosystem: it means `.github/workflows/` plus an `action.yml` in the
+  # repo ROOT. Composite actions in subdirectories are invisible to it. Ours
+  # lives at `.github/actions/setup-env/action.yml`, so its pins silently
+  # rotted while the workflow pins advanced around them — by the time this was
+  # noticed it was two versions behind on `pnpm/action-setup` and a major
+  # behind on `actions/setup-node` versus the identical actions in
+  # `publish-npm.yml`. Adding a composite action under `.github/actions/`
+  # means adding an entry here; nothing else will catch the drift.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -22,6 +32,17 @@ updates:
       # One PR per Monday for all action bumps. With SHA pinning,
       # ungrouped meant 5+ PRs each Monday that all needed identical
       # review (verify SHA, verify version comment, merge).
+      actions-deps:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: github-actions
+    directory: /.github/actions/setup-env
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
       actions-deps:
         patterns: ["*"]
     commit-message:

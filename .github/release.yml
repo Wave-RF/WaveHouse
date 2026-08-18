@@ -1,0 +1,46 @@
+# GitHub's auto-generated release notes — the body of every GitHub Release.
+#
+# GoReleaser hands the body to GitHub (`changelog.use: github-native` in
+# .goreleaser.yaml), and GitHub builds it from the PRs merged since the previous
+# tag. main is squash-merged, so one PR is one line, titled with its
+# Conventional Commit subject. This file is the only knob on that output — the
+# `changelog.filters` in .goreleaser.yaml do not apply.
+#
+# Categories are matched by PR LABEL, top to bottom, first match wins; a PR with
+# no matching label falls into the `*` catch-all. So a category is only as good
+# as the labels: `dependencies` / `github_actions` / `go` / `documentation` are
+# applied automatically by actions/labeler (path-based, see labeler.yml), while
+# `breaking-change`, `security`, `bug`, and `enhancement` are applied by hand
+# during triage — label the PR, or it lands in "Other changes".
+changelog:
+  exclude:
+    labels:
+      - duplicate
+      - invalid
+      - wontfix
+  categories:
+    # Ordered by what a reader upgrading needs to see first. `!` in the PR title
+    # marks the breaking change per Conventional Commits; the label is what puts
+    # it at the top of the notes.
+    - title: ⚠️ Breaking changes
+      labels: [breaking-change]
+    - title: 🔒 Security
+      labels: [security]
+    - title: ✨ Features
+      labels: [enhancement]
+    - title: 🐛 Bug fixes
+      labels: [bug]
+    - title: 📚 Documentation
+      labels: [documentation]
+    # The catch-all has to explicitly opt OUT of the dependency labels. Matching
+    # is first-category-wins, and `*` matches everything — so without this
+    # `exclude`, every Dependabot PR would land in "Other changes" and the
+    # Dependencies category below would always render empty. The per-category
+    # `exclude` is what lets Dependencies both match and still sort last, so a
+    # long Dependabot run never buries the changes people actually care about.
+    - title: 🧹 Other changes
+      labels: ["*"]
+      exclude:
+        labels: [dependencies, github_actions]
+    - title: 📦 Dependencies
+      labels: [dependencies, github_actions]

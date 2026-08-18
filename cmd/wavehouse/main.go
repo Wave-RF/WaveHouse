@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -29,12 +30,65 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 )
 
-// Pre-populated build info variables, set via ldflags in the Makefile.
+// Pre-populated build info variables, set via ldflags by the Makefile and by
+// GoReleaser at release time. The defaults here are the unstamped-build
+// fallbacks; buildInfoFallback below fills them in for `go install` builds.
+//
+// All three MUST keep constant string initializers: `go build -ldflags -X`
+// silently does nothing to a variable whose initializer isn't a constant.
+// BuildTime was `time.Now().Format(time.RFC3339)`, so every `-X
+// main.BuildTime=...` the Makefile and .goreleaser.yaml have ever passed was
+// dropped on the floor and /version reported the process's start time as its
+// build time.
 var (
 	Version   = "dev"
-	BuildTime = time.Now().Format(time.RFC3339)
+	BuildTime = "unknown"
 	GitCommit = "unknown"
 )
+
+func init() { buildInfoFallback() }
+
+// buildInfoFallback recovers the build stamps from the metadata the Go
+// toolchain embeds on its own, for binaries built without our ldflags.
+//
+// `go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@v0.1.0` — the install
+// path the README documents — passes no ldflags, so a perfectly good tagged
+// build would otherwise report itself as "dev"/"unknown"/"unknown". The module
+// version and VCS stamps the toolchain records cover exactly that case.
+//
+// ldflags always win: everything below is gated on Version still holding its
+// unstamped default, so a Makefile or GoReleaser build is never second-guessed.
+func buildInfoFallback() {
+	if Version != "dev" {
+		return
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+
+	// "(devel)" is what a plain `go build` inside the module reports — no
+	// better than the "dev" we already have.
+	if v := info.Main.Version; v != "" && v != "(devel)" {
+		Version = strings.TrimPrefix(v, "v")
+	}
+
+	// Present only when the binary was built from a VCS checkout; `go install
+	// module@version` builds from the module cache and carries neither, which
+	// is why these are set independently of Version above.
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			if s.Value != "" {
+				GitCommit = s.Value
+			}
+		case "vcs.time":
+			if s.Value != "" {
+				BuildTime = s.Value
+			}
+		}
+	}
+}
 
 func main() {
 	// Subcommand dispatch. Currently only `health` exists — used by the

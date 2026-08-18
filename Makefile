@@ -771,6 +771,45 @@ ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverag
 	@scripts/ci-marker.sh write
 	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
 
+##@ Release
+
+# Releases are cut by pushing ONE tag — no version bump, no commit, no release
+# PR. Every component derives its version from the tag it was built at (the
+# server via GoReleaser's ldflags, the Go SDK because a module's version simply
+# IS its tag, @wavehouse/sdk because publish-npm.yml stamps package.json from
+# the tag before publishing). The `main` ruleset forbids direct pushes anyway,
+# so a bump commit would need its own reviewed PR before every release.
+#
+# scripts/release.sh holds the preflight checks — on main, clean tree, synced
+# with origin, tag free on both sides, CI green on this exact commit — and
+# prints what will be published before prompting. DRY_RUN=1 stops after the
+# plan. Full walkthrough: docs/src/content/docs/development.md §Cutting a release.
+
+# VERSION is `?=`-defaulted to a git-describe string for build stamping, so it
+# is NEVER empty — a forgotten `VERSION=` would reach release.sh as something
+# like `1064a4fe-dirty` and fail with a confusing semver error instead of a
+# usage message. $(origin) is what distinguishes "passed on the command line"
+# from "defaulted above".
+define require_release_version
+@[ "$(origin VERSION)" = "command line" ] || { \
+	printf '$(RED)✗$(RESET) usage: make $@ VERSION=X.Y.Z  (bare semver, no leading v)\n' >&2; exit 1; }
+endef
+
+.PHONY: release-server
+release-server: ## Tag a server release — binaries + container image (VERSION=X.Y.Z)
+	$(require_release_version)
+	@scripts/release.sh server "$(VERSION)"
+
+.PHONY: release-sdk-ts
+release-sdk-ts: ## Tag a TypeScript SDK release — npm (VERSION=X.Y.Z)
+	$(require_release_version)
+	@scripts/release.sh ts "$(VERSION)"
+
+.PHONY: release-sdk-go
+release-sdk-go: ## Tag a Go SDK release — go get (VERSION=X.Y.Z)
+	$(require_release_version)
+	@scripts/release.sh go "$(VERSION)"
+
 ##@ Analysis
 
 # Analysis tools are exploratory utilities run by humans investigating binary

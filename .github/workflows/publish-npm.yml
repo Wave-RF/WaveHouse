@@ -4,30 +4,66 @@ name: Publish SDK (npm)
 # ONE trusted publisher (workflow file) per package, so the dev channel and
 # tagged releases can't be split across two files. Two jobs:
 #
-#   dev      push to main → 0.0.0-dev.<build-hash> under the `dev` dist-tag,
-#            published only when the built dist actually changed. The version
-#            IS a hash of the build output, so an unchanged build maps to an
-#            already-published version and is skipped. No clients/ts path guard
-#            (a shared-dep or build-config change is caught too) and no manual
-#            trigger. The npm analog of the GHCR :dev image (publish-dev.yml).
+#   dev      push to main → 0.0.1-dev.<utc-stamp>.h<build-hash> under the `dev`
+#            dist-tag, published only when the built dist actually changed. No
+#            clients/ts path guard (a shared-dep or build-config change is
+#            caught too) and no manual trigger. The npm analog of the GHCR :dev
+#            image (publish-dev.yml).
 #
-#   release  sdk-v* tag → version under `latest` (stable) or
+#   release  clients/ts/v* tag → version under `latest` (stable) or
 #            `alpha`/`beta`/`rc`/`next` (prerelease) + a GitHub Release. The
-#            SDK analog of release.yml. `v*` (server) and `sdk-v*` (SDK) tag
-#            globs are disjoint, so this and release.yml never both fire.
+#            SDK analog of release.yml. Tag globs are anchored at the start of
+#            the ref name, so `v*` (server) can never match `clients/ts/v*` and
+#            this and release.yml never both fire.
+#
+# Tag naming: `clients/<lang>/vX.Y.Z`, one family per releasable client. Go
+# requires exactly this shape for a module in a subdirectory — `go get
+# .../clients/go@v1.2.3` resolves only against a `clients/go/v1.2.3` tag
+# (https://go.dev/ref/mod) — so every client follows it rather than leaving Go
+# as the exception.
+#
+# The TAG is the version. This job writes the tag's version into package.json
+# before publishing rather than checking that someone remembered to bump it:
+# the branch ruleset forbids pushing to `main` directly, so a bump commit would
+# need its own PR merged before every release. Go and the server already work
+# this way (module tags and ldflags), and now npm does too — releasing anything
+# in this repo is `git tag && git push`, nothing else.
+#
+# Dev version scheme (#475) — two properties, in this order:
+#
+#   ORDERED BY RECENCY. Dev versions used to be `0.0.0-dev.h<hash>`. semver
+#   compares alphanumeric prerelease identifiers LEXICALLY, so a content hash
+#   makes the order arbitrary with respect to time: of the ten publishes on
+#   that scheme, the newest sorted sixth and a June build was the highest.
+#   That matters because `npm i @wavehouse/sdk@dev` records a RANGE, not the
+#   tag — `^0.0.0-dev.h04a…` is satisfied by `0.0.0-dev.hff4…`, so the next
+#   resolution walked backwards two months and the lockfile pinned it there.
+#   The `<utc-stamp>` identifier is numeric, and semver compares numeric
+#   identifiers numerically, so the channel now orders by publish time.
+#
+#   ISOLATED FROM RELEASES. The base is `0.0.1`, not `0.0.0` and not the
+#   upcoming release version. `0.0.1-*` outranks every legacy `0.0.0-dev.*`
+#   (which are permanent — npm's unpublish window is 72 hours), so the poisoned
+#   history can never win a range again. And because prereleases only satisfy
+#   ranges anchored to their own MAJOR.MINOR.PATCH, a dev build can never leak
+#   into `^0.1.0` — nor can a release ever shadow the dev channel. 0.0.1 is
+#   permanently free: this package's first release was 0.1.0.
+#
+# The trailing `.h<hash>` keeps the build content-addressed: it is what the dev
+# job compares against to decide whether there is anything new to publish.
 #
 # Auth: OIDC trusted publishing — no NPM_TOKEN. Configure ONE trusted
 # publisher on npmjs.com → repo Wave-RF/WaveHouse, workflow publish-npm.yml.
 # Both publish steps pass --provenance for a signed build-provenance attestation
 # (the OIDC id-token above + public repo + npm >= 11.5.1 from Node 24).
 #
-# To cut a release: bump clients/ts/package.json, commit, then
-# `git tag sdk-vX.Y.Z[-pre] && git push origin sdk-vX.Y.Z[-pre]`.
+# To cut a release: `make release-sdk-ts VERSION=X.Y.Z` (scripts/release.sh),
+# or by hand `git tag clients/ts/vX.Y.Z && git push origin clients/ts/vX.Y.Z`.
 
 on:
   push:
     branches: [main]
-    tags: ["sdk-v*"]
+    tags: ["clients/ts/v*"]
 
 permissions:
   contents: read
@@ -72,19 +108,42 @@ jobs:
       - name: Publish @wavehouse/sdk@dev when the build changes
         working-directory: clients/ts
         shell: bash
+        env:
+          # The dev channel's own version line, deliberately BELOW any version
+          # this package will ever release (it shipped 0.1.0 first), and ABOVE
+          # every legacy `0.0.0-dev.*` publish. See the version-scheme note in
+          # the header comment.
+          DEV_BASE: "0.0.1"
         run: |
-          # Content-addressed: the version is a hash of the built dist (file
-          # names + contents), so an unchanged build resolves to a version that
-          # already exists and we skip. Runs on every push to main; npm stamps
-          # the commit into the published manifest's gitHead for traceability.
+          set -euo pipefail
+
+          # Content hash of the built dist (file names + contents) — the build's
+          # identity, and what decides whether there is anything to publish.
           hash=$(find dist -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)
-          # h-prefix keeps it a valid semver pre-release identifier even on the
-          # rare all-digit hash (a numeric identifier can't have a leading zero).
-          version="0.0.0-dev.h${hash}"
-          if npm view "@wavehouse/sdk@${version}" version >/dev/null 2>&1; then
-            echo "Build unchanged — @wavehouse/sdk@${version} already published; nothing to do."
-            exit 0
-          fi
+
+          # Skip only when `dev` ALREADY points at a same-scheme publish of this
+          # exact dist. Matching on the hash alone would let a legacy
+          # `0.0.0-dev.h<hash>` publish satisfy the check and strand the tag on
+          # the old, unordered version line forever (a docs-only push to main
+          # rebuilds a byte-identical dist).
+          current=$(npm view "@wavehouse/sdk@dev" version 2>/dev/null || true)
+          case "${current}" in
+            "${DEV_BASE}-dev."*".h${hash}")
+              echo "Build unchanged — @wavehouse/sdk@dev is already ${current}; nothing to do."
+              exit 0
+              ;;
+          esac
+
+          # Publish-time UTC stamp as the FIRST prerelease identifier after
+          # `dev`. semver compares prerelease identifiers left to right and
+          # compares numeric ones numerically, so this — not the hash — is what
+          # orders the channel by recency (#475). The hash stays on the end for
+          # identity; `h`-prefixed so an all-digit hash can't become a numeric
+          # identifier with a leading zero.
+          stamp=$(date -u +%Y%m%d%H%M%S)
+          version="${DEV_BASE}-dev.${stamp}.h${hash}"
+
+          echo "Publishing ${version} (previous dev: ${current:-<none>})"
           npm version "${version}" --no-git-tag-version --allow-same-version
           # --ignore-scripts publishes exactly the dist we just hashed (the
           # typecheck + build already ran above; this skips a redundant rebuild).
@@ -92,8 +151,8 @@ jobs:
           npm publish --access public --tag dev --ignore-scripts --provenance
 
   release:
-    name: Release (sdk-v* tag)
-    if: startsWith(github.ref, 'refs/tags/sdk-v')
+    name: Release (clients/ts/v* tag)
+    if: startsWith(github.ref, 'refs/tags/clients/ts/v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -101,6 +160,12 @@ jobs:
       id-token: write # OIDC for npm trusted publishing
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The GitHub Release step needs to see every `clients/ts/v*` tag to work out
+          # which one the generated notes should start from. A default checkout
+          # fetches only the triggering ref, so the tag list would be empty and
+          # every release would look like the first one.
+          fetch-tags: true
 
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
@@ -120,37 +185,91 @@ jobs:
         id: meta
         shell: bash
         run: |
-          version=$(node -p "require('./clients/ts/package.json').version")
-          expected="sdk-v${version}"
-          actual="${GITHUB_REF#refs/tags/}"
-          if [ "${expected}" != "${actual}" ]; then
-            echo "::error::Tag '${actual}' != clients/ts/package.json version ('${expected}'). Bump the version in package.json and retag."
-            exit 1
+          set -euo pipefail
+          ref="${GITHUB_REF#refs/tags/}"
+
+          # The tag is the version. `${ref##*/}` takes the segment after the
+          # last slash (`clients/ts/v1.2.3` → `v1.2.3`); release-channel.sh has
+          # already rejected anything that isn't semver-shaped by the time the
+          # dist-tag is resolved below.
+          version="${ref##*/}"
+          version="${version#v}"
+
+          # package.json's committed value is documentation, not the source of
+          # truth — a bump commit would need its own PR, since the ruleset
+          # forbids pushing to `main`. Surface the drift, don't fail on it.
+          declared=$(node -p "require('./clients/ts/package.json').version")
+          if [ "${declared}" != "${version}" ]; then
+            echo "::notice::clients/ts/package.json says ${declared}; publishing ${version} from the tag."
           fi
-          case "${version}" in
-            *-alpha*) tag=alpha ;;
-            *-beta*)  tag=beta ;;
-            *-rc*)    tag=rc ;;
-            *-*)      tag=next ;;   # any other prerelease form
-            *)        tag=latest ;;
-          esac
+
+          # Shared with release.yml's GHCR moving tag, so `@wavehouse/sdk@rc`
+          # and `ghcr.io/wave-rf/wavehouse:rc` can't come to mean different
+          # things. Stable → latest; prerelease → alpha/beta/rc/next.
+          tag="$(scripts/ci/release-channel.sh "${ref}")"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "dist_tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "Publishing ${version} under dist-tag '${tag}'."
 
       - name: Publish to npm
         working-directory: clients/ts
-        # `npm publish` typechecks + builds via the package's prepublishOnly.
-        # --provenance attaches a signed build-provenance attestation.
-        run: npm publish --access public --tag "${{ steps.meta.outputs.dist_tag }}" --provenance
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Stamp the tag's version in. package.json is not the source of truth
+          # (see "Resolve version" above) so this is what actually decides the
+          # published version. --allow-same-version keeps a re-run idempotent
+          # when the committed value already matches.
+          npm version "${VERSION}" --no-git-tag-version --allow-same-version
+          # `npm publish` typechecks + builds via the package's prepublishOnly.
+          # --provenance attaches a signed build-provenance attestation.
+          npm publish --access public --tag "${DIST_TAG}" --provenance
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
         shell: bash
         run: |
-          flags=(--title "@wavehouse/sdk ${{ steps.meta.outputs.version }}" --generate-notes)
-          if [ "${{ steps.meta.outputs.dist_tag }}" != "latest" ]; then
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+
+          # Publishing to npm already happened. Never fail this job over the
+          # GitHub Release: if one already exists for this tag — because it was
+          # drafted in the Releases UI, or because the job is being re-run after
+          # a transient failure — `gh release create` would exit non-zero and
+          # red an otherwise successful publish. Leave the existing one alone,
+          # matching GoReleaser's `mode: keep-existing` on the server side, so
+          # hand-written notes are never clobbered.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::notice::Release $tag already exists — leaving its notes untouched."
+            exit 0
+          fi
+
+          flags=(--title "@wavehouse/sdk ${VERSION}")
+          if [ "${DIST_TAG}" != "latest" ]; then
             flags+=(--prerelease)
           fi
-          gh release create "${GITHUB_REF#refs/tags/}" "${flags[@]}"
+
+          # Anchor the generated notes to the previous SDK tag. Without this,
+          # GitHub diffs from the most recent *release* — which in this repo is
+          # usually a `v*` server release, quite possibly on the very same
+          # commit, yielding an empty changelog. The glob is anchored at the
+          # start of the ref name, so it cannot match a server or Go SDK tag.
+          prev="$(git tag -l 'clients/ts/v*' --sort=-v:refname | grep -vFx "$tag" | head -n1 || true)"
+          if [ -n "$prev" ]; then
+            flags+=(--generate-notes --notes-start-tag "$prev")
+            echo "Generating notes covering ${prev}..${tag}"
+          else
+            # First SDK release: there is no earlier `clients/ts/v*` to diff from, and
+            # letting GitHub pick would hand us the server release on the same
+            # commit — i.e. nothing. An explicit body beats an empty one.
+            flags+=(--notes "First release of \`@wavehouse/sdk\`. See the [\`v${VERSION}\` server release](https://github.com/${GITHUB_REPOSITORY}/releases/tag/v${VERSION}) for the full change list.")
+            echo "No earlier clients/ts/v* tag — using the first-release note."
+          fi
+
+          gh release create "$tag" "${flags[@]}"

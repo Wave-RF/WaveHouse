@@ -67,7 +67,6 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
-!.github/board-config.env
 
 # Debug
 __debug_bin*

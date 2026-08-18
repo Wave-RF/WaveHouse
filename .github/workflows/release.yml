@@ -11,6 +11,13 @@ permissions:
   id-token: write # OIDC for build-provenance attestations (Sigstore)
   attestations: write # write the build-provenance attestations
 
+concurrency:
+  # Per-tag, never cancelling: two runs of the SAME tag (a re-run after a
+  # transient GHCR failure) must not overlap and race each other's pushes,
+  # but two different tags are independent releases and both must complete.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     name: Release
@@ -63,6 +70,44 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Resolve the moving GHCR tag BEFORE the build, so a malformed tag
+      # fails here rather than after an 8-target cross-compile and a
+      # multi-arch image push. The script rejects anything that isn't
+      # semver-shaped, so a typo can't fall through to `latest`.
+      - name: Resolve release channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          channel="$(scripts/ci/release-channel.sh "$GITHUB_REF_NAME")"
+          echo "WAVEHOUSE_CHANNEL=${channel}" >> "$GITHUB_ENV"
+          echo "::notice::${GITHUB_REF_NAME} publishes ghcr.io/wave-rf/wavehouse:${GITHUB_REF_NAME} + :${channel}"
+
+      # Pin which tag the generated release notes are diffed from. Several tag
+      # families share this repo — `v*` for the server, `clients/<lang>/v*` for
+      # each client SDK — and GoReleaser's own detection walks back from the
+      # parent commit without caring which family it lands on, so a server
+      # release cut after an SDK release would otherwise describe itself as
+      # "everything since clients/ts/v0.4.1". Tag globs are anchored at the
+      # start of the ref name, so `v*` cannot match a `clients/...` tag — which
+      # is also why this workflow's own `on.push.tags` filter doesn't fire on
+      # SDK releases.
+      #
+      # Left unset when there is no earlier `v*` tag (the first release): with
+      # no previous tag, GitHub generates notes from the start of history,
+      # which is exactly right for a first release. Setting it to an empty
+      # string would not be — GoReleaser reads that as "no changelog".
+      - name: Resolve previous release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          prev="$(git tag -l 'v*' --sort=-v:refname | grep -vFx "$GITHUB_REF_NAME" | head -n1 || true)"
+          if [ -n "$prev" ]; then
+            echo "GORELEASER_PREVIOUS_TAG=${prev}" >> "$GITHUB_ENV"
+            echo "::notice::Release notes will cover ${prev}..${GITHUB_REF_NAME}"
+          else
+            echo "::notice::No earlier v* tag — notes will cover the full history."
+          fi
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
@@ -72,6 +117,10 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Second dockers_v2 tag in .goreleaser.yaml. Stable → latest;
+          # prerelease → alpha/beta/rc/next, so an rc can't displace the
+          # :latest a shipped stable release owns.
+          WAVEHOUSE_CHANNEL: ${{ env.WAVEHOUSE_CHANNEL }}
 
       # Build-provenance attestations — free for public repos via Sigstore's
       # public-good infra. Binaries: one attestation over every artifact listed
@@ -99,3 +148,40 @@ jobs:
           subject-name: ghcr.io/wave-rf/wavehouse
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
+
+      # Prove the attestations we just wrote actually verify against the
+      # artifacts people will download — the same `gh attestation verify`
+      # command the install docs tell users to run. Attesting and verifying
+      # are different code paths (subject digests, the checksums-file
+      # expansion, the registry round-trip), so a release that publishes
+      # unverifiable provenance should go red rather than look green.
+      # Runs last: the release is already public by this point, so this is a
+      # loud alarm, not a gate.
+      - name: Verify published provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Digest, not tag: verifying by tag would re-resolve the pointer
+          # and could check a different image than the one just attested.
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Every archive listed in checksums.txt is a subject of the binary
+          # attestation. Verify them all rather than a representative one —
+          # a per-GOOS/GOARCH gap is exactly what this would miss.
+          shopt -s nullglob
+          archives=(dist/*.tar.gz dist/*.zip)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::no release archives in dist/ to verify"
+            exit 1
+          fi
+          for archive in "${archives[@]}"; do
+            echo "--- $archive"
+            gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"
+          done
+
+          echo "--- ghcr.io/wave-rf/wavehouse@${IMAGE_DIGEST}"
+          gh attestation verify \
+            "oci://ghcr.io/wave-rf/wavehouse@${IMAGE_DIGEST}" \
+            --repo "$GITHUB_REPOSITORY"
