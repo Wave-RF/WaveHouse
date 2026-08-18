@@ -154,7 +154,7 @@ flowchart TB
 | Schema validation | Custom code in ingest API | Built in (discovers `system.columns`) |
 | Row/column access control | Custom middleware or a dedicated service | Built in (Hasura-style, JWT-driven) |
 | Dead letter queue | Custom retry + dead topic on Kafka | Built in (`WAVEHOUSE_DLQ`) |
-| Client SDK | Each team writes one | `@wavehouse/sdk` (TypeScript, zero-dep, codegen) |
+| Client SDK | Each team writes one | `@wavehouse/sdk` (TypeScript, one dependency, codegen) |
 
 The DIY path works — big teams run it — but the ops cost is not small. You're paying for a Kafka cluster (or Confluent bill), a second service you wrote from scratch, and all the debugging hours when the batching consumer stalls at 3 a.m.
 
