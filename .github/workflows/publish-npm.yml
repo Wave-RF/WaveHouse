@@ -5,10 +5,11 @@ name: Publish SDK (npm)
 # tagged releases can't be split across two files. Two jobs:
 #
 #   dev      push to main → 0.0.1-dev.<utc-stamp>.h<build-hash> under the `dev`
-#            dist-tag, published only when the built dist actually changed. No
-#            clients/ts path guard (a shared-dep or build-config change is
-#            caught too) and no manual trigger. The npm analog of the GHCR :dev
-#            image (publish-dev.yml).
+#            dist-tag, published only when the PUBLISHED PACKAGE changes — the
+#            hash covers everything `npm pack` would ship, not just dist, so a
+#            manifest-only change still republishes. No clients/ts path guard
+#            (a shared-dep or build-config change is caught too) and no manual
+#            trigger. The npm analog of the GHCR :dev image (publish-dev.yml).
 #
 #   release  clients/ts/v* tag → version under `latest` (stable) or
 #            `alpha`/`beta`/`rc`/`next` (prerelease) + a GitHub Release. The
@@ -49,8 +50,8 @@ name: Publish SDK (npm)
 #   into `^0.1.0` — nor can a release ever shadow the dev channel. 0.0.1 is
 #   permanently free: this package's first release was 0.1.0.
 #
-# The trailing `.h<hash>` keeps the build content-addressed: it is what the dev
-# job compares against to decide whether there is anything new to publish.
+# The trailing `.h<hash>` keeps the PACKAGE content-addressed: it is what the
+# dev job compares against to decide whether there is anything new to publish.
 #
 # Auth: OIDC trusted publishing — no NPM_TOKEN. Configure ONE trusted
 # publisher on npmjs.com → repo Wave-RF/WaveHouse, workflow publish-npm.yml.
@@ -83,6 +84,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Only contents: read here, so this is hygiene rather than exposure —
+          # but npm lifecycle scripts run in this job too, and nothing needs
+          # authenticated git.
+          persist-credentials: false
 
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
@@ -152,10 +158,10 @@ jobs:
                   } | sha256sum | cut -c1-12)
 
           # Skip only when `dev` ALREADY points at a same-scheme publish of this
-          # exact dist. Matching on the hash alone would let a legacy
+          # exact package. Matching on the hash alone would let a legacy
           # `0.0.0-dev.h<hash>` publish satisfy the check and strand the tag on
           # the old, unordered version line forever (a docs-only push to main
-          # rebuilds a byte-identical dist).
+          # rebuilds a byte-identical package).
           current=$(npm view "@wavehouse/sdk@dev" version 2>/dev/null || true)
           case "${current}" in
             "${DEV_BASE}-dev."*".h${hash}")

@@ -27,6 +27,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # The most privileged job here: contents+packages+attestations write,
+          # running a third-party action, a downloaded goreleaser binary, a full
+          # `go mod download` + cross-compile, and a Docker build — any one of
+          # which could read a persisted token out of .git/config and push. No
+          # authenticated git is needed: GoReleaser talks to the API via
+          # GITHUB_TOKEN, `git describe` is local, and the fetch is already done.
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

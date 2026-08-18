@@ -48,6 +48,9 @@ jobs:
           # goreleaser reads full git history for changelog + commit
           # info. Matches release.yml.
           fetch-depth: 0
+          # Same reasoning as release.yml: a third-party action and a
+          # cross-compile run here, and nothing needs authenticated git.
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

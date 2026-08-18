@@ -37,6 +37,8 @@ jobs:
           # goreleaser uses `git describe` to derive the snapshot
           # version; needs full tag history.
           fetch-depth: 0
+          # Runs on PR-authored code; nothing here needs authenticated git.
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
