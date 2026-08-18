@@ -33,10 +33,13 @@
 #                   and NOT `dependencies` (#480, #412, #341).
 #   documentation   labeler maps docs/**, and the npm Dependabot config points
 #                   at the workspace root, so every npm bump touches
-#                   docs/package.json and gets labelled. 13 of the last 30
-#                   Dependabot PRs carry it (#482, #439, #426, #423, #420, …) —
-#                   without the exclude, "Documentation" renders as a wall of
-#                   `deps: bump the npm-deps group`.
+#                   docs/package.json and gets labelled. Count only MERGED PRs
+#                   here — an open or superseded bump never reaches a release
+#                   body, and npm group bumps are routinely superseded before
+#                   merge: 3 of the 23 Dependabot PRs merged to date carry it
+#                   (#439, #416, #342). A bump or two per release rather than a
+#                   flood, but the exclude costs nothing and the ratio grows
+#                   with the npm surface.
 #
 # `security` deliberately has NO author exclude: a Dependabot bump that a
 # maintainer hand-labels `security` is a security fix and belongs at the top,
