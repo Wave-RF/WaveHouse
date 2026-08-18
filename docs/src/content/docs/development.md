@@ -561,20 +561,9 @@ Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs 
 
 PRs are grouped per config to reduce noise. The npm config is pointed at the workspace **root** (`directory: /`), not the individual member directories. The repo has a single root `pnpm-lock.yaml`, and Dependabot only updates a lockfile co-located with the manifest it targets — so a per-member config (the previous setup) bumped a member's `package.json` without regenerating the root lockfile, and every such PR then failed CI's `pnpm install --frozen-lockfile` with `ERR_PNPM_OUTDATED_LOCKFILE`. Pointing at the root lets Dependabot read `pnpm-workspace.yaml`, walk every member, and update the one lockfile.
 
-The GitHub Actions config names **two** directories. `directory: /` reaches
-`.github/workflows/` but does not descend into `.github/actions/*/action.yml`,
-so the `setup-env` composite action — which owns every cache in CI — was
-invisible to Dependabot, and its pins went stale against upstream and diverged
-from `publish-npm.yml`, which Dependabot *does* track and which doesn't call
-`setup-env`. Listing its directory under `directories:` brings it into the same
-weekly group; **adding a composite action means adding its directory there**,
-because nothing else catches the drift.
+The GitHub Actions config names **two** directories. `directory: /` reaches `.github/workflows/` but does not descend into `.github/actions/*/action.yml`, so the `setup-env` composite action — which owns every cache in `ci.yml` — was invisible to Dependabot, and its pins went stale against upstream and diverged from `publish-npm.yml`, which Dependabot *does* track and which doesn't call `setup-env`. Listing its directory under `directories:` brings it into the same weekly group; **adding a composite action means adding its directory there**, because nothing else catches the drift.
 
-`typescript` majors are held back (`ignore: version-update:semver-major`)
-because `tsup` vendors a `rollup-plugin-dts` that crashes on TypeScript 7
-during `clients/ts`'s `prepare` script — i.e. inside `pnpm install`, which
-takes every Node job down at once. See the comment in `.github/dependabot.yml`
-for the condition that lets it be removed.
+`typescript` majors are held back (`ignore: version-update:semver-major`) because `tsup` vendors a `rollup-plugin-dts` that crashes on TypeScript 7 during `clients/ts`'s `prepare` script — i.e. inside `pnpm install`, which takes every Node job down at once. See the comment in `.github/dependabot.yml` for the condition that lets it be removed.
 
 **No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
 
