@@ -10,8 +10,6 @@ npm install @wavehouse/sdk
 
 Requires Node 22 or newer — the only line this SDK is tested against; Node 18 and 20 are past upstream end-of-life. Browsers need no polyfill, and Node needs an `EventSource` polyfill only for streaming — see [Runtime support](https://wavehouse.dev/sdk/#runtime-support).
 
-Until the next tagged release, the server's admin surfaces (raw SQL, schema, policy, DLQ, pipes admin, codegen) live at `/v1/ops/*` and only the `dev` build targets them — `npm i @wavehouse/sdk@dev` alongside a server built from `main`. See [Versioning](#use-without-a-build-step-cdn) below.
-
 This works in any framework that uses a bundler — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — with `import { createClient } from '@wavehouse/sdk'`.
 
 The package is published with [npm provenance](https://docs.npmjs.com/generating-provenance-statements) — npm shows a verified provenance badge on the [package page](https://www.npmjs.com/package/@wavehouse/sdk), and `npm audit signatures` checks the attestation against this repository's signed build.
@@ -32,7 +30,7 @@ No bundler, no `npm`, no framework required — drop the SDK straight into an HT
 </script>
 ```
 
-Pin a version for production once the first tagged release exists (`https://esm.sh/@wavehouse/sdk@<version>` — see Versioning below). jsDelivr (`https://cdn.jsdelivr.net/npm/@wavehouse/sdk/+esm`) and unpkg (`https://unpkg.com/@wavehouse/sdk?module`) serve the same ES module.
+Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`). jsDelivr (`https://cdn.jsdelivr.net/npm/@wavehouse/sdk/+esm`) and unpkg (`https://unpkg.com/@wavehouse/sdk?module`) serve the same ES module.
 
 **Classic global (`<script src>`).** For pages that can't use ES modules, the bundled IIFE build attaches everything to a `WaveHouse` global:
 
@@ -44,7 +42,7 @@ Pin a version for production once the first tagged release exists (`https://esm.
 </script>
 ```
 
-**Versioning.** A bare CDN URL serves the `latest` dist-tag — today a `0.0.0-dev.*` snapshot, since no tagged release exists yet; once one does, pin for production (`@wavehouse/sdk@<version>`) or float on a range (`@0` for the newest 0.x). Builds from `main` are published under the `dev` tag — `@wavehouse/sdk@dev` — for trying unreleased changes. Note the current path skew: the `latest` snapshot predates the server's `/v1/admin` → `/v1/ops` rename, so its admin surfaces (raw SQL, schema, policy, DLQ, pipes admin, codegen) get `404` from a renamed server — use `@wavehouse/sdk@dev` alongside a server built from `main`.
+**Versioning.** A bare CDN URL serves the latest published **release**; pin for production (`@wavehouse/sdk@0.1.0`) or float on a range (`@0` for the newest 0.x, `@0.1` for 0.1.x). Builds from `main` are published under the `dev` tag — `@wavehouse/sdk@dev` — for trying unreleased changes.
 
 Streaming (`.stream()`) uses the browser's native `EventSource`, so it works in both forms with no polyfill.
 
@@ -146,13 +144,13 @@ if (error) {
 
 ## Codegen
 
-Generate TypeScript types from your live WaveHouse schema. The package ships a `wavehouse-codegen` bin — until the first tagged release, select the `@dev` build explicitly:
+Generate TypeScript types from your live WaveHouse schema. The package ships a `wavehouse-codegen` bin, so after installing you can run it with `npx`:
 
 ```bash
-npx --package @wavehouse/sdk@dev wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
+npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-This introspects `/v1/ops/schema`, maps ClickHouse column types to TypeScript, and outputs a `Database` interface you can pass to `createClient<Database>()`. `/v1/ops/schema` is **admin-only** — pass an admin-role token with `--auth <jwt>` (or `-a`) against any non-dev policy. The `/v1/ops/*` paths are unreleased on both sides: until the next release, the published `latest` build (a pre-rename `0.0.0-dev.*` snapshot) targets the old `/v1/admin`-era paths and gets `404` from a renamed server — use the `@dev` build (`npm i @wavehouse/sdk@dev`) alongside a server built from `main`.
+This introspects `/v1/ops/schema`, maps ClickHouse column types to TypeScript, and outputs a `Database` interface you can pass to `createClient<Database>()`. `/v1/ops/schema` is **admin-only** — pass an admin-role token with `--auth <jwt>` (or `-a`) against any non-dev policy.
 
 ## Development & Testing
 

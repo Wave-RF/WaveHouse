@@ -94,10 +94,10 @@ StreamController (NOT thenable)
 
 ## Codegen CLI
 
-Generate TypeScript types from a running WaveHouse instance. The package ships a `wavehouse-codegen` bin — until the first tagged release, select the `@dev` build explicitly (the published `latest` CLI still targets the removed pre-`/v1/ops` paths and gets `404`s; see the [Installation note](/sdk#installation)):
+Generate TypeScript types from a running WaveHouse instance. The package ships a `wavehouse-codegen` bin, so after installing `@wavehouse/sdk` you can run it with `npx`:
 
 ```bash
-npx --package @wavehouse/sdk@dev wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
+npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 
 # Or, working inside this repo (clients/ts/):
 pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts

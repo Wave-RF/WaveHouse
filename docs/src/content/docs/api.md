@@ -605,10 +605,6 @@ curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z
 
 Every admin-gated surface lives under the `/v1/ops/*` prefix, behind a single `RequireAdmin` gate: schema discovery, DLQ stats, and the policy and pipe CRUD below, plus the raw-SQL passthrough [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse) documented with the query endpoints above. They require the policy `admin_role` (`"admin"` by default, exact case-sensitive match) — or the non-JWT [operator key](#authentication), which reaches the same surface without a token; other callers get 401 (present-but-invalid token) / 403, and the quickstart's trial `public` role cannot call any of them. There is no separate `service` role. The JWT middleware always runs — a tokenless request (or a valid token without a role claim) resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is denied `403`, while a present-but-invalid token keeps its stashed verification error and is denied `401`.
 
-:::note[Renamed from `/v1/admin/*`]
-These endpoints previously lived at `/v1/admin/*` (raw SQL, policy, pipes) and at the top level (`/v1/schema`, `/v1/schema/refresh`, `/v1/dlq/stats`). They all moved under `/v1/ops/*` in a single pre-1.0 rename with **no aliases kept** — a request to an old path returns `404 {"error":"not found"}`. See the [CHANGELOG](https://github.com/Wave-RF/WaveHouse/blob/main/CHANGELOG.md) for the full old-path → new-path mapping. If you fenced `/v1/admin/` at your reverse proxy, that rule silently stops matching — move it to `/v1/ops/` (see [Fencing the admin surface](/reverse-proxy#fencing-the-admin-surface)).
-:::
-
 The admin endpoints in this section that accept a request body — `PUT /v1/ops/policy`, `POST /v1/ops/policy/validate`, and `PUT /v1/ops/pipes/{name}` — cap it at 1 MiB (the same 1 MiB parameter/AST-body cap as `POST /v1/query`); an over-cap body is rejected with `413 {"error":"request body exceeded 1048576 bytes"}`. A policy document or pipe definition is bounded, so this never binds legitimate use. The raw-SQL `POST /v1/ops/query` instead carries the 16 MiB bulk-payload cap documented with the query endpoints above.
 
 #### `GET /v1/ops/schema` — List All Table Schemas
@@ -810,13 +806,12 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `table_name` | string | Target ClickHouse table (from URL). |
-| `scope` | string | Optional cache-invalidation scope, omitted when empty. The ingest handler currently always publishes it empty (see the TODO in `internal/api/ingest.go`); consumers must tolerate its presence. |
 | `received_timestamp` | string | RFC 3339 nano timestamp when WaveHouse received the event. |
 | `data` | object | The flat JSON body, with parseable `DateTime`/`DateTime64` column values rewritten to canonical RFC 3339 UTC (see [timestamp canonicalization](#timestamp-canonicalization)); other values as originally sent. |
 
 ### Client-Facing Format (SSE)
 
-Same fields as the wire format minus the internal `scope`, which is not forwarded to stream clients:
+Same as the wire format — events are passed through directly:
 
 ```json
 {
@@ -832,7 +827,7 @@ Same fields as the wire format minus the internal `scope`, which is not forwarde
 
 ## Dead Letter Queue (DLQ)
 
-When a batch insert to ClickHouse fails (e.g., type errors, connection issues), the worker re-inserts the batch row by row: rows that succeed are acked, and only the rows that fail again are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — those messages are ACKed from the main stream and moved to the DLQ for inspection. The DLQ message body is the published `EventMessage` envelope (`{"table_name":…,"received_timestamp":…,"data":{…}}` — as published, so it would also carry `scope` if that were ever set; the failed row is under its `data` key, its `DateTime`/`DateTime64` values as published: canonicalized where WaveHouse could parse them, otherwise the producer's original spelling — see [timestamp canonicalization](#timestamp-canonicalization)); the failure reason, table, and time travel in the `X-DLQ-Table` / `X-DLQ-Error` / `X-DLQ-Timestamp` message headers.
+When a batch insert to ClickHouse fails (e.g., type errors, connection issues), the worker re-inserts the batch row by row: rows that succeed are acked, and only the rows that fail again are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — those messages are ACKed from the main stream and moved to the DLQ for inspection. The DLQ message body is the published `EventMessage` envelope (`{"table_name":…,"received_timestamp":…,"data":{…}}` — the failed row is under its `data` key, its `DateTime`/`DateTime64` values as published: canonicalized where WaveHouse could parse them, otherwise the producer's original spelling — see [timestamp canonicalization](#timestamp-canonicalization)); the failure reason, table, and time travel in the `X-DLQ-Table` / `X-DLQ-Error` / `X-DLQ-Timestamp` message headers.
 
 Use `GET /v1/ops/dlq/stats` to monitor DLQ depth.
 

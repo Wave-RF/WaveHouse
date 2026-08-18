@@ -73,9 +73,7 @@ Fetch the table's column definitions from ClickHouse. `.schema()` hits
 `/v1/ops/schema`, an **admin-only** endpoint: the caller must pass the admin
 gate — resolve to the policy admin role or present the non-JWT
 [operator key](/api#authentication) via [`options.headers`](/sdk#custom-headers)
-— or this returns `403`. The
-client build targeting `/v1/ops` is unreleased — see the
-[Installation note](/sdk#installation) for the `@dev`-tag build.
+— or this returns `403`.
 
 ```ts
 const { data } = await clicks.schema();
@@ -261,7 +259,7 @@ while (result.hasMore && result.next) {
 
 ## Raw SQL — `wh.sql(query, opts?)`
 
-Execute a raw SQL query. `/v1/ops/query` is admin-only: the caller must resolve to the policy admin role (`admin_role`, `"admin"` by default). A tokenless request falls back to the `default_role`, so it is rejected with `403` on any policy that doesn't deliberately set `default_role` to the admin role (a loudly-warned dev-only setting); an invalid or expired token is rejected with `401`. The SDK has no first-class option for the server's non-JWT [operator key](/api#authentication) — an operator can send its `X-Operator-Key` header via [`options.headers`](/sdk#custom-headers). The client build targeting `/v1/ops` is unreleased — see the [Installation note](/sdk#installation) for the `@dev`-tag build.
+Execute a raw SQL query. `/v1/ops/query` is admin-only: the caller must resolve to the policy admin role (`admin_role`, `"admin"` by default). A tokenless request falls back to the `default_role`, so it is rejected with `403` on any policy that doesn't deliberately set `default_role` to the admin role (a loudly-warned dev-only setting); an invalid or expired token is rejected with `401`. The SDK has no first-class option for the server's non-JWT [operator key](/api#authentication) — an operator can send its `X-Operator-Key` header via [`options.headers`](/sdk#custom-headers).
 
 ```ts
 const { data, error } = await wh.sql('SELECT page, count() FROM clicks GROUP BY page LIMIT 10');

@@ -49,9 +49,6 @@ Open a live stream. See [Streaming](/sdk/streaming).
 
 Manage named query pipes. Requires the admin gate — the admin role
 (`policy.admin_role`) or the [operator key](/api#authentication).
-These methods hit `/v1/ops/pipes*`; the client build targeting `/v1/ops` is
-unreleased — see the [Installation note](/sdk#installation) for the
-`@dev`-tag build.
 
 ```ts
 // List all pipes

@@ -20,9 +20,7 @@ goroutine / channel / timer interplay is subtle.
 | `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |
 
 The pipeline is **insert-only**. The wire format carries
-`{table_name, scope, received_timestamp, data}` — `scope` is an optional
-cache-invalidation scope that the ingest handler currently always publishes
-empty (see the TODO in `internal/api/ingest.go`). The worker parses
+`{table_name, received_timestamp, data}` and nothing else; the worker parses
 the envelope and bulk-`INSERT`s — schema validation already happened at the
 HTTP ingest handler, before publish. Non-insert mutations go through
 `POST /v1/ops/query` (admin-only).

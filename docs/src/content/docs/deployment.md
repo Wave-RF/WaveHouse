@@ -81,7 +81,7 @@ Production images are published to GitHub Container Registry via GoReleaser:
 ghcr.io/wave-rf/wavehouse:<tag>
 ```
 
-Today only `:dev` (rolling `main`-branch build) and `:dev-<full-commit-sha>` (immutable, pruned after 30 days) are published; `:vX.Y.Z` and `:latest` arrive with the first `v*` release tag. To pin (see the [alpha-stage caution](https://github.com/Wave-RF/WaveHouse#-project-status) in the README), use a `:dev-<full-commit-sha>` tag — the full 40-character commit SHA, not the short form — or an image digest.
+`:vX.Y.Z` and `:latest` track tagged releases; `:dev` is the rolling `main`-branch build, and `:dev-<full-commit-sha>` (immutable, pruned after 30 days) captures a single commit. To pin (see the [alpha-stage caution](https://github.com/Wave-RF/WaveHouse#-project-status) in the README), use a `:dev-<full-commit-sha>` tag — the full 40-character commit SHA, not the short form — or an image digest.
 
 Published images carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation (stored in the registry). Verify one before deploying, pinning the signer to the workflow that publishes the tag — `--repo` alone accepts an attestation from any workflow in the repo:
 
@@ -316,7 +316,7 @@ The Dockerfile `HEALTHCHECK` lets dependent services wait for WaveHouse to be re
 ```yaml
 services:
   wavehouse:
-    image: ghcr.io/wave-rf/wavehouse:dev
+    image: ghcr.io/wave-rf/wavehouse:latest
     # HEALTHCHECK is inherited from the image — no override needed.
 
   my-frontend:
