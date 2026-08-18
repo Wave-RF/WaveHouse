@@ -56,9 +56,10 @@ import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components
     (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag.
     Streaming uses the browser's native `EventSource`, so it needs no polyfill
     either way. A bare CDN URL resolves the `latest` dist-tag — which, until the first
-    `clients/ts/v*` release ships, is still a `0.0.0-dev.*` snapshot ([see the
-    caution](/development#the-dev-channel)), so pin a version for anything
-    real. Use a range (`@0`, `@0.1`) to float within a major or minor, or the
+    **stable** `clients/ts/v*` release ships, is still a `0.0.0-dev.*` snapshot
+    ([see the caution](/development#the-dev-channel)), so pin a version for
+    anything real. A prerelease publishes under `alpha`/`beta`/`rc`/`next` and
+    leaves `latest` alone. Use a range (`@0`, `@0.1`) to float within a major or minor, or the
     `@dev` tag for unreleased builds from `main`.
   </TabItem>
 </Tabs>

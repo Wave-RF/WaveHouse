@@ -12,6 +12,17 @@
 # applied automatically by actions/labeler (path-based, see labeler.yml), while
 # `breaking-change`, `security`, `bug`, and `enhancement` are applied by hand
 # during triage — label the PR, or it lands in "Other changes".
+#
+# Dependabot is separated by AUTHOR, not by label, and that is load-bearing.
+# `github_actions` is path-based here (labeler.yml maps `.github/workflows/**`
+# and `.github/actions/**` to it), so it marks every hand-written CI PR too —
+# excluding that label from the catch-all filed all of our own CI work under
+# "Dependencies". Nor can the label simply be dropped from the Dependencies
+# list: Dependabot's own action bumps carry `github_actions` and NOT
+# `dependencies` (checked against #480, #412, #341), so that empties the
+# category instead. Only the author axis separates the two populations. Both
+# spellings are listed because GitHub's docs use the bare handle while the API
+# reports the login as `dependabot[bot]`.
 changelog:
   exclude:
     labels:
@@ -32,15 +43,20 @@ changelog:
       labels: [bug]
     - title: 📚 Documentation
       labels: [documentation]
-    # The catch-all has to explicitly opt OUT of the dependency labels. Matching
-    # is first-category-wins, and `*` matches everything — so without this
-    # `exclude`, every Dependabot PR would land in "Other changes" and the
-    # Dependencies category below would always render empty. The per-category
-    # `exclude` is what lets Dependencies both match and still sort last, so a
-    # long Dependabot run never buries the changes people actually care about.
+    # Our own CI/release work, which is dense in this repo's history and is not
+    # a dependency bump.
+    - title: 🔧 CI & build
+      labels: [github_actions]
+      exclude:
+        authors: [dependabot, "dependabot[bot]"]
     - title: 🧹 Other changes
       labels: ["*"]
       exclude:
-        labels: [dependencies, github_actions]
+        authors: [dependabot, "dependabot[bot]"]
+    # Last, so a long Dependabot run never buries the changes people actually
+    # care about. `*` rather than a label list: everything reaching this point
+    # has already been excluded from the two categories above by author, so this
+    # is exactly the Dependabot set — and a bump that somehow carried neither
+    # `dependencies` nor `github_actions` still gets listed instead of dropped.
     - title: 📦 Dependencies
-      labels: [dependencies, github_actions]
+      labels: ["*"]
