@@ -84,7 +84,7 @@ func TestQueryHandler_RejectsMalformedRequests(t *testing.T) {
 			wantErr: "invalid json",
 		},
 		{
-			// The pre-proxy /v1/ops/query handler accepted a `params` array
+			// The pre-proxy /v1/admin/query handler accepted a `params` array
 			// bound to positional `?` placeholders. The new HTTP proxy
 			// dropped that and DisallowUnknownFields rejects it loudly
 			// — silently ignoring the field would let old clients run

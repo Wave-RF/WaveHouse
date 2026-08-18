@@ -94,16 +94,16 @@ StreamController (NOT thenable)
 
 ## Codegen CLI
 
-Generate TypeScript types from a running WaveHouse instance. The package ships a `wavehouse-codegen` bin, so after installing `@wavehouse/sdk` you can run it with `npx`:
+Generate TypeScript types from a running WaveHouse instance. The package ships a `wavehouse-codegen` bin — until the first tagged release, select the `@dev` build explicitly (the published `latest` CLI still targets the removed pre-`/v1/ops` paths and gets `404`s; see the [Installation note](/sdk#installation)):
 
 ```bash
-npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
+npx --package @wavehouse/sdk@dev wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 
 # Or, working inside this repo (clients/ts/):
 pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`. The published CLI targeting `/v1/ops` is unreleased — see the [Installation note](/sdk#installation) for the `@dev`-tag build. Codegen currently emits non-compiling types against a live server — it parses the schema response as a map while the endpoint returns an array ([#388](https://github.com/Wave-RF/WaveHouse/issues/388)).
+Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`.
 
 **Options:**
 

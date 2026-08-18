@@ -83,15 +83,23 @@ ghcr.io/wave-rf/wavehouse:<tag>
 
 Today only `:dev` (rolling `main`-branch build) and `:dev-<full-commit-sha>` (immutable, pruned after 30 days) are published; `:vX.Y.Z` and `:latest` arrive with the first `v*` release tag. To pin (see the [alpha-stage caution](https://github.com/Wave-RF/WaveHouse#-project-status) in the README), use a `:dev-<full-commit-sha>` tag — the full 40-character commit SHA, not the short form — or an image digest.
 
-Published images carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation (stored in the registry). Verify one before deploying:
+Published images carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation (stored in the registry). Verify one before deploying, pinning the signer to the workflow that publishes the tag — `--repo` alone accepts an attestation from any workflow in the repo:
 
 ```bash
-gh attestation verify oci://ghcr.io/wave-rf/wavehouse:<tag> --repo Wave-RF/WaveHouse
+# :dev and :dev-<sha> images are published by publish-dev.yml
+gh attestation verify oci://ghcr.io/wave-rf/wavehouse:dev \
+  --repo Wave-RF/WaveHouse \
+  --signer-workflow Wave-RF/WaveHouse/.github/workflows/publish-dev.yml
+
+# :vX.Y.Z and :latest release images are published by release.yml
+gh attestation verify oci://ghcr.io/wave-rf/wavehouse:vX.Y.Z \
+  --repo Wave-RF/WaveHouse \
+  --signer-workflow Wave-RF/WaveHouse/.github/workflows/release.yml
 ```
 
 ## Releases
 
-Releases are built with [GoReleaser](https://goreleaser.com/). The configuration is in `.goreleaser.yaml`. The release archives attached to each GitHub Release carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify a downloaded archive with `gh attestation verify <file> --repo Wave-RF/WaveHouse`. (This covers the prebuilt archives, not `go install`, which compiles from source.)
+Releases are built with [GoReleaser](https://goreleaser.com/). The configuration is in `.goreleaser.yaml`. The release archives attached to each GitHub Release carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify a downloaded archive with `gh attestation verify <file> --repo Wave-RF/WaveHouse --signer-workflow Wave-RF/WaveHouse/.github/workflows/release.yml`. (This covers the prebuilt archives, not `go install`, which compiles from source.)
 
 ### Supported Platforms
 

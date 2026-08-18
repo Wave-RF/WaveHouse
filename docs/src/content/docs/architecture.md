@@ -208,16 +208,20 @@ Active Sweeper (async goroutine, every 60s):
 
 ```text
 Client POST /v1/ops/query
-  → JWT auth middleware (always runs; no/invalid token → empty role)
-  → /v1/ops RequireAdmin (role == policy.admin_role, or the operator-key bit) — single gate shared
-    with the rest of /v1/ops/* (policy CRUD, pipes CRUD, schema
-    discovery, DLQ stats). Raw SQL has
-    no per-statement scope check (a full SQL parser would be needed to
-    authorize predicates), so the role gate is the entire authorization
-    story. /v1/ops/query is the only sanctioned surface for non-SELECT
-    statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…); non-admin callers
-    use `POST /v1/ingest?table={table}` for writes and the structured query
-    endpoint or named pipes for reads.
+  → JWT auth middleware (always runs, never rejects; a bad token yields an
+    empty role and stashes its verification error for the denying gate)
+  → policy.ResolveRole (empty role → default_role — the one sanctioned
+    roleless exception)
+  → /v1/ops RequireAdmin (resolved role == policy.admin_role, or the
+    operator-key bit) — single gate shared with the rest of /v1/ops/*
+    (policy CRUD, pipes CRUD, schema discovery, DLQ stats). A denial is
+    401 when a stashed error shows the caller presented an invalid token,
+    else 403. Raw SQL has no per-statement scope check (a full SQL parser
+    would be needed to authorize predicates), so the role gate is the
+    entire authorization story. /v1/ops/query is the only sanctioned
+    surface for non-SELECT statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…);
+    non-admin callers use `POST /v1/ingest?table={table}` for writes and
+    the structured query endpoint or named pipes for reads.
   → Decode {"sql": "..."} from the request body.
   → POST the SQL verbatim to ClickHouse's HTTP interface at
     <scheme>://<host>:<httpport>/?default_format=JSON

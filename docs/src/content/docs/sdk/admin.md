@@ -33,7 +33,7 @@ await wh.schema.refresh();
 
 Individual table schema is also available via `wh.from('clicks').schema()`.
 
-> `wh.schema.list()`, `wh.schema.refresh()`, and `wh.from(t).schema()` hit `/v1/ops/schema*`, which are **admin-only** endpoints. Against any non-dev policy (anything but `default_role: admin`), construct the client with an admin-role token or these calls return `403`.
+> `wh.schema.list()`, `wh.schema.refresh()`, and `wh.from(t).schema()` hit `/v1/ops/schema*`, which are **admin-only** endpoints: the caller must resolve to the policy admin role (`admin_role`, `"admin"` by default). Unless the deployment deliberately sets `default_role` to that role (the loudly-warned dev-only setting), construct the client with an admin-role token or these calls return `403`.
 
 ---
 

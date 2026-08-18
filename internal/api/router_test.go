@@ -338,6 +338,8 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		{http.MethodPost, "/v1/schema/refresh", "", http.StatusNotFound},
 		{http.MethodGet, "/v1/dlq/stats", "", http.StatusNotFound},
 		{http.MethodPost, "/v1/admin/query", "", http.StatusNotFound},
+		{http.MethodGet, "/v1/admin/policy", "", http.StatusNotFound},
+		{http.MethodGet, "/v1/admin/pipes", "", http.StatusNotFound},
 	}
 
 	for _, tt := range tests {
