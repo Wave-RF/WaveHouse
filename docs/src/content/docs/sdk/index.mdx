@@ -395,15 +395,9 @@ const wh = createClient({
 It carries any `RequestInit` field — `mode`, `cache`, `keepalive`, `credentials`, `redirect` — plus runtime-specific extensions such as Next.js's `next: { tags }`, which tags the cached response for on-demand revalidation. Only those runtime extensions need a cast; the standard fields are declared on `RequestInit` already.
 
 :::caution[Two of those fields don't apply to streams]
-On `.stream()` and `.liveQuery()`'s live connection the transport keeps `cache`
-and `redirect` for itself, because there they're correctness rather than
-preference. It constrains one more without owning it: `credentials` stays yours,
-forwarded in a browser and dropped elsewhere because some runtimes throw if it
-is set at all. See [Supplying your own fetch](#supplying-your-own-fetch) for
-what each is set to and why.
+On `.stream()` and `.liveQuery()`'s live connection the transport keeps `cache` and `redirect` for itself, because there they're correctness rather than preference. It constrains one more without owning it: `credentials` stays yours, forwarded in a browser and dropped elsewhere because some runtimes throw if it is set at all. See [Supplying your own fetch](#supplying-your-own-fetch) for what each is set to and why.
 
-Everything else reaches streams normally — including `mode` from the example
-above. Only `cache` is different there: on a stream it is already `no-store`.
+Everything else reaches streams normally — including `mode` from the example above. Only `cache` is different there: on a stream it is already `no-store`.
 :::
 
 :::note[`credentials: 'include'` needs a proxy that owns CORS]
@@ -469,7 +463,7 @@ undici keeps its connection pool on a shared `globalThis` symbol, and whichever 
 
 Measured with 8.9.0 loaded first and 8.10.0's `fetch` doing the request, 1.5 s idle gaps against a 10 ms server:
 
-```
+```text
                           per-request ms
 no explicit dispatcher    21  1514  1495   583   ← still stalling
 explicit new Agent()      17    14    12    13

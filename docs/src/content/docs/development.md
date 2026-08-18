@@ -425,6 +425,17 @@ The configuration is in `.golangci.yml` (v2 format with `default: none` for expl
 
 Formatting (**gofumpt** — strict superset of gofmt — and **goimports** import grouping) is enforced through the v2 `formatters:` section rather than as linters.
 
+### Markdown and MDX
+
+`make lint` also covers documentation: **markdownlint** owns Markdown *and* MDX style (rules in `.markdownlint.json`, file selection in `.markdownlint-cli2.jsonc`) and **misspell** owns spelling. Two rules are repo-local, in `scripts/markdownlint-rules/`:
+
+- **WH001 / no-hard-wrapped-prose** — a paragraph must be one line. Hard-wrapping at 72/80 columns turns a one-word edit into a five-line diff. Autofixes; tables, code, lists, headings, JSX, and `:::` aside delimiters are left alone.
+- **WH002 / mdx-fence-needs-blank-line** — an MDX code fence directly against a JSX tag (`<TabItem label="YAML">` immediately followed by a fence) is swallowed into the JSX block and renders raw. The build still succeeds, so nothing else catches it.
+
+Run `make fix` to apply both. It is two-phase for a reason: `scripts/fix-mdx-fences.mjs` repairs MDX structure *before* `markdownlint --fix` runs, because until that blank line exists CommonMark sees no code block and the generic rules will happily reformat the code inside it. Don't run `markdownlint-cli2 --fix` against MDX directly.
+
+Editors get the same two rules for free — the markdownlint extension reads `.markdownlint-cli2.jsonc`, `customRules` and all — and agent-written files are fixed at write time by `.claude/hooks/markdown-on-save.sh`.
+
 ## Project Structure
 
 ```text
@@ -497,10 +508,10 @@ Run `make help` to see all targets. Key ones:
 | **Static checks** | |
 | `make fmt` | Check formatting across Go (`gofumpt`) + TS (Biome). Run `make fix` to apply. |
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
-| `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) |
+| `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
 | `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
 | `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) (parallel-safe: `make -j verify`) |
-| `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`) and TS (Biome `--write`) |
+| `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), and Markdown/MDX (`fix-mdx-fences` → markdownlint `--fix` → misspell) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
 | `make build-release` | Stripped release-style build → `bin/wavehouse-release` |

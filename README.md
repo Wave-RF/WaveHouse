@@ -108,8 +108,7 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:latest --repo Wave-RF/Wave
 go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 ```
 
-You'll still need ClickHouse reachable — point WaveHouse at it via `WH_CH_ADDR` (defaults to `localhost:9000`).
-See [Configuration](https://wavehouse.dev/configuration).
+You'll still need ClickHouse reachable — point WaveHouse at it via `WH_CH_ADDR` (defaults to `localhost:9000`). See [Configuration](https://wavehouse.dev/configuration).
 
 ## 🚦 Project status
 

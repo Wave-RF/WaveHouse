@@ -429,13 +429,22 @@ tidy: ## Verify go.mod/go.sum are tidy (run `make fix` to apply)
 
 # fix: apply auto-fixes everywhere, fanned out into three tracks that touch
 # disjoint files — Go (.go + go.mod/sum), TS/JS/JSON (Biome), Markdown — so they
-# run in parallel safely. The Go track is itself a serial chain (tidy → gofumpt →
-# goimports → golangci --fix): order matters there, since each rewrites the same
-# files and the formatters must settle before lint --fix runs.
+# run in parallel safely. Two of the three are themselves serial chains, because
+# inside a track every step rewrites the same files: Go is tidy → gofumpt →
+# goimports → golangci --fix (the formatters must settle before lint --fix), and
+# Markdown is fix-md → fix-prose (markdownlint and misspell both write .md/.mdx,
+# so running them concurrently is a lost-update race).
 .PHONY: fix
 fix: ## Apply auto-fixes across Go (tidy + gofumpt + goimports + lint --fix) + TS/JSON (Biome) + Markdown (markdownlint) + docs prose (misspell)
-	@$(MAKE) -j $(JOBS) fix-go fix-ts fix-md fix-prose
+	@$(MAKE) -j $(JOBS) fix-go fix-ts fix-docs
 	@echo "$(GREEN)==> Done$(RESET)"
+
+# fix-docs: the Markdown track, serial. A wrapper, so `make fix-md` and
+# `make fix-prose` still stand on their own.
+.PHONY: fix-docs
+fix-docs:
+	@$(MAKE) fix-md
+	@$(MAKE) fix-prose
 
 .PHONY: fix-go
 fix-go: $(GOLANGCI_LINT)
@@ -450,9 +459,14 @@ fix-ts: pnpm-install
 	@echo "$(CYAN)==> Applying Biome fixes (format + lint + imports)...$(RESET)"
 	@$(PNPM) -w run fix
 
+# fix-md: two phases, and the order is load-bearing. scripts/fix-mdx-fences.mjs
+# first inserts the blank line an MDX fence needs beside a JSX tag (WH002);
+# until that blank line exists CommonMark sees no code block there, so the
+# generic rules would "fix" the code inside it — de-indenting YAML comments they
+# mistake for headings, rewriting bare URLs. markdownlint --fix runs second.
 .PHONY: fix-md
 fix-md: pnpm-install
-	@echo "$(CYAN)==> Applying markdownlint fixes...$(RESET)"
+	@echo "$(CYAN)==> Applying MDX structure + markdownlint fixes...$(RESET)"
 	@$(PNPM) -w run fix:md
 
 # fix-prose: misspell autofix (common typos + UK → US) over the docs prose. Its

@@ -113,7 +113,7 @@ Tooling notes (the non-obvious bits `make help` won't tell you):
 - `golangci-lint` is pinned in the Makefile (v2.11.4), auto-installed to `.bin/` on first `make lint` — kept out of `go.mod` (its deps conflict with the main module).
 - `pnpm` (≥ 11.1) + `Node 22 LTS` (`.nvmrc`, matches CI) must be on PATH; `make tools` runs one root `pnpm install --frozen-lockfile` across the three workspaces (SDK `clients/ts/`, E2E `tests/e2e/sdk/`, docs `docs/`).
 - **GNU Make 4+** required (uses `--output-sync=target`); macOS BSD Make 3.81 won't parse it. Full setup: `docs/src/content/docs/development.md` § Prerequisites.
-- **Lint split**: Biome owns JS/TS/JSON, markdownlint owns Markdown *style*, misspell owns spelling (all under `make lint`/`make fix`); accuracy/clarity/doc-sync is the `docs-reviewer` gate (§Docs review).
+- **Lint split**: Biome owns JS/TS/JSON, markdownlint owns Markdown *and MDX* style — including two repo-local rules, WH001 (no hard-wrapped prose) and WH002 (MDX fence beside a JSX tag) in `scripts/markdownlint-rules/` — misspell owns spelling (all under `make lint`/`make fix`); accuracy/clarity/doc-sync is the `docs-reviewer` gate (§Docs review). See §Markdown authoring rules.
 - **Worktrunk** (`wt`, `.config/wt.toml`): `wt switch --create` seeds `.bin/` + `node_modules/` from main, then runs `make tools`.
 
 ## Testing Conventions
@@ -320,6 +320,26 @@ Source-of-truth pairs that must agree:
 - Handler error responses ↔ `docs/src/content/docs/api.md` error tables
 
 Before finishing a task, grep for the identifiers you touched (field names, env var names, endpoint paths) across docs to catch staleness.
+
+### Markdown authoring rules
+
+- **Never hard-wrap prose. One paragraph is one line.** No wrapping at 72/80 columns, no "semantic linefeeds" splitting a paragraph at sentence boundaries. Wrapped prose makes every later edit rewrap the whole block, so a one-word change lands as a five-line diff. Enforced by WH001 (`scripts/markdownlint-rules/no-hard-wrapped-prose.mjs`), which autofixes. Tables, code, lists, headings, JSX, and `:::` aside delimiters are untouched — only paragraph text is joined, including the body *inside* an aside.
+- **In MDX, leave a blank line between a JSX tag and a code fence.** Without it MDX swallows the fence into the JSX block and the code renders raw — a silent failure that still builds:
+
+  ````mdx
+  <TabItem label="YAML">
+
+  ```yaml
+  data_dir: ./data
+  ```
+
+  </TabItem>
+  ````
+
+  Enforced by WH002. The autofix is `scripts/fix-mdx-fences.mjs`, which must run *before* markdownlint — while the blank line is missing CommonMark sees no code block, so generic rules will "fix" the code inside it. `make fix` and the agent hook already order it correctly; don't call `markdownlint-cli2 --fix` on MDX by hand.
+- **Editors get the same rules for free.** The markdownlint extension reads `.markdownlint-cli2.jsonc`, `customRules` included, so WH001/WH002 squiggle in-editor with nothing configured in `.vscode/settings.json` (the old `markdownlint.customRules` setting is deprecated in favor of that file).
+- **These fix themselves as you write.** `.claude/hooks/markdown-on-save.sh` (PostToolUse, sibling of `gofumpt-on-save.sh`) runs the MDX pass, markdownlint `--fix`, and misspell on each `.md`/`.mdx` you write, so an agent's output is corrected in the same pass rather than costing a lint failure and a manual cleanup. It only sees `Edit`/`Write`/`MultiEdit` — a file written through a Bash heredoc bypasses it, so run `make fix` after doing that.
+- **WH001 is scoped to docs prose**, off under `.github/` and `.claude/` via their own `.markdownlint.json` — the same line `scripts/docs-prose.sh` draws.
 
 ### Authoring Mermaid diagrams
 

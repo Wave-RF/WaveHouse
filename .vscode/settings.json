@@ -63,12 +63,19 @@
     "editor.tabSize": 2,
     // Apply markdownlint's auto-fixes on save — mirrors `make fix` / `pnpm run
     // fix:md`. The DavidAnson.vscode-markdownlint extension and the CLI both read
-    // the same .markdownlint.json (rules) + .markdownlint-cli2.jsonc (globs), so
+    // the same .markdownlint.json (rules) + .markdownlint-cli2.jsonc (globs AND
+    // customRules, so WH001/WH002 squiggle in the editor with no setting here —
+    // markdownlint.customRules is deprecated in favor of exactly that file), so
     // the editor and CI stay in lockstep.
+    //
+    // WH002's autofix is owned by scripts/fix-mdx-fences.mjs, not by fix-on-save:
+    // it must run before the generic rules, which the editor cannot order. Save
+    // shows the squiggle; `make fix` (or the markdown-on-save hook) repairs it.
     "editor.codeActionsOnSave": {
       "source.fixAll.markdownlint": "explicit"
     }
   },
+
 
   // ── Markdown link validation (VS Code built-in — Microsoft) ────
   // The only editor-side link checker we use is VS Code's own built-in
@@ -88,7 +95,14 @@
   "markdown.validate.fileLinks.enabled": "ignore",
   "markdown.validate.fileLinks.markdownFragmentLinks": "ignore",
   "markdown.validate.fragmentLinks.enabled": "warning",
-  "markdown.validate.referenceLinks.enabled": "warning",
+  // Off, not "warning": Starlight asides are `:::note[Title]`, and the validator
+  // reads that trailing `[Title]` as a shortcut reference link with no
+  // definition — ~40 false positives across the docs, one per aside, plus a few
+  // more where it parses MDX JSX props the same way. This repo defines no
+  // reference-style links at all, so the check has nothing true to say here.
+  // (markdownlint's equivalent, MD052, stays quiet for its own reason: its
+  // shortcut_syntax option is off by default. Editor and CLI agree.)
+  "markdown.validate.referenceLinks.enabled": "ignore",
   "markdown.validate.unusedLinkDefinitions.enabled": "warning",
   "markdown.validate.duplicateLinkDefinitions.enabled": "warning",
 

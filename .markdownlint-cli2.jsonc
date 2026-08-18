@@ -13,8 +13,22 @@
   // `astro build` (CI, via `make ci` → build-docs), the single source of truth
   // for broken links. See docs/astro.config.mjs.
   //
-  // NOTE: .mdx is intentionally NOT linted — markdownlint parses CommonMark, not
-  // MDX's JSX/import syntax (docs/src/content/docs/index.mdx).
+  // .mdx IS linted, with a caveat worth knowing: markdownlint parses CommonMark,
+  // not MDX, so it reads JSX as HTML blocks. That turns out to be a feature —
+  // when a fence is glued to a <TabItem> (see WH002) the fence stops being a
+  // code block and the rules light up, which is exactly the bug we want caught.
+  // It also means generic `--fix` must never run first on such a file — the
+  // rules would "fix" code that only looks like prose — so scripts/fix-mdx-fences.mjs
+  // repairs the structure before this config's fix pass. See `fix:md` in package.json.
+  //
+  // customRules live here and nowhere else — the VS Code extension reads this
+  // file too, so the editor squiggles the same rules CI does with no editor-side
+  // setting (markdownlint.customRules is deprecated in favor of this file):
+  //   WH001  prose paragraphs must not be hard-wrapped   (autofix: joins them)
+  //   WH002  MDX fence adjacent to a JSX tag needs a blank line (fixed in phase 1)
+  // Both are enabled in .markdownlint.json; WH001 is scoped to docs prose by
+  // .github/.markdownlint.json and .claude/.markdownlint.json, which turn it
+  // off for agent prompts and CI docs (the same line scripts/docs-prose.sh draws).
   //
   // markdownlint-cli2 globs with dot:true, so `**/*.md` descends into hidden
   // dirs — including .worktrees/, where this repo nests git worktrees. Honor
@@ -23,7 +37,11 @@
   // (`--fix`) never rewrites another branch's files. The explicit ignores below
   // stay as a fallback for the case where .gitignore is absent.
   "gitignore": true,
-  "globs": ["**/*.md"],
+  "globs": ["**/*.md", "**/*.mdx"],
+  "customRules": [
+    "./scripts/markdownlint-rules/no-hard-wrapped-prose.mjs",
+    "./scripts/markdownlint-rules/mdx-fence-needs-blank-line.mjs"
+  ],
   "ignores": [
     "**/node_modules/**",
     "**/dist/**",
