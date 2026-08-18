@@ -9,6 +9,10 @@ import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components
 
 ## Installation
 
+:::caution[Pin a version until the first stable release]
+`@wavehouse/sdk`'s `latest` dist-tag still resolves to a `0.0.0-dev.*` snapshot, so the bare commands below install that rather than a release — see [the caution in Development](/development#the-dev-channel). Pin an exact version, or use `@dev` for the current `main`.
+:::
+
 <Tabs syncKey="pkg">
   <TabItem label="pnpm">
     ```bash

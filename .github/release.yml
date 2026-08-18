@@ -6,23 +6,42 @@
 # Conventional Commit subject. This file is the only knob on that output — the
 # `changelog.filters` in .goreleaser.yaml do not apply.
 #
-# Categories are matched by PR LABEL, top to bottom, first match wins; a PR with
-# no matching label falls into the `*` catch-all. So a category is only as good
-# as the labels: `dependencies` / `github_actions` / `go` / `documentation` are
-# applied automatically by actions/labeler (path-based, see labeler.yml), while
-# `breaking-change`, `security`, `bug`, and `enhancement` are applied by hand
-# during triage — label the PR, or it lands in "Other changes".
+# Categories are matched by PR LABEL, top to bottom, first match wins; `*` is a
+# catch-all for whatever the categories ABOVE it did not take. So a category is
+# only as good as its labels: `github_actions` / `documentation` / `go` /
+# `dependencies` are applied automatically by actions/labeler (path-based, see
+# labeler.yml), while `breaking-change`, `security`, `bug`, and `enhancement`
+# are applied by hand during triage — label the PR, or it lands in "Other
+# changes".
 #
-# Dependabot is separated by AUTHOR, not by label, and that is load-bearing.
-# `github_actions` is path-based here (labeler.yml maps `.github/workflows/**`
-# and `.github/actions/**` to it), so it marks every hand-written CI PR too —
-# excluding that label from the catch-all filed all of our own CI work under
-# "Dependencies". Nor can the label simply be dropped from the Dependencies
-# list: Dependabot's own action bumps carry `github_actions` and NOT
-# `dependencies` (checked against #480, #412, #341), so that empties the
-# category instead. Only the author axis separates the two populations. Both
-# spellings are listed because GitHub's docs use the bare handle while the API
-# reports the login as `dependabot[bot]`.
+# THE INVARIANT: every category keyed on a label that actions/labeler applies
+# BY PATH must carry the Dependabot author exclude. Dependabot is separated by
+# author rather than by label, and the final `*` category is what collects it —
+# so any earlier category matching a path-based label intercepts bumps before
+# they get there. Two labels qualify today, and both bit:
+#
+#   github_actions  labeler maps .github/workflows/** and .github/actions/**,
+#                   so it marks our own CI PRs, not just Dependabot's action
+#                   bumps (#446 is a hand-written CI PR carrying it). Excluding
+#                   the LABEL from the catch-all filed all our CI work under
+#                   Dependencies; dropping it instead empties that category,
+#                   because Dependabot's action bumps carry `github_actions`
+#                   and NOT `dependencies` (#480, #412, #341).
+#   documentation   labeler maps docs/**, and the npm Dependabot config points
+#                   at the workspace root, so every npm bump touches
+#                   docs/package.json and gets labelled. 13 of the last 30
+#                   Dependabot PRs carry it (#482, #439, #426, #423, #420, …) —
+#                   without the exclude, "Documentation" renders as a wall of
+#                   `deps: bump the npm-deps group`.
+#
+# `security` deliberately has NO author exclude: a Dependabot bump that a
+# maintainer hand-labels `security` is a security fix and belongs at the top,
+# not buried under Dependencies.
+#
+# This routing cannot be linted locally. Dry-run it against real history before
+# cutting a release:
+#   gh api -X POST repos/Wave-RF/WaveHouse/releases/generate-notes \
+#     -f tag_name=vX.Y.Z -f target_commitish=main --jq .body
 changelog:
   exclude:
     labels:
@@ -43,6 +62,8 @@ changelog:
       labels: [bug]
     - title: 📚 Documentation
       labels: [documentation]
+      exclude:
+        authors: [dependabot, "dependabot[bot]"]
     # Our own CI/release work, which is dense in this repo's history and is not
     # a dependency bump.
     - title: 🔧 CI & build
@@ -55,8 +76,8 @@ changelog:
         authors: [dependabot, "dependabot[bot]"]
     # Last, so a long Dependabot run never buries the changes people actually
     # care about. `*` rather than a label list: everything reaching this point
-    # has already been excluded from the two categories above by author, so this
-    # is exactly the Dependabot set — and a bump that somehow carried neither
-    # `dependencies` nor `github_actions` still gets listed instead of dropped.
+    # has already been excluded from the categories above by author, so this is
+    # exactly the Dependabot set — and a bump that somehow carried none of the
+    # dependency labels still gets listed instead of dropped.
     - title: 📦 Dependencies
       labels: ["*"]
