@@ -15,7 +15,7 @@ const clicks = wh.from('clicks');
 
 ### `.fetch(opts?)`
 
-Shortcut for "select every column", with a default limit of 1000. When an access-control policy restricts your role's columns, the server returns only the columns your role is allowed to read. `.fetch()` is never a way around `deny_columns`/`allow_columns` / cannot bypass these server-side restriction (see [Access control](/access-control#column-permissions)).
+Shortcut for "select every column", with a default limit of 1000. When an access-control policy restricts your role's columns, the server returns only the columns your role is allowed to read — `.fetch()` is never a way around `deny_columns`/`allow_columns` (see [Access control](/access-control#column-permissions)).
 
 To paginate, chain an explicit `.orderBy()` — a bare `.fetch()` sends no default order (see [Pagination](#pagination)). Ordering, grouping, or filtering by a column your role can't read is rejected, so a column-restricted role must reference only readable columns in those clauses.
 
@@ -26,7 +26,7 @@ const { data } = await clicks.fetch({ limit: 50, signal: controller.signal });
 
 ### `.insert(data, opts?)`
 
-Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table={table}`. An **array** is serialized to NDJSON (one record per line) and sent as a single `application/x-ndjson` request, and, so bad records don't fail the rest of the batch — per-record outcomes come back in the result.
+Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table={table}`. An **array** is serialized to NDJSON (one record per line) and sent as a single `application/x-ndjson` request, so a bad record no longer fails or hides the rest of the batch — per-record outcomes come back in the result.
 
 ```ts
 // Single row → { ok: true } (or { ok: true, duplicate: true } when dedup skips it)

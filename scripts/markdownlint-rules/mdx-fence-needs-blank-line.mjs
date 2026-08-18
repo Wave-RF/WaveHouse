@@ -38,12 +38,13 @@ export default {
     // CommonMark has no JSX, so this only applies to MDX.
     if (!params.name.endsWith(".mdx")) return;
 
+    // Deliberately no fixInfo. A bare `markdownlint-cli2 --fix` would apply the
+    // blank-line insert AND, in the same pass, the generic fixes computed
+    // against the swallowed-fence parse — repairing the symptom while
+    // corrupting the code. Reporting only keeps the violation visible until the
+    // ordered pass in scripts/fix-mdx-fences.mjs runs.
     for (const { line, detail } of findFenceTagViolations(params.lines)) {
-      onError({
-        lineNumber: line,
-        detail,
-        fixInfo: { lineNumber: line, editColumn: 1, deleteCount: 0, insertText: "\n" },
-      });
+      onError({ lineNumber: line, detail });
     }
   },
 };

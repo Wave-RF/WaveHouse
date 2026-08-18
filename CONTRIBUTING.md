@@ -91,6 +91,7 @@ test(cache): add tiered cache stampede test
 
 - **Formatting**: Code must be formatted with `gofumpt` (a strict superset of `gofmt`). `make fmt` checks it (CI runs the same target); `make fix` applies it.
 - **Linting**: All lint checks in `.golangci.yml` must pass (see `make lint`).
+- **Docs prose**: never hard-wrap Markdown — one paragraph is one line. `make lint` enforces it (rule `WH001`), and `make fix` applies it along with the rest of the Markdown/MDX fixers. See [Development → Markdown and MDX](https://wavehouse.dev/development#markdown-and-mdx).
 - **Naming**: Follow [Go naming conventions](https://go.dev/doc/effective_go#names).
 - **Interfaces**: Define interfaces where they are consumed, not where they are implemented.
 - **Errors**: Return errors rather than panicking. Use `fmt.Errorf("context: %w", err)` for wrapping.

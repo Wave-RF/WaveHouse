@@ -407,6 +407,14 @@ lint-gha: $(ACTIONLINT) $(SHELLCHECK)
 # classifier behind CI's `changes` job and the local git hooks) against the
 # canonical change shapes — fast, dependency-free, so the allowlists can't
 # silently regress. A verify leaf so CI's lint job runs it.
+# test-md-rules: fixtures for the repo-local markdownlint rules. They rewrite
+# every .md/.mdx on every agent write, and they classify by line shape with no
+# parse tree, so an unrecognized construct is corrupted rather than skipped —
+# cheap fixtures are the only thing that catches the next shape regression.
+.PHONY: test-md-rules
+test-md-rules: pnpm-install
+	$(call run,markdownlint rule tests,node --test scripts/markdownlint-rules/rules.test.mjs,)
+
 .PHONY: test-classify-paths
 test-classify-paths:
 	$(call run,classify-paths test,scripts/classify-paths.test.sh,)
@@ -500,7 +508,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.

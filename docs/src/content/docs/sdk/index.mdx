@@ -348,7 +348,7 @@ const wh = createClient({ baseURL: 'https://app.example.com/api/wavehouse' });
 // streams  → https://app.example.com/api/wavehouse/v1/stream
 ```
 
-Trailing slashes on `baseURL` are optional, but it must be **absolute** — scheme and host included — and the scheme must be `http` or `https`. A same-origin relative path like `/api/warehouse` makes every REST call reject with a `TypeError` instead of returning a `Result`, and surfaces on a stream as an `SSE_CONNECT_ERROR` to the subscriber's `error` callback — so build an absolute one: `` `${location.origin}/api/warehouse` ``. A `ws://`/`wss://` base ends the stream with the same error: streaming is plain HTTP, and there is no WebSocket endpoint.
+Trailing slashes on `baseURL` are optional, but it must be **absolute** — scheme and host included — and the scheme must be `http` or `https`. A same-origin relative path like `/api/wavehouse` makes every REST call reject with a `TypeError` instead of returning a `Result`, and surfaces on a stream as an `SSE_CONNECT_ERROR` to the subscriber's `error` callback — so build an absolute one: `` `${location.origin}/api/wavehouse` ``. A `ws://`/`wss://` base ends the stream with the same error: streaming is plain HTTP, and there is no WebSocket endpoint.
 
 The proxy in front must **strip** the prefix before forwarding, since WaveHouse itself always serves at `/v1/…` — see [Behind a reverse proxy → Path prefixes](/reverse-proxy#path-prefixes).
 

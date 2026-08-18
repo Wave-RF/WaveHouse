@@ -22,13 +22,14 @@
   // repairs the structure before this config's fix pass. See `fix:md` in package.json.
   //
   // customRules live here and nowhere else — the VS Code extension reads this
-  // file too, so the editor squiggles the same rules CI does with no editor-side
-  // setting (markdownlint.customRules is deprecated in favor of this file):
+  // file too, so no editor-side setting is needed (markdownlint.customRules is
+  // deprecated in favor of this file). Note the editor only activates on
+  // Markdown, so .mdx gets no squiggles either way; CI and `make fix` cover it:
   //   WH001  prose paragraphs must not be hard-wrapped   (autofix: joins them)
   //   WH002  MDX fence adjacent to a JSX tag needs a blank line (fixed in phase 1)
-  // Both are enabled in .markdownlint.json; WH001 is scoped to docs prose by
-  // .github/.markdownlint.json and .claude/.markdownlint.json, which turn it
-  // off for agent prompts and CI docs (the same line scripts/docs-prose.sh draws).
+  // Both are enabled in .markdownlint.json. WH001 is turned off for CI docs and
+  // agent prompts by .github/.markdownlint.json and .claude/.markdownlint.json,
+  // and applies everywhere else — a narrower exclusion than scripts/docs-prose.sh.
   //
   // markdownlint-cli2 globs with dot:true, so `**/*.md` descends into hidden
   // dirs — including .worktrees/, where this repo nests git worktrees. Honor

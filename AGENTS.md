@@ -99,7 +99,7 @@ make ci                # Full pre-push pipeline — run it the documented way (�
 make build             # Compile → bin/wavehouse
 make dev               # ClickHouse + hot-reload server on :8080 (Docker)
 make deps-up           # Start ClickHouse alone — for `make dev`; NOT needed by `make ci`
-make dev-docs          # Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321
+make dev-docs          # Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321 (next free port if busy)
 make build-docs        # Production build → docs/dist/
 make preview-docs      # Wrangler preview of the production build (auto-builds if dist/ missing)
 make branding-docs     # Regenerate logo/favicon/OG assets from docs/src/assets/branding/mark.svg
@@ -323,7 +323,7 @@ Before finishing a task, grep for the identifiers you touched (field names, env 
 
 ### Markdown authoring rules
 
-- **Never hard-wrap prose. One paragraph is one line.** No wrapping at 72/80 columns, no "semantic linefeeds" splitting a paragraph at sentence boundaries. Wrapped prose makes every later edit rewrap the whole block, so a one-word change lands as a five-line diff. Enforced by WH001 (`scripts/markdownlint-rules/no-hard-wrapped-prose.mjs`), which autofixes. Tables, code, lists, headings, JSX, and `:::` aside delimiters are untouched — only paragraph text is joined, including the body *inside* an aside.
+- **Never hard-wrap prose. One paragraph is one line.** No wrapping at 72/80 columns, no "semantic linefeeds" splitting a paragraph at sentence boundaries. Wrapped prose makes every later edit rewrap the whole block, so a one-word change lands as a five-line diff. Enforced by WH001 (`scripts/markdownlint-rules/no-hard-wrapped-prose.mjs`), which autofixes. Tables (with or without leading pipes), code, headings, setext underlines, blockquotes, JSX, multi-line MDX `import`/`export`, and `:::` aside delimiters are left alone; a list item is joined as a unit, marker line included; an aside's *body* is joined but its delimiters are not.
 - **In MDX, leave a blank line between a JSX tag and a code fence.** Without it MDX swallows the fence into the JSX block and the code renders raw — a silent failure that still builds:
 
   ````mdx
@@ -337,9 +337,9 @@ Before finishing a task, grep for the identifiers you touched (field names, env 
   ````
 
   Enforced by WH002. The autofix is `scripts/fix-mdx-fences.mjs`, which must run *before* markdownlint — while the blank line is missing CommonMark sees no code block, so generic rules will "fix" the code inside it. `make fix` and the agent hook already order it correctly; don't call `markdownlint-cli2 --fix` on MDX by hand.
-- **Editors get the same rules for free.** The markdownlint extension reads `.markdownlint-cli2.jsonc`, `customRules` included, so WH001/WH002 squiggle in-editor with nothing configured in `.vscode/settings.json` (the old `markdownlint.customRules` setting is deprecated in favor of that file).
+- **Editors see WH001 in `.md` only.** The markdownlint extension reads `.markdownlint-cli2.jsonc`, `customRules` included, so no `.vscode` setting is needed (`markdownlint.customRules` is deprecated in favor of that file). But it activates on the `markdown` language ID, and `.mdx` is not associated with it — so WH002 never squiggles in the editor, and WH001 squiggles only in `.md`. Don't "fix" that with a `files.associations` entry: it would enable `source.fixAll.markdownlint` on `.mdx` and reintroduce the ordering hazard above. `make fix` and the agent hook are the MDX path.
 - **These fix themselves as you write.** `.claude/hooks/markdown-on-save.sh` (PostToolUse, sibling of `gofumpt-on-save.sh`) runs the MDX pass, markdownlint `--fix`, and misspell on each `.md`/`.mdx` you write, so an agent's output is corrected in the same pass rather than costing a lint failure and a manual cleanup. It only sees `Edit`/`Write`/`MultiEdit` — a file written through a Bash heredoc bypasses it, so run `make fix` after doing that.
-- **WH001 is scoped to docs prose**, off under `.github/` and `.claude/` via their own `.markdownlint.json` — the same line `scripts/docs-prose.sh` draws.
+- **WH001 is off under `.github/` and `.claude/`** (CI docs and agent prompts) via their own `.markdownlint.json`. It applies everywhere else, `AGENTS.md` and `CHANGELOG.md` included — so this is a narrower exclusion than `scripts/docs-prose.sh`, which also skips those two.
 
 ### Authoring Mermaid diagrams
 
