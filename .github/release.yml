@@ -14,11 +14,15 @@
 # are applied by hand during triage — label the PR, or it lands in "Other
 # changes".
 #
-# THE INVARIANT: every category keyed on a label that actions/labeler applies
-# BY PATH must carry the Dependabot author exclude. Dependabot is separated by
-# author rather than by label, and the final `*` category is what collects it —
-# so any earlier category matching a path-based label intercepts bumps before
-# they get there. Two labels qualify today, and both bit:
+# THE INVARIANT: every category keyed on a label that a DEPENDABOT PR CAN CARRY
+# must have the Dependabot author exclude. Dependabot is separated by author
+# rather than by label, and the final `*` category is what collects it — so any
+# earlier category matching one of those labels intercepts bumps before they
+# get there. Two sources feed that set, and checking only the first is not
+# enough: labeler's path labels (`documentation`, `github_actions`, `go`,
+# `dependencies`, `area/*`) AND the ecosystem labels Dependabot applies itself
+# (`dependencies`, `javascript`, `go`, `github_actions` — `javascript` is not
+# in labeler.yml at all). Two labels are load-bearing today, and both bit:
 #
 #   github_actions  labeler maps .github/workflows/** and .github/actions/**,
 #                   so it marks our own CI PRs, not just Dependabot's action
@@ -60,14 +64,19 @@ changelog:
       labels: [enhancement]
     - title: 🐛 Bug fixes
       labels: [bug]
-    - title: 📚 Documentation
-      labels: [documentation]
-      exclude:
-        authors: [dependabot, "dependabot[bot]"]
-    # Our own CI/release work, which is dense in this repo's history and is not
-    # a dependency bump.
+    # ABOVE Documentation deliberately. First match wins, and our CI PRs carry
+    # BOTH labels — AGENTS.md requires a doc update with every change, so a CI
+    # PR almost always touches docs/** or README.md too (7 of the last 9:
+    # #334, #329, #312, #311, #310, #308, #275). With Documentation first this
+    # category would be dead on arrival and Documentation would be a wall of
+    # `ci:` PRs. The cost is a docs PR that also edits a workflow filing here
+    # instead — one instance in recent history (#187) against seven.
     - title: 🔧 CI & build
       labels: [github_actions]
+      exclude:
+        authors: [dependabot, "dependabot[bot]"]
+    - title: 📚 Documentation
+      labels: [documentation]
       exclude:
         authors: [dependabot, "dependabot[bot]"]
     - title: 🧹 Other changes
