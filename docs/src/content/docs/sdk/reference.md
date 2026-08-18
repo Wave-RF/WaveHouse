@@ -30,7 +30,7 @@ The SDK **never throws** for anything the server returns — all API errors come
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
 | 400 | `HTTP_400` | No | Bad request (validation, missing fields) |
-| 401 | `HTTP_401` | No | A present-but-invalid or expired JWT that a gate then denied. A *missing* token is not a `401` — it resolves to `default_role`, and a denial is `403` |
+| 401 | `HTTP_401` | No | On REST, a present-but-invalid or expired JWT that a gate then denied. **WaveHouse itself** never returns `401` for a *missing* token — that resolves to `default_role`, and a denial is `403`. On a stream it is always from something in front, since `/v1/stream` is ungated |
 | 403 | `HTTP_403` | No | Insufficient permissions |
 | 404 | `HTTP_404` | No | Table or pipe not found |
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
