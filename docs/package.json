@@ -23,7 +23,7 @@
     "@wave-rf/starlight-llm-tools": "^0.3.1",
     "@wavehouse/sdk": "workspace:*",
     "astro": "^7.1.1",
-    "astro-vtbot": "^3.0.1",
+    "astro-vtbot": "^3.1.0",
     "katex": "^0.18.4",
     "rehype-katex": "^7.0.1",
     "rehype-mermaid": "^3.0.0",
