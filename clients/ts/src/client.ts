@@ -84,7 +84,7 @@ export class WaveHouseClient<DB extends Database = Database> {
     // SQL errors. Throw a clear runtime error pointing at the migration.
     if (Array.isArray(opts)) {
       throw new Error(
-        "[WaveHouse SDK] client.sql(sql, params) was removed. The /v1/admin/query endpoint does not accept positional `?` params. Inline literals into the SQL, or use the structured query builder (wh.from(table)…) for safe binding from user input.",
+        "[WaveHouse SDK] client.sql(sql, params) was removed. The /v1/ops/query endpoint does not accept positional `?` params. Inline literals into the SQL, or use the structured query builder (wh.from(table)…) for safe binding from user input.",
       );
     }
     return sql<Row>(this._ctx, query, opts);

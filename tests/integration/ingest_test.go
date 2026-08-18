@@ -54,7 +54,7 @@ func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 	// Confirm the success path didn't tee anything into the DLQ for this
 	// table — that's the actual contract we're asserting (no silent
 	// duplicate writes to dlq.<table> alongside the real INSERT).
-	dlqResp, err := http.Get(e.server.URL + "/v1/dlq/stats")
+	dlqResp, err := http.Get(e.server.URL + "/v1/ops/dlq/stats")
 	require.NoError(t, err)
 	defer dlqResp.Body.Close()
 

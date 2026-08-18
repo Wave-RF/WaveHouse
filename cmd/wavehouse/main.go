@@ -400,7 +400,7 @@ func run() int {
 	}
 
 	// TODO: is this really the best/right way to do this?
-	// /v1/admin/query proxies straight to ClickHouse over HTTP — no native
+	// /v1/ops/query proxies straight to ClickHouse over HTTP — no native
 	// driver involvement. Construct the base URL from the same fields the
 	// ingest worker uses, defaulting the scheme to http if blank.
 	queryHost, _, err := net.SplitHostPort(cfg.ClickHouse.Addr)

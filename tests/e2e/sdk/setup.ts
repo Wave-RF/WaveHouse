@@ -48,17 +48,17 @@ async function createTables(): Promise<void> {
   }
 }
 
-// /v1/schema returns an array of { name, columns, ... } — wait until every
+// /v1/ops/schema returns an array of { name, columns, ... } — wait until every
 // generated table is present so we don't burn the full timeout on the happy
 // path.
 async function refreshSchema(): Promise<void> {
   const headers = { Authorization: setupAuth() };
-  await fetch(`${WH_URL}/v1/schema/refresh`, { method: "POST", headers });
+  await fetch(`${WH_URL}/v1/ops/schema/refresh`, { method: "POST", headers });
 
   const expected = allTableSpecs().map((t) => t.name);
   const start = Date.now();
   while (Date.now() - start < 30_000) {
-    const res = await fetch(`${WH_URL}/v1/schema`, { headers });
+    const res = await fetch(`${WH_URL}/v1/ops/schema`, { headers });
     if (res.ok) {
       const schema = (await res.json()) as Array<{ name?: string }>;
       const present = new Set(schema.map((t) => t?.name).filter(Boolean));
@@ -85,7 +85,7 @@ async function bootstrapTestPolicy(): Promise<void> {
   }
   const policy = { tables };
 
-  const res = await fetch(`${WH_URL}/v1/admin/policy`, {
+  const res = await fetch(`${WH_URL}/v1/ops/policy`, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",

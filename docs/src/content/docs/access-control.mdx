@@ -54,7 +54,7 @@ For authorization, the behavior that matters is what happens with **no** role: t
 Setting `default_role` does nothing on its own; the role you name still needs entries under `tables` to grant any access. Think of it as "which role does an anonymous caller assume", not "what can anonymous callers do".
 
 :::caution[`default_role: admin` is a dev-only footgun]
-Setting `default_role` equal to `admin_role` is permitted — it makes every unauthenticated request a full admin, including `/v1/admin/*`, which is handy for local development with no tokens. It is **never** for production. Every node that loads such a policy logs a loud `WARN` on startup and on every update.
+Setting `default_role` equal to `admin_role` is permitted — it makes every unauthenticated request a full admin, including `/v1/ops/*`, which is handy for local development with no tokens. It is **never** for production. Every node that loads such a policy logs a loud `WARN` on startup and on every update.
 :::
 
 ### `admin_role` — the privileged role
@@ -62,7 +62,7 @@ Setting `default_role` equal to `admin_role` is permitted — it makes every una
 `admin_role` (default: `"admin"`) is the one role that bypasses the entire policy:
 
 - It is granted **full, unrestricted access** to every table and operation. An admin is **never** column-scoped or row-scoped, even by a policy entry that explicitly names the admin role — admin is an unconditional bypass, not a scoped grant.
-- It is the gate for every admin surface: `/v1/admin/*` (raw SQL, policy CRUD, pipe CRUD), plus the schema and DLQ endpoints. The gate reads `admin_role` live from the policy, so changing it applies without a restart.
+- It is the gate for the whole `/v1/ops/*` tree — raw SQL, policy CRUD, pipe CRUD, schema discovery, and DLQ stats. The gate reads `admin_role` live from the policy, so changing it applies without a restart.
 
 There is no separate `service` role. To reach an admin endpoint or to read data beyond what `default_role` grants, present a valid token whose `role_claim` is the admin role (or another granted role) — **or** present the non-JWT [operator key](#operator-key) described below.
 
@@ -72,7 +72,7 @@ There is no separate `service` role. To reach an admin endpoint or to read data 
 
 ### Operator key
 
-`auth.operator_key` (config; presented in an `Authorization: Operator <key>` header, or the `X-Operator-Key` alias) is a static, role-free credential for the person running the deployment, meant for bootstrap and break-glass recovery. A request presenting it is authorized as a **full-access platform operator** — the entire data plane *and* the `/v1/admin/*` management surface — without minting a JWT, and independently of the JWT verifier (`jwt_secret`/`jwks_url`).
+`auth.operator_key` (config; presented in an `Authorization: Operator <key>` header, or the `X-Operator-Key` alias) is a static, role-free credential for the person running the deployment, meant for bootstrap and break-glass recovery. A request presenting it is authorized as a **full-access platform operator** — the entire data plane *and* the `/v1/ops/*` management surface — without minting a JWT, and independently of the JWT verifier (`jwt_secret`/`jwks_url`).
 
 Unlike `admin_role`, the operator key is honored **even when the policy is `nil`** (deleted, or never seeded), so it is the one HTTP path that can restore a wiped policy — the break-glass case the caution above describes. It is matched in constant time, takes precedence over any Bearer token on the same request, and is disabled when empty (the default). Treat it as an admin secret: load it from a secret store, serve it only over TLS, and rotate it like any other credential. See [Configuration — Authentication](/configuration#authentication).
 
@@ -87,7 +87,7 @@ head -c 32 /dev/urandom | base64
 Set the result via `WH_AUTH_OPERATOR_KEY` (or `auth.operator_key`) and present it as `Authorization: Operator <key>` (or `X-Operator-Key: <key>`):
 
 ```bash
-curl -H "Authorization: Operator $(cat operator.key)" https://wavehouse.example.com/v1/admin/policy
+curl -H "Authorization: Operator $(cat operator.key)" https://wavehouse.example.com/v1/ops/policy
 ```
 
 **Monitor failed attempts.** A successful operator authentication is audit-logged at `INFO`; a request presenting a *wrong* operator key is logged at `WARN` (`operator key authentication failed`) and counted by the `wavehouse_auth_operator_key_failures_total` metric, then handled as an ordinary unauthenticated request (the middleware never rejects). A wrong operator key is never sent by accident, so a nonzero rate is a strong probing/brute-force signal against your most privileged credential — alert on it.
@@ -99,7 +99,7 @@ A policy is a YAML or JSON document with three top-level fields:
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `default_role` | string | Role that a roleless (tokenless or claimless) request assumes. Empty = no public access. |
-| `admin_role` | string | Role granted full, unrestricted access and the `/v1/admin/*` gate. Optional; defaults to `"admin"`. |
+| `admin_role` | string | Role granted full, unrestricted access and the `/v1/ops/*` gate. Optional; defaults to `"admin"`. |
 | `tables` | map | Per-table permissions, keyed by ClickHouse table name. |
 
 Each table entry holds permissions for two operations — `select` (reads) and `insert` (writes) — and each operation maps **role → permissions**:
@@ -234,7 +234,7 @@ Values are always bound as SQL **parameters**, never concatenated into the query
 
 "Can't be resolved" means the claim path is **absent** from the token (or `null`) — or resolves to a JSON **object or array** rather than a scalar, which usually means a dropped path segment (`{{ jwt.app_metadata }}` where `{{ jwt.app_metadata.tenant_id }}` was meant); the one structured shape with defined semantics is the bare-claim `_in` array above. Scalar claims — strings, booleans, and numbers — resolve normally. A numeric claim binds in **canonical decimal form**, not the token's spelling: an integer id keeps every digit — up to a 100-digit bound, far past any real id — while `1.0` or `1e3` binds as `1` and `1000`, so spelling differences between issuers never change the bound value. What must fit the bound is the value's **exact decimal form**, exponent applied — roughly 100 digits (the exact-form gate allows 102 characters, whatever they are) — so `1e400` can't be resolved, but neither can `1e150` or `1e-150`, whose short spellings expand to 151- and 152-character exact forms even though a float64 could hold them; prefer issuing integer ids as integers. Type the scoped column to match: an integer column — or a `Decimal` whose scale covers the claim's fractional digits — keeps the comparison exact, while a `Float32`/`Float64` column rounds the stored value and quietly gives that exactness back (`col = '9007199254740993'` matches a stored `9007199254740992` there). A claim that is *present but empty* is a value the token vouches for: it resolves to `''` and binds normally, so `_neq` against an empty-string claim still emits `col != ''`. Make sure your identity provider actually issues the claims your policy templates reference — and omits unset claims rather than issuing them as empty strings.
 
-Claim paths may contain only letters, digits, `_`, and `.` (the segment separator). Any `{{ … }}` fragment that is not a well-formed `{{ jwt.<path> }}` template — a path outside that grammar (a hyphen: `{{ jwt.tenant-id }}`; a namespaced claim: `{{ jwt.https://app.example.com/tenant_id }}`), a missing or misspelled `jwt.` prefix, or an unterminated `{{` — is **not** recognized as a template, and left unchecked the resolver would bind the literal `{{ … }}` text as a value. (Policy values have no other placeholder syntax; a pipe's `{{param}}` placeholders are a different mechanism and are not accepted here.) That is *not* fail-closed: on a read filter `_neq`/`_lt` would then match essentially every row (a leak), and on a write `check` the literal text would be stamped into every inserted row (silent corruption). So such a policy is **rejected when it is written**: a bootstrap policy file carrying one makes WaveHouse refuse to start when the store is seeded from it (a populated KV store skips the file), and a `PUT` on `/v1/admin/policy` (or a `POST` to `/v1/admin/policy/validate`) returns `400`. A policy already stored in NATS KV is *not* re-validated when a node loads it ([#461](https://github.com/Wave-RF/WaveHouse/issues/461)), so after upgrading, re-`PUT` your policy once to surface a template written before this rule existed — until you do, that stored policy keeps binding the literal text, and the leak above stays live for it. Flatten hyphenated or namespaced claims into a supported path at your identity provider — on Auth0, an [Action can set a flat custom claim](https://auth0.com/docs/secure/tokens/json-web-tokens/create-custom-claims) outside the registered OIDC names (its legacy Rules required URL namespacing, which established tenants often still carry), and namespacing is a common OIDC convention elsewhere, so a namespaced claim is the shape you are most likely to meet first.
+Claim paths may contain only letters, digits, `_`, and `.` (the segment separator). Any `{{ … }}` fragment that is not a well-formed `{{ jwt.<path> }}` template — a path outside that grammar (a hyphen: `{{ jwt.tenant-id }}`; a namespaced claim: `{{ jwt.https://app.example.com/tenant_id }}`), a missing or misspelled `jwt.` prefix, or an unterminated `{{` — is **not** recognized as a template, and left unchecked the resolver would bind the literal `{{ … }}` text as a value. (Policy values have no other placeholder syntax; a pipe's `{{param}}` placeholders are a different mechanism and are not accepted here.) That is *not* fail-closed: on a read filter `_neq`/`_lt` would then match essentially every row (a leak), and on a write `check` the literal text would be stamped into every inserted row (silent corruption). So such a policy is **rejected when it is written**: a bootstrap policy file carrying one makes WaveHouse refuse to start when the store is seeded from it (a populated KV store skips the file), and a `PUT` on `/v1/ops/policy` (or a `POST` to `/v1/ops/policy/validate`) returns `400`. A policy already stored in NATS KV is *not* re-validated when a node loads it ([#461](https://github.com/Wave-RF/WaveHouse/issues/461)), so after upgrading, re-`PUT` your policy once to surface a template written before this rule existed — until you do, that stored policy keeps binding the literal text, and the leak above stays live for it. Flatten hyphenated or namespaced claims into a supported path at your identity provider — on Auth0, an [Action can set a flat custom claim](https://auth0.com/docs/secure/tokens/json-web-tokens/create-custom-claims) outside the registered OIDC names (its legacy Rules required URL namespacing, which established tenants often still carry), and namespacing is a common OIDC convention elsewhere, so a namespaced claim is the shape you are most likely to meet first.
 
 Row filters apply on the structured-query path and, per subscriber, on the live SSE stream — the stream evaluates the same resolved predicates in memory against each subscriber's token claims (see the [enforcement caution](#where-each-rule-is-enforced) for what its in-memory comparison can and cannot decide). Named pipes authorize by `allowed_roles` membership alone — scope a pipe's exposure in its SQL text, since neither the table policy's row `filter` nor its column allow/deny list is applied on the pipe path (see [Named Pipes](/pipes#authorizing-a-pipe)).
 
@@ -379,7 +379,7 @@ The same policy drives every data path, but not every field is meaningful on eve
 | Structured read | `POST /v1/query?table={table}` | table+role `select` required, then `allow`/`deny_columns`, row `filter`, aggregation rules, and the per-role `max_rows` / `max_execution_time` / `max_rows_to_read` / `max_memory_usage` caps (over the [ClickHouse server-wide limits](/configuration#server-side-resource-limits)) |
 | Ingest (write) | `POST /v1/ingest?table={table}` | table+role `insert` required, then `allow`/`deny_columns` and `check` (enforced and auto-injected) |
 | Live stream | `GET /v1/stream` | table+role `select` required (a table the role can't read is skipped), then denied columns are masked from each event and the role's row `filter` is applied per subscriber against their JWT claims (see caution below) |
-| Raw SQL | `POST /v1/admin/query` | `admin_role` only — no per-statement policy; the role gate is the entire authorization story |
+| Raw SQL | `POST /v1/ops/query` | `admin_role` only — no per-statement policy; the role gate is the entire authorization story |
 | Named pipe | `GET/POST /v1/pipes/{name}` | per-pipe `allowed_roles` (not the policy engine; see [Named Pipes](/pipes)). Resource limits come from ClickHouse's [server-wide settings](/configuration#server-side-resource-limits), not per-role policy caps |
 
 :::caution[Live streams enforce column and row policy, but not resource limits]
@@ -410,16 +410,16 @@ The policy lives behind three admin endpoints (all require `admin_role`):
 
 | Method | Endpoint | Purpose |
 | ------ | -------- | ------- |
-| `GET` | `/v1/admin/policy` | Fetch the current policy. Returns `{"tables":{}}` when none is set. |
-| `PUT` | `/v1/admin/policy` | Replace the **entire** policy. Validated before it is saved. |
-| `POST` | `/v1/admin/policy/validate` | Dry-run validation — returns `{"valid": true}` or the error, without saving. |
+| `GET` | `/v1/ops/policy` | Fetch the current policy. Returns `{"tables":{}}` when none is set. |
+| `PUT` | `/v1/ops/policy` | Replace the **entire** policy. Validated before it is saved. |
+| `POST` | `/v1/ops/policy/validate` | Dry-run validation — returns `{"valid": true}` or the error, without saving. |
 
 `PUT` is a full replace, not a merge: send the complete document every time. Validation rejects empty role names, negative limits, [malformed claim templates](#jwt-claim-templating), and unsupported `check` operators — `_neq`/`_gt`/`_lt`, or `_eq` and `_in` together on one column (but it intentionally allows `default_role == admin_role`, warning instead). Once accepted, the policy is written to NATS KV and propagated to every node via KV Watch — changes apply cluster-wide within moments, no restart.
 
 ```bash
 # Replace the policy (admin token required). POST the same body to
-# /v1/admin/policy/validate first for a dry run that doesn't save.
-curl -X PUT http://localhost:8080/v1/admin/policy \
+# /v1/ops/policy/validate first for a dry run that doesn't save.
+curl -X PUT http://localhost:8080/v1/ops/policy \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d @policy.json
@@ -431,9 +431,9 @@ The full request and response shapes for these endpoints live in the [API Refere
 
 NATS KV is the **source of truth** for the live policy. A file is only ever a *seed* for an empty store:
 
-- `policy.file_path` (config) points at a YAML or JSON policy file. On startup, **if and only if the KV store is empty**, the file is loaded, validated, and written to KV. On every subsequent boot the file is ignored — KV already has the authoritative copy, and runtime edits flow through `PUT /v1/admin/policy`.
+- `policy.file_path` (config) points at a YAML or JSON policy file. On startup, **if and only if the KV store is empty**, the file is loaded, validated, and written to KV. On every subsequent boot the file is ignored — KV already has the authoritative copy, and runtime edits flow through `PUT /v1/ops/policy`.
 - **When `policy.file_path` is set, the file must exist, parse, and pass policy validation**, or WaveHouse refuses to boot. That turns a typo, a missing mount, or a policy invalid under a newly-tightened rule — such as the [malformed-template rejection](#jwt-claim-templating) above — into a loud failure instead of a silent fail-closed deployment that denies everything.
-- **When `policy.file_path` is empty and KV is empty**, the store comes up with no policy — every **token-based** request is denied (logged loudly, admin included). Seed one via `PUT /v1/admin/policy` using the [operator key](#operator-key), the deliberate break-glass that works under a `nil` policy — or set `policy.file_path` and reboot.
+- **When `policy.file_path` is empty and KV is empty**, the store comes up with no policy — every **token-based** request is denied (logged loudly, admin included). Seed one via `PUT /v1/ops/policy` using the [operator key](#operator-key), the deliberate break-glass that works under a `nil` policy — or set `policy.file_path` and reboot.
 
 :::caution
 Validation guards only the **seed** path. A policy already in KV is not re-validated when a node loads it ([#461](https://github.com/Wave-RF/WaveHouse/issues/461)), so upgrading WaveHouse never re-checks the stored policy — after an upgrade that tightens validation (like the [claim-template rules](#jwt-claim-templating) above), re-`PUT` your policy once; until you do, a policy the new rules would reject keeps its old runtime behavior.
@@ -460,12 +460,12 @@ Because a deleted policy locks out every *token-based* caller (including admin),
 
 ## A complete example
 
-A multi-tenant analytics deployment: anonymous callers get nothing, `viewer` reads its own tenant's rows with sensitive columns masked and expensive aggregations blocked, `writer` ingests events that are stamped with the caller's identity, and `admin` is unrestricted. Save it as your `policy.file_path` bootstrap file (`policy.yaml` or `policy.json` — both parse identically), or `PUT` it to `/v1/admin/policy`:
+A multi-tenant analytics deployment: anonymous callers get nothing, `viewer` reads its own tenant's rows with sensitive columns masked and expensive aggregations blocked, `writer` ingests events that are stamped with the caller's identity, and `admin` is unrestricted. Save it as your `policy.file_path` bootstrap file (`policy.yaml` or `policy.json` — both parse identically), or `PUT` it to `/v1/ops/policy`:
 
 <Tabs syncKey="policy">
 <TabItem label="YAML">
 ```yaml
-# admin: full access + the /v1/admin/* gate (this is also the default)
+# admin: full access + the /v1/ops/* gate (this is also the default)
 admin_role: admin
 # "" = closed: a request with no/!valid token is denied
 default_role: ""

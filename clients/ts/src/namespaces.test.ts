@@ -22,12 +22,12 @@ describe("sql", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("POSTs to /v1/admin/query with sql field", async () => {
+  it("POSTs to /v1/ops/query with sql field", async () => {
     const result = await sql(makeCtx(), "SELECT count() FROM clicks");
 
     expect(result.data).toEqual([{ count: 10 }]);
     const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toContain("/v1/admin/query");
+    expect(url).toContain("/v1/ops/query");
     expect(JSON.parse(init.body)).toEqual({ sql: "SELECT count() FROM clicks" });
   });
 
@@ -68,7 +68,7 @@ describe("SchemaNamespace", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("list() GETs /v1/schema", async () => {
+  it("list() GETs /v1/ops/schema", async () => {
     const schemas = { clicks: { name: "clicks", columns: [] } };
     fetchSpy.mockResolvedValue(new Response(JSON.stringify(schemas), { status: 200 }));
 
@@ -76,10 +76,10 @@ describe("SchemaNamespace", () => {
     const result = await ns.list();
 
     expect(result.data).toEqual(schemas);
-    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/schema");
+    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/schema");
   });
 
-  it("refresh() POSTs to /v1/schema/refresh", async () => {
+  it("refresh() POSTs to /v1/ops/schema/refresh", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
 
     const ns = new SchemaNamespace(makeCtx());
@@ -87,7 +87,7 @@ describe("SchemaNamespace", () => {
 
     expect(result.error).toBeNull();
     expect(fetchSpy.mock.calls[0][1].method).toBe("POST");
-    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/schema/refresh");
+    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/schema/refresh");
   });
 });
 
@@ -99,7 +99,7 @@ describe("PolicyNamespace", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("get() GETs /v1/admin/policy", async () => {
+  it("get() GETs /v1/ops/policy", async () => {
     const policy = { tables: {} };
     fetchSpy.mockResolvedValue(new Response(JSON.stringify(policy), { status: 200 }));
 
@@ -107,10 +107,10 @@ describe("PolicyNamespace", () => {
     const result = await ns.get();
 
     expect(result.data).toEqual(policy);
-    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/admin/policy");
+    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/policy");
   });
 
-  it("set() PUTs /v1/admin/policy", async () => {
+  it("set() PUTs /v1/ops/policy", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
     const ns = new PolicyNamespace(makeCtx());
@@ -120,14 +120,14 @@ describe("PolicyNamespace", () => {
     expect(fetchSpy.mock.calls[0][1].method).toBe("PUT");
   });
 
-  it("validate() POSTs /v1/admin/policy/validate", async () => {
+  it("validate() POSTs /v1/ops/policy/validate", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({ valid: true }), { status: 200 }));
 
     const ns = new PolicyNamespace(makeCtx());
     const result = await ns.validate({ tables: {} });
 
     expect(result.data).toEqual({ valid: true });
-    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/admin/policy/validate");
+    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/policy/validate");
   });
 });
 
@@ -141,7 +141,7 @@ describe("DLQNamespace", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("list() GETs /v1/dlq/stats", async () => {
+  it("list() GETs /v1/ops/dlq/stats", async () => {
     const stats = { tables: { clicks: 5 }, total: 5 };
     fetchSpy.mockResolvedValue(new Response(JSON.stringify(stats), { status: 200 }));
 

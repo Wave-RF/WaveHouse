@@ -996,9 +996,12 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 	t.Parallel()
 
 	const (
-		// worker.go config values
+		// worker.go config values. maxWait is deliberately far longer than the
+		// assertion window below (production's defaultMaxWait), so a
+		// size-trigger flush and a batch stranded waiting out the timer (the
+		// regression pinned here) can't blur together on a slow CI runner.
 		maxBatch = 100
-		maxWait  = 2 * time.Second
+		maxWait  = 30 * time.Second
 
 		// test values
 		batchA = 5 // intentionally under maxBatch
@@ -1076,13 +1079,16 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// All B rows must reach ClickHouse within maxWait − epsilon.
+	// All B rows must reach ClickHouse within production's defaultMaxWait —
+	// proof they flushed on B's own size trigger faster than the real 5s
+	// timer bound, not on this test's (30s) timer.
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return rowsByTable["tableB"] >= batchB
-	}, maxWait-(250*time.Millisecond), 25*time.Millisecond,
-		"table B should flush "+fmt.Sprint(batchB)+" rows within "+fmt.Sprint(maxWait)+" of being published "+
+	}, defaultMaxWait, 25*time.Millisecond,
+		"table B hit maxBatch and should flush on its own size trigger "+
+			"before production's defaultMaxWait timer bound "+
 			"(table A's prior events must not strand B rows in a batch "+
 			"that waits for the maxWait timer)",
 	)

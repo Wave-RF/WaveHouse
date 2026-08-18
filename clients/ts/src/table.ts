@@ -184,7 +184,7 @@ export class TableRef<Row = Record<string, unknown>> {
   async schema(opts?: { signal?: AbortSignal }): Promise<Result<TableSchema>> {
     const { data, error } = await request<TableSchema>(this._ctx, {
       method: "GET",
-      path: `/v1/schema?table=${encodeURIComponent(this._table)}`,
+      path: `/v1/ops/schema?table=${encodeURIComponent(this._table)}`,
       signal: opts?.signal,
     });
     if (error) return err(error);

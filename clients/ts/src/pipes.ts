@@ -68,7 +68,7 @@ export class PipesNamespace {
   async list(opts?: { signal?: AbortSignal }): Promise<Result<Pipe[]>> {
     const { data, error } = await request<Pipe[]>(this._ctx, {
       method: "GET",
-      path: "/v1/admin/pipes",
+      path: "/v1/ops/pipes",
       signal: opts?.signal,
     });
     if (error) return err(error);
@@ -79,7 +79,7 @@ export class PipesNamespace {
   async get(name: string, opts?: { signal?: AbortSignal }): Promise<Result<Pipe>> {
     const { data, error } = await request<Pipe>(this._ctx, {
       method: "GET",
-      path: `/v1/admin/pipes/${encodeURIComponent(name)}`,
+      path: `/v1/ops/pipes/${encodeURIComponent(name)}`,
       signal: opts?.signal,
     });
     if (error) return err(error);
@@ -94,7 +94,7 @@ export class PipesNamespace {
   ): Promise<Result<void>> {
     const { error } = await request<{ ok: boolean }>(this._ctx, {
       method: "PUT",
-      path: `/v1/admin/pipes/${encodeURIComponent(name)}`,
+      path: `/v1/ops/pipes/${encodeURIComponent(name)}`,
       body: def,
       signal: opts?.signal,
     });
@@ -106,7 +106,7 @@ export class PipesNamespace {
   async delete(name: string, opts?: { signal?: AbortSignal }): Promise<Result<void>> {
     const { error } = await request<{ ok: boolean }>(this._ctx, {
       method: "DELETE",
-      path: `/v1/admin/pipes/${encodeURIComponent(name)}`,
+      path: `/v1/ops/pipes/${encodeURIComponent(name)}`,
       signal: opts?.signal,
     });
     if (error) return err<void>(error);
