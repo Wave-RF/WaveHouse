@@ -69,13 +69,13 @@ internal/
 
 The API layer uses [Chi](https://github.com/go-chi/chi) for routing with RequestID, a CORS middleware, and a custom JSON recoverer (`jsonRecoverer`) that emits a JSON `500` on panic instead of chi's plain-text `middleware.Recoverer`.
 
-- **router.go** — Route definitions. Public: `/livez`, `/readyz`, and the content-free `/v1/health` SDK ping (plus the permanent `/healthz` alias and the deprecated `/health`, `/ready` aliases). Policy-gated: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream`. Admin-only (`RequireAdmin` — role == `policy.admin_role`, or a request bearing the operator key's operator bit, which passes even under a nil policy): `/v1/schema/*`, `/v1/dlq/stats`, `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`).
+- **router.go** — Route definitions. Public: `/livez`, `/readyz`, and the content-free `/v1/health` SDK ping (plus the permanent `/healthz` alias and the deprecated `/health`, `/ready` aliases). Policy-gated: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream`. Admin-only (`RequireAdmin` — role == `policy.admin_role`, or a request bearing the operator key's operator bit, which passes even under a nil policy): `/v1/ops/schema/*`, `/v1/ops/dlq/stats`, `/v1/ops/policy`, `/v1/ops/pipes/*`, `/v1/ops/query` (raw SQL — same gate as the rest of `/v1/ops/*`).
 - **auth middleware** — the JWT/JWKS authentication middleware is its own package, [`auth/`](#auth--authentication); the router runs it on every `/v1/*` route.
-- **policy.go** — CRUD handler for access control policies (`/v1/admin/policy`).
+- **policy.go** — CRUD handler for access control policies (`/v1/ops/policy`).
 - **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
 - **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
 - **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`. When dedup is on, a row missing the configured `id_field` can't be deduped: it is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total` (labeled by `table`), then published un-deduped — or rejected when `dedupe.require_id` is set ([#219](https://github.com/Wave-RF/WaveHouse/issues/219)).
-- **query.go** — Proxies raw SQL for `POST /v1/admin/query` straight to ClickHouse's HTTP interface. **Not cached** — sets `Cache-Control: no-store` so every request hits ClickHouse; DateTime is rendered ISO-8601 via `date_time_output_format=iso` (the Go-side type conversion lives in the structured-query / pipes path, not here).
+- **query.go** — Proxies raw SQL for `POST /v1/ops/query` straight to ClickHouse's HTTP interface. **Not cached** — sets `Cache-Control: no-store` so every request hits ClickHouse; DateTime is rendered ISO-8601 via `date_time_output_format=iso` (the Go-side type conversion lives in the structured-query / pipes path, not here).
 - **stream.go** — Real-time streaming via SSE. Callers select a table with the `?table=` query parameter. Each connection registers one `Subscriber` (the `stream/` package) with both the event `Hub` (under its `(topic, role)`) and the shared keepalive wheel, then drains both from a single byte-pump — so idle streams keep emitting `:` keepalive comments (surviving reverse-proxy idle timeouts) while live events arrive already projected and serialized. Per-event projection/serialization happens **once per role** in the `Hub`, not once per subscriber ([#294](https://github.com/Wave-RF/WaveHouse/issues/294)); the handler also snapshots the connection's JWT claims onto the `Subscriber`, which the `Hub` evaluates per subscriber when the role carries a row-level `filter` ([#319](https://github.com/Wave-RF/WaveHouse/issues/319)). Gap-fill replay from NATS JetStream (`DeliverByStartTime`) stays per-connection (low-volume, one-time on connect).
 - **schema.go** — Schema discovery API: list all schemas, get one table, trigger refresh.
 - **dlq.go** — DLQ stats endpoint and `EnsureDLQStream` helper for creating the `WAVEHOUSE_DLQ` NATS stream.
@@ -120,7 +120,7 @@ The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https:/
 
 ### `ingest/` — Ingest Pipeline, DLQ & Sweeping
 
-- **worker.go** — `StartIngestWorker` launches an ingest pipeline: a JetStream consumer reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull subscription, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, received_timestamp, data}` and nothing else; the worker accepts any table name now (the table name in the NATS subject is `query.SafeEncodeNATS(rawUnsafeTableName)`), then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest?table={table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin role (`policy.admin_role`) — see the Query Path section below; the `/v1/admin/*` `RequireAdmin` middleware enforces the check at the API layer, so a no/invalid-token request (resolved to `default_role`, not admin in a production config) never reaches the proxy. On a bulk-insert failure the batch is re-inserted row by row; rows that succeed are acked, and only the rows that fail again are routed to the DLQ (`sendToDLQ`), which republishes the as-published `EventMessage` envelope to `dlq.{table}` NATS subjects with the failure context in `X-DLQ-*` headers when DLQ is enabled — see [Ingest Pipeline](/ingest-pipeline) for the worker internals.
+- **worker.go** — `StartIngestWorker` launches an ingest pipeline: a JetStream consumer reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull subscription, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, received_timestamp, data}` and nothing else; the worker accepts any table name now (the table name in the NATS subject is `query.SafeEncodeNATS(rawUnsafeTableName)`), then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest?table={table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/ops/query` under the admin role (`policy.admin_role`) — see the Query Path section below; the `/v1/ops/*` `RequireAdmin` middleware enforces the check at the API layer, so a no/invalid-token request (resolved to `default_role`, not admin in a production config) never reaches the proxy. On a bulk-insert failure the batch is re-inserted row by row; rows that succeed are acked, and only the rows that fail again are routed to the DLQ (`sendToDLQ`), which republishes the as-published `EventMessage` envelope to `dlq.{table}` NATS subjects with the failure context in `X-DLQ-*` headers when DLQ is enabled — see [Ingest Pipeline](/ingest-pipeline) for the worker internals.
 - **types.go** — `EventMessage` struct (TableName, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
 - **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
 
@@ -191,8 +191,8 @@ Ingest worker pipeline (StartIngestWorker):
 
   (Insert-only pipeline. The wire format `EventMessage` carries only
   {table_name, received_timestamp, data}; non-insert mutations
-  DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/admin/query — the
-  /v1/admin/* RequireAdmin gate rejects non-admin callers at the API layer, so
+  DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/ops/query — the
+  /v1/ops/* RequireAdmin gate rejects non-admin callers at the API layer, so
   a no/invalid-token request (resolved to default_role, not admin in a
   production config) cannot reach the proxy.)
 
@@ -206,16 +206,21 @@ Active Sweeper (async goroutine, every 60s):
 ### Query Path
 
 ```text
-Client POST /v1/admin/query
-  → JWT auth middleware (always runs; no/invalid token → empty role)
-  → /v1/admin RequireAdmin (role == policy.admin_role, or the operator-key bit) — single gate shared
-    with the rest of /v1/admin/* (policy CRUD, pipes CRUD). Raw SQL has
-    no per-statement scope check (a full SQL parser would be needed to
-    authorize predicates), so the role gate is the entire authorization
-    story. /v1/admin/query is the only sanctioned surface for non-SELECT
-    statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…); non-admin callers
-    use `POST /v1/ingest?table={table}` for writes and the structured query
-    endpoint or named pipes for reads.
+Client POST /v1/ops/query
+  → JWT auth middleware (always runs, never rejects; a bad token yields an
+    empty role and stashes its verification error for the denying gate)
+  → policy.ResolveRole (empty role → default_role — the one sanctioned
+    roleless exception)
+  → /v1/ops RequireAdmin (resolved role == policy.admin_role, or the
+    operator-key bit) — single gate shared with the rest of /v1/ops/*
+    (policy CRUD, pipes CRUD, schema discovery, DLQ stats). A denial is
+    401 when a stashed error shows the caller presented an invalid token,
+    else 403. Raw SQL has no per-statement scope check (a full SQL parser
+    would be needed to authorize predicates), so the role gate is the
+    entire authorization story. /v1/ops/query is the only sanctioned
+    surface for non-SELECT statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…);
+    non-admin callers use `POST /v1/ingest?table={table}` for writes and
+    the structured query endpoint or named pipes for reads.
   → Decode {"sql": "..."} from the request body.
   → POST the SQL verbatim to ClickHouse's HTTP interface at
     <scheme>://<host>:<httpport>/?default_format=JSON

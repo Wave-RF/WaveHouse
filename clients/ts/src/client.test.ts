@@ -144,14 +144,14 @@ describe("WaveHouseClient.pipe()", () => {
 });
 
 describe("WaveHouseClient.sql()", () => {
-  it("delegates to sql() and POSTs to /v1/admin/query", async () => {
+  it("delegates to sql() and POSTs to /v1/ops/query", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify([{ count: 42 }]), { status: 200 }));
 
     const client = createClient({ baseURL: "http://localhost:8080" });
     const result = await client.sql("SELECT count() FROM clicks");
 
     expect(result.data).toEqual([{ count: 42 }]);
-    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/admin/query");
+    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/query");
   });
 
   it("throws a migration-clear error when called with a legacy params array", () => {

@@ -22,8 +22,8 @@ goroutine / channel / timer interplay is subtle.
 The pipeline is **insert-only**. The wire format carries
 `{table_name, received_timestamp, data}` and nothing else; the worker parses
 the envelope and bulk-`INSERT`s — schema validation already happened at the
-HTTP ingest handler, before publish. Non-insert mutations go through a
-different admin path.
+HTTP ingest handler, before publish. Non-insert mutations go through
+`POST /v1/ops/query` (admin-only).
 
 ## High-level shape
 

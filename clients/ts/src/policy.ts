@@ -14,7 +14,7 @@ export class PolicyNamespace {
   async get(opts?: { signal?: AbortSignal }): Promise<Result<Policy>> {
     const { data, error } = await request<Policy>(this._ctx, {
       method: "GET",
-      path: "/v1/admin/policy",
+      path: "/v1/ops/policy",
       signal: opts?.signal,
     });
     if (error) return err(error);
@@ -25,7 +25,7 @@ export class PolicyNamespace {
   async set(policy: Policy, opts?: { signal?: AbortSignal }): Promise<Result<void>> {
     const { error } = await request<{ ok: boolean }>(this._ctx, {
       method: "PUT",
-      path: "/v1/admin/policy",
+      path: "/v1/ops/policy",
       body: policy,
       signal: opts?.signal,
     });
@@ -40,7 +40,7 @@ export class PolicyNamespace {
   ): Promise<Result<ValidationResult>> {
     const { data, error } = await request<ValidationResult>(this._ctx, {
       method: "POST",
-      path: "/v1/admin/policy/validate",
+      path: "/v1/ops/policy/validate",
       body: policy,
       signal: opts?.signal,
     });

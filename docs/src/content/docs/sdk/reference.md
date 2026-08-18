@@ -91,7 +91,7 @@ createClient<DB>(config) → WaveHouseClient
 │   ├── .selectAll() → QueryBuilder (PromiseLike)
 │   ├── .insert(data) → Promise<Result<InsertResult>>
 │   ├── .insertNDJSON(source) → Promise<Result<InsertResult>>
-│   ├── .schema() → Promise<Result<TableSchema>>
+│   ├── .schema() → Promise<Result<TableSchema>>   (admin)
 │   └── .stream(opts?) → StreamController
 ├── .pipe(name, params?) → PipeRef (PromiseLike)
 │   ├── .fetch(opts?) → Promise<Result<Row[]>>   // { signal } only — no limit
@@ -101,15 +101,15 @@ createClient<DB>(config) → WaveHouseClient
 │   ├── .get(name) → Promise<Result<Pipe>>
 │   ├── .set(name, def) → Promise<Result<void>>
 │   └── .delete(name) → Promise<Result<void>>
-├── .sql(query, opts?) → Promise<Result<Row[]>>
-├── .schema
+├── .sql(query, opts?) → Promise<Result<Row[]>>   (admin)
+├── .schema (admin)
 │   ├── .list() → Promise<Result<Schemas>>
 │   └── .refresh() → Promise<Result<void>>
 ├── .policy (admin)
 │   ├── .get() → Promise<Result<Policy>>
 │   ├── .set(policy) → Promise<Result<void>>
 │   └── .validate(policy) → Promise<Result<ValidationResult>>
-├── .dlq
+├── .dlq (admin)
 │   ├── .list() → Promise<Result<DLQStats>>
 │   ├── .table(name) → Promise<Result<DLQStats>>
 │   └── .stream() → StreamController  // not yet functional server-side — #197
@@ -135,7 +135,7 @@ npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-Codegen reads `/v1/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`.
+Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`.
 
 **Options:**
 

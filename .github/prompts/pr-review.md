@@ -31,7 +31,7 @@ Review against each of these, in this order:
    - SQL injection in any ClickHouse-bound path (`BindParams`, query builders, dynamic table names)
    - Broken authentication / authorization (JWT claim handling, role extraction, policy templating)
    - Sensitive data exposure (secrets in logs, error messages leaking internal state)
-   - Broken access control (policy bypass, raw-SQL outside the admin role — `policy.admin_role` — on `/v1/admin/query`)
+   - Broken access control (policy bypass, raw-SQL outside the admin role — `policy.admin_role` — on `/v1/ops/query`)
    - Security misconfiguration (CORS, TLS, default credentials, permissive defaults)
    - Insufficient logging / monitoring
    - SSRF, XXE, deserialization flaws if touched
