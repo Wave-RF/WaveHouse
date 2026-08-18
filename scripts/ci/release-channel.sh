@@ -46,9 +46,14 @@ fi
 version="${tag##*/}"
 version="${version#v}"
 
-# Semver shape, deliberately strict: MAJOR.MINOR.PATCH with optional
-# `-prerelease` and `+build`. Rejects `v1.2`, `latest`, `1.2.3.4`.
-if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+# Full SemVer 2.0.0 grammar, not a loose approximation — this gate is the last
+# thing standing between a typo and an immutable tag, and scripts/release.sh
+# trusts it. The official regex, transcribed to POSIX ERE (bash has no
+# non-capturing groups): numeric identifiers may not have leading zeros, and
+# dot-separated identifiers may not be empty. So `v01.2.3`, `v1.2.3-01`, and
+# `v1.2.3-alpha..1` are rejected where a `[0-9A-Za-z.-]+` blob accepted them.
+semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*))?(\+([0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*))?$'
+if ! [[ "$version" =~ $semver ]]; then
   echo "::error::'$tag' is not a semver release tag (expected vX.Y.Z or clients/<lang>/vX.Y.Z, with an optional -prerelease suffix)." >&2
   exit 1
 fi
@@ -57,12 +62,21 @@ fi
 # `+alpha` build tag on a stable release can't be read as a prerelease.
 version="${version%%+*}"
 
+# No prerelease at all -> stable -> `latest`.
 case "$version" in
-  *-alpha*) echo alpha ;;
-  *-beta*) echo beta ;;
-  *-rc*) echo rc ;;
-  # Any other prerelease form (`-next`, `-canary`, `-0`, …) lands on the
-  # catch-all rather than `latest`. Mirrors publish-npm.yml's dist-tag map.
-  *-*) echo next ;;
-  *) echo latest ;;
+  *-*) ;;
+  *) echo latest; exit 0 ;;
+esac
+
+# Match the FIRST prerelease identifier EXACTLY, not as a substring. A glob
+# (`*-alpha*`) reads `v1.2.3-alphafoo` as alpha and `v1.2.3-preview-rc.1` as rc,
+# which would point a channel other people consume at an unrelated release.
+# Anything that isn't exactly alpha/beta/rc is some other prerelease and belongs
+# on `next`. Mirrors publish-npm.yml's dist-tag map.
+prerelease="${version#*-}"
+case "${prerelease%%.*}" in
+  alpha) echo alpha ;;
+  beta) echo beta ;;
+  rc) echo rc ;;
+  *) echo next ;;
 esac

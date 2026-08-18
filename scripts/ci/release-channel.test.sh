@@ -60,7 +60,32 @@ ok "v1.0.0+alpha" latest
 ok "v1.0.0+build.5" latest
 ok "v1.0.0-alpha+meta" alpha
 
+# --- ONLY an exact first prerelease identifier picks a named channel --------
+# A substring match would point a channel real consumers install from at an
+# unrelated release: `-alphafoo` is not the alpha line, and `-preview-rc.1` is
+# not the rc line. Everything that isn't exactly alpha/beta/rc is `next`.
+ok "v1.2.3-alphafoo" next
+ok "v1.2.3-preview-rc.1" next
+ok "v1.2.3-betamax" next
+ok "v1.2.3-rcfoo" next
+ok "clients/ts/v1.2.3-alpha-extra" next
+# ...while the real channels still resolve, with or without a numeric part.
+ok "v1.2.3-alpha" alpha
+ok "v1.2.3-beta" beta
+ok "v1.2.3-rc" rc
+
 # --- fail closed on anything not semver-shaped -----------------------------
+# SemVer forbids leading zeros on numeric identifiers and empty dot-separated
+# identifiers; a loose `[0-9A-Za-z.-]+` blob accepted all of these, and
+# scripts/release.sh trusts this gate before creating an immutable tag.
+rejects "v01.2.3"
+rejects "v1.02.3"
+rejects "v1.2.03"
+rejects "v1.2.3-01"
+rejects "v1.2.3-alpha..1"
+rejects "v1.2.3-"
+rejects "v1.2.3+"
+rejects "v1.2.3-alpha+"
 rejects "v1.2"
 rejects "v1.2.3.4"
 rejects "latest"

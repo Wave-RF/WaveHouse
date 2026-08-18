@@ -56,10 +56,13 @@ func init() { buildInfoFallback() }
 // build would otherwise report itself as "dev"/"unknown"/"unknown". The module
 // version and VCS stamps the toolchain records cover exactly that case.
 //
-// ldflags always win: everything below is gated on Version still holding its
-// unstamped default, so a Makefile or GoReleaser build is never second-guessed.
+// ldflags always win, and each field is gated on ITS OWN default rather than on
+// Version alone: a build that stamps only -X main.GitCommit would otherwise have
+// that value overwritten here, since Version would still read "dev". The
+// Makefile and GoReleaser both stamp all three today, but the contract should
+// hold for a partial link too.
 func buildInfoFallback() {
-	if Version != "dev" {
+	if Version != "dev" && GitCommit != "unknown" && BuildTime != "unknown" {
 		return
 	}
 	info, ok := debug.ReadBuildInfo()
@@ -67,23 +70,24 @@ func buildInfoFallback() {
 		return
 	}
 
-	// "(devel)" is what a plain `go build` inside the module reports — no
-	// better than the "dev" we already have.
-	if v := info.Main.Version; v != "" && v != "(devel)" {
+	// "(devel)" is what a build with no VCS metadata reports (`-buildvcs=false`,
+	// or building outside a repo) — no better than the "dev" we already have.
+	// A normal `go build` in a checkout gets a real pseudo-version, and
+	// `go install pkg@vX.Y.Z` gets the module version.
+	if v := info.Main.Version; Version == "dev" && v != "" && v != "(devel)" {
 		Version = strings.TrimPrefix(v, "v")
 	}
 
 	// Present only when the binary was built from a VCS checkout; `go install
-	// module@version` builds from the module cache and carries neither, which
-	// is why these are set independently of Version above.
+	// module@version` builds from the module cache and carries neither.
 	for _, s := range info.Settings {
 		switch s.Key {
 		case "vcs.revision":
-			if s.Value != "" {
+			if GitCommit == "unknown" && s.Value != "" {
 				GitCommit = s.Value
 			}
 		case "vcs.time":
-			if s.Value != "" {
+			if BuildTime == "unknown" && s.Value != "" {
 				BuildTime = s.Value
 			}
 		}

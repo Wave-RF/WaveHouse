@@ -117,9 +117,39 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Content hash of the built dist (file names + contents) — the build's
-          # identity, and what decides whether there is anything to publish.
-          hash=$(find dist -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)
+          # Content hash of what npm would actually PUBLISH, not just of dist.
+          # `dist` alone misses everything else in the tarball: a change to
+          # `exports`, `files`, `bin`, `engines`, or the bundled README/LICENSE
+          # leaves dist byte-identical, so the skip check below would suppress a
+          # publish that genuinely changed the package. `npm pack --dry-run`
+          # asks npm itself for the file list rather than reimplementing its
+          # `files`/.npmignore rules. The `version` field is stripped before
+          # hashing because we are about to compute it from this very hash.
+          # npm still runs `prepare` here despite --ignore-scripts, and its output
+          # lands on stdout ahead of the JSON, so slice from the array start.
+          files=$(npm pack --dry-run --json --ignore-scripts 2>/dev/null \
+            | sed -n '/^\[$/,$p' \
+            | node -e '
+                const p = JSON.parse(require("fs").readFileSync(0, "utf8"));
+                for (const f of p[0].files) console.log(f.path);
+              ' | LC_ALL=C sort)
+          [ -n "$files" ] || { echo "::error::npm pack returned no file list"; exit 1; }
+
+          # Hash the file list plus every file's contents. package.json is
+          # hashed with `version` removed — we are about to derive the version
+          # from this hash, so including it would be circular. NOTE: no replacer
+          # array on JSON.stringify; it filters keys RECURSIVELY, which would
+          # flatten nested objects (`exports`, `engines`, `publishConfig`) to
+          # `{}` and silently miss changes to them.
+          hash=$( { printf '%s\n' "$files"
+                    printf '%s\n' "$files" | while IFS= read -r f; do
+                      if [ "$f" = "package.json" ]; then
+                        node -e 'const p=require("./package.json"); delete p.version; process.stdout.write(JSON.stringify(p))'
+                      else
+                        cat -- "$f"
+                      fi
+                    done
+                  } | sha256sum | cut -c1-12)
 
           # Skip only when `dev` ALREADY points at a same-scheme publish of this
           # exact dist. Matching on the hash alone would let a legacy
@@ -166,6 +196,12 @@ jobs:
           # just the tag list — under the default depth-1 checkout `<tag>^` does
           # not resolve at all. fetch-depth: 0 brings both history and tags.
           fetch-depth: 0
+          # This job holds `contents: write`, and `pnpm install` plus npm
+          # lifecycle scripts run before the release step — so a compromised
+          # dependency would inherit push access from credentials left in
+          # .git/config. Nothing here needs authenticated git: `git describe`
+          # is local and `gh release create` uses GH_TOKEN.
+          persist-credentials: false
 
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
@@ -224,6 +260,16 @@ jobs:
           # published version. --allow-same-version keeps a re-run idempotent
           # when the committed value already matches.
           npm version "${VERSION}" --no-git-tag-version --allow-same-version
+
+          # --allow-same-version covers `npm version`, NOT `npm publish`: npm
+          # rejects an already-published version outright. Without this guard a
+          # re-run after a post-publish failure (the GitHub Release step, a
+          # network blip) dies here and can never reach the steps that still
+          # need to run. Idempotent instead.
+          if npm view "@wavehouse/sdk@${VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::@wavehouse/sdk@${VERSION} is already published — skipping publish."
+            exit 0
+          fi
           # `npm publish` typechecks + builds via the package's prepublishOnly.
           # --provenance attaches a signed build-provenance attestation.
           npm publish --access public --tag "${DIST_TAG}" --provenance
