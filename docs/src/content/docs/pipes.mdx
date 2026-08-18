@@ -119,22 +119,22 @@ Pipe execution is gated by `allowed_roles` — a plain allowlist, evaluated inde
 
 To make a pipe public, list the role that `default_role` resolves to. For example, with `default_role: viewer`, a pipe with `"allowed_roles": ["viewer"]` is reachable with no token at all.
 
-This is the *only* authorization check on the execute path — pipes deliberately sit outside the `/v1/admin/*` gate so non-admin callers can run them. The pipe's SQL is not re-checked against the table policy's column or row rules, so **scope the data in the pipe's SQL itself** rather than assuming policy column masking applies. A pipe's `{{param}}` placeholders bind caller-supplied values, never token claims — a parameterized predicate is a convenience for the caller, not an authorization boundary.
+This is the *only* authorization check on the execute path — pipes deliberately sit outside the `/v1/ops/*` gate so non-admin callers can run them. The pipe's SQL is not re-checked against the table policy's column or row rules, so **scope the data in the pipe's SQL itself** rather than assuming policy column masking applies. A pipe's `{{param}}` template parameters interpolate values from the request — or a parameter's configured default when the caller omits one ([resolution order](#how-a-value-is-resolved)) — inlined as escaped SQL literals, never token claims; a parameterized predicate is a convenience for the caller, not an authorization boundary.
 
 ## Creating and managing pipes
 
-Pipe CRUD is admin-only, under `/v1/admin/pipes`:
+Pipe CRUD is admin-only, under `/v1/ops/pipes`:
 
 | Method | Endpoint | Purpose |
 | ------ | -------- | ------- |
-| `GET` | `/v1/admin/pipes` | List all pipes. |
-| `GET` | `/v1/admin/pipes/{name}` | Get one pipe's definition. |
-| `PUT` | `/v1/admin/pipes/{name}` | Create or replace a pipe. |
-| `DELETE` | `/v1/admin/pipes/{name}` | Delete a pipe. |
+| `GET` | `/v1/ops/pipes` | List all pipes. |
+| `GET` | `/v1/ops/pipes/{name}` | Get one pipe's definition. |
+| `PUT` | `/v1/ops/pipes/{name}` | Create or replace a pipe. |
+| `DELETE` | `/v1/ops/pipes/{name}` | Delete a pipe. |
 
 ```bash
 # Create / update a pipe (admin token required)
-curl -X PUT http://localhost:8080/v1/admin/pipes/top_pages \
+curl -X PUT http://localhost:8080/v1/ops/pipes/top_pages \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -206,7 +206,7 @@ On startup, each top-level `*.sql` file is loaded as a pipe whose **name is the 
 - After bootstrap, the API and KV are the source of truth; the directory is read-only at runtime. Mount it read-only in containers (e.g. `./my-pipes:/app/pipes:ro`).
 
 :::caution[Bootstrapped pipes are admin-only until you grant roles]
-A `.sql` file carries only the SQL — there's no way to express `allowed_roles`, `parameters`, or a `description` in the file. A pipe seeded this way therefore has an empty `allowed_roles`, which (fails-closed) means **admin only**. To expose it to other roles or add formal parameters, `PUT` the full definition through `/v1/admin/pipes/{name}` after boot. Inline `{{name:default}}` placeholders still work in a bootstrapped file, so the SQL can be parameter-ready even without formal declarations.
+A `.sql` file carries only the SQL — there's no way to express `allowed_roles`, `parameters`, or a `description` in the file. A pipe seeded this way therefore has an empty `allowed_roles`, which (fails-closed) means **admin only**. To expose it to other roles or add formal parameters, `PUT` the full definition through `/v1/ops/pipes/{name}` after boot. Inline `{{name:default}}` placeholders still work in a bootstrapped file, so the SQL can be parameter-ready even without formal declarations.
 :::
 
 ## End-to-end example
@@ -222,7 +222,7 @@ Ship a curated "top pages" endpoint that the public dashboard can call with no t
 2. **Register the pipe**, allowing `viewer`:
 
    ```bash
-   curl -X PUT http://localhost:8080/v1/admin/pipes/top_pages \
+   curl -X PUT http://localhost:8080/v1/ops/pipes/top_pages \
      -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
      -d '{
        "sql": "SELECT page, count() AS views FROM clicks WHERE received_timestamp >= {{since:2024-01-01}} GROUP BY page ORDER BY views DESC LIMIT {{limit:50}}",

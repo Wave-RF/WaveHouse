@@ -5,7 +5,7 @@ sidebar:
   order: 7
 ---
 
-Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, schema introspection, and admin — with request/response formats, error codes, and examples. The JWT middleware always runs; what a caller can do is driven by the policy; see [Configuration](/configuration#authentication) for the full auth config surface.
+Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, and the admin-gated `/v1/ops/*` surface (raw SQL, schema introspection, DLQ stats, policy and pipe CRUD) — with request/response formats, error codes, and examples. The JWT middleware always runs; what a caller can do is driven by the policy; see [Configuration](/configuration#authentication) for the full auth config surface.
 
 ## Authentication
 
@@ -23,13 +23,15 @@ For SSE connections where custom headers are not possible, you can pass the toke
 GET /v1/stream?token=<jwt>
 ```
 
-The `Authorization` header takes precedence when both are provided: the `?token=` query parameter is only a fallback for clients that can't set headers (browser `EventSource`), so a token in the more log-leakable URL never overrides an explicit header credential. A `?token=` is stripped from the URL after extraction whichever credential wins, so it stays out of WaveHouse's own logs — but it has already crossed the wire in the request URI, so redact query strings at any proxy, CDN, or load balancer in front.
+The `Authorization` header takes precedence when both are provided: the `?token=` query parameter is only a fallback for clients that can't set headers — a hand-rolled browser `EventSource`, for instance — so a token in the more log-leakable URL never overrides an explicit header credential. A `?token=` is stripped from the URL after extraction whichever credential wins, so it stays out of WaveHouse's own logs — but it has already crossed the wire in the request URI, so redact query strings at any proxy, CDN, or load balancer in front.
+
+Prefer the header wherever you can. The TypeScript SDK streams over `fetch` and always uses `Authorization`, on browsers and servers alike; the query parameter exists for clients that have no other option.
 
 **Authentication is decoupled from authorization.** A request with **no token**, or an **invalid/expired/malformed** one, is *not* rejected outright — it falls back to an empty role that resolves to the policy `default_role`, and authorization is decided downstream. Because the bad-token reason is remembered, a request that is then denied for lacking permission fails loud (`401` "invalid/expired token") instead of a bare `403`. Elevated access requires a valid token whose role is granted (or equals the `admin_role`). A `403` body has two forms: a request that resolves to **no role at all** (no token and no `default_role` configured) returns `{"error":"forbidden: request has no role and no public default_role is configured"}`, while a request carrying a concrete-but-unauthorized role returns the bare `{"error":"forbidden"}` shown in the tables below.
 
-**Public (unauthenticated) access is driven by the policy.** Define a usable `default_role` and no-token requests are evaluated as that role (see [Roles & Access Control](#roles--access-control)); remove it and roleless requests are denied. Setting `default_role` equal to the `admin_role` is allowed — it makes every unauthenticated request admin (including `/v1/admin/*`), handy for local/dev — but it is logged loudly on every node that loads such a policy and must not be used in production. `/v1/admin/*` **and** the schema/DLQ endpoints are admin-only, and a pipe with **no `allowed_roles` authorizes nobody but the admin role** — but a pipe *can* be reached by the public when its `allowed_roles` lists the role the `default_role` resolves to (pipe access is plain allowlist membership, the same as any other role).
+**Public (unauthenticated) access is driven by the policy.** Define a usable `default_role` and no-token requests are evaluated as that role (see [Roles & Access Control](#roles--access-control)); remove it and roleless requests are denied. Setting `default_role` equal to the `admin_role` is allowed — it makes every unauthenticated request admin (including `/v1/ops/*`), handy for local/dev — but it is logged loudly on every node that loads such a policy and must not be used in production. `/v1/ops/*` (raw SQL, policy/pipe CRUD, schema, DLQ) is admin-only, and a pipe with **no `allowed_roles` authorizes nobody but the admin role** — but a pipe *can* be reached by the public when its `allowed_roles` lists the role the `default_role` resolves to (pipe access is plain allowlist membership, the same as any other role).
 
-**Operator key (non-JWT, break-glass).** A separate, role-free credential — `auth.operator_key` — authorizes a caller as a **full-access platform operator**: the entire data plane *and* the `/v1/admin/*` surface, without a JWT and independently of the token verifier. Present it in the standard `Authorization` header with the `Operator` scheme (forwarded verbatim by proxies, no collision with Bearer JWTs), or via the `X-Operator-Key` alias:
+**Operator key (non-JWT, break-glass).** A separate, role-free credential — `auth.operator_key` — authorizes a caller as a **full-access platform operator**: the entire data plane *and* the `/v1/ops/*` surface, without a JWT and independently of the token verifier. Present it in the standard `Authorization` header with the `Operator` scheme (forwarded verbatim by proxies, no collision with Bearer JWTs), or via the `X-Operator-Key` alias:
 
 ```text
 Authorization: Operator <operator-key>
@@ -185,12 +187,12 @@ Accepts a single flat JSON object, a JSON array of objects, or a newline-delimit
 | a JSON array of objects (any length, even 1) | `application/json` | per-record summary — see [Batch Ingest](#batch-ingest) |
 | one JSON object per line (NDJSON) | `application/x-ndjson` | per-record summary — see [Batch Ingest](#batch-ingest) |
 
-The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse)). For uploads larger than that, use the streaming NDJSON form below rather than one big body, and set your own outer limit at the [reverse proxy](/reverse-proxy#request-body-size-limits).
+The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse)). For uploads larger than that, use the streaming NDJSON form below rather than one big body, and set your own outer limit at the [reverse proxy](/reverse-proxy#request-body-size-limits).
 
 The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
 :::note[Insert-only]
-The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse), which is restricted to the admin role (`admin_role`, the same gate as the rest of `/v1/admin/*`).
+The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse), which is restricted to the admin role (`admin_role`, the same gate as the rest of `/v1/ops/*`).
 
 The policy engine authorizes mutations by inspecting the columns being written. That works for inserts but not for predicate-driven mutations like `DELETE … WHERE` — there's no way to prove the predicate matches only rows the caller is allowed to touch. Routing those statements through the admin-gated raw-SQL surface keeps the policy contract honest.
 :::
@@ -281,7 +283,7 @@ curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 WaveHouse pins `date_time_input_format=best_effort` on its inserts — the ClickHouse server default since 26.5. On an older server whose default was `basic`, a plain `DateTime` column read an all-digit timestamp string of five or more digits as Unix seconds (shorter runs it rejected outright, where `best_effort` reads `"2026"` as a year); under `best_effort`, `"20260711"` stores 2026-07-11, not 1970-08-23, and some lengths (e.g. 12 digits) are rejected outright. (`DateTime64` columns diverge the same way on calendar-shaped runs — `"20260711"` is 1970-08-23 under `basic`, 2026-07-11 under `best_effort` — and additionally whenever an epoch run's unit doesn't match the column scale, e.g. a 16-digit microsecond epoch into a `DateTime64(3)`; an epoch run whose unit matches the column scale (a 13-digit millisecond epoch into a `DateTime64(3)`) reads identically too — only 9–10-digit Unix-seconds runs, with an optional fraction, agree at *every* scale.) The canonical form itself is what the pin rescues: under `basic` an RFC 3339 value's `Z` suffix is rejected outright (the row fails and lands in the DLQ), and the pin is what makes it insertable regardless of server version. Zone-less date-times and 9–10-digit Unix-seconds strings parse identically under both settings.
 :::
 
-**The canonical form, precisely.** This is the one strict timestamp spelling in WaveHouse — the same one `/v1/query` and `/v1/pipes/{name}` render for top-level timestamp columns and the SSE stream carries (the raw-SQL proxy `/v1/admin/query` instead renders server-side via `date_time_output_format=iso`, which keeps trailing fraction zeros):
+**The canonical form, precisely.** This is the one strict timestamp spelling in WaveHouse — the same one `/v1/query` and `/v1/pipes/{name}` render for top-level timestamp columns and the SSE stream carries (the raw-SQL proxy `/v1/ops/query` instead renders server-side via `date_time_output_format=iso`, which keeps trailing fraction zeros):
 
 - `YYYY-MM-DDTHH:MM:SSZ`, or `YYYY-MM-DDTHH:MM:SS.FZ` when there is a sub-second part: uppercase `T` separator, uppercase `Z` suffix, always UTC — never a numeric offset — and seconds always present.
 - The fraction is **truncated** (never rounded) to the column's precision: a `DateTime` column (whole seconds) never carries a fraction; a `DateTime64(3)` column carries at most three digits.
@@ -377,7 +379,7 @@ curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 
 ---
 
-### `POST /v1/admin/query` — Query ClickHouse
+### `POST /v1/ops/query` — Query ClickHouse
 
 Executes a SQL statement directly against ClickHouse. **WaveHouse proxies the SQL string verbatim to ClickHouse's HTTP interface** — any statement ClickHouse accepts works, including arbitrary DDL/DML/SYSTEM verbs and inline FORMAT directives. Multi-statement input (`SELECT 1; TRUNCATE t`) also works on recent ClickHouse versions where multi-query is enabled by default; older or restrictively-configured servers may reject the second statement with a clear error. Read queries return a JSON array of result rows; mutations/DDL return HTTP 200 with `[]` on success. DateTime columns are ISO-8601 formatted via the upstream `date_time_output_format=iso` setting — server-side rendering that keeps trailing fraction zeros, so a `DateTime64(3)` whole-second value returns `.000Z` here where `/v1/query` renders plain `Z`; other types are returned as ClickHouse renders them under `FORMAT JSON`.
 
@@ -392,10 +394,10 @@ The proxy buffers the upstream response in memory before forwarding (no row-stre
 This endpoint **does not cache, does not singleflight, and emits `Cache-Control: no-store`** — every request goes straight to ClickHouse, mutation or read, and downstream HTTP caches are explicitly told not to store the response. Raw SQL is an admin escape hatch with infrequent, ad-hoc traffic, so the L1/singleflight machinery would only add complexity without a real hit-rate win. Use [`POST /v1/query?table={table}`](#post-v1querytabletable--structured-query) or [`GET/POST /v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe) for the cached read paths (dashboards, high-QPS clients, etc.) — both share an in-process L1 (Ristretto) with singleflight coalescing.
 
 :::note[Admin only]
-The route is mounted under `/v1/admin/*`, behind the `RequireAdmin` gate: only a caller whose JWT role equals the policy `admin_role` (`"admin"` by default) may use it. A request with no/invalid token resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is rejected. Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story, shared with the rest of `/v1/admin/*` (policy CRUD, pipes CRUD). The normal surfaces for non-admin callers are `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
+The route is mounted under `/v1/ops/*`, behind the `RequireAdmin` gate: only a caller whose JWT role equals the policy `admin_role` (`"admin"` by default) — or who presents the non-JWT [operator key](#authentication) — may use it. A tokenless request (or a valid token without a role claim) resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is rejected with `403`; a present-but-invalid token — expired, malformed, bad signature — keeps its stashed verification error and fails loud with `401` instead. Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story, shared with the rest of `/v1/ops/*` (see [Admin Endpoints](#admin-endpoints)). The normal surfaces for non-admin callers are `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
 :::
 
-`/v1/admin/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate with the admin role (`admin_role`).
+`/v1/ops/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate with the admin role (`admin_role`).
 
 **Request:**
 
@@ -443,7 +445,7 @@ The earlier handler accepted a `params` array bound to `?` placeholders; the HTT
 
 ```bash
 # Requires an admin-role JWT — see "Generating a JWT for Testing" below.
-curl -X POST http://localhost:8080/v1/admin/query \
+curl -X POST http://localhost:8080/v1/ops/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
@@ -498,7 +500,7 @@ Table, column, and alias names may contain any characters ClickHouse accepts —
 
 **Response:**
 
-JSON array of result rows. Top-level `DateTime`/`DateTime64` values are returned in canonical RFC 3339 UTC (`2026-06-21T04:00:00.123Z`) — `Nullable` timestamp columns included (a SQL `NULL` renders as JSON `null`), while timestamps nested inside `Array`/`Map`/`Tuple` columns are rendered in the column's declared zone, else the ClickHouse server's, as the driver returns them — byte-identical to the [SSE stream](#get-v1stream--server-sent-events-stream) for values [canonicalized at ingest](#timestamp-canonicalization) (a fail-open pass-through that ClickHouse accepted still comes back canonical here, though it streamed in the producer's spelling). The response carries an `X-Cache: HIT` or `X-Cache: MISS` header — this endpoint shares the in-process L1 (Ristretto) + singleflight machinery (unlike `/v1/admin/query`, which always hits ClickHouse).
+JSON array of result rows. Top-level `DateTime`/`DateTime64` values are returned in canonical RFC 3339 UTC (`2026-06-21T04:00:00.123Z`) — `Nullable` timestamp columns included (a SQL `NULL` renders as JSON `null`), while timestamps nested inside `Array`/`Map`/`Tuple` columns are rendered in the column's declared zone, else the ClickHouse server's, as the driver returns them — byte-identical to the [SSE stream](#get-v1stream--server-sent-events-stream) for values [canonicalized at ingest](#timestamp-canonicalization) (a fail-open pass-through that ClickHouse accepted still comes back canonical here, though it streamed in the producer's spelling). The response carries an `X-Cache: HIT` or `X-Cache: MISS` header — this endpoint shares the in-process L1 (Ristretto) + singleflight machinery (unlike `/v1/ops/query`, which always hits ClickHouse).
 
 The inbound request body is capped at 1 MiB; a body over the cap is rejected with `413`. A query AST is bounded by nature (far under 1 MiB even with a large `in`-list), and the cap blocks a single-request memory-exhaustion vector on this public endpoint. Set a tighter or higher outer limit at your [reverse proxy](/reverse-proxy#request-body-size-limits) — but it can only narrow the effective limit, not raise it past this cap.
 
@@ -517,7 +519,7 @@ The inbound request body is capped at 1 MiB; a body over the cap is rejected wit
 
 ### `GET/POST /v1/pipes/{name}` — Execute Named Pipe
 
-Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached in the shared L1 (Ristretto) with singleflight coalescing — same machinery as the structured query endpoint, and again, unlike `/v1/admin/query`.
+Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached in the shared L1 (Ristretto) with singleflight coalescing — same machinery as the structured query endpoint, and again, unlike `/v1/ops/query`.
 
 **Query Parameters:** Any key matching a pipe parameter name.
 
@@ -534,7 +536,7 @@ Executes a pre-defined named query (pipe) with parameter binding. Parameters can
 
 JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whether the row came from the in-process L1.
 
-The POST parameter body is capped at 1 MiB; a body over the cap is rejected with `413` (the same control-plane cap as [`POST /v1/query`](#post-v1querytabletable--structured-query) — see [reverse proxy → body limits](/reverse-proxy#request-body-size-limits)). A malformed-but-within-cap body is ignored rather than rejected, since parameters may legitimately come from the query string alone.
+The POST parameter body is capped at 1 MiB; a body over the cap is rejected with `413` (the same 1 MiB parameter/AST-body cap as [`POST /v1/query`](#post-v1querytabletable--structured-query) — see [reverse proxy → body limits](/reverse-proxy#request-body-size-limits)). A malformed-but-within-cap body is ignored rather than rejected, since parameters may legitimately come from the query string alone.
 
 **Error responses:**
 
@@ -583,10 +585,10 @@ Row values of top-level `DateTime`/`DateTime64` columns inside `data` arrive in 
 
 **Note:** When access control policies are active, streamed events are filtered per the caller's role: tables without `select` permission are skipped, denied columns are removed from each event, and the role's [row-level `filter`](/access-control#row-level-security) is evaluated per subscriber against the caller's JWT claims — supplied by the connection's token (the `Authorization` header, or the `?token=` fallback above), with replayed gap-fill events filtered the same way. For a filter constant the query path's SQL also accepts ([the enforcement caution](/access-control#where-each-rule-is-enforced) gives per-type guidance), a connection is never delivered a row the query path would hide for that role — every comparison the stream can't prove fails closed and withholds the row instead. Numeric comparisons run in the column's storage domain — both operands narrowed the way ClickHouse narrows the stored value and the bound constant — so columns that narrow on insert (`Float32`/`Float64` width, a `Decimal`'s scale) agree with the query path too; the residual payload-vs-stored case is an event whose insert later fails into the DLQ, which the caution documents. The connection's claims are captured once, when the stream is established — a policy change applies from the next live event (an in-flight gap-fill finishes under the policy snapshot taken when the stream opened), but an expired token or changed claims take effect only when the client reconnects.
 
-**CORS:** `/v1/stream` honors the `server.cors_allowed_origins` allowlist like every endpoint, so a browser `EventSource` from an allowed origin connects normally. `Last-Event-ID` is allow-listed in the CORS preflight so fetch-based clients can resume cross-origin.
+**CORS:** `/v1/stream` honors the `server.cors_allowed_origins` allowlist like every endpoint. Note that a **header-authenticated stream preflights before it connects** — `Authorization` is not CORS-safelisted — where a bare `EventSource` never preflighted at all: its request is not a `fetch()`, so Fetch's unsafe-request flag is never set and `Last-Event-ID` rides on the plain `GET`. Both headers are allow-listed, so an allowed origin connects *and* resumes cross-origin.
 
 :::caution[Behind a proxy: disable response buffering]
-SSE needs one bit of proxy configuration: disable response buffering, or the proxy holds events until a buffer fills and clients receive nothing in real time. Idle timeouts are handled for you — the `:` keepalive comment above keeps a quiet stream alive under typical proxy/tunnel idle windows ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)), so raising the idle/read timeout is now optional. Browser `EventSource` still auto-reconnects (resuming via `Last-Event-ID`) if a connection drops. See [Behind a reverse proxy → Server-Sent Events](/reverse-proxy#server-sent-events-sse) for nginx/Caddy/Cloudflare specifics.
+SSE needs one bit of proxy configuration: disable response buffering, or the proxy holds events until a buffer fills and clients receive nothing in real time. Idle timeouts are handled for you — the `:` keepalive comment above keeps a quiet stream alive under typical proxy/tunnel idle windows ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)), so raising the idle/read timeout is now optional. The TypeScript SDK's stream transport and browser `EventSource` both auto-reconnect (resuming via `Last-Event-ID`) if a connection drops. See [Behind a reverse proxy → Server-Sent Events](/reverse-proxy#server-sent-events-sse) for nginx/Caddy/Cloudflare specifics.
 :::
 
 **curl example:**
@@ -601,13 +603,15 @@ curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z
 
 ---
 
-### `GET /v1/schema` — List All Table Schemas
+### Admin Endpoints
+
+Every admin-gated surface lives under the `/v1/ops/*` prefix, behind a single `RequireAdmin` gate: schema discovery, DLQ stats, and the policy and pipe CRUD below, plus the raw-SQL passthrough [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse) documented with the query endpoints above. They require the policy `admin_role` (`"admin"` by default, exact case-sensitive match) — or the non-JWT [operator key](#authentication), which reaches the same surface without a token; other callers get 401 (present-but-invalid token) / 403, and the quickstart's trial `public` role cannot call any of them. There is no separate `service` role. The JWT middleware always runs — a tokenless request (or a valid token without a role claim) resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is denied `403`, while a present-but-invalid token keeps its stashed verification error and is denied `401`.
+
+The admin endpoints in this section that accept a request body — `PUT /v1/ops/policy`, `POST /v1/ops/policy/validate`, and `PUT /v1/ops/pipes/{name}` — cap it at 1 MiB (the same 1 MiB parameter/AST-body cap as `POST /v1/query`); an over-cap body is rejected with `413 {"error":"request body exceeded 1048576 bytes"}`. A policy document or pipe definition is bounded, so this never binds legitimate use. The raw-SQL `POST /v1/ops/query` instead carries the 16 MiB bulk-payload cap documented with the query endpoints above.
+
+#### `GET /v1/ops/schema` — List All Table Schemas
 
 Returns all discovered ClickHouse table schemas.
-
-:::note[Admin only]
-The schema and DLQ endpoints in this section require the `admin_role` (like [`/v1/admin/query`](#post-v1adminquery--query-clickhouse)); other callers get 401 (bad token) / 403. The quickstart's trial `public` role cannot call them.
-:::
 
 **Response:**
 
@@ -626,7 +630,7 @@ The schema and DLQ endpoints in this section require the `admin_role` (like [`/v
 
 ---
 
-### `GET /v1/schema?table={table}` — Get Table Schema
+#### `GET /v1/ops/schema?table={table}` — Get Table Schema
 
 Returns the schema for a specific table.
 
@@ -652,9 +656,9 @@ Returns the schema for a specific table.
 
 ---
 
-### `POST /v1/schema/refresh` — Refresh Schemas
+#### `POST /v1/ops/schema/refresh` — Refresh Schemas
 
-Triggers an immediate re-discovery of ClickHouse table schemas, then returns the refreshed schema list (same array shape as `GET /v1/schema`). Admin-only, like the rest of this section.
+Triggers an immediate re-discovery of ClickHouse table schemas, then returns the refreshed schema list (same array shape as `GET /v1/ops/schema`). Admin-only, like the rest of this section.
 
 **Error responses:**
 
@@ -678,9 +682,9 @@ Triggers an immediate re-discovery of ClickHouse table schemas, then returns the
 
 ---
 
-### `GET /v1/dlq/stats` — DLQ Statistics
+#### `GET /v1/ops/dlq/stats` — DLQ Statistics
 
-Returns per-table message counts in the Dead Letter Queue. Admin-only, like the rest of this section. Before any failure has ever occurred, the endpoint returns `200` with `{"tables":{},"total":0}`.
+Returns per-table message counts in the Dead Letter Queue. Admin-only, like the rest of this section, and registered only while the DLQ is enabled (`dlq.enabled`, the default). Before any failure has ever occurred, the endpoint returns `200` with `{"tables":{},"total":0}`.
 
 **Error responses:**
 
@@ -688,6 +692,7 @@ Returns per-table message counts in the Dead Letter Queue. Admin-only, like the 
 | ------ | ---- | ----- |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
+| 404 | `{"error":"not found"}` | The DLQ is disabled (`dlq.enabled: false`), so the route is not registered. Only observable as admin — a non-admin caller is denied by the tree-level gate first (403) |
 | 500 | `{"error":"stream info failed"}` | NATS JetStream stream-info lookup failed |
 
 **Query Parameters:**
@@ -710,17 +715,11 @@ Returns per-table message counts in the Dead Letter Queue. Admin-only, like the 
 
 ---
 
-### Admin Endpoints
-
-Admin endpoints require the policy `admin_role` (`"admin"` by default, exact case-sensitive match). There is no separate `service` role. The JWT middleware always runs — a request with no/invalid token resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is denied.
-
-The admin endpoints that accept a request body — `PUT /v1/admin/policy`, `POST /v1/admin/policy/validate`, and `PUT /v1/admin/pipes/{name}` — cap it at 1 MiB (the same control-plane backstop as the public read endpoints); an over-cap body is rejected with `413 {"error":"request body exceeded 1048576 bytes"}`. A policy document or pipe definition is bounded, so this never binds legitimate use.
-
-#### `GET /v1/admin/policy` — Get Access Control Policy
+#### `GET /v1/ops/policy` — Get Access Control Policy
 
 Returns the current access control policy.
 
-#### `PUT /v1/admin/policy` — Update Access Control Policy
+#### `PUT /v1/ops/policy` — Update Access Control Policy
 
 Replaces the entire access control policy. Validated before saving.
 
@@ -756,21 +755,21 @@ Replaces the entire access control policy. Validated before saving.
 }
 ```
 
-The `default_role` field (optional) is the role assigned to any request that reaches the policy engine **without** a role — a valid token carrying no role claim, a request with no token at all, or one whose token was invalid/expired. **Setting it enables unauthenticated access:** roleless requests are evaluated as that role and receive exactly its permissions (or are denied if it grants none on the table/operation). If `default_role` is unset, a roleless request is denied. Setting it equal to the `admin_role` is allowed — every roleless request then becomes admin (including `/v1/admin/*`), which is handy for local/dev — but each node that loads such a policy logs a loud warning, and it must not be used in production.
+The `default_role` field (optional) is the role assigned to any request that reaches the policy engine **without** a role — a valid token carrying no role claim, a request with no token at all, or one whose token was invalid/expired. **Setting it enables unauthenticated access:** roleless requests are evaluated as that role and receive exactly its permissions (or are denied if it grants none on the table/operation). If `default_role` is unset, a roleless request is denied. Setting it equal to the `admin_role` is allowed — every roleless request then becomes admin (including `/v1/ops/*`), which is handy for local/dev — but each node that loads such a policy logs a loud warning, and it must not be used in production.
 
-#### `POST /v1/admin/policy/validate` — Validate Policy (Dry Run)
+#### `POST /v1/ops/policy/validate` — Validate Policy (Dry Run)
 
 Validates a policy without saving it. Returns `{"valid": true}` or an error.
 
-#### `GET /v1/admin/pipes` — List Named Pipes
+#### `GET /v1/ops/pipes` — List Named Pipes
 
 Returns all registered named query pipes.
 
-#### `GET /v1/admin/pipes/{name}` — Get Named Pipe
+#### `GET /v1/ops/pipes/{name}` — Get Named Pipe
 
 Returns a specific named pipe definition.
 
-#### `PUT /v1/admin/pipes/{name}` — Create/Update Named Pipe
+#### `PUT /v1/ops/pipes/{name}` — Create/Update Named Pipe
 
 ```json
 {
@@ -786,7 +785,7 @@ Returns a specific named pipe definition.
 
 **`allowed_roles`** restricts execution: the caller's role (a tokenless or roleless request is first resolved to the policy `default_role`) must appear in the list. The admin role (`admin_role`) always passes. Matching is exact — there is no `"*"` wildcard — and empty-string entries are ignored. An empty or omitted list authorizes **nobody but the admin role**, and a request whose role is absent or unlisted is denied (fails closed).
 
-#### `DELETE /v1/admin/pipes/{name}` — Delete Named Pipe
+#### `DELETE /v1/ops/pipes/{name}` — Delete Named Pipe
 
 ## Event Message Format
 
@@ -832,7 +831,7 @@ Same as the wire format — events are passed through directly:
 
 When a batch insert to ClickHouse fails (e.g., type errors, connection issues), the worker re-inserts the batch row by row: rows that succeed are acked, and only the rows that fail again are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — those messages are ACKed from the main stream and moved to the DLQ for inspection. The DLQ message body is the published `EventMessage` envelope (`{"table_name":…,"received_timestamp":…,"data":{…}}` — the failed row is under its `data` key, its `DateTime`/`DateTime64` values as published: canonicalized where WaveHouse could parse them, otherwise the producer's original spelling — see [timestamp canonicalization](#timestamp-canonicalization)); the failure reason, table, and time travel in the `X-DLQ-Table` / `X-DLQ-Error` / `X-DLQ-Timestamp` message headers.
 
-Use `GET /v1/dlq/stats` to monitor DLQ depth.
+Use `GET /v1/ops/dlq/stats` to monitor DLQ depth.
 
 ## Generating a JWT for Testing
 

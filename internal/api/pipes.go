@@ -115,7 +115,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	// "*" any-role wildcard and empty entries are ignored, so a stray "" can't
 	// authorize an empty role. The admin role bypasses every pipe's allowlist by
 	// design, not oversight: admins author pipes and can run arbitrary SQL via
-	// /v1/admin/query, so allowed_roles is never a confidentiality boundary
+	// /v1/ops/query, so allowed_roles is never a confidentiality boundary
 	// against them (mirrors Evaluate's admin bypass). A pipe with no
 	// allowed_roles therefore authorizes nobody but admin (fails closed).
 	var p *policy.Policy

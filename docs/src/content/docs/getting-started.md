@@ -47,7 +47,7 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
   "
 ```
 
-Schemas refresh every 60 seconds by default, or on demand via `POST /v1/schema/refresh` (admin-only). If the first ingest below returns `404 unknown table: clicks`, the refresh simply hasn't picked the new table up yet — wait and retry (worst case the next refresh is a full 60 seconds out).
+Schemas refresh every 60 seconds by default, or on demand via `POST /v1/ops/schema/refresh` (admin-only). If the first ingest below returns `404 unknown table: clicks`, the refresh simply hasn't picked the new table up yet — wait and retry (worst case the next refresh is a full 60 seconds out).
 
 ## 3. Ingest an event
 
@@ -73,7 +73,7 @@ curl -s -X POST "http://localhost:8080/v1/query?table=clicks" \
   -d '{"columns": ["page", "button", "score"], "limit": 10}'
 ```
 
-`POST /v1/query?table={table}` and `GET/POST /v1/pipes/{name}` are cached in-process (L1 Ristretto) with singleflight coalescing — duplicate concurrent queries hit ClickHouse once. For raw SQL there's `POST /v1/admin/query` (an admin escape hatch that never caches, emitting `Cache-Control: no-store`), but it's **admin-only** — the trial `public` role can't reach it. To use it, swap the public default for real auth: configure a JWT secret and present a token whose role is the policy [`admin_role`](/access-control#admin_role--the-privileged-role).
+`POST /v1/query?table={table}` and `GET/POST /v1/pipes/{name}` are cached in-process (L1 Ristretto) with singleflight coalescing — duplicate concurrent queries hit ClickHouse once. For raw SQL there's `POST /v1/ops/query` (an admin escape hatch that never caches, emitting `Cache-Control: no-store`), but it's **admin-only** — the trial `public` role can't reach it. To use it, swap the public default for real auth: configure a JWT secret and present a token whose role is the policy [`admin_role`](/access-control#admin_role--the-privileged-role).
 
 :::tip[Prefer a type-safe client?]
 The [TypeScript SDK](/sdk) wraps this endpoint in a chainable query builder with autocomplete on your table names and row types — plus live queries and streaming. The raw shapes are in the [structured query reference](/api#post-v1querytabletable--structured-query).
@@ -95,7 +95,7 @@ curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z
 
 The handful of things that most often trip up a first session — each is expected behavior with a quick fix:
 
-- **`404 unknown table: clicks` on the first ingest.** Schema discovery refreshes every 60 seconds (`WH_SCHEMA_REFRESH_INTERVAL`), so a just-created table may not be visible yet. Wait and retry — worst case the next refresh is a full 60 seconds out. (`POST /v1/schema/refresh` forces it, but that endpoint is admin-only — the trial `public` role can't call it.)
+- **`404 unknown table: clicks` on the first ingest.** Schema discovery refreshes every 60 seconds (`WH_SCHEMA_REFRESH_INTERVAL`), so a just-created table may not be visible yet. Wait and retry — worst case the next refresh is a full 60 seconds out. (`POST /v1/ops/schema/refresh` forces it, but that endpoint is admin-only — the trial `public` role can't call it.)
 - **The query returns `[]` right after an ingest succeeded.** Ingest acknowledges as soon as the event is durable in the WAL; the batch worker flushes to ClickHouse every few seconds. If you query within that window the rows simply aren't in ClickHouse yet — re-query after ~5 seconds. (The [SSE stream](#5-subscribe-to-real-time-updates) sees events *immediately* — it's broadcast before the flush.)
 - **`403` on a table you created yourself.** WaveHouse is fail-closed and the trial policy grants the `public` role access to the *named demo tables only* (`clicks`, `events`). A new table needs a policy entry — see [Access Control](/access-control) for granting roles per table.
 - **A port is already taken.** The stack binds `8080` (WaveHouse) and `8123`/`9000` (ClickHouse). Stop whatever holds the port or edit the `ports:` mappings in `deployments/compose/standalone.yaml`.
@@ -105,7 +105,7 @@ The handful of things that most often trip up a first session — each is expect
 
 - **[Architecture](/architecture)** — how ingest, query, cache, and streaming fit together.
 - **[API Reference](/api)** — every endpoint, request/response shape, and error code.
-- **[TypeScript SDK](/sdk)** — zero-dependency client with query builder, live queries, and codegen.
+- **[TypeScript SDK](/sdk)** — client with query builder, live queries, and codegen; one runtime dependency.
 - **[Configuration](/configuration)** — full YAML + environment variable reference.
 - **[Deployment](/deployment)** — Docker images, releases, health checks.
 - **[Development](/development)** — building from source, running tests, hot-reload workflow.

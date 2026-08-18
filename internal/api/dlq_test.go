@@ -22,7 +22,7 @@ func TestDLQStats_EmptyWhenNoStream(t *testing.T) {
 
 	handler := NewDLQHandler(emb.JetStream(), slog.Default())
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 
 	handler.Stats(rec, req)
@@ -61,7 +61,7 @@ func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 	}
 
 	handler := NewDLQHandler(js, slog.Default())
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 
 	handler.Stats(rec, req)
@@ -93,7 +93,7 @@ func TestDLQStats_SingleTable(t *testing.T) {
 	require.NoError(t, err)
 
 	handler := NewDLQHandler(js, slog.Default())
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 
 	handler.Stats(rec, req)

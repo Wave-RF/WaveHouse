@@ -17,7 +17,7 @@ It is deliberately detailed: this is a hot, concurrency-heavy path, and the goro
 | `sweeper.go` | The **Active Sweeper** — purges stream messages that are both written to ClickHouse and past the SSE gap window |
 | `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |
 
-The pipeline is **insert-only**. The wire format carries `{table_name, received_timestamp, data}` and nothing else; the worker parses the envelope and bulk-`INSERT`s — schema validation already happened at the HTTP ingest handler, before publish. Non-insert mutations go through a different admin path.
+The pipeline is **insert-only**. The wire format carries `{table_name, received_timestamp, data}` and nothing else; the worker parses the envelope and bulk-`INSERT`s — schema validation already happened at the HTTP ingest handler, before publish. Non-insert mutations go through `POST /v1/ops/query` (admin-only).
 
 ## High-level shape
 

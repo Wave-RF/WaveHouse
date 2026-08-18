@@ -144,14 +144,14 @@ describe("WaveHouseClient.pipe()", () => {
 });
 
 describe("WaveHouseClient.sql()", () => {
-  it("delegates to sql() and POSTs to /v1/admin/query", async () => {
+  it("delegates to sql() and POSTs to /v1/ops/query", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify([{ count: 42 }]), { status: 200 }));
 
     const client = createClient({ baseURL: "http://localhost:8080" });
     const result = await client.sql("SELECT count() FROM clicks");
 
     expect(result.data).toEqual([{ count: 42 }]);
-    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/admin/query");
+    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/query");
   });
 
   it("throws a migration-clear error when called with a legacy params array", () => {
@@ -356,5 +356,29 @@ describe("options.fetchOptions", () => {
       "X-Tenant": "acme",
       Authorization: "Bearer test-token",
     });
+  });
+});
+
+describe("stream error delivery", () => {
+  it("delivers a start-up failure to a subscriber attached after .stream() returns", async () => {
+    // Regression: the transport used to detect an unresolvable `baseURL`
+    // synchronously inside `connect()`, which runs in the StreamController
+    // constructor — so the error fired before `.stream()` had returned and no
+    // subscriber could ever see it. Every transport-level test attaches its
+    // callbacks before `connect()`, which is exactly why they missed it.
+    const wh = createClient({ baseURL: "not-a-url" });
+    const stream = wh.from("clicks").stream();
+
+    const errors: unknown[] = [];
+    const statuses: string[] = [];
+    stream.subscribe({
+      next: () => {},
+      status: (s) => statuses.push(s),
+      error: (e) => errors.push(e),
+    });
+
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    expect((errors[0] as { code: string }).code).toBe("SSE_CONNECT_ERROR");
+    expect(statuses).toContain("closed");
   });
 });

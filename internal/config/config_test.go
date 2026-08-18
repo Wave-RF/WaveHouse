@@ -445,7 +445,7 @@ func TestValidate_PrometheusPathReservedConflicts(t *testing.T) {
 		{"health probe", "/health", 0, "reserved endpoint"},
 		{"ready probe", "/ready", 0, "reserved endpoint"},
 		{"v1 root same-port", "/v1", 0, "authenticated /v1"},
-		{"v1 subpath same-port", "/v1/admin/metrics", 0, "authenticated /v1"},
+		{"v1 subpath same-port", "/v1/ops/metrics", 0, "authenticated /v1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

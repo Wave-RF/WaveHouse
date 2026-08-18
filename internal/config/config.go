@@ -169,7 +169,7 @@ type Auth struct {
 // cleanly — policy.NewStore returns a fatal error otherwise, so a typo or a
 // missing mount surfaces as a refused boot instead of a silent fail-closed
 // (every request 403s, including admin). When left empty, the store comes up
-// with no cached policy and the operator seeds via PUT /v1/admin/policy.
+// with no cached policy and the operator seeds via PUT /v1/ops/policy.
 //
 // A baked-in default like "policy.yaml" would re-introduce the silent-lockout
 // failure mode for any deployment that didn't ship that exact file at CWD,

@@ -119,13 +119,13 @@ curl http://localhost:8080/livez   # → {"status":"ok"}
 curl http://localhost:8080/readyz  # → {"status":"ready"}
 ```
 
-The admin surface — `/v1/schema`, `/v1/admin/query` (raw SQL), `/v1/dlq/stats` — needs the **admin** role, which the `public` trial role doesn't have. Mint an admin JWT (see [Validating tokens](#validating-tokens) below) and pass it:
+The admin surface — `/v1/ops/schema`, `/v1/ops/query` (raw SQL), `/v1/ops/dlq/stats` — needs the **admin** role, which the `public` trial role doesn't have. Mint an admin JWT (see [Validating tokens](#validating-tokens) below) and pass it:
 
 ```bash
-curl -s http://localhost:8080/v1/schema -H "Authorization: Bearer $TOKEN" | jq
-curl -s -X POST http://localhost:8080/v1/admin/query -H "Authorization: Bearer $TOKEN" \
+curl -s http://localhost:8080/v1/ops/schema -H "Authorization: Bearer $TOKEN" | jq
+curl -s -X POST http://localhost:8080/v1/ops/query -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
-curl -s http://localhost:8080/v1/dlq/stats -H "Authorization: Bearer $TOKEN"
+curl -s http://localhost:8080/v1/ops/dlq/stats -H "Authorization: Bearer $TOKEN"
 ```
 
 ### How `make dev` works
@@ -208,9 +208,9 @@ The **operator key** is a non-JWT alternative: set one and send it in an `Author
 ```bash
 WH_AUTH_OPERATOR_KEY=dev-operator-key make dev
 # ...then, in another shell — the admin surface works even with no policy seeded:
-curl -H "Authorization: Operator dev-operator-key" http://localhost:8080/v1/admin/policy
+curl -H "Authorization: Operator dev-operator-key" http://localhost:8080/v1/ops/policy
 # the X-Operator-Key alias works too:
-curl -H "X-Operator-Key: dev-operator-key" http://localhost:8080/v1/admin/policy
+curl -H "X-Operator-Key: dev-operator-key" http://localhost:8080/v1/ops/policy
 ```
 
 Then mint a token (role == the policy `admin_role`) and call an admin endpoint:
@@ -219,7 +219,7 @@ Then mint a token (role == the policy `admin_role`) and call an admin endpoint:
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli)
 export TOKEN=$(jwt encode --secret "my-secret" '{"role": "admin", "exp": 9999999999}')
 
-curl -s -X POST http://localhost:8080/v1/admin/query \
+curl -s -X POST http://localhost:8080/v1/ops/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'

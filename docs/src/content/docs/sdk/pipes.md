@@ -31,7 +31,7 @@ Open a live stream (see [Streaming](/sdk/streaming)).
 
 ## Pipes Admin — `wh.pipes`
 
-Manage named query pipes. Requires the admin role (`policy.admin_role`).
+Manage named query pipes. Requires the admin gate — the admin role (`policy.admin_role`) or the [operator key](/api#authentication).
 
 ```ts
 // List all pipes

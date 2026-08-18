@@ -205,7 +205,7 @@ describe("TableRef", () => {
 
   // --- schema ---
 
-  it("schema() sends GET to /v1/schema?table={table}", async () => {
+  it("schema() sends GET to /v1/ops/schema?table={table}", async () => {
     const schema = {
       name: "clicks",
       columns: [{ name: "page", type: "String", is_nullable: false, has_default: false }],
@@ -215,7 +215,7 @@ describe("TableRef", () => {
     const result = await table().schema();
 
     expect(result.data).toEqual(schema);
-    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/schema?table=clicks");
+    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/schema?table=clicks");
   });
 
   // --- stream ---

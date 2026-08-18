@@ -35,12 +35,12 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 //
 // Pass the role AFTER default-role resolution so forbiddenForRole's empty-role
 // message is accurate. allowedRoles is the set the gate would have accepted (a
-// pipe's allowed_roles); the gates with no flat role list — the /v1/admin gate
+// pipe's allowed_roles); the gates with no flat role list — the /v1/ops gate
 // and the policy-evaluator paths (ingest, structured query) — pass nil. attrs
 // are gate-specific structured fields appended to the WARN: each gate tags a
 // "gate" (admin / policy / pipe) so a denial is attributable to the check that
-// raised it (the route pattern alone can't — /v1/schema runs the admin gate,
-// not a policy one), and the policy paths add the table + action they evaluated.
+// raised it without parsing the route pattern, and the policy paths add the
+// table + action they evaluated.
 // logger is the calling gate's injected logger (each handler holds one; main
 // wires it, tests pass their own) — the denial WARN goes there, not to a
 // package global.
@@ -74,7 +74,7 @@ func writeAuthzDenied(w http.ResponseWriter, r *http.Request, logger *slog.Logge
 // would have accepted, and the matched route + method. role_observed empty with
 // a non-empty role_resolved means the caller presented no role and was mapped to
 // default_role; roles_allowed is populated only by the pipe gate (a pipe's
-// allowed_roles) and is empty for the /v1/admin gate and the policy-evaluator
+// allowed_roles) and is empty for the /v1/ops gate and the policy-evaluator
 // paths (ingest, structured query). attrs carry each gate's own fields (the
 // "gate" tag, plus table + action on the policy paths) so the records stay
 // distinguishable beyond the route.

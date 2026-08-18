@@ -1,6 +1,6 @@
 # @wavehouse/sdk
 
-Zero-dependency TypeScript client for [WaveHouse](https://github.com/Wave-RF/WaveHouse) — schema-aware real-time API gateway for ClickHouse.
+TypeScript client for [WaveHouse](https://github.com/Wave-RF/WaveHouse) — schema-aware real-time API gateway for ClickHouse. One runtime dependency (`eventsource-parser`, ~1.4 KB gzipped, itself dependency-free).
 
 ## Installation
 
@@ -8,7 +8,7 @@ Zero-dependency TypeScript client for [WaveHouse](https://github.com/Wave-RF/Wav
 npm install @wavehouse/sdk
 ```
 
-Requires Node 22 or newer — the only line this SDK is tested against; Node 18 and 20 are past upstream end-of-life. Browsers need no polyfill, and Node needs an `EventSource` polyfill only for streaming — see [Runtime support](https://wavehouse.dev/sdk/#runtime-support).
+Requires Node 22 or newer — the only line this SDK is tested against; Node 18 and 20 are past upstream end-of-life. Neither browsers nor Node need a polyfill: streaming runs on `fetch`, like the rest of the SDK — see [Runtime support](https://wavehouse.dev/sdk/#runtime-support).
 
 This works in any framework that uses a bundler — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — with `import { createClient } from '@wavehouse/sdk'`.
 
@@ -44,7 +44,7 @@ Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`). jsDelivr (
 
 **Versioning.** A bare CDN URL serves the latest published **release**; pin for production (`@wavehouse/sdk@0.1.0`) or float on a range (`@0` for the newest 0.x, `@0.1` for 0.1.x). Builds from `main` are published under the `dev` tag — `@wavehouse/sdk@dev` — for trying unreleased changes.
 
-Streaming (`.stream()`) uses the browser's native `EventSource`, so it works in both forms with no polyfill.
+Streaming (`.stream()`) runs on `fetch`, so it works in both forms with no polyfill.
 
 ## Quick Start
 
@@ -131,7 +131,7 @@ const { data } = await wh.from('clicks').select('page').limit(10);
 
 Async request methods return a `Result<T>` object — destructure it as `{ data, error }` — and never throw for anything the server returns. `.stream()` and `.liveQuery()` return controllers instead, reporting failures through the subscriber's `error` callback.
 
-The SDK does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR`, and despite that error's `retryable: true` the SDK never re-dials the stream itself), `.stream()` / `.liveQuery()` in a runtime with no `EventSource`, and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call.
+The SDK does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report a terminal `SSE_CONNECT_ERROR`), `.stream()` / `.liveQuery()` in a runtime with no global `fetch` and no `options.fetch`, and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and on a stream is reported as a retryable `SSE_AUTH_ERROR`. A dropped stream *is* re-dialed by the SDK, on a jittered backoff; only non-retryable failures end it. One more exception can escape an SDK call, though it is yours rather than ours: a subscriber's `status` handler throwing on the first, synchronous `.subscribe()` / `.liveQuery()` call — see [Error Handling](https://wavehouse.dev/sdk/reference#error-handling).
 
 ```ts
 const { data, error } = await wh.from('clicks').fetch();
@@ -150,7 +150,7 @@ Generate TypeScript types from your live WaveHouse schema. The package ships a `
 npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-This introspects `/v1/schema`, maps ClickHouse column types to TypeScript, and outputs a `Database` interface you can pass to `createClient<Database>()`. `/v1/schema` is **admin-only** — pass an admin-role token with `--auth <jwt>` (or `-a`) against any non-dev policy.
+This introspects `/v1/ops/schema`, maps ClickHouse column types to TypeScript, and outputs a `Database` interface you can pass to `createClient<Database>()`. `/v1/ops/schema` is **admin-only** — pass an admin-role token with `--auth <jwt>` (or `-a`) against any non-dev policy.
 
 ## Development & Testing
 

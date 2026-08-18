@@ -84,7 +84,7 @@ export class WaveHouseClient<DB extends Database = Database> {
     // SQL errors. Throw a clear runtime error pointing at the migration.
     if (Array.isArray(opts)) {
       throw new Error(
-        "[WaveHouse SDK] client.sql(sql, params) was removed. The /v1/admin/query endpoint does not accept positional `?` params. Inline literals into the SQL, or use the structured query builder (wh.from(table)…) for safe binding from user input.",
+        "[WaveHouse SDK] client.sql(sql, params) was removed. The /v1/ops/query endpoint does not accept positional `?` params. Inline literals into the SQL, or use the structured query builder (wh.from(table)…) for safe binding from user input.",
       );
     }
     return sql<Row>(this._ctx, query, opts);
@@ -95,19 +95,14 @@ export class WaveHouseClient<DB extends Database = Database> {
     table: string,
     opts?: StreamOptions,
   ): StreamController<T> {
-    if (typeof EventSource === "undefined") {
-      // TODO: fallback method? polling?
-      throw new Error(
-        "[WaveHouse SDK] Native EventSource is not available in this environment. " +
-          "Please provide a global polyfill (e.g., `globalThis.EventSource = require('eventsource')`).",
-      );
-    }
-
     const transport = new SSETransport<T>({
       baseURL: this._ctx.baseURL,
       table,
       since: opts?.since,
       auth: this._ctx.auth,
+      fetch: this._ctx.options.fetch,
+      headers: this._ctx.options.headers,
+      fetchOptions: this._ctx.options.fetchOptions,
     });
     const controller = new StreamController<T>(transport);
     if (opts?.signal) controller.attachSignal(opts.signal);

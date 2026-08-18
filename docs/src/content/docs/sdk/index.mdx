@@ -1,11 +1,11 @@
 ---
 title: "TypeScript SDK"
-description: "Zero-dependency client SDK — query builder, real-time streaming, codegen."
+description: "Client SDK — query builder, real-time streaming, codegen."
 ---
 
 import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components";
 
-`@wavehouse/sdk` — Zero-dependency TypeScript client for WaveHouse.
+`@wavehouse/sdk` — TypeScript client for WaveHouse. One runtime dependency: `eventsource-parser` (~1.4 KB gzipped, itself dependency-free), which frames the SSE stream.
 
 ## Installation
 
@@ -58,7 +58,7 @@ deno add npm:@wavehouse/sdk
 </script>
 ```
 
-Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`); jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For pages that can't use ES modules, the bundled IIFE build at `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag. Streaming uses the browser's native `EventSource`, so it needs no polyfill either way. A bare CDN URL tracks the latest published release; use a range (`@0`, `@0.1`) to float within a major or minor, or the `@dev` tag for unreleased builds from `main` (see [Releasing the SDK](/development#releasing-the-sdk)).
+Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`); jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For pages that can't use ES modules, the bundled IIFE build at `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag. Streaming runs on `fetch`, so it needs no polyfill either way. A bare CDN URL tracks the latest published release; use a range (`@0`, `@0.1`) to float within a major or minor, or the `@dev` tag for unreleased builds from `main` (see [Releasing the SDK](/development#releasing-the-sdk)).
 
   </TabItem>
 </Tabs>
@@ -141,17 +141,9 @@ For pages that cannot use ES modules, `dist/index.global.js` is a self-contained
 
 ### Runtime support
 
-**Browsers** — all SDK features work natively. `fetch`, `AbortController`, and `EventSource` are built into every modern browser; no polyfills are required.
+**Browsers** — all SDK features work natively. `fetch`, `AbortController`, and `ReadableStream` are built into every modern browser; no polyfills are required.
 
-**Node.js** — non-streaming features (`wh.from().fetch()`, `.insert()`, `.sql()`, pipes, admin) work in Node 22 and later (the package's minimum, per `engines.node`). 22 is the only line we test against, and older releases are past end-of-life upstream. Streaming (`.stream()`, `.liveQuery()`) uses `EventSource`, which is **not** a default global in Node. The SDK feature-detects with `typeof EventSource === "undefined"` and throws a descriptive error if it is absent. To use streaming in Node you must polyfill before calling any stream method:
-
-```js
-import { EventSource } from 'eventsource'; // npm install eventsource
-globalThis.EventSource = EventSource;
-```
-
-`--experimental-eventsource` (available in recent Node releases) also
-satisfies the check when passed on the command line.
+**Node.js** — every feature, streaming included, works in Node 22 and later (the package's minimum, per `engines.node`). 22 is the only line we test against, and older releases are past end-of-life upstream. Streaming runs on the same `fetch` and `ReadableStream` globals as the rest of the SDK, so it needs **no `EventSource` polyfill** — earlier versions did, and that requirement is gone.
 
 ## Quick Start
 
@@ -329,19 +321,21 @@ const wh = createClient<Database>({
 |-------|------|---------|-------------|
 | `baseURL` | `string` | — | WaveHouse server URL, optionally including a path prefix (required) |
 | `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
-| `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
-| `options.headers` | `Record<string, string>` | — | Headers added to every REST request ([details](#custom-headers)) |
-| `options.fetchOptions` | `RequestInit` | — | Extra `RequestInit` fields merged into every REST request ([details](#extra-requestinit-fields)) |
-| `options.fetch` | `FetchLike` | global `fetch` | HTTP implementation for every REST request ([details](#supplying-your-own-fetch)) |
-
-:::caution[These three apply to REST only]
-`headers`, `fetchOptions`, and `fetch` do **not** reach the streaming transport. `.stream()` and `.liveQuery()`'s live connection go through `EventSource`, which accepts neither custom headers nor a `fetch` — which is why the token rides in `?token=` there. If WaveHouse sits behind a header-gated proxy, REST works and streaming does not; follow [#203](https://github.com/Wave-RF/WaveHouse/issues/203) for that. (`.liveQuery()`'s initial backfill is an ordinary REST call and *is* covered.)
-:::
+| `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx **REST** requests; stream reconnects are unbounded ([details](/sdk/streaming#transport-behavior)) |
+| `options.headers` | `Record<string, string>` | — | Headers added to every request ([details](#custom-headers)) |
+| `options.fetchOptions` | `RequestInit` | — | Extra `RequestInit` fields merged into every request ([details](#extra-requestinit-fields)) |
+| `options.fetch` | `FetchLike` | global `fetch` | HTTP implementation for every request ([details](#supplying-your-own-fetch)) |
 
 :::note[How the token is transmitted]
-The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server prefers the header, and it strips `?token=` from the request URL either way — so an unused credential can't survive into a later handler's log line, and the token stays out of **WaveHouse's own** logs.
+The SDK attaches your `auth` token as an `Authorization: Bearer` header on every request, streaming included. It is re-read on each connection attempt, so a stream that outlives its token reconnects with a fresh one instead of replaying an expired credential.
 
-That strip can't reach anything upstream, though: the token is in the request URI on the wire, so any proxy, CDN, or load balancer in front of WaveHouse records it in access logs unless you redact query strings there.
+The token is never placed in the URL. The server still accepts a `?token=` query parameter for clients that cannot set headers — see [API Reference — Authentication](/api#authentication) — but the SDK does not use it, so it never reaches a proxy or CDN access log.
+:::
+
+:::caution[Streaming asks more of a custom `fetch`]
+`.stream()` and `.liveQuery()` read the response as it arrives, so an `options.fetch` used with them must return a response with a live streaming body. A response handed back with an absent or already-consumed body fails fast with `SSE_NO_STREAM_BODY`. What the SDK cannot rescue is a wrapper that *awaits* the body before returning — `await res.text()`, or the `res.clone().text()` a logging wrapper reaches for — because on a stream that never ends it never resolves and your function never returns. Both satisfy every REST call, which is what makes the trap easy to walk into.
+
+`options.headers` is also subject to CORS in a browser: a header outside the safelist joins the preflight, which the origin has to allow. WaveHouse advertises a fixed set, so custom headers reach it cross-origin only when a proxy in front terminates the preflight — the deployment they exist for. Server-side callers never preflight.
 :::
 
 #### Serving under a path prefix
@@ -354,13 +348,13 @@ const wh = createClient({ baseURL: 'https://app.example.com/api/wavehouse' });
 // streams  → https://app.example.com/api/wavehouse/v1/stream
 ```
 
-Trailing slashes on `baseURL` are optional, but it must be **absolute** — scheme and host included. A same-origin relative path like `/api/wavehouse` makes every REST call reject with a `TypeError` instead of returning a `Result`, and surfaces on a stream as an `SSE_CONNECT_ERROR` to the subscriber's `error` callback — so build an absolute one: `` `${location.origin}/api/wavehouse` ``.
+Trailing slashes on `baseURL` are optional, but it must be **absolute** — scheme and host included — and the scheme must be `http` or `https`. A same-origin relative path like `/api/warehouse` makes every REST call reject with a `TypeError` instead of returning a `Result`, and surfaces on a stream as an `SSE_CONNECT_ERROR` to the subscriber's `error` callback — so build an absolute one: `` `${location.origin}/api/warehouse` ``. A `ws://`/`wss://` base ends the stream with the same error: streaming is plain HTTP, and there is no WebSocket endpoint.
 
 The proxy in front must **strip** the prefix before forwarding, since WaveHouse itself always serves at `/v1/…` — see [Behind a reverse proxy → Path prefixes](/reverse-proxy#path-prefixes).
 
 ### Custom headers
 
-`options.headers` adds headers to every REST request — the usual reason being a header-gated proxy in front of WaveHouse, such as a Cloudflare Access service token:
+`options.headers` adds headers to every request, streaming included — the usual reason being a header-gated proxy in front of WaveHouse, such as a Cloudflare Access service token:
 
 ```ts
 const wh = createClient({
@@ -389,16 +383,28 @@ Headers are static. For a credential that rotates per request, wrap the transpor
 
 ### Extra `RequestInit` fields
 
-`options.fetchOptions` is merged into the `RequestInit` of every REST request — for settings that aren't headers and don't warrant replacing the whole transport:
+`options.fetchOptions` is merged into the `RequestInit` of every request, streaming included — for settings that aren't headers and don't warrant replacing the whole transport:
 
 ```ts
 const wh = createClient({
-  baseURL: 'https://<project_id>.wavehouse.app',
-  options: { fetchOptions: { cache: 'no-store', keepalive: true } },
+  baseURL: 'https://wavehouse.example.com',
+  options: { fetchOptions: { cache: 'no-store', mode: 'cors' } },
 });
 ```
 
 It carries any `RequestInit` field — `mode`, `cache`, `keepalive`, `credentials`, `redirect` — plus runtime-specific extensions such as Next.js's `next: { tags }`, which tags the cached response for on-demand revalidation. Only those runtime extensions need a cast; the standard fields are declared on `RequestInit` already.
+
+:::caution[Two of those fields don't apply to streams]
+On `.stream()` and `.liveQuery()`'s live connection the transport keeps `cache`
+and `redirect` for itself, because there they're correctness rather than
+preference. It constrains one more without owning it: `credentials` stays yours,
+forwarded in a browser and dropped elsewhere because some runtimes throw if it
+is set at all. See [Supplying your own fetch](#supplying-your-own-fetch) for
+what each is set to and why.
+
+Everything else reaches streams normally — including `mode` from the example
+above. Only `cache` is different there: on a stream it is already `no-store`.
+:::
 
 :::note[`credentials: 'include'` needs a proxy that owns CORS]
 Sending cookies cross-origin is a common reason to reach for this, but it can't work against WaveHouse's own CORS: it deliberately never emits `Access-Control-Allow-Credentials` (it's a Bearer-token API), and the default `cors_allowed_origins: "*"` makes `include` a hard browser failure regardless. It applies where a fronting proxy answers CORS itself — see [Behind a reverse proxy](/reverse-proxy#header-and-auth-forwarding). Same-origin deployments already send cookies without it.
@@ -426,11 +432,15 @@ const wh = createClient({
 
 Retries go through the same function, so middleware sees every attempt.
 
-The SDK always calls your function with a **string** URL and a plain `RequestInit`. Off the response it reads `.ok` and `.headers` always, `.text()` on success, and `.status`, `.statusText` plus `.json()` when the response is not `ok` — so a hand-rolled response object needs all six. If your function rejects, the request becomes a `NETWORK_ERROR` result and is retried with backoff; the one exception is a `DOMException` named `AbortError` — what the platform `fetch` and undici throw on abort — which becomes `ABORTED` and is not retried. An implementation that signals abort some other way (`node-fetch` throws its own `AbortError` class) gets retried instead.
+The SDK always calls your function with a **string** URL and a plain `RequestInit`. Off the response the **REST path** reads `.ok` and `.headers` always, `.text()` on success, and `.status`, `.statusText` plus `.json()` when the response is not `ok` — so a hand-rolled response object needs all six there. A stub used with `.stream()` or `.liveQuery()` needs a different set: `.ok`, `.status`, `.type` (checked for `opaqueredirect`), `.headers` carrying `content-type: text/event-stream`, and a live, unread `.body` — plus `.statusText` and `.json()` if your stub ever answers a stream with a non-`ok` response, which goes through the same error parsing as REST. `.text()` is never called on a stream.
 
-The option's type is exported as `FetchLike`. It matches the standard `fetch` signature — written out rather than as `typeof fetch`, which resolves differently depending on whether your TypeScript `lib` includes DOM. Let TypeScript infer your parameters (`(url, init) => …`) and it fits without annotation.
+**On REST**, if your function rejects, the request becomes a `NETWORK_ERROR` result and is retried with backoff — unless the `AbortSignal` you passed has been aborted, in which case the result is `ABORTED` and nothing is retried. That's decided from the signal rather than from what your function threw, so an implementation that signals abort some other way — `AbortSignal.timeout()` raises a `TimeoutError`, `node-fetch` its own `AbortError` class — is reported the same way. On a stream the same rejection is reported to the subscriber as `SSE_NETWORK_ERROR` and re-dialed — including an `AbortError`, since the stream transport applies the same rule: only an abort *it* raised, via `.close()`, ends the stream. See [Error Handling](/sdk/reference#error-handling).
 
-Only the SSE transport is exempt: the live connection behind `.stream()` and `.liveQuery()` uses `EventSource`, which this does not replace. `.liveQuery()`'s [initial backfill](/sdk/streaming#live-queries) is an ordinary request and *does* go through your function.
+The option's type is exported as `FetchLike`. It is written out rather than as `typeof fetch`, which resolves differently depending on whether your TypeScript `lib` includes DOM. Its URL parameter is `string` — all the SDK ever passes — which, because function parameters are contravariant, accepts *more* implementations than the wider spelling would: the global `fetch` fits, and so does hand-written `(url: string, init?: RequestInit) => Promise<Response>` middleware. Let TypeScript infer your parameters (`(url, init) => …`) and it fits without annotation.
+
+Streaming goes through your function too. That comes with the extra requirement described above — the response must carry a live streaming body — and the streaming transport keeps ownership of two `RequestInit` fields where the value is load-bearing rather than a preference: `cache` (as an init field; a `Cache-Control` header would fail cross-origin preflight) and `redirect`. It constrains one more without owning it: `credentials` stays yours, forwarded in a browser and dropped elsewhere, because some runtimes throw if it is set at all.
+
+`redirect` depends on whether the request carries a credential. With one — an `auth` token or configured `headers` — a redirect is refused and reported as `SSE_REDIRECT`, because a cross-origin hop strips `Authorization` (which this endpoint answers with a silently reduced view rather than an error) while forwarding your other headers to wherever the redirect points. Without either, redirects are followed normally, so CDN canonicalization, geo/LB indirection, and an http→https upgrade all work. The test is that concrete pair rather than "is this request authenticated", and **cookies are not part of it**. A cookie isn't stripped the way `Authorization` is — it is re-derived from the cookie store at each hop, so a redirect carries it only while the hop stays inside **both** the request's origin and the cookie's own `Path`. Leaving either loses it. The origin half is the one no cookie attribute can override: under the default `same-origin` credentials mode the browser attaches nothing once a redirect goes cross-origin, whatever the `Domain` — so `app.example.com` → `api.example.com` on a shared `Domain=example.com` session cookie loses it, and so does an http→https upgrade, which is cross-origin by scheme and port. A same-origin rewrite from `/v1/stream` to `/stream` under a `Path=/v1` cookie loses it the other way. This endpoint answers a cookieless request with a reduced view rather than an error ([#478](https://github.com/Wave-RF/WaveHouse/issues/478)). Going cross-origin with `credentials: "include"` usually fails earlier and louder instead: WaveHouse never sends `Access-Control-Allow-Credentials`, so against it the browser blocks the response outright. Behind a proxy that owns CORS and does allow credentials the hop succeeds — and then ordinary cookie scoping decides. `include` *replaces* the origin rule rather than lifting it: the cookie crosses only if its own `Domain` covers the target, so a host-only cookie — what you get with no `Domain` attribute — still stops at its host. If you need to follow a credentialed redirect anyway, supply an `options.fetch` that overrides `redirect`. A `200` that isn't `text/event-stream` is refused too (`SSE_BAD_CONTENT_TYPE`), so an auth gateway's login page fails loudly instead of leaving the stream connected and permanently silent.
 
 #### Swapping in undici
 
@@ -449,7 +459,7 @@ const wh = createClient({
   baseURL: 'https://<project_id>.wavehouse.app',
   options: {
     fetch: (url, init) =>
-      undiciFetch(url as string, { ...init, dispatcher } as never) as unknown as Promise<Response>,
+      undiciFetch(url, { ...init, dispatcher } as never) as unknown as Promise<Response>,
   },
 });
 ```
@@ -468,7 +478,7 @@ explicit new Agent()      17    14    12    13
 An explicit `dispatcher` wins because the request never consults the shared symbol at all. An explicit `setGlobalDispatcher` call (below) wins the other way round — it overwrites the symbol after the first copy claimed it.
 :::
 
-All three casts are load-bearing, for one underlying reason: undici declares its own request/response types, separate from the ones behind your global `fetch`, so the two aren't structurally assignable. `url as string` is needed because `FetchLike` accepts the full `fetch` input union while undici's `RequestInfo` names its *own* `Request`; `{ ...init, dispatcher } as never` covers the same split on `RequestInit`, which differs on `body` and `headers` (`never` is assignable to either spelling, so one snippet compiles whether or not your `lib` includes DOM); and the return cast handles the `Response` mismatch. They're safe because of the narrow runtime contract above — a string URL and a plain `RequestInit` in, six members read back. `undici` is a dependency you add; the SDK itself stays dependency-free.
+Both casts are load-bearing, for one underlying reason: undici declares its own request/response types, separate from the ones behind your global `fetch`, so the two aren't structurally assignable. `{ ...init, dispatcher } as never` covers the split on `RequestInit`, which differs on `body` and `headers` (`never` is assignable to either spelling, so one snippet compiles whether or not your `lib` includes DOM); and the return cast handles the `Response` mismatch. The URL needs no cast — `FetchLike` declares it as `string`, which undici's `RequestInfo` accepts. They're safe because of the narrow runtime contract above — a string URL and a plain `RequestInit` in, and only the response members enumerated above read back. `undici` is a dependency you add on top of the SDK's single ~1.4 KB one.
 
 If you're genuinely pinned to an affected undici, the same snippet fixes it — your pinned version, with a dispatcher that never reuses a keep-alive socket: `new Agent({ pipelining: 0 })`. That costs a fresh connection per request, so prefer upgrading. Note that tuning `keepAliveTimeout` does **not** help: the retirement timer is starved by the same idle event loop that triggers the bug, so the socket is still there to be reused.
 
