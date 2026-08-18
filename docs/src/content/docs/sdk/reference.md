@@ -30,7 +30,7 @@ The SDK **never throws** for anything the server returns — all API errors come
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
 | 400 | `HTTP_400` | No | Bad request (validation, missing fields) |
-| 401 | `HTTP_401` | No | Missing or invalid JWT |
+| 401 | `HTTP_401` | No | A present-but-invalid or expired JWT that a gate then denied. A *missing* token is not a `401` — it resolves to `default_role`, and a denial is `403` |
 | 403 | `HTTP_403` | No | Insufficient permissions |
 | 404 | `HTTP_404` | No | Table or pipe not found |
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
@@ -62,7 +62,7 @@ Rejected requests surface the real status and message rather than an opaque conn
 
 `SSE_PARSE_ERROR` is the one code that isn't a connection outcome: it's reported and *skipped*, and the connection keeps reading — one bad frame shouldn't cost you the stream. For an ordinary bad frame its `retryable: true` is therefore vestigial — nothing is re-dialed. Two exceptions, one to each half of that reported-and-skipped rule. A frame whose `data` isn't valid JSON is skipped but never *reported* — `console.warn` and dropped, with no `error` callback. The parser's 16 MiB buffer cap is reported but not *skipped*: an overflow terminates the parser, so the transport stops reading and reconnects rather than feeding it again.
 
-**If your own callback throws.** For anything delivered *through the transport* — `next`, `status`, or `error` — a throw never ends the stream: it is isolated and logged to the console, matching what `EventSource` did, and never routed to your `error` callback, so a handler that swallows its own failures fails silently.
+**If your own callback throws.** For anything delivered *through the transport* — `next`, `status`, or `error` — a throw never ends the stream: it is isolated and logged to the console, and never routed to your `error` callback, so a handler that swallows its own failures fails silently.
 
 **Wrap your handler bodies in your own `try`/`catch`.** That isolation is a backstop against one bad callback killing the connection, not a promise that throwing is harmless. Four paths sit outside it, all tracked in [#473](https://github.com/Wave-RF/WaveHouse/issues/473):
 

@@ -203,7 +203,9 @@ export interface ClientOptions {
    * With `credentials: "include"` the origin half is replaced rather than
    * lifted: ordinary cookie scoping decides, so the cookie crosses a
    * CORS-allowed cross-origin hop only if its own `Domain` covers the target —
-   * a host-only cookie, the default, still stops at its host. Spelled out under "Supplying your own `fetch`" in the SDK guide; see #478. `credentials` itself is honored in
+   * a host-only cookie, the default, still stops at its host. Spelled out
+   * under "Supplying your own `fetch`" in the SDK guide; see #478.
+   * `credentials` itself is honored in
    * browsers and dropped elsewhere, since some runtimes throw if it is set.
    */
   fetchOptions?: RequestInit;

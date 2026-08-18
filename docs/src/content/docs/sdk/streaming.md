@@ -210,6 +210,8 @@ const stream = wh.from('clicks')
 
 Supported operators: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `like`, `not_like` — the same `FilterOp` set `.where()` takes everywhere (the SDK maps them to wire tokens such as `eq`/`neq` internally).
 
+One operator does not behave identically on both sides: `like` and `not_like` match **case-insensitively** here, while ClickHouse's `LIKE` on the query path is case-sensitive. That matters most inside a single `liveQuery()`, where the backfill rows come through the server's case-sensitive filter and the live frames through this one — so a pattern like `'/Home%'` can admit live events whose historical counterparts the backfill excluded.
+
 ---
 
 ## Live Queries
