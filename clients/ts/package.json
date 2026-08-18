@@ -40,11 +40,14 @@
     "prepublishOnly": "pnpm run typecheck && pnpm run build",
     "codegen": "tsx src/cli/codegen.ts"
   },
+  "dependencies": {
+    "eventsource-parser": "^3.1.0"
+  },
   "devDependencies": {
     "@types/node": "catalog:",
     "@vitest/coverage-v8": "^4.1.10",
     "tsup": "^8.0.0",
-    "tsx": "^4.22.4",
+    "tsx": "^4.23.12",
     "typescript": "catalog:",
     "vitest": "catalog:"
   },

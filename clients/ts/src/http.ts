@@ -31,8 +31,13 @@ export interface HttpResult<T> {
  * `Authorization` and let the server pick. Canonical casing wins, and values
  * replace rather than append — a header joined instead of replaced is a known
  * way to produce `Content-Type: application/json, image/png`.
+ *
+ * Shared with the SSE transport so both paths resolve `headers` the same way,
+ * rather than growing a second precedence story.
+ *
+ * @internal
  */
-function mergeHeaders(
+export function mergeHeaders(
   base: Record<string, string>,
   extra: Record<string, string> | undefined,
 ): Record<string, string> {
@@ -53,6 +58,15 @@ function mergeHeaders(
     configured.set(lower, name);
   }
   return merged;
+}
+
+/** The documented shape for a cancelled request: a Result, never a throw. */
+function abortedResult<T>(): HttpResult<T> {
+  return {
+    data: null,
+    error: { status: 0, code: "ABORTED", message: "Request aborted", retryable: false },
+    headers: new Headers(),
+  };
 }
 
 /**
@@ -133,18 +147,39 @@ export async function request<T>(ctx: HttpContext, opts: RequestSpec): Promise<H
 
       return { data: null, error, headers: res.headers };
     } catch (e) {
-      // AbortError — return immediately, no retry
-      if (e instanceof DOMException && e.name === "AbortError") {
-        return {
-          data: null,
-          error: { status: 0, code: "ABORTED", message: "Request aborted", retryable: false },
-          headers: new Headers(),
-        };
+      // Classified on the *signal*, never the rejection's type. Keying off the
+      // error made the outcome depend on `maxRetries` — an implementation that
+      // throws something other than a `DOMException` named `AbortError`
+      // (`AbortSignal.timeout()` raises a `TimeoutError`, `node-fetch` its own
+      // class) fell through to NETWORK_ERROR here and was reclassified only if
+      // a retry remained for the backoff to notice the signal.
+      //
+      // Matching on the error would also misread middleware: an `options.fetch`
+      // enforcing its own per-attempt deadline aborts an internal controller
+      // and rejects with a real `AbortError` while the caller's signal is
+      // untouched. Nobody asked to cancel, so that is a transient failure to
+      // retry, not a terminal `ABORTED`.
+      if (opts.signal?.aborted) {
+        return abortedResult<T>();
       }
 
       lastError = networkError(e);
       if (attempt < maxAttempts - 1) {
-        await sleep(backoff(attempt), opts.signal);
+        // This sleep is the one that runs inside the catch, so unlike the two
+        // in the try above, an abort raised *by* the backoff would escape
+        // `request()` as a raw DOMException instead of the documented ABORTED
+        // result — and no caller wraps this, so it would reach the consumer as
+        // an unhandled rejection.
+        try {
+          await sleep(backoff(attempt), opts.signal);
+        } catch (abort) {
+          // Same rule as above, so the two classifications can't drift apart.
+          // `sleep` only rejects when the signal fires, so this always holds.
+          if (opts.signal?.aborted) {
+            return abortedResult<T>();
+          }
+          throw abort;
+        }
       }
     }
   }

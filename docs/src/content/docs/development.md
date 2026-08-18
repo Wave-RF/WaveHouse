@@ -18,7 +18,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse via testcontainers (no compose file) | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
-| **pnpm** | 11.1+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.1.3 --activate` (recommended), or `npm i -g pnpm` |
+| **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
 
 ### Auto-installed by `make tools`
@@ -37,7 +37,7 @@ go version          # go1.26+
 make --version      # GNU Make 4.x
 docker compose version
 node --version      # v22.x (matches .nvmrc and CI)
-pnpm --version      # 11.1+
+pnpm --version      # 11.21+
 ```
 
 If any of those are wrong/missing, the Makefile recipes will fail with confusing errors (e.g. `--output-sync` is unrecognized on Make 3.81; `pnpm: command not found` on `make test-ts`).
@@ -557,16 +557,17 @@ For a combined security scan, run `make verify` — it runs `vulncheck` alongsid
 
 ### Dependabot
 
-Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for four update configs:
+Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for three update configs:
 
 - **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`
-- **GitHub Actions** (root) — outdated action versions tracked against the SHA pins in the workflow files, commit prefix `ci:`
-- **GitHub Actions** (`/.github/actions/setup-env`) — the same, for the composite action, commit prefix `ci:`
+- **GitHub Actions** (root **and** `/.github/actions/setup-env`) — outdated action versions tracked against the SHA pins across `.github/workflows/*` and the `setup-env` composite action, commit prefix `ci:`
 - **npm — pnpm workspace** (root) — covers all three TypeScript packages (the docs site, the SDK, and the E2E tests) in one grouped PR, commit prefix `deps:`
 
-The two GitHub Actions entries are not a duplicate. For this ecosystem `directory: /` does **not** mean "the whole repo" — it means `.github/workflows/` plus an `action.yml` in the repo *root*, so composite actions in subdirectories are invisible to it. `setup-env`'s pins silently rotted for months while the identical actions in the workflow files were bumped around them. **Adding a composite action under `.github/actions/` means adding an entry here**; nothing else will catch the drift.
-
 PRs are grouped per config to reduce noise. The npm config is pointed at the workspace **root** (`directory: /`), not the individual member directories. The repo has a single root `pnpm-lock.yaml`, and Dependabot only updates a lockfile co-located with the manifest it targets — so a per-member config (the previous setup) bumped a member's `package.json` without regenerating the root lockfile, and every such PR then failed CI's `pnpm install --frozen-lockfile` with `ERR_PNPM_OUTDATED_LOCKFILE`. Pointing at the root lets Dependabot read `pnpm-workspace.yaml`, walk every member, and update the one lockfile.
+
+The GitHub Actions config names **two** directories. `directory: /` reaches `.github/workflows/` but does not descend into `.github/actions/*/action.yml`, so the `setup-env` composite action — which owns every cache in `ci.yml` — was invisible to Dependabot, and its pins went stale against upstream and diverged from `publish-npm.yml`, which Dependabot *does* track and which doesn't call `setup-env`. Listing its directory under `directories:` brings it into the same weekly group; **adding a composite action means adding its directory there**, because nothing else catches the drift.
+
+`typescript` majors are held back (`ignore: version-update:semver-major`) because `tsup` vendors a `rollup-plugin-dts` that crashes on TypeScript 7 during `clients/ts`'s `prepare` script — i.e. inside `pnpm install`, which takes every Node job down at once. See the comment in `.github/dependabot.yml` for the condition that lets it be removed.
 
 **No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
 

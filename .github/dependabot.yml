@@ -14,17 +14,18 @@ updates:
 
   # GitHub Actions
   #
-  # TWO entries, because `directory: /` does NOT mean "the whole repo" for
-  # this ecosystem: it means `.github/workflows/` plus an `action.yml` in the
-  # repo ROOT. Composite actions in subdirectories are invisible to it. Ours
-  # lives at `.github/actions/setup-env/action.yml`, so its pins silently
-  # rotted while the workflow pins advanced around them — by the time this was
-  # noticed it was two versions behind on `pnpm/action-setup` and a major
-  # behind on `actions/setup-node` versus the identical actions in
-  # `publish-npm.yml`. Adding a composite action under `.github/actions/`
-  # means adding an entry here; nothing else will catch the drift.
+  # TWO directories, not one. `directory: /` only reaches .github/workflows/ —
+  # it does NOT descend into .github/actions/*/action.yml. The setup-env
+  # composite action therefore went untracked, and its pins went stale against
+  # upstream and diverged from publish-npm.yml — a workflow Dependabot DOES
+  # track, and which doesn't call setup-env (actions/setup-node v7.0.0 there
+  # vs v6.4.0 here; pnpm/action-setup v6.0.9 vs v6.0.8). Adding a composite
+  # action under .github/actions/ means adding its directory below; nothing
+  # else catches the drift.
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - /.github/actions/setup-env
     schedule:
       interval: weekly
       day: monday
@@ -32,17 +33,6 @@ updates:
       # One PR per Monday for all action bumps. With SHA pinning,
       # ungrouped meant 5+ PRs each Monday that all needed identical
       # review (verify SHA, verify version comment, merge).
-      actions-deps:
-        patterns: ["*"]
-    commit-message:
-      prefix: "ci"
-
-  - package-ecosystem: github-actions
-    directory: /.github/actions/setup-env
-    schedule:
-      interval: weekly
-      day: monday
-    groups:
       actions-deps:
         patterns: ["*"]
     commit-message:
@@ -73,5 +63,16 @@ updates:
     groups:
       npm-deps:
         patterns: ["*"]
+    ignore:
+      # TypeScript 7 (the native port) is held back by tsup: tsup 8.5.1 — the
+      # current release — vendors rollup-plugin-dts 6.1.1, which reaches for
+      # TS 5-era internals and dies with "Cannot read properties of undefined
+      # (reading 'useCaseSensitiveFileNames')" the moment `dts: true` runs.
+      # That is clients/ts's `prepare` script, so the crash lands inside
+      # `pnpm install` and takes every Node job down with it (#482).
+      # rollup-plugin-dts >= 6.5.0 declares TS 7 support; drop this ignore once
+      # tsup ships a release that vendors it. Tracked in #487.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     commit-message:
       prefix: "deps"

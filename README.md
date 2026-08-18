@@ -60,7 +60,7 @@ If you're building user-facing analytics, WaveHouse is like **Supabase for Click
 - **Query** — in-process Ristretto cache + `singleflight` coalescing; type-safe structured query AST; Tinybird-style named pipes (parameterized SQL endpoints).
 - **Real-time** — native SSE push, broadcast *before* the ClickHouse flush, with JetStream gap-fill for late/reconnecting clients.
 - **Security** — Hasura-style per-table, per-role column + row policies with JWT claim templating, stored in NATS KV.
-- **Client** — `@wavehouse/sdk`: zero-dependency TypeScript client with query builder, live queries, streaming, and schema codegen.
+- **Client** — `@wavehouse/sdk`: TypeScript client with query builder, live queries, streaming, and schema codegen; one runtime dependency (an SSE frame parser, ~1.4 KB gzipped).
 
 ## 📊 How it compares
 
@@ -127,7 +127,7 @@ Track what's shipped, in progress, and planned on the [**project board**](https:
 
 ## 💻 Local Development
 
-You'll need **Go 1.26+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pnpm 11+**. See [development docs](https://wavehouse.dev/development) for the authoritative source of truth with the full list, version requirements, and gotchas.
+You'll need **Go 1.26+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pnpm 11.21+**. See [development docs](https://wavehouse.dev/development) for the authoritative source of truth with the full list, version requirements, and gotchas.
 
 ```bash
 make tools    # one-time bootstrap

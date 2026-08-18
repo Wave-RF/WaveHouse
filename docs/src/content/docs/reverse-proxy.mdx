@@ -132,13 +132,16 @@ Raising the proxy's read/idle timeout for `/v1/stream` is therefore no longer re
 - **Cloudflare** — the edge idle timeout isn't configurable on standard plans; the keepalive is what keeps a quiet stream alive.
 - **Envoy / Istio** — the default **15s route timeout is a total cap, not an idle timeout**, so a keepalive can't help: set the route `timeout: 0` for `/v1/stream` regardless of the keepalive.
 
-### 3. Forward the token, `since`, and `Last-Event-ID`
+### 3. Forward the credential, `since`, and `Last-Event-ID` — and don't redirect
 
-A browser `EventSource` can't set request headers, so the JWT can be passed as a query parameter: `GET /v1/stream?token=<jwt>` (it's stripped after extraction — whichever credential wins — so it stays out of WaveHouse's own logs, but it has already crossed your proxy in the URI, hence the third bullet below; an `Authorization` header still takes precedence). Make sure your proxy:
+The SDK streams over `fetch` and sends the JWT as an `Authorization` header, the same as on every other request. A client that can't set headers — a hand-rolled browser `EventSource`, say — can still pass it as `GET /v1/stream?token=<jwt>` (it's stripped after extraction, whichever credential wins, so it stays out of WaveHouse's own logs; an `Authorization` header always takes precedence). Make sure your proxy:
 
-- forwards the query string (`token`, `since`) — most do by default;
+- forwards the `Authorization` request header — check this first if streams authenticate from `curl` but not through the proxy;
+- **allows `Authorization` (and `Last-Event-ID`) on `OPTIONS /v1/stream`, if the proxy answers CORS itself.** `Authorization` is not CORS-safelisted, so a credentialed cross-origin browser stream now preflights *before it connects* — where a bare `EventSource` never preflighted at all, its request not being a `fetch()`. An **uncredentialed** stream preflights from the first reconnect *after it has received an event* — the resumption header only exists once there is an id to resume from — because `Last-Event-ID` isn't safelisted either. Reject the preflight and a credentialed stream never opens; reject it on the resumption path and the stream is dead from its first drop onward — the id is never cleared, so every attempt re-sends `Last-Event-ID`, fails the same preflight before the request goes out, and re-dials forever without getting back on ([#471](https://github.com/Wave-RF/WaveHouse/issues/471)). WaveHouse's own CORS already allow-lists both;
+- forwards the query string (`since`, and `token` if any client still uses it) — most do by default;
 - forwards the `Last-Event-ID` request header so reconnects resume from the right point (it's already allow-listed in WaveHouse's CORS preflight);
-- does not log the full URL with `token` in it.
+- does not redirect `/v1/stream` for authenticated clients. The SDK's streaming transport refuses a redirect on any stream carrying a credential (an `auth` token or `options.headers`), because a cross-origin hop strips `Authorization` — and this endpoint answers an unauthenticated caller with a reduced view rather than an error — while forwarding your other headers to wherever it points. An uncredentialed stream follows redirects normally;
+- does not log the full URL, for any client still sending `token` in it.
 
 ## Idle timeouts by provider
 
@@ -174,7 +177,7 @@ Linux's [`tcp_keepalive_time`](https://man7.org/linux/man-pages/man7/tcp.7.html)
 
 ### Absolute / total-duration caps — a keepalive does **not** help
 
-These limit the *whole* request regardless of traffic, so no keepalive extends them. You must raise the cap or have the client reconnect (browser `EventSource` does this automatically, resuming via `Last-Event-ID`).
+These limit the *whole* request regardless of traffic, so no keepalive extends them. You must raise the cap or have the client reconnect — the SDK's stream transport and browser `EventSource` both do this automatically, resuming via `Last-Event-ID`.
 
 | Layer | Cap | What to do | Source |
 | --- | --- | --- | --- |

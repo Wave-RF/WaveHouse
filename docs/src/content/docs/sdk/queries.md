@@ -155,7 +155,7 @@ clicks.select('page').where('score', '>', 10).where('page', 'like', '/home%')
 | `'<'` | `lt` | Less than |
 | `'<='` | `lte` | Less than or equal |
 | `'in'` | `in` | Value in array |
-| `'like'` | `like` | SQL LIKE pattern |
+| `'like'` | `like` | SQL LIKE pattern. Case-**sensitive** on `/v1/query`; the client-side filter used by `.stream()` / `.liveQuery()` matches case-**insensitively** |
 | `'not_like'` | — | SQL NOT LIKE — **client-side only** (live-query / stream filtering); the `/v1/query` backend rejects it |
 
 #### Aggregations
