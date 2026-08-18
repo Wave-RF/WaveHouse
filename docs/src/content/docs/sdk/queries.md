@@ -70,8 +70,10 @@ await clicks.insertNDJSON(await openAsBlob('events.ndjson'));
 ### `.schema(opts?)`
 
 Fetch the table's column definitions from ClickHouse. `.schema()` hits
-`/v1/ops/schema`, an **admin-only** endpoint: against any non-dev policy,
-construct the client with an admin-role token or this returns `403`. The
+`/v1/ops/schema`, an **admin-only** endpoint: the caller must pass the admin
+gate — resolve to the policy admin role or present the non-JWT
+[operator key](/api#authentication) via [`options.headers`](/sdk#custom-headers)
+— or this returns `403`. The
 client build targeting `/v1/ops` is unreleased — see the
 [Installation note](/sdk#installation) for the `@dev`-tag build.
 
