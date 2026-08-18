@@ -12,7 +12,7 @@
 // That shape is also the hazard: every construct this rule must not touch has
 // to be recognized from line shape alone, and a construct it fails to recognize
 // is silently destroyed rather than merely missed. Anything added to classify()
-// needs a fixture in no-hard-wrapped-prose.test.mjs — two corrupting bugs
+// needs a fixture in rules.test.mjs — two corrupting bugs
 // (pipe-less tables, short setext underlines) got through review on exactly
 // that gap. Prefer skipping too much: a paragraph left wrapped is a nit, a
 // joined table is data loss.
@@ -50,22 +50,14 @@ const HARD_BREAK = /(\\|\s\s)$/;
 const FENCE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
 const ESM_OPEN = /^\s*(import|export)\s/;
 
-const depthDelta = (line) => {
-  let delta = 0;
-  for (const ch of line) {
-    if (ch === "{" || ch === "[" || ch === "(") delta++;
-    else if (ch === "}" || ch === "]" || ch === ")") delta--;
-  }
-  return delta;
-};
-
 /** Tag every line as prose / list / blank / block / skip. */
 function classify(lines) {
   const kind = new Array(lines.length).fill("prose");
   let fence = null;
   let frontmatter = false;
   let jsxTag = false;
-  let esmDepth = null;
+  let esm = false;
+  let htmlComment = false;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -101,9 +93,25 @@ function classify(lines) {
       continue;
     }
 
+    // markdownlint hands rules a MASKED copy of any HTML comment's interior —
+    // every non-whitespace character replaced by `.` — so that rules don't match
+    // inside one. The fix's insertText is built from those same lines, so
+    // joining a line that touches a comment writes the mask back to disk and
+    // destroys the comment's text. Never join one.
+    if (htmlComment) {
+      kind[i] = "skip";
+      if (line.includes("-->")) htmlComment = false;
+      continue;
+    }
+    if (line.includes("<!--")) {
+      kind[i] = "skip";
+      if (!line.includes("-->")) htmlComment = true;
+      continue;
+    }
+
     if (!line.trim()) {
       kind[i] = "blank";
-      esmDepth = null; // an ESM block cannot span a blank line in MDX
+      esm = false; // an ESM block cannot span a blank line in MDX
       continue;
     }
     if (/^(\s{4,}\S|\t)/.test(line)) {
@@ -114,17 +122,16 @@ function classify(lines) {
     // A multi-line ESM statement: `export const meta = {` … `};`. Only the
     // opener looks like ESM, so the body must be skipped by state, not shape —
     // joining it collapses any `//` comment over the rest of the statement and
-    // breaks the MDX parse.
-    if (esmDepth !== null) {
+    // breaks the MDX parse. The run ends at the blank line that separates ESM
+    // from markdown; counting braces instead would miscount the ones inside
+    // comments and string literals and end the skip early.
+    if (esm) {
       kind[i] = "skip";
-      esmDepth += depthDelta(line);
-      if (esmDepth <= 0) esmDepth = null;
       continue;
     }
     if (ESM_OPEN.test(line)) {
       kind[i] = "skip";
-      const delta = depthDelta(line);
-      if (delta > 0) esmDepth = delta;
+      esm = true;
       continue;
     }
 

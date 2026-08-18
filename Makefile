@@ -448,9 +448,12 @@ fix: ## Apply auto-fixes across Go (tidy + gofumpt + goimports + lint --fix) + T
 	@echo "$(GREEN)==> Done$(RESET)"
 
 # fix-docs: the Markdown track, serial. A wrapper, so `make fix-md` and
-# `make fix-prose` still stand on their own.
+# `make fix-prose` still stand on their own. It names pnpm-install even though
+# fix-md already does: fix-md is reached through a SUB-make, whose prerequisites
+# the parent cannot dedup against fix-ts's, so without this `make -j fix` can
+# run two `pnpm install` processes against one node_modules.
 .PHONY: fix-docs
-fix-docs:
+fix-docs: pnpm-install
 	@$(MAKE) fix-md
 	@$(MAKE) fix-prose
 

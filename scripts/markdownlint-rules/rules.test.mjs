@@ -117,6 +117,23 @@ describe("WH001 leaves non-prose alone", () => {
   );
   unchanged(
     "t.mdx",
+    'export const meta = {\n  // the closing } is below\n  title: "a",\n  // another comment\n  body: "b",\n};\n',
+    "an MDX export whose comments hold unbalanced braces",
+  );
+  // markdownlint masks HTML-comment interiors in the buffer rules are handed, so
+  // joining such a line would write the mask back and destroy the comment text.
+  unchanged(
+    "t.md",
+    "This paragraph is wrapped and ends with\na note <!-- TODO: ask legal about the wording --> right here.\n",
+    "a paragraph whose continuation carries an inline HTML comment",
+  );
+  unchanged(
+    "t.md",
+    "<!-- a note about the block below\nit is generated -->\nGenerated table follows.\n",
+    "prose directly after a multi-line HTML comment",
+  );
+  unchanged(
+    "t.mdx",
     '<Cta\n  variant="band"\n  title="Managed"\n/>\n',
     "a JSX tag with attributes across lines",
   );

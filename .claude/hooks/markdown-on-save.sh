@@ -44,7 +44,14 @@ fi
 # Phase 2: markdownlint (style + WH001 unwrapping). `--no-globs` keeps it to
 # this one file instead of the whole repo; a nonzero exit just means something
 # unfixable remains (e.g. a fence with no language), which CI will report.
+#
+# Twice, mirroring `fix:md` in package.json: WH001's insert carries the pre-fix
+# text of the lines it joins, so another rule's fix for a joined line is dropped
+# on the first pass. One pass would leave behind an issue `make fix` would have
+# cleared — the exact round-trip this hook exists to avoid, in the common case
+# where WH001 fires.
 if [ -x node_modules/.bin/markdownlint-cli2 ]; then
+  node_modules/.bin/markdownlint-cli2 --no-globs --fix ":$rel" >/dev/null 2>&1 || true
   node_modules/.bin/markdownlint-cli2 --no-globs --fix ":$rel" >/dev/null 2>&1 || true
 fi
 

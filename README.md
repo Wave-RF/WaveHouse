@@ -132,7 +132,7 @@ make dev      # hot-reload on .go save
 
 > **AI-assisted, human-reviewed.** Much of WaveHouse — code and docs alike — is written with AI assistance ([Claude Code](https://claude.com/claude-code)). Every change, whether AI- or human-authored, goes through the same review gates, tests, and CI before it lands. We note it for transparency: treat the docs as the source of truth, and please [open an issue](https://github.com/Wave-RF/WaveHouse/issues) if anything reads as off or out of date.
 
-The repo ships minimal team-wide [Claude Code](https://claude.com/claude-code) configuration — safety guardrails, a couple of slash commands / subagents, an auto-format hook, and [worktrunk](https://worktrunk.dev) project hooks for parallel agent workflows. Personal preferences (status line, model, allow lists) stay user-level. See [Claude Code & AI agents](docs/src/content/docs/claude-code.md) for setup + reference. `AGENTS.md` at the repo root is the canonical source of truth for project conventions.
+The repo ships minimal team-wide [Claude Code](https://claude.com/claude-code) configuration — safety guardrails, a couple of slash commands / subagents, auto-format hooks, and [worktrunk](https://worktrunk.dev) project hooks for parallel agent workflows. Personal preferences (status line, model, allow lists) stay user-level. See [Claude Code & AI agents](docs/src/content/docs/claude-code.md) for setup + reference. `AGENTS.md` at the repo root is the canonical source of truth for project conventions.
 
 ## 🤝 Contributing
 
