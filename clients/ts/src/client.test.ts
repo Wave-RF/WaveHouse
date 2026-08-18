@@ -358,3 +358,27 @@ describe("options.fetchOptions", () => {
     });
   });
 });
+
+describe("stream error delivery", () => {
+  it("delivers a start-up failure to a subscriber attached after .stream() returns", async () => {
+    // Regression: the transport used to detect an unresolvable `baseURL`
+    // synchronously inside `connect()`, which runs in the StreamController
+    // constructor — so the error fired before `.stream()` had returned and no
+    // subscriber could ever see it. Every transport-level test attaches its
+    // callbacks before `connect()`, which is exactly why they missed it.
+    const wh = createClient({ baseURL: "not-a-url" });
+    const stream = wh.from("clicks").stream();
+
+    const errors: unknown[] = [];
+    const statuses: string[] = [];
+    stream.subscribe({
+      next: () => {},
+      status: (s) => statuses.push(s),
+      error: (e) => errors.push(e),
+    });
+
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    expect((errors[0] as { code: string }).code).toBe("SSE_CONNECT_ERROR");
+    expect(statuses).toContain("closed");
+  });
+});
