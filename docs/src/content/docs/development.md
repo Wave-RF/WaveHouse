@@ -623,9 +623,16 @@ Tag globs are anchored at the start of the ref name, so `v*` never matches a `cl
 Consumers can check provenance for themselves:
 
 ```bash
-gh attestation verify wavehouse_linux_amd64.tar.gz --repo Wave-RF/WaveHouse
-gh attestation verify oci://ghcr.io/wave-rf/wavehouse:v0.1.0 --repo Wave-RF/WaveHouse
+gh attestation verify wavehouse_linux_amd64.tar.gz \
+  --repo Wave-RF/WaveHouse \
+  --signer-workflow Wave-RF/WaveHouse/.github/workflows/release.yml
+
+gh attestation verify oci://ghcr.io/wave-rf/wavehouse:v0.1.0 \
+  --repo Wave-RF/WaveHouse \
+  --signer-workflow Wave-RF/WaveHouse/.github/workflows/release.yml
 ```
+
+`--signer-workflow` is not optional garnish: `--repo` alone accepts an attestation produced by *any* workflow in the repo. Same point, and the `:dev` equivalent, in [Deployment → Registry](/deployment#registry) and `SECURITY.md`.
 
 :::note[Releasing from the GitHub UI instead]
 Publishing a release from **Releases → Draft a new release** creates the tag, which fires the same workflow — so it works, and GoReleaser's default `mode: keep-existing` (the key is not set in `.goreleaser.yaml`) means it will not overwrite notes you wrote. Two things the `make` targets do for you and the UI does not: none of the preflight checks run, and you must click **Generate release notes** yourself, because a body you publish empty stays empty.

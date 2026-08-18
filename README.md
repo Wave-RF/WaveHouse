@@ -101,8 +101,12 @@ docker pull ghcr.io/wave-rf/wavehouse:dev       # rolling main-branch build
 Both tags carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify before you deploy:
 
 ```bash
-gh attestation verify oci://ghcr.io/wave-rf/wavehouse:latest --repo Wave-RF/WaveHouse
+gh attestation verify oci://ghcr.io/wave-rf/wavehouse:dev \
+  --repo Wave-RF/WaveHouse \
+  --signer-workflow Wave-RF/WaveHouse/.github/workflows/publish-dev.yml
 ```
+
+Swap in `:vX.Y.Z` and `release.yml` for a release image. Pin the signer either way — `--repo` alone accepts an attestation from any workflow in the repo.
 
 ### C. `go install` (binary, no Docker)
 

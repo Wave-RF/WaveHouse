@@ -125,7 +125,7 @@ jobs:
 
       # Prove the attestations we just wrote actually verify against the
       # artifacts people will download — the same `gh attestation verify`
-      # command the install docs tell users to run. Attesting and verifying
+      # command, flags included, that the install docs tell users to run. Attesting and verifying
       # are different code paths (subject digests, the checksums-file
       # expansion, the registry round-trip), so a release that publishes
       # unverifiable provenance should go red rather than look green.
@@ -150,12 +150,21 @@ jobs:
             echo "::error::no release archives in dist/ to verify"
             exit 1
           fi
+          # --signer-workflow, not just --repo: `--repo` alone accepts an
+          # attestation produced by ANY workflow in the repo, so without it this
+          # step would happily pass on provenance minted somewhere else — which
+          # is the exact weakness SECURITY.md warns consumers about. Pinning it
+          # to this workflow is what makes the check mean "release.yml built
+          # this".
+          signer="${GITHUB_REPOSITORY}/.github/workflows/release.yml"
+
           for archive in "${archives[@]}"; do
             echo "--- $archive"
-            gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "$archive" \
+              --repo "$GITHUB_REPOSITORY" --signer-workflow "$signer"
           done
 
           echo "--- ghcr.io/wave-rf/wavehouse@${IMAGE_DIGEST}"
           gh attestation verify \
             "oci://ghcr.io/wave-rf/wavehouse@${IMAGE_DIGEST}" \
-            --repo "$GITHUB_REPOSITORY"
+            --repo "$GITHUB_REPOSITORY" --signer-workflow "$signer"
