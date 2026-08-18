@@ -172,13 +172,15 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
         activeSSEConnections = Math.max(0, activeSSEConnections - 1);
         this._counted = false;
       }
-    }
-    // Same isolation as `_emitStatus`, which this deliberately bypasses so the
-    // terminal "closed" always gets through.
-    try {
-      this.onStatus?.("closed");
-    } catch (e) {
-      console.error("[wavehouse] SSE status handler threw:", e);
+      // Same isolation as `_emitStatus`, which this deliberately bypasses:
+      // `_emitStatus` returns early once `_closed` is set, so the terminal
+      // status would never get out. Inside the guard, so a redundant
+      // `disconnect()` is a no-op rather than a second `closed`.
+      try {
+        this.onStatus?.("closed");
+      } catch (e) {
+        console.error("[wavehouse] SSE status handler threw:", e);
+      }
     }
   }
 

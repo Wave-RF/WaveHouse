@@ -84,7 +84,7 @@ describe("Streaming", () => {
 
         await stream.connected(5_000);
 
-        await whAuth.from(T.clicks).insert({
+        const publicInsert = await whAuth.from(T.clicks).insert({
           event_id: id,
           page: "/sse-public-test",
           user_id: "public-user",
@@ -92,6 +92,7 @@ describe("Streaming", () => {
           country: "US",
           duration_ms: 99,
         });
+        expect(publicInsert.error).toBeNull();
 
         await waitForCondition(() => receivedEvents.some((e) => e.data?.event_id === id), 10_000);
 
@@ -123,13 +124,14 @@ describe("Streaming", () => {
         });
         await stream.connected(5_000);
 
-        await whAuth.from(T.clicks).insert({
+        const canonInsert = await whAuth.from(T.clicks).insert({
           event_id: id,
           page: "/canonical-ts",
           user_id: "canon-user",
           session_id: "canon-sess",
           received_timestamp: "2026-06-21T06:00:00.123+02:00",
         });
+        expect(canonInsert.error).toBeNull();
 
         await waitForCondition(() => receivedEvents.some((e) => e.data?.event_id === id), 10_000);
         const frame = receivedEvents.find((e) => e.data?.event_id === id);
@@ -249,8 +251,14 @@ describe("Streaming", () => {
 
         // One row per country; the filter must route each to only its matching subscriber.
         const base = { page: "/scoped", user_id: "u", session_id: "s", duration_ms: 1 };
-        await inserter.from(T.clicks).insert({ ...base, event_id: usId, country: "US" });
-        await inserter.from(T.clicks).insert({ ...base, event_id: caId, country: "CA" });
+        // A failed write would otherwise surface as a stream timeout below,
+        // blaming the subscriber for a row that was never published.
+        for (const row of [
+          { ...base, event_id: usId, country: "US" },
+          { ...base, event_id: caId, country: "CA" },
+        ]) {
+          expect((await inserter.from(T.clicks).insert(row)).error).toBeNull();
+        }
 
         // Each subscriber receives its own country's row.
         await waitForCondition(() => usEvents.some((e) => e.data?.event_id === usId), 10_000);
@@ -263,8 +271,12 @@ describe("Streaming", () => {
         // not just "not yet arrived".
         const usBarrierId = testId();
         const caBarrierId = testId();
-        await inserter.from(T.clicks).insert({ ...base, event_id: usBarrierId, country: "US" });
-        await inserter.from(T.clicks).insert({ ...base, event_id: caBarrierId, country: "CA" });
+        for (const row of [
+          { ...base, event_id: usBarrierId, country: "US" },
+          { ...base, event_id: caBarrierId, country: "CA" },
+        ]) {
+          expect((await inserter.from(T.clicks).insert(row)).error).toBeNull();
+        }
         await waitForCondition(
           () => usEvents.some((e) => e.data?.event_id === usBarrierId),
           10_000,
@@ -310,8 +322,12 @@ describe("Streaming", () => {
         // Below the bound first, above it second: frames on one connection are
         // strictly ordered behind the same subject, so receiving the high row
         // proves the low row was withheld, not merely late.
-        await inserter.from(T.clicks).insert({ ...base, event_id: lowId, duration_ms: 100 });
-        await inserter.from(T.clicks).insert({ ...base, event_id: highId, duration_ms: 250 });
+        for (const row of [
+          { ...base, event_id: lowId, duration_ms: 100 },
+          { ...base, event_id: highId, duration_ms: 250 },
+        ]) {
+          expect((await inserter.from(T.clicks).insert(row)).error).toBeNull();
+        }
 
         await waitForCondition(() => events.some((e) => e.data?.event_id === highId), 10_000);
         expect(events.some((e) => e.data?.event_id === lowId)).toBe(false);

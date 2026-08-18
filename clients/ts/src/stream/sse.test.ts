@@ -753,6 +753,23 @@ describe("SSETransport lifecycle", () => {
     expect(seen.statuses).toContain("closed");
   });
 
+  it("emits closed once, however many times disconnect is called", async () => {
+    const f = makeFetch();
+    const t = new SSETransport({ baseURL: "http://x", table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(1));
+
+    t.disconnect();
+    t.disconnect();
+    t.disconnect();
+
+    // The emit deliberately bypasses `_emitStatus` (which returns early once
+    // `_closed` is set), so it has to sit inside the teardown guard or every
+    // redundant call re-fires it.
+    expect(seen.statuses.filter((s) => s === "closed")).toHaveLength(1);
+  });
+
   it("ends the stream on a baseURL that cannot resolve", async () => {
     vi.useFakeTimers();
     const f = makeFetch();
