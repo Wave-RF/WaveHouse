@@ -113,17 +113,39 @@ ok "tag $tag is free"
 
 # CI green on this exact commit. `CI` is the aggregator job and the ruleset's
 # sole required check, so its conclusion is the whole gate (see
-# .github/workflows/README.md). Advisory: a missing gh or an API hiccup warns
-# rather than blocks, since the tag is still recoverable at this point and a
-# hard dependency on the API would make releasing impossible during an outage.
+# .github/workflows/README.md).
+#
+# `check_name=CI&per_page=100` matters on both counts. Commits here carry
+# 30-46 check runs and the endpoint defaults to per_page=30, so filtering
+# client-side made it luck whether the aggregator was on the page at all —
+# when it wasn't, this printed "could not read CI status" and waved the
+# release through, reading like a transient API hiccup rather than a check
+# that never ran. And a commit legitimately has TWO `CI` runs (the branch push
+# and the merge_group), so `first` picked one arbitrarily; both must be green.
+#
+# Only "no runs at all" and "no gh" are advisory — a hard API dependency would
+# make releasing impossible during a GitHub outage. A run that exists and is
+# not green blocks.
 if command -v gh >/dev/null 2>&1; then
-  conclusion="$(gh api "repos/{owner}/{repo}/commits/$local_sha/check-runs" \
-    --jq '[.check_runs[] | select(.name == "CI")] | first | .conclusion // empty' 2>/dev/null || true)"
-  case "$conclusion" in
-    success) ok "CI is green on $(git rev-parse --short HEAD)" ;;
-    "") printf '%s!%s could not read CI status for this commit — check it before continuing\n' "$YELLOW" "$RESET" ;;
-    *) die "CI concluded '$conclusion' on $(git rev-parse --short HEAD) — do not release a red commit" ;;
-  esac
+  conclusions=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && conclusions+=("$line")
+  done < <(gh api "repos/{owner}/{repo}/commits/$local_sha/check-runs?check_name=CI&per_page=100" \
+    --jq '.check_runs[] | .conclusion // "pending"' 2>/dev/null || true)
+
+  if [ ${#conclusions[@]} -eq 0 ]; then
+    printf '%s!%s no CI check run found for %s — verify it before continuing\n' \
+      "$YELLOW" "$RESET" "$(git rev-parse --short HEAD)"
+  else
+    not_green=()
+    for c in "${conclusions[@]}"; do
+      [ "$c" = "success" ] || not_green+=("$c")
+    done
+    if [ ${#not_green[@]} -gt 0 ]; then
+      die "CI on $(git rev-parse --short HEAD) is ${not_green[*]} — a release must be cut from a green commit"
+    fi
+    ok "CI is green on $(git rev-parse --short HEAD) (${#conclusions[@]} run(s))"
+  fi
 else
   printf '%s!%s gh not installed — skipping the CI status check\n' "$YELLOW" "$RESET"
 fi

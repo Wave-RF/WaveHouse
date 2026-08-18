@@ -161,11 +161,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The GitHub Release step needs to see every `clients/ts/v*` tag to work out
-          # which one the generated notes should start from. A default checkout
-          # fetches only the triggering ref, so the tag list would be empty and
-          # every release would look like the first one.
-          fetch-tags: true
+          # The GitHub Release step resolves which tag the generated notes start
+          # from with `git describe … "<tag>^"`, which needs commit HISTORY, not
+          # just the tag list — under the default depth-1 checkout `<tag>^` does
+          # not resolve at all. fetch-depth: 0 brings both history and tags.
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
@@ -258,9 +258,17 @@ jobs:
           # Anchor the generated notes to the previous SDK tag. Without this,
           # GitHub diffs from the most recent *release* — which in this repo is
           # usually a `v*` server release, quite possibly on the very same
-          # commit, yielding an empty changelog. The glob is anchored at the
-          # start of the ref name, so it cannot match a server or Go SDK tag.
-          prev="$(git tag -l 'clients/ts/v*' --sort=-v:refname | grep -vFx "$tag" | head -n1 || true)"
+          # commit, yielding an empty changelog.
+          #
+          # Selected by walking git HISTORY from this tag's parent, not by
+          # version-sorting the tag list. Sorting picks "the highest tag that
+          # isn't this one", which is a different and wrong thing: releasing a
+          # patch while a newer minor exists selects a previous tag that is
+          # *ahead* of the current one, and git's versionsort ranks a
+          # prerelease above its own release, so `v0.2.1` selects
+          # `v0.2.0-rc.1` over `v0.2.0`. `--match` keeps it inside this
+          # client's own tag family.
+          prev="$(git describe --tags --abbrev=0 --match 'clients/ts/v*' "${tag}^" 2>/dev/null || true)"
           if [ -n "$prev" ]; then
             flags+=(--generate-notes --notes-start-tag "$prev")
             echo "Generating notes covering ${prev}..${tag}"
@@ -268,7 +276,11 @@ jobs:
             # First SDK release: there is no earlier `clients/ts/v*` to diff from, and
             # letting GitHub pick would hand us the server release on the same
             # commit — i.e. nothing. An explicit body beats an empty one.
-            flags+=(--notes "First release of \`@wavehouse/sdk\`. See the [\`v${VERSION}\` server release](https://github.com/${GITHUB_REPOSITORY}/releases/tag/v${VERSION}) for the full change list.")
+            # Deliberately NOT linking `releases/tag/v${VERSION}`: the server
+            # and the SDK version independently, so a matching server release
+            # may not exist — and this path only ever runs once, on the release
+            # least able to absorb a 404.
+            flags+=(--notes "First release of \`@wavehouse/sdk\`. See the [repository releases](https://github.com/${GITHUB_REPOSITORY}/releases) for the full change list.")
             echo "No earlier clients/ts/v* tag — using the first-release note."
           fi
 

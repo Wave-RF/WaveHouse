@@ -8,6 +8,18 @@ version: 2
 # rather than inherited.
 project_name: wavehouse
 
+# GoReleaser's tag detection — which tag it is releasing, and which one the
+# release notes are diffed from — walks git history without caring which tag
+# family it lands on. This repo has several: `v*` for the server and
+# `clients/<lang>/v*` for each client SDK. Without this, cutting `v0.1.0` after
+# an SDK release describes the server release as "everything since
+# clients/ts/v0.1.0" — verified: `previous=clients/ts/v0.1.0 current=v0.1.0`.
+# Ignoring the client families makes the built-in detection correct, which is
+# why no workflow needs to pass GORELEASER_PREVIOUS_TAG.
+git:
+  ignore_tags:
+    - "clients/*"
+
 builds:
   - id: wavehouse
     main: ./cmd/wavehouse
@@ -97,6 +109,15 @@ dockers_v2:
       "org.opencontainers.image.created": "{{ .Date }}"
 
 changelog:
+  # The changelog pipe is NOT skipped by `release.disable` — only by
+  # `--snapshot` or this key (verified: a run with `release.disable: true`
+  # still logs "generating changelog"). Left on, `github-native` would make
+  # publish-dev.yml POST /releases/generate-notes on every push to main — an
+  # endpoint needing `contents: write`, which that workflow deliberately does
+  # not grant — to build a body that is then discarded, for a synthetic tag
+  # that exists only on the runner. goreleaser-validate.yml cannot catch it
+  # either, since `build --snapshot` skips this pipe entirely.
+  disable: '{{ eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}'
   # Delegate the release body to GitHub's own "generate release notes" — the
   # grouped, linked, per-PR list you get from the Releases UI button, with
   # authors and a New Contributors section. `use: git` built the body from raw

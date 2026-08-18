@@ -102,12 +102,13 @@ Releases are built with [GoReleaser](https://goreleaser.com/). The configuration
 
 ### Creating a Release
 
-Tag and push to trigger the release workflow:
-
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+make release-server VERSION=0.1.0
 ```
+
+That runs the preflight checks (on `main`, clean tree, in sync with `origin`, tag free, CI green on this commit), shows what will be published, and prompts before creating and pushing the annotated `v0.1.0` tag — which is what triggers the release workflow. Tag creation is restricted to repo admins by the `release tag protection` ruleset.
+
+The TypeScript SDK releases separately under its own `clients/ts/v*` tag; a `v*` tag publishes only the binaries and the container image. Full walkthrough, including what each tag publishes and how to verify provenance: [Development → Cutting a release](/development#cutting-a-release).
 
 ## Environment Variables
 

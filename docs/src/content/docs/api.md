@@ -156,7 +156,7 @@ This is what the SDK's `wh.sys.health()` calls, and the endpoint to use when cho
 
 ### `GET /version` — Build Info
 
-Returns the build metadata embedded in the running binary — the `version`, `git_commit`, and `build_time` injected at compile time via `-ldflags`, plus the `go_version` read from the runtime. No authentication required: these are the same values logged at startup, so the endpoint discloses nothing the logs don't already. Useful for confirming exactly which build is deployed when troubleshooting.
+Returns the build metadata embedded in the running binary — `version`, `git_commit`, and `build_time`, plus the `go_version` read from the runtime. No authentication required: these are the same values logged at startup, so the endpoint discloses nothing the logs don't already. Useful for confirming exactly which build is deployed when troubleshooting.
 
 **Response:**
 
@@ -169,7 +169,15 @@ Returns the build metadata embedded in the running binary — the `version`, `gi
 }
 ```
 
-A binary built without the `-ldflags` injection (e.g. a bare `go build` rather than `make build`) reports the fallback values `"dev"` / `"unknown"` for `version` / `git_commit`.
+Where those values come from depends on how the binary was built:
+
+| Build | `version` | `git_commit` / `build_time` |
+| --- | --- | --- |
+| `make build`, or a release artifact | The `-ldflags`-injected values — a release tag for published builds | Injected |
+| `go build` inside a checkout | The module pseudo-version Go derives from the commit (e.g. `0.0.0-20260815021004-1064a4fe6a59`) | Read from the VCS stamps Go embeds |
+| `go install …/cmd/wavehouse@vX.Y.Z` | The module version, so the released tag without its leading `v` | `"unknown"` — a module-cache build carries no VCS stamps |
+
+`go install` passes no `-ldflags`, so without the build-info fallback a perfectly good tagged install would report itself as `"dev"`. Ldflags always win when present.
 
 ---
 

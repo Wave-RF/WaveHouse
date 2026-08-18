@@ -518,6 +518,10 @@ Run `make help` to see all targets. Key ones:
 | `make test-e2e` | E2E SDK suite against `bin/wavehouse-cov` + coverage gate |
 | `make test-all` | All four suites sequentially + merged coverage gate |
 | `make ci` | Full pipeline: parallel `verify` + builds + unit/SDK tests, then integration + E2E + cov |
+| **Release** (see [Cutting a release](#cutting-a-release)) | |
+| `make release-server VERSION=X.Y.Z` | Tag a server release — binaries + container image |
+| `make release-sdk-ts VERSION=X.Y.Z` | Tag a TypeScript SDK release — npm |
+| `make release-sdk-go VERSION=X.Y.Z` | Tag a Go SDK release — `go get` (pending [#434](https://github.com/Wave-RF/WaveHouse/pull/434)) |
 | **Analysis** (informational, not in CI) | |
 | `make size` | Binary size analysis → `tmp/analysis/` (text + SVG + interactive HTML) |
 | `make audit-cgo` | Audit dependency tree for C files (builds use `CGO_ENABLED=0`) |
@@ -553,11 +557,14 @@ For a combined security scan, run `make verify` — it runs `vulncheck` alongsid
 
 ### Dependabot
 
-Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for three update configs:
+Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for four update configs:
 
 - **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`
-- **GitHub Actions** (root) — outdated action versions tracked against the SHA pins in `ci.yml` / `release.yml`, commit prefix `ci:`
+- **GitHub Actions** (root) — outdated action versions tracked against the SHA pins in the workflow files, commit prefix `ci:`
+- **GitHub Actions** (`/.github/actions/setup-env`) — the same, for the composite action, commit prefix `ci:`
 - **npm — pnpm workspace** (root) — covers all three TypeScript packages (the docs site, the SDK, and the E2E tests) in one grouped PR, commit prefix `deps:`
+
+The two GitHub Actions entries are not a duplicate. For this ecosystem `directory: /` does **not** mean "the whole repo" — it means `.github/workflows/` plus an `action.yml` in the repo *root*, so composite actions in subdirectories are invisible to it. `setup-env`'s pins silently rotted for months while the identical actions in the workflow files were bumped around them. **Adding a composite action under `.github/actions/` means adding an entry here**; nothing else will catch the drift.
 
 PRs are grouped per config to reduce noise. The npm config is pointed at the workspace **root** (`directory: /`), not the individual member directories. The repo has a single root `pnpm-lock.yaml`, and Dependabot only updates a lockfile co-located with the manifest it targets — so a per-member config (the previous setup) bumped a member's `package.json` without regenerating the root lockfile, and every such PR then failed CI's `pnpm install --frozen-lockfile` with `ERR_PNPM_OUTDATED_LOCKFILE`. Pointing at the root lets Dependabot read `pnpm-workspace.yaml`, walk every member, and update the one lockfile.
 
@@ -565,13 +572,16 @@ PRs are grouped per config to reduce noise. The npm config is pointed at the wor
 
 ## Cutting a release
 
-Every release in this repo is **one tag and nothing else** — no version bump, no commit, no release PR:
+Cutting a release is **one tag** — no version bump in code, no release branch:
 
 ```bash
 make release-server VERSION=0.1.0   # tag v0.1.0            → binaries + container image
 make release-sdk-ts VERSION=0.1.0   # tag clients/ts/v0.1.0 → @wavehouse/sdk on npm
-make release-sdk-go VERSION=0.1.0   # tag clients/go/v0.1.0 → go get .../clients/go
 ```
+
+`make release-sdk-go` exists too, wired ahead of the Go SDK landing ([#434](https://github.com/Wave-RF/WaveHouse/pull/434)); it refuses to run until `clients/go/` is in the repo.
+
+The one thing to do *before* tagging is promote the changelog: `AGENTS.md` requires every PR to add its entry under `## Unreleased`, so open a PR renaming that heading to `## [X.Y.Z] - YYYY-MM-DD` and adding the matching link reference at the foot of the file. Nothing in the release pipeline reads `CHANGELOG.md` — this is for the file's own readers.
 
 Each runs [`scripts/release.sh`](https://github.com/Wave-RF/WaveHouse/blob/main/scripts/release.sh), which preflights (on `main`, clean tree, in sync with `origin/main`, the tag free both locally and on the remote, the required `CI` check green on *this exact commit*), prints exactly what will be published, and asks before pushing. `DRY_RUN=1 make release-…` stops after the plan. Tag creation is admin-only via the `release tag protection` ruleset.
 
@@ -603,11 +613,11 @@ Tag globs are anchored at the start of the ref name, so `v*` never matches a `cl
 
 ### What a release publishes
 
-- **GitHub Release** with the cross-compiled archives (linux/darwin/windows/freebsd × amd64/arm64; `.zip` on Windows, `.tar.gz` elsewhere) and `checksums.txt`. A tag carrying a prerelease suffix (`v0.1.0-alpha.1`) is marked as a GitHub pre-release, so it never takes the "Latest release" badge from a shipped stable version.
-- **Release notes generated by GitHub** from the PRs merged since the previous tag *in the same family* — one line per PR, since `main` is squash-merged, grouped into the categories defined in [`.github/release.yml`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/release.yml). Grouping is by **PR label**: `dependencies` / `github_actions` / `documentation` are applied automatically by `actions/labeler`, but `breaking-change`, `security`, `bug`, and `enhancement` are applied by hand — an unlabelled PR lands in "Other changes". `CHANGELOG.md` is *not* the source of the release body; it is the longer-form record of why each change was made.
-- **GHCR image** at `ghcr.io/wave-rf/wavehouse`, with two tags: the immutable `:vX.Y.Z`, and one moving *channel* pointer. A stable release moves `:latest`; a prerelease moves `:alpha` / `:beta` / `:rc` / `:next` instead, matching the npm dist-tag it would get. `scripts/ci/release-channel.sh` is the single rule every publisher uses, so `ghcr.io/wave-rf/wavehouse:rc` and `@wavehouse/sdk@rc` can't drift apart. **A prerelease-only project therefore has no `:latest` tag** — that is deliberate; `:latest` starts existing when the first stable release ships.
-- **npm publish** of `@wavehouse/sdk` under `latest` (stable) or `alpha`/`beta`/`rc`/`next` (prerelease), plus its own GitHub Release.
-- **Build-provenance attestations** (Sigstore, free for public repos) over every archive and over the image's multi-arch manifest digest, the image's stored alongside it in GHCR. The release job verifies its own attestations before finishing, so a release that publishes unverifiable provenance goes red.
+- **Server —** a **GitHub Release** with the cross-compiled archives (linux/darwin/windows/freebsd × amd64/arm64; `.zip` on Windows, `.tar.gz` elsewhere) and `checksums.txt`. A tag carrying a prerelease suffix (`v0.1.0-alpha.1`) is marked as a GitHub pre-release, so it never takes the "Latest release" badge from a shipped stable version.
+- **Both —** **release notes generated by GitHub** from the PRs merged since the previous tag *in the same family* — one line per PR, since `main` is squash-merged, grouped into the categories defined in [`.github/release.yml`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/release.yml). Grouping is by **PR label**: `dependencies` / `github_actions` / `documentation` are applied automatically by `actions/labeler`, but `breaking-change`, `security`, `bug`, and `enhancement` are applied by hand — an unlabelled PR lands in "Other changes". `CHANGELOG.md` is *not* the source of the release body; it is the longer-form record of why each change was made.
+- **Server —** a **GHCR image** at `ghcr.io/wave-rf/wavehouse`, with two tags: the immutable `:vX.Y.Z`, and one moving *channel* pointer. A stable release moves `:latest`; a prerelease moves `:alpha` / `:beta` / `:rc` / `:next` instead, matching the npm dist-tag it would get. `scripts/ci/release-channel.sh` is the single rule every publisher uses, so `ghcr.io/wave-rf/wavehouse:rc` and `@wavehouse/sdk@rc` can't drift apart. **A prerelease-only project therefore has no `:latest` tag** — that is deliberate; `:latest` starts existing when the first stable release ships.
+- **TypeScript SDK —** an **npm publish** of `@wavehouse/sdk` under `latest` (stable) or `alpha`/`beta`/`rc`/`next` (prerelease), plus its own GitHub Release.
+- **Both —** **build-provenance attestations** (Sigstore, free for public repos) over every archive and over the image's multi-arch manifest digest, the image's stored alongside it in GHCR. The release job verifies its own attestations before finishing, so a release that publishes unverifiable provenance goes red.
 
 Consumers can check provenance for themselves:
 
@@ -617,7 +627,7 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:v0.1.0 --repo Wave-RF/Wave
 ```
 
 :::note[Releasing from the GitHub UI instead]
-Publishing a release from **Releases → Draft a new release** creates the tag, which fires the same workflow — so it works, and GoReleaser's `mode: keep-existing` means it will not overwrite notes you wrote. Two things the `make` targets do for you and the UI does not: none of the preflight checks run, and you must click **Generate release notes** yourself, because a body you publish empty stays empty.
+Publishing a release from **Releases → Draft a new release** creates the tag, which fires the same workflow — so it works, and GoReleaser's default `mode: keep-existing` (the key is not set in `.goreleaser.yaml`) means it will not overwrite notes you wrote. Two things the `make` targets do for you and the UI does not: none of the preflight checks run, and you must click **Generate release notes** yourself, because a body you publish empty stays empty.
 :::
 
 ## The `dev` channel
@@ -629,13 +639,17 @@ Between releases, every push to `main` republishes both artifacts so `@dev` alwa
 
   The `<utc-stamp>` is load-bearing, not decoration. `npm install …@dev` records a *range* in your `package.json`, not the dist-tag, so what you get on the next install is the highest version matching that range. Under the old `0.0.0-dev.h<hash>` scheme, semver's lexical ordering of alphanumeric prerelease identifiers meant the newest publish routinely wasn't the highest one, and a range could resolve *backwards* — an `@dev` install landed on a two-month-old build ([#475](https://github.com/Wave-RF/WaveHouse/issues/475)). A numeric identifier compares numerically, so the channel now orders by publish time. The `0.0.1` base keeps the channel below every real release (so a dev build can never satisfy `^0.1.0`) and above the legacy `0.0.0-dev.*` publishes, which npm's 72-hour unpublish window makes permanent.
 
+:::caution[`latest` still points at a dev snapshot]
+npm set this package's `latest` dist-tag on its *first* publish — even though that publish went out under `--tag dev` — so it currently resolves to `0.0.0-dev.0f8826c`, the June 4 bootstrap build. Until the first `clients/ts/v*` release, a bare `npm install @wavehouse/sdk` and the bare CDN URLs get that snapshot, **not** a release. Publishing the first stable version moves `latest` to it and fixes this for every consumer; delete this note in the same change.
+:::
+
 Docker needs no equivalent fix: a tag is a mutable pointer resolved fresh on every pull, with no version ranges and no ordering, so the failure mode #475 describes cannot arise there.
 
 Binaries installed with `go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@vX.Y.Z` get no `-ldflags`, so they read their version from the module metadata the Go toolchain embeds; `/version` reports the tag with `git_commit`/`build_time` as `unknown`. Release archives and container images carry all three.
 
 ## CI & review automation
 
-This repo has three tiers of AI automation sitting alongside the normal CI checks. Full detail lives in `AGENTS.md`; this section covers the contributor-facing behavior.
+AI automation sits alongside the normal CI checks — advisory PR review from CodeRabbit and Copilot, plus the local Claude Code tooling in `.claude/`. Full detail lives in `AGENTS.md` §Repository Automation; this section covers the contributor-facing behavior.
 
 ### PR title and Conventional Commits
 

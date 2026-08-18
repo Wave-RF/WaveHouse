@@ -119,7 +119,12 @@ JOBS ?= $(DEFAULT_JOBS)
 # Version metadata is always embedded in the binary. Names match the package
 # vars in cmd/wavehouse/main.go (Version / GitCommit / BuildTime), which the
 # goreleaser config injects the same way for release artifacts.
-VERSION    ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo dev)
+# `--match 'v[0-9]*'` keeps this on the SERVER's tag family. Without it,
+# `git describe` returns whichever tag is nearest in history — so once
+# `clients/ts/v0.1.0` exists, `make build` stamps the SDK's version into the
+# server binary and out through /version, and goreleaser-validate.yml logs
+# "current tag is not semver". `--always` still covers the no-match case.
+VERSION    ?= $(shell git describe --tags --match 'v[0-9]*' --dirty --always 2>/dev/null || echo dev)
 COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 VERSION_LDFLAGS := -X main.Version=$(VERSION) -X main.GitCommit=$(COMMIT) -X main.BuildTime=$(BUILD_TIME)
