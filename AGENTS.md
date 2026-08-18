@@ -111,7 +111,7 @@ Tooling notes (the non-obvious bits `make help` won't tell you):
 
 - Dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via `tool` directives — `go tool <name>`, no manual install.
 - `golangci-lint` is pinned in the Makefile (v2.11.4), auto-installed to `.bin/` on first `make lint` — kept out of `go.mod` (its deps conflict with the main module).
-- `pnpm` (≥ 11.1) + `Node 22 LTS` (`.nvmrc`, matches CI) must be on PATH; `make tools` runs one root `pnpm install --frozen-lockfile` across the three workspaces (SDK `clients/ts/`, E2E `tests/e2e/sdk/`, docs `docs/`).
+- `pnpm` (≥ 11.21) + `Node 22 LTS` (`.nvmrc`, matches CI) must be on PATH; `make tools` runs one root `pnpm install --frozen-lockfile` across the three workspaces (SDK `clients/ts/`, E2E `tests/e2e/sdk/`, docs `docs/`).
 - **GNU Make 4+** required (uses `--output-sync=target`); macOS BSD Make 3.81 won't parse it. Full setup: `docs/src/content/docs/development.md` § Prerequisites.
 - **Lint split**: Biome owns JS/TS/JSON, markdownlint owns Markdown *and MDX* style — including two repo-local rules, WH001 (no hard-wrapped prose) and WH002 (MDX fence beside a JSX tag) in `scripts/markdownlint-rules/` — misspell owns spelling (all under `make lint`/`make fix`); accuracy/clarity/doc-sync is the `docs-reviewer` gate (§Docs review). See §Markdown authoring rules.
 - **Worktrunk** (`wt`, `.config/wt.toml`): `wt switch --create` seeds `.bin/` + `node_modules/` from main, then runs `make tools`.
