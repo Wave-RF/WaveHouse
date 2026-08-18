@@ -51,8 +51,14 @@ archives:
     # of development history in every one of the eight archives, for a file
     # that is a click away on GitHub and whose contents are the release notes
     # the download page already shows.
+    # NOTICE is not optional: the repo is Apache-2.0 and §4(d) makes every
+    # redistributor of these archives inherit an attribution obligation they
+    # cannot satisfy from a tarball carrying only LICENSE. GoReleaser's default
+    # glob never included it either, so this hunk is the moment to fix it —
+    # archive contents are effectively permanent once published.
     files:
       - LICENSE*
+      - NOTICE*
       - README*
 
 # Suppress the GitHub Release on dev pushes. publish-dev.yml sets

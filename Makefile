@@ -413,6 +413,15 @@ lint-gha: $(ACTIONLINT) $(SHELLCHECK)
 test-classify-paths:
 	$(call run,classify-paths test,scripts/classify-paths.test.sh,)
 
+# test-release-channel: assert scripts/ci/release-channel.sh — the single rule
+# mapping a release tag to its moving channel (`:latest` / `@latest` vs
+# `:rc` / `@rc` …), shared by release.yml, publish-npm.yml and release.sh.
+# Covers the fail-closed cases too: an unclassifiable tag must never resolve to
+# `latest`. A verify leaf, same as test-classify-paths.
+.PHONY: test-release-channel
+test-release-channel:
+	$(call run,release-channel test,scripts/ci/release-channel.test.sh,)
+
 .PHONY: vulncheck
 vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
 ifdef V
@@ -488,7 +497,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-release-channel vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.

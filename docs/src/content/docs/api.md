@@ -162,7 +162,7 @@ Returns the build metadata embedded in the running binary — `version`, `git_co
 
 ```json
 {
-  "version": "v1.2.3",
+  "version": "1.2.3",
   "git_commit": "a1b2c3d",
   "build_time": "2026-06-02T12:00:00Z",
   "go_version": "go1.26.3"
@@ -173,7 +173,8 @@ Where those values come from depends on how the binary was built:
 
 | Build | `version` | `git_commit` / `build_time` |
 | --- | --- | --- |
-| `make build`, or a release artifact | The `-ldflags`-injected values — a release tag for published builds | Injected |
+| Release artifact or container image | The tag **without** its leading `v` — GoReleaser injects `{{ .Version }}`, so `v1.2.3` reports `1.2.3` | Injected |
+| `make build` | Whatever `git describe` returns, which **keeps** the `v` (e.g. `v1.2.3-4-gdeadbee`, or a bare short SHA before the first tag) | Injected |
 | `go build` inside a checkout | The module pseudo-version Go derives from the commit (e.g. `0.0.0-20260815021004-1064a4fe6a59`) | Read from the VCS stamps Go embeds |
 | `go install …/cmd/wavehouse@vX.Y.Z` | The module version, so the released tag without its leading `v` | `"unknown"` — a module-cache build carries no VCS stamps |
 

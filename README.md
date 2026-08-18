@@ -92,9 +92,11 @@ The stack ships a permissive dev policy, so you can ingest without a token. Crea
 ### B. Prebuilt container image
 
 ```bash
-docker pull ghcr.io/wave-rf/wavehouse:latest    # tagged release
+docker pull ghcr.io/wave-rf/wavehouse:latest    # latest stable release
 docker pull ghcr.io/wave-rf/wavehouse:dev       # rolling main-branch build
 ```
+
+`:latest` follows stable releases only — a prerelease moves `:alpha` / `:beta` / `:rc` / `:next` instead, so `:latest` starts existing with the first stable tag. Until then, use `:dev`.
 
 Both tags carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify before you deploy:
 

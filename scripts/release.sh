@@ -187,7 +187,17 @@ case "$reply" in
 esac
 
 git tag -a "$tag" -m "$desc $version"
-git push "$REMOTE" "refs/tags/$tag"
+
+# Roll the local tag back if the push is rejected — tag creation is admin-only
+# via the `release tag protection` ruleset, and any network failure lands here
+# too. Left behind, the stray tag makes the NEXT attempt die on the
+# "already exists locally — pick the next version" check above, which would be
+# actively wrong advice: nothing was published, so the same version is still
+# free.
+if ! git push "$REMOTE" "refs/tags/$tag"; then
+  git tag -d "$tag" >/dev/null
+  die "push rejected — local tag $tag removed, nothing was published"
+fi
 
 printf '\n%s✓ pushed %s%s\n\n' "$GREEN" "$tag" "$RESET"
 info "watch:  gh run watch \$(gh run list --limit 1 --json databaseId --jq '.[0].databaseId')"
