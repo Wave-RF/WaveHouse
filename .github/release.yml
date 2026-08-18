@@ -66,11 +66,19 @@ changelog:
       labels: [bug]
     # ABOVE Documentation deliberately. First match wins, and our CI PRs carry
     # BOTH labels — AGENTS.md requires a doc update with every change, so a CI
-    # PR almost always touches docs/** or README.md too (7 of the last 9:
-    # #334, #329, #312, #311, #310, #308, #275). With Documentation first this
-    # category would be dead on arrival and Documentation would be a wall of
-    # `ci:` PRs. The cost is a docs PR that also edits a workflow filing here
-    # instead — one instance in recent history (#187) against seven.
+    # PR almost always touches docs/** or README.md too. Of the last 12 human
+    # PRs carrying `github_actions`, 10 also carry `documentation` (only #446
+    # and #283 do not), so with Documentation first this category is dead on
+    # arrival and Documentation fills with `ci:` PRs.
+    #
+    # It is a trade, not a free win, and the cost side is real: a docs PR that
+    # also edits a workflow now files here. In that same window #290
+    # (`feat(docs): live-demo hero panel`) and #277 (`feat(docs): prod-faithful
+    # dev loop`) both would, as would #187 and #193 further back. Counting only
+    # PRs that reach these two categories: ~7 genuine CI PRs rescued from
+    # Documentation against ~2-4 docs PRs misfiled as CI. Worth it because the
+    # CI population is the one that grows, but re-check the balance before
+    # copying this decision forward.
     - title: 🔧 CI & build
       labels: [github_actions]
       exclude:
