@@ -3,13 +3,14 @@ title: "SDK Admin & System"
 description: "Schema introspection, access-control policy, DLQ stats, and health checks in @wavehouse/sdk."
 ---
 
-Operational surfaces of `@wavehouse/sdk`. Everything here except
-`wh.sys.health()` sits behind the server's admin gate: the caller must
-resolve to the admin role (`policy.admin_role`) or present the non-JWT
+Operational surfaces of `@wavehouse/sdk`. With one exception, everything on
+this page sits behind the server's admin gate: the caller must resolve to
+the admin role (`policy.admin_role`) or present the non-JWT
 [operator key](/api#authentication) — the SDK has no first-class
 operator-key option, but [`options.headers`](/sdk#custom-headers) can carry
-the `X-Operator-Key` header. See [Access Control](/access-control) for how
-roles resolve.
+the `X-Operator-Key` header. The exception is `wh.sys.health()`, which calls
+the public, content-free `/v1/health` route and needs no credentials. See
+[Access Control](/access-control) for how roles resolve.
 Examples import from `@wavehouse/sdk`; using the CDN instead, import from
 `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 
