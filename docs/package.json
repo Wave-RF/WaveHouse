@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@astrojs/check": "^0.9.10",
-    "@astrojs/starlight": "^0.41.6",
+    "@astrojs/starlight": "^0.41.7",
     "@astrojs/starlight-tailwind": "^5.0.0",
     "@fontsource-variable/inter": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
@@ -23,8 +23,8 @@
     "@wave-rf/starlight-llm-tools": "^0.3.1",
     "@wavehouse/sdk": "workspace:*",
     "astro": "^7.1.1",
-    "astro-vtbot": "^3.0.1",
-    "katex": "^0.18.1",
+    "astro-vtbot": "^3.1.0",
+    "katex": "^0.18.4",
     "rehype-katex": "^7.0.1",
     "rehype-mermaid": "^3.0.0",
     "remark-math": "^6.0.0",
@@ -32,7 +32,7 @@
     "starlight-image-zoom": "^0.15.0",
     "starlight-links-validator": "^0.25.2",
     "tailwindcss": "^4.3.3",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240208.0",
