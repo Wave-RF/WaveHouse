@@ -130,8 +130,7 @@ curl -s http://localhost:8080/v1/dlq/stats -H "Authorization: Bearer $TOKEN"
 
 ### How `make dev` works
 
-`make dev` is a one-stop convenience target for backend and frontend
-development. The recipe is essentially:
+`make dev` is a one-stop convenience target for backend and frontend development. The recipe is essentially:
 
 ```make
 dev: deps-up $(AIR)
@@ -151,9 +150,7 @@ dev: deps-up $(AIR)
 
 ### Dev convenience targets
 
-These are the small targets behind `make dev` — useful directly when you want
-to run WaveHouse outside of air (e.g. `make build && ./bin/wavehouse`), or
-when you need to poke at ClickHouse:
+These are the small targets behind `make dev` — useful directly when you want to run WaveHouse outside of air (e.g. `make build && ./bin/wavehouse`), or when you need to poke at ClickHouse:
 
 | Target | What it does |
 | ------ | ------------ |

@@ -217,6 +217,7 @@ Every key, with its default. Save the YAML as `config.yaml` next to the binary (
 
 <Tabs syncKey="cfg">
 <TabItem label="YAML">
+
 ```yaml
 data_dir: ./data         # nats → ./data/nats, pebble → ./data/pebble
 
@@ -294,8 +295,10 @@ prometheus:
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
 ```
+
 </TabItem>
 <TabItem label="Environment">
+
 ```ini
 WH_DATA_DIR=./data
 
@@ -350,5 +353,6 @@ WH_PROMETHEUS_ENABLED=false
 WH_PROMETHEUS_PATH=/metrics
 WH_PROMETHEUS_PORT=0
 ```
+
 </TabItem>
 </Tabs>

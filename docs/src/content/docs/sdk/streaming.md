@@ -3,11 +3,7 @@ title: "SDK Streaming & Live Queries"
 description: "Real-time SSE streams, client-side filtering, and backfill-then-live queries in @wavehouse/sdk."
 ---
 
-Real-time consumption with `@wavehouse/sdk`: SSE event streams from tables,
-builders, and pipes, plus live queries that backfill history before going
-live. Builders and table refs come from [Queries](/sdk/queries).
-Examples import from `@wavehouse/sdk`; using the CDN instead, import from
-`https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
+Real-time consumption with `@wavehouse/sdk`: SSE event streams from tables, builders, and pipes, plus live queries that backfill history before going live. Builders and table refs come from [Queries](/sdk/queries). Examples import from `@wavehouse/sdk` or `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 
 ## Streaming
 
@@ -84,25 +80,13 @@ interface StreamEvent<T> {
 }
 ```
 
-Row values of top-level `DateTime`/`DateTime64` columns inside `data` (not
-timestamps nested in `Array`/`Map`/`Tuple` columns) arrive in canonical RFC 3339
-UTC (`2026-06-21T04:00:00.123Z`), matching what `/v1/query` returns for the
-same row — `new Date(value)` parses correctly with no zone fix-up.
-Values WaveHouse couldn't canonicalize (ingest is fail-open) stream in the
-producer's original spelling, and the `/v1/query` match doesn't hold for them:
-a spelling ClickHouse accepted anyway still queries back in canonical UTC (one
-it rejected never lands in the table at all), and a zone-less date-time is
-what `new Date()` reads as *local* time — though a date-only `YYYY-MM-DD`
-string is read as UTC, an ECMAScript quirk
-(see [Timestamp canonicalization](/api#timestamp-canonicalization)).
+Row values of top-level `DateTime`/`DateTime64` columns inside `data` (not timestamps nested in `Array`/`Map`/`Tuple` columns) arrive in canonical RFC 3339 UTC (`2026-06-21T04:00:00.123Z`), matching what `/v1/query` returns for the same row — `new Date(value)` parses correctly with no zone fix-up. Values WaveHouse couldn't canonicalize (ingest is fail-open) stream in the producer's original spelling, and the `/v1/query` match doesn't hold for them: a spelling ClickHouse accepted anyway still queries back in canonical UTC (one it rejected never lands in the table at all), and a zone-less date-time is what `new Date()` reads as *local* time — though a date-only `YYYY-MM-DD` string is read as UTC, an ECMAScript quirk (see [Timestamp canonicalization](/api#timestamp-canonicalization)).
 
 ### Transport Behavior
 
 | Transport | Reconnect | Protocol |
 | --------- | --------- | -------- |
 | SSE | Automatic (native `EventSource` with `Last-Event-ID`) | HTTP/2 recommended |
-<!-- | TBD | Automatic (retries?) | HTTP/2 recommended | -->
-<!-- TODO: Fill in above ^ for SSE fallback, likely polling? -->
 
 :::note[SSE connection limit]
 The SDK warns when more than 5 concurrent SSE connections are open (browser limit per domain).

@@ -241,21 +241,7 @@ Client POST /v1/admin/query
     (browser, CDN, corp proxy) caches the result.
 ```
 
-The proxy-pattern wins are: zero classification logic on the WaveHouse
-side (no isMutation heuristic to maintain), and any ClickHouse statement
-type — including verbs added in future versions and inline FORMAT
-overrides — works without WaveHouse code changes. Multi-statement input
-(`SELECT 1; TRUNCATE t`) is supported when the upstream ClickHouse has
-multi-query enabled, which is the default on recent versions; older or
-restrictively-configured servers will return a clear error from
-ClickHouse itself for the second statement. The proxy buffers the response in memory with a
-64 MiB cap (502 with `clickhouse response exceeded N bytes` on overflow,
-to keep a runaway `SELECT *` from pinning RAM on the API server), and
-passes ClickHouse's `Content-Type` through when an inline `FORMAT`
-directive overrides the default JSON envelope. The structured query
-endpoint and pipes still go through `clickhouse-go`'s native driver
-(Query/Exec) for performance and to keep the cached row-array shape
-consistent.
+The proxy-pattern wins are: zero classification logic on the WaveHouse side (no isMutation heuristic to maintain), and any ClickHouse statement type — including verbs added in future versions and inline FORMAT overrides — works without WaveHouse code changes. Multi-statement input (`SELECT 1; TRUNCATE t`) is supported when the upstream ClickHouse has multi-query enabled, which is the default on recent versions; older or restrictively-configured servers will return a clear error from ClickHouse itself for the second statement. The proxy buffers the response in memory with a 64 MiB cap (502 with `clickhouse response exceeded N bytes` on overflow, to keep a runaway `SELECT *` from pinning RAM on the API server), and passes ClickHouse's `Content-Type` through when an inline `FORMAT` directive overrides the default JSON envelope. The structured query endpoint and pipes still go through `clickhouse-go`'s native driver (Query/Exec) for performance and to keep the cached row-array shape consistent.
 
 ### Streaming Path
 

@@ -109,23 +109,26 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 
 **Plus** — optional [deduplication](/configuration#deduplication) (idempotent ingest by ID), a dead-letter queue for failed batch inserts, and Tinybird-style [named pipes](/pipes) with parameter binding and per-role restrictions.
 
-## Query it like a database. Subscribe to it like a socket.
+## Query it like a database. Subscribe to it like a socket
 
 The zero-dependency [TypeScript SDK](/sdk) wraps the whole surface — typed inserts, a chainable query builder, and live queries that backfill history before streaming:
 
 <Tabs>
  <TabItem label="Ingest">
+
   ```ts
   import { createClient } from '@wavehouse/sdk';
 
-  const wh = createClient({ baseURL: 'https://wavehouse.example.com' });
+  const wh = createClient({ baseURL: 'https://<project_id>.wavehouse.app' });
 
   // Returns immediately — buffered in the WAL, schema-validated
   // at the edge, batch-flushed to ClickHouse behind the scenes.
   await wh.from('clicks').insert({ page: '/home', button: 'signup' });
   ```
+
  </TabItem>
  <TabItem label="Query">
+
   ```ts
   // Chainable, type-safe, never throws — branch on { data, error }.
   const { data, error } = await wh.from('clicks')
@@ -134,8 +137,10 @@ The zero-dependency [TypeScript SDK](/sdk) wraps the whole surface — typed ins
     .orderBy('received_timestamp', 'desc')
     .limit(100);
   ```
+
  </TabItem>
  <TabItem label="Live updates">
+
   ```ts
   // Historical backfill + real-time stream, deduplicated at the seam.
   const lq = wh.from('clicks')
@@ -150,6 +155,7 @@ The zero-dependency [TypeScript SDK](/sdk) wraps the whole surface — typed ins
 
   // later: lq.close();
   ```
+
  </TabItem>
 </Tabs>
 

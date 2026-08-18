@@ -3,14 +3,7 @@ title: "SDK Queries"
 description: "Tables, the chainable query builder, pagination, and raw SQL in @wavehouse/sdk."
 ---
 
-Reading and writing data with `@wavehouse/sdk`: table references, the
-chainable query builder, cursor pagination, and the admin-only raw-SQL
-escape hatch. Every call returns the SDK's
-[`Result<T>`](/sdk#result-type) — nothing throws for anything the server
-returns (see [Error Handling](/sdk/reference#error-handling) for the caller and
-environment errors that do).
-Examples import from `@wavehouse/sdk`; using the CDN instead, import from
-`https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
+Reading and writing data with `@wavehouse/sdk`: table references, the chainable query builder, cursor pagination, and the admin-only raw-SQL escape hatch. Every call returns the SDK's [`Result<T>`](/sdk#result-type) — nothing throws for anything the server returns (see [Error Handling](/sdk/reference#error-handling) for the caller and environment errors that do). Examples import from `@wavehouse/sdk` or `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 
 ## Tables — `wh.from(table)`
 
@@ -22,7 +15,7 @@ const clicks = wh.from('clicks');
 
 ### `.fetch(opts?)`
 
-Shortcut for "select every column", with a default limit of 1000. When an access-control policy restricts your role's columns, the server returns only the columns your role is allowed to read — `.fetch()` is never a way around `deny_columns`/`allow_columns` (see [Access control](/access-control#column-permissions)).
+Shortcut for "select every column", with a default limit of 1000. When an access-control policy restricts your role's columns, the server returns only the columns your role is allowed to read. `.fetch()` is never a way around `deny_columns`/`allow_columns` / cannot bypass these server-side restriction (see [Access control](/access-control#column-permissions)).
 
 To paginate, chain an explicit `.orderBy()` — a bare `.fetch()` sends no default order (see [Pagination](#pagination)). Ordering, grouping, or filtering by a column your role can't read is rejected, so a column-restricted role must reference only readable columns in those clauses.
 
@@ -33,7 +26,7 @@ const { data } = await clicks.fetch({ limit: 50, signal: controller.signal });
 
 ### `.insert(data, opts?)`
 
-Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table={table}`. An **array** is serialized to NDJSON (one record per line) and sent as a single `application/x-ndjson` request, so a bad record no longer fails or hides the rest of the batch — per-record outcomes come back in the result.
+Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table={table}`. An **array** is serialized to NDJSON (one record per line) and sent as a single `application/x-ndjson` request, and, so bad records don't fail the rest of the batch — per-record outcomes come back in the result.
 
 ```ts
 // Single row → { ok: true } (or { ok: true, duplicate: true } when dedup skips it)
@@ -88,7 +81,7 @@ const { data } = await clicks.select('page', 'button').where('page', '=', '/home
 
 ### `.selectAll()`
 
-Start a query that selects **every column your role is allowed to read** — the explicit form of what a bare `.fetch()` does. Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.); the server expands it to your allowed columns (never a raw `SELECT *`) and never bypasses `deny_columns`/`allow_columns`. See [Access control → Column permissions](/access-control#column-permissions).
+Selects **every column your role is allowed to read** — the explicit form of what a bare `.fetch()` does. Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.); the server expands it to your allowed columns (never a raw `SELECT *`) and never bypasses `deny_columns`/`allow_columns`. See [Access control → Column permissions](/access-control#column-permissions).
 
 ```ts
 const { data } = await clicks.selectAll().where('country', '=', 'US').limit(10);
@@ -167,8 +160,7 @@ clicks.select('page')
   .aggregate('uniqExact', 'user_id', 'unique_users') // custom fn
 ```
 
-Each aggregation method signature: `(column: string, alias?: string)`.  
-`count()` defaults to `column='*'`, `alias='count'`.
+Each aggregation method signature: `(column: string, alias?: string)`. `count()` defaults to `column='*'`, `alias='count'`.
 
 #### `.groupBy(...columns)`
 
@@ -230,8 +222,7 @@ if (hasMore && next) {
 | `signal` | `AbortSignal` | Cancel the request |
 | `limit` | `number` | Override builder limit for this fetch |
 
-A pipe's `.fetch()` takes the narrower `PipeRequestOptions` instead — see
-[Pipes](/sdk/pipes#fetchopts).
+A pipe's `.fetch()` takes the narrower `PipeRequestOptions` instead — see [Pipes](/sdk/pipes#fetchopts).
 
 ### `.stream(opts?)`
 
