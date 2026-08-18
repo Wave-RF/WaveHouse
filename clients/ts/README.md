@@ -42,7 +42,7 @@ Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`). jsDelivr (
 </script>
 ```
 
-**Versioning.** A bare CDN URL resolves the `latest` dist-tag — which, until the first `clients/ts/v*` release ships, is still a `0.0.0-dev.*` snapshot rather than a release, so pin for production. Otherwise it serves the latest published **release**; pin for production (`@wavehouse/sdk@0.1.0`) or float on a range (`@0` for the newest 0.x, `@0.1` for 0.1.x). Builds from `main` are published under the `dev` tag — `@wavehouse/sdk@dev` — for trying unreleased changes.
+**Versioning.** A bare CDN URL resolves the `latest` dist-tag. Until the first `clients/ts/v*` release ships, `latest` is still a `0.0.0-dev.*` snapshot rather than a release ([why](https://wavehouse.dev/development#the-dev-channel)); after that it tracks the newest published release. Either way, pin for production (`@wavehouse/sdk@0.1.0`) or float on a range (`@0` for the newest 0.x, `@0.1` for 0.1.x). Builds from `main` are published under the `dev` tag — `@wavehouse/sdk@dev` — for trying unreleased changes.
 
 Streaming (`.stream()`) uses the browser's native `EventSource`, so it works in both forms with no polyfill.
 
