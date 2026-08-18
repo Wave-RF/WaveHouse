@@ -62,6 +62,16 @@ describe("fetchSchemas", () => {
     await expect(fetchSchemas("http://localhost:8080")).rejects.toThrow(/JSON array/);
   });
 
+  it.each([
+    ["a null member", [null]],
+    ["a table missing its columns", [{ name: "clicks" }]],
+    ["a column missing its type", [{ name: "clicks", columns: [{ name: "page" }] }]],
+  ])("rejects an array with %s instead of crashing mid-generation", async (_desc, body) => {
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+
+    await expect(fetchSchemas("http://localhost:8080")).rejects.toThrow(/JSON array/);
+  });
+
   it("surfaces an HTTP error status", async () => {
     fetchSpy.mockResolvedValue(new Response('{"error":"forbidden"}', { status: 403 }));
 

@@ -161,6 +161,25 @@ interface TableSchema {
   columns: Column[];
 }
 
+// Runtime guards mirroring the interfaces above, limited to the fields whose
+// absence would crash generation (`is_nullable` is unused and `has_default` is
+// truthiness-safe, so a server that omits a boolean still generates fine) — a
+// malformed member should fail fetchSchemas' loud shape error, not surface as
+// a TypeError mid-generation.
+function isColumn(value: unknown): value is Column {
+  if (typeof value !== "object" || value === null) return false;
+  const col = value as Record<string, unknown>;
+  return typeof col.name === "string" && typeof col.type === "string";
+}
+
+function isTableSchema(value: unknown): value is TableSchema {
+  if (typeof value !== "object" || value === null) return false;
+  const table = value as Record<string, unknown>;
+  return (
+    typeof table.name === "string" && Array.isArray(table.columns) && table.columns.every(isColumn)
+  );
+}
+
 async function fetchSchemas(url: string, auth?: string): Promise<TableSchema[]> {
   const headers: Record<string, string> = {};
   if (auth) headers.Authorization = `Bearer ${auth}`;
@@ -170,10 +189,10 @@ async function fetchSchemas(url: string, auth?: string): Promise<TableSchema[]> 
     const text = await res.text();
     throw new Error(`Schema fetch failed (${res.status}): ${text}`);
   }
-  // /v1/ops/schema returns a JSON array of tables — reject any other shape
-  // loudly rather than iterating array indices into garbage types.
+  // /v1/ops/schema returns a JSON array of tables — reject any other shape,
+  // malformed members included, loudly rather than crashing mid-generation.
   const body = (await res.json()) as unknown;
-  if (!Array.isArray(body)) {
+  if (!Array.isArray(body) || !body.every(isTableSchema)) {
     throw new Error("Unexpected /v1/ops/schema response: expected a JSON array of table schemas");
   }
   return body as TableSchema[];

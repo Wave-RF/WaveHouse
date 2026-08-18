@@ -4,8 +4,12 @@ description: "Schema introspection, access-control policy, DLQ stats, and health
 ---
 
 Operational surfaces of `@wavehouse/sdk`. Everything here except
-`wh.sys.health()` requires the admin role (`policy.admin_role`) — see
-[Access Control](/access-control) for how roles resolve.
+`wh.sys.health()` sits behind the server's admin gate: the caller must
+resolve to the admin role (`policy.admin_role`) or present the non-JWT
+[operator key](/api#authentication) — the SDK has no first-class
+operator-key option, but [`options.headers`](/sdk#custom-headers) can carry
+the `X-Operator-Key` header. See [Access Control](/access-control) for how
+roles resolve.
 Examples import from `@wavehouse/sdk`; using the CDN instead, import from
 `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 
@@ -33,13 +37,13 @@ await wh.schema.refresh();
 
 Individual table schema is also available via `wh.from('clicks').schema()`.
 
-> `wh.schema.list()`, `wh.schema.refresh()`, and `wh.from(t).schema()` hit `/v1/ops/schema*`, which are **admin-only** endpoints: the caller must resolve to the policy admin role (`admin_role`, `"admin"` by default). Unless the deployment deliberately sets `default_role` to that role (the loudly-warned dev-only setting), construct the client with an admin-role token or these calls return `403`.
+> `wh.schema.list()`, `wh.schema.refresh()`, and `wh.from(t).schema()` hit `/v1/ops/schema*`, which are **admin-only** endpoints: the caller must pass the admin gate — resolve to the policy admin role (`admin_role`, `"admin"` by default) or present the non-JWT [operator key](/api#authentication). Unless the deployment deliberately sets `default_role` to the admin role (the loudly-warned dev-only setting), construct the client with an admin-role token — or send the operator key via [`options.headers`](/sdk#custom-headers) — or these calls return `403`.
 
 ---
 
 ## Policy — `wh.policy`
 
-Manage Hasura-style access control policies. Requires the admin role (`policy.admin_role`).
+Manage Hasura-style access control policies. Requires the admin gate — the admin role (`policy.admin_role`) or the [operator key](/api#authentication).
 
 ```ts
 // Get current policy
@@ -70,7 +74,7 @@ const { data } = await wh.policy.validate(policyDraft);
 
 ## DLQ — `wh.dlq`
 
-Dead Letter Queue operations. Requires the admin role (`policy.admin_role`).
+Dead Letter Queue operations. Requires the admin gate — the admin role (`policy.admin_role`) or the [operator key](/api#authentication).
 
 ```ts
 // Get DLQ statistics
