@@ -208,6 +208,14 @@ describe("WH002 flags an MDX fence glued to a JSX tag", () => {
     const src = "<Foo onClick={() => f()}>\n```yaml\nkey: value\n```\n</Foo>\n";
     assert.equal((run("t.mdx", src).stdout.match(/WH002/g) ?? []).length, 2);
   });
+
+  it("still sees both sides for a nested-brace attribute on an HTML tag name", () => {
+    // CommonMark HTML block type 6 needs only a known block-level name, so an
+    // unmasked `>` does NOT disqualify it the way it does for type 7 — the fence
+    // really is swallowed here, and a one-sided report would half-fix it.
+    const src = "<div onClick={() => open({tab: 1})}>\n```yaml\nkey: value\n```\n</div>\n";
+    assert.equal((run("t.mdx", src).stdout.match(/WH002/g) ?? []).length, 2);
+  });
 });
 
 describe("fix-mdx-fences.mjs repairs the structure", () => {

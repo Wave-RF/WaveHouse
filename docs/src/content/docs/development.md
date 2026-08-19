@@ -493,7 +493,7 @@ Run `make help` to see all targets. Key ones:
 | Target | Description |
 | ------ | ----------- |
 | `make help` | Show all targets with descriptions (always the source of truth) |
-| `make tools` | Bootstrap: install pinned tools (`golangci-lint`, `air`), Go modules, pnpm deps |
+| `make tools` | Bootstrap: install pinned tools (`golangci-lint`, `air`, `misspell`, `shellcheck`, `actionlint`), Go modules, pnpm deps, and git hooks (`core.hooksPath` → `.githooks/`) |
 | **Dev** | |
 | `make dev` | Hot-reload dev server: ClickHouse via Compose + WaveHouse under air on `:8080` |
 | `make deps-up` | Start ClickHouse alone (idempotent; blocks until healthy) |

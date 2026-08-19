@@ -47,9 +47,16 @@ function openingTagAbove(lines, index) {
       .slice(i, index)
       .map((l) => l.trim())
       .join(" ");
-    // Mask strings first, then `{…}`, so a brace inside a quoted value can't
-    // confuse the second pass.
-    const masked = joined.replace(/"[^"]*"|'[^']*'/g, '""').replace(/\{[^{}]*\}/g, "{}");
+    // Mask strings first, so a brace inside a quoted value can't confuse the
+    // container pass. Then collapse `{…}` innermost-first to a fixpoint: a
+    // single pass leaves the OUTER level of a nested container intact, and a `>`
+    // between the two levels survives — `{() => open({tab: 1})}` is the shape.
+    // The replacement is brace-free so the loop can actually converge.
+    let masked = joined.replace(/"[^"]*"|'[^']*'/g, '""');
+    for (let previous; previous !== masked; ) {
+      previous = masked;
+      masked = masked.replace(/\{[^{}]*\}/g, '""');
+    }
     if (masked.includes("</") || masked.indexOf(">") !== masked.length - 1) return null;
     return i === index - 1 ? joined : `${line.trim()} …`;
   }
