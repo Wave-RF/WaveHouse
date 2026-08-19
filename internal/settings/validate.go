@@ -173,13 +173,16 @@ func (v *validator) parseRoles(data []byte) ([]string, bool) {
 }
 
 // parsePolicies returns nil for an empty document: no policy, fail closed —
-// the same semantics as a deleted policy in the store.
+// the same semantics as a deleted policy in the store. That state is legal
+// but flagged with a warning: the total lockout should announce itself at
+// validation time, not be discovered one 403 at a time.
 func (v *validator) parsePolicies(data []byte) *policy.Policy {
 	var p policy.Policy
 	if !v.parseFile(FilePolicies, data, &p) {
 		return nil
 	}
 	if p.DefaultRole == "" && p.AdminRole == "" && len(p.Tables) == 0 {
+		v.warnf(FilePolicies, "", "empty document — no policy; every request will be denied (fail closed)")
 		return nil
 	}
 	if err := policy.Validate(&p); err != nil {
@@ -230,15 +233,31 @@ func (v *validator) parsePipes(data []byte) []pipes.NamedQuery {
 	return f.Pipes
 }
 
+// checkIDField rejects an explicit id_field value that could never match a
+// JSON key: empty or whitespace-only (the author wrote a value that names
+// nothing) and surrounding whitespace (an exact-match lookup would silently
+// miss every row). Absent (nil) is always fine — it means inherit, and the
+// compiled default floors the cascade. Interior whitespace stays legal:
+// "click id" is a valid JSON key.
+func (v *validator) checkIDField(path string, val *string, omitHint string) {
+	if val == nil {
+		return
+	}
+	switch {
+	case strings.TrimSpace(*val) == "":
+		v.errorf(FileConfig, path, "must not be empty — %s", omitHint)
+	case strings.TrimSpace(*val) != *val:
+		v.errorf(FileConfig, path, "id_field %q has surrounding whitespace", *val)
+	}
+}
+
 func (v *validator) parseConfig(data []byte) TenantConfig {
 	var c TenantConfig
 	if !v.parseFile(FileConfig, data, &c) {
 		return TenantConfig{}
 	}
 	if d := c.Dedupe; d != nil {
-		if d.IDField != nil && *d.IDField == "" {
-			v.errorf(FileConfig, "dedupe.id_field", "must not be empty — omit it to use the default")
-		}
+		v.checkIDField("dedupe.id_field", d.IDField, "omit it to use the default")
 		// Sorted iteration keeps finding order deterministic across runs.
 		for _, table := range slices.Sorted(maps.Keys(d.Tables)) {
 			td := d.Tables[table]
@@ -249,9 +268,7 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 			case strings.TrimSpace(table) != table:
 				v.errorf(FileConfig, path, "table name %q has surrounding whitespace", table)
 			}
-			if td.IDField != nil && *td.IDField == "" {
-				v.errorf(FileConfig, path+".id_field", "must not be empty — omit it to inherit the global value")
-			}
+			v.checkIDField(path+".id_field", td.IDField, "omit it to inherit the global value")
 			if td.IDField == nil && td.RequireID == nil {
 				v.warnf(FileConfig, path, "override sets nothing — remove it, or set id_field or require_id")
 			}

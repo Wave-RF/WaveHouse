@@ -72,9 +72,10 @@ type TenantConfig struct {
 //
 // Each field resolves independently through a three-level cascade: table
 // override → the global value here → compiled default. Absent means inherit,
-// and an explicit "" id_field is rejected at every level, so the effective
-// id_field can never be empty — require_id without an id_field simply
-// requires the inherited one.
+// and an explicit empty, whitespace-only, or whitespace-padded id_field is
+// rejected at every level, so the effective id_field can never be empty or
+// silently unmatchable — require_id without an id_field simply requires the
+// inherited one.
 type DedupeConfig struct {
 	IDField   *string `json:"id_field,omitempty"`
 	RequireID *bool   `json:"require_id,omitempty"`

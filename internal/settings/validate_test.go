@@ -64,8 +64,12 @@ func TestValidate_EmptyDocuments(t *testing.T) {
 		FileRoles: `{}`, FilePolicies: `{}`, FilePipes: `{}`, FileConfig: `{}`,
 	}))
 
-	require.Empty(t, findings)
+	// Valid — but not silent: the one finding is the no-policy lockout warning,
+	// so the total deny announces itself at validation time, not per-403.
 	require.NotNil(t, doc)
+	assert.False(t, HasErrors(findings))
+	require.Len(t, findings, 1)
+	assert.Contains(t, findingStrings(findings), "every request will be denied")
 	assert.Nil(t, doc.Policy, "an empty policies.json means no policy (fail closed)")
 	assert.Empty(t, doc.Roles)
 	assert.Empty(t, doc.Pipes)
@@ -171,6 +175,9 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"bad param type", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x", "type": "float"}]}]}`, "unknown type"},
 		{"duplicate param", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x"}, {"name": "x"}]}]}`, "duplicate parameter"},
 		{"empty dedupe id_field", FileConfig, `{"dedupe": {"id_field": ""}}`, "dedupe.id_field: must not be empty"},
+		{"whitespace-only dedupe id_field", FileConfig, `{"dedupe": {"id_field": "  "}}`, "dedupe.id_field: must not be empty"},
+		{"padded dedupe id_field", FileConfig, `{"dedupe": {"id_field": " click_id"}}`, "surrounding whitespace"},
+		{"padded override id_field", FileConfig, `{"dedupe": {"tables": {"clicks": {"id_field": "click_id "}}}}`, "dedupe.tables.clicks.id_field"},
 		{"empty override table name", FileConfig, `{"dedupe": {"tables": {"": {"id_field": "x"}}}}`, "table name must not be empty"},
 		{"override table whitespace", FileConfig, `{"dedupe": {"tables": {" clicks": {"require_id": true}}}}`, "surrounding whitespace"},
 		{"empty override id_field", FileConfig, `{"dedupe": {"tables": {"clicks": {"id_field": ""}}}}`, "dedupe.tables.clicks.id_field: must not be empty"},
