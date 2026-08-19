@@ -186,7 +186,7 @@ Check a directory with `wavehouse validate [dir]` — the argument falls back to
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `settings.dir` | `WH_SETTINGS_DIR` | *(empty)* | Path to the settings directory. No default, same reasoning as `policy.file_path`: a baked-in path would turn a missing mount into silent misconfiguration instead of an explicit operator choice. |
+| `settings.dir` | `WH_SETTINGS_DIR` | *(empty)* | Path to the settings directory. Its one consumer is the `wavehouse validate` CLI, which — like `wavehouse health` — resolves its input directly from the `[dir]` argument or `WH_SETTINGS_DIR` without loading this file, so a value set only in the YAML key is not picked up. No default, same reasoning as `policy.file_path`: a baked-in path would turn a missing mount into silent misconfiguration instead of an explicit operator choice. |
 
 ### OTel
 
@@ -288,7 +288,8 @@ pipes:
 
 settings:
   dir: ""                # settings directory (roles/policies/pipes/config .json);
-                         # check with `wavehouse validate`
+                         # `wavehouse validate` reads its [dir] argument or
+                         # WH_SETTINGS_DIR (the env var), not this YAML key
 
 otel:
   enabled: false         # master switch — set true to export via OTLP gRPC
