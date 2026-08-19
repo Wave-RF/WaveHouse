@@ -36,19 +36,32 @@
 
 ```bash
 git clone https://github.com/Wave-RF/WaveHouse.git && cd WaveHouse
-docker compose -f deployments/compose/standalone.yaml up -d   # ClickHouse + WaveHouse (ships a dev policy)
+docker compose -f deployments/compose/standalone.yaml up -d
+```
 
-# create a table (or import your schema)
+The in-repo compose spins up WaveHouse and ClickHouse. Then, create a table (or import your existing schema):
+
+```bash
 docker compose -f deployments/compose/standalone.yaml exec clickhouse \
   clickhouse-client --query "CREATE TABLE IF NOT EXISTS events (kind String, user String, received_timestamp DateTime64(3,'UTC') DEFAULT now64(3,'UTC')) ENGINE=MergeTree ORDER BY kind"
+```
 
-# stream live events in one terminal, then ingest one in another and watch it arrive
+Then, stream live events in one terminal, ingest one in another, and watch the ingested events arrive from the stream:
+
+```bash
 curl -N "http://localhost:8080/v1/stream?table=events" & sleep 1
-# in another terminal, ingest an event (no auth needed with the dev policy)
-# (a 404 "unknown table" here just means schema discovery hasn't seen the new table yet. Just retry; worst case 60s before discovery)
+```
+
+> [!IMPORTANT]
+No auth is needed to ingest with the default dev policy. The policy is VERY permissive, and not intended for production deployments.
+
+```bash
 curl -sX POST "http://localhost:8080/v1/ingest?table=events" \
   -H 'content-type: application/json' -d '{"kind":"click","user":"u_42"}'
 ```
+
+> [!TIP]
+A 404 "unknown table" error here just means schema discovery hasn't seen the new table yet. Just retry; worst case 60s before discovery.
 
 Full walkthrough at **[wavehouse.dev/getting-started](https://wavehouse.dev/getting-started)**.
 
@@ -76,13 +89,13 @@ If you're building user-facing analytics, WaveHouse is like **Supabase for Click
 | Row/column policies (JWT)     |         ✗         |      custom      |  tokens only  | ✓ Hasura-style |
 | Cost model                    |       infra       | infra + eng time | per-vCPU SaaS |   infra only   |
 
-Full breakdown, failure modes, and the engineering rationale at **[wavehouse.dev/why-wavehouse](https://wavehouse.dev/why-wavehouse)**.
+Full breakdown, failure modes, and our engineering rationale at **[wavehouse.dev/why-wavehouse](https://wavehouse.dev/why-wavehouse)**.
 
 ## Getting Started
 
-Pick between the in-repo Docker Compose, pulling a container image, or `go install`. Each starts WaveHouse listening on `http://localhost:8080`.
+Pick between the in-repo Docker Compose, pulling a container image, or `go install`. The Compose option starts WaveHouse; the other options just download/install a container or binary. Run the selected artifact before using `http://localhost:8080`.
 
-### A. Docker Compose (recommended for first run)
+### A. Docker Compose (recommended for beginners)
 
 ```bash
 git clone https://github.com/Wave-RF/WaveHouse.git && cd WaveHouse
@@ -140,7 +153,7 @@ make dev      # hot-reload on .go save
 
 Issues, pull requests, and feedback welcome! See our [CONTRIBUTING.md](CONTRIBUTING.md) guidelines on how to structure your code and run the integration test suites.
 
-## 🛡️ Security
+## Security
 
 Found a vulnerability? **Do NOT open a public issue.** Email `security@wave-rf.com` per [SECURITY.md](SECURITY.md) — we acknowledge within 48 hours and aim for an initial assessment in 5 business days.
 
@@ -150,8 +163,8 @@ The repo contains a minimal [Claude Code](https://claude.com/claude-code) config
 
 ## Responsible GenAI Usage Disclosure
 
-> **AI-assisted, human-reviewed.** WaveHouse has been developed with AI assistance ([Claude Code](https://claude.com/claude-code)). Every change, whether AI- or human-authored, goes through the same review gates, tests, and CI before it gets merged. The docs are the source of truth, and please [open an issue](https://github.com/Wave-RF/WaveHouse/issues) if anything is out of date. (or, obviously, if you notice an issue)
+> **AI-assisted, human-reviewed.** WaveHouse has been developed with AI assistance ([Claude Code](https://claude.com/claude-code)). Every change, whether AI- or human-authored, goes through the same review gates, tests, and CI before it gets merged. The docs are the source of truth, and please [open an issue](https://github.com/Wave-RF/WaveHouse/issues) if anything is out of date. (or, obviously, if you notice an issue that isn't security-related)
 
-## 📜 License
+## License
 
 WaveHouse is open source under the [Apache License 2.0](LICENSE).
