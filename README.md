@@ -12,7 +12,10 @@
 </p>
 
 <p align="center">
-  The open-source real-time API gateway for ClickHouse: schema-aware ingest, async batching, real-time SSE streaming, and tiered query caching. <strong>All in a single binary.</strong>
+  The open-source real-time API gateway for ClickHouse: schema-aware ingest, async batching, real-time SSE streaming, and tiered query caching.
+  <strong>
+  All in a single binary.
+  </strong>
 </p>
 
 <p align="center">
