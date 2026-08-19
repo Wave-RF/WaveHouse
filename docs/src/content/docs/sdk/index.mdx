@@ -9,10 +9,6 @@ import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components
 
 ## Installation
 
-:::caution[Pin a version until the first stable release]
-`@wavehouse/sdk`'s `latest` dist-tag still resolves to a `0.0.0-dev.*` snapshot, so the bare commands below install that rather than a release — see [the caution in Development](/development#the-dev-channel). Pin an exact version, or use `@dev` for the current `main`.
-:::
-
 <Tabs syncKey="pkg">
   <TabItem label="pnpm">
 
@@ -62,7 +58,7 @@ deno add npm:@wavehouse/sdk
 </script>
 ```
 
-Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`); jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For pages that can't use ES modules, the bundled IIFE build at `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag. Streaming runs on `fetch`, so it needs no polyfill either way. A bare CDN URL resolves the `latest` dist-tag — which, until the first **stable** `clients/ts/v*` release ships, is still a `0.0.0-dev.*` snapshot rather than a release ([see the caution](/development#the-dev-channel)); a prerelease publishes under `alpha`/`beta`/`rc`/`next` and leaves `latest` alone. Use a range (`@0`, `@0.1`) to float within a major or minor, or the `@dev` tag for unreleased builds from `main` (see [Cutting a release](/development#cutting-a-release)).
+Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`); jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For pages that can't use ES modules, the bundled IIFE build at `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag. Streaming runs on `fetch`, so it needs no polyfill either way. A bare CDN URL tracks the latest published release; use a range (`@0`, `@0.1`) to float within a major or minor, or the `@dev` tag for unreleased builds from `main` (see [Cutting a release](/development#cutting-a-release)).
 
   </TabItem>
 </Tabs>

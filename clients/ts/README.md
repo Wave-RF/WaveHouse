@@ -8,8 +8,6 @@ TypeScript client for [WaveHouse](https://github.com/Wave-RF/WaveHouse) — sche
 npm install @wavehouse/sdk
 ```
 
-> **Pin a version until the first stable release.** `latest` still resolves to a `0.0.0-dev.*` snapshot rather than a release ([why](https://wavehouse.dev/development#the-dev-channel)), so the bare command above installs that. Pin an exact version, or use `@wavehouse/sdk@dev` for the current `main`.
-
 Requires Node 22 or newer — the only line this SDK is tested against; Node 18 and 20 are past upstream end-of-life. Neither browsers nor Node need a polyfill: streaming runs on `fetch`, like the rest of the SDK — see [Runtime support](https://wavehouse.dev/sdk/#runtime-support).
 
 This works in any framework that uses a bundler — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — with `import { createClient } from '@wavehouse/sdk'`.
@@ -44,7 +42,7 @@ Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`). jsDelivr (
 </script>
 ```
 
-**Versioning.** A bare CDN URL resolves the `latest` dist-tag. Until the first **stable** `clients/ts/v*` release ships, `latest` is still a `0.0.0-dev.*` snapshot rather than a release ([why](https://wavehouse.dev/development#the-dev-channel)); after that it tracks the newest stable release — a prerelease publishes under `alpha`/`beta`/`rc`/`next` and never moves it. Either way, pin for production (`@wavehouse/sdk@0.1.0`) or float on a range (`@0` for the newest 0.x, `@0.1` for 0.1.x). Builds from `main` are published under the `dev` tag — `@wavehouse/sdk@dev` — for trying unreleased changes.
+**Versioning.** A bare CDN URL serves the latest published **release**; pin for production (`@wavehouse/sdk@0.1.0`) or float on a range (`@0` for the newest 0.x, `@0.1` for 0.1.x). Builds from `main` are published under the `dev` tag — `@wavehouse/sdk@dev` — for trying unreleased changes.
 
 Streaming (`.stream()`) runs on `fetch`, so it works in both forms with no polyfill.
 
