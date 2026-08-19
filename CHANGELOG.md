@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## Unreleased
 
-## [0.1.0] - 2026-08-18
+## [0.1.0] - 2026-08-19
 
 The first public release. Everything below shipped in it — the sections are grouped the way Keep a Changelog asks for, but since there is no previous release to compare against, a reader upgrading from nothing can treat the whole file as "Added". The date is the intended cut date; correct it if tagging slips, and move anything merged in between up from `## Unreleased`.
 
@@ -208,7 +208,7 @@ The first public release. Everything below shipped in it — the sections are gr
 
   The release job also stops *validating* `clients/ts/package.json` against the tag and instead stamps the tag's version into it before publishing, logging a notice on drift. Requiring them to match meant every SDK release needed a version-bump commit first — and since the `main` ruleset forbids direct pushes, that commit needed its own reviewed PR. All three components now derive their version from the tag they were built at (the server via GoReleaser's ldflags, the Go SDK because a module's version simply *is* its tag), so cutting any release is one `git tag` and nothing else.
 
-- **`CHANGELOG.md` restructured into one canonical set of sections** (`CHANGELOG.md`): the file had accumulated **35** `###` bands under a single `## Unreleased` — seven separate `### Added` headings, six `### Changed`, and a non-standard `### Changed (breaking)` — because every PR appended its own band rather than merging into the existing ones. Entries are now grouped once each, in Keep a Changelog's order, with document order preserved so the newest work still reads first; `Changed (breaking)` folded into `Changed`, which loses nothing given those entries carry their own inline `BREAKING:` marker and all of it predates any released version. The transformation only regrouped lines — all 333 top-level entries and 50 nested ones are byte-identical, verified by diffing the sorted multiset of non-heading lines before and after.
+- **`CHANGELOG.md` restructured into one canonical set of sections** (`CHANGELOG.md`): the file had accumulated dozens of duplicate `###` bands under a single `## Unreleased` — several separate `### Added` headings, several `### Changed`, and a non-standard `### Changed (breaking)` — because every PR appended its own band rather than merging into the existing ones. Entries are now grouped once each, in Keep a Changelog's order, with document order preserved so the newest work still reads first; `Changed (breaking)` folded into `Changed`, which loses nothing given those entries carry their own inline `BREAKING:` marker and all of it predates any released version. The transformation only regroups lines, never rewrites them: every entry is byte-identical before and after, verified by diffing the sorted multiset of non-heading lines. (Exact counts are deliberately not quoted — the base moves with every merge, and a stale figure beside a "verified" claim is worse than no figure.)
 
 - **Release archives no longer bundle `CHANGELOG.md`** (`.goreleaser.yaml`): GoReleaser's default file glob includes `CHANGELOG*`, which put 324 KB of development history into each of the eight archives — for a file that is one click away on GitHub and whose contents the release page already renders as notes. Narrowed to `LICENSE*` + `README*`.
 

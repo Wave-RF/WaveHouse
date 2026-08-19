@@ -92,7 +92,7 @@ The stack ships a permissive dev policy, so you can ingest without a token. Crea
 ### B. Prebuilt container image
 
 ```bash
-docker pull ghcr.io/wave-rf/wavehouse:latest    # latest stable release
+docker pull ghcr.io/wave-rf/wavehouse:latest    # latest stable release (none published yet — see below)
 docker pull ghcr.io/wave-rf/wavehouse:dev       # rolling main-branch build
 ```
 

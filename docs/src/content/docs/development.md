@@ -631,6 +631,8 @@ Tag globs are anchored at the start of the ref name, so `v*` never matches a `cl
 - **Server —** **build-provenance attestations** (Sigstore, free for public repos) over every archive and over the image's multi-arch manifest digest; the image attestation is stored alongside the image in GHCR. The release job verifies its own attestations before finishing, so a release that publishes unverifiable provenance goes red.
 - **TypeScript SDK —** an **npm provenance attestation** via `npm publish --provenance`, surfaced as the provenance badge on the package page and checkable with `npm audit signatures`. The npm job does not re-verify it the way the server job does.
 
+Binaries installed with `go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@vX.Y.Z` get no `-ldflags`, so they read their version from the module metadata the Go toolchain embeds; `/version` reports the tag without its leading `v` (`0.1.0`, not `v0.1.0`), with `git_commit`/`build_time` as `unknown`. Release archives and container images carry all three.
+
 Consumers can check provenance for themselves:
 
 ```bash
@@ -663,8 +665,6 @@ npm set this package's `latest` dist-tag on its *first* publish — even though 
 :::
 
 Docker needs no equivalent fix: a tag is a mutable pointer resolved fresh on every pull, with no version ranges and no ordering, so the failure mode #475 describes cannot arise there.
-
-Binaries installed with `go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@vX.Y.Z` get no `-ldflags`, so they read their version from the module metadata the Go toolchain embeds; `/version` reports the tag without its leading `v` (`0.1.0`, not `v0.1.0`), with `git_commit`/`build_time` as `unknown`. Release archives and container images carry all three.
 
 ## CI & review automation
 
