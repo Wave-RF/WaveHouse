@@ -429,14 +429,14 @@ Formatting (**gofumpt** — strict superset of gofmt — and **goimports** impor
 
 `make lint` also covers documentation: **markdownlint** owns Markdown *and* MDX style (rules in `.markdownlint.json`, file selection in `.markdownlint-cli2.jsonc`) and **misspell** owns spelling. Two rules are repo-local, in `scripts/markdownlint-rules/`:
 
-- **WH001 / no-hard-wrapped-prose** — a paragraph must be one line. Hard-wrapping at 72/80 columns turns a one-word edit into a five-line diff. Autofixes. Tables (leading pipes optional), code, headings, setext underlines, blockquotes, JSX, and multi-line MDX `import`/`export` are left alone; a list item is joined as a unit; an aside's body is joined but its `:::` delimiters are not.
+- **WH001 / no-hard-wrapped-prose** — a paragraph must be one line. Hard-wrapping at 72/80 columns turns a one-word edit into a five-line diff. Autofixes. Tables (leading pipes optional), code, headings, setext underlines, blockquotes, JSX, `$$` display math, and multi-line MDX `import`/`export` are left alone; a list item is joined as a unit; an aside's body is joined but its `:::` delimiters are not.
 - **WH002 / mdx-fence-needs-blank-line** — an MDX code fence directly against a JSX tag (`<TabItem label="YAML">` immediately followed by a fence). MDX renders that fine; the problem is that markdownlint parses CommonMark, where the tag opens an HTML block that runs to the next blank line — so the fence is not a code block to any generic rule, and `markdownlint --fix` will happily reformat the code inside it. The blank line is what keeps the two parsers agreeing.
 
-Run `make fix` to apply them. **The generic markdownlint fixers run over `.md` only.** markdownlint parses CommonMark and MDX does not, and where the two disagree an autofix rewrites the inside of a code block — de-indenting YAML comments it reads as headings, autolinking bare URLs. Reporting that disagreement is useful, so `make lint` still checks `.mdx`; acting on it is not. MDX therefore gets exactly one fixer, `scripts/fix-mdx-fences.mjs`, which only ever inserts a blank line beside a JSX tag.
+Run `make fix` to apply them. **The generic markdownlint fixers run over `.md` only.** markdownlint parses CommonMark and MDX does not, and where the two disagree an autofix rewrites the inside of a code block — de-indenting YAML comments it reads as headings, autolinking bare URLs. Reporting that disagreement is useful, so `make lint` still checks `.mdx`; acting on it is not. MDX therefore gets exactly one *structural* fixer, `scripts/fix-mdx-fences.mjs`, which only ever inserts a blank line beside a JSX tag. (misspell still auto-corrects spelling in `.mdx` — its corrections come from a curated list and don't depend on parsing the document.)
 
 The practical consequence: **a problem `make lint` reports in an `.mdx` file may need fixing by hand**, WH001's hard-wrapped prose included. Never run `markdownlint-cli2 --fix` against MDX directly. Improving this — a formatter that understands MDX rather than one that guesses — is tracked in [#499](https://github.com/Wave-RF/WaveHouse/issues/499).
 
-The markdownlint extension reads `.markdownlint-cli2.jsonc`, `customRules` and all, so no editor setting is needed — but it only activates on Markdown, so in-editor squiggles cover WH001 in `.md` and never WH002 in `.mdx`. Agent-written files get the full chain at write time from `.claude/hooks/markdown-on-save.sh`; everyone else gets it from `make fix`.
+The markdownlint extension reads `.markdownlint-cli2.jsonc`, `customRules` and all, so no editor setting is needed — but it only activates on Markdown, so in-editor squiggles cover WH001 in `.md` and never WH002 in `.mdx`. Agent-written files get the same treatment at write time from `.claude/hooks/markdown-on-save.sh` — markdownlint in `.md`, the fence pass in `.mdx` — and everyone else gets it from `make fix`.
 
 ## Project Structure
 
@@ -513,7 +513,7 @@ Run `make help` to see all targets. Key ones:
 | `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
 | `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
 | `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + docs type-check (`astro check` — not a full build, so link validation stays CI's job) (parallel-safe: `make -j verify`) |
-| `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), and Markdown/MDX (`fix-mdx-fences` → markdownlint `--fix` → misspell) |
+| `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint `--fix`), MDX (`fix-mdx-fences` only — the generic fixers never run over `.mdx`), and docs-prose spelling (misspell, both) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
 | `make build-release` | Stripped release-style build → `bin/wavehouse-release` |

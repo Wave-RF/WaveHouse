@@ -49,7 +49,7 @@ Both markers are tree-keyed so commit-then-push works without a re-run when the 
 | ---- | ------- |
 | `.claude/settings.json` | Team-wide: `deny` permissions (force-push / git reset --hard / filter-branch / update-ref -d, gh pr merge / ready / approve / request-changes, gh repo/release delete, gh secret delete, gh workflow disable, rm -rf / sudo rm), all four hooks wired |
 | `.claude/hooks/gofumpt-on-save.sh` | PostToolUse Edit/Write/MultiEdit: auto-formats `.go` files |
-| `.claude/hooks/markdown-on-save.sh` | PostToolUse Edit/Write/MultiEdit: repairs MDX fence structure, applies markdownlint `--fix` (WH001 unwrapping included), and runs misspell over docs prose |
+| `.claude/hooks/markdown-on-save.sh` | PostToolUse Edit/Write/MultiEdit: repairs MDX fence structure in `.mdx`, applies markdownlint `--fix` (WH001 unwrapping) in `.md` only, and runs misspell over docs prose in both |
 | `.claude/hooks/agent-bash-gate.sh` | PreToolUse Bash: catches accidental Agent PR Discipline violations (drafts only, no human reviewer adds, a marker (from a review or a logged skip) from every reviewer in `scripts/pre-push-reviewers.sh` required on any push to a non-main branch with commits ahead of `main`; PR title linted via `scripts/lint-pr-title.sh` on `gh pr create` / `gh pr edit --title`) |
 | `.claude/hooks/review-marker.sh` | SubagentStop: on a reviewer's `VERDICT: ship_it`, writes its `tmp/<name>-passed-<HEAD-sha>` marker (the reviewer set comes from `scripts/pre-push-reviewers.sh`). Filters by `agent_type` in-script (SubagentStop has no matcher). Reads `.last_assistant_message` (flat string) rather than PostToolUse:Agent's structured `tool_response` |
 | `.claude/commands/cover.md` | `/cover [suite]` — suite dispatch + coverage threshold analysis |

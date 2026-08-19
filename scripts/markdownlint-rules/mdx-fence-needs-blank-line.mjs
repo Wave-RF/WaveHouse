@@ -26,8 +26,10 @@
 // interior blank line will therefore look harmless — that is the trap, not a
 // counter-example.
 //
-// This rule reports (CI + editor). The *fix* is applied earlier, by
-// scripts/fix-mdx-fences.mjs, because it has to land before any other fixer:
+// This rule reports (CI + editor). The *fix* is applied separately, by
+// scripts/fix-mdx-fences.mjs, because the generic markdownlint fixers never
+// run over .mdx at all — `fix:md` scopes them to **/*.md. The reason they are
+// kept away:
 // until the blank line exists CommonMark sees no code block, so a YAML block's
 // `#` comments parse as ATX headings and MD022/MD023/MD026/MD034 will happily
 // "fix" them — de-indenting them out of the block and rewriting bare URLs
@@ -50,11 +52,12 @@ export default {
     // CommonMark has no JSX, so this only applies to MDX.
     if (!params.name.endsWith(".mdx")) return;
 
-    // Deliberately no fixInfo. A bare `markdownlint-cli2 --fix` would apply the
-    // blank-line insert AND, in the same pass, the generic fixes computed
-    // against the swallowed-fence parse — repairing the symptom while
-    // corrupting the code. Reporting only keeps the violation visible until the
-    // ordered pass in scripts/fix-mdx-fences.mjs runs.
+    // Deliberately no fixInfo. `fix:md` never runs markdownlint --fix over
+    // .mdx, so a fixInfo here would only ever fire if someone ran it by hand —
+    // which would apply the blank-line insert AND, in the same pass, the generic
+    // fixes computed against the swallowed-fence parse, repairing the symptom
+    // while corrupting the code. Reporting only keeps the violation visible for
+    // scripts/fix-mdx-fences.mjs to repair.
     for (const { line, detail } of findFenceTagViolations(params.lines)) {
       onError({ lineNumber: line, detail });
     }

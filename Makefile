@@ -477,7 +477,9 @@ fix-ts: pnpm-install
 # comments it reads as headings, autolinking bare URLs. Reporting on that
 # disagreement is useful (lint-md still checks .mdx); acting on it is not.
 #
-# .mdx therefore gets exactly one fixer, our own: scripts/fix-mdx-fences.mjs,
+# .mdx therefore gets exactly one STRUCTURAL fixer, our own — misspell still
+# corrects spelling there, since its curated list needs no parse:
+# scripts/fix-mdx-fences.mjs,
 # which only ever inserts a blank line next to a JSX tag, so its worst failure
 # is a render-neutral blank line rather than rewritten code.
 #

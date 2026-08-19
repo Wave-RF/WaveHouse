@@ -73,11 +73,13 @@
     // WH002 — which only applies to .mdx — never squiggles at all. `make fix`
     // and .claude/hooks/markdown-on-save.sh are the MDX path. Associating .mdx
     // with markdown would be the wrong fix: it would turn on the fix-on-save
-    // below for MDX and reintroduce the ordering hazard described next.
+    // below for MDX, running exactly the generic fixers that `fix:md` keeps away
+    // from .mdx (see the note below).
     //
     // WH002's autofix is owned by scripts/fix-mdx-fences.mjs, not by fix-on-save:
-    // it must run before the generic rules, which the editor cannot order. Save
-    // shows the squiggle; `make fix` (or the markdown-on-save hook) repairs it.
+    // the generic markdownlint fixers are never run over .mdx, because where
+    // their CommonMark parse disagrees with MDX they rewrite the inside of a
+    // code block. `make fix` (or the markdown-on-save hook) repairs it instead.
     "editor.codeActionsOnSave": {
       "source.fixAll.markdownlint": "explicit"
     }

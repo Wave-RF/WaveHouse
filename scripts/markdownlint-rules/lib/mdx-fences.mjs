@@ -1,8 +1,8 @@
 // Shared detector for WH002 (MDX code fence glued to a JSX tag).
 //
 // One implementation, two consumers — the markdownlint rule next door (lint,
-// CI, editor squiggles) and scripts/fix-mdx-fences.mjs (the autofix pass that
-// has to run before markdownlint touches the file). Keeping the logic here is
+// CI, editor squiggles) and scripts/fix-mdx-fences.mjs (the only fixer allowed
+// near an .mdx file). Keeping the logic here is
 // what stops those two from drifting; see AGENTS.md §"DRY — one source of truth".
 
 const CLOSE_TAG = /^\s*<\/[A-Za-z][^>]*>\s*$/; // </TabItem>

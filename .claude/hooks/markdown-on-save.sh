@@ -13,8 +13,8 @@
 # and re-stages files silently changes what you reviewed and fights `git add -p`.
 # The commit hook stays a check; this fixes early enough that it rarely fires.
 #
-# Order is load-bearing — see scripts/fix-mdx-fences.mjs for why the MDX
-# structural pass must precede markdownlint.
+# The two branches below are mutually exclusive by extension: markdownlint's
+# generic fixers never see .mdx. See scripts/fix-mdx-fences.mjs for why.
 #
 # Safety: best-effort throughout. A missing tool, an unparseable file, or a
 # lint error that has no fix leaves the file alone and never blocks the edit.
@@ -53,7 +53,8 @@ else
   rel="${dir#"$root"/}/$(basename "$file_path")"
 fi
 
-# .mdx gets exactly one fixer, and it is ours. The generic markdownlint rules
+# .mdx gets exactly one STRUCTURAL fixer, and it is ours (misspell below still
+# corrects spelling there). The generic markdownlint rules
 # are deliberately never run against MDX — markdownlint parses CommonMark, MDX
 # does not, and where the two disagree a generic autofix rewrites the inside of
 # a code block. fix-mdx-fences only ever inserts a blank line beside a JSX tag,
