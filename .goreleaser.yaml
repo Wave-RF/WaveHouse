@@ -1,5 +1,25 @@
 version: 2
 
+# GoReleaser defaults ProjectName to the repo directory name — "WaveHouse" —
+# which is the only place the product's display casing leaked into an artifact
+# identifier: archives built as `WaveHouse_linux_amd64.tar.gz` while the binary
+# inside, the GHCR image, and the npm package are all lowercase `wavehouse`.
+# Asset URLs are permanent once a release is published, so this is pinned
+# rather than inherited.
+project_name: wavehouse
+
+# GoReleaser's tag detection — which tag it is releasing, and which one the
+# release notes are diffed from — walks git history without caring which tag
+# family it lands on. This repo has several: `v*` for the server and
+# `clients/<lang>/v*` for each client SDK. Without this, cutting `v0.1.0` after
+# an SDK release describes the server release as "everything since
+# clients/ts/v0.1.0" — verified: `previous=clients/ts/v0.1.0 current=v0.1.0`.
+# Ignoring the client families makes the built-in detection correct, which is
+# why no workflow needs to pass GORELEASER_PREVIOUS_TAG.
+git:
+  ignore_tags:
+    - "clients/*"
+
 builds:
   - id: wavehouse
     main: ./cmd/wavehouse
@@ -19,6 +39,27 @@ checksum:
 
 archives:
   - name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    # Windows gets .zip; everything else keeps GoReleaser's tar.gz default.
+    # Windows has shipped bsdtar since 10 1803, so a .tar.gz is *openable* —
+    # but not from Explorer, which still only double-clicks into .zip. The
+    # convention costs nothing and this is the first release whose asset
+    # names people will script against.
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    # Narrowed from GoReleaser's default, which also globs CHANGELOG* — 324 KB
+    # of development history in every one of the eight archives, for a file
+    # that is a click away on GitHub and whose contents are the release notes
+    # the download page already shows.
+    # NOTICE is not optional: the repo is Apache-2.0 and §4(d) makes every
+    # redistributor of these archives inherit an attribution obligation they
+    # cannot satisfy from a tarball carrying only LICENSE. GoReleaser's default
+    # glob never included it either, so this hunk is the moment to fix it —
+    # archive contents are effectively permanent once published.
+    files:
+      - LICENSE*
+      - NOTICE*
+      - README*
 
 # Suppress the GitHub Release on dev pushes. publish-dev.yml sets
 # WAVEHOUSE_DEV=1 + a synthetic tag so it can reuse this same pipeline;
@@ -30,6 +71,12 @@ archives:
 # release path.
 release:
   disable: '{{ eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}'
+  # `auto` marks the GitHub Release as a pre-release whenever the tag
+  # carries a prerelease identifier (v0.1.0-alpha.1 → yes; v0.1.0 → no).
+  # GoReleaser's default is a flat `false`, which would have published the
+  # first alpha as a full stable release — and GitHub's "Latest release"
+  # badge keys off exactly this field.
+  prerelease: auto
 
 dockers_v2:
   - dockerfile: deployments/Dockerfile.goreleaser
@@ -37,13 +84,24 @@ dockers_v2:
       - wavehouse
     images:
       - "ghcr.io/wave-rf/wavehouse"
-    # Tag scheme switches on WAVEHOUSE_DEV:
-    #   release: :{{ .Tag }} (e.g. :v1.2.3) + :latest
-    #   dev:     :dev-<full sha>            + :dev (rolling)
-    # The full SHA matches cleanup-ghcr.yml's `^dev-[0-9a-f]+$` regex.
+    # Every build gets an immutable reference plus one moving pointer.
+    #
+    #   immutable  release: :{{ .Tag }} (e.g. :v1.2.3)
+    #              dev:     :dev-<full sha>   (matches cleanup-ghcr.yml's
+    #                                          `^dev-[0-9a-f]+$` regex)
+    #   moving     release: the channel release.yml derived from the tag via
+    #                       scripts/ci/release-channel.sh — :latest for a
+    #                       stable tag, :alpha/:beta/:rc/:next for a
+    #                       prerelease
+    #              dev:     :dev (rolling, follows main)
+    #
+    # The channel indirection is why `v1.3.0-rc.1` can't take :latest away
+    # from a shipped `v1.2.0`. The dev branch stays an explicit literal
+    # rather than leaning on WAVEHOUSE_CHANNEL's default: a push to main that
+    # forgot to set the env var must never be able to publish :latest.
     tags:
       - '{{ if eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}dev-{{ .FullCommit }}{{ else }}{{ .Tag }}{{ end }}'
-      - '{{ if eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}dev{{ else }}latest{{ end }}'
+      - '{{ if eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}dev{{ else }}{{ envOrDefault "WAVEHOUSE_CHANNEL" "latest" }}{{ end }}'
     platforms:
       - linux/amd64
       - linux/arm64
@@ -57,9 +115,23 @@ dockers_v2:
       "org.opencontainers.image.created": "{{ .Date }}"
 
 changelog:
-  sort: asc
-  use: git
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
+  # The changelog pipe is NOT skipped by `release.disable` — only by
+  # `--snapshot` or this key (verified: a run with `release.disable: true`
+  # still logs "generating changelog"). Left on, `github-native` would make
+  # publish-dev.yml POST /releases/generate-notes on every push to main — an
+  # endpoint needing `contents: write`, which that workflow deliberately does
+  # not grant — to build a body that is then discarded, for a synthetic tag
+  # that exists only on the runner. goreleaser-validate.yml cannot catch it
+  # either, since `build --snapshot` skips this pipe entirely.
+  disable: '{{ eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}'
+  # Delegate the release body to GitHub's own "generate release notes" — the
+  # grouped, linked, per-PR list you get from the Releases UI button, with
+  # authors and a New Contributors section. `use: git` built the body from raw
+  # commit subjects instead: nearly the same content (main is squash-merged, so
+  # each subject IS a PR title) but no links, no authors, and no grouping.
+  #
+  # Categorization and exclusions move to .github/release.yml with this. The
+  # `sort` and `filters` keys that used to live here are gone rather than left
+  # in place: github-native renders the body on GitHub's side, so GoReleaser
+  # never sees the commits and both would be silently dead config.
+  use: github-native

@@ -512,7 +512,7 @@ Run `make help` to see all targets. Key ones:
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
 | `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
 | `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
-| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + docs type-check (`astro check` — not a full build, so link validation stays CI's job) (parallel-safe: `make -j verify`) |
+| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + docs type-check (`astro check` — not a full build, so link validation stays CI's job) (parallel-safe: `make -j verify`) |
 | `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint `--fix`), MDX (`fix-mdx-fences` only — the generic fixers never run over `.mdx`), and docs-prose spelling (misspell, both) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
@@ -528,6 +528,10 @@ Run `make help` to see all targets. Key ones:
 | `make test-e2e` | E2E SDK suite against `bin/wavehouse-cov` + coverage gate |
 | `make test-all` | All four suites sequentially + merged coverage gate |
 | `make ci` | Full pipeline: parallel `verify` + builds + unit/SDK tests, then integration + E2E + cov |
+| **Release** (see [Cutting a release](#cutting-a-release)) | |
+| `make release-server VERSION=X.Y.Z` | Tag a server release — binaries + container image |
+| `make release-sdk-ts VERSION=X.Y.Z` | Tag a TypeScript SDK release — npm |
+| `make release-sdk-go VERSION=X.Y.Z` | Tag a Go SDK release — `go get` (pending [#434](https://github.com/Wave-RF/WaveHouse/pull/434)) |
 | **Analysis** (informational, not in CI) | |
 | `make size` | Binary size analysis → `tmp/analysis/` (text + SVG + interactive HTML) |
 | `make audit-cgo` | Audit dependency tree for C files (builds use `CGO_ENABLED=0`) |
@@ -577,29 +581,94 @@ The GitHub Actions config names **two** directories. `directory: /` reaches `.gi
 
 **No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
 
-## Releasing the SDK
+## Cutting a release
 
-The TypeScript SDK (`@wavehouse/sdk`, in `clients/ts/`) publishes to npm via `.github/workflows/publish-npm.yml` using OIDC trusted publishing — no `NPM_TOKEN`. It is independent of the server's Go/Docker release (`release.yml`): the `v*` (server) and `sdk-v*` (SDK) tag globs are disjoint, so the two never collide. There are two channels:
-
-- **Dev snapshots.** Every push to `main` publishes `0.0.0-dev.<hash>` under the `dev` dist-tag — but only when the built `dist/` actually changed (the version is a hash of the build output, so an unchanged build resolves to an already-published version and is skipped). Install the bleeding edge with `npm install @wavehouse/sdk@dev`.
-- **Tagged releases.** Pushing a `sdk-vX.Y.Z` tag publishes that version and creates a GitHub Release. A stable version goes to the `latest` dist-tag; a prerelease (`sdk-v0.2.0-rc.1`) is published under `alpha`/`beta`/`rc`/`next` — derived from the suffix — and marked as a GitHub pre-release. The tag **must** match `clients/ts/package.json`'s `version`, or the job fails fast.
-
-To cut a release:
+Cutting a release is **one tag** — no version bump in code, no release branch:
 
 ```bash
-# 1. Bump "version" in clients/ts/package.json, commit, and merge to main.
-# 2. Tag the release commit and push the tag:
-git tag sdk-v0.1.0
-git push origin sdk-v0.1.0
+make release-server VERSION=0.1.0   # tag v0.1.0            → binaries + container image
+make release-sdk-ts VERSION=0.1.0   # tag clients/ts/v0.1.0 → @wavehouse/sdk on npm
 ```
 
-:::caution[The first tagged release promotes `latest`]
-npm sets a package's `latest` dist-tag on its *first* publish even under `--tag dev`, so until the first `sdk-v*` release a bare `npm install @wavehouse/sdk` (and the bare CDN URLs) resolve to a `0.0.0-dev.*` snapshot. The first tagged stable release moves `latest` to a real version and fixes this for every consumer.
+`make release-sdk-go` exists too, wired ahead of the Go SDK landing ([#434](https://github.com/Wave-RF/WaveHouse/pull/434)); it refuses to run until `clients/go/` is in the repo.
+
+The one thing to do *before* tagging is promote the changelog: `AGENTS.md` requires every PR to add its entry under `## Unreleased`, so open a PR renaming that heading to `## [X.Y.Z] - YYYY-MM-DD` and adding the matching link reference at the foot of the file. Nothing in the release pipeline reads `CHANGELOG.md` — this is for the file's own readers.
+
+Each runs [`scripts/release.sh`](https://github.com/Wave-RF/WaveHouse/blob/main/scripts/release.sh), which preflights (on `main`, clean tree, in sync with `origin/main`, the tag free both locally and on the remote, the required `CI` check green on *this exact commit*), prints exactly what will be published, and asks before pushing. `DRY_RUN=1 make release-…` stops after the plan. Tag creation is admin-only via the `release tag protection` ruleset.
+
+The components are independent — releasing the server does not publish the SDK, and their version numbers need not match.
+
+### Why there is no version to bump
+
+The **tag is the version**, everywhere:
+
+| Component | Where the version comes from |
+| --- | --- |
+| Server | GoReleaser's `-ldflags` at build time, from the tag |
+| Go SDK | The tag itself — a Go module has no version file |
+| TypeScript SDK | `publish-npm.yml` stamps `clients/ts/package.json` from the tag before publishing |
+
+The npm case is the one that usually forces a bump commit, and it is deliberately not the source of truth here: the `main` ruleset forbids pushing to `main` directly, so bumping `package.json` would mean a reviewed PR merged before *every* release. The committed value is documentation — if it drifts from the tag, the workflow logs a notice and the tag wins.
+
+### Tag naming
+
+```text
+v0.1.0              server (root Go module)
+clients/ts/v0.1.0   @wavehouse/sdk
+clients/go/v0.1.0   Go SDK
+```
+
+The `clients/<lang>/` prefix isn't a style choice. Go resolves a module in a subdirectory only against a tag carrying that subdirectory as a prefix ([the module reference](https://go.dev/ref/mod) is explicit), so `go get github.com/Wave-RF/WaveHouse/clients/go@v0.1.0` requires precisely `clients/go/v0.1.0`. Every client follows that shape rather than leaving Go as the exception, and a new language is one more `clients/<lang>/v*` family.
+
+Tag globs are anchored at the start of the ref name, so `v*` never matches a `clients/...` tag — which is what keeps a client release from triggering a server release.
+
+### What a release publishes
+
+- **Server —** a **GitHub Release** with the cross-compiled archives (linux/darwin/windows/freebsd × amd64/arm64; `.zip` on Windows, `.tar.gz` elsewhere) and `checksums.txt`. A tag carrying a prerelease suffix (`v0.1.0-alpha.1`) is marked as a GitHub pre-release, so it never takes the "Latest release" badge from a shipped stable version.
+- **Both —** **release notes generated by GitHub** from the PRs merged since the previous tag *in the same family* — one line per PR, since `main` is squash-merged, grouped into the categories defined in [`.github/release.yml`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/release.yml). Grouping is by **PR label**: `github_actions` / `documentation` are applied automatically by `actions/labeler`, but `breaking-change`, `security`, `bug`, and `enhancement` are applied by hand — an unlabelled PR lands in "Other changes". Dependabot is split out by **author** rather than by label, because the labels `actions/labeler` applies by path — `github_actions`, `documentation` — mark our own PRs too; our CI work gets its own "CI & build" section — ordered above Documentation, since a CI PR here nearly always updates docs too — and Dependencies is pure Dependabot residue. **Any category keyed on a label a Dependabot PR can carry needs that author exclude** — labeler's path labels *and* the ecosystem labels Dependabot applies itself (`dependencies`, `javascript`, `go`, `github_actions`; `javascript` is in neither `labeler.yml` nor our categories) — or that category intercepts bumps before they reach the `📦 Dependencies` catch-all. `CHANGELOG.md` is *not* the source of the release body; it is the longer-form record of why each change was made.
+- **Server —** a **GHCR image** at `ghcr.io/wave-rf/wavehouse`, with two tags: the immutable `:vX.Y.Z`, and one moving *channel* pointer. A stable release moves `:latest`; a prerelease moves `:alpha` / `:beta` / `:rc` / `:next` instead, matching the npm dist-tag it would get. The channel comes from the **first** prerelease identifier, matched **exactly**: `v0.2.0-rc.1` → `:rc`, while `-alpha1`, `-preview.1`, or any other form → `:next`. `scripts/ci/release-channel.sh` is the single rule every publisher uses, so `ghcr.io/wave-rf/wavehouse:rc` and `@wavehouse/sdk@rc` can't drift apart. **A prerelease-only project therefore has no `:latest` tag** — that is deliberate; `:latest` starts existing when the first stable release ships.
+- **TypeScript SDK —** an **npm publish** of `@wavehouse/sdk` under `latest` (stable) or `alpha`/`beta`/`rc`/`next` (prerelease), plus its own GitHub Release.
+- **Server —** **build-provenance attestations** (Sigstore, free for public repos) over every archive and over the image's multi-arch manifest digest; the image attestation is stored alongside the image in GHCR. The release job verifies its own attestations before finishing, so a release that publishes unverifiable provenance goes red.
+- **TypeScript SDK —** an **npm provenance attestation** via `npm publish --provenance`, surfaced as the provenance badge on the package page and checkable with `npm audit signatures`. The npm job does not re-verify it the way the server job does.
+
+Binaries installed with `go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@vX.Y.Z` get no `-ldflags`, so they read their version from the module metadata the Go toolchain embeds; `/version` reports the tag without its leading `v` (`0.1.0`, not `v0.1.0`), with `git_commit`/`build_time` as `unknown`. Release archives and container images carry all three.
+
+Consumers can check provenance for themselves:
+
+```bash
+gh attestation verify wavehouse_linux_amd64.tar.gz \
+  --repo Wave-RF/WaveHouse \
+  --signer-workflow Wave-RF/WaveHouse/.github/workflows/release.yml
+
+gh attestation verify oci://ghcr.io/wave-rf/wavehouse:v0.1.0 \
+  --repo Wave-RF/WaveHouse \
+  --signer-workflow Wave-RF/WaveHouse/.github/workflows/release.yml
+```
+
+`--signer-workflow` is not optional garnish: `--repo` alone accepts an attestation produced by *any* workflow in the repo. Same point, and the `:dev` equivalent, in [Deployment → Registry](/deployment#registry) and `SECURITY.md`.
+
+:::note[Releasing from the GitHub UI instead]
+Publishing a release from **Releases → Draft a new release** creates the tag, which fires the same workflow — so it works, and GoReleaser's default `mode: keep-existing` (the key is not set in `.goreleaser.yaml`) means it will not overwrite notes you wrote. Two things the `make` targets do for you and the UI does not: none of the preflight checks run, and you must click **Generate release notes** yourself, because a body you publish empty stays empty.
 :::
+
+## The `dev` channel
+
+Between releases, every push to `main` republishes both artifacts so `@dev` always means "current `main`":
+
+- **`ghcr.io/wave-rf/wavehouse:dev`** — a rolling pointer, plus an immutable `:dev-<sha>` (pruned after 30 days by `cleanup-ghcr.yml`, newest 5 always kept). Built by the same GoReleaser pipeline with `WAVEHOUSE_DEV=1`, which suppresses the GitHub Release. Note a Docker tag is only a pointer: `docker run …:dev` reuses a stale local image unless you `docker pull` first or pass `--pull=always`.
+- **`@wavehouse/sdk@dev`** — `0.0.1-dev.<utc-stamp>.h<build-hash>`, published only when the published package actually changes. The trailing hash covers every file `npm pack` would ship — the built `dist/`, `package.json` minus its `version`, and the bundled `README`/`LICENSE` — so a push whose package would be byte-identical to the current `dev` publish is skipped, while a change to `exports`, `files`, `bin`, or `engines` republishes even though `dist/` is untouched.
+
+  The `<utc-stamp>` is load-bearing, not decoration. `npm install …@dev` records a *range* in your `package.json`, not the dist-tag, so what you get on the next install is the highest version matching that range. Under the old `0.0.0-dev.h<hash>` scheme, semver's lexical ordering of alphanumeric prerelease identifiers meant the newest publish routinely wasn't the highest one, and a range could resolve *backwards* — an `@dev` install landed on a two-month-old build ([#475](https://github.com/Wave-RF/WaveHouse/issues/475)). A numeric identifier compares numerically, so the channel now orders by publish time. The `0.0.1` base keeps the channel below every real release (so a dev build can never satisfy `^0.1.0`) and above the legacy `0.0.0-dev.*` publishes, which npm's 72-hour unpublish window makes permanent.
+
+:::caution[`latest` still points at a dev snapshot]
+npm set this package's `latest` dist-tag on its *first* publish — even though that publish went out under `--tag dev` — so it currently resolves to `0.0.0-dev.0f8826c`, the June 4 bootstrap build. Until the first **stable** `clients/ts/v*` release, a bare `npm install @wavehouse/sdk` and the bare CDN URLs get that snapshot, **not** a release — a prerelease publishes under `alpha`/`beta`/`rc`/`next` and leaves `latest` where it is. Publishing the first stable version moves `latest` to it and fixes this for every consumer; delete this note in the same change.
+:::
+
+Docker needs no equivalent fix: a tag is a mutable pointer resolved fresh on every pull, with no version ranges and no ordering, so the failure mode #475 describes cannot arise there.
 
 ## CI & review automation
 
-This repo has three tiers of AI automation sitting alongside the normal CI checks. Full detail lives in `AGENTS.md`; this section covers the contributor-facing behavior.
+AI automation sits alongside the normal CI checks — advisory PR review from CodeRabbit and Copilot, plus the local Claude Code tooling in `.claude/`. Full detail lives in `AGENTS.md` §Repository Automation; this section covers the contributor-facing behavior.
 
 ### PR title and Conventional Commits
 
@@ -669,12 +738,13 @@ When pushing back on a bot's suggestion, end the reply with the bot's mention (e
 
 ### Issue triage
 
-`.github/workflows/triage.yml` classifies new and edited issues via GitHub Models (`gpt-4o-mini`) and applies:
+Issue triage is **manual**. There is no triage workflow: `.github/workflows/triage.yml` classified new and edited issues with GitHub Models, which GitHub [retired on 2026-07-30](https://github.blog/changelog/2026-07-30-github-models-is-now-retired/) — the inference endpoint returns `410` for every request, so the workflow failed on every issue open/edit until it was removed ([#431](https://github.com/Wave-RF/WaveHouse/issues/431)).
 
-- `area/*` labels based on the issue body (areas pulled dynamically from the `area/*` repo labels — adding a new `area/foo` label with a description is all you need; no workflow edit)
-- `security` if the model flags a security concern
-- `breaking-change` if the model flags a public-API break
-- Priority on the **Task Board** project #7 via the board's `Priority` field (requires `PROJECT_BOARD_TOKEN` secret — labels apply with or without it)
+What that means in practice:
+
+- `area/*`, `security`, and `breaking-change` labels are applied by hand when an issue is triaged. PR labels are unaffected — those come from `actions/labeler` (below), which is path-based and needs no model.
+- Priority on the **Task Board** project #7 is set by hand on the board's `Priority` field. `.github/board-config.env` existed only for that workflow and is gone with it. The `PROJECT_BOARD_TOKEN` repo secret is now **unused** — it has no consumers left, so it is worth deleting and revoking the PAT behind it.
+- Maintainers running Claude Code can use the `/pm-triage` skill, which does the same classification locally against the live board.
 
 ### Auto-labeling PRs
 
@@ -684,7 +754,7 @@ The `PR housekeeping` workflow (`.github/workflows/housekeeping.yml`) runs `acti
 
 Follow the checklist in `AGENTS.md` §"Common Tasks / Adding a new internal package" — the automation-relevant steps are:
 
-1. Create a matching `area/<pkg>` repo label with a meaningful description (triage reads the description as the classifier's per-area hint).
+1. Create a matching `area/<pkg>` repo label with a meaningful description.
 2. Add the path → label mapping to `.github/labeler.yml` so PRs touching the new package get auto-labeled.
 
-Triage picks up the new label automatically; no workflow edit needed.
+Step 2 is the one that automates anything — PR labeling is path-based. Step 1's label is applied by hand during issue triage.

@@ -119,7 +119,12 @@ JOBS ?= $(DEFAULT_JOBS)
 # Version metadata is always embedded in the binary. Names match the package
 # vars in cmd/wavehouse/main.go (Version / GitCommit / BuildTime), which the
 # goreleaser config injects the same way for release artifacts.
-VERSION    ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo dev)
+# `--match 'v[0-9]*'` keeps this on the SERVER's tag family. Without it,
+# `git describe` returns whichever tag is nearest in history — so once
+# `clients/ts/v0.1.0` exists, `make build` stamps the SDK's version into the
+# server binary and out through /version, and goreleaser-validate.yml logs
+# "current tag is not semver". `--always` still covers the no-match case.
+VERSION    ?= $(shell git describe --tags --match 'v[0-9]*' --dirty --always 2>/dev/null || echo dev)
 COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 VERSION_LDFLAGS := -X main.Version=$(VERSION) -X main.GitCommit=$(COMMIT) -X main.BuildTime=$(BUILD_TIME)
@@ -421,6 +426,15 @@ test-md-rules: pnpm-install
 test-classify-paths:
 	$(call run,classify-paths test,scripts/classify-paths.test.sh,)
 
+# test-release-channel: assert scripts/ci/release-channel.sh — the single rule
+# mapping a release tag to its moving channel (`:latest` / `@latest` vs
+# `:rc` / `@rc` …), shared by release.yml, publish-npm.yml and release.sh.
+# Covers the fail-closed cases too: an unclassifiable tag must never resolve to
+# `latest`. A verify leaf, same as test-classify-paths.
+.PHONY: test-release-channel
+test-release-channel:
+	$(call run,release-channel test,scripts/ci/release-channel.test.sh,)
+
 .PHONY: vulncheck
 vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
 ifdef V
@@ -511,11 +525,11 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (13): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (14): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
-# for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint) and
-# test-classify-paths for the tooling;
+# for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
+# test-classify-paths and test-release-channel for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
 # nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
 # (`biome check`) but NOT fmt-ts (`biome format`) — check already covers
@@ -529,7 +543,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
@@ -830,6 +844,45 @@ ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverag
 	@$(MAKE) cov
 	@scripts/ci-marker.sh write
 	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
+
+##@ Release
+
+# Releases are cut by pushing ONE tag — no version bump, no commit, no release
+# PR. Every component derives its version from the tag it was built at (the
+# server via GoReleaser's ldflags, the Go SDK because a module's version simply
+# IS its tag, @wavehouse/sdk because publish-npm.yml stamps package.json from
+# the tag before publishing). The `main` ruleset forbids direct pushes anyway,
+# so a bump commit would need its own reviewed PR before every release.
+#
+# scripts/release.sh holds the preflight checks — on main, clean tree, synced
+# with origin, tag free on both sides, CI green on this exact commit — and
+# prints what will be published before prompting. DRY_RUN=1 stops after the
+# plan. Full walkthrough: docs/src/content/docs/development.md §Cutting a release.
+
+# VERSION is `?=`-defaulted to a git-describe string for build stamping, so it
+# is NEVER empty — a forgotten `VERSION=` would reach release.sh as something
+# like `1064a4fe-dirty` and fail with a confusing semver error instead of a
+# usage message. $(origin) is what distinguishes "passed on the command line"
+# from "defaulted above".
+define require_release_version
+@[ "$(origin VERSION)" = "command line" ] || { \
+	printf '$(RED)✗$(RESET) usage: make $@ VERSION=X.Y.Z  (bare semver, no leading v)\n' >&2; exit 1; }
+endef
+
+.PHONY: release-server
+release-server: ## Tag a server release — binaries + container image (VERSION=X.Y.Z)
+	$(require_release_version)
+	@scripts/release.sh server "$(VERSION)"
+
+.PHONY: release-sdk-ts
+release-sdk-ts: ## Tag a TypeScript SDK release — npm (VERSION=X.Y.Z)
+	$(require_release_version)
+	@scripts/release.sh ts "$(VERSION)"
+
+.PHONY: release-sdk-go
+release-sdk-go: ## Tag a Go SDK release — go get (VERSION=X.Y.Z)
+	$(require_release_version)
+	@scripts/release.sh go "$(VERSION)"
 
 ##@ Analysis
 
