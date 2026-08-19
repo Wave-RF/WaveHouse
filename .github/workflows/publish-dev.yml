@@ -11,9 +11,11 @@ name: Publish dev image
 # Release.
 #
 # Real tagged releases (`v*`) flow through release.yml against the
-# same .goreleaser.yaml without WAVEHOUSE_DEV set, producing
-# `:vX.Y.Z` + `:latest`. Cleanup of old dev-<sha> tags is handled
-# by cleanup-ghcr.yml.
+# same .goreleaser.yaml without WAVEHOUSE_DEV set, producing `:vX.Y.Z`
+# plus a moving channel pointer — `:latest` for a stable tag, but
+# `:alpha`/`:beta`/`:rc`/`:next` for a prerelease, which therefore never
+# touches `:latest`. Cleanup of old dev-<sha> tags is handled by
+# cleanup-ghcr.yml.
 #
 # The TypeScript SDK publishes separately — see publish-npm.yml.
 on:
@@ -46,6 +48,9 @@ jobs:
           # goreleaser reads full git history for changelog + commit
           # info. Matches release.yml.
           fetch-depth: 0
+          # Same reasoning as release.yml: a third-party action and a
+          # cross-compile run here, and nothing needs authenticated git.
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

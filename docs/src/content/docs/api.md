@@ -158,20 +158,29 @@ This is what the SDK's `wh.sys.health()` calls, and the endpoint to use when cho
 
 ### `GET /version` — Build Info
 
-Returns the build metadata embedded in the running binary — the `version`, `git_commit`, and `build_time` injected at compile time via `-ldflags`, plus the `go_version` read from the runtime. No authentication required: these are the same values logged at startup, so the endpoint discloses nothing the logs don't already. Useful for confirming exactly which build is deployed when troubleshooting.
+Returns the build metadata embedded in the running binary — `version`, `git_commit`, and `build_time`, plus the `go_version` read from the runtime. No authentication required: these are the same values logged at startup, so the endpoint discloses nothing the logs don't already. Useful for confirming exactly which build is deployed when troubleshooting.
 
 **Response:**
 
 ```json
 {
-  "version": "v1.2.3",
+  "version": "1.2.3",
   "git_commit": "a1b2c3d",
   "build_time": "2026-06-02T12:00:00Z",
   "go_version": "go1.26.3"
 }
 ```
 
-A binary built without the `-ldflags` injection (e.g. a bare `go build` rather than `make build`) reports the fallback values `"dev"` / `"unknown"` for `version` / `git_commit`.
+Where those values come from depends on how the binary was built:
+
+| Build | `version` | `git_commit` / `build_time` |
+| --- | --- | --- |
+| Release artifact or container image | The tag **without** its leading `v` — GoReleaser injects `{{ .Version }}`, so `v1.2.3` reports `1.2.3` | Injected |
+| `make build` | Whatever `git describe` returns, which **keeps** the `v` (e.g. `v1.2.3-4-gdeadbee`, or a bare short SHA before the first tag) | Injected |
+| `go build` inside a checkout | The module pseudo-version Go derives from the commit (e.g. `0.0.0-20260815021004-1064a4fe6a59`) | Read from the VCS stamps Go embeds |
+| `go install …/cmd/wavehouse@vX.Y.Z` | The module version, so the released tag without its leading `v` | `"unknown"` — a module-cache build carries no VCS stamps |
+
+`go install` passes no `-ldflags`, so without the build-info fallback a perfectly good tagged install would report itself as `"dev"`. Ldflags always win when present.
 
 ---
 
