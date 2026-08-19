@@ -181,6 +181,20 @@ describe("WH002 flags an MDX fence glued to a JSX tag", () => {
     // Both sides, or the fixer inserts one blank line and leaves the block broken.
     assert.equal((stdout.match(/WH002/g) ?? []).length, 2);
   });
+
+  it("does not fire on a complete inline element above a fence", () => {
+    // `<span>text</span>` starts with a tag and ends with `>`, but it is not an
+    // opening tag — firing here would make the shared fixer insert a blank line
+    // into valid MDX.
+    const src = "<span>text</span>\n```yaml\nkey: value\n```\n";
+    assert.doesNotMatch(run("t.mdx", src).stdout, /WH002/);
+    assert.equal(run("t.mdx", src, { fix: true }).output, src);
+  });
+
+  it("does not fire when the backward scan would cross prose", () => {
+    const src = "<Foo>\nprose that ends in a >\n```yaml\nkey: value\n```\n";
+    assert.doesNotMatch(run("t.mdx", src).stdout, /WH002/);
+  });
 });
 
 describe("fix-mdx-fences.mjs repairs the structure", () => {

@@ -15,6 +15,14 @@ const FENCE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
  * checking only the line above would see `label="YAML">`, match nothing, and
  * report just the closing-side violation. The fixer would then insert one of
  * the two blank lines the block needs and leave it broken.
+ *
+ * The candidate is validated as a WHOLE, because "starts with a tag, ends with
+ * `>`" is not enough on its own: `<span>text</span>` satisfies it, and so does
+ * an open tag followed by prose that happens to end in `>`. Both would make the
+ * shared fixer insert a blank line into valid MDX. The joined text must
+ * therefore be a single opening tag — exactly one `>`, at the very end, and no
+ * `</` anywhere. An attribute value containing a literal `>` is rejected too;
+ * that is a miss rather than a corruption, which is the direction to err in.
  */
 function openingTagAbove(lines, index) {
   const prev = lines[index - 1];
@@ -25,9 +33,14 @@ function openingTagAbove(lines, index) {
     const line = lines[i];
     if (!line.trim()) return null; // a blank line ends the run — nothing to report
     if (/^\s*<\/[A-Za-z]/.test(line)) return null; // a closing tag, not an opening one
-    if (/^\s*<[A-Za-z]/.test(line)) {
-      return i === index - 1 ? line.trim() : `${line.trim()} …`;
-    }
+    if (!/^\s*<[A-Za-z]/.test(line)) continue; // keep walking back to the tag's first line
+
+    const joined = lines
+      .slice(i, index)
+      .map((l) => l.trim())
+      .join(" ");
+    if (joined.includes("</") || joined.indexOf(">") !== joined.length - 1) return null;
+    return i === index - 1 ? joined : `${line.trim()} …`;
   }
   return null;
 }
