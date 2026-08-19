@@ -193,7 +193,12 @@ export default {
       // Only plain prose continues a paragraph — a list item starts a new one.
       while (i + 1 < lines.length && kind[i + 1] === "prose" && !HARD_BREAK.test(lines[i])) {
         i++;
-        parts.push(lines[i].trim());
+        const continuation = lines[i].replace(/^\s+/, "");
+        // The guard above stops the run from continuing PAST a hard break, but
+        // the line carrying it is still absorbed — and trimming its trailing
+        // whitespace would delete the <br> it encodes. Keep it: the loop exits
+        // on the next pass, so such a line is always the last part.
+        parts.push(HARD_BREAK.test(continuation) ? continuation : continuation.replace(/\s+$/, ""));
       }
       if (parts.length === 1) continue;
 

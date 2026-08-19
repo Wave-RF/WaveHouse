@@ -83,7 +83,6 @@
     }
   },
 
-
   // ── Markdown link validation (VS Code built-in — Microsoft) ────
   // The only editor-side link checker we use is VS Code's own built-in
   // Markdown validation — no third-party link extension. It accurately

@@ -36,6 +36,16 @@ cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
 # root, so hand it a repo-relative path.
 rel="${file_path#"$PWD"/}"
 
+# `rel` stays ABSOLUTE exactly when the strip above failed — i.e. the file is
+# not under the project root. Bail there: this repo's Markdown conventions have
+# no business rewriting agent memory files under ~/.claude/, scratch notes in
+# /tmp, or Markdown in an unrelated checkout, all of which a session routinely
+# writes. (Sibling worktrees are already covered by the `ignores` in
+# .markdownlint-cli2.jsonc, which cli2 honors even for a named file.)
+case "$rel" in
+  /*) exit 0 ;;
+esac
+
 # Phase 1: MDX structure. Must land before any generic fixer sees the file.
 if [ "${rel##*.}" = "mdx" ]; then
   node scripts/fix-mdx-fences.mjs "$rel" >/dev/null 2>&1 || true

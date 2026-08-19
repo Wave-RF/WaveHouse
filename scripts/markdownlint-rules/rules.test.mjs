@@ -117,6 +117,13 @@ describe("WH001 leaves non-prose alone", () => {
     'export const meta = {\n  // the id used by the demo\n  id: "abc",\n  kind: "demo",\n};\n',
     "a multi-line MDX export with a comment inside",
   );
+  it("keeps a two-space hard break carried by a continuation line", () => {
+    // The run stopped at the break correctly, but the line carrying it was
+    // absorbed and trimmed, silently deleting the <br>. alpha+beta still join —
+    // they are one paragraph — and the break after beta must survive.
+    const { output } = run("t.md", "alpha line\nbeta line  \ngamma line\n", { fix: true });
+    assert.equal(output, "alpha line beta line  \ngamma line\n");
+  });
   unchanged(
     "t.mdx",
     "import { Tabs } from '@astrojs/starlight/components';\nimport Cta from '../x.astro';\n",

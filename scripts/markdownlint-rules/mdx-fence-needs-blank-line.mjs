@@ -19,6 +19,13 @@
 // and turning bare URLs into autolinks. The blank line is what keeps the two
 // parsers agreeing about where the code is.
 //
+// Reproducing it needs one more condition: while the fenced content has NO
+// blank line, CommonMark's HTML block runs past the whole thing and the generic
+// rules stay silent. The rewriting starts once a blank line inside the content
+// ends that HTML block and exposes the remainder. A minimal sample without an
+// interior blank line will therefore look harmless — that is the trap, not a
+// counter-example.
+//
 // This rule reports (CI + editor). The *fix* is applied earlier, by
 // scripts/fix-mdx-fences.mjs, because it has to land before any other fixer:
 // until the blank line exists CommonMark sees no code block, so a YAML block's
