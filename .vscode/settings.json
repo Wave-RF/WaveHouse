@@ -64,9 +64,16 @@
     // Apply markdownlint's auto-fixes on save — mirrors `make fix` / `pnpm run
     // fix:md`. The DavidAnson.vscode-markdownlint extension and the CLI both read
     // the same .markdownlint.json (rules) + .markdownlint-cli2.jsonc (globs AND
-    // customRules, so WH001/WH002 squiggle in the editor with no setting here —
-    // markdownlint.customRules is deprecated in favor of exactly that file), so
-    // the editor and CI stay in lockstep.
+    // customRules — so no setting is needed here; markdownlint.customRules is
+    // deprecated in favor of exactly that file), so the editor and CI stay in
+    // lockstep for Markdown.
+    //
+    // Not for MDX: the extension activates on the `markdown` language ID only,
+    // and .mdx is not associated with it, so WH001 squiggles in .md alone and
+    // WH002 — which only applies to .mdx — never squiggles at all. `make fix`
+    // and .claude/hooks/markdown-on-save.sh are the MDX path. Associating .mdx
+    // with markdown would be the wrong fix: it would turn on the fix-on-save
+    // below for MDX and reintroduce the ordering hazard described next.
     //
     // WH002's autofix is owned by scripts/fix-mdx-fences.mjs, not by fix-on-save:
     // it must run before the generic rules, which the editor cannot order. Save

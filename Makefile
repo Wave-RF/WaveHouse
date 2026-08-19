@@ -495,9 +495,11 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (9): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (13): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
-# docs spelling) for JS/TS + Markdown + prose;
+# docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
+# for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint) and
+# test-classify-paths for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
 # nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
 # (`biome check`) but NOT fmt-ts (`biome format`) — check already covers

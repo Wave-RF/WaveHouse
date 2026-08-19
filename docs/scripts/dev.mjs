@@ -41,8 +41,28 @@ const ROOT = resolve(import.meta.dirname, "..");
 const BIN = join(ROOT, "node_modules", ".bin");
 const STAGING = join(ROOT, ".dev-dist");
 const DIST = join(ROOT, "dist");
-const PORT_START = Number(process.env.DOCS_PORT ?? 4321);
+const DEFAULT_PORT = 4321;
+const MAX_PORT = 65535;
 const PORT_TRIES = 20;
+
+/* DOCS_PORT has to be a real port before it reaches the scan: "" and "0" would
+ * bind an ephemeral port and announce http://localhost:0, anything non-numeric
+ * becomes NaN (the loop then runs zero times and reports "NaN–NaN"), and
+ * anything out of range throws ERR_SOCKET_BAD_PORT from inside the probe. */
+function parsePort(raw) {
+  if (raw === undefined || raw === "") return DEFAULT_PORT;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > MAX_PORT) return null;
+  return port;
+}
+
+const PORT_START = parsePort(process.env.DOCS_PORT);
+if (PORT_START === null) {
+  console.log(
+    `\x1b[36m[dev-docs]\x1b[0m \x1b[1;31mDOCS_PORT must be an integer 1-${MAX_PORT}, got ${JSON.stringify(process.env.DOCS_PORT)}\x1b[0m\x07`,
+  );
+  process.exit(1);
+}
 const DEBOUNCE_MS = 300;
 
 const log = (msg) => console.log(`\x1b[36m[dev-docs]\x1b[0m ${msg}`);
@@ -69,15 +89,19 @@ const STRICT = Boolean(process.env.DOCS_WATCH_STRICT);
 function portFree(port, host) {
   return new Promise((resolvePort) => {
     const probe = createNetServer();
-    // Anything but "someone already has it" counts as free: a host with IPv6
-    // disabled answers EADDRNOTAVAIL for ::1, which must not veto the port.
-    probe.once("error", (err) => resolvePort(!["EADDRINUSE", "EACCES"].includes(err.code)));
+    // A host with IPv6 disabled answers EADDRNOTAVAIL for ::1, and that alone
+    // must not veto the port. Every other error — EADDRINUSE, EACCES, a bad
+    // host, EADDRNOTAVAIL on any other address — means we cannot claim it.
+    probe.once("error", (err) => resolvePort(err.code === "EADDRNOTAVAIL" && host === "::1"));
     probe.listen({ port, host, exclusive: true }, () => probe.close(() => resolvePort(true)));
   });
 }
 
+/** Last port the scan will try — clamped, since start+tries can exceed the range. */
+const lastPortFor = (start, tries) => Math.min(start + tries - 1, MAX_PORT);
+
 async function findFreePort(start, tries) {
-  for (let port = start; port < start + tries; port++) {
+  for (let port = start, last = lastPortFor(start, tries); port <= last; port++) {
     if ((await portFree(port, "127.0.0.1")) && (await portFree(port, "::1"))) {
       return port;
     }
@@ -250,7 +274,7 @@ if (shuttingDown) process.exit();
 const PORT = await findFreePort(PORT_START, PORT_TRIES);
 if (PORT === null) {
   fail(
-    `no free port in ${PORT_START}–${PORT_START + PORT_TRIES - 1}. ` +
+    `no free port in ${PORT_START}–${lastPortFor(PORT_START, PORT_TRIES)}. ` +
       `Stop one of the servers holding them, or set DOCS_PORT to a clear range.`,
   );
   process.exit(1);

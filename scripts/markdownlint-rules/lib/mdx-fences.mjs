@@ -5,9 +5,32 @@
 // has to run before markdownlint touches the file). Keeping the logic here is
 // what stops those two from drifting; see AGENTS.md §"DRY — one source of truth".
 
-const OPEN_TAG = /^\s*<[A-Za-z][^>]*[^/>]>\s*$/; // <TabItem label="YAML">
 const CLOSE_TAG = /^\s*<\/[A-Za-z][^>]*>\s*$/; // </TabItem>
 const FENCE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
+
+/**
+ * If the line above `index` ends a JSX *opening* tag, return that tag's text.
+ *
+ * The tag may span lines — `<TabItem` / `label="YAML">` is one opening tag, and
+ * checking only the line above would see `label="YAML">`, match nothing, and
+ * report just the closing-side violation. The fixer would then insert one of
+ * the two blank lines the block needs and leave it broken.
+ */
+function openingTagAbove(lines, index) {
+  const prev = lines[index - 1];
+  // Must end a tag, and must not be self-closing (`<Foo />` has no children).
+  if (prev === undefined || !/>\s*$/.test(prev) || /\/>\s*$/.test(prev)) return null;
+
+  for (let i = index - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line.trim()) return null; // a blank line ends the run — nothing to report
+    if (/^\s*<\/[A-Za-z]/.test(line)) return null; // a closing tag, not an opening one
+    if (/^\s*<[A-Za-z]/.test(line)) {
+      return i === index - 1 ? line.trim() : `${line.trim()} …`;
+    }
+  }
+  return null;
+}
 
 /**
  * Find every place an MDX code fence sits directly against a JSX tag.
@@ -29,9 +52,8 @@ export function findFenceTagViolations(lines) {
 
     if (fence === null) {
       fence = match[1];
-      if (i > 0 && OPEN_TAG.test(lines[i - 1])) {
-        found.push({ line: i + 1, detail: `fence opens directly after ${lines[i - 1].trim()}` });
-      }
+      const tag = openingTagAbove(lines, i);
+      if (tag) found.push({ line: i + 1, detail: `fence opens directly after ${tag}` });
       return;
     }
 

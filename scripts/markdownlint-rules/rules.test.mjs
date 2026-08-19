@@ -83,6 +83,13 @@ describe("WH001 joins hard-wrapped prose", () => {
     const once = run("t.md", "Wrapped one\ntwo three.\n", { fix: true }).output;
     assert.equal(run("t.md", once, { fix: true }).output, once);
   });
+
+  it("still fires when a leading --- is a thematic break, not frontmatter", () => {
+    const { output } = run("t.md", "---\n\nA paragraph that is\nhard wrapped here.\n", {
+      fix: true,
+    });
+    assert.equal(output, "---\n\nA paragraph that is hard wrapped here.\n");
+  });
 });
 
 describe("WH001 leaves non-prose alone", () => {
@@ -159,6 +166,13 @@ describe("WH002 flags an MDX fence glued to a JSX tag", () => {
 
   it("ignores .md, which has no JSX", () => {
     assert.doesNotMatch(run("t.md", glued).stdout, /WH002/);
+  });
+
+  it("sees an opening tag whose attributes span lines", () => {
+    const multiline = '<TabItem\n  label="YAML">\n```yaml\nkey: value\n```\n</TabItem>\n';
+    const { stdout } = run("t.mdx", multiline);
+    // Both sides, or the fixer inserts one blank line and leaves the block broken.
+    assert.equal((stdout.match(/WH002/g) ?? []).length, 2);
   });
 });
 

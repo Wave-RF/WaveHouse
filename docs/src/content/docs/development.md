@@ -286,7 +286,7 @@ go build -o bin/wavehouse ./cmd/wavehouse
 
 ### How It Works
 
-All test commands use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile invokes them as `go tool <name>`, so no global installation is needed.
+All **Go** test commands use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile invokes them as `go tool <name>`, so no global installation is needed.
 
 All tests run with Go's **race detector** (`-race`) enabled by default. WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE hubs) — the race detector catches data races that would panic in production.
 

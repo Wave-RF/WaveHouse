@@ -53,6 +53,11 @@ const ESM_OPEN = /^\s*(import|export)\s/;
 /** Tag every line as prose / list / blank / block / skip. */
 function classify(lines) {
   const kind = new Array(lines.length).fill("prose");
+  // Frontmatter only counts when it is actually closed. A lone leading `---` is
+  // a thematic break, and treating it as an unterminated block would mark every
+  // remaining line "skip" and silently disable the rule for the whole file.
+  const hasFrontmatter =
+    lines[0]?.trim() === "---" && lines.slice(1).some((line) => line.trim() === "---");
   let fence = null;
   let frontmatter = false;
   let jsxTag = false;
@@ -62,7 +67,7 @@ function classify(lines) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-    if (i === 0 && line.trim() === "---") {
+    if (i === 0 && hasFrontmatter) {
       frontmatter = true;
       kind[i] = "skip";
       continue;
