@@ -26,9 +26,10 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 Run `make tools` once after cloning to populate everything that doesn't have to be on your PATH:
 
 - **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
+- **`misspell` v0.8.0, `shellcheck` v0.11.0, `actionlint` v1.7.12** → installed to `.bin/<os>_<arch>/`; they back `make lint-prose`, `make lint-sh`, and `make lint-gha`. `make tools` also points `core.hooksPath` at `.githooks/`, which is what installs the pre-commit and pre-push gates.
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
 - **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
-- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by two parts of the docs *build*: `rehype-mermaid` (SVG diagram rendering) and the `diagram-png` integration (`docs/src/integrations/diagram-png.mjs`), which rasterizes each diagram to light/dark PNGs (a solid surface-card variant plus a transparent-background variant for slide decks) at `astro:build:done` for the Copy/Download buttons in the zoom lightbox. Both reuse the same Playwright Chromium, as does the manual `docs/scripts/screenshot.mjs` QA helper. `starlight-links-validator` runs under `build-docs` / CI only — the `dev-docs` watch loop skips it so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `DOCS_WATCH_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`. It is also a real `@wavehouse/sdk` consumer (the landing page's live demo imports the workspace package), so `check-docs` / `build-docs` / `dev-docs` build the SDK first via `build-ts`; if you drive Astro directly through pnpm (e.g. `pnpm --filter wavehouse-docs run start`), run `make build-ts` once first so the dep resolves.
+- **pnpm deps** for the repo root plus `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). The root workspace is where the repo-wide linters live — **Biome** (JS/TS/JSON) and **markdownlint-cli2** (Markdown/MDX, including the repo-local `WH001`/`WH002` rules). Neither is ever run from a global install: `make lint` / `make fix` shell out to `pnpm -w run`, and every target that needs them declares the `pnpm-install` prerequisite, so a clean clone is linting correctly after `make tools` with nothing else on your PATH. `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by two parts of the docs *build*: `rehype-mermaid` (SVG diagram rendering) and the `diagram-png` integration (`docs/src/integrations/diagram-png.mjs`), which rasterizes each diagram to light/dark PNGs (a solid surface-card variant plus a transparent-background variant for slide decks) at `astro:build:done` for the Copy/Download buttons in the zoom lightbox. Both reuse the same Playwright Chromium, as does the manual `docs/scripts/screenshot.mjs` QA helper. `starlight-links-validator` runs under `build-docs` / CI only — the `dev-docs` watch loop skips it so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `DOCS_WATCH_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`. It is also a real `@wavehouse/sdk` consumer (the landing page's live demo imports the workspace package), so `check-docs` / `build-docs` / `dev-docs` build the SDK first via `build-ts`; if you drive Astro directly through pnpm (e.g. `pnpm --filter wavehouse-docs run start`), run `make build-ts` once first so the dep resolves.
 
 ### Verify your setup
 
@@ -130,8 +131,7 @@ curl -s http://localhost:8080/v1/ops/dlq/stats -H "Authorization: Bearer $TOKEN"
 
 ### How `make dev` works
 
-`make dev` is a one-stop convenience target for backend and frontend
-development. The recipe is essentially:
+`make dev` is a one-stop convenience target for backend and frontend development. The recipe is essentially:
 
 ```make
 dev: deps-up $(AIR)
@@ -151,9 +151,7 @@ dev: deps-up $(AIR)
 
 ### Dev convenience targets
 
-These are the small targets behind `make dev` — useful directly when you want
-to run WaveHouse outside of air (e.g. `make build && ./bin/wavehouse`), or
-when you need to poke at ClickHouse:
+These are the small targets behind `make dev` — useful directly when you want to run WaveHouse outside of air (e.g. `make build && ./bin/wavehouse`), or when you need to poke at ClickHouse:
 
 | Target | What it does |
 | ------ | ------------ |
@@ -288,7 +286,7 @@ go build -o bin/wavehouse ./cmd/wavehouse
 
 ### How It Works
 
-All test commands use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile uses `go run` so no global installation is needed.
+All **Go** test commands use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile invokes them as `go tool <name>`, so no global installation is needed.
 
 All tests run with Go's **race detector** (`-race`) enabled by default. WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE hubs) — the race detector catches data races that would panic in production.
 
@@ -402,13 +400,12 @@ If a previous run was killed (harness timeout, stop button, `SIGKILL`), it can l
 make lint
 ```
 
-`golangci-lint` is installed separately (not in `go.mod` — its massive dependency tree causes conflicts). If not found, `make lint` prints install instructions.
+`golangci-lint` is kept out of `go.mod` (its dependency tree conflicts with the main module), so the Makefile pins the version instead and downloads it into `.bin/` on first use — `make lint` and `make tools` both handle it, and no global install is needed.
 
-Install options:
+A global copy is never what `make lint` runs, so install one only if you want to invoke `golangci-lint` outside `make`:
 
 - **macOS**: `brew install golangci-lint`
 - **Binary**: See [golangci-lint.run/welcome/install/](https://golangci-lint.run/welcome/install/)
-- **Go install**: `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`
 
 The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control) — that file is the authoritative list of enabled linters. Highlights:
 
@@ -427,6 +424,19 @@ The configuration is in `.golangci.yml` (v2 format with `default: none` for expl
 - **tparallel** — Missing `t.Parallel()` in test subtests
 
 Formatting (**gofumpt** — strict superset of gofmt — and **goimports** import grouping) is enforced through the v2 `formatters:` section rather than as linters.
+
+### Markdown and MDX
+
+`make lint` also covers documentation: **markdownlint** owns Markdown *and* MDX style (rules in `.markdownlint.json`; file selection in `.markdownlint-cli2.jsonc` for `.md`, plus the `**/*.mdx` glob on `lint:md` in `package.json`) and **misspell** owns spelling. Two rules are repo-local, in `scripts/markdownlint-rules/`:
+
+- **WH001 / no-hard-wrapped-prose** — a paragraph must be one line. Hard-wrapping at 72/80 columns turns a one-word edit into a five-line diff. Autofixes. Tables (leading pipes optional), code, headings, setext underlines, blockquotes, JSX, `$$` display math, and multi-line MDX `import`/`export` are left alone; a list item is joined as a unit; an aside's body is joined but its `:::` delimiters are not.
+- **WH002 / mdx-fence-needs-blank-line** — an MDX code fence directly against a JSX tag (`<TabItem label="YAML">` immediately followed by a fence). MDX renders that fine; the problem is that markdownlint parses CommonMark, where the tag opens an HTML block that runs to the next blank line — so the fence is not a code block to any generic rule, and `markdownlint --fix` will happily reformat the code inside it. The blank line is what keeps the two parsers agreeing.
+
+Run `make fix` to apply them. **The generic markdownlint fixers run over `.md` only.** markdownlint parses CommonMark and MDX does not, and where the two disagree an autofix rewrites the inside of a code block — de-indenting YAML comments it reads as headings, autolinking bare URLs. Reporting that disagreement is useful, so `make lint` still checks `.mdx`; acting on it is not. MDX therefore gets exactly one *structural* fixer, `scripts/fix-mdx-fences.mjs`, which only ever inserts a blank line beside a JSX tag. (misspell still auto-corrects spelling in `.mdx` — its corrections come from a curated list and don't depend on parsing the document.)
+
+The practical consequence: **a problem `make lint` reports in an `.mdx` file may need fixing by hand**, WH001's hard-wrapped prose included. A bare `markdownlint-cli2 --fix` can't reach MDX either: `.markdownlint-cli2.jsonc` globs `.md` only and the `.mdx` glob sits on `lint:md`, so the guard is structural rather than a rule you have to remember. Improving this — a formatter that understands MDX rather than one that guesses — is tracked in [#499](https://github.com/Wave-RF/WaveHouse/issues/499).
+
+The markdownlint extension reads `.markdownlint-cli2.jsonc`, `customRules` and all, so no editor setting is needed — but it only activates on Markdown, so in-editor squiggles cover WH001 in `.md` and never WH002 in `.mdx`. Agent-written files get the same treatment at write time from `.claude/hooks/markdown-on-save.sh` — markdownlint in `.md`, the fence pass in `.mdx` — and everyone else gets it from `make fix`.
 
 ## Project Structure
 
@@ -485,7 +495,7 @@ Run `make help` to see all targets. Key ones:
 | Target | Description |
 | ------ | ----------- |
 | `make help` | Show all targets with descriptions (always the source of truth) |
-| `make tools` | Bootstrap: install pinned tools (`golangci-lint`, `air`), Go modules, pnpm deps |
+| `make tools` | Bootstrap: install pinned tools (`golangci-lint`, `air`, `misspell`, `shellcheck`, `actionlint`), Go modules, pnpm deps, and git hooks (`core.hooksPath` → `.githooks/`) |
 | **Dev** | |
 | `make dev` | Hot-reload dev server: ClickHouse via Compose + WaveHouse under air on `:8080` |
 | `make deps-up` | Start ClickHouse alone (idempotent; blocks until healthy) |
@@ -500,10 +510,10 @@ Run `make help` to see all targets. Key ones:
 | **Static checks** | |
 | `make fmt` | Check formatting across Go (`gofumpt`) + TS (Biome). Run `make fix` to apply. |
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
-| `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) |
+| `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
 | `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
-| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) (parallel-safe: `make -j verify`) |
-| `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`) and TS (Biome `--write`) |
+| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + docs type-check (`astro check` — not a full build, so link validation stays CI's job) (parallel-safe: `make -j verify`) |
+| `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint `--fix`), MDX (`fix-mdx-fences` only — the generic fixers never run over `.mdx`), and docs-prose spelling (misspell, both) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
 | `make build-release` | Stripped release-style build → `bin/wavehouse-release` |

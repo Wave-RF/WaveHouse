@@ -1,0 +1,66 @@
+---
+// Per-page trademark attributions for the footer.
+//
+// Page-scoped on purpose: a blanket notice listing every mark the site mentions
+// would be legal wallpaper nobody reads, and would attribute marks that don't
+// appear on the page you're looking at. This lists only what THIS page names,
+// in the order it names them — so the ClickHouse notice leads on the pages
+// about ClickHouse, and /sdk/pipes (which names nothing) renders no block at
+// all beyond the copyright line.
+//
+// The marks and their owners live in src/config/trademarks.ts, shared with
+// src/plugins/rehype-trademarks.ts — the pass that puts the matching ® / ™ on
+// the first mention in the prose above. One registry, so the marks and owners
+// can't drift apart.
+//
+// The two sides do NOT read the same text, though: this component scans the raw
+// body, while the rehype pass deliberately skips code, pre and h1–h6. So the
+// footer is a superset — /architecture carries an OpenTelemetry notice for a
+// mark named only in a heading and a code block. Over-attributing is the safe
+// direction; making the two agree is tracked in #497.
+import { findTrademarks, trademarkNotices } from "../config/trademarks";
+
+interface Props {
+  /**
+   * Everything the page renders as words — body plus frontmatter, since hero
+   * taglines, descriptions and the Cloud CTA copy are all frontmatter-driven
+   * here and all end up on the page.
+   */
+  source: string;
+}
+
+const { source } = Astro.props;
+const marks = findTrademarks(source);
+const notices = trademarkNotices(marks);
+---
+
+{
+  /* Keyed off marks, not notices: `owner` is optional in the registry, and an
+     ownerless mark is meant to be covered by the catch-all sentence below —
+     which lives inside this block. Gating on notices hid the catch-all exactly
+     when it was the only thing carrying the attribution. */
+  marks.length > 0 && (
+    <p class="wh-legal">
+      {notices.length > 0 && <>{notices.join(" ")} </>}All other product names, logos, and brands are the property of their
+      respective owners. WaveHouse is an independent open-source project and is not affiliated
+      with, endorsed by, or sponsored by the trademark holders named above.
+    </p>
+  )
+}
+
+<style>
+  .wh-legal {
+    /* Small print, but not unreadably so: 12px at the site's subtle ink still
+       clears AA (see the --wh-ink-subtle note in global.css). */
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--wh-ink-subtle);
+    /* Full footer width, no measure cap. The usual reason to cap a measure is
+       readability over many lines, but that trades width for HEIGHT — and this
+       block is a notice nobody reads line by line, sitting at the very bottom
+       of every page. Wide and short is the right shape for it; a 62ch column
+       here just made the footer taller for no gain. */
+    margin: 0;
+    text-wrap: pretty;
+  }
+</style>

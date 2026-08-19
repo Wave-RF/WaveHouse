@@ -63,8 +63,23 @@
     "editor.tabSize": 2,
     // Apply markdownlint's auto-fixes on save — mirrors `make fix` / `pnpm run
     // fix:md`. The DavidAnson.vscode-markdownlint extension and the CLI both read
-    // the same .markdownlint.json (rules) + .markdownlint-cli2.jsonc (globs), so
-    // the editor and CI stay in lockstep.
+    // the same .markdownlint.json (rules) + .markdownlint-cli2.jsonc (globs AND
+    // customRules — so no setting is needed here; markdownlint.customRules is
+    // deprecated in favor of exactly that file), so the editor and CI stay in
+    // lockstep for Markdown.
+    //
+    // Not for MDX: the extension activates on the `markdown` language ID only,
+    // and .mdx is not associated with it, so WH001 squiggles in .md alone and
+    // WH002 — which only applies to .mdx — never squiggles at all. `make fix`
+    // and .claude/hooks/markdown-on-save.sh are the MDX path. Associating .mdx
+    // with markdown would be the wrong fix: it would turn on the fix-on-save
+    // below for MDX, running exactly the generic fixers the config globs keep
+    // away from .mdx (see the note below).
+    //
+    // WH002's autofix is owned by scripts/fix-mdx-fences.mjs, not by fix-on-save:
+    // the generic markdownlint fixers are never run over .mdx, because where
+    // their CommonMark parse disagrees with MDX they rewrite the inside of a
+    // code block. `make fix` (or the markdown-on-save hook) repairs it instead.
     "editor.codeActionsOnSave": {
       "source.fixAll.markdownlint": "explicit"
     }
@@ -88,7 +103,14 @@
   "markdown.validate.fileLinks.enabled": "ignore",
   "markdown.validate.fileLinks.markdownFragmentLinks": "ignore",
   "markdown.validate.fragmentLinks.enabled": "warning",
-  "markdown.validate.referenceLinks.enabled": "warning",
+  // Off, not "warning": Starlight asides are `:::note[Title]`, and the validator
+  // reads that trailing `[Title]` as a shortcut reference link with no
+  // definition — ~40 false positives across the docs, one per aside, plus a few
+  // more where it parses MDX JSX props the same way. This repo defines no
+  // reference-style links at all, so the check has nothing true to say here.
+  // (markdownlint's equivalent, MD052, stays quiet for its own reason: its
+  // shortcut_syntax option is off by default. Editor and CLI agree.)
+  "markdown.validate.referenceLinks.enabled": "ignore",
   "markdown.validate.unusedLinkDefinitions.enabled": "warning",
   "markdown.validate.duplicateLinkDefinitions.enabled": "warning",
 

@@ -3,9 +3,7 @@ title: "SDK Reference & CLI"
 description: "Error codes, AbortController, the full API tree, the codegen CLI, and E2E testing with @wavehouse/sdk."
 ---
 
-Cross-cutting reference for `@wavehouse/sdk`: cancellation, the error model
-behind every [`Result<T>`](/sdk#result-type), the complete API tree at a
-glance, and the tooling that ships in the package.
+Cross-cutting reference for `@wavehouse/sdk`: cancellation, the error model behind every [`Result<T>`](/sdk#result-type), the complete API tree at a glance, and the tooling that ships in the package.
 
 ## AbortController Support
 

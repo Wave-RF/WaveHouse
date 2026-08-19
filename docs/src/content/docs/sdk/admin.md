@@ -3,16 +3,7 @@ title: "SDK Admin & System"
 description: "Schema introspection, access-control policy, DLQ stats, and health checks in @wavehouse/sdk."
 ---
 
-Operational surfaces of `@wavehouse/sdk`. With one exception, everything on
-this page sits behind the server's admin gate: the caller must resolve to
-the admin role (`policy.admin_role`) or present the non-JWT
-[operator key](/api#authentication) — the SDK has no first-class
-operator-key option, but [`options.headers`](/sdk#custom-headers) can carry
-the `X-Operator-Key` header. The exception is `wh.sys.health()`, which calls
-the public, content-free `/v1/health` route and needs no credentials. See
-[Access Control](/access-control) for how roles resolve.
-Examples import from `@wavehouse/sdk`; using the CDN instead, import from
-`https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
+Operational surfaces of `@wavehouse/sdk`. With one exception, everything on this page sits behind the server's admin gate: the caller must resolve to the admin role (`policy.admin_role`) or present the non-JWT [operator key](/api#authentication) — the SDK has no first-class operator-key option, but [`options.headers`](/sdk#custom-headers) can carry the `X-Operator-Key` header. The exception is `wh.sys.health()`, which calls the public, content-free `/v1/health` route and needs no credentials. See [Access Control](/access-control) for how roles resolve. Examples import from `@wavehouse/sdk` or `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 
 ## Schema — `wh.schema`
 
@@ -77,7 +68,7 @@ const { data } = await wh.dlq.list();
 const { data } = await wh.dlq.table('clicks');
 ```
 
-`wh.dlq.stream()` exists in the API but is **not yet functional**: there is no server-side DLQ stream today (the SSE bridge only carries `ingest.>` subjects), so it connects and receives no events — live DLQ streaming is tracked in [#197](https://github.com/Wave-RF/WaveHouse/issues/197).
+`wh.dlq.stream()` exists in the API but is **not yet functional**: there is no server-side DLQ stream today (the SSE bridge only carries `ingest.>` subjects), so it connects and receives no events rather than failing. Live DLQ streaming is tracked in [#197](https://github.com/Wave-RF/WaveHouse/issues/197).
 
 ---
 

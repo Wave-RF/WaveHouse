@@ -15,18 +15,25 @@ hero:
   title: WaveHouse
   tagline: The open-source real-time API gateway for ClickHouse. Schema-aware ingest, async batching, real-time streaming, and tiered query caching — in a single binary.
   actions:
-    - text: Get started
+    - text: Read the docs
       link: /getting-started
       icon: right-arrow
       variant: primary
-    - text: View on GitHub
-      link: https://github.com/Wave-RF/WaveHouse
+    # First-party links are UTM-tagged and keep their Referer automatically —
+    # Hero.astro runs every action href through tagFirstParty()/relFor(), so
+    # don't hand-write utm_* or rel here. See src/config/outbound.ts.
+    - text: Try WaveHouse Cloud
+      link: https://wavehouse.cloud
       icon: external
-      variant: minimal
+      variant: secondary
+      attrs:
+        target: _blank
 ---
 
 import { Card, CardGrid, LinkCard, LinkButton, Tabs, TabItem } from '@astrojs/starlight/components';
+import CloudCta from '../../components/CloudCta.astro';
 import HomepageCtaTracking from '../../components/HomepageCtaTracking.astro';
+import { cloudLink } from '../../config/outbound';
 
 <div class="wh-stats not-content">
   <div class="wh-stat">
@@ -47,7 +54,7 @@ import HomepageCtaTracking from '../../components/HomepageCtaTracking.astro';
   <div class="wh-stat">
     <span class="wh-stat__value">Apache 2.0</span>
     <span class="wh-stat__unit">open</span>
-    <span class="wh-stat__label">no vendor lock, no SaaS tier</span>
+    <span class="wh-stat__label">same binary, self-host or managed</span>
   </div>
 </div>
 
@@ -102,23 +109,26 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 
 **Plus** — optional [deduplication](/configuration#deduplication) (idempotent ingest by ID), a dead-letter queue for failed batch inserts, and Tinybird-style [named pipes](/pipes) with parameter binding and per-role restrictions.
 
-## Query it like a database. Subscribe to it like a socket.
+## Query it like a database. Subscribe to it like a socket
 
 The [TypeScript SDK](/sdk) wraps the whole surface — typed inserts, a chainable query builder, and live queries that backfill history before streaming:
 
 <Tabs>
  <TabItem label="Ingest">
+
   ```ts
   import { createClient } from '@wavehouse/sdk';
 
-  const wh = createClient({ baseURL: 'https://wavehouse.example.com' });
+  const wh = createClient({ baseURL: 'https://<project_id>.wavehouse.app' });
 
   // Returns immediately — buffered in the WAL, schema-validated
   // at the edge, batch-flushed to ClickHouse behind the scenes.
   await wh.from('clicks').insert({ page: '/home', button: 'signup' });
   ```
+
  </TabItem>
  <TabItem label="Query">
+
   ```ts
   // Chainable, type-safe, never throws — branch on { data, error }.
   const { data, error } = await wh.from('clicks')
@@ -127,8 +137,10 @@ The [TypeScript SDK](/sdk) wraps the whole surface — typed inserts, a chainabl
     .orderBy('received_timestamp', 'desc')
     .limit(100);
   ```
+
  </TabItem>
  <TabItem label="Live updates">
+
   ```ts
   // Historical backfill, then the live stream.
   const lq = wh.from('clicks')
@@ -143,6 +155,7 @@ The [TypeScript SDK](/sdk) wraps the whole surface — typed inserts, a chainabl
 
   // later: lq.close();
   ```
+
  </TabItem>
 </Tabs>
 
@@ -168,6 +181,17 @@ curl -N "http://localhost:8080/v1/stream?table=clicks"
 WaveHouse is fail-closed, so the standalone stack ships a permissive trial policy (a non-admin `public` role that can read/write the demo tables, seeded on first boot) — then it's five minutes from `git clone` to a live event stream. See [Getting Started](/getting-started).
 
 **How it ships:** one `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external dependency is ClickHouse.** Same binary on a laptop, in Docker, or on a production host.
+
+## Or skip the ops entirely
+
+Self-hosting WaveHouse is deliberately boring — one binary, one dependency. But *that one dependency* is a ClickHouse cluster somebody has to size, upgrade, back up, and keep alive at 3am.
+
+<CloudCta
+  variant="band"
+  placement="homepage-band"
+  title="Managed WaveHouse Cloud"
+  body="Managed ClickHouse plus the WaveHouse gateway, autoscaling and usage-based — the same Apache-2.0 binary documented on this site, operated by the people who write it. Your queries, pipes, and SDK code are identical either way, so moving between self-hosted and managed is a config change, not a migration."
+/>
 
 ## Where to next
 
@@ -196,7 +220,7 @@ WaveHouse is fail-closed, so the standalone stack ships a permissive trial polic
 
 <div class="wh-closer not-content">
   <p class="wh-closer__title">WaveHouse is <span class="wh-closer__alpha">alpha</span> — and built entirely in the open.</p>
-  <p class="wh-closer__sub">Apache-2.0-licensed, single binary, no SaaS tier, no vendor lock-in. We ship with honest expectations — see the <a href="https://github.com/Wave-RF/WaveHouse/blob/main/SUPPORT.md" target="_blank" rel="noopener noreferrer">support cadence</a> and <a href="https://github.com/Wave-RF/WaveHouse/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">security policy</a>. Kick the tires and tell us where it breaks.</p>
+  <p class="wh-closer__sub">Apache-2.0-licensed, single binary, no vendor lock-in — self-host it forever, or let us run it on <a href={cloudLink("homepage-closer")} target="_blank" rel="noopener">WaveHouse Cloud</a>. We ship with honest expectations — see the <a href="https://github.com/Wave-RF/WaveHouse/blob/main/SUPPORT.md" target="_blank" rel="noopener noreferrer">support cadence</a> and <a href="https://github.com/Wave-RF/WaveHouse/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">security policy</a>. Kick the tires and tell us where it breaks.</p>
   <div class="wh-closer__actions">
     <LinkButton href="/getting-started" icon="right-arrow">Get started in five minutes</LinkButton>
     <LinkButton href="https://github.com/Wave-RF/WaveHouse" variant="secondary" icon="external">Star on GitHub</LinkButton>

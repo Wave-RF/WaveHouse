@@ -99,7 +99,7 @@ make ci                # Full pre-push pipeline — run it the documented way (�
 make build             # Compile → bin/wavehouse
 make dev               # ClickHouse + hot-reload server on :8080 (Docker)
 make deps-up           # Start ClickHouse alone — for `make dev`; NOT needed by `make ci`
-make dev-docs          # Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321
+make dev-docs          # Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321 (next free port if busy)
 make build-docs        # Production build → docs/dist/
 make preview-docs      # Wrangler preview of the production build (auto-builds if dist/ missing)
 make branding-docs     # Regenerate logo/favicon/OG assets from docs/src/assets/branding/mark.svg
@@ -113,7 +113,7 @@ Tooling notes (the non-obvious bits `make help` won't tell you):
 - `golangci-lint` is pinned in the Makefile (v2.11.4), auto-installed to `.bin/` on first `make lint` — kept out of `go.mod` (its deps conflict with the main module).
 - `pnpm` (≥ 11.21) + `Node 22 LTS` (`.nvmrc`, matches CI) must be on PATH; `make tools` runs one root `pnpm install --frozen-lockfile` across the three workspaces (SDK `clients/ts/`, E2E `tests/e2e/sdk/`, docs `docs/`).
 - **GNU Make 4+** required (uses `--output-sync=target`); macOS BSD Make 3.81 won't parse it. Full setup: `docs/src/content/docs/development.md` § Prerequisites.
-- **Lint split**: Biome owns JS/TS/JSON, markdownlint owns Markdown *style*, misspell owns spelling (all under `make lint`/`make fix`); accuracy/clarity/doc-sync is the `docs-reviewer` gate (§Docs review).
+- **Lint split**: Biome owns JS/TS/JSON, markdownlint owns Markdown *and MDX* style — including two repo-local rules, WH001 (no hard-wrapped prose) and WH002 (MDX fence beside a JSX tag) in `scripts/markdownlint-rules/` — misspell owns spelling (all under `make lint`/`make fix`); accuracy/clarity/doc-sync is the `docs-reviewer` gate (§Docs review). See §Markdown authoring rules.
 - **Worktrunk** (`wt`, `.config/wt.toml`): `wt switch --create` seeds `.bin/` + `node_modules/` from main, then runs `make tools`.
 
 ## Testing Conventions
@@ -320,6 +320,34 @@ Source-of-truth pairs that must agree:
 - Handler error responses ↔ `docs/src/content/docs/api.md` error tables
 
 Before finishing a task, grep for the identifiers you touched (field names, env var names, endpoint paths) across docs to catch staleness.
+
+### Markdown authoring rules
+
+- **Never hard-wrap prose. One paragraph is one line.** No wrapping at 72/80 columns, no "semantic linefeeds" splitting a paragraph at sentence boundaries. Wrapped prose makes every later edit rewrap the whole block, so a one-word change lands as a five-line diff. Enforced by WH001 (`scripts/markdownlint-rules/no-hard-wrapped-prose.mjs`), which autofixes. Tables (with or without leading pipes), code, headings, setext underlines, blockquotes, JSX, `$$` display math, multi-line MDX `import`/`export`, and `:::` aside delimiters are left alone; a list item is joined as a unit, marker line included; an aside's *body* is joined but its delimiters are not.
+- **In MDX, leave a blank line between a JSX tag and a code fence.** MDX itself renders the glued form correctly — verified by compiling both shapes with the same `@mdx-js/mdx` Astro uses. The blank line is what keeps *markdownlint* agreeing with it: markdownlint parses CommonMark, where `<TabItem …>` opens an HTML block that runs to the next blank line, so a glued fence is not a code block to any generic rule and `markdownlint --fix` will reformat the code inside it:
+
+  ````mdx
+  <TabItem label="YAML">
+
+  ```yaml
+  data_dir: ./data
+  ```
+
+  </TabItem>
+  ````
+
+  Enforced by WH002. **`.mdx` is never auto-fixed by the generic markdownlint rules** — `make fix` scopes that pass to `**/*.md`, because where markdownlint's CommonMark parse and MDX disagree a generic autofix rewrites the inside of a code block. MDX gets exactly one *structural* fixer, `scripts/fix-mdx-fences.mjs`, which only ever inserts a blank line beside a JSX tag (misspell still corrects spelling there — its curated list needs no parse). So `make lint` reports MDX problems but `make fix` will not silently repair them — including WH001 wrapping, which you must unwrap by hand in `.mdx`. You can't reach MDX with a bare `markdownlint-cli2 --fix` either — the config globs `.md` only, and the `.mdx` glob lives on `lint:md` — so that hazard is closed by construction rather than by this instruction.
+- **Editors see WH001 in `.md` only.** The markdownlint extension reads `.markdownlint-cli2.jsonc`, `customRules` included, so no `.vscode` setting is needed (`markdownlint.customRules` is deprecated in favor of that file). But it activates on the `markdown` language ID, and `.mdx` is not associated with it — so WH002 never squiggles in the editor, and WH001 squiggles only in `.md`. Don't "fix" that with a `files.associations` entry: it would enable `source.fixAll.markdownlint` on `.mdx`, running exactly the generic fixers that must never see MDX. `make fix` and the agent hook are the MDX path.
+- **These fix themselves as you write.** `.claude/hooks/markdown-on-save.sh` (PostToolUse, sibling of `gofumpt-on-save.sh`) runs the MDX fence pass on `.mdx`, markdownlint `--fix` on `.md`, and misspell on both, so an agent's output is corrected in the same pass rather than costing a lint failure and a manual cleanup. It only sees `Edit`/`Write`/`MultiEdit` — a file written through a Bash heredoc bypasses it, so run `make fix` after doing that.
+- **WH001 is off under `.github/` and `.claude/`** (CI docs and agent prompts) via their own `.markdownlint.json`. It applies everywhere else, `AGENTS.md` and `CHANGELOG.md` included — so this is a narrower exclusion than `scripts/docs-prose.sh`, which also skips those two.
+
+### Authoring docs-site pages
+
+Three invariants the docs site enforces in code, each of which fails quietly rather than loudly if you hand-write around it:
+
+- **Opt a page into the Cloud CTA with `cloudCta` frontmatter**, not by importing the component. `cloudCta: true` takes the default copy; `cloudCta: { title?, body? }` overrides it, which is the point — the CTA lands hardest when it names the work *that* page just described. Schema in `docs/src/content.config.ts`; the footer renders it. (The homepage is the exception: it passes `<CloudCta variant="band">` inline, because the wide band variant is splash-only and `template: splash` pages don't render the footer's copy.)
+- **Never hand-write `®` or `™` in prose.** `rehype-trademarks` appends the symbol to each mark's first mention automatically, and `markFirstMentions` (`docs/src/config/trademarks.ts`) matches the bare name with no check for a symbol already there — so "ClickHouse®" renders as "ClickHouse®®". Add the mark to the registry in `trademarks.ts` and let the plugin place it; the footer notice is generated from the same registry.
+- **Never hand-write `utm_*` params or `rel` on a link to `wavehouse.cloud` or `wave-rf.com`.** Use `cloudLink()` / `relFor()` from `docs/src/config/outbound.ts`. First-party links deliberately carry `rel="noopener"` *without* `noreferrer`, because `noreferrer` suppresses the `Referer` header PostHog turns into `$referring_domain` — writing the `rel` by hand is the easy way to silently destroy the attribution the whole feature exists for. Third-party links keep both.
 
 ### Authoring Mermaid diagrams
 

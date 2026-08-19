@@ -59,7 +59,7 @@ const wh = createClient({
 });
 ```
 
-`baseURL` may include a path prefix (`https://app.example.com/api/warehouse`) when WaveHouse is served under one — see [Serving under a path prefix](https://wavehouse.dev/sdk#serving-under-a-path-prefix).
+`baseURL` may include a path prefix (`https://app.example.com/api/wavehouse`) when WaveHouse is served under one — see [Serving under a path prefix](https://wavehouse.dev/sdk#serving-under-a-path-prefix).
 
 ### Query Data
 

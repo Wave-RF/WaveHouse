@@ -1,6 +1,8 @@
 ---
 title: "Deployment"
 description: "Running WaveHouse in production: Docker images, releases, environment variables, health checks, and schema setup."
+cloudCta:
+  body: "Everything on this page — pinned images, health probes, rollout, secret handling, and the ClickHouse cluster underneath all of it — is what WaveHouse Cloud operates for you. Same binary, same config surface, none of the pager duty."
 sidebar:
   order: 10
 ---

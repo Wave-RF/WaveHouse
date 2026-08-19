@@ -1,6 +1,8 @@
 ---
 title: "Configuration"
 description: "Full configuration reference — YAML settings and environment variables."
+cloudCta:
+  body: "Most of the knobs on this page exist because a self-hoster has to size them against their own hardware. On WaveHouse Cloud they arrive tuned, and the ones you still care about are a dashboard away."
 sidebar:
   order: 9
 ---
@@ -215,6 +217,7 @@ Every key, with its default. Save the YAML as `config.yaml` next to the binary (
 
 <Tabs syncKey="cfg">
 <TabItem label="YAML">
+
 ```yaml
 data_dir: ./data         # nats → ./data/nats, pebble → ./data/pebble
 
@@ -292,8 +295,10 @@ prometheus:
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
 ```
+
 </TabItem>
 <TabItem label="Environment">
+
 ```ini
 WH_DATA_DIR=./data
 
@@ -348,5 +353,6 @@ WH_PROMETHEUS_ENABLED=false
 WH_PROMETHEUS_PATH=/metrics
 WH_PROMETHEUS_PORT=0
 ```
+
 </TabItem>
 </Tabs>
