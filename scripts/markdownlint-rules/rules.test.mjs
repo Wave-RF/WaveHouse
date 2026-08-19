@@ -195,6 +195,19 @@ describe("WH002 flags an MDX fence glued to a JSX tag", () => {
     const src = "<Foo>\nprose that ends in a >\n```yaml\nkey: value\n```\n";
     assert.doesNotMatch(run("t.mdx", src).stdout, /WH002/);
   });
+
+  it("still sees both sides when an attribute value contains >", () => {
+    // Rejecting the opening side alone would be worse than not detecting at all:
+    // the fixer inserts one of the two blank lines, WH002 falls silent, and the
+    // generic pass then rewrites the fenced code.
+    const src = '<TabItem label="a>b">\n```yaml\nkey: value\n```\n</TabItem>\n';
+    assert.equal((run("t.mdx", src).stdout.match(/WH002/g) ?? []).length, 2);
+  });
+
+  it("still sees both sides when an expression container contains >", () => {
+    const src = "<Foo onClick={() => f()}>\n```yaml\nkey: value\n```\n</Foo>\n";
+    assert.equal((run("t.mdx", src).stdout.match(/WH002/g) ?? []).length, 2);
+  });
 });
 
 describe("fix-mdx-fences.mjs repairs the structure", () => {

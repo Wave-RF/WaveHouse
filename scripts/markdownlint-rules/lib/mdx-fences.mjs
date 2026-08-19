@@ -21,8 +21,16 @@ const FENCE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
  * an open tag followed by prose that happens to end in `>`. Both would make the
  * shared fixer insert a blank line into valid MDX. The joined text must
  * therefore be a single opening tag — exactly one `>`, at the very end, and no
- * `</` anywhere. An attribute value containing a literal `>` is rejected too;
- * that is a miss rather than a corruption, which is the direction to err in.
+ * `</` anywhere.
+ *
+ * Attribute values and expression containers are masked before that test, and
+ * that masking is load-bearing rather than polish. A `>` inside them
+ * (`label="a>b"`, `when={a > b}`, `onClick={() => f()}`) is ordinary JSX; without
+ * masking such a tag is rejected on the OPENING side while the closing side
+ * still fires, so the fixer inserts one of the two blank lines, WH002 falls
+ * silent, and the generic pass then rewrites the code inside the fence. A miss
+ * on both sides would be harmless; a miss on one side is the corruption this
+ * whole rule exists to prevent.
  */
 function openingTagAbove(lines, index) {
   const prev = lines[index - 1];
@@ -39,7 +47,10 @@ function openingTagAbove(lines, index) {
       .slice(i, index)
       .map((l) => l.trim())
       .join(" ");
-    if (joined.includes("</") || joined.indexOf(">") !== joined.length - 1) return null;
+    // Mask strings first, then `{…}`, so a brace inside a quoted value can't
+    // confuse the second pass.
+    const masked = joined.replace(/"[^"]*"|'[^']*'/g, '""').replace(/\{[^{}]*\}/g, "{}");
+    if (masked.includes("</") || masked.indexOf(">") !== masked.length - 1) return null;
     return i === index - 1 ? joined : `${line.trim()} …`;
   }
   return null;
