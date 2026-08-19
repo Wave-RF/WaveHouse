@@ -54,6 +54,19 @@ function run(name, content, { fix = false, config } = {}) {
   return { output: readFileSync(file, "utf8"), stdout };
 }
 
+/** Copy the repo's real markdownlint configs into `dir`, with loadable rule paths. */
+function copyRepoConfig(dir) {
+  writeFileSync(
+    path.join(dir, ".markdownlint.json"),
+    readFileSync(path.join(repoRoot, ".markdownlint.json"), "utf8"),
+  );
+  const cli2Config = readFileSync(
+    path.join(repoRoot, ".markdownlint-cli2.jsonc"),
+    "utf8",
+  ).replaceAll('"./scripts/', `"${repoRoot}/scripts/`);
+  writeFileSync(path.join(dir, ".markdownlint-cli2.jsonc"), cli2Config);
+}
+
 const unchanged = (name, content, label) =>
   it(label, () => assert.equal(run(name, content, { fix: true }).output, content));
 
@@ -217,6 +230,45 @@ describe("WH002 flags an MDX fence glued to a JSX tag", () => {
     // really is swallowed here, and a one-sided report would half-fix it.
     const src = "<div onClick={() => open({tab: 1})}>\n```yaml\nkey: value\n```\n</div>\n";
     assert.equal((run("t.mdx", src).stdout.match(/WH002/g) ?? []).length, 2);
+  });
+});
+
+describe("the repo config keeps a bare --fix away from MDX", () => {
+  // The guard is structural, not prose: `.markdownlint-cli2.jsonc` globs `.md`
+  // only, and the `.mdx` glob lives on `lint:md`. If someone moves it back into
+  // the config, a bare `markdownlint-cli2 --fix` silently starts rewriting the
+  // inside of MDX code blocks again — the exact corruption this arrangement
+  // exists to prevent, and previously prevented only by a sentence in AGENTS.md.
+  // The interior blank line matters: without one, CommonMark's HTML block runs
+  // past the whole fence and the generic rules stay quiet, so a fixture without
+  // it would pass even with the guard removed.
+  const glued =
+    '<TabItem label="YAML">\n```yaml\n# see https://example.com/config\ncache:\n   ttl: 60s\n\n# second section\nother: 1\n```\n</TabItem>\n';
+
+  it("leaves a glued-fence .mdx byte-identical under a bare --fix", () => {
+    const dir = mkdtempSync(path.join(workdir, "bare-"));
+    const file = path.join(dir, "t.mdx");
+    writeFileSync(file, glued);
+    copyRepoConfig(dir);
+    try {
+      execFileSync(cli2, ["--fix"], { cwd: dir, encoding: "utf8", stdio: "pipe" });
+    } catch {
+      // A nonzero exit just means findings remain; the file is what matters.
+    }
+    assert.equal(readFileSync(file, "utf8"), glued);
+  });
+
+  it("still reports .mdx when the lint glob is supplied, as lint:md does", () => {
+    const dir = mkdtempSync(path.join(workdir, "lint-"));
+    writeFileSync(path.join(dir, "t.mdx"), glued);
+    copyRepoConfig(dir);
+    let stdout = "";
+    try {
+      stdout = execFileSync(cli2, ["**/*.mdx"], { cwd: dir, encoding: "utf8", stdio: "pipe" });
+    } catch (err) {
+      stdout = `${err.stdout ?? ""}${err.stderr ?? ""}`;
+    }
+    assert.match(stdout, /WH002/);
   });
 });
 

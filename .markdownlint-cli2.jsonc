@@ -40,7 +40,14 @@
   // (`--fix`) never rewrites another branch's files. The explicit ignores below
   // stay as a fallback for the case where .gitignore is absent.
   "gitignore": true,
-  "globs": ["**/*.md", "**/*.mdx"],
+  // .md ONLY, deliberately. The .mdx glob lives on `lint:md` in package.json
+  // instead, because --fix is orthogonal to globs: leaving **/*.mdx here means
+  // a bare `markdownlint-cli2 --fix` from the repo root rewrites the inside of
+  // MDX code blocks, and "don't run that by hand" is a prohibition, not a
+  // guard. With the glob on the lint script, a bare --fix is safe by
+  // construction and the worst a bare lint can do is under-report .mdx —
+  // the strictly better failure of the two.
+  "globs": ["**/*.md"],
   "customRules": [
     "./scripts/markdownlint-rules/no-hard-wrapped-prose.mjs",
     "./scripts/markdownlint-rules/mdx-fence-needs-blank-line.mjs"

@@ -470,8 +470,9 @@ fix-ts: pnpm-install
 	@echo "$(CYAN)==> Applying Biome fixes (format + lint + imports)...$(RESET)"
 	@$(PNPM) -w run fix
 
-# fix-md: the generic markdownlint --fix pass is scoped to **/*.md and never
-# runs over .mdx. That is the root fix for a whole class of corruption:
+# fix-md: the generic markdownlint --fix pass reaches **/*.md only and never
+# .mdx — the config globs .md, and the .mdx glob lives on `lint:md`, so even a
+# bare `markdownlint-cli2 --fix` is safe. That is the root fix for a whole class of corruption:
 # markdownlint parses CommonMark, MDX does not, and where the two disagree a
 # generic autofix rewrites the inside of a code block — de-indenting YAML
 # comments it reads as headings, autolinking bare URLs. Reporting on that
