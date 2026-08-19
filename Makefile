@@ -472,7 +472,9 @@ fix-ts: pnpm-install
 
 # fix-md: the generic markdownlint --fix pass reaches **/*.md only and never
 # .mdx — the config globs .md, and the .mdx glob lives on `lint:md`, so even a
-# bare `markdownlint-cli2 --fix` is safe. That is the root fix for a whole class of corruption:
+# bare `markdownlint-cli2 --fix` is safe.
+#
+# That is the root fix for a whole class of corruption:
 # markdownlint parses CommonMark, MDX does not, and where the two disagree a
 # generic autofix rewrites the inside of a code block — de-indenting YAML
 # comments it reads as headings, autolinking bare URLs. Reporting on that
@@ -657,7 +659,11 @@ DOCS_FILTER := wavehouse-docs
 # fix-prose hand misspell this explicit list (lazily expanded via `=`, so the
 # find only runs when those targets run) rather than a directory — so misspell
 # never reads a .ts content-config as text.
-DOCS_PROSE   = $(shell find $(DOCS_DIR)/src/content -type f \( -name '*.md' -o -name '*.mdx' \) 2>/dev/null)
+# The canonical docs-prose set, from the one script that defines it (AGENTS.md
+# §DRY). A local `find` here used to cover only docs/src/content, so README,
+# CONTRIBUTING, SECURITY, SUPPORT, CODE_OF_CONDUCT and the SDK readme were
+# rewritten by the on-save hook's misspell pass but never checked by this gate.
+DOCS_PROSE   = $(shell bash scripts/docs-prose.sh all 2>/dev/null)
 
 # pnpm-install: hidden internal target. Node targets depend on it to ensure
 # workspace deps are present; on a warm tree `--frozen-lockfile` is a fast

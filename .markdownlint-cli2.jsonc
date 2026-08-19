@@ -19,14 +19,17 @@
   // code block and the rules light up — which is exactly the hazard we want
   // caught, since it is what makes a generic --fix rewrite the code.
   // It also means generic `--fix` must never run over .mdx AT ALL — the rules
-  // would "fix" code that only looks like prose. `fix:md` in package.json scopes
-  // that pass to **/*.md; .mdx is checked here but fixed only by our own
+  // would "fix" code that only looks like prose. .mdx IS linted, but through the
+  // `**/*.mdx` glob on `lint:md` in package.json, not this file's `globs`, which
+  // are .md only so that no generic pass — `fix:md` or a bare `--fix` — can
+  // reach MDX (see the globs note below). The only fixer that touches .mdx is
   // scripts/fix-mdx-fences.mjs, which just inserts blank lines beside JSX tags.
   //
   // customRules live here and nowhere else — the VS Code extension reads this
   // file too, so no editor-side setting is needed (markdownlint.customRules is
   // deprecated in favor of this file). Note the editor only activates on
-  // Markdown, so .mdx gets no squiggles either way; CI and `make fix` cover it:
+  // Markdown, so .mdx gets no squiggles either way. CI reports both; `make fix`
+  // repairs WH001 in .md and only WH002 in .mdx:
   //   WH001  prose paragraphs must not be hard-wrapped   (autofix: joins them)
   //   WH002  MDX fence adjacent to a JSX tag needs a blank line (fixed in phase 1)
   // Both are enabled in .markdownlint.json. WH001 is turned off for CI docs and

@@ -7,10 +7,12 @@
 // to a JSX tag, CommonMark does not see a code block, so a YAML block's `#`
 // comments look like ATX headings — and MD022/MD023/MD026/MD034 then
 // "helpfully" de-indent them out of the block, space them apart, and rewrite
-// bare URLs inside what is supposed to be verbatim code. `fix:md` therefore
-// scopes the generic pass to **/*.md, and this is the ONLY fixer that touches
-// .mdx. It can only ever insert a blank line, so its worst failure mode is a
-// render-neutral blank line rather than rewritten code.
+// bare URLs inside what is supposed to be verbatim code. So .markdownlint-cli2.jsonc
+// globs .md only (the .mdx glob lives on `lint:md`), which keeps every generic
+// pass — `fix:md` or a bare `--fix` — away from MDX. This is the only STRUCTURAL
+// fixer that touches .mdx; misspell still corrects spelling there. It can only
+// ever insert a blank line, so its worst failure mode is a render-neutral blank
+// line rather than rewritten code.
 //
 // The detection logic is shared with the WH002 markdownlint rule (which owns
 // reporting for CI and the editor) — see markdownlint-rules/lib/mdx-fences.mjs.
