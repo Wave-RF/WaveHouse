@@ -130,10 +130,17 @@ func (v *validator) parseFile(name string, data []byte, target any) bool {
 	if data == nil {
 		return false // missing file, already reported
 	}
-	if len(strings.TrimSpace(string(data))) == 0 {
+	switch strings.TrimSpace(string(data)) {
+	case "":
 		// An all-whitespace file is what a truncated save looks like; it must
 		// never be read as an empty document.
 		v.errorf(name, "", "file is empty — not valid JSON; an empty document is {}")
+		return false
+	case "null":
+		// The one well-formed document decodeStrict can't catch: a top-level
+		// null decodes into the zero value without error, silently reading as
+		// "no settings". (Other non-object roots already fail the decode.)
+		v.errorf(name, "", "document is null — an empty document is {}")
 		return false
 	}
 	v.findings = append(v.findings, dupKeyFindings(name, data)...)

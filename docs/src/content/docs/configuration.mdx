@@ -176,6 +176,16 @@ See [API — Authentication](/api#authentication).
 | --- | --- | ------- | ----------- |
 | `pipes.dir` | `WH_PIPES_DIR` | *(empty)* | Optional bootstrap source for named query pipes. When set, `.sql` files in this directory are loaded into the NATS KV pipe store on startup. The directory is **read-only at runtime** — it's a seed, not authoritative storage. After bootstrap, the API and KV are the source of truth (runtime pipe edits go through the API, not the files). Empty default skips bootstrap entirely. Mount read-only in containers (e.g. `./my-pipes:/app/pipes:ro`). |
 
+### Settings Directory
+
+The settings directory holds WaveHouse's file-based settings as exactly four JSON documents: `roles.json`, `policies.json`, `pipes.json`, and `config.json`. Every file must exist (an empty document is `{}` — a missing file always means deletion or a wrong path, never "defaults"), and any other `*.json` file in the directory is an error, so a typoed filename fails loudly instead of being silently ignored.
+
+Check a directory with `wavehouse validate [dir]` — the argument falls back to `WH_SETTINGS_DIR`. It validates without starting the server (JSON syntax including unknown fields and duplicate keys, per-file shape rules, and cross-file role references), prints every finding in one pass, and exits `0` for valid (warnings allowed), `1` for invalid, `2` for usage — so operators and CI can gate a settings change before it reaches a running instance.
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `settings.dir` | `WH_SETTINGS_DIR` | *(empty)* | Path to the settings directory. No default, same reasoning as `policy.file_path`: a baked-in path would turn a missing mount into silent misconfiguration instead of an explicit operator choice. |
+
 ### OTel
 
 The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/logs) is then individually gated by its own `enabled` flag — you can run traces-only, logs-only, etc. Prometheus exposition is configured in its own top-level [`prometheus`](#prometheus) block; it operates independently and works in any combination with OTel (OTLP push only, Prometheus only, both, or neither). Stdout is always active for logs (the logger fans out to both stdout and the OTLP exporter), so logs never disappear regardless of collector state. gRPC exporters are lazy, so an unreachable collector does not block startup; transient export errors are surfaced via the OTel SDK's error handler. The `if err != nil` fallback in `main.go` only fires for genuine init errors (malformed options, resource construction failure).
@@ -273,6 +283,10 @@ policy:
 pipes:
   dir: ""                # empty = skip bootstrap; set + read-only mount to seed pipes
 
+settings:
+  dir: ""                # settings directory (roles/policies/pipes/config .json);
+                         # check with `wavehouse validate`
+
 otel:
   enabled: false         # master switch — set true to export via OTLP gRPC
   # Endpoint, TLS, custom CA, mTLS, and auth headers come from the standard
@@ -336,6 +350,8 @@ WH_DLQ_ENABLED=true
 WH_POLICY_FILE_PATH=
 
 WH_PIPES_DIR=
+
+WH_SETTINGS_DIR=
 
 WH_OTEL_ENABLED=false
 WH_OTEL_TRACES_ENABLED=true

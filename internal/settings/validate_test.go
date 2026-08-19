@@ -130,6 +130,8 @@ func TestValidate_FileSyntax(t *testing.T) {
 	}{
 		{"empty file", FilePolicies, "", "file is empty"},
 		{"whitespace only", FileRoles, "  \n\t", "file is empty"},
+		{"null document", FileRoles, `null`, "document is null"},
+		{"null with whitespace", FileConfig, "  null\n", "document is null"},
 		{"syntax error", FilePipes, `{"pipes": [`, "unexpected EOF"},
 		{"unknown field", FilePolicies, `{"default_roll": "public"}`, "unknown field"},
 		{"trailing content", FileConfig, `{} {}`, "trailing content"},
@@ -227,52 +229,29 @@ func TestValidate_RoleReferences(t *testing.T) {
 
 func TestValidate_Warnings(t *testing.T) {
 	t.Parallel()
-
-	t.Run("admin grant is dead config", func(t *testing.T) {
-		t.Parallel()
-		files := validFiles()
-		files[FilePolicies] = `{"default_role": "public", "tables": {"clicks": {"select": {"admin": {"max_rows": 5}}}}}`
-		doc, findings := parse(writeDir(t, files))
-		require.NotNil(t, doc, "warnings alone must leave the directory valid: %s", findingStrings(findings))
-		assert.False(t, HasErrors(findings))
-		assert.Contains(t, findingStrings(findings), "unconditional bypass")
-	})
-
-	t.Run("default_role equals admin", func(t *testing.T) {
-		t.Parallel()
-		files := validFiles()
-		files[FilePolicies] = `{"default_role": "admin", "tables": {}}`
-		doc, findings := parse(writeDir(t, files))
-		require.NotNil(t, doc)
-		assert.Contains(t, findingStrings(findings), "every roleless request gets full admin")
-	})
-
-	t.Run("admin in pipe allowlist is redundant", func(t *testing.T) {
-		t.Parallel()
-		files := validFiles()
-		files[FilePipes] = `{"pipes": [{"name": "a", "sql": "SELECT 1", "allowed_roles": ["admin"]}]}`
-		doc, findings := parse(writeDir(t, files))
-		require.NotNil(t, doc)
-		assert.Contains(t, findingStrings(findings), "listing it is redundant")
-	})
-
-	t.Run("empty dedupe override sets nothing", func(t *testing.T) {
-		t.Parallel()
-		files := validFiles()
-		files[FileConfig] = `{"dedupe": {"tables": {"clicks": {}}}}`
-		doc, findings := parse(writeDir(t, files))
-		require.NotNil(t, doc, "an empty override is a warning, not an error")
-		assert.Contains(t, findingStrings(findings), "override sets nothing")
-	})
-
-	t.Run("default on required parameter", func(t *testing.T) {
-		t.Parallel()
-		files := validFiles()
-		files[FilePipes] = `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x", "required": true, "default": 5}]}]}`
-		doc, findings := parse(writeDir(t, files))
-		require.NotNil(t, doc)
-		assert.Contains(t, findingStrings(findings), "never used")
-	})
+	tests := []struct {
+		name string
+		file string
+		body string
+		want string
+	}{
+		{"admin grant is dead config", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"select": {"admin": {"max_rows": 5}}}}}`, "unconditional bypass"},
+		{"default_role equals admin", FilePolicies, `{"default_role": "admin", "tables": {}}`, "every roleless request gets full admin"},
+		{"admin in pipe allowlist is redundant", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "allowed_roles": ["admin"]}]}`, "listing it is redundant"},
+		{"empty dedupe override sets nothing", FileConfig, `{"dedupe": {"tables": {"clicks": {}}}}`, "override sets nothing"},
+		{"default on required parameter", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x", "required": true, "default": 5}]}]}`, "never used"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			files := validFiles()
+			files[tt.file] = tt.body
+			doc, findings := parse(writeDir(t, files))
+			require.NotNil(t, doc, "warnings alone must leave the directory valid: %s", findingStrings(findings))
+			assert.False(t, HasErrors(findings))
+			assert.Contains(t, findingStrings(findings), tt.want)
+		})
+	}
 }
 
 // TestValidate_FindingsOnly pins the exported surface: Validate checks and
