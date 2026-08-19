@@ -45,10 +45,15 @@
 # maintainer hand-labels `security` is a security fix and belongs at the top,
 # not buried under Dependencies.
 #
-# This routing cannot be linted locally. Dry-run it against real history before
-# cutting a release:
+# This routing cannot be linted locally, but it CAN be dry-run against real
+# history — including from a branch, before this file reaches main, because
+# `configuration_file_path` resolves relative to `target_commitish`:
 #   gh api -X POST repos/Wave-RF/WaveHouse/releases/generate-notes \
-#     -f tag_name=vX.Y.Z -f target_commitish=main --jq .body
+#     -f tag_name=vX.Y.Z -f target_commitish=<branch-or-main> \
+#     -f configuration_file_path=.github/release.yml --jq .body
+# Do this after editing the categories below. Last run on this config: all 23
+# merged Dependabot PRs landed in Dependencies, none leaked into CI & build
+# (41) or Documentation (54).
 changelog:
   exclude:
     labels:
