@@ -13,8 +13,28 @@
   // `astro build` (CI, via `make ci` → build-docs), the single source of truth
   // for broken links. See docs/astro.config.mjs.
   //
-  // NOTE: .mdx is intentionally NOT linted — markdownlint parses CommonMark, not
-  // MDX's JSX/import syntax (docs/src/content/docs/index.mdx).
+  // .mdx IS linted, with a caveat worth knowing: markdownlint parses CommonMark,
+  // not MDX, so it reads JSX as HTML blocks. That turns out to be a feature —
+  // when a fence is glued to a <TabItem> (see WH002) the fence stops being a
+  // code block and the rules light up — which is exactly the hazard we want
+  // caught, since it is what makes a generic --fix rewrite the code.
+  // It also means generic `--fix` must never run over .mdx AT ALL — the rules
+  // would "fix" code that only looks like prose. .mdx IS linted, but through the
+  // `**/*.mdx` glob on `lint:md` in package.json, not this file's `globs`, which
+  // are .md only so that no generic pass — `fix:md` or a bare `--fix` — can
+  // reach MDX (see the globs note below). The only fixer that touches .mdx is
+  // scripts/fix-mdx-fences.mjs, which just inserts blank lines beside JSX tags.
+  //
+  // customRules live here and nowhere else — the VS Code extension reads this
+  // file too, so no editor-side setting is needed (markdownlint.customRules is
+  // deprecated in favor of this file). Note the editor only activates on
+  // Markdown, so .mdx gets no squiggles either way. CI reports both; `make fix`
+  // repairs WH001 in .md and only WH002 in .mdx:
+  //   WH001  prose paragraphs must not be hard-wrapped   (autofix: joins them)
+  //   WH002  MDX fence adjacent to a JSX tag needs a blank line (fixed in phase 1)
+  // Both are enabled in .markdownlint.json. WH001 is turned off for CI docs and
+  // agent prompts by .github/.markdownlint.json and .claude/.markdownlint.json,
+  // and applies everywhere else — a narrower exclusion than scripts/docs-prose.sh.
   //
   // markdownlint-cli2 globs with dot:true, so `**/*.md` descends into hidden
   // dirs — including .worktrees/, where this repo nests git worktrees. Honor
@@ -23,7 +43,18 @@
   // (`--fix`) never rewrites another branch's files. The explicit ignores below
   // stay as a fallback for the case where .gitignore is absent.
   "gitignore": true,
+  // .md ONLY, deliberately. The .mdx glob lives on `lint:md` in package.json
+  // instead, because --fix is orthogonal to globs: leaving **/*.mdx here means
+  // a bare `markdownlint-cli2 --fix` from the repo root rewrites the inside of
+  // MDX code blocks, and "don't run that by hand" is a prohibition, not a
+  // guard. With the glob on the lint script, a bare --fix is safe by
+  // construction and the worst a bare lint can do is under-report .mdx —
+  // the strictly better failure of the two.
   "globs": ["**/*.md"],
+  "customRules": [
+    "./scripts/markdownlint-rules/no-hard-wrapped-prose.mjs",
+    "./scripts/markdownlint-rules/mdx-fence-needs-blank-line.mjs"
+  ],
   "ignores": [
     "**/node_modules/**",
     "**/dist/**",

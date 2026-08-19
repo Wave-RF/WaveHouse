@@ -45,9 +45,14 @@ describe("Streaming", () => {
         filter: { duration_ms: { _gt: "100" } },
       },
     };
+    // `anon` deliberately cannot see `payload` here, which is what makes the
+    // Authorization-header test below discriminating: `viewer` keeps the
+    // baseline `["*"]`, so the two roles observe different frames. Role
+    // matching is exact (internal/policy: no "*" any-role wildcard), so this
+    // entry is the only thing `anon` gets on this table.
     publicPolicy.tables[T.events].select = {
       ...(publicPolicy.tables[T.events].select || {}),
-      anon: { allow_columns: ["*"] },
+      anon: { allow_columns: ["event_id", "type", "user_id", "source", "received_timestamp"] },
     };
 
     await admin.policy.set(publicPolicy);
@@ -79,7 +84,7 @@ describe("Streaming", () => {
 
         await stream.connected(5_000);
 
-        await whAuth.from(T.clicks).insert({
+        const publicInsert = await whAuth.from(T.clicks).insert({
           event_id: id,
           page: "/sse-public-test",
           user_id: "public-user",
@@ -87,6 +92,7 @@ describe("Streaming", () => {
           country: "US",
           duration_ms: 99,
         });
+        expect(publicInsert.error).toBeNull();
 
         await waitForCondition(() => receivedEvents.some((e) => e.data?.event_id === id), 10_000);
 
@@ -118,13 +124,14 @@ describe("Streaming", () => {
         });
         await stream.connected(5_000);
 
-        await whAuth.from(T.clicks).insert({
+        const canonInsert = await whAuth.from(T.clicks).insert({
           event_id: id,
           page: "/canonical-ts",
           user_id: "canon-user",
           session_id: "canon-sess",
           received_timestamp: "2026-06-21T06:00:00.123+02:00",
         });
+        expect(canonInsert.error).toBeNull();
 
         await waitForCondition(() => receivedEvents.some((e) => e.data?.event_id === id), 10_000);
         const frame = receivedEvents.find((e) => e.data?.event_id === id);
@@ -149,42 +156,67 @@ describe("Streaming", () => {
       }
     });
 
-    it("receives events after insert (authenticated via ?token=)", async () => {
+    it("streams a column the public role cannot see (Authorization header)", async () => {
+      // The end-to-end proof that the credential move works. It has to be a
+      // column `anon` is denied: `/v1/stream` never rejects a bad or missing
+      // token, it answers with whatever `default_role` may see — so a test
+      // against a table both roles can read fully would pass just as happily
+      // with the header dropped, which is exactly what it is meant to catch.
       const whAuth = dataClient();
-      const receivedEvents: any[] = [];
+      const whPublic = publicClient();
       const id = testId();
 
-      // The SDK should automatically append the JWT as ?token= here
-      const stream = whAuth.from(T.clicks).stream();
+      const authEvents: any[] = [];
+      const anonEvents: any[] = [];
 
-      let unsub: (() => void) | undefined;
+      const authStream = whAuth.from(T.events).stream();
+      const anonStream = whPublic.from(T.events).stream();
+      let unsubAuth: (() => void) | undefined;
+      let unsubAnon: (() => void) | undefined;
+
       try {
-        unsub = stream.subscribe({
-          // initial: (result) => console.log("Initial SSE result:", result),
-          next: (event) => receivedEvents.push(event),
-          // status: (status) => console.log("SSE status:", status),
-          error: (err) => console.error("SSE error:", err),
+        unsubAuth = authStream.subscribe({
+          next: (event) => authEvents.push(event),
+          error: (err) => console.error("authed SSE error:", err),
+        });
+        unsubAnon = anonStream.subscribe({
+          next: (event) => anonEvents.push(event),
+          error: (err) => console.error("anon SSE error:", err),
         });
 
-        await stream.connected(20_000);
+        await authStream.connected(20_000);
+        await anonStream.connected(20_000);
 
-        await whAuth.from(T.clicks).insert({
+        const inserted = await whAuth.from(T.events).insert({
           event_id: id,
-          page: "/sse-auth-test",
+          type: "sse-auth-test",
           user_id: "auth-user",
-          session_id: "sse-sess",
-          country: "US",
-          duration_ms: 99,
+          payload: '{"secret":"viewer-only"}',
+          source: "web",
         });
+        // Without this, a failed write shows up as two 10s timeouts blaming
+        // the stream for an event that was never published.
+        expect(inserted.error).toBeNull();
 
-        await waitForCondition(() => receivedEvents.some((e) => e.data?.event_id === id), 10_000);
+        await waitForCondition(() => authEvents.some((e) => e.data?.event_id === id), 10_000);
+        await waitForCondition(() => anonEvents.some((e) => e.data?.event_id === id), 10_000);
 
-        const matchedEvent = receivedEvents.find((e) => e.data?.event_id === id);
-        expect(matchedEvent).toBeDefined();
-        expect(matchedEvent?.data.user_id).toBe("auth-user");
+        const authed = authEvents.find((e) => e.data?.event_id === id);
+        const anon = anonEvents.find((e) => e.data?.event_id === id);
+
+        // Authenticated as `viewer` via the header: the restricted column is present.
+        expect(authed?.data.payload).toBe('{"secret":"viewer-only"}');
+        // Same table, same event, no credential: the server projected it away.
+        // If the SDK stopped sending Authorization, the first assertion would
+        // see this frame instead.
+        expect(anon).toBeDefined();
+        expect(anon?.data.payload).toBeUndefined();
+        expect(anon?.data.event_id).toBe(id);
       } finally {
-        if (unsub) unsub();
-        stream.close();
+        if (unsubAuth) unsubAuth();
+        if (unsubAnon) unsubAnon();
+        authStream.close();
+        anonStream.close();
       }
     });
 
@@ -219,8 +251,14 @@ describe("Streaming", () => {
 
         // One row per country; the filter must route each to only its matching subscriber.
         const base = { page: "/scoped", user_id: "u", session_id: "s", duration_ms: 1 };
-        await inserter.from(T.clicks).insert({ ...base, event_id: usId, country: "US" });
-        await inserter.from(T.clicks).insert({ ...base, event_id: caId, country: "CA" });
+        // A failed write would otherwise surface as a stream timeout below,
+        // blaming the subscriber for a row that was never published.
+        for (const row of [
+          { ...base, event_id: usId, country: "US" },
+          { ...base, event_id: caId, country: "CA" },
+        ]) {
+          expect((await inserter.from(T.clicks).insert(row)).error).toBeNull();
+        }
 
         // Each subscriber receives its own country's row.
         await waitForCondition(() => usEvents.some((e) => e.data?.event_id === usId), 10_000);
@@ -233,8 +271,12 @@ describe("Streaming", () => {
         // not just "not yet arrived".
         const usBarrierId = testId();
         const caBarrierId = testId();
-        await inserter.from(T.clicks).insert({ ...base, event_id: usBarrierId, country: "US" });
-        await inserter.from(T.clicks).insert({ ...base, event_id: caBarrierId, country: "CA" });
+        for (const row of [
+          { ...base, event_id: usBarrierId, country: "US" },
+          { ...base, event_id: caBarrierId, country: "CA" },
+        ]) {
+          expect((await inserter.from(T.clicks).insert(row)).error).toBeNull();
+        }
         await waitForCondition(
           () => usEvents.some((e) => e.data?.event_id === usBarrierId),
           10_000,
@@ -280,8 +322,12 @@ describe("Streaming", () => {
         // Below the bound first, above it second: frames on one connection are
         // strictly ordered behind the same subject, so receiving the high row
         // proves the low row was withheld, not merely late.
-        await inserter.from(T.clicks).insert({ ...base, event_id: lowId, duration_ms: 100 });
-        await inserter.from(T.clicks).insert({ ...base, event_id: highId, duration_ms: 250 });
+        for (const row of [
+          { ...base, event_id: lowId, duration_ms: 100 },
+          { ...base, event_id: highId, duration_ms: 250 },
+        ]) {
+          expect((await inserter.from(T.clicks).insert(row)).error).toBeNull();
+        }
 
         await waitForCondition(() => events.some((e) => e.data?.event_id === highId), 10_000);
         expect(events.some((e) => e.data?.event_id === lowId)).toBe(false);

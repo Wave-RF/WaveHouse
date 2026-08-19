@@ -15,7 +15,6 @@
   "devDependencies": {
     "@types/node": "catalog:",
     "@vitest/coverage-v8": "^4.1.10",
-    "eventsource": "^4.1.0",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

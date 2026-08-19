@@ -95,19 +95,14 @@ export class WaveHouseClient<DB extends Database = Database> {
     table: string,
     opts?: StreamOptions,
   ): StreamController<T> {
-    if (typeof EventSource === "undefined") {
-      // TODO: fallback method? polling?
-      throw new Error(
-        "[WaveHouse SDK] Native EventSource is not available in this environment. " +
-          "Please provide a global polyfill (e.g., `globalThis.EventSource = require('eventsource')`).",
-      );
-    }
-
     const transport = new SSETransport<T>({
       baseURL: this._ctx.baseURL,
       table,
       since: opts?.since,
       auth: this._ctx.auth,
+      fetch: this._ctx.options.fetch,
+      headers: this._ctx.options.headers,
+      fetchOptions: this._ctx.options.fetchOptions,
     });
     const controller = new StreamController<T>(transport);
     if (opts?.signal) controller.attachSignal(opts.signal);

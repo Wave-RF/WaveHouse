@@ -42,8 +42,9 @@ export default defineConfig({
     // to this dir so the SDK's own *.test.ts unit files under clients/ts/src
     // are NOT pulled into the e2e run.
     include: [`${here}/*.test.ts`],
-    // Absolute (via import.meta.dirname) so they resolve regardless of root/cwd.
-    setupFiles: [path.join(import.meta.dirname, "polyfills.ts")],
+    // Absolute (via import.meta.dirname) so it resolves regardless of root/cwd.
+    // No setupFiles: streaming runs on the SDK's fetch transport, so there is
+    // no longer an EventSource global to polyfill.
     globalSetup: path.join(import.meta.dirname, "setup.ts"),
     testTimeout: 30_000,
     hookTimeout: 120_000,

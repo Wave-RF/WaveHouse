@@ -60,7 +60,7 @@ If you're building user-facing analytics, WaveHouse is like **Supabase for Click
 - **Query** — in-process Ristretto cache + `singleflight` coalescing; type-safe structured query AST; Tinybird-style named pipes (parameterized SQL endpoints).
 - **Real-time** — native SSE push, broadcast *before* the ClickHouse flush, with JetStream gap-fill for late/reconnecting clients.
 - **Security** — Hasura-style per-table, per-role column + row policies with JWT claim templating, stored in NATS KV.
-- **Client** — `@wavehouse/sdk`: zero-dependency TypeScript client with query builder, live queries, streaming, and schema codegen.
+- **Client** — `@wavehouse/sdk`: TypeScript client with query builder, live queries, streaming, and schema codegen; one runtime dependency (an SSE frame parser, ~1.4 KB gzipped).
 
 ## 📊 How it compares
 
@@ -108,8 +108,7 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:latest --repo Wave-RF/Wave
 go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 ```
 
-You'll still need ClickHouse reachable — point WaveHouse at it via `WH_CH_ADDR` (defaults to `localhost:9000`).
-See [Configuration](https://wavehouse.dev/configuration).
+You'll still need ClickHouse reachable — point WaveHouse at it via `WH_CH_ADDR` (defaults to `localhost:9000`). See [Configuration](https://wavehouse.dev/configuration).
 
 ## 🚦 Project status
 
@@ -121,7 +120,7 @@ Track what's shipped, in progress, and planned on the [**project board**](https:
 
 ## 💻 Local Development
 
-You'll need **Go 1.26+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pnpm 11+**. See [development docs](https://wavehouse.dev/development) for the authoritative source of truth with the full list, version requirements, and gotchas.
+You'll need **Go 1.26+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pnpm 11.21+**. See [development docs](https://wavehouse.dev/development) for the authoritative source of truth with the full list, version requirements, and gotchas.
 
 ```bash
 make tools    # one-time bootstrap
@@ -133,7 +132,7 @@ make dev      # hot-reload on .go save
 
 > **AI-assisted, human-reviewed.** Much of WaveHouse — code and docs alike — is written with AI assistance ([Claude Code](https://claude.com/claude-code)). Every change, whether AI- or human-authored, goes through the same review gates, tests, and CI before it lands. We note it for transparency: treat the docs as the source of truth, and please [open an issue](https://github.com/Wave-RF/WaveHouse/issues) if anything reads as off or out of date.
 
-The repo ships minimal team-wide [Claude Code](https://claude.com/claude-code) configuration — safety guardrails, a couple of slash commands / subagents, an auto-format hook, and [worktrunk](https://worktrunk.dev) project hooks for parallel agent workflows. Personal preferences (status line, model, allow lists) stay user-level. See [Claude Code & AI agents](docs/src/content/docs/claude-code.md) for setup + reference. `AGENTS.md` at the repo root is the canonical source of truth for project conventions.
+The repo ships minimal team-wide [Claude Code](https://claude.com/claude-code) configuration — safety guardrails, a couple of slash commands / subagents, auto-format hooks, and [worktrunk](https://worktrunk.dev) project hooks for parallel agent workflows. Personal preferences (status line, model, allow lists) stay user-level. See [Claude Code & AI agents](docs/src/content/docs/claude-code.md) for setup + reference. `AGENTS.md` at the repo root is the canonical source of truth for project conventions.
 
 ## 🤝 Contributing
 

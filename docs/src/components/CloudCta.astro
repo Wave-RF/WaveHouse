@@ -1,0 +1,228 @@
+---
+// "We'll run this for you" callout pointing at WaveHouse Cloud.
+//
+// Placed at the end of the ops-heavy pages (deployment, durability, access
+// control, …) via the `cloudCta` frontmatter flag, which Footer.astro reads —
+// that indirection is what lets plain-.md pages carry the CTA without being
+// converted to .mdx. .mdx pages can also import it directly for inline use.
+//
+// The link is built through cloudLink() so it always carries UTMs and keeps its
+// Referer; see src/config/outbound.ts for why both matter.
+import { cloudLink, REL_KEEP_REFERRER } from "../config/outbound";
+import ExternalIcon from "./ExternalIcon.astro";
+
+interface Props {
+  /**
+   * Where on the site this instance lives — "docs-deployment",
+   * "homepage-closer", … Rides along as utm_content and as a PostHog property,
+   * so it must be unique per placement or the two can't be told apart.
+   */
+  placement: string;
+  /** Override the default heading. */
+  title?: string;
+  /** Override the default body copy — use it to name what THIS page stops being your problem. */
+  body?: string;
+  /** "panel" for in-content use, "band" for the full-width homepage treatment. */
+  variant?: "panel" | "band";
+}
+
+const {
+  placement,
+  title = "Don't want to run this yourself?",
+  body =
+    "WaveHouse Cloud runs both halves for you — managed ClickHouse plus the WaveHouse gateway, with schema-aware ingest, SSE streaming, and tiered caching. Same open-source binary, zero ops.",
+  variant = "panel",
+} = Astro.props;
+
+const href = cloudLink(placement);
+---
+
+<aside class:list={["wh-cloudcta", `wh-cloudcta--${variant}`, "not-content"]}>
+  <p class="wh-cloudcta__title">{title}</p>
+  <p class="wh-cloudcta__body">{body}</p>
+  <div class="wh-cloudcta__actions">
+    <a
+      class="wh-cloudcta__button"
+      href={href}
+      target="_blank"
+      rel={REL_KEEP_REFERRER}
+      data-ph-cloud-cta={placement}
+    >
+      <span>Start on WaveHouse Cloud</span>
+      {/* ↗ not → : this leaves the docs for another origin, in a new tab. */}
+      <ExternalIcon class="wh-cloudcta__arrow" />
+    </a>
+    <span class="wh-cloudcta__note">Open-source core — self-host it forever if you'd rather.</span>
+  </div>
+</aside>
+
+<script is:inline>
+  function setupCloudCtaTracking() {
+    document.querySelectorAll("[data-ph-cloud-cta]").forEach(function (el) {
+      el.removeEventListener("click", el.__whPhCloudCtaHandler);
+      el.__whPhCloudCtaHandler = function () {
+        window.posthog?.capture("cloud_cta_clicked", {
+          placement: el.getAttribute("data-ph-cloud-cta"),
+          cta_href: el.getAttribute("href"),
+        });
+      };
+      el.addEventListener("click", el.__whPhCloudCtaHandler);
+    });
+  }
+  document.addEventListener("DOMContentLoaded", setupCloudCtaTracking);
+  document.addEventListener("astro:page-load", setupCloudCtaTracking);
+</script>
+
+<style>
+  .wh-cloudcta {
+    display: grid;
+    gap: 0.75rem;
+    padding: 1.5rem;
+    border: 1px solid var(--wh-border-strong);
+    border-radius: 0.75rem;
+    /* Accent-tinted so it reads as a promoted aside rather than another <Aside>
+       note, but tinted over the surface token so it stays legible in both
+       themes without a second colour definition. */
+    background:
+      linear-gradient(
+        135deg,
+        color-mix(in oklab, var(--wh-accent) 9%, transparent) 0%,
+        transparent 55%
+      ),
+      var(--wh-surface);
+  }
+  .wh-cloudcta--panel {
+    margin-block: 2.5rem 0;
+  }
+
+  .wh-cloudcta__title {
+    margin: 0;
+    font-size: 1.0625rem;
+    font-weight: 600;
+    color: var(--wh-ink);
+    min-width: 0;
+  }
+  .wh-cloudcta__body {
+    margin: 0;
+    font-size: 0.9375rem;
+    line-height: 1.6;
+    color: var(--wh-ink-muted);
+  }
+
+  .wh-cloudcta__actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.75rem 1rem;
+    margin-top: 0.25rem;
+  }
+  .wh-cloudcta__button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    background: var(--wh-accent);
+    color: var(--wh-accent-ink);
+    font-size: 0.9375rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition:
+      background 0.12s ease,
+      transform 0.12s ease;
+  }
+  .wh-cloudcta__button:hover {
+    background: var(--wh-accent-hover);
+    color: var(--wh-accent-ink);
+  }
+  .wh-cloudcta__arrow {
+    /* Nudged along its own diagonal, since it points up-and-right. */
+    transition: transform 0.12s ease;
+  }
+  .wh-cloudcta__button:hover .wh-cloudcta__arrow {
+    transform: translate(1.5px, -1.5px);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .wh-cloudcta__button,
+    .wh-cloudcta__arrow {
+      transition: none;
+    }
+    .wh-cloudcta__button:hover .wh-cloudcta__arrow {
+      transform: none;
+    }
+  }
+  .wh-cloudcta__note {
+    font-size: 0.8125rem;
+    color: var(--wh-ink-subtle);
+  }
+
+  /* ---------- band variant (homepage / splash, no sidebar) ---------- */
+  .wh-cloudcta--band {
+    margin-block: 3rem 0;
+    padding: 2rem;
+    text-align: left;
+  }
+  .wh-cloudcta--band .wh-cloudcta__title {
+    font-size: 1.25rem;
+  }
+  .wh-cloudcta--band .wh-cloudcta__body {
+    font-size: 1rem;
+    max-width: 60ch;
+  }
+
+  @media (max-width: 30rem) {
+    .wh-cloudcta {
+      padding: 1.25rem;
+    }
+    .wh-cloudcta--band {
+      padding: 1.5rem;
+    }
+    /* Full-width button on narrow screens — a shrink-wrapped pill next to the
+       note text wraps into an awkward two-line ragged block. */
+    .wh-cloudcta__button {
+      width: 100%;
+      justify-content: center;
+    }
+  }
+
+  /* ---------- band: copy left, action right, once there's room ----------
+     The band spans the full content column (67.5rem) but the body is capped at
+     a 60ch reading measure, which left ~410px of the band empty on the right
+     and the whole thing looking bottom-left weighted. Above 64rem the actions
+     move into a second column and take that space.
+
+     64rem is where it actually fits rather than a round number: the band's
+     inner width is min(67.5rem, 100vw - 2*pad) - 2*2rem, so at a 1024px
+     viewport it is 928px = the 60ch measure (606) + this gap (40) + 283 left
+     over, against a 247px button. Below that the button would start shrinking,
+     so the stacked layout stays. */
+  @media (min-width: 64rem) {
+    .wh-cloudcta--band {
+      grid-template-columns: minmax(0, 1fr) auto;
+      column-gap: 2.5rem;
+      align-items: center;
+    }
+    .wh-cloudcta--band .wh-cloudcta__title,
+    .wh-cloudcta--band .wh-cloudcta__body {
+      grid-column: 1;
+    }
+    .wh-cloudcta--band .wh-cloudcta__actions {
+      grid-column: 2;
+      /* Span both copy rows so the action block centres against the whole
+         text block, not against whichever row it happened to land in. */
+      grid-row: 1 / span 2;
+      flex-direction: column;
+      align-items: stretch;
+      margin-top: 0;
+      /* Wide enough that the note sits on one line rather than orphaning its
+         last word; the copy column is minmax(0,1fr) so it absorbs the cost. */
+      max-width: 22.5rem;
+    }
+    .wh-cloudcta--band .wh-cloudcta__button {
+      justify-content: center;
+    }
+    .wh-cloudcta--band .wh-cloudcta__note {
+      text-align: center;
+    }
+  }
+</style>

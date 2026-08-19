@@ -10,6 +10,8 @@
 // degrades the panel to slower, not blank. Server-side this renders a stable
 // skeleton ("—" counts, fixed-height feed) so the page is layout-complete
 // without JS and degrades to that skeleton if the demo is unreachable.
+import ExternalIcon from "./ExternalIcon.astro";
+
 const REPO_URL = "https://github.com/Wave-RF/WaveHouse";
 const DEMO_HOST = "stats.wavehouse.dev";
 ---
@@ -105,7 +107,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
       target="_blank"
       rel="noopener noreferrer"
       data-ph-demo="full_demo"
-    >Full demo ↗</a>
+    >Full demo <ExternalIcon /></a>
   </div>
   <p class="wh-live__byline">
     Queried in your browser by <code>@wavehouse/sdk</code> — one cached <code>pipe()</code>
@@ -789,7 +791,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
     transition: background 0.15s ease, transform 0.15s ease;
   }
   .wh-live__star:hover {
-    background: var(--wh-accent-hi);
+    background: var(--wh-accent-hover);
     transform: translateY(-1px);
   }
   .wh-live__cta-text { color: var(--wh-ink-muted); }

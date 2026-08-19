@@ -90,6 +90,12 @@
 
   --wh-accent: var(--brand-blue);
   --wh-accent-hi: var(--brand-blue-hi);
+  /* accent as a FILL on hover (primary buttons) — split from the bright rim
+     role for the same reason --wh-accent-text was, except light has to move it
+     the OTHER way. Brightening is right in dark, where the ink on the fill is
+     #04171A (9.1:1). In light that ink is white, so brightening to #06B0BF
+     would drop the label to 2.6:1 — light darkens instead. */
+  --wh-accent-hover: var(--brand-blue-hi);
   /* accent used as TEXT (links, current items, focus ring) — split from the
      bright rim role so light mode can darken it to an AA-passing value
      (#1DC9D8 stays 8.9:1 in dark; light overrides to #086D77 = 6:1). */
@@ -177,6 +183,9 @@
 
   --wh-accent: var(--brand-blue-deep);
   --wh-accent-hi: var(--brand-blue);
+  /* Darker, not brighter — see the dark-mode note. Derived from the brand hue
+     rather than a new hex, and it RAISES the white label past its resting 6:1. */
+  --wh-accent-hover: color-mix(in oklab, var(--brand-blue-deep) 86%, #000);
   --wh-accent-text: var(--brand-blue-deep); /* #086D77 = 6:1 on white (bright #06B0BF was 2.6:1) */
   --wh-accent-lo: #D8EFF2;
   --wh-accent-ink: #FFFFFF;
@@ -650,16 +659,34 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
    absolute http(s) hrefs are off-site by construction (internal links are
    root-relative). Exclusions: buttons/cards carry their own affordances,
    prev/next pagination cards already have a directional arrow (and a second
-   floating glyph inside the card read as broken), and the footer's
+   floating glyph inside the card read as broken), the footer's
    brand-sentence link ("A Wave RF open-source project") is prose identity,
-   not navigation — a mid-phrase arrow just splits the sentence. */
+   not navigation — a mid-phrase arrow just splits the sentence — and the cloud
+   CTA's button ships its own → (it renders inside <footer> on doc pages, so it
+   needs the exclusion here even though the homepage copy sits in content). */
 .sl-markdown-content a[href^="http"]:not(:where(.sl-link-button, .sl-link-card, .not-content a))::after,
-footer a[href^="http"]:not(:where(.pagination-links a, .wh-footer__sub a))::after {
+footer a[href^="http"]:not(:where(.pagination-links a, .wh-footer__sub a, .wh-cloudcta__button))::after {
   content: "↗";
   display: inline-block;
   margin-inline-start: 0.2em;
   font-size: 0.65em;
   opacity: 0.6;
+}
+
+/* ® / ™ on the first mention of a third-party mark, inserted by
+   src/plugins/rehype-trademarks.ts (registry: src/config/trademarks.ts).
+   Superscripted rather than left at full size — a legal notice mark sitting on
+   the baseline at 100% next to body copy reads as a typo. line-height: 0 keeps
+   the raised glyph from opening up the line it lands on, and because it's real
+   text (not a ::after) it still copies and gets read out. */
+.wh-tm {
+  font-size: 0.62em;
+  line-height: 0;
+  vertical-align: 0.45em;
+  /* The glyph is notation, not part of the sentence — don't let it pick up
+     italics from surrounding emphasis. Weight is inherited on purpose so it
+     doesn't look detached inside bold table cells. */
+  font-style: normal;
 }
 
 /* Inline code — denser, branded surface */
@@ -890,7 +917,7 @@ a.sl-link-button.primary {
   box-shadow: var(--wh-shadow-glow);
 }
 a.sl-link-button.primary:hover {
-  background: var(--wh-accent-hi);
+  background: var(--wh-accent-hover);
   transform: translateY(-1px);
 }
 a.sl-link-button.secondary,
@@ -1081,8 +1108,21 @@ a.sl-link-button.minimal:hover {
   }
   /* Everything else in the un-capped container but outside the grid (the
      page footer: edit link, last-updated, prev/next) keeps the prose width,
-     centered on the same axis as the grid's middle track. */
-  .main-pane .sl-container:has(> .sl-markdown-content) > :not(.sl-markdown-content) {
+     centered on the same axis as the grid's middle track.
+     .wh-footer--full opts out: the splash footer is a deliberately full-bleed
+     band (width:100vw + margin-inline:50%-50vw), and this rule outspecifies its
+     Astro-scoped CSS 4 classes to 1 — so without the exclusion the band
+     silently collapsed to a 1080px floating box above 1080px viewports, which
+     is where its 4-column layout lives. Below that the cap never bit, so it
+     looked correct on every narrow check.
+
+     It has to be the --full VARIANT, not .wh-footer: the docs-page
+     .wh-footer--compact wraps Starlight's own footer content (pagination, edit
+     link, last-updated), so exempting the base class un-capped all of that to
+     the full pane and left it 126px a side wider than the prose it follows. */
+  .main-pane
+    .sl-container:has(> .sl-markdown-content)
+    > :not(.sl-markdown-content, .wh-footer--full) {
     max-width: var(--sl-content-width);
     margin-inline: auto;
   }
