@@ -1,6 +1,8 @@
 ---
 title: "Access Control"
 description: "Roles, policies, and row/column permissions — how WaveHouse decides what each caller can read and write."
+cloudCta:
+  body: "Designing your row and column policies stays your call — it encodes your tenancy model. Running the JWT verification, the policy store, and its sync across every node does not have to be. WaveHouse Cloud operates that half."
 sidebar:
   order: 5
 ---
@@ -106,6 +108,7 @@ Each table entry holds permissions for two operations — `select` (reads) and `
 
 <Tabs syncKey="policy">
   <TabItem label="YAML">
+
 ```yaml
 tables:
   events:                 # ClickHouse table name
@@ -116,8 +119,10 @@ tables:
       writer:             # role → what "writer" may insert
         allow_columns: ["page", "score", "user_id"]
 ```
+
   </TabItem>
   <TabItem label="JSON">
+
 ```json
 {
   "tables": {
@@ -136,6 +141,7 @@ tables:
   }
 }
 ```
+
   </TabItem>
 </Tabs>
 
@@ -147,14 +153,17 @@ A role with no entry under the operation it is attempting is denied. The set of 
 
 <Tabs syncKey="policy">
   <TabItem label="YAML">
+
 ```yaml
 select:
   viewer:
     allow_columns: ["page", "button", "received_timestamp"]
     deny_columns: ["user_email", "ip_address"]
 ```
+
   </TabItem>
   <TabItem label="JSON">
+
 ```json
 {
   "select": {
@@ -165,6 +174,7 @@ select:
   }
 }
 ```
+
   </TabItem>
 </Tabs>
 
@@ -182,6 +192,7 @@ On a structured query (`POST /v1/query?table={table}`) the allowlist is a **hard
 
 <Tabs syncKey="policy">
   <TabItem label="YAML">
+
 ```yaml
 select:
   viewer:
@@ -189,8 +200,10 @@ select:
       tenant_id:
         _eq: "{{ jwt.app_metadata.tenant_id }}"
 ```
+
   </TabItem>
   <TabItem label="JSON">
+
 ```json
 {
   "select": {
@@ -204,6 +217,7 @@ select:
   }
 }
 ```
+
   </TabItem>
 </Tabs>
 
@@ -244,6 +258,7 @@ Row filters apply on the structured-query path and, per subscriber, on the live 
 
 <Tabs syncKey="policy">
   <TabItem label="YAML">
+
 ```yaml
 insert:
   writer:
@@ -254,8 +269,10 @@ insert:
       tenant_id:
         _eq: "{{ jwt.app_metadata.tenant_id }}"
 ```
+
   </TabItem>
   <TabItem label="JSON">
+
 ```json
 {
   "insert": {
@@ -273,6 +290,7 @@ insert:
   }
 }
 ```
+
   </TabItem>
 </Tabs>
 
@@ -291,6 +309,7 @@ This pairs naturally with a matching `filter` on the `select` side: `check` stam
 
 <Tabs syncKey="policy">
   <TabItem label="YAML">
+
 ```yaml
 select:
   viewer:
@@ -300,8 +319,10 @@ select:
     # allowlist: only these three
     allowed_aggregations: ["count", "sum", "avg"]
 ```
+
   </TabItem>
   <TabItem label="JSON">
+
 ```json
 {
   "select": {
@@ -314,6 +335,7 @@ select:
   }
 }
 ```
+
   </TabItem>
 </Tabs>
 
@@ -339,6 +361,7 @@ Four fields cap the cost of a single structured query for this role. All must be
 
 <Tabs syncKey="policy">
   <TabItem label="YAML">
+
 ```yaml
 select:
   viewer:
@@ -347,8 +370,10 @@ select:
     max_rows_to_read: 50000000      # reject a read that scans > 50M rows
     max_memory_usage: "4GiB"        # peak memory per query
 ```
+
   </TabItem>
   <TabItem label="JSON">
+
 ```json
 {
   "select": {
@@ -361,6 +386,7 @@ select:
   }
 }
 ```
+
   </TabItem>
 </Tabs>
 
@@ -443,16 +469,20 @@ In `config.yaml` (or the matching environment variable):
 
 <Tabs syncKey="cfg">
 <TabItem label="YAML">
+
 ```yaml
 policy:
   # seed on first boot only; KV wins thereafter
   file_path: /etc/wavehouse/policy.yaml
 ```
+
 </TabItem>
 <TabItem label="Environment">
+
 ```ini
 WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
 ```
+
 </TabItem>
 </Tabs>
 
@@ -464,6 +494,7 @@ A multi-tenant analytics deployment: anonymous callers get nothing, `viewer` rea
 
 <Tabs syncKey="policy">
 <TabItem label="YAML">
+
 ```yaml
 # admin: full access + the /v1/ops/* gate (this is also the default)
 admin_role: admin
@@ -493,8 +524,10 @@ tables:
           tenant_id:
             _eq: "{{ jwt.app_metadata.tenant_id }}"
 ```
+
 </TabItem>
 <TabItem label="JSON">
+
 ```json
 {
   "admin_role": "admin",
@@ -531,6 +564,7 @@ tables:
   }
 }
 ```
+
 </TabItem>
 </Tabs>
 

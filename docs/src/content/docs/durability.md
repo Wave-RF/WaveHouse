@@ -1,6 +1,8 @@
 ---
 title: "Durability & Storage"
 description: "What a WaveHouse ingest ack guarantees, why embedded JetStream fsyncs every publish, and how to tell whether your storage substrate can sustain it."
+cloudCta:
+  body: "Finding out your disk cannot sustain an fsync per publish is the kind of lesson that arrives at peak traffic. WaveHouse Cloud runs on storage already benchmarked against this page, with the WAL sizing and retention handled for you."
 sidebar:
   order: 11
 ---

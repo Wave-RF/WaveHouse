@@ -1,6 +1,8 @@
 ---
 title: "Architecture"
 description: "System design, data flows, internal packages, and technology stack."
+cloudCta:
+  body: "Every box in these diagrams is something somebody has to run, watch, and upgrade. On WaveHouse Cloud that somebody is us — the architecture is identical, which is why your queries and SDK code do not change when you move."
 sidebar:
   order: 4
 ---
@@ -121,7 +123,7 @@ The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https:/
 ### `ingest/` — Ingest Pipeline, DLQ & Sweeping
 
 - **worker.go** — `StartIngestWorker` launches an ingest pipeline: a JetStream consumer reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull subscription, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, received_timestamp, data}` and nothing else; the worker accepts any table name now (the table name in the NATS subject is `query.SafeEncodeNATS(rawUnsafeTableName)`), then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest?table={table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/ops/query` under the admin role (`policy.admin_role`) — see the Query Path section below; the `/v1/ops/*` `RequireAdmin` middleware enforces the check at the API layer, so a no/invalid-token request (resolved to `default_role`, not admin in a production config) never reaches the proxy. On a bulk-insert failure the batch is re-inserted row by row; rows that succeed are acked, and only the rows that fail again are routed to the DLQ (`sendToDLQ`), which republishes the as-published `EventMessage` envelope to `dlq.{table}` NATS subjects with the failure context in `X-DLQ-*` headers when DLQ is enabled — see [Ingest Pipeline](/ingest-pipeline) for the worker internals.
-- **types.go** — `EventMessage` struct (TableName, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
+- **types.go** — `EventMessage` struct (TableName, Scope — reserved, always empty today, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
 - **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
 
 ### `mq/` — Message Queue
@@ -244,21 +246,7 @@ Client POST /v1/ops/query
     (browser, CDN, corp proxy) caches the result.
 ```
 
-The proxy-pattern wins are: zero classification logic on the WaveHouse
-side (no isMutation heuristic to maintain), and any ClickHouse statement
-type — including verbs added in future versions and inline FORMAT
-overrides — works without WaveHouse code changes. Multi-statement input
-(`SELECT 1; TRUNCATE t`) is supported when the upstream ClickHouse has
-multi-query enabled, which is the default on recent versions; older or
-restrictively-configured servers will return a clear error from
-ClickHouse itself for the second statement. The proxy buffers the response in memory with a
-64 MiB cap (502 with `clickhouse response exceeded N bytes` on overflow,
-to keep a runaway `SELECT *` from pinning RAM on the API server), and
-passes ClickHouse's `Content-Type` through when an inline `FORMAT`
-directive overrides the default JSON envelope. The structured query
-endpoint and pipes still go through `clickhouse-go`'s native driver
-(Query/Exec) for performance and to keep the cached row-array shape
-consistent.
+The proxy-pattern wins are: zero classification logic on the WaveHouse side (no isMutation heuristic to maintain), and any ClickHouse statement type — including verbs added in future versions and inline FORMAT overrides — works without WaveHouse code changes. Multi-statement input (`SELECT 1; TRUNCATE t`) is supported when the upstream ClickHouse has multi-query enabled, which is the default on recent versions; older or restrictively-configured servers will return a clear error from ClickHouse itself for the second statement. The proxy buffers the response in memory with a 64 MiB cap (502 with `clickhouse response exceeded N bytes` on overflow, to keep a runaway `SELECT *` from pinning RAM on the API server), and passes ClickHouse's `Content-Type` through when an inline `FORMAT` directive overrides the default JSON envelope. The structured query endpoint and pipes still go through `clickhouse-go`'s native driver (Query/Exec) for performance and to keep the cached row-array shape consistent.
 
 ### Streaming Path
 

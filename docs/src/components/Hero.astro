@@ -1,4 +1,7 @@
 ---
+import { relFor, tagFirstParty } from "../config/outbound";
+import { markFirstMentions } from "../config/trademarks";
+import ExternalIcon from "./ExternalIcon.astro";
 import LiveDemo from "./LiveDemo.astro";
 
 type HeroAction = {
@@ -37,6 +40,16 @@ const heroData = (data.hero ?? {}) as HeroData;
 const heroTitle = heroData.title || data.title || "";
 const tagline = heroData.tagline;
 const actions = heroData.actions ?? [];
+
+// The tagline is the page's first visible prose, and on the homepage it names
+// ClickHouse — so this, not the body, is where the ® has to land. The hero
+// comes from frontmatter, which never passes through the markdown pipeline, so
+// rehype-trademarks can't reach it; instead that plugin pre-seeds itself from
+// the same frontmatter and skips whatever we mark here. One registry, one
+// first-mention per page, across two rendering paths.
+const marked = markFirstMentions(tagline ?? "", new Set());
+// markFirstMentions returns [] when nothing matched — render the tagline whole.
+const taglineRuns = marked.length > 0 ? marked : [{ text: tagline ?? "" }];
 
 if (import.meta.env.DEV && !heroTitle) {
   // Surfaces breakage immediately when a Starlight minor-version bump renames
@@ -100,7 +113,14 @@ if (import.meta.env.DEV && !heroTitle) {
       </h1>
 
       {tagline && (
-        <p class="wh-hero__tagline" data-stagger="2">{tagline}</p>
+        <p class="wh-hero__tagline" data-stagger="2">
+          {taglineRuns.map((run) => (
+            <>
+              {run.text}
+              {run.mark && <span class="wh-tm">{run.mark.symbol}</span>}
+            </>
+          ))}
+        </p>
       )}
 
       {actions.length > 0 && (
@@ -111,14 +131,18 @@ if (import.meta.env.DEV && !heroTitle) {
               typeof action.icon === "string" ? action.icon : action.icon?.name;
             if (attrs.target === "_blank") {
               const existing = String(attrs.rel ?? "").split(/\s+/).filter(Boolean);
-              for (const token of ["noopener", "noreferrer"]) {
+              // noopener always; noreferrer only for third-party destinations.
+              // Our own hosts (wave-rf.com, wavehouse.cloud) need the Referer to
+              // survive or PostHog can't attribute the visit to the docs — see
+              // src/config/outbound.ts.
+              for (const token of relFor(action.link).split(" ")) {
                 if (!existing.includes(token)) existing.push(token);
               }
               attrs.rel = existing.join(" ");
             }
             return (
               <a
-                href={action.link}
+                href={tagFirstParty(action.link, "homepage-hero")}
                 class:list={[
                   "wh-hero__action",
                   `wh-hero__action--${action.variant ?? "primary"}`,
@@ -149,21 +173,7 @@ if (import.meta.env.DEV && !heroTitle) {
                     into an object ({type:'icon', name:'external'}), so check
                     both shapes — a bare string compare silently never matched. */}
                 {action.variant !== "primary" && iconName === "external" && (
-                  <svg
-                    width="13"
-                    height="13"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    aria-hidden="true"
-                  >
-                    <path
-                      d="M7 17 17 7m0 0H8m9 0v9"
-                      stroke="currentColor"
-                      stroke-width="2.5"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                    ></path>
-                  </svg>
+                  <ExternalIcon />
                 )}
               </a>
             );
@@ -438,7 +448,7 @@ if (import.meta.env.DEV && !heroTitle) {
     box-shadow: var(--wh-shadow-glow);
   }
   .wh-hero__action--primary:hover {
-    background: var(--wh-accent-hi);
+    background: var(--wh-accent-hover);
     transform: translateY(-1px);
   }
   .wh-hero__action--secondary,

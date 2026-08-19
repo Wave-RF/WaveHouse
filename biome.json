@@ -10,7 +10,8 @@
       "clients/ts/src/**",
       "clients/ts/*.{ts,js,mjs,cjs,json}",
       "tests/e2e/sdk/**/*.{ts,js,mjs,cjs,json}",
-      "docs/**/*.{ts,js,mjs,cjs,json}"
+      "docs/**/*.{ts,js,mjs,cjs,json}",
+      "scripts/**/*.{ts,js,mjs,cjs}"
     ]
   },
   "formatter": {
