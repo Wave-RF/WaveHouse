@@ -16,7 +16,8 @@
   // .mdx IS linted, with a caveat worth knowing: markdownlint parses CommonMark,
   // not MDX, so it reads JSX as HTML blocks. That turns out to be a feature —
   // when a fence is glued to a <TabItem> (see WH002) the fence stops being a
-  // code block and the rules light up, which is exactly the bug we want caught.
+  // code block and the rules light up — which is exactly the hazard we want
+  // caught, since it is what makes a generic --fix rewrite the code.
   // It also means generic `--fix` must never run first on such a file — the
   // rules would "fix" code that only looks like prose — so scripts/fix-mdx-fences.mjs
   // repairs the structure before this config's fix pass. See `fix:md` in package.json.

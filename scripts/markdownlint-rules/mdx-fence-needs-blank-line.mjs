@@ -1,8 +1,7 @@
 // WH002/mdx-fence-needs-blank-line — a code fence adjacent to a JSX tag needs a
 // blank line between them.
 //
-// In MDX, markdown inside a JSX element is only parsed as markdown when a blank
-// line separates it from the tag. Without one:
+// The shape this catches:
 //
 //     <TabItem label="YAML">
 //     ```yaml
@@ -10,9 +9,15 @@
 //     ```
 //     </TabItem>
 //
-// the fence is swallowed into the JSX block and the code renders raw. It is a
-// silent failure — the build succeeds and the page is simply wrong — which is
-// why it needs a lint rule rather than trust.
+// MDX renders that correctly — compiling both shapes with the same
+// @mdx-js/mdx Astro uses produces identical output, so the site is fine either
+// way. The blank line matters because markdownlint does NOT see what MDX sees:
+// it parses CommonMark, where `<TabItem …>` opens an HTML block that runs to
+// the next blank line. The fence inside is therefore not a code block to any
+// generic rule, so the YAML's `#` comments read as ATX headings and
+// MD022/MD023/MD026/MD034 rewrite the code — de-indenting it out of the block
+// and turning bare URLs into autolinks. The blank line is what keeps the two
+// parsers agreeing about where the code is.
 //
 // This rule reports (CI + editor). The *fix* is applied earlier, by
 // scripts/fix-mdx-fences.mjs, because it has to land before any other fixer:

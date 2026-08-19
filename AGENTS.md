@@ -324,7 +324,7 @@ Before finishing a task, grep for the identifiers you touched (field names, env 
 ### Markdown authoring rules
 
 - **Never hard-wrap prose. One paragraph is one line.** No wrapping at 72/80 columns, no "semantic linefeeds" splitting a paragraph at sentence boundaries. Wrapped prose makes every later edit rewrap the whole block, so a one-word change lands as a five-line diff. Enforced by WH001 (`scripts/markdownlint-rules/no-hard-wrapped-prose.mjs`), which autofixes. Tables (with or without leading pipes), code, headings, setext underlines, blockquotes, JSX, multi-line MDX `import`/`export`, and `:::` aside delimiters are left alone; a list item is joined as a unit, marker line included; an aside's *body* is joined but its delimiters are not.
-- **In MDX, leave a blank line between a JSX tag and a code fence.** Without it MDX swallows the fence into the JSX block and the code renders raw — a silent failure that still builds:
+- **In MDX, leave a blank line between a JSX tag and a code fence.** MDX itself renders the glued form correctly — verified by compiling both shapes with the same `@mdx-js/mdx` Astro uses. The blank line is what keeps *markdownlint* agreeing with it: markdownlint parses CommonMark, where `<TabItem …>` opens an HTML block that runs to the next blank line, so a glued fence is not a code block to any generic rule and `markdownlint --fix` will reformat the code inside it:
 
   ````mdx
   <TabItem label="YAML">

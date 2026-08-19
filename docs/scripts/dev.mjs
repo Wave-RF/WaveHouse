@@ -86,13 +86,23 @@ const STRICT = Boolean(process.env.DOCS_WATCH_STRICT);
  * separate sockets, and the common squatter — an `astro dev` elsewhere — holds
  * only [::1]. Probing IPv4 alone would call the port free and we would fail on
  * the v6 bind anyway, which is exactly the failure this replaces. */
+/** Bind errors that mean "this host has no usable IPv6", not "the port is taken". */
+const IPV6_UNAVAILABLE = new Set(["EADDRNOTAVAIL", "EAFNOSUPPORT", "EPROTONOSUPPORT"]);
+
 function portFree(port, host) {
   return new Promise((resolvePort) => {
     const probe = createNetServer();
-    // A host with IPv6 disabled answers EADDRNOTAVAIL for ::1, and that alone
-    // must not veto the port. Every other error — EADDRINUSE, EACCES, a bad
-    // host, EADDRNOTAVAIL on any other address — means we cannot claim it.
-    probe.once("error", (err) => resolvePort(err.code === "EADDRNOTAVAIL" && host === "::1"));
+    // A host without usable IPv6 must not veto the port — but "without usable
+    // IPv6" surfaces as more than one code. EADDRNOTAVAIL is ::1 merely not
+    // being configured; when IPv6 is compiled out of the runtime altogether
+    // (ipv6.disable=1 kernels, WSL1, images built without AF_INET6) the
+    // socket() call fails first and libuv reports EAFNOSUPPORT or
+    // EPROTONOSUPPORT. Allowing only the first would fail every candidate on
+    // those hosts and report "no free port" where nothing is holding one.
+    //
+    // Everything else — EADDRINUSE, EACCES, a bad host, any of these on an
+    // address other than ::1 — means we cannot claim the port.
+    probe.once("error", (err) => resolvePort(host === "::1" && IPV6_UNAVAILABLE.has(err.code)));
     probe.listen({ port, host, exclusive: true }, () => probe.close(() => resolvePort(true)));
   });
 }
