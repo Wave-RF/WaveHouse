@@ -18,9 +18,10 @@
   // when a fence is glued to a <TabItem> (see WH002) the fence stops being a
   // code block and the rules light up — which is exactly the hazard we want
   // caught, since it is what makes a generic --fix rewrite the code.
-  // It also means generic `--fix` must never run first on such a file — the
-  // rules would "fix" code that only looks like prose — so scripts/fix-mdx-fences.mjs
-  // repairs the structure before this config's fix pass. See `fix:md` in package.json.
+  // It also means generic `--fix` must never run over .mdx AT ALL — the rules
+  // would "fix" code that only looks like prose. `fix:md` in package.json scopes
+  // that pass to **/*.md; .mdx is checked here but fixed only by our own
+  // scripts/fix-mdx-fences.mjs, which just inserts blank lines beside JSX tags.
   //
   // customRules live here and nowhere else — the VS Code extension reads this
   // file too, so no editor-side setting is needed (markdownlint.customRules is

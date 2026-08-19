@@ -470,11 +470,20 @@ fix-ts: pnpm-install
 	@echo "$(CYAN)==> Applying Biome fixes (format + lint + imports)...$(RESET)"
 	@$(PNPM) -w run fix
 
-# fix-md: two phases, and the order is load-bearing. scripts/fix-mdx-fences.mjs
-# first inserts the blank line an MDX fence needs beside a JSX tag (WH002);
-# until that blank line exists CommonMark sees no code block there, so the
-# generic rules would "fix" the code inside it — de-indenting YAML comments they
-# mistake for headings, rewriting bare URLs. markdownlint --fix runs second.
+# fix-md: the generic markdownlint --fix pass is scoped to **/*.md and never
+# runs over .mdx. That is the root fix for a whole class of corruption:
+# markdownlint parses CommonMark, MDX does not, and where the two disagree a
+# generic autofix rewrites the inside of a code block — de-indenting YAML
+# comments it reads as headings, autolinking bare URLs. Reporting on that
+# disagreement is useful (lint-md still checks .mdx); acting on it is not.
+#
+# .mdx therefore gets exactly one fixer, our own: scripts/fix-mdx-fences.mjs,
+# which only ever inserts a blank line next to a JSX tag, so its worst failure
+# is a render-neutral blank line rather than rewritten code.
+#
+# The md pass runs twice because it is not a fixpoint in one: WH001's insert
+# carries the pre-fix text of the lines it joins, so another rule's fix for a
+# joined line is dropped on the first pass.
 .PHONY: fix-md
 fix-md: pnpm-install
 	@echo "$(CYAN)==> Applying MDX structure + markdownlint fixes...$(RESET)"

@@ -32,35 +32,45 @@ esac
 
 cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
 
-# markdownlint-cli2 resolves globs (and per-directory config) from the repo
-# root, so hand it a repo-relative path.
-rel="${file_path#"$PWD"/}"
-
-# `rel` stays ABSOLUTE exactly when the strip above failed — i.e. the file is
-# not under the project root. Bail there: this repo's Markdown conventions have
-# no business rewriting agent memory files under ~/.claude/, scratch notes in
-# /tmp, or Markdown in an unrelated checkout, all of which a session routinely
-# writes. (Sibling worktrees are already covered by the `ignores` in
-# .markdownlint-cli2.jsonc, which cli2 honors even for a named file.)
-case "$rel" in
-  /*) exit 0 ;;
+# Resolve both sides to physical paths before comparing. A literal prefix strip
+# is not a containment check: `<repo>/../notes.md` strips to `../notes.md`,
+# which is not absolute and would sail past a `case */*` bail. Symlinks have the
+# same problem in reverse. This repo's Markdown conventions have no business
+# rewriting agent memory files under ~/.claude/, scratch notes in /tmp, or
+# Markdown in an unrelated checkout — all of which a session routinely writes.
+root=$(pwd -P) || exit 0
+dir=$(cd "$(dirname "$file_path")" 2>/dev/null && pwd -P) || exit 0
+case "$dir" in
+  "$root" | "$root"/*) ;;
+  *) exit 0 ;;
 esac
 
-# Phase 1: MDX structure. Must land before any generic fixer sees the file.
-if [ "${rel##*.}" = "mdx" ]; then
-  node scripts/fix-mdx-fences.mjs "$rel" >/dev/null 2>&1 || true
+# markdownlint-cli2 resolves globs (and per-directory config) from the repo
+# root, so hand it a repo-relative path.
+if [ "$dir" = "$root" ]; then
+  rel=$(basename "$file_path")
+else
+  rel="${dir#"$root"/}/$(basename "$file_path")"
 fi
 
-# Phase 2: markdownlint (style + WH001 unwrapping). `--no-globs` keeps it to
-# this one file instead of the whole repo; a nonzero exit just means something
-# unfixable remains (e.g. a fence with no language), which CI will report.
-#
-# Twice, mirroring `fix:md` in package.json: WH001's insert carries the pre-fix
-# text of the lines it joins, so another rule's fix for a joined line is dropped
-# on the first pass. One pass would leave behind an issue `make fix` would have
-# cleared — the exact round-trip this hook exists to avoid, in the common case
-# where WH001 fires.
-if [ -x node_modules/.bin/markdownlint-cli2 ]; then
+# .mdx gets exactly one fixer, and it is ours. The generic markdownlint rules
+# are deliberately never run against MDX — markdownlint parses CommonMark, MDX
+# does not, and where the two disagree a generic autofix rewrites the inside of
+# a code block. fix-mdx-fences only ever inserts a blank line beside a JSX tag,
+# so its worst failure is a render-neutral blank line. `make lint` still CHECKS
+# .mdx; it just never acts on the disagreement. Mirrors `fix:md`.
+if [ "${rel##*.}" = "mdx" ]; then
+  node scripts/fix-mdx-fences.mjs "$rel" >/dev/null 2>&1 || true
+elif [ -x node_modules/.bin/markdownlint-cli2 ]; then
+  # Plain Markdown: markdownlint's parse IS authoritative, so the full fixer
+  # chain is safe. `--no-globs` keeps it to this one file rather than the whole
+  # repo; a nonzero exit only means something unfixable remains (e.g. a fence
+  # with no language), which CI reports.
+  #
+  # Twice, mirroring `fix:md`: WH001's insert carries the pre-fix text of the
+  # lines it joins, so another rule's fix for a joined line is dropped on the
+  # first pass. One pass would leave behind exactly the issue this hook exists
+  # to prevent, in the common case where WH001 fires.
   node_modules/.bin/markdownlint-cli2 --no-globs --fix ":$rel" >/dev/null 2>&1 || true
   node_modules/.bin/markdownlint-cli2 --no-globs --fix ":$rel" >/dev/null 2>&1 || true
 fi

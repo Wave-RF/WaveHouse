@@ -2,14 +2,15 @@
 // Phase 1 of `make fix` / `pnpm run fix:md`: insert the blank line an MDX code
 // fence needs when it sits directly against a JSX tag (WH002).
 //
-// Why this is a script and not just `markdownlint-cli2 --fix`: it MUST run
-// before the generic rules get a chance to fix anything. While the blank line
-// is missing, CommonMark does not see a code block at all, so a YAML block's
-// `#` comments look like ATX headings — and MD022/MD023/MD026/MD034 then
+// Why this is a script and not just `markdownlint-cli2 --fix`: the generic
+// markdownlint rules are never run against MDX at all. While a fence sits glued
+// to a JSX tag, CommonMark does not see a code block, so a YAML block's `#`
+// comments look like ATX headings — and MD022/MD023/MD026/MD034 then
 // "helpfully" de-indent them out of the block, space them apart, and rewrite
-// bare URLs inside what is supposed to be verbatim code. markdownlint-cli2
-// always merges the nearest .markdownlint.json into a `--config` run, so a
-// WH002-only markdownlint pass cannot be expressed; a standalone pass can.
+// bare URLs inside what is supposed to be verbatim code. `fix:md` therefore
+// scopes the generic pass to **/*.md, and this is the ONLY fixer that touches
+// .mdx. It can only ever insert a blank line, so its worst failure mode is a
+// render-neutral blank line rather than rewritten code.
 //
 // The detection logic is shared with the WH002 markdownlint rule (which owns
 // reporting for CI and the editor) — see markdownlint-rules/lib/mdx-fences.mjs.

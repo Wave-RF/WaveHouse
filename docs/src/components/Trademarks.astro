@@ -10,8 +10,14 @@
 //
 // The marks and their owners live in src/config/trademarks.ts, shared with
 // src/plugins/rehype-trademarks.ts — the pass that puts the matching ® / ™ on
-// the first mention in the prose above. One registry, so the footer can't
-// promise a notice the prose didn't mark, or vice versa.
+// the first mention in the prose above. One registry, so the marks and owners
+// can't drift apart.
+//
+// The two sides do NOT read the same text, though: this component scans the raw
+// body, while the rehype pass deliberately skips code, pre and h1–h6. So the
+// footer is a superset — /architecture carries an OpenTelemetry notice for a
+// mark named only in a heading and a code block. Over-attributing is the safe
+// direction; making the two agree is tracked in #497.
 import { findTrademarks, trademarkNotices } from "../config/trademarks";
 
 interface Props {

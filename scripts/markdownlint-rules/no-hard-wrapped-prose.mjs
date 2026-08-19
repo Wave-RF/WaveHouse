@@ -63,6 +63,7 @@ function classify(lines) {
   let jsxTag = false;
   let esm = false;
   let htmlComment = false;
+  let mathBlock = false;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -95,6 +96,22 @@ function classify(lines) {
     if (fenceMatch) {
       fence = fenceMatch[1];
       kind[i] = "skip";
+      continue;
+    }
+
+    // $$ display math — remark-math + rehype-katex are wired into
+    // docs/astro.config.mjs, so this is a supported construct here. Tracked
+    // like a fence rather than matched per line: guarding only the delimiters
+    // still lets the expressions between them be joined into one.
+    if (mathBlock) {
+      kind[i] = "skip";
+      if (line.includes("$$")) mathBlock = false;
+      continue;
+    }
+    if (/^\s{0,3}\$\$/.test(line)) {
+      kind[i] = "skip";
+      // A second $$ on the same line closes it there.
+      if (line.split("$$").length - 1 < 2) mathBlock = true;
       continue;
     }
 

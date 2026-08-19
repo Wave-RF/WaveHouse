@@ -112,6 +112,8 @@ describe("WH001 leaves non-prose alone", () => {
   unchanged("t.md", "> quoted line\n> second quoted line\n", "a blockquote");
   unchanged("t.md", "# Heading\n\nBody.\n", "a heading followed by a paragraph");
   unchanged("t.md", "    indented code\n    second line\n", "an indented code block");
+  unchanged("t.md", "$$\nE = mc^2\n\\sum_{i=1}^{n} x_i\n$$\n", "a $$ display-math block");
+  unchanged("t.md", "$$ E = mc^2 $$\n\nA paragraph.\n", "single-line $$ display math");
   unchanged(
     "t.mdx",
     'export const meta = {\n  // the id used by the demo\n  id: "abc",\n  kind: "demo",\n};\n',
