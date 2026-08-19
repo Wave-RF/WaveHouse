@@ -31,6 +31,17 @@ type Config struct {
 	Prometheus Prometheus `yaml:"prometheus"`
 	Query      Query      `yaml:"query"`
 	Stream     Stream     `yaml:"stream"`
+	Settings   Settings   `yaml:"settings"`
+}
+
+// Settings locates the hot-reloadable settings directory — the four JSON
+// documents (roles.json, policies.json, pipes.json, config.json) validated by
+// internal/settings. Boot-tier by necessity: it's the pointer the reload
+// machinery follows, so it can't live behind itself. No default, same
+// reasoning as policy.file_path: a baked-in path would turn a missing mount
+// into silent misconfiguration instead of an explicit operator choice.
+type Settings struct {
+	Dir string `yaml:"dir" env:"WH_SETTINGS_DIR"`
 }
 
 // Query holds query-shaping defaults. Server-wide *resource* limits (memory,

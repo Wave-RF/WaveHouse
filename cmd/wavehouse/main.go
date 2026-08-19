@@ -37,12 +37,16 @@ var (
 )
 
 func main() {
-	// Subcommand dispatch. Currently only `health` exists — used by the
-	// Dockerfile HEALTHCHECK to self-probe /livez without needing curl
-	// or wget in the (distroless) image. If we ever need more, swap to
-	// a real argv router.
-	if len(os.Args) > 1 && os.Args[1] == "health" {
-		os.Exit(runHealthCheck())
+	// Subcommand dispatch. `health` self-probes /livez for the distroless
+	// Dockerfile HEALTHCHECK; `validate` checks a settings directory without
+	// starting the server. If this grows further, swap to a real argv router.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "health":
+			os.Exit(runHealthCheck())
+		case "validate":
+			os.Exit(runValidate(os.Args[2:]))
+		}
 	}
 	os.Exit(run())
 }
