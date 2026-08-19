@@ -54,8 +54,8 @@ else
 fi
 
 # .mdx gets exactly one STRUCTURAL fixer, and it is ours (misspell below still
-# corrects spelling there). The generic markdownlint rules
-# are deliberately never run against MDX — markdownlint parses CommonMark, MDX
+# corrects spelling there). The generic markdownlint rules are deliberately
+# never run against MDX — markdownlint parses CommonMark, MDX
 # does not, and where the two disagree a generic autofix rewrites the inside of
 # a code block. fix-mdx-fences only ever inserts a blank line beside a JSX tag,
 # so its worst failure is a render-neutral blank line. `make lint` still CHECKS

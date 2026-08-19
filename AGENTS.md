@@ -341,6 +341,14 @@ Before finishing a task, grep for the identifiers you touched (field names, env 
 - **These fix themselves as you write.** `.claude/hooks/markdown-on-save.sh` (PostToolUse, sibling of `gofumpt-on-save.sh`) runs the MDX fence pass on `.mdx`, markdownlint `--fix` on `.md`, and misspell on both, so an agent's output is corrected in the same pass rather than costing a lint failure and a manual cleanup. It only sees `Edit`/`Write`/`MultiEdit` — a file written through a Bash heredoc bypasses it, so run `make fix` after doing that.
 - **WH001 is off under `.github/` and `.claude/`** (CI docs and agent prompts) via their own `.markdownlint.json`. It applies everywhere else, `AGENTS.md` and `CHANGELOG.md` included — so this is a narrower exclusion than `scripts/docs-prose.sh`, which also skips those two.
 
+### Authoring docs-site pages
+
+Three invariants the docs site enforces in code, each of which fails quietly rather than loudly if you hand-write around it:
+
+- **Opt a page into the Cloud CTA with `cloudCta` frontmatter**, not by importing the component. `cloudCta: true` takes the default copy; `cloudCta: { title?, body? }` overrides it, which is the point — the CTA lands hardest when it names the work *that* page just described. Schema in `docs/src/content.config.ts`; the footer renders it. (The homepage is the exception: it passes `<CloudCta variant="band">` inline, because the wide band variant is splash-only and `template: splash` pages don't render the footer's copy.)
+- **Never hand-write `®` or `™` in prose.** `rehype-trademarks` appends the symbol to each mark's first mention automatically, and `markFirstMentions` (`docs/src/config/trademarks.ts`) matches the bare name with no check for a symbol already there — so "ClickHouse®" renders as "ClickHouse®®". Add the mark to the registry in `trademarks.ts` and let the plugin place it; the footer notice is generated from the same registry.
+- **Never hand-write `utm_*` params or `rel` on a link to `wavehouse.cloud` or `wave-rf.com`.** Use `cloudLink()` / `relFor()` from `docs/src/config/outbound.ts`. First-party links deliberately carry `rel="noopener"` *without* `noreferrer`, because `noreferrer` suppresses the `Referer` header PostHog turns into `$referring_domain` — writing the `rel` by hand is the easy way to silently destroy the attribution the whole feature exists for. Third-party links keep both.
+
 ### Authoring Mermaid diagrams
 
 Diagrams render inside the Starlight content column (~46–58rem wide) as build-time SVG via `astro-themed-mermaid`, themed by `docs/src/config/mermaid-theme.mjs`. **Author them vertically so they fit the page at a legible size** — the single most common diagram mistake here is a wide left-to-right flowchart that gets scaled down to fit the column until its labels are unreadable.

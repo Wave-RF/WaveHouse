@@ -7,7 +7,7 @@
 // interaction — how markdownlint's fix applier combines one rule's line-delete
 // with another rule's edit on the same line — not in the rule's return value.
 //
-// Every construct classify() recognizes should have a fixture here. Two
+// Every construct classify() recognizes has a fixture here — keep it that way. Two
 // corrupting bugs (pipe-less tables, single-character setext underlines) got
 // through review because nothing exercised those shapes.
 
@@ -97,6 +97,18 @@ describe("WH001 joins hard-wrapped prose", () => {
     assert.equal(run("t.md", once, { fix: true }).output, once);
   });
 
+  it("joins prose after real frontmatter without touching the frontmatter", () => {
+    const { output } = run(
+      "t.md",
+      '---\ntitle: "A page"\ndescription: "Its description"\n---\n\nA paragraph that is\nwrapped here.\n',
+      { fix: true },
+    );
+    assert.equal(
+      output,
+      '---\ntitle: "A page"\ndescription: "Its description"\n---\n\nA paragraph that is wrapped here.\n',
+    );
+  });
+
   it("still fires when a leading --- is a thematic break, not frontmatter", () => {
     const { output } = run("t.md", "---\n\nA paragraph that is\nhard wrapped here.\n", {
       fix: true,
@@ -127,6 +139,10 @@ describe("WH001 leaves non-prose alone", () => {
   unchanged("t.md", "    indented code\n    second line\n", "an indented code block");
   unchanged("t.md", "$$\nE = mc^2\n\\sum_{i=1}^{n} x_i\n$$\n", "a $$ display-math block");
   unchanged("t.md", "$$ E = mc^2 $$\n\nA paragraph.\n", "single-line $$ display math");
+  unchanged("t.md", "Prose above it.\n[ref]: https://example.com\n", "a link-reference definition");
+  unchanged("t.md", "Prose above it.\n[^1]: The footnote body.\n", "a footnote definition");
+  unchanged("t.md", "Paragraph.\n***\n", "an asterisk thematic break");
+  unchanged("t.md", "Paragraph.\n___\n", "an underscore thematic break");
   unchanged(
     "t.mdx",
     'export const meta = {\n  // the id used by the demo\n  id: "abc",\n  kind: "demo",\n};\n',

@@ -3,8 +3,8 @@
 // One implementation, two consumers — the markdownlint rule next door (lint,
 // CI, editor squiggles) and scripts/fix-mdx-fences.mjs (the only STRUCTURAL
 // fixer allowed near an .mdx file — misspell still corrects spelling there).
-// Keeping the logic here is
-// what stops those two from drifting; see AGENTS.md §"DRY — one source of truth".
+// Keeping the logic here is what stops those two from drifting; see AGENTS.md
+// §"DRY — one source of truth".
 
 const CLOSE_TAG = /^\s*<\/[A-Za-z][^>]*>\s*$/; // </TabItem>
 const FENCE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;

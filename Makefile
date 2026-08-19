@@ -376,11 +376,11 @@ lint-md: pnpm-install
 # lint-prose: docs prose quality, owned by misspell — a curated common-typo +
 # US-locale (UK → US) checker over the canonical docs-prose set (see DOCS_PROSE
 # and scripts/docs-prose.sh — the Starlight content plus the root governance
-# docs). Its word
-# list is finite and maintained upstream, so it gates with ~zero false positives
-# and no project dictionary to babysit. `-error` makes it exit non-zero on
-# findings; `make fix` (fix-prose) auto-applies the corrections. Distinct domain
-# from markdownlint (*style*) and Biome (JS/TS/JSON) — no overlap. (A full
+# docs). Its word list is finite and maintained upstream, so it gates with
+# ~zero false positives and no project dictionary to babysit. `-error` makes it
+# exit non-zero on findings; `make fix` (fix-prose) auto-applies the
+# corrections. Distinct domain from markdownlint (*style*) and Biome
+# (JS/TS/JSON) — no overlap. (A full
 # dictionary spell-checker, cspell, was trialled and dropped: on these jargon-
 # dense docs it flagged ~64 legitimate terms and zero real typos — an unbounded
 # dictionary tax for no signal. Catching novel typos is left to human/LLM
@@ -482,11 +482,11 @@ fix-ts: pnpm-install
 # comments it reads as headings, autolinking bare URLs. Reporting on that
 # disagreement is useful (lint-md still checks .mdx); acting on it is not.
 #
-# .mdx therefore gets exactly one STRUCTURAL fixer, our own — misspell still
-# corrects spelling there, since its curated list needs no parse:
-# scripts/fix-mdx-fences.mjs,
-# which only ever inserts a blank line next to a JSX tag, so its worst failure
-# is a render-neutral blank line rather than rewritten code.
+# .mdx therefore gets exactly one STRUCTURAL fixer, our own
+# scripts/fix-mdx-fences.mjs — misspell still corrects spelling there, since its
+# curated list needs no parse. That fixer only ever inserts a blank line next to
+# a JSX tag, so its worst failure is a render-neutral blank line rather than
+# rewritten code.
 #
 # The md pass runs twice because it is not a fixpoint in one: WH001's insert
 # carries the pre-fix text of the lines it joins, so another rule's fix for a

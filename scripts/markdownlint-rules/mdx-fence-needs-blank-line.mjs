@@ -28,8 +28,8 @@
 //
 // This rule reports (CI + editor). The *fix* is applied separately, by
 // scripts/fix-mdx-fences.mjs, because the generic markdownlint fixers never run
-// over .mdx at all — .markdownlint-cli2.jsonc globs .md only, and the .mdx glob
-// lives on `lint:md`. The reason they are kept away:
+// over .mdx at all — .markdownlint-cli2.jsonc globs .md only, and the .mdx
+// glob lives on `lint:md`. The reason they are kept away:
 // until the blank line exists CommonMark sees no code block, so a YAML block's
 // `#` comments parse as ATX headings and MD022/MD023/MD026/MD034 will happily
 // "fix" them — de-indenting them out of the block and rewriting bare URLs
