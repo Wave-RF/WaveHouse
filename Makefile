@@ -374,7 +374,9 @@ lint-md: pnpm-install
 	$(call run,markdownlint,$(PNPM) -s -w run lint:md,run make fix to auto-fix what is fixable)
 
 # lint-prose: docs prose quality, owned by misspell — a curated common-typo +
-# US-locale (UK → US) checker over the Starlight content (.md + .mdx). Its word
+# US-locale (UK → US) checker over the canonical docs-prose set (see DOCS_PROSE
+# and scripts/docs-prose.sh — the Starlight content plus the root governance
+# docs). Its word
 # list is finite and maintained upstream, so it gates with ~zero false positives
 # and no project dictionary to babysit. `-error` makes it exit non-zero on
 # findings; `make fix` (fix-prose) auto-applies the corrections. Distinct domain
@@ -655,14 +657,24 @@ DOCS_DIR    := docs
 SDK_NAME    := @wavehouse/sdk
 DOCS_FILTER := wavehouse-docs
 
-# Markdown + MDX prose sources under the Starlight content dir. lint-prose /
-# fix-prose hand misspell this explicit list (lazily expanded via `=`, so the
-# find only runs when those targets run) rather than a directory — so misspell
-# never reads a .ts content-config as text.
 # The canonical docs-prose set, from the one script that defines it (AGENTS.md
-# §DRY). A local `find` here used to cover only docs/src/content, so README,
-# CONTRIBUTING, SECURITY, SUPPORT, CODE_OF_CONDUCT and the SDK readme were
-# rewritten by the on-save hook's misspell pass but never checked by this gate.
+# §DRY). lint-prose / fix-prose hand misspell this explicit file list rather
+# than a directory, so it never reads a .ts content-config as text — the
+# script's extension filter enforces that now, where a local `find -name` used
+# to. That `find` covered only docs/src/content, so README, CONTRIBUTING,
+# SECURITY, SUPPORT, CODE_OF_CONDUCT and the SDK readme were being rewritten by
+# the on-save hook's misspell pass but never checked by this gate.
+#
+# Recursively expanded (`=`, not `:=`), so the git call fires only inside the
+# lint-prose / fix-prose recipes — `make help` never pays for it.
+#
+# One asymmetry to know about: the script lists TRACKED files (`git ls-files`),
+# while the hook gates on `docs-prose.sh is-match`, a pure path test. So a
+# brand-new page that hasn't been `git add`ed is fixed on write but not seen by
+# `make fix-prose`. It self-heals — pre-commit stages first, so `make verify`
+# does see it — but the symptom is a commit that fails on spelling right after
+# a clean `make fix`. Widening the script to `git ls-files -co` would also feed
+# untracked drafts to the docs-reviewer, which is why it lists tracked only.
 DOCS_PROSE   = $(shell bash scripts/docs-prose.sh all 2>/dev/null)
 
 # pnpm-install: hidden internal target. Node targets depend on it to ensure

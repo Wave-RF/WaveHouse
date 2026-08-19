@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# Canonical "docs prose" resolver — the user-facing documentation that the
-# docs-reviewer subagent reviews and gates (accuracy-vs-code, runnable
-# examples, clarity, completeness, and code<->docs sync).
+# Canonical "docs prose" resolver. TWO consumers depend on this list, so an
+# exclusion added for one silently changes the other:
+#
+#   1. the docs-reviewer subagent — what it reviews and gates (accuracy-vs-code,
+#      runnable examples, clarity, completeness, and code<->docs sync);
+#   2. `make lint-prose` / `make fix-prose` — the misspell gate set (via
+#      DOCS_PROSE in the Makefile) and the on-save hook (via `is-match`).
+#
+# So dropping a file here also drops it from spell-checking.
 #
 # DENYLIST model: every tracked *.md / *.mdx file IS docs prose UNLESS it
 # matches an exclusion below — so newly-added docs are covered automatically
