@@ -16,8 +16,10 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
 
-// The four settings files. Anything else ending in .json in the directory is
-// rejected — a typoed filename must fail loudly, not be silently ignored.
+// The four settings files. Any other entry in the directory is rejected — a
+// typoed filename must fail loudly, not be silently ignored. The one
+// exception is dot-prefixed entries (vim swap files, the `..data` machinery
+// Kubernetes ConfigMap mounts publish through), which are skipped.
 const (
 	FileRoles    = "roles.json"
 	FilePolicies = "policies.json"
@@ -25,13 +27,13 @@ const (
 	FileConfig   = "config.json"
 )
 
-// Files lists every expected file. All four must exist (an empty document is
-// written as {}), so an accidental deletion reads as an error, never as
-// "defaults".
-var Files = []string{FileRoles, FilePolicies, FilePipes, FileConfig}
-
-// EnvDir is the environment variable naming the settings directory.
-const EnvDir = "WH_SETTINGS_DIR"
+// Files returns every expected file. All four must exist (an empty document
+// is written as {}), so an accidental deletion reads as an error, never as
+// "defaults". A function rather than a package variable because Go has no
+// const slices — this keeps the set genuinely immutable.
+func Files() []string {
+	return []string{FileRoles, FilePolicies, FilePipes, FileConfig}
+}
 
 // Document is a fully parsed and validated settings directory.
 type Document struct {

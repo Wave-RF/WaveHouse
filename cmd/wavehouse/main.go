@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -97,16 +98,40 @@ func buildInfoFallback() {
 func main() {
 	// Subcommand dispatch. `health` self-probes /livez for the distroless
 	// Dockerfile HEALTHCHECK; `validate` checks a settings directory without
-	// starting the server. If this grows further, swap to a real argv router.
+	// starting the server. An unknown command is a usage error — it must
+	// never fall through and silently start the server (`wavehouse validat`
+	// booting a listener is not a typo anyone wants). Hand-rolled on purpose:
+	// three commands and zero flags don't earn a CLI framework; the day a
+	// subcommand grows flags, port this switch to cobra.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "health":
 			os.Exit(runHealthCheck())
 		case "validate":
 			os.Exit(runValidate(os.Args[2:]))
+		case "version", "--version", "-v":
+			fmt.Printf("wavehouse %s (commit %s, built %s)\n", Version, GitCommit, BuildTime)
+			os.Exit(0)
+		case "help", "--help", "-h":
+			printUsage(os.Stdout)
+			os.Exit(0)
+		default:
+			fmt.Fprintf(os.Stderr, "wavehouse: unknown command %q\n\n", os.Args[1])
+			printUsage(os.Stderr)
+			os.Exit(2)
 		}
 	}
 	os.Exit(run())
+}
+
+func printUsage(w io.Writer) {
+	_, _ = fmt.Fprintf(w, `usage:
+  wavehouse                 start the server
+  wavehouse validate [dir]  validate a settings directory (dir falls back to %s)
+  wavehouse health          liveness self-probe against the local server (container HEALTHCHECK)
+  wavehouse version         print version, commit, and build time
+  wavehouse help            show this help
+`, config.EnvSettingsDir)
 }
 
 // run executes the binary and returns a process exit code. Using a

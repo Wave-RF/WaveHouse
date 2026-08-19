@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -519,4 +520,16 @@ func TestValidate_InvalidHTTPScheme(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "clickhouse.http_scheme must be 'http' or 'https'")
+}
+
+// TestEnvSettingsDir_MatchesStructTag pins the exported constant to the
+// Settings.Dir env tag. A struct tag must be a string literal, so it can't
+// reference EnvSettingsDir directly; this test is what makes the constant the
+// single authority (subcommands read the constant, config binding reads the
+// tag — drift between them would be a silent misconfiguration).
+func TestEnvSettingsDir_MatchesStructTag(t *testing.T) {
+	t.Parallel()
+	field, ok := reflect.TypeFor[Settings]().FieldByName("Dir")
+	require.True(t, ok)
+	assert.Equal(t, EnvSettingsDir, field.Tag.Get("env"))
 }

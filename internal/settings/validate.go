@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"bytes"
 	"fmt"
 	"maps"
 	"os"
@@ -95,16 +96,33 @@ func (v *validator) checkDir(dir string) (map[string][]byte, bool) {
 		return nil, false
 	}
 
+	expected := Files()
 	files := map[string][]byte{}
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || strings.HasPrefix(name, ".") {
+		// Dot-prefixed entries are the machinery of atomic writers and
+		// editors — Kubernetes ConfigMap mounts publish through `..data`
+		// symlink directories, vim keeps `.foo.swp` — so they are the one
+		// thing tolerated besides the four files. Everything else unexpected
+		// is an error: a stray entry in a control-plane directory is a typo
+		// or a leak, never decoration.
+		if strings.HasPrefix(name, ".") {
 			continue
 		}
-		if !slices.Contains(Files, name) {
-			if strings.EqualFold(filepath.Ext(name), ".json") {
-				v.errorf(name, "", "unknown settings file — expected only %s", strings.Join(Files, ", "))
+		if !slices.Contains(expected, name) {
+			kind := "file"
+			if e.IsDir() {
+				kind = "directory"
 			}
+			v.errorf(name, "", "unexpected %s — the settings directory holds only %s", kind, strings.Join(expected, ", "))
+			continue
+		}
+		if e.IsDir() {
+			// A directory squatting on a settings filename would otherwise
+			// surface as "missing" — name the real problem. The nil entry
+			// marks it handled so exactly one finding is emitted.
+			v.errorf(name, "", "is a directory — expected a JSON file")
+			files[name] = nil
 			continue
 		}
 		// Clean is redundant after Join but satisfies gosec G304: dir can
@@ -112,11 +130,12 @@ func (v *validator) checkDir(dir string) (map[string][]byte, bool) {
 		data, err := os.ReadFile(filepath.Clean(filepath.Join(dir, name)))
 		if err != nil {
 			v.errorf(name, "", "read: %v", err)
+			files[name] = nil // handled — don't also report it as missing
 			continue
 		}
 		files[name] = data
 	}
-	for _, name := range Files {
+	for _, name := range expected {
 		if _, present := files[name]; !present {
 			v.errorf(name, "", "missing — every settings file must exist (an empty document is {})")
 		}
@@ -128,7 +147,13 @@ func (v *validator) checkDir(dir string) (map[string][]byte, bool) {
 // strict decode — and reports whether target was populated.
 func (v *validator) parseFile(name string, data []byte, target any) bool {
 	if data == nil {
-		return false // missing file, already reported
+		return false // missing/unreadable file, already reported
+	}
+	if bytes.HasPrefix(data, []byte("\xef\xbb\xbf")) {
+		// Notepad and friends prepend this; without the check it surfaces as a
+		// cryptic `invalid character 'ï'` decode error.
+		v.errorf(name, "", "file begins with a UTF-8 byte order mark — save without BOM")
+		return false
 	}
 	switch strings.TrimSpace(string(data)) {
 	case "":
@@ -191,8 +216,16 @@ func (v *validator) parsePolicies(data []byte) *policy.Policy {
 	return &p
 }
 
-// pipeParamTypes are the documented ParamDef.Type values ("" = unspecified).
-var pipeParamTypes = []string{"", "string", "number", "boolean", "array"}
+// validParamType reports whether t is a documented ParamDef.Type ("" =
+// unspecified). A switch rather than a package-level slice so the set is
+// genuinely constant.
+func validParamType(t string) bool {
+	switch t {
+	case "", "string", "number", "boolean", "array":
+		return true
+	}
+	return false
+}
 
 func (v *validator) parsePipes(data []byte) []pipes.NamedQuery {
 	var f PipesFile
@@ -222,7 +255,7 @@ func (v *validator) parsePipes(data []byte) []pipes.NamedQuery {
 				v.errorf(FilePipes, ppath, "duplicate parameter %q", param.Name)
 			}
 			seenParams[param.Name] = true
-			if !slices.Contains(pipeParamTypes, param.Type) {
+			if !validParamType(param.Type) {
 				v.errorf(FilePipes, ppath+".type", "unknown type %q — expected one of string, number, boolean, array", param.Type)
 			}
 			if param.Required && param.Default != nil {
@@ -254,6 +287,9 @@ func (v *validator) checkIDField(path string, val *string, omitHint string) {
 func (v *validator) parseConfig(data []byte) TenantConfig {
 	var c TenantConfig
 	if !v.parseFile(FileConfig, data, &c) {
+		// Not swallowed: parseFile already recorded the error finding. The
+		// zero value just lets the one-pass sweep continue through the other
+		// files; the document is discarded whenever any error exists.
 		return TenantConfig{}
 	}
 	if d := c.Dedupe; d != nil {
@@ -321,6 +357,10 @@ func (v *validator) checkRoleRefs(roles []string, p *policy.Policy, queries []pi
 			for op, grants := range map[string]map[string]policy.RolePermissions{"select": tp.Select, "insert": tp.Insert} {
 				for role := range grants {
 					path := fmt.Sprintf("tables.%s.%s.%s", table, op, role)
+					if role == "" {
+						v.errorf(FilePolicies, path, "grant role must not be empty — an empty role matches no request")
+						continue
+					}
 					if role == admin {
 						v.warnf(FilePolicies, path, "admin is an unconditional bypass — this grant has no effect")
 						continue
@@ -336,7 +376,13 @@ func (v *validator) checkRoleRefs(roles []string, p *policy.Policy, queries []pi
 	for i, q := range queries {
 		for j, role := range q.AllowedRoles {
 			path := fmt.Sprintf("pipes[%d].allowed_roles[%d]", i, j)
-			if role != "" && role == admin {
+			if role == "" {
+				v.errorf(FilePipes, path, "role must not be empty — an empty allowlist entry authorizes nobody")
+				continue
+			}
+			// role is non-empty here, so this can't false-match the ""
+			// AdminRole(nil) returns when there is no policy.
+			if role == admin {
 				v.warnf(FilePipes, path, "the admin role can always execute pipes — listing it is redundant")
 				continue
 			}

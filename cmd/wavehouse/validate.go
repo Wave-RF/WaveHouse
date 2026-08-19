@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 )
 
@@ -18,12 +19,12 @@ func runValidate(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: wavehouse validate [dir]")
 		return 2
 	}
-	dir := os.Getenv(settings.EnvDir)
+	dir := os.Getenv(config.EnvSettingsDir)
 	if len(args) == 1 {
 		dir = args[0]
 	}
 	if dir == "" {
-		fmt.Fprintf(os.Stderr, "usage: wavehouse validate [dir] (or set %s)\n", settings.EnvDir)
+		fmt.Fprintf(os.Stderr, "usage: wavehouse validate [dir] (or set %s)\n", config.EnvSettingsDir)
 		return 2
 	}
 

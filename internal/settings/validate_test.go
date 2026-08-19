@@ -104,21 +104,65 @@ func TestValidate_DirectoryProblems(t *testing.T) {
 		assert.Contains(t, findingStrings(findings), "config.json: missing")
 	})
 
-	t.Run("unknown json file", func(t *testing.T) {
+	t.Run("unexpected file", func(t *testing.T) {
 		t.Parallel()
 		files := validFiles()
-		files["polices.json"] = `{}`
+		files["polices.json"] = `{}` // the canonical typo
+		files["notes.txt"] = "scratch"
 		doc, findings := parse(writeDir(t, files))
 		assert.Nil(t, doc)
-		assert.Contains(t, findingStrings(findings), "polices.json: unknown settings file")
+		out := findingStrings(findings)
+		assert.Contains(t, out, "polices.json: unexpected file")
+		assert.Contains(t, out, "notes.txt: unexpected file")
 	})
 
-	t.Run("non-json entries ignored", func(t *testing.T) {
+	t.Run("unexpected directory", func(t *testing.T) {
+		t.Parallel()
+		dir := writeDir(t, validFiles())
+		require.NoError(t, os.Mkdir(filepath.Join(dir, "backup"), 0o700))
+		doc, findings := parse(dir)
+		assert.Nil(t, doc)
+		assert.Contains(t, findingStrings(findings), "backup: unexpected directory")
+	})
+
+	t.Run("settings file is a directory", func(t *testing.T) {
 		t.Parallel()
 		files := validFiles()
-		files["notes.txt"] = "scratch"
+		delete(files, FileRoles)
+		dir := writeDir(t, files)
+		require.NoError(t, os.Mkdir(filepath.Join(dir, FileRoles), 0o700))
+		doc, findings := parse(dir)
+		assert.Nil(t, doc)
+		out := findingStrings(findings)
+		assert.Contains(t, out, "roles.json: is a directory")
+		assert.NotContains(t, out, "missing", "one problem, one finding")
+	})
+
+	t.Run("unreadable file", func(t *testing.T) {
+		t.Parallel()
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores file permission bits")
+		}
+		dir := writeDir(t, validFiles())
+		require.NoError(t, os.Chmod(filepath.Join(dir, FileConfig), 0o000))
+		doc, findings := parse(dir)
+		assert.Nil(t, doc)
+		out := findingStrings(findings)
+		assert.Contains(t, out, "config.json: read:")
+		assert.NotContains(t, out, "missing", "one problem, one finding")
+	})
+
+	t.Run("dot entries ignored", func(t *testing.T) {
+		t.Parallel()
+		// Editor swap files and the dot-prefixed machinery Kubernetes
+		// ConfigMap mounts publish through (`..data` symlink directories) must
+		// stay invisible — erroring on them would break the exact mount
+		// pattern the cloud fan-out uses.
+		files := validFiles()
 		files[".roles.json.swp"] = "vim"
-		doc, findings := parse(writeDir(t, files))
+		dir := writeDir(t, files)
+		require.NoError(t, os.Mkdir(filepath.Join(dir, "..data"), 0o700))
+		doc, findings := parse(dir)
 		assert.Empty(t, findings)
 		assert.NotNil(t, doc)
 	})
@@ -134,6 +178,8 @@ func TestValidate_FileSyntax(t *testing.T) {
 	}{
 		{"empty file", FilePolicies, "", "file is empty"},
 		{"whitespace only", FileRoles, "  \n\t", "file is empty"},
+		{"byte order mark", FileRoles, "\xef\xbb\xbf{}", "byte order mark"},
+		{"duplicate key inside an array element", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "name": "b"}]}`, "pipes[0].name: duplicate key"},
 		{"null document", FileRoles, `null`, "document is null"},
 		{"null with whitespace", FileConfig, "  null\n", "document is null"},
 		{"syntax error", FilePipes, `{"pipes": [`, "unexpected EOF"},
@@ -169,6 +215,8 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"duplicate role", FileRoles, `{"roles": ["analyst", "analyst"]}`, "duplicate role"},
 		{"check uses _gt", FilePolicies, `{"tables": {"clicks": {"insert": {"analyst": {"check": {"region": {"_gt": "1"}}}}}}}`, "check does not honor"},
 		{"unknown filter operator", FilePolicies, `{"tables": {"clicks": {"select": {"analyst": {"filter": {"region": {"_like": "x"}}}}}}}`, "unknown field"},
+		{"empty grant role", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"select": {"": {}}}}}`, "grant role must not be empty"},
+		{"empty allowlist role", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "allowed_roles": [""]}]}`, "allowed_roles[0]: role must not be empty"},
 		{"empty pipe name", FilePipes, `{"pipes": [{"name": "", "sql": "SELECT 1"}]}`, "pipe name must not be empty"},
 		{"duplicate pipe", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1"}, {"name": "a", "sql": "SELECT 2"}]}`, "duplicate pipe"},
 		{"empty pipe sql", FilePipes, `{"pipes": [{"name": "a", "sql": "  "}]}`, "pipe SQL must not be empty"},
@@ -259,6 +307,61 @@ func TestValidate_Warnings(t *testing.T) {
 			assert.Contains(t, findingStrings(findings), tt.want)
 		})
 	}
+}
+
+// TestValidate_MultipleFaults pins the one-pass contract head-on: independent
+// problems in different files are all reported together — a syntax error in
+// one file must not suppress content or reference findings in another — and
+// exactly once, so the operator gets the whole list without noise.
+func TestValidate_MultipleFaults(t *testing.T) {
+	t.Parallel()
+	doc, findings := parse(writeDir(t, map[string]string{
+		FileRoles:    `{"roles": ["analyst", "analyst"]}`,       // duplicate role
+		FilePolicies: `{"default_role": "ghost", "tables": {}}`, // undeclared role
+		FilePipes:    `{"pipes": [`,                             // truncated JSON
+		FileConfig:   `{"query": {"default_max_rows": -1}}`,     // bounds violation
+	}))
+	assert.Nil(t, doc)
+	out := findingStrings(findings)
+	assert.Contains(t, out, "duplicate role")
+	assert.Contains(t, out, `role "ghost" is not declared`)
+	assert.Contains(t, out, "unexpected EOF")
+	assert.Contains(t, out, "must be non-negative")
+	assert.Len(t, findings, 4, "every fault reported exactly once, no noise:\n%s", out)
+}
+
+// TestValidate_ErrorAndWarningMix pins that a warning is still reported
+// alongside an error, and that the error alone decides rejection.
+func TestValidate_ErrorAndWarningMix(t *testing.T) {
+	t.Parallel()
+	files := validFiles()
+	files[FilePolicies] = `{"default_role": "public", "tables": {"clicks": {"select": {"admin": {}}}}}` // warning: admin grant is dead config
+	files[FileConfig] = `{"schema": {"refresh_interval": 0}}`                                           // error: bounds violation
+	doc, findings := parse(writeDir(t, files))
+	assert.Nil(t, doc, "one error rejects the directory even when the rest only warns")
+	require.True(t, HasErrors(findings))
+	out := findingStrings(findings)
+	assert.Contains(t, out, "unconditional bypass")
+	assert.Contains(t, out, "must be >= 1")
+	assert.Len(t, findings, 2, "findings:\n%s", out)
+}
+
+// FuzzSyntaxGate pins that the hand-rolled pieces of the syntax gate — strict
+// decoding and the token-level duplicate-key scan — never panic on arbitrary
+// bytes. Hand-edited files are exactly where arbitrary bytes come from.
+func FuzzSyntaxGate(f *testing.F) {
+	for _, seed := range []string{
+		"", "null", "{}", "[]", `{"a":1,"a":2}`, `{"a":[{"b":1,"b":2}]}`,
+		`{"pipes": [`, "\xef\xbb\xbf{}", `{"a":"\ud800"}`, `[[[[[[[[`, `{"a"`,
+		strings.Repeat(`{"a":`, 100) + "1" + strings.Repeat("}", 100),
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, body string) {
+		var roles RolesFile
+		_ = decodeStrict([]byte(body), &roles)
+		_ = dupKeyFindings(FileRoles, []byte(body))
+	})
 }
 
 // TestValidate_FindingsOnly pins the exported surface: Validate checks and

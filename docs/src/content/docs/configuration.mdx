@@ -180,7 +180,7 @@ See [API — Authentication](/api#authentication).
 
 ### Settings Directory
 
-The settings directory holds WaveHouse's file-based settings as exactly four JSON documents: `roles.json`, `policies.json`, `pipes.json`, and `config.json`. Every file must exist (an empty document is `{}` — a missing file always means deletion or a wrong path, never "defaults"), and any other `*.json` file in the directory is an error, so a typoed filename fails loudly instead of being silently ignored.
+The settings directory holds WaveHouse's file-based settings as exactly four JSON documents: `roles.json`, `policies.json`, `pipes.json`, and `config.json`. Every file must exist (an empty document is `{}` — a missing file always means deletion or a wrong path, never "defaults"), and any other entry in the directory is an error, so a typoed filename or a stray backup fails loudly instead of being silently ignored. Dot-prefixed entries are the one exception: editor swap files and the `..data` machinery Kubernetes ConfigMap mounts publish through are ignored.
 
 Check a directory with `wavehouse validate [dir]` — the argument falls back to `WH_SETTINGS_DIR`. It validates without starting the server (JSON syntax including unknown fields and duplicate keys, per-file shape rules, and cross-file role references), prints every finding in one pass, and exits `0` for valid (warnings allowed), `1` for invalid, `2` for usage — so operators and CI can gate a settings change before it reaches a running instance.
 
