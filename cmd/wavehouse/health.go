@@ -36,7 +36,7 @@ import (
 func runHealthCheck(args []string) int {
 	fs := flag.NewFlagSet("health", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprint(fs.Output(), `usage: wavehouse health
+		_, _ = fmt.Fprint(fs.Output(), `usage: wavehouse health
 
 Liveness self-probe against the local server's /livez endpoint (the container
 HEALTHCHECK). The port comes from WH_SERVER_PORT, defaulting to 8080.

@@ -20,7 +20,7 @@ import (
 func runValidate(args []string) int {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), `usage: wavehouse validate [dir]
+		_, _ = fmt.Fprintf(fs.Output(), `usage: wavehouse validate [dir]
 
 Validate a settings directory (%s) without
 starting the server. With no dir argument, the directory comes from %s.
