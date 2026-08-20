@@ -127,10 +127,27 @@ func (v *validator) checkDir(dir string) (map[string][]byte, bool) {
 		}
 		// Clean is redundant after Join but satisfies gosec G304: dir can
 		// arrive from CLI args/env (taint sources), unlike config-struct paths.
-		data, err := os.ReadFile(filepath.Clean(filepath.Join(dir, name)))
+		path := filepath.Clean(filepath.Join(dir, name))
+		// Stat gate before the read: os.ReadFile on a FIFO blocks until a
+		// writer connects, which would hang validate (and, later, a reload)
+		// with no finding and no exit. Stat follows symlinks, so the
+		// symlink-to-regular-file layout Kubernetes ConfigMap mounts use
+		// still passes; anything else non-regular is rejected.
+		info, err := os.Stat(path)
+		switch {
+		case err != nil:
+			v.errorf(name, "", "stat: %v", err)
+			files[name] = nil // handled — don't also report it as missing
+			continue
+		case !info.Mode().IsRegular():
+			v.errorf(name, "", "not a regular file (mode %s) — expected a JSON file", info.Mode().Type())
+			files[name] = nil
+			continue
+		}
+		data, err := os.ReadFile(path)
 		if err != nil {
 			v.errorf(name, "", "read: %v", err)
-			files[name] = nil // handled — don't also report it as missing
+			files[name] = nil
 			continue
 		}
 		files[name] = data
