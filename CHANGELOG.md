@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## Unreleased
 
+### Added
+
+- **"Was this page helpful?" feedback widget on every docs page** (`docs/src/components/PageFeedback.astro` (new), `docs/src/components/Footer.astro`): a thumbs-up / thumbs-down vote below the page content, captured to PostHog as `docs_feedback` with `{ helpful, page }`. It renders from `Footer.astro`'s sidebar branch — the same indirection the Cloud CTA uses — rather than a per-page import or frontmatter flag, so every content page gets it automatically, including ones not written yet; it sits *below* the Cloud CTA on the pages that carry one, and splash pages (the homepage and 404) take the other footer branch and never render it. One vote per page per visitor: the choice is remembered in `localStorage` keyed by pathname, and a revisit renders the thanks message instead of re-prompting (storage is a nicety, not the record — a browser with storage disabled still votes).
+
 ## [0.1.0] - 2026-08-19
 
 The first public release. Everything below shipped in it — the sections are grouped the way Keep a Changelog asks for, but since there is no previous release to compare against, a reader upgrading from nothing can treat the whole file as "Added". The date is the intended cut date; correct it if tagging slips, and move anything merged in between up from `## Unreleased`.

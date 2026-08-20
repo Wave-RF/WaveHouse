@@ -16,6 +16,7 @@ import { pageText } from "../config/trademarks";
 import CloudCta from "./CloudCta.astro";
 import Logo from "./Logo.astro";
 import MermaidZoom from "./MermaidZoom.astro";
+import PageFeedback from "./PageFeedback.astro";
 import ReadingProgress from "./ReadingProgress.astro";
 import ScrollHints from "./ScrollHints.astro";
 import Trademarks from "./Trademarks.astro";
@@ -42,6 +43,13 @@ const cloudCtaProps = cloudCta === true ? {} : cloudCta;
 // CTA converts, the architecture one doesn't" without any per-page wiring.
 const cloudCtaPlacement = `docs-${entry.id || "index"}`;
 
+// "Was this page helpful?" rides the footer for the same reason the Cloud CTA
+// does: every content page gets it — including ones not written yet — with no
+// frontmatter flag and no import. The sidebar branch below already excludes
+// splash pages; 404 is one of those today, and this keeps it excluded if that
+// ever changes.
+const showFeedback = entry.id !== "404" && !entry.id.endsWith("/404");
+
 // Everything the page turns into visible words, for the per-page trademark
 // notices. pageText() picks the frontmatter fields that actually render (hero
 // tagline, title, this page's Cloud CTA copy) and leaves out the ones that
@@ -56,6 +64,7 @@ const trademarkSource = pageText(entry.data, entry.body ?? "");
     <footer class="wh-footer wh-footer--compact not-content">
       <ReadingProgress />
       {cloudCtaProps && <CloudCta placement={cloudCtaPlacement} {...cloudCtaProps} />}
+      {showFeedback && <PageFeedback />}
       <div class="wh-footer__meta">
         <EditLink />
         <LastUpdated />

@@ -1,0 +1,182 @@
+---
+// "Was this page helpful?" — a two-button thumbs vote at the end of every doc
+// page, captured to PostHog as `docs_feedback`.
+//
+// Rendered from Footer.astro's sidebar (doc-page) branch — the same indirection
+// the Cloud CTA uses — so it lands on every content page, including ones not
+// written yet, with no per-page frontmatter, import, or opt-in, and below the
+// Cloud CTA on pages that carry one. Splash pages (homepage, 404) take the
+// other footer branch and never render it.
+//
+// One vote per page per visitor: the choice is remembered in localStorage keyed
+// by pathname, so a revisit shows the thanks message rather than re-prompting.
+// Storage is a nicety, not the record — the capture is what counts, so a
+// browser with storage disabled still votes (it just gets asked again).
+
+// Thumbs-down is thumbs-up rotated 180° (the two Lucide glyphs are exact point
+// reflections of each other), so the path is defined once and the CSS turns it.
+const THUMB_PATH =
+  "M7 10v12M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z";
+
+const votes = [
+  { vote: "up", label: "Yes, this page was helpful" },
+  { vote: "down", label: "No, this page was not helpful" },
+] as const;
+---
+
+<div class="wh-feedback" data-wh-feedback>
+  <div class="wh-feedback__prompt">
+    <p class="wh-feedback__question">Was this page helpful?</p>
+    <div class="wh-feedback__actions">
+      {
+        votes.map(({ vote, label }) => (
+          <button
+            type="button"
+            class:list={["wh-feedback__btn", `wh-feedback__btn--${vote}`]}
+            aria-label={label}
+            data-wh-feedback-vote={vote}
+          >
+            <svg class="wh-feedback__icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d={THUMB_PATH}
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        ))
+      }
+    </div>
+  </div>
+  {/* tabindex so the click handler can move focus here — the button the
+      keyboard user just pressed is display:none by then. */}
+  <p class="wh-feedback__thanks" role="status" tabindex="-1">Thanks for the feedback.</p>
+</div>
+
+<script is:inline>
+  // is:inline (not a bundled module) to match the codebase's DOM-script
+  // convention (see Footer.astro / MermaidZoom.astro) and stay out of
+  // `astro check`. With view transitions this re-executes per navigation, so
+  // the window flag guards against re-binding the delegated click listener;
+  // per-page work runs from the persistent `astro:page-load` handler.
+  (() => {
+    if (window.__whPageFeedbackInit) return;
+    window.__whPageFeedbackInit = true;
+
+    const storageKey = () => "wh-docs-feedback:" + location.pathname;
+
+    function readVote() {
+      try {
+        return window.localStorage.getItem(storageKey());
+      } catch {
+        return null; // storage disabled (private mode, blocked cookies)
+      }
+    }
+
+    function rememberVote(value) {
+      try {
+        window.localStorage.setItem(storageKey(), value);
+      } catch {
+        // Non-fatal: the capture already landed, we just can't skip the prompt
+        // next time.
+      }
+    }
+
+    // Restore the already-voted state. Runs per page, soft navigations included.
+    function render() {
+      const root = document.querySelector("[data-wh-feedback]");
+      if (root && readVote()) root.dataset.state = "voted";
+    }
+
+    document.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const button = target.closest("[data-wh-feedback-vote]");
+      if (!button) return;
+      const root = button.closest("[data-wh-feedback]");
+      if (!root || root.dataset.state === "voted") return;
+
+      const helpful = button.dataset.whFeedbackVote === "up";
+      window.posthog?.capture("docs_feedback", { helpful, page: location.pathname });
+      rememberVote(helpful ? "up" : "down");
+      root.dataset.state = "voted";
+      root.querySelector(".wh-feedback__thanks")?.focus();
+    });
+
+    document.addEventListener("astro:page-load", render);
+    if (document.readyState !== "loading") render();
+    else document.addEventListener("DOMContentLoaded", render);
+  })();
+</script>
+
+<style>
+  /* No outer spacing or rule of its own: as a grid item of .wh-footer--compact
+     it inherits that footer's `gap`, which is what keeps it aligned with the
+     Cloud CTA above and the edit-link row below. */
+  .wh-feedback__prompt {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1rem;
+  }
+  .wh-feedback[data-state="voted"] .wh-feedback__prompt {
+    display: none;
+  }
+
+  .wh-feedback__question {
+    margin: 0;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--wh-ink);
+  }
+
+  .wh-feedback__actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .wh-feedback__btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    border: 1px solid var(--wh-border-strong);
+    border-radius: 0.5rem;
+    background: var(--wh-surface);
+    color: var(--wh-ink-muted);
+    cursor: pointer;
+    transition:
+      background 0.12s ease,
+      border-color 0.12s ease,
+      color 0.12s ease;
+  }
+  .wh-feedback__btn:hover {
+    background: var(--wh-surface-elevated);
+    border-color: var(--wh-accent);
+    color: var(--wh-accent-text);
+  }
+  .wh-feedback__icon {
+    width: 1.125rem;
+    height: 1.125rem;
+  }
+  .wh-feedback__btn--down .wh-feedback__icon {
+    transform: rotate(180deg);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .wh-feedback__btn {
+      transition: none;
+    }
+  }
+
+  .wh-feedback__thanks {
+    display: none;
+    margin: 0;
+    font-size: 0.9375rem;
+    color: var(--wh-ink-muted);
+  }
+  .wh-feedback[data-state="voted"] .wh-feedback__thanks {
+    display: block;
+  }
+</style>
