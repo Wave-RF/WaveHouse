@@ -14,7 +14,11 @@
   // not the seven prefixes they typed on the way there — hence the idle
   // debounce — and a result_count of 0 is the whole point: a search that found
   // nothing is a docs gap.
-  function whCaptureSearch(input, retries) {
+  function whCaptureSearch(input, retries, pathname) {
+    // The reader can click a result before the debounce (or a retry) fires;
+    // capturing then would stamp the event with the destination page's
+    // doc_section. A settled-then-abandoned timer just drops.
+    if (location.pathname !== pathname) return;
     var query = (input.value || '').trim();
     if (!query || query === window.__whPhLastSearch) return;
     var root = document.getElementById('starlight__search');
@@ -27,7 +31,7 @@
     var list = root && root.querySelector('.pagefind-ui__results');
     if (!list) {
       if (retries > 0) {
-        window.__whPhSearchTimer = setTimeout(function() { whCaptureSearch(input, retries - 1); }, 400);
+        window.__whPhSearchTimer = setTimeout(function() { whCaptureSearch(input, retries - 1, pathname); }, 400);
       }
       return;
     }
@@ -61,7 +65,7 @@
     window.__whPhSearchHandler = function(e) {
       if (!e.target.classList?.contains('pagefind-ui__search-input')) return;
       clearTimeout(window.__whPhSearchTimer);
-      window.__whPhSearchTimer = setTimeout(function() { whCaptureSearch(e.target, 3); }, 1000);
+      window.__whPhSearchTimer = setTimeout(function() { whCaptureSearch(e.target, 3, location.pathname); }, 1000);
     };
     document.addEventListener('input', window.__whPhSearchHandler);
 
