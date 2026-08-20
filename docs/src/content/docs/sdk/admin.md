@@ -35,6 +35,7 @@ const { data: policy } = await wh.policy.get();
 // Update policy
 await wh.policy.set({
   default_role: 'viewer',
+  admin_role: 'admin',
   tables: {
     clicks: {
       select: {

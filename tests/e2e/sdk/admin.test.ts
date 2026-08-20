@@ -68,6 +68,8 @@ describe("Admin", () => {
 
   describe("Policy", () => {
     const testPolicy = {
+      default_role: "viewer",
+      admin_role: "admin",
       tables: {
         [T.clicks]: {
           select: {
@@ -107,6 +109,7 @@ describe("Admin", () => {
       expect(getResult.error).toBeNull();
       expect(getResult.data).toBeDefined();
       expect(getResult.data).toHaveProperty("tables");
+      console.log("Policy get result:", getResult.data);
     });
   });
 
