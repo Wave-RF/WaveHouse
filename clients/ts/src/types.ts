@@ -337,6 +337,7 @@ export interface ParamDef {
 
 export interface Policy {
   default_role?: string;
+  admin_role?: string;
   tables: Record<string, TablePolicy>;
 }
 
