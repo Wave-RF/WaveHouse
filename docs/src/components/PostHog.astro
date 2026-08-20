@@ -31,7 +31,18 @@ const apiHost =
       capture_pageview: 'history_change',
       // Surface broken docs JS (LiveDemo SSE, copy buttons, theme scripts) in
       // PostHog error tracking — volume on a docs site is negligible.
-      capture_exceptions: true
+      capture_exceptions: true,
+      // doc_section = first path segment ("home" for /), stamped at capture
+      // time so every event can be sliced by docs area. A before_send hook
+      // instead of register(): a queued register() replays only after init has
+      // already captured the first hard-load $pageview (which would then carry
+      // the previous visit's persisted value), and history_change navigations
+      // update the URL before capture fires, so reading location here is
+      // always current.
+      before_send: (e) => {
+        if (e && e.properties) e.properties.doc_section = location.pathname.split('/')[1] || 'home';
+        return e;
+      }
     })
   }
 </script>
