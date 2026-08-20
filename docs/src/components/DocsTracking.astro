@@ -14,14 +14,23 @@
   // not the seven prefixes they typed on the way there — hence the idle
   // debounce — and a result_count of 0 is the whole point: a search that found
   // nothing is a docs gap.
-  function whCaptureSearch(input) {
+  function whCaptureSearch(input, retries) {
     var query = (input.value || '').trim();
     if (!query || query === window.__whPhLastSearch) return;
     var root = document.getElementById('starlight__search');
     // Pagefind renders the results list only once a search has settled; while
-    // one is in flight the drawer holds just the "Searching…" message.
+    // one is in flight the drawer holds just the "Searching…" message. That
+    // in-flight window can outlast the idle debounce (cold first search: the
+    // wasm + index load happens then), and no further `input` event will
+    // re-arm the timer — so re-check a few times instead of dropping the
+    // search on the floor.
     var list = root && root.querySelector('.pagefind-ui__results');
-    if (!list) return;
+    if (!list) {
+      if (retries > 0) {
+        window.__whPhSearchTimer = setTimeout(function() { whCaptureSearch(input, retries - 1); }, 400);
+      }
+      return;
+    }
     // "12 results for x" / "No results for x" — the rendered list is capped at
     // Pagefind's page size, so only the message carries the real total, and the
     // count (when there is one) always leads the string.
@@ -52,7 +61,7 @@
     window.__whPhSearchHandler = function(e) {
       if (!e.target.classList?.contains('pagefind-ui__search-input')) return;
       clearTimeout(window.__whPhSearchTimer);
-      window.__whPhSearchTimer = setTimeout(function() { whCaptureSearch(e.target); }, 1000);
+      window.__whPhSearchTimer = setTimeout(function() { whCaptureSearch(e.target, 3); }, 1000);
     };
     document.addEventListener('input', window.__whPhSearchHandler);
 

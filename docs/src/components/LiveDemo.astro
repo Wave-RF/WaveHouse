@@ -428,18 +428,19 @@ const DEMO_HOST = "stats.wavehouse.dev";
       return true;
     }
 
-    // Once per mount, on connect rather than on the first row: the panel is
-    // proof of something the moment the stream is up, and a quiet minute on the
-    // repo isn't a disengaged reader. A reconnect isn't a second visit either.
-    let engaged = false;
+    // Once per mount, on connect rather than on the first row, and named for
+    // what it measures — the demo backend answered — not reader engagement:
+    // the stream is subscribed on load, below the fold or not. A reconnect
+    // isn't a second visit either.
+    let connected = false;
     function setStream(state: string) {
       const live = state === "live";
       const bad = state === "error" || state === "closed";
       stream.dataset.state = live ? "live" : bad ? "down" : "connecting";
       streamLabel.textContent = live ? "live" : bad ? "offline" : `${state}…`;
-      if (live && !engaged) {
-        engaged = true;
-        posthog()?.capture("live_demo_engaged");
+      if (live && !connected) {
+        connected = true;
+        posthog()?.capture("live_demo_connected");
       }
     }
 
