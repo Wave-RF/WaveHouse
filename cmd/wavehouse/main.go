@@ -100,13 +100,15 @@ func main() {
 	// Dockerfile HEALTHCHECK; `validate` checks a settings directory without
 	// starting the server. An unknown command is a usage error — it must
 	// never fall through and silently start the server (`wavehouse validat`
-	// booting a listener is not a typo anyone wants). Hand-rolled on purpose:
-	// three commands and zero flags don't earn a CLI framework; the day a
-	// subcommand grows flags, port this switch to cobra.
+	// booting a listener is not a typo anyone wants). The switch only routes;
+	// each subcommand owns a stdlib flag.FlagSet, so `wavehouse <command> -h`
+	// prints command-specific help and a stray flag or argument is a usage
+	// error. If the command surface outgrows this (nested subcommands, shared
+	// persistent flags), port the switch to cobra or kong.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "health":
-			os.Exit(runHealthCheck())
+			os.Exit(runHealthCheck(os.Args[2:]))
 		case "validate":
 			os.Exit(runValidate(os.Args[2:]))
 		case "version", "--version", "-v":
@@ -131,6 +133,8 @@ func printUsage(w io.Writer) {
   wavehouse health          liveness self-probe against the local server (container HEALTHCHECK)
   wavehouse version         print version, commit, and build time
   wavehouse help            show this help
+
+Run 'wavehouse <command> -h' for command-specific help.
 `, config.EnvSettingsDir)
 }
 

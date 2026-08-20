@@ -12,6 +12,13 @@ import (
 // content. Unknown fields are the JSON form of the retired-config-key trap: a
 // misspelled key silently ignored quietly reverts the author's intent to a
 // default, so it must be an error.
+//
+// TODO: replace with encoding/json/v2 once the module's go directive reaches
+// 1.27 — v2's Unmarshal with RejectUnknownMembers covers unknown fields and
+// trailing content natively. dupKeyFindings stays even then: v2 fails on the
+// first duplicate key, while the scanner reports every occurrence with its
+// path. The null/empty-file checks in parseFile stay too — v2 still decodes a
+// top-level null to the zero value without error.
 func decodeStrict(data []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()

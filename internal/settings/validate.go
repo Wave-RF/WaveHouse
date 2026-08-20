@@ -72,10 +72,10 @@ func (v *validator) warnf(file, path, format string, args ...any) {
 // checkDir verifies the directory itself and reads each expected file's bytes.
 // A missing file is an error — an empty deployment writes {} in all four
 // files, so absence always means deletion or a wrong path, never "defaults".
-// Unknown *.json files are errors too: a typoed polices.json silently ignored
-// would revert the author's intent, the exact trap strict decoding closes for
-// keys. Non-JSON entries (editor swap files, backups) are ignored so hand
-// editing stays pleasant.
+// Any other entry — file or subdirectory, JSON or not — is an error: a typoed
+// polices.json silently ignored would revert the author's intent, the exact
+// trap strict decoding closes for keys. The one exception is dot-prefixed
+// entries (see the loop body).
 func (v *validator) checkDir(dir string) (map[string][]byte, bool) {
 	info, err := os.Stat(dir)
 	switch {

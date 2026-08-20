@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -31,7 +33,29 @@ import (
 // Port resolution mirrors the server's: WH_SERVER_PORT env var (set by
 // `ENV WH_SERVER_PORT=8080` in the Dockerfile, overridable by compose env
 // or `docker run -e`), defaulting to 8080.
-func runHealthCheck() int {
+func runHealthCheck(args []string) int {
+	fs := flag.NewFlagSet("health", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), `usage: wavehouse health
+
+Liveness self-probe against the local server's /livez endpoint (the container
+HEALTHCHECK). The port comes from WH_SERVER_PORT, defaulting to 8080.
+
+Exit codes: 0 alive, 1 not alive, 2 usage.
+`)
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2 // fs already printed the flag error and usage
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "wavehouse health: unexpected argument %q\n", fs.Arg(0))
+		fs.Usage()
+		return 2
+	}
+
 	port := 8080
 	if p := os.Getenv("WH_SERVER_PORT"); p != "" {
 		parsed, err := strconv.Atoi(p)

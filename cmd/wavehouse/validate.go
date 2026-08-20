@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
@@ -15,16 +18,34 @@ import (
 // back to WH_SETTINGS_DIR. Exit codes: 0 valid (warnings allowed), 1 invalid,
 // 2 usage.
 func runValidate(args []string) int {
-	if len(args) > 1 {
-		fmt.Fprintln(os.Stderr, "usage: wavehouse validate [dir]")
+	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), `usage: wavehouse validate [dir]
+
+Validate a settings directory (%s) without
+starting the server. With no dir argument, the directory comes from %s.
+
+Exit codes: 0 valid (warnings allowed), 1 invalid, 2 usage.
+`, strings.Join(settings.Files(), ", "), config.EnvSettingsDir)
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2 // fs already printed the flag error and usage
+	}
+	if fs.NArg() > 1 {
+		fmt.Fprintf(os.Stderr, "wavehouse validate: expected at most one directory argument, got %d\n", fs.NArg())
+		fs.Usage()
 		return 2
 	}
 	dir := os.Getenv(config.EnvSettingsDir)
-	if len(args) == 1 {
-		dir = args[0]
+	if fs.NArg() == 1 {
+		dir = fs.Arg(0)
 	}
 	if dir == "" {
-		fmt.Fprintf(os.Stderr, "usage: wavehouse validate [dir] (or set %s)\n", config.EnvSettingsDir)
+		fmt.Fprintf(os.Stderr, "wavehouse validate: no directory given and %s is not set\n", config.EnvSettingsDir)
+		fs.Usage()
 		return 2
 	}
 

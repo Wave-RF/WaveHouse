@@ -54,4 +54,12 @@ func TestRunValidate(t *testing.T) {
 	t.Run("too many arguments is a usage error", func(t *testing.T) {
 		assert.Equal(t, 2, runValidate([]string{"a", "b"}))
 	})
+
+	t.Run("-h prints help and exits 0", func(t *testing.T) {
+		assert.Equal(t, 0, runValidate([]string{"-h"}))
+	})
+
+	t.Run("unknown flag is a usage error", func(t *testing.T) {
+		assert.Equal(t, 2, runValidate([]string{"--bogus"}))
+	})
 }

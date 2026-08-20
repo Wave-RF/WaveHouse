@@ -45,7 +45,7 @@ func TestRunHealthCheck_Success(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv("WH_SERVER_PORT", portFromListener(t, srv.Listener))
-	assert.Equal(t, 0, runHealthCheck(), "200 OK should map to exit 0")
+	assert.Equal(t, 0, runHealthCheck(nil), "200 OK should map to exit 0")
 }
 
 func TestRunHealthCheck_BootDegraded503(t *testing.T) {
@@ -61,7 +61,7 @@ func TestRunHealthCheck_BootDegraded503(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv("WH_SERVER_PORT", portFromListener(t, srv.Listener))
-	assert.Equal(t, 1, runHealthCheck(), "503 should map to exit 1 — Docker marks unhealthy")
+	assert.Equal(t, 1, runHealthCheck(nil), "503 should map to exit 1 — Docker marks unhealthy")
 }
 
 func TestRunHealthCheck_ConnectionRefused(t *testing.T) {
@@ -76,7 +76,7 @@ func TestRunHealthCheck_ConnectionRefused(t *testing.T) {
 	require.NoError(t, ln.Close())
 
 	t.Setenv("WH_SERVER_PORT", port)
-	assert.Equal(t, 1, runHealthCheck(), "connection refused should map to exit 1")
+	assert.Equal(t, 1, runHealthCheck(nil), "connection refused should map to exit 1")
 }
 
 func TestRunHealthCheck_InvalidPortEnv(t *testing.T) {
@@ -84,5 +84,15 @@ func TestRunHealthCheck_InvalidPortEnv(t *testing.T) {
 	// a confusing dial error. Catches the case where an operator
 	// fat-fingers WH_SERVER_PORT in a deployment manifest.
 	t.Setenv("WH_SERVER_PORT", "not-a-number")
-	assert.Equal(t, 1, runHealthCheck(), "non-integer WH_SERVER_PORT should exit 1")
+	assert.Equal(t, 1, runHealthCheck(nil), "non-integer WH_SERVER_PORT should exit 1")
+}
+
+func TestRunHealthCheck_Flags(t *testing.T) {
+	t.Run("-h prints help and exits 0", func(t *testing.T) {
+		assert.Equal(t, 0, runHealthCheck([]string{"-h"}))
+	})
+
+	t.Run("stray argument is a usage error", func(t *testing.T) {
+		assert.Equal(t, 2, runHealthCheck([]string{"stray"}))
+	})
 }
