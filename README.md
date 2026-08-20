@@ -19,8 +19,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Wave-RF/WaveHouse/badges/coverage-go.json" alt="Go Coverage"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+  <a href="https://github.com/Wave-RF/WaveHouse/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/Wave-RF/WaveHouse?filter=!client&color=%2306B0BF"></a>
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-%23086D77"></a>
 </p>
 
 <p align="center">
@@ -53,7 +53,7 @@ curl -N "http://localhost:8080/v1/stream?table=events" & sleep 1
 ```
 
 > [!IMPORTANT]
-No auth is needed to ingest with the default dev policy. The policy is VERY permissive, and not intended for production deployments.
+> No auth is needed to ingest with the default dev policy. The policy is VERY permissive, and not intended for production deployments.
 
 ```bash
 curl -sX POST "http://localhost:8080/v1/ingest?table=events" \
@@ -61,7 +61,7 @@ curl -sX POST "http://localhost:8080/v1/ingest?table=events" \
 ```
 
 > [!TIP]
-A 404 "unknown table" error here just means schema discovery hasn't seen the new table yet. Just retry; worst case 60s before discovery.
+> A 404 "unknown table" error here just means schema discovery hasn't seen the new table yet. Just retry; worst case 60s before discovery.
 
 Full walkthrough at **[wavehouse.dev/getting-started](https://wavehouse.dev/getting-started)**.
 
@@ -95,7 +95,7 @@ Full breakdown, failure modes, and our engineering rationale at **[wavehouse.dev
 
 Pick between the in-repo Docker Compose, pulling a container image, or `go install`. The Compose option starts WaveHouse; the other options just download/install a container or binary. Run the selected artifact before using `http://localhost:8080`.
 
-### A. Docker Compose (recommended for beginners)
+### A. Docker Compose (recommended)
 
 ```bash
 git clone https://github.com/Wave-RF/WaveHouse.git && cd WaveHouse
@@ -110,8 +110,6 @@ The stack has a permissive dev policy, so you can ingest without a token. Create
 docker pull ghcr.io/wave-rf/wavehouse:latest    # latest stable release 
 docker pull ghcr.io/wave-rf/wavehouse:dev       # rolling main-branch build
 ```
-
-`:latest` follows stable releases only. A prerelease moves `:alpha` / `:beta` / `:rc` / `:next` instead, so `:latest` starts existing with the first stable tag. Until then, use `:dev`.
 
 Tags carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify before you deploy:
 
@@ -159,7 +157,7 @@ Found a vulnerability? **Do NOT open a public issue.** Email `security@wave-rf.c
 
 ## AI-Assisted Development
 
-The repo contains a minimal [Claude Code](https://claude.com/claude-code) configuration: safety guardrails, a couple of slash commands and subagents, auto-format hooks, and [worktrunk](https://worktrunk.dev) project hooks for parallel agent workflows. Personal preferences (status line, model, allow lists) stay user-level. See [Claude Code & AI agents](docs/src/content/docs/claude-code.md) for setup + reference. `AGENTS.md` at the repo root is the canonical source of truth for project conventions.
+The repo contains a minimal [Claude Code](https://claude.com/claude-code) configuration: safety guardrails, a couple of slash commands and subagents, auto-format hooks, and [worktrunk](https://worktrunk.dev) project hooks for parallel agent workflows. Personal preferences (status line, model, allow lists) stay user-level. See [Claude Code & AI agents](https://wavehouse.dev/claude-code) for setup + reference. `AGENTS.md` at the repo root is the canonical source of truth for project conventions.
 
 ## Responsible GenAI Usage Disclosure
 
