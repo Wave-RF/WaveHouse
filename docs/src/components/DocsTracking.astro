@@ -1,0 +1,92 @@
+---
+// PostHog tracking for the three site-wide surfaces with no component of their
+// own: Starlight's Pagefind search, Expressive Code's copy buttons, and the 404
+// page. All three are owned by third-party markup (some of it created after
+// page load), so the handlers are delegated from `document` and hang off
+// `window` — removed before re-adding, the same idempotence the per-element
+// trackers get from `el.__whPh*Handler`. Rendered once per page from
+// Footer.astro; no markup, no styles.
+---
+
+<script is:inline>
+  // Pagefind's UI is light DOM inside <site-search>, so one delegated `input`
+  // listener reaches it. The valuable event is the query the reader settled on,
+  // not the seven prefixes they typed on the way there — hence the idle
+  // debounce — and a result_count of 0 is the whole point: a search that found
+  // nothing is a docs gap.
+  function whCaptureSearch(input, retries, pathname) {
+    // The reader can click a result before the debounce (or a retry) fires;
+    // capturing then would stamp the event with the destination page's
+    // doc_section. A settled-then-abandoned timer just drops.
+    if (location.pathname !== pathname) return;
+    var query = (input.value || '').trim();
+    if (!query || query === window.__whPhLastSearch) return;
+    var root = document.getElementById('starlight__search');
+    // Pagefind renders the results list only once a search has settled; while
+    // one is in flight the drawer holds just the "Searching…" message. That
+    // in-flight window can outlast the idle debounce (cold first search: the
+    // wasm + index load happens then), and no further `input` event will
+    // re-arm the timer — so re-check a few times instead of dropping the
+    // search on the floor.
+    var list = root && root.querySelector('.pagefind-ui__results');
+    if (!list) {
+      if (retries > 0) {
+        window.__whPhSearchTimer = setTimeout(function() { whCaptureSearch(input, retries - 1, pathname); }, 400);
+      }
+      return;
+    }
+    // "12 results for x" / "No results for x" — the rendered list is capped at
+    // Pagefind's page size, so only the message carries the real total, and the
+    // count (when there is one) always leads the string.
+    var msg = root.querySelector('.pagefind-ui__message');
+    var count = msg && msg.textContent.trim().match(/^([\d,]+)\b/);
+    window.__whPhLastSearch = query;
+    window.posthog?.capture('docs_search', {
+      query: query,
+      result_count: count ? Number(count[1].replace(/,/g, '')) : list.children.length
+    });
+  }
+
+  // Starlight builds the 404 route from src/content/docs/404.md; the .wh-404
+  // block that page renders is the marker. Keyed on the requested path so the
+  // DOMContentLoaded + astro:page-load pair fires it once per visit.
+  function whCapture404() {
+    if (!document.querySelector('.wh-404')) return;
+    if (window.__whPh404Path === location.pathname) return;
+    window.__whPh404Path = location.pathname;
+    window.posthog?.capture('docs_404', {
+      path: location.pathname,
+      referrer: document.referrer
+    });
+  }
+
+  function setupDocsTracking() {
+    document.removeEventListener('input', window.__whPhSearchHandler);
+    window.__whPhSearchHandler = function(e) {
+      if (!e.target.classList?.contains('pagefind-ui__search-input')) return;
+      clearTimeout(window.__whPhSearchTimer);
+      window.__whPhSearchTimer = setTimeout(function() { whCaptureSearch(e.target, 3, location.pathname); }, 1000);
+    };
+    document.addEventListener('input', window.__whPhSearchHandler);
+
+    // Expressive Code binds its own click handler to `.expressive-code .copy
+    // button`; we watch the same clicks from the document rather than re-walk
+    // every code block on every navigation. The hero's install chip is not an
+    // EC block, so hero_install_copied stays its own event.
+    document.removeEventListener('click', window.__whPhCodeCopyHandler);
+    window.__whPhCodeCopyHandler = function(e) {
+      var btn = e.target.closest?.('.expressive-code .copy button');
+      if (!btn) return;
+      var pre = btn.closest('figure')?.querySelector('pre');
+      window.posthog?.capture('code_copied', {
+        page: location.pathname,
+        language: pre?.getAttribute('data-language') || null
+      });
+    };
+    document.addEventListener('click', window.__whPhCodeCopyHandler);
+
+    whCapture404();
+  }
+  document.addEventListener('DOMContentLoaded', setupDocsTracking);
+  document.addEventListener('astro:page-load', setupDocsTracking);
+</script>

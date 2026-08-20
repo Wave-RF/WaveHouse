@@ -68,6 +68,8 @@ describe("Admin", () => {
 
   describe("Policy", () => {
     const testPolicy = {
+      default_role: "viewer",
+      admin_role: "admin",
       tables: {
         [T.clicks]: {
           select: {
@@ -98,6 +100,7 @@ describe("Admin", () => {
       // setting the bare testPolicy would wipe every other suite's tables from
       // the live policy until afterAll restores it.
       const setResult = await wh.policy.set({
+        ...testPolicy,
         tables: { ...(baselinePolicy?.tables ?? {}), ...testPolicy.tables },
       });
       expect(setResult.error).toBeNull();
@@ -107,6 +110,10 @@ describe("Admin", () => {
       expect(getResult.error).toBeNull();
       expect(getResult.data).toBeDefined();
       expect(getResult.data).toHaveProperty("tables");
+      expect(getResult.data).toMatchObject({
+        default_role: "viewer",
+        admin_role: "admin",
+      });
     });
   });
 

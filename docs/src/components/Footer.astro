@@ -14,6 +14,7 @@ import {
 } from "../config/outbound";
 import { pageText } from "../config/trademarks";
 import CloudCta from "./CloudCta.astro";
+import DocsTracking from "./DocsTracking.astro";
 import Logo from "./Logo.astro";
 import MermaidZoom from "./MermaidZoom.astro";
 import PageFeedback from "./PageFeedback.astro";
@@ -194,11 +195,13 @@ const trademarkSource = pageText(entry.data, entry.body ?? "");
   )
 }
 
-{/* Click-to-zoom for Mermaid diagrams + horizontal-scroll affordances —
-    rendered once per page from here (Footer is on every page);
-    self-contained scripts + styles, no markup. */}
+{/* Click-to-zoom for Mermaid diagrams + horizontal-scroll affordances, and the
+    site-wide PostHog trackers (search / code copy / 404) — rendered once per
+    page from here (Footer is on every page); self-contained scripts + styles,
+    no markup. */}
 <MermaidZoom />
 <ScrollHints />
+<DocsTracking />
 
 <script is:inline>
   function setupFooterLinkTracking() {

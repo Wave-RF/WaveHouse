@@ -166,6 +166,11 @@ const DEMO_HOST = "stats.wavehouse.dev";
   const MAX_ROWS = 6;
   const fmtInt = (n: number) => Number(n).toLocaleString("en-US");
 
+  // window.posthog comes from the head snippet (PostHog.astro), never an
+  // import, so it's typed at the call site.
+  const posthog = () =>
+    (window as { posthog?: { capture: (event: string, props?: object) => void } }).posthog;
+
   // Backfill rows come back RFC3339 from ClickHouse, but live SSE rows carry
   // the producer's payload as ingested — a zone-less ClickHouse-style
   // "YYYY-MM-DD HH:MM:SS[.fff]" (UTC by the gh_events contract), which
@@ -423,11 +428,20 @@ const DEMO_HOST = "stats.wavehouse.dev";
       return true;
     }
 
+    // Once per mount, on connect rather than on the first row, and named for
+    // what it measures — the demo backend answered — not reader engagement:
+    // the stream is subscribed on load, below the fold or not. A reconnect
+    // isn't a second visit either.
+    let connected = false;
     function setStream(state: string) {
       const live = state === "live";
       const bad = state === "error" || state === "closed";
       stream.dataset.state = live ? "live" : bad ? "down" : "connecting";
       streamLabel.textContent = live ? "live" : bad ? "offline" : `${state}…`;
+      if (live && !connected) {
+        connected = true;
+        posthog()?.capture("live_demo_connected");
+      }
     }
 
     // Live tail first, so an event landing while the backfill is in flight
@@ -508,10 +522,10 @@ const DEMO_HOST = "stats.wavehouse.dev";
     // --- CTA analytics, same shape as the hero buttons' tracking.
     root.querySelectorAll<HTMLAnchorElement>("[data-ph-demo]").forEach((el) => {
       el.addEventListener("click", () => {
-        (window as { posthog?: { capture: (e: string, p: object) => void } }).posthog?.capture(
-          "live_demo_cta_clicked",
-          { target: el.getAttribute("data-ph-demo"), href: el.href },
-        );
+        posthog()?.capture("live_demo_cta_clicked", {
+          target: el.getAttribute("data-ph-demo"),
+          href: el.href,
+        });
       });
     });
   }
