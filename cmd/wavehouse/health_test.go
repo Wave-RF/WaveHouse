@@ -88,11 +88,18 @@ func TestRunHealthCheck_InvalidPortEnv(t *testing.T) {
 }
 
 func TestRunHealthCheck_Flags(t *testing.T) {
-	t.Run("-h prints help and exits 0", func(t *testing.T) {
-		assert.Equal(t, 0, runHealthCheck([]string{"-h"}))
-	})
-
-	t.Run("stray argument is a usage error", func(t *testing.T) {
-		assert.Equal(t, 2, runHealthCheck([]string{"stray"}))
-	})
+	tests := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{name: "-h prints help and exits 0", args: []string{"-h"}, want: 0},
+		{name: "unknown flag is a usage error", args: []string{"--bogus"}, want: 2},
+		{name: "stray argument is a usage error", args: []string{"stray"}, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, runHealthCheck(tt.args))
+		})
+	}
 }
