@@ -1,8 +1,17 @@
 version: 2
 updates:
   # Go modules
+  #
+  # TWO directories, not one — the same trap as github-actions below:
+  # `directory: /` covers the root module only, and Dependabot does not
+  # descend into nested modules. clients/go is its own module, so its
+  # go.mod needs its own entry here. That module is stdlib-only today
+  # (no `require` block, no go.sum), so this catches the first dependency
+  # it takes on rather than closing a gap that already exists.
   - package-ecosystem: gomod
-    directory: /
+    directories:
+      - /
+      - /clients/go
     schedule:
       interval: weekly
       day: monday
