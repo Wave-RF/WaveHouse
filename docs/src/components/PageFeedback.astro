@@ -47,6 +47,7 @@ const votes = [
           type="button"
           class:list={["wh-feedback__btn", `wh-feedback__btn--${vote}`]}
           aria-label={label}
+          aria-pressed="false"
           data-wh-feedback-vote={vote}
         >
           <svg class="wh-feedback__icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -103,16 +104,19 @@ const votes = [
       } catch {}
     }
 
+    function applyVote(root, vote) {
+      if (vote) root.dataset.vote = vote;
+      else delete root.dataset.vote;
+      root.querySelectorAll("[data-wh-feedback-vote]").forEach((btn) => {
+        btn.setAttribute("aria-pressed", String(btn.dataset.whFeedbackVote === vote));
+      });
+    }
+
     // Restore the already-voted state. Runs per page, soft navigations included.
     function render() {
       const root = document.querySelector("[data-wh-feedback]");
       if (!root) return;
-      const vote = readVote(root.dataset.whBuild || "");
-      if (vote) {
-        root.dataset.vote = vote;
-      } else {
-        delete root.dataset.vote;
-      }
+      applyVote(root, readVote(root.dataset.whBuild || ""));
     }
 
     document.addEventListener("click", (event) => {
@@ -133,9 +137,9 @@ const votes = [
           window.posthog.capture("docs_feedback", {
             helpful: null, page: location.pathname, build, retracted: true,
           });
-          try { window.localStorage.removeItem(storageKey()); } catch {}
         }
-        delete root.dataset.vote;
+        try { window.localStorage.removeItem(storageKey()); } catch {}
+        applyVote(root, null);
         return;
       }
 
@@ -148,7 +152,7 @@ const votes = [
         window.posthog.capture("docs_feedback", props);
         rememberVote(vote, build);
       }
-      root.dataset.vote = vote;
+      applyVote(root, vote);
       // Only steal focus on the first vote — a change-vote doesn't need it.
       if (!changed) root.querySelector(".wh-feedback__thanks")?.focus();
     });
