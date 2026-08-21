@@ -28,6 +28,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 )
 
@@ -98,7 +99,7 @@ func buildInfoFallback() {
 func main() {
 	// Subcommand dispatch. `health` self-probes /livez for the distroless
 	// Dockerfile HEALTHCHECK; `validate` checks a settings directory without
-	// starting the server. An unknown command is a usage error — it must
+	// starting the server; `init-settings` writes a starter one. An unknown command is a usage error — it must
 	// never fall through and silently start the server (`wavehouse validat`
 	// booting a listener is not a typo anyone wants). The switch only routes;
 	// each subcommand owns a stdlib flag.FlagSet, so `wavehouse <command> -h`
@@ -111,6 +112,8 @@ func main() {
 			os.Exit(runHealthCheck(os.Args[2:]))
 		case "validate":
 			os.Exit(runValidate(os.Args[2:]))
+		case "init-settings":
+			os.Exit(runInitSettings(os.Args[2:]))
 		case "version", "--version", "-v":
 			fmt.Printf("wavehouse %s (commit %s, built %s)\n", Version, GitCommit, BuildTime)
 			os.Exit(0)
@@ -130,6 +133,8 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, `usage:
   wavehouse                 start the server
   wavehouse validate [dir]  validate a settings directory (dir falls back to %s)
+  wavehouse init-settings <dir>
+                            write a starter settings directory (every key at its default)
   wavehouse health          liveness self-probe against the local server (container HEALTHCHECK)
   wavehouse version         print version, commit, and build time
   wavehouse help            show this help
@@ -167,6 +172,19 @@ func run() int {
 		logger.Warn("no auth.jwt_secret or auth.jwks_url set: no token can be validated, so every request resolves to the policy default_role (public access)")
 	case cfg.Auth.JWTSecret == "change-me-in-production":
 		logger.Warn("WH_AUTH_JWT_SECRET is using the default insecure value")
+	}
+
+	// Settings directory — the hot-reloadable half of configuration (tenant
+	// tunables: dedupe id_field/require_id, query default_max_rows, schema
+	// refresh_interval, CORS origins). Required: config.Validate already
+	// rejected an empty settings.dir, and an invalid directory refuses boot —
+	// the same fail-loud contract as policy.file_path. The binary carries no
+	// compiled defaults; `wavehouse init-settings` writes the seed. A *reload*
+	// of an invalid directory merely keeps the previous snapshot.
+	settingsStore, _ := settings.Open(cfg.Settings.Dir, logger)
+	if settingsStore == nil {
+		logger.Error("settings directory invalid, refusing to start — findings above; `wavehouse validate` reproduces them, `wavehouse init-settings` writes a starter directory", "dir", cfg.Settings.Dir)
+		return 1
 	}
 
 	cfg.Auth.OperatorKey = strings.TrimSpace(cfg.Auth.OperatorKey)
@@ -274,6 +292,29 @@ func run() int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Settings reload triggers. All three (SIGHUP here, the directory watcher
+	// below, POST /v1/ops/settings/reload) funnel into the same serialized
+	// Store.Reload, and a rejected reload keeps the previous good snapshot.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				settingsStore.TriggerReload("sighup")
+			}
+		}
+	}()
+	go func() {
+		// Watcher setup failure degrades, not fatal: SIGHUP and the ops
+		// endpoint still reload.
+		if err := settingsStore.Watch(ctx); err != nil {
+			logger.Error("settings directory watcher failed; reload via SIGHUP or POST /v1/ops/settings/reload", "error", err)
+		}
+	}()
+
 	// Schema discovery — non-fatal on boot. If the first Refresh fails
 	// (ClickHouse unreachable, database missing, etc.) we mark the binary
 	// degraded via bootState (which /livez surfaces as 503 + diagnostic)
@@ -284,8 +325,10 @@ func run() int {
 	// only after the first successful Refresh (sync or retry) so it never
 	// races RetryRefresh on Refresh calls or on bootState writes.
 	bootState := api.NewBootState(nil)
-	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
-	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
+	// The interval source keeps the cadence live across settings reloads; the
+	// constructor value is the boot-time resolution of the same setting.
+	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, settingsStore.SchemaRefreshInterval(), logger)
+	registry.SetIntervalSource(settingsStore.SchemaRefreshInterval)
 	if err := registry.Refresh(ctx); err != nil {
 		logger.Warn("schema discovery failed on boot, retrying in background", "error", err)
 		bootState.Set(fmt.Errorf("schema discovery: %w", err))
@@ -427,8 +470,7 @@ func run() int {
 	ingestHandler.PolicyStore = policyStore
 	if dedup != nil {
 		ingestHandler.Dedup = dedup
-		ingestHandler.IDField = cfg.Dedupe.IDField
-		ingestHandler.RequireID = cfg.Dedupe.RequireID
+		ingestHandler.DedupeSettings = settingsStore.DedupeFor
 	}
 
 	var dlqHandler *api.DLQHandler
@@ -486,12 +528,13 @@ func run() int {
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
 		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout, logger),
-		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, cfg.Query.DefaultMaxRows, logger),
+		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, settingsStore.DefaultMaxRows, logger),
 		AuthMW:          authMW,
 		PolicyStore:     policyStore,
 		Logger:          logger,
 		JS:              js,
-		CORSOrigins:     cfg.Server.CORSAllowedOrigins,
+		CORSOrigins:     settingsStore.CORSOrigins,
+		Settings:        api.NewSettingsHandler(settingsStore, logger),
 	}
 
 	// Prometheus /metrics routing: same-port → mount on API router,

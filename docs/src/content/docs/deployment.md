@@ -59,7 +59,7 @@ Or override any config with environment variables:
 
 ```bash
 WH_CH_ADDR=clickhouse.example.com:9000 \
-WH_SCHEMA_REFRESH_INTERVAL=30 \
+WH_SERVER_PORT=9090 \
 ./bin/wavehouse
 ```
 
@@ -135,15 +135,6 @@ WH_CH_ADDR=clickhouse:9000
 WH_CH_HTTP_PORT=8123
 WH_CH_HTTP_SCHEME=http              # Scheme for the same (http/https)
 
-# Schema discovery
-WH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes
-
-# CORS — comma-separated allowlist (or "*" for any origin).
-# WaveHouse is a Bearer-token API; no cookies are used and the middleware
-# deliberately omits Access-Control-Allow-Credentials, so this allowlist only
-# controls *which origins can read responses*, not cookie scope.
-WH_SERVER_CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
-
 # Auth (the JWT middleware always runs — set a secret/JWKS to validate tokens;
 # without one, every request resolves to the policy default_role)
 WH_AUTH_JWT_SECRET=<strong-random-secret>
@@ -163,15 +154,21 @@ WH_AUTH_OPERATOR_KEY=<strong-random-operator-key>
 WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
 WH_PIPES_DIR=/etc/wavehouse/pipes
 
+# Settings directory (required): roles.json, policies.json, pipes.json,
+# config.json. Tenant tunables live in its config.json — dedupe
+# id_field/require_id (+ per-table overrides), query default_max_rows, schema
+# refresh_interval, CORS allowed_origins — and reload on file change, SIGHUP,
+# or POST /v1/ops/settings/reload. Create it with
+# `wavehouse init-settings /etc/wavehouse/settings`; the container images
+# bake a default at /app/settings. See Configuration — Settings directory.
+WH_SETTINGS_DIR=/etc/wavehouse/settings
+
 # Cache tuning
 WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60
 
-# Optional dedup
+# Optional dedup (the switch is boot config; the id field and strictness are
+# settings-directory tunables)
 WH_DEDUPE_ENABLED=true
-WH_DEDUPE_ID_FIELD=event_id
-# Reject rows missing the id field instead of publishing them un-deduped
-# (default false → such rows are logged + counted, not rejected).
-WH_DEDUPE_REQUIRE_ID=false
 
 # Standalone tuning
 WH_MQ_GAP_WINDOW_MINUTES=15       # Minutes of NATS history for SSE gap-fill
@@ -369,7 +366,7 @@ CREATE TABLE IF NOT EXISTS clicks (
 ORDER BY (page);
 ```
 
-WaveHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (default: 60). You can also trigger an immediate refresh via `POST /v1/ops/schema/refresh` (admin-only).
+WaveHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (settings directory; seed default 60). You can also trigger an immediate refresh via `POST /v1/ops/schema/refresh` (admin-only).
 
 ## Dead Letter Queue (DLQ)
 

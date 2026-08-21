@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,8 +27,39 @@ func validFiles() map[string]string {
 		FileRoles:    `{"roles": ["public", "analyst", "admin"]}`,
 		FilePolicies: `{"default_role": "public", "tables": {"clicks": {"select": {"analyst": {"max_rows": 100}}}}}`,
 		FilePipes:    `{"pipes": [{"name": "top_clicks", "sql": "SELECT 1", "allowed_roles": ["analyst"], "parameters": [{"name": "limit", "type": "number"}]}]}`,
-		FileConfig:   `{"dedupe": {"id_field": "event_id", "tables": {"clicks": {"id_field": "click_id"}}}, "schema": {"refresh_interval": 60}}`,
+		FileConfig:   configJSON(`{"dedupe": {"tables": {"clicks": {"id_field": "click_id"}}}}`),
 	}
+}
+
+// configJSON returns the seed config.json with patch merged over it, one
+// level deep (a patched block's keys replace the seed's, the rest of the
+// block is kept). Every key is required, so tests that care about one key
+// build a complete document from the seed rather than repeating all of them.
+func configJSON(patch string) string {
+	seed, err := Seed()
+	if err != nil {
+		panic(err)
+	}
+	var base, over map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(seed[FileConfig], &base); err != nil {
+		panic(err)
+	}
+	if err := json.Unmarshal([]byte(patch), &over); err != nil {
+		panic(err)
+	}
+	for block, keys := range over {
+		if base[block] == nil {
+			base[block] = map[string]json.RawMessage{}
+		}
+		for k, v := range keys {
+			base[block][k] = v
+		}
+	}
+	out, err := json.Marshal(base)
+	if err != nil {
+		panic(err)
+	}
+	return string(out)
 }
 
 func findingStrings(findings []Finding) string {
@@ -61,7 +93,7 @@ func TestValidate_ValidDirectory(t *testing.T) {
 func TestValidate_EmptyDocuments(t *testing.T) {
 	t.Parallel()
 	doc, findings := parse(writeDir(t, map[string]string{
-		FileRoles: `{}`, FilePolicies: `{}`, FilePipes: `{}`, FileConfig: `{}`,
+		FileRoles: `{}`, FilePolicies: `{}`, FilePipes: `{}`, FileConfig: configJSON(`{}`),
 	}))
 
 	// Valid — but not silent: the one finding is the no-policy lockout warning,
@@ -229,7 +261,14 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"empty override table name", FileConfig, `{"dedupe": {"tables": {"": {"id_field": "x"}}}}`, "table name must not be empty"},
 		{"override table whitespace", FileConfig, `{"dedupe": {"tables": {" clicks": {"require_id": true}}}}`, "surrounding whitespace"},
 		{"empty override id_field", FileConfig, `{"dedupe": {"tables": {"clicks": {"id_field": ""}}}}`, "dedupe.tables.clicks.id_field: must not be empty"},
-		{"negative max rows", FileConfig, `{"query": {"default_max_rows": -1}}`, "must be non-negative"},
+		{"negative max rows", FileConfig, `{"query": {"default_max_rows": -1}}`, "must be >= 1"},
+		{"zero max rows", FileConfig, `{"query": {"default_max_rows": 0}}`, "must be >= 1"},
+		{"missing dedupe block", FileConfig, configJSON(`{}`)[:0] + `{"query": {"default_max_rows": 1}, "schema": {"refresh_interval": 1}, "cors": {"allowed_origins": []}}`, "dedupe: required"},
+		{"missing dedupe.require_id", FileConfig, `{"dedupe": {"id_field": "event_id"}}`, "dedupe.require_id: required"},
+		{"missing query.default_max_rows", FileConfig, `{"query": {}}`, "query.default_max_rows: required"},
+		{"missing schema.refresh_interval", FileConfig, `{"schema": {}}`, "schema.refresh_interval: required"},
+		{"missing cors.allowed_origins", FileConfig, `{"cors": {}}`, "cors.allowed_origins: required"},
+		{"empty config document", FileConfig, `{}`, "cors: required"},
 		{"stream is boot config", FileConfig, `{"stream": {"keepalive_interval": "30s"}}`, "unknown field"},
 		{"zero refresh interval", FileConfig, `{"schema": {"refresh_interval": 0}}`, "must be >= 1"},
 		{"empty cors origin", FileConfig, `{"cors": {"allowed_origins": [" "]}}`, "origin must not be empty"},
@@ -293,7 +332,7 @@ func TestValidate_Warnings(t *testing.T) {
 		{"admin grant is dead config", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"select": {"admin": {"max_rows": 5}}}}}`, "unconditional bypass"},
 		{"default_role equals admin", FilePolicies, `{"default_role": "admin", "tables": {}}`, "every roleless request gets full admin"},
 		{"admin in pipe allowlist is redundant", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "allowed_roles": ["admin"]}]}`, "listing it is redundant"},
-		{"empty dedupe override sets nothing", FileConfig, `{"dedupe": {"tables": {"clicks": {}}}}`, "override sets nothing"},
+		{"empty dedupe override sets nothing", FileConfig, configJSON(`{"dedupe": {"tables": {"clicks": {}}}}`), "override sets nothing"},
 		{"default on required parameter", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x", "required": true, "default": 5}]}]}`, "never used"},
 	}
 	for _, tt := range tests {
@@ -316,17 +355,17 @@ func TestValidate_Warnings(t *testing.T) {
 func TestValidate_MultipleFaults(t *testing.T) {
 	t.Parallel()
 	doc, findings := parse(writeDir(t, map[string]string{
-		FileRoles:    `{"roles": ["analyst", "analyst"]}`,       // duplicate role
-		FilePolicies: `{"default_role": "ghost", "tables": {}}`, // undeclared role
-		FilePipes:    `{"pipes": [`,                             // truncated JSON
-		FileConfig:   `{"query": {"default_max_rows": -1}}`,     // bounds violation
+		FileRoles:    `{"roles": ["analyst", "analyst"]}`,               // duplicate role
+		FilePolicies: `{"default_role": "ghost", "tables": {}}`,         // undeclared role
+		FilePipes:    `{"pipes": [`,                                     // truncated JSON
+		FileConfig:   configJSON(`{"query": {"default_max_rows": -1}}`), // bounds violation
 	}))
 	assert.Nil(t, doc)
 	out := findingStrings(findings)
 	assert.Contains(t, out, "duplicate role")
 	assert.Contains(t, out, `role "ghost" is not declared`)
 	assert.Contains(t, out, "unexpected EOF")
-	assert.Contains(t, out, "must be non-negative")
+	assert.Contains(t, out, "must be >= 1")
 	assert.Len(t, findings, 4, "every fault reported exactly once, no noise:\n%s", out)
 }
 
@@ -336,7 +375,7 @@ func TestValidate_ErrorAndWarningMix(t *testing.T) {
 	t.Parallel()
 	files := validFiles()
 	files[FilePolicies] = `{"default_role": "public", "tables": {"clicks": {"select": {"admin": {}}}}}` // warning: admin grant is dead config
-	files[FileConfig] = `{"schema": {"refresh_interval": 0}}`                                           // error: bounds violation
+	files[FileConfig] = configJSON(`{"schema": {"refresh_interval": 0}}`)                               // error: bounds violation
 	doc, findings := parse(writeDir(t, files))
 	assert.Nil(t, doc, "one error rejects the directory even when the rest only warns")
 	require.True(t, HasErrors(findings))

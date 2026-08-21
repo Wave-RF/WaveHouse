@@ -11,6 +11,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestMain pins WH_SETTINGS_DIR for the whole package: settings.dir is a
+// required boot key, and the Load tests run in parallel (so t.Setenv is out).
+// Tests that exercise the requirement itself build a Config literal.
+func TestMain(m *testing.M) {
+	if err := os.Setenv("WH_SETTINGS_DIR", "./settings"); err != nil {
+		panic(err)
+	}
+	os.Exit(m.Run())
+}
+
+func TestValidate_SettingsDirRequired(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: 30 * time.Second},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "settings.dir")
+	assert.Contains(t, err.Error(), "init-settings")
+}
+
 func TestLoad_Defaults(t *testing.T) {
 	t.Parallel()
 	cfg, err := Load("nonexistent.yaml")
@@ -28,12 +50,10 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "role", cfg.Auth.RoleClaim)
 	assert.Empty(t, cfg.Auth.OperatorKey, "operator key is empty by default (feature off)")
 	assert.False(t, cfg.Dedupe.Enabled)
-	assert.Equal(t, "event_id", cfg.Dedupe.IDField)
 	assert.True(t, cfg.DLQ.Enabled)
 	assert.Empty(t, cfg.Policy.FilePath, "no default bootstrap file — operators opt in explicitly so a missing file never produces a silent fail-closed boot")
 	assert.Equal(t, "", cfg.Pipes.Dir)
 	assert.Equal(t, "./data", cfg.DataDir)
-	assert.Equal(t, 60, cfg.Schema.RefreshInterval)
 	assert.False(t, cfg.OTel.Enabled)
 	assert.True(t, cfg.OTel.Traces.Enabled)
 	assert.InEpsilon(t, 1.0, cfg.OTel.Traces.SampleRate, 0.0001)
@@ -78,50 +98,13 @@ func TestLoad_OperatorKey_FromEnv(t *testing.T) {
 	assert.Equal(t, "env-operator-key", cfg.Auth.OperatorKey)
 }
 
-func TestLoad_QueryLimits_Defaults(t *testing.T) {
-	t.Parallel()
-	cfg, err := Load("nonexistent.yaml")
-	require.NoError(t, err)
-	// Only the result-LIMIT default lives in WaveHouse config now; server-wide
-	// resource limits (memory, rows scanned, time) are ClickHouse's job.
-	assert.Equal(t, 10000, cfg.Query.DefaultMaxRows)
-}
-
-func TestLoad_QueryLimits_FromYAML(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	yamlContent := `
-query:
-  default_max_rows: 25000
-`
-	path := filepath.Join(dir, "config.yaml")
-	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o600))
-
-	cfg, err := Load(path)
-	require.NoError(t, err)
-	assert.Equal(t, 25000, cfg.Query.DefaultMaxRows)
-}
-
-func TestValidate_NegativeQueryDefaultMaxRows(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: 30 * time.Second},
-		Schema:     Schema{RefreshInterval: 60},
-		Query:      Query{DefaultMaxRows: -1},
-	}
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "default_max_rows")
-}
-
 func TestValidate_KeepaliveValues(t *testing.T) {
 	t.Parallel()
 	base := func() Config {
 		return Config{
 			Server:     Server{Port: 8080},
+			Settings:   Settings{Dir: "./settings"},
 			ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: 30 * time.Second},
-			Schema:     Schema{RefreshInterval: 60},
 		}
 	}
 
@@ -203,8 +186,8 @@ func TestValidate_PortOutOfRange(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
 				Server:     Server{Port: tt.port},
+				Settings:   Settings{Dir: "./settings"},
 				ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-				Schema:     Schema{RefreshInterval: 60},
 			}
 			err := cfg.Validate()
 			require.Error(t, err)
@@ -217,32 +200,20 @@ func TestValidate_NegativeShutdownTimeout(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080, ShutdownTimeout: -1},
+		Settings:   Settings{Dir: "./settings"},
 		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-		Schema:     Schema{RefreshInterval: 60},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "shutdown_timeout")
 }
 
-func TestValidate_SchemaRefreshIntervalZero(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-		Schema:     Schema{RefreshInterval: 0},
-	}
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "schema.refresh_interval")
-}
-
 func TestValidate_NegativeQueryTime(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
+		Settings:   Settings{Dir: "./settings"},
 		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: -1},
-		Schema:     Schema{RefreshInterval: 60},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
@@ -253,8 +224,8 @@ func TestValidate_ZeroQueryTime(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
+		Settings:   Settings{Dir: "./settings"},
 		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: 0},
-		Schema:     Schema{RefreshInterval: 60},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
@@ -265,9 +236,9 @@ func TestValidate_NegativeGapWindow(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
+		Settings:   Settings{Dir: "./settings"},
 		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		MQ:         MQ{GapWindowMinutes: -1},
-		Schema:     Schema{RefreshInterval: 60},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
@@ -289,8 +260,8 @@ func TestValidate_TracesSampleRateOutOfRange(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
 				Server:     Server{Port: 8080},
+				Settings:   Settings{Dir: "./settings"},
 				ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-				Schema:     Schema{RefreshInterval: 60},
 				OTel: OTel{
 					Enabled: true,
 					Traces:  OTelTraces{Enabled: true, SampleRate: tc.rate},
@@ -308,8 +279,8 @@ func TestValidate_LogsSampleRateOutOfRange(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
+		Settings:   Settings{Dir: "./settings"},
 		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: true,
 			Traces:  OTelTraces{Enabled: true, SampleRate: 0.10},
@@ -328,8 +299,8 @@ func TestValidate_SampleRatesIgnoredWhenObservabilityDisabled(t *testing.T) {
 	// config that they haven't enabled yet.
 	cfg := Config{
 		Server:     Server{Port: 8080},
+		Settings:   Settings{Dir: "./settings"},
 		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: false,
 			Traces:  OTelTraces{SampleRate: 99},
@@ -345,8 +316,8 @@ func TestValidate_SampleRatesIgnoredWhenSignalDisabled(t *testing.T) {
 	// signal is off, its sample_rate is unused and should not gate startup.
 	cfg := Config{
 		Server:     Server{Port: 8080},
+		Settings:   Settings{Dir: "./settings"},
 		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: true,
 			Traces:  OTelTraces{Enabled: false, SampleRate: 99},
@@ -370,8 +341,8 @@ func TestValidate_PrometheusPortCollidesWithServerPort(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
+		Settings:   Settings{Dir: "./settings"},
 		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-		Schema:     Schema{RefreshInterval: 60},
 		Prometheus: Prometheus{
 			Enabled: true,
 			Path:    "/metrics",
@@ -398,8 +369,8 @@ func TestValidate_PrometheusPortOutOfRange(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
 				Server:     Server{Port: 8080},
+				Settings:   Settings{Dir: "./settings"},
 				ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-				Schema:     Schema{RefreshInterval: 60},
 				Prometheus: Prometheus{
 					Enabled: true,
 					Path:    "/metrics",
@@ -417,8 +388,8 @@ func TestValidate_PrometheusPathMustStartWithSlash(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
+		Settings:   Settings{Dir: "./settings"},
 		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-		Schema:     Schema{RefreshInterval: 60},
 		Prometheus: Prometheus{
 			Enabled: true,
 			Path:    "metrics", // missing leading slash
@@ -453,8 +424,8 @@ func TestValidate_PrometheusPathReservedConflicts(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
 				Server:     Server{Port: 8080},
+				Settings:   Settings{Dir: "./settings"},
 				ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-				Schema:     Schema{RefreshInterval: 60},
 				Prometheus: Prometheus{Enabled: true, Path: tc.path, Port: tc.port},
 			}
 			err := cfg.Validate()
@@ -471,8 +442,8 @@ func TestValidate_PrometheusV1PathAllowedOnSidecarPort(t *testing.T) {
 	// path doesn't collide with the API. Validation should let this through.
 	cfg := Config{
 		Server:     Server{Port: 8080},
+		Settings:   Settings{Dir: "./settings"},
 		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-		Schema:     Schema{RefreshInterval: 60},
 		Prometheus: Prometheus{Enabled: true, Path: "/v1/metrics", Port: 9091},
 	}
 	assert.NoError(t, cfg.Validate())
@@ -484,8 +455,8 @@ func TestValidate_PrometheusOnly_NoOTel(t *testing.T) {
 	// otel.enabled stays false, prometheus.enabled is true. Must validate.
 	cfg := Config{
 		Server:     Server{Port: 8080},
+		Settings:   Settings{Dir: "./settings"},
 		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-		Schema:     Schema{RefreshInterval: 60},
 		Prometheus: Prometheus{Enabled: true, Path: "/metrics", Port: 0},
 	}
 	assert.NoError(t, cfg.Validate())
@@ -498,8 +469,8 @@ func TestValidate_PrometheusIgnoredWhenDisabled(t *testing.T) {
 	// get yelled at about unused fields.
 	cfg := Config{
 		Server:     Server{Port: 8080},
+		Settings:   Settings{Dir: "./settings"},
 		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-		Schema:     Schema{RefreshInterval: 60},
 		Prometheus: Prometheus{
 			Enabled: false,
 			Path:    "garbage",
@@ -513,8 +484,8 @@ func TestValidate_InvalidHTTPScheme(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
+		Settings:   Settings{Dir: "./settings"},
 		ClickHouse: ClickHouse{HTTPScheme: "ftp", QueryTimeout: time.Duration(30) * time.Second}, // Intentionally invalid ftp
-		Schema:     Schema{RefreshInterval: 60},
 	}
 
 	err := cfg.Validate()

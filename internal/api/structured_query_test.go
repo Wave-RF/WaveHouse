@@ -40,7 +40,7 @@ func newStructuredQueryHandler(t testing.TB) *StructuredQueryHandler {
 			},
 		},
 	})
-	return NewStructuredQueryHandler(nil, nil, reg, nil, 60, 5*time.Second, 0, testutil.NopLogger())
+	return NewStructuredQueryHandler(nil, nil, reg, nil, 60, 5*time.Second, nil, testutil.NopLogger())
 }
 
 func TestStructuredQuery_MissingTable(t *testing.T) {
@@ -295,7 +295,7 @@ func newCapturingHandler(t *testing.T, conn driver.Conn, p *policy.Policy) *Stru
 			},
 		},
 	})
-	return NewStructuredQueryHandler(conn, nil, reg, policy.NewMemoryStore(p), 60, 5*time.Second, 0, testutil.NopLogger())
+	return NewStructuredQueryHandler(conn, nil, reg, policy.NewMemoryStore(p), 60, 5*time.Second, nil, testutil.NopLogger())
 }
 
 func viewerRequest(t *testing.T, sq query.StructuredQuery) *http.Request {

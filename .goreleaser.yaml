@@ -82,6 +82,10 @@ dockers_v2:
   - dockerfile: deployments/Dockerfile.goreleaser
     ids:
       - wavehouse
+    # The seed settings directory, baked into the image at /app/settings
+    # (see the Dockerfile). Keep in lockstep with deployments/Dockerfile.
+    extra_files:
+      - internal/settings/seed
     images:
       - "ghcr.io/wave-rf/wavehouse"
     # Every build gets an immutable reference plus one moving pointer.

@@ -30,13 +30,20 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # them here would buy nothing and obscures intent. Named-volume copy-up runs
 # against `/app/data` regardless; bind mounts mask the image dir entirely
 # and rely on host-side ownership matching UID 65532.
-RUN mkdir -p /app/data /app/pipes && chown -R 65532:65532 /app
+#
+# /app/settings is the baked seed settings directory (every key at its
+# default, the same files `wavehouse init-settings` writes) so a bare
+# `docker run` boots; production bind-mounts its own directory over it.
+# Deliberately NOT a VOLUME (unlike /app/data): it's config, not state, and an
+# anonymous volume would hide a forgotten mount.
+RUN mkdir -p /app/data /app/pipes && cp -r /src/internal/settings/seed /app/settings && chown -R 65532:65532 /app
 
 # Stage 2: Final minimal image
 FROM gcr.io/distroless/static-debian12
 
 WORKDIR /app
 USER nonroot:nonroot
+ENV WH_SETTINGS_DIR=/app/settings
 
 COPY --from=builder --chown=nonroot:nonroot /app /app
 COPY --from=builder --chown=nonroot:nonroot /bin/wavehouse /app/wavehouse

@@ -283,22 +283,28 @@ func (v *validator) parsePipes(data []byte) []pipes.NamedQuery {
 	return f.Pipes
 }
 
-// checkIDField rejects an explicit id_field value that could never match a
-// JSON key: empty or whitespace-only (the author wrote a value that names
-// nothing) and surrounding whitespace (an exact-match lookup would silently
-// miss every row). Absent (nil) is always fine — it means inherit, and the
-// compiled default floors the cascade. Interior whitespace stays legal:
-// "click id" is a valid JSON key.
-func (v *validator) checkIDField(path string, val *string, omitHint string) {
+// checkIDField rejects an id_field value that could never match a JSON key:
+// empty or whitespace-only (the author wrote a value that names nothing) and
+// surrounding whitespace (an exact-match lookup would silently miss every
+// row). nil is the caller's concern — required at the top level, inherit in
+// a table override. Interior whitespace stays legal: "click id" is a valid
+// JSON key.
+func (v *validator) checkIDField(path string, val *string) {
 	if val == nil {
 		return
 	}
 	switch {
 	case strings.TrimSpace(*val) == "":
-		v.errorf(FileConfig, path, "must not be empty — %s", omitHint)
+		v.errorf(FileConfig, path, "must not be empty")
 	case strings.TrimSpace(*val) != *val:
 		v.errorf(FileConfig, path, "id_field %q has surrounding whitespace", *val)
 	}
+}
+
+// required reports a missing key. Every top-level tunable is required so the
+// adopted snapshot never depends on a value the files don't state.
+func (v *validator) required(path string) {
+	v.errorf(FileConfig, path, "required — run `wavehouse init-settings` for a complete starter config.json")
 }
 
 func (v *validator) parseConfig(data []byte) TenantConfig {
@@ -309,8 +315,16 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		// files; the document is discarded whenever any error exists.
 		return TenantConfig{}
 	}
-	if d := c.Dedupe; d != nil {
-		v.checkIDField("dedupe.id_field", d.IDField, "omit it to use the default")
+	if d := c.Dedupe; d == nil {
+		v.required("dedupe")
+	} else {
+		if d.IDField == nil {
+			v.required("dedupe.id_field")
+		}
+		if d.RequireID == nil {
+			v.required("dedupe.require_id")
+		}
+		v.checkIDField("dedupe.id_field", d.IDField)
 		// Sorted iteration keeps finding order deterministic across runs.
 		for _, table := range slices.Sorted(maps.Keys(d.Tables)) {
 			td := d.Tables[table]
@@ -321,23 +335,31 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 			case strings.TrimSpace(table) != table:
 				v.errorf(FileConfig, path, "table name %q has surrounding whitespace", table)
 			}
-			v.checkIDField(path+".id_field", td.IDField, "omit it to inherit the global value")
+			v.checkIDField(path+".id_field", td.IDField)
 			if td.IDField == nil && td.RequireID == nil {
 				v.warnf(FileConfig, path, "override sets nothing — remove it, or set id_field or require_id")
 			}
 		}
 	}
-	if q := c.Query; q != nil {
-		if q.DefaultMaxRows != nil && *q.DefaultMaxRows < 0 {
-			v.errorf(FileConfig, "query.default_max_rows", "must be non-negative, got %d", *q.DefaultMaxRows)
-		}
+	if q := c.Query; q == nil {
+		v.required("query")
+	} else if q.DefaultMaxRows == nil {
+		v.required("query.default_max_rows")
+	} else if *q.DefaultMaxRows < 1 {
+		v.errorf(FileConfig, "query.default_max_rows", "must be >= 1, got %d", *q.DefaultMaxRows)
 	}
-	if s := c.Schema; s != nil {
-		if s.RefreshInterval != nil && *s.RefreshInterval < 1 {
-			v.errorf(FileConfig, "schema.refresh_interval", "must be >= 1 second, got %d", *s.RefreshInterval)
-		}
+	if s := c.Schema; s == nil {
+		v.required("schema")
+	} else if s.RefreshInterval == nil {
+		v.required("schema.refresh_interval")
+	} else if *s.RefreshInterval < 1 {
+		v.errorf(FileConfig, "schema.refresh_interval", "must be >= 1 second, got %d", *s.RefreshInterval)
 	}
-	if co := c.CORS; co != nil {
+	if co := c.CORS; co == nil {
+		v.required("cors")
+	} else if co.AllowedOrigins == nil {
+		v.required("cors.allowed_origins")
+	} else {
 		for i, origin := range co.AllowedOrigins {
 			if strings.TrimSpace(origin) == "" {
 				v.errorf(FileConfig, fmt.Sprintf("cors.allowed_origins[%d]", i), "origin must not be empty")

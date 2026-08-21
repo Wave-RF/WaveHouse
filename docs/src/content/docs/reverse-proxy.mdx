@@ -22,7 +22,7 @@ WaveHouse and your proxy are layers of one system, not substitutes. The proxy ow
 | Slow-loris / slow-body mitigation | ✗ | ✓ |
 | Request-body size limit | Fixed internal backstop (1 MiB parameter/AST bodies, 16 MiB bulk payload bodies) | Tunable outer limit |
 | Authentication (JWT) | ✓ (validates / resolves role) | Pass through |
-| CORS | ✓ (`server.cors_allowed_origins`) | Pass through (don't double it) |
+| CORS | ✓ (`cors.allowed_origins`, [settings directory](/configuration#settings-directory)) | Pass through (don't double it) |
 | Health probes | ✓ (serves `/livez`, `/readyz`, `/v1/health`) | Route / expose appropriately |
 
 :::note[Defense in depth, not either/or]
@@ -196,7 +196,7 @@ These limit the *whole* request regardless of traffic, so no keepalive extends t
 WaveHouse does **not** derive a client IP from forwarded headers — it does no per-IP logic (rate limiting and IP allow/deny are the proxy's job) and does not trust `X-Forwarded-For` / `X-Real-IP` / `True-Client-IP` to rewrite the connection's source address. So a forged forwarded header has no effect on WaveHouse, and `r.RemoteAddr` (what OpenTelemetry records as the peer) is the honest immediate peer — your proxy, when one is in front. Still, don't expose `:8080` to untrusted clients: bind WaveHouse to a private interface or firewall the port so the proxy is the only path in. Capturing the real client IP in WaveHouse's own traces and logs — trusted-proxy-aware, so it can't be spoofed — is tracked in [#333](https://github.com/Wave-RF/WaveHouse/issues/333).
 :::
 
-- **CORS** — WaveHouse applies its own CORS from `server.cors_allowed_origins`. Let one layer own CORS: either pass it through the proxy untouched (recommended), or strip it from WaveHouse and do it at the proxy — not both, or browsers see duplicate `Access-Control-Allow-Origin` headers and reject the response.
+- **CORS** — WaveHouse applies its own CORS from the settings directory's `cors.allowed_origins`. Let one layer own CORS: either pass it through the proxy untouched (recommended), or strip it from WaveHouse and do it at the proxy — not both, or browsers see duplicate `Access-Control-Allow-Origin` headers and reject the response.
 
 ## Fencing the admin surface
 

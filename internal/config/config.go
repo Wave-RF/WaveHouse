@@ -23,13 +23,11 @@ type Config struct {
 	Dedupe     Dedupe     `yaml:"dedupe"`
 	Cache      Cache      `yaml:"cache"`
 	Auth       Auth       `yaml:"auth"`
-	Schema     Schema     `yaml:"schema"`
 	DLQ        DLQ        `yaml:"dlq"`
 	Policy     Policy     `yaml:"policy"`
 	Pipes      Pipes      `yaml:"pipes"`
 	OTel       OTel       `yaml:"otel"`
 	Prometheus Prometheus `yaml:"prometheus"`
-	Query      Query      `yaml:"query"`
 	Stream     Stream     `yaml:"stream"`
 	Settings   Settings   `yaml:"settings"`
 }
@@ -44,24 +42,14 @@ const EnvSettingsDir = "WH_SETTINGS_DIR"
 // Settings locates the hot-reloadable settings directory — the four JSON
 // documents (roles.json, policies.json, pipes.json, config.json) validated by
 // internal/settings. Boot-tier by necessity: it's the pointer the reload
-// machinery follows, so it can't live behind itself. No default, same
-// reasoning as policy.file_path: a baked-in path would turn a missing mount
-// into silent misconfiguration instead of an explicit operator choice.
+// machinery follows, so it can't live behind itself. REQUIRED, with no
+// default, same reasoning as policy.file_path: a baked-in path would turn a
+// missing mount into silent misconfiguration instead of an explicit operator
+// choice, and the binary has no compiled tunable defaults to fall back on —
+// `wavehouse init-settings <dir>` writes the starter directory (the container
+// images bake it at /app/settings).
 type Settings struct {
 	Dir string `yaml:"dir" env:"WH_SETTINGS_DIR"`
-}
-
-// Query holds query-shaping defaults. Server-wide *resource* limits (memory,
-// rows scanned, execution time) deliberately live in ClickHouse itself — its
-// settings profiles and quotas, see docs/configuration — so they apply
-// uniformly to every query (including raw admin SQL) and compose with the
-// per-role caps WaveHouse adds via per-query settings. This block holds only
-// the result-shaping default that is genuinely WaveHouse's to own.
-type Query struct {
-	// DefaultMaxRows is the result LIMIT applied to a structured query when the
-	// caller and policy specify none — the visible, tunable form of what used to
-	// be the hard-coded query.DefaultMaxRows. 0 falls back to that constant.
-	DefaultMaxRows int `yaml:"default_max_rows" env:"WH_QUERY_DEFAULT_MAX_ROWS" env-default:"10000"`
 }
 
 // OTel configures the OpenTelemetry pipeline. `enabled` is the master switch;
@@ -117,10 +105,11 @@ type OTelLogs struct {
 	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_LOGS_SAMPLE_RATE" env-default:"1.0"`
 }
 
+// Server holds listener wiring. The CORS allowlist is a tenant tunable and
+// lives in the settings directory's config.json (internal/settings).
 type Server struct {
-	Port               int      `yaml:"port" env:"WH_SERVER_PORT" env-default:"8080"`
-	ShutdownTimeout    int      `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT" env-default:"10"`
-	CORSAllowedOrigins []string `yaml:"cors_allowed_origins" env:"WH_SERVER_CORS_ALLOWED_ORIGINS" env-default:"*"`
+	Port            int `yaml:"port" env:"WH_SERVER_PORT" env-default:"8080"`
+	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT" env-default:"10"`
 }
 
 type Stream struct {
@@ -150,10 +139,12 @@ type MQ struct {
 	MaxBytesGB       int `yaml:"max_bytes_gb" env:"WH_MQ_MAX_BYTES_GB" env-default:"50"`
 }
 
+// Dedupe holds only the enable switch: it owns Pebble's lifecycle, which only
+// a restart can change. The behavioral knobs (id_field, require_id, per-table
+// overrides) are tenant tunables and live in the settings directory's
+// config.json (internal/settings).
 type Dedupe struct {
-	Enabled   bool   `yaml:"enabled" env:"WH_DEDUPE_ENABLED" env-default:"false"`
-	IDField   string `yaml:"id_field" env:"WH_DEDUPE_ID_FIELD" env-default:"event_id"`
-	RequireID bool   `yaml:"require_id" env:"WH_DEDUPE_REQUIRE_ID" env-default:"false"`
+	Enabled bool `yaml:"enabled" env:"WH_DEDUPE_ENABLED" env-default:"false"`
 }
 
 type Cache struct {
@@ -209,11 +200,6 @@ type Pipes struct {
 	Dir string `yaml:"dir" env:"WH_PIPES_DIR" env-default:""`
 }
 
-// Schema configures ClickHouse schema discovery.
-type Schema struct {
-	RefreshInterval int `yaml:"refresh_interval" env:"WH_SCHEMA_REFRESH_INTERVAL" env-default:"60"` // seconds
-}
-
 // DLQ configures the Dead Letter Queue for failed batch inserts.
 type DLQ struct {
 	Enabled bool `yaml:"enabled" env:"WH_DLQ_ENABLED" env-default:"true"`
@@ -233,6 +219,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("server.shutdown_timeout must be non-negative")
 	}
 
+	if strings.TrimSpace(c.Settings.Dir) == "" {
+		return fmt.Errorf("settings.dir (%s) is required: point it at a settings directory, or create one with `wavehouse init-settings <dir>`", EnvSettingsDir)
+	}
+
 	if c.Stream.KeepaliveInterval < 0 {
 		return fmt.Errorf("stream.keepalive_interval must be non-negative, got %s", c.Stream.KeepaliveInterval)
 	}
@@ -240,20 +230,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("stream.keepalive_buckets must be non-negative, got %d", c.Stream.KeepaliveBuckets)
 	}
 
-	if c.Schema.RefreshInterval < 1 {
-		return fmt.Errorf("schema.refresh_interval must be >= 1 second")
-	}
-
 	if c.ClickHouse.QueryTimeout <= time.Duration(0) {
 		return fmt.Errorf("clickhouse.query_timeout must be > 0, got %s", c.ClickHouse.QueryTimeout)
-	}
-
-	// query.default_max_rows is the fallback result LIMIT. 0 (or a directly-built
-	// config that omits it) means "use the built-in query.DefaultMaxRows" — the
-	// builder substitutes the constant for any non-positive value — so only a
-	// negative value is an error.
-	if c.Query.DefaultMaxRows < 0 {
-		return fmt.Errorf("query.default_max_rows must be non-negative, got %d", c.Query.DefaultMaxRows)
 	}
 
 	if c.MQ.GapWindowMinutes < 0 {

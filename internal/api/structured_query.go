@@ -27,8 +27,12 @@ type StructuredQueryHandler struct {
 	BucketSecs      int
 	sf              singleflight.Group
 	maxQueryTimeout time.Duration
-	defaultMaxRows  int
-	logger          *slog.Logger
+	// defaultMaxRows returns the current fallback result LIMIT
+	// (settings.Store.DefaultMaxRows in production) — a func, not an int, so a
+	// settings reload takes effect on the next query without a restart. Nil or
+	// a non-positive return means the builder's compiled constant.
+	defaultMaxRows func() int
+	logger         *slog.Logger
 
 	// maxRequestBytes optionally overrides the default inbound request body
 	// cap (maxControlBodyBytes). When 0, the default applies. Exists so
@@ -45,7 +49,7 @@ func NewStructuredQueryHandler(
 	policyStore *policy.Store,
 	bucketSecs int,
 	queryTimeout time.Duration,
-	defaultMaxRows int,
+	defaultMaxRows func() int,
 	logger *slog.Logger,
 ) *StructuredQueryHandler {
 	return &StructuredQueryHandler{
@@ -115,7 +119,11 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// skip the check. The role's row-filter predicate and max_rows cap are emitted
 	// by Build too, structurally (#322). A policy denial returns a typed error we
 	// map to 403; a malformed query maps to 400.
-	result, err := query.Build(table, &sq, schema, perms, h.BucketSecs, h.defaultMaxRows)
+	maxRows := 0 // non-positive → the builder's compiled constant
+	if h.defaultMaxRows != nil {
+		maxRows = h.defaultMaxRows()
+	}
+	result, err := query.Build(table, &sq, schema, perms, h.BucketSecs, maxRows)
 	if err != nil {
 		// A query that selects nothing — no columns, no aggregations, no
 		// select_all — is a request for no data, not an error: return an empty

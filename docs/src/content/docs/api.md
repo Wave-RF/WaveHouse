@@ -594,7 +594,7 @@ Row values of top-level `DateTime`/`DateTime64` columns inside `data` arrive in 
 
 **Note:** When access control policies are active, streamed events are filtered per the caller's role: tables without `select` permission are skipped, denied columns are removed from each event, and the role's [row-level `filter`](/access-control#row-level-security) is evaluated per subscriber against the caller's JWT claims — supplied by the connection's token (the `Authorization` header, or the `?token=` fallback above), with replayed gap-fill events filtered the same way. For a filter constant the query path's SQL also accepts ([the enforcement caution](/access-control#where-each-rule-is-enforced) gives per-type guidance), a connection is never delivered a row the query path would hide for that role — every comparison the stream can't prove fails closed and withholds the row instead. Numeric comparisons run in the column's storage domain — both operands narrowed the way ClickHouse narrows the stored value and the bound constant — so columns that narrow on insert (`Float32`/`Float64` width, a `Decimal`'s scale) agree with the query path too; the residual payload-vs-stored case is an event whose insert later fails into the DLQ, which the caution documents. The connection's claims are captured once, when the stream is established — a policy change applies from the next live event (an in-flight gap-fill finishes under the policy snapshot taken when the stream opened), but an expired token or changed claims take effect only when the client reconnects.
 
-**CORS:** `/v1/stream` honors the `server.cors_allowed_origins` allowlist like every endpoint. Note that a **header-authenticated stream preflights before it connects** — `Authorization` is not CORS-safelisted — where a bare `EventSource` never preflighted at all: its request is not a `fetch()`, so Fetch's unsafe-request flag is never set and `Last-Event-ID` rides on the plain `GET`. Both headers are allow-listed, so an allowed origin connects *and* resumes cross-origin.
+**CORS:** `/v1/stream` honors the `cors.allowed_origins` allowlist (settings directory) like every endpoint. Note that a **header-authenticated stream preflights before it connects** — `Authorization` is not CORS-safelisted — where a bare `EventSource` never preflighted at all: its request is not a `fetch()`, so Fetch's unsafe-request flag is never set and `Last-Event-ID` rides on the plain `GET`. Both headers are allow-listed, so an allowed origin connects *and* resumes cross-origin.
 
 :::caution[Behind a proxy: disable response buffering]
 SSE needs one bit of proxy configuration: disable response buffering, or the proxy holds events until a buffer fills and clients receive nothing in real time. Idle timeouts are handled for you — the `:` keepalive comment above keeps a quiet stream alive under typical proxy/tunnel idle windows ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)), so raising the idle/read timeout is now optional. The TypeScript SDK's stream transport and browser `EventSource` both auto-reconnect (resuming via `Last-Event-ID`) if a connection drops. See [Behind a reverse proxy → Server-Sent Events](/reverse-proxy#server-sent-events-sse) for nginx/Caddy/Cloudflare specifics.
@@ -795,6 +795,21 @@ Returns a specific named pipe definition.
 **`allowed_roles`** restricts execution: the caller's role (a tokenless or roleless request is first resolved to the policy `default_role`) must appear in the list. The admin role (`admin_role`) always passes. Matching is exact — there is no `"*"` wildcard — and empty-string entries are ignored. An empty or omitted list authorizes **nobody but the admin role**, and a request whose role is absent or unlisted is denied (fails closed).
 
 #### `DELETE /v1/ops/pipes/{name}` — Delete Named Pipe
+
+#### `POST /v1/ops/settings/reload` — Reload Settings Directory
+
+Re-validates the [settings directory](/configuration#settings-directory) and adopts it when no finding is an error — the same serialized reload path the file watcher and `SIGHUP` use.
+
+```json
+{
+  "adopted": true,
+  "findings": [
+    { "severity": "warning", "file": "policies.json", "message": "empty document — no policy; every request will be denied (fail closed)" }
+  ]
+}
+```
+
+`200` when adopted (warnings allowed); `422` when validation rejected the directory — the previous settings stay in effect, and `findings` says why.
 
 ## Event Message Format
 

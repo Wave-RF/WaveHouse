@@ -50,9 +50,13 @@ type SchemaRegistry struct {
 	conn            driver.Conn
 	database        string
 	refreshInterval time.Duration
-	logger          *slog.Logger
-	mu              sync.RWMutex
-	tables          map[string]*TableSchema
+	// intervalFn, when set via SetIntervalSource, supplies the current
+	// auto-refresh interval on each tick so a settings reload retunes the
+	// cadence without restarting the loop.
+	intervalFn func() time.Duration
+	logger     *slog.Logger
+	mu         sync.RWMutex
+	tables     map[string]*TableSchema
 }
 
 // NewSchemaRegistry creates a registry that discovers schemas from system.columns.
@@ -210,10 +214,32 @@ func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxB
 	}
 }
 
+// SetIntervalSource installs a dynamic source for the auto-refresh interval
+// (settings.Store.SchemaRefreshInterval in production), polled after each tick.
+// Call before StartAutoRefresh; the constructor's interval remains the
+// fallback whenever fn is nil or returns a non-positive duration.
+func (sr *SchemaRegistry) SetIntervalSource(fn func() time.Duration) {
+	sr.intervalFn = fn
+}
+
+// currentInterval resolves the effective auto-refresh interval.
+func (sr *SchemaRegistry) currentInterval() time.Duration {
+	if sr.intervalFn != nil {
+		if d := sr.intervalFn(); d > 0 {
+			return d
+		}
+	}
+	return sr.refreshInterval
+}
+
 // StartAutoRefresh runs a background goroutine that refreshes schemas
-// at the configured interval. Blocks until ctx is cancelled.
+// at the configured interval. Blocks until ctx is cancelled. The interval is
+// re-read after every tick, so a changed setting applies from the next cycle
+// — an in-flight wait finishes at the old cadence rather than resetting,
+// which keeps a reload from ever deferring an imminent refresh.
 func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
-	ticker := time.NewTicker(sr.refreshInterval)
+	interval := sr.currentInterval()
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -222,6 +248,10 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 		case <-ticker.C:
 			if err := sr.Refresh(ctx); err != nil {
 				sr.logger.Error("schema auto-refresh failed", "error", err)
+			}
+			if next := sr.currentInterval(); next != interval {
+				interval = next
+				ticker.Reset(interval)
 			}
 		}
 	}

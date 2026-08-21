@@ -19,7 +19,7 @@ func writeSettingsDir(t *testing.T, policies string) string {
 		"roles.json":    `{"roles": ["public"]}`,
 		"policies.json": policies,
 		"pipes.json":    `{}`,
-		"config.json":   `{}`,
+		"config.json":   `{"dedupe": {"id_field": "event_id", "require_id": false}, "query": {"default_max_rows": 10000}, "schema": {"refresh_interval": 60}, "cors": {"allowed_origins": ["*"]}}`,
 	}
 	for name, content := range files {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600))

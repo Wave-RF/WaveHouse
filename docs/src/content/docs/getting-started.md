@@ -95,7 +95,7 @@ curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z
 
 The handful of things that most often trip up a first session — each is expected behavior with a quick fix:
 
-- **`404 unknown table: clicks` on the first ingest.** Schema discovery refreshes every 60 seconds (`WH_SCHEMA_REFRESH_INTERVAL`), so a just-created table may not be visible yet. Wait and retry — worst case the next refresh is a full 60 seconds out. (`POST /v1/ops/schema/refresh` forces it, but that endpoint is admin-only — the trial `public` role can't call it.)
+- **`404 unknown table: clicks` on the first ingest.** Schema discovery refreshes every 60 seconds (`schema.refresh_interval` in the [settings directory](/configuration#settings-directory)), so a just-created table may not be visible yet. Wait and retry — worst case the next refresh is a full 60 seconds out. (`POST /v1/ops/schema/refresh` forces it, but that endpoint is admin-only — the trial `public` role can't call it.)
 - **The query returns `[]` right after an ingest succeeded.** Ingest acknowledges as soon as the event is durable in the WAL; the batch worker flushes to ClickHouse every few seconds. If you query within that window the rows simply aren't in ClickHouse yet — re-query after ~5 seconds. (The [SSE stream](#5-subscribe-to-real-time-updates) sees events *immediately* — it's broadcast before the flush.)
 - **`403` on a table you created yourself.** WaveHouse is fail-closed and the trial policy grants the `public` role access to the *named demo tables only* (`clicks`, `events`). A new table needs a policy entry — see [Access Control](/access-control) for granting roles per table.
 - **A port is already taken.** The stack binds `8080` (WaveHouse) and `8123`/`9000` (ClickHouse). Stop whatever holds the port or edit the `ports:` mappings in `deployments/compose/standalone.yaml`.
@@ -113,4 +113,4 @@ The handful of things that most often trip up a first session — each is expect
 ## Going further
 
 - **Validate JWTs**: set `WH_AUTH_JWT_SECRET=<secret>` (the middleware always runs; without a secret every request is the policy `default_role`) and replace the shipped trial policy (`deployments/compose/dev-policy.yaml`) with a least-privilege one — see [API Reference — Authentication](/api#authentication) and [Access Control](/access-control).
-- **Enable deduplication**: set `WH_DEDUPE_ENABLED=true` and `WH_DEDUPE_ID_FIELD=event_id` — see [Configuration — Deduplication](/configuration#deduplication).
+- **Enable deduplication**: set `WH_DEDUPE_ENABLED=true` — records dedupe on their `event_id` field by default; pick a different field (globally or per table) in the settings directory's `config.json` — see [Configuration — Deduplication](/configuration#deduplication).

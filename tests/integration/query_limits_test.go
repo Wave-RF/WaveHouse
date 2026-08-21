@@ -99,7 +99,7 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 				},
 			})
 			h := api.NewStructuredQueryHandler(
-				e.chConn, nil, e.registry, store, 60, 30*time.Second, 0, testutil.NopLogger(),
+				e.chConn, nil, e.registry, store, 60, 30*time.Second, nil, testutil.NopLogger(),
 			)
 
 			req := httptest.NewRequest(http.MethodPost,

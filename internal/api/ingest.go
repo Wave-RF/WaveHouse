@@ -36,13 +36,16 @@ const maxReportedResults = 10000
 
 // IngestHandler handles POST /v1/ingest?table={table}
 type IngestHandler struct {
-	Registry    *discovery.SchemaRegistry
-	Dedup       dedupe.Deduplicator // nil if dedup disabled
-	IDField     string              // dedup key field name (e.g. "event_id")
-	RequireID   bool                // reject rows missing IDField instead of publishing un-deduped (dedupe.require_id)
-	Publisher   mq.Publisher
-	PolicyStore *policy.Store
-	logger      *slog.Logger
+	Registry *discovery.SchemaRegistry
+	Dedup    dedupe.Deduplicator // nil if dedup disabled
+	// DedupeSettings resolves the effective dedupe id_field/require_id for a
+	// table (settings.Store.DedupeFor in production). Called once per record so
+	// a settings reload lands at a record boundary — one record never mixes two
+	// documents' values. Dedup is skipped when nil.
+	DedupeSettings func(table string) (idField string, requireID bool)
+	Publisher      mq.Publisher
+	PolicyStore    *policy.Store
+	logger         *slog.Logger
 
 	// maxRequestBytes optionally overrides the default inbound request body cap
 	// (maxRequestBodyBytes). When 0, the default applies. Exists so same-package
@@ -422,19 +425,23 @@ func (h *IngestHandler) processRecord(
 	// enforces) after the permission checks: check clauses keep pre-#372 semantics.
 	discovery.CanonicalizeTimestamps(schema, data)
 
-	// Optional deduplication.
-	if h.Dedup != nil && h.IDField != "" {
-		idVal, ok := data[h.IDField]
+	// Optional deduplication. The id_field/require_id pair resolves per record
+	// (table override → global; the settings directory always states both, so
+	// no compiled fallback is needed). A Deduplicator without a settings
+	// source is a wiring bug, not a mode — main wires both or neither.
+	if h.Dedup != nil && h.DedupeSettings != nil {
+		idField, requireID := h.DedupeSettings(table)
+		idVal, ok := data[idField]
 		if !ok {
 			dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
-			if h.RequireID {
-				h.logger.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", h.IDField, "table", table)
+			if requireID {
+				h.logger.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", idField, "table", table)
 				return false, &recordReject{
 					Status:  http.StatusBadRequest,
-					Message: fmt.Sprintf("missing dedupe id field %q", h.IDField),
+					Message: fmt.Sprintf("missing dedupe id field %q", idField),
 				}, nil
 			}
-			h.logger.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", h.IDField, "table", table)
+			h.logger.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", idField, "table", table)
 		} else {
 			eventID := fmt.Sprint(idVal)
 			dup, err := h.Dedup.CheckAndMark(ctx, eventID)

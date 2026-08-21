@@ -6,16 +6,6 @@ data_dir: ./data
 server:
   port: 8080
   shutdown_timeout: 10
-  # CORS allowlist. "*" allows any browser origin; this is fine in dev because
-  # WaveHouse is a Bearer-token API (no cookies, no credentials mode — see
-  # internal/api/router.go corsMiddleware), so cross-origin XHR can't smuggle
-  # auth. In production with a known frontend domain, replace "*" with the
-  # explicit list, e.g.:
-  #   cors_allowed_origins:
-  #     - "https://dashboard.wavehouse.example"
-  #     - "http://localhost:3000"   # local frontend dev server
-  cors_allowed_origins:
-    - "*"
 
 otel:
   enabled: false         # master switch — set true to export via OTLP gRPC
@@ -47,13 +37,6 @@ clickhouse:
   password: ""
   query_timeout: 30s
 
-# Query-shaping defaults. Server-wide RESOURCE limits (memory, rows scanned,
-# execution time) live in ClickHouse itself — its settings profiles and quotas
-# — so they apply to every query uniformly; see docs/configuration. This block
-# holds only the result-LIMIT default.
-query:
-  default_max_rows: 10000          # fallback result LIMIT (<=0 falls back to 10000)
-
 # Server-Sent Events keepalive for GET /v1/stream. A shared ticker pushes a ":"
 # comment to idle streams so they survive reverse-proxy/tunnel idle timeouts.
 # keepalive_interval is the effective per-connection period; keep it under your
@@ -67,12 +50,11 @@ mq:
   gap_window_minutes: 15
   max_bytes_gb: 50
 
+# Only the enable switch lives here — it owns Pebble's lifecycle, which only a
+# restart can change. id_field / require_id / per-table overrides are tenant
+# tunables in the settings directory's config.json.
 dedupe:
   enabled: false
-  id_field: event_id
-  # Reject rows missing id_field instead of publishing them un-deduped. Off by
-  # default (they are logged + counted via wavehouse_ingest_dedupe_missing_id_total).
-  require_id: false
 
 cache:
   l1_max_cost: 67108864
@@ -89,9 +71,6 @@ auth:
   role_claim: role
   operator_key: "" # non-JWT full-access operator credential (Authorization: Operator <key>, or X-Operator-Key) for bootstrap/break-glass; empty disables
 
-schema:
-  refresh_interval: 60
-
 dlq:
   enabled: true
 
@@ -103,9 +82,18 @@ dlq:
 pipes:
   dir: ""
 
-# Hot-reloadable settings directory: roles.json, policies.json, pipes.json,
-# config.json. Check it with `wavehouse validate` (which also honors
-# WH_SETTINGS_DIR). Server-side loading/reload is landing incrementally; empty
-# leaves it off.
+# Settings directory (REQUIRED): roles.json, policies.json, pipes.json,
+# config.json. The tenant tunables live in its config.json — dedupe
+# id_field/require_id (+ per-table overrides), query.default_max_rows,
+# schema.refresh_interval, cors.allowed_origins — and every key is required:
+# the binary has no compiled defaults, so what's adopted is exactly what the
+# files say. The server validates the directory at boot (invalid or missing
+# refuses to start) and reloads it on SIGHUP, on file change, or via
+# POST /v1/ops/settings/reload; a reload that fails validation keeps the
+# previous settings. `wavehouse init-settings <dir>` writes a starter
+# directory with every key at its default; `wavehouse validate [dir]` checks
+# one (both honor WH_SETTINGS_DIR). This points at the checked-in seed for
+# local dev — to experiment, `wavehouse init-settings ./settings` and point
+# here instead.
 settings:
-  dir: ""
+  dir: internal/settings/seed

@@ -163,7 +163,7 @@ func TestIngest_Dedup_FirstTime(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.IDField = "event_id"
+	h.DedupeSettings = func(string) (string, bool) { return "event_id", false }
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "evt-1"})
 	w := httptest.NewRecorder()
@@ -179,7 +179,7 @@ func TestIngest_Dedup_Duplicate(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.IDField = "event_id"
+	h.DedupeSettings = func(string) (string, bool) { return "event_id", false }
 
 	// First call.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "dup-1"})
@@ -691,9 +691,9 @@ func TestIngest_Dedup_MissingIDField(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.IDField = "event_id"
+	h.DedupeSettings = func(string) (string, bool) { return "event_id", false }
 
-	// Payload omits event_id and require_id is off (the default): the row skips
+	// Payload omits event_id and require_id is off: the row skips
 	// dedup and is still published — the warn+counter path, not a rejection (#219).
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
 	w := httptest.NewRecorder()
@@ -710,8 +710,7 @@ func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = testutil.NewMockDeduplicator()
-	h.IDField = "event_id"
-	h.RequireID = true
+	h.DedupeSettings = func(string) (string, bool) { return "event_id", true }
 
 	w := httptest.NewRecorder()
 	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
@@ -733,8 +732,7 @@ func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = testutil.NewMockDeduplicator()
-	h.IDField = "event_id"
-	h.RequireID = true
+	h.DedupeSettings = func(string) (string, bool) { return "event_id", true }
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
@@ -986,7 +984,7 @@ func TestIngest_NDJSON_Dedup(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.IDField = "event_id"
+	h.DedupeSettings = func(string) (string, bool) { return "event_id", false }
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),

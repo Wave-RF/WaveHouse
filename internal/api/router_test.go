@@ -122,7 +122,7 @@ func TestRequireAdmin_OperatorBypassesNilPolicy(t *testing.T) {
 
 func TestCORSMiddleware_Preflight(t *testing.T) {
 	t.Parallel()
-	handler := corsMiddleware([]string{"*"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func() []string { return []string{"*"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("should not reach handler on OPTIONS")
 	}))
 
@@ -142,7 +142,7 @@ func TestCORSMiddleware_Preflight(t *testing.T) {
 func TestCORSMiddleware_NormalRequest(t *testing.T) {
 	t.Parallel()
 	var called bool
-	handler := corsMiddleware([]string{"*"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func() []string { return []string{"*"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -160,7 +160,7 @@ func TestCORSMiddleware_NormalRequest(t *testing.T) {
 func TestCORSMiddleware_AllowListedOrigin(t *testing.T) {
 	t.Parallel()
 	var called bool
-	handler := corsMiddleware([]string{"https://app.example.com"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func() []string { return []string{"https://app.example.com"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -179,7 +179,7 @@ func TestCORSMiddleware_AllowListedOrigin(t *testing.T) {
 func TestCORSMiddleware_BlockedOrigin(t *testing.T) {
 	t.Parallel()
 	var called bool
-	handler := corsMiddleware([]string{"https://allowed.com"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func() []string { return []string{"https://allowed.com"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -218,7 +218,7 @@ func TestCORSMiddleware_NoCredentialsHeader(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			handler := corsMiddleware(tc.allowed)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			handler := corsMiddleware(func() []string { return tc.allowed })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			}))
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
@@ -235,7 +235,7 @@ func TestCORSMiddleware_NoCredentialsHeader(t *testing.T) {
 // callers don't get CORS response headers stamped onto every response.
 func TestCORSMiddleware_NoOriginIsPassthrough(t *testing.T) {
 	t.Parallel()
-	handler := corsMiddleware([]string{"*"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func() []string { return []string{"*"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
@@ -253,7 +253,7 @@ func TestCORSMiddleware_NoOriginIsPassthrough(t *testing.T) {
 // that as a preflight failure, so the actual request never fires.
 func TestCORSMiddleware_BlockedOriginPreflight(t *testing.T) {
 	t.Parallel()
-	handler := corsMiddleware([]string{"https://allowed.com"})(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func() []string { return []string{"https://allowed.com"} })(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatal("should not reach handler on OPTIONS")
 	}))
 
@@ -368,7 +368,7 @@ func TestNewRouter_CORSOnStream(t *testing.T) {
 		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
 		AuthMW:      func(next http.Handler) http.Handler { return next },
-		CORSOrigins: []string{"https://app.example.com"},
+		CORSOrigins: func() []string { return []string{"https://app.example.com"} },
 		Logger:      testutil.NopLogger(),
 	})
 

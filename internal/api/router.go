@@ -28,12 +28,19 @@ type Dependencies struct {
 	Policy          *PolicyHandler
 	Pipes           *PipesHandler
 	StructuredQuery *StructuredQueryHandler
-	AuthMW          func(http.Handler) http.Handler
+	// Settings, if non-nil, mounts POST /v1/ops/settings/reload — the API
+	// trigger for reloading the settings directory. Nil when no settings
+	// directory is configured (nothing to reload).
+	Settings *SettingsHandler
+	AuthMW   func(http.Handler) http.Handler
 	// PolicyStore backs the RequireAdmin gate: the admin role (policy.AdminRole)
 	// is read live from the policy, so admin_role changes apply without a restart.
 	PolicyStore *policy.Store
 	JS          jetstream.JetStream // for SSE gap-fill
-	CORSOrigins []string            // allowed CORS origins; ["*"] = allow all
+	// CORSOrigins returns the allowed CORS origins, read per request so a
+	// settings reload applies immediately (settings.Store.CORSOrigins in
+	// production). Nil func, an empty list, or ["*"] all mean allow-all.
+	CORSOrigins func() []string
 	Logger      *slog.Logger
 	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
 	// endpoint (Prometheus convention). Wired by main.go from the OTel Prometheus
@@ -186,6 +193,9 @@ func NewRouter(deps Dependencies) http.Handler {
 				r.Put("/pipes/{name}", deps.Pipes.Put)
 				r.Delete("/pipes/{name}", deps.Pipes.Delete)
 			}
+			if deps.Settings != nil {
+				r.Post("/settings/reload", deps.Settings.Reload)
+			}
 		})
 	})
 
@@ -286,17 +296,7 @@ func RequireAdmin(store *policy.Store, logger *slog.Logger) func(http.Handler) h
 //
 // Non-CORS requests (no Origin header) are passed through unchanged — we
 // don't decorate same-origin responses with CORS noise.
-func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
-	allowAll := len(allowedOrigins) == 0
-	allowedSet := make(map[string]struct{}, len(allowedOrigins))
-	for _, o := range allowedOrigins {
-		if o == "*" {
-			allowAll = true
-			continue
-		}
-		allowedSet[o] = struct{}{}
-	}
-
+func corsMiddleware(origins func() []string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
@@ -305,6 +305,24 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 			if origin == "" {
 				next.ServeHTTP(w, r)
 				return
+			}
+
+			// Resolved per request (not captured at router build) so a settings
+			// reload changes the allowlist without a restart. The lists are a
+			// handful of origins, so a linear scan beats rebuilding a set.
+			var allowedOrigins []string
+			if origins != nil {
+				allowedOrigins = origins()
+			}
+			allowAll := len(allowedOrigins) == 0
+			originListed := false
+			for _, o := range allowedOrigins {
+				if o == "*" {
+					allowAll = true
+				}
+				if o == origin {
+					originListed = true
+				}
 			}
 
 			allowed := false
@@ -320,7 +338,7 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 				// allowed-origin request, stripping the CORS headers and
 				// breaking the legitimate client.
 				w.Header().Set("Vary", "Origin")
-				if _, ok := allowedSet[origin]; ok {
+				if originListed {
 					w.Header().Set("Access-Control-Allow-Origin", origin)
 					allowed = true
 				}

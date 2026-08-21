@@ -60,27 +60,28 @@ type PipesFile struct {
 // that migrate out of boot config (config.yaml/env keeps what the platform
 // operator owns: wiring, lifecycle, secrets — and platform-infra knobs like
 // the SSE keepalives, which exist for the deployment's proxies, not the
-// tenant). Every field is a pointer or slice — absent means "compiled
-// default", so validation only judges values the author actually wrote.
+// tenant). Every block and every top-level key inside it is REQUIRED: the
+// binary carries no compiled defaults, so the adopted snapshot is exactly
+// what the files say. Defaults live in the seed directory (see Seed) that
+// `wavehouse init-settings` writes. The fields are pointers only so Validate
+// can tell "absent" from the zero value and report it by path.
 type TenantConfig struct {
-	Dedupe *DedupeConfig `json:"dedupe,omitempty"`
-	Query  *QueryConfig  `json:"query,omitempty"`
-	Schema *SchemaConfig `json:"schema,omitempty"`
-	CORS   *CORSConfig   `json:"cors,omitempty"`
+	Dedupe *DedupeConfig `json:"dedupe"`
+	Query  *QueryConfig  `json:"query"`
+	Schema *SchemaConfig `json:"schema"`
+	CORS   *CORSConfig   `json:"cors"`
 }
 
 // DedupeConfig tunes dedupe behavior. dedupe.enabled stays boot config: it
 // owns Pebble's lifecycle, which only a restart can change.
 //
-// Each field resolves independently through a three-level cascade: table
-// override → the global value here → compiled default. Absent means inherit,
-// and an explicit empty, whitespace-only, or whitespace-padded id_field is
-// rejected at every level, so the effective id_field can never be empty or
-// silently unmatchable — require_id without an id_field simply requires the
-// inherited one.
+// id_field and require_id are required here and optional per table: a table
+// override inherits whichever field it doesn't name. An empty,
+// whitespace-only, or whitespace-padded id_field is rejected at every level,
+// so the effective id_field can never be empty or silently unmatchable.
 type DedupeConfig struct {
-	IDField   *string `json:"id_field,omitempty"`
-	RequireID *bool   `json:"require_id,omitempty"`
+	IDField   *string `json:"id_field"`
+	RequireID *bool   `json:"require_id"`
 	// Tables holds per-table overrides keyed by ClickHouse table name (#222).
 	// Names are format-checked only — existence is schema discovery's runtime
 	// concern, same as policies.json table keys.
@@ -94,18 +95,25 @@ type TableDedupe struct {
 	RequireID *bool   `json:"require_id,omitempty"`
 }
 
-// QueryConfig mirrors the boot config Query block.
+// QueryConfig holds query-shaping defaults. Server-wide *resource* limits
+// (memory, rows scanned, execution time) deliberately live in ClickHouse
+// itself — its settings profiles and quotas — so they apply uniformly to
+// every query; this block holds only the result-LIMIT default.
 type QueryConfig struct {
-	DefaultMaxRows *int `json:"default_max_rows,omitempty"`
+	// DefaultMaxRows is the result LIMIT applied to a structured query when
+	// the caller and policy specify none. Must be >= 1.
+	DefaultMaxRows *int `json:"default_max_rows"`
 }
 
-// SchemaConfig mirrors the boot config Schema block (seconds).
+// SchemaConfig tunes ClickHouse schema discovery.
 type SchemaConfig struct {
-	RefreshInterval *int `json:"refresh_interval,omitempty"`
+	// RefreshInterval is the auto-refresh period in seconds. Must be >= 1.
+	RefreshInterval *int `json:"refresh_interval"`
 }
 
-// CORSConfig carries the per-request CORS allowlist (boot config
-// server.cors_allowed_origins today).
+// CORSConfig carries the per-request CORS allowlist. ["*"] allows any
+// browser origin; see corsMiddleware in internal/api for why that is safe
+// for a Bearer-token API.
 type CORSConfig struct {
-	AllowedOrigins []string `json:"allowed_origins,omitempty"`
+	AllowedOrigins []string `json:"allowed_origins"`
 }

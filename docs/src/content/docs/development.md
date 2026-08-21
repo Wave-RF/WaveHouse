@@ -144,7 +144,7 @@ dev: deps-up $(AIR)
 
 **While `make dev` is running you get:**
 
-- WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based app on any localhost port can hit the API directly.
+- WaveHouse on `http://localhost:8080` with the default allow-all CORS posture, so a browser-based app on any localhost port can hit the API directly.
 - A placeholder JWT secret (`change-me-in-production`) ships in `config.yaml`, but **no policy** is seeded — so the stack is fail-closed until you seed one (see [Test the API](#test-the-api)). Override the secret via `WH_AUTH_JWT_SECRET`.
 - ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
 - Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Config isn't hot-reloaded — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
@@ -228,11 +228,13 @@ curl -s -X POST http://localhost:8080/v1/ops/query \
 
 ### Enable Dedup (Optional)
 
-Set `WH_DEDUPE_ENABLED=true` and `WH_DEDUPE_ID_FIELD=event_id`:
+Set `WH_DEDUPE_ENABLED=true`:
 
 ```bash
-WH_DEDUPE_ENABLED=true WH_DEDUPE_ID_FIELD=event_id make dev
+WH_DEDUPE_ENABLED=true make dev
 ```
+
+Records dedupe on their `event_id` field by default; the settings directory's `config.json` overrides the field globally or per table (see [Configuration — Deduplication](/configuration#deduplication)).
 
 Then include the dedup field in your ingest body:
 
