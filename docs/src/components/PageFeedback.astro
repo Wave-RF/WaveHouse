@@ -124,11 +124,23 @@ const votes = [
       if (!root) return;
 
       const vote = button.dataset.whFeedbackVote;
-      if (vote === root.dataset.vote) return; // same thumb — no-op
+      const build = root.dataset.whBuild || "";
+      const oldVote = root.dataset.vote;
+
+      // Same thumb again — toggle off (retract the vote).
+      if (vote === oldVote) {
+        if (typeof window.posthog?.capture === "function") {
+          window.posthog.capture("docs_feedback", {
+            helpful: null, page: location.pathname, build, retracted: true,
+          });
+          try { window.localStorage.removeItem(storageKey()); } catch {}
+        }
+        delete root.dataset.vote;
+        return;
+      }
 
       const helpful = vote === "up";
-      const build = root.dataset.whBuild || "";
-      const changed = !!root.dataset.vote; // re-vote, not first vote
+      const changed = !!oldVote; // re-vote, not first vote
 
       if (typeof window.posthog?.capture === "function") {
         const props = { helpful, page: location.pathname, build };
