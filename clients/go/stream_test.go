@@ -466,3 +466,189 @@ func TestStreamBaseURLPathPrefixIsPreserved(t *testing.T) {
 		t.Fatal("stream never reached the prefixed path")
 	}
 }
+
+// TestStream_TerminalConnectFailures: every way a connection can fail in a way
+// reconnecting cannot fix. Each case must surface a specific, non-retryable
+// code and close the stream — the generic retryable SSE_ERROR would spin here.
+func TestStream_TerminalConnectFailures(t *testing.T) {
+	tests := []struct {
+		name     string
+		handler  http.HandlerFunc
+		baseURL  string // overrides the test server URL when non-empty
+		auth     func(context.Context) (string, error)
+		wantCode string
+	}{
+		{
+			name: "200 that is not an event stream",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, "<html><body>Please sign in</body></html>")
+			},
+			wantCode: "SSE_BAD_CONTENT_TYPE",
+		},
+		{
+			name: "200 with no Content-Type at all",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header()["Content-Type"] = nil
+				w.WriteHeader(http.StatusOK)
+			},
+			wantCode: "SSE_BAD_CONTENT_TYPE",
+		},
+		{
+			name: "credentialed request is redirected",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				http.Redirect(w, &http.Request{}, "https://elsewhere.example/v1/stream", http.StatusFound)
+			},
+			auth:     StaticToken("secret-token"),
+			wantCode: "SSE_REDIRECT",
+		},
+		{
+			name:     "baseURL scheme cannot carry SSE",
+			handler:  func(http.ResponseWriter, *http.Request) {},
+			baseURL:  "ws://example.invalid",
+			wantCode: "SSE_CONNECT_ERROR",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(tc.handler)
+			t.Cleanup(srv.Close)
+
+			base := srv.URL
+			if tc.baseURL != "" {
+				base = tc.baseURL
+			}
+			client := NewClient(Config{BaseURL: base, Auth: tc.auth, HTTPClient: srv.Client()})
+
+			stream := client.From("clicks").Stream(nil)
+			defer stream.Close()
+
+			errCh := make(chan error, 4)
+			stream.Subscribe(&StreamSubscriber{Error: func(err error) { errCh <- err }})
+
+			select {
+			case err := <-errCh:
+				var apiErr *Error
+				if !errors.As(err, &apiErr) {
+					t.Fatalf("want *Error, got %T: %v", err, err)
+				}
+				if apiErr.Code != tc.wantCode {
+					t.Fatalf("want code %s, got %s (%v)", tc.wantCode, apiErr.Code, err)
+				}
+				if apiErr.Retryable {
+					t.Fatalf("%s must not be retryable", apiErr.Code)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("error never surfaced")
+			}
+
+			select {
+			case <-stream.done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("stream never closed after terminal %s", tc.wantCode)
+			}
+		})
+	}
+}
+
+// TestStream_RedirectFollowedWhenUncredentialed: the refusal is scoped to
+// requests carrying a credential. Without one there is nothing to leak or
+// silently downgrade, so the redirect is followed as usual.
+func TestStream_RedirectFollowedWhenUncredentialed(t *testing.T) {
+	target := sseServer(t, []string{sseFrame("2026-01-01T00:00:01Z", "/home")})
+
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/v1/stream?table=clicks", http.StatusFound)
+	}))
+	t.Cleanup(front.Close)
+
+	stream := streamClient(t, front).From("clicks").Stream(nil)
+	defer stream.Close()
+
+	events := make(chan StreamEvent, 4)
+	stream.Subscribe(&StreamSubscriber{Next: func(e StreamEvent) { events <- e }})
+
+	select {
+	case e := <-events:
+		if e.Table != "clicks" {
+			t.Fatalf("want table clicks, got %s", e.Table)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("redirect was not followed for an uncredentialed stream")
+	}
+}
+
+// TestStream_MalformedFrameIsTypedAndRetryable: a bad frame must arrive as an
+// *Error so errors.As and IsRetryable work on it — a bare fmt.Errorf would
+// leave callers string-matching.
+func TestStream_MalformedFrameIsTypedAndRetryable(t *testing.T) {
+	srv := sseServer(t, []string{"id: 1\ndata: {not json\n\n"})
+	stream := streamClient(t, srv).From("clicks").Stream(nil)
+	defer stream.Close()
+
+	errCh := make(chan error, 4)
+	stream.Subscribe(&StreamSubscriber{Error: func(err error) { errCh <- err }})
+
+	select {
+	case err := <-errCh:
+		var apiErr *Error
+		if !errors.As(err, &apiErr) {
+			t.Fatalf("want *Error, got %T: %v", err, err)
+		}
+		if apiErr.Code != "SSE_PARSE_ERROR" {
+			t.Fatalf("want SSE_PARSE_ERROR, got %s", apiErr.Code)
+		}
+		if !IsRetryable(err) {
+			t.Fatal("a malformed frame must stay retryable")
+		}
+		if strings.Contains(apiErr.Message, "not json") {
+			t.Fatal("payload must not be echoed into the error message")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("error never surfaced")
+	}
+}
+
+// TestStream_ConfiguredHeadersReachTheStream: ClientOptions.Headers apply to
+// SSE, not just REST — and the SDK's own headers still win a collision.
+func TestStream_ConfiguredHeadersReachTheStream(t *testing.T) {
+	seen := make(chan http.Header, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case seen <- r.Header.Clone():
+		default:
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	client := NewClient(Config{
+		BaseURL:    srv.URL,
+		HTTPClient: srv.Client(),
+		Options: &ClientOptions{Headers: map[string]string{
+			"X-Operator-Key": "op-secret",
+			"accept":         "application/json", // must lose to the SDK's own Accept
+		}},
+	})
+	stream := client.From("clicks").Stream(nil)
+	defer stream.Close()
+
+	select {
+	case h := <-seen:
+		if got := h.Get("X-Operator-Key"); got != "op-secret" {
+			t.Fatalf("want configured header on the stream request, got %q", got)
+		}
+		if got := h.Get("Accept"); got != "text/event-stream" {
+			t.Fatalf("SDK Accept must win, got %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream request never arrived")
+	}
+}

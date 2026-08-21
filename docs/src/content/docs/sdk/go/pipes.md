@@ -50,7 +50,7 @@ stream := wh.Pipe("top_pages", nil).Stream(nil)
 
 ## Pipes Admin — `client.Pipes`
 
-Manage named query pipes. Requires the admin role (`policy.admin_role`).
+Manage named query pipes. These sit behind the admin gate on `/v1/ops/*`, which a caller clears one of two ways: a JWT resolving to the policy admin role (`policy.admin_role`), or the server's non-JWT [operator key](/api#authentication) sent as `X-Operator-Key` via [`ClientOptions.Headers`](/sdk/go#clientoptions).
 
 ```go
 // List all pipes.

@@ -309,7 +309,7 @@ for page.HasMore && page.Next != nil {
 
 ## Raw SQL — `wavehouse.SQL[Row](ctx, client, query)`
 
-Execute a raw SQL query via `/v1/admin/query`. This endpoint is admin-only: JWT tokens must resolve to the admin role (`admin_role`, default `"admin"`). Requests without valid tokens fall back to `default_role` and are rejected unless `default_role` is set to admin (dev-only). Alternatively, an operator key (`Authorization: Operator <key>` or `X-Operator-Key`) authorizes `/v1/admin/*`. Since `Config.Auth` uses `Bearer <token>`, provide a `Config.HTTPClient` with a `Transport` that sets the `X-Operator-Key` header to use an operator key. Use `map[string]any` for dynamic schemas.
+Execute a raw SQL query via `/v1/ops/query`. This endpoint is admin-only: JWT tokens must resolve to the admin role (`admin_role`, default `"admin"`). Requests without valid tokens fall back to `default_role` and are rejected unless `default_role` is set to admin (dev-only). Alternatively, an operator key (`Authorization: Operator <key>` or `X-Operator-Key`) authorizes `/v1/ops/*`. Since `Config.Auth` uses `Bearer <token>`, provide a `Config.HTTPClient` with a `Transport` that sets the `X-Operator-Key` header to use an operator key. Use `map[string]any` for dynamic schemas.
 
 ```go
 rows, err := wavehouse.SQL[map[string]any](ctx, wh,

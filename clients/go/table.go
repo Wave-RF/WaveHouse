@@ -81,7 +81,7 @@ func (t *TableRef) Schema(ctx context.Context) (*TableSchema, error) {
 	var schema TableSchema
 	if err := doRequest(ctx, t.ctx, requestOptions{
 		method: "GET",
-		path:   "/v1/schema",
+		path:   "/v1/ops/schema",
 		params: url.Values{"table": {t.table}},
 	}, &schema); err != nil {
 		return nil, fmt.Errorf("get schema for table %q: %w", t.table, err)

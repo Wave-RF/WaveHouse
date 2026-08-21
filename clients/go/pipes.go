@@ -16,7 +16,7 @@ func (p *PipesNamespace) List(ctx context.Context) ([]Pipe, error) {
 	var pipes []Pipe
 	if err := doRequest(ctx, p.ctx, requestOptions{
 		method: "GET",
-		path:   "/v1/admin/pipes",
+		path:   "/v1/ops/pipes",
 	}, &pipes); err != nil {
 		return nil, fmt.Errorf("list pipes: %w", err)
 	}
@@ -28,7 +28,7 @@ func (p *PipesNamespace) Get(ctx context.Context, name string) (*Pipe, error) {
 	var pipe Pipe
 	if err := doRequest(ctx, p.ctx, requestOptions{
 		method: "GET",
-		path:   "/v1/admin/pipes/" + url.PathEscape(name),
+		path:   "/v1/ops/pipes/" + url.PathEscape(name),
 	}, &pipe); err != nil {
 		return nil, fmt.Errorf("get pipe %q: %w", name, err)
 	}
@@ -39,7 +39,7 @@ func (p *PipesNamespace) Get(ctx context.Context, name string) (*Pipe, error) {
 func (p *PipesNamespace) Set(ctx context.Context, name string, def PipeDef) error {
 	if err := doRequest(ctx, p.ctx, requestOptions{
 		method: "PUT",
-		path:   "/v1/admin/pipes/" + url.PathEscape(name),
+		path:   "/v1/ops/pipes/" + url.PathEscape(name),
 		body:   def,
 	}, nil); err != nil {
 		return fmt.Errorf("set pipe %q: %w", name, err)
@@ -51,7 +51,7 @@ func (p *PipesNamespace) Set(ctx context.Context, name string, def PipeDef) erro
 func (p *PipesNamespace) Delete(ctx context.Context, name string) error {
 	if err := doRequest(ctx, p.ctx, requestOptions{
 		method: "DELETE",
-		path:   "/v1/admin/pipes/" + url.PathEscape(name),
+		path:   "/v1/ops/pipes/" + url.PathEscape(name),
 	}, nil); err != nil {
 		return fmt.Errorf("delete pipe %q: %w", name, err)
 	}

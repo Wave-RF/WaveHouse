@@ -16,7 +16,7 @@ func (s *SchemaNamespace) List(ctx context.Context) (Schemas, error) {
 	var raw []TableSchema
 	if err := doRequest(ctx, s.ctx, requestOptions{
 		method: "GET",
-		path:   "/v1/schema",
+		path:   "/v1/ops/schema",
 	}, &raw); err != nil {
 		return nil, fmt.Errorf("list schemas: %w", err)
 	}
@@ -31,7 +31,7 @@ func (s *SchemaNamespace) List(ctx context.Context) (Schemas, error) {
 func (s *SchemaNamespace) Refresh(ctx context.Context) error {
 	if err := doRequest(ctx, s.ctx, requestOptions{
 		method: "POST",
-		path:   "/v1/schema/refresh",
+		path:   "/v1/ops/schema/refresh",
 	}, nil); err != nil {
 		return fmt.Errorf("refresh schema: %w", err)
 	}

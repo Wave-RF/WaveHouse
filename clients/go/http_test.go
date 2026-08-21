@@ -113,7 +113,7 @@ func TestDoRequest_AuthInjection(t *testing.T) {
 
 	err := doRequest(context.Background(), hctx, requestOptions{
 		method: "GET",
-		path:   "/v1/schema",
+		path:   "/v1/ops/schema",
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +135,7 @@ func TestDoRequest_4xxNotRetried(t *testing.T) {
 
 	err := doRequest(context.Background(), hctx, requestOptions{
 		method: "GET",
-		path:   "/v1/schema",
+		path:   "/v1/ops/schema",
 	}, nil)
 
 	if !errIs(err, "HTTP_404") {
@@ -199,7 +199,7 @@ func TestDoRequest_EmptyResponse(t *testing.T) {
 	var result map[string]string
 	err := doRequest(context.Background(), hctx, requestOptions{
 		method: "POST",
-		path:   "/v1/schema/refresh",
+		path:   "/v1/ops/schema/refresh",
 	}, &result)
 	if err != nil {
 		t.Fatal(err)
@@ -333,5 +333,100 @@ func TestBaseURLPathPrefixIsPreserved(t *testing.T) {
 		if result["status"] != "ok" {
 			t.Fatalf("base %q: want ok, got %v", base, result)
 		}
+	}
+}
+
+// TestConfiguredHeadersOnRESTRequests: ClientOptions.Headers apply to every
+// REST call, are matched case-insensitively, and always lose to the SDK's own
+// headers rather than appending alongside them.
+func TestConfiguredHeadersOnRESTRequests(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured map[string]string
+		auth       func(context.Context) (string, error)
+		header     string
+		want       string
+	}{
+		{
+			name:       "custom header is forwarded",
+			configured: map[string]string{"X-Operator-Key": "op-secret"},
+			header:     "X-Operator-Key",
+			want:       "op-secret",
+		},
+		{
+			name:       "name matching is case-insensitive",
+			configured: map[string]string{"x-tenant-id": "acme"},
+			header:     "X-Tenant-Id",
+			want:       "acme",
+		},
+		{
+			name:       "SDK Accept outranks a configured one",
+			configured: map[string]string{"Accept": "text/plain"},
+			header:     "Accept",
+			want:       "application/json",
+		},
+		{
+			name:       "SDK Authorization outranks a configured one",
+			configured: map[string]string{"Authorization": "Bearer configured"},
+			auth:       StaticToken("real-token"),
+			header:     "Authorization",
+			want:       "Bearer real-token",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got http.Header
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Clone()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `[]`)
+			}))
+			defer srv.Close()
+
+			client := NewClient(Config{
+				BaseURL:    srv.URL,
+				Auth:       tc.auth,
+				HTTPClient: srv.Client(),
+				Options:    &ClientOptions{Headers: tc.configured},
+			})
+			if _, err := client.Schema.List(context.Background()); err != nil {
+				t.Fatalf("schema list: %v", err)
+			}
+			if v := got.Values(tc.header); len(v) != 1 {
+				t.Fatalf("want exactly one %s header, got %v", tc.header, v)
+			}
+			if v := got.Get(tc.header); v != tc.want {
+				t.Fatalf("want %s: %q, got %q", tc.header, tc.want, v)
+			}
+		})
+	}
+}
+
+// TestConfiguredHeadersAreCopied: mutating the caller's map after NewClient
+// must not change what later requests send.
+func TestConfiguredHeadersAreCopied(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	defer srv.Close()
+
+	headers := map[string]string{"X-Tenant-Id": "acme"}
+	client := NewClient(Config{
+		BaseURL:    srv.URL,
+		HTTPClient: srv.Client(),
+		Options:    &ClientOptions{Headers: headers},
+	})
+	headers["X-Tenant-Id"] = "attacker"
+	delete(headers, "X-Tenant-Id")
+
+	if _, err := client.Schema.List(context.Background()); err != nil {
+		t.Fatalf("schema list: %v", err)
+	}
+	if v := got.Get("X-Tenant-Id"); v != "acme" {
+		t.Fatalf("want the value captured at construction, got %q", v)
 	}
 }

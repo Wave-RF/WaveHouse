@@ -97,12 +97,29 @@ The default client has no `Timeout`; use a `context.Context` deadline to prevent
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `MaxRetries` | `int` | `2` | Retry attempts for retryable errors (5xx, 429, network failures). |
+| `Headers` | `map[string]string` | `nil` | Sent on every request the client makes — REST calls and SSE streams alike. |
 
 `*Client` is safe for concurrent use; state is immutable after `NewClient` and builder chains copy. Ensure your `Auth` function is concurrency-safe.
 
 :::caution[`Options` opts you out of the default, not just in]
 The 2-retry default only applies if `Config.Options` is `nil`. If `Options` is provided, an unset `MaxRetries` field defaults to Go's int zero value (`0`), which explicitly disables retries. Passing `&wavehouse.ClientOptions{}` removes the default retry behavior.
 :::
+
+`Headers` is the Go analog of the TypeScript SDK's [`options.headers`](/sdk#custom-headers) — a gateway credential, a tenant selector, or tracing metadata that has no first-class option. It is also how an operator sends the server's non-JWT [operator key](/api#authentication):
+
+```go
+wh := wavehouse.NewClient(wavehouse.Config{
+    BaseURL: "http://localhost:8080",
+    Options: &wavehouse.ClientOptions{
+        MaxRetries: 2, // Options opts out of the default — set it explicitly.
+        Headers:    map[string]string{"X-Operator-Key": os.Getenv("WH_OPERATOR_KEY")},
+    },
+})
+```
+
+The SDK's own headers win: `Authorization`, `Accept`, `Content-Type`, and the stream's `Cache-Control` are set after yours and overwrite any entry that collides. Names are matched case-insensitively (`net/http` canonicalizes them), and each entry replaces rather than appends. The map is copied at `NewClient`, so mutating it afterwards changes nothing.
+
+For the two remaining TypeScript knobs there is no Go field, because `Config.HTTPClient` already covers them: `options.fetch` maps to supplying your own `*http.Client`, and `options.fetchOptions` maps to a custom `http.RoundTripper` on that client's `Transport`.
 
 For static tokens, use `wavehouse.StaticToken(token)`:
 
@@ -114,7 +131,11 @@ wh := wavehouse.NewClient(wavehouse.Config{
 ```
 
 :::note[How the token is transmitted]
-Unlike a browser's `EventSource`, Go's `net/http` client sets arbitrary headers on any request, so the Go SDK sends `Authorization: Bearer <token>` on every request, including SSE streams. No `?token=` query fallback (a TypeScript-in-the-browser concern; see its [equivalent note](/sdk#creating-a-client)).
+The Go SDK sends `Authorization: Bearer <token>` on every request, including SSE streams, and never uses a `?token=` query fallback. Both SDKs work this way: the TypeScript SDK streams over `fetch` rather than `EventSource` for exactly this reason, so header auth is now the shared behavior rather than a Go-only property (see its [equivalent note](/sdk#creating-a-client)). The token is re-read from `Auth` on every reconnect attempt, so a rotating token keeps a long-lived stream alive.
+:::
+
+:::caution[A credentialed stream will not follow a redirect]
+When the stream request carries a credential — an `Auth` token or a `ClientOptions.Headers` entry — the SDK refuses any 3xx and fails the stream with a terminal `SSE_REDIRECT`. Following it would either strip `Authorization` on a cross-host hop and silently downgrade the stream to `default_role`, or forward your configured headers to wherever the redirect points. Uncredentialed streams follow redirects normally.
 :::
 
 :::caution[Use HTTPS for authenticated non-local servers]
@@ -170,6 +191,7 @@ Both SDKs share a wire format and feature set, verified by a shared `wire_cases.
 - **Streams closed explicitly.** `TableRef.Stream` and `QueryBuilder.Stream` omit `context.Context`. The returned `*StreamController` manages its own goroutine and connection, torn down by `.Close()` (deferred `stream.Close()` is usual). See [Streaming](/sdk/go/streaming).
 - **Generics on package functions.** Go lacks type parameters on methods; use `FetchTyped[Row]`, `Fetch[Row]`, or `SQL[Row]`.
 - **No implicit "await."** Call `.FetchUntyped(ctx)` or `wavehouse.FetchTyped[Row](ctx, builder)` explicitly; `QueryBuilder` is not `PromiseLike`.
+- **No third-party dependencies.** The Go SDK is stdlib-only, including its SSE frame parser. The TypeScript SDK carries exactly one runtime dependency (`eventsource-parser`, ~1.4 KB gzipped).
 - **Any slice batches.** Reflection allows `[]ClickRow{...}` to use the same NDJSON batch path as `[]map[string]any`. See [Queries → Insert](/sdk/go/queries#insertctx-data).
 
 ## Explore the Go SDK

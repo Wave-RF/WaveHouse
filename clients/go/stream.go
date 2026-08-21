@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -246,21 +247,28 @@ func (sc *StreamController) run(ctx context.Context, hctx httpContext, table str
 		}
 
 		if err != nil {
-			// A non-retryable API error (401/403/404, ...) is terminal:
-			// reconnecting can't fix a bad token or a missing table, and the
-			// TS SDK's EventSource likewise ends up closed on a non-200.
-			// Emit it and exit — the deferred cleanup sets StatusClosed.
+			// connect classifies its own failures (SSE_AUTH_ERROR,
+			// SSE_NETWORK_ERROR, SSE_REDIRECT, SSE_BAD_CONTENT_TYPE,
+			// SSE_READ_ERROR, HTTP_nnn), so pass the typed error straight
+			// through and let Retryable decide whether to reconnect. A
+			// non-retryable error is terminal: reconnecting can't fix a bad
+			// token, a missing table, or a proxy answering with HTML.
 			var apiErr *Error
-			if errors.As(err, &apiErr) && !apiErr.Retryable {
+			if errors.As(err, &apiErr) {
 				sc.emitError(apiErr)
-				return
+				if !apiErr.Retryable {
+					return
+				}
+			} else {
+				// Unclassified — retry, but keep the generic code so callers
+				// can still match on it.
+				sc.emitError(&Error{
+					Status:    0,
+					Code:      "SSE_ERROR",
+					Message:   err.Error(),
+					Retryable: true,
+				})
 			}
-			sc.emitError(&Error{
-				Status:    0,
-				Code:      "SSE_ERROR",
-				Message:   err.Error(),
-				Retryable: true,
-			})
 		}
 
 		sc.setStatus(StatusReconnecting)
@@ -281,7 +289,22 @@ func (sc *StreamController) run(ctx context.Context, hctx httpContext, table str
 func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table, since string) (string, bool, error) {
 	u, err := url.Parse(hctx.baseURL + "/v1/stream")
 	if err != nil {
-		return "", false, err
+		return "", false, &Error{
+			Status:    0,
+			Code:      "SSE_CONNECT_ERROR",
+			Message:   fmt.Sprintf("invalid baseURL: %v", err),
+			Retryable: false,
+		}
+	}
+	// A non-HTTP scheme can never carry SSE. Terminal, not retryable: retrying
+	// a ws:// or file:// baseURL just spins.
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", false, &Error{
+			Status:    0,
+			Code:      "SSE_CONNECT_ERROR",
+			Message:   fmt.Sprintf("baseURL scheme %q is not http or https", u.Scheme),
+			Retryable: false,
+		}
 	}
 	q := u.Query()
 	q.Set("table", table)
@@ -294,7 +317,14 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 	if hctx.auth != nil {
 		token, err := hctx.auth(ctx)
 		if err != nil {
-			return "", false, fmt.Errorf("auth: %w", err)
+			// Retryable: a token endpoint having a bad minute shouldn't tear
+			// down a healthy long-lived stream.
+			return "", false, &Error{
+				Status:    0,
+				Code:      "SSE_AUTH_ERROR",
+				Message:   err.Error(),
+				Retryable: true,
+			}
 		}
 		if token != "" {
 			authHeader = "Bearer " + token
@@ -307,20 +337,73 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 	if err != nil {
 		return "", false, err
 	}
+	applyConfiguredHeaders(req.Header, hctx.headers)
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
 	}
 
-	resp, err := hctx.httpClient.Do(req)
+	client := hctx.httpClient
+	credentialed := authHeader != "" || len(hctx.headers) > 0
+	if credentialed {
+		// Refuse to follow a redirect while carrying a credential. net/http
+		// drops Authorization on a cross-host hop but forwards custom headers
+		// verbatim, so following one would either downgrade the stream to
+		// default_role without saying so, or hand configured secrets to
+		// wherever the redirect points. Copy the client so a caller-supplied
+		// one keeps its own CheckRedirect for every other request.
+		c := *client
+		c.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		client = &c
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
-		return "", false, err
+		if ctx.Err() != nil {
+			return "", false, errAborted
+		}
+		return "", false, &Error{
+			Status:    0,
+			Code:      "SSE_NETWORK_ERROR",
+			Message:   err.Error(),
+			Retryable: true,
+		}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if credentialed && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return "", false, &Error{
+			Status: resp.StatusCode,
+			Code:   "SSE_REDIRECT",
+			Message: fmt.Sprintf(
+				"stream endpoint redirected to %q and the SDK did not follow it; redirects are refused while the request carries a credential",
+				resp.Header.Get("Location")),
+			Retryable: false,
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return "", false, parseErrorResponse(resp)
+	}
+
+	// A 200 that isn't an event stream means something between the caller and
+	// WaveHouse answered — a captive portal or an auth gateway's login page.
+	// Without this check the stream sits in StatusLive and silently delivers
+	// nothing.
+	if ct := resp.Header.Get("Content-Type"); !isEventStream(ct) {
+		shown := ct
+		if shown == "" {
+			shown = "(none)"
+		}
+		return "", false, &Error{
+			Status:    resp.StatusCode,
+			Code:      "SSE_BAD_CONTENT_TYPE",
+			Message:   fmt.Sprintf("expected Content-Type text/event-stream, got %s", shown),
+			Retryable: false,
+		}
 	}
 
 	sc.setStatus(StatusLive)
@@ -372,7 +455,25 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 		}
 	}
 
-	return lastID, true, scanner.Err()
+	if scanErr := scanner.Err(); scanErr != nil {
+		return lastID, true, &Error{
+			Status:    0,
+			Code:      "SSE_READ_ERROR",
+			Message:   scanErr.Error(),
+			Retryable: true,
+		}
+	}
+	return lastID, true, nil
+}
+
+// isEventStream reports whether a Content-Type header names text/event-stream,
+// ignoring any parameters (charset, boundary) and case.
+func isEventStream(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+	return mediaType == "text/event-stream"
 }
 
 // sseMessage matches the server's SSE event JSON shape.
@@ -389,7 +490,12 @@ func (sc *StreamController) handleSSEData(data string) {
 		// process-global logger, so consumers control visibility and a
 		// malformed-frame flood can't spam host-application logs. Payload
 		// deliberately omitted: event data can carry tenant/PII fields.
-		sc.emitError(fmt.Errorf("malformed SSE message (%d bytes): %w", len(data), err))
+		sc.emitError(&Error{
+			Status:    0,
+			Code:      "SSE_PARSE_ERROR",
+			Message:   fmt.Sprintf("malformed SSE message (%d bytes): %v", len(data), err),
+			Retryable: true,
+		})
 		return
 	}
 

@@ -47,17 +47,17 @@ const server = createServer((req, res) => {
       body: Buffer.concat(chunks).toString("utf-8"),
     };
     res.setHeader("Content-Type", "application/json");
-    if (req.url?.startsWith("/v1/dlq")) {
+    if (req.url?.startsWith("/v1/ops/dlq")) {
       res.end(JSON.stringify({ tables: {}, total: 0 }));
-    } else if (req.url?.startsWith("/v1/schema") && req.method === "GET") {
+    } else if (req.url?.startsWith("/v1/ops/schema") && req.method === "GET") {
       res.end(JSON.stringify([]));
-    } else if (req.url === "/v1/admin/policy/validate" && req.method === "POST") {
+    } else if (req.url === "/v1/ops/policy/validate" && req.method === "POST") {
       res.end(JSON.stringify({ valid: true }));
-    } else if (req.url?.startsWith("/v1/admin/policy") && req.method === "GET") {
+    } else if (req.url?.startsWith("/v1/ops/policy") && req.method === "GET") {
       res.end(JSON.stringify({ tables: {} }));
-    } else if (req.url?.startsWith("/v1/admin/pipes/") && req.method === "GET") {
+    } else if (req.url?.startsWith("/v1/ops/pipes/") && req.method === "GET") {
       res.end(JSON.stringify({ name: "test", sql: "SELECT 1" }));
-    } else if (req.url === "/v1/admin/pipes" && req.method === "GET") {
+    } else if (req.url === "/v1/ops/pipes" && req.method === "GET") {
       res.end(JSON.stringify([]));
     } else if (req.url?.startsWith("/v1/ingest")) {
       // Same shapes the real server returns (internal/api/ingest.go).

@@ -45,7 +45,14 @@ HTTP exchange errors are `*wavehouse.Error` (unwrap via `errors.As`). Client-sid
 | 503 | `HTTP_503` | Yes | Service unavailable (auto-retries, honoring `Retry-After`, capped at 30s) |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `context.Context` |
-| 0 | `SSE_ERROR` | Yes | Stream connection failure; delivered to subscriber's `Error` callback; auto-reconnects |
+| 0 | `SSE_AUTH_ERROR` | Yes | The `Auth` provider returned an error for this attempt; the stream retries, so a token endpoint having a bad minute doesn't tear down a healthy stream |
+| 0 | `SSE_NETWORK_ERROR` | Yes | Transport failure opening or holding the stream connection |
+| 0 | `SSE_CONNECT_ERROR` | No | `BaseURL` is unparseable, or its scheme is not `http`/`https` — retrying cannot fix it |
+| *3xx* | `SSE_REDIRECT` | No | The stream endpoint redirected while the request carried a credential, and the SDK refused to follow it |
+| 200 | `SSE_BAD_CONTENT_TYPE` | No | A `200` that wasn't `text/event-stream` — something between you and WaveHouse answered (a captive portal, an auth gateway's login page) |
+| 0 | `SSE_PARSE_ERROR` | Yes | A frame's JSON didn't decode; the frame is dropped and the stream continues |
+| 0 | `SSE_READ_ERROR` | Yes | The connection failed mid-read; the stream reconnects from the last event ID |
+| 0 | `SSE_ERROR` | Yes | Stream failure the SDK could not classify further |
 
 ```go
 page, err := wh.From("clicks").Fetch(ctx)
@@ -62,7 +69,7 @@ if err != nil {
 
 `wavehouse.IsRetryable(err)` shortcuts the `errors.As` + `.Retryable` check.
 
-Retries apply to all HTTP methods, matching TypeScript's `http.ts`. For `/v1/ingest`, at-least-once delivery on retry is a documented contract (see API docs ["At-least-once on retry"](/api#post-v1ingesttabletable--ingest-data)); use server-side dedup for duplicate suppression. `/v1/admin/query` (raw SQL) requires `admin_role`, so repeated execution on retry is an accepted risk.
+Retries apply to all HTTP methods, matching TypeScript's `http.ts`. For `/v1/ingest`, at-least-once delivery on retry is a documented contract (see API docs ["At-least-once on retry"](/api#post-v1ingesttabletable--ingest-data)); use server-side dedup for duplicate suppression. `/v1/ops/query` (raw SQL) requires `admin_role`, so repeated execution on retry is an accepted risk.
 
 ## Full API Tree
 
@@ -133,7 +140,7 @@ Or, inside `clients/go/`:
 go run ./cmd/wavehouse-codegen --url http://localhost:8080 --out ./db_types.go
 ```
 
-Codegen reads the admin-only `/v1/schema` endpoint; non-dev servers require an admin token or return `403`. Use `WAVEHOUSE_AUTH` instead of `--auth <jwt>` to keep tokens out of shell history and process listings.
+Codegen reads the admin-only `/v1/ops/schema` endpoint; non-dev servers require an admin token or return `403`. Use `WAVEHOUSE_AUTH` instead of `--auth <jwt>` to keep tokens out of shell history and process listings.
 
 **Options:**
 
@@ -186,7 +193,7 @@ The generator does not special-case initialisms: `event_id` becomes `EventId`, n
 | `SimpleAggregateFunction(fn, T)` | same as `T` (rollup tables from `AggregatingMergeTree`/`SummingMergeTree` generate usable structs) |
 | anything unrecognized | `any` |
 
-Unlike the TypeScript SDK, Go codegen preserves ClickHouse integer **widths** (`UInt64` → `uint64`, not a generic `number`), so 64-bit columns decode exactly where TS hits the 2^53 ceiling. Generated structs target `/v1/query` and `/v1/pipes/*`. For the raw-SQL path (`/v1/admin/query`), which quotes 64-bit+ integers, use `map[string]any` with `SQL[Row]`.
+Unlike the TypeScript SDK, Go codegen preserves ClickHouse integer **widths** (`UInt64` → `uint64`, not a generic `number`), so 64-bit columns decode exactly where TS hits the 2^53 ceiling. Generated structs target `/v1/query` and `/v1/pipes/*`. For the raw-SQL path (`/v1/ops/query`), which quotes 64-bit+ integers, use `map[string]any` with `SQL[Row]`.
 
 ## Testing
 

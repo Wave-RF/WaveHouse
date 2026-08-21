@@ -1,4 +1,4 @@
-// Command wavehouse-codegen reads a WaveHouse server's /v1/schema endpoint
+// Command wavehouse-codegen reads a WaveHouse server's /v1/ops/schema endpoint
 // and generates Go struct definitions for use with the wavehouse SDK.
 //
 // Usage:
@@ -56,7 +56,7 @@ func parseArgs() cliArgs {
 Options:
   --url, -u       WaveHouse base URL (default: http://localhost:8080)
   --out, -o       Output .go file path (default: ./wavehouse_types.go)
-  --auth, -a      Bearer token for authenticated /v1/schema endpoint
+  --auth, -a      Bearer token for authenticated /v1/ops/schema endpoint
                   (prefer the WAVEHOUSE_AUTH env var — argv leaks into
                   shell history and process listings)
   --package, -p   Go package name (default: main)
@@ -85,7 +85,7 @@ type tableSchema struct {
 }
 
 func fetchSchemas(ctx context.Context, baseURL, auth string) (map[string]tableSchema, error) {
-	url := strings.TrimRight(baseURL, "/") + "/v1/schema"
+	url := strings.TrimRight(baseURL, "/") + "/v1/ops/schema"
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build schema request for %s: %w", url, err)
@@ -124,7 +124,7 @@ func fetchSchemas(ctx context.Context, baseURL, auth string) (map[string]tableSc
 	return m, nil
 }
 
-// chTypeToGo maps a ClickHouse type string (as reported by /v1/schema) to a
+// chTypeToGo maps a ClickHouse type string (as reported by /v1/ops/schema) to a
 // Go type name suitable for a JSON struct field.
 //
 // We deliberately don't import clickhouse-go's type catalog
@@ -135,7 +135,7 @@ func fetchSchemas(ctx context.Context, baseURL, auth string) (map[string]tableSc
 // types the *driver* scans query results into over the native protocol
 // (time.Time for Date/DateTime*, uuid.UUID for UUID, decimal.Decimal for
 // Decimal, net.IP for IPv4/IPv6, *big.Int for [U]Int128/256), not the types
-// that round-trip cleanly through the JSON the /v1/schema and query
+// that round-trip cleanly through the JSON the /v1/ops/schema and query
 // endpoints actually speak. ClickHouse's JSON output renders DateTime as
 // "2024-01-15 10:30:00" (no "T", no offset), which fails Go's default
 // time.Time JSON unmarshaling; big integers and decimals are similarly
@@ -188,7 +188,7 @@ func chTypeToGo(chType string) string {
 	// pipe paths (/v1/query, /v1/pipes/*), where the server scans ClickHouse
 	// values into Go types and re-marshals them — so 64-bit integers arrive
 	// as ordinary UNQUOTED JSON numbers and map to int64/uint64 exactly.
-	// (Only /v1/admin/query forwards ClickHouse's own JSON, which quotes
+	// (Only /v1/ops/query forwards ClickHouse's own JSON, which quotes
 	// 64-bit ints; use map[string]any with SQL[Row] there.)
 	if mapped, ok := map[string]string{
 		"UInt8": "uint8", "UInt16": "uint16", "UInt32": "uint32", "UInt64": "uint64",

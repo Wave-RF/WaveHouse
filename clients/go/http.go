@@ -26,6 +26,17 @@ type httpContext struct {
 	auth       func(ctx context.Context) (string, error)
 	maxRetries int
 	httpClient *http.Client
+	headers    map[string]string
+}
+
+// applyConfiguredHeaders writes the client's configured headers onto a request.
+// Call it *before* the SDK sets its own headers: Set replaces, so whatever the
+// SDK writes afterwards wins a collision. http.Header canonicalizes names, so
+// "x-tenant" and "X-Tenant" are the same entry.
+func applyConfiguredHeaders(h http.Header, configured map[string]string) {
+	for k, v := range configured {
+		h.Set(k, v)
+	}
 }
 
 // requestOptions describes a single HTTP request.
@@ -86,6 +97,7 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 		if err != nil {
 			return fmt.Errorf("wavehouse: build request: %w", err)
 		}
+		applyConfiguredHeaders(req.Header, hctx.headers)
 		req.Header.Set("Content-Type", ct)
 		req.Header.Set("Accept", "application/json")
 		if authHeader != "" {

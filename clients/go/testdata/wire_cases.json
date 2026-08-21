@@ -454,7 +454,7 @@
     "name": "raw SQL",
     "endpoint": "sql",
     "sql": "SELECT count() FROM clicks",
-    "expected_path": "/v1/admin/query",
+    "expected_path": "/v1/ops/query",
     "expected_method": "POST",
     "expected_body": { "sql": "SELECT count() FROM clicks" }
   },
@@ -467,19 +467,19 @@
   {
     "name": "schema list",
     "endpoint": "schema_list",
-    "expected_path": "/v1/schema",
+    "expected_path": "/v1/ops/schema",
     "expected_method": "GET"
   },
   {
     "name": "schema refresh",
     "endpoint": "schema_refresh",
-    "expected_path": "/v1/schema/refresh",
+    "expected_path": "/v1/ops/schema/refresh",
     "expected_method": "POST"
   },
   {
     "name": "policy get",
     "endpoint": "policy_get",
-    "expected_path": "/v1/admin/policy",
+    "expected_path": "/v1/ops/policy",
     "expected_method": "GET"
   },
   {
@@ -500,14 +500,14 @@
   {
     "name": "DLQ list",
     "endpoint": "dlq_list",
-    "expected_path": "/v1/dlq/stats",
+    "expected_path": "/v1/ops/dlq/stats",
     "expected_method": "GET"
   },
   {
     "name": "DLQ table filter",
     "endpoint": "dlq_table",
     "table": "events",
-    "expected_path": "/v1/dlq/stats?table=events",
+    "expected_path": "/v1/ops/dlq/stats?table=events",
     "expected_method": "GET"
   },
   {
@@ -519,7 +519,7 @@
         "events": {}
       }
     },
-    "expected_path": "/v1/admin/policy",
+    "expected_path": "/v1/ops/policy",
     "expected_method": "PUT",
     "expected_content_type": "application/json",
     "expected_body": {
@@ -538,7 +538,7 @@
         "events": {}
       }
     },
-    "expected_path": "/v1/admin/policy/validate",
+    "expected_path": "/v1/ops/policy/validate",
     "expected_method": "POST",
     "expected_content_type": "application/json",
     "expected_body": {
@@ -551,14 +551,14 @@
   {
     "name": "pipes list",
     "endpoint": "pipes_list",
-    "expected_path": "/v1/admin/pipes",
+    "expected_path": "/v1/ops/pipes",
     "expected_method": "GET"
   },
   {
     "name": "pipes get",
     "endpoint": "pipes_get",
     "pipe_name": "my_pipe",
-    "expected_path": "/v1/admin/pipes/my_pipe",
+    "expected_path": "/v1/ops/pipes/my_pipe",
     "expected_method": "GET"
   },
   {
@@ -572,7 +572,7 @@
       ],
       "description": "Top pages by view count"
     },
-    "expected_path": "/v1/admin/pipes/my_pipe",
+    "expected_path": "/v1/ops/pipes/my_pipe",
     "expected_method": "PUT",
     "expected_content_type": "application/json",
     "expected_body": {
@@ -587,7 +587,7 @@
     "name": "pipes delete",
     "endpoint": "pipes_delete",
     "pipe_name": "my_pipe",
-    "expected_path": "/v1/admin/pipes/my_pipe",
+    "expected_path": "/v1/ops/pipes/my_pipe",
     "expected_method": "DELETE"
   },
   {

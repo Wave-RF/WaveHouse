@@ -122,6 +122,8 @@ type StreamEvent struct {
 }
 ```
 
+Top-level `DateTime`/`DateTime64` values inside `Data` arrive in canonical RFC 3339 UTC, byte-identical to what `/v1/query` renders for the same stored value — the ingest handler rewrites them before publishing, so a live frame and a later query can't disagree on the spelling of an instant. Two consequences worth knowing: a value you sent as `2026-06-21T06:00:00.123+02:00` comes back as `2026-06-21T04:00:00.123Z` (same instant, different spelling), and the canonicalization is deliberately fail-open — a value the server can't parse, or one whose zone it can't resolve, is published verbatim. See [Timestamp canonicalization](/api#timestamp-canonicalization).
+
 :::note[`Events()` carries events only]
 `Error` and `Status` are delivered exclusively via `.Subscribe(...)`. The channel closes on terminal errors (401/403/404). Pair `Events()` with a subscriber to determine why a stream ended.
 :::
@@ -136,9 +138,19 @@ Events buffer (up to 256) starting at `.Stream()`; events arriving before the fi
 | --------- | --------- | -------- |
 | SSE | Automatic, exponential backoff (max 30s), gap-fill replay via last event ID | HTTP/2 recommended |
 
-Reconnect covers transport failures and retryable (5xx/429) responses. Non-retryable ones (401/403/404) are terminal: the `Error` callback fires, status goes `StatusClosed`, no reconnect. `Auth` provider errors during (re)connect are retryable (`SSE_ERROR`) and reconnects continue — `ClientOptions.MaxRetries` bounds request retries only, not stream reconnects — so call `.Close()` if the provider fails permanently.
+Reconnect covers transport failures and retryable responses (5xx/429, plus `SSE_AUTH_ERROR`, `SSE_PARSE_ERROR`, and `SSE_READ_ERROR`). Terminal failures fire the `Error` callback, set status `StatusClosed`, and stop: non-retryable HTTP statuses, `SSE_CONNECT_ERROR` (bad `BaseURL`), `SSE_REDIRECT` (a credentialed request was redirected), and `SSE_BAD_CONTENT_TYPE` (a `200` that wasn't an event stream). Every error reaches the callback as a `*wavehouse.Error`, so `errors.As` and `wavehouse.IsRetryable` work on all of them — see the [error-code table](/sdk/go/reference#error-handling).
 
-Auth goes as an `Authorization: Bearer` header on every connection ([note in Getting Started](/sdk/go#creating-a-client)). Browser `EventSource` limits don't apply.
+Note that `/v1/stream` is not admin-gated, so WaveHouse itself never answers a stream with `401`. A `401` on a stream came from something in front of it. `Auth` provider errors during (re)connect are retryable (`SSE_ERROR`) and reconnects continue — `ClientOptions.MaxRetries` bounds request retries only, not stream reconnects — so call `.Close()` if the provider fails permanently.
+
+Auth goes as an `Authorization: Bearer` header on every connection, re-read from `Auth` per attempt ([note in Getting Started](/sdk/go#creating-a-client)). The TypeScript SDK streams over `fetch` and authenticates the same way, so this is shared behavior rather than a Go-only property — what Go avoids is the browser's per-domain connection ceiling, not a different auth mechanism.
+
+Delivery across a reconnect is **at-least-once**: the server replays from the last event ID *inclusively*, so the first frame after a gap-fill is usually one you already saw. Replay reaches back only as far as the server's `mq.gap_window_minutes` (15 minutes by default); a longer outage resumes live with a hole.
+
+### Server-Side Policy Filtering
+
+Before anything reaches the client, the server applies the caller's policy to the stream: a table the role can't `select` never opens, denied columns are stripped from every frame, and a role carrying a row `filter` has non-matching rows withheld per subscriber — on live frames and on `Since` gap-fill replay alike. The claims are captured from the JWT at connect time.
+
+Two things follow. **Event-id gaps are normal on a filtered stream** — a gap means a row was withheld, not that a frame was dropped. And **the row filter fails closed**: a comparison the server can't prove — an unresolvable claim, a type it can't compare — withholds the row rather than passing it. See [Access control](/access-control#row-level-security).
 
 ### Client-Side Stream Filtering
 

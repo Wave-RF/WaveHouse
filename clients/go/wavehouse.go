@@ -41,6 +41,16 @@ type ClientOptions struct {
 	// MaxRetries is the maximum number of retry attempts for retryable errors.
 	// Total attempts = MaxRetries + 1. Default: 2.
 	MaxRetries int
+
+	// Headers are sent on every request the client makes — REST calls and SSE
+	// streams alike. Use them for a gateway credential, a tenant selector, or
+	// tracing metadata that has no first-class option.
+	//
+	// The SDK's own headers win: Authorization, Accept, Content-Type, and the
+	// stream's Cache-Control are set after these and overwrite any entry that
+	// collides. Names are matched case-insensitively (canonicalized by
+	// net/http), and each entry replaces rather than appends.
+	Headers map[string]string
 }
 
 // StaticToken returns an Auth function that always returns the same token.
@@ -72,6 +82,15 @@ func NewClient(cfg Config) *Client {
 		maxRetries = cfg.Options.MaxRetries
 	}
 
+	// Copy so a later mutation of the caller's map can't reach into requests.
+	var headers map[string]string
+	if cfg.Options != nil && len(cfg.Options.Headers) > 0 {
+		headers = make(map[string]string, len(cfg.Options.Headers))
+		for k, v := range cfg.Options.Headers {
+			headers[k] = v
+		}
+	}
+
 	hc := cfg.HTTPClient
 	if hc == nil {
 		// Not http.DefaultClient: it's mutable global state another package
@@ -85,6 +104,7 @@ func NewClient(cfg Config) *Client {
 			auth:       cfg.Auth,
 			maxRetries: maxRetries,
 			httpClient: hc,
+			headers:    headers,
 		},
 	}
 
@@ -124,7 +144,7 @@ func SQL[Row any](ctx context.Context, c *Client, query string) ([]Row, error) {
 	var rows []Row
 	err := doRequest(ctx, c.ctx, requestOptions{
 		method: "POST",
-		path:   "/v1/admin/query",
+		path:   "/v1/ops/query",
 		body:   map[string]string{"sql": query},
 	}, &rows)
 	if err != nil {

@@ -92,17 +92,17 @@ func TestConformance_WireFormat(t *testing.T) {
 				// Return valid JSON so the SDK doesn't error on decode.
 				w.Header().Set("Content-Type", "application/json")
 				switch {
-				case strings.HasPrefix(r.URL.Path, "/v1/dlq"):
+				case strings.HasPrefix(r.URL.Path, "/v1/ops/dlq"):
 					_ = json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{}, Total: 0})
-				case strings.HasPrefix(r.URL.Path, "/v1/schema") && r.Method == "GET":
+				case strings.HasPrefix(r.URL.Path, "/v1/ops/schema") && r.Method == "GET":
 					_ = json.NewEncoder(w).Encode([]TableSchema{})
-				case r.URL.Path == "/v1/admin/policy/validate" && r.Method == "POST":
+				case r.URL.Path == "/v1/ops/policy/validate" && r.Method == "POST":
 					_ = json.NewEncoder(w).Encode(ValidationResult{Valid: true})
-				case strings.HasPrefix(r.URL.Path, "/v1/admin/policy") && r.Method == "GET":
+				case strings.HasPrefix(r.URL.Path, "/v1/ops/policy") && r.Method == "GET":
 					_ = json.NewEncoder(w).Encode(Policy{Tables: map[string]TablePolicy{}})
-				case strings.HasPrefix(r.URL.Path, "/v1/admin/pipes/") && r.Method == "GET":
+				case strings.HasPrefix(r.URL.Path, "/v1/ops/pipes/") && r.Method == "GET":
 					_ = json.NewEncoder(w).Encode(Pipe{Name: "test", SQL: "SELECT 1"})
-				case r.URL.Path == "/v1/admin/pipes" && r.Method == "GET":
+				case r.URL.Path == "/v1/ops/pipes" && r.Method == "GET":
 					_ = json.NewEncoder(w).Encode([]Pipe{})
 				default:
 					_ = json.NewEncoder(w).Encode([]map[string]any{})

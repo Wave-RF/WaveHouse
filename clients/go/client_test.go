@@ -76,8 +76,8 @@ func TestClient_From(t *testing.T) {
 
 func TestClient_SQL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/admin/query" {
-			t.Errorf("want /v1/admin/query, got %s", r.URL.Path)
+		if r.URL.Path != "/v1/ops/query" {
+			t.Errorf("want /v1/ops/query, got %s", r.URL.Path)
 		}
 		var body map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&body)

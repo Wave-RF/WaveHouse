@@ -5,9 +5,11 @@ description: "Schema introspection, access-control policy, DLQ stats, and health
 
 Operational surfaces of `github.com/Wave-RF/WaveHouse/clients/go`. All except `client.Sys.Health` require the admin role (`policy.admin_role`)—see [Access Control](/access-control) and the TypeScript SDK's [Admin & System](/sdk/admin) page.
 
+Every namespace on this page is admin-gated: the server mounts them under `/v1/ops/*` behind one gate, which a caller clears either with a JWT resolving to the policy admin role (`admin_role`, `"admin"` by default) or with the server's non-JWT [operator key](/api#authentication) sent as `X-Operator-Key` via [`ClientOptions.Headers`](/sdk/go#clientoptions).
+
 ## Schema — `client.Schema`
 
-Introspect ClickHouse table schemas. `Schema.List`, `Schema.Refresh`, and `From(t).Schema` hit the **admin-only** `/v1/schema*`; against any non-dev policy (anything but `default_role: admin`) build the client with an admin-role token or they return a `*wavehouse.Error` with `Status: 403`.
+Introspect ClickHouse table schemas. `Schema.List`, `Schema.Refresh`, and `From(t).Schema` hit the **admin-gated** `/v1/ops/schema*`; against any non-dev policy (anything but `default_role: admin`) build the client with an admin-role token or they return a `*wavehouse.Error` with `Status: 403`.
 
 ```go
 // List all table schemas.

@@ -23,8 +23,8 @@ func TestSysNamespace_Health(t *testing.T) {
 
 func TestSchemaNamespace_List(t *testing.T) {
 	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/schema" {
-			t.Errorf("want /v1/schema, got %s", r.URL.Path)
+		if r.URL.Path != "/v1/ops/schema" {
+			t.Errorf("want /v1/ops/schema, got %s", r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode([]TableSchema{
 			{Name: "clicks", Columns: []Column{{Name: "page", Type: "String"}}},
@@ -132,7 +132,7 @@ func TestPipesNamespace_CRUD(t *testing.T) {
 	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
-			if r.URL.Path == "/v1/admin/pipes" {
+			if r.URL.Path == "/v1/ops/pipes" {
 				_ = json.NewEncoder(w).Encode([]Pipe{{Name: "p1", SQL: "SELECT 1"}})
 			} else {
 				_ = json.NewEncoder(w).Encode(Pipe{Name: "p1", SQL: "SELECT 1"})
