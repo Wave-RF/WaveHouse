@@ -1,0 +1,236 @@
+---
+// "Was this page helpful?" — a two-button thumbs vote at the end of every doc
+// page, captured to PostHog as `docs_feedback`.
+//
+// Rendered from Footer.astro's sidebar (doc-page) branch — the same indirection
+// the Cloud CTA uses — so it lands on every content page, including ones not
+// written yet, with no per-page frontmatter, import, or opt-in, and below the
+// Cloud CTA on pages that carry one. Splash pages (homepage, 404) take the
+// other footer branch and never render it.
+//
+// One vote per page per build: the choice is remembered in localStorage keyed
+// by pathname and build SHA. A new docs build clears stale votes so visitors
+// can re-evaluate updated content. After voting the choice stays visible and
+// changeable — clicking the other thumb fires a new capture with `changed:
+// true`. Storage is a nicety, not the record — the capture is what counts.
+
+import { execSync } from "node:child_process";
+
+// Thumbs-down is thumbs-up rotated 180° (the two Lucide glyphs are exact point
+// reflections of each other), so the path is defined once and the CSS turns it.
+const THUMB_PATH =
+  "M7 10v12M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z";
+
+// ponytail: build SHA at SSG time — ties feedback to a specific docs revision
+// and expires stale votes when docs are rebuilt.
+let buildSha = "";
+try {
+  buildSha = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
+} catch {
+  // Non-git builds (CI tarball, etc.): empty SHA matches empty, so votes
+  // persist across builds — acceptable for the edge case.
+}
+
+const votes = [
+  { vote: "up", label: "Yes, this page was helpful" },
+  { vote: "down", label: "No, this page was not helpful" },
+] as const;
+---
+
+<div class="wh-feedback" data-wh-feedback data-wh-build={buildSha}>
+  <p class="wh-feedback__question">Was this page helpful?</p>
+  <p class="wh-feedback__thanks" role="status" tabindex="-1">Thanks for the feedback!</p>
+  <div class="wh-feedback__actions">
+    {
+      votes.map(({ vote, label }) => (
+        <button
+          type="button"
+          class:list={["wh-feedback__btn", `wh-feedback__btn--${vote}`]}
+          aria-label={label}
+          aria-pressed="false"
+          data-wh-feedback-vote={vote}
+        >
+          <svg class="wh-feedback__icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              d={THUMB_PATH}
+              stroke="currentColor"
+              stroke-width="1.75"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+      ))
+    }
+  </div>
+</div>
+
+<script is:inline>
+  // is:inline (not a bundled module) to match the codebase's DOM-script
+  // convention (see Footer.astro / MermaidZoom.astro) and stay out of
+  // `astro check`. With view transitions this re-executes per navigation, so
+  // the window flag guards against re-binding the delegated click listener;
+  // per-page work runs from the persistent `astro:page-load` handler.
+  (() => {
+    if (window.__whPageFeedbackInit) return;
+    window.__whPageFeedbackInit = true;
+
+    const storageKey = () => "wh-docs-feedback:" + location.pathname;
+
+    function readVote(build) {
+      try {
+        const raw = window.localStorage.getItem(storageKey());
+        if (!raw) return null;
+        // ponytail: migrate bare "up"/"down" from pre-build-SHA format
+        if (raw === "up" || raw === "down") {
+          window.localStorage.removeItem(storageKey());
+          return null;
+        }
+        const parsed = JSON.parse(raw);
+        if (parsed.build !== build) {
+          // Stale build — clear so the visitor can re-evaluate updated content.
+          window.localStorage.removeItem(storageKey());
+          return null;
+        }
+        return parsed.vote;
+      } catch {
+        return null;
+      }
+    }
+
+    function rememberVote(vote, build) {
+      try {
+        window.localStorage.setItem(storageKey(), JSON.stringify({ vote, build }));
+      } catch {}
+    }
+
+    function applyVote(root, vote) {
+      if (vote) root.dataset.vote = vote;
+      else delete root.dataset.vote;
+      root.querySelectorAll("[data-wh-feedback-vote]").forEach((btn) => {
+        btn.setAttribute("aria-pressed", String(btn.dataset.whFeedbackVote === vote));
+      });
+    }
+
+    // Restore the already-voted state. Runs per page, soft navigations included.
+    function render() {
+      const root = document.querySelector("[data-wh-feedback]");
+      if (!root) return;
+      applyVote(root, readVote(root.dataset.whBuild || ""));
+    }
+
+    document.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const button = target.closest("[data-wh-feedback-vote]");
+      if (!button) return;
+      const root = button.closest("[data-wh-feedback]");
+      if (!root) return;
+
+      const vote = button.dataset.whFeedbackVote;
+      const build = root.dataset.whBuild || "";
+      const oldVote = root.dataset.vote;
+
+      // Same thumb again — toggle off (retract the vote).
+      if (vote === oldVote) {
+        if (typeof window.posthog?.capture === "function") {
+          window.posthog.capture("docs_feedback", {
+            helpful: null, page: location.pathname, build, retracted: true,
+          });
+        }
+        try { window.localStorage.removeItem(storageKey()); } catch {}
+        applyVote(root, null);
+        return;
+      }
+
+      const helpful = vote === "up";
+      const changed = !!oldVote; // re-vote, not first vote
+
+      if (typeof window.posthog?.capture === "function") {
+        const props = { helpful, page: location.pathname, build };
+        if (changed) props.changed = true;
+        window.posthog.capture("docs_feedback", props);
+        rememberVote(vote, build);
+      }
+      applyVote(root, vote);
+      // Only steal focus on the first vote — a change-vote doesn't need it.
+      if (!changed) root.querySelector(".wh-feedback__thanks")?.focus();
+    });
+
+    document.addEventListener("astro:page-load", render);
+    if (document.readyState !== "loading") render();
+    else document.addEventListener("DOMContentLoaded", render);
+  })();
+</script>
+
+<style>
+  /* Centered, compact row: question/thanks + two thumb buttons inline.
+     Less prominent than page content — secondary text color, smaller type. */
+  .wh-feedback {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+  }
+
+  .wh-feedback__question {
+    margin: 0;
+    font-size: 0.8125rem;
+    color: var(--wh-ink-muted);
+  }
+
+  .wh-feedback__actions {
+    display: flex;
+    gap: 0.375rem;
+  }
+  .wh-feedback__btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    border: 1px solid var(--wh-border);
+    border-radius: 0.375rem;
+    background: transparent;
+    color: var(--wh-ink-subtle);
+    cursor: pointer;
+    transition:
+      background 0.12s ease,
+      border-color 0.12s ease,
+      color 0.12s ease;
+  }
+  .wh-feedback__btn:hover {
+    background: var(--wh-surface-elevated);
+    border-color: var(--wh-border-strong);
+    color: var(--wh-ink-muted);
+  }
+  /* Active (voted) thumb — accent border + fill so the visitor sees their choice. */
+  .wh-feedback[data-vote="up"] .wh-feedback__btn--up,
+  .wh-feedback[data-vote="down"] .wh-feedback__btn--down {
+    background: var(--wh-surface-elevated);
+    border-color: var(--wh-accent);
+    color: var(--wh-accent-text);
+  }
+  .wh-feedback__icon {
+    width: 1rem;
+    height: 1rem;
+  }
+  .wh-feedback__btn--down .wh-feedback__icon {
+    transform: rotate(180deg);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .wh-feedback__btn {
+      transition: none;
+    }
+  }
+
+  .wh-feedback__thanks {
+    display: none;
+    margin: 0;
+    font-size: 0.8125rem;
+    color: var(--wh-ink-muted);
+  }
+  /* Swap question → thanks after voting; buttons stay visible for change-vote. */
+  .wh-feedback[data-vote] .wh-feedback__question { display: none; }
+  .wh-feedback[data-vote] .wh-feedback__thanks { display: block; }
+</style>
