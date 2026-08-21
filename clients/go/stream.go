@@ -640,15 +640,66 @@ func evaluateFilter(actual any, op string, expected any, re *regexp.Regexp) bool
 }
 
 // equalValues compares two values for equality, normalizing numeric types
-// (JSON decodes numbers as float64, but callers may pass int).
+// (JSON decodes numbers as float64, but callers may pass int) and comparing
+// timestamps as instants rather than as text — see asInstant.
 func equalValues(a, b any) bool {
+	// nil only equals nil: without this the fmt.Sprint fallback would match a
+	// missing column against the literal string "<nil>".
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
 	if af, aOK := toFloat64(a); aOK {
 		if bf, bOK := toFloat64(b); bOK {
 			return af == bf
 		}
 	}
+	if at, aOK := asInstant(a); aOK {
+		if bt, bOK := asInstant(b); bOK {
+			return at.Equal(bt)
+		}
+	}
 	// fmt.Sprint is safe for all types (no panic on maps/slices).
 	return fmt.Sprint(a) == fmt.Sprint(b)
+}
+
+// maxTimeOperandChars mirrors the server's row-filter pre-gate: the longest
+// spelling the ingest grammar accepts (RFC 3339 with nanoseconds and a numeric
+// offset) is 35 bytes, so 64 is generous slack while keeping a megabyte
+// "timestamp" from being scanned once per filter per event.
+const maxTimeOperandChars = 64
+
+// asInstant reports the instant a value denotes, but only for spellings that
+// name one unambiguously — RFC 3339 with an explicit offset or `Z`.
+//
+// This exists because the server canonicalizes every top-level DateTime value
+// to RFC 3339 UTC before publishing (#402), so a payload reads `...T04:00:00Z`
+// while a caller's filter constant may name the same instant as
+// `...T06:00:00+02:00`. Comparing those as text is wrong in both directions:
+// lexically the payload sorts *below* the constant, so `gte` misses a row that
+// is chronologically equal. The server compares DateTime columns as instants
+// for exactly this reason; this is the client-side twin of that rule.
+//
+// Deliberately narrow. A zone-less spelling ("2026-06-21 04:00:00") names an
+// instant only relative to the column's declared timezone, which the server
+// reads from the schema and a stream subscriber does not have. Guessing UTC
+// would move the instant, so those fail to parse here and fall through to text
+// comparison rather than being silently reinterpreted.
+func asInstant(v any) (time.Time, bool) {
+	s, ok := v.(string)
+	if !ok || len(s) > maxTimeOperandChars {
+		return time.Time{}, false
+	}
+	// ClickHouse has no ',' decimal separator, but Go's RFC3339Nano accepts one
+	// per ISO 8601. Reject it so the client can't admit a spelling the server
+	// would refuse.
+	if strings.ContainsRune(s, ',') {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // evaluateIn checks whether actual is contained in the expected slice.
@@ -679,6 +730,26 @@ func compareOrdered(actual, expected any) (int, bool) {
 			default:
 				return 0, true
 			}
+		}
+	}
+	// Timestamps compare chronologically, not lexically. If either side names
+	// an instant the other must too: ordering a canonicalized payload against a
+	// spelling that isn't a provable instant is meaningless, and text
+	// comparison there would admit rows the query path excludes. Fail closed,
+	// as the server's row filter does for a DateTime column.
+	aTime, aIsTime := asInstant(actual)
+	bTime, bIsTime := asInstant(expected)
+	if aIsTime || bIsTime {
+		if !aIsTime || !bIsTime {
+			return 0, false
+		}
+		switch {
+		case aTime.Before(bTime):
+			return -1, true
+		case aTime.After(bTime):
+			return 1, true
+		default:
+			return 0, true
 		}
 	}
 	if aStr, ok := actual.(string); ok {

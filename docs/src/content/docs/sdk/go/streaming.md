@@ -160,6 +160,20 @@ stream := wh.From("clicks").
 
 Supported operators: `OpEq`, `OpNeq`, `OpGt`, `OpGte`, `OpLt`, `OpLte`, `OpIn`, `OpLike`, `OpNotLike` — the `FilterOp` set `.Where()` takes everywhere (mapped to wire tokens `eq`/`neq`). `OpLike`/`OpNotLike` use SQL LIKE semantics (`%`, `_`), case-insensitively. `OpIn` accepts any Go slice type (e.g., `[]string`, `[]int`).
 
+#### How values are compared
+
+The client-side evaluator mirrors the server's row-filter comparison rules rather than comparing everything as text:
+
+- **Timestamps compare chronologically.** Since the server canonicalizes every top-level `DateTime`/`DateTime64` value to RFC 3339 UTC before publishing, a payload reads `2026-06-21T04:00:00Z` while your filter constant may name the same instant as `2026-06-21T06:00:00+02:00`. Comparing those as text is wrong in both directions — lexically the payload sorts *below* the constant, so `OpGte` would miss a row that is chronologically equal. Both sides are parsed as instants instead.
+- **Only unambiguous spellings count as instants.** RFC 3339 with an explicit offset or `Z`. A zone-less spelling like `2026-06-21 04:00:00` names an instant only relative to the column's declared timezone, which the server reads from the schema and a stream subscriber does not have — guessing UTC would move the instant. Such a constant is not treated as a timestamp.
+- **Ordering an instant against a non-instant fails closed.** If one side parses as a timestamp and the other does not, `OpGt`/`OpGte`/`OpLt`/`OpLte` withhold the row rather than falling back to text comparison, which could otherwise admit rows the query path excludes. The usual cause is a zone-less filter constant — give it an offset.
+- **A missing column equals only `nil`.** A column absent from the payload does not match the string `"<nil>"`.
+- **Numbers compare numerically**, so `9 < 100` as you would expect rather than as text.
+
+:::caution[Integer precision above 2^53]
+Event data decodes through `encoding/json` into `map[string]any`, so JSON numbers arrive as `float64`. An integer column beyond `Number.MAX_SAFE_INTEGER` (2^53) has already lost exactness before any filter runs — the server compares such columns in their exact storage domain, so a client-side filter on a very large `UInt64` can disagree with the server's verdict. Filter on a string or timestamp column instead when exactness at that magnitude matters.
+:::
+
 ## Live Queries
 
 Live queries combine a historical backfill (`.FetchUntyped`) with a real-time stream for seamless initial loads and updates. They are available only on `*QueryBuilder` (no `TableRef.LiveQuery` shortcut), matching the TypeScript SDK.

@@ -652,3 +652,119 @@ func TestStream_ConfiguredHeadersReachTheStream(t *testing.T) {
 		t.Fatal("stream request never arrived")
 	}
 }
+
+// TestEvaluateFilter_TimestampsCompareAsInstants: the server canonicalizes
+// every top-level DateTime value to RFC 3339 UTC before publishing (#402), so
+// a payload and a caller's filter constant routinely spell the same instant
+// differently. Comparing those as text disagrees with the server's row filter,
+// which compares DateTime columns chronologically.
+func TestEvaluateFilter_TimestampsCompareAsInstants(t *testing.T) {
+	// The canonicalized payload value, and the same instant in +02:00 — which
+	// sorts ABOVE it lexically ("06" > "04") while being chronologically equal.
+	const canonical = "2026-06-21T04:00:00Z"
+	const sameInstantOffset = "2026-06-21T06:00:00+02:00"
+	const oneSecondLater = "2026-06-21T06:00:01+02:00"
+
+	tests := []struct {
+		name     string
+		actual   any
+		op       string
+		expected any
+		want     bool
+	}{
+		{"equal across offsets", canonical, "eq", sameInstantOffset, true},
+		{"neq is false across offsets", canonical, "neq", sameInstantOffset, false},
+		{"gte holds at the same instant", canonical, "gte", sameInstantOffset, true},
+		{"lte holds at the same instant", canonical, "lte", sameInstantOffset, true},
+		{"gt is false at the same instant", canonical, "gt", sameInstantOffset, false},
+		{"lt sees a later offset instant", canonical, "lt", oneSecondLater, true},
+		{"gt is false against a later instant", canonical, "gt", oneSecondLater, false},
+		{"in matches across offsets", canonical, "in", []any{"2020-01-01T00:00:00Z", sameInstantOffset}, true},
+
+		// Same-offset spellings must keep working exactly as before.
+		{"gt within UTC", "2026-06-21T04:00:01Z", "gt", canonical, true},
+		{"lt within UTC", "2026-06-21T03:59:59Z", "lt", canonical, true},
+		{"eq identical text", canonical, "eq", canonical, true},
+
+		// Sub-second precision survives the round trip.
+		{"fractional seconds order correctly", "2026-06-21T04:00:00.500Z", "gt", canonical, true},
+
+		// A zone-less constant names an instant only relative to the column's
+		// declared timezone, which a stream subscriber does not have. It must
+		// not be silently read as UTC — ordering fails closed.
+		{"zone-less constant fails closed on gt", canonical, "gt", "2026-06-21 03:00:00", false},
+		{"zone-less constant fails closed on lt", canonical, "lt", "2026-06-21 05:00:00", false},
+
+		// A ',' fraction is ISO 8601 but not ClickHouse, so it is not an instant.
+		{"comma fraction is not an instant", canonical, "eq", "2026-06-21T04:00:00,000Z", false},
+
+		// Non-timestamp strings keep lexicographic ordering.
+		{"plain strings still order lexically", "banana", "gt", "apple", true},
+		{"plain strings still compare equal", "apple", "eq", "apple", true},
+
+		// Numbers are untouched by any of this.
+		{"numbers still order numerically", 100.0, "gt", 9.0, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evaluateFilter(tc.actual, tc.op, tc.expected, nil); got != tc.want {
+				t.Fatalf("evaluateFilter(%v, %q, %v) = %v, want %v",
+					tc.actual, tc.op, tc.expected, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEqualValues_NilOnlyEqualsNil: a column missing from the payload must not
+// match the literal string "<nil>" through the fmt.Sprint fallback.
+func TestEqualValues_NilOnlyEqualsNil(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b any
+		want bool
+	}{
+		{"nil equals nil", nil, nil, true},
+		{"nil does not equal the string <nil>", nil, "<nil>", false},
+		{"the string <nil> does not equal nil", "<nil>", nil, false},
+		{"nil does not equal empty string", nil, "", false},
+		{"nil does not equal zero", nil, 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := equalValues(tc.a, tc.b); got != tc.want {
+				t.Fatalf("equalValues(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStream_FilterMatchesCanonicalizedPayload: the end-to-end shape of the
+// same bug — a caller filters on a non-UTC spelling and the server delivers the
+// canonicalized one.
+func TestStream_FilterMatchesCanonicalizedPayload(t *testing.T) {
+	frame := `event: message
+id: 2026-06-21T04:00:00Z
+data: {"table_name":"clicks","received_timestamp":"2026-06-21T04:00:00Z","data":{"page":"/home","event_ts":"2026-06-21T04:00:00Z"}}
+
+`
+	srv := sseServer(t, []string{frame})
+
+	stream := streamClient(t, srv).From("clicks").
+		SelectAll().
+		Where("event_ts", OpGte, "2026-06-21T06:00:00+02:00").
+		Stream(nil)
+	defer stream.Close()
+
+	events := make(chan StreamEvent, 4)
+	stream.Subscribe(&StreamSubscriber{Next: func(e StreamEvent) { events <- e }})
+
+	select {
+	case e := <-events:
+		if e.Data["page"] != "/home" {
+			t.Fatalf("unexpected row: %v", e.Data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a row chronologically equal to the filter constant was withheld")
+	}
+}
