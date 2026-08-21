@@ -99,8 +99,13 @@ const votes = [
       if (!root || root.dataset.state === "voted") return;
 
       const helpful = button.dataset.whFeedbackVote === "up";
-      window.posthog?.capture("docs_feedback", { helpful, page: location.pathname });
-      rememberVote(helpful ? "up" : "down");
+      // ponytail: gate persistence on capture existing — if PostHog is blocked
+      // (ad blocker, consent) the visitor gets re-prompted instead of silently
+      // losing the vote forever.
+      if (typeof window.posthog?.capture === "function") {
+        window.posthog.capture("docs_feedback", { helpful, page: location.pathname });
+        rememberVote(helpful ? "up" : "down");
+      }
       root.dataset.state = "voted";
       root.querySelector(".wh-feedback__thanks")?.focus();
     });
