@@ -22,12 +22,16 @@ let createClient;
 try {
   ({ createClient } = await import(join(__dirname, "../../clients/ts/dist/index.js")));
 } catch (err) {
-  console.error("Cannot load the TypeScript SDK build. Run the SDK build first (e.g. `pnpm --dir clients/ts build`).");
+  console.error(
+    "Cannot load the TypeScript SDK build. Run the SDK build first (e.g. `pnpm --dir clients/ts build`).",
+  );
   console.error(err.message);
   process.exit(1);
 }
 
-const cases = JSON.parse(readFileSync(join(__dirname, "../../clients/go/testdata/wire_cases.json"), "utf-8"));
+const cases = JSON.parse(
+  readFileSync(join(__dirname, "../../clients/go/testdata/wire_cases.json"), "utf-8"),
+);
 
 let lastCapture = { method: "", path: "", contentType: "", body: "" };
 
@@ -303,7 +307,8 @@ for (const f of failures) {
 
 if (failed > 0 || skipped > 0 || passed === 0) {
   if (passed === 0) console.log("  ✗ nothing ran — every case skipped or the fixture is empty\n");
-  if (skipped > 0) console.log("  ✗ skipped cases break cross-SDK parity — wire up the endpoint above\n");
+  if (skipped > 0)
+    console.log("  ✗ skipped cases break cross-SDK parity — wire up the endpoint above\n");
   process.exit(1);
 } else {
   console.log("  ✓ All cases passed\n");
