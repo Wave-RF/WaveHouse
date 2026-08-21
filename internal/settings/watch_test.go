@@ -2,6 +2,7 @@ package settings
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,6 +15,24 @@ import (
 // TestStore_Watch_ReloadsOnChange pins the watcher end to end: an edit to a
 // settings file lands in the snapshot without any explicit reload call. The
 // debounce makes exact timing untestable, so the assertion polls.
+// startWatch runs s.Watch in the background and proves the watch is live
+// before returning: it writes a valid config.json with maxRows and waits for
+// the watcher to adopt it. A fixed sleep could not distinguish "watch
+// registered" from "write raced ahead of w.Add", and with the watch proven
+// live, the caller's later mutations can't be mistaken for setup races.
+func startWatch(ctx context.Context, t *testing.T, s *Store, maxRows int) <-chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- s.Watch(ctx) }()
+	// Keep writing until the watcher picks one up: the write and w.Add race,
+	// and a write that lands before the watch exists emits no event.
+	require.Eventually(t, func() bool {
+		require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), FileConfig), []byte(configJSON(fmt.Sprintf(`{"query": {"default_max_rows": %d}}`, maxRows))), 0o600))
+		return s.DefaultMaxRows() == maxRows
+	}, 5*time.Second, 2*watchDebounce, "watcher should adopt the readiness write")
+	return done
+}
+
 func TestStore_Watch_ReloadsOnChange(t *testing.T) {
 	t.Parallel()
 	s := newLoadedStore(t, map[string]string{
@@ -21,16 +40,7 @@ func TestStore_Watch_ReloadsOnChange(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- s.Watch(ctx) }()
-
-	// Give the watcher a beat to register before writing, so the event isn't
-	// emitted before the watch exists.
-	time.Sleep(100 * time.Millisecond)
-	require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 900}}`)), 0o600))
-
-	assert.Eventually(t, func() bool { return s.DefaultMaxRows() == 900 },
-		5*time.Second, 50*time.Millisecond, "watcher should adopt the edited file")
+	done := startWatch(ctx, t, s, 900)
 
 	// An invalid edit is debounced, rejected, and the snapshot survives.
 	require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), FileConfig), []byte(`not json`), 0o600))
@@ -63,14 +73,12 @@ func TestStore_Watch_SurvivesDirectoryRecreate(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- s.Watch(ctx) }()
-	time.Sleep(100 * time.Millisecond)
+	done := startWatch(ctx, t, s, 200)
 
 	// Remove the whole directory: a rejected reload, snapshot survives.
 	require.NoError(t, os.RemoveAll(s.Dir()))
 	time.Sleep(4 * watchDebounce)
-	assert.Equal(t, 100, s.DefaultMaxRows(), "vanished directory must keep the previous snapshot")
+	assert.Equal(t, 200, s.DefaultMaxRows(), "vanished directory must keep the previous snapshot")
 
 	// Recreate it with new content: the watcher must pick it up again.
 	files := validFiles()
