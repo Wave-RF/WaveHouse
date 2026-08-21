@@ -42,8 +42,9 @@ services:
       WH_DLQ_ENABLED: "true"
       # Settings directory (roles.json, policies.json, pipes.json, config.json)
       # — required; the image sets WH_SETTINGS_DIR=/app/settings and bakes the
-      # seed there (every key at its default: dedupe on event_id, 10000-row
-      # query limit, 60s schema refresh, CORS "*"). Tenant tunables live in its
+      # seed there (every key at its default: event_id as the dedupe id
+      # field — applies once WH_DEDUPE_ENABLED is true — 10000-row query
+      # limit, 60s schema refresh, CORS "*"). Tenant tunables live in its
       # config.json and reload live (file watch / SIGHUP /
       # POST /v1/ops/settings/reload). To edit them, write your own with
       # `wavehouse init-settings ./my-settings` and bind-mount it below.

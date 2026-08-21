@@ -199,7 +199,7 @@ The server validates and adopts the directory at boot — a missing or invalid d
 
 A running instance re-validates and re-adopts on any of three triggers, all funneling through one serialized reload path:
 
-- **File change** — the directory is watched; a burst of writes (an editor save, a Kubernetes ConfigMap republish) coalesces into one reload.
+- **File change** — the directory is watched; a burst of writes (an editor save, a Kubernetes ConfigMap republish) coalesces into one reload, and a directory that is deleted and recreated (or renamed over) is picked up again.
 - **`SIGHUP`** — `kill -HUP <pid>`.
 - **`POST /v1/ops/settings/reload`** (admin-only) — returns `{"adopted": bool, "findings": [...]}`; `200` when adopted, `422` when rejected.
 

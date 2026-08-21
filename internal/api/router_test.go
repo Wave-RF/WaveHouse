@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
@@ -118,6 +119,40 @@ func TestRequireAdmin_OperatorBypassesNilPolicy(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code, "operator bit admits even a nil-policy request (break-glass)")
+}
+
+// TestCORSMiddleware_OriginsReloadBetweenRequests pins that the allowlist is
+// resolved per request, not captured at router construction: a settings
+// reload that changes cors.allowed_origins must apply to the very next
+// request without rebuilding the middleware.
+func TestCORSMiddleware_OriginsReloadBetweenRequests(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	origins := []string{"https://old.example.com"}
+	handler := corsMiddleware(func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return origins
+	})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+
+	get := func(origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+		req.Header.Set("Origin", origin)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+
+	assert.Equal(t, "https://old.example.com", get("https://old.example.com").Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, get("https://new.example.com").Header().Get("Access-Control-Allow-Origin"), "not yet allowed")
+
+	// "Reload": swap the list the getter returns.
+	mu.Lock()
+	origins = []string{"https://new.example.com"}
+	mu.Unlock()
+
+	assert.Equal(t, "https://new.example.com", get("https://new.example.com").Header().Get("Access-Control-Allow-Origin"), "new allowlist applies on the next request")
+	assert.Empty(t, get("https://old.example.com").Header().Get("Access-Control-Allow-Origin"), "old origin no longer allowed")
 }
 
 func TestCORSMiddleware_Preflight(t *testing.T) {

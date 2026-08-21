@@ -52,3 +52,41 @@ func TestStore_Watch_MissingDir(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "settings watcher")
 }
+
+// TestStore_Watch_SurvivesDirectoryRecreate pins the recreate contract:
+// fsnotify drops a watch whose directory is removed, so without the parent
+// watch + re-add a delete-and-recreate would leave later edits unwatched.
+func TestStore_Watch_SurvivesDirectoryRecreate(t *testing.T) {
+	t.Parallel()
+	s := newLoadedStore(t, map[string]string{
+		FileConfig: configJSON(`{"query": {"default_max_rows": 100}}`),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Watch(ctx) }()
+	time.Sleep(100 * time.Millisecond)
+
+	// Remove the whole directory: a rejected reload, snapshot survives.
+	require.NoError(t, os.RemoveAll(s.Dir()))
+	time.Sleep(4 * watchDebounce)
+	assert.Equal(t, 100, s.DefaultMaxRows(), "vanished directory must keep the previous snapshot")
+
+	// Recreate it with new content: the watcher must pick it up again.
+	files := validFiles()
+	files[FileConfig] = configJSON(`{"query": {"default_max_rows": 300}}`)
+	require.NoError(t, os.Mkdir(s.Dir(), 0o750))
+	for name, content := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), name), []byte(content), 0o600))
+	}
+	assert.Eventually(t, func() bool { return s.DefaultMaxRows() == 300 },
+		5*time.Second, 50*time.Millisecond, "recreated directory should be adopted")
+
+	// And edits inside the recreated directory are watched again.
+	require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 400}}`)), 0o600))
+	assert.Eventually(t, func() bool { return s.DefaultMaxRows() == 400 },
+		5*time.Second, 50*time.Millisecond, "edits after recreate should be watched")
+
+	cancel()
+	assert.NoError(t, <-done)
+}
