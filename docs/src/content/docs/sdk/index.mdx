@@ -8,14 +8,7 @@ import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components
 `@wavehouse/sdk` — TypeScript client for WaveHouse. One runtime dependency: `eventsource-parser` (~1.4 KB gzipped, itself dependency-free), which frames the SSE stream.
 
 :::tip[Writing Go instead?]
-WaveHouse also ships an official Go SDK
-(`github.com/Wave-RF/WaveHouse/clients/go`) — zero third-party dependencies,
-`context.Context`-first, generics for typed rows. See the
-[Go SDK docs](/sdk/go). The two clients speak the same wire format, so
-everything below about tables, the query builder, streaming, and admin
-endpoints carries over conceptually, but API and lifecycle details differ —
-Go uses context-first calls and package-level generics, and streams must be
-closed explicitly.
+WaveHouse also ships an official Go SDK (`github.com/Wave-RF/WaveHouse/clients/go`) — zero third-party dependencies, `context.Context`-first, generics for typed rows. See the [Go SDK docs](/sdk/go). The two clients speak the same wire format, so everything below about tables, the query builder, streaming, and admin endpoints carries over conceptually, but API and lifecycle details differ — Go uses context-first calls and package-level generics, and streams must be closed explicitly.
 :::
 
 ## Installation
