@@ -76,7 +76,7 @@ describe("request", () => {
 
     await request(makeCtx({ auth: async () => "my-token" }), {
       method: "GET",
-      path: "/v1/schema",
+      path: "/v1/ops/schema",
     });
 
     const [, init] = fetchSpy.mock.calls[0];
@@ -88,7 +88,7 @@ describe("request", () => {
 
     await request(makeCtx({ auth: async () => "" }), {
       method: "GET",
-      path: "/v1/schema",
+      path: "/v1/ops/schema",
     });
 
     const [, init] = fetchSpy.mock.calls[0];
@@ -100,7 +100,7 @@ describe("request", () => {
       new Response(JSON.stringify({ error: "unknown table: foo" }), { status: 404 }),
     );
 
-    const result = await request(makeCtx(), { method: "GET", path: "/v1/schema?table=foo" });
+    const result = await request(makeCtx(), { method: "GET", path: "/v1/ops/schema?table=foo" });
 
     expect(result.data).toBeNull();
     expect(result.error?.status).toBe(404);
@@ -167,12 +167,76 @@ describe("request", () => {
     expect(result.error?.retryable).toBe(false);
   });
 
+  it("returns ABORTED when the abort lands during a retry backoff", async () => {
+    // The existing abort test rejects the *fetch*, which is caught by the
+    // branch at the top of the catch. This one aborts during the backoff that
+    // runs inside that same catch — the one sleep whose rejection had no
+    // handler, so it escaped `request()` as a raw DOMException and reached the
+    // caller as an unhandled rejection instead of the documented Result.
+    fetchSpy.mockRejectedValue(new TypeError("fetch failed"));
+
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 20);
+
+    // maxRetries must be > 0 or there is no backoff to abort during —
+    // the default fixture is 0, which returns NETWORK_ERROR on the first pass.
+    const result = await request(makeCtx({ options: { maxRetries: 1 } }), {
+      method: "GET",
+      path: "/health",
+      signal: ac.signal,
+    });
+
+    expect(result.error?.code).toBe("ABORTED");
+    expect(result.error?.retryable).toBe(false);
+  });
+
+  it.each([0, 2])(
+    "reports ABORTED regardless of the rejection type, at maxRetries=%i",
+    async (maxRetries) => {
+      // AbortSignal.timeout() rejects with a TimeoutError, and node-fetch with
+      // its own AbortError class — neither is a DOMException named AbortError.
+      // Keying the check off the error alone made the answer depend on whether
+      // a retry remained for the backoff sleep to notice the signal.
+      const ac = new AbortController();
+      fetchSpy.mockImplementation(async () => {
+        ac.abort();
+        throw new TypeError("fetch failed");
+      });
+
+      const result = await request(makeCtx({ options: { maxRetries } }), {
+        method: "GET",
+        path: "/health",
+        signal: ac.signal,
+      });
+
+      expect(result.error?.code).toBe("ABORTED");
+    },
+  );
+
+  it("retries a middleware's own AbortError when the caller did not cancel", async () => {
+    // An `options.fetch` enforcing a per-attempt deadline aborts an internal
+    // controller and rejects with a real AbortError, while the caller's signal
+    // is untouched. Nobody asked to cancel, so this is transient — matching on
+    // the error type instead of the signal would end the call as ABORTED.
+    fetchSpy
+      .mockRejectedValueOnce(new DOMException("Aborted", "AbortError"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    const result = await request<{ ok: boolean }>(makeCtx({ options: { maxRetries: 1 } }), {
+      method: "GET",
+      path: "/health",
+    });
+
+    expect(result.error).toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
   it("appends query params to URL", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
 
     await request(makeCtx(), {
       method: "GET",
-      path: "/v1/dlq/stats",
+      path: "/v1/ops/dlq/stats",
       params: { table: "clicks" },
     });
 
@@ -197,12 +261,12 @@ describe("request", () => {
 
     await request(makeCtx({ baseURL: "https://app.example.com/api/warehouse/" }), {
       method: "GET",
-      path: "/v1/dlq/stats",
+      path: "/v1/ops/dlq/stats",
       params: { table: "clicks" },
     });
 
     const [url] = fetchSpy.mock.calls[0];
-    expect(url).toBe("https://app.example.com/api/warehouse/v1/dlq/stats?table=clicks");
+    expect(url).toBe("https://app.example.com/api/warehouse/v1/ops/dlq/stats?table=clicks");
   });
 
   it("handles empty response body", async () => {
@@ -210,7 +274,7 @@ describe("request", () => {
 
     const result = await request(makeCtx(), {
       method: "POST",
-      path: "/v1/schema/refresh",
+      path: "/v1/ops/schema/refresh",
     });
 
     expect(result.data).toBeUndefined();

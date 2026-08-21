@@ -119,7 +119,12 @@ JOBS ?= $(DEFAULT_JOBS)
 # Version metadata is always embedded in the binary. Names match the package
 # vars in cmd/wavehouse/main.go (Version / GitCommit / BuildTime), which the
 # goreleaser config injects the same way for release artifacts.
-VERSION    ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo dev)
+# `--match 'v[0-9]*'` keeps this on the SERVER's tag family. Without it,
+# `git describe` returns whichever tag is nearest in history — so once
+# `clients/ts/v0.1.0` exists, `make build` stamps the SDK's version into the
+# server binary and out through /version, and goreleaser-validate.yml logs
+# "current tag is not semver". `--always` still covers the no-match case.
+VERSION    ?= $(shell git describe --tags --match 'v[0-9]*' --dirty --always 2>/dev/null || echo dev)
 COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 VERSION_LDFLAGS := -X main.Version=$(VERSION) -X main.GitCommit=$(COMMIT) -X main.BuildTime=$(BUILD_TIME)
@@ -263,8 +268,11 @@ dev-ts: pnpm-install ## Watch-build SDK (tsup --watch)
 # production while you edit, and the browser refreshes itself per build.
 # Slower per change than Astro HMR; the raw dev server remains available as
 # `pnpm --filter wavehouse-docs run start` when fidelity doesn't matter.
+# Serves :4321, walking upward if that's taken (ports are machine-wide, so a
+# dev server in another worktree or repo will claim it) — the script prints the
+# port it settled on. DOCS_PORT=… moves the starting point.
 .PHONY: dev-docs
-dev-docs: install-playwright-docs build-ts ## Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321
+dev-docs: install-playwright-docs build-ts ## Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321 (next free port if busy)
 	@$(PNPM) --filter $(DOCS_FILTER) run dev
 
 # preview-docs serves the production build through wrangler (Cloudflare Workers
@@ -375,11 +383,13 @@ lint-md: pnpm-install
 	$(call run,markdownlint,$(PNPM) -s -w run lint:md,run make fix to auto-fix what is fixable)
 
 # lint-prose: docs prose quality, owned by misspell — a curated common-typo +
-# US-locale (UK → US) checker over the Starlight content (.md + .mdx). Its word
-# list is finite and maintained upstream, so it gates with ~zero false positives
-# and no project dictionary to babysit. `-error` makes it exit non-zero on
-# findings; `make fix` (fix-prose) auto-applies the corrections. Distinct domain
-# from markdownlint (*style*) and Biome (JS/TS/JSON) — no overlap. (A full
+# US-locale (UK → US) checker over the canonical docs-prose set (see DOCS_PROSE
+# and scripts/docs-prose.sh — the Starlight content plus the root governance
+# docs). Its word list is finite and maintained upstream, so it gates with
+# ~zero false positives and no project dictionary to babysit. `-error` makes it
+# exit non-zero on findings; `make fix` (fix-prose) auto-applies the
+# corrections. Distinct domain from markdownlint (*style*) and Biome
+# (JS/TS/JSON) — no overlap. (A full
 # dictionary spell-checker, cspell, was trialled and dropped: on these jargon-
 # dense docs it flagged ~64 legitimate terms and zero real typos — an unbounded
 # dictionary tax for no signal. Catching novel typos is left to human/LLM
@@ -408,9 +418,26 @@ lint-gha: $(ACTIONLINT) $(SHELLCHECK)
 # classifier behind CI's `changes` job and the local git hooks) against the
 # canonical change shapes — fast, dependency-free, so the allowlists can't
 # silently regress. A verify leaf so CI's lint job runs it.
+# test-md-rules: fixtures for the repo-local markdownlint rules. They rewrite
+# every .md/.mdx on every agent write, and they classify by line shape with no
+# parse tree, so an unrecognized construct is corrupted rather than skipped —
+# cheap fixtures are the only thing that catches the next shape regression.
+.PHONY: test-md-rules
+test-md-rules: pnpm-install
+	$(call run,markdownlint rule tests,node --test scripts/markdownlint-rules/rules.test.mjs,)
+
 .PHONY: test-classify-paths
 test-classify-paths:
 	$(call run,classify-paths test,scripts/classify-paths.test.sh,)
+
+# test-release-channel: assert scripts/ci/release-channel.sh — the single rule
+# mapping a release tag to its moving channel (`:latest` / `@latest` vs
+# `:rc` / `@rc` …), shared by release.yml, publish-npm.yml and release.sh.
+# Covers the fail-closed cases too: an unclassifiable tag must never resolve to
+# `latest`. A verify leaf, same as test-classify-paths.
+.PHONY: test-release-channel
+test-release-channel:
+	$(call run,release-channel test,scripts/ci/release-channel.test.sh,)
 
 .PHONY: vulncheck
 vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
@@ -436,13 +463,25 @@ verify-go-sdk: ## Static checks for the Go SDK (clients/go, a nested module) —
 
 # fix: apply auto-fixes everywhere, fanned out into three tracks that touch
 # disjoint files — Go (.go + go.mod/sum), TS/JS/JSON (Biome), Markdown — so they
-# run in parallel safely. The Go track is itself a serial chain (tidy → gofumpt →
-# goimports → golangci --fix): order matters there, since each rewrites the same
-# files and the formatters must settle before lint --fix runs.
+# run in parallel safely. Two of the three are themselves serial chains, because
+# inside a track every step rewrites the same files: Go is tidy → gofumpt →
+# goimports → golangci --fix (the formatters must settle before lint --fix), and
+# Markdown is fix-md → fix-prose (markdownlint and misspell both write .md/.mdx,
+# so running them concurrently is a lost-update race).
 .PHONY: fix
 fix: ## Apply auto-fixes across Go (tidy + gofumpt + goimports + lint --fix) + TS/JSON (Biome) + Markdown (markdownlint) + docs prose (misspell)
-	@$(MAKE) -j $(JOBS) fix-go fix-ts fix-md fix-prose
+	@$(MAKE) -j $(JOBS) fix-go fix-ts fix-docs
 	@echo "$(GREEN)==> Done$(RESET)"
+
+# fix-docs: the Markdown track, serial. A wrapper, so `make fix-md` and
+# `make fix-prose` still stand on their own. It names pnpm-install even though
+# fix-md already does: fix-md is reached through a SUB-make, whose prerequisites
+# the parent cannot dedup against fix-ts's, so without this `make -j fix` can
+# run two `pnpm install` processes against one node_modules.
+.PHONY: fix-docs
+fix-docs: pnpm-install
+	@$(MAKE) fix-md
+	@$(MAKE) fix-prose
 
 .PHONY: fix-go
 fix-go: $(GOLANGCI_LINT)
@@ -459,9 +498,28 @@ fix-ts: pnpm-install
 	@echo "$(CYAN)==> Applying Biome fixes (format + lint + imports)...$(RESET)"
 	@$(PNPM) -w run fix
 
+# fix-md: the generic markdownlint --fix pass reaches **/*.md only and never
+# .mdx — the config globs .md, and the .mdx glob lives on `lint:md`, so even a
+# bare `markdownlint-cli2 --fix` is safe.
+#
+# That is the root fix for a whole class of corruption:
+# markdownlint parses CommonMark, MDX does not, and where the two disagree a
+# generic autofix rewrites the inside of a code block — de-indenting YAML
+# comments it reads as headings, autolinking bare URLs. Reporting on that
+# disagreement is useful (lint-md still checks .mdx); acting on it is not.
+#
+# .mdx therefore gets exactly one STRUCTURAL fixer, our own
+# scripts/fix-mdx-fences.mjs — misspell still corrects spelling there, since its
+# curated list needs no parse. That fixer only ever inserts a blank line next to
+# a JSX tag, so its worst failure is a render-neutral blank line rather than
+# rewritten code.
+#
+# The md pass runs twice because it is not a fixpoint in one: WH001's insert
+# carries the pre-fix text of the lines it joins, so another rule's fix for a
+# joined line is dropped on the first pass.
 .PHONY: fix-md
 fix-md: pnpm-install
-	@echo "$(CYAN)==> Applying markdownlint fixes...$(RESET)"
+	@echo "$(CYAN)==> Applying MDX structure + markdownlint fixes...$(RESET)"
 	@$(PNPM) -w run fix:md
 
 # fix-prose: misspell autofix (common typos + UK → US) over the docs prose. Its
@@ -479,10 +537,13 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (see verify-parallel prerequisites): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck,
-# verify-go-sdk (go vet + gofumpt on the nested clients/go module) on the Go
+# Leaves (16): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck,
+# lint-go-sdk (golangci) + verify-go-sdk (go vet + gofumpt), both on the
+# nested clients/go module, on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
-# docs spelling) for JS/TS + Markdown + prose;
+# docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
+# for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
+# test-classify-paths and test-release-channel for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
 # nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
 # (`biome check`) but NOT fmt-ts (`biome format`) — check already covers
@@ -496,7 +557,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-go-sdk lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths vulncheck check-docs typecheck-ts verify-go-sdk
+verify-parallel: tidy fmt-go lint-go lint-go-sdk lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel vulncheck check-docs typecheck-ts verify-go-sdk
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
@@ -624,11 +685,25 @@ DOCS_DIR    := docs
 SDK_NAME    := @wavehouse/sdk
 DOCS_FILTER := wavehouse-docs
 
-# Markdown + MDX prose sources under the Starlight content dir. lint-prose /
-# fix-prose hand misspell this explicit list (lazily expanded via `=`, so the
-# find only runs when those targets run) rather than a directory — so misspell
-# never reads a .ts content-config as text.
-DOCS_PROSE   = $(shell find $(DOCS_DIR)/src/content -type f \( -name '*.md' -o -name '*.mdx' \) 2>/dev/null)
+# The canonical docs-prose set, from the one script that defines it (AGENTS.md
+# §DRY). lint-prose / fix-prose hand misspell this explicit file list rather
+# than a directory, so it never reads a .ts content-config as text — the
+# script's extension filter enforces that now, where a local `find -name` used
+# to. That `find` covered only docs/src/content, so README, CONTRIBUTING,
+# SECURITY, SUPPORT, CODE_OF_CONDUCT and the SDK readme were being rewritten by
+# the on-save hook's misspell pass but never checked by this gate.
+#
+# Recursively expanded (`=`, not `:=`), so the git call fires only inside the
+# lint-prose / fix-prose recipes — `make help` never pays for it.
+#
+# One asymmetry to know about: the script lists TRACKED files (`git ls-files`),
+# while the hook gates on `docs-prose.sh is-match`, a pure path test. So a
+# brand-new page that hasn't been `git add`ed is fixed on write but not seen by
+# `make fix-prose`. It self-heals — pre-commit stages first, so `make verify`
+# does see it — but the symptom is a commit that fails on spelling right after
+# a clean `make fix`. Widening the script to `git ls-files -co` would also feed
+# untracked drafts to the docs-reviewer, which is why it lists tracked only.
+DOCS_PROSE   = $(shell bash scripts/docs-prose.sh all 2>/dev/null)
 
 # pnpm-install: hidden internal target. Node targets depend on it to ensure
 # workspace deps are present; on a warm tree `--frozen-lockfile` is a fast
@@ -690,7 +765,7 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 	@printf "$(CYAN)==> Running Integration Tests...$(RESET)\n"
 	@rm -rf $(COV_INT)/data && mkdir -p $(COV_INT)/data
 	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
-		-tags="integration $(TAGS)" -timeout 120s -coverpkg=./... -race -count=1 \
+		-tags="integration $(TAGS)" -timeout 240s -coverpkg=./... -race -count=1 \
 		./tests/integration/... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
 	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render integration; fi
@@ -808,6 +883,45 @@ ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverag
 	@$(MAKE) cov
 	@scripts/ci-marker.sh write
 	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
+
+##@ Release
+
+# Releases are cut by pushing ONE tag — no version bump, no commit, no release
+# PR. Every component derives its version from the tag it was built at (the
+# server via GoReleaser's ldflags, the Go SDK because a module's version simply
+# IS its tag, @wavehouse/sdk because publish-npm.yml stamps package.json from
+# the tag before publishing). The `main` ruleset forbids direct pushes anyway,
+# so a bump commit would need its own reviewed PR before every release.
+#
+# scripts/release.sh holds the preflight checks — on main, clean tree, synced
+# with origin, tag free on both sides, CI green on this exact commit — and
+# prints what will be published before prompting. DRY_RUN=1 stops after the
+# plan. Full walkthrough: docs/src/content/docs/development.md §Cutting a release.
+
+# VERSION is `?=`-defaulted to a git-describe string for build stamping, so it
+# is NEVER empty — a forgotten `VERSION=` would reach release.sh as something
+# like `1064a4fe-dirty` and fail with a confusing semver error instead of a
+# usage message. $(origin) is what distinguishes "passed on the command line"
+# from "defaulted above".
+define require_release_version
+@[ "$(origin VERSION)" = "command line" ] || { \
+	printf '$(RED)✗$(RESET) usage: make $@ VERSION=X.Y.Z  (bare semver, no leading v)\n' >&2; exit 1; }
+endef
+
+.PHONY: release-server
+release-server: ## Tag a server release — binaries + container image (VERSION=X.Y.Z)
+	$(require_release_version)
+	@scripts/release.sh server "$(VERSION)"
+
+.PHONY: release-sdk-ts
+release-sdk-ts: ## Tag a TypeScript SDK release — npm (VERSION=X.Y.Z)
+	$(require_release_version)
+	@scripts/release.sh ts "$(VERSION)"
+
+.PHONY: release-sdk-go
+release-sdk-go: ## Tag a Go SDK release — go get (VERSION=X.Y.Z)
+	$(require_release_version)
+	@scripts/release.sh go "$(VERSION)"
 
 ##@ Analysis
 

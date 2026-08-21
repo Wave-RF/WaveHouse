@@ -62,11 +62,16 @@ type Filter struct {
 
 // ResolvedPermissions is the result of evaluating a policy against JWT claims.
 type ResolvedPermissions struct {
-	Allowed             bool
-	AllowColumns        []string
-	DenyColumns         []string
-	WhereClause         string
-	WhereParams         []any
+	Allowed      bool
+	AllowColumns []string
+	DenyColumns  []string
+	WhereClause  string
+	WhereParams  []any
+	// rowFilter is the same row-level-security predicate as WhereClause/WhereParams,
+	// kept in resolved form so the stream path can evaluate it in memory (RowVisible)
+	// while the query path renders it to SQL. Both derive from one resolvePredicates
+	// call in Evaluate, so the two read surfaces can't drift. See rowfilter.go.
+	rowFilter           []resolvedPredicate
 	CheckClauses        map[string]any // column → required value (for inserts)
 	AllowedAggregations []string
 	DeniedAggregations  []string
@@ -189,7 +194,13 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 				return &ResolvedPermissions{Allowed: false}
 			}
 		}
-		clauses, params := resolveFilters(perms.Filter, claims)
+		// Resolve the row-filter once into predicates, then render both read surfaces
+		// from that single source so they can't drift: the query path binds them into
+		// a SQL WHERE here; the stream path evaluates the same predicates in memory
+		// (ResolvedPermissions.RowVisible).
+		preds := resolvePredicates(perms.Filter, claims)
+		resolved.rowFilter = preds
+		clauses, params := predicatesToSQL(preds)
 		if len(clauses) > 0 {
 			resolved.WhereClause = strings.Join(clauses, " AND ")
 			resolved.WhereParams = params
@@ -202,7 +213,17 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		for col, f := range perms.Check {
 			switch {
 			case f.Eq != nil:
-				resolved.CheckClauses[col] = resolveTemplate(*f.Eq, claims)
+				// Deliberate asymmetry with the read path: an unresolvable check claim
+				// still resolves to "" and is auto-injected as the required value (#463).
+				// A placeholder-free value is marked LiteralValue so the check
+				// comparison can accept its numeric reading; a claim-derived value
+				// stays a plain string and keeps strict canonical equality.
+				v, _ := resolveTemplate(*f.Eq, claims)
+				if !claimTemplateRe.MatchString(*f.Eq) {
+					resolved.CheckClauses[col] = LiteralValue(v)
+				} else {
+					resolved.CheckClauses[col] = v
+				}
 			case f.In != nil:
 				// A []any value marks a set-membership check (vs a scalar required
 				// value); ingest enforces "inserted value must be one of these".
@@ -214,68 +235,143 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	return resolved
 }
 
-// resolveFilters converts filter definitions with claim templates into SQL WHERE clauses.
-func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string, []any) {
+// resolvedPredicate is one row-filter comparison with its claim templates already
+// resolved to concrete string values — the shared, render-agnostic form the query
+// path turns into SQL (predicatesToSQL) and the stream path evaluates in memory
+// (RowVisible). Op is one of "=", "!=", ">", "<", "in". Values holds one element
+// for the scalar operators and zero-or-more for "in"; an EMPTY Values matches no
+// rows on either surface — an empty/unresolvable "in" set, or a scalar whose
+// constant was unresolvable (an absent/null claim, a structured value, or one with
+// no canonical form — see resolveTemplate/CanonicalScalar).
+type resolvedPredicate struct {
+	Column string
+	Op     string
+	Values []string
+}
+
+// resolvePredicates resolves each filter's claim templates once into predicates.
+// Both read surfaces derive from this single result so they can't drift; the
+// operator order within a column (=, !=, >, <, in) mirrors the former inline SQL.
+func resolvePredicates(filters map[string]Filter, claims map[string]any) []resolvedPredicate {
+	var preds []resolvedPredicate
+	// An unresolvable constant (ok=false from resolveTemplate) yields a predicate
+	// with NO values, which matches no rows on either surface (#385) — never a
+	// synthesized stand-in that could match some other principal's rows.
+	scalar := func(col, op, tmpl string) resolvedPredicate {
+		v, ok := resolveTemplate(tmpl, claims)
+		if !ok {
+			return resolvedPredicate{Column: col, Op: op}
+		}
+		return resolvedPredicate{Column: col, Op: op, Values: []string{v}}
+	}
+	for col, f := range filters {
+		if f.Eq != nil {
+			preds = append(preds, scalar(col, "=", *f.Eq))
+		}
+		if f.Neq != nil {
+			preds = append(preds, scalar(col, "!=", *f.Neq))
+		}
+		if f.Gt != nil {
+			preds = append(preds, scalar(col, ">", *f.Gt))
+		}
+		if f.Lt != nil {
+			preds = append(preds, scalar(col, "<", *f.Lt))
+		}
+		if f.In != nil {
+			preds = append(preds, resolvedPredicate{col, "in", toStrings(resolveInValues(*f.In, claims))})
+		}
+	}
+	return preds
+}
+
+// predicatesToSQL renders resolved predicates into WHERE clauses and bound params.
+func predicatesToSQL(preds []resolvedPredicate) ([]string, []any) {
 	var clauses []string
 	var params []any
-	for col, f := range filters {
+	for _, p := range preds {
 		// Quote the policy-authored column the same way the query builder quotes
 		// caller columns, so a row-filter on a weird-but-legal column name (dots,
 		// spaces, keywords) is emitted safely.
-		qcol := chsql.QuoteIdent(col)
-		if f.Eq != nil {
-			val := resolveTemplate(*f.Eq, claims)
-			clauses = append(clauses, fmt.Sprintf("%s = ?", qcol))
-			params = append(params, val)
-		}
-		if f.Neq != nil {
-			val := resolveTemplate(*f.Neq, claims)
-			clauses = append(clauses, fmt.Sprintf("%s != ?", qcol))
-			params = append(params, val)
-		}
-		if f.Gt != nil {
-			val := resolveTemplate(*f.Gt, claims)
-			clauses = append(clauses, fmt.Sprintf("%s > ?", qcol))
-			params = append(params, val)
-		}
-		if f.Lt != nil {
-			val := resolveTemplate(*f.Lt, claims)
-			clauses = append(clauses, fmt.Sprintf("%s < ?", qcol))
-			params = append(params, val)
-		}
-		if f.In != nil {
-			vals := resolveInValues(*f.In, claims)
-			if len(vals) == 0 {
+		qcol := chsql.QuoteIdent(p.Column)
+		switch p.Op {
+		case "in":
+			if len(p.Values) == 0 {
 				// An empty/unresolvable set fails closed: a row filter scoped to no
 				// values matches no rows, never widening to all of them (the #224
 				// fail-open). `IN ()` is not valid SQL, so emit a constant false.
 				clauses = append(clauses, "1 = 0")
 			} else {
-				placeholders := strings.TrimSuffix(strings.Repeat("?,", len(vals)), ",")
+				placeholders := strings.TrimSuffix(strings.Repeat("?,", len(p.Values)), ",")
 				clauses = append(clauses, fmt.Sprintf("%s IN (%s)", qcol, placeholders))
-				params = append(params, vals...)
+				for _, v := range p.Values {
+					params = append(params, v)
+				}
 			}
+		default:
+			if len(p.Values) == 0 {
+				// An unresolvable claim fails closed: binding the '' it renders to
+				// would emit a real predicate against the empty string — `col != ''`
+				// or `col > ''` matches essentially every row, erasing the
+				// restriction (#385). Matching the _in branch above, a filter scoped
+				// to a claim the token doesn't carry matches no rows.
+				clauses = append(clauses, "1 = 0")
+				continue
+			}
+			clauses = append(clauses, fmt.Sprintf("%s %s ?", qcol, p.Op))
+			params = append(params, p.Values[0])
 		}
 	}
 	return clauses, params
 }
 
+// resolveFilters converts filter definitions with claim templates into SQL WHERE
+// clauses. Retained as the predicates→SQL composition the query-path tests target.
+func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string, []any) {
+	return predicatesToSQL(resolvePredicates(filters, claims))
+}
+
+// toStrings normalizes resolveInValues' []any (already canonical strings) to the
+// []string a resolvedPredicate carries.
+func toStrings(vals []any) []string {
+	if len(vals) == 0 {
+		return nil
+	}
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = fmt.Sprint(v)
+	}
+	return out
+}
+
 // resolveTemplate resolves {{ jwt.claim.path }} templates against JWT claims.
-// If a claim path cannot be resolved, the template placeholder is replaced with
-// an empty string to prevent "<nil>" from leaking into SQL filters.
-func resolveTemplate(tmpl string, claims map[string]any) string {
-	return claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
+// If a claim path cannot be resolved — absent/null, a structured value (JSON
+// object or array) rather than a scalar, or a numeric literal with no canonical
+// form (see CanonicalScalar) — the placeholder is replaced with an empty string
+// (never "<nil>") and ok is false, so filter callers can fail the predicate
+// closed instead of binding a value the token never carried (#385). A template
+// with no placeholders — including a literal "" — is always ok, and binds
+// exactly as written: canonicalizing a numeric-spelled literal here would
+// silently move read filters on String columns (`_neq: "1.0"` on a version
+// column is a different predicate than `_neq: "1"`); the insert-check
+// comparison instead accepts a literal's numeric reading at compare time
+// (CanonicalNumericLiteral).
+func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
+	ok := true
+	resolved := claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
 		sub := claimTemplateRe.FindStringSubmatch(match)
 		if len(sub) < 2 {
+			// Unreachable: claimTemplateRe has exactly one capture group, so a match
+			// always yields group 1. Kept as a fail-closed guard.
+			ok = false
 			return ""
 		}
-		parts := strings.Split(sub[1], ".")
-		val := navigateClaims(claims, parts)
-		if val == nil {
-			return ""
+		s, bindable := CanonicalScalar(navigateClaims(claims, strings.Split(sub[1], ".")))
+		if !bindable {
+			ok = false
 		}
-		return fmt.Sprint(val)
+		return s
 	})
+	return resolved, ok
 }
 
 // resolveInValues resolves a templated _in value into the set of bound values
@@ -283,25 +379,42 @@ func resolveTemplate(tmpl string, claims map[string]any) string {
 // reference and that claim is a JSON array, every element becomes one value —
 // the multi-tenant case, where a token's tenant_ids list scopes the predicate.
 // A scalar claim (or any template with surrounding text) yields a single value,
-// matching resolveTemplate. Elements are stringified like the other operators so
-// policy filters stay uniformly string-valued. Returns nil when the claim is
-// absent so the caller can fail the predicate closed.
+// matching resolveTemplate. Every bound value routes through CanonicalScalar,
+// so elements follow the same rule as the top-level claim: one structured,
+// null, or canonical-form-less element fails the WHOLE set closed (nil) rather
+// than binding a "map[…]"/"<nil>" rendering no row legitimately matches.
+// Returns nil likewise when the claim itself is absent, a JSON object, or has
+// no canonical form, so the caller can fail the predicate closed.
 func resolveInValues(tmpl string, claims map[string]any) []any {
 	if m := wholeClaimRe.FindStringSubmatch(strings.TrimSpace(tmpl)); m != nil {
 		switch v := navigateClaims(claims, strings.Split(m[1], ".")).(type) {
-		case nil:
-			return nil
 		case []any:
 			out := make([]any, 0, len(v))
 			for _, e := range v {
-				out = append(out, fmt.Sprint(e))
+				s, ok := CanonicalScalar(e)
+				if !ok {
+					return nil
+				}
+				out = append(out, s)
 			}
 			return out
 		default:
-			return []any{fmt.Sprint(v)}
+			// Everything CanonicalScalar rejects — an absent/null claim, a
+			// JSON-object claim (never a membership set), a number with no
+			// canonical form — fails closed rather than bind as a one-element set.
+			if s, ok := CanonicalScalar(v); ok {
+				return []any{s}
+			}
+			return nil
 		}
 	}
-	return []any{resolveTemplate(tmpl, claims)}
+	if v, ok := resolveTemplate(tmpl, claims); ok {
+		return []any{v}
+	}
+	// A template with surrounding text whose claim is unresolvable also yields
+	// nil (not a one-element set containing the partial literal), so it fails
+	// closed like the bare-claim case above (#385).
+	return nil
 }
 
 // navigateClaims traverses nested claim maps using dot-separated path parts.
@@ -342,7 +455,7 @@ func (rp *ResolvedPermissions) IsColumnAllowed(col string) bool {
 	// allow list, so a column in BOTH is denied. The order of the two loops is
 	// cosmetic — the result is the conjunction "in allow AND not in deny" either
 	// way; what would be unsafe is allow-WINS (returning true before consulting
-	// deny), which we never do. See access-control.md "deny_columns always wins".
+	// deny), which we never do. See access-control.mdx "deny_columns always wins".
 	//
 	// "*" carries no special meaning here: in a query it is a literal column name,
 	// decided by these same rules (and gated by schema membership in the builder,
@@ -478,6 +591,48 @@ func Validate(p *Policy) error {
 	return nil
 }
 
+// malformedTemplate reports the first `{{ … }}` fragment of v that resolveTemplate
+// would NOT recognize as a claim template — a path outside the [a-zA-Z0-9_.]
+// grammar (a hyphen, a namespaced OIDC URL), a wrong or absent `jwt.` prefix,
+// indexing, or an unterminated `{{`. resolveTemplate binds such a fragment as
+// literal text, which is a fail-open on the filter path (`_neq`/`_lt` match ~every
+// row) and silent row corruption on the check path, so validateRolePerms rejects
+// it at write time — Store.Put, i.e. bootstrap-file adoption or an admin PUT; a
+// policy already in KV is not re-validated when a node loads it (#461). A
+// well-formed template — with or without surrounding literal
+// text, e.g. "acct-{{ jwt.org_id }}" — returns ("", false).
+func malformedTemplate(v string) (string, bool) {
+	// Strip every well-formed template; a surviving "{{" is one the resolver
+	// would leave as a literal instead of interpolating — except when stripping
+	// itself splices one from the fragments around a well-formed template
+	// ("{{{ jwt.a }}{" strips to "{{"), a rare over-rejection that errs
+	// fail-closed at write time, never at query time.
+	stripped := claimTemplateRe.ReplaceAllString(v, "")
+	i := strings.Index(stripped, "{{")
+	if i < 0 {
+		return "", false
+	}
+	frag := stripped[i:]
+	if end := strings.Index(frag, "}}"); end >= 0 {
+		frag = frag[:end+2]
+	}
+	return frag, true
+}
+
+// rejectMalformedTemplates fails a policy at write time if any operator value in
+// f carries a claim template the resolver would not interpolate (malformedTemplate).
+func rejectMalformedTemplates(table, op, role, kind, col string, f Filter) error {
+	for _, v := range []*string{f.Eq, f.Neq, f.Gt, f.Lt, f.In} {
+		if v == nil {
+			continue
+		}
+		if frag, bad := malformedTemplate(*v); bad {
+			return fmt.Errorf("table %q, op %q, role %q: %s column %q references an unrecognized claim template %q — claim paths may contain only letters, digits, '_' and '.'; flatten hyphenated or namespaced (OIDC URL) claims at the identity provider", table, op, role, kind, col, frag)
+		}
+	}
+	return nil
+}
+
 func validateRolePerms(table, op, role string, perms RolePermissions) error {
 	if strings.TrimSpace(role) == "" {
 		return fmt.Errorf("table %q, op %q: empty role name is not allowed", table, op)
@@ -498,12 +653,16 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 	// query time, so a '?' in one would shift clickhouse-go's positional value
 	// binding. Refuse such a policy at write time, mirroring the query builder's
 	// chsql.BindUnsafe guard on caller-supplied columns.
-	for col := range perms.Filter {
+	for col, f := range perms.Filter {
 		if chsql.BindUnsafe(col) {
 			return fmt.Errorf("table %q, op %q, role %q: filter column %q contains '?' (unsupported)", table, op, role, col)
 		}
-		// The filter path enforces every operator (_eq/_neq/_gt/_lt/_in), so none is
-		// rejected here — only the bind-unsafe column name above.
+		// The filter path enforces every operator (_eq/_neq/_gt/_lt/_in), so no
+		// operator is rejected here. A malformed claim template IS rejected: the
+		// resolver would bind it as a literal, a fail-open for _neq/_lt (#385/#457).
+		if err := rejectMalformedTemplates(table, op, role, "filter", col, f); err != nil {
+			return err
+		}
 	}
 	for col, f := range perms.Check {
 		if chsql.BindUnsafe(col) {
@@ -511,17 +670,23 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 		}
 		// The check/insert path honors only _eq (a required value) and _in (a
 		// required set); the comparison operators have no insert-time semantics and
-		// no auto-inject, so reject them loudly at config load (#224).
+		// no auto-inject, so reject them loudly at write time (#224).
 		if f.Neq != nil || f.Gt != nil || f.Lt != nil {
 			return fmt.Errorf("table %q, op %q, role %q: check column %q uses _neq/_gt/_lt, which check does not honor (use _eq or _in)", table, op, role, col)
 		}
 		// _eq and _in are both honored, but they carry different required-value
 		// semantics (a single value vs. set membership) and Evaluate resolves only
-		// one — _eq wins, silently dropping _in. Reject the ambiguous pair at config
-		// load rather than enforce an arbitrary branch (the same accept-but-ignore
+		// one — _eq wins, silently dropping _in. Reject the ambiguous pair at write
+		// time rather than enforce an arbitrary branch (the same accept-but-ignore
 		// gap #224 closes).
 		if f.Eq != nil && f.In != nil {
 			return fmt.Errorf("table %q, op %q, role %q: check column %q sets both _eq and _in; use exactly one", table, op, role, col)
+		}
+		// A malformed claim template on the check path is rejected too: the resolver
+		// would bind the literal `{{…}}` text as the required value and stamp it into
+		// every auto-injected row (#385/#457; the required-value question is #463).
+		if err := rejectMalformedTemplates(table, op, role, "check", col, f); err != nil {
+			return err
 		}
 	}
 	return nil

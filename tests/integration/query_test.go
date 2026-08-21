@@ -19,7 +19,7 @@ import (
 )
 
 // TestQuery_MutationsReturnEmptyArray pins the response-shape contract for
-// non-insert mutations through `/v1/admin/query`: HTTP 200 with body `[]`,
+// non-insert mutations through `/v1/ops/query`: HTTP 200 with body `[]`,
 // never HTTP 500 or `null`. The endpoint proxies SQL to ClickHouse's HTTP
 // interface, which returns no body for mutations; WaveHouse normalises that
 // to the JSON empty-array shape callers can do `result.length` on.
@@ -33,7 +33,7 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 	tests := []struct {
 		name        string
 		rowIDs      []string                                                          // IDs to seed via /v1/ingest?table={table} before the mutation
-		mutationSQL func(table string) string                                         // SQL to POST to /v1/admin/query
+		mutationSQL func(table string) string                                         // SQL to POST to /v1/ops/query
 		postCheck   func(t *testing.T, ctx context.Context, e *testEnv, table string) // verify the mutation actually ran
 	}{
 		{
@@ -54,14 +54,14 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 		},
 		{
 			// Predicate-driven DELETE — the canonical example of why
-			// non-insert mutations route through /v1/admin/query rather
+			// non-insert mutations route through /v1/ops/query rather
 			// than the policy-authorized ingest path: we can't prove a
 			// WHERE predicate matches only rows the caller is allowed
 			// to touch. ClickHouse lightweight DELETE marks matching
 			// rows invisible synchronously, so the post-check can poll
 			// for the row to disappear.
 			//
-			// /v1/admin/query proxies to ClickHouse's HTTP interface
+			// /v1/ops/query proxies to ClickHouse's HTTP interface
 			// (named-param syntax, not positional `?`), so the dropID
 			// is inlined into the SQL literal — test-controlled, safe.
 			name:   "DELETE removes only the targeted row",
@@ -86,7 +86,7 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 					}
 					return kept == 1 && dropped == 0
 				}, 30*time.Second, 500*time.Millisecond,
-					"DELETE through /v1/admin/query must mutate only the targeted row")
+					"DELETE through /v1/ops/query must mutate only the targeted row")
 			},
 		},
 	}
@@ -134,7 +134,7 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 
 			mutationBody, _ := json.Marshal(map[string]string{"sql": tt.mutationSQL(table)})
 			qResp, err := http.Post(
-				e.server.URL+"/v1/admin/query",
+				e.server.URL+"/v1/ops/query",
 				"application/json",
 				bytes.NewReader(mutationBody),
 			)
@@ -144,9 +144,9 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 			respBytes, err := io.ReadAll(qResp.Body)
 			require.NoError(t, err)
 			require.Equal(t, http.StatusOK, qResp.StatusCode,
-				"mutations through /v1/admin/query must return 200, not 500; body: %s", respBytes)
+				"mutations through /v1/ops/query must return 200, not 500; body: %s", respBytes)
 			assert.JSONEq(t, "[]", string(respBytes),
-				"mutations through /v1/admin/query must marshal to [] (empty result set), not null or {}")
+				"mutations through /v1/ops/query must marshal to [] (empty result set), not null or {}")
 
 			postCtx, postCancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer postCancel()

@@ -10,6 +10,8 @@
 // degrades the panel to slower, not blank. Server-side this renders a stable
 // skeleton ("—" counts, fixed-height feed) so the page is layout-complete
 // without JS and degrades to that skeleton if the demo is unreachable.
+import ExternalIcon from "./ExternalIcon.astro";
+
 const REPO_URL = "https://github.com/Wave-RF/WaveHouse";
 const DEMO_HOST = "stats.wavehouse.dev";
 ---
@@ -105,7 +107,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
       target="_blank"
       rel="noopener noreferrer"
       data-ph-demo="full_demo"
-    >Full demo ↗</a>
+    >Full demo <ExternalIcon /></a>
   </div>
   <p class="wh-live__byline">
     Queried in your browser by <code>@wavehouse/sdk</code> — one cached <code>pipe()</code>
@@ -163,6 +165,11 @@ const DEMO_HOST = "stats.wavehouse.dev";
 
   const MAX_ROWS = 6;
   const fmtInt = (n: number) => Number(n).toLocaleString("en-US");
+
+  // window.posthog comes from the head snippet (PostHog.astro), never an
+  // import, so it's typed at the call site.
+  const posthog = () =>
+    (window as { posthog?: { capture: (event: string, props?: object) => void } }).posthog;
 
   // Backfill rows come back RFC3339 from ClickHouse, but live SSE rows carry
   // the producer's payload as ingested — a zone-less ClickHouse-style
@@ -421,11 +428,20 @@ const DEMO_HOST = "stats.wavehouse.dev";
       return true;
     }
 
+    // Once per mount, on connect rather than on the first row, and named for
+    // what it measures — the demo backend answered — not reader engagement:
+    // the stream is subscribed on load, below the fold or not. A reconnect
+    // isn't a second visit either.
+    let connected = false;
     function setStream(state: string) {
       const live = state === "live";
       const bad = state === "error" || state === "closed";
       stream.dataset.state = live ? "live" : bad ? "down" : "connecting";
       streamLabel.textContent = live ? "live" : bad ? "offline" : `${state}…`;
+      if (live && !connected) {
+        connected = true;
+        posthog()?.capture("live_demo_connected");
+      }
     }
 
     // Live tail first, so an event landing while the backfill is in flight
@@ -506,10 +522,10 @@ const DEMO_HOST = "stats.wavehouse.dev";
     // --- CTA analytics, same shape as the hero buttons' tracking.
     root.querySelectorAll<HTMLAnchorElement>("[data-ph-demo]").forEach((el) => {
       el.addEventListener("click", () => {
-        (window as { posthog?: { capture: (e: string, p: object) => void } }).posthog?.capture(
-          "live_demo_cta_clicked",
-          { target: el.getAttribute("data-ph-demo"), href: el.href },
-        );
+        posthog()?.capture("live_demo_cta_clicked", {
+          target: el.getAttribute("data-ph-demo"),
+          href: el.href,
+        });
       });
     });
   }
@@ -789,7 +805,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
     transition: background 0.15s ease, transform 0.15s ease;
   }
   .wh-live__star:hover {
-    background: var(--wh-accent-hi);
+    background: var(--wh-accent-hover);
     transform: translateY(-1px);
   }
   .wh-live__cta-text { color: var(--wh-ink-muted); }

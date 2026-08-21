@@ -161,10 +161,11 @@ func TestExecuteCHQuery_SelectRoutesToQuery(t *testing.T) {
 }
 
 // TestExecuteCHQuery_TransformsClickHouseTypes pins transformRow's contract
-// at the unit level: UUIDs become canonical strings, time.Time becomes
-// RFC3339Nano UTC, and other scalars pass through unchanged. The integration
-// suite exercises the same path against a real ClickHouse, but this unit
-// test catches regressions in the type-conversion branches without
+// at the unit level: UUIDs become canonical strings, time.Time — including the
+// *time.Time a Nullable(DateTime…) column scans as — becomes RFC3339Nano UTC
+// (NULL stays JSON null), and other scalars pass through unchanged. The
+// integration suite exercises the same path against a real ClickHouse, but
+// this unit test catches regressions in the type-conversion branches without
 // standing up testcontainers.
 func TestExecuteCHQuery_TransformsClickHouseTypes(t *testing.T) {
 	t.Parallel()
@@ -174,16 +175,20 @@ func TestExecuteCHQuery_TransformsClickHouseTypes(t *testing.T) {
 		columns: []chainColumnType{
 			{name: "id", scanType: reflect.TypeFor[uuid.UUID]()},
 			{name: "received_at", scanType: reflect.TypeFor[time.Time]()},
+			{name: "updated_at", scanType: reflect.TypeFor[*time.Time]()},
+			{name: "deleted_at", scanType: reflect.TypeFor[*time.Time]()},
 			{name: "n", scanType: reflect.TypeFor[int64]()},
 		},
-		values: []any{id, ts, int64(42)},
+		values: []any{id, ts, &ts, (*time.Time)(nil), int64(42)},
 	}}
 
-	rows, err := executeCHQuery(context.Background(), conn, "SELECT id, received_at, n FROM t", nil)
+	rows, err := executeCHQuery(context.Background(), conn, "SELECT id, received_at, updated_at, deleted_at, n FROM t", nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, id.String(), rows[0]["id"], "UUID must be stringified")
 	assert.Equal(t, ts.UTC().Format(time.RFC3339Nano), rows[0]["received_at"], "time must be RFC3339Nano in UTC")
+	assert.Equal(t, ts.UTC().Format(time.RFC3339Nano), rows[0]["updated_at"], "nullable time must be RFC3339Nano in UTC")
+	assert.Nil(t, rows[0]["deleted_at"], "NULL nullable time must stay nil")
 	assert.Equal(t, int64(42), rows[0]["n"], "scalar must pass through unchanged")
 }
 

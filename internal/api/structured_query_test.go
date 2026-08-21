@@ -29,8 +29,8 @@ func structuredQueryRequest(t *testing.T, table string, sq query.StructuredQuery
 	return httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query?table="+url.QueryEscape(table), bytes.NewReader(body))
 }
 
-func newStructuredQueryHandler() *StructuredQueryHandler {
-	reg := discovery.NewSchemaRegistryFromMap([]*discovery.TableSchema{
+func newStructuredQueryHandler(t testing.TB) *StructuredQueryHandler {
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
 		{
 			Name: "clicks",
 			Columns: []discovery.Column{
@@ -76,7 +76,7 @@ func TestStructuredQuery_MissingTable(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newStructuredQueryHandler()
+			h := newStructuredQueryHandler(t)
 
 			body, err := json.Marshal(query.StructuredQuery{Columns: []string{"page"}})
 			require.NoError(t, err)
@@ -100,7 +100,7 @@ func TestStructuredQuery_MissingTable(t *testing.T) {
 
 func TestStructuredQuery_UnknownTable(t *testing.T) {
 	t.Parallel()
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	r := structuredQueryRequest(t, "nope", query.StructuredQuery{Columns: []string{"x"}})
 	w := httptest.NewRecorder()
 	h.Handle(w, r)
@@ -112,7 +112,7 @@ func TestStructuredQuery_UnknownTable(t *testing.T) {
 
 func TestStructuredQuery_InvalidJSON(t *testing.T) {
 	t.Parallel()
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query?table=clicks", bytes.NewReader([]byte(`{bad}`)))
 	w := httptest.NewRecorder()
 	h.Handle(w, r)
@@ -131,7 +131,7 @@ func TestStructuredQuery_RequestBodyCap(t *testing.T) {
 	t.Parallel()
 
 	const testCap = 64
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	h.maxRequestBytes = testCap
 
 	// A valid query whose JSON exceeds the cap — a big `in`-list, the exact
@@ -163,7 +163,7 @@ func TestStructuredQuery_PolicyForbidden(t *testing.T) {
 			},
 		},
 	}
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	h.PolicyStore = policy.NewMemoryStore(p)
 
 	sq := query.StructuredQuery{Columns: []string{"page"}}
@@ -191,7 +191,7 @@ func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
 			},
 		},
 	}
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	h.PolicyStore = policy.NewMemoryStore(p)
 
 	// Request "count" column which is not in AllowColumns.
@@ -224,7 +224,7 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 			},
 		},
 	}
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	h.PolicyStore = policy.NewMemoryStore(p)
 
 	sq := query.StructuredQuery{
@@ -248,7 +248,7 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 
 func TestStructuredQuery_NoPolicyAllowsAll(t *testing.T) {
 	t.Parallel()
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	// No PolicyStore — all queries should be allowed (past policy).
 	sq := query.StructuredQuery{Columns: []string{"page"}}
 	r := structuredQueryRequest(t, "clicks", sq)
@@ -263,25 +263,28 @@ func TestStructuredQuery_NoPolicyAllowsAll(t *testing.T) {
 
 // ─── #223: column allowlist is a hard cap on every read, end-to-end ──────────
 
-// sqlCapturingConn records the SQL the handler hands to ClickHouse so tests can
-// assert the generated projection without a live database. Query returns an
-// empty result set (the handler marshals it to []); these tests assert on the
-// SQL string and HTTP status, not on rows. lastSQL stays empty when the request
-// is rejected before execution — which is itself the assertion for denied paths.
+// sqlCapturingConn records the SQL (and bound args) the handler hands to
+// ClickHouse so tests can assert the generated query without a live database.
+// Query returns an empty result set (the handler marshals it to []); these
+// tests assert on the SQL string, args, and HTTP status, not on rows. lastSQL
+// stays empty when the request is rejected before execution — which is itself
+// the assertion for denied paths.
 type sqlCapturingConn struct {
 	driver.Conn
-	lastSQL string
+	lastSQL  string
+	lastArgs []any
 }
 
-func (c *sqlCapturingConn) Query(_ context.Context, sql string, _ ...any) (driver.Rows, error) {
+func (c *sqlCapturingConn) Query(_ context.Context, sql string, args ...any) (driver.Rows, error) {
 	c.lastSQL = sql
+	c.lastArgs = args
 	return &chainEmptyRows{}, nil
 }
 
 // sensitiveSchema has a column (payload, user_id) that restrictive policies hide.
 func newCapturingHandler(t *testing.T, conn driver.Conn, p *policy.Policy) *StructuredQueryHandler {
 	t.Helper()
-	reg := discovery.NewSchemaRegistryFromMap([]*discovery.TableSchema{
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
 		{
 			Name: "clicks",
 			Columns: []discovery.Column{
@@ -327,6 +330,36 @@ func TestStructuredQuery_SelectAll_RestrictedRoleGetsAllowedProjection(t *testin
 	assert.NotContains(t, conn.lastSQL, "*")
 	assert.NotContains(t, conn.lastSQL, "payload")
 	assert.NotContains(t, conn.lastSQL, "user_id")
+}
+
+// TestStructuredQuery_RowFilterAndMaxRows_ReachClickHouse pins the handler seam
+// #322 rewired: the role's row-filter predicate and max_rows cap now reach
+// ClickHouse only through Build itself — the handler no longer post-edits the
+// built SQL — so if perms ever stopped flowing into Build, nothing downstream
+// would re-add them. Asserts the predicate leads both the WHERE clause and the
+// bound args (policy value before the caller's filter value) and that the
+// role's cap replaces the default LIMIT.
+func TestStructuredQuery_RowFilterAndMaxRows_ReachClickHouse(t *testing.T) {
+	t.Parallel()
+	eq := "{{ jwt.org_id }}"
+	conn := &sqlCapturingConn{}
+	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{
+		Filter:  map[string]policy.Filter{"user_id": {Eq: &eq}},
+		MaxRows: 100,
+	}))
+
+	r := structuredQueryRequest(t, "clicks", query.StructuredQuery{
+		Columns: []string{"page"},
+		Filters: []query.Filter{{Column: "page", Op: "eq", Value: "/home"}},
+	})
+	ctx := auth.WithClaims(auth.WithRole(r.Context(), "viewer"), jwt.MapClaims{"org_id": "org-1"})
+
+	w := httptest.NewRecorder()
+	h.Handle(w, r.WithContext(ctx))
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, "SELECT `page` FROM `clicks` WHERE (`user_id` = ?) AND `page` = ? LIMIT 100", conn.lastSQL)
+	assert.Equal(t, []any{"org-1", "/home"}, conn.lastArgs)
 }
 
 // TestStructuredQuery_OmittedColumns_ReturnsNothing pins safe-by-default: a request

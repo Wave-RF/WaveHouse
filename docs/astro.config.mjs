@@ -12,6 +12,7 @@ import starlightLinksValidator from "starlight-links-validator";
 import { mermaidTheme } from "./src/config/mermaid-theme.mjs";
 import { sidebar } from "./src/config/sidebar.ts";
 import { diagramPng } from "./src/integrations/diagram-png.mjs";
+import { rehypeTrademarks } from "./src/plugins/rehype-trademarks.ts";
 
 // Color-agnostic Mermaid plugin (astro-themed-mermaid pkg) + WaveHouse's palette
 // (src/config/mermaid-theme). Diagram colors are defined once in global.css
@@ -31,7 +32,10 @@ export default defineConfig({
     // mermaid.rehypeMermaid = rehype-mermaid behind the package's per-diagram
     // render cache (node_modules/.cache/astro-themed-mermaid/) — rebuilds that
     // don't change a diagram skip Chromium entirely (~6.5s → ~3.7s per build).
-    rehypePlugins: [mermaid.rehypeMermaid, rehypeKatex],
+    // rehypeTrademarks runs last on purpose: it skips the SVG and .katex
+    // subtrees the two plugins before it produce, so it has to see them already
+    // rendered rather than as ```mermaid fences and $math$.
+    rehypePlugins: [mermaid.rehypeMermaid, rehypeKatex, rehypeTrademarks],
   },
   integrations: [
     starlight({

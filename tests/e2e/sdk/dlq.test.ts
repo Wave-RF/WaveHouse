@@ -47,9 +47,10 @@ describe("Dead Letter Queue (DLQ) & Failures", () => {
     // edge under CI load. The structural fix is a lower e2e maxWait (deferred
     // config PR), which drops the 5s-timer dependency; this budget can shrink
     // back once that lands.
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const chRows = await chQuery(
         `SELECT count() as cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
+        signal,
       );
       return Number((chRows[0] as any).cnt) === 9;
     }, 10_000);

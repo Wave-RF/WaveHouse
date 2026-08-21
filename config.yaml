@@ -102,3 +102,10 @@ dlq:
 # directory is a seed, not authoritative storage.
 pipes:
   dir: ""
+
+# Hot-reloadable settings directory: roles.json, policies.json, pipes.json,
+# config.json. Check it with `wavehouse validate` (which also honors
+# WH_SETTINGS_DIR). Server-side loading/reload is landing incrementally; empty
+# leaves it off.
+settings:
+  dir: ""

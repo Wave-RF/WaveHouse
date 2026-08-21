@@ -3,9 +3,7 @@ title: "TypeScript SDK Reference & CLI"
 description: "Error codes, AbortController, the full API tree, the codegen CLI, and E2E testing with @wavehouse/sdk."
 ---
 
-Cross-cutting reference for `@wavehouse/sdk`: cancellation, the error model
-behind every [`Result<T>`](/sdk#result-type), the complete API tree at a
-glance, and the tooling that ships in the package.
+Cross-cutting reference for `@wavehouse/sdk`: cancellation, the error model behind every [`Result<T>`](/sdk#result-type), the complete API tree at a glance, and the tooling that ships in the package.
 
 ## AbortController Support
 
@@ -25,22 +23,53 @@ if (error?.code === 'ABORTED') {
 
 ## Error Handling
 
-The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no `EventSource` (see [Runtime support](/sdk#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and surfaces on a stream as `SSE_CONNECT_ERROR`.
+The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no global `fetch` and no `options.fetch` (see [Runtime support](/sdk#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and on a stream is reported as a retryable `SSE_AUTH_ERROR`. One more exception escapes an SDK call synchronously, though it is yours rather than ours: your own `status` handler throwing on the first `.subscribe()` or `.liveQuery()`, described under *If your own callback throws* below.
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
 | 400 | `HTTP_400` | No | Bad request (validation, missing fields) |
-| 401 | `HTTP_401` | No | Present-but-invalid or expired JWT (a *missing* token is evaluated as `default_role`, so it succeeds or is denied with 403 — never 401) |
+| 401 | `HTTP_401` | No | On REST, a present-but-invalid or expired JWT that a gate then denied. **WaveHouse itself** never returns `401` for a *missing* token — that resolves to `default_role`, and a denial is `403`. On a stream it is always from something in front, since `/v1/stream` is ungated |
 | 403 | `HTTP_403` | No | Insufficient permissions |
 | 404 | `HTTP_404` | No | Table or pipe not found |
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
 | 503 | `HTTP_503` | Yes | Service unavailable (auto-retries with `Retry-After`) |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `AbortSignal` |
-| 0 | `SSE_CONNECT_ERROR` | Yes | Stream failed to connect (e.g. a non-absolute `baseURL`) |
-| 0 | `SSE_ERROR` | Yes | Stream connection error |
+| 0 | `SSE_CONNECT_ERROR` | No | Stream could not be started (e.g. a non-absolute `baseURL`) |
+| 0 | `SSE_AUTH_ERROR` | Yes | The `auth` callback threw while minting a token for an attempt |
+| 0 | `SSE_NETWORK_ERROR` | Yes | Stream request failed to reach the server |
+| 0 | `SSE_READ_ERROR` | Yes | Stream was interrupted mid-read |
+| 0 | `SSE_PARSE_ERROR` | Yes (usually nothing to re-dial) | Unparseable frame — reported and skipped, the connection continues. The buffer cap reports here too, then ends the connection (see below) |
+| *(response status)* | `SSE_NO_STREAM_BODY` | No | A configured `options.fetch` returned a response with no readable body |
+| *(0 in a browser, the 3xx in Node)* | `SSE_REDIRECT` | No | The stream endpoint redirected; point `baseURL` at the final URL |
+| *(response status)* | `SSE_BAD_CONTENT_TYPE` | No | A `200` that wasn't `text/event-stream` — usually a gateway's login page |
+| *(response status)* | `HTTP_4xx` / `HTTP_5xx` | Per status | The stream request was rejected — same codes as REST |
 
-The two `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them. Their `retryable: true` is advisory: unlike the REST codes above, the SDK never re-dials a stream itself. After the connection is open, drops surface through the `status` callback (`reconnecting` → `live`, or `closed`) while the native `EventSource` re-dials on its own; `SSE_ERROR` is a defensive fallback for a transport left in an unexpected state. A failure *before* the `EventSource` is constructed — a non-absolute `baseURL`, a rejecting `auth` callback — is terminal (`SSE_CONNECT_ERROR`), so fix the cause and start a new stream.
+The `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them. Both transports act on `retryable`; what differs is when the error reaches you. All four combinations, with the two exceptions noted under the table:
+
+| | Retryable | Not retryable |
+|---|---|---|
+| **REST** | retried up to `maxRetries`, then returned — the flag records what was already tried | returned on the first attempt, no backoff (every `4xx`) |
+| **Stream** | reported *before* the transport re-dials, which it does indefinitely | reported once; the stream closes and stays closed |
+
+On REST, `ABORTED` is the one error raised *by* a backoff rather than by an attempt: aborting during a retry sleep ends the call immediately with `ABORTED` instead of waiting the delay out. On a stream, `SSE_PARSE_ERROR` is flagged retryable, but an ordinary bad frame is skipped in place — no re-dial, no close. The one that *does* re-dial is the buffer-cap overflow described below.
+
+On a stream, a retryable failure is re-dialed on a jittered exponential backoff (capped at 30s, and reset only once a connection has held for a few seconds — so a server that accepts and instantly closes still backs off), with the `status` callback moving `reconnecting` → `live`.
+
+Rejected requests surface the real status and message rather than an opaque connection failure — in a browser going cross-origin, though, only when the rejection passes CORS and the gateway answered whatever preflight the request triggers — `Authorization`, configured `headers`, or `Last-Event-ID` once the stream resumes; a rejected preflight or a response without `Access-Control-Allow-Origin` reaches you as a retryable network error instead — indistinguishable from a drop, and retried. Any `4xx` ends the stream, since repeating the request won't usually talk whatever rejected it round — the exception being a `429` or `408` from a fronting rate limiter, which is transient even though the stream still ends, so catch it and open a new one after a delay ([#469](https://github.com/Wave-RF/WaveHouse/issues/469)). Note that **WaveHouse never rejects a stream for authentication**: `/v1/stream` is ungated, so an expired or missing token resolves to `default_role` and you get a `200` with a filtered view, not a `401`. The one 4xx it raises itself is `400` for a missing or empty `table`, and only on the stream route: a `404` or `405` means the request never reached that route, most often a `baseURL` path prefix your proxy didn't strip. Any other 4xx comes from something in front — an auth gateway, a proxy. That silent-downgrade behavior is exactly why `auth` is re-read on every connection attempt, and [#239](https://github.com/Wave-RF/WaveHouse/issues/239) tracks enforcing expiry server-side. `SSE_CONNECT_ERROR` and `SSE_NO_STREAM_BODY` are configuration faults, so fix the cause and start a new stream.
+
+`SSE_PARSE_ERROR` is the one code that isn't a connection outcome: it's reported and *skipped*, and the connection keeps reading — one bad frame shouldn't cost you the stream. For an ordinary bad frame its `retryable: true` is therefore vestigial — nothing is re-dialed. Two exceptions, one to each half of that reported-and-skipped rule. A frame whose `data` isn't valid JSON is skipped but never *reported* — `console.warn` and dropped, with no `error` callback. The parser's 16 MiB buffer cap is reported but not *skipped*: an overflow terminates the parser, so the transport stops reading and reconnects rather than feeding it again.
+
+**If your own callback throws.** For anything delivered *through the transport* — `next`, `status`, or `error` — a throw never ends the stream: it is isolated and logged to the console, and never routed to your `error` callback, so a handler that swallows its own failures fails silently.
+
+**Wrap your handler bodies in your own `try`/`catch`.** That isolation is a backstop against one bad callback killing the connection, not a promise that throwing is harmless. Four paths sit outside it, all tracked in [#473](https://github.com/Wave-RF/WaveHouse/issues/473):
+
+- **The first `status` call** — `.subscribe()`'s, and the one `liveQuery()` makes internally on your behalf. It fires synchronously with the current state before the transport is involved, and is unguarded, so the throw propagates back out of the call *you* made, unlogged. Out of `.subscribe()` that leaves your subscriber registered with no unsubscribe function returned. Out of `liveQuery()` it is worse: you get no handle at all, so there is nothing to `.close()`; the backfill never starts, so `initial()` is never called; and the stream opened a moment earlier keeps running — connected, reconnecting on its own — with nothing referencing it. Because the backfill never ran, the buffering phase also never ends — your `next()` is never called at all, and every event the stream receives is appended to a buffer you have no way to reach. Passing `opts.signal` is the only way to stop it. Since this call always happens, it is the *first* thing a throwing `status` handler does.
+- **Delivery to other consumers stops at the one that threw** — later subscribers and any concurrent `for await`. For the iterator the event is *dropped*, not queued, because the fan-out runs before the event is handed to a waiter or buffered. And if the throw lands on the terminal `closed` status, the iterator is never marked done either, so a `for await` waits forever against a dead stream until something calls `.close()`. Order-dependent and invisible.
+- **A throwing `status` handler subscribed before `.connected()`** makes that promise reject with its timeout error against a stream that is already `live`, because the throw aborts the fan-out before `connected()`'s internal watcher is reached.
+- **Inside `liveQuery()`**, a throw from `initial()`, or from `next()` during the backfill flush, is absorbed by the backfill's own error path, with no log and no signal. The cost differs: `initial()` throws *before* the flush starts, so every buffered event is lost, while a `next()` throw mid-flush loses only the remainder. Either way, later live events reach `next()` as normal, with a further throw isolated and logged.
+
+`SSE_AUTH_ERROR` is the one caller-side failure that isn't terminal. A rejecting `auth` callback propagates out of a REST call, but on a stream — where `auth` is invoked on every connection attempt rather than once per stream — a token endpoint having a bad minute is treated as transient and retried, rather than tearing down a stream that is otherwise healthy.
 
 ---
 
@@ -60,25 +89,25 @@ createClient<DB>(config) → WaveHouseClient
 │   ├── .selectAll() → QueryBuilder (PromiseLike)
 │   ├── .insert(data) → Promise<Result<InsertResult>>
 │   ├── .insertNDJSON(source) → Promise<Result<InsertResult>>
-│   ├── .schema() → Promise<Result<TableSchema>>
+│   ├── .schema() → Promise<Result<TableSchema>>   (admin)
 │   └── .stream(opts?) → StreamController
 ├── .pipe(name, params?) → PipeRef (PromiseLike)
-│   ├── .fetch(opts?) → Promise<Result<Row[]>>
+│   ├── .fetch(opts?) → Promise<Result<Row[]>>   // { signal } only — no limit
 │   └── .stream(opts?) → StreamController
 ├── .pipes (admin)
 │   ├── .list() → Promise<Result<Pipe[]>>
 │   ├── .get(name) → Promise<Result<Pipe>>
 │   ├── .set(name, def) → Promise<Result<void>>
 │   └── .delete(name) → Promise<Result<void>>
-├── .sql(query, opts?) → Promise<Result<Row[]>>
-├── .schema
+├── .sql(query, opts?) → Promise<Result<Row[]>>   (admin)
+├── .schema (admin)
 │   ├── .list() → Promise<Result<Schemas>>
 │   └── .refresh() → Promise<Result<void>>
 ├── .policy (admin)
 │   ├── .get() → Promise<Result<Policy>>
 │   ├── .set(policy) → Promise<Result<void>>
 │   └── .validate(policy) → Promise<Result<ValidationResult>>
-├── .dlq
+├── .dlq (admin)
 │   ├── .list() → Promise<Result<DLQStats>>
 │   ├── .table(name) → Promise<Result<DLQStats>>
 │   └── .stream() → StreamController  // not yet functional server-side — #197
@@ -87,6 +116,7 @@ createClient<DB>(config) → WaveHouseClient
 
 StreamController (NOT thenable)
 ├── .subscribe({ next, status?, error? }) → unsubscribe()
+├── .connected(timeoutMs?) → Promise<void>
 ├── .close()
 ├── .status → StreamStatus
 └── [Symbol.asyncIterator]() → AsyncIterableIterator<StreamEvent>
@@ -103,7 +133,7 @@ npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-Codegen reads `/v1/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`.
+Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`.
 
 **Options:**
 
@@ -154,6 +184,6 @@ The SDK doubles as the E2E integration test harness. Tests in `tests/e2e/sdk/` e
 make test-e2e
 ```
 
-Test files live in `tests/e2e/sdk/`: `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress` (each `*.test.ts`).
+Test files live in `tests/e2e/sdk/` (each `*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's own `waitForCondition` poll helper rather than a pipeline test.
 
 See [Development Guide — E2E Tests via SDK](/development#e2e-tests-via-sdk) for architecture details and workflow tips.

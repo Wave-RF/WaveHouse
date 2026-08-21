@@ -3,14 +3,7 @@ title: "TypeScript SDK Queries"
 description: "Tables, the chainable query builder, pagination, and raw SQL in @wavehouse/sdk."
 ---
 
-Reading and writing data with `@wavehouse/sdk`: table references, the
-chainable query builder, cursor pagination, and the admin-only raw-SQL
-escape hatch. Every call returns the SDK's
-[`Result<T>`](/sdk#result-type) — nothing throws for anything the server
-returns (see [Error Handling](/sdk/reference#error-handling) for the caller and
-environment errors that do).
-Examples import from `@wavehouse/sdk`; using the CDN instead, import from
-`https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
+Reading and writing data with `@wavehouse/sdk`: table references, the chainable query builder, cursor pagination, and the admin-only raw-SQL escape hatch. Every call returns the SDK's [`Result<T>`](/sdk#result-type) — nothing throws for anything the server returns (see [Error Handling](/sdk/reference#error-handling) for the caller and environment errors that do). Examples import from `@wavehouse/sdk` or `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 
 ## Tables — `wh.from(table)`
 
@@ -62,14 +55,14 @@ await clicks.insertNDJSON('{"page":"/a"}\n{"page":"/b"}\n');
 // From a browser <input type="file"> (a File is a Blob)
 await clicks.insertNDJSON(fileInput.files[0]);
 
-// From a Node file (Node 20+: fs.openAsBlob; or read it to a string)
+// From a Node file (fs.openAsBlob; or read it to a string)
 import { openAsBlob } from 'node:fs';
 await clicks.insertNDJSON(await openAsBlob('events.ndjson'));
 ```
 
 ### `.schema(opts?)`
 
-Fetch the table's column definitions from ClickHouse.
+Fetch the table's column definitions from ClickHouse. `.schema()` hits `/v1/ops/schema`, an **admin-only** endpoint: the caller must pass the admin gate — resolve to the policy admin role or present the non-JWT [operator key](/api#authentication) via [`options.headers`](/sdk#custom-headers) — or this returns `403`.
 
 ```ts
 const { data } = await clicks.schema();
@@ -88,7 +81,7 @@ const { data } = await clicks.select('page', 'button').where('page', '=', '/home
 
 ### `.selectAll()`
 
-Start a query that selects **every column your role is allowed to read** — the explicit form of what a bare `.fetch()` does. Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.); for a column-restricted role the server expands it to exactly that role's allowed columns rather than a bare `SELECT *` (unrestricted/admin roles do get `SELECT *`), and it never bypasses `deny_columns`/`allow_columns`. See [Access control → Column permissions](/access-control#column-permissions).
+Selects **every column your role is allowed to read** — the explicit form of what a bare `.fetch()` does. Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.); for a column-restricted role the server expands it to exactly that role's allowed columns rather than a bare `SELECT *` (unrestricted/admin roles do get `SELECT *`) and never bypasses `deny_columns`/`allow_columns`. See [Access control → Column permissions](/access-control#column-permissions).
 
 ```ts
 const { data } = await clicks.selectAll().where('country', '=', 'US').limit(10);
@@ -151,8 +144,8 @@ clicks.select('page').where('score', '>', 10).where('page', 'like', '/home%')
 | `'<'` | `lt` | Less than |
 | `'<='` | `lte` | Less than or equal |
 | `'in'` | `in` | Value in array |
-| `'like'` | `like` | SQL LIKE pattern |
-| `'not_like'` | `not_like` | SQL NOT LIKE — **client-side only** (live-query / stream filtering); the `/v1/query` backend rejects the token |
+| `'like'` | `like` | SQL LIKE pattern. Case-**sensitive** on `/v1/query`; the client-side filter used by `.stream()` / `.liveQuery()` matches case-**insensitively** |
+| `'not_like'` | `not_like` | SQL NOT LIKE — **client-side only** (live-query / stream filtering); the `/v1/query` backend rejects it |
 
 #### Aggregations
 
@@ -167,15 +160,9 @@ clicks.select('page')
   .aggregate('uniqExact', 'user_id', 'unique_users') // allowlisted fn
 ```
 
-Custom function names pass through `.aggregate(fn, column, alias)` but are
-validated server-side against a fixed allowlist (matched case-insensitively):
-`count`, `sum`, `avg`, `min`, `max`, `countDistinct`, `uniq`, `uniqExact`,
-`any`, `anyLast`, `argMin`, `argMax`, `groupArray`, `median`, `quantile`,
-`stddevPop`, `stddevSamp`, `varPop`, `varSamp`. Anything else is rejected
-with `400 unsupported aggregation function`.
+Custom function names pass through `.aggregate(fn, column, alias)` but are validated server-side against a fixed allowlist (matched case-insensitively): `count`, `sum`, `avg`, `min`, `max`, `countDistinct`, `uniq`, `uniqExact`, `any`, `anyLast`, `argMin`, `argMax`, `groupArray`, `median`, `quantile`, `stddevPop`, `stddevSamp`, `varPop`, `varSamp`. Anything else is rejected with `400 unsupported aggregation function`.
 
-Each aggregation method signature: `(column: string, alias?: string)`.  
-`count()` defaults to `column='*'`, `alias='count'`.
+Each aggregation method signature: `(column: string, alias?: string)`. `count()` defaults to `column='*'`, `alias='count'`.
 
 #### `.groupBy(...columns)`
 
@@ -230,12 +217,14 @@ if (hasMore && next) {
 }
 ```
 
-**Options:**
+**Options** — `RequestOptions`:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `signal` | `AbortSignal` | Cancel the request |
 | `limit` | `number` | Override builder limit for this fetch |
+
+A pipe's `.fetch()` takes the narrower `PipeRequestOptions` instead — see [Pipes](/sdk/pipes#fetchopts).
 
 ### `.stream(opts?)`
 
@@ -263,7 +252,7 @@ Rows decode with JSON numbers as JS `number`s, so an integer cursor column past 
 
 ## Raw SQL — `wh.sql(query, opts?)`
 
-Execute a raw SQL query. `/v1/admin/query` is admin-only: the caller's JWT must resolve to the policy admin role (`admin_role`, `"admin"` by default). A request with no token, or an invalid/expired one, falls back to the `default_role`, and is rejected unless the deployment sets `default_role` to the admin role (permitted, but dev-only).
+Execute a raw SQL query. `/v1/ops/query` is admin-only: the caller must resolve to the policy admin role (`admin_role`, `"admin"` by default). A tokenless request falls back to the `default_role`, so it is rejected with `403` on any policy that doesn't deliberately set `default_role` to the admin role (a loudly-warned dev-only setting); an invalid or expired token is rejected with `401`. The SDK has no first-class option for the server's non-JWT [operator key](/api#authentication) — an operator can send its `X-Operator-Key` header via [`options.headers`](/sdk#custom-headers).
 
 ```ts
 const { data, error } = await wh.sql('SELECT page, count() FROM clicks GROUP BY page LIMIT 10');

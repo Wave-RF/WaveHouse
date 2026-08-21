@@ -22,14 +22,14 @@ describe("resolveURL", () => {
   });
 
   it("preserves a multi-segment prefix", () => {
-    expect(resolveURL("https://example.com/a/b/c", "/v1/admin/pipes").toString()).toBe(
-      "https://example.com/a/b/c/v1/admin/pipes",
+    expect(resolveURL("https://example.com/a/b/c", "/v1/ops/pipes").toString()).toBe(
+      "https://example.com/a/b/c/v1/ops/pipes",
     );
   });
 
   it("accepts a path with or without a leading slash", () => {
-    expect(resolveURL("https://example.com/api", "v1/schema").toString()).toBe(
-      resolveURL("https://example.com/api", "/v1/schema").toString(),
+    expect(resolveURL("https://example.com/api", "v1/ops/schema").toString()).toBe(
+      resolveURL("https://example.com/api", "/v1/ops/schema").toString(),
     );
   });
 
@@ -40,8 +40,8 @@ describe("resolveURL", () => {
   });
 
   it("appends params after the prefix", () => {
-    const url = resolveURL("https://example.com/api", "/v1/dlq/stats", { table: "clicks" });
-    expect(url.toString()).toBe("https://example.com/api/v1/dlq/stats?table=clicks");
+    const url = resolveURL("https://example.com/api", "/v1/ops/dlq/stats", { table: "clicks" });
+    expect(url.toString()).toBe("https://example.com/api/v1/ops/dlq/stats?table=clicks");
   });
 
   it("merges params with a query string already on the path", () => {
@@ -52,7 +52,7 @@ describe("resolveURL", () => {
   });
 
   it("percent-encodes param values", () => {
-    const url = resolveURL("https://example.com", "/v1/schema", { table: "a b&c" });
+    const url = resolveURL("https://example.com", "/v1/ops/schema", { table: "a b&c" });
     expect(url.searchParams.get("table")).toBe("a b&c");
     expect(url.toString()).toContain("table=a+b%26c");
   });

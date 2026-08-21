@@ -11,6 +11,13 @@ permissions:
   id-token: write # OIDC for build-provenance attestations (Sigstore)
   attestations: write # write the build-provenance attestations
 
+concurrency:
+  # Per-tag, never cancelling: two runs of the SAME tag (a re-run after a
+  # transient GHCR failure) must not overlap and race each other's pushes,
+  # but two different tags are independent releases and both must complete.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     name: Release
@@ -20,6 +27,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # The most privileged job here: contents+packages+attestations write,
+          # running a third-party action, a downloaded goreleaser binary, a full
+          # `go mod download` + cross-compile, and a Docker build — any one of
+          # which could read a persisted token out of .git/config and push. No
+          # authenticated git is needed: GoReleaser talks to the API via
+          # GITHUB_TOKEN, `git describe` is local, and the fetch is already done.
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -57,11 +71,23 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Resolve the moving GHCR tag BEFORE the build, so a malformed tag
+      # fails here rather than after an 8-target cross-compile and a
+      # multi-arch image push. The script rejects anything that isn't
+      # semver-shaped, so a typo can't fall through to `latest`.
+      - name: Resolve release channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          channel="$(scripts/ci/release-channel.sh "$GITHUB_REF_NAME")"
+          echo "WAVEHOUSE_CHANNEL=${channel}" >> "$GITHUB_ENV"
+          echo "::notice::${GITHUB_REF_NAME} publishes ghcr.io/wave-rf/wavehouse:${GITHUB_REF_NAME} + :${channel}"
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
@@ -72,13 +98,17 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Second dockers_v2 tag in .goreleaser.yaml. Stable → latest;
+          # prerelease → alpha/beta/rc/next, so an rc can't displace the
+          # :latest a shipped stable release owns.
+          WAVEHOUSE_CHANNEL: ${{ env.WAVEHOUSE_CHANNEL }}
 
       # Build-provenance attestations — free for public repos via Sigstore's
       # public-good infra. Binaries: one attestation over every artifact listed
       # in goreleaser's checksums.txt. Image: attest the multi-arch
       # manifest-list digest and store the attestation alongside it in GHCR.
       - name: Attest binary provenance
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: dist/checksums.txt
 
@@ -94,8 +124,54 @@ jobs:
           echo "Resolved $ref -> $digest"
 
       - name: Attest image provenance
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/wave-rf/wavehouse
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
+
+      # Prove the attestations we just wrote actually verify against the
+      # artifacts people will download — the same `gh attestation verify`
+      # command, flags included, that the install docs tell users to run. Attesting and verifying
+      # are different code paths (subject digests, the checksums-file
+      # expansion, the registry round-trip), so a release that publishes
+      # unverifiable provenance should go red rather than look green.
+      # Runs last: the release is already public by this point, so this is a
+      # loud alarm, not a gate.
+      - name: Verify published provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Digest, not tag: verifying by tag would re-resolve the pointer
+          # and could check a different image than the one just attested.
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Every archive listed in checksums.txt is a subject of the binary
+          # attestation. Verify them all rather than a representative one —
+          # a per-GOOS/GOARCH gap is exactly what this would miss.
+          shopt -s nullglob
+          archives=(dist/*.tar.gz dist/*.zip)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::no release archives in dist/ to verify"
+            exit 1
+          fi
+          # --signer-workflow, not just --repo: `--repo` alone accepts an
+          # attestation produced by ANY workflow in the repo, so without it this
+          # step would happily pass on provenance minted somewhere else — which
+          # is the exact weakness SECURITY.md warns consumers about. Pinning it
+          # to this workflow is what makes the check mean "release.yml built
+          # this".
+          signer="${GITHUB_REPOSITORY}/.github/workflows/release.yml"
+
+          for archive in "${archives[@]}"; do
+            echo "--- $archive"
+            gh attestation verify "$archive" \
+              --repo "$GITHUB_REPOSITORY" --signer-workflow "$signer"
+          done
+
+          echo "--- ghcr.io/wave-rf/wavehouse@${IMAGE_DIGEST}"
+          gh attestation verify \
+            "oci://ghcr.io/wave-rf/wavehouse@${IMAGE_DIGEST}" \
+            --repo "$GITHUB_REPOSITORY" --signer-workflow "$signer"

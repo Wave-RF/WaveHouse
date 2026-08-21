@@ -3,10 +3,10 @@ import { request } from "./http.js";
 import { QueryBuilder } from "./query-builder.js";
 import type { StreamController } from "./stream/controller.js";
 import type {
-  FetchOptions,
   HttpContext,
   InsertRecordResult,
   InsertResult,
+  RequestOptions,
   Result,
   StreamOptions,
   TableSchema,
@@ -58,7 +58,7 @@ export class TableRef<Row = Record<string, unknown>> {
   }
 
   /** SELECT * shortcut — fetches rows with optional pagination. */
-  async fetch(opts?: FetchOptions): Promise<Result<Row[]>> {
+  async fetch(opts?: RequestOptions): Promise<Result<Row[]>> {
     return this.select()
       .limit(opts?.limit ?? 1000)
       .fetch(opts);
@@ -184,7 +184,7 @@ export class TableRef<Row = Record<string, unknown>> {
   async schema(opts?: { signal?: AbortSignal }): Promise<Result<TableSchema>> {
     const { data, error } = await request<TableSchema>(this._ctx, {
       method: "GET",
-      path: `/v1/schema?table=${encodeURIComponent(this._table)}`,
+      path: `/v1/ops/schema?table=${encodeURIComponent(this._table)}`,
       signal: opts?.signal,
     });
     if (error) return err(error);

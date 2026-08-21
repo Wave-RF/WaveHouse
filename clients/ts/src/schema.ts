@@ -15,7 +15,7 @@ export class SchemaNamespace {
     // The backend returns TableSchema[] — transform to Record<string, TableSchema>.
     const { data, error } = await request<unknown>(this._ctx, {
       method: "GET",
-      path: "/v1/schema",
+      path: "/v1/ops/schema",
       signal: opts?.signal,
     });
     if (error) return err(error);
@@ -38,7 +38,7 @@ export class SchemaNamespace {
   async refresh(opts?: { signal?: AbortSignal }): Promise<Result<void>> {
     const { error } = await request<Schemas>(this._ctx, {
       method: "POST",
-      path: "/v1/schema/refresh",
+      path: "/v1/ops/schema/refresh",
       signal: opts?.signal,
     });
     if (error) return err<void>(error);

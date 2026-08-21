@@ -25,6 +25,7 @@ type Metrics struct {
 	frames   metric.Int64Counter
 	bytes    metric.Int64Counter
 	dropped  metric.Int64Counter
+	withheld metric.Int64Counter
 }
 
 // NewMetrics builds the SSE instruments on the global meter provider. Call it
@@ -42,7 +43,9 @@ func NewMetrics() *Metrics {
 		metric.WithDescription("SSE bytes written to clients"), metric.WithUnit("By"))
 	dropped, _ := meter.Int64Counter("wavehouse_sse_dropped_frames_total",
 		metric.WithDescription("SSE frames dropped to a full subscriber queue (slow consumer)"))
-	return &Metrics{active: active, duration: duration, frames: frames, bytes: bytes, dropped: dropped}
+	withheld, _ := meter.Int64Counter("wavehouse_sse_rows_withheld_total",
+		metric.WithDescription("Event rows withheld from a subscriber by the role's row-level-security filter (including fail-closed evaluations)"))
+	return &Metrics{active: active, duration: duration, frames: frames, bytes: bytes, dropped: dropped, withheld: withheld}
 }
 
 // ConnOpened records a newly established stream.
@@ -80,4 +83,16 @@ func (m *Metrics) FrameDropped(kind string) {
 		return
 	}
 	m.dropped.Add(context.Background(), 1, metric.WithAttributes(attribute.String("kind", kind)))
+}
+
+// RowWithheld records one event row withheld from one subscriber (live or replay)
+// by the role's row-level-security filter, including fail-closed evaluations.
+// Labeled by table and role (policy-bounded, not data-bounded) so an operator can
+// tell "no matching rows" from "a misconfigured filter withholding everything".
+func (m *Metrics) RowWithheld(table, role string) {
+	if m == nil {
+		return
+	}
+	m.withheld.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("table", table), attribute.String("role", role)))
 }

@@ -6,10 +6,21 @@
 import EditLink from "virtual:starlight/components/EditLink";
 import LastUpdated from "virtual:starlight/components/LastUpdated";
 import Pagination from "virtual:starlight/components/Pagination";
+import {
+  REL_EXTERNAL,
+  REL_KEEP_REFERRER,
+  cloudLink,
+  waveRfLink,
+} from "../config/outbound";
+import { pageText } from "../config/trademarks";
+import CloudCta from "./CloudCta.astro";
+import DocsTracking from "./DocsTracking.astro";
 import Logo from "./Logo.astro";
 import MermaidZoom from "./MermaidZoom.astro";
+import PageFeedback from "./PageFeedback.astro";
 import ReadingProgress from "./ReadingProgress.astro";
 import ScrollHints from "./ScrollHints.astro";
+import Trademarks from "./Trademarks.astro";
 
 const year = new Date().getFullYear();
 
@@ -19,14 +30,42 @@ const year = new Date().getFullYear();
 //   - no sidebar  → full-width, multi-column "marketing" footer (room to breathe)
 //   - has sidebar → slim, content-aligned footer (a big band crammed next to a
 //                    fixed sidebar reads as broken; a slim one reads as native)
-const { hasSidebar } = Astro.locals.starlightRoute;
+const { hasSidebar, entry } = Astro.locals.starlightRoute;
 const repo = "https://github.com/Wave-RF/WaveHouse";
+
+// Pages opt into the WaveHouse Cloud callout with `cloudCta` frontmatter (see
+// src/content.config.ts). Rendering it here — first in the footer, i.e. right
+// after the page content and before the edit-link/prev-next chrome — is what
+// keeps the plain-.md ops pages able to carry it without becoming .mdx.
+const cloudCta = entry.data.cloudCta;
+const cloudCtaProps = cloudCta === true ? {} : cloudCta;
+
+// The page slug names the placement, so PostHog can tell "the deployment-page
+// CTA converts, the architecture one doesn't" without any per-page wiring.
+const cloudCtaPlacement = `docs-${entry.id || "index"}`;
+
+// "Was this page helpful?" rides the footer for the same reason the Cloud CTA
+// does: every content page gets it — including ones not written yet — with no
+// frontmatter flag and no import. The sidebar branch below already excludes
+// splash pages; 404 is one of those today, and this keeps it excluded if that
+// ever changes.
+const showFeedback = entry.id !== "404" && !entry.id.endsWith("/404");
+
+// Everything the page turns into visible words, for the per-page trademark
+// notices. pageText() picks the frontmatter fields that actually render (hero
+// tagline, title, this page's Cloud CTA copy) and leaves out the ones that
+// don't — `description` is <meta>-only, sidebar labels are nav chrome. Naming
+// a mark in the footer that the reader never sees on the page would make the
+// notice wrong in the other direction.
+const trademarkSource = pageText(entry.data, entry.body ?? "");
 ---
 
 {
   hasSidebar ? (
     <footer class="wh-footer wh-footer--compact not-content">
       <ReadingProgress />
+      {cloudCtaProps && <CloudCta placement={cloudCtaPlacement} {...cloudCtaProps} />}
+      {showFeedback && <PageFeedback />}
       <div class="wh-footer__meta">
         <EditLink />
         <LastUpdated />
@@ -38,31 +77,44 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
           <Logo class="wh-footer__logo" title="WaveHouse" />
         <span class="wh-footer__sub">
           A{" "}
-          <a href="https://wave-rf.com" target="_blank" rel="noopener noreferrer">
+          <a
+            href={waveRfLink("footer-compact-brand")}
+            target="_blank"
+            rel={REL_KEEP_REFERRER}
+            data-ph-link="wave-rf"
+          >
             Wave RF
           </a>{" "}
           open-source project
         </span>
         <nav class="wh-footer__links" aria-label="Footer">
-          <a href={repo} target="_blank" rel="noopener noreferrer" data-ph-link="github">
+          <a
+            class="wh-footer__link--cloud"
+            href={cloudLink("footer-compact", { medium: "referral" })}
+            target="_blank"
+            rel={REL_KEEP_REFERRER}
+            data-ph-link="cloud"
+          >
+            WaveHouse Cloud
+          </a>
+          <a href={repo} target="_blank" rel={REL_EXTERNAL} data-ph-link="github">
             GitHub
           </a>
-          <a href={`${repo}/discussions`} target="_blank" rel="noopener noreferrer" data-ph-link="discussions">
+          <a href={`${repo}/discussions`} target="_blank" rel={REL_EXTERNAL} data-ph-link="discussions">
             Discussions
           </a>
-          <a href={`${repo}/blob/main/CHANGELOG.md`} target="_blank" rel="noopener noreferrer" data-ph-link="changelog">
+          <a href={`${repo}/blob/main/CHANGELOG.md`} target="_blank" rel={REL_EXTERNAL} data-ph-link="changelog">
             Changelog
           </a>
-          <a href={`${repo}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer" data-ph-link="license">
+          <a href={`${repo}/blob/main/LICENSE`} target="_blank" rel={REL_EXTERNAL} data-ph-link="license">
             License
           </a>
         </nav>
       </div>
 
         <div class="wh-footer__sign">
-          <span>© {year} Wave RF</span>
-          <span aria-hidden="true">·</span>
-          <span class="wh-footer__motto">No cell service? No problem.</span>
+          <span class="wh-footer__copyright">© {year} Wave RF. All rights reserved.</span>
+          <Trademarks source={trademarkSource} />
         </div>
       </div>
     </footer>
@@ -73,11 +125,16 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
           <Logo class="wh-footer__logo" title="WaveHouse" />
           <span class="wh-footer__sub">
             A{" "}
-            <a href="https://wave-rf.com" target="_blank" rel="noopener noreferrer">
+            <a
+              href={waveRfLink("footer-full-brand")}
+              target="_blank"
+              rel={REL_KEEP_REFERRER}
+              data-ph-link="wave-rf"
+            >
               Wave RF
             </a>{" "}
             open-source project ·{" "}
-            <a href={repo} target="_blank" rel="noopener noreferrer">
+            <a href={repo} target="_blank" rel={REL_EXTERNAL}>
               GitHub
             </a>
           </span>
@@ -99,31 +156,52 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
           </div>
           <div class="wh-footer__col">
             <span class="wh-footer__label">Project</span>
-            <a href={repo} target="_blank" rel="noopener noreferrer" data-ph-link="github">Source</a>
-            <a href={`${repo}/discussions`} target="_blank" rel="noopener noreferrer" data-ph-link="discussions">Discussions</a>
-            <a href={`${repo}/blob/main/CHANGELOG.md`} target="_blank" rel="noopener noreferrer" data-ph-link="changelog">Changelog</a>
-            <a href={`${repo}/blob/main/CONTRIBUTING.md`} target="_blank" rel="noopener noreferrer" data-ph-link="contributing">Contributing</a>
-            <a href={`${repo}/blob/main/SUPPORT.md`} target="_blank" rel="noopener noreferrer" data-ph-link="support">Support</a>
-            <a href={`${repo}/blob/main/SECURITY.md`} target="_blank" rel="noopener noreferrer" data-ph-link="security">Security</a>
-            <a href={`${repo}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer" data-ph-link="license">License</a>
+            <a href={repo} target="_blank" rel={REL_EXTERNAL} data-ph-link="github">Source</a>
+            <a href={`${repo}/discussions`} target="_blank" rel={REL_EXTERNAL} data-ph-link="discussions">Discussions</a>
+            <a href={`${repo}/blob/main/CHANGELOG.md`} target="_blank" rel={REL_EXTERNAL} data-ph-link="changelog">Changelog</a>
+            <a href={`${repo}/blob/main/CONTRIBUTING.md`} target="_blank" rel={REL_EXTERNAL} data-ph-link="contributing">Contributing</a>
+            <a href={`${repo}/blob/main/SUPPORT.md`} target="_blank" rel={REL_EXTERNAL} data-ph-link="support">Support</a>
+            <a href={`${repo}/blob/main/SECURITY.md`} target="_blank" rel={REL_EXTERNAL} data-ph-link="security">Security</a>
+            <a href={`${repo}/blob/main/LICENSE`} target="_blank" rel={REL_EXTERNAL} data-ph-link="license">License</a>
+          </div>
+          <div class="wh-footer__col">
+            <span class="wh-footer__label">Wave RF</span>
+            <a
+              class="wh-footer__link--cloud"
+              href={cloudLink("footer-full", { medium: "referral" })}
+              target="_blank"
+              rel={REL_KEEP_REFERRER}
+              data-ph-link="cloud"
+            >
+              WaveHouse Cloud
+            </a>
+            <a
+              href={waveRfLink("footer-full-col")}
+              target="_blank"
+              rel={REL_KEEP_REFERRER}
+              data-ph-link="wave-rf"
+            >
+              wave-rf.com
+            </a>
           </div>
         </div>
 
         <div class="wh-footer__sign">
-          <span>© {year} Wave RF</span>
-          <span aria-hidden="true">·</span>
-          <span class="wh-footer__motto">No cell service? No problem.</span>
+          <span class="wh-footer__copyright">© {year} Wave RF. All rights reserved.</span>
+          <Trademarks source={trademarkSource} />
         </div>
       </div>
     </footer>
   )
 }
 
-{/* Click-to-zoom for Mermaid diagrams + horizontal-scroll affordances —
-    rendered once per page from here (Footer is on every page);
-    self-contained scripts + styles, no markup. */}
+{/* Click-to-zoom for Mermaid diagrams + horizontal-scroll affordances, and the
+    site-wide PostHog trackers (search / code copy / 404) — rendered once per
+    page from here (Footer is on every page); self-contained scripts + styles,
+    no markup. */}
 <MermaidZoom />
 <ScrollHints />
+<DocsTracking />
 
 <script is:inline>
   function setupFooterLinkTracking() {
@@ -154,18 +232,41 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
     transition: color 0.12s ease;
   }
   .wh-footer__sub a:hover {
-    color: var(--wh-accent-hi);
+    color: var(--wh-accent-text);
   }
+  /* Stacked, not a row: the copyright line is one short string but the
+     trademark notices below it run to several sentences, and side-by-side they
+     read as one run-on line. */
   .wh-footer__sign {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
+    display: grid;
+    /* Default `stretch`, not `start`: the trademark notice below the copyright
+       should run the footer's full width rather than shrink-wrap into a tall
+       narrow column. */
+    gap: 0.625rem;
     font-size: 0.8125rem;
     color: var(--wh-ink-subtle);
+  }
+  .wh-footer__copyright {
+    /* Not nowrap — at 320px this line is wider than the content column, and
+       forcing it on a single line is how a footer starts scrolling the page
+       sideways. Let it wrap, just not to a one-word second line. */
+    text-wrap: pretty;
   }
   .wh-footer__motto {
     font-style: italic;
     color: var(--wh-ink-muted);
+  }
+  /* The one commercial link in a footer of project links — accent-coloured at
+     rest (the rest are muted) so it reads as the deliberate exception rather
+     than getting lost among GitHub/Changelog/License. */
+  .wh-footer__links a.wh-footer__link--cloud,
+  .wh-footer__col a.wh-footer__link--cloud {
+    color: var(--wh-accent-text);
+    font-weight: 550;
+  }
+  .wh-footer__links a.wh-footer__link--cloud:hover,
+  .wh-footer__col a.wh-footer__link--cloud:hover {
+    color: var(--wh-accent-text);
   }
 
   /* Starlight pads the bottom of both the content panel (1.5rem) and <main>
@@ -220,25 +321,20 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
     gap: 0.625rem;
     flex-wrap: wrap;
   }
-  /* push the links to the trailing edge of the content column (gap sized so
-     the row + the external-link arrows still fit the prose column on one
-     line — 1.25rem tipped it into an awkward two-row wrap) */
+  /* Always its own left-aligned row under the brand line.
+     This used to right-align onto the brand row (margin-inline-start: auto)
+     and only break out below 86rem. That stopped being reachable once the
+     brand line grew the "from antenna to API" tagline and the nav gained the
+     WaveHouse Cloud link: the pair now needs ~955px, and Starlight caps the
+     content column near 720px at EVERY viewport width — even 2560px — so the
+     single-row case never won, it just produced a ragged right-aligned wrap.
+     One predictable layout beats a breakpoint guarding an unreachable one. */
   .wh-footer__links {
-    margin-inline-start: auto;
     display: flex;
     flex-wrap: wrap;
-    gap: 1rem;
+    gap: 0.75rem 1rem;
     font-size: 0.875rem;
-  }
-  /* In the 72–86rem window Starlight squeezes the content pane below the
-     prose width and the single-row bar can't fit (needs ~700px, gets ~650) —
-     wrap deliberately: links become their own left-aligned row under the
-     brand instead of a ragged right-aligned overflow. */
-  @media (max-width: 86rem) {
-    .wh-footer__links {
-      margin-inline-start: 0;
-      flex-basis: 100%;
-    }
+    flex-basis: 100%;
   }
   .wh-footer__links a {
     color: var(--wh-ink-muted);
@@ -246,29 +342,33 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
     transition: color 0.12s ease;
   }
   .wh-footer__links a:hover {
-    color: var(--wh-accent-hi);
+    color: var(--wh-accent-text);
   }
 
-  /* On narrow content columns, let the brand line and links stack cleanly
-     rather than cramming onto one row. */
+  /* Narrow content columns: loosen the horizontal gap so the two-row wrap the
+     links fall into stays readable rather than looking like one run-on line. */
   @media (max-width: 34rem) {
     .wh-footer__links {
-      margin-inline-start: 0;
-      width: 100%;
-      gap: 1rem 1.25rem;
+      gap: 0.75rem 1.25rem;
     }
   }
 
   /* ---------- full footer (splash / no-sidebar pages) ---------- */
-  /* Splash content is centered in the viewport, so the classic
-     `margin-inline: 50% - 50vw` + `width: 100vw` full-bleed reaches both edges.
-     (overflow-x: clip on <html> in global.css guards the scrollbar-width edge
-     case on classic, non-overlay scrollbars.) */
+  /* `margin-inline: 50% - 50vw` + `width: 100vw` bleeds the band to both edges.
+     It measures from 50% of the CONTAINING BLOCK, so that container has to be
+     centred in the viewport — which Starlight's stock cap is not; the rule just
+     below pins it. (overflow-x: hidden on <html> in global.css guards the
+     scrollbar-width edge case on classic, non-overlay scrollbars.) */
   .wh-footer--full {
     width: 100vw;
     margin-top: 6rem;
     margin-inline: calc(50% - 50vw);
-    padding: 3rem var(--sl-content-pad-x) 2rem;
+    /* --sl-content-pad-x alone put the columns on the content COLUMN's edge,
+       which is 1.5rem left of where the page's text actually starts: the hero
+       sits its copy inside a 1.5rem inset of that same column. That made the
+       footer the leftmost thing on the page at every width (24px left of the
+       headline above it). Adding the inset lands it on the text edge instead. */
+    padding: 3rem calc(var(--sl-content-pad-x) + 1.5rem) 2rem;
     border-top: 1px solid var(--wh-border);
     /* Solid page-bg base under the fade so the band reads as opaque while its
        transparent top still blends into the page above. */
@@ -280,8 +380,24 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
       ),
       var(--wh-bg);
   }
+  /* Centre the container the bleed above measures from. Starlight caps
+     .sl-container at --sl-content-width with NO auto margins, so between 1112px
+     (where the cap starts binding) and 1152px (where global.css un-caps it for
+     the breakout grid) it sat left-aligned inside .content-panel's padding —
+     16px in, up to 48px spare on the right — and the band missed the right edge
+     by that much. Scoped by :has to the container that actually holds this
+     footer, so docs-page containers are untouched. */
+  :global(.sl-container:has(> .wh-footer--full)) {
+    margin-inline: auto;
+  }
   .wh-footer--full .wh-footer__inner {
-    max-width: 70rem;
+    /* The page's text column, not a standalone 70rem: content width less the
+       hero's 1.5rem inset a side. Paired with the padding above, this holds the
+       columns on the hero's text edge both when the column is capped (wide
+       viewports, where this max-width centres it) and when it is not (narrow,
+       where the padding alone positions it). At 70rem the footer overhung the
+       content column entirely. */
+    max-width: calc(var(--sl-content-width) - 3rem);
     margin: 0 auto;
     display: grid;
     gap: 2.5rem;
@@ -303,7 +419,7 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
   }
   .wh-footer__cols {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 2rem;
   }
   .wh-footer__col {
@@ -318,7 +434,7 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
     transition: color 0.12s ease;
   }
   .wh-footer__col a:hover {
-    color: var(--wh-accent-hi);
+    color: var(--wh-accent-text);
   }
   .wh-footer__label {
     font-size: 0.7rem;
@@ -333,11 +449,13 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
     border-top: 1px solid var(--wh-border);
   }
 
-  /* 40rem (not 50): at tablet widths three narrow columns fit comfortably —
-     the 2-col fallback stranded PROJECT alone on a second row at 768px. */
-  @media (max-width: 40rem) {
+  /* 4 → 2 → 1, skipping 3 on purpose: with four columns a 3-wide step strands
+     WAVE RF alone on a second row, the same failure the old 3-col layout hit
+     with PROJECT at 768px. 2-up divides evenly instead. */
+  @media (max-width: 50rem) {
     .wh-footer__cols {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 2rem 1.5rem;
     }
   }
   @media (max-width: 30rem) {

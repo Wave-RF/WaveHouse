@@ -5,8 +5,8 @@
  * search index, and the starlight-llm-tools outputs only exist in real
  * builds. So instead of the dev server, this loop runs a full `astro build`
  * on every save and serves the result through `wrangler dev --live-reload`
- * on :4321 — the same Worker + Static Assets pipeline as wavehouse.dev,
- * with the browser auto-refreshing when a build lands.
+ * on :4321 (or the next free port) — the same Worker + Static Assets pipeline
+ * as wavehouse.dev, with the browser auto-refreshing when a build lands.
  *
  * Builds go to a .dev-dist/ staging dir and are synced into dist/ (plain
  * node fs — no rsync or any other external tool, so WSL/minimal images work)
@@ -19,7 +19,10 @@
  * available as `pnpm run start` when HMR matters more than fidelity.
  *
  * Knobs:
- *   DOCS_PORT=…           serve port (default 4321)
+ *   DOCS_PORT=…           first port to try (default 4321). If it's taken the
+ *                         loop walks upward to the next free one and prints
+ *                         where it landed — wrangler itself would just die,
+ *                         see findFreePort() below.
  *   DOCS_WATCH_STRICT=1   keep starlight-links-validator in watch builds —
  *                         a broken link then fails the build loudly here
  *                         instead of waiting for CI. Off by default because
@@ -31,19 +34,90 @@
 import { spawn } from "node:child_process";
 import { existsSync, watch } from "node:fs";
 import { cp, readdir, rm, stat } from "node:fs/promises";
+import { createServer as createNetServer } from "node:net";
 import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const BIN = join(ROOT, "node_modules", ".bin");
 const STAGING = join(ROOT, ".dev-dist");
 const DIST = join(ROOT, "dist");
-const PORT = process.env.DOCS_PORT ?? "4321";
+const DEFAULT_PORT = 4321;
+const MAX_PORT = 65535;
+const PORT_TRIES = 20;
+
+/* DOCS_PORT has to be a real port before it reaches the scan: "" and "0" would
+ * bind an ephemeral port and announce http://localhost:0, anything non-numeric
+ * becomes NaN (the loop then runs zero times and reports "NaN–NaN"), and
+ * anything out of range throws ERR_SOCKET_BAD_PORT from inside the probe. */
+function parsePort(raw) {
+  if (raw === undefined || raw === "") return DEFAULT_PORT;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > MAX_PORT) return null;
+  return port;
+}
+
+const PORT_START = parsePort(process.env.DOCS_PORT);
+if (PORT_START === null) {
+  console.log(
+    `\x1b[36m[dev-docs]\x1b[0m \x1b[1;31mDOCS_PORT must be an integer 1-${MAX_PORT}, got ${JSON.stringify(process.env.DOCS_PORT)}\x1b[0m\x07`,
+  );
+  process.exit(1);
+}
 const DEBOUNCE_MS = 300;
 
 const log = (msg) => console.log(`\x1b[36m[dev-docs]\x1b[0m ${msg}`);
 // Loud-failure banner: bold red + terminal bell (most terminals flash/bounce).
 const fail = (msg) => console.log(`\x1b[36m[dev-docs]\x1b[0m \x1b[1;31m${msg}\x1b[0m\x07`);
 const STRICT = Boolean(process.env.DOCS_WATCH_STRICT);
+
+/* Pick the port BEFORE handing it to wrangler.
+ *
+ * `wrangler dev` hunts for a free port when you don't name one, but treats an
+ * explicit `--port` as strict — it dies with a raw kj bind exception rather
+ * than moving. We have to pass `--port` (the URL is logged below, and bare
+ * wrangler would land somewhere we couldn't announce), so the hunting is ours
+ * to do. `astro dev` never enters into it: this loop serves builds through the
+ * Worker, so Vite's own port-hunting is not in the path.
+ *
+ * Ports are machine-wide, not per-worktree or per-repo, so the usual collision
+ * is a dev server from an entirely different checkout.
+ *
+ * Both stacks get probed because wrangler binds 127.0.0.1 and [::1] as
+ * separate sockets, and the common squatter — an `astro dev` elsewhere — holds
+ * only [::1]. Probing IPv4 alone would call the port free and we would fail on
+ * the v6 bind anyway, which is exactly the failure this replaces. */
+/** Bind errors that mean "this host has no usable IPv6", not "the port is taken". */
+const IPV6_UNAVAILABLE = new Set(["EADDRNOTAVAIL", "EAFNOSUPPORT", "EPROTONOSUPPORT"]);
+
+function portFree(port, host) {
+  return new Promise((resolvePort) => {
+    const probe = createNetServer();
+    // A host without usable IPv6 must not veto the port — but "without usable
+    // IPv6" surfaces as more than one code. EADDRNOTAVAIL is ::1 merely not
+    // being configured; when IPv6 is compiled out of the runtime altogether
+    // (ipv6.disable=1 kernels, WSL1, images built without AF_INET6) the
+    // socket() call fails first and libuv reports EAFNOSUPPORT or
+    // EPROTONOSUPPORT. Allowing only the first would fail every candidate on
+    // those hosts and report "no free port" where nothing is holding one.
+    //
+    // Everything else — EADDRINUSE, EACCES, a bad host, any of these on an
+    // address other than ::1 — means we cannot claim the port.
+    probe.once("error", (err) => resolvePort(host === "::1" && IPV6_UNAVAILABLE.has(err.code)));
+    probe.listen({ port, host, exclusive: true }, () => probe.close(() => resolvePort(true)));
+  });
+}
+
+/** Last port the scan will try — clamped, since start+tries can exceed the range. */
+const lastPortFor = (start, tries) => Math.min(start + tries - 1, MAX_PORT);
+
+async function findFreePort(start, tries) {
+  for (let port = start, last = lastPortFor(start, tries); port <= last; port++) {
+    if ((await portFree(port, "127.0.0.1")) && (await portFree(port, "::1"))) {
+      return port;
+    }
+  }
+  return null;
+}
 
 let activeBuild = null;
 function run(cmd, args, opts = {}) {
@@ -204,7 +278,22 @@ if (existsSync(join(DIST, "index.html"))) {
 // A signal during the cold-start build means we're done before serving starts.
 if (shuttingDown) process.exit();
 
-wrangler = spawn(join(BIN, "wrangler"), ["dev", "--live-reload", "--port", PORT], {
+// Resolved here rather than at startup so the gap between "it was free" and
+// "wrangler has it" stays as small as possible — a cold-start build is minutes
+// of window during which someone else could take the port.
+const PORT = await findFreePort(PORT_START, PORT_TRIES);
+if (PORT === null) {
+  fail(
+    `no free port in ${PORT_START}–${lastPortFor(PORT_START, PORT_TRIES)}. ` +
+      `Stop one of the servers holding them, or set DOCS_PORT to a clear range.`,
+  );
+  process.exit(1);
+}
+if (PORT !== PORT_START) {
+  log(`port ${PORT_START} is busy (often a dev server from another checkout) — using ${PORT}`);
+}
+
+wrangler = spawn(join(BIN, "wrangler"), ["dev", "--live-reload", "--port", String(PORT)], {
   cwd: ROOT,
   stdio: "inherit",
 });

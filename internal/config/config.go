@@ -31,6 +31,24 @@ type Config struct {
 	Prometheus Prometheus `yaml:"prometheus"`
 	Query      Query      `yaml:"query"`
 	Stream     Stream     `yaml:"stream"`
+	Settings   Settings   `yaml:"settings"`
+}
+
+// EnvSettingsDir is the environment variable naming the settings directory —
+// the same variable the Settings.Dir struct tag binds. Subcommands
+// (`wavehouse validate`) read it directly without loading config, so the name
+// is exported here as the single authority; a struct tag must be a literal,
+// so a config test pins the tag to this constant to prevent drift.
+const EnvSettingsDir = "WH_SETTINGS_DIR"
+
+// Settings locates the hot-reloadable settings directory — the four JSON
+// documents (roles.json, policies.json, pipes.json, config.json) validated by
+// internal/settings. Boot-tier by necessity: it's the pointer the reload
+// machinery follows, so it can't live behind itself. No default, same
+// reasoning as policy.file_path: a baked-in path would turn a missing mount
+// into silent misconfiguration instead of an explicit operator choice.
+type Settings struct {
+	Dir string `yaml:"dir" env:"WH_SETTINGS_DIR"`
 }
 
 // Query holds query-shaping defaults. Server-wide *resource* limits (memory,
@@ -51,7 +69,7 @@ type Query struct {
 // The OTLP destination — endpoint, TLS, custom CA, mutual TLS, and auth headers
 // — is configured through the standard OTEL_EXPORTER_OTLP_* environment
 // variables read by the OpenTelemetry SDK, not WaveHouse config. See
-// docs/configuration.md.
+// docs/src/content/docs/configuration.mdx.
 type OTel struct {
 	Enabled bool        `yaml:"enabled" env:"WH_OTEL_ENABLED" env-default:"false"`
 	Traces  OTelTraces  `yaml:"traces"`
@@ -169,7 +187,7 @@ type Auth struct {
 // cleanly — policy.NewStore returns a fatal error otherwise, so a typo or a
 // missing mount surfaces as a refused boot instead of a silent fail-closed
 // (every request 403s, including admin). When left empty, the store comes up
-// with no cached policy and the operator seeds via PUT /v1/admin/policy.
+// with no cached policy and the operator seeds via PUT /v1/ops/policy.
 //
 // A baked-in default like "policy.yaml" would re-introduce the silent-lockout
 // failure mode for any deployment that didn't ship that exact file at CWD,

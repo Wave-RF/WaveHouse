@@ -31,9 +31,10 @@ describe("Query", () => {
       });
     }
     // Poll until all seeded rows are visible in ClickHouse
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT count() as cnt FROM default.${T.clicks} WHERE event_id IN ('${seededIds.join("','")}')`,
+        signal,
       );
       return Number((r[0] as any).cnt) === seededIds.length;
     }, 15_000);
@@ -151,7 +152,7 @@ describe("Query", () => {
   });
 
   it("raw SQL query", async () => {
-    // Scope to seededIds so the SQL string is unique per run. /v1/admin/query
+    // Scope to seededIds so the SQL string is unique per run. /v1/ops/query
     // itself never caches (Cache-Control: no-store on every response) — the
     // uniqueness here avoids confusing test output when this and admin.test.ts
     // each independently SELECT count() from the same table and the suites

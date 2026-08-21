@@ -33,7 +33,7 @@ func AdminRole(p *Policy) string {
 // role is never admin either, regardless of how admin_role is configured — a
 // roleless request must never inherit admin via an empty-string match. This is
 // the single source of truth for the admin check; Evaluate, ResolveRole,
-// Validate, the /v1/admin gate, and pipe authorization all route through it.
+// Validate, the /v1/ops gate, and pipe authorization all route through it.
 func IsAdmin(p *Policy, role string) bool {
 	if p == nil {
 		return false
@@ -44,7 +44,7 @@ func IsAdmin(p *Policy, role string) bool {
 // DefaultRoleGrantsAdmin reports whether the policy's default_role resolves to
 // the admin role. When true, ResolveRole maps every roleless request (no token,
 // or a token without a role claim) to the admin role, so unauthenticated callers
-// receive full admin access — including /v1/admin/*. This is permitted as a
+// receive full admin access — including /v1/ops/*. This is permitted as a
 // local/dev convenience (no token needed to exercise admin surfaces), but is
 // unsafe in production, so the policy store warns loudly whenever a policy with
 // this setting is adopted. An empty default_role (no public access) is never

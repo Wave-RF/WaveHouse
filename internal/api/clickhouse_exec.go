@@ -20,7 +20,7 @@ import (
 //
 // Used by the structured-query and pipes handlers — those are the cached
 // read paths that need explicit Query/Exec dispatch and per-row scanning.
-// The raw-SQL endpoint (/v1/admin/query) proxies straight to ClickHouse
+// The raw-SQL endpoint (/v1/ops/query) proxies straight to ClickHouse
 // over HTTP and never calls this; see internal/api/query.go.
 func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []any) ([]map[string]any, error) {
 	if isMutation(sql) {
@@ -339,6 +339,11 @@ func transformRow(row map[string]any) map[string]any {
 			row[k] = uuid.UUID(val).String()
 		case time.Time:
 			row[k] = val.UTC().Format(time.RFC3339Nano)
+		case *time.Time:
+			// Nullable(DateTime…) scans as a pointer; NULL stays nil (JSON null).
+			if val != nil {
+				row[k] = val.UTC().Format(time.RFC3339Nano)
+			}
 		}
 	}
 	return row

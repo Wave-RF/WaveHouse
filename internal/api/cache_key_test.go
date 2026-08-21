@@ -7,7 +7,7 @@ import (
 )
 
 // queryCacheKey is consumed by structured_query.go and pipes.go, so its
-// contract has to stay stable even though /v1/admin/query no longer caches.
+// contract has to stay stable even though /v1/ops/query no longer caches.
 // Table-driven so future collision regressions drop in as additional rows
 // without growing the assertion flow.
 func TestQueryCacheKey(t *testing.T) {

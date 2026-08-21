@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -108,6 +109,69 @@ func TestMiddleware_ValidToken_FlatRole(t *testing.T) {
 	assert.NoError(t, c.authErr)
 }
 
+// TestMiddleware_LargeIntegerClaim_ExactThroughPolicy pins jwt.WithJSONNumber
+// on the parser: a numeric claim above 2^53 must survive jwt.Parse exactly as
+// issued, not as a float64 — which rounds 1234567890123456789 to
+// 1234567890123456768, a *different* value a policy filter would silently bind.
+// The claim rides a real signed token because a hand-built claims map (or a
+// string-valued test claim) passes with or without the parser option; the tail
+// asserts the exact digits reach a resolved policy filter, the consumer the
+// precision exists for.
+func TestMiddleware_LargeIntegerClaim_ExactThroughPolicy(t *testing.T) {
+	t.Parallel()
+	c := run(t, cfg(), bearer(testutil.MakeJWT(t, map[string]any{"role": "viewer", "tenant_id": int64(1234567890123456789)})))
+	require.True(t, c.hasClaims)
+	assert.Equal(t, json.Number("1234567890123456789"), c.claims["tenant_id"])
+
+	eq := "{{ jwt.tenant_id }}"
+	p := &policy.Policy{Tables: map[string]policy.TablePolicy{
+		"clicks": {Select: map[string]policy.RolePermissions{
+			"viewer": {Filter: map[string]policy.Filter{"tenant_id": {Eq: &eq}}},
+		}},
+	}}
+	perms := policy.Evaluate(p, "viewer", "clicks", "select", c.claims)
+	require.True(t, perms.Allowed)
+	assert.Equal(t, "`tenant_id` = ?", perms.WhereClause)
+	assert.Equal(t, []any{"1234567890123456789"}, perms.WhereParams)
+}
+
+// TestMiddleware_NumericClaimSpelling_BindsCanonically: json.Number keeps the
+// token's literal spelling, so without normalization the bound filter value
+// would depend on how the IdP spelled the number — and a numeric ClickHouse
+// column rejects '1.0'/'1e3' as a TYPE_MISMATCH error on every query for that
+// role. The claims ride a real signed token (a json.Number claim value
+// marshals verbatim into the payload) so the exact parser configuration is
+// what's under test, per the note on the large-integer test above.
+func TestMiddleware_NumericClaimSpelling_BindsCanonically(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		literal string
+		want    string
+	}{
+		{"integer spelling stays exact", "1234567890123456789", "1234567890123456789"},
+		{"float spelling of an integer", "1.0", "1"},
+		{"exponent spelling", "1e3", "1000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := run(t, cfg(), bearer(testutil.MakeJWT(t, map[string]any{"role": "viewer", "tenant_id": json.Number(tt.literal)})))
+			require.True(t, c.hasClaims)
+
+			eq := "{{ jwt.tenant_id }}"
+			p := &policy.Policy{Tables: map[string]policy.TablePolicy{
+				"clicks": {Select: map[string]policy.RolePermissions{
+					"viewer": {Filter: map[string]policy.Filter{"tenant_id": {Eq: &eq}}},
+				}},
+			}}
+			perms := policy.Evaluate(p, "viewer", "clicks", "select", c.claims)
+			require.True(t, perms.Allowed)
+			assert.Equal(t, []any{tt.want}, perms.WhereParams)
+		})
+	}
+}
+
 func TestMiddleware_BearerScheme_CaseInsensitive(t *testing.T) {
 	t.Parallel()
 	// RFC 7235 auth-schemes are case-insensitive; a lowercase / mixed-case
@@ -175,6 +239,21 @@ func TestMiddleware_ExpiredToken_FallsBackWithExpiredError(t *testing.T) {
 	require.Error(t, c.authErr)
 	assert.True(t, errors.Is(c.authErr, errTokenExpired), "expired tokens get the distinct expired error")
 	assert.Equal(t, "token expired", c.authErr.Error())
+}
+
+// TestMiddleware_ExpZeroClaim_TokenExpired pins the deliberate validation
+// shift that rides along with jwt.WithJSONNumber: float64 decoding
+// special-cased a literal exp of 0 as "no expiry claim" (the token never
+// expired); as a json.Number it reads as the epoch, so the token is expired.
+// A jwt/v5 upgrade or a dropped parser option that silently restored
+// never-expiring exp:0 tokens must fail here.
+func TestMiddleware_ExpZeroClaim_TokenExpired(t *testing.T) {
+	t.Parallel()
+	tok := testutil.MakeJWT(t, map[string]any{"role": "viewer", "exp": 0})
+	c := run(t, cfg(), bearer(tok))
+	assert.Empty(t, c.role)
+	require.Error(t, c.authErr)
+	assert.True(t, errors.Is(c.authErr, errTokenExpired), "exp: 0 must read as the epoch (expired), not as no-expiry")
 }
 
 func TestMiddleware_QueryParamToken_StrippedFromURL(t *testing.T) {

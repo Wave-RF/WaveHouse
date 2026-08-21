@@ -9,10 +9,12 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRequireAdmin_AdminAllowed(t *testing.T) {
@@ -279,21 +281,27 @@ func TestCORSMiddleware_BlockedOriginPreflight(t *testing.T) {
 func TestNewRouter_RoutesRegistered(t *testing.T) {
 	t.Parallel()
 
-	reg := discovery.NewSchemaRegistryFromMap([]*discovery.TableSchema{
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
 		{Name: "events", Columns: []discovery.Column{{Name: "id", Type: "String"}}},
 	})
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
+
+	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024, testutil.NopLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = emb.Close() })
 
 	deps := Dependencies{
-		Ingest:  NewIngestHandler(reg, pub, testutil.NopLogger()),
-		Query:   &QueryHandler{},
-		SSE:     NewStreamHandler(hub, nil),
-		Health:  &HealthHandler{},
-		Version: NewVersionHandler("test", "test", "test"),
-		Schema:  NewSchemaHandler(reg),
-		AuthMW:  func(next http.Handler) http.Handler { return next },
-		Logger:  testutil.NopLogger(),
+		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Query:       &QueryHandler{},
+		SSE:         NewStreamHandler(hub, nil),
+		Health:      &HealthHandler{},
+		Version:     NewVersionHandler("test", "test", "test"),
+		Schema:      NewSchemaHandler(reg),
+		DLQ:         NewDLQHandler(emb.JetStream(), testutil.NopLogger()),
+		AuthMW:      func(next http.Handler) http.Handler { return next },
+		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
+		Logger:      testutil.NopLogger(),
 	}
 
 	router := NewRouter(deps)
@@ -301,34 +309,50 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	tests := []struct {
 		method string
 		path   string
-		expect int // expected status (not 404/405)
+		role   string // "" = roleless request (proves the row needs no gate)
+		expect int
 	}{
-		// Canonical K8s-convention probes.
-		{http.MethodGet, "/livez", http.StatusOK},
-		{http.MethodGet, "/readyz", http.StatusOK},
+		// Canonical K8s-convention probes. Roleless: a 200 proves ungated.
+		{http.MethodGet, "/livez", "", http.StatusOK},
+		{http.MethodGet, "/readyz", "", http.StatusOK},
 		// Deprecated aliases (kept for v0.1.x, removed in v0.2.0).
-		{http.MethodGet, "/healthz", http.StatusOK},
-		{http.MethodGet, "/health", http.StatusOK},
-		{http.MethodGet, "/ready", http.StatusOK},
-		{http.MethodGet, "/version", http.StatusOK},
+		{http.MethodGet, "/healthz", "", http.StatusOK},
+		{http.MethodGet, "/health", "", http.StatusOK},
+		{http.MethodGet, "/ready", "", http.StatusOK},
+		{http.MethodGet, "/version", "", http.StatusOK},
 		// Public content-free liveness ping for the SDK (under /v1, no auth gate).
-		{http.MethodGet, "/v1/health", http.StatusOK},
-		// Schema is admin-only (see TestNewRouter_SchemaAdminOnly); a roleless
-		// request is denied 403 — the route still exists, which is what this
-		// registration test asserts (not 404/405).
-		{http.MethodGet, "/v1/schema", http.StatusForbidden},
-		{http.MethodGet, "/v1/schema?table=events", http.StatusForbidden},
+		{http.MethodGet, "/v1/health", "", http.StatusOK},
+		// Admin-gated /v1/ops routes. The tree-level gate denies before
+		// sub-route matching, so a 403 would NOT prove registration (every
+		// /v1/ops/<anything> 403s rolelessly) — these rows therefore run as
+		// admin and require the handler's 200 (denial is pinned separately by
+		// TestNewRouter_SchemaAdminOnly and TestNewRouter_RawSQLAdminGate).
+		{http.MethodGet, "/v1/ops/schema", "admin", http.StatusOK},
+		{http.MethodGet, "/v1/ops/schema?table=events", "admin", http.StatusOK},
+		{http.MethodPost, "/v1/ops/schema/refresh", "admin", http.StatusOK},
+		{http.MethodGet, "/v1/ops/dlq/stats", "admin", http.StatusOK},
+		// Pre-/v1/ops paths, removed with no aliases: they must stay 404.
+		// Roleless, so re-registering an alias fails this row whether the
+		// alias is gated (403) or — the real hazard — ungated (200).
+		{http.MethodGet, "/v1/schema", "", http.StatusNotFound},
+		{http.MethodPost, "/v1/schema/refresh", "", http.StatusNotFound},
+		{http.MethodGet, "/v1/dlq/stats", "", http.StatusNotFound},
+		{http.MethodPost, "/v1/admin/query", "", http.StatusNotFound},
+		{http.MethodGet, "/v1/admin/policy", "", http.StatusNotFound},
+		{http.MethodGet, "/v1/admin/pipes", "", http.StatusNotFound},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
 			t.Parallel()
-			req := httptest.NewRequestWithContext(context.Background(), tt.method, tt.path, nil)
+			ctx := context.Background()
+			if tt.role != "" {
+				ctx = auth.WithRole(ctx, tt.role)
+			}
+			req := httptest.NewRequestWithContext(ctx, tt.method, tt.path, nil)
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
 			assert.Equal(t, tt.expect, rec.Code, "unexpected route status")
-			assert.NotEqual(t, http.StatusNotFound, rec.Code, "route should exist")
-			assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code, "method should be allowed")
 		})
 	}
 }
@@ -339,7 +363,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 func TestNewRouter_CORSOnStream(t *testing.T) {
 	t.Parallel()
 
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 	router := NewRouter(Dependencies{
 		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
@@ -396,7 +420,7 @@ func TestNewRouter_CORSOnStream(t *testing.T) {
 	})
 }
 
-// TestNewRouter_RawSQLAdminGate pins the contract for POST /v1/admin/query:
+// TestNewRouter_RawSQLAdminGate pins the contract for POST /v1/ops/query:
 //
 //	admin role   → reaches handler
 //	service role → 403 (no longer privileged)
@@ -409,9 +433,9 @@ func TestNewRouter_CORSOnStream(t *testing.T) {
 func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 	t.Parallel()
 
-	reg := discovery.NewSchemaRegistryFromMap(nil)
+	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
@@ -429,7 +453,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 		if role != "" {
 			ctx = auth.WithRole(ctx, role)
 		}
-		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/admin/query", nil)
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/ops/query", nil)
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
 		return rec
@@ -470,9 +494,9 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	t.Parallel()
 
-	reg := discovery.NewSchemaRegistryFromMap(nil)
+	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	deps := Dependencies{
 		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
@@ -489,16 +513,17 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	router := NewRouter(deps)
 
 	// Admin pipes route should 404 when pipes is nil. Send it as admin so the
-	// /v1/admin gate passes and we observe the route being absent (the gate
+	// /v1/ops gate passes and we observe the route being absent (the gate
 	// runs before sub-route matching, so a roleless request would 403 first).
-	req := httptest.NewRequestWithContext(auth.WithRole(context.Background(), "admin"), http.MethodGet, "/v1/admin/pipes", nil)
+	req := httptest.NewRequestWithContext(auth.WithRole(context.Background(), "admin"), http.MethodGet, "/v1/ops/pipes", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 
-	// DLQ stats should 404 when DLQ is nil (the route — and its admin gate —
-	// is never registered, so no role is needed to observe the 404).
-	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
+	// DLQ stats should 404 when DLQ is nil. As with pipes above, send it as
+	// admin: the /v1/ops gate covers the whole tree and runs before sub-route
+	// matching, so a roleless request would 403 before the absent route 404s.
+	req = httptest.NewRequestWithContext(auth.WithRole(context.Background(), "admin"), http.MethodGet, "/v1/ops/dlq/stats", nil)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -521,9 +546,9 @@ func TestCORSMiddleware_EmptyOrigins_AllowAll(t *testing.T) {
 func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 	t.Parallel()
 
-	reg := discovery.NewSchemaRegistryFromMap(nil)
+	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 	deps := Dependencies{
 		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:  &QueryHandler{},
@@ -546,9 +571,9 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 	t.Parallel()
 
-	reg := discovery.NewSchemaRegistryFromMap(nil)
+	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 	deps := Dependencies{
 		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:  &QueryHandler{},
@@ -643,9 +668,11 @@ func TestJSONRecoverer_PanicAfterPartialWriteDoesNotCorrupt(t *testing.T) {
 // gate is its entire authorization story.
 func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 	t.Parallel()
-	reg := discovery.NewSchemaRegistryFromMap(nil)
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
+		{Name: "events", Columns: []discovery.Column{{Name: "id", Type: "String"}}},
+	})
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
@@ -669,7 +696,7 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 		return rec
 	}
 
-	for _, path := range []string{"/v1/schema", "/v1/schema?table=events"} {
+	for _, path := range []string{"/v1/ops/schema", "/v1/ops/schema?table=events"} {
 		t.Run(path+" tokenless 403", func(t *testing.T) {
 			t.Parallel()
 			rec := get(path, "")
@@ -680,8 +707,10 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 		t.Run(path+" admin reaches handler", func(t *testing.T) {
 			t.Parallel()
 			rec := get(path, "admin")
-			assert.NotEqual(t, http.StatusForbidden, rec.Code, "admin must reach schema")
-			assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
+			// Require the handler's 200, not merely "not denied": under the
+			// tree-level /v1/ops gate a 404 would also be "not 403", so only
+			// a success status proves the admin reached the schema handler.
+			assert.Equal(t, http.StatusOK, rec.Code, "admin must reach schema")
 		})
 	}
 }

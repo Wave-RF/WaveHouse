@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
-	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
@@ -66,7 +65,7 @@ func TestRequireAdmin_DenialLogsStructuredWarn(t *testing.T) {
 	}))
 
 	ctx := auth.WithRole(context.Background(), "viewer")
-	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/admin/query", nil)
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/ops/query", nil)
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	out := buf.String()
@@ -76,7 +75,7 @@ func TestRequireAdmin_DenialLogsStructuredWarn(t *testing.T) {
 	assert.Contains(t, out, `"role_observed":"viewer"`)
 	assert.Contains(t, out, `"role_resolved":"viewer"`)
 	assert.Contains(t, out, `"roles_allowed":null`, "the admin gate logs no explicit allowlist")
-	assert.Contains(t, out, `"route":"/v1/admin/query"`)
+	assert.Contains(t, out, `"route":"/v1/ops/query"`)
 	assert.Contains(t, out, `"method":"GET"`)
 	assert.Contains(t, out, `"status":403`)
 	assert.Contains(t, out, `"gate":"admin"`)
@@ -94,7 +93,7 @@ func TestRequireAdmin_EmptyRoleDenialLogsResolvedRole(t *testing.T) {
 		t.Fatal("handler must not run on a denied request")
 	}))
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/admin/query", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/query", nil)
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	out := buf.String()
@@ -116,7 +115,7 @@ func TestRequireAdmin_InvalidTokenDenialLogsFailLoudReason(t *testing.T) {
 	}))
 
 	ctx := auth.WithAuthError(context.Background(), errors.New("token expired"))
-	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/admin/query", nil)
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/ops/query", nil)
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	out := buf.String()
@@ -162,7 +161,7 @@ func TestPipesHandler_Execute_DenialLogsAllowedRoles(t *testing.T) {
 func TestIngest_DenialLogsPolicyGate(t *testing.T) {
 	t.Parallel()
 	logger, buf := warnBufLogger()
-	h := NewIngestHandler(testRegistry(), &testutil.MockPublisher{}, logger)
+	h := NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, logger)
 	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {Select: map[string]policy.RolePermissions{"viewer": {}}}, // no insert for viewer
@@ -185,16 +184,17 @@ func TestIngest_DenialLogsPolicyGate(t *testing.T) {
 
 // TestAuthzDenied_LogsChiRoutePattern: routed through the real mux, the WARN's
 // route is the matched route template, not the raw path — low-cardinality and
-// free of concrete path params. /v1/schema runs the admin gate (no /admin
-// prefix), so gate=admin is what tells the operator which check denied it.
+// free of concrete path params. The /v1/ops gate is tree-level middleware, so
+// it denies before sub-route matching and the template is /v1/ops/*; the
+// gate=admin attribute tells the operator which check denied it.
 func TestAuthzDenied_LogsChiRoutePattern(t *testing.T) {
 	t.Parallel()
 	logger, buf := warnBufLogger()
-	reg := discovery.NewSchemaRegistryFromMap(nil)
+	reg := testutil.NewTestSchemaRegistry(t, nil)
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, &testutil.MockPublisher{}, logger),
 		Query:       &QueryHandler{},
-		SSE:         NewStreamHandler(stream.NewHub(nil, nil), nil),
+		SSE:         NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:      &HealthHandler{},
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },
@@ -203,12 +203,12 @@ func TestAuthzDenied_LogsChiRoutePattern(t *testing.T) {
 	})
 
 	ctx := auth.WithRole(context.Background(), "viewer")
-	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/schema", nil)
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/ops/schema", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 
 	out := buf.String()
-	assert.Contains(t, out, `"route":"/v1/schema"`, "route should be the chi pattern")
-	assert.Contains(t, out, `"gate":"admin"`, "/v1/schema runs the admin gate, not a policy one")
+	assert.Contains(t, out, `"route":"/v1/ops/*"`, "route should be the chi pattern")
+	assert.Contains(t, out, `"gate":"admin"`, "/v1/ops/schema runs the admin gate, not a policy one")
 }

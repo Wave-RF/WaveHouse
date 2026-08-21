@@ -19,7 +19,7 @@ export class DLQNamespace {
   async list(opts?: { signal?: AbortSignal }): Promise<Result<DLQStats>> {
     const { data, error } = await request<DLQStats>(this._ctx, {
       method: "GET",
-      path: "/v1/dlq/stats",
+      path: "/v1/ops/dlq/stats",
       signal: opts?.signal,
     });
     if (error) return err(error);
@@ -30,7 +30,7 @@ export class DLQNamespace {
   async table(name: string, opts?: { signal?: AbortSignal }): Promise<Result<DLQStats>> {
     const { data, error } = await request<DLQStats>(this._ctx, {
       method: "GET",
-      path: "/v1/dlq/stats",
+      path: "/v1/ops/dlq/stats",
       params: { table: name },
       signal: opts?.signal,
     });

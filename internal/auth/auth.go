@@ -203,7 +203,15 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 			// default at the end (roleless + recorded error). Ordering it this way
 			// means a future missing return, or a mis-set !ok/!Valid condition,
 			// can never accidentally promote an unverified token to a real role.
-			token, err := jwt.Parse(tokenStr, keyFunc, jwt.WithValidMethods(validMethods))
+			// WithJSONNumber decodes numeric claims as json.Number instead of
+			// float64, which is exact only to 2^53 — without it a large numeric
+			// claim (a 19-digit tenant id) silently rounds, and two tenants whose
+			// ids differ in the trailing digits can bind the same policy filter
+			// value. exp/nbf/iat validation handles json.Number natively, with
+			// one deliberate tightening: a literal exp of 0, which float64
+			// decoding special-cased as "no expiry", now reads as the epoch and
+			// is expired (see CHANGELOG).
+			token, err := jwt.Parse(tokenStr, keyFunc, jwt.WithValidMethods(validMethods), jwt.WithJSONNumber())
 			if err == nil && token.Valid {
 				if claims, ok := token.Claims.(jwt.MapClaims); ok {
 					ctx := WithClaims(r.Context(), claims)

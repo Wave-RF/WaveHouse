@@ -9,7 +9,7 @@ import (
 )
 
 // queryCacheKey produces a deterministic L1/L2 cache key for a (sql, params)
-// pair. The raw-SQL endpoint (`POST /v1/admin/query`) does not cache, but the
+// pair. The raw-SQL endpoint (`POST /v1/ops/query`) does not cache, but the
 // structured query (`POST /v1/query?table={table}`) and named pipes
 // (`GET/POST /v1/pipes/{name}`) handlers do — they share this helper so a
 // key change in one place propagates to every cached read path.

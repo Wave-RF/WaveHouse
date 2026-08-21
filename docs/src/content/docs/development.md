@@ -18,7 +18,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse via testcontainers (no compose file) | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
-| **pnpm** | 11.1+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.1.3 --activate` (recommended), or `npm i -g pnpm` |
+| **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
 
 ### Auto-installed by `make tools`
@@ -26,9 +26,10 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 Run `make tools` once after cloning to populate everything that doesn't have to be on your PATH:
 
 - **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
+- **`misspell` v0.8.0, `shellcheck` v0.11.0, `actionlint` v1.7.12** → installed to `.bin/<os>_<arch>/`; they back `make lint-prose`, `make lint-sh`, and `make lint-gha`. `make tools` also points `core.hooksPath` at `.githooks/`, which is what installs the pre-commit and pre-push gates.
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
 - **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
-- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by two parts of the docs *build*: `rehype-mermaid` (SVG diagram rendering) and the `diagram-png` integration (`docs/src/integrations/diagram-png.mjs`), which rasterizes each diagram to light/dark PNGs (a solid surface-card variant plus a transparent-background variant for slide decks) at `astro:build:done` for the Copy/Download buttons in the zoom lightbox. Both reuse the same Playwright Chromium, as does the manual `docs/scripts/screenshot.mjs` QA helper. `starlight-links-validator` runs under `build-docs` / CI only — the `dev-docs` watch loop skips it so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `DOCS_WATCH_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`. It is also a real `@wavehouse/sdk` consumer (the landing page's live demo imports the workspace package), so `check-docs` / `build-docs` / `dev-docs` build the SDK first via `build-ts`; if you drive Astro directly through pnpm (e.g. `pnpm --filter wavehouse-docs run start`), run `make build-ts` once first so the dep resolves.
+- **pnpm deps** for the repo root plus `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). The root workspace is where the repo-wide linters live — **Biome** (JS/TS/JSON) and **markdownlint-cli2** (Markdown/MDX, including the repo-local `WH001`/`WH002` rules). Neither is ever run from a global install: `make lint` / `make fix` shell out to `pnpm -w run`, and every target that needs them declares the `pnpm-install` prerequisite, so a clean clone is linting correctly after `make tools` with nothing else on your PATH. `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by two parts of the docs *build*: `rehype-mermaid` (SVG diagram rendering) and the `diagram-png` integration (`docs/src/integrations/diagram-png.mjs`), which rasterizes each diagram to light/dark PNGs (a solid surface-card variant plus a transparent-background variant for slide decks) at `astro:build:done` for the Copy/Download buttons in the zoom lightbox. Both reuse the same Playwright Chromium, as does the manual `docs/scripts/screenshot.mjs` QA helper. `starlight-links-validator` runs under `build-docs` / CI only — the `dev-docs` watch loop skips it so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `DOCS_WATCH_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`. It is also a real `@wavehouse/sdk` consumer (the landing page's live demo imports the workspace package), so `check-docs` / `build-docs` / `dev-docs` build the SDK first via `build-ts`; if you drive Astro directly through pnpm (e.g. `pnpm --filter wavehouse-docs run start`), run `make build-ts` once first so the dep resolves.
 
 ### Verify your setup
 
@@ -37,7 +38,7 @@ go version          # go1.26+
 make --version      # GNU Make 4.x
 docker compose version
 node --version      # v22.x (matches .nvmrc and CI)
-pnpm --version      # 11.1+
+pnpm --version      # 11.21+
 ```
 
 If any of those are wrong/missing, the Makefile recipes will fail with confusing errors (e.g. `--output-sync` is unrecognized on Make 3.81; `pnpm: command not found` on `make test-ts`).
@@ -119,19 +120,18 @@ curl http://localhost:8080/livez   # → {"status":"ok"}
 curl http://localhost:8080/readyz  # → {"status":"ready"}
 ```
 
-The admin surface — `/v1/schema`, `/v1/admin/query` (raw SQL), `/v1/dlq/stats` — needs the **admin** role, which the `public` trial role doesn't have. Mint an admin JWT (see [Validating tokens](#validating-tokens) below) and pass it:
+The admin surface — `/v1/ops/schema`, `/v1/ops/query` (raw SQL), `/v1/ops/dlq/stats` — needs the **admin** role, which the `public` trial role doesn't have. Mint an admin JWT (see [Validating tokens](#validating-tokens) below) and pass it:
 
 ```bash
-curl -s http://localhost:8080/v1/schema -H "Authorization: Bearer $TOKEN" | jq
-curl -s -X POST http://localhost:8080/v1/admin/query -H "Authorization: Bearer $TOKEN" \
+curl -s http://localhost:8080/v1/ops/schema -H "Authorization: Bearer $TOKEN" | jq
+curl -s -X POST http://localhost:8080/v1/ops/query -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
-curl -s http://localhost:8080/v1/dlq/stats -H "Authorization: Bearer $TOKEN"
+curl -s http://localhost:8080/v1/ops/dlq/stats -H "Authorization: Bearer $TOKEN"
 ```
 
 ### How `make dev` works
 
-`make dev` is a one-stop convenience target for backend and frontend
-development. The recipe is essentially:
+`make dev` is a one-stop convenience target for backend and frontend development. The recipe is essentially:
 
 ```make
 dev: deps-up $(AIR)
@@ -151,9 +151,7 @@ dev: deps-up $(AIR)
 
 ### Dev convenience targets
 
-These are the small targets behind `make dev` — useful directly when you want
-to run WaveHouse outside of air (e.g. `make build && ./bin/wavehouse`), or
-when you need to poke at ClickHouse:
+These are the small targets behind `make dev` — useful directly when you want to run WaveHouse outside of air (e.g. `make build && ./bin/wavehouse`), or when you need to poke at ClickHouse:
 
 | Target | What it does |
 | ------ | ------------ |
@@ -211,9 +209,9 @@ The **operator key** is a non-JWT alternative: set one and send it in an `Author
 ```bash
 WH_AUTH_OPERATOR_KEY=dev-operator-key make dev
 # ...then, in another shell — the admin surface works even with no policy seeded:
-curl -H "Authorization: Operator dev-operator-key" http://localhost:8080/v1/admin/policy
+curl -H "Authorization: Operator dev-operator-key" http://localhost:8080/v1/ops/policy
 # the X-Operator-Key alias works too:
-curl -H "X-Operator-Key: dev-operator-key" http://localhost:8080/v1/admin/policy
+curl -H "X-Operator-Key: dev-operator-key" http://localhost:8080/v1/ops/policy
 ```
 
 Then mint a token (role == the policy `admin_role`) and call an admin endpoint:
@@ -222,7 +220,7 @@ Then mint a token (role == the policy `admin_role`) and call an admin endpoint:
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli)
 export TOKEN=$(jwt encode --secret "my-secret" '{"role": "admin", "exp": 9999999999}')
 
-curl -s -X POST http://localhost:8080/v1/admin/query \
+curl -s -X POST http://localhost:8080/v1/ops/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
@@ -288,7 +286,7 @@ go build -o bin/wavehouse ./cmd/wavehouse
 
 ### How It Works
 
-The Go suite targets (`test-unit`, `test-integration`) use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile uses `go tool` so no global installation is needed. `test-e2e` runs the orchestrator + vitest and `test-ts` runs vitest directly, so neither uses gotestsum. The Go SDK and conformance targets (`test-go-sdk`, `test-go-sdk-e2e`, `test-conformance-ts`) run plain `go test` / `node` and ignore `ARGS` and `V=1`.
+The Go suite targets (`test-unit`, `test-integration`) use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile invokes them as `go tool <name>`, so no global installation is needed. `test-e2e` runs the orchestrator + vitest and `test-ts` runs vitest directly, so neither uses gotestsum. The Go SDK and conformance targets (`test-go-sdk`, `test-go-sdk-e2e`, `test-conformance-ts`) run plain `go test` / `node` and ignore `ARGS` and `V=1`.
 
 Go tests run with the **race detector** (`-race`) enabled by default (including `test-go-sdk` — the SDK's streaming subsystem is highly concurrent; `test-go-sdk-e2e` skips it since it drives a live server). WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE hubs) — the race detector catches data races that would panic in production.
 
@@ -367,7 +365,7 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 **Architecture**:
 
 - `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved. CI runs the exact same path.
-- `tests/e2e/sdk/setup.ts` — `globalSetup` that probes the orchestrator-supplied `CLICKHOUSE_URL`/`WAVEHOUSE_URL`, creates the per-suite tables, refreshes the schema, and bootstraps a baseline policy. Lifecycle is owned by the orchestrator: if either URL isn't reachable it fails fast rather than starting anything itself.
+- `tests/e2e/sdk/setup.ts` — `globalSetup`. Probes the `CLICKHOUSE_URL` / `WAVEHOUSE_URL` the orchestrator injects, creates the per-suite tables, refreshes the schema, and bootstraps the baseline policy. It starts nothing itself and fails fast if either URL isn't up. It also prints the active Node/undici version, warning when the local Node major differs from `.nvmrc` — a runtime-specific transport bug is otherwise indistinguishable from a code failure (see [#440](https://github.com/Wave-RF/WaveHouse/issues/440)).
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
 
 **Running E2E tests**:
@@ -379,9 +377,29 @@ make test-e2e
 
 `make test-e2e` builds `bin/wavehouse-cov` (coverage-instrumented) and runs the orchestrator under `scripts/orchestrator/` to wire ClickHouse + the cover binary into the suite. covdata flushes on SIGINT into `tmp/coverage/e2e/data/`.
 
-`make test-e2e` is self-contained — it always starts its own ClickHouse testcontainer and `wavehouse-cov` on a random free port, so it neither needs nor reuses a running `make dev`.
+The orchestrator always provisions its own stack — a fresh ClickHouse testcontainer plus `wavehouse-cov` on a random free port — so a running `make dev` on `:8080` is neither detected nor reused, and the two don't collide. To run vitest against a stack you manage yourself, start the server from the **repo root** with the E2E fixture config:
 
-**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`.
+```bash
+WH_CONFIG=tests/e2e/fixtures/config.yaml go run ./cmd/wavehouse
+```
+
+The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `policy.file_path` is relative to the working directory. The fixture pins no ClickHouse address, so the server looks for one on `localhost:9000`; point it elsewhere with `WH_CH_ADDR` / `WH_CH_HTTP_PORT` if yours isn't there.
+
+Prefixing the variable to `make dev` does **not** work: that recipe pins `WH_CONFIG=.config.local.yaml` inline, which overrides anything inherited from the environment.
+
+Then set `CLICKHOUSE_URL` / `WAVEHOUSE_URL` and run `pnpm test` from `tests/e2e/sdk/`; teardown is a no-op on that path, so your stack survives between iterations.
+
+If a previous run was killed (harness timeout, stop button, `SIGKILL`), it can leave a `wavehouse-cov` behind. That process shares `tmp/data` and `tmp/wavehouse-cov.log` with the next run and will corrupt it, so the orchestrator kills any leftover before starting and says so.
+
+**Environment knobs**:
+
+| Variable | Effect |
+|----------|--------|
+| `V=1` | Stream the WaveHouse subprocess log live *in addition to* capturing it to `tmp/wavehouse-cov.log`. The on-failure log excerpt is then skipped — you have already seen it |
+| `E2E_CH_QUERY_TIMEOUT_MS` | Per-request ceiling for the suite's direct ClickHouse queries (default `10000`) |
+| `E2E_NO_COVERAGE=1` | Drop `--coverage` from the vitest run (skips v8 instrumentation and report generation) while chasing a flake. **Local debugging only** — no report is written. Ignored (with a log line) under `make ci` / `make test-all`, so an exported-and-forgotten var can't produce a green coverage gate with the TS e2e report missing |
+
+**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's own `waitForCondition` poll helper rather than a pipeline test.
 
 ## Linting
 
@@ -389,7 +407,12 @@ make test-e2e
 make lint
 ```
 
-`golangci-lint` is pinned in the `Makefile` (v2.11.4) and auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or `make tools`) — no manual install needed. It's kept out of `go.mod` because its dependency tree conflicts with the main module. Install it globally and you'll get an unpinned version the build never uses, with findings that diverge from CI.
+`golangci-lint` is kept out of `go.mod` (its dependency tree conflicts with the main module), so the Makefile pins the version instead and downloads it into `.bin/` on first use — `make lint` and `make tools` both handle it, and no global install is needed.
+
+A global copy is never what `make lint` runs, so install one only if you want to invoke `golangci-lint` outside `make`:
+
+- **macOS**: `brew install golangci-lint`
+- **Binary**: See [golangci-lint.run/welcome/install/](https://golangci-lint.run/welcome/install/)
 
 The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control) — that file is the authoritative list of enabled linters. Highlights:
 
@@ -408,6 +431,19 @@ The configuration is in `.golangci.yml` (v2 format with `default: none` for expl
 - **tparallel** — Missing `t.Parallel()` in test subtests
 
 Formatting (**gofumpt** — strict superset of gofmt — and **goimports** import grouping) is enforced through the v2 `formatters:` section rather than as linters.
+
+### Markdown and MDX
+
+`make lint` also covers documentation: **markdownlint** owns Markdown *and* MDX style (rules in `.markdownlint.json`; file selection in `.markdownlint-cli2.jsonc` for `.md`, plus the `**/*.mdx` glob on `lint:md` in `package.json`) and **misspell** owns spelling. Two rules are repo-local, in `scripts/markdownlint-rules/`:
+
+- **WH001 / no-hard-wrapped-prose** — a paragraph must be one line. Hard-wrapping at 72/80 columns turns a one-word edit into a five-line diff. Autofixes. Tables (leading pipes optional), code, headings, setext underlines, blockquotes, JSX, `$$` display math, and multi-line MDX `import`/`export` are left alone; a list item is joined as a unit; an aside's body is joined but its `:::` delimiters are not.
+- **WH002 / mdx-fence-needs-blank-line** — an MDX code fence directly against a JSX tag (`<TabItem label="YAML">` immediately followed by a fence). MDX renders that fine; the problem is that markdownlint parses CommonMark, where the tag opens an HTML block that runs to the next blank line — so the fence is not a code block to any generic rule, and `markdownlint --fix` will happily reformat the code inside it. The blank line is what keeps the two parsers agreeing.
+
+Run `make fix` to apply them. **The generic markdownlint fixers run over `.md` only.** markdownlint parses CommonMark and MDX does not, and where the two disagree an autofix rewrites the inside of a code block — de-indenting YAML comments it reads as headings, autolinking bare URLs. Reporting that disagreement is useful, so `make lint` still checks `.mdx`; acting on it is not. MDX therefore gets exactly one *structural* fixer, `scripts/fix-mdx-fences.mjs`, which only ever inserts a blank line beside a JSX tag. (misspell still auto-corrects spelling in `.mdx` — its corrections come from a curated list and don't depend on parsing the document.)
+
+The practical consequence: **a problem `make lint` reports in an `.mdx` file may need fixing by hand**, WH001's hard-wrapped prose included. A bare `markdownlint-cli2 --fix` can't reach MDX either: `.markdownlint-cli2.jsonc` globs `.md` only and the `.mdx` glob sits on `lint:md`, so the guard is structural rather than a rule you have to remember. Improving this — a formatter that understands MDX rather than one that guesses — is tracked in [#499](https://github.com/Wave-RF/WaveHouse/issues/499).
+
+The markdownlint extension reads `.markdownlint-cli2.jsonc`, `customRules` and all, so no editor setting is needed — but it only activates on Markdown, so in-editor squiggles cover WH001 in `.md` and never WH002 in `.mdx`. Agent-written files get the same treatment at write time from `.claude/hooks/markdown-on-save.sh` — markdownlint in `.md`, the fence pass in `.mdx` — and everyone else gets it from `make fix`.
 
 ## Project Structure
 
@@ -429,7 +465,7 @@ WaveHouse/
 │   ├── pipes/              # Named query pipes (NATS KV + .sql bootstrap)
 │   ├── policy/             # Access control policies (evaluation + NATS KV store)
 │   ├── query/              # Structured query AST + SQL builder
-│   ├── stream/             # SSE fan-out (event Hub, subscriber queues, keepalive)
+│   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
 │   └── testutil/           # Shared test helpers and mocks
 ├── clients/                # Official SDKs
 │   ├── ts/                 # TypeScript SDK (@wavehouse/sdk)
@@ -441,10 +477,13 @@ WaveHouse/
 │   └── e2e/                # E2E suite (orchestrator + ClickHouse testcontainer)
 │       ├── fixtures/       # ClickHouse DDL + config/policy fixtures
 │       └── sdk/            # E2E specs driven through the TypeScript SDK (Vitest)
+├── clients/                # Client SDKs
+│   └── ts/                 # TypeScript SDK (@wavehouse/sdk, pnpm workspace)
 ├── deployments/
 │   ├── compose/            # Docker Compose files (standalone.yaml, dependencies.yaml)
 │   ├── Dockerfile          # Runtime image
 │   └── Dockerfile.goreleaser  # Release image (built by GoReleaser)
+├── scripts/                # E2E orchestrator, cov tool, CI/hook helpers
 ├── docs/                   # Documentation
 ├── config.yaml             # Default configuration file
 ├── Makefile                # Build, test, lint, deploy targets
@@ -468,7 +507,7 @@ Run `make help` to see all targets. Key ones:
 | Target | Description |
 | ------ | ----------- |
 | `make help` | Show all targets with descriptions (always the source of truth) |
-| `make tools` | Bootstrap: install pinned tools (`golangci-lint`, `air`), Go modules, pnpm deps |
+| `make tools` | Bootstrap: install pinned tools (`golangci-lint`, `air`, `misspell`, `shellcheck`, `actionlint`), Go modules, pnpm deps, and git hooks (`core.hooksPath` → `.githooks/`) |
 | **Dev** | |
 | `make dev` | Hot-reload dev server: ClickHouse via Compose + WaveHouse under air on `:8080` |
 | `make deps-up` | Start ClickHouse alone (idempotent; blocks until healthy) |
@@ -483,10 +522,10 @@ Run `make help` to see all targets. Key ones:
 | **Static checks** | |
 | `make fmt` | Check formatting across root-module Go (`gofumpt`) + TS (Biome); the nested `clients/go` module's gofumpt check runs under `make verify` (`verify-go-sdk`). Run `make fix` to apply everywhere. |
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
-| `make lint` | Run linters across Go (`golangci-lint`, root + `clients/go`) + TS (Biome) + Markdown (markdownlint) + docs prose (misspell) |
+| `make lint` | Run linters across Go (`golangci-lint`, root + `clients/go`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
 | `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
-| `make verify` | Repo-wide static checks: root Go (tidy + fmt + vulncheck + lint), `clients/go` (fmt + vet + lint — no tidy/vulncheck: it's a nested module, invisible to the root-scoped `tidy`/`vulncheck` targets) + TS (Biome + `tsc` typecheck) + Markdown/prose, shell (shellcheck), workflows (actionlint), and `astro check` (parallel-safe: `make -j verify`) |
-| `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint) + docs prose (misspell) |
+| `make verify` | Repo-wide static checks: root Go (tidy + fmt + vulncheck + lint), `clients/go` (fmt + vet + lint — no tidy/vulncheck: it's a nested module, invisible to the root-scoped `tidy`/`vulncheck` targets) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + docs type-check (`astro check` — not a full build, so link validation stays CI's job) (parallel-safe: `make -j verify`) |
+| `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint `--fix`), MDX (`fix-mdx-fences` only — the generic fixers never run over `.mdx`), and docs-prose spelling (misspell, both) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
 | `make build-release` | Stripped release-style build → `bin/wavehouse-release` |
@@ -504,6 +543,10 @@ Run `make help` to see all targets. Key ones:
 | `make test-e2e` | E2E SDK suite against `bin/wavehouse-cov` + coverage gate |
 | `make test-all` | All suites sequentially + merged coverage gate |
 | `make ci` | Full pipeline: parallel `verify` + builds + unit/SDK tests, then integration + E2E + cov |
+| **Release** (see [Cutting a release](#cutting-a-release)) | |
+| `make release-server VERSION=X.Y.Z` | Tag a server release — binaries + container image |
+| `make release-sdk-ts VERSION=X.Y.Z` | Tag a TypeScript SDK release — npm |
+| `make release-sdk-go VERSION=X.Y.Z` | Tag a Go SDK release — `go get` |
 | **Analysis** (informational, not in CI) | |
 | `make size` | Binary size analysis → `tmp/analysis/` (text + SVG + interactive HTML) |
 | `make audit-cgo` | Audit dependency tree for C files (builds use `CGO_ENABLED=0`) |
@@ -542,38 +585,105 @@ For a combined security scan, run `make verify` — it runs `vulncheck` alongsid
 Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for three update configs:
 
 - **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`
-- **GitHub Actions** (root) — outdated action versions tracked against the SHA pins in `ci.yml` / `release.yml`, commit prefix `ci:`
+- **GitHub Actions** (root **and** `/.github/actions/setup-env`) — outdated action versions tracked against the SHA pins across `.github/workflows/*` and the `setup-env` composite action, commit prefix `ci:`
 - **npm — pnpm workspace** (root) — covers all three TypeScript packages (the docs site, the SDK, and the E2E tests) in one grouped PR, commit prefix `deps:`
 
 PRs are grouped per config to reduce noise. The npm config is pointed at the workspace **root** (`directory: /`), not the individual member directories. The repo has a single root `pnpm-lock.yaml`, and Dependabot only updates a lockfile co-located with the manifest it targets — so a per-member config (the previous setup) bumped a member's `package.json` without regenerating the root lockfile, and every such PR then failed CI's `pnpm install --frozen-lockfile` with `ERR_PNPM_OUTDATED_LOCKFILE`. Pointing at the root lets Dependabot read `pnpm-workspace.yaml`, walk every member, and update the one lockfile.
 
+The GitHub Actions config names **two** directories. `directory: /` reaches `.github/workflows/` but does not descend into `.github/actions/*/action.yml`, so the `setup-env` composite action — which owns every cache in `ci.yml` — was invisible to Dependabot, and its pins went stale against upstream and diverged from `publish-npm.yml`, which Dependabot *does* track and which doesn't call `setup-env`. Listing its directory under `directories:` brings it into the same weekly group; **adding a composite action means adding its directory there**, because nothing else catches the drift.
+
+`typescript` majors are held back (`ignore: version-update:semver-major`) because `tsup` vendors a `rollup-plugin-dts` that crashes on TypeScript 7 during `clients/ts`'s `prepare` script — i.e. inside `pnpm install`, which takes every Node job down at once. See the comment in `.github/dependabot.yml` for the condition that lets it be removed.
+
 **No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
 
-## Releasing the SDKs
+## Cutting a release
 
-**Go SDK** (`github.com/Wave-RF/WaveHouse/clients/go`): no tagged releases yet — `go get` resolves a pseudo-version from `main`. A tagged release requires a `clients/go/vX.Y.Z` tag (Go's nested-module tag form); the server's `v*` and npm's `sdk-v*` tag globs deliberately don't cover it, and no release workflow exists for it yet.
-
-**TypeScript SDK** (`@wavehouse/sdk`, in `clients/ts/`) publishes to npm via `.github/workflows/publish-npm.yml` using OIDC trusted publishing — no `NPM_TOKEN`. It is independent of the server's Go/Docker release (`release.yml`): the `v*` (server) and `sdk-v*` (SDK) tag globs are disjoint, so the two never collide. There are two channels:
-
-- **Dev snapshots.** Every push to `main` publishes `0.0.0-dev.<hash>` under the `dev` dist-tag — but only when the built `dist/` actually changed (the version is a hash of the build output, so an unchanged build resolves to an already-published version and is skipped). Install the bleeding edge with `npm install @wavehouse/sdk@dev`.
-- **Tagged releases.** Pushing a `sdk-vX.Y.Z` tag publishes that version and creates a GitHub Release. A stable version goes to the `latest` dist-tag; a prerelease (`sdk-v0.2.0-rc.1`) is published under `alpha`/`beta`/`rc`/`next` — derived from the suffix — and marked as a GitHub pre-release. The tag **must** match `clients/ts/package.json`'s `version`, or the job fails fast.
-
-To cut a release:
+Cutting a release is **one tag** — no version bump in code, no release branch:
 
 ```bash
-# 1. Bump "version" in clients/ts/package.json, commit, and merge to main.
-# 2. Tag the release commit and push the tag:
-git tag sdk-v0.1.0
-git push origin sdk-v0.1.0
+make release-server VERSION=0.1.0   # tag v0.1.0            → binaries + container image
+make release-sdk-ts VERSION=0.1.0   # tag clients/ts/v0.1.0 → @wavehouse/sdk on npm
+make release-sdk-go VERSION=0.1.0   # tag clients/go/v0.1.0 → the Go module proxy
 ```
 
-:::caution[The first tagged release promotes `latest`]
-npm sets a package's `latest` dist-tag on its *first* publish even under `--tag dev`, so until the first `sdk-v*` release a bare `npm install @wavehouse/sdk` (and the bare CDN URLs) resolve to a `0.0.0-dev.*` snapshot. The first tagged stable release moves `latest` to a real version and fixes this for every consumer.
+The one thing to do *before* tagging is promote the changelog: `AGENTS.md` requires every PR to add its entry under `## Unreleased`, so open a PR renaming that heading to `## [X.Y.Z] - YYYY-MM-DD` and adding the matching link reference at the foot of the file. Nothing in the release pipeline reads `CHANGELOG.md` — this is for the file's own readers.
+
+Each runs [`scripts/release.sh`](https://github.com/Wave-RF/WaveHouse/blob/main/scripts/release.sh), which preflights (on `main`, clean tree, in sync with `origin/main`, the tag free both locally and on the remote, the required `CI` check green on *this exact commit*), prints exactly what will be published, and asks before pushing. `DRY_RUN=1 make release-…` stops after the plan. Tag creation is admin-only via the `release tag protection` ruleset.
+
+The components are independent — releasing the server does not publish the SDK, and their version numbers need not match.
+
+### Why there is no version to bump
+
+The **tag is the version**, everywhere:
+
+| Component | Where the version comes from |
+| --- | --- |
+| Server | GoReleaser's `-ldflags` at build time, from the tag |
+| Go SDK | The tag itself — a Go module has no version file |
+| TypeScript SDK | `publish-npm.yml` stamps `clients/ts/package.json` from the tag before publishing |
+
+The npm case is the one that usually forces a bump commit, and it is deliberately not the source of truth here: the `main` ruleset forbids pushing to `main` directly, so bumping `package.json` would mean a reviewed PR merged before *every* release. The committed value is documentation — if it drifts from the tag, the workflow logs a notice and the tag wins.
+
+### Tag naming
+
+```text
+v0.1.0              server (root Go module)
+clients/ts/v0.1.0   @wavehouse/sdk
+clients/go/v0.1.0   Go SDK
+```
+
+The `clients/<lang>/` prefix isn't a style choice. Go resolves a module in a subdirectory only against a tag carrying that subdirectory as a prefix ([the module reference](https://go.dev/ref/mod) is explicit), so `go get github.com/Wave-RF/WaveHouse/clients/go@v0.1.0` requires precisely `clients/go/v0.1.0`. Every client follows that shape rather than leaving Go as the exception, and a new language is one more `clients/<lang>/v*` family.
+
+Tag globs are anchored at the start of the ref name, so `v*` never matches a `clients/...` tag — which is what keeps a client release from triggering a server release.
+
+### What a release publishes
+
+- **Server —** a **GitHub Release** with the cross-compiled archives (linux/darwin/windows/freebsd × amd64/arm64; `.zip` on Windows, `.tar.gz` elsewhere) and `checksums.txt`. A tag carrying a prerelease suffix (`v0.1.0-alpha.1`) is marked as a GitHub pre-release, so it never takes the "Latest release" badge from a shipped stable version.
+- **Server + TypeScript SDK —** **release notes generated by GitHub** from the PRs merged since the previous tag *in the same family* — one line per PR, since `main` is squash-merged, grouped into the categories defined in [`.github/release.yml`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/release.yml). Grouping is by **PR label**: `github_actions` / `documentation` are applied automatically by `actions/labeler`, but `breaking-change`, `security`, `bug`, and `enhancement` are applied by hand — an unlabelled PR lands in "Other changes". Dependabot is split out by **author** rather than by label, because the labels `actions/labeler` applies by path — `github_actions`, `documentation` — mark our own PRs too; our CI work gets its own "CI & build" section — ordered above Documentation, since a CI PR here nearly always updates docs too — and Dependencies is pure Dependabot residue. **Any category keyed on a label a Dependabot PR can carry needs that author exclude** — labeler's path labels *and* the ecosystem labels Dependabot applies itself (`dependencies`, `javascript`, `go`, `github_actions`; `javascript` is in neither `labeler.yml` nor our categories) — or that category intercepts bumps before they reach the `📦 Dependencies` catch-all. `CHANGELOG.md` is *not* the source of the release body; it is the longer-form record of why each change was made.
+- **Server —** a **GHCR image** at `ghcr.io/wave-rf/wavehouse`, with two tags: the immutable `:vX.Y.Z`, and one moving *channel* pointer. A stable release moves `:latest`; a prerelease moves `:alpha` / `:beta` / `:rc` / `:next` instead, matching the npm dist-tag it would get. The channel comes from the **first** prerelease identifier, matched **exactly**: `v0.2.0-rc.1` → `:rc`, while `-alpha1`, `-preview.1`, or any other form → `:next`. `scripts/ci/release-channel.sh` is the single rule every publisher uses, so `ghcr.io/wave-rf/wavehouse:rc` and `@wavehouse/sdk@rc` can't drift apart. **A prerelease-only project therefore has no `:latest` tag** — that is deliberate; `:latest` starts existing when the first stable release ships.
+- **TypeScript SDK —** an **npm publish** of `@wavehouse/sdk` under `latest` (stable) or `alpha`/`beta`/`rc`/`next` (prerelease), plus its own GitHub Release.
+- **Go SDK —** nothing to upload. A `clients/go/vX.Y.Z` tag *is* the release: the [Go module proxy](https://proxy.golang.org) serves it on the first `go get github.com/Wave-RF/WaveHouse/clients/go@vX.Y.Z`, and `sum.golang.org` records the module hash. No workflow fires — the release tag globs (`v*`, `clients/ts/v*`) are anchored and never match it — so there is no GitHub Release or provenance attestation for the Go SDK today.
+- **Server —** **build-provenance attestations** (Sigstore, free for public repos) over every archive and over the image's multi-arch manifest digest; the image attestation is stored alongside the image in GHCR. The release job verifies its own attestations before finishing, so a release that publishes unverifiable provenance goes red.
+- **TypeScript SDK —** an **npm provenance attestation** via `npm publish --provenance`, surfaced as the provenance badge on the package page and checkable with `npm audit signatures`. The npm job does not re-verify it the way the server job does.
+
+Binaries installed with `go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@vX.Y.Z` get no `-ldflags`, so they read their version from the module metadata the Go toolchain embeds; `/version` reports the tag without its leading `v` (`0.1.0`, not `v0.1.0`), with `git_commit`/`build_time` as `unknown`. Release archives and container images carry all three.
+
+Consumers can check provenance for themselves:
+
+```bash
+gh attestation verify wavehouse_linux_amd64.tar.gz \
+  --repo Wave-RF/WaveHouse \
+  --signer-workflow Wave-RF/WaveHouse/.github/workflows/release.yml
+
+gh attestation verify oci://ghcr.io/wave-rf/wavehouse:v0.1.0 \
+  --repo Wave-RF/WaveHouse \
+  --signer-workflow Wave-RF/WaveHouse/.github/workflows/release.yml
+```
+
+`--signer-workflow` is not optional garnish: `--repo` alone accepts an attestation produced by *any* workflow in the repo. Same point, and the `:dev` equivalent, in [Deployment → Registry](/deployment#registry) and `SECURITY.md`.
+
+:::note[Releasing from the GitHub UI instead]
+Publishing a release from **Releases → Draft a new release** creates the tag, which fires the same workflow — so it works, and GoReleaser's default `mode: keep-existing` (the key is not set in `.goreleaser.yaml`) means it will not overwrite notes you wrote. Two things the `make` targets do for you and the UI does not: none of the preflight checks run, and you must click **Generate release notes** yourself, because a body you publish empty stays empty.
 :::
+
+## The `dev` channel
+
+Between releases, every push to `main` republishes both artifacts so `@dev` always means "current `main`":
+
+- **`ghcr.io/wave-rf/wavehouse:dev`** — a rolling pointer, plus an immutable `:dev-<sha>` (pruned after 30 days by `cleanup-ghcr.yml`, newest 5 always kept). Built by the same GoReleaser pipeline with `WAVEHOUSE_DEV=1`, which suppresses the GitHub Release. Note a Docker tag is only a pointer: `docker run …:dev` reuses a stale local image unless you `docker pull` first or pass `--pull=always`.
+- **`@wavehouse/sdk@dev`** — `0.0.1-dev.<utc-stamp>.h<build-hash>`, published only when the published package actually changes. The trailing hash covers every file `npm pack` would ship — the built `dist/`, `package.json` minus its `version`, and the bundled `README`/`LICENSE` — so a push whose package would be byte-identical to the current `dev` publish is skipped, while a change to `exports`, `files`, `bin`, or `engines` republishes even though `dist/` is untouched.
+
+  The `<utc-stamp>` is load-bearing, not decoration. `npm install …@dev` records a *range* in your `package.json`, not the dist-tag, so what you get on the next install is the highest version matching that range. Under the old `0.0.0-dev.h<hash>` scheme, semver's lexical ordering of alphanumeric prerelease identifiers meant the newest publish routinely wasn't the highest one, and a range could resolve *backwards* — an `@dev` install landed on a two-month-old build ([#475](https://github.com/Wave-RF/WaveHouse/issues/475)). A numeric identifier compares numerically, so the channel now orders by publish time. The `0.0.1` base keeps the channel below every real release (so a dev build can never satisfy `^0.1.0`) and above the legacy `0.0.0-dev.*` publishes, which npm's 72-hour unpublish window makes permanent.
+
+:::caution[`latest` still points at a dev snapshot]
+npm set this package's `latest` dist-tag on its *first* publish — even though that publish went out under `--tag dev` — so it currently resolves to `0.0.0-dev.0f8826c`, the June 4 bootstrap build. Until the first **stable** `clients/ts/v*` release, a bare `npm install @wavehouse/sdk` and the bare CDN URLs get that snapshot, **not** a release — a prerelease publishes under `alpha`/`beta`/`rc`/`next` and leaves `latest` where it is. Publishing the first stable version moves `latest` to it and fixes this for every consumer; delete this note in the same change.
+:::
+
+Docker needs no equivalent fix: a tag is a mutable pointer resolved fresh on every pull, with no version ranges and no ordering, so the failure mode #475 describes cannot arise there.
 
 ## CI & review automation
 
-This repo has three tiers of AI automation sitting alongside the normal CI checks. Full detail lives in `AGENTS.md`; this section covers the contributor-facing behavior.
+AI automation sits alongside the normal CI checks — advisory PR review from CodeRabbit and Copilot, plus the local Claude Code tooling in `.claude/`. Full detail lives in `AGENTS.md` §Repository Automation; this section covers the contributor-facing behavior.
 
 ### PR title and Conventional Commits
 
@@ -643,12 +753,13 @@ When pushing back on a bot's suggestion, end the reply with the bot's mention (e
 
 ### Issue triage
 
-`.github/workflows/triage.yml` classifies new and edited issues via GitHub Models (`gpt-4o-mini`) and applies:
+Issue triage is **manual**. There is no triage workflow: `.github/workflows/triage.yml` classified new and edited issues with GitHub Models, which GitHub [retired on 2026-07-30](https://github.blog/changelog/2026-07-30-github-models-is-now-retired/) — the inference endpoint returns `410` for every request, so the workflow failed on every issue open/edit until it was removed ([#431](https://github.com/Wave-RF/WaveHouse/issues/431)).
 
-- `area/*` labels based on the issue body (areas pulled dynamically from the `area/*` repo labels — adding a new `area/foo` label with a description is all you need; no workflow edit)
-- `security` if the model flags a security concern
-- `breaking-change` if the model flags a public-API break
-- Priority on the **Task Board** project #7 via the board's `Priority` field (requires `PROJECT_BOARD_TOKEN` secret — labels apply with or without it)
+What that means in practice:
+
+- `area/*`, `security`, and `breaking-change` labels are applied by hand when an issue is triaged. PR labels are unaffected — those come from `actions/labeler` (below), which is path-based and needs no model.
+- Priority on the **Task Board** project #7 is set by hand on the board's `Priority` field. `.github/board-config.env` existed only for that workflow and is gone with it. The `PROJECT_BOARD_TOKEN` repo secret is now **unused** — it has no consumers left, so it is worth deleting and revoking the PAT behind it.
+- Maintainers running Claude Code can use the `/pm-triage` skill, which does the same classification locally against the live board.
 
 ### Auto-labeling PRs
 
@@ -658,7 +769,7 @@ The `PR housekeeping` workflow (`.github/workflows/housekeeping.yml`) runs `acti
 
 Follow the checklist in `AGENTS.md` §"Common Tasks / Adding a new internal package" — the automation-relevant steps are:
 
-1. Create a matching `area/<pkg>` repo label with a meaningful description (triage reads the description as the classifier's per-area hint).
+1. Create a matching `area/<pkg>` repo label with a meaningful description.
 2. Add the path → label mapping to `.github/labeler.yml` so PRs touching the new package get auto-labeled.
 
-Triage picks up the new label automatically; no workflow edit needed.
+Step 2 is the one that automates anything — PR labeling is path-based. Step 1's label is applied by hand during issue triage.

@@ -79,7 +79,7 @@ describe("PipesNamespace", () => {
     vi.restoreAllMocks();
   });
 
-  it("list() GETs /v1/admin/pipes", async () => {
+  it("list() GETs /v1/ops/pipes", async () => {
     const pipes = [{ name: "p1", sql: "SELECT 1" }];
     fetchSpy.mockResolvedValue(new Response(JSON.stringify(pipes), { status: 200 }));
 
@@ -87,10 +87,10 @@ describe("PipesNamespace", () => {
     const result = await ns.list();
 
     expect(result.data).toEqual(pipes);
-    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/admin/pipes");
+    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/pipes");
   });
 
-  it("get() GETs /v1/admin/pipes/{name}", async () => {
+  it("get() GETs /v1/ops/pipes/{name}", async () => {
     fetchSpy.mockResolvedValue(
       new Response(JSON.stringify({ name: "p1", sql: "SELECT 1" }), { status: 200 }),
     );
@@ -99,10 +99,10 @@ describe("PipesNamespace", () => {
     const result = await ns.get("p1");
 
     expect(result.data?.name).toBe("p1");
-    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/admin/pipes/p1");
+    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/pipes/p1");
   });
 
-  it("set() PUTs /v1/admin/pipes/{name}", async () => {
+  it("set() PUTs /v1/ops/pipes/{name}", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
     const ns = new PipesNamespace(makeCtx());
@@ -110,11 +110,11 @@ describe("PipesNamespace", () => {
 
     expect(result.error).toBeNull();
     const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toContain("/v1/admin/pipes/p1");
+    expect(url).toContain("/v1/ops/pipes/p1");
     expect(init.method).toBe("PUT");
   });
 
-  it("delete() DELETEs /v1/admin/pipes/{name}", async () => {
+  it("delete() DELETEs /v1/ops/pipes/{name}", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
     const ns = new PipesNamespace(makeCtx());

@@ -13,8 +13,19 @@ updates:
       prefix: "deps"
 
   # GitHub Actions
+  #
+  # TWO directories, not one. `directory: /` only reaches .github/workflows/ —
+  # it does NOT descend into .github/actions/*/action.yml. The setup-env
+  # composite action therefore went untracked, and its pins went stale against
+  # upstream and diverged from publish-npm.yml — a workflow Dependabot DOES
+  # track, and which doesn't call setup-env (actions/setup-node v7.0.0 there
+  # vs v6.4.0 here; pnpm/action-setup v6.0.9 vs v6.0.8). Adding a composite
+  # action under .github/actions/ means adding its directory below; nothing
+  # else catches the drift.
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - /.github/actions/setup-env
     schedule:
       interval: weekly
       day: monday
@@ -52,5 +63,26 @@ updates:
     groups:
       npm-deps:
         patterns: ["*"]
+    ignore:
+      # TypeScript 7 (the native port) is held back by tsup: tsup 8.5.1 — the
+      # current release — vendors rollup-plugin-dts 6.1.1, which reaches for
+      # TS 5-era internals and dies with "Cannot read properties of undefined
+      # (reading 'useCaseSensitiveFileNames')" the moment `dts: true` runs.
+      # That is clients/ts's `prepare` script, so the crash lands inside
+      # `pnpm install` and takes every Node job down with it (#482).
+      # rollup-plugin-dts >= 6.5.0 declares TS 7 support; drop this ignore once
+      # tsup ships a release that vendors it. Tracked in #487.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # eventsource-parser 4.0.0 drops its CJS build (exports["."] loses the
+      # `require` condition) and raises engines.node to >=22.12 — the release
+      # where Node's require(esm) went unflagged. @wavehouse/sdk ships CJS and
+      # externalises this dep (dist/index.cjs literally `require`s it), while
+      # advertising engines.node ">=22", so v4 breaks the CJS entry point for
+      # consumers on Node 22.0-22.11. It is the SDK's ONLY runtime dependency.
+      # Unblock is a decision, not an upstream wait: either raise the SDK's
+      # floor to >=22.12 or stop shipping CJS. Tracked in #492.
+      - dependency-name: "eventsource-parser"
+        update-types: ["version-update:semver-major"]
     commit-message:
       prefix: "deps"

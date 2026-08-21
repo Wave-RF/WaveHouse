@@ -2,7 +2,7 @@ import { networkError, parseErrorResponse } from "./errors.js";
 import type { HttpContext, WaveHouseError } from "./types.js";
 import { resolveURL } from "./url.js";
 
-interface RequestOptions {
+interface RequestSpec {
   method: string;
   path: string;
   body?: unknown;
@@ -26,10 +26,54 @@ export interface HttpResult<T> {
 }
 
 /**
+ * Merge configured headers underneath the SDK's own, matching names
+ * case-insensitively so a caller's `authorization` can't sit alongside our
+ * `Authorization` and let the server pick. Canonical casing wins, and values
+ * replace rather than append — a header joined instead of replaced is a known
+ * way to produce `Content-Type: application/json, image/png`.
+ *
+ * Shared with the SSE transport so both paths resolve `headers` the same way,
+ * rather than growing a second precedence story.
+ *
+ * @internal
+ */
+export function mergeHeaders(
+  base: Record<string, string>,
+  extra: Record<string, string> | undefined,
+): Record<string, string> {
+  if (!extra) return base;
+  const sdkNames = new Set(Object.keys(base).map((k) => k.toLowerCase()));
+  const merged = { ...base };
+  // Spelling each configured name was last stored under, so two entries
+  // differing only in case replace each other here rather than surviving as
+  // separate keys for `Headers` to comma-join at fetch time.
+  const configured = new Map<string, string>();
+  for (const [name, value] of Object.entries(extra)) {
+    const lower = name.toLowerCase();
+    // Skip rather than overwrite: `base` is the SDK's own, which outranks.
+    if (sdkNames.has(lower)) continue;
+    const prior = configured.get(lower);
+    if (prior !== undefined) delete merged[prior];
+    merged[name] = value;
+    configured.set(lower, name);
+  }
+  return merged;
+}
+
+/** The documented shape for a cancelled request: a Result, never a throw. */
+function abortedResult<T>(): HttpResult<T> {
+  return {
+    data: null,
+    error: { status: 0, code: "ABORTED", message: "Request aborted", retryable: false },
+    headers: new Headers(),
+  };
+}
+
+/**
  * Internal fetch wrapper with auth injection, retry, backoff, and Retry-After.
  * @internal
  */
-export async function request<T>(ctx: HttpContext, opts: RequestOptions): Promise<HttpResult<T>> {
+export async function request<T>(ctx: HttpContext, opts: RequestSpec): Promise<HttpResult<T>> {
   const url = resolveURL(ctx.baseURL, opts.path, opts.params).toString();
   const headers: Record<string, string> = {
     "Content-Type": opts.contentType ?? "application/json",
@@ -51,17 +95,29 @@ export async function request<T>(ctx: HttpContext, opts: RequestOptions): Promis
     }
   }
 
+  // After auth, so `auth` keeps ownership of Authorization, and after the
+  // Content-Type/Accept this request needs.
+  const finalHeaders = mergeHeaders(headers, ctx.options.headers);
+
   let lastError: WaveHouseError | null = null;
   const maxAttempts = ctx.options.maxRetries + 1;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const res = await fetch(url, {
+      // Configured RequestInit first, so the fields the SDK controls overwrite
+      // it — a supplied `method` or `body` would otherwise corrupt the request.
+      const init: RequestInit = {
+        ...ctx.options.fetchOptions,
         method: opts.method,
-        headers,
+        headers: finalHeaders,
         body: requestBody,
         signal: opts.signal,
-      });
+      };
+      // Call the global directly when no override is configured, rather than
+      // capturing it — a detached `fetch` reference is not universally safe to
+      // invoke, and late binding is what lets tests swap `globalThis.fetch`.
+      const doFetch = ctx.options.fetch;
+      const res = doFetch ? await doFetch(url, init) : await fetch(url, init);
 
       if (res.ok) {
         const text = await res.text();
@@ -91,18 +147,39 @@ export async function request<T>(ctx: HttpContext, opts: RequestOptions): Promis
 
       return { data: null, error, headers: res.headers };
     } catch (e) {
-      // AbortError — return immediately, no retry
-      if (e instanceof DOMException && e.name === "AbortError") {
-        return {
-          data: null,
-          error: { status: 0, code: "ABORTED", message: "Request aborted", retryable: false },
-          headers: new Headers(),
-        };
+      // Classified on the *signal*, never the rejection's type. Keying off the
+      // error made the outcome depend on `maxRetries` — an implementation that
+      // throws something other than a `DOMException` named `AbortError`
+      // (`AbortSignal.timeout()` raises a `TimeoutError`, `node-fetch` its own
+      // class) fell through to NETWORK_ERROR here and was reclassified only if
+      // a retry remained for the backoff to notice the signal.
+      //
+      // Matching on the error would also misread middleware: an `options.fetch`
+      // enforcing its own per-attempt deadline aborts an internal controller
+      // and rejects with a real `AbortError` while the caller's signal is
+      // untouched. Nobody asked to cancel, so that is a transient failure to
+      // retry, not a terminal `ABORTED`.
+      if (opts.signal?.aborted) {
+        return abortedResult<T>();
       }
 
       lastError = networkError(e);
       if (attempt < maxAttempts - 1) {
-        await sleep(backoff(attempt), opts.signal);
+        // This sleep is the one that runs inside the catch, so unlike the two
+        // in the try above, an abort raised *by* the backoff would escape
+        // `request()` as a raw DOMException instead of the documented ABORTED
+        // result — and no caller wraps this, so it would reach the consumer as
+        // an unhandled rejection.
+        try {
+          await sleep(backoff(attempt), opts.signal);
+        } catch (abort) {
+          // Same rule as above, so the two classifications can't drift apart.
+          // `sleep` only rejects when the signal fires, so this always holds.
+          if (opts.signal?.aborted) {
+            return abortedResult<T>();
+          }
+          throw abort;
+        }
       }
     }
   }

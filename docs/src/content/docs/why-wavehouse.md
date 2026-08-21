@@ -1,6 +1,9 @@
 ---
 title: "Why WaveHouse?"
 description: "How WaveHouse compares to direct ClickHouse, Kafka + ClickHouse, and Tinybird — with the failure modes, DIY cost, and feature matrix."
+cloudCta:
+  title: "Weighing this against a managed option?"
+  body: "The DIY cost this page totals up is the part WaveHouse Cloud removes — without the lock-in that usually comes attached, because the core stays Apache-2.0 and self-hostable. If Cloud ever stops earning its keep, you take the binary and go."
 sidebar:
   order: 3
 ---
@@ -50,7 +53,7 @@ Even if you remember to batch client-side, a naive ingest path has no safe way t
 - **No backpressure channel.** If the merger falls behind, ClickHouse raises an error at the *next* insert. The client has already left.
 - **No DLQ.** Bad events that fail to insert are either lost or logged into ClickHouse's error log. Good luck replaying yesterday's dropped rows.
 
-WaveHouse fixes all three at the gateway: validates every payload against the real `system.columns` schema before accepting, returns `503 Service Unavailable` with a `Retry-After` header when the NATS WAL fills, and routes failed batch inserts to a dedicated `WAVEHOUSE_DLQ` stream you can inspect via `GET /v1/dlq/stats`.
+WaveHouse fixes all three at the gateway: validates every payload against the real `system.columns` schema before accepting, returns `503 Service Unavailable` with a `Retry-After` header when the NATS WAL fills, and routes failed batch inserts to a dedicated `WAVEHOUSE_DLQ` stream you can inspect via `GET /v1/ops/dlq/stats`.
 
 ### No real-time push
 
@@ -154,7 +157,7 @@ flowchart TB
 | Schema validation | Custom code in ingest API | Built in (discovers `system.columns`) |
 | Row/column access control | Custom middleware or a dedicated service | Built in (Hasura-style, JWT-driven) |
 | Dead letter queue | Custom retry + dead topic on Kafka | Built in (`WAVEHOUSE_DLQ`) |
-| Client SDK | Each team writes one | `@wavehouse/sdk` (TypeScript) + `github.com/Wave-RF/WaveHouse/clients/go` — zero-dep, codegen |
+| Client SDK | Each team writes one | `@wavehouse/sdk` (TypeScript, one dependency, codegen) + `github.com/Wave-RF/WaveHouse/clients/go` (Go, zero dependencies, codegen) |
 
 The DIY path works — big teams run it — but the ops cost is not small. You're paying for a Kafka cluster (or Confluent bill), a second service you wrote from scratch, and all the debugging hours when the batching consumer stalls at 3 a.m.
 
