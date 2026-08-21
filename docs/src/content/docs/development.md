@@ -324,7 +324,7 @@ make ci
 make cov
 ```
 
-Each coverage-instrumented suite target (`test-unit`, `test-integration`, `test-e2e`, `test-ts`) writes `covdata` to `tmp/coverage/<suite>/data/`, renders a textfmt + HTML report, and gates against the per-suite threshold in `.testcoverage.yml`. `make cov` merges whichever suites have run and gates against the total. The Go SDK and conformance targets (`test-go-sdk`, `test-go-sdk-e2e`, `test-conformance-ts`) run without coverage instrumentation or a per-suite gate.
+Each coverage-instrumented suite target (`test-unit`, `test-integration`, `test-e2e`, `test-go-sdk`, `test-ts`) writes `covdata` to `tmp/coverage/<suite>/data/`, renders a textfmt + HTML report, and gates against the per-suite threshold in `.testcoverage.yml`. `make cov` merges whichever suites have run and gates against the total. `test-go-sdk` is gated but **not** merged: `clients/go` is a nested Go module, invisible to the root module's `-coverpkg=./...`, so its statements can never reach `tmp/coverage/total` — it carries its own `suites.go-sdk` floor instead, the same way the TS SDK carries `ts-*`. The remaining SDK/conformance targets (`test-go-sdk-e2e`, `test-conformance-ts`) run without coverage instrumentation or a per-suite gate.
 
 **Verbose output**: Use `V=1` to switch from the compact `pkgname-and-test-fails` format to `standard-verbose` on `test-unit` / `test-integration`, and to stream live output on `test-e2e`. This is a standard Makefile convention (`make test -v` can't work because `-v` is a `make` flag). `test-ts` and the Go SDK / conformance targets ignore it.
 
@@ -338,7 +338,7 @@ Each coverage-instrumented suite target (`test-unit`, `test-integration`, `test-
 | -------- | -------- | ------- | ------- |
 | Unit tests | `internal/*/_test.go` | No | `make test` |
 | SDK unit tests (TS) | `clients/ts/src/**/*.test.ts` | No | `make test-ts` (always includes coverage + gate) |
-| SDK unit tests (Go) | `clients/go/*_test.go` (nested Go module) | No | `make test-go-sdk` (runs with `-race`) |
+| SDK unit tests (Go) | `clients/go/*_test.go` (nested Go module) | No | `make test-go-sdk` (runs with `-race`, always includes coverage + gate) |
 | Wire-format conformance | `clients/go/conformance_test.go` + `tests/conformance/conformance_ts.mjs`, both replaying `clients/go/testdata/wire_cases.json` | No | Go half via `make test-go-sdk`; TS half via `make test-conformance-ts` |
 | SDK E2E (Go, live server) | `clients/go/e2e_test.go` (`//go:build e2e`) | No | `make test-go-sdk-e2e` (`WAVEHOUSE_URL`, `WAVEHOUSE_AUTH`) |
 | Integration tests (Go) | `tests/integration/*_test.go` | Yes | `make test-integration` |
@@ -534,7 +534,7 @@ Run `make help` to see all targets. Key ones:
 | **Test** | |
 | `make test` | Alias for `test-unit` + `test-go-sdk` |
 | `make test-unit` | Go unit tests + render coverage + gate suite threshold |
-| `make test-go-sdk` | Go SDK (`clients/go`, nested module) unit tests with `-race` |
+| `make test-go-sdk` | Go SDK (`clients/go`, nested module) unit tests with `-race` + render coverage + gate `suites.go-sdk` (own gate; never merged into the Go total) |
 | `make test-go-sdk-e2e` | Go SDK E2E against a live server (`WAVEHOUSE_URL`, `WAVEHOUSE_AUTH`) |
 | `make test-conformance-ts` | TS SDK wire-format conformance against the shared `wire_cases.json` fixture (builds the TS SDK first) |
 | `make test-integration` | Go integration tests (requires Docker) + coverage gate |

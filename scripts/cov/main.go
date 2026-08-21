@@ -59,6 +59,30 @@ const (
 // see the ts-total path below.
 var goSuites = []string{"unit", "integration", "e2e"}
 
+// Go suites that produce covdata in the same layout as goSuites and are
+// rendered + gated identically, but are deliberately NOT merged into the
+// Go total: they come from a NESTED module (clients/go has its own
+// go.mod). The root module cannot see a nested one — `go list ./...` at
+// the repo root never yields clients/go — so the goSuites' -coverpkg=./...
+// can't reach these files in the first place; they can only ever be in
+// tmp/coverage/total if we put them there, which we don't. Folding a
+// shipped client library into the server's project-wide number (and into
+// the README badge `cov badge` derives from it) would move that number for
+// reasons that have nothing to do with the server, so the SDK gets its own
+// floor instead — the same separation the TS SDK gets via ts-*.
+var standaloneGoSuites = []string{"go-sdk"}
+
+// suiteModuleDir maps a suite to the module directory its covdata was
+// produced in, for suites that aren't the root module. `go tool cover
+// -html` reads the source of every package named in the profile and
+// resolves it through the module in the process's working directory, so a
+// nested module's profile has to be rendered from inside that module —
+// from the repo root the tool fails with "no required module provides
+// package github.com/Wave-RF/WaveHouse/clients/go/...". `go tool covdata
+// textfmt` has no such constraint (it only reads the covdata files), so
+// only the HTML step needs the chdir.
+var suiteModuleDir = map[string]string{"go-sdk": "clients/go"}
+
 // TypeScript SDK suites (vitest). ts-unit comes from clients/ts; ts-e2e
 // from tests/e2e/sdk run with --coverage. Both produce Istanbul-format
 // coverage-final.json that `cov ts-merge` combines into ts-total.
@@ -212,7 +236,7 @@ func goSuiteCoverage(c *config, suite string) (rows []pkgRow, total, covered int
 	if err = sh("go", "tool", "covdata", "textfmt", "-i="+dataDir, "-o", profile); err != nil {
 		return nil, 0, 0, "", err
 	}
-	if err = sh("go", "tool", "cover", "-html="+profile, "-o", htmlOut); err != nil {
+	if err = renderHTML(suite, profile, htmlOut); err != nil {
 		return nil, 0, 0, "", err
 	}
 	rows, total, covered, err = parseCoverage(profile, c, c.excludesFor(suite))
@@ -220,6 +244,27 @@ func goSuiteCoverage(c *config, suite string) (rows []pkgRow, total, covered int
 		return nil, 0, 0, "", err
 	}
 	return rows, total, covered, htmlOut, nil
+}
+
+// renderHTML turns a textfmt profile into the clickable HTML report. For a
+// suite whose covdata came from a nested module (see suiteModuleDir) the
+// tool runs with that module as its working directory — otherwise it can't
+// resolve the profile's package paths to source and bails — so the profile
+// and output paths are made absolute first.
+func renderHTML(suite, profile, htmlOut string) error {
+	dir, nested := suiteModuleDir[suite]
+	if !nested {
+		return sh("go", "tool", "cover", "-html="+profile, "-o", htmlOut)
+	}
+	absProfile, err := filepath.Abs(profile)
+	if err != nil {
+		return err
+	}
+	absHTML, err := filepath.Abs(htmlOut)
+	if err != nil {
+		return err
+	}
+	return shIn(dir, "go", "tool", "cover", "-html="+absProfile, "-o", absHTML)
 }
 
 func renderSuite(c *config, suite string) error {
@@ -247,7 +292,7 @@ func renderSuite(c *config, suite string) error {
 // "one side legitimately absent" (skip, fine) from "nothing ran at all"
 // (fail, because the caller expected a gate).
 func hasAnyCoverage() bool {
-	for _, s := range goSuites {
+	for _, s := range slices.Concat(goSuites, standaloneGoSuites) {
 		if hasCovdata(filepath.Join(root, s, "data")) {
 			return true
 		}
@@ -297,6 +342,13 @@ func merge(c *config) error {
 	fmt.Printf("\n%s==> Per-suite breakdown:%s\n", cyan, reset)
 	for _, s := range goSuites {
 		fmt.Printf("  %s%-13s%s %s\n", cyan, s+":", reset, suitePct(c, s))
+	}
+	// Nested-module Go suites: gated on their own, never merged above.
+	for _, s := range standaloneGoSuites {
+		if pct := suitePct(c, s); pct != "n/a" {
+			fmt.Printf("  %s%-13s%s %s  %s(separate gate; not in merge above)%s\n",
+				cyan, s+":", reset, pct, yellow, reset)
+		}
 	}
 	// Surface TS SDK coverage alongside the Go total — informational only,
 	// not part of the Go merged number above. `make cov` is the gate.
@@ -548,6 +600,25 @@ func report(c *config) error {
 		rows = append(rows, reportRow{
 			name: "Go total", pct: formatPctBare(covered, total), gated: true, thresh: th,
 			pass: meetsThreshold(covered, total, th), html: html, rule: true,
+		})
+	}
+
+	// --- Nested-module Go suites (own gate, below the Go total) ---
+	// Rendered and gated exactly like the suites above, but listed after
+	// the total they are deliberately not part of — see standaloneGoSuites.
+	for i, s := range standaloneGoSuites {
+		if !hasCovdata(filepath.Join(root, s, "data")) {
+			rows = append(rows, reportRow{name: s, pct: "n/a", rule: i == 0})
+			continue
+		}
+		_, total, covered, html, err := goSuiteCoverage(c, s)
+		if err != nil {
+			return err
+		}
+		th := thresholdFor(c, s)
+		rows = append(rows, reportRow{
+			name: s, pct: formatPctBare(covered, total), gated: true, thresh: th,
+			pass: meetsThreshold(covered, total, th), html: html, rule: i == 0,
 		})
 	}
 
@@ -917,9 +988,15 @@ func meetsThreshold(covered, total, threshold int) bool {
 // sh runs an external command with stdio wired through. Every call site
 // passes "go" as the program and a fixed series of "tool", "<tool-name>",
 // flag, … args; the only variable bits are paths we computed ourselves.
+func sh(name string, args ...string) error { return shIn("", name, args...) }
+
+// shIn is sh with an explicit working directory ("" = inherit ours) — for
+// the one tool that cares which module it runs in, `go tool cover -html`
+// on a nested module's profile. See renderHTML.
 // #nosec G204,G702 — name and args are not user input.
-func sh(name string, args ...string) error {
+func shIn(dir, name string, args ...string) error {
 	cmd := exec.CommandContext(context.Background(), name, args...)
+	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

@@ -206,6 +206,12 @@ jobs:
           go-cache-suffix: "-unit"
       - name: Run Go unit tests + SDK vitest + Go SDK tests
         run: make test-unit test-ts test-go-sdk test-conformance-ts COV_DEFER=1
+      # This one fragment carries THREE suites' data: unit covdata, ts-unit
+      # (vitest/istanbul) and go-sdk covdata from the nested clients/go
+      # module — every target above ran under COV_DEFER, so the `coverage`
+      # job renders and gates all three. No per-suite paths here on purpose:
+      # uploading the whole tmp/coverage tree means a new suite collected by
+      # this job needs no workflow change.
       - name: Upload coverage fragment
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

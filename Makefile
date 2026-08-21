@@ -199,6 +199,9 @@ ACTIONLINT         := $(LOCAL_BIN)/actionlint-$(ACTIONLINT_VERSION)
 COV_UNIT  := tmp/coverage/unit
 COV_INT   := tmp/coverage/integration
 COV_E2E   := tmp/coverage/e2e
+# go-sdk is the nested module at clients/go — same layout, own gate, but
+# deliberately outside COV_TOTAL (see test-go-sdk below).
+COV_GOSDK := tmp/coverage/go-sdk
 COV_TOTAL := tmp/coverage/total
 
 # --- Coverage Thresholds ------------------------------------------------------
@@ -805,10 +808,28 @@ test-ts: pnpm-install ## Run SDK vitest unit tests + coverage + gate against sui
 # go.mod), so it's outside test-unit's ./internal/... ./cmd/... scope and
 # needs its own target. -race because the SDK's streaming subsystem is the
 # most concurrent code in the repo.
+#
+# Coverage is collected exactly like the root-module Go suites (covdata into
+# tmp/coverage/<suite>/data via -test.gocoverdir), so `cov render go-sdk`
+# renders + gates it with no new machinery and CI's coverage fragment —
+# `path: tmp/coverage` on the unit job, which already runs this target —
+# carries it to the `coverage` job unchanged. -coverpkg=./... resolves
+# inside clients/go, so the denominator is the SDK package + the codegen
+# command, nothing from the server.
+#
+# The go-sdk suite is NOT part of the merged Go total: a nested module is
+# invisible to the root module (`go list ./...` at the repo root never
+# yields clients/go), so the other suites' -coverpkg=./... cannot reach
+# these files — they can't leak into tmp/coverage/total, and no
+# exclude.paths entry is needed to keep them out. Same separation the TS
+# SDK gets via ts-*. Gate: suites.go-sdk in .testcoverage.yml.
 .PHONY: test-go-sdk
-test-go-sdk: ## Run Go SDK (clients/go, a nested module) unit tests
+test-go-sdk: ## Run Go SDK (clients/go, a nested module) unit tests + render coverage + gate threshold
 	@printf "$(CYAN)==> Running Go SDK tests...$(RESET)\n"
-	@cd clients/go && go test -race ./...
+	@rm -rf $(COV_GOSDK)/data && mkdir -p $(COV_GOSDK)/data
+	@cd clients/go && GOCOVERDIR="$(CURDIR)/$(COV_GOSDK)/data" go test -cover -coverpkg=./... -race ./... \
+		-args -test.gocoverdir="$(CURDIR)/$(COV_GOSDK)/data"
+	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render go-sdk; fi
 
 # test-conformance-ts: the TS half of the cross-SDK wire-format conformance
 # suite (the Go half is clients/go/conformance_test.go, run by test-go-sdk).
@@ -830,7 +851,7 @@ test-go-sdk-e2e: ## Run Go SDK E2E tests against a live WaveHouse instance (WAVE
 .PHONY: test-all
 test-all: ## Run all suites sequentially + one consolidated Go + TS coverage report + gates
 	@$(MAKE) test-unit COV_DEFER=1
-	@$(MAKE) test-go-sdk
+	@$(MAKE) test-go-sdk COV_DEFER=1
 	@$(MAKE) test-conformance-ts
 	@$(MAKE) test-ts COV_DEFER=1
 	@$(MAKE) test-integration COV_DEFER=1
