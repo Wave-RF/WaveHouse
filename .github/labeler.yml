@@ -43,7 +43,9 @@
   - changed-files:
     - any-glob-to-any-file:
       - "clients/ts/**"
+      - "clients/go/**"
       - "tests/e2e/sdk/**"
+      - "tests/conformance/**"
 
 "area/docs":
   - changed-files:
@@ -83,8 +85,8 @@
 dependencies:
   - changed-files:
     - any-glob-to-any-file:
-      - "go.mod"
-      - "go.sum"
+      - "**/go.mod"
+      - "**/go.sum"
       - "**/package.json"
       - "**/pnpm-lock.yaml"
       - "**/package-lock.json"
