@@ -3,11 +3,7 @@ title: "Go SDK Reference & CLI"
 description: "Error codes, context cancellation, the full API tree, and the codegen CLI for the WaveHouse Go SDK."
 ---
 
-Cross-cutting reference for `github.com/Wave-RF/WaveHouse/clients/go`:
-cancellation, the error model behind every request-response call's `(T, error)` return,
-the complete API tree at a glance, and the `wavehouse-codegen` tool that
-ships with the module. Compare with the TypeScript SDK's
-[Reference & CLI](/sdk/reference) page.
+Cross-cutting reference for `github.com/Wave-RF/WaveHouse/clients/go`: cancellation, the error model behind every request-response call's `(T, error)` return, the complete API tree at a glance, and the `wavehouse-codegen` tool that ships with the module. Compare with the TypeScript SDK's [Reference & CLI](/sdk/reference) page.
 
 ## Context Cancellation
 

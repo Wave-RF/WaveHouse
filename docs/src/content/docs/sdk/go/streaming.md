@@ -3,14 +3,7 @@ title: "Go SDK Streaming & Live Queries"
 description: "Real-time SSE streams, client-side filtering, and backfill-then-live queries in the WaveHouse Go SDK."
 ---
 
-Real-time consumption with `github.com/Wave-RF/WaveHouse/clients/go`: SSE
-event streams from tables, builders, and pipes, plus live queries that
-backfill history before going live. Builders and table refs come from
-[Queries](/sdk/go/queries). Compare with the TypeScript SDK's
-[Streaming & Live Queries](/sdk/streaming) page — the two implement the same
-protocol and mostly the same client-side filtering, but connection lifecycle
-differs: Go streams are goroutine-backed and closed explicitly, not tied to
-a `context.Context` or a browser's `EventSource`.
+Real-time consumption with `github.com/Wave-RF/WaveHouse/clients/go`: SSE event streams from tables, builders, and pipes, plus live queries that backfill history before going live. Builders and table refs come from [Queries](/sdk/go/queries). Compare with the TypeScript SDK's [Streaming & Live Queries](/sdk/streaming) page — the two implement the same protocol and mostly the same client-side filtering, but connection lifecycle differs: Go streams are goroutine-backed and closed explicitly, not tied to a `context.Context` or a browser's `EventSource`.
 
 ## Streaming
 

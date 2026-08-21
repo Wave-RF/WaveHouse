@@ -3,15 +3,10 @@ title: "Go SDK"
 description: "Zero-dependency Go client SDK — query builder, real-time streaming, codegen."
 ---
 
-`github.com/Wave-RF/WaveHouse/clients/go` — zero third-party runtime
-dependency Go client for WaveHouse (stdlib only).
+`github.com/Wave-RF/WaveHouse/clients/go` — zero third-party runtime dependency Go client for WaveHouse (stdlib only).
 
 :::tip[Looking for the TypeScript SDK?]
-This page and the rest of `/sdk/go/*` cover the Go client. The
-JavaScript/TypeScript client (`@wavehouse/sdk`) has its own docs starting at
-[SDK Overview](/sdk) — the two SDKs speak the same wire format, so anything
-you learn about WaveHouse's query builder, streaming, or admin endpoints on
-either page mostly carries over.
+This page and the rest of `/sdk/go/*` cover the Go client. The JavaScript/TypeScript client (`@wavehouse/sdk`) has its own docs starting at [SDK Overview](/sdk) — the two SDKs speak the same wire format, so anything you learn about WaveHouse's query builder, streaming, or admin endpoints on either page mostly carries over.
 :::
 
 ## Installation

@@ -3,14 +3,7 @@ title: "Go SDK Queries"
 description: "Tables, the chainable query builder, pagination, and raw SQL in the WaveHouse Go SDK."
 ---
 
-Reading and writing data with `github.com/Wave-RF/WaveHouse/clients/go`:
-table references, the chainable query builder, cursor pagination, and the
-admin-only raw-SQL escape hatch. Every request-response operation takes a
-`context.Context` as its first argument and returns `(T, error)`; the
-chainable builder methods and `.Stream(opts)` are the exceptions — see
-[Error Handling](/sdk/go#error-handling). Compare with the TypeScript SDK's
-[Queries](/sdk/queries) page, which covers the same surface with a
-`Result<T>`-returning, `PromiseLike` builder.
+Reading and writing data with `github.com/Wave-RF/WaveHouse/clients/go`: table references, the chainable query builder, cursor pagination, and the admin-only raw-SQL escape hatch. Every request-response operation takes a `context.Context` as its first argument and returns `(T, error)`; the chainable builder methods and `.Stream(opts)` are the exceptions — see [Error Handling](/sdk/go#error-handling). Compare with the TypeScript SDK's [Queries](/sdk/queries) page, which covers the same surface with a `Result<T>`-returning, `PromiseLike` builder.
 
 ## Tables — `client.From(table)`
 
