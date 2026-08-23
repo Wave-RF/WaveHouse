@@ -26,9 +26,12 @@ func startWatch(ctx context.Context, t *testing.T, s *Store, maxRows int) <-chan
 	go func() { done <- s.Watch(ctx) }()
 	// Keep writing until the watcher picks one up: the write and w.Add race,
 	// and a write that lands before the watch exists emits no event.
-	require.Eventually(t, func() bool {
-		require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), FileConfig), []byte(configJSON(fmt.Sprintf(`{"query": {"default_max_rows": %d}}`, maxRows))), 0o600))
-		return s.DefaultMaxRows() == maxRows
+	// EventuallyWithT rather than Eventually: the condition runs off the test
+	// goroutine, where a bare require.NoError would FailNow the wrong
+	// goroutine and stall the poll until timeout instead of failing loudly.
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		require.NoError(c, os.WriteFile(filepath.Join(s.Dir(), FileConfig), []byte(configJSON(fmt.Sprintf(`{"query": {"default_max_rows": %d}}`, maxRows))), 0o600))
+		assert.Equal(c, maxRows, s.DefaultMaxRows())
 	}, 5*time.Second, 2*watchDebounce, "watcher should adopt the readiness write")
 	return done
 }
