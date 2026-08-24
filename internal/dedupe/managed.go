@@ -18,8 +18,8 @@ var ErrDisabled = errors.New("dedupe store is not open")
 // can never close the database under a lookup.
 type Managed struct {
 	dir string
-	mu sync.RWMutex
-	db *EmbeddedDeduplicator
+	mu  sync.RWMutex
+	db  *EmbeddedDeduplicator
 }
 
 // NewManaged returns a closed Managed store rooted at dir. Nothing is opened
