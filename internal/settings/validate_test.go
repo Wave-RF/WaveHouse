@@ -265,6 +265,7 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"zero max rows", FileConfig, `{"query": {"default_max_rows": 0}}`, "must be >= 1"},
 		{"missing dedupe block", FileConfig, configJSON(`{}`)[:0] + `{"query": {"default_max_rows": 1}, "schema": {"refresh_interval": 1}, "cors": {"allowed_origins": []}}`, "dedupe: required"},
 		{"missing dedupe.require_id", FileConfig, `{"dedupe": {"id_field": "event_id"}}`, "dedupe.require_id: required"},
+		{"missing dedupe.enabled", FileConfig, `{"dedupe": {"id_field": "event_id", "require_id": false}}`, "dedupe.enabled: required"},
 		{"missing query.default_max_rows", FileConfig, `{"query": {}}`, "query.default_max_rows: required"},
 		{"missing schema.refresh_interval", FileConfig, `{"schema": {}}`, "schema.refresh_interval: required"},
 		{"missing cors.allowed_origins", FileConfig, `{"cors": {}}`, "cors.allowed_origins: required"},
@@ -333,6 +334,7 @@ func TestValidate_Warnings(t *testing.T) {
 		{"default_role equals admin", FilePolicies, `{"default_role": "admin", "tables": {}}`, "every roleless request gets full admin"},
 		{"admin in pipe allowlist is redundant", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "allowed_roles": ["admin"]}]}`, "listing it is redundant"},
 		{"empty dedupe override sets nothing", FileConfig, configJSON(`{"dedupe": {"tables": {"clicks": {}}}}`), "override sets nothing"},
+		{"empty cors allowlist allows every origin", FileConfig, configJSON(`{"cors": {"allowed_origins": []}}`), "empty list allows every origin"},
 		{"default on required parameter", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x", "required": true, "default": 5}]}]}`, "never used"},
 	}
 	for _, tt := range tests {

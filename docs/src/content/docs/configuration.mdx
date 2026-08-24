@@ -15,7 +15,7 @@ WaveHouse is configured via a YAML file with environment variable overrides. All
 
 1. If a config file exists at the specified path (default: `config.yaml`), it is loaded first.
 2. Environment variables override any values from the YAML file.
-3. If no config file exists, all values are read from environment variables (with defaults).
+3. If no config file exists, all values are read from environment variables. Every key has a default except `settings.dir` (`WH_SETTINGS_DIR`), which must be set either way.
 
 Set `WH_CONFIG` to change the config file path:
 
@@ -23,7 +23,7 @@ Set `WH_CONFIG` to change the config file path:
 export WH_CONFIG=/etc/wavehouse/config.yaml
 ```
 
-Boot config (YAML + env) holds what the platform operator owns: wiring, lifecycle, secrets. The tenant-owned behavioral tunables — dedupe `id_field`/`require_id`, `query.default_max_rows`, `schema.refresh_interval`, CORS origins — live in the hot-reloadable [settings directory](#settings-directory) instead.
+Boot config (YAML + env) holds what the platform operator owns: wiring, lifecycle, secrets. The tenant-owned behavioral tunables — dedupe `enabled`/`id_field`/`require_id`, `query.default_max_rows`, `schema.refresh_interval`, CORS origins — live in the hot-reloadable [settings directory](/settings-directory) instead.
 
 ## Full Reference
 
@@ -40,7 +40,7 @@ Boot config (YAML + env) holds what the platform operator owns: wiring, lifecycl
 | `server.port` | `WH_SERVER_PORT` | `8080` | HTTP server listen port. |
 | `server.shutdown_timeout` | `WH_SERVER_SHUTDOWN_TIMEOUT` | `10` | Graceful shutdown timeout in seconds. |
 
-The CORS allowlist is a [settings-directory](#settings-directory) tunable (`cors.allowed_origins` in `config.json`), so it reloads without a restart.
+The CORS allowlist is a [settings-directory](/settings-directory) tunable (`cors.allowed_origins` in `config.json`), so it reloads without a restart.
 
 The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate TLS at a [reverse proxy](/reverse-proxy#tls) for internet-facing deployments. (The `clickhouse.http_scheme` option below is the *outbound* WaveHouse → ClickHouse hop, unrelated to your clients' TLS.)
 
@@ -67,7 +67,7 @@ The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate 
 
 ### Query
 
-The fallback result `LIMIT`, `query.default_max_rows`, is a [settings-directory](#settings-directory) tunable in `config.json` (seed default `10000`): the `LIMIT` applied to a structured query when the caller and policy specify none.
+The fallback result `LIMIT`, `query.default_max_rows`, is a [settings-directory](/settings-directory) tunable in `config.json` (seed default `10000`): the `LIMIT` applied to a structured query when the caller and policy specify none.
 
 This is a result-**shaping** default, not a resource limit. Server-wide resource limits (memory, rows scanned, execution time) belong in ClickHouse — see [Server-side resource limits](#server-side-resource-limits) below.
 
@@ -113,7 +113,7 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 
 ### Schema Discovery
 
-`schema.refresh_interval` — how often (in seconds) to re-discover ClickHouse table schemas — is a [settings-directory](#settings-directory) tunable in `config.json` (seed default `60`); a reloaded value takes effect from the next refresh cycle. Schemas are also refreshable on-demand via `POST /v1/ops/schema/refresh` (admin-only).
+`schema.refresh_interval` — how often (in seconds) to re-discover ClickHouse table schemas — is a [settings-directory](/settings-directory) tunable in `config.json` (seed default `60`); a reloaded value takes effect from the next refresh cycle. Schemas are also refreshable on-demand via `POST /v1/ops/schema/refresh` (admin-only).
 
 ### Message Queue (NATS)
 
@@ -126,15 +126,7 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 
 ### Deduplication
 
-| YAML Key | Env Var | Default | Description |
-| --- | --- | ------- | ----------- |
-| `dedupe.enabled` | `WH_DEDUPE_ENABLED` | `false` | Enable event deduplication. Boot config because it owns the embedded Pebble store's lifecycle, which only a restart can change. |
-
-The behavioral knobs are [settings-directory](#settings-directory) tunables in `config.json`, resolved per record (table override → global value):
-
-- `dedupe.id_field` (seed default `event_id`) — JSON field name in the ingest body used as the dedup key.
-- `dedupe.require_id` (seed default `false`) — controls what happens to a row missing `id_field` (which can't be deduped, so idempotency wouldn't apply to it). Such a row is always logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`, in both modes. `false`: it is then published un-deduped. `true` rejects it instead (`400` for a single insert; a per-record failure in a batch) — a server-side tripwire for producers that must guarantee the id.
-- `dedupe.tables.<table>.{id_field, require_id}` — per-table overrides; each entry overrides only the fields it names and inherits the rest.
+No boot-config keys. `dedupe.enabled`, `dedupe.id_field`, `dedupe.require_id`, and the per-table overrides are all settings-directory keys — see [Settings Directory — Deduplication](/settings-directory#deduplication).
 
 ### Cache
 
@@ -183,57 +175,11 @@ See [API — Authentication](/api#authentication).
 
 ### Settings Directory
 
-The settings directory holds WaveHouse's file-based settings as exactly four JSON documents: `roles.json`, `policies.json`, `pipes.json`, and `config.json`. Every file must exist (an empty document is `{}` — a missing file always means deletion or a wrong path, never "defaults"), and any other entry in the directory is an error, so a typoed filename or a stray backup fails loudly instead of being silently ignored. Dot-prefixed entries are the one exception: editor swap files and the `..data` machinery Kubernetes ConfigMap mounts publish through are ignored.
-
-Create one with `wavehouse init-settings <dir>`: it writes all four files with every key at its default and refuses a non-empty directory, so an existing settings directory is never overwritten. The binary carries no compiled defaults — the seed is the one place they live, and what the server adopts is exactly what the files say. The container images bake the same seed at `/app/settings` (and set `WH_SETTINGS_DIR` to it), so a bare `docker run` boots; bind-mount your own directory over that path to edit.
-
-Check a directory with `wavehouse validate [dir]` — the argument falls back to `WH_SETTINGS_DIR`. It validates without starting the server (JSON syntax including unknown fields and duplicate keys, per-file shape rules including the required keys, and cross-file role references), prints every finding in one pass, and exits `0` for valid (warnings allowed), `1` for invalid, `2` for usage — so operators and CI can gate a settings change before it reaches a running instance.
+The hot-reloadable half of configuration — the four JSON files, every `config.json` key, the reload triggers, and the `validate` / `init-settings` CLI — has its own page: [Settings Directory](/settings-directory). The one boot-config key involved is where the directory lives:
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `settings.dir` | `WH_SETTINGS_DIR` | *(required)* | Path to the settings directory. The server loads it at boot; the `wavehouse validate` CLI — like `wavehouse health` — resolves its input directly from the `[dir]` argument or `WH_SETTINGS_DIR` without loading this file, so a value set only in the YAML key validates on boot but not via the bare CLI. No default, same reasoning as `policy.file_path`: a baked-in path would turn a missing mount into silent misconfiguration instead of an explicit operator choice. The container images set it to the baked `/app/settings`. |
-
-#### Loading and hot reload
-
-The server validates and adopts the directory at boot — a missing or invalid directory refuses to start, the same fail-loud contract as `policy.file_path` (run `wavehouse validate` to reproduce the findings, `wavehouse init-settings` to create a starter directory).
-
-A running instance re-validates and re-adopts on any of three triggers, all funneling through one serialized reload path:
-
-- **File change** — the directory is watched; a burst of writes (an editor save, a Kubernetes ConfigMap republish) coalesces into one reload, and a directory that is deleted and recreated (or renamed over) is picked up again.
-- **`SIGHUP`** — `kill -HUP <pid>`.
-- **`POST /v1/ops/settings/reload`** (admin-only) — returns `{"adopted": bool, "findings": [...]}`; `200` when adopted, `422` when rejected.
-
-A reload that fails validation is logged (and reported by the endpoint) and the previous good settings stay in effect — an operator mid-edit, a deleted file, even a vanished directory degrades to a log line, never to a broken server. Warnings don't block adoption, matching `wavehouse validate`.
-
-#### `config.json` keys
-
-The tenant tunables. Every key is required (a missing one is a validation error) except the per-table overrides; the "Seed" column is what `wavehouse init-settings` writes:
-
-| Key | Seed | Description |
-| --- | ---- | ----------- |
-| `dedupe.id_field` | `event_id` | Dedup key field — see [Deduplication](#deduplication). |
-| `dedupe.require_id` | `false` | Reject rows missing the id field — see [Deduplication](#deduplication). |
-| `dedupe.tables.<table>.{id_field, require_id}` | `{}` | Optional per-table overrides; each entry overrides only the fields it names and inherits the rest. |
-| `query.default_max_rows` | `10000` | Fallback result `LIMIT` (`>= 1`) — see [Query](#query). |
-| `schema.refresh_interval` | `60` | Seconds between schema re-discoveries (`>= 1`) — see [Schema Discovery](#schema-discovery). |
-| `cors.allowed_origins` | `["*"]` | Allowed CORS origins, applied per request. `"*"` allows any browser origin. WaveHouse is a Bearer-token API — `Access-Control-Allow-Credentials` is intentionally never sent, so this allowlist controls *which origins can read responses*, not cookie scope. Tighten to your frontend's exact origin(s) in production (e.g. `["https://dashboard.example.com", "http://localhost:3000"]`). |
-
-```json
-{
-  "dedupe": {
-    "id_field": "event_id",
-    "require_id": false,
-    "tables": {
-      "clicks": { "id_field": "click_id" }
-    }
-  },
-  "query": { "default_max_rows": 10000 },
-  "schema": { "refresh_interval": 60 },
-  "cors": { "allowed_origins": ["*"] }
-}
-```
-
-Platform-infra knobs deliberately stay boot config even though they look behavioral — the SSE keepalives exist for the deployment's proxies, `dedupe.enabled` owns a store lifecycle — so the split is by *owner*: the operator's knobs restart, the tenant's reload.
 
 ### OTel
 
@@ -299,10 +245,6 @@ mq:
   gap_window_minutes: 15
   max_bytes_gb: 50
 
-dedupe:
-  enabled: false         # id_field / require_id / per-table overrides live in the
-                         # settings directory's config.json
-
 cache:
   l1_max_cost: 67108864
   timestamp_bucket_seconds: 60
@@ -325,10 +267,11 @@ pipes:
   dir: ""                # empty = skip bootstrap; set + read-only mount to seed pipes
 
 settings:
-  dir: ""                # REQUIRED: settings directory (roles/policies/pipes/
-                         # config .json) — validated at boot, reloaded on file
-                         # change, SIGHUP, or POST /v1/ops/settings/reload;
-                         # create one with `wavehouse init-settings <dir>`
+  dir: ./settings        # REQUIRED — no default: settings directory (roles/
+                         # policies/pipes/config .json), validated at boot,
+                         # reloaded on file change, SIGHUP, or
+                         # POST /v1/ops/settings/reload; create one with
+                         # `wavehouse init-settings ./settings`
 
 otel:
   enabled: false         # master switch — set true to export via OTLP gRPC
@@ -373,8 +316,6 @@ WH_CH_QUERY_TIMEOUT=30s
 WH_MQ_GAP_WINDOW_MINUTES=15
 WH_MQ_MAX_BYTES_GB=50
 
-WH_DEDUPE_ENABLED=false
-
 WH_CACHE_L1_MAX_COST=67108864
 WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60
 
@@ -389,7 +330,7 @@ WH_POLICY_FILE_PATH=
 
 WH_PIPES_DIR=
 
-WH_SETTINGS_DIR=            # required; the container images set /app/settings
+WH_SETTINGS_DIR=./settings  # required, no default (`wavehouse init-settings ./settings`); the container images set /app/settings
 
 WH_OTEL_ENABLED=false
 WH_OTEL_TRACES_ENABLED=true

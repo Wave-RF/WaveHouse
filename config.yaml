@@ -50,12 +50,6 @@ mq:
   gap_window_minutes: 15
   max_bytes_gb: 50
 
-# Only the enable switch lives here — it owns Pebble's lifecycle, which only a
-# restart can change. id_field / require_id / per-table overrides are tenant
-# tunables in the settings directory's config.json.
-dedupe:
-  enabled: false
-
 cache:
   l1_max_cost: 67108864
   timestamp_bucket_seconds: 60
@@ -84,7 +78,7 @@ pipes:
 
 # Settings directory (REQUIRED): roles.json, policies.json, pipes.json,
 # config.json. The tenant tunables live in its config.json — dedupe
-# id_field/require_id (+ per-table overrides), query.default_max_rows,
+# enabled/id_field/require_id (+ per-table overrides), query.default_max_rows,
 # schema.refresh_interval, cors.allowed_origins — and every key is required:
 # the binary has no compiled defaults, so what's adopted is exactly what the
 # files say. The server validates the directory at boot (invalid or missing

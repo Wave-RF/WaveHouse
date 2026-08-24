@@ -18,7 +18,7 @@ import (
 // fullConfig is a complete config.json (every key is required) with the
 // given query.default_max_rows.
 func fullConfig(maxRows int) string {
-	return fmt.Sprintf(`{"dedupe": {"id_field": "event_id", "require_id": false}, "query": {"default_max_rows": %d}, "schema": {"refresh_interval": 60}, "cors": {"allowed_origins": ["*"]}}`, maxRows)
+	return fmt.Sprintf(`{"dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}, "query": {"default_max_rows": %d}, "schema": {"refresh_interval": 60}, "cors": {"allowed_origins": ["*"]}}`, maxRows)
 }
 
 // writeSettingsFixture materializes a minimal valid settings directory whose

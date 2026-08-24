@@ -564,18 +564,34 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// An absent getter, a nil list, and an empty list all mean allow-all — an
+// empty allowlist is NOT "no origins". The validator warns on [] for exactly
+// this reason; this pins the behavior the warning describes.
 func TestCORSMiddleware_EmptyOrigins_AllowAll(t *testing.T) {
 	t.Parallel()
-	handler := corsMiddleware(nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+	tests := []struct {
+		name    string
+		origins func() []string
+	}{
+		{"nil getter", nil},
+		{"nil list", func() []string { return nil }},
+		{"empty list", func() []string { return []string{} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			handler := corsMiddleware(tt.origins)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
-	req.Header.Set("Origin", "https://anything.example.com")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+			req.Header.Set("Origin", "https://anything.example.com")
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
 
-	assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
+			assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
+		})
+	}
 }
 
 func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {

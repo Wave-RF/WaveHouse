@@ -1,0 +1,73 @@
+---
+title: "Settings Directory"
+description: "The hot-reloadable half of configuration — the four JSON files, the config.json keys, reload triggers, and the validate / init-settings CLI."
+cloudCta:
+  body: "Everything on this page is what a tenant tunes — id fields, query limits, CORS origins. On WaveHouse Cloud these are the settings you edit in the dashboard, and the files, the reload, and the validation happen for you."
+sidebar:
+  order: 10
+---
+
+Boot config — the YAML file and `WH_*` environment variables on the [Configuration](/configuration) page — is what the platform operator owns: wiring, lifecycle, secrets, and it changes with a restart. This page covers the other half: the **settings directory**, the tenant-owned behavioral tunables that a running instance re-reads without restarting.
+
+The settings directory holds WaveHouse's file-based settings as exactly four JSON documents: `roles.json`, `policies.json`, `pipes.json`, and `config.json`. Every file must exist (an empty document is `{}` — a missing file always means deletion or a wrong path, never "defaults"), and any other entry in the directory is an error, so a typoed filename or a stray backup fails loudly instead of being silently ignored. Dot-prefixed entries are the one exception: editor swap files and the `..data` machinery Kubernetes ConfigMap mounts publish through are ignored.
+
+Create one with `wavehouse init-settings <dir>`: it writes all four files with every key at its default and refuses a non-empty directory, so an existing settings directory is never overwritten. The binary carries no compiled defaults — the seed is the one place they live, and what the server adopts is exactly what the files say. The container images bake the same seed at `/app/settings` (and set `WH_SETTINGS_DIR` to it), so a bare `docker run` boots; bind-mount your own directory over that path to edit.
+
+Check a directory with `wavehouse validate [dir]` — the argument falls back to `WH_SETTINGS_DIR`. It validates without starting the server (JSON syntax including unknown fields and duplicate keys, per-file shape rules including the required keys, and cross-file role references), prints every finding in one pass, and exits `0` for valid (warnings allowed), `1` for invalid, `2` for usage — so operators and CI can gate a settings change before it reaches a running instance.
+
+Where the directory lives is the one boot-config key involved: `settings.dir` / `WH_SETTINGS_DIR`, documented in [Configuration — Settings Directory](/configuration#settings-directory). It's required with no default, and the container images set it to `/app/settings`.
+
+## Loading and hot reload
+
+The server validates and adopts the directory at boot — a missing or invalid directory refuses to start, the same fail-loud contract as `policy.file_path` (run `wavehouse validate` to reproduce the findings, `wavehouse init-settings` to create a starter directory).
+
+A running instance re-validates and re-adopts on any of three triggers, all funneling through one serialized reload path:
+
+- **File change** — the directory is watched; a burst of writes (an editor save, a Kubernetes ConfigMap republish) coalesces into one reload, and a directory that is deleted and recreated (or renamed over) is picked up again.
+- **`SIGHUP`** — `kill -HUP <pid>`.
+- **`POST /v1/ops/settings/reload`** (admin-only) — returns `{"adopted": bool, "findings": [...]}`; `200` when adopted, `422` when rejected.
+
+A reload that fails validation is logged (and reported by the endpoint) and the previous good settings stay in effect — an operator mid-edit, a deleted file, even a vanished directory degrades to a log line, never to a broken server. Warnings don't block adoption, matching `wavehouse validate`.
+
+"Previous good settings" is the in-memory snapshot of the running process, nothing more: there is no persisted copy of the files. A restart re-validates the directory from scratch and refuses to start on the same findings the reload rejected, so bad files never survive a restart silently — fix them (or run `wavehouse validate`) before bouncing the server.
+
+## `config.json` keys
+
+The tenant tunables. Every key is required (a missing one is a validation error) except the per-table overrides; the "Seed" column is what `wavehouse init-settings` writes:
+
+| Key | Seed | Description |
+| --- | ---- | ----------- |
+| `dedupe.enabled` | `false` | Turn deduplication on; a reload opens or closes the Pebble store — see [Deduplication](#deduplication). |
+| `dedupe.id_field` | `event_id` | Dedup key field — see [Deduplication](#deduplication). |
+| `dedupe.require_id` | `false` | Reject rows missing the id field — see [Deduplication](#deduplication). |
+| `dedupe.tables.<table>.{id_field, require_id}` | `{}` | Optional per-table overrides; each entry overrides only the fields it names and inherits the rest. |
+| `query.default_max_rows` | `10000` | Fallback result `LIMIT` (`>= 1`) — see [Query](/configuration#query). |
+| `schema.refresh_interval` | `60` | Seconds between schema re-discoveries (`>= 1`) — see [Schema Discovery](/configuration#schema-discovery). |
+| `cors.allowed_origins` | `["*"]` | Allowed CORS origins, applied per request. `"*"` allows any browser origin. WaveHouse is a Bearer-token API — `Access-Control-Allow-Credentials` is intentionally never sent, so this allowlist controls *which origins can read responses*, not cookie scope. Tighten to your frontend's exact origin(s) in production (e.g. `["https://dashboard.example.com", "http://localhost:3000"]`). An empty list `[]` is **not** "no origins" — it is equivalent to `["*"]` and validation warns about it; to disallow every browser origin, list only the origins you do allow. |
+
+```json
+{
+  "dedupe": {
+    "enabled": false,
+    "id_field": "event_id",
+    "require_id": false,
+    "tables": {
+      "clicks": { "id_field": "click_id" }
+    }
+  },
+  "query": { "default_max_rows": 10000 },
+  "schema": { "refresh_interval": 60 },
+  "cors": { "allowed_origins": ["*"] }
+}
+```
+
+Platform-infra knobs deliberately stay boot config even though they look behavioral — the SSE keepalives exist for the deployment's proxies, `dlq.enabled` owns a NATS stream — so the split is by *owner*: the operator's knobs restart, the tenant's reload.
+
+## Deduplication
+
+Every dedupe knob lives here — there are no boot-config keys for it. The switch and its fields are resolved per record from one snapshot (table override → global value):
+
+- `dedupe.enabled` (seed default `false`) — turns deduplication on. Hot-reloadable: a reload that flips it opens the embedded Pebble store at `<data_dir>/pebble` (or closes it), so no restart is needed; seen ids persist across an off/on cycle. If the store fails to open on a reload, the failure is logged and ingest fails closed (`500 dedupe failed`) until the next reload or restart — the files asked for dedupe, so publishing un-deduped is not a fallback. At boot a failed open refuses to start, like every other store.
+- `dedupe.id_field` (seed default `event_id`) — JSON field name in the ingest body used as the dedup key.
+- `dedupe.require_id` (seed default `false`) — controls what happens to a row missing `id_field` (which can't be deduped, so idempotency wouldn't apply to it). Such a row is always logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`, in both modes. `false`: it is then published un-deduped. `true` rejects it instead (`400` for a single insert; a per-record failure in a batch) — a server-side tripwire for producers that must guarantee the id.
+- `dedupe.tables.<table>.{id_field, require_id}` — per-table overrides; each entry overrides only the fields it names and inherits the rest.

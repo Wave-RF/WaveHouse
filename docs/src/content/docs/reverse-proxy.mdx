@@ -22,7 +22,7 @@ WaveHouse and your proxy are layers of one system, not substitutes. The proxy ow
 | Slow-loris / slow-body mitigation | ✗ | ✓ |
 | Request-body size limit | Fixed internal backstop (1 MiB parameter/AST bodies, 16 MiB bulk payload bodies) | Tunable outer limit |
 | Authentication (JWT) | ✓ (validates / resolves role) | Pass through |
-| CORS | ✓ (`cors.allowed_origins`, [settings directory](/configuration#settings-directory)) | Pass through (don't double it) |
+| CORS | ✓ (`cors.allowed_origins`, [settings directory](/settings-directory)) | Pass through (don't double it) |
 | Health probes | ✓ (serves `/livez`, `/readyz`, `/v1/health`) | Route / expose appropriately |
 
 :::note[Defense in depth, not either/or]

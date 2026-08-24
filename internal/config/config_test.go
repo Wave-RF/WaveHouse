@@ -49,7 +49,6 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, time.Duration(30)*time.Second, cfg.ClickHouse.QueryTimeout)
 	assert.Equal(t, "role", cfg.Auth.RoleClaim)
 	assert.Empty(t, cfg.Auth.OperatorKey, "operator key is empty by default (feature off)")
-	assert.False(t, cfg.Dedupe.Enabled)
 	assert.True(t, cfg.DLQ.Enabled)
 	assert.Empty(t, cfg.Policy.FilePath, "no default bootstrap file — operators opt in explicitly so a missing file never produces a silent fail-closed boot")
 	assert.Equal(t, "", cfg.Pipes.Dir)

@@ -9,10 +9,13 @@ import (
 )
 
 // seedFS holds the starter settings directory: every file present, every
-// key set to its default. It is the ONE place defaults live — the binary
-// has no compiled fallbacks — and it ships three ways: `wavehouse
-// init-settings` writes it out, the container images bake it at
-// /app/settings, and the compose quickstart serves from that copy.
+// key set to its default. The checked-in seed/ directory is the ONE place
+// defaults live — the binary has no compiled fallbacks. It has two
+// consumers: this embed, so `wavehouse init-settings` can write the
+// directory anywhere without a source tree, and the container images, which
+// COPY the same directory to /app/settings as plain files (the goreleaser
+// image is assembled on the build platform for a target-platform binary, so
+// it can't run init-settings at build time).
 //
 //go:embed seed/*.json
 var seedFS embed.FS

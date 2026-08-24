@@ -10,9 +10,6 @@ mq:
   # writes anywhere near that.
   max_bytes_gb: 1
 
-dedupe:
-  enabled: true
-
 # JWT validation. The suite signs test tokens with this fixed dev secret;
 # don't reuse outside the e2e rig.
 auth:
@@ -29,7 +26,7 @@ policy:
   file_path: tests/e2e/fixtures/policy.yaml
 
 # Tenant tunables (schema refresh_interval 5s so schema-discovery tests don't
-# wait a minute; dedupe id_field; CORS "*") live in the settings directory —
+# wait a minute; dedupe enabled + id_field; CORS "*") live in the settings directory —
 # see settings/config.json. Same cwd-relative resolution as policy.file_path.
 settings:
   dir: tests/e2e/fixtures/settings

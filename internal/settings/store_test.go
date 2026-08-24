@@ -74,7 +74,7 @@ func TestStore_DedupeFor_Cascade(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			id, req := s.DedupeFor(tt.table)
+			_, id, req := s.DedupeFor(tt.table)
 			assert.Equal(t, tt.wantID, id)
 			assert.Equal(t, tt.wantRequire, req)
 		})
@@ -110,7 +110,7 @@ func TestStore_SurvivesVanishedDirectory(t *testing.T) {
 	assert.False(t, adopted)
 	assert.True(t, HasErrors(findings))
 	assert.Equal(t, 42, s.DefaultMaxRows())
-	id, req := s.DedupeFor("clicks")
+	_, id, req := s.DedupeFor("clicks")
 	assert.Equal(t, "event_id", id)
 	assert.False(t, req)
 }
@@ -130,7 +130,7 @@ func TestStore_SeedIsValid(t *testing.T) {
 	// decision (dev-policy.yaml is the opt-in trial one).
 	assert.Len(t, findings, 1, "findings: %s", findingStrings(findings))
 	assert.Contains(t, findingStrings(findings), "no policy")
-	id, req := s.DedupeFor("anything")
+	_, id, req := s.DedupeFor("anything")
 	assert.Equal(t, "event_id", id)
 	assert.False(t, req)
 	assert.Equal(t, 10000, s.DefaultMaxRows())
@@ -154,4 +154,24 @@ func TestStore_TypedAccessors(t *testing.T) {
 	assert.Equal(t, 250, s.DefaultMaxRows())
 	assert.Equal(t, 5*time.Second, s.SchemaRefreshInterval())
 	assert.Equal(t, []string{"https://app.example.com"}, s.CORSOrigins())
+}
+
+// TestStore_AfterAdoptRunsOnlyOnAdoption pins the lifecycle hook contract:
+// it fires after every successful reload (with the new snapshot already
+// visible) and never on a rejected one.
+func TestStore_AfterAdoptRunsOnlyOnAdoption(t *testing.T) {
+	t.Parallel()
+	s := newLoadedStore(t, nil)
+	var seen []bool
+	s.AfterAdopt(func() { seen = append(seen, s.DedupeEnabled()) })
+
+	require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), FileConfig), []byte(configJSON(`{"dedupe": {"enabled": true}}`)), 0o600))
+	_, adopted := s.Reload()
+	require.True(t, adopted)
+	assert.Equal(t, []bool{true}, seen, "hook sees the newly adopted snapshot")
+
+	require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 0}}`)), 0o600))
+	_, adopted = s.Reload()
+	require.False(t, adopted)
+	assert.Equal(t, []bool{true}, seen, "rejected reload must not fire the hook")
 }

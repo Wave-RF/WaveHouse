@@ -29,6 +29,11 @@ type Store struct {
 	// parse-then-swap sequences (a stale parse must not overwrite a newer one).
 	mu   sync.Mutex
 	snap atomic.Pointer[Document]
+	// afterAdopt runs under mu after every successful swap, in registration
+	// order — for consumers that own a resource whose lifecycle follows a
+	// setting (the Pebble store behind dedupe.enabled) rather than reading
+	// the snapshot per call.
+	afterAdopt []func()
 }
 
 // Open validates dir and returns a Store holding its document. A rejected
@@ -58,7 +63,20 @@ func (s *Store) Reload() ([]Finding, bool) {
 		return findings, false
 	}
 	s.snap.Store(doc)
+	for _, fn := range s.afterAdopt {
+		fn()
+	}
 	return findings, true
+}
+
+// AfterAdopt registers fn to run after each subsequent successful reload,
+// serialized with the reload itself. Open's boot adoption has already
+// happened by the time a caller can register, so the caller applies the
+// boot state itself.
+func (s *Store) AfterAdopt(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.afterAdopt = append(s.afterAdopt, fn)
 }
 
 // TriggerReload is Reload plus outcome logging, tagged with the trigger's
@@ -96,13 +114,19 @@ func (s *Store) doc() *Document {
 	return s.snap.Load()
 }
 
-// DedupeFor resolves the effective dedupe settings for a table: the table
-// override for each field it names, the global value otherwise. Both fields
-// resolve from one snapshot load, so a reload can never hand a record the
-// id_field of one document and the require_id of another.
-func (s *Store) DedupeFor(table string) (idField string, requireID bool) {
+// DedupeEnabled reports the adopted dedupe.enabled switch.
+func (s *Store) DedupeEnabled() bool {
+	return *s.doc().Config.Dedupe.Enabled
+}
+
+// DedupeFor resolves the effective dedupe settings for a table: the switch,
+// then the table override for each field it names, the global value
+// otherwise. All three resolve from one snapshot load, so a reload can never
+// hand a record the id_field of one document and the require_id (or enabled)
+// of another.
+func (s *Store) DedupeFor(table string) (enabled bool, idField string, requireID bool) {
 	d := s.doc().Config.Dedupe
-	idField, requireID = *d.IDField, *d.RequireID
+	enabled, idField, requireID = *d.Enabled, *d.IDField, *d.RequireID
 	if td, ok := d.Tables[table]; ok {
 		if td.IDField != nil {
 			idField = *td.IDField
@@ -111,7 +135,7 @@ func (s *Store) DedupeFor(table string) (idField string, requireID bool) {
 			requireID = *td.RequireID
 		}
 	}
-	return idField, requireID
+	return enabled, idField, requireID
 }
 
 // DefaultMaxRows returns the fallback result LIMIT for structured queries.

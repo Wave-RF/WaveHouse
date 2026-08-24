@@ -35,8 +35,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # default, the same files `wavehouse init-settings` writes) so a bare
 # `docker run` boots; production bind-mounts its own directory over it.
 # Deliberately NOT a VOLUME (unlike /app/data): it's config, not state, and an
-# anonymous volume would hide a forgotten mount.
-RUN mkdir -p /app/data /app/pipes && cp -r /src/internal/settings/seed /app/settings && chown -R 65532:65532 /app
+# anonymous volume would hide a forgotten mount. Same COPY as
+# Dockerfile.goreleaser — keep the two in lockstep.
+COPY internal/settings/seed /app/settings
+RUN mkdir -p /app/data /app/pipes && chown -R 65532:65532 /app
 
 # Stage 2: Final minimal image
 FROM gcr.io/distroless/static-debian12

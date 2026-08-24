@@ -163,7 +163,7 @@ func TestIngest_Dedup_FirstTime(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.DedupeSettings = func(string) (string, bool) { return "event_id", false }
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", false }
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "evt-1"})
 	w := httptest.NewRecorder()
@@ -179,7 +179,7 @@ func TestIngest_Dedup_Duplicate(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.DedupeSettings = func(string) (string, bool) { return "event_id", false }
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", false }
 
 	// First call.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "dup-1"})
@@ -691,7 +691,7 @@ func TestIngest_Dedup_MissingIDField(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.DedupeSettings = func(string) (string, bool) { return "event_id", false }
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", false }
 
 	// Payload omits event_id and require_id is off: the row skips
 	// dedup and is still published — the warn+counter path, not a rejection (#219).
@@ -710,7 +710,7 @@ func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = testutil.NewMockDeduplicator()
-	h.DedupeSettings = func(string) (string, bool) { return "event_id", true }
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", true }
 
 	w := httptest.NewRecorder()
 	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
@@ -732,7 +732,7 @@ func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = testutil.NewMockDeduplicator()
-	h.DedupeSettings = func(string) (string, bool) { return "event_id", true }
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", true }
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
@@ -984,7 +984,7 @@ func TestIngest_NDJSON_Dedup(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.DedupeSettings = func(string) (string, bool) { return "event_id", false }
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", false }
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
@@ -1722,4 +1722,28 @@ func TestIngest_Batch_MixedTimestampSpellings(t *testing.T) {
 		"banana",               // unparseable — passed through verbatim
 		"2026-06-21T04:00:00Z", // Unix seconds — canonicalized
 	}, spellings)
+}
+
+// TestIngest_Dedup_DisabledBySettings pins the hot-reloadable switch: with
+// dedupe.enabled false the deduplicator is never consulted (an Err that would
+// otherwise 500 is proof), the missing-id tripwire doesn't fire even in
+// strict mode, and the record publishes.
+func TestIngest_Dedup_DisabledBySettings(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	dedup := testutil.NewMockDeduplicator()
+	dedup.Err = errors.New("must not be called while disabled")
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h.Dedup = dedup
+	h.DedupeSettings = func(string) (bool, string, bool) { return false, "event_id", true }
+
+	for _, body := range []map[string]any{
+		{"event_id": "e1", "page": "/home"},
+		{"page": "/home"},
+	} {
+		w := httptest.NewRecorder()
+		h.Handle(w, ingestRequest(t, "clicks", body))
+		assert.Equal(t, http.StatusOK, w.Code)
+	}
+	assert.Len(t, pub.Messages, 2, "both records publish, neither deduped nor rejected")
 }

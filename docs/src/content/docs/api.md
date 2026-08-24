@@ -798,7 +798,7 @@ Returns a specific named pipe definition.
 
 #### `POST /v1/ops/settings/reload` — Reload Settings Directory
 
-Re-validates the [settings directory](/configuration#settings-directory) and adopts it when no finding is an error — the same serialized reload path the file watcher and `SIGHUP` use.
+Re-validates the [settings directory](/settings-directory) and adopts it when no finding is an error — the same serialized reload path the file watcher and `SIGHUP` use.
 
 ```json
 {

@@ -175,8 +175,8 @@ func run() int {
 	}
 
 	// Settings directory — the hot-reloadable half of configuration (tenant
-	// tunables: dedupe id_field/require_id, query default_max_rows, schema
-	// refresh_interval, CORS origins). Required: config.Validate already
+	// tunables: dedupe enabled/id_field/require_id, query default_max_rows,
+	// schema refresh_interval, CORS origins). Required: config.Validate already
 	// rejected an empty settings.dir, and an invalid directory refuses boot —
 	// the same fail-loud contract as policy.file_path. The binary carries no
 	// compiled defaults; `wavehouse init-settings` writes the seed. A *reload*
@@ -353,17 +353,33 @@ func run() int {
 	natsDir := filepath.Join(cfg.DataDir, "nats")
 	pebbleDir := filepath.Join(cfg.DataDir, "pebble")
 
-	// Optional embedded dedupe (Pebble).
-	var dedup dedupe.Deduplicator
-	if cfg.Dedupe.Enabled {
+	// Embedded dedupe (Pebble). The store follows the hot-reloadable
+	// dedupe.enabled setting: opened here when the adopted settings say so
+	// (a failed open is fatal, like every other store at boot), then opened or
+	// closed after each later adoption. A failed open on reload is logged and
+	// leaves the store closed — ingest then fails closed (500 "dedupe
+	// failed") rather than silently publishing un-deduped, since the files
+	// asked for dedupe.
+	dedup := dedupe.NewManaged(pebbleDir)
+	defer func() { _ = dedup.Close() }()
+	if settingsStore.DedupeEnabled() {
 		config.WarnIfFreshDataDir(logger, "pebble", pebbleDir)
-		dedup, err = dedupe.NewEmbedded(pebbleDir)
-		if err != nil {
+		if err := dedup.Apply(true); err != nil {
 			config.LogStorageInitError(logger, "dedupe", pebbleDir, err)
 			return 1
 		}
-		defer func() { _ = dedup.Close() }()
 	}
+	settingsStore.AfterAdopt(func() {
+		enabled := settingsStore.DedupeEnabled()
+		if enabled && !dedup.Open() {
+			config.WarnIfFreshDataDir(logger, "pebble", pebbleDir)
+		}
+		if err := dedup.Apply(enabled); err != nil {
+			config.LogStorageInitError(logger, "dedupe", pebbleDir, err)
+			return
+		}
+		logger.Info("dedupe store reconciled with settings", "enabled", enabled)
+	})
 
 	// Embedded MQ (NATS).
 	config.WarnIfFreshDataDir(logger, "nats", natsDir)
@@ -468,10 +484,8 @@ func run() int {
 	js := embeddedMQ.JetStream()
 	ingestHandler := api.NewIngestHandler(registry, embeddedMQ, logger)
 	ingestHandler.PolicyStore = policyStore
-	if dedup != nil {
-		ingestHandler.Dedup = dedup
-		ingestHandler.DedupeSettings = settingsStore.DedupeFor
-	}
+	ingestHandler.Dedup = dedup
+	ingestHandler.DedupeSettings = settingsStore.DedupeFor
 
 	var dlqHandler *api.DLQHandler
 	if cfg.DLQ.Enabled {

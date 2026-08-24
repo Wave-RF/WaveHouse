@@ -19,7 +19,8 @@
 FROM --platform=$BUILDPLATFORM alpine:3 AS layout
 # The seed settings directory arrives via `extra_files` in .goreleaser.yaml
 # (the goreleaser context holds only the dist tree). Baked at /app/settings so
-# a bare `docker run` boots; not a VOLUME — it's config, not state.
+# a bare `docker run` boots; not a VOLUME — it's config, not state. Same COPY
+# as deployments/Dockerfile — keep the two in lockstep.
 COPY internal/settings/seed /app/settings
 RUN mkdir -p /app/data /app/pipes && chown -R 65532:65532 /app
 

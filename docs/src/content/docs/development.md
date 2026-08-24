@@ -138,7 +138,7 @@ dev: deps-up $(AIR)
     air -c .air.toml
 ```
 
-`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` (the `.go` and `.yaml` files within them), rebuilds `tmp/wavehouse` on change, and restarts the binary. Config is **not** hot-reloaded: `make dev` runs the binary with `WH_CONFIG=.config.local.yaml` — a gitignored personal copy seeded **once** from `config.yaml` on first run (it won't re-copy if it already exists). So to change dev config, edit `.config.local.yaml` (not `config.yaml`) and restart `make dev`; air watches neither root file.
+`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` (the `.go` and `.yaml` files within them), rebuilds `tmp/wavehouse` on change, and restarts the binary. Config is **not** hot-reloaded: `make dev` runs the binary with `WH_CONFIG=.config.local.yaml` — a gitignored personal copy seeded **once** from `config.yaml` on first run (it won't re-copy if it already exists). So to change dev config, edit `.config.local.yaml` (not `config.yaml`) and restart `make dev`; air watches neither root file. The flip side: when `config.yaml` gains a key your copy lacks, your copy is stale — `make dev` warns when `config.yaml` is newer than `.config.local.yaml`, and the fix is to port the change over or delete `.config.local.yaml` to re-seed it. `settings.dir` is the one key that will stop the server outright if it's missing (it's required with no default), so a checkout whose local copy predates it fails at config validation until re-seeded.
 
 `air` is pinned to a specific version and installed via `go install` rather than a `go.mod` tool directive — its transitive deps (Hugo, godartsass, Sass libs) would bloat `go.sum` for everyone. Same exclusion principle as `golangci-lint`.
 
@@ -228,13 +228,15 @@ curl -s -X POST http://localhost:8080/v1/ops/query \
 
 ### Enable Dedup (Optional)
 
-Set `WH_DEDUPE_ENABLED=true`:
+`make dev` points `settings.dir` at the checked-in seed, which ships with `dedupe.enabled: false`. Write your own settings directory and flip it there (the seed is committed — don't edit it in place):
 
 ```bash
-WH_DEDUPE_ENABLED=true make dev
+./tmp/wavehouse init-settings ./settings   # or: go run ./cmd/wavehouse init-settings ./settings
+# set "enabled": true under "dedupe" in ./settings/config.json,
+# and settings.dir: ./settings in .config.local.yaml
 ```
 
-Records dedupe on their `event_id` field by default; the settings directory's `config.json` overrides the field globally or per table (see [Configuration — Deduplication](/configuration#deduplication)).
+The key hot-reloads, so once the server is running you can toggle it by editing `config.json` — no restart. Records dedupe on their `event_id` field by default; the same file overrides the field globally or per table (see [Configuration — Deduplication](/settings-directory#deduplication)).
 
 Then include the dedup field in your ingest body:
 

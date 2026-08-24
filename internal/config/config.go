@@ -20,7 +20,6 @@ type Config struct {
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
 	MQ         MQ         `yaml:"mq"`
-	Dedupe     Dedupe     `yaml:"dedupe"`
 	Cache      Cache      `yaml:"cache"`
 	Auth       Auth       `yaml:"auth"`
 	DLQ        DLQ        `yaml:"dlq"`
@@ -137,14 +136,6 @@ type ClickHouse struct {
 type MQ struct {
 	GapWindowMinutes int `yaml:"gap_window_minutes" env:"WH_MQ_GAP_WINDOW_MINUTES" env-default:"15"`
 	MaxBytesGB       int `yaml:"max_bytes_gb" env:"WH_MQ_MAX_BYTES_GB" env-default:"50"`
-}
-
-// Dedupe holds only the enable switch: it owns Pebble's lifecycle, which only
-// a restart can change. The behavioral knobs (id_field, require_id, per-table
-// overrides) are tenant tunables and live in the settings directory's
-// config.json (internal/settings).
-type Dedupe struct {
-	Enabled bool `yaml:"enabled" env:"WH_DEDUPE_ENABLED" env-default:"false"`
 }
 
 type Cache struct {

@@ -249,6 +249,8 @@ $(CONFIG_FILES): .%.local.yaml: %.yaml
 	@if [ ! -f $@ ]; then \
 		echo "⚙️  Creating local config: $@ from $<..."; \
 		cp $< $@; \
+	else \
+		echo "$(YELLOW)⚠️  $< is newer than $@ — port the change over, or delete $@ to re-seed it$(RESET)"; \
 	fi
 
 .PHONY: dev

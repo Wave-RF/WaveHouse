@@ -72,14 +72,16 @@ type TenantConfig struct {
 	CORS   *CORSConfig   `json:"cors"`
 }
 
-// DedupeConfig tunes dedupe behavior. dedupe.enabled stays boot config: it
-// owns Pebble's lifecycle, which only a restart can change.
+// DedupeConfig tunes dedupe behavior, including the switch itself: a reload
+// that flips enabled opens or closes the embedded Pebble store on the fly
+// (dedupe.Managed), so the whole block is tenant-owned.
 //
 // id_field and require_id are required here and optional per table: a table
 // override inherits whichever field it doesn't name. An empty,
 // whitespace-only, or whitespace-padded id_field is rejected at every level,
 // so the effective id_field can never be empty or silently unmatchable.
 type DedupeConfig struct {
+	Enabled   *bool   `json:"enabled"`
 	IDField   *string `json:"id_field"`
 	RequireID *bool   `json:"require_id"`
 	// Tables holds per-table overrides keyed by ClickHouse table name (#222).

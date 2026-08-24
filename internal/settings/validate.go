@@ -318,6 +318,9 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 	if d := c.Dedupe; d == nil {
 		v.required("dedupe")
 	} else {
+		if d.Enabled == nil {
+			v.required("dedupe.enabled")
+		}
 		if d.IDField == nil {
 			v.required("dedupe.id_field")
 		}
@@ -355,11 +358,18 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 	} else if *s.RefreshInterval < 1 {
 		v.errorf(FileConfig, "schema.refresh_interval", "must be >= 1 second, got %d", *s.RefreshInterval)
 	}
-	if co := c.CORS; co == nil {
+	switch co := c.CORS; {
+	case co == nil:
 		v.required("cors")
-	} else if co.AllowedOrigins == nil {
+	case co.AllowedOrigins == nil:
 		v.required("cors.allowed_origins")
-	} else {
+	case len(co.AllowedOrigins) == 0:
+		// An empty list is not "no origins": corsMiddleware treats it as
+		// allow-all, and [] is the natural spelling for "none" in a
+		// hand-edited file — so name the trap before it hot-reloads into
+		// effect.
+		v.warnf(FileConfig, "cors.allowed_origins", `empty list allows every origin — write ["*"] to say so explicitly, or list the origins to allow`)
+	default:
 		for i, origin := range co.AllowedOrigins {
 			if strings.TrimSpace(origin) == "" {
 				v.errorf(FileConfig, fmt.Sprintf("cors.allowed_origins[%d]", i), "origin must not be empty")

@@ -156,7 +156,7 @@ WH_PIPES_DIR=/etc/wavehouse/pipes
 
 # Settings directory (required): roles.json, policies.json, pipes.json,
 # config.json. Tenant tunables live in its config.json — dedupe
-# id_field/require_id (+ per-table overrides), query default_max_rows, schema
+# enabled/id_field/require_id (+ per-table overrides), query default_max_rows, schema
 # refresh_interval, CORS allowed_origins — and reload on file change, SIGHUP,
 # or POST /v1/ops/settings/reload. Create it with
 # `wavehouse init-settings /etc/wavehouse/settings`; the container images
@@ -165,10 +165,6 @@ WH_SETTINGS_DIR=/etc/wavehouse/settings
 
 # Cache tuning
 WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60
-
-# Optional dedup (the switch is boot config; the id field and strictness are
-# settings-directory tunables)
-WH_DEDUPE_ENABLED=true
 
 # Standalone tuning
 WH_MQ_GAP_WINDOW_MINUTES=15       # Minutes of NATS history for SSE gap-fill
@@ -184,7 +180,7 @@ WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
 WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
 
 - `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE gap-fill across restarts.
-- `<data_dir>/pebble` — Pebble dedup KV. Only used when `WH_DEDUPE_ENABLED=true`.
+- `<data_dir>/pebble` — Pebble dedup KV. Only used while `dedupe.enabled` is `true` in the settings directory's `config.json` (opened and closed on reload).
 
 In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data` and `/app/pipes` owned by the nonroot user (UID 65532); the binary creates the `nats/` and `pebble/` subdirectories under `/app/data` itself on first run.
 
