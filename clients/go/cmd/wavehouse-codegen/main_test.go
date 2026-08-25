@@ -1,8 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"go/format"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -169,5 +177,241 @@ func TestGeneratedShapeDecodesStructuredQueryPayload(t *testing.T) {
 	}
 	if rows[0].Big.String() != "170141183460469231731687303715884105727" {
 		t.Fatalf("128-bit value corrupted: %s", rows[0].Big)
+	}
+}
+
+// withArgs points os.Args at args for the duration of the test. parseArgs and
+// flagValue read the global directly, so tests driving them must not run in
+// parallel.
+func withArgs(t *testing.T, args []string) {
+	t.Helper()
+	saved := os.Args
+	t.Cleanup(func() { os.Args = saved })
+	os.Args = args
+}
+
+func TestFlagValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		want  string
+		wantI int
+	}{
+		{name: "value follows the flag", args: []string{"cg", "--url", "http://h:9000"}, want: "http://h:9000", wantI: 2},
+		// There is no lookahead: a flag-shaped value is consumed as the value.
+		{name: "flag-shaped value", args: []string{"cg", "--out", "--package"}, want: "--package", wantI: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withArgs(t, tt.args)
+			i := 1
+			if got := flagValue(&i); got != tt.want {
+				t.Errorf("flagValue() = %q, want %q", got, tt.want)
+			}
+			if i != tt.wantI {
+				t.Errorf("index advanced to %d, want %d", i, tt.wantI)
+			}
+		})
+	}
+}
+
+func TestParseArgs(t *testing.T) {
+	// Every case differs from the defaults parseArgs starts with by a field or
+	// two, so deriving the wants keeps each row about what it changes.
+	defaults := cliArgs{url: "http://localhost:8080", out: "./wavehouse_types.go", pkg: "main"}
+	allFlags := cliArgs{url: "http://h:9000", out: "./types.go", auth: "argv-token", pkg: "db"}
+	secondURL, envAuth, argvAuth := defaults, defaults, defaults
+	secondURL.url = "http://second"
+	envAuth.auth = "env-token"
+	argvAuth.auth = "argv-token"
+	tests := []struct {
+		name string
+		args []string
+		env  string // WAVEHOUSE_AUTH
+		want cliArgs
+	}{
+		{name: "no arguments uses defaults", args: []string{"cg"}, want: defaults},
+		{
+			name: "long flags",
+			args: []string{"cg", "--url", "http://h:9000", "--out", "./types.go", "--auth", "argv-token", "--package", "db"},
+			want: allFlags,
+		},
+		{
+			name: "short flags",
+			args: []string{"cg", "-u", "http://h:9000", "-o", "./types.go", "-a", "argv-token", "-p", "db"},
+			want: allFlags,
+		},
+		{name: "later flag wins", args: []string{"cg", "-u", "http://first", "--url", "http://second"}, want: secondURL},
+		{name: "WAVEHOUSE_AUTH fills an unset --auth", args: []string{"cg"}, env: "env-token", want: envAuth},
+		{name: "--auth beats WAVEHOUSE_AUTH", args: []string{"cg", "--auth", "argv-token"}, env: "env-token", want: argvAuth},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("WAVEHOUSE_AUTH", tt.env) // empty reads back the same as unset
+			withArgs(t, tt.args)
+			if got := parseArgs(); got != tt.want {
+				t.Errorf("parseArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// parseArgsChildEnv carries the argv under test to the re-executed child.
+const parseArgsChildEnv = "WAVEHOUSE_CODEGEN_TEST_ARGS"
+
+// TestParseArgsExitPaths covers the branches that end in os.Exit, which can
+// only be observed from outside the process: each case re-runs this test
+// binary with the argv under test and asserts on the child's exit code and
+// output.
+func TestParseArgsExitPaths(t *testing.T) {
+	if raw, ok := os.LookupEnv(parseArgsChildEnv); ok {
+		withArgs(t, append([]string{"wavehouse-codegen"}, strings.Fields(raw)...))
+		parseArgs()
+		t.Fatal("parseArgs returned instead of exiting")
+	}
+	tests := []struct {
+		name     string
+		args     string
+		wantCode int
+		wantOut  string
+	}{
+		{name: "missing value for a long flag", args: "--url", wantCode: 2, wantOut: "missing value for --url"},
+		{name: "missing value for a short flag", args: "-o", wantCode: 2, wantOut: "missing value for -o"},
+		{name: "missing value after a satisfied flag", args: "--url http://h:9000 --package", wantCode: 2, wantOut: "missing value for --package"},
+		{name: "unknown argument", args: "--nope", wantCode: 2, wantOut: `unknown argument "--nope"`},
+		{name: "bare value with no flag", args: "stray", wantCode: 2, wantOut: `unknown argument "stray"`},
+		{name: "help exits cleanly", args: "--help", wantCode: 0, wantOut: "Generate Go types from WaveHouse schema"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Re-executing this test binary is the standard way to observe
+			// an os.Exit path; the argv is fixed by the table above.
+			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestParseArgsExitPaths$") //nolint:gosec // the command is this test binary, not user input
+			cmd.Env = append(os.Environ(), parseArgsChildEnv+"="+tt.args)
+			out, err := cmd.CombinedOutput()
+			code := 0
+			var exitErr *exec.ExitError
+			switch {
+			case errors.As(err, &exitErr):
+				code = exitErr.ExitCode()
+			case err != nil:
+				t.Fatalf("run child: %v", err)
+			}
+			if code != tt.wantCode {
+				t.Errorf("child exit code = %d, want %d\n%s", code, tt.wantCode, out)
+			}
+			if !strings.Contains(string(out), tt.wantOut) {
+				t.Errorf("child output missing %q:\n%s", tt.wantOut, out)
+			}
+		})
+	}
+}
+
+// schemaRequest is what the stub server saw. It travels over a buffered
+// channel rather than a shared variable so -race sees the edge between the
+// server goroutine and the test.
+type schemaRequest struct {
+	path string
+	auth string
+}
+
+// schemaServer answers every request with body under status (0 means 200).
+func schemaServer(t *testing.T, status int, body string) (string, <-chan schemaRequest) {
+	t.Helper()
+	seen := make(chan schemaRequest, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- schemaRequest{path: r.URL.Path, auth: r.Header.Get("Authorization")}
+		if status != 0 {
+			w.WriteHeader(status)
+		}
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, seen
+}
+
+func TestFetchSchemas(t *testing.T) {
+	const clicksJSON = `{"name":"clicks","columns":[{"name":"page","type":"String"},{"name":"ts","type":"DateTime","has_default":true}]}`
+	clicks := tableSchema{Name: "clicks", Columns: []column{
+		{Name: "page", Type: "String"},
+		{Name: "ts", Type: "DateTime", HasDefault: true},
+	}}
+	tests := []struct {
+		name     string
+		suffix   string // appended to the stub server's base URL
+		auth     string
+		status   int
+		body     string
+		want     map[string]tableSchema
+		wantAuth string
+		wantErr  string
+	}{
+		{
+			name: "array response with bearer auth", auth: "tok-123", body: "[" + clicksJSON + "]",
+			want: map[string]tableSchema{"clicks": clicks}, wantAuth: "Bearer tok-123",
+		},
+		{
+			name: "map response without auth", body: `{"clicks":` + clicksJSON + `}`,
+			want: map[string]tableSchema{"clicks": clicks},
+		},
+		{name: "trailing slash trimmed from base URL", suffix: "/", body: "[]", want: map[string]tableSchema{}},
+		{name: "malformed JSON", body: `[{"name":`, wantErr: "read schema response"},
+		{name: "JSON that is neither array nor map", body: `"nope"`, wantErr: "decode schema JSON"},
+		{name: "non-200 status", status: http.StatusInternalServerError, body: "boom", wantErr: "schema fetch failed: HTTP 500"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base, seen := schemaServer(t, tt.status, tt.body)
+			got, err := fetchSchemas(t.Context(), base+tt.suffix, tt.auth)
+			switch {
+			case tt.wantErr != "":
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("fetchSchemas() error = %v, want one containing %q", err, tt.wantErr)
+				}
+			case err != nil:
+				t.Fatalf("fetchSchemas() error = %v", err)
+			case !reflect.DeepEqual(got, tt.want):
+				t.Errorf("fetchSchemas() = %+v, want %+v", got, tt.want)
+			}
+			select {
+			case req := <-seen:
+				if req.path != "/v1/ops/schema" {
+					t.Errorf("requested path = %q, want /v1/ops/schema", req.path)
+				}
+				if req.auth != tt.wantAuth {
+					t.Errorf("Authorization header = %q, want %q", req.auth, tt.wantAuth)
+				}
+			default:
+				t.Error("stub server never saw a request")
+			}
+		})
+	}
+}
+
+func TestFetchSchemasRequestErrors(t *testing.T) {
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	tests := []struct {
+		name    string
+		ctx     context.Context
+		baseURL string
+		wantErr string
+	}{
+		{name: "unparseable base URL", ctx: t.Context(), baseURL: "http://%zz", wantErr: "build schema request"},
+		{name: "transport failure", ctx: canceled, baseURL: "http://127.0.0.1:1", wantErr: "fetch schema from"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := fetchSchemas(tt.ctx, tt.baseURL, ""); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("fetchSchemas() error = %v, want one containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSortedKeys(t *testing.T) {
+	got := sortedKeys(map[string]tableSchema{"clicks": {}, "acks": {}, "views": {}})
+	if want := []string{"acks", "clicks", "views"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("sortedKeys() = %v, want %v", got, want)
 	}
 }
