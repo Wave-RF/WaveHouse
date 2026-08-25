@@ -28,6 +28,7 @@ type StreamController struct {
 	cancel      context.CancelFunc
 	done        chan struct{}
 	closed      bool
+	lastErr     error // replayed to subscribers that register after it was emitted
 }
 
 // newController builds a controller whose event channel buffers from
@@ -57,17 +58,23 @@ func (sc *StreamController) Status() StreamStatus {
 }
 
 // Subscribe registers callbacks and returns an unsubscribe function. The
-// subscriber's Status callback fires immediately with the current status.
+// subscriber's Status callback fires immediately with the current status, and
+// its Error callback fires with the last error if one was already emitted —
+// otherwise a connection that fails before Subscribe returns would deliver it
+// to nobody.
 func (sc *StreamController) Subscribe(sub *StreamSubscriber) func() {
 	sc.mu.Lock()
 	sc.subscribers = append(sc.subscribers, sub)
-	currentStatus := sc.status
+	currentStatus, missedErr := sc.status, sc.lastErr
 	sc.mu.Unlock()
 
 	// Benign race: setStatus also calls the subscriber, so a stale status here
 	// is immediately followed by the correct one.
 	if sub.Status != nil {
 		sub.Status(currentStatus)
+	}
+	if missedErr != nil && sub.Error != nil {
+		sub.Error(missedErr)
 	}
 
 	return func() {
@@ -192,8 +199,15 @@ func (sc *StreamController) emitEvent(event StreamEvent) {
 	}
 }
 
+// emitError records err for late subscribers and delivers it to the current
+// ones. Recording and snapshotting share one critical section so a subscriber
+// registering concurrently is served by exactly one of the two paths.
 func (sc *StreamController) emitError(err error) {
-	for _, sub := range sc.snapshotSubs() {
+	sc.mu.Lock()
+	sc.lastErr = err
+	subs := append([]*StreamSubscriber(nil), sc.subscribers...)
+	sc.mu.Unlock()
+	for _, sub := range subs {
 		if sub.Error != nil {
 			sub.Error(err)
 		}

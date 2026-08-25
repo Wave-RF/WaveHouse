@@ -381,6 +381,27 @@ func TestProjectColumns(t *testing.T) {
 	}
 }
 
+// A connect that fails before Subscribe returns still has to reach the
+// subscriber; without the replay in Subscribe this is a scheduling race that
+// only shows up on a loaded machine.
+func TestStream_SubscribeReplaysAMissedTerminalError(t *testing.T) {
+	stream := NewClient(Config{BaseURL: "ws://example.invalid"}).From("clicks").Stream(nil)
+	defer stream.Close()
+	<-stream.done // the connect has already failed and emitted
+
+	errCh := make(chan error, 1)
+	stream.Subscribe(&StreamSubscriber{Error: func(err error) { errCh <- err }})
+	select {
+	case err := <-errCh:
+		var apiErr *Error
+		if !errors.As(err, &apiErr) || apiErr.Code != "SSE_CONNECT_ERROR" {
+			t.Fatalf("want SSE_CONNECT_ERROR, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a subscriber registered after the failure never saw it")
+	}
+}
+
 // TestStream_TerminalConnectFailures: every way a connection can fail in a way
 // reconnecting cannot fix. Each case must surface a specific, non-retryable
 // code, close the stream, and leave Connected failing — the generic retryable
