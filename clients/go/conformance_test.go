@@ -14,19 +14,10 @@ import (
 	"testing"
 )
 
-// logCallErr surfaces SDK-call errors that the conformance harness otherwise
-// ignores — the assertions only inspect the captured request, but when a call
-// fails before sending, the failure message should name the real cause.
-func logCallErr(t *testing.T, err error) {
-	t.Helper()
-	if err != nil {
-		t.Logf("SDK call returned error (request may still be valid): %v", err)
-	}
-}
-
-// wireCasesJSON embeds the shared wire-format conformance fixture so the
-// test binary is self-contained: it works from a module archive or a
-// standalone checkout without depending on paths outside the Go module.
+// wireCasesJSON embeds the shared wire-format fixture — the same file the TS
+// runner replays (tests/conformance/conformance_ts.mjs) — so the test binary
+// is self-contained: it works from a module archive or a standalone checkout
+// without depending on paths outside the Go module.
 //
 //go:embed testdata/wire_cases.json
 var wireCasesJSON []byte
@@ -54,15 +45,6 @@ type wireOp struct {
 	Args   []any  `json:"args"`
 }
 
-func loadWireCases(t *testing.T) []wireCase {
-	t.Helper()
-	var cases []wireCase
-	if err := json.Unmarshal(wireCasesJSON, &cases); err != nil {
-		t.Fatalf("parse wire_cases.json: %v", err)
-	}
-	return cases
-}
-
 // captured holds the HTTP request details from a single SDK call.
 type captured struct {
 	method      string
@@ -71,8 +53,34 @@ type captured struct {
 	body        string
 }
 
+// logErr surfaces SDK-call errors the assertions otherwise ignore: they only
+// inspect the captured request, but a call that fails before sending should
+// name the real cause.
+func logErr(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Logf("SDK call returned error (request may still be valid): %v", err)
+	}
+}
+
+// errOf drops the value of a two-result SDK call, keeping only the error.
+func errOf[T any](_ T, err error) error { return err }
+
+// jsonArg decodes a fixture field into the SDK request type it stands for.
+func jsonArg[T any](t *testing.T, field string, raw json.RawMessage) T {
+	t.Helper()
+	var v T
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("parse %s: %v", field, err)
+	}
+	return v
+}
+
 func TestConformance_WireFormat(t *testing.T) {
-	cases := loadWireCases(t)
+	var cases []wireCase
+	if err := json.Unmarshal(wireCasesJSON, &cases); err != nil {
+		t.Fatalf("parse wire_cases.json: %v", err)
+	}
 
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
@@ -117,159 +125,98 @@ func TestConformance_WireFormat(t *testing.T) {
 			})
 			ctx := context.Background()
 
-			// Execute the case.
 			switch tc.Endpoint {
 			case "query":
-				q := applyOps(t, tc.Table, c, tc.Operations)
-				_, err := q.FetchUntyped(ctx)
-				logCallErr(t, err)
-
-			case "ingest":
-				if len(tc.Operations) == 0 || tc.Operations[0].Method != "insert" {
-					t.Fatalf("ingest case %q has no insert operation", tc.Name)
-				}
-				if len(tc.Operations[0].Args) == 0 {
-					t.Fatal("insert needs 1 arg, got 0")
-				}
-				data := tc.Operations[0].Args[0]
-				_, err := c.From(tc.Table).Insert(ctx, data)
-				logCallErr(t, err)
-
-			case "ingest_batch":
-				if len(tc.Operations) == 0 || tc.Operations[0].Method != "insert" {
-					t.Fatalf("ingest_batch case %q has no insert operation", tc.Name)
-				}
-				if len(tc.Operations[0].Args) == 0 {
-					t.Fatal("insert needs 1 arg, got 0")
-				}
-				rawArr, ok := tc.Operations[0].Args[0].([]any)
-				if !ok {
-					t.Fatalf("batch insert args[0] is not an array")
-				}
-				rows := make([]map[string]any, len(rawArr))
-				for i, r := range rawArr {
-					rows[i] = toStringMap(t, r)
-				}
-				_, batchErr := c.From(tc.Table).Insert(ctx, rows)
-				logCallErr(t, batchErr)
-
+				logErr(t, errOf(applyOps(t, tc.Table, c, tc.Operations).FetchUntyped(ctx)))
+			case "ingest", "ingest_batch":
+				logErr(t, errOf(c.From(tc.Table).Insert(ctx, insertArg(t, tc))))
 			case "pipe":
-				p := c.Pipe(tc.PipeName, tc.PipeParams)
-				_, err := p.FetchUntyped(ctx)
-				logCallErr(t, err)
-
+				logErr(t, errOf(c.Pipe(tc.PipeName, tc.PipeParams).FetchUntyped(ctx)))
 			case "sql":
-				_, err := SQL[map[string]any](ctx, c, tc.SQL)
-				logCallErr(t, err)
-
+				logErr(t, errOf(SQL[map[string]any](ctx, c, tc.SQL)))
 			case "health":
-				logCallErr(t, c.Sys.Health(ctx))
-
+				logErr(t, c.Sys.Health(ctx))
 			case "schema_list":
-				_, err := c.Schema.List(ctx)
-				logCallErr(t, err)
-
+				logErr(t, errOf(c.Schema.List(ctx)))
 			case "schema_refresh":
-				logCallErr(t, c.Schema.Refresh(ctx))
-
+				logErr(t, c.Schema.Refresh(ctx))
 			case "policy_get":
-				_, err := c.Policy.Get(ctx)
-				logCallErr(t, err)
-
+				logErr(t, errOf(c.Policy.Get(ctx)))
 			case "policy_set":
-				var pol Policy
-				if err := json.Unmarshal(tc.PolicyBody, &pol); err != nil {
-					t.Fatalf("parse policy_body: %v", err)
-				}
-				logCallErr(t, c.Policy.Set(ctx, &pol))
-
+				logErr(t, c.Policy.Set(ctx, jsonArg[*Policy](t, "policy_body", tc.PolicyBody)))
 			case "policy_validate":
-				var pol Policy
-				if err := json.Unmarshal(tc.PolicyBody, &pol); err != nil {
-					t.Fatalf("parse policy_body: %v", err)
-				}
-				_, err := c.Policy.Validate(ctx, &pol)
-				logCallErr(t, err)
-
+				logErr(t, errOf(c.Policy.Validate(ctx, jsonArg[*Policy](t, "policy_body", tc.PolicyBody))))
 			case "dlq_list":
-				_, err := c.DLQ.List(ctx)
-				logCallErr(t, err)
-
+				logErr(t, errOf(c.DLQ.List(ctx)))
 			case "dlq_table":
-				_, err := c.DLQ.Table(ctx, tc.Table)
-				logCallErr(t, err)
-
+				logErr(t, errOf(c.DLQ.Table(ctx, tc.Table)))
 			case "pipes_list":
-				_, err := c.Pipes.List(ctx)
-				logCallErr(t, err)
-
+				logErr(t, errOf(c.Pipes.List(ctx)))
 			case "pipes_get":
-				_, err := c.Pipes.Get(ctx, tc.PipeName)
-				logCallErr(t, err)
-
+				logErr(t, errOf(c.Pipes.Get(ctx, tc.PipeName)))
 			case "pipes_set":
-				var def PipeDef
-				if err := json.Unmarshal(tc.PipeDefBody, &def); err != nil {
-					t.Fatalf("parse pipe_def: %v", err)
-				}
-				logCallErr(t, c.Pipes.Set(ctx, tc.PipeName, def))
-
+				logErr(t, c.Pipes.Set(ctx, tc.PipeName, jsonArg[PipeDef](t, "pipe_def", tc.PipeDefBody)))
 			case "pipes_delete":
-				logCallErr(t, c.Pipes.Delete(ctx, tc.PipeName))
-
+				logErr(t, c.Pipes.Delete(ctx, tc.PipeName))
 			default:
 				// Hard failure, matching the TS runner: skipped cases break
 				// cross-SDK parity.
 				t.Fatalf("unhandled endpoint %q — wire it up in the dispatch switch", tc.Endpoint)
 			}
 
-			// Verify method.
 			mu.Lock()
 			defer mu.Unlock()
-			if tc.ExpectedMethod != "" && capt.method != tc.ExpectedMethod {
-				t.Errorf("method: want %s, got %s", tc.ExpectedMethod, capt.method)
-			}
 
-			// Verify path.
-			if tc.ExpectedPath != "" {
-				// Normalize: the SDK may use different encoding (+ vs %20).
-				wantPath := normalizePath(tc.ExpectedPath)
-				gotPath := normalizePath(capt.path)
-				if wantPath != gotPath {
-					t.Errorf("path: want %s, got %s", tc.ExpectedPath, capt.path)
+			wantEq := func(what, want, got string) {
+				t.Helper()
+				if want != "" && want != got {
+					t.Errorf("%s: want %s, got %s", what, want, got)
 				}
 			}
-
-			// Verify content type.
-			if tc.ExpectedContentType != "" && capt.contentType != tc.ExpectedContentType {
-				t.Errorf("content-type: want %s, got %s", tc.ExpectedContentType, capt.contentType)
+			wantEq("method", tc.ExpectedMethod, capt.method)
+			wantEq("content-type", tc.ExpectedContentType, capt.contentType)
+			// Paths compare by meaning (see normalizePath) but report as written.
+			if tc.ExpectedPath != "" && normalizePath(tc.ExpectedPath) != normalizePath(capt.path) {
+				t.Errorf("path: want %s, got %s", tc.ExpectedPath, capt.path)
 			}
 
-			// Verify raw body (for NDJSON).
+			// Raw body: the NDJSON cases, where the byte layout is the point.
 			if tc.ExpectedRawBody != nil {
 				if capt.body != *tc.ExpectedRawBody {
 					t.Errorf("raw body:\n  want: %s\n  got:  %s", *tc.ExpectedRawBody, capt.body)
 				}
 				return
 			}
-
-			// Verify JSON body.
-			if tc.ExpectedBody != nil && string(tc.ExpectedBody) != "null" {
-				var want, got any
-				if err := json.Unmarshal(tc.ExpectedBody, &want); err != nil {
-					t.Fatalf("parse expected_body: %v", err)
-				}
-				if err := json.Unmarshal([]byte(capt.body), &got); err != nil {
-					t.Fatalf("parse captured body: %v (body: %s)", err, capt.body)
-				}
-				if !deepEqualJSON(want, got) {
-					wantJSON, _ := json.MarshalIndent(want, "", "  ")
-					gotJSON, _ := json.MarshalIndent(got, "", "  ")
-					t.Errorf("body mismatch:\n  want: %s\n  got:  %s", wantJSON, gotJSON)
-				}
+			if tc.ExpectedBody == nil || string(tc.ExpectedBody) == "null" {
+				return
+			}
+			// Both sides decode into any, so every number is a float64 on both
+			// sides and map key order is irrelevant to DeepEqual.
+			var want, got any
+			if err := json.Unmarshal(tc.ExpectedBody, &want); err != nil {
+				t.Fatalf("parse expected_body: %v", err)
+			}
+			if err := json.Unmarshal([]byte(capt.body), &got); err != nil {
+				t.Fatalf("parse captured body: %v (body: %s)", err, capt.body)
+			}
+			if !reflect.DeepEqual(want, got) {
+				wantJSON, _ := json.MarshalIndent(want, "", "  ")
+				gotJSON, _ := json.MarshalIndent(got, "", "  ")
+				t.Errorf("body mismatch:\n  want: %s\n  got:  %s", wantJSON, gotJSON)
 			}
 		})
 	}
+}
+
+// aggOps are the fixture ops that map one-to-one onto a (column, alias)
+// aggregation method. Empty args fall through to each method's own defaults.
+var aggOps = map[string]func(*QueryBuilder, string, string) *QueryBuilder{
+	"count":         (*QueryBuilder).Count,
+	"sum":           (*QueryBuilder).Sum,
+	"avg":           (*QueryBuilder).Avg,
+	"min":           (*QueryBuilder).Min,
+	"max":           (*QueryBuilder).Max,
+	"countDistinct": (*QueryBuilder).CountDistinct,
 }
 
 // applyOps replays the operation chain from the fixture onto a QueryBuilder.
@@ -280,6 +227,10 @@ func applyOps(t *testing.T, table string, c *Client, ops []wireOp) *QueryBuilder
 	q := c.From(table).Select()
 
 	for _, op := range ops {
+		if agg, ok := aggOps[op.Method]; ok {
+			q = agg(q, stringArg(op.Args, 0, ""), stringArg(op.Args, 1, ""))
+			continue
+		}
 		switch op.Method {
 		case "select":
 			q = c.From(table).Select(toStringSlice(op.Args)...)
@@ -289,61 +240,51 @@ func applyOps(t *testing.T, table string, c *Client, ops []wireOp) *QueryBuilder
 			if len(op.Args) != 3 {
 				t.Fatalf("where needs 3 args, got %d", len(op.Args))
 			}
-			col, ok := op.Args[0].(string)
-			if !ok {
-				t.Fatalf("where: column arg is %T, want string", op.Args[0])
+			col, colOK := op.Args[0].(string)
+			rawOp, opOK := op.Args[1].(string)
+			if !colOK || !opOK {
+				t.Fatalf("where: want (string, string, any) args, got (%T, %T)", op.Args[0], op.Args[1])
 			}
-			rawOp, ok := op.Args[1].(string)
-			if !ok {
-				t.Fatalf("where: operator arg is %T, want string", op.Args[1])
-			}
-			opStr := FilterOp(rawOp)
-			val := op.Args[2]
-			q = q.Where(col, opStr, val)
-		case "count":
-			col, alias := stringArg(op.Args, 0, "*"), stringArg(op.Args, 1, "count")
-			q = q.Count(col, alias)
-		case "sum":
-			col, alias := stringArg(op.Args, 0, ""), stringArg(op.Args, 1, "")
-			q = q.Sum(col, alias)
-		case "avg":
-			col, alias := stringArg(op.Args, 0, ""), stringArg(op.Args, 1, "")
-			q = q.Avg(col, alias)
-		case "min":
-			col, alias := stringArg(op.Args, 0, ""), stringArg(op.Args, 1, "")
-			q = q.Min(col, alias)
-		case "max":
-			col, alias := stringArg(op.Args, 0, ""), stringArg(op.Args, 1, "")
-			q = q.Max(col, alias)
-		case "countDistinct":
-			col, alias := stringArg(op.Args, 0, ""), stringArg(op.Args, 1, "")
-			q = q.CountDistinct(col, alias)
+			q = q.Where(col, FilterOp(rawOp), op.Args[2])
 		case "aggregate":
-			fn := stringArg(op.Args, 0, "")
-			col := stringArg(op.Args, 1, "")
-			alias := stringArg(op.Args, 2, "")
-			q = q.Aggregate(fn, col, alias)
+			q = q.Aggregate(stringArg(op.Args, 0, ""), stringArg(op.Args, 1, ""), stringArg(op.Args, 2, ""))
 		case "groupBy":
-			cols := toStringSlice(op.Args)
-			q = q.GroupBy(cols...)
+			q = q.GroupBy(toStringSlice(op.Args)...)
 		case "orderBy":
-			col := stringArg(op.Args, 0, "")
-			dir := stringArg(op.Args, 1, "asc")
-			q = q.OrderBy(col, dir)
+			q = q.OrderBy(stringArg(op.Args, 0, ""), stringArg(op.Args, 1, "asc"))
 		case "limit":
-			n := intArg(op.Args, 0)
-			q = q.Limit(n)
+			q = q.Limit(intArg(op.Args, 0))
 		case "timeRange":
-			col := stringArg(op.Args, 0, "")
-			since := stringArg(op.Args, 1, "")
-			until := stringArg(op.Args, 2, "")
-			q = q.TimeRange(col, since, until)
+			q = q.TimeRange(stringArg(op.Args, 0, ""), stringArg(op.Args, 1, ""), stringArg(op.Args, 2, ""))
 		case "cacheTTL":
-			n := intArg(op.Args, 0)
-			q = q.CacheTTL(n)
+			q = q.CacheTTL(intArg(op.Args, 0))
 		}
 	}
 	return q
+}
+
+// insertArg returns the payload for an ingest case. Batch rows arrive from
+// JSON as []any; hand Insert the []map[string]any a caller would pass so it
+// takes the batch (NDJSON) path a typed slice takes.
+func insertArg(t *testing.T, tc wireCase) any {
+	t.Helper()
+	if len(tc.Operations) == 0 || tc.Operations[0].Method != "insert" || len(tc.Operations[0].Args) == 0 {
+		t.Fatalf("ingest case %q needs an insert operation with one arg", tc.Name)
+	}
+	arg := tc.Operations[0].Args[0]
+	batch, ok := arg.([]any)
+	if !ok {
+		return arg
+	}
+	rows := make([]map[string]any, len(batch))
+	for i, r := range batch {
+		row, ok := r.(map[string]any)
+		if !ok {
+			t.Fatalf("fixture row is not an object: %T", r)
+		}
+		rows[i] = row
+	}
+	return rows
 }
 
 func stringArg(args []any, i int, fallback string) string {
@@ -377,46 +318,6 @@ func toStringSlice(args []any) []string {
 		out[i], _ = a.(string)
 	}
 	return out
-}
-
-func toStringMap(t *testing.T, v any) map[string]any {
-	t.Helper()
-	m, ok := v.(map[string]any)
-	if !ok {
-		t.Fatalf("fixture row is not an object: %T", v)
-	}
-	return m
-}
-
-// deepEqualJSON compares two JSON-decoded values, treating float64 ints as equal
-// to ints (JSON numbers decode as float64 in Go).
-func deepEqualJSON(a, b any) bool {
-	return reflect.DeepEqual(normalizeJSON(a), normalizeJSON(b))
-}
-
-func normalizeJSON(v any) any {
-	switch val := v.(type) {
-	case map[string]any:
-		m := make(map[string]any, len(val))
-		for k, v := range val {
-			m[k] = normalizeJSON(v)
-		}
-		return m
-	case []any:
-		s := make([]any, len(val))
-		for i, v := range val {
-			s[i] = normalizeJSON(v)
-		}
-		return s
-	case float64:
-		// Normalize integer-valued floats to int for comparison.
-		if val == float64(int64(val)) {
-			return int64(val)
-		}
-		return val
-	default:
-		return val
-	}
 }
 
 // normalizePath compares request URIs by meaning: same path, same decoded

@@ -2,9 +2,10 @@
 /**
  * Cross-language wire-format conformance test for the TypeScript SDK.
  *
- * Reads wire_cases.json (owned by the Go module, at clients/go/testdata/)
- * and verifies the TS SDK produces identical HTTP requests (method, path,
- * content-type, body) to the shared fixture.
+ * Replays the shared fixture (clients/go/testdata/wire_cases.json, owned by
+ * the Go module and also replayed by clients/go/conformance_test.go) and
+ * verifies the TS SDK produces the same HTTP request: method, path,
+ * content-type, body.
  *
  * Run: node tests/conformance/conformance_ts.mjs
  * Exit 0 = all pass, exit 1 = failures.
@@ -17,7 +18,6 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// Import the built SDK.
 let createClient;
 try {
   ({ createClient } = await import(join(__dirname, "../../clients/ts/dist/index.js")));
@@ -35,11 +35,25 @@ const cases = JSON.parse(
 
 let lastCapture = { method: "", path: "", contentType: "", body: "" };
 
-function resetCapture() {
-  lastCapture = { method: "", path: "", contentType: "", body: "" };
+// Canned responses, matching the real server's shapes (internal/api/*.go) so
+// the SDK never errors on decode. Mirrors the Go harness's handler.
+function cannedResponse(url, method, contentType) {
+  if (url.startsWith("/v1/ops/dlq")) return { tables: {}, total: 0 };
+  if (url.startsWith("/v1/ops/schema") && method === "GET") return [];
+  if (url === "/v1/ops/policy/validate" && method === "POST") return { valid: true };
+  if (url.startsWith("/v1/ops/policy") && method === "GET") return { tables: {} };
+  if (url.startsWith("/v1/ops/pipes/") && method === "GET")
+    return { name: "test", sql: "SELECT 1" };
+  if (url === "/v1/ops/pipes" && method === "GET") return [];
+  if (url.startsWith("/v1/ingest")) {
+    return contentType === "application/x-ndjson"
+      ? { total: 0, succeeded: 0, failed: 0, duplicates: 0 }
+      : { ok: true };
+  }
+  if (url === "/v1/health") return { status: "ok" };
+  return [];
 }
 
-// Start echo server.
 const server = createServer((req, res) => {
   const chunks = [];
   req.on("data", (c) => chunks.push(c));
@@ -51,31 +65,9 @@ const server = createServer((req, res) => {
       body: Buffer.concat(chunks).toString("utf-8"),
     };
     res.setHeader("Content-Type", "application/json");
-    if (req.url?.startsWith("/v1/ops/dlq")) {
-      res.end(JSON.stringify({ tables: {}, total: 0 }));
-    } else if (req.url?.startsWith("/v1/ops/schema") && req.method === "GET") {
-      res.end(JSON.stringify([]));
-    } else if (req.url === "/v1/ops/policy/validate" && req.method === "POST") {
-      res.end(JSON.stringify({ valid: true }));
-    } else if (req.url?.startsWith("/v1/ops/policy") && req.method === "GET") {
-      res.end(JSON.stringify({ tables: {} }));
-    } else if (req.url?.startsWith("/v1/ops/pipes/") && req.method === "GET") {
-      res.end(JSON.stringify({ name: "test", sql: "SELECT 1" }));
-    } else if (req.url === "/v1/ops/pipes" && req.method === "GET") {
-      res.end(JSON.stringify([]));
-    } else if (req.url?.startsWith("/v1/ingest")) {
-      // Same shapes the real server returns (internal/api/ingest.go).
-      if (lastCapture.contentType === "application/x-ndjson") {
-        res.end(JSON.stringify({ total: 0, succeeded: 0, failed: 0, duplicates: 0 }));
-      } else {
-        res.end(JSON.stringify({ ok: true }));
-      }
-    } else if (req.url === "/v1/health") {
-      // Real server shape (internal/api/health.go).
-      res.end(JSON.stringify({ status: "ok" }));
-    } else {
-      res.end(JSON.stringify([]));
-    }
+    res.end(
+      JSON.stringify(cannedResponse(lastCapture.path, lastCapture.method, lastCapture.contentType)),
+    );
   });
 });
 
@@ -83,9 +75,19 @@ await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const { port } = server.address();
 const baseURL = `http://127.0.0.1:${port}`;
 
+// Fixture ops that map one-to-one onto a (column, alias) aggregation method.
+// An empty arg falls through to the SDK's own default.
+const AGGREGATIONS = new Set(["count", "sum", "avg", "min", "max", "countDistinct"]);
+
+// applyQueryOps replays a fixture operation chain onto a query builder.
+// Fixtures always put select first, so rebuilding on select is safe.
 function applyQueryOps(wh, table, operations) {
   let q = wh.from(table).select();
   for (const op of operations) {
+    if (AGGREGATIONS.has(op.method)) {
+      q = q[op.method](op.args[0] || undefined, op.args[1] || undefined);
+      continue;
+    }
     switch (op.method) {
       case "select":
         q = wh.from(table).select(...op.args);
@@ -95,24 +97,6 @@ function applyQueryOps(wh, table, operations) {
         break;
       case "where":
         q = q.where(op.args[0], op.args[1], op.args[2]);
-        break;
-      case "count":
-        q = q.count(op.args[0] || "*", op.args[1] || "count");
-        break;
-      case "sum":
-        q = q.sum(op.args[0], op.args[1] || undefined);
-        break;
-      case "avg":
-        q = q.avg(op.args[0], op.args[1] || undefined);
-        break;
-      case "min":
-        q = q.min(op.args[0], op.args[1] || undefined);
-        break;
-      case "max":
-        q = q.max(op.args[0], op.args[1] || undefined);
-        break;
-      case "countDistinct":
-        q = q.countDistinct(op.args[0], op.args[1] || undefined);
         break;
       case "aggregate":
         q = q.aggregate(op.args[0], op.args[1], op.args[2]);
@@ -136,6 +120,38 @@ function applyQueryOps(wh, table, operations) {
   }
   return q;
 }
+
+// insertArg returns an ingest case's payload. Hard failure on a malformed
+// case, matching the Go harness.
+function insertArg(tc) {
+  const op = tc.operations?.[0];
+  if (op?.method !== "insert" || !op.args?.length) {
+    throw new Error(`${tc.name}: ingest case needs an insert operation with one arg`);
+  }
+  return op.args[0];
+}
+
+// One entry per fixture `endpoint` value. A case naming an endpoint that is
+// missing here counts as skipped and fails the run — see below.
+const ENDPOINTS = {
+  query: (wh, tc) => applyQueryOps(wh, tc.table, tc.operations ?? []).fetch(),
+  ingest: (wh, tc) => wh.from(tc.table).insert(insertArg(tc)),
+  ingest_batch: (wh, tc) => wh.from(tc.table).insert(insertArg(tc)),
+  pipe: (wh, tc) => wh.pipe(tc.pipe_name, tc.pipe_params ?? undefined).fetch(),
+  sql: (wh, tc) => wh.sql(tc.sql),
+  health: (wh) => wh.sys.health(),
+  schema_list: (wh) => wh.schema.list(),
+  schema_refresh: (wh) => wh.schema.refresh(),
+  policy_get: (wh) => wh.policy.get(),
+  policy_set: (wh, tc) => wh.policy.set(tc.policy_body),
+  policy_validate: (wh, tc) => wh.policy.validate(tc.policy_body),
+  dlq_list: (wh) => wh.dlq.list(),
+  dlq_table: (wh, tc) => wh.dlq.table(tc.table),
+  pipes_list: (wh) => wh.pipes.list(),
+  pipes_get: (wh, tc) => wh.pipes.get(tc.pipe_name),
+  pipes_set: (wh, tc) => wh.pipes.set(tc.pipe_name, tc.pipe_def),
+  pipes_delete: (wh, tc) => wh.pipes.delete(tc.pipe_name),
+};
 
 // Compare request URIs by meaning: same path, same decoded query values,
 // regardless of + vs %20 spelling or parameter order (mirrors the Go harness).
@@ -169,92 +185,31 @@ function sortKeys(v) {
 
 let passed = 0;
 let failed = 0;
-let skipped = 0;
 const skippedNames = [];
 const failures = [];
 
 for (const tc of cases) {
-  resetCapture();
+  lastCapture = { method: "", path: "", contentType: "", body: "" };
   const wh = createClient({ baseURL, options: { maxRetries: 0 } });
 
+  const run = ENDPOINTS[tc.endpoint];
+  if (!run) {
+    skippedNames.push(`${tc.name} (endpoint: ${tc.endpoint})`);
+    continue;
+  }
+
   try {
-    switch (tc.endpoint) {
-      case "query": {
-        const q = applyQueryOps(wh, tc.table, tc.operations ?? []);
-        await q.fetch();
-        break;
-      }
-      case "ingest":
-      case "ingest_batch":
-        if (tc.operations?.[0]?.method !== "insert") {
-          // Hard failure, matching the Go harness.
-          throw new Error(`${tc.name}: ingest case has no insert operation`);
-        }
-        await wh.from(tc.table).insert(tc.operations[0].args[0]);
-        break;
-      case "pipe":
-        await wh.pipe(tc.pipe_name, tc.pipe_params ?? undefined).fetch();
-        break;
-      case "sql":
-        await wh.sql(tc.sql);
-        break;
-      case "health":
-        await wh.sys.health();
-        break;
-      case "schema_list":
-        await wh.schema.list();
-        break;
-      case "schema_refresh":
-        await wh.schema.refresh();
-        break;
-      case "policy_get":
-        await wh.policy.get();
-        break;
-      case "policy_set":
-        await wh.policy.set(tc.policy_body);
-        break;
-      case "policy_validate":
-        await wh.policy.validate(tc.policy_body);
-        break;
-      case "dlq_list":
-        await wh.dlq.list();
-        break;
-      case "dlq_table":
-        await wh.dlq.table(tc.table);
-        break;
-      case "pipes_list":
-        await wh.pipes.list();
-        break;
-      case "pipes_get":
-        await wh.pipes.get(tc.pipe_name);
-        break;
-      case "pipes_set":
-        await wh.pipes.set(tc.pipe_name, tc.pipe_def);
-        break;
-      case "pipes_delete":
-        await wh.pipes.delete(tc.pipe_name);
-        break;
-      default:
-        // Not a pass — the Go harness hard-fails on these; we count and exit
-        // non-zero below. Fixture cases with a new endpoint value must be
-        // wired up here before they count.
-        skipped++;
-        skippedNames.push(`${tc.name} (endpoint: ${tc.endpoint})`);
-        continue;
-    }
+    await run(wh, tc);
 
     const errs = [];
-
-    if (tc.expected_method && lastCapture.method !== tc.expected_method) {
-      errs.push(`method: want ${tc.expected_method}, got ${lastCapture.method}`);
+    for (const [what, want, got] of [
+      ["method", tc.expected_method, lastCapture.method],
+      ["content-type", tc.expected_content_type, lastCapture.contentType],
+    ]) {
+      if (want && want !== got) errs.push(`${what}: want ${want}, got ${got}`);
     }
-
     if (tc.expected_path && normalizePath(lastCapture.path) !== normalizePath(tc.expected_path)) {
       errs.push(`path: want ${tc.expected_path}, got ${lastCapture.path}`);
-    }
-
-    if (tc.expected_content_type && lastCapture.contentType !== tc.expected_content_type) {
-      errs.push(`content-type: want ${tc.expected_content_type}, got ${lastCapture.contentType}`);
     }
 
     if (tc.expected_raw_body !== undefined) {
@@ -290,6 +245,7 @@ for (const tc of cases) {
 server.closeAllConnections?.();
 server.close();
 
+const skipped = skippedNames.length;
 console.log(
   `\nWire-format conformance (TS SDK): ${passed} passed, ${failed} failed, ${skipped} skipped, ${cases.length} total\n`,
 );
