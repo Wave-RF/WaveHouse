@@ -292,29 +292,6 @@ func run() int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Settings reload triggers. All three (SIGHUP here, the directory watcher
-	// below, POST /v1/ops/settings/reload) funnel into the same serialized
-	// Store.Reload, and a rejected reload keeps the previous good snapshot.
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-hup:
-				settingsStore.TriggerReload("sighup")
-			}
-		}
-	}()
-	go func() {
-		// Watcher setup failure degrades, not fatal: SIGHUP and the ops
-		// endpoint still reload.
-		if err := settingsStore.Watch(ctx); err != nil {
-			logger.Error("settings directory watcher failed; reload via SIGHUP or POST /v1/ops/settings/reload", "error", err)
-		}
-	}()
-
 	// Schema discovery — non-fatal on boot. If the first Refresh fails
 	// (ClickHouse unreachable, database missing, etc.) we mark the binary
 	// degraded via bootState (which /livez surfaces as 503 + diagnostic)
@@ -354,32 +331,62 @@ func run() int {
 	pebbleDir := filepath.Join(cfg.DataDir, "pebble")
 
 	// Embedded dedupe (Pebble). The store follows the hot-reloadable
-	// dedupe.enabled setting: opened here when the adopted settings say so
-	// (a failed open is fatal, like every other store at boot), then opened or
-	// closed after each later adoption. A failed open on reload is logged and
-	// leaves the store closed — ingest then fails closed (500 "dedupe
-	// failed") rather than silently publishing un-deduped, since the files
-	// asked for dedupe.
+	// dedupe.enabled setting: one reconcile closure opens or closes it to
+	// match the current snapshot. It is registered as the after-adopt hook
+	// BEFORE the boot apply below (Apply is idempotent), so a reload landing
+	// between the two can't leave the settings saying "on" with the store
+	// still closed — either the hook sees it or the boot apply reads it. A
+	// failed open is fatal at boot, like every other store; on reload it is
+	// logged and leaves the store closed — ingest then fails closed (500
+	// "dedupe failed") rather than silently publishing un-deduped, since the
+	// files asked for dedupe.
 	dedup := dedupe.NewManaged(pebbleDir)
 	defer func() { _ = dedup.Close() }()
-	if settingsStore.DedupeEnabled() {
-		config.WarnIfFreshDataDir(logger, "pebble", pebbleDir)
-		if err := dedup.Apply(true); err != nil {
-			config.LogStorageInitError(logger, "dedupe", pebbleDir, err)
-			return 1
-		}
-	}
-	settingsStore.AfterAdopt(func() {
+	reconcileDedupe := func() (bool, error) {
 		enabled := settingsStore.DedupeEnabled()
 		if enabled && !dedup.Open() {
 			config.WarnIfFreshDataDir(logger, "pebble", pebbleDir)
 		}
 		if err := dedup.Apply(enabled); err != nil {
 			config.LogStorageInitError(logger, "dedupe", pebbleDir, err)
-			return
+			return enabled, err
 		}
-		logger.Info("dedupe store reconciled with settings", "enabled", enabled)
+		return enabled, nil
+	}
+	settingsStore.AfterAdopt(func() {
+		if enabled, err := reconcileDedupe(); err == nil {
+			logger.Info("dedupe store reconciled with settings", "enabled", enabled)
+		}
 	})
+	if _, err := reconcileDedupe(); err != nil {
+		return 1
+	}
+
+	// Settings reload triggers. All three (SIGHUP here, the directory watcher
+	// below, POST /v1/ops/settings/reload) funnel into the same serialized
+	// Store.Reload, and a rejected reload keeps the previous good snapshot.
+	// Started only now, after every AfterAdopt hook is registered: the
+	// watcher reloads once as soon as its watch exists, and that reload must
+	// already drive the dedupe store.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				settingsStore.TriggerReload("sighup")
+			}
+		}
+	}()
+	go func() {
+		// Watcher setup failure degrades, not fatal: SIGHUP and the ops
+		// endpoint still reload.
+		if err := settingsStore.Watch(ctx); err != nil {
+			logger.Error("settings directory watcher failed; reload via SIGHUP or POST /v1/ops/settings/reload", "error", err)
+		}
+	}()
 
 	// Embedded MQ (NATS).
 	config.WarnIfFreshDataDir(logger, "nats", natsDir)

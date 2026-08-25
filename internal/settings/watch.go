@@ -31,6 +31,9 @@ const watchDebounce = 250 * time.Millisecond
 // directory's own name, and the directory watch is re-added on every reload
 // so it is restored once the directory exists again.
 //
+// Once the watch is registered the directory is reloaded immediately, so an
+// edit that landed between the boot read and the watch is not lost.
+//
 // The setup error is returned (directory missing, fd limits); runtime watcher
 // errors are logged and the loop continues — SIGHUP and the ops reload
 // endpoint remain as triggers even if the watcher degrades.
@@ -51,6 +54,11 @@ func (s *Store) Watch(ctx context.Context) error {
 			s.logger.Warn("settings watcher: parent directory not watched; a deleted-and-recreated settings directory won't reload until SIGHUP or POST /v1/ops/settings/reload", "parent", parent, "error", err)
 		}
 	}
+	// Catch up on the gap between Open's read at boot and the watch existing:
+	// an edit that landed in between (a ConfigMap update during a rolling
+	// restart, say) fired no event and would otherwise sit unnoticed, with
+	// every pod looking healthy, until something touched the directory again.
+	s.TriggerReload("watch")
 
 	// The timer starts disarmed; each relevant event re-arms it, so the
 	// reload fires watchDebounce after the *last* event of a burst.

@@ -23,7 +23,7 @@ Set `WH_CONFIG` to change the config file path:
 export WH_CONFIG=/etc/wavehouse/config.yaml
 ```
 
-Boot config (YAML + env) holds what the platform operator owns: wiring, lifecycle, secrets. The tenant-owned behavioral tunables — dedupe `enabled`/`id_field`/`require_id`, `query.default_max_rows`, `schema.refresh_interval`, CORS origins — live in the hot-reloadable [settings directory](/settings-directory) instead.
+This page is boot config only — what the platform operator owns (wiring, lifecycle, secrets), read once at startup. Tenant-owned behavioral tunables are not here: they live in the hot-reloadable [Settings Directory](/settings-directory).
 
 ## Full Reference
 
@@ -39,8 +39,6 @@ Boot config (YAML + env) holds what the platform operator owns: wiring, lifecycl
 | --- | --- | ------- | ----------- |
 | `server.port` | `WH_SERVER_PORT` | `8080` | HTTP server listen port. |
 | `server.shutdown_timeout` | `WH_SERVER_SHUTDOWN_TIMEOUT` | `10` | Graceful shutdown timeout in seconds. |
-
-The CORS allowlist is a [settings-directory](/settings-directory) tunable (`cors.allowed_origins` in `config.json`), so it reloads without a restart.
 
 The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate TLS at a [reverse proxy](/reverse-proxy#tls) for internet-facing deployments. (The `clickhouse.http_scheme` option below is the *outbound* WaveHouse → ClickHouse hop, unrelated to your clients' TLS.)
 
@@ -64,12 +62,6 @@ The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate 
 | `clickhouse.username` | `WH_CH_USERNAME` | `default` | Authentication username. |
 | `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password. |
 | `clickhouse.query_timeout` | `WH_CH_QUERY_TIMEOUT` | `30s` | Maximum wall-clock time WaveHouse waits for a read. It bounds the client context deadline, from which the driver derives a server-side `max_execution_time`. |
-
-### Query
-
-The fallback result `LIMIT`, `query.default_max_rows`, is a [settings-directory](/settings-directory) tunable in `config.json` (seed default `10000`): the `LIMIT` applied to a structured query when the caller and policy specify none.
-
-This is a result-**shaping** default, not a resource limit. Server-wide resource limits (memory, rows scanned, execution time) belong in ClickHouse — see [Server-side resource limits](#server-side-resource-limits) below.
 
 ### Server-side resource limits
 
@@ -111,10 +103,6 @@ Set the backstop on the profile of the ClickHouse user WaveHouse connects as (`c
 WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so they **compose** with the ClickHouse profile — a per-role cap *tightens* within the profile's ceiling, and a `<constraints>` block bounds how far any setting can move. But if the profile marks a setting `readonly` (or `<constraints>` disallows changing it), ClickHouse will **reject** WaveHouse's per-query override and the query fails. So keep the settings WaveHouse manages (`max_memory_usage`, `max_execution_time`, `max_rows_to_read`, `max_result_rows`) **changeable** for its user — use a `<max>` constraint, not `readonly`, if you want a hard ceiling.
 :::
 
-### Schema Discovery
-
-`schema.refresh_interval` — how often (in seconds) to re-discover ClickHouse table schemas — is a [settings-directory](/settings-directory) tunable in `config.json` (seed default `60`); a reloaded value takes effect from the next refresh cycle. Schemas are also refreshable on-demand via `POST /v1/ops/schema/refresh` (admin-only).
-
 ### Message Queue (NATS)
 
 | YAML Key | Env Var | Default | Description |
@@ -123,10 +111,6 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 | `mq.max_bytes_gb` | `WH_MQ_MAX_BYTES_GB` | `50` | Maximum NATS JetStream stream size in GB. When full, new publishes are rejected with `DiscardNew` policy, triggering 503 backpressure on the ingest endpoint. |
 
 **Durability.** The embedded server runs with JetStream `SyncAlways`, so every event is `fsync`'d to disk before `POST /v1/ingest` returns `200`. This makes your storage's `fsync` latency your ingest latency floor — see [Durability & Storage](/durability) to check whether your substrate can sustain it. There is no knob to relax this today ([#139](https://github.com/Wave-RF/WaveHouse/issues/139) tracks a configurable group-commit interval).
-
-### Deduplication
-
-No boot-config keys. `dedupe.enabled`, `dedupe.id_field`, `dedupe.require_id`, and the per-table overrides are all settings-directory keys — see [Settings Directory — Deduplication](/settings-directory#deduplication).
 
 ### Cache
 
@@ -175,7 +159,7 @@ See [API — Authentication](/api#authentication).
 
 ### Settings Directory
 
-The hot-reloadable half of configuration — the four JSON files, every `config.json` key, the reload triggers, and the `validate` / `init-settings` CLI — has its own page: [Settings Directory](/settings-directory). The one boot-config key involved is where the directory lives:
+The one boot-config key for the [Settings Directory](/settings-directory) is where it lives:
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |

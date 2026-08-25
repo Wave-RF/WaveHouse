@@ -63,6 +63,15 @@ var dedupeMissingIDCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 	metric.WithDescription("Ingested records missing the configured dedupe id_field (idempotency skipped)"),
 )
 
+// dedupeDisabledCounter counts records published un-deduped because the
+// settings snapshot said dedupe was on while the store was switched off —
+// transient across a reload; a climbing rate means the store and the
+// settings have come apart.
+var dedupeDisabledCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
+	"wavehouse_ingest_dedupe_disabled_total",
+	metric.WithDescription("Ingested records published without dedupe because the store was switched off while settings said enabled (reload window)"),
+)
+
 // batchResult is the response body for any multi-record ingest (a JSON array,
 // an NDJSON batch, and — later — CSV). The status is 200 whenever the body was
 // readable and the records were processed; per-record rejections (malformed
@@ -451,8 +460,12 @@ func (h *IngestHandler) processRecord(
 					// A reload flipped dedupe.enabled between the snapshot
 					// read above and this call (the two transition at
 					// different instants). Publish un-deduped, as a record
-					// under the other setting would have been.
-					h.logger.WarnContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "event_id", eventID, "table", table)
+					// under the other setting would have been. The counter
+					// carries the signal (a burst is a reload; a steady rate
+					// is the store and settings out of step), so the line is
+					// Debug rather than a WARN per record.
+					dedupeDisabledCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
+					h.logger.DebugContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "event_id", eventID, "table", table)
 				case err != nil:
 					h.logger.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
 					return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}

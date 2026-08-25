@@ -54,6 +54,29 @@ func TestStore_Watch_ReloadsOnChange(t *testing.T) {
 	assert.NoError(t, <-done)
 }
 
+// TestStore_Watch_CatchesUpOnStart pins the boot gap: an edit that lands after
+// Open's read but before the watch exists fires no event, so Watch reloads
+// once as soon as the watch is registered instead of waiting for the next one.
+func TestStore_Watch_CatchesUpOnStart(t *testing.T) {
+	t.Parallel()
+	s := newLoadedStore(t, map[string]string{
+		FileConfig: configJSON(`{"query": {"default_max_rows": 100}}`),
+	})
+	// The "in-between" edit: after Open, before Watch.
+	require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 700}}`)), 0o600))
+	assert.Equal(t, 100, s.DefaultMaxRows(), "no watch yet, so nothing has adopted the edit")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Watch(ctx) }()
+	assert.Eventually(t, func() bool { return s.DefaultMaxRows() == 700 },
+		5*time.Second, 50*time.Millisecond, "Watch should reload once on start without any further edit")
+
+	cancel()
+	assert.NoError(t, <-done)
+}
+
 // TestStore_Watch_MissingDir pins the setup contract: a nonexistent directory
 // is a returned error (main.go logs it and degrades to SIGHUP + the ops
 // endpoint), not a silent no-op loop.
