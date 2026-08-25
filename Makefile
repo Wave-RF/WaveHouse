@@ -359,7 +359,7 @@ fmt: fmt-go fmt-ts ## Check formatting across Go (gofumpt) + TS (Biome). Run `ma
 
 .PHONY: fmt-go
 fmt-go:
-	$(call run,gofumpt (Go fmt),$(GOFUMPT) -l $(GO_DIRS) | (! grep .),run make fix to apply formatting)
+	$(call run,gofumpt (Go fmt),$(GOFUMPT) -l $(GO_DIRS) clients/go | (! grep .),run make fix to apply formatting)
 
 .PHONY: fmt-ts
 fmt-ts: pnpm-install

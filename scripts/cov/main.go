@@ -150,6 +150,16 @@ func main() {
 		if err := merge(cfg); err != nil {
 			fatal("%v", err)
 		}
+		// merge() only prints the standalone suites; gate them here too, or
+		// go-sdk-only input would exit 0 with no threshold applied.
+		for _, s := range standaloneGoSuites {
+			if !hasCovdata(filepath.Join(root, s, "data")) {
+				continue
+			}
+			if err := renderSuite(cfg, s); err != nil {
+				fatal("%v", err)
+			}
+		}
 		if err := mergeTS(cfg); err != nil {
 			fatal("%v", err)
 		}

@@ -38,6 +38,7 @@ Subscribes to live events using the pipe's name as a table name; see [Streaming]
 
 ```go
 stream := wh.Pipe("top_pages", nil).Stream(nil)
+defer stream.Close()
 ```
 
 ---
