@@ -446,11 +446,17 @@ func (h *IngestHandler) processRecord(
 			} else {
 				eventID := fmt.Sprint(idVal)
 				dup, err := h.Dedup.CheckAndMark(ctx, eventID)
-				if err != nil {
+				switch {
+				case errors.Is(err, dedupe.ErrDisabled):
+					// A reload flipped dedupe.enabled between the snapshot
+					// read above and this call (the two transition at
+					// different instants). Publish un-deduped, as a record
+					// under the other setting would have been.
+					h.logger.WarnContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "event_id", eventID, "table", table)
+				case err != nil:
 					h.logger.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
 					return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
-				}
-				if dup {
+				case dup:
 					h.logger.InfoContext(ctx, "duplicate event skipped", "event_id", eventID)
 					return true, nil, nil
 				}

@@ -55,5 +55,9 @@ func TestManaged_OpenFailureStaysClosed(t *testing.T) {
 	m := NewManaged(path)
 	require.Error(t, m.Apply(true))
 	assert.False(t, m.Open())
+	_, err = m.CheckAndMark(context.Background(), "e1")
+	require.ErrorIs(t, err, ErrUnavailable, "switched on but not open must fail closed, not read as disabled")
 	require.NoError(t, m.Close())
+	_, err = m.CheckAndMark(context.Background(), "e1")
+	require.ErrorIs(t, err, ErrDisabled)
 }

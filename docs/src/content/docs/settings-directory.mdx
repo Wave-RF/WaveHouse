@@ -43,7 +43,7 @@ The tenant tunables. Every key is required (a missing one is a validation error)
 | `dedupe.tables.<table>.{id_field, require_id}` | `{}` | Optional per-table overrides; each entry overrides only the fields it names and inherits the rest. |
 | `query.default_max_rows` | `10000` | Fallback result `LIMIT` (`>= 1`) — see [Query](/configuration#query). |
 | `schema.refresh_interval` | `60` | Seconds between schema re-discoveries (`>= 1`) — see [Schema Discovery](/configuration#schema-discovery). |
-| `cors.allowed_origins` | `["*"]` | Allowed CORS origins, applied per request. `"*"` allows any browser origin. WaveHouse is a Bearer-token API — `Access-Control-Allow-Credentials` is intentionally never sent, so this allowlist controls *which origins can read responses*, not cookie scope. Tighten to your frontend's exact origin(s) in production (e.g. `["https://dashboard.example.com", "http://localhost:3000"]`). An empty list `[]` is **not** "no origins" — it is equivalent to `["*"]` and validation warns about it; to disallow every browser origin, list only the origins you do allow. |
+| `cors.allowed_origins` | `["*"]` | Allowed CORS origins, applied per request. `"*"` allows any browser origin. WaveHouse is a Bearer-token API — `Access-Control-Allow-Credentials` is intentionally never sent, so this allowlist controls *which origins can read responses*, not cookie scope. Tighten to your frontend's exact origin(s) in production (e.g. `["https://dashboard.example.com", "http://localhost:3000"]`). An empty list `[]` is **not** "no origins" — it is equivalent to `["*"]` and validation warns about it; to restrict browser origins, list only the ones you allow. |
 
 ```json
 {

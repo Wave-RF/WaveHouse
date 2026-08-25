@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
+	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -1730,20 +1731,45 @@ func TestIngest_Batch_MixedTimestampSpellings(t *testing.T) {
 // strict mode, and the record publishes.
 func TestIngest_Dedup_DisabledBySettings(t *testing.T) {
 	t.Parallel()
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{name: "with id: not consulted", body: map[string]any{"event_id": "e1", "page": "/home"}},
+		{name: "without id: strict mode does not reject", body: map[string]any{"page": "/home"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			dedup := testutil.NewMockDeduplicator()
+			dedup.Err = errors.New("must not be called while disabled")
+			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h.Dedup = dedup
+			h.DedupeSettings = func(string) (bool, string, bool) { return false, "event_id", true }
+
+			w := httptest.NewRecorder()
+			h.Handle(w, ingestRequest(t, "clicks", tt.body))
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Len(t, pub.Messages, 1, "record publishes, neither deduped nor rejected")
+		})
+	}
+}
+
+// TestIngest_Dedup_DisabledMidReload pins the reload window: the settings
+// snapshot still says enabled but the deduplicator has already been switched
+// off (or not yet on). The record publishes un-deduped instead of failing.
+func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
+	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	dedup := testutil.NewMockDeduplicator()
-	dedup.Err = errors.New("must not be called while disabled")
+	dedup.Err = dedupe.ErrDisabled
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.DedupeSettings = func(string) (bool, string, bool) { return false, "event_id", true }
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", true }
 
-	for _, body := range []map[string]any{
-		{"event_id": "e1", "page": "/home"},
-		{"page": "/home"},
-	} {
-		w := httptest.NewRecorder()
-		h.Handle(w, ingestRequest(t, "clicks", body))
-		assert.Equal(t, http.StatusOK, w.Code)
-	}
-	assert.Len(t, pub.Messages, 2, "both records publish, neither deduped nor rejected")
+	w := httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"event_id": "e1", "page": "/home"}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Len(t, pub.Messages, 1, "published without idempotency, not 500")
 }

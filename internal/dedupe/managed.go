@@ -6,11 +6,17 @@ import (
 	"sync"
 )
 
-// ErrDisabled is returned by Managed.CheckAndMark while the store is closed.
-// It only reaches a caller when the adopted settings say dedupe is on but the
-// store failed to open — the ingest handler consults the settings first and
-// never calls CheckAndMark while dedupe is off.
-var ErrDisabled = errors.New("dedupe store is not open")
+// ErrDisabled is returned by Managed.CheckAndMark while dedupe is switched
+// off. The ingest handler consults the settings snapshot before calling, so
+// it only sees this in the window of a reload that flips dedupe.enabled:
+// the snapshot and the store transition at different instants, and a record
+// caught between them is published un-deduped rather than failed.
+var ErrDisabled = errors.New("dedupe is disabled")
+
+// ErrUnavailable is returned by Managed.CheckAndMark when dedupe is switched
+// on but the Pebble store failed to open. Ingest fails closed on it — the
+// settings asked for dedupe, so publishing un-deduped is not a fallback.
+var ErrUnavailable = errors.New("dedupe store is not open")
 
 // Managed is a Deduplicator whose Pebble store follows the hot-reloadable
 // dedupe.enabled setting: Apply(true) opens it, Apply(false) closes it, and
@@ -19,7 +25,10 @@ var ErrDisabled = errors.New("dedupe store is not open")
 type Managed struct {
 	dir string
 	mu  sync.RWMutex
-	db  *EmbeddedDeduplicator
+	// enabled is the last state passed to Apply; db is nil while disabled
+	// and also when an enabling open failed.
+	enabled bool
+	db      *EmbeddedDeduplicator
 }
 
 // NewManaged returns a closed Managed store rooted at dir. Nothing is opened
@@ -35,6 +44,7 @@ func NewManaged(dir string) *Managed {
 func (m *Managed) Apply(enabled bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.enabled = enabled
 	switch {
 	case enabled && m.db == nil:
 		db, err := NewEmbedded(m.dir)
@@ -57,12 +67,16 @@ func (m *Managed) Open() bool {
 	return m.db != nil
 }
 
-// CheckAndMark delegates to the open store; ErrDisabled while closed.
+// CheckAndMark delegates to the open store; ErrDisabled while switched off,
+// ErrUnavailable while switched on but not open.
 func (m *Managed) CheckAndMark(ctx context.Context, eventID string) (bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if m.db == nil {
+	if !m.enabled {
 		return false, ErrDisabled
+	}
+	if m.db == nil {
+		return false, ErrUnavailable
 	}
 	return m.db.CheckAndMark(ctx, eventID)
 }
