@@ -3,13 +3,11 @@ title: "Go SDK Admin & System"
 description: "Schema introspection, access-control policy, DLQ stats, and health checks in the WaveHouse Go SDK."
 ---
 
-Operational surfaces of `github.com/Wave-RF/WaveHouse/clients/go`. All except `client.Sys.Health` require the admin role (`policy.admin_role`)—see [Access Control](/access-control) and the TypeScript SDK's [Admin & System](/sdk/admin) page.
-
-Every namespace on this page is admin-gated: the server mounts them under `/v1/ops/*` behind one gate, which a caller clears either with a JWT resolving to the policy admin role (`admin_role`, `"admin"` by default) or with the server's non-JWT [operator key](/api#authentication) sent as `X-Operator-Key` via [`ClientOptions.Headers`](/sdk/go#clientoptions).
+Operational surfaces of `github.com/Wave-RF/WaveHouse/clients/go`. Every namespace here except `client.Sys.Health` sits behind the server's admin gate on `/v1/ops/*`, which a caller clears either with a JWT resolving to the policy admin role (`admin_role`, `"admin"` by default) or with the server's non-JWT [operator key](/api#authentication) sent as `X-Operator-Key` via [`ClientOptions.Headers`](/sdk/go#clientoptions). Without one, these calls return a `*wavehouse.Error` with `Status: 403` — unless the deployment sets `default_role` to admin, which is dev-only. See [Access Control](/access-control), and the TypeScript SDK's [Admin & System](/sdk/admin) page.
 
 ## Schema — `client.Schema`
 
-Introspect ClickHouse table schemas. `Schema.List`, `Schema.Refresh`, and `From(t).Schema` hit the **admin-gated** `/v1/ops/schema*`; against any non-dev policy (anything but `default_role: admin`) build the client with an admin-role token or they return a `*wavehouse.Error` with `Status: 403`.
+Introspect ClickHouse table schemas. `Schema.List`, `Schema.Refresh`, and `From(t).Schema` all hit `/v1/ops/schema*`.
 
 ```go
 // List all table schemas.
@@ -18,15 +16,15 @@ schemas, err := wh.Schema.List(ctx)
 
 // Force refresh from ClickHouse.
 err = wh.Schema.Refresh(ctx)
-```
 
-Individual table schema: `wh.From("clicks").Schema(ctx)`.
+// One table: wh.From("clicks").Schema(ctx)
+```
 
 ---
 
 ## Policy — `client.Policy`
 
-Manage Hasura-style access control policies (admin role required).
+Manage Hasura-style access control policies.
 
 ```go
 // Get current policy.
@@ -57,20 +55,16 @@ result, err := wh.Policy.Validate(ctx, policyDraft)
 // result.Valid == true, or err wraps the validation failure details
 ```
 
-`PolicyFilter` fields (`Eq`, `Neq`, `Gt`, `Lt`, `In`) are `*string` to distinguish empty strings from absent operators. Use a helper:
-
-```go
-func strPtr(s string) *string { return &s }
-```
+`PolicyFilter` fields (`Eq`, `Neq`, `Gt`, `Lt`, `In`) are `*string`, so an empty string is distinguishable from an absent operator — hence the `tenantFilter` variable above, or a `func strPtr(s string) *string { return &s }` helper.
 
 ---
 
 ## DLQ — `client.DLQ`
 
-Dead Letter Queue operations (admin role required).
+Dead Letter Queue statistics.
 
 ```go
-// Get DLQ statistics.
+// Totals across tables.
 stats, err := wh.DLQ.List(ctx)
 // stats.Tables: map[string]int{"clicks": 3, "users": 0}
 // stats.Total: 3
@@ -85,7 +79,7 @@ stats, err = wh.DLQ.Table(ctx, "clicks")
 
 ## System — `client.Sys`
 
-Server-online check.
+The one surface on this page that needs no credentials.
 
 ```go
 // Health hits the public, content-free /v1/health route — 200 → nil error,

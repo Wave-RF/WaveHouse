@@ -3,11 +3,11 @@ title: "Go SDK Reference & CLI"
 description: "Error codes, context cancellation, the full API tree, and the codegen CLI for the WaveHouse Go SDK."
 ---
 
-Cross-cutting reference for `github.com/Wave-RF/WaveHouse/clients/go`: cancellation, the error model behind every request-response call's `(T, error)` return, the complete API tree at a glance, and the `wavehouse-codegen` tool that ships with the module. Compare with the TypeScript SDK's [Reference & CLI](/sdk/reference) page.
+Cross-cutting reference for `github.com/Wave-RF/WaveHouse/clients/go`: cancellation, the error model behind every request-response call's `(T, error)` return, the complete API tree, and the `wavehouse-codegen` tool that ships with the module. Compare with the TypeScript SDK's [Reference & CLI](/sdk/reference).
 
 ## Context Cancellation
 
-Non-streaming operations take a `context.Context` as their first argument (similar to TypeScript's `AbortSignal`). Cancel it using a timeout or explicit `cancel()`:
+Non-streaming operations take a `context.Context` as their first argument (the analog of TypeScript's `AbortSignal`). Cancel via a timeout or an explicit `cancel()`; cancellation returns immediately, without retrying, as `&wavehouse.Error{Status: 0, Code: "ABORTED", Retryable: false}`.
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -20,15 +20,11 @@ if errors.As(err, &whErr) && whErr.Code == "ABORTED" {
 }
 ```
 
-Cancellation returns immediately (no retry) with `&wavehouse.Error{Status: 0, Code: "ABORTED", Retryable: false}`.
-
 `.Stream(opts)` ignores `context.Context`; the returned `*StreamController` manages its own context and goroutine, closed via `.Close()`. See [Streaming](/sdk/go/streaming#streamoptions).
 
 ## Error Handling
 
-The SDK never panics on API or network failures. Request-response operations (queries, ingest, pipes, admin) return `(T, error)`, while result-less operations (`Pipes.Set`/`Delete`, `Policy.Set`, `Schema.Refresh`, `Sys.Health`) return a bare `error`.
-
-HTTP exchange errors are `*wavehouse.Error` (unwrap via `errors.As`). Client-side failures (e.g., `Auth` provider, marshal failures) are plain wrapped errors; handle the `errors.As == false` case. Streaming methods (`Stream`, `Subscribe`, `Close`) do not return `(T, error)`; stream errors use the subscriber's `Error` callback. `Connected(ctx)` returns plain errors. This mirrors the TypeScript SDK's "never throws" guarantee.
+The SDK never panics on API or network failures, mirroring the TypeScript SDK's "never throws" guarantee. Request-response operations (queries, ingest, pipes, admin) return `(T, error)`, while result-less ones (`Pipes.Set`/`Delete`, `Policy.Set`, `Schema.Refresh`, `Sys.Health`) return a bare `error`. HTTP exchange errors are `*wavehouse.Error` (unwrap via `errors.As`, or use `wavehouse.IsRetryable(err)` to shortcut the `errors.As` + `.Retryable` check); client-side failures such as an `Auth` provider or marshal error are plain wrapped errors, so handle the `errors.As == false` case — see the [worked example](/sdk/go#error-handling). Streaming methods (`Stream`, `Subscribe`, `Close`) report through the subscriber's `Error` callback instead, and `Connected(ctx)` returns plain errors.
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|--------------|
@@ -50,22 +46,7 @@ HTTP exchange errors are `*wavehouse.Error` (unwrap via `errors.As`). Client-sid
 | 0 | `SSE_READ_ERROR` | Yes | The connection failed mid-read; the stream reconnects from the last event ID |
 | 0 | `SSE_ERROR` | Yes | Stream failure the SDK could not classify further |
 
-```go
-page, err := wh.From("clicks").Fetch(ctx)
-if err != nil {
-    var whErr *wavehouse.Error
-    if errors.As(err, &whErr) {
-        fmt.Println(whErr.Status, whErr.Code, whErr.Message, whErr.Retryable)
-    } else {
-        fmt.Println("client-side failure:", err) // auth provider, marshal, ...
-    }
-    return err
-}
-```
-
-`wavehouse.IsRetryable(err)` shortcuts the `errors.As` + `.Retryable` check.
-
-Retries apply to all HTTP methods, matching TypeScript's `http.ts`. For `/v1/ingest`, at-least-once delivery on retry is a documented contract (see API docs ["At-least-once on retry"](/api#post-v1ingesttabletable--ingest-data)); use server-side dedup for duplicate suppression. `/v1/ops/query` (raw SQL) requires `admin_role`, so repeated execution on retry is an accepted risk.
+Retries apply to all HTTP methods, matching TypeScript's `http.ts`. For `/v1/ingest`, at-least-once delivery on retry is a documented contract (see ["At-least-once on retry"](/api#post-v1ingesttabletable--ingest-data)); use server-side dedup to suppress duplicates. `/v1/ops/query` (raw SQL) requires `admin_role`, so repeated execution on retry is an accepted risk.
 
 ## Full API Tree
 
@@ -120,7 +101,7 @@ NewClient(Config) → *Client
 
 ## Codegen CLI
 
-Generate Go structs from a running WaveHouse instance using the `wavehouse-codegen` command in `cmd/`:
+Generate Go structs from a running WaveHouse instance with the `wavehouse-codegen` command in `cmd/`:
 
 ```bash
 export WAVEHOUSE_AUTH='<admin-jwt>'   # avoids leaking the token via argv
@@ -128,15 +109,12 @@ go run github.com/Wave-RF/WaveHouse/clients/go/cmd/wavehouse-codegen@latest \
     --url http://localhost:8080 \
     --out ./db_types.go \
     --package myapp
-```
 
-Or, inside `clients/go/`:
-
-```bash
+# Or, from inside a checkout of clients/go/:
 go run ./cmd/wavehouse-codegen --url http://localhost:8080 --out ./db_types.go
 ```
 
-Codegen reads the admin-only `/v1/ops/schema` endpoint; non-dev servers require an admin token or return `403`. Use `WAVEHOUSE_AUTH` instead of `--auth <jwt>` to keep tokens out of shell history and process listings.
+Codegen reads the admin-only `/v1/ops/schema` endpoint, so a non-dev server needs an admin token or returns `403`. Prefer `WAVEHOUSE_AUTH` over `--auth <jwt>` to keep tokens out of shell history and process listings.
 
 **Options:**
 
@@ -148,9 +126,7 @@ Codegen reads the admin-only `/v1/ops/schema` endpoint; non-dev servers require 
 | `--package`, `-p` | Go package name for the generated file | `main` |
 | `--help`, `-h` | Show usage and exit | — |
 
-Output is processed via `go/format`. If a table or column name produces invalid Go source, codegen fails loudly.
-
-**Example output:**
+**Example output** (for the [development quick-start](/development#quick-start) `clicks` table):
 
 ```go
 // Code generated by wavehouse-codegen. DO NOT EDIT.
@@ -166,9 +142,7 @@ type ClicksRow struct {
 }
 ```
 
-(Example for the [development quick-start](/development#quick-start) `clicks` table; `received_timestamp` is `*string` + `,omitempty` due to its `DEFAULT` clause.)
-
-The generator does not special-case initialisms: `event_id` becomes `EventId`, not the Go-idiomatic `EventID` — each `_`-separated part just gets its first letter upper-cased. Table and column names are converted to `PascalCase`; leading digits get an `X` prefix (e.g., `2fa_events` $\rightarrow$ `X2faEventsRow`). Columns with `has_default: true` become pointer fields with `,omitempty`: `nil` uses the server default, a pointed-at value is sent — including an explicit `0`/`false`/`""`.
+Output is run through `go/format`, and codegen fails loudly if a table or column name would produce invalid Go source. Names become `PascalCase`, with an `X` prefix for a leading digit (`2fa_events` → `X2faEventsRow`); initialisms are not special-cased, so `event_id` becomes `EventId`, not `EventID`. Columns with `has_default: true` become pointer fields with `,omitempty` — as `received_timestamp` does above — where `nil` uses the server default and a pointed-at value is sent, including an explicit `0`/`false`/`""`.
 
 **ClickHouse → Go type mapping:**
 
@@ -184,26 +158,28 @@ The generator does not special-case initialisms: `event_id` becomes `EventId`, n
 | `Decimal*` | `string` |
 | `Nullable(T)` | `*T` |
 | `LowCardinality(T)` | same as `T` |
-| `Array(T)` | `[]T` (except `Array(UInt8)` $\rightarrow$ `json.RawMessage` per [#436](https://github.com/Wave-RF/WaveHouse/issues/436)) |
+| `Array(T)` | `[]T` (except `Array(UInt8)` → `json.RawMessage` per [#436](https://github.com/Wave-RF/WaveHouse/issues/436)) |
 | `Map(K, V)` | `map[K]V` (fallback: `map[string]any`) |
 | `SimpleAggregateFunction(fn, T)` | same as `T` (rollup tables from `AggregatingMergeTree`/`SummingMergeTree` generate usable structs) |
 | anything unrecognized | `any` |
 
-Unlike the TypeScript SDK, Go codegen preserves ClickHouse integer **widths** (`UInt64` → `uint64`, not a generic `number`), so 64-bit columns decode exactly where TS hits the 2^53 ceiling. Generated structs target `/v1/query` and `/v1/pipes/*`. For the raw-SQL path (`/v1/ops/query`), which quotes 64-bit+ integers, use `map[string]any` with `SQL[Row]`.
+Unlike the TypeScript SDK, Go codegen preserves ClickHouse integer **widths** (`UInt64` → `uint64`, not a generic `number`), so 64-bit columns decode exactly where TS hits the 2^53 ceiling. Generated structs target `/v1/query` and `/v1/pipes/*`; for the raw-SQL path (`/v1/ops/query`), which quotes 64-bit-and-wider integers, use `map[string]any` with `SQL[Row]`.
 
 ## Testing
 
-Unit tests are colocated in `clients/go/` (module `clients/go/go.mod`), separate from the root `WaveHouse` module. The cross-language wire-format **conformance suite** uses `clients/go/conformance_test.go` to replay the shared fixture (`clients/go/testdata/wire_cases.json`), asserting correct HTTP methods, paths, content types, and bodies. The TypeScript half—`tests/conformance/conformance_ts.mjs`, run via `make test-conformance-ts` (builds TS SDK first)—uses the same fixture; CI runs both to ensure wire format consistency.
+Unit tests are colocated in `clients/go/`, which is its own module (`clients/go/go.mod`), separate from the root `WaveHouse` module:
 
 ```bash
 cd clients/go
 go test ./...
 ```
 
-E2E tests (build tag `e2e`) run against a live WaveHouse instance via a dedicated Make target:
+The cross-language wire-format **conformance suite** replays a shared fixture (`clients/go/testdata/wire_cases.json`) from `clients/go/conformance_test.go`, asserting HTTP methods, paths, content types, and bodies. The TypeScript half — `tests/conformance/conformance_ts.mjs`, run via `make test-conformance-ts` — replays the same fixture, and CI runs both to keep the wire formats in step.
+
+E2E tests (build tag `e2e`) run against a live WaveHouse instance via their own Make target:
 
 ```bash
 WAVEHOUSE_URL=http://localhost:8080 WAVEHOUSE_AUTH='<jwt>' make test-go-sdk-e2e
 ```
 
-`WAVEHOUSE_URL` defaults to `http://localhost:8080`; optional `WAVEHOUSE_AUTH` is for admin cases. The suite skips if the server is unreachable. Unlike the TypeScript SDK, Go isn't yet in the repo's `make test-e2e` harness (see [E2E Testing](/sdk/reference#e2e-testing)).
+`WAVEHOUSE_URL` defaults to `http://localhost:8080`, and the optional `WAVEHOUSE_AUTH` covers the admin cases; the suite skips if the server is unreachable. Unlike the TypeScript SDK, Go isn't yet in the repo's `make test-e2e` harness (see [E2E Testing](/sdk/reference#e2e-testing)).
