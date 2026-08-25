@@ -46,7 +46,7 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
    - Configuration options → update `docs/src/content/docs/configuration.mdx`
    - Deployment → update `docs/src/content/docs/deployment.md`
    - Architecture → update `docs/src/content/docs/architecture.md`
-   - Client SDK surface → update **both** SDKs (`clients/ts/src/`, `clients/go/`), their doc trees (`docs/src/content/docs/sdk/` and `.../sdk/go/`), and the shared wire fixture `clients/go/testdata/wire_cases.json`; see AGENTS.md §SDK Sync
+   - Client SDK surface → update **both** SDKs (`clients/ts/src/`, `clients/go/`), the shared topic pages under `docs/src/content/docs/sdk/` (one `<Tabs syncKey="lang">` block per topic) plus the per-language setup pages `sdk/typescript.mdx` / `sdk/go.md`, and the shared wire fixture `clients/go/testdata/wire_cases.json`; see AGENTS.md §SDK Sync
 
 4. Follow the commit message format (see below).
 
@@ -90,7 +90,7 @@ test(cache): add tiered cache stampede test
 
 ## Code Style
 
-- **Formatting**: Code must be formatted with `gofumpt` (a strict superset of `gofmt`). `make fmt` checks the root module; the nested `clients/go` module is checked by `make verify` (its `verify-go-sdk` leaf, which the pre-commit hook and CI run). `make fix` applies gofumpt to both.
+- **Formatting**: Code must be formatted with `gofumpt` (a strict superset of `gofmt`). `make fmt` checks both modules — the root one and the nested `clients/go` — as do `make lint` and `make tidy`. `make fix` applies the corresponding fixes to both.
 - **Linting**: All lint checks in `.golangci.yml` must pass (see `make lint`).
 - **Naming**: Follow [Go naming conventions](https://go.dev/doc/effective_go#names).
 - **Interfaces**: Define interfaces where they are consumed, not where they are implemented.

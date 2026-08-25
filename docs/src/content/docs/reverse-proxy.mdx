@@ -82,7 +82,7 @@ handle_path /api/wavehouse/* {
 The ingress controller forwards the full path unless you ask it to rewrite. Pair a capture-group path (`/api/wavehouse(/|$)(.*)` with `pathType: ImplementationSpecific`) with the `nginx.ingress.kubernetes.io/rewrite-target: /$2` annotation, or the prefix arrives at WaveHouse unstripped.
 :::
 
-Point either SDK at the prefixed URL and it does the rest — `createClient({ baseURL: 'https://app.example.com/api/wavehouse' })` in TypeScript, `wavehouse.NewClient(wavehouse.Config{BaseURL: "https://app.example.com/api/wavehouse"})` in Go — both sending REST calls and SSE streams under the prefix ([SDK → Serving under a path prefix](/sdk#serving-under-a-path-prefix), [Go SDK → Creating a client](/sdk/go#creating-a-client)).
+Point either SDK at the prefixed URL and it does the rest — `createClient({ baseURL: 'https://app.example.com/api/wavehouse' })` in TypeScript, `wavehouse.NewClient(wavehouse.Config{BaseURL: "https://app.example.com/api/wavehouse"})` in Go — both sending REST calls and SSE streams under the prefix ([TypeScript → Serving under a path prefix](/sdk/typescript#serving-under-a-path-prefix), [Go → Creating a client](/sdk/go#creating-a-client)).
 
 ## Request-body size limits
 

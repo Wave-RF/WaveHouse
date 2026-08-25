@@ -1,542 +1,105 @@
 ---
-title: "TypeScript SDK"
-description: "Client SDK — query builder, real-time streaming, codegen."
+title: "Client SDKs"
+description: "Official WaveHouse clients for TypeScript and Go — query builder, real-time streaming, codegen."
 ---
 
 import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components";
 
-`@wavehouse/sdk` — TypeScript client for WaveHouse. One runtime dependency: `eventsource-parser` (~1.4 KB gzipped, itself dependency-free), which frames the SSE stream.
+WaveHouse ships two officially supported clients with full API-tree parity: **TypeScript** (`@wavehouse/sdk`) and **Go** (`github.com/Wave-RF/WaveHouse/clients/go`). Both give you a typed query builder, real-time SSE streaming over header-authenticated HTTP, live queries that backfill history before going live, and a codegen CLI that turns your ClickHouse schema into row types.
 
-:::tip[Writing Go instead?]
-WaveHouse also ships an official Go SDK (`github.com/Wave-RF/WaveHouse/clients/go`) — zero third-party dependencies, `context.Context`-first, generics for typed rows. See the [Go SDK docs](/sdk/go). Both clients speak the same wire format, so everything below about tables, the query builder, streaming, and admin endpoints carries over conceptually; the [API shapes differ](/sdk/go#differences-from-the-typescript-sdk).
-:::
+They speak the same wire format — a shared fixture replayed by both test suites keeps it that way — so the topic pages below cover both languages side by side. Pick a language once and the tabs follow you across every page.
 
-## Installation
+## Install
 
-<Tabs syncKey="pkg">
-  <TabItem label="pnpm">
-
-```bash
-pnpm add @wavehouse/sdk
-```
-
-  </TabItem>
-  <TabItem label="npm">
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
 
 ```bash
 npm install @wavehouse/sdk
 ```
 
+Other package managers, the CDN build, and runtime support: [TypeScript setup](/sdk/typescript#installation).
+
   </TabItem>
-  <TabItem label="yarn">
+  <TabItem label="Go">
 
 ```bash
-yarn add @wavehouse/sdk
+go get github.com/Wave-RF/WaveHouse/clients/go
 ```
 
-  </TabItem>
-  <TabItem label="bun">
-
-```bash
-bun add @wavehouse/sdk
-```
-
-  </TabItem>
-  <TabItem label="deno">
-
-```bash
-deno add npm:@wavehouse/sdk
-```
-
-  </TabItem>
-  <TabItem label="CDN">
-    No bundler or package manager required — the ES module loads natively in modern browsers:
-
-```html
-<script type="module">
-  import { createClient } from 'https://esm.sh/@wavehouse/sdk';
-
-  const wh = createClient({ baseURL: 'https://<project_id>.wavehouse.app' });
-  const { data } = await wh.from('clicks').select('page').limit(10);
-  console.log(data);
-</script>
-```
-
-Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`); jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For pages that can't use ES modules, the bundled IIFE build at `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag. Streaming runs on `fetch`, so it needs no polyfill either way. A bare CDN URL tracks the latest published release; use a range (`@0`, `@0.1`) to float within a major or minor, or the `@dev` tag for unreleased builds from `main` (see [Cutting a release](/development#cutting-a-release)).
+Import path, Go version floor, and client construction: [Go setup](/sdk/go#installation).
 
   </TabItem>
 </Tabs>
 
-The package works in any bundler-based framework — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — via `import { createClient } from '@wavehouse/sdk'`, and with no build step at all via the CDN tab above.
+## First query
 
-## Imports & Runtimes
-
-How to import `@wavehouse/sdk` after installation, and what to expect in each runtime.
-
-### Import line
-
-<Tabs syncKey="pkg">
-  <TabItem label="pnpm">
-
-```ts
-import { createClient } from '@wavehouse/sdk';
-```
-
-  </TabItem>
-  <TabItem label="npm">
-
-```ts
-import { createClient } from '@wavehouse/sdk';
-```
-
-  </TabItem>
-  <TabItem label="yarn">
-
-```ts
-import { createClient } from '@wavehouse/sdk';
-```
-
-  </TabItem>
-  <TabItem label="bun">
-
-```ts
-import { createClient } from '@wavehouse/sdk';
-```
-
-  </TabItem>
-  <TabItem label="deno">
-    After `deno add npm:@wavehouse/sdk`, Deno resolves the bare specifier from `deno.json` just like Node/Bun:
-
-```ts
-import { createClient } from '@wavehouse/sdk';
-```
-
-  </TabItem>
-  <TabItem label="CDN">
-
-```ts
-import { createClient } from 'https://esm.sh/@wavehouse/sdk';
-```
-
-Pin a version for production: `https://esm.sh/@wavehouse/sdk@0.1.0`. jsDelivr (`https://cdn.jsdelivr.net/npm/@wavehouse/sdk/+esm`) and unpkg (`https://unpkg.com/@wavehouse/sdk?module`) serve the same ES module.
-
-  </TabItem>
-</Tabs>
-
-### Node CJS (`require`)
-
-The package ships a CommonJS build at `dist/index.cjs` (the `"require"` condition in the exports map), so Node projects that have not yet adopted `"type": "module"` can use:
-
-```js
-const { createClient } = require('@wavehouse/sdk');
-```
-
-### IIFE global (`<script src>`)
-
-For pages that cannot use ES modules, `dist/index.global.js` is a self-contained minified bundle that exposes every export on a `WaveHouse` global (`window.WaveHouse`). CDNs serve it via the `unpkg`/`jsdelivr` fields in `package.json`:
-
-```html
-<script src="https://cdn.jsdelivr.net/npm/@wavehouse/sdk"></script>
-<script>
-  const wh = WaveHouse.createClient({ baseURL: 'https://your-wavehouse.example.com' });
-  wh.from('clicks').select('page').limit(10).then(({ data }) => console.log(data));
-</script>
-```
-
-### Runtime support
-
-**Browsers** — all SDK features work natively. `fetch`, `AbortController`, and `ReadableStream` are built into every modern browser; no polyfills are required.
-
-**Node.js** — every feature, streaming included, works in Node 22 and later (the package's minimum, per `engines.node`). 22 is the only line we test against, and older releases are past end-of-life upstream. Streaming runs on the same `fetch` and `ReadableStream` globals as the rest of the SDK, so it needs **no `EventSource` polyfill** — earlier versions did, and that requirement is gone.
-
-## Quick Start
-
-<Tabs syncKey="pkg">
-  <TabItem label="pnpm">
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
 
 ```ts
 import { createClient } from '@wavehouse/sdk';
 
-const wh = createClient({
-  baseURL: 'http://localhost:8080',
-  auth: async () => getAccessToken(), // omit for public/unauthenticated
-});
+const wh = createClient({ baseURL: 'https://<project_id>.wavehouse.app' });
 
-// Query
 const { data, error } = await wh.from('clicks').select('page').limit(10);
-
-// Insert
-await wh.from('clicks').insert({ page: '/home', button: 'signup' });
-
-// Stream
-const stream = wh.from('clicks').stream();
-const unsub = stream.subscribe({
-  next: (event) => console.log(event.data),
-  status: (s) => console.log('Stream:', s),
-});
+if (error) throw new Error(error.message);
+console.log(data);
 ```
 
   </TabItem>
-  <TabItem label="npm">
+  <TabItem label="Go">
 
-```ts
-import { createClient } from '@wavehouse/sdk';
+```go
+package main
 
-const wh = createClient({
-  baseURL: 'http://localhost:8080',
-  auth: async () => getAccessToken(), // omit for public/unauthenticated
-});
+import (
+    "context"
+    "fmt"
+    "log"
 
-// Query
-const { data, error } = await wh.from('clicks').select('page').limit(10);
+    wavehouse "github.com/Wave-RF/WaveHouse/clients/go"
+)
 
-// Insert
-await wh.from('clicks').insert({ page: '/home', button: 'signup' });
+func main() {
+    wh := wavehouse.NewClient(wavehouse.Config{
+        BaseURL: "https://<project_id>.wavehouse.app",
+    })
 
-// Stream
-const stream = wh.from('clicks').stream();
-const unsub = stream.subscribe({
-  next: (event) => console.log(event.data),
-  status: (s) => console.log('Stream:', s),
-});
-```
-
-  </TabItem>
-  <TabItem label="yarn">
-
-```ts
-import { createClient } from '@wavehouse/sdk';
-
-const wh = createClient({
-  baseURL: 'http://localhost:8080',
-  auth: async () => getAccessToken(), // omit for public/unauthenticated
-});
-
-// Query
-const { data, error } = await wh.from('clicks').select('page').limit(10);
-
-// Insert
-await wh.from('clicks').insert({ page: '/home', button: 'signup' });
-
-// Stream
-const stream = wh.from('clicks').stream();
-const unsub = stream.subscribe({
-  next: (event) => console.log(event.data),
-  status: (s) => console.log('Stream:', s),
-});
-```
-
-  </TabItem>
-  <TabItem label="bun">
-
-```ts
-import { createClient } from '@wavehouse/sdk';
-
-const wh = createClient({
-  baseURL: 'http://localhost:8080',
-  auth: async () => getAccessToken(), // omit for public/unauthenticated
-});
-
-// Query
-const { data, error } = await wh.from('clicks').select('page').limit(10);
-
-// Insert
-await wh.from('clicks').insert({ page: '/home', button: 'signup' });
-
-// Stream
-const stream = wh.from('clicks').stream();
-const unsub = stream.subscribe({
-  next: (event) => console.log(event.data),
-  status: (s) => console.log('Stream:', s),
-});
-```
-
-  </TabItem>
-  <TabItem label="deno">
-
-```ts
-import { createClient } from '@wavehouse/sdk';
-
-const wh = createClient({
-  baseURL: 'http://localhost:8080',
-  auth: async () => getAccessToken(), // omit for public/unauthenticated
-});
-
-// Query
-const { data, error } = await wh.from('clicks').select('page').limit(10);
-
-// Insert
-await wh.from('clicks').insert({ page: '/home', button: 'signup' });
-
-// Stream
-const stream = wh.from('clicks').stream();
-const unsub = stream.subscribe({
-  next: (event) => console.log(event.data),
-  status: (s) => console.log('Stream:', s),
-});
-```
-
-  </TabItem>
-  <TabItem label="CDN">
-
-```ts
-import { createClient } from 'https://esm.sh/@wavehouse/sdk';
-
-const wh = createClient({
-  baseURL: 'http://localhost:8080',
-  auth: async () => getAccessToken(), // omit for public/unauthenticated
-});
-
-// Query
-const { data, error } = await wh.from('clicks').select('page').limit(10);
-
-// Insert
-await wh.from('clicks').insert({ page: '/home', button: 'signup' });
-
-// Stream
-const stream = wh.from('clicks').stream();
-const unsub = stream.subscribe({
-  next: (event) => console.log(event.data),
-  status: (s) => console.log('Stream:', s),
-});
+    page, err := wh.From("clicks").Select("page").Limit(10).FetchUntyped(context.Background())
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println(page.Data)
+}
 ```
 
   </TabItem>
 </Tabs>
 
-## Creating a Client
-
-```ts
-import { createClient } from '@wavehouse/sdk';
-import type { Database } from './my-types'; // optional hand-written types
-
-const wh = createClient<Database>({
-  baseURL: 'https://<project_id>.wavehouse.app',
-  auth: async () => myAuthProvider.getToken(),
-  options: {
-    maxRetries: 2,
-  },
-});
-```
-
-### `ClientConfig<DB>`
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `baseURL` | `string` | — | WaveHouse server URL, optionally including a path prefix (required) |
-| `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
-| `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx **REST** requests; stream reconnects are unbounded ([details](/sdk/streaming#transport-behavior)) |
-| `options.headers` | `Record<string, string>` | — | Headers added to every request ([details](#custom-headers)) |
-| `options.fetchOptions` | `RequestInit` | — | Extra `RequestInit` fields merged into every request ([details](#extra-requestinit-fields)) |
-| `options.fetch` | `FetchLike` | global `fetch` | HTTP implementation for every request ([details](#supplying-your-own-fetch)) |
-
-:::note[How the token is transmitted]
-The SDK attaches your `auth` token as an `Authorization: Bearer` header on every request, streaming included. It is re-read on each connection attempt, so a stream that outlives its token reconnects with a fresh one instead of replaying an expired credential.
-
-The token is never placed in the URL. The server still accepts a `?token=` query parameter for clients that cannot set headers — see [API Reference — Authentication](/api#authentication) — but the SDK does not use it, so it never reaches a proxy or CDN access log.
-:::
-
-:::caution[Streaming asks more of a custom `fetch`]
-`.stream()` and `.liveQuery()` read the response as it arrives, so an `options.fetch` used with them must return a response with a live streaming body. A response handed back with an absent or already-consumed body fails fast with `SSE_NO_STREAM_BODY`. What the SDK cannot rescue is a wrapper that *awaits* the body before returning — `await res.text()`, or the `res.clone().text()` a logging wrapper reaches for — because on a stream that never ends it never resolves and your function never returns. Both satisfy every REST call, which is what makes the trap easy to walk into.
-
-`options.headers` is also subject to CORS in a browser: a header outside the safelist joins the preflight, which the origin has to allow. WaveHouse advertises a fixed set, so custom headers reach it cross-origin only when a proxy in front terminates the preflight — the deployment they exist for. Server-side callers never preflight.
-:::
-
-#### Serving under a path prefix
-
-`baseURL` may carry a path prefix, for a WaveHouse reachable somewhere other than the root of an origin — behind a backend-for-frontend (BFF), an app-server route, or a path-routed ingress. Every request path is appended to it, on both transports:
-
-```ts
-const wh = createClient({ baseURL: 'https://app.example.com/api/wavehouse' });
-// queries  → https://app.example.com/api/wavehouse/v1/query
-// streams  → https://app.example.com/api/wavehouse/v1/stream
-```
-
-Trailing slashes on `baseURL` are optional, but it must be **absolute** — scheme and host included — and the scheme must be `http` or `https`. A same-origin relative path like `/api/wavehouse` makes every REST call reject with a `TypeError` instead of returning a `Result`, and surfaces on a stream as an `SSE_CONNECT_ERROR` to the subscriber's `error` callback — so build an absolute one: `` `${location.origin}/api/wavehouse` ``. A `ws://`/`wss://` base ends the stream with the same error: streaming is plain HTTP, and there is no WebSocket endpoint.
-
-The proxy in front must **strip** the prefix before forwarding, since WaveHouse itself always serves at `/v1/…` — see [Behind a reverse proxy → Path prefixes](/reverse-proxy#path-prefixes).
-
-### Custom headers
-
-`options.headers` adds headers to every request, streaming included — the usual reason being a header-gated proxy in front of WaveHouse, such as a Cloudflare Access service token:
-
-```ts
-const wh = createClient({
-  baseURL: 'https://<project_id>.wavehouse.app',
-  options: {
-    headers: {
-      'CF-Access-Client-Id': process.env.CF_ACCESS_CLIENT_ID!,
-      'CF-Access-Client-Secret': process.env.CF_ACCESS_CLIENT_SECRET!,
-    },
-  },
-});
-```
-
-Header names are matched **case-insensitively**, as HTTP requires, so `authorization` and `Authorization` are the same header rather than two.
-
-Your headers are applied *underneath* the SDK's own, and a collision means yours is dropped rather than merged:
-
-- **`auth` keeps `Authorization`.** Setting it here won't displace your token provider. Use `auth` for credentials.
-- **`Content-Type` and `Accept` belong to the request.** The SDK knows what it's sending; a global `Content-Type` that outranked it would break requests whose body isn't JSON.
-
-Nothing is ever comma-joined: on a collision the SDK's value stands alone, and two of your own entries differing only in case collapse to the last one — a header joined rather than replaced is how you end up sending `Content-Type: application/json, image/png`.
-
-From a **browser**, a cross-origin custom header must also survive CORS preflight, and WaveHouse allow-lists a fixed set (`Accept`, `Authorization`, `Content-Type`, `Last-Event-ID`, `X-Request-ID`) with no config knob. So custom headers work server-side, or from a browser when the proxy in front owns CORS — which is the same proxy the header is usually for.
-
-Headers are static. For a credential that rotates per request, wrap the transport with [`options.fetch`](#supplying-your-own-fetch); a callback form is tracked in [#459](https://github.com/Wave-RF/WaveHouse/issues/459).
-
-### Extra `RequestInit` fields
-
-`options.fetchOptions` is merged into the `RequestInit` of every request, streaming included — for settings that aren't headers and don't warrant replacing the whole transport:
-
-```ts
-const wh = createClient({
-  baseURL: 'https://wavehouse.example.com',
-  options: { fetchOptions: { cache: 'no-store', mode: 'cors' } },
-});
-```
-
-It carries any `RequestInit` field — `mode`, `cache`, `keepalive`, `credentials`, `redirect` — plus runtime-specific extensions such as Next.js's `next: { tags }`, which tags the cached response for on-demand revalidation. Only those runtime extensions need a cast; the standard fields are declared on `RequestInit` already.
-
-:::caution[Two of those fields don't apply to streams]
-On `.stream()` and `.liveQuery()`'s live connection the transport keeps `cache` and `redirect` for itself, because there they're correctness rather than preference. It constrains one more without owning it: `credentials` stays yours, forwarded in a browser and dropped elsewhere because some runtimes throw if it is set at all. See [Supplying your own fetch](#supplying-your-own-fetch) for what each is set to and why.
-
-Everything else reaches streams normally — including `mode` from the example above. Only `cache` is different there: on a stream it is already `no-store`.
-:::
-
-:::note[`credentials: 'include'` needs a proxy that owns CORS]
-Sending cookies cross-origin is a common reason to reach for this, but it can't work against WaveHouse's own CORS: it deliberately never emits `Access-Control-Allow-Credentials` (it's a Bearer-token API), and the default `cors_allowed_origins: "*"` makes `include` a hard browser failure regardless. It applies where a fronting proxy answers CORS itself — see [Behind a reverse proxy](/reverse-proxy#header-and-auth-forwarding). Same-origin deployments already send cookies without it.
-:::
-
-The fields the SDK controls — `method`, `headers`, `body`, and `signal` — always win, so this can't corrupt the request itself. In particular `headers` here is ignored; use `options.headers`, which merges properly.
-
-### Supplying your own `fetch`
-
-`options.fetch` replaces the HTTP implementation the SDK uses. Reach for it to route through a proxy, attach client certificates, wrap requests in your own middleware (logging, tracing, circuit breaking), stub HTTP in your own tests without monkey-patching a global, or to work around transport behavior of the runtime you happen to be on:
-
-```ts
-const wh = createClient({
-  baseURL: 'https://<project_id>.wavehouse.app',
-  options: {
-    fetch: async (url, init) => {
-      const started = performance.now();
-      const res = await fetch(url, init);
-      console.log(res.status, url, `${Math.round(performance.now() - started)}ms`);
-      return res;
-    },
-  },
-});
-```
-
-Retries go through the same function, so middleware sees every attempt.
-
-The SDK always calls your function with a **string** URL and a plain `RequestInit`. Off the response the **REST path** reads `.ok` and `.headers` always, `.text()` on success, and `.status`, `.statusText` plus `.json()` when the response is not `ok` — so a hand-rolled response object needs all six there. A stub used with `.stream()` or `.liveQuery()` needs a different set: `.ok`, `.status`, `.type` (checked for `opaqueredirect`), `.headers` carrying `content-type: text/event-stream`, and a live, unread `.body` — plus `.statusText` and `.json()` if your stub ever answers a stream with a non-`ok` response, which goes through the same error parsing as REST. `.text()` is never called on a stream.
-
-**On REST**, if your function rejects, the request becomes a `NETWORK_ERROR` result and is retried with backoff — unless the `AbortSignal` you passed has been aborted, in which case the result is `ABORTED` and nothing is retried. That's decided from the signal rather than from what your function threw, so an implementation that signals abort some other way — `AbortSignal.timeout()` raises a `TimeoutError`, `node-fetch` its own `AbortError` class — is reported the same way. On a stream the same rejection is reported to the subscriber as `SSE_NETWORK_ERROR` and re-dialed — including an `AbortError`, since the stream transport applies the same rule: only an abort *it* raised, via `.close()`, ends the stream. See [Error Handling](/sdk/reference#error-handling).
-
-The option's type is exported as `FetchLike`. It is written out rather than as `typeof fetch`, which resolves differently depending on whether your TypeScript `lib` includes DOM. Its URL parameter is `string` — all the SDK ever passes — which, because function parameters are contravariant, accepts *more* implementations than the wider spelling would: the global `fetch` fits, and so does hand-written `(url: string, init?: RequestInit) => Promise<Response>` middleware. Let TypeScript infer your parameters (`(url, init) => …`) and it fits without annotation.
-
-Streaming goes through your function too. That comes with the extra requirement described above — the response must carry a live streaming body — and the streaming transport keeps ownership of two `RequestInit` fields where the value is load-bearing rather than a preference: `cache` (as an init field; a `Cache-Control` header would fail cross-origin preflight) and `redirect`. It constrains one more without owning it: `credentials` stays yours, forwarded in a browser and dropped elsewhere, because some runtimes throw if it is set at all.
-
-`redirect` depends on whether the request carries a credential. With one — an `auth` token or configured `headers` — a redirect is refused and reported as `SSE_REDIRECT`, because a cross-origin hop strips `Authorization` (which this endpoint answers with a silently reduced view rather than an error) while forwarding your other headers to wherever the redirect points. Without either, redirects are followed normally, so CDN canonicalization, geo/LB indirection, and an http→https upgrade all work. The test is that concrete pair rather than "is this request authenticated", and **cookies are not part of it**. A cookie isn't stripped the way `Authorization` is — it is re-derived from the cookie store at each hop, so a redirect carries it only while the hop stays inside **both** the request's origin and the cookie's own `Path`. Leaving either loses it. The origin half is the one no cookie attribute can override: under the default `same-origin` credentials mode the browser attaches nothing once a redirect goes cross-origin, whatever the `Domain` — so `app.example.com` → `api.example.com` on a shared `Domain=example.com` session cookie loses it, and so does an http→https upgrade, which is cross-origin by scheme and port. A same-origin rewrite from `/v1/stream` to `/stream` under a `Path=/v1` cookie loses it the other way. This endpoint answers a cookieless request with a reduced view rather than an error ([#478](https://github.com/Wave-RF/WaveHouse/issues/478)). Going cross-origin with `credentials: "include"` usually fails earlier and louder instead: WaveHouse never sends `Access-Control-Allow-Credentials`, so against it the browser blocks the response outright. Behind a proxy that owns CORS and does allow credentials the hop succeeds — and then ordinary cookie scoping decides. `include` *replaces* the origin rule rather than lifting it: the cookie crosses only if its own `Domain` covers the target, so a host-only cookie — what you get with no `Domain` attribute — still stops at its host. If you need to follow a credentialed redirect anyway, supply an `options.fetch` that overrides `redirect`. A `200` that isn't `text/event-stream` is refused too (`SSE_BAD_CONTENT_TYPE`), so an auth gateway's login page fails loudly instead of leaving the stream connected and permanently silent.
-
-#### Swapping in undici
-
-The motivating case is a transport bug in the runtime's own HTTP stack, which you can't fix from inside the SDK — for example [undici #5600](https://github.com/nodejs/undici/issues/5600): reusing a keep-alive socket while the event loop is idle stalls the request before it goes out. How bad it gets varies with the runtime and the idle gap: the upstream report measured ~450–465 ms against a 10 ms server, and we have measured anything from ~100 ms to tens of seconds on a server answering instantly. It affects undici 8.8.0–8.9.0, and Node 26 bundles 8.9.0.
-
-**Upgrading undici is the actual fix** — it landed in 8.10.0. What `options.fetch` buys you is a way to get there without waiting for a new runtime: install undici yourself and route requests through it. The one non-obvious part is that you must pass its dispatcher **explicitly**.
-
-```ts
-import { createClient } from '@wavehouse/sdk';
-import { Agent, fetch as undiciFetch } from 'undici'; // npm install undici — 8.10.0+
-
-// Explicit, not implied — see below.
-const dispatcher = new Agent();
-
-const wh = createClient({
-  baseURL: 'https://<project_id>.wavehouse.app',
-  options: {
-    fetch: (url, init) =>
-      undiciFetch(url, { ...init, dispatcher } as never) as unknown as Promise<Response>,
-  },
-});
-```
-
-:::caution[Importing a fixed undici is not enough on its own]
-undici keeps its connection pool on a shared `globalThis` symbol, and whichever copy loads first claims it. Node claims it for the *bundled* copy the first time anything touches one of its web globals — a `fetch()` call, but equally a `new Headers()` or `new Response()` — not at startup. So which undici owns the pool comes down to a load order you don't really control, and auditing your own code for `fetch` calls won't tell you: any dependency can claim it first, and so can this SDK, which constructs a `Headers` on its abort and retry-exhausted paths. Call `undiciFetch` without a `dispatcher` and it resolves whatever is on that symbol, so requests can go through the buggy pool even though you imported a fixed undici.
-
-Measured with 8.9.0 loaded first and 8.10.0's `fetch` doing the request, 1.5 s idle gaps against a 10 ms server:
-
-```text
-                          per-request ms
-no explicit dispatcher    21  1514  1495   583   ← still stalling
-explicit new Agent()      17    14    12    13
-```
-
-An explicit `dispatcher` wins because the request never consults the shared symbol at all. An explicit `setGlobalDispatcher` call (below) wins the other way round — it overwrites the symbol after the first copy claimed it.
-:::
-
-Both casts are load-bearing, for one underlying reason: undici declares its own request/response types, separate from the ones behind your global `fetch`, so the two aren't structurally assignable. `{ ...init, dispatcher } as never` covers the split on `RequestInit`, which differs on `body` and `headers` (`never` is assignable to either spelling, so one snippet compiles whether or not your `lib` includes DOM); and the return cast handles the `Response` mismatch. The URL needs no cast — `FetchLike` declares it as `string`, which undici's `RequestInfo` accepts. They're safe because of the narrow runtime contract above — a string URL and a plain `RequestInit` in, and only the response members enumerated above read back. `undici` is a dependency you add on top of the SDK's single ~1.4 KB one.
-
-If you're genuinely pinned to an affected undici, the same snippet fixes it — your pinned version, with a dispatcher that never reuses a keep-alive socket: `new Agent({ pipelining: 0 })`. That costs a fresh connection per request, so prefer upgrading. Note that tuning `keepAliveTimeout` does **not** help: the retirement timer is starved by the same idle event loop that triggers the bug, so the socket is still there to be reused.
-
-To change the transport process-wide instead of per-client, an installed undici's `setGlobalDispatcher(new Agent())` is picked up by Node's built-in global `fetch`, no `options.fetch` needed. That's an explicit write, so it wins the race described above — but only if the *installed* undici is 8.10.0+, since it hands connection handling to that copy.
-
-### Type-Safe Tables
-
-Pass a `Database` type to get autocomplete on table names and row types:
-
-```ts
-interface Database {
-  clicks: { page: string; button: string; score: number; received_timestamp: string };
-  users: { id: string; name: string; email: string };
-}
-
-const wh = createClient<Database>({ baseURL: '...' });
-const clicks = wh.from('clicks'); // ✅ autocomplete
-const { data } = await clicks.select('page', 'button').limit(10);
-// data is Array<{ page: string; button: string; score: number; received_timestamp: string }> | null
-```
-
-Generate the `Database` interface from a running server with the [codegen CLI](/sdk/reference#codegen-cli).
-
-## Result Type
-
-Every async SDK operation returns `Result<T>` — a discriminated union that never throws for anything the server returns (caller and environment errors do throw — see [Error Handling](/sdk/reference#error-handling)):
-
-```ts
-type Result<T> =
-  | { ok: true;  data: T;    error: null; hasMore?: boolean; next?: () => Promise<Result<T>> }
-  | { ok: false; data: null; error: WaveHouseError }
-
-interface WaveHouseError {
-  status: number;     // HTTP status (0 for network errors)
-  code: string;       // e.g. 'HTTP_400', 'NETWORK_ERROR', 'ABORTED'
-  message: string;    // Human-readable error message
-  details?: unknown;  // Raw response body
-  retryable: boolean; // Whether SDK would retry this error
-}
-```
-
-Usage pattern — branch on `result.ok` (or destructure `{ data, error }` if you prefer):
-
-```ts
-const result = await wh.from('clicks').select('page').limit(10);
-if (result.ok) {
-  console.log(result.data); // Row[] — TypeScript knows data is non-null here
-} else {
-  console.error(result.error.message); // never throws
-}
-```
-
-The full error-code table lives in [Error Handling](/sdk/reference#error-handling).
-
-## Explore the SDK
+## Setup & caveats, per language
+
+Installation, client construction, auth, custom headers, and the error model are language-specific — each SDK has its own page for them.
+
+<CardGrid>
+  <LinkCard
+    title="TypeScript setup"
+    description="Install across package managers and runtimes, createClient, custom headers and fetch, the Result type."
+    href="/sdk/typescript"
+  />
+  <LinkCard
+    title="Go setup"
+    description="go get, NewClient, Config and ClientOptions, typed rows via generics, the (T, error) model."
+    href="/sdk/go"
+  />
+</CardGrid>
+
+## Topics, both languages
 
 <CardGrid>
   <LinkCard
     title="Queries"
-    description="Tables, the chainable query builder, pagination, and raw SQL."
+    description="Tables, the chainable query builder, inserts, pagination, and raw SQL."
     href="/sdk/queries"
   />
   <LinkCard
@@ -556,12 +119,7 @@ The full error-code table lives in [Error Handling](/sdk/reference#error-handlin
   />
   <LinkCard
     title="Reference & CLI"
-    description="Error codes, AbortController, the full API tree, codegen, and E2E testing."
+    description="Error codes, cancellation, the full API tree, and the codegen CLIs."
     href="/sdk/reference"
-  />
-  <LinkCard
-    title="Go SDK"
-    description="The zero-dependency Go client — context.Context, generics for typed rows, and a codegen CLI."
-    href="/sdk/go"
   />
 </CardGrid>

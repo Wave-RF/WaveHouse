@@ -1,0 +1,140 @@
+---
+title: "SDK Pipes"
+description: "Execute and manage named query pipes with the WaveHouse SDKs."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Named pipes are server-defined, parameterized queries (see [Named Pipes guide](/pipes)). Both SDKs execute pipes for allowed roles and manage their definitions under the admin role.
+
+## Executing a pipe
+
+Reference a pre-defined named query pipe, binding its parameters.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+`wh.pipe(name, params?)` returns a `PipeRef`, which is **PromiseLike**.
+
+```ts
+// These are equivalent (PipeRef is PromiseLike):
+const { data } = await wh.pipe('top_pages', { start_date: '2026-01-01', limit: 50 }).fetch();
+const { data } = await wh.pipe('top_pages', { start_date: '2026-01-01', limit: 50 });
+```
+
+`.fetch(opts?)` takes `PipeRequestOptions` — `{ signal }` only, narrower than the `.fetch(opts?)` on a [query builder](/sdk/queries#executing-the-query), which also accepts `limit`. Passing a `limit` is a compile error rather than a silent no-op.
+
+`limit` is typed `never` rather than left out, so the rejection also catches a value passed in a variable — leaving it out would only reject an inline object. That cuts both ways: a value *declared* as `RequestOptions` is rejected whether or not it actually carries a limit, since the type permits one. If you share one options object across calls, type it as `PipeRequestOptions` — the table and query-builder `.fetch()` accept that too — or inline `{ signal }` at the pipe call.
+
+  </TabItem>
+  <TabItem label="Go">
+
+`client.Pipe(name, params)` returns a `*PipeRef`. Unlike the TypeScript SDK's `PromiseLike` `PipeRef`, you execute it explicitly. Pass `nil` for `params` if the pipe takes none, or only needs its server-side defaults.
+
+`wavehouse.Fetch[Row](ctx, pipeRef)` decodes results into `[]Row` — a package-level generic function, since Go has no generic methods (the same pattern as `FetchTyped` for queries and `SQL` for raw SQL). `.FetchUntyped(ctx)` is the non-generic method form, decoding into `[]map[string]any`.
+
+```go
+type TopPage struct {
+    Page  string `json:"page"`
+    Views int    `json:"views"`
+}
+
+rows, err := wavehouse.Fetch[TopPage](ctx,
+    wh.Pipe("top_pages", map[string]any{"start_date": "2026-01-01", "limit": 50}),
+)
+
+untyped, err := wh.Pipe("top_pages", nil).FetchUntyped(ctx)
+```
+
+  </TabItem>
+</Tabs>
+
+There is no per-call row cap here: the endpoint binds your params as the pipe's parameters, so a limit has to be declared in the pipe's SQL as `{{limit}}` (see [Named Pipes](/pipes)) and passed as a parameter, as in the examples above.
+
+## Streaming a pipe
+
+Open a live stream from a pipe ref (see [Streaming](/sdk/streaming)). The pipe's SQL and params are **not** applied — the pipe's *name* is used as a table name, so where a table of that name exists you receive its raw events, and otherwise the stream stays silent rather than erroring. Both SDKs behave this way; both wait on a pipe-aware stream endpoint ([#445](https://github.com/Wave-RF/WaveHouse/issues/445)).
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+const stream = wh.pipe('top_pages').stream();
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+stream := wh.Pipe("top_pages", nil).Stream(nil)
+defer stream.Close()
+```
+
+  </TabItem>
+</Tabs>
+
+---
+
+## Managing pipe definitions
+
+Create, read, and delete pipe definitions. These sit behind the [admin gate](/sdk/admin) on `/v1/ops/*` — the admin role (`policy.admin_role`) or the [operator key](/api#authentication).
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+// List all pipes
+const { data: pipes } = await wh.pipes.list();
+
+// Get a single pipe definition
+const { data: pipe } = await wh.pipes.get('top_pages');
+
+// Create or update
+await wh.pipes.set('top_pages', {
+  sql: 'SELECT page, count() as views FROM clicks GROUP BY page LIMIT {{limit}}',
+  parameters: [{ name: 'limit', type: 'number', required: false, default: 100 }],
+  description: 'Top pages by view count',
+  allowed_roles: ['viewer', 'admin'],
+});
+
+// Delete
+await wh.pipes.delete('old_pipe');
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+// List all pipes.
+pipes, err := wh.Pipes.List(ctx)
+
+// Get a single pipe definition.
+pipe, err := wh.Pipes.Get(ctx, "top_pages")
+
+// Create or update.
+err = wh.Pipes.Set(ctx, "top_pages", wavehouse.PipeDef{
+    SQL: "SELECT page, count() as views FROM clicks GROUP BY page LIMIT {{limit}}",
+    Parameters: []wavehouse.ParamDef{
+        {Name: "limit", Type: "number", Required: false, Default: 100},
+    },
+    Description:  "Top pages by view count",
+    AllowedRoles: []string{"viewer", "admin"},
+})
+
+// Delete.
+err = wh.Pipes.Delete(ctx, "old_pipe")
+```
+
+`PipeDef` is `Pipe` minus `Name`, which the methods take as a path argument:
+
+```go
+type PipeDef struct {
+    SQL          string
+    Parameters   []ParamDef
+    Description  string
+    AllowedRoles []string
+}
+```
+
+  </TabItem>
+</Tabs>

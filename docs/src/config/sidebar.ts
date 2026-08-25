@@ -25,28 +25,22 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
     items: [
       { label: "API Reference", slug: "api" },
       {
-        // Separate trees per SDK — API shapes diverge enough that shared
-        // prose reads worse than dedicated pages. Revisit with tabs if a
-        // third language lands.
-        label: "TypeScript SDK",
+        // Topic-first SDK pages: the shared usage pages carry
+        // <Tabs syncKey="lang"> per language and each language keeps its own
+        // setup/caveats page — the topic URLs never churn as languages are
+        // added (decision in PR #313, executed for Go in PR #434). A third
+        // language adds one setup page and a tab per topic; it does NOT add a
+        // parallel tree, and no language sits at the root of /sdk.
+        label: "SDKs",
         items: [
           { label: "Overview", slug: "sdk" },
+          { label: "TypeScript setup", slug: "sdk/typescript" },
+          { label: "Go setup", slug: "sdk/go" },
           { label: "Queries", slug: "sdk/queries" },
           { label: "Streaming & Live Queries", slug: "sdk/streaming" },
           { label: "Pipes", slug: "sdk/pipes" },
           { label: "Admin & System", slug: "sdk/admin" },
           { label: "Reference & CLI", slug: "sdk/reference" },
-        ],
-      },
-      {
-        label: "Go SDK",
-        items: [
-          { label: "Overview", slug: "sdk/go" },
-          { label: "Queries", slug: "sdk/go/queries" },
-          { label: "Streaming & Live Queries", slug: "sdk/go/streaming" },
-          { label: "Pipes", slug: "sdk/go/pipes" },
-          { label: "Admin & System", slug: "sdk/go/admin" },
-          { label: "Reference & CLI", slug: "sdk/go/reference" },
         ],
       },
     ],

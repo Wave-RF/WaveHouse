@@ -1,13 +1,9 @@
 ---
-title: "Go SDK"
-description: "Zero-dependency Go client SDK — query builder, real-time streaming, codegen."
+title: "Go SDK setup"
+description: "Installing the WaveHouse Go client, creating a client, typed rows via generics, and the (T, error) model."
 ---
 
-`github.com/Wave-RF/WaveHouse/clients/go` — a Go client for WaveHouse with zero third-party runtime dependencies, SSE parser included.
-
-:::tip[Looking for the TypeScript SDK?]
-`/sdk/go/*` covers the Go client; the JavaScript/TypeScript client (`@wavehouse/sdk`) starts at [SDK Overview](/sdk). Both speak the same wire format, so concepts carry over — only the [API shapes differ](#differences-from-the-typescript-sdk).
-:::
+Setup and caveats for `github.com/Wave-RF/WaveHouse/clients/go`, the Go client: installation, client construction, typed rows, and the `(T, error)` model. Usage is documented per topic, both languages side by side, starting at [Queries](/sdk/queries) — writing TypeScript instead? [TypeScript setup](/sdk/typescript) is the mirror of this page.
 
 ## Installation
 
@@ -95,7 +91,7 @@ The default client sets no `Timeout`; use a `context.Context` deadline to preven
 The 2-retry default applies only when `Config.Options` is `nil`. Passing `&wavehouse.ClientOptions{}` leaves `MaxRetries` at Go's zero value (`0`), which disables retries — set it explicitly.
 :::
 
-`Headers` is the Go analog of the TypeScript SDK's [`options.headers`](/sdk#custom-headers) — a gateway credential, a tenant selector, or tracing metadata with no first-class option. It is also how an operator sends the server's non-JWT [operator key](/api#authentication):
+`Headers` is the Go analog of the TypeScript SDK's [`options.headers`](/sdk/typescript#custom-headers) — a gateway credential, a tenant selector, or tracing metadata with no first-class option. It is also how an operator sends the server's non-JWT [operator key](/api#authentication):
 
 ```go
 wh := wavehouse.NewClient(wavehouse.Config{
@@ -110,7 +106,7 @@ wh := wavehouse.NewClient(wavehouse.Config{
 The SDK's own headers win: `Authorization`, `Accept`, `Content-Type`, and the stream's `Cache-Control` are set after yours and overwrite any collision, matched case-insensitively and replacing rather than appending. The map is copied at `NewClient`, so later mutation changes nothing. There is no Go field for `options.fetch` or `options.fetchOptions` because `Config.HTTPClient` covers both — supply your own `*http.Client`, or a custom `http.RoundTripper` on its `Transport`.
 
 :::note[How the token is transmitted]
-The SDK sends `Authorization: Bearer <token>` on every request, SSE streams included, and never uses a `?token=` query fallback. The TypeScript SDK streams over `fetch` rather than `EventSource` for exactly this reason, so header auth is shared behavior rather than a Go-only property (see its [equivalent note](/sdk#creating-a-client)). The token is re-read from `Auth` on every reconnect attempt, so a rotating token keeps a long-lived stream alive.
+The SDK sends `Authorization: Bearer <token>` on every request, SSE streams included, and never uses a `?token=` query fallback. The TypeScript SDK streams over `fetch` rather than `EventSource` for exactly this reason, so header auth is shared behavior rather than a Go-only property (see its [equivalent note](/sdk/typescript#creating-a-client)). The token is re-read from `Auth` on every reconnect attempt, so a rotating token keeps a long-lived stream alive.
 :::
 
 :::caution[A credentialed stream will not follow a redirect]
@@ -136,11 +132,11 @@ page, err := wavehouse.FetchTyped[ClickRow](ctx,
 // page.Data is []ClickRow
 ```
 
-Use the [codegen CLI](/sdk/go/reference#codegen-cli) to generate row structs from a running server. `FetchTyped`, `Fetch[Row]` (pipes), and `SQL[Row]` (raw SQL) are package-level generic functions because Go lacks generic methods; the untyped equivalents (`.FetchUntyped(ctx)`) are ordinary methods.
+Use the [codegen CLI](/sdk/reference#codegen-cli) to generate row structs from a running server. `FetchTyped`, `Fetch[Row]` (pipes), and `SQL[Row]` (raw SQL) are package-level generic functions because Go lacks generic methods; the untyped equivalents (`.FetchUntyped(ctx)`) are ordinary methods.
 
 ## Error Handling
 
-Request-response operations (queries, ingest, pipes, admin) return `(T, error)`, or a bare `error` when there is no body (`Pipes.Set`/`Delete`, `Policy.Set`, `Schema.Refresh`, `Sys.Health`). HTTP exchange errors are `*wavehouse.Error`; unwrap via `errors.As`. Client-side failures (`Auth` provider, marshal errors) are plain wrapped errors, so handle the `errors.As == false` case too. Streaming methods (`Stream`, `Subscribe`, `Close`, `Connected`) report through callbacks or plain errors; see [Streaming](/sdk/go/streaming).
+Request-response operations (queries, ingest, pipes, admin) return `(T, error)`, or a bare `error` when there is no body (`Pipes.Set`/`Delete`, `Policy.Set`, `Schema.Refresh`, `Sys.Health`). HTTP exchange errors are `*wavehouse.Error`; unwrap via `errors.As`. Client-side failures (`Auth` provider, marshal errors) are plain wrapped errors, so handle the `errors.As == false` case too. Streaming methods (`Stream`, `Subscribe`, `Close`, `Connected`) report through callbacks or plain errors; see [Streaming](/sdk/streaming).
 
 ```go
 page, err := wh.From("clicks").Fetch(ctx)
@@ -155,24 +151,26 @@ if err != nil {
 }
 ```
 
-See [Reference → Error Handling](/sdk/go/reference#error-handling) for retry behavior and error codes.
+See [Reference → Error Handling](/sdk/reference#error-handling) for retry behavior and error codes.
 
 ## Differences from the TypeScript SDK
 
 Both SDKs share a wire format and feature set, verified in CI against a shared `wire_cases.json` fixture that asserts equivalent HTTP requests for builder calls. The API shapes differ:
 
 - **No `Result<T>` union.** Go returns `(T, error)`; a non-nil `error` is the only failure signal. No `{ok, data, error}` objects, no `error: null` sentinels.
-- **`context.Context` instead of `AbortSignal`.** Non-streaming calls take `ctx context.Context` first; use a deadline or `cancel()`. See [Reference → Context Cancellation](/sdk/go/reference#context-cancellation).
-- **Streams closed explicitly.** `TableRef.Stream` and `QueryBuilder.Stream` take no context; the returned `*StreamController` owns its goroutine and connection until `.Close()` (usually deferred). See [Streaming](/sdk/go/streaming).
+- **`context.Context` instead of `AbortSignal`.** Non-streaming calls take `ctx context.Context` first; use a deadline or `cancel()`. See [Reference → Context Cancellation](/sdk/reference#cancellation).
+- **Streams closed explicitly.** `TableRef.Stream` and `QueryBuilder.Stream` take no context; the returned `*StreamController` owns its goroutine and connection until `.Close()` (usually deferred). See [Streaming](/sdk/streaming).
 - **Generics on package functions.** Go has no type parameters on methods, so use `FetchTyped[Row]`, `Fetch[Row]`, or `SQL[Row]`.
 - **No implicit "await."** `QueryBuilder` is not `PromiseLike`; call `.FetchUntyped(ctx)` or `wavehouse.FetchTyped[Row](ctx, builder)` explicitly.
 - **No third-party dependencies.** Stdlib only, SSE frame parser included. The TypeScript SDK carries exactly one runtime dependency (`eventsource-parser`, ~1.4 KB gzipped).
-- **Any slice batches.** Reflection lets `[]ClickRow{...}` take the same NDJSON batch path as `[]map[string]any`. See [Queries → Insert](/sdk/go/queries#insertctx-data).
+- **Any slice batches.** Reflection lets `[]ClickRow{...}` take the same NDJSON batch path as `[]map[string]any`. See [Queries → Insert](/sdk/queries#inserting-rows).
 
-## Explore the Go SDK
+## Where to go next
 
-- [Queries](/sdk/go/queries) — Tables, chainable query builder, pagination, and raw SQL.
-- [Streaming & Live Queries](/sdk/go/streaming) — SSE streams, client-side filtering, and backfill-then-live queries.
-- [Pipes](/sdk/go/pipes) — Manage named query pipes.
-- [Admin & System](/sdk/go/admin) — Schema introspection, access-control policy, DLQ stats, and health checks.
-- [Reference & CLI](/sdk/go/reference) — Error codes, context cancellation, API tree, and codegen CLI.
+The topic pages cover both SDKs, tabbed by language — the tab you pick here follows you across all of them.
+
+- [Queries](/sdk/queries) — Tables, chainable query builder, inserts, pagination, and raw SQL.
+- [Streaming & Live Queries](/sdk/streaming) — SSE streams, client-side filtering, and backfill-then-live queries.
+- [Pipes](/sdk/pipes) — Execute and manage named query pipes.
+- [Admin & System](/sdk/admin) — Schema introspection, access-control policy, DLQ stats, and health checks.
+- [Reference & CLI](/sdk/reference) — Error codes, context cancellation, API tree, and codegen CLI.

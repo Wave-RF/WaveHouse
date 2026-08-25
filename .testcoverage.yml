@@ -35,6 +35,17 @@ suites:
   # `-coverpkg=./...` can never reach it: rendered and gated on its own,
   # never merged into the total above, nothing to add under exclude.paths.
   # 75 vs 82.7% measured; the headroom is the codegen CLI. Raise as it fills.
+  #
+  # ONE key here, three for the TS SDK below, because the TS SDK has two
+  # coverage-PRODUCING suites and this has one. `ts-unit` is vitest, `ts-e2e`
+  # is the same SDK source re-measured by the orchestrator's live-server run,
+  # and `ts-total` exists only because those two have to be merged before a
+  # meaningful floor can be applied. `make test-sdk-go` is the Go SDK's only
+  # instrumented suite, so a `go-sdk-total` would be a copy of this number and
+  # a `go-sdk-e2e` would gate a suite that emits no covdata: `test-sdk-go-e2e`
+  # drives a server it did not start and runs uninstrumented. Wiring that suite
+  # into the orchestrator so it earns the same three-gate shape is #518 — add
+  # the other two keys with it, not before.
   go-sdk: 75
   # TypeScript SDK suites — see scripts/cov for the merge / render logic.
   # vitest gates via --coverage.thresholds.statements; the merged ts-total

@@ -76,7 +76,7 @@ curl -s -X POST "http://localhost:8080/v1/query?table=clicks" \
 `POST /v1/query?table={table}` and `GET/POST /v1/pipes/{name}` are cached in-process (L1 Ristretto) with singleflight coalescing — duplicate concurrent queries hit ClickHouse once. For raw SQL there's `POST /v1/ops/query` (an admin escape hatch that never caches, emitting `Cache-Control: no-store`), but it's **admin-only** — the trial `public` role can't reach it. To use it, swap the public default for real auth: configure a JWT secret and present a token whose role is the policy [`admin_role`](/access-control#admin_role--the-privileged-role).
 
 :::tip[Prefer a type-safe client?]
-The [TypeScript SDK](/sdk) wraps this endpoint in a chainable query builder with autocomplete on your table names and row types — plus live queries and streaming; the [Go SDK](/sdk/go) offers the same builder with generics for typed rows. The raw shapes are in the [structured query reference](/api#post-v1querytabletable--structured-query).
+The [client SDKs](/sdk/queries) wrap this endpoint in a chainable query builder — autocomplete on your table names and row types in TypeScript, generics for typed rows in Go — plus live queries and streaming. The raw shapes are in the [structured query reference](/api#post-v1querytabletable--structured-query).
 :::
 
 ## 5. Subscribe to real-time updates
@@ -105,8 +105,7 @@ The handful of things that most often trip up a first session — each is expect
 
 - **[Architecture](/architecture)** — how ingest, query, cache, and streaming fit together.
 - **[API Reference](/api)** — every endpoint, request/response shape, and error code.
-- **[TypeScript SDK](/sdk)** — client with query builder, live queries, and codegen; one runtime dependency.
-- **[Go SDK](/sdk/go)** — the same surface for Go: context-first, generics for typed rows, codegen CLI.
+- **[Client SDKs](/sdk)** — official TypeScript and Go clients: query builder, live queries, streaming, and codegen.
 - **[Configuration](/configuration)** — full YAML + environment variable reference.
 - **[Deployment](/deployment)** — Docker images, releases, health checks.
 - **[Development](/development)** — building from source, running tests, hot-reload workflow.

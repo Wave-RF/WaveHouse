@@ -69,6 +69,19 @@ var standaloneGoSuites = []string{"go-sdk"}
 // paths through the module in its working directory, so it must run there.
 var suiteModuleDir = map[string]string{"go-sdk": "clients/go"}
 
+// suiteTarget names the make target that populates a suite, for the
+// "did you run it?" hint. Only suites whose target isn't `test-<suite>`
+// need an entry.
+var suiteTarget = map[string]string{"go-sdk": "test-sdk-go"}
+
+// makeTargetFor returns the make target that populates the named suite.
+func makeTargetFor(suite string) string {
+	if t, ok := suiteTarget[suite]; ok {
+		return t
+	}
+	return "test-" + suite
+}
+
 // TypeScript SDK suites (vitest). ts-unit comes from clients/ts; ts-e2e
 // from tests/e2e/sdk run with --coverage. Both produce Istanbul-format
 // coverage-final.json that `cov ts-merge` combines into ts-total.
@@ -225,7 +238,7 @@ func goSuiteCoverage(c *config, suite string) (rows []pkgRow, total, covered int
 	dir := filepath.Join(root, suite)
 	dataDir := filepath.Join(dir, "data")
 	if !hasCovdata(dataDir) {
-		return nil, 0, 0, "", fmt.Errorf("no covdata in %s — did make test-%s run?", dataDir, suite)
+		return nil, 0, 0, "", fmt.Errorf("no covdata in %s — did make %s run?", dataDir, makeTargetFor(suite))
 	}
 	profile := filepath.Join(dir, "coverage.txt")
 	htmlOut = filepath.Join(dir, "coverage.html")
@@ -385,7 +398,7 @@ func merge(c *config) error {
 //
 // Layout under tmp/coverage/:
 //
-//	ts-unit/coverage-final.json    ← `make test-ts`
+//	ts-unit/coverage-final.json    ← `make test-sdk-ts`
 //	ts-e2e/coverage-final.json     ← `make test-e2e`
 //	ts-merge-input/                ← scratch dir (both renamed json files)
 //	ts-total/                      ← merged JSON + requested reports
@@ -469,11 +482,11 @@ func mergeTS(c *config) error {
 				filepath.Join(root, name, "coverage-final.json"))
 		} else {
 			fmt.Printf("  %s✗%s %-9s (no coverage-final.json; run `make %s` to include)\n",
-				yellow, reset, name, ternary(name == "ts-unit", "test-ts", "test-e2e"))
+				yellow, reset, name, ternary(name == "ts-unit", "test-sdk-ts", "test-e2e"))
 		}
 	}
 	if len(merged) == 0 {
-		fmt.Printf("  %sno TS coverage data — skipping ts-merge (run `make test-ts` and/or `make test-e2e` to populate)%s\n", yellow, reset)
+		fmt.Printf("  %sno TS coverage data — skipping ts-merge (run `make test-sdk-ts` and/or `make test-e2e` to populate)%s\n", yellow, reset)
 		return nil
 	}
 

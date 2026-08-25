@@ -18,7 +18,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse via testcontainers (no compose file) | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
-| **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
+| **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-sdk-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
 
 ### Auto-installed by `make tools`
@@ -41,7 +41,7 @@ node --version      # v22.x (matches .nvmrc and CI)
 pnpm --version      # 11.21+
 ```
 
-If any of those are wrong/missing, the Makefile recipes will fail with confusing errors (e.g. `--output-sync` is unrecognized on Make 3.81; `pnpm: command not found` on `make test-ts`).
+If any of those are wrong/missing, the Makefile recipes will fail with confusing errors (e.g. `--output-sync` is unrecognized on Make 3.81; `pnpm: command not found` on `make test-sdk-ts`).
 
 ### Optional but recommended
 
@@ -192,9 +192,9 @@ There's no bundled playground — point the published `@wavehouse/sdk` client (o
 WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml make dev
 ```
 
-See the [SDK guide](/sdk) for the client API and examples.
+See the [SDK guide](/sdk) for the client API and examples in both languages.
 
-Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { createClient } from '@wavehouse/sdk'` and point `baseURL: 'http://localhost:8080'`; CORS is permissive so cross-origin browser requests just work. Go services do the same with `wavehouse.NewClient(wavehouse.Config{BaseURL: "http://localhost:8080"})` — see the [Go SDK docs](/sdk/go).
+Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { createClient } from '@wavehouse/sdk'` and point `baseURL: 'http://localhost:8080'`; CORS is permissive so cross-origin browser requests just work. Go services do the same with `wavehouse.NewClient(wavehouse.Config{BaseURL: "http://localhost:8080"})` — see [Go setup](/sdk/go).
 
 ### Validating tokens
 
@@ -286,29 +286,36 @@ go build -o bin/wavehouse ./cmd/wavehouse
 
 ### How It Works
 
-The Go suite targets (`test-unit`, `test-integration`) use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile invokes them as `go tool <name>`, so no global installation is needed. `test-e2e` runs the orchestrator + vitest and `test-ts` runs vitest directly, so neither uses gotestsum. The Go SDK and conformance targets (`test-go-sdk`, `test-go-sdk-e2e`, `test-conformance-ts`) run plain `go test` / `node` and ignore `ARGS` and `V=1`.
+Every Go suite target — `test-unit`, `test-integration`, `test-sdk-go`, `test-sdk-go-e2e` — uses [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary, and every one of them honors `ARGS="..."` and `V=1`. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile invokes them as `go tool <name>`, so no global installation is needed. The nested `clients/go` module has no `tool` directives of its own, so the SDK targets resolve the binary from the root module with `go tool -n gotestsum` before running it inside `clients/go`. `test-e2e` runs the orchestrator + vitest and `test-sdk-ts` runs vitest plus the Node conformance runner, so neither uses gotestsum.
 
-Go tests run with the **race detector** (`-race`) enabled by default (including `test-go-sdk` — the SDK's streaming subsystem is highly concurrent; `test-go-sdk-e2e` skips it since it drives a live server). WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE hubs) — the race detector catches data races that would panic in production.
+Go tests run with the **race detector** (`-race`) enabled by default (including `test-sdk-go` — the SDK's streaming subsystem is highly concurrent; `test-sdk-go-e2e` skips it since it drives a live server). WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE hubs) — the race detector catches data races that would panic in production.
 
 ### Quick Reference
 
 ```bash
-# V=1 gives verbose output on test-unit / test-integration / test-e2e,
+# V=1 gives verbose output on every Go suite target and test-e2e,
 # e.g. `V=1 make test-unit`
 
-# Unit tests + Go SDK tests (compact output) — alias for `test-unit` + `test-go-sdk`
+# Go server unit tests (compact output) — alias for `test-unit`
 make test
 
-# Run specific root-module test(s) — ARGS reaches test-unit only; the
-# test-go-sdk half of `make test` runs its full suite regardless
+# Run specific test(s) — ARGS passes through to go test
 make test ARGS="-run TestValidate"
 
 # Go integration tests (requires Docker)
 make test-integration
 
-# SDK vitest unit tests + coverage + gate against suites.ts-unit
-# (`make cov` auto-merges ts-unit + ts-e2e — no separate command)
-make test-ts
+# Both SDK suites, each including its half of the wire-format
+# conformance suite
+make test-sdk
+
+# One SDK at a time
+make test-sdk-go     # nested clients/go module, -race, gates suites.go-sdk
+make test-sdk-ts     # vitest + coverage, gates suites.ts-unit
+                     # (`make cov` auto-merges ts-unit + ts-e2e)
+
+# Go SDK against a live server (nothing is started for you)
+WAVEHOUSE_URL=http://localhost:8080 make test-sdk-go-e2e
 
 # E2E SDK suite against bin/wavehouse-cov
 make test-e2e
@@ -316,19 +323,19 @@ make test-e2e
 # All suites sequentially + merged coverage
 make test-all
 
-# Full CI: parallel verify + builds (Go + SDK + docs) + test + test-ts +
-# test-conformance-ts, then test-integration + test-e2e + cov
+# Full CI: parallel verify + builds (Go + SDK + docs) + test + test-sdk,
+# then test-integration + test-e2e + cov
 make ci
 
 # Merge available covdata + gate against total threshold
 make cov
 ```
 
-Each coverage-instrumented suite target (`test-unit`, `test-integration`, `test-e2e`, `test-go-sdk`, `test-ts`) writes `covdata` to `tmp/coverage/<suite>/data/`, renders a textfmt + HTML report, and gates against the per-suite threshold in `.testcoverage.yml`. `make cov` merges whichever suites have run and gates against the total. `test-go-sdk` is gated but **not** merged: `clients/go` is a nested Go module, invisible to the root module's `-coverpkg=./...`, so its statements can never reach `tmp/coverage/total` — it carries its own `suites.go-sdk` floor instead, the same way the TS SDK carries `ts-*`. The remaining SDK/conformance targets (`test-go-sdk-e2e`, `test-conformance-ts`) run without coverage instrumentation or a per-suite gate.
+Each coverage-instrumented suite target (`test-unit`, `test-integration`, `test-e2e`, `test-sdk-go`, `test-sdk-ts`) writes `covdata` to `tmp/coverage/<suite>/data/`, renders a textfmt + HTML report, and gates against the per-suite threshold in `.testcoverage.yml`. `make cov` merges whichever suites have run and gates against the total. `test-sdk-go` is gated but **not** merged: `clients/go` is a nested Go module, invisible to the root module's `-coverpkg=./...`, so its statements can never reach `tmp/coverage/total` — it carries its own `suites.go-sdk` floor instead, the same way the TS SDK carries `ts-*`. `test-sdk-go-e2e` runs without coverage instrumentation or a per-suite gate; giving it the same unit/e2e/total gate shape the TS SDK has is tracked in [#518](https://github.com/Wave-RF/WaveHouse/issues/518).
 
-**Verbose output**: Use `V=1` to switch from the compact `pkgname-and-test-fails` format to `standard-verbose` on `test-unit` / `test-integration`, and to stream live output on `test-e2e`. This is a standard Makefile convention (`make test -v` can't work because `-v` is a `make` flag). `test-ts` and the Go SDK / conformance targets ignore it.
+**Verbose output**: Use `V=1` to switch from the compact `pkgname-and-test-fails` format to `standard-verbose` on every gotestsum target (`test-unit`, `test-integration`, `test-sdk-go`, `test-sdk-go-e2e`), and to stream live output on `test-e2e`. This is a standard Makefile convention (`make test -v` can't work because `-v` is a `make` flag). `test-sdk-ts` ignores it.
 
-**Extra flags**: `test-unit`, `test-integration`, and `test-ts` accept `ARGS="..."` for pass-through flags (e.g., `-run`, `-count`, `-timeout` for the Go targets; vitest flags for `test-ts`). `test-e2e` and the Go SDK / conformance targets ignore it.
+**Extra flags**: every Go suite target plus `test-sdk-ts` accepts `ARGS="..."` for pass-through flags (e.g., `-run`, `-count`, `-timeout` for the Go targets; vitest flags for `test-sdk-ts`). `test-e2e` ignores it.
 
 **Note on timing**: gotestsum's `DONE ... in X.XXXs` reports pure test execution time. The total wall time includes Go compiling all packages — the first run compiles everything (~15s), subsequent runs use the build cache (~1s).
 
@@ -337,10 +344,10 @@ Each coverage-instrumented suite target (`test-unit`, `test-integration`, `test-
 | Category | Location | Docker? | Command |
 | -------- | -------- | ------- | ------- |
 | Unit tests | `internal/*/_test.go` | No | `make test` |
-| SDK unit tests (TS) | `clients/ts/src/**/*.test.ts` | No | `make test-ts` (always includes coverage + gate) |
-| SDK unit tests (Go) | `clients/go/*_test.go` (nested Go module) | No | `make test-go-sdk` (runs with `-race`, always includes coverage + gate) |
-| Wire-format conformance | `clients/go/conformance_test.go` + `tests/conformance/conformance_ts.mjs`, both replaying `clients/go/testdata/wire_cases.json` | No | Go half via `make test-go-sdk`; TS half via `make test-conformance-ts` |
-| SDK E2E (Go, live server) | `clients/go/e2e_test.go` (`//go:build e2e`) | No | `make test-go-sdk-e2e` (`WAVEHOUSE_URL`, `WAVEHOUSE_AUTH`) |
+| SDK unit tests (TS) | `clients/ts/src/**/*.test.ts` | No | `make test-sdk-ts` (always includes coverage + gate) |
+| SDK unit tests (Go) | `clients/go/*_test.go` (nested Go module) | No | `make test-sdk-go` (runs with `-race`, always includes coverage + gate) |
+| Wire-format conformance | `clients/go/conformance_test.go` + `tests/conformance/conformance_ts.mjs`, both replaying `clients/go/testdata/wire_cases.json` | No | Each half rides its language's target — Go in `make test-sdk-go`, TS in `make test-sdk-ts`; `make test-sdk` runs both |
+| SDK E2E (Go, live server) | `clients/go/e2e_test.go` (`//go:build e2e`) | No | `make test-sdk-go-e2e` (`WAVEHOUSE_URL`, `WAVEHOUSE_AUTH`) |
 | Integration tests (Go) | `tests/integration/*_test.go` | Yes | `make test-integration` |
 | E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
 
@@ -353,8 +360,8 @@ Shared test utilities live in `internal/testutil/` (e.g., `testutil.NopLogger()`
 
 - **Unit test for `internal/foo/`** → create `internal/foo/foo_test.go` (same package).
 - **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`).
-- **E2E test via SDK** → add a `tests/e2e/sdk/*.test.ts` file. These tests exercise the full pipeline (ingest → ClickHouse → query) through the TypeScript SDK. Run with `make test-e2e`.
-- **Go SDK unit test** → add to `clients/go/*_test.go` (nested module — outside `test-unit`'s scope). Run with `make test-go-sdk`.
+- **E2E test via SDK** → add a `tests/e2e/sdk/*.test.ts` file. These tests exercise the full pipeline (ingest → ClickHouse → query) through the TypeScript SDK. Run with `make test-e2e`. (The Go SDK's own e2e suite is not yet driven by that orchestrator — [#518](https://github.com/Wave-RF/WaveHouse/issues/518).)
+- **Go SDK unit test** → add to `clients/go/*_test.go` (nested module — outside `test-unit`'s scope). Run with `make test-sdk-go`.
 - **Wire-format parity case** → when you add or change an endpoint, add an entry to `clients/go/testdata/wire_cases.json` plus its dispatch in both runners (`clients/go/conformance_test.go` and `tests/conformance/conformance_ts.mjs`). Required by the SDK sync rule in `AGENTS.md` / `CONTRIBUTING.md`.
 - **Test helpers** → add to `internal/testutil/` (Go) or `tests/e2e/sdk/helpers.ts` (E2E).
 
@@ -520,11 +527,11 @@ Run `make help` to see all targets. Key ones:
 | `make obs-grafana` | Grafana alternative to aspire, more advanced and complicated |
 | `make obs-front` | Custom graphs like grafana, but is simpler and easier to configure like aspire |
 | **Static checks** | |
-| `make fmt` | Check formatting across root-module Go (`gofumpt`) + TS (Biome); the nested `clients/go` module's gofumpt check runs under `make verify` (`verify-go-sdk`). Run `make fix` to apply everywhere. |
-| `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
+| `make fmt` | Check formatting across Go (`gofumpt`, both the root module and the nested `clients/go`) + TS (Biome). Run `make fix` to apply. |
+| `make tidy` | Verify `go.mod`/`go.sum` are tidy in both modules (run `make fix` to apply) |
 | `make lint` | Run linters across Go (`golangci-lint`, root + `clients/go`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
 | `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
-| `make verify` | Repo-wide static checks: root Go (tidy + fmt + vulncheck + lint), `clients/go` (fmt + vet + lint — no tidy/vulncheck: it's a nested module, invisible to the root-scoped `tidy`/`vulncheck` targets) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + docs type-check (`astro check` — not a full build, so link validation stays CI's job) (parallel-safe: `make -j verify`) |
+| `make verify` | Repo-wide static checks: Go (tidy + fmt + lint across both modules; `vulncheck` is still root-only — extending it to the nested module is tracked in [#437](https://github.com/Wave-RF/WaveHouse/issues/437)) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + docs type-check (`astro check` — not a full build, so link validation stays CI's job) (parallel-safe: `make -j verify`) |
 | `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint `--fix`), MDX (`fix-mdx-fences` only — the generic fixers never run over `.mdx`), and docs-prose spelling (misspell, both) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
@@ -532,17 +539,17 @@ Run `make help` to see all targets. Key ones:
 | `make build-cover` | Coverage-instrumented build → `bin/wavehouse-cov` (used by E2E) |
 | `make build-ts` | Build TypeScript SDK → `clients/ts/dist/` |
 | **Test** | |
-| `make test` | Alias for `test-unit` + `test-go-sdk` |
+| `make test` | Alias for `test-unit` (Go server unit tests) |
 | `make test-unit` | Go unit tests + render coverage + gate suite threshold |
-| `make test-go-sdk` | Go SDK (`clients/go`, nested module) unit tests with `-race` + render coverage + gate `suites.go-sdk` (own gate; never merged into the Go total) |
-| `make test-go-sdk-e2e` | Go SDK E2E against a live server (`WAVEHOUSE_URL`, `WAVEHOUSE_AUTH`) |
-| `make test-conformance-ts` | TS SDK wire-format conformance against the shared `wire_cases.json` fixture (builds the TS SDK first) |
+| `make test-sdk` | Both SDK suites — `test-sdk-go` + `test-sdk-ts` |
+| `make test-sdk-go` | Go SDK (`clients/go`, nested module) unit + wire-conformance tests with `-race` + render coverage + gate `suites.go-sdk` (own gate; never merged into the Go total) |
+| `make test-sdk-ts` | TS SDK vitest unit + wire-conformance tests + v8 coverage + gate against `suites.ts-unit` (matches Go's "always coverage" pattern) |
+| `make test-sdk-go-e2e` | Go SDK E2E against a live server (`WAVEHOUSE_URL`, `WAVEHOUSE_AUTH`) |
 | `make test-integration` | Go integration tests (requires Docker) + coverage gate |
-| `make test-ts` | SDK vitest unit tests + v8 coverage + gate against `suites.ts-unit` (matches Go's "always coverage" pattern) |
 | `make cov` | Merge Go + TS coverage and gate against thresholds. Auto-runs after `make test-all` and `make ci`; standalone `make cov` is "show me the merged numbers without re-running." Each side skips silently if its data is missing, but `make cov` fails if *both* are empty (you ran it before any test target). |
 | `make test-e2e` | E2E SDK suite against `bin/wavehouse-cov` + coverage gate |
 | `make test-all` | All suites sequentially + merged coverage gate |
-| `make ci` | Full pipeline: parallel `verify` + builds + unit/SDK tests, then integration + E2E + cov |
+| `make ci` | Full pipeline: parallel `verify` + builds + `test` / `test-sdk`, then integration + E2E + cov |
 | **Release** (see [Cutting a release](#cutting-a-release)) | |
 | `make release-server VERSION=X.Y.Z` | Tag a server release — binaries + container image |
 | `make release-sdk-ts VERSION=X.Y.Z` | Tag a TypeScript SDK release — npm |
@@ -559,7 +566,7 @@ Run `make help` to see all targets. Key ones:
 | `make clean-tools` | Installed tools and pnpm deps (`.bin/`, `node_modules/`) |
 | `make clean-all` | Full reset: above + `data/` + Docker volumes |
 
-`test-unit`, `test-integration`, and `test-ts` accept `ARGS="..."` for pass-through flags; `test-unit`, `test-integration`, and `test-e2e` accept `V=1` for verbose output. `test-go-sdk`, `test-go-sdk-e2e`, and `test-conformance-ts` ignore both. Build targets accept `TAGS="..."` for Go build tags.
+Every Go suite target (`test-unit`, `test-integration`, `test-sdk-go`, `test-sdk-go-e2e`) plus `test-sdk-ts` accepts `ARGS="..."` for pass-through flags; those Go targets and `test-e2e` accept `V=1` for verbose output, which `test-sdk-ts` ignores. Build targets accept `TAGS="..."` for Go build tags.
 
 ## Dependency Management
 
@@ -703,7 +710,7 @@ If the title doesn't match, a sticky comment posts on the PR explaining the form
 
 The `main branch protection` ruleset requires one status check to pass before any PR can merge:
 
-- `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit test-ts test-go-sdk test-conformance-ts`), `integration` (`make test-integration`), `e2e` (`make -j test-e2e` — builds its own SDK dist + cover binary on a warm cache, runs the suite exactly like a local run), `coverage` (`make cov` over every suite's uploaded coverage fragment + threshold gates, like local `make ci`'s final step), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled and treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys. Every run's Summary page gets a per-job wall-clock table from the non-gating `Timing summary` job. The full architecture — DAG diagram, design invariants, cache policy, how to add a job — lives in [`.github/workflows/README.md`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/workflows/README.md).
+- `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit test-sdk`), `integration` (`make test-integration`), `e2e` (`make -j test-e2e` — builds its own SDK dist + cover binary on a warm cache, runs the suite exactly like a local run), `coverage` (`make cov` over every suite's uploaded coverage fragment + threshold gates, like local `make ci`'s final step), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled and treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys. Every run's Summary page gets a per-job wall-clock table from the non-gating `Timing summary` job. The full architecture — DAG diagram, design invariants, cache policy, how to add a job — lives in [`.github/workflows/README.md`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/workflows/README.md).
 
 The `PR housekeeping` workflow still runs on every PR (labels + the title explainer comment) but is no longer a required check.
 

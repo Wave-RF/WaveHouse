@@ -94,7 +94,7 @@ make fix               # Auto-fix everything fixable (gofumpt, goimports, lint -
 make test              # Go unit tests + coverage gate (alias for test-unit)
 make test-integration  # Go integration tests + gate (Docker; testcontainers)
 make test-e2e          # E2E SDK suite vs the cover binary + gate (Docker; testcontainers)
-make test-ts           # SDK vitest unit tests + coverage + gate
+make test-sdk          # Both SDK suites (Go + TS) + coverage + gates
 make ci                # Full pre-push pipeline — run it the documented way (§Local-First Validation)
 make build             # Compile → bin/wavehouse
 make dev               # ClickHouse + hot-reload server on :8080 (Docker)
@@ -140,7 +140,7 @@ Tooling notes (the non-obvious bits `make help` won't tell you):
 make ci   # Full parity with CI: parallel verify + builds + unit/SDK tests, then integration + E2E + cov
 ```
 
-If `make ci` passes locally, your commit has crossed the same gates CI will run — the CI workflow (`.github/workflows/ci.yml`) is a job DAG over the *same Makefile targets* (`verify`, `build-docs`, `test-unit`/`test-ts`, `test-integration`, `test-e2e`, `cov`), just spread across parallel runners. For workflow-only changes, read the YAML diff carefully and run `actionlint` if you have it installed.
+If `make ci` passes locally, your commit has crossed the same gates CI will run — the CI workflow (`.github/workflows/ci.yml`) is a job DAG over the *same Makefile targets* (`verify`, `build-docs`, `test-unit`/`test-sdk`, `test-integration`, `test-e2e`, `cov`), just spread across parallel runners. For workflow-only changes, read the YAML diff carefully and run `actionlint` if you have it installed.
 
 ### Running `make ci` (for agents)
 
@@ -364,7 +364,7 @@ The TypeScript SDK (`@wavehouse/sdk` in `clients/ts/`) and Go SDK (`github.com/W
 
 | Backend change | SDK considerations |
 | -------------- | ------------------ |
-| New user-facing API endpoint | Add a typed client method in **both** SDKs (TS: `clients/ts/src/` — `client.ts`, `query-builder.ts`, `pipes.ts`, `policy.ts`, `stream/`; Go: `clients/go/` — corresponding file). Update doc pages under `docs/src/content/docs/sdk/` for both `ts/` and `go/`. Add a wire case to `clients/go/testdata/wire_cases.json` with dispatch in both conformance runners. |
+| New user-facing API endpoint | Add a typed client method in **both** SDKs (TS: `clients/ts/src/` — `client.ts`, `query-builder.ts`, `pipes.ts`, `policy.ts`, `stream/`; Go: `clients/go/` — corresponding file). Update the shared topic page under `docs/src/content/docs/sdk/` — add or extend the `<Tabs syncKey="lang">` block so BOTH languages are covered on the same page (never a per-language page tree; see §SDK docs layout). Add a wire case to `clients/go/testdata/wire_cases.json` with dispatch in both conformance runners. |
 | Change to JWT auth / role extraction | TS: `clients/ts/src/http.ts` + `client.ts`. Go: `clients/go/http.go` + `wavehouse.go`. |
 | Change to `EventMessage` / ingest event format | Update payload types in both SDKs (some are codegen-regenerated — re-run both codegen CLIs). |
 | New / changed structured query AST | TS: `clients/ts/src/query-builder.ts`. Go: `clients/go/query_builder.go` + `types.go`. |
@@ -376,6 +376,16 @@ The TypeScript SDK (`@wavehouse/sdk` in `clients/ts/`) and Go SDK (`github.com/W
 Internal-only backend changes (middleware refactors, observability internals, dedup implementation, sweeper logic, NATS plumbing) generally don't need SDK updates. Use judgement — table above is the source of truth; nothing automated nudges you.
 
 **The decision test**: would a user's *code* need to change to take advantage of (or be compatible with) this change? If yes, both SDKs need updates. If no (purely internal optimization), no.
+
+### SDK docs layout
+
+The SDK docs are **topic-first, not language-first** — the decision from PR #313, carried into the Go SDK in PR #434. Adding a third language must not change the shape:
+
+- **One page per topic, shared by every language**: `/sdk/queries`, `/sdk/streaming`, `/sdk/pipes`, `/sdk/admin`, `/sdk/reference`. Prose that holds for every client stays outside the tabs; the language-specific code and caveats go inside a `<Tabs syncKey="lang">` block, one `<TabItem>` per language. The `syncKey` is `lang` everywhere, so a reader picks a language once and it follows them across the whole tree.
+- **One setup/caveats page per language**: `/sdk/typescript`, `/sdk/go`. Installation, client construction, auth, and the error model are genuinely per-language and live here.
+- **`/sdk` is the language-neutral overview.** No language sits at the root of `/sdk` — that was the trap the Go SDK's first draft fell into, leaving TypeScript un-prefixed and undocumented as a language.
+- **Adding a language** = one new setup page + one new `<TabItem>` per topic page + one sidebar entry. It is never a parallel `/sdk/<lang>/<topic>` tree, because that churns the topic URLs and doubles the pages to keep in sync.
+- Because tabs need MDX, the topic pages are `.mdx` — remember §Markdown authoring rules: `make fix` does not auto-fix MDX, so unwrap WH001 wrapping by hand and keep a blank line between a JSX tag and a code fence.
 
 ## Common Tasks
 

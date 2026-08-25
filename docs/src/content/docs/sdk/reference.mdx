@@ -1,13 +1,18 @@
 ---
-title: "TypeScript SDK Reference & CLI"
-description: "Error codes, AbortController, the full API tree, the codegen CLI, and E2E testing with @wavehouse/sdk."
+title: "SDK Reference & CLI"
+description: "Error codes, cancellation, the full API tree, and the codegen CLIs for the WaveHouse SDKs."
 ---
 
-Cross-cutting reference for `@wavehouse/sdk`: cancellation, the error model behind every [`Result<T>`](/sdk#result-type), the complete API tree at a glance, and the tooling that ships in the package.
+import { Tabs, TabItem } from "@astrojs/starlight/components";
 
-## AbortController Support
+Cross-cutting reference for both SDKs: cancellation, the error model, the complete API tree at a glance, and the tooling each package ships.
 
-All async operations accept an `AbortSignal` for cancellation:
+## Cancellation
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+All async operations accept an `AbortSignal`:
 
 ```ts
 const controller = new AbortController();
@@ -19,11 +24,37 @@ if (error?.code === 'ABORTED') {
 }
 ```
 
+  </TabItem>
+  <TabItem label="Go">
+
+Non-streaming operations take a `context.Context` as their first argument (the analog of TypeScript's `AbortSignal`). Cancel via a timeout or an explicit `cancel()`; cancellation returns immediately, without retrying, as `&wavehouse.Error{Status: 0, Code: "ABORTED", Retryable: false}`.
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+page, err := wh.From("clicks").Fetch(ctx)
+var whErr *wavehouse.Error
+if errors.As(err, &whErr) && whErr.Code == "ABORTED" {
+    fmt.Println("Request timed out")
+}
+```
+
+`.Stream(opts)` ignores `context.Context`; the returned `*StreamController` manages its own context and goroutine, closed via `.Close()`. See [Streaming → Stream options](/sdk/streaming#stream-options).
+
+  </TabItem>
+</Tabs>
+
 ---
 
 ## Error Handling
 
-The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no global `fetch` and no `options.fetch` (see [Runtime support](/sdk#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and on a stream is reported as a retryable `SSE_AUTH_ERROR`. One more exception escapes an SDK call synchronously, though it is yours rather than ours: your own `status` handler throwing on the first `.subscribe()` or `.liveQuery()`, described under *If your own callback throws* below.
+Neither SDK raises for anything the server returns — API errors are values. Both raise (or return plain wrapped errors) for caller and environment faults instead.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+All API errors come back in [`Result.error`](/sdk/typescript#result-type). The SDK does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk/typescript#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no global `fetch` and no `options.fetch` (see [Runtime support](/sdk/typescript#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and on a stream is reported as a retryable `SSE_AUTH_ERROR`. One more exception escapes an SDK call synchronously, though it is yours rather than ours: your own `status` handler throwing on the first `.subscribe()` or `.liveQuery()`, described under *If your own callback throws* below.
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
@@ -71,9 +102,42 @@ Rejected requests surface the real status and message rather than an opaque conn
 
 `SSE_AUTH_ERROR` is the one caller-side failure that isn't terminal. A rejecting `auth` callback propagates out of a REST call, but on a stream — where `auth` is invoked on every connection attempt rather than once per stream — a token endpoint having a bad minute is treated as transient and retried, rather than tearing down a stream that is otherwise healthy.
 
+  </TabItem>
+  <TabItem label="Go">
+
+The SDK never panics on API or network failures, mirroring the TypeScript SDK's "never throws" guarantee. Request-response operations (queries, ingest, pipes, admin) return `(T, error)`, while result-less ones (`Pipes.Set`/`Delete`, `Policy.Set`, `Schema.Refresh`, `Sys.Health`) return a bare `error`. HTTP exchange errors are `*wavehouse.Error` (unwrap via `errors.As`, or use `wavehouse.IsRetryable(err)` to shortcut the `errors.As` + `.Retryable` check); client-side failures such as an `Auth` provider or marshal error are plain wrapped errors, so handle the `errors.As == false` case — see the [worked example](/sdk/go#error-handling). Streaming methods (`Stream`, `Subscribe`, `Close`) report through the subscriber's `Error` callback instead, and `Connected(ctx)` returns plain errors.
+
+| Status | Code | Retryable | Description |
+|--------|------|-----------|--------------|
+| 400 | `HTTP_400` | No | Bad request (validation, missing fields) |
+| 401 | `HTTP_401` | No | Invalid or expired JWT (missing tokens use `default_role`, resulting in success or 403) |
+| 403 | `HTTP_403` | No | Insufficient permissions |
+| 404 | `HTTP_404` | No | Table or pipe not found |
+| 429 | `HTTP_429` | Yes | Rate limited (auto-retries, honoring `Retry-After`, capped at 30s) |
+| 500 | `HTTP_500` | Yes | Server error (retried per `ClientOptions.MaxRetries`) |
+| 503 | `HTTP_503` | Yes | Service unavailable (auto-retries, honoring `Retry-After`, capped at 30s) |
+| 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
+| 0 | `ABORTED` | No | Request canceled via `context.Context` |
+| 0 | `SSE_AUTH_ERROR` | Yes | The `Auth` provider returned an error for this attempt; the stream retries, so a token endpoint having a bad minute doesn't tear down a healthy stream |
+| 0 | `SSE_NETWORK_ERROR` | Yes | Transport failure opening or holding the stream connection |
+| 0 | `SSE_CONNECT_ERROR` | No | `BaseURL` is unparseable, or its scheme is not `http`/`https` — retrying cannot fix it |
+| *3xx* | `SSE_REDIRECT` | No | The stream endpoint redirected while the request carried a credential, and the SDK refused to follow it |
+| 200 | `SSE_BAD_CONTENT_TYPE` | No | A `200` that wasn't `text/event-stream` — something between you and WaveHouse answered (a captive portal, an auth gateway's login page) |
+| 0 | `SSE_PARSE_ERROR` | Yes | A frame's JSON didn't decode; the frame is dropped and the stream continues |
+| 0 | `SSE_READ_ERROR` | Yes | The connection failed mid-read; the stream reconnects from the last event ID |
+| 0 | `SSE_ERROR` | Yes | Stream failure the SDK could not classify further |
+
+Retries apply to all HTTP methods, matching the TypeScript SDK's `http.ts`. For `/v1/ingest`, at-least-once delivery on retry is a documented contract (see ["At-least-once on retry"](/api#post-v1ingesttabletable--ingest-data)); use server-side dedup to suppress duplicates. `/v1/ops/query` (raw SQL) requires `admin_role`, so repeated execution on retry is an accepted risk.
+
+  </TabItem>
+</Tabs>
+
 ---
 
 ## Full API Tree
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
 
 ```text
 createClient<DB>(config) → WaveHouseClient
@@ -122,9 +186,71 @@ StreamController (NOT thenable)
 └── [Symbol.asyncIterator]() → AsyncIterableIterator<StreamEvent>
 ```
 
+  </TabItem>
+  <TabItem label="Go">
+
+```text
+NewClient(Config) → *Client
+├── .From(table) → *TableRef
+│   ├── .Fetch(ctx) → (*Page[map[string]any], error)
+│   ├── .Select(...cols) → *QueryBuilder
+│   │   ├── .Select() .SelectAll() .Where() .Count() .Sum() .Avg() .Min() .Max()
+│   │   │   .CountDistinct() .Aggregate() .GroupBy() .OrderBy()
+│   │   │   .Limit() .TimeRange() .CacheTTL()
+│   │   ├── FetchTyped[Row](ctx, q)  → (*Page[Row], error)          // package-level generic func
+│   │   ├── .FetchUntyped(ctx)       → (*Page[map[string]any], error)
+│   │   ├── .Stream(opts)            → *StreamController
+│   │   └── .LiveQuery(sub, opts)    → *LiveQueryHandle
+│   ├── .SelectAll() → *QueryBuilder
+│   ├── .Insert(ctx, data) → (*InsertResult, error)
+│   ├── .InsertNDJSON(ctx, ndjson) → (*InsertResult, error)
+│   ├── .Schema(ctx) → (*TableSchema, error)
+│   └── .Stream(opts) → *StreamController
+├── .Pipe(name, params) → *PipeRef
+│   ├── Fetch[Row](ctx, p) → ([]Row, error)          // package-level generic func
+│   ├── .FetchUntyped(ctx) → ([]map[string]any, error)
+│   └── .Stream(opts) → *StreamController
+├── .Pipes (admin) → *PipesNamespace
+│   ├── .List(ctx) → ([]Pipe, error)
+│   ├── .Get(ctx, name) → (*Pipe, error)
+│   ├── .Set(ctx, name, PipeDef) → error
+│   └── .Delete(ctx, name) → error
+├── SQL[Row](ctx, client, query) → ([]Row, error)     // package-level generic func, admin-only
+├── .Schema (admin) → *SchemaNamespace
+│   ├── .List(ctx) → (Schemas, error)
+│   └── .Refresh(ctx) → error
+├── .Policy (admin) → *PolicyNamespace
+│   ├── .Get(ctx) → (*Policy, error)
+│   ├── .Set(ctx, *Policy) → error
+│   └── .Validate(ctx, *Policy) → (*ValidationResult, error)
+├── .DLQ (admin) → *DLQNamespace
+│   ├── .List(ctx) → (*DLQStats, error)
+│   ├── .Table(ctx, name) → (*DLQStats, error)
+│   └── .Stream(opts) → *StreamController  // not yet functional server-side — #197
+└── .Sys → *SysNamespace
+    └── .Health(ctx) → error
+
+*StreamController
+├── .Subscribe(*StreamSubscriber) → func()  // unsubscribe
+├── .Events() → <-chan StreamEvent          // idiomatic Go alternative to an async iterator
+├── .Close()
+├── .Status() → StreamStatus
+└── .Connected(ctx) → error                 // Go-only addition, blocks until live
+```
+
+  </TabItem>
+</Tabs>
+
+---
+
 ## Codegen CLI
 
-Generate TypeScript types from a running WaveHouse instance. The package ships a `wavehouse-codegen` bin, so after installing `@wavehouse/sdk` you can run it with `npx`:
+Generate typed row definitions from a running WaveHouse instance. Codegen reads the admin-only `/v1/ops/schema` endpoint, so a non-dev server needs an admin token or returns `403`.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+The package ships a `wavehouse-codegen` bin, so after installing `@wavehouse/sdk` you can run it with `npx`:
 
 ```bash
 npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
@@ -133,7 +259,7 @@ npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`.
+Pass an admin-role token with `--auth <jwt>`.
 
 **Options:**
 
@@ -174,11 +300,91 @@ export interface ClicksRow {
 | `Map(K, V)` | `Record<K, V>` |
 | `LowCardinality(T)` | same as `T` |
 
-## E2E Testing
+  </TabItem>
+  <TabItem label="Go">
+
+The module ships a `wavehouse-codegen` command under `cmd/`:
+
+```bash
+export WAVEHOUSE_AUTH='<admin-jwt>'   # avoids leaking the token via argv
+go run github.com/Wave-RF/WaveHouse/clients/go/cmd/wavehouse-codegen@latest \
+    --url http://localhost:8080 \
+    --out ./db_types.go \
+    --package myapp
+
+# Or, from inside a checkout of clients/go/:
+go run ./cmd/wavehouse-codegen --url http://localhost:8080 --out ./db_types.go
+```
+
+Prefer `WAVEHOUSE_AUTH` over `--auth <jwt>` to keep tokens out of shell history and process listings.
+
+**Options:**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--url`, `-u` | WaveHouse base URL | `http://localhost:8080` |
+| `--out`, `-o` | Output `.go` file path | `./wavehouse_types.go` |
+| `--auth`, `-a` | Bearer token; prefer `WAVEHOUSE_AUTH` env var | `$WAVEHOUSE_AUTH` |
+| `--package`, `-p` | Go package name for the generated file | `main` |
+| `--help`, `-h` | Show usage and exit | — |
+
+**Example output** (for the [development quick-start](/development#quick-start) `clicks` table):
+
+```go
+// Code generated by wavehouse-codegen. DO NOT EDIT.
+
+package myapp
+
+// ClicksRow represents a row in the "clicks" table.
+type ClicksRow struct {
+    Page              string  `json:"page"`
+    Button            string  `json:"button"`
+    Score             float64 `json:"score"`
+    ReceivedTimestamp *string `json:"received_timestamp,omitempty"`
+}
+```
+
+Output is run through `go/format`, and codegen fails loudly if a table or column name would produce invalid Go source. Names become `PascalCase`, with an `X` prefix for a leading digit (`2fa_events` → `X2faEventsRow`); initialisms are not special-cased, so `event_id` becomes `EventId`, not `EventID`. Columns with `has_default: true` become pointer fields with `,omitempty` — as `received_timestamp` does above — where `nil` uses the server default and a pointed-at value is sent, including an explicit `0`/`false`/`""`.
+
+**ClickHouse → Go type mapping:**
+
+| ClickHouse Type | Go Type |
+|------------------|---------|
+| `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Time`/`Time64`, `Enum8`/`Enum16`, `IPv4`/`IPv6` | `string` |
+| `Bool` / `Boolean` | `bool` |
+| `UInt8` / `UInt16` / `UInt32` / `UInt64` | `uint8` / `uint16` / `uint32` / `uint64` |
+| `Int8` / `Int16` / `Int32` / `Int64` | `int8` / `int16` / `int32` / `int64` |
+| `Float32`, `BFloat16` | `float32` |
+| `Float64` | `float64` |
+| `UInt128`/`UInt256`, `Int128`/`Int256` | `json.Number` |
+| `Decimal*` | `string` |
+| `Nullable(T)` | `*T` |
+| `LowCardinality(T)` | same as `T` |
+| `Array(T)` | `[]T` (except `Array(UInt8)` → `json.RawMessage` per [#436](https://github.com/Wave-RF/WaveHouse/issues/436)) |
+| `Map(K, V)` | `map[K]V` (fallback: `map[string]any`) |
+| `SimpleAggregateFunction(fn, T)` | same as `T` (rollup tables from `AggregatingMergeTree`/`SummingMergeTree` generate usable structs) |
+| anything unrecognized | `any` |
+
+Unlike the TypeScript SDK, Go codegen preserves ClickHouse integer **widths** (`UInt64` → `uint64`, not a generic `number`), so 64-bit columns decode exactly where TS hits the 2^53 ceiling. Generated structs target `/v1/query` and `/v1/pipes/*`; for the raw-SQL path (`/v1/ops/query`), which quotes 64-bit-and-wider integers, use `map[string]any` with `SQL[Row]`.
+
+  </TabItem>
+</Tabs>
+
+---
+
+## Testing
+
+The cross-language wire-format **conformance suite** replays one shared fixture (`clients/go/testdata/wire_cases.json`) through both SDKs, asserting HTTP methods, paths, content types, and bodies. The Go half is `clients/go/conformance_test.go` (run by `make test-sdk-go`); the TypeScript half is `tests/conformance/conformance_ts.mjs` (run by `make test-sdk-ts`). `make test-sdk` runs both, and so does CI, keeping the wire formats in step.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
 
 The SDK doubles as the E2E integration test harness. Tests in `tests/e2e/sdk/` exercise the full pipeline (ingest → ClickHouse → query) through the SDK, validating both the backend and the client library in one pass.
 
 ```bash
+# Unit tests + wire conformance
+make test-sdk-ts
+
 # Run all E2E tests: the orchestrator boots a ClickHouse testcontainer +
 # the wavehouse-cov binary, then runs the SDK suite
 make test-e2e
@@ -187,3 +393,24 @@ make test-e2e
 Test files live in `tests/e2e/sdk/` (each `*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's own `waitForCondition` poll helper rather than a pipeline test.
 
 See [Development Guide — E2E Tests via SDK](/development#e2e-tests-via-sdk) for architecture details and workflow tips.
+
+  </TabItem>
+  <TabItem label="Go">
+
+Unit tests are colocated in `clients/go/`, which is its own module (`clients/go/go.mod`), separate from the root `WaveHouse` module:
+
+```bash
+# Unit tests + wire conformance + coverage gate
+make test-sdk-go
+```
+
+E2E tests (build tag `e2e`) run against a live WaveHouse instance:
+
+```bash
+WAVEHOUSE_URL=http://localhost:8080 WAVEHOUSE_AUTH='<jwt>' make test-sdk-go-e2e
+```
+
+`WAVEHOUSE_URL` defaults to `http://localhost:8080`, and the optional `WAVEHOUSE_AUTH` covers the admin cases; the suite skips if the server is unreachable. Unlike the TypeScript SDK, the Go E2E suite isn't yet driven by the repo's `make test-e2e` orchestrator — wiring it in, with its own coverage gate, is tracked in [#518](https://github.com/Wave-RF/WaveHouse/issues/518).
+
+  </TabItem>
+</Tabs>

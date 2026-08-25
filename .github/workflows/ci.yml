@@ -204,8 +204,8 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           go-cache-suffix: "-unit"
-      - name: Run Go unit tests + SDK vitest + Go SDK tests
-        run: make test-unit test-ts test-go-sdk test-conformance-ts COV_DEFER=1
+      - name: Run Go unit tests + both SDK suites
+        run: make test-unit test-sdk COV_DEFER=1
       # One fragment, three suites (unit, ts-unit, go-sdk) — all deferred to
       # the `coverage` job. Whole-tree path so a new suite needs no edit here.
       - name: Upload coverage fragment
