@@ -179,7 +179,7 @@ The hot-reloadable half of configuration — the four JSON files, every `config.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `settings.dir` | `WH_SETTINGS_DIR` | *(required)* | Path to the settings directory. The server loads it at boot; the `wavehouse validate` CLI — like `wavehouse health` — resolves its input directly from the `[dir]` argument or `WH_SETTINGS_DIR` without loading this file, so a value set only in the YAML key validates on boot but not via the bare CLI. No default, same reasoning as `policy.file_path`: a baked-in path would turn a missing mount into silent misconfiguration instead of an explicit operator choice. The container images set it to the baked `/app/settings`. |
+| `settings.dir` | `WH_SETTINGS_DIR` | *(required)* | Path to the settings directory. The server loads it at boot; the `wavehouse validate` CLI — like `wavehouse health` — resolves its input directly from the `[dir]` argument or `WH_SETTINGS_DIR` without loading this file, so a value set only in the YAML key validates on boot but not via the bare CLI. No default, same reasoning as `policy.file_path`: a baked-in path would turn a missing mount into silent misconfiguration instead of an explicit operator choice. The container images preset it to `/app/settings` but ship no files there — mount a directory (or seed a volume with `init-settings`). |
 
 ### OTel
 
@@ -330,7 +330,7 @@ WH_POLICY_FILE_PATH=
 
 WH_PIPES_DIR=
 
-WH_SETTINGS_DIR=./settings  # required, no default (`wavehouse init-settings ./settings`); the container images set /app/settings
+WH_SETTINGS_DIR=./settings  # required, no default (`wavehouse init-settings ./settings`); the container images preset /app/settings and mount it
 
 WH_OTEL_ENABLED=false
 WH_OTEL_TRACES_ENABLED=true

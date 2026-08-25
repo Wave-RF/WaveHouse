@@ -40,13 +40,15 @@ services:
       WH_POLICY_FILE_PATH: /app/policy.yaml
       WH_DLQ_ENABLED: "true"
       # Settings directory (roles.json, policies.json, pipes.json, config.json)
-      # — required; the image sets WH_SETTINGS_DIR=/app/settings and bakes the
-      # seed there (every key at its default: dedupe off, event_id as its id
-      # field, 10000-row query limit, 60s schema refresh, CORS "*"). Tenant
-      # tunables live in its
-      # config.json and reload live (file watch / SIGHUP /
-      # POST /v1/ops/settings/reload). To edit them, write your own with
-      # `wavehouse init-settings ./my-settings` and bind-mount it below.
+      # — required, and the image ships none (same as the policy file): the
+      # image sets WH_SETTINGS_DIR=/app/settings and the wavehouse-settings
+      # volume below is mounted there. Seed it ONCE before the first `up`:
+      #   docker compose -f deployments/compose/standalone.yaml run --rm wavehouse init-settings /app/settings
+      # (every key at its default: dedupe off, event_id as its id field,
+      # 10000-row query limit, 60s schema refresh, CORS "*"). Tenant tunables
+      # live in its config.json and reload live (file watch / SIGHUP /
+      # POST /v1/ops/settings/reload); to edit, bind-mount your own directory
+      # instead (see volumes below).
       # Optional: bootstrap pipes from .sql files. Mount your pipes dir
       # read-only and uncomment WH_PIPES_DIR. The directory is a seed for
       # NATS KV — runtime pipe edits go through the API, not the files.
@@ -54,7 +56,8 @@ services:
     volumes:
       - wavehouse-data:/app/data
       - ./dev-policy.yaml:/app/policy.yaml:ro    # permissive trial policy (public role, demo tables) — tune for prod
-      # - ./my-settings:/app/settings    # your own settings dir (from `wavehouse init-settings`)
+      - wavehouse-settings:/app/settings    # seed once: `... run --rm wavehouse init-settings /app/settings`
+      # - ./my-settings:/app/settings    # or your own dir (from `wavehouse init-settings ./my-settings`) instead of the volume
       # - ./my-pipes:/app/pipes:ro    # uncomment alongside WH_PIPES_DIR
     depends_on:
       - clickhouse
@@ -62,3 +65,4 @@ services:
 volumes:
   clickhouse-data:
   wavehouse-data:
+  wavehouse-settings:

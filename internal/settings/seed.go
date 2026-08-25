@@ -10,12 +10,10 @@ import (
 
 // seedFS holds the starter settings directory: every file present, every
 // key set to its default. The checked-in seed/ directory is the ONE place
-// defaults live — the binary has no compiled fallbacks. It has two
-// consumers: this embed, so `wavehouse init-settings` can write the
-// directory anywhere without a source tree, and the container images, which
-// COPY the same directory to /app/settings as plain files (the goreleaser
-// image is assembled on the build platform for a target-platform binary, so
-// it can't run init-settings at build time).
+// defaults live — the binary has no compiled fallbacks. Its one consumer is
+// this embed, so `wavehouse init-settings` can write the directory anywhere
+// without a source tree; the container images ship no settings (the operator
+// mounts or seeds /app/settings), same as they ship no policy file.
 //
 //go:embed seed/*.json
 var seedFS embed.FS

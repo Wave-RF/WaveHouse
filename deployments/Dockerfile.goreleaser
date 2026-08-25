@@ -17,12 +17,9 @@
 # once natively and COPY'ing into each target image is correct AND
 # removes the binfmt/QEMU dependency entirely.
 FROM --platform=$BUILDPLATFORM alpine:3 AS layout
-# The seed settings directory arrives via `extra_files` in .goreleaser.yaml
-# (the goreleaser context holds only the dist tree). Baked at /app/settings so
-# a bare `docker run` boots; not a VOLUME — it's config, not state. Same COPY
-# as deployments/Dockerfile — keep the two in lockstep.
-COPY internal/settings/seed /app/settings
-RUN mkdir -p /app/data /app/pipes && chown -R 65532:65532 /app
+# /app/settings is the empty settings-directory mount point — see the same
+# RUN in deployments/Dockerfile; keep the two in lockstep.
+RUN mkdir -p /app/data /app/pipes /app/settings && chown -R 65532:65532 /app
 
 FROM gcr.io/distroless/static-debian12
 

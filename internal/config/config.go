@@ -46,7 +46,7 @@ const EnvSettingsDir = "WH_SETTINGS_DIR"
 // missing mount into silent misconfiguration instead of an explicit operator
 // choice, and the binary has no compiled tunable defaults to fall back on —
 // `wavehouse init-settings <dir>` writes the starter directory (the container
-// images bake it at /app/settings).
+// images preset WH_SETTINGS_DIR=/app/settings and expect a mount there).
 type Settings struct {
 	Dir string `yaml:"dir" env:"WH_SETTINGS_DIR"`
 }

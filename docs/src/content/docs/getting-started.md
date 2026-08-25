@@ -20,6 +20,8 @@ The fastest path uses Docker Compose — it launches ClickHouse and a single `wa
 ```bash
 git clone https://github.com/Wave-RF/WaveHouse.git
 cd WaveHouse
+# Seed the settings directory once — the image ships none
+docker compose -f deployments/compose/standalone.yaml run --rm wavehouse init-settings /app/settings
 docker compose -f deployments/compose/standalone.yaml up -d
 ```
 

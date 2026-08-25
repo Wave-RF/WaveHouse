@@ -31,14 +31,15 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # against `/app/data` regardless; bind mounts mask the image dir entirely
 # and rely on host-side ownership matching UID 65532.
 #
-# /app/settings is the baked seed settings directory (every key at its
-# default, the same files `wavehouse init-settings` writes) so a bare
-# `docker run` boots; production bind-mounts its own directory over it.
-# Deliberately NOT a VOLUME (unlike /app/data): it's config, not state, and an
-# anonymous volume would hide a forgotten mount. Same COPY as
-# Dockerfile.goreleaser — keep the two in lockstep.
-COPY internal/settings/seed /app/settings
-RUN mkdir -p /app/data /app/pipes && chown -R 65532:65532 /app
+# /app/settings is the settings-directory mount point, pre-created (owned
+# by the nonroot user so a named volume copies that ownership up) but
+# deliberately EMPTY: the image ships no settings, same as it ships no
+# policy. The operator mounts a directory there — or seeds a volume once
+# with `wavehouse init-settings /app/settings` — and a missing mount refuses
+# to boot instead of running on defaults nobody chose. Not a VOLUME either
+# (unlike /app/data): it's config, not state, and an anonymous volume would
+# hide a forgotten mount.
+RUN mkdir -p /app/data /app/pipes /app/settings && chown -R 65532:65532 /app
 
 # Stage 2: Final minimal image
 FROM gcr.io/distroless/static-debian12

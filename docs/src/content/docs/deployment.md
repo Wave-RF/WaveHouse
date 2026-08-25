@@ -16,7 +16,8 @@ WaveHouse runs as one process with embedded NATS and optional Pebble dedup. The 
 ### Quick Start with Docker Compose
 
 ```bash
-# Start ClickHouse + WaveHouse
+# Seed the settings directory once (the image ships none), then start ClickHouse + WaveHouse
+docker compose -f deployments/compose/standalone.yaml run --rm wavehouse init-settings /app/settings
 docker compose -f deployments/compose/standalone.yaml up -d
 
 # Create your tables in ClickHouse (WaveHouse discovers schemas automatically)
@@ -159,8 +160,9 @@ WH_PIPES_DIR=/etc/wavehouse/pipes
 # enabled/id_field/require_id (+ per-table overrides), query default_max_rows, schema
 # refresh_interval, CORS allowed_origins — and reload on file change, SIGHUP,
 # or POST /v1/ops/settings/reload. Create it with
-# `wavehouse init-settings /etc/wavehouse/settings`; the container images
-# bake a default at /app/settings. See Configuration — Settings directory.
+# `wavehouse init-settings /etc/wavehouse/settings`. The container images
+# ship none: mount a directory at /app/settings (WH_SETTINGS_DIR is preset
+# to it). See Configuration — Settings directory.
 WH_SETTINGS_DIR=/etc/wavehouse/settings
 
 # Cache tuning

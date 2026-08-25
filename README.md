@@ -132,7 +132,7 @@ wavehouse init-settings ./settings   # starter settings directory, every key at 
 WH_SETTINGS_DIR=./settings wavehouse
 ```
 
-The settings directory is required (no default — the container images bake one at `/app/settings`). You'll still need ClickHouse reachable. Point WaveHouse at it by setting `WH_CH_ADDR` (defaults to `localhost:9000`). See [Configuration](https://wavehouse.dev/configuration) for more information.
+The settings directory is required (no default; the container images ship none — mount one at `/app/settings`). You'll still need ClickHouse reachable. Point WaveHouse at it by setting `WH_CH_ADDR` (defaults to `localhost:9000`). See [Configuration](https://wavehouse.dev/configuration) for more information.
 
 ## Project status
 
