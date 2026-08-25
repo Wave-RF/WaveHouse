@@ -199,8 +199,7 @@ ACTIONLINT         := $(LOCAL_BIN)/actionlint-$(ACTIONLINT_VERSION)
 COV_UNIT  := tmp/coverage/unit
 COV_INT   := tmp/coverage/integration
 COV_E2E   := tmp/coverage/e2e
-# go-sdk is the nested module at clients/go — same layout, own gate, but
-# deliberately outside COV_TOTAL (see test-go-sdk below).
+# Nested module at clients/go — same layout, own gate, outside COV_TOTAL.
 COV_GOSDK := tmp/coverage/go-sdk
 COV_TOTAL := tmp/coverage/total
 
@@ -541,8 +540,7 @@ fix-prose: $(MISSPELL)
 # markdownlint along behind it).
 #
 # Leaves (16): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck,
-# lint-go-sdk (golangci) + verify-go-sdk (go vet + gofumpt), both on the
-# nested clients/go module, on the Go
+# lint-go-sdk + verify-go-sdk (both on the nested clients/go module) on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
 # for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
@@ -804,25 +802,12 @@ test-ts: pnpm-install ## Run SDK vitest unit tests + coverage + gate against sui
 		$(if $(COV_DEFER),,--coverage.thresholds.statements=$$(go run ./scripts/cov threshold ts-unit)) $(ARGS)
 	@if [ -z "$(COV_DEFER)" ]; then printf "$(GREEN)==> ts-unit gate passed$(RESET)  HTML: tmp/coverage/ts-unit/index.html\n"; fi
 
-# test-go-sdk: unit tests for clients/go/ — a nested Go module (its own
-# go.mod), so it's outside test-unit's ./internal/... ./cmd/... scope and
-# needs its own target. -race because the SDK's streaming subsystem is the
-# most concurrent code in the repo.
-#
-# Coverage is collected exactly like the root-module Go suites (covdata into
-# tmp/coverage/<suite>/data via -test.gocoverdir), so `cov render go-sdk`
-# renders + gates it with no new machinery and CI's coverage fragment —
-# `path: tmp/coverage` on the unit job, which already runs this target —
-# carries it to the `coverage` job unchanged. -coverpkg=./... resolves
-# inside clients/go, so the denominator is the SDK package + the codegen
-# command, nothing from the server.
-#
-# The go-sdk suite is NOT part of the merged Go total: a nested module is
-# invisible to the root module (`go list ./...` at the repo root never
-# yields clients/go), so the other suites' -coverpkg=./... cannot reach
-# these files — they can't leak into tmp/coverage/total, and no
-# exclude.paths entry is needed to keep them out. Same separation the TS
-# SDK gets via ts-*. Gate: suites.go-sdk in .testcoverage.yml.
+# test-go-sdk: unit tests for the nested clients/go module — outside
+# test-unit's scope, so it needs its own target (-race: the SDK's streaming
+# subsystem is the most concurrent code in the repo). Covdata lands in the
+# same layout as the root-module suites, so `cov render go-sdk` gates it with
+# no new machinery, but it is never merged into the Go total — see the go-sdk
+# comment in .testcoverage.yml.
 .PHONY: test-go-sdk
 test-go-sdk: ## Run Go SDK (clients/go, a nested module) unit tests + render coverage + gate threshold
 	@printf "$(CYAN)==> Running Go SDK tests...$(RESET)\n"
@@ -831,9 +816,8 @@ test-go-sdk: ## Run Go SDK (clients/go, a nested module) unit tests + render cov
 		-args -test.gocoverdir="$(CURDIR)/$(COV_GOSDK)/data"
 	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render go-sdk; fi
 
-# test-conformance-ts: the TS half of the cross-SDK wire-format conformance
-# suite (the Go half is clients/go/conformance_test.go, run by test-go-sdk).
-# Both replay clients/go/testdata/wire_cases.json.
+# test-conformance-ts: TS half of the cross-SDK wire-format conformance suite
+# (Go half: clients/go/conformance_test.go); both replay the same fixture.
 .PHONY: test-conformance-ts
 test-conformance-ts: build-ts ## Run TS SDK wire-format conformance against the shared fixture
 	@printf "$(CYAN)==> Running TS wire-format conformance...$(RESET)\n"

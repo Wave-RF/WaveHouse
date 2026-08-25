@@ -417,13 +417,7 @@ Internal-only backend changes (middleware refactors, observability internals, de
 ```text
 cmd/                    → Binary entry points (thin — just wiring)
 clients/ts/             → TypeScript SDK (@wavehouse/sdk)
-clients/go/             → Go SDK (github.com/Wave-RF/WaveHouse/clients/go)
-  wavehouse.go, http.go, errors.go, types.go       → Client core (constructor, transport, errors, shared types)
-  query_builder.go, table.go                        → Structured query builder + per-table typed client
-  stream.go, live_query.go                          → SSE streaming + live queries
-  pipes.go, policy.go, schema.go, dlq.go, sys.go   → Subsystem clients (pipes, policy, schema, DLQ, health)
-  cmd/wavehouse-codegen/main.go                     → Codegen CLI
-  testdata/wire_cases.json                          → Wire-format conformance fixtures
+clients/go/             → Go SDK (github.com/Wave-RF/WaveHouse/clients/go) — nested module; file layout mirrors clients/ts/, plus cmd/wavehouse-codegen/ and testdata/wire_cases.json
 internal/api/           → HTTP layer (handlers, router, middleware, schema/DLQ/policy/pipes endpoints)
 internal/auth/          → JWT/JWKS authentication middleware (HMAC or JWKS, role extraction from claims)
 internal/cache/         → Caching (interface + L1/L2/tiered implementations)

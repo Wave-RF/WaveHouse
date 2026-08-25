@@ -12,9 +12,8 @@
 # together, so `threshold.total` below applies to the *project-wide*
 # coverage number — unit alone covers only `./internal/...` packages
 # exercised by `*_test.go` files (below total threshold); merged
-# coverage adds integration- and e2e-only paths and clears it. The
-# nested-module suites (go-sdk) are gated separately and never merged
-# in — see suites.go-sdk.
+# coverage adds integration- and e2e-only paths and clears it.
+# Nested-module suites (go-sdk) are gated separately — see suites.go-sdk.
 profile: tmp/coverage/total/coverage.txt
 local-prefix: github.com/Wave-RF/WaveHouse
 
@@ -32,17 +31,10 @@ suites:
   unit: 80
   integration: 20
   e2e: 60
-  # Go SDK (clients/go) — a NESTED module, so its coverage is rendered and
-  # gated on its own and is deliberately NOT part of the merged Go total
-  # above. Nothing from clients/go can leak into that total: the root
-  # module can't see a nested one (`go list ./...` at the repo root never
-  # yields clients/go), so the unit/integration/e2e `-coverpkg=./...` never
-  # reaches these files — which is also why there is no `^clients/go/`
-  # entry under exclude.paths; there is nothing to exclude.
-  # Measured 82.7% when this floor was set (SDK package 88.6%,
-  # cmd/wavehouse-codegen 55.8%). 75 leaves the same order of headroom
-  # unit's 80 leaves under its real ~91%. Raise it as the codegen
-  # command's tests fill in.
+  # Go SDK (clients/go) — a NESTED module, so the root module's
+  # `-coverpkg=./...` can never reach it: rendered and gated on its own,
+  # never merged into the total above, nothing to add under exclude.paths.
+  # 75 vs 82.7% measured; the headroom is the codegen CLI. Raise as it fills.
   go-sdk: 75
   # TypeScript SDK suites — see scripts/cov for the merge / render logic.
   # vitest gates via --coverage.thresholds.statements; the merged ts-total
