@@ -13,6 +13,7 @@
 # coverage number — unit alone covers only `./internal/...` packages
 # exercised by `*_test.go` files (below total threshold); merged
 # coverage adds integration- and e2e-only paths and clears it.
+# Nested-module suites (go-sdk) are gated separately — see suites.go-sdk.
 profile: tmp/coverage/total/coverage.txt
 local-prefix: github.com/Wave-RF/WaveHouse
 
@@ -22,7 +23,7 @@ local-prefix: github.com/Wave-RF/WaveHouse
 threshold:
   total: 80
 
-# Per-suite coverage thresholds (custom key — read by scripts/coverage.sh,
+# Per-suite coverage thresholds (custom key — read by scripts/cov,
 # silently ignored by go-test-coverage). Single source of truth for what
 # percentage each suite must hit before it counts as passing.
 #
@@ -30,6 +31,25 @@ suites:
   unit: 80
   integration: 20
   e2e: 60
+  # Go SDK (clients/go) — a NESTED module, so the root module's
+  # `-coverpkg=./...` can never reach it: rendered and gated on its own,
+  # never merged into the total above, nothing to add under exclude.paths.
+  # 75 vs 87.1% measured (SDK 88.5%, codegen CLI 81.0%). The gap is deliberate
+  # slack, matching how every other floor here is set (ts-unit is 40 against a
+  # measured 76%): these are regression floors, not targets, so ordinary churn
+  # doesn't red the build. Raise it when a real regression slips under 75.
+  #
+  # ONE key here, three for the TS SDK below, because the TS SDK has two
+  # coverage-PRODUCING suites and this has one. `ts-unit` is vitest, `ts-e2e`
+  # is the same SDK source re-measured by the orchestrator's live-server run,
+  # and `ts-total` exists only because those two have to be merged before a
+  # meaningful floor can be applied. `make test-sdk-go` is the Go SDK's only
+  # instrumented suite, so a `go-sdk-total` would be a copy of this number and
+  # a `go-sdk-e2e` would gate a suite that emits no covdata: `test-sdk-go-e2e`
+  # drives a server it did not start and runs uninstrumented. Wiring that suite
+  # into the orchestrator so it earns the same three-gate shape is #518 — add
+  # the other two keys with it, not before.
+  go-sdk: 75
   # TypeScript SDK suites — see scripts/cov for the merge / render logic.
   # vitest gates via --coverage.thresholds.statements; the merged ts-total
   # is gated by `cov ts-merge` against the value below. Tune ts-total

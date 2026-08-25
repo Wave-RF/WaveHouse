@@ -59,6 +59,34 @@ const (
 // see the ts-total path below.
 var goSuites = []string{"unit", "integration", "e2e"}
 
+// Go suites rendered and gated like goSuites but never merged into the Go
+// total: they come from the nested clients/go module — see the go-sdk
+// comment in .testcoverage.yml.
+var standaloneGoSuites = []string{"go-sdk"}
+
+// suiteModuleDir maps a non-root-module suite to the module directory its
+// covdata came from. `go tool cover -html` resolves the profile's package
+// paths through the module in its working directory, so it must run there.
+var suiteModuleDir = map[string]string{"go-sdk": "clients/go"}
+
+// suiteTarget names the make target that populates a suite, for the
+// "did you run it?" hint. Only suites whose target isn't `test-<suite>`
+// need an entry. One source of truth: every hint in this file routes
+// through makeTargetFor, so a target rename touches only this map.
+var suiteTarget = map[string]string{
+	"go-sdk":  "test-sdk-go",
+	"ts-unit": "test-sdk-ts",
+	"ts-e2e":  "test-e2e", // the orchestrator run, not a target of its own
+}
+
+// makeTargetFor returns the make target that populates the named suite.
+func makeTargetFor(suite string) string {
+	if t, ok := suiteTarget[suite]; ok {
+		return t
+	}
+	return "test-" + suite
+}
+
 // TypeScript SDK suites (vitest). ts-unit comes from clients/ts; ts-e2e
 // from tests/e2e/sdk run with --coverage. Both produce Istanbul-format
 // coverage-final.json that `cov ts-merge` combines into ts-total.
@@ -140,6 +168,16 @@ func main() {
 		if err := merge(cfg); err != nil {
 			fatal("%v", err)
 		}
+		// merge() only prints the standalone suites; gate them here too, or
+		// go-sdk-only input would exit 0 with no threshold applied.
+		for _, s := range standaloneGoSuites {
+			if !hasCovdata(filepath.Join(root, s, "data")) {
+				continue
+			}
+			if err := renderSuite(cfg, s); err != nil {
+				fatal("%v", err)
+			}
+		}
 		if err := mergeTS(cfg); err != nil {
 			fatal("%v", err)
 		}
@@ -205,14 +243,14 @@ func goSuiteCoverage(c *config, suite string) (rows []pkgRow, total, covered int
 	dir := filepath.Join(root, suite)
 	dataDir := filepath.Join(dir, "data")
 	if !hasCovdata(dataDir) {
-		return nil, 0, 0, "", fmt.Errorf("no covdata in %s — did make test-%s run?", dataDir, suite)
+		return nil, 0, 0, "", fmt.Errorf("no covdata in %s — did make %s run?", dataDir, makeTargetFor(suite))
 	}
 	profile := filepath.Join(dir, "coverage.txt")
 	htmlOut = filepath.Join(dir, "coverage.html")
 	if err = sh("go", "tool", "covdata", "textfmt", "-i="+dataDir, "-o", profile); err != nil {
 		return nil, 0, 0, "", err
 	}
-	if err = sh("go", "tool", "cover", "-html="+profile, "-o", htmlOut); err != nil {
+	if err = renderHTML(suite, profile, htmlOut); err != nil {
 		return nil, 0, 0, "", err
 	}
 	rows, total, covered, err = parseCoverage(profile, c, c.excludesFor(suite))
@@ -220,6 +258,24 @@ func goSuiteCoverage(c *config, suite string) (rows []pkgRow, total, covered int
 		return nil, 0, 0, "", err
 	}
 	return rows, total, covered, htmlOut, nil
+}
+
+// renderHTML turns a textfmt profile into the clickable HTML report, running
+// from the suite's own module (hence absolute paths) when it is a nested one.
+func renderHTML(suite, profile, htmlOut string) error {
+	dir, nested := suiteModuleDir[suite]
+	if !nested {
+		return sh("go", "tool", "cover", "-html="+profile, "-o", htmlOut)
+	}
+	absProfile, err := filepath.Abs(profile)
+	if err != nil {
+		return err
+	}
+	absHTML, err := filepath.Abs(htmlOut)
+	if err != nil {
+		return err
+	}
+	return shIn(dir, "go", "tool", "cover", "-html="+absProfile, "-o", absHTML)
 }
 
 func renderSuite(c *config, suite string) error {
@@ -247,7 +303,7 @@ func renderSuite(c *config, suite string) error {
 // "one side legitimately absent" (skip, fine) from "nothing ran at all"
 // (fail, because the caller expected a gate).
 func hasAnyCoverage() bool {
-	for _, s := range goSuites {
+	for _, s := range slices.Concat(goSuites, standaloneGoSuites) {
 		if hasCovdata(filepath.Join(root, s, "data")) {
 			return true
 		}
@@ -269,11 +325,7 @@ func merge(c *config) error {
 			dirs = append(dirs, d)
 			fmt.Printf("  %s✔%s %-13s %s\n", green, reset, s, d)
 		} else {
-			hint := "test-" + s
-			if s == "unit" {
-				hint = "test"
-			}
-			fmt.Printf("  %s✗%s %-13s (no covdata; run `make %s` to include)\n", yellow, reset, s, hint)
+			fmt.Printf("  %s✗%s %-13s (no covdata; run `make %s` to include)\n", yellow, reset, s, makeTargetFor(s))
 		}
 	}
 	if len(dirs) == 0 {
@@ -297,6 +349,13 @@ func merge(c *config) error {
 	fmt.Printf("\n%s==> Per-suite breakdown:%s\n", cyan, reset)
 	for _, s := range goSuites {
 		fmt.Printf("  %s%-13s%s %s\n", cyan, s+":", reset, suitePct(c, s))
+	}
+	// Nested-module Go suites: gated on their own, never merged above.
+	for _, s := range standaloneGoSuites {
+		if pct := suitePct(c, s); pct != "n/a" {
+			fmt.Printf("  %s%-13s%s %s  %s(separate gate; not in merge above)%s\n",
+				cyan, s+":", reset, pct, yellow, reset)
+		}
 	}
 	// Surface TS SDK coverage alongside the Go total — informational only,
 	// not part of the Go merged number above. `make cov` is the gate.
@@ -340,7 +399,7 @@ func merge(c *config) error {
 //
 // Layout under tmp/coverage/:
 //
-//	ts-unit/coverage-final.json    ← `make test-ts`
+//	ts-unit/coverage-final.json    ← `make test-sdk-ts`
 //	ts-e2e/coverage-final.json     ← `make test-e2e`
 //	ts-merge-input/                ← scratch dir (both renamed json files)
 //	ts-total/                      ← merged JSON + requested reports
@@ -424,11 +483,11 @@ func mergeTS(c *config) error {
 				filepath.Join(root, name, "coverage-final.json"))
 		} else {
 			fmt.Printf("  %s✗%s %-9s (no coverage-final.json; run `make %s` to include)\n",
-				yellow, reset, name, ternary(name == "ts-unit", "test-ts", "test-e2e"))
+				yellow, reset, name, makeTargetFor(name))
 		}
 	}
 	if len(merged) == 0 {
-		fmt.Printf("  %sno TS coverage data — skipping ts-merge (run `make test-ts` and/or `make test-e2e` to populate)%s\n", yellow, reset)
+		fmt.Printf("  %sno TS coverage data — skipping ts-merge (run `make test-sdk-ts` and/or `make test-e2e` to populate)%s\n", yellow, reset)
 		return nil
 	}
 
@@ -548,6 +607,23 @@ func report(c *config) error {
 		rows = append(rows, reportRow{
 			name: "Go total", pct: formatPctBare(covered, total), gated: true, thresh: th,
 			pass: meetsThreshold(covered, total, th), html: html, rule: true,
+		})
+	}
+
+	// --- Nested-module Go suites: own gate, not in the total above ---
+	for i, s := range standaloneGoSuites {
+		if !hasCovdata(filepath.Join(root, s, "data")) {
+			rows = append(rows, reportRow{name: s, pct: "n/a", rule: i == 0})
+			continue
+		}
+		_, total, covered, html, err := goSuiteCoverage(c, s)
+		if err != nil {
+			return err
+		}
+		th := thresholdFor(c, s)
+		rows = append(rows, reportRow{
+			name: s, pct: formatPctBare(covered, total), gated: true, thresh: th,
+			pass: meetsThreshold(covered, total, th), html: html, rule: i == 0,
 		})
 	}
 
@@ -692,15 +768,6 @@ func formatPctBare(covered, total int) string {
 
 // tsHTML is the vitest/nyc HTML report path for a TS suite.
 func tsHTML(suite string) string { return filepath.Join(root, suite, "index.html") }
-
-// ternary returns a if cond else b. Used inline to keep the merge log
-// branching from sprawling into a 5-line if/else.
-func ternary[T any](cond bool, a, b T) T {
-	if cond {
-		return a
-	}
-	return b
-}
 
 // copyFile streams src → dst, creating dst and overwriting if it exists.
 // Used to stage coverage-final.json files under suite-prefixed names
@@ -917,9 +984,13 @@ func meetsThreshold(covered, total, threshold int) bool {
 // sh runs an external command with stdio wired through. Every call site
 // passes "go" as the program and a fixed series of "tool", "<tool-name>",
 // flag, … args; the only variable bits are paths we computed ourselves.
+func sh(name string, args ...string) error { return shIn("", name, args...) }
+
+// shIn is sh with an explicit working directory ("" = inherit ours).
 // #nosec G204,G702 — name and args are not user input.
-func sh(name string, args ...string) error {
+func shIn(dir, name string, args ...string) error {
 	cmd := exec.CommandContext(context.Background(), name, args...)
+	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

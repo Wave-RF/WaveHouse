@@ -148,7 +148,7 @@ curl -X PUT http://localhost:8080/v1/ops/pipes/top_pages \
   }'
 ```
 
-A `PUT` is a full replace of that named pipe; `name` is taken from the URL. Definitions are stored in NATS KV and synced across nodes, so a create/update/delete applies cluster-wide without a restart. The [TypeScript SDK](/sdk) exposes the same operations as `client.pipes.list()`, `client.pipes.get(name)`, `client.pipes.set(name, def)`, and `client.pipes.delete(name)`.
+A `PUT` is a full replace of that named pipe; `name` is taken from the URL. Definitions are stored in NATS KV and synced across nodes, so a create/update/delete applies cluster-wide without a restart. Both [SDKs](/sdk/pipes#managing-pipe-definitions) expose the same operations — TypeScript as `client.pipes.list()`, `client.pipes.get(name)`, `client.pipes.set(name, def)`, and `client.pipes.delete(name)`, Go as `wh.Pipes.List(ctx)`, `wh.Pipes.Get(ctx, name)`, `wh.Pipes.Set(ctx, name, def)`, and `wh.Pipes.Delete(ctx, name)`.
 
 ## Executing a pipe
 

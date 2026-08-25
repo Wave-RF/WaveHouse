@@ -192,13 +192,15 @@ ACTIONLINT_VERSION := v1.7.12
 ACTIONLINT         := $(LOCAL_BIN)/actionlint-$(ACTIONLINT_VERSION)
 
 # --- Coverage Directories -----------------------------------------------------
-# One path per suite. Internal layout (managed by scripts/coverage.sh):
+# One path per suite. Internal layout (managed by scripts/cov):
 #   $(COV_X)/data/         binary covdata (covmeta.* / covcounters.*)
 #   $(COV_X)/coverage.txt  rendered textfmt profile
 #   $(COV_X)/coverage.html rendered HTML report
 COV_UNIT  := tmp/coverage/unit
 COV_INT   := tmp/coverage/integration
 COV_E2E   := tmp/coverage/e2e
+# Nested module at clients/go — same layout, own gate, outside COV_TOTAL.
+COV_GOSDK := tmp/coverage/go-sdk
 COV_TOTAL := tmp/coverage/total
 
 # --- Coverage Thresholds ------------------------------------------------------
@@ -330,6 +332,12 @@ obs-front: ## Start local OTel Front UI
 # Dynamically find all directories containing Go files, safely ignoring hidden folders like .worktrees
 GO_DIRS := $(shell go list -f '{{.Dir}}' ./...)
 
+# The Go SDK is a NESTED module (its own go.mod), so it is invisible to the
+# root `go list ./...` above — every Go check names it explicitly. Path-based
+# tools (gofumpt, goimports) take it as an extra argument; module-scoped tools
+# (go mod tidy, golangci-lint) need a second invocation from inside it.
+GO_SDK_DIR := clients/go
+
 # fmt / lint / fix: one Biome binary (biome.json) scans the whole workspace
 # (SDK + e2e + docs); Markdown is owned separately by markdownlint-cli2 (rules in
 # .markdownlint.json, globs in .markdownlint-cli2.jsonc) — Biome only does
@@ -357,18 +365,25 @@ fmt: fmt-go fmt-ts ## Check formatting across Go (gofumpt) + TS (Biome). Run `ma
 
 .PHONY: fmt-go
 fmt-go:
-	$(call run,gofumpt (Go fmt),$(GOFUMPT) -l $(GO_DIRS) | (! grep .),run make fix to apply formatting)
+	$(call run,gofumpt (Go fmt),$(GOFUMPT) -l $(GO_DIRS) $(GO_SDK_DIR) | (! grep .),run make fix to apply formatting)
 
 .PHONY: fmt-ts
 fmt-ts: pnpm-install
 	$(call run,Biome (format),$(PNPM) -s -w run format,run make fix to apply formatting)
 
 .PHONY: lint
-lint: lint-go lint-ts lint-md lint-prose ## Lint across Go (golangci-lint) + TS/JSON (Biome) + Markdown (markdownlint) + docs prose (misspell). Run `make fix` to apply --fix.
+lint: lint-go lint-ts lint-md lint-prose ## Lint across Go (golangci-lint, both modules) + TS/JSON (Biome) + Markdown (markdownlint) + docs prose (misspell). Run `make fix` to apply --fix.
 
+# lint-go spans BOTH Go modules, the same way fmt-go does — one entry point per
+# tool, not one per module. It takes two invocations rather than two targets
+# because golangci-lint is module-scoped: `run ./...` resolves packages through
+# the go.mod in its working directory, so the nested SDK needs its own run from
+# inside $(GO_SDK_DIR). It picks up this repo's .golangci.yml either way
+# (golangci-lint walks up to find the config).
 .PHONY: lint-go
 lint-go: $(GOLANGCI_LINT) go-mod-download
 	$(call run,golangci-lint,$(GOLANGCI_LINT) run ./... --allow-parallel-runners,run make fix to auto-fix what is fixable)
+	$(call run,golangci-lint (Go SDK),cd $(GO_SDK_DIR) && $(GOLANGCI_LINT) run ./... --allow-parallel-runners,run make fix to auto-fix what is fixable)
 
 .PHONY: lint-ts
 lint-ts: pnpm-install
@@ -447,9 +462,12 @@ endif
 # tidy: read-only check via `go mod tidy -diff` (Go 1.23+). Prints the
 # unified diff that would be applied and exits non-zero if anything is off,
 # without touching go.mod / go.sum. Safe to run in parallel with fmt/lint.
+# Spans both modules (see $(GO_SDK_DIR)) so `make verify` checks exactly what
+# `make fix` would rewrite — the nested go.mod included.
 .PHONY: tidy
-tidy: ## Verify go.mod/go.sum are tidy (run `make fix` to apply)
+tidy: ## Verify go.mod/go.sum are tidy in both modules (run `make fix` to apply)
 	$(call run,go.mod tidy,go mod tidy -diff,run make fix to tidy go.mod and go.sum)
+	$(call run,go.mod tidy (Go SDK),cd $(GO_SDK_DIR) && go mod tidy -diff,run make fix to tidy go.mod and go.sum)
 
 # fix: apply auto-fixes everywhere, fanned out into three tracks that touch
 # disjoint files — Go (.go + go.mod/sum), TS/JS/JSON (Biome), Markdown — so they
@@ -473,13 +491,19 @@ fix-docs: pnpm-install
 	@$(MAKE) fix-md
 	@$(MAKE) fix-prose
 
+# The gofumpt/goimports passes take $(GO_SDK_DIR) as an extra path argument;
+# `go mod tidy` and `golangci-lint` are module-scoped, so the nested SDK gets
+# its own `cd $(GO_SDK_DIR) &&` line for each. That `cd` is the only difference
+# between the two golangci-lint lines below — they are not a duplicate.
 .PHONY: fix-go
 fix-go: $(GOLANGCI_LINT)
-	@echo "$(CYAN)==> Applying Go auto-fixes (tidy + gofumpt + goimports + lint --fix)...$(RESET)"
+	@echo "$(CYAN)==> Applying Go auto-fixes (tidy + gofumpt + goimports + lint --fix, both modules)...$(RESET)"
 	@go mod tidy
-	@$(GOFUMPT) -w $(GO_DIRS)
-	@$(GOIMPORTS) -w $(GO_DIRS)
+	@cd $(GO_SDK_DIR) && go mod tidy
+	@$(GOFUMPT) -w $(GO_DIRS) $(GO_SDK_DIR)
+	@$(GOIMPORTS) -w $(GO_DIRS) $(GO_SDK_DIR)
 	@$(GOLANGCI_LINT) run --fix ./... --allow-parallel-runners
+	@cd $(GO_SDK_DIR) && $(GOLANGCI_LINT) run --fix ./... --allow-parallel-runners
 
 .PHONY: fix-ts
 fix-ts: pnpm-install
@@ -525,9 +549,11 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (14): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
-# side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
-# docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
+# Leaves (14): tidy, fmt-go (gofumpt), lint-go (golangci) and vulncheck on the
+# Go side — the first three span BOTH modules (root + the nested clients/go
+# SDK), so the SDK needs no leaves of its own; lint-ts (biome check) + lint-md
+# (markdownlint) + lint-prose (misspell, docs spelling) + test-md-rules
+# (node --test over the WH001/WH002 fixtures)
 # for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
 # test-classify-paths and test-release-channel for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
@@ -565,10 +591,18 @@ typecheck-ts: pnpm-install
 # go-mod-download is a no-doc intermediate target — every Go-toolchain target
 # (build/test/lint variants) declares it as a prereq so `make -j` doesn't
 # kick off N parallel `go mod download` calls racing on the module cache.
-# Symmetric with pnpm-install for the Node side.
+# Symmetric with pnpm-install for the Node side. It warms BOTH modules, so a
+# target that reaches into $(GO_SDK_DIR) inherits the same guarantee from the
+# one prereq (the SDK is stdlib-only today, so its half is ~free — it is there
+# so the invariant holds if that ever changes). Only the SDK half swallows its
+# output on success: with no requirements to fetch it prints a "no module
+# dependencies to download" line that would otherwise show up ahead of every
+# Go target. The root half stays unfiltered so a cold cache's "go: downloading"
+# progress is still visible.
 .PHONY: go-mod-download
 go-mod-download:
 	@go mod download
+	@cd $(GO_SDK_DIR) && out=$$(go mod download 2>&1) || { printf '%s\n' "$$out" >&2; exit 1; }
 
 .PHONY: $(BINARIES)
 $(BINARIES): go-mod-download
@@ -657,7 +691,7 @@ branding-docs: ## Regenerate docs logo/favicon/OG assets from docs/src/assets/br
 #
 # Everything is driven directly via `pnpm --filter <pkg>` — no per-subproject
 # Makefiles. The user-facing Node targets live inline in their natural verb
-# sections (build-ts/dev-ts/test-ts/clean-ts; build-docs/dev-docs/preview-docs/
+# sections (build-ts/dev-ts/clean-ts and test-sdk-ts; build-docs/dev-docs/preview-docs/
 # branding-docs/clean-docs) and declare pnpm-install as a prereq so a fresh
 # clone or a changed lockfile is handled lazily. `make tools` does the full
 # bootstrap.
@@ -742,7 +776,7 @@ test-unit: go-mod-download ## Run Go unit tests + render coverage + gate thresho
 	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render unit; fi
 
 # Hidden alias: `make test` matches `go test ./...` muscle memory; test-unit
-# is the explicit form.
+# is the explicit form. Server unit tests only — the SDK suites are `test-sdk`.
 .PHONY: test
 test: test-unit
 
@@ -772,20 +806,64 @@ test-e2e: build-ts build-cover ## Run E2E SDK suite against cover binary + rende
 		go run ./scripts/orchestrator
 	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render e2e; fi
 
-# test-ts: vitest unit tests for the SDK, always with v8 coverage. Standalone
-# it also gates against suites.ts-unit (via vitest's --coverage.thresholds);
-# under COV_DEFER it only collects, leaving the gate to `make cov` (cov report)
-# so CI emits one consolidated coverage block. THRESHOLD is read live from
-# .testcoverage.yml via scripts/cov; override with
-# `make test-ts ARGS='--coverage.thresholds.statements=70'`.
-.PHONY: test-ts
-test-ts: pnpm-install ## Run SDK vitest unit tests + coverage + gate against suites.ts-unit
-	@printf "$(CYAN)==> Running SDK unit tests...$(RESET)\n"
+# --- SDK test suites ----------------------------------------------------------
+# One naming family for every SDK suite: `test-sdk` runs them all, `test-sdk-go`
+# / `test-sdk-ts` run one language. Each language target also runs ITS HALF of
+# the cross-language wire-format conformance suite (both halves replay
+# clients/go/testdata/wire_cases.json) — the Go half is an ordinary test file in
+# the SDK package, so folding the TS half into test-sdk-ts keeps the two
+# symmetric and costs no extra target.
+.PHONY: test-sdk
+test-sdk: test-sdk-go test-sdk-ts ## Run both SDK test suites (Go + TypeScript) incl. cross-language wire conformance
+
+# test-sdk-go: unit tests for the nested clients/go module — outside test-unit's
+# scope, so it needs its own target (-race: the SDK's streaming subsystem is the
+# most concurrent code in the repo). gotestsum comes from the ROOT module's tool
+# directives, which `go tool` can only resolve there — hence `go tool -n` to
+# resolve the binary before cd-ing into the nested module. Covdata lands in the
+# same layout as the root-module suites, so `cov render go-sdk` gates it with no
+# new machinery, but it is never merged into the Go total — see the go-sdk
+# comment in .testcoverage.yml.
+.PHONY: test-sdk-go
+test-sdk-go: go-mod-download ## Run Go SDK (clients/go, a nested module) unit + conformance tests + render coverage + gate threshold
+	@printf "$(CYAN)==> Running Go SDK tests...$(RESET)\n"
+	@rm -rf $(COV_GOSDK)/data && mkdir -p $(COV_GOSDK)/data
+	@gotestsum=$$(go tool -n gotestsum) && cd $(GO_SDK_DIR) && \
+		GOCOVERDIR="$(CURDIR)/$(COV_GOSDK)/data" "$$gotestsum" --format $(GOTESTSUM_FMT) -- \
+		-cover -coverpkg=./... -race -timeout 60s ./... $(ARGS) \
+		-args -test.gocoverdir="$(CURDIR)/$(COV_GOSDK)/data"
+	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render go-sdk; fi
+
+# test-sdk-ts: vitest unit tests for the TS SDK, always with v8 coverage, then
+# the TS half of the wire conformance suite (which replays the fixture through
+# the built dist — hence the build-ts prereq). Standalone it also gates against
+# suites.ts-unit (via vitest's --coverage.thresholds); under COV_DEFER it only
+# collects, leaving the gate to `make cov` (cov report) so CI emits one
+# consolidated coverage block. THRESHOLD is read live from .testcoverage.yml via
+# scripts/cov; override with
+# `make test-sdk-ts ARGS='--coverage.thresholds.statements=70'`.
+.PHONY: test-sdk-ts
+test-sdk-ts: pnpm-install build-ts ## Run TS SDK vitest unit + conformance tests + coverage + gate against suites.ts-unit
+	@printf "$(CYAN)==> Running TypeScript SDK tests...$(RESET)\n"
 	@rm -rf tmp/coverage/ts-unit && mkdir -p tmp/coverage/ts-unit
 	@TS_UNIT_COVERAGE_DIR="$(CURDIR)/tmp/coverage/ts-unit" \
 		$(PNPM) --filter $(SDK_NAME) exec vitest run --coverage \
 		$(if $(COV_DEFER),,--coverage.thresholds.statements=$$(go run ./scripts/cov threshold ts-unit)) $(ARGS)
+	@printf "$(CYAN)==> Running TypeScript wire-format conformance...$(RESET)\n"
+	@node tests/conformance/conformance_ts.mjs
 	@if [ -z "$(COV_DEFER)" ]; then printf "$(GREEN)==> ts-unit gate passed$(RESET)  HTML: tmp/coverage/ts-unit/index.html\n"; fi
+
+# test-sdk-go-e2e: the Go SDK against a LIVE server (WAVEHOUSE_URL +
+# WAVEHOUSE_AUTH), behind the `e2e` build tag. Unlike test-e2e it brings up
+# nothing itself and collects no coverage; wiring it into the orchestrator so it
+# runs in CI with a coverage gate — the way the TS SDK's e2e half already does —
+# is tracked in #518.
+.PHONY: test-sdk-go-e2e
+test-sdk-go-e2e: go-mod-download ## Run Go SDK E2E tests against a live WaveHouse instance (WAVEHOUSE_URL, WAVEHOUSE_AUTH)
+	@printf "$(CYAN)==> Running Go SDK E2E tests...$(RESET)\n"
+	@gotestsum=$$(go tool -n gotestsum) && cd $(GO_SDK_DIR) && \
+		"$$gotestsum" --format $(GOTESTSUM_FMT) -- \
+		-tags e2e -count=1 -timeout 60s ./... $(ARGS)
 
 # Aggregator: recipe-based with $(MAKE) calls so suites run sequentially even
 # under `make -j N`. The suites bind ports / spin testcontainers / start the
@@ -793,7 +871,7 @@ test-ts: pnpm-install ## Run SDK vitest unit tests + coverage + gate against sui
 .PHONY: test-all
 test-all: ## Run all suites sequentially + one consolidated Go + TS coverage report + gates
 	@$(MAKE) test-unit COV_DEFER=1
-	@$(MAKE) test-ts COV_DEFER=1
+	@$(MAKE) test-sdk COV_DEFER=1
 	@$(MAKE) test-integration COV_DEFER=1
 	@$(MAKE) test-e2e COV_DEFER=1
 	@$(MAKE) cov
@@ -832,7 +910,7 @@ cov: go-mod-download ## Consolidated coverage report (Go + TS) + gate against th
 # marker that standalone `make verify` writes is instead written by ci's own
 # `ci-marker.sh write` below — it touches both the ci and verify markers.
 .PHONY: ci-parallel
-ci-parallel: verify-parallel build build-cover build-ts build-docs test test-ts
+ci-parallel: verify-parallel build build-cover build-ts build-docs test test-sdk
 
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
@@ -988,7 +1066,7 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # tools: bootstrap a fresh clone.
 #   - Installs pinned external binaries to .bin/ (golangci-lint, air, misspell).
 #   - Downloads Go modules so go.mod tool deps are available offline.
-#   - Installs SDK + E2E pnpm deps so test-ts / test-e2e are runnable
+#   - Installs SDK + E2E pnpm deps so test-sdk-ts / test-e2e are runnable
 #     without a separate manual setup step.
 #
 # Note: go.mod tool deps (gotestsum, gofumpt, etc.) are *downloaded* by

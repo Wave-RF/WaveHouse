@@ -39,13 +39,14 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
 
    The pre-push hook (installed by `make tools`) blocks a push until the tree has been validated locally: a code change needs `make ci`, a docs/prose-only change needs only `make verify` (the same split CI makes). `make lint` / `make test` / `make build` are fast inner-loop subsets.
 
-2. Write tests for new functionality. Unit tests go alongside the code in `internal/`. Integration tests go in `tests/` with the `//go:build integration` tag.
+2. Write tests for new functionality. Unit tests go alongside the code in `internal/`; SDK tests live in `clients/ts/src/` and `clients/go/`. Integration tests go in `tests/` with the `//go:build integration` tag.
 
 3. Update documentation if your change affects:
    - API endpoints → update `docs/src/content/docs/api.md`
    - Configuration options → update `docs/src/content/docs/configuration.mdx`
    - Deployment → update `docs/src/content/docs/deployment.md`
    - Architecture → update `docs/src/content/docs/architecture.md`
+   - Client SDK surface → update **both** SDKs (`clients/ts/src/`, `clients/go/`), the shared topic pages under `docs/src/content/docs/sdk/` (one `<Tabs syncKey="lang">` block per topic) plus the per-language setup pages `sdk/typescript.mdx` / `sdk/go.md`, and the shared wire fixture `clients/go/testdata/wire_cases.json`; see AGENTS.md §SDK Sync
 
 4. Follow the commit message format (see below).
 
@@ -89,7 +90,7 @@ test(cache): add tiered cache stampede test
 
 ## Code Style
 
-- **Formatting**: Code must be formatted with `gofumpt` (a strict superset of `gofmt`). `make fmt` checks it (CI runs the same target); `make fix` applies it.
+- **Formatting**: Code must be formatted with `gofumpt` (a strict superset of `gofmt`). `make fmt` checks both modules — the root one and the nested `clients/go` — as do `make lint` and `make tidy`. `make fix` applies the corresponding fixes to both.
 - **Linting**: All lint checks in `.golangci.yml` must pass (see `make lint`).
 - **Naming**: Follow [Go naming conventions](https://go.dev/doc/effective_go#names).
 - **Interfaces**: Define interfaces where they are consumed, not where they are implemented.

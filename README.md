@@ -75,7 +75,7 @@ If you're building user-facing analytics, WaveHouse is like **Supabase for Click
 - **Query** — in-process Ristretto cache + `singleflight` coalescing; type-safe structured query AST; Tinybird-style named pipes (parameterized SQL endpoints).
 - **Real-time** — native SSE push, broadcast *before* the ClickHouse flush, with JetStream gap-fill for late/reconnecting clients.
 - **Security** — Hasura-style per-table, per-role column + row policies with JWT claim templating, stored in NATS KV.
-- **Client** — `@wavehouse/sdk`: TypeScript client with query builder, live queries, streaming, and schema codegen; one runtime dependency (an SSE frame parser, ~1.4 KB gzipped).
+- **Client SDKs** — TypeScript (`@wavehouse/sdk`) and Go (`github.com/Wave-RF/WaveHouse/clients/go`): query builder, live queries, streaming, and schema codegen in both, over one shared wire format.
 
 ## How it compares
 

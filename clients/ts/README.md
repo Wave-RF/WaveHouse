@@ -8,7 +8,7 @@ TypeScript client for [WaveHouse](https://github.com/Wave-RF/WaveHouse) — sche
 npm install @wavehouse/sdk
 ```
 
-Requires Node 22 or newer — the only line this SDK is tested against; Node 18 and 20 are past upstream end-of-life. Neither browsers nor Node need a polyfill: streaming runs on `fetch`, like the rest of the SDK — see [Runtime support](https://wavehouse.dev/sdk/#runtime-support).
+Requires Node 22 or newer — the only line this SDK is tested against; Node 18 and 20 are past upstream end-of-life. Neither browsers nor Node need a polyfill: streaming runs on `fetch`, like the rest of the SDK — see [Runtime support](https://wavehouse.dev/sdk/typescript#runtime-support).
 
 This works in any framework that uses a bundler — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — with `import { createClient } from '@wavehouse/sdk'`.
 
@@ -57,7 +57,7 @@ const wh = createClient({
 });
 ```
 
-`baseURL` may include a path prefix (`https://app.example.com/api/wavehouse`) when WaveHouse is served under one — see [Serving under a path prefix](https://wavehouse.dev/sdk#serving-under-a-path-prefix).
+`baseURL` may include a path prefix (`https://app.example.com/api/wavehouse`) when WaveHouse is served under one — see [Serving under a path prefix](https://wavehouse.dev/sdk/typescript#serving-under-a-path-prefix).
 
 ### Query Data
 
@@ -170,7 +170,7 @@ E2E tests live in `tests/e2e/sdk/` (repo root) and exercise the full pipeline th
 
 ## API Reference
 
-See the full [SDK API Reference](https://wavehouse.dev/sdk) for detailed documentation of every method, type, and option.
+See the full [SDK documentation](https://wavehouse.dev/sdk/typescript) for detailed documentation of every method, type, and option.
 
 ## License
 

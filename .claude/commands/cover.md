@@ -1,6 +1,6 @@
 ---
 description: Render coverage HTML for a suite and surface drops below threshold
-argument-hint: [unit|integration|e2e|sdk|merge|all] (default: merge whatever exists)
+argument-hint: [unit|integration|e2e|go-sdk|ts-unit|ts-e2e|ts-total|merge|all] (default: merge whatever exists)
 ---
 
 Generate the coverage report and surface anything below threshold from `.testcoverage.yml`.
@@ -13,10 +13,11 @@ Behavior:
 - **unit**: `make test-unit` (gates per-suite + writes `tmp/coverage/unit/`)
 - **integration**: `make test-integration` (requires Docker)
 - **e2e**: `make test-e2e` (requires Docker; orchestrator + cover binary)
-- **ts-unit**: `make test-ts` (SDK unit tests + coverage + gate against `suites.ts-unit`)
+- **go-sdk**: `make test-sdk-go` (nested module `clients/go`; gates against `suites.go-sdk`, rendered separately and never merged into the Go total)
+- **ts-unit**: `make test-sdk-ts` (TS SDK unit tests + coverage + gate against `suites.ts-unit`)
 - **ts-e2e**: emitted as a side effect of `make test-e2e` (the orchestrator always passes `--coverage` to the e2e vitest run; informational only, no standalone gate)
 - **ts-total**: `make cov` (runs `cov report` — one consolidated Go + TS summary with per-suite HTML links + all gates; fails if *no* suite has data)
-- **all**: `make test-all` (all four suites sequentially + `make cov`)
+- **all**: `make test-all` (every suite sequentially + `make cov`)
 
 After the run completes:
 

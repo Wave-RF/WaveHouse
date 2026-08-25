@@ -82,7 +82,7 @@ handle_path /api/wavehouse/* {
 The ingress controller forwards the full path unless you ask it to rewrite. Pair a capture-group path (`/api/wavehouse(/|$)(.*)` with `pathType: ImplementationSpecific`) with the `nginx.ingress.kubernetes.io/rewrite-target: /$2` annotation, or the prefix arrives at WaveHouse unstripped.
 :::
 
-Point the SDK at the prefixed URL and it does the rest — `createClient({ baseURL: 'https://app.example.com/api/wavehouse' })` sends both REST calls and SSE streams under the prefix ([SDK → Serving under a path prefix](/sdk#serving-under-a-path-prefix)).
+Point either SDK at the prefixed URL and it does the rest — `createClient({ baseURL: 'https://app.example.com/api/wavehouse' })` in TypeScript, `wavehouse.NewClient(wavehouse.Config{BaseURL: "https://app.example.com/api/wavehouse"})` in Go — both sending REST calls and SSE streams under the prefix ([TypeScript → Serving under a path prefix](/sdk/typescript#serving-under-a-path-prefix), [Go → Creating a client](/sdk/go#creating-a-client)).
 
 ## Request-body size limits
 
@@ -209,10 +209,10 @@ WaveHouse serves Kubernetes-convention probes on `:8080` (full behavior in [Depl
 - **`/livez`** — liveness; sticky-200 after first successful boot. Does not touch ClickHouse.
 - **`/readyz`** — readiness; issues a ClickHouse `Ping` on **every** call. Point your load balancer's (internal) health check here so it routes around an instance whose ClickHouse is unreachable.
 - **`/healthz`** — permanent alias of `/livez`.
-- **`/v1/health`** — the SDK's content-free liveness ping; mirrors `/livez` (200 once booted) and never touches ClickHouse.
+- **`/v1/health`** — the SDKs' content-free liveness ping; mirrors `/livez` (200 once booted) and never touches ClickHouse.
 
 :::caution[Recommended: keep the bare probe paths off the public vhost]
-Expose only **`/v1/health`** (and your API) to the internet — route `/livez`, `/readyz`, and `/healthz` on a private/internal listener, not the public proxy. Your orchestrator still reaches them the internal way regardless: kubelet probes the container directly on `:8080`, and a load balancer health-checks the backend — neither goes through the public proxy. Two reasons to keep them internal: `/readyz` pings ClickHouse on every call, so a public `/readyz` lets an unauthenticated flood turn into a per-request backend ping; and the probes leak boot/readiness state. `/v1/health` is the safe public liveness endpoint because it answers the same "is this server up" question without touching ClickHouse — it's what the SDK's `wh.sys.health()` calls.
+Expose only **`/v1/health`** (and your API) to the internet — route `/livez`, `/readyz`, and `/healthz` on a private/internal listener, not the public proxy. Your orchestrator still reaches them the internal way regardless: kubelet probes the container directly on `:8080`, and a load balancer health-checks the backend — neither goes through the public proxy. Two reasons to keep them internal: `/readyz` pings ClickHouse on every call, so a public `/readyz` lets an unauthenticated flood turn into a per-request backend ping; and the probes leak boot/readiness state. `/v1/health` is the safe public liveness endpoint because it answers the same "is this server up" question without touching ClickHouse — it's what the SDKs' liveness ping calls (`wh.sys.health()` / `wh.Sys.Health(ctx)`).
 :::
 
 ## Timeouts and slow links

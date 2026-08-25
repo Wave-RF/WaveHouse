@@ -1,8 +1,11 @@
 version: 2
 updates:
-  # Go modules
+  # Go modules. TWO directories: Dependabot does not descend into nested
+  # modules, so clients/go needs its own entry (stdlib-only today).
   - package-ecosystem: gomod
-    directory: /
+    directories:
+      - /
+      - /clients/go
     schedule:
       interval: weekly
       day: monday

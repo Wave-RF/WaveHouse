@@ -25,13 +25,17 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
     items: [
       { label: "API Reference", slug: "api" },
       {
-        // Topic-first SDK pages: when a second SDK language lands, these
-        // shared usage pages grow <Tabs syncKey="lang"> code tabs and each
-        // language gets its own setup/caveats page — the topic URLs never
-        // churn (decision in PR #313).
-        label: "TypeScript SDK",
+        // Topic-first SDK pages: the shared usage pages carry
+        // <Tabs syncKey="lang"> per language and each language keeps its own
+        // setup/caveats page — the topic URLs never churn as languages are
+        // added (decision in PR #313, executed for Go in PR #434). A third
+        // language adds one setup page and a tab per topic; it does NOT add a
+        // parallel tree, and no language sits at the root of /sdk.
+        label: "SDKs",
         items: [
           { label: "Overview", slug: "sdk" },
+          { label: "TypeScript setup", slug: "sdk/typescript" },
+          { label: "Go setup", slug: "sdk/go" },
           { label: "Queries", slug: "sdk/queries" },
           { label: "Streaming & Live Queries", slug: "sdk/streaming" },
           { label: "Pipes", slug: "sdk/pipes" },

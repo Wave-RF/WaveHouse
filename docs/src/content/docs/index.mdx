@@ -102,8 +102,8 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
  <Card title="Hasura-style access control" icon="seti:lock">
   Per-table, per-role column and row-level policies with JWT claim templating. Stored in NATS KV with file-based bootstrap and cluster sync.
  </Card>
- <Card title="TypeScript SDK" icon="seti:typescript">
-  `@wavehouse/sdk` — a type-safe query builder, live queries, real-time streaming, and codegen from your schemas, with one runtime dependency of ~1.4 KB gzipped.
+ <Card title="TypeScript & Go SDKs" icon="seti:typescript">
+  `@wavehouse/sdk` and `github.com/Wave-RF/WaveHouse/clients/go` — type-safe query builders, live queries, real-time streaming, and codegen from your schemas, speaking one shared wire format.
  </Card>
 </CardGrid>
 
@@ -111,7 +111,7 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 
 ## Query it like a database. Subscribe to it like a socket
 
-The [TypeScript SDK](/sdk) wraps the whole surface — typed inserts, a chainable query builder, and live queries that backfill history before streaming:
+The [client SDKs](/sdk) wrap the whole surface — typed inserts, a chainable query builder, and live queries that backfill history before streaming. Examples below are TypeScript; the Go client mirrors the same feature set, and every SDK page carries both languages side by side.
 
 <Tabs>
  <TabItem label="Ingest">
@@ -212,8 +212,8 @@ Self-hosting WaveHouse is deliberately boring — one binary, one dependency. Bu
   href="/api"
  />
  <LinkCard
-  title="TypeScript SDK"
-  description="Query builder, live queries, streaming, and schema codegen."
+  title="Client SDKs"
+  description="TypeScript and Go — query builder, live queries, streaming, and schema codegen."
   href="/sdk"
  />
 </CardGrid>
