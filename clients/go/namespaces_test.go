@@ -2,200 +2,194 @@ package wavehouse
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"sync"
 	"testing"
 )
 
-func TestSysNamespace_Health(t *testing.T) {
-	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/health" {
-			t.Errorf("want /v1/health, got %s", r.URL.Path)
-		}
-		w.WriteHeader(200)
-	}))
-	err := c.Sys.Health(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-}
+// TestNamespaces_RequestShape: the method, path and query parameters every
+// namespace helper puts on the wire, and the shape it decodes the reply into.
+func TestNamespaces_RequestShape(t *testing.T) {
+	ctx := context.Background()
+	policy := &Policy{Tables: map[string]TablePolicy{}}
 
-func TestSchemaNamespace_List(t *testing.T) {
-	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/ops/schema" {
-			t.Errorf("want /v1/ops/schema, got %s", r.URL.Path)
-		}
-		_ = json.NewEncoder(w).Encode([]TableSchema{
-			{Name: "clicks", Columns: []Column{{Name: "page", Type: "String"}}},
-		})
-	}))
-	schemas, err := c.Schema.List(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name       string
+		reply      any // nil replies with a bare 200
+		call       func(*testing.T, *Client)
+		wantMethod string
+		wantPath   string
+		wantTable  string // expected ?table= parameter, if any
+	}{
+		{
+			name:       "Sys.Health",
+			call:       func(t *testing.T, c *Client) { mustNoErr(t, c.Sys.Health(ctx)) },
+			wantMethod: "GET",
+			wantPath:   "/v1/health",
+		},
+		{
+			name:  "Schema.List keys tables by name",
+			reply: []TableSchema{{Name: "clicks", Columns: []Column{{Name: "page", Type: "String"}}}},
+			call: func(t *testing.T, c *Client) {
+				schemas, err := c.Schema.List(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := schemas["clicks"]; !ok {
+					t.Fatalf("want clicks in schemas, got %v", schemas)
+				}
+			},
+			wantMethod: "GET",
+			wantPath:   "/v1/ops/schema",
+		},
+		{
+			name:       "Schema.Refresh",
+			call:       func(t *testing.T, c *Client) { mustNoErr(t, c.Schema.Refresh(ctx)) },
+			wantMethod: "POST",
+			wantPath:   "/v1/ops/schema/refresh",
+		},
+		{
+			name:  "Policy.Get",
+			reply: policy,
+			call: func(t *testing.T, c *Client) {
+				pol, err := c.Policy.Get(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if pol.Tables == nil {
+					t.Fatal("want a tables map")
+				}
+			},
+			wantMethod: "GET",
+			wantPath:   "/v1/ops/policy",
+		},
+		{
+			name:       "Policy.Set",
+			call:       func(t *testing.T, c *Client) { mustNoErr(t, c.Policy.Set(ctx, policy)) },
+			wantMethod: "PUT",
+			wantPath:   "/v1/ops/policy",
+		},
+		{
+			name:  "Policy.Validate",
+			reply: ValidationResult{Valid: true},
+			call: func(t *testing.T, c *Client) {
+				v, err := c.Policy.Validate(ctx, policy)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !v.Valid {
+					t.Fatal("want valid=true")
+				}
+			},
+			wantMethod: "POST",
+			wantPath:   "/v1/ops/policy/validate",
+		},
+		{
+			name:  "DLQ.List totals every table",
+			reply: DLQStats{Tables: map[string]int{"clicks": 3}, Total: 3},
+			call: func(t *testing.T, c *Client) {
+				stats, err := c.DLQ.List(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stats.Total != 3 {
+					t.Fatalf("want total=3, got %d", stats.Total)
+				}
+			},
+			wantMethod: "GET",
+			wantPath:   "/v1/ops/dlq/stats",
+		},
+		{
+			name:  "DLQ.Table filters by table",
+			reply: DLQStats{Tables: map[string]int{"clicks": 2}, Total: 2},
+			call: func(t *testing.T, c *Client) {
+				_, err := c.DLQ.Table(ctx, "clicks")
+				mustNoErr(t, err)
+			},
+			wantMethod: "GET",
+			wantPath:   "/v1/ops/dlq/stats",
+			wantTable:  "clicks",
+		},
+		{
+			name:  "Pipes.List",
+			reply: []Pipe{{Name: "p1", SQL: "SELECT 1"}},
+			call: func(t *testing.T, c *Client) {
+				pipes, err := c.Pipes.List(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(pipes) != 1 || pipes[0].Name != "p1" {
+					t.Fatalf("want [p1], got %v", pipes)
+				}
+			},
+			wantMethod: "GET",
+			wantPath:   "/v1/ops/pipes",
+		},
+		{
+			name:  "Pipes.Get",
+			reply: Pipe{Name: "p1", SQL: "SELECT 1"},
+			call: func(t *testing.T, c *Client) {
+				p, err := c.Pipes.Get(ctx, "p1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if p.Name != "p1" {
+					t.Fatalf("want p1, got %s", p.Name)
+				}
+			},
+			wantMethod: "GET",
+			wantPath:   "/v1/ops/pipes/p1",
+		},
+		{
+			name:       "Pipes.Set",
+			call:       func(t *testing.T, c *Client) { mustNoErr(t, c.Pipes.Set(ctx, "p1", PipeDef{SQL: "SELECT 1"})) },
+			wantMethod: "PUT",
+			wantPath:   "/v1/ops/pipes/p1",
+		},
+		{
+			name:       "Pipes.Delete",
+			call:       func(t *testing.T, c *Client) { mustNoErr(t, c.Pipes.Delete(ctx, "p1")) },
+			wantMethod: "DELETE",
+			wantPath:   "/v1/ops/pipes/p1",
+		},
+		{
+			name:  "PipeRef.Fetch posts the pipe's parameters",
+			reply: []map[string]any{{"count": 42}},
+			call: func(t *testing.T, c *Client) {
+				rows, err := Fetch[map[string]any](ctx, c.Pipe("top_pages", map[string]any{"limit": 10}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(rows) != 1 {
+					t.Fatalf("want 1 row, got %d", len(rows))
+				}
+			},
+			wantMethod: "POST",
+			wantPath:   "/v1/pipes/top_pages",
+		},
 	}
-	if _, ok := schemas["clicks"]; !ok {
-		t.Fatal("want clicks in schemas")
-	}
-}
 
-func TestSchemaNamespace_Refresh(t *testing.T) {
-	var mu sync.Mutex
-	var gotMethod string
-	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		gotMethod = r.Method
-		mu.Unlock()
-		w.WriteHeader(200)
-	}))
-	err := c.Schema.Refresh(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if gotMethod != "POST" {
-		t.Fatalf("want POST, got %s", gotMethod)
-	}
-}
-
-func TestPolicyNamespace_GetSetValidate(t *testing.T) {
-	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case "GET":
-			_ = json.NewEncoder(w).Encode(Policy{Tables: map[string]TablePolicy{}})
-		case "PUT":
-			w.WriteHeader(200)
-		case "POST":
-			_ = json.NewEncoder(w).Encode(ValidationResult{Valid: true})
-		}
-	}))
-
-	pol, err := c.Policy.Get(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pol.Tables == nil {
-		t.Fatal("want tables map")
-	}
-
-	err = c.Policy.Set(context.Background(), pol)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	v, err := c.Policy.Validate(context.Background(), pol)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !v.Valid {
-		t.Fatal("want valid=true")
-	}
-}
-
-func TestDLQNamespace(t *testing.T) {
-	t.Run("List", func(t *testing.T) {
-		c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_ = json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{"clicks": 3}, Total: 3})
-		}))
-		stats, err := c.DLQ.List(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if stats.Total != 3 {
-			t.Fatalf("want total=3, got %d", stats.Total)
-		}
-	})
-
-	t.Run("Table", func(t *testing.T) {
-		var mu sync.Mutex
-		var gotParam string
-		c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			gotParam = r.URL.Query().Get("table")
-			mu.Unlock()
-			_ = json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{"clicks": 2}, Total: 2})
-		}))
-		_, err := c.DLQ.Table(context.Background(), "clicks")
-		if err != nil {
-			t.Fatal(err)
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		if gotParam != "clicks" {
-			t.Fatalf("want table=clicks, got %s", gotParam)
-		}
-	})
-}
-
-func TestPipesNamespace_CRUD(t *testing.T) {
-	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case "GET":
-			if r.URL.Path == "/v1/ops/pipes" {
-				_ = json.NewEncoder(w).Encode([]Pipe{{Name: "p1", SQL: "SELECT 1"}})
-			} else {
-				_ = json.NewEncoder(w).Encode(Pipe{Name: "p1", SQL: "SELECT 1"})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			respond := ok200
+			if tt.reply != nil {
+				respond = jsonResponse(tt.reply)
 			}
-		case "PUT":
-			w.WriteHeader(200)
-		case "DELETE":
-			w.WriteHeader(200)
-		}
-	}))
+			c, reqs := recordingClient(t, respond)
+			tt.call(t, c)
 
-	pipes, err := c.Pipes.List(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(pipes) != 1 || pipes[0].Name != "p1" {
-		t.Fatalf("want [p1], got %v", pipes)
-	}
-
-	p, err := c.Pipes.Get(context.Background(), "p1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Name != "p1" {
-		t.Fatalf("want p1, got %s", p.Name)
-	}
-
-	err = c.Pipes.Set(context.Background(), "p1", PipeDef{SQL: "SELECT 1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = c.Pipes.Delete(context.Background(), "p1")
-	if err != nil {
-		t.Fatal(err)
+			got := <-reqs
+			if got.method != tt.wantMethod || got.path != tt.wantPath {
+				t.Fatalf("want %s %s, got %s %s", tt.wantMethod, tt.wantPath, got.method, got.path)
+			}
+			if tbl := got.query.Get("table"); tbl != tt.wantTable {
+				t.Fatalf("want table=%q, got %q", tt.wantTable, tbl)
+			}
+		})
 	}
 }
 
-func TestPipeRef_Fetch(t *testing.T) {
-	var mu sync.Mutex
-	var gotPath, gotMethod string
-	var gotBody map[string]any
-	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		gotPath = r.URL.Path
-		gotMethod = r.Method
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		mu.Unlock()
-		_ = json.NewEncoder(w).Encode([]map[string]any{{"count": 42}})
-	}))
-	rows, err := Fetch[map[string]any](context.Background(), c.Pipe("top_pages", map[string]any{"limit": 10}))
+func mustNoErr(t *testing.T, err error) {
+	t.Helper()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("want 1 row, got %d", len(rows))
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if gotPath != "/v1/pipes/top_pages" {
-		t.Fatalf("want /v1/pipes/top_pages, got %s", gotPath)
-	}
-	if gotMethod != "POST" {
-		t.Fatalf("want POST, got %s", gotMethod)
 	}
 }

@@ -46,6 +46,10 @@ func TestParseErrorResponse(t *testing.T) {
 			wantRetry:  true,
 			nilDetails: true,
 		},
+		// Retryability is decided by status class alone — 429 and 5xx only.
+		{name: "ForbiddenNotRetryable", status: 403, body: `{"error":"nope"}`, wantMsg: "nope"},
+		{name: "TooManyRequestsRetryable", status: 429, body: `{"error":"slow down"}`, wantMsg: "slow down", wantRetry: true},
+		{name: "ServiceUnavailableRetryable", status: 503, body: `{"error":"down"}`, wantMsg: "down", wantRetry: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -74,33 +78,6 @@ func TestParseErrorResponse(t *testing.T) {
 	}
 }
 
-func TestParseErrorResponse_5xxRetryable(t *testing.T) {
-	tests := []struct {
-		name      string
-		status    int
-		retryable bool
-	}{
-		{"BadRequest", 400, false},
-		{"Forbidden", 403, false},
-		{"TooManyRequests", 429, true},
-		{"InternalServerError", 500, true},
-		{"ServiceUnavailable", 503, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			res := &http.Response{
-				StatusCode: tt.status,
-				Body:       io.NopCloser(strings.NewReader(`{"error":"test"}`)),
-				Header:     http.Header{},
-			}
-			e := parseErrorResponse(res)
-			if e.Retryable != tt.retryable {
-				t.Errorf("status %d: want retryable=%v, got %v", tt.status, tt.retryable, e.Retryable)
-			}
-		})
-	}
-}
-
 func TestNetworkError(t *testing.T) {
 	e := networkError(errors.New("connection refused"))
 	if e.Code != "NETWORK_ERROR" {
@@ -118,16 +95,13 @@ func TestNetworkError(t *testing.T) {
 }
 
 func TestError_ErrorMethod(t *testing.T) {
-	e := &Error{Status: 404, Code: "HTTP_404", Message: "not found"}
-	got := e.Error()
-	if !strings.Contains(got, "HTTP_404") || !strings.Contains(got, "not found") {
-		t.Fatalf("unexpected Error() output: %s", got)
-	}
-
-	e2 := &Error{Status: 0, Code: "NETWORK_ERROR", Message: "timeout"}
-	got2 := e2.Error()
-	if !strings.Contains(got2, "NETWORK_ERROR") {
-		t.Fatalf("unexpected Error() output: %s", got2)
+	for _, e := range []*Error{
+		{Status: 404, Code: "HTTP_404", Message: "not found"},
+		{Status: 0, Code: "NETWORK_ERROR", Message: "timeout"},
+	} {
+		if got := e.Error(); !strings.Contains(got, e.Code) || !strings.Contains(got, e.Message) {
+			t.Errorf("Error() = %q, want it to name both %q and %q", got, e.Code, e.Message)
+		}
 	}
 }
 

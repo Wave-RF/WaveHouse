@@ -99,6 +99,7 @@ func TestGenerate_Basic(t *testing.T) {
 		"clicks": {Name: "clicks", Columns: []column{
 			{Name: "page", Type: "String"},
 			{Name: "score", Type: "Float64"},
+			{Name: "big", Type: "UInt128"},
 			{Name: "received_timestamp", Type: "DateTime64(3, 'UTC')", HasDefault: true},
 		}},
 	}, "myapp")
@@ -107,15 +108,20 @@ func TestGenerate_Basic(t *testing.T) {
 	}
 	for _, want := range []string{
 		"package myapp",
+		`import "encoding/json"`, // dragged in by the json.Number field below
 		"type ClicksRow struct {",
 		"Page string `json:\"page\"`",
 		"Score float64 `json:\"score\"`",
+		"Big json.Number `json:\"big\"`",
 		// Defaulted column: pointer + omitempty so an explicit zero still sends.
 		"ReceivedTimestamp *string `json:\"received_timestamp,omitempty\"`",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated output missing %q:\n%s", want, out)
 		}
+	}
+	if _, err := format.Source([]byte(out)); err != nil {
+		t.Fatalf("generated output is not valid Go: %v", err)
 	}
 }
 
@@ -163,20 +169,5 @@ func TestGeneratedShapeDecodesStructuredQueryPayload(t *testing.T) {
 	}
 	if rows[0].Big.String() != "170141183460469231731687303715884105727" {
 		t.Fatalf("128-bit value corrupted: %s", rows[0].Big)
-	}
-}
-
-func TestGenerate_JSONNumberImport(t *testing.T) {
-	out, err := generate(map[string]tableSchema{
-		"t": {Name: "t", Columns: []column{{Name: "big", Type: "UInt128"}}},
-	}, "main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out, `import "encoding/json"`) {
-		t.Fatalf("json.Number field without encoding/json import:\n%s", out)
-	}
-	if _, err := format.Source([]byte(out)); err != nil {
-		t.Fatalf("generated output is not valid Go: %v", err)
 	}
 }

@@ -52,6 +52,10 @@ func e2eClient(t *testing.T) *Client {
 	return NewClient(cfg)
 }
 
+// e2eCtx is the context every e2e call uses. The deadlines that matter are
+// scoped where they belong: the reachability probe above and waitForRows below.
+var e2eCtx = context.Background()
+
 // marker returns a unique string for the running test, useful for
 // inserting distinguishable rows that won't collide across parallel runs.
 func marker(t *testing.T) string {
@@ -110,18 +114,16 @@ func waitForRows(t *testing.T, c *Client, table, markerCol, mk string, want int)
 
 func TestE2E_HealthCheck(t *testing.T) {
 	c := e2eClient(t)
-	ctx := context.Background()
 
-	if err := c.Sys.Health(ctx); err != nil {
+	if err := c.Sys.Health(e2eCtx); err != nil {
 		t.Fatalf("Health check failed: %v", err)
 	}
 }
 
 func TestE2E_SchemaList(t *testing.T) {
 	c := e2eClient(t)
-	ctx := context.Background()
 
-	schemas, err := c.Schema.List(ctx)
+	schemas, err := c.Schema.List(e2eCtx)
 	if err != nil {
 		t.Fatalf("Schema.List failed: %v", err)
 	}
@@ -136,63 +138,54 @@ func TestE2E_SchemaList(t *testing.T) {
 	}
 }
 
-func TestE2E_InsertAndQuery(t *testing.T) {
-	c := e2eClient(t)
-	ctx := context.Background()
-	table, ts := firstTable(t, c)
-	mk := marker(t)
-
-	row, markerCol := buildMarkerRow(t, ts, mk)
-
-	res, err := c.From(table).Insert(ctx, row)
-	if err != nil {
-		t.Fatalf("Insert into %s failed: %v", table, err)
+// TestE2E_Insert covers both ingest paths against the live server: a bare map
+// goes as one JSON body, a slice as an NDJSON batch.
+func TestE2E_Insert(t *testing.T) {
+	tests := []struct {
+		name  string
+		count int
+	}{
+		{"single row", 1},
+		{"batch of three", 3},
 	}
-	if !res.OK {
-		t.Fatalf("Insert into %s: OK=false", table)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := e2eClient(t)
+			table, ts := firstTable(t, c)
+			mk := marker(t)
 
-	rows := waitForRows(t, c, table, markerCol, mk, 1)
-	if len(rows) == 0 {
-		t.Fatal("Query returned zero rows — expected the inserted marker row")
-	}
-	got, _ := rows[0][markerCol].(string)
-	if got != mk {
-		t.Errorf("marker mismatch: want %q, got %q", mk, got)
-	}
-}
+			// Every row carries the same marker, so one query counts them all.
+			rows := make([]map[string]any, tt.count)
+			markerCol := ""
+			for i := range rows {
+				rows[i], markerCol = buildMarkerRow(t, ts, mk)
+			}
+			var payload any = rows
+			if tt.count == 1 {
+				payload = rows[0] // a bare map takes the single-insert path
+			}
 
-func TestE2E_BatchInsert(t *testing.T) {
-	c := e2eClient(t)
-	ctx := context.Background()
-	table, ts := firstTable(t, c)
+			res, err := c.From(table).Insert(e2eCtx, payload)
+			if err != nil {
+				t.Fatalf("Insert into %s failed: %v", table, err)
+			}
+			if !res.OK {
+				t.Fatalf("Insert into %s: OK=false", table)
+			}
 
-	mk := marker(t)
-
-	// Build 3 rows, each with the same marker so we can count them.
-	rows := make([]map[string]any, 3)
-	markerCol := ""
-	for i := range rows {
-		rows[i], markerCol = buildMarkerRow(t, ts, mk)
-	}
-
-	res, err := c.From(table).Insert(ctx, rows)
-	if err != nil {
-		t.Fatalf("Batch insert failed: %v", err)
-	}
-	if !res.OK {
-		t.Fatalf("Batch insert: OK=false")
-	}
-
-	got := waitForRows(t, c, table, markerCol, mk, 3)
-	if len(got) < 3 {
-		t.Fatalf("expected >= 3 rows for marker %q, got %d", mk, len(got))
+			got := waitForRows(t, c, table, markerCol, mk, tt.count)
+			if len(got) < tt.count {
+				t.Fatalf("expected >= %d rows for marker %q, got %d", tt.count, mk, len(got))
+			}
+			if v, _ := got[0][markerCol].(string); v != mk {
+				t.Errorf("marker mismatch: want %q, got %q", mk, v)
+			}
+		})
 	}
 }
 
 func TestE2E_QueryBuilder(t *testing.T) {
 	c := e2eClient(t)
-	ctx := context.Background()
 	table, ts := firstTable(t, c)
 
 	// Pick two columns for a minimal projection.
@@ -211,7 +204,7 @@ func TestE2E_QueryBuilder(t *testing.T) {
 		Select(cols...).
 		OrderBy(cols[0], "asc").
 		Limit(5).
-		FetchUntyped(ctx)
+		FetchUntyped(e2eCtx)
 	if err != nil {
 		t.Fatalf("QueryBuilder chain failed: %v", err)
 	}
@@ -224,11 +217,10 @@ func TestE2E_QueryBuilder(t *testing.T) {
 
 func TestE2E_TypedFetch(t *testing.T) {
 	c := e2eClient(t)
-	ctx := context.Background()
 	table, _ := firstTable(t, c)
 
 	q := c.From(table).SelectAll().Limit(3)
-	page, err := FetchTyped[map[string]any](ctx, q)
+	page, err := FetchTyped[map[string]any](e2eCtx, q)
 	if err != nil {
 		t.Fatalf("FetchTyped failed: %v", err)
 	}
@@ -243,9 +235,8 @@ func TestE2E_TypedFetch(t *testing.T) {
 
 func TestE2E_SQLQuery(t *testing.T) {
 	c := e2eClient(t)
-	ctx := context.Background()
 
-	rows, err := SQL[map[string]any](ctx, c, "SELECT 1 AS n")
+	rows, err := SQL[map[string]any](e2eCtx, c, "SELECT 1 AS n")
 	if err != nil {
 		skipIfUnauthorized(t, err, "SQL query")
 		t.Fatalf("SQL query failed: %v", err)
@@ -272,21 +263,20 @@ func TestE2E_SQLQuery(t *testing.T) {
 
 func TestE2E_PolicyGetSet(t *testing.T) {
 	c := e2eClient(t)
-	ctx := context.Background()
 
-	pol, err := c.Policy.Get(ctx)
+	pol, err := c.Policy.Get(e2eCtx)
 	if err != nil {
 		skipIfUnauthorized(t, err, "Policy.Get")
 		t.Fatalf("Policy.Get failed: %v", err)
 	}
 
 	// Round-trip: set the same policy back.
-	if err := c.Policy.Set(ctx, pol); err != nil {
+	if err := c.Policy.Set(e2eCtx, pol); err != nil {
 		t.Fatalf("Policy.Set (round-trip) failed: %v", err)
 	}
 
 	// Read again and verify tables still match.
-	pol2, err := c.Policy.Get(ctx)
+	pol2, err := c.Policy.Get(e2eCtx)
 	if err != nil {
 		t.Fatalf("Policy.Get (after set) failed: %v", err)
 	}
@@ -297,7 +287,6 @@ func TestE2E_PolicyGetSet(t *testing.T) {
 
 func TestE2E_PipesCRUD(t *testing.T) {
 	c := e2eClient(t)
-	ctx := context.Background()
 
 	pipeName := fmt.Sprintf("e2e_test_%d", time.Now().UnixNano())
 
@@ -306,7 +295,7 @@ func TestE2E_PipesCRUD(t *testing.T) {
 		SQL:         "SELECT 1 AS ok",
 		Description: "E2E test pipe — safe to delete",
 	}
-	if err := c.Pipes.Set(ctx, pipeName, def); err != nil {
+	if err := c.Pipes.Set(e2eCtx, pipeName, def); err != nil {
 		skipIfUnauthorized(t, err, "Pipes.Set")
 		t.Fatalf("Pipes.Set (create) failed: %v", err)
 	}
@@ -317,7 +306,7 @@ func TestE2E_PipesCRUD(t *testing.T) {
 	})
 
 	// Get
-	pipe, err := c.Pipes.Get(ctx, pipeName)
+	pipe, err := c.Pipes.Get(e2eCtx, pipeName)
 	if err != nil {
 		t.Fatalf("Pipes.Get failed: %v", err)
 	}
@@ -326,7 +315,7 @@ func TestE2E_PipesCRUD(t *testing.T) {
 	}
 
 	// List — verify it appears
-	pipes, err := c.Pipes.List(ctx)
+	pipes, err := c.Pipes.List(e2eCtx)
 	if err != nil {
 		t.Fatalf("Pipes.List failed: %v", err)
 	}
@@ -342,12 +331,12 @@ func TestE2E_PipesCRUD(t *testing.T) {
 	}
 
 	// Delete
-	if err := c.Pipes.Delete(ctx, pipeName); err != nil {
+	if err := c.Pipes.Delete(e2eCtx, pipeName); err != nil {
 		t.Fatalf("Pipes.Delete failed: %v", err)
 	}
 
 	// Verify gone — Get should fail.
-	_, err = c.Pipes.Get(ctx, pipeName)
+	_, err = c.Pipes.Get(e2eCtx, pipeName)
 	if err == nil {
 		t.Error("Pipes.Get after delete: expected error, got nil")
 	}

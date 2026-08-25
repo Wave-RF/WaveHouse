@@ -1,12 +1,14 @@
 package wavehouse
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,6 +23,9 @@ func errIs(err error, code string) bool {
 	return false
 }
 
+// testCtx and queryTestCtx are the two entry points every test in this package
+// uses to reach a throwaway server: the bare transport context, and a full
+// Client wired to the same server.
 func testCtx(t *testing.T, handler http.Handler) httpContext {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -29,6 +34,95 @@ func testCtx(t *testing.T, handler http.Handler) httpContext {
 		baseURL:    srv.URL,
 		maxRetries: 0,
 		httpClient: srv.Client(),
+	}
+}
+
+func queryTestCtx(t *testing.T, handler http.Handler) *Client {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	return NewClient(Config{
+		BaseURL:    srv.URL,
+		HTTPClient: srv.Client(),
+		Options:    &ClientOptions{MaxRetries: 0},
+	})
+}
+
+// recordedRequest is one request as the test server saw it — everything a test
+// might assert on, copied on the server goroutine.
+type recordedRequest struct {
+	method string
+	path   string
+	query  url.Values
+	header http.Header
+	body   []byte
+}
+
+// jsonBody decodes the recorded body as a JSON object. UseNumber keeps int64
+// cursor values exact on the assertion side too.
+func (r recordedRequest) jsonBody(t *testing.T) map[string]any {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(r.body))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil {
+		t.Fatalf("decode request body %q: %v", r.body, err)
+	}
+	return m
+}
+
+// recordRequests wraps handler so every request it serves lands on the
+// returned buffered channel — a channel, not a shared variable, so -race sees
+// the edge between the server goroutine and the test. handler still reads an
+// intact Body.
+func recordRequests(t *testing.T, handler http.Handler) (http.Handler, <-chan recordedRequest) {
+	t.Helper()
+	seen := make(chan recordedRequest, 16)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		seen <- recordedRequest{
+			method: r.Method,
+			path:   r.URL.Path,
+			query:  r.URL.Query(),
+			header: r.Header.Clone(),
+			body:   raw,
+		}
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		handler.ServeHTTP(w, r)
+	}), seen
+}
+
+func recordingCtx(t *testing.T, handler http.Handler) (httpContext, <-chan recordedRequest) {
+	t.Helper()
+	h, seen := recordRequests(t, handler)
+	return testCtx(t, h), seen
+}
+
+func recordingClient(t *testing.T, handler http.Handler) (*Client, <-chan recordedRequest) {
+	t.Helper()
+	h, seen := recordRequests(t, handler)
+	return queryTestCtx(t, h), seen
+}
+
+// ok200 answers with a bare 200; jsonArray with an empty JSON array — the
+// minimal valid reply for a list endpoint.
+var (
+	ok200 = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	jsonArray = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[]`)
+	})
+)
+
+// jsonResponse answers any request with body encoded as JSON.
+func jsonResponse(body any) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(body)
 	}
 }
 
@@ -51,153 +145,134 @@ func TestDoRequest_SuccessfulGET(t *testing.T) {
 	}
 }
 
-func TestDoRequest_POSTWithBody(t *testing.T) {
-	var gotBody map[string]string
-	var gotCT string
-	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotCT = r.Header.Get("Content-Type")
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(200)
-	}))
+// TestDoRequest_RequestShape: what the transport puts on the wire for each
+// body/auth combination.
+func TestDoRequest_RequestShape(t *testing.T) {
+	tests := []struct {
+		name     string
+		auth     func(context.Context) (string, error)
+		opts     requestOptions
+		wantCT   string
+		wantBody string
+		wantAuth string
+	}{
+		{
+			name:     "a struct body is marshaled as JSON",
+			opts:     requestOptions{method: "POST", path: "/v1/ingest", body: map[string]string{"page": "/home"}},
+			wantCT:   "application/json",
+			wantBody: `{"page":"/home"}`,
+		},
+		{
+			name:     "a raw body keeps the caller's content type",
+			opts:     requestOptions{method: "POST", path: "/v1/ingest", rawBody: `{"page":"/a"}`, contentType: "application/x-ndjson"},
+			wantCT:   "application/x-ndjson",
+			wantBody: `{"page":"/a"}`,
+		},
+		{
+			name:     "the auth provider's token becomes a Bearer header",
+			auth:     StaticToken("my-token"),
+			opts:     requestOptions{method: "GET", path: "/v1/ops/schema"},
+			wantCT:   "application/json",
+			wantAuth: "Bearer my-token",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hctx, reqs := recordingCtx(t, ok200)
+			hctx.auth = tt.auth
 
-	err := doRequest(context.Background(), hctx, requestOptions{
-		method: "POST",
-		path:   "/v1/ingest",
-		body:   map[string]string{"page": "/home"},
-	}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotCT != "application/json" {
-		t.Fatalf("want application/json, got %s", gotCT)
-	}
-	if gotBody["page"] != "/home" {
-		t.Fatalf("want /home, got %v", gotBody)
+			if err := doRequest(context.Background(), hctx, tt.opts, nil); err != nil {
+				t.Fatal(err)
+			}
+			got := <-reqs
+			if got.method != tt.opts.method || got.path != tt.opts.path {
+				t.Fatalf("want %s %s, got %s %s", tt.opts.method, tt.opts.path, got.method, got.path)
+			}
+			if ct := got.header.Get("Content-Type"); ct != tt.wantCT {
+				t.Fatalf("want Content-Type %q, got %q", tt.wantCT, ct)
+			}
+			if string(got.body) != tt.wantBody {
+				t.Fatalf("want body %q, got %q", tt.wantBody, got.body)
+			}
+			if auth := got.header.Get("Authorization"); auth != tt.wantAuth {
+				t.Fatalf("want Authorization %q, got %q", tt.wantAuth, auth)
+			}
+		})
 	}
 }
 
-func TestDoRequest_RawBody(t *testing.T) {
-	var gotBody string
-	var gotCT string
-	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotCT = r.Header.Get("Content-Type")
-		raw, _ := io.ReadAll(r.Body)
-		gotBody = string(raw)
-		_ = json.NewEncoder(w).Encode(map[string]int{"total": 1})
-	}))
-
-	err := doRequest(context.Background(), hctx, requestOptions{
-		method:      "POST",
-		path:        "/v1/ingest",
-		rawBody:     `{"page":"/a"}`,
-		contentType: "application/x-ndjson",
-	}, nil)
-	if err != nil {
-		t.Fatal(err)
+// TestDoRequest_RetryPolicy: which statuses are retried, how many attempts
+// they take, and whether Retry-After is honored.
+func TestDoRequest_RetryPolicy(t *testing.T) {
+	tests := []struct {
+		name           string
+		status         int
+		retryAfter     string
+		maxRetries     int
+		wantAttempts   int32
+		wantErrCode    string
+		wantMinElapsed time.Duration
+	}{
+		{name: "4xx is not retried", status: 404, maxRetries: 2, wantAttempts: 1, wantErrCode: "HTTP_404"},
+		{name: "5xx retries until it succeeds", status: 500, maxRetries: 2, wantAttempts: 3},
+		{
+			name: "429 waits out Retry-After", status: 429, retryAfter: "1",
+			maxRetries: 1, wantAttempts: 2, wantMinElapsed: 900 * time.Millisecond,
+		},
 	}
-	if gotCT != "application/x-ndjson" {
-		t.Fatalf("want ndjson content type, got %s", gotCT)
-	}
-	if gotBody != `{"page":"/a"}` {
-		t.Fatalf("want raw body, got %s", gotBody)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if calls.Add(1) >= tt.wantAttempts && tt.wantErrCode == "" {
+					_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if tt.retryAfter != "" {
+					w.Header().Set("Retry-After", tt.retryAfter)
+				}
+				w.WriteHeader(tt.status)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "boom"})
+			}))
+			hctx.maxRetries = tt.maxRetries
 
-func TestDoRequest_AuthInjection(t *testing.T) {
-	var gotAuth string
-	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		w.WriteHeader(200)
-	}))
-	hctx.auth = StaticToken("my-token")
-
-	err := doRequest(context.Background(), hctx, requestOptions{
-		method: "GET",
-		path:   "/v1/ops/schema",
-	}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotAuth != "Bearer my-token" {
-		t.Fatalf("want 'Bearer my-token', got %s", gotAuth)
-	}
-}
-
-func TestDoRequest_4xxNotRetried(t *testing.T) {
-	var count atomic.Int32
-	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		count.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(404)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
-	}))
-	hctx.maxRetries = 2
-
-	err := doRequest(context.Background(), hctx, requestOptions{
-		method: "GET",
-		path:   "/v1/ops/schema",
-	}, nil)
-
-	if !errIs(err, "HTTP_404") {
-		t.Fatalf("want HTTP_404 error, got %v", err)
-	}
-	if count.Load() != 1 {
-		t.Fatalf("4xx should not retry, got %d attempts", count.Load())
-	}
-}
-
-func TestDoRequest_5xxRetried(t *testing.T) {
-	var count atomic.Int32
-	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		n := count.Add(1)
-		if n < 3 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(500)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal"})
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
-	}))
-	hctx.maxRetries = 2
-
-	var result map[string]string
-	err := doRequest(context.Background(), hctx, requestOptions{
-		method: "GET",
-		path:   "/health",
-	}, &result)
-	if err != nil {
-		t.Fatalf("want success after retries, got %v", err)
-	}
-	if count.Load() != 3 {
-		t.Fatalf("want 3 attempts, got %d", count.Load())
+			start := time.Now()
+			var result map[string]string
+			err := doRequest(context.Background(), hctx, requestOptions{method: "GET", path: "/health"}, &result)
+			if tt.wantErrCode == "" && err != nil {
+				t.Fatalf("want success after retries, got %v", err)
+			}
+			if tt.wantErrCode != "" && !errIs(err, tt.wantErrCode) {
+				t.Fatalf("want %s error, got %v", tt.wantErrCode, err)
+			}
+			if got := calls.Load(); got != tt.wantAttempts {
+				t.Fatalf("want %d attempts, got %d", tt.wantAttempts, got)
+			}
+			if elapsed := time.Since(start); elapsed < tt.wantMinElapsed {
+				t.Fatalf("Retry-After not honored — retried after only %v", elapsed)
+			}
+		})
 	}
 }
 
 func TestDoRequest_AbortedOnCancel(t *testing.T) {
-	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	hctx := testCtx(t, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		time.Sleep(5 * time.Second)
 	}))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	err := doRequest(ctx, hctx, requestOptions{
-		method: "GET",
-		path:   "/health",
-	}, nil)
-
+	err := doRequest(ctx, hctx, requestOptions{method: "GET", path: "/health"}, nil)
 	if !errIs(err, "ABORTED") {
 		t.Fatalf("want ABORTED, got %v", err)
 	}
 }
 
 func TestDoRequest_EmptyResponse(t *testing.T) {
-	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(200)
-	}))
-
 	var result map[string]string
-	err := doRequest(context.Background(), hctx, requestOptions{
+	err := doRequest(context.Background(), testCtx(t, ok200), requestOptions{
 		method: "POST",
 		path:   "/v1/ops/schema/refresh",
 	}, &result)
@@ -283,32 +358,6 @@ func TestRetryAfterDelay(t *testing.T) {
 	}
 }
 
-func TestDoRequest_429RetriesWithRetryAfter(t *testing.T) {
-	var calls atomic.Int64
-	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if calls.Add(1) == 1 {
-			w.Header().Set("Retry-After", "1")
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	}))
-	hctx.maxRetries = 1
-
-	start := time.Now()
-	var result map[string]string
-	err := doRequest(context.Background(), hctx, requestOptions{method: "GET", path: "/x"}, &result)
-	if err != nil {
-		t.Fatalf("want success after 429 retry, got %v", err)
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("want 2 attempts, got %d", got)
-	}
-	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
-		t.Fatalf("Retry-After: 1 not honored — retried after only %v", elapsed)
-	}
-}
-
 // A BaseURL carrying a path prefix must survive on both transports — the bug
 // #428 fixed in the TS client, which Go avoids by concatenating rather than
 // resolving. Guards against a future switch to url.JoinPath/ResolveReference.
@@ -336,19 +385,14 @@ func TestBaseURLPathPrefixIsPreserved(t *testing.T) {
 	}
 }
 
-// headerCaptureServer answers any request with `[]` and hands that request's
-// headers back over the channel — a channel, not a shared variable, so -race
-// sees the edge between the server goroutine and the test.
-func headerCaptureServer(t *testing.T) (*httptest.Server, <-chan http.Header) {
+// headerCaptureClient is a Client with configured headers and auth pointed at
+// a server that records what it received.
+func headerCaptureClient(t *testing.T, opts *ClientOptions, auth func(context.Context) (string, error)) (*Client, <-chan recordedRequest) {
 	t.Helper()
-	captured := make(chan http.Header, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		captured <- r.Header.Clone()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `[]`)
-	}))
+	h, reqs := recordRequests(t, jsonArray)
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return srv, captured
+	return NewClient(Config{BaseURL: srv.URL, Auth: auth, HTTPClient: srv.Client(), Options: opts}), reqs
 }
 
 // TestConfiguredHeadersOnRESTRequests: ClientOptions.Headers apply to every
@@ -391,17 +435,11 @@ func TestConfiguredHeadersOnRESTRequests(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, headers := headerCaptureServer(t)
-			client := NewClient(Config{
-				BaseURL:    srv.URL,
-				Auth:       tc.auth,
-				HTTPClient: srv.Client(),
-				Options:    &ClientOptions{Headers: tc.configured},
-			})
+			client, reqs := headerCaptureClient(t, &ClientOptions{Headers: tc.configured}, tc.auth)
 			if _, err := client.Schema.List(context.Background()); err != nil {
 				t.Fatalf("schema list: %v", err)
 			}
-			got := <-headers
+			got := (<-reqs).header
 			if v := got.Values(tc.header); len(v) != 1 {
 				t.Fatalf("want exactly one %s header, got %v", tc.header, v)
 			}
@@ -415,20 +453,15 @@ func TestConfiguredHeadersOnRESTRequests(t *testing.T) {
 // TestConfiguredHeadersAreCopied: mutating the caller's map after NewClient
 // must not change what later requests send.
 func TestConfiguredHeadersAreCopied(t *testing.T) {
-	srv, captured := headerCaptureServer(t)
 	headers := map[string]string{"X-Tenant-Id": "acme"}
-	client := NewClient(Config{
-		BaseURL:    srv.URL,
-		HTTPClient: srv.Client(),
-		Options:    &ClientOptions{Headers: headers},
-	})
+	client, reqs := headerCaptureClient(t, &ClientOptions{Headers: headers}, nil)
 	headers["X-Tenant-Id"] = "attacker"
 	delete(headers, "X-Tenant-Id")
 
 	if _, err := client.Schema.List(context.Background()); err != nil {
 		t.Fatalf("schema list: %v", err)
 	}
-	if v := (<-captured).Get("X-Tenant-Id"); v != "acme" {
+	if v := (<-reqs).header.Get("X-Tenant-Id"); v != "acme" {
 		t.Fatalf("want the value captured at construction, got %q", v)
 	}
 }

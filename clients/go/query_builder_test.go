@@ -1,124 +1,148 @@
 package wavehouse
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 )
 
-func queryTestCtx(t *testing.T, handler http.Handler) *Client {
-	t.Helper()
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
-	return NewClient(Config{
-		BaseURL:    srv.URL,
-		HTTPClient: srv.Client(),
-		Options:    &ClientOptions{MaxRetries: 0},
-	})
-}
-
-func captureQueryBody(t *testing.T, handler http.Handler) (*Client, func() map[string]any) {
-	t.Helper()
-	// body is written on the server goroutine and read on the test goroutine;
-	// the mutex is what makes that visible under -race.
-	var mu sync.Mutex
-	var body []byte
-	wrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read request body: %v", err)
-		}
-		mu.Lock()
-		body = raw
-		mu.Unlock()
-		handler.ServeHTTP(w, r)
-	})
-	c := queryTestCtx(t, wrapper)
-	return c, func() map[string]any {
-		mu.Lock()
-		defer mu.Unlock()
-		var m map[string]any
-		_ = json.Unmarshal(body, &m)
-		return m
-	}
-}
-
-var emptyRows = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+// oneRow answers any query with a single-row result set.
+var oneRow = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode([]map[string]any{{"page": "/home"}})
 })
 
 func TestQueryBuilder_Immutability(t *testing.T) {
-	c := queryTestCtx(t, emptyRows)
-	b1 := c.From("clicks").Select("page")
-	b2 := b1.Where("score", OpGt, 10)
-	if b1 == b2 {
+	b1 := queryTestCtx(t, oneRow).From("clicks").Select("page")
+	if b2 := b1.Where("score", OpGt, 10); b1 == b2 {
 		t.Fatal("builder should be immutable — chain methods return new instances")
 	}
 }
 
-func TestQueryBuilder_SelectColumns(t *testing.T) {
-	c, getBody := captureQueryBody(t, emptyRows)
-	_, _ = c.From("clicks").Select("page", "button").FetchUntyped(context.Background())
-
-	body := getBody()
-	cols, ok := body["columns"].([]any)
-	if !ok || len(cols) != 2 {
-		t.Fatalf("want [page, button], got %v", body["columns"])
+// TestQueryBuilder_RequestBody pins the exact StructuredQuery each chain puts
+// on the wire. The table name always travels as a query parameter, never in
+// the body — and CacheTTL is client-side only, so it appears in neither.
+func TestQueryBuilder_RequestBody(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, *TableRef) error
+		want string
+	}{
+		{
+			name: "the Fetch shortcut selects everything",
+			run:  func(ctx context.Context, tr *TableRef) error { _, err := tr.Fetch(ctx); return err },
+			want: `{"select_all":true,"limit":1000}`,
+		},
+		{
+			name: "Select projects the named columns",
+			run:  func(ctx context.Context, tr *TableRef) error { return runFetch(ctx, tr.Select("page", "button")) },
+			want: `{"columns":["page","button"],"limit":1000}`,
+		},
+		{
+			name: "SelectAll asks for every readable column",
+			run:  func(ctx context.Context, tr *TableRef) error { return runFetch(ctx, tr.SelectAll()) },
+			want: `{"select_all":true,"limit":1000}`,
+		},
+		{
+			name: "a bare query defaults to select_all",
+			run:  func(ctx context.Context, tr *TableRef) error { return runFetch(ctx, tr.Select()) },
+			want: `{"select_all":true,"limit":1000}`,
+		},
+		{
+			name: "an aggregation-only query does not set select_all",
+			run:  func(ctx context.Context, tr *TableRef) error { return runFetch(ctx, tr.Select().Count("*", "n")) },
+			want: `{"aggregations":[{"fn":"count","column":"*","alias":"n"}],"limit":1000}`,
+		},
+		{
+			name: "Where appends a filter",
+			run: func(ctx context.Context, tr *TableRef) error {
+				return runFetch(ctx, tr.Select("page").Where("score", OpGt, 10))
+			},
+			want: `{"columns":["page"],"filters":[{"column":"score","op":"gt","value":10}],"limit":1000}`,
+		},
+		{
+			name: "every aggregation helper, with and without an explicit alias",
+			run: func(ctx context.Context, tr *TableRef) error {
+				return runFetch(ctx, tr.Select().Count("*", "total").Sum("score", "").Avg("score", "").
+					Min("score", "").Max("score", "").CountDistinct("page", "").
+					Aggregate("uniqExact", "user_id", "unique_users"))
+			},
+			want: `{"aggregations":[{"fn":"count","column":"*","alias":"total"},` +
+				`{"fn":"sum","column":"score","alias":"sum_score"},` +
+				`{"fn":"avg","column":"score","alias":"avg_score"},` +
+				`{"fn":"min","column":"score","alias":"min_score"},` +
+				`{"fn":"max","column":"score","alias":"max_score"},` +
+				`{"fn":"countDistinct","column":"page","alias":"count_distinct_page"},` +
+				`{"fn":"uniqExact","column":"user_id","alias":"unique_users"}],"limit":1000}`,
+		},
+		{
+			name: "GroupBy",
+			run:  func(ctx context.Context, tr *TableRef) error { return runFetch(ctx, tr.Select("page").GroupBy("page")) },
+			want: `{"columns":["page"],"group_by":["page"],"limit":1000}`,
+		},
+		{
+			name: "OrderBy",
+			run: func(ctx context.Context, tr *TableRef) error {
+				return runFetch(ctx, tr.Select("page").OrderBy("page", "desc"))
+			},
+			want: `{"columns":["page"],"order_by":[{"column":"page","dir":"desc"}],"limit":1000}`,
+		},
+		{
+			name: "Limit overrides the default",
+			run:  func(ctx context.Context, tr *TableRef) error { return runFetch(ctx, tr.Select("page").Limit(50)) },
+			want: `{"columns":["page"],"limit":50}`,
+		},
+		{
+			name: "TimeRange omits an empty until",
+			run: func(ctx context.Context, tr *TableRef) error {
+				return runFetch(ctx, tr.Select("page").TimeRange("received_timestamp", "1h", ""))
+			},
+			want: `{"columns":["page"],"limit":1000,"time_range":{"column":"received_timestamp","since":"1h"}}`,
+		},
+		{
+			name: "a fully chained query composes every clause",
+			run: func(ctx context.Context, tr *TableRef) error {
+				return runFetch(ctx, tr.Select("page").Where("score", OpGt, 10).Count("*", "total").
+					GroupBy("page").OrderBy("total", "desc").Limit(50).
+					TimeRange("received_timestamp", "1h", "").CacheTTL(60))
+			},
+			want: `{"columns":["page"],"aggregations":[{"fn":"count","column":"*","alias":"total"}],` +
+				`"filters":[{"column":"score","op":"gt","value":10}],"group_by":["page"],` +
+				`"order_by":[{"column":"total","dir":"desc"}],"limit":50,` +
+				`"time_range":{"column":"received_timestamp","since":"1h"}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, reqs := recordingClient(t, oneRow)
+			if err := tt.run(context.Background(), c.From("clicks")); err != nil {
+				t.Fatal(err)
+			}
+			got := <-reqs
+			if got.method != "POST" || got.path != "/v1/query" {
+				t.Fatalf("want POST /v1/query, got %s %s", got.method, got.path)
+			}
+			if tbl := got.query.Get("table"); tbl != "clicks" {
+				t.Fatalf("want table=clicks in the query string, got %q", tbl)
+			}
+			if string(got.body) != tt.want {
+				t.Fatalf("body:\n got %s\nwant %s", got.body, tt.want)
+			}
+		})
 	}
 }
 
-func TestQueryBuilder_SelectAll(t *testing.T) {
-	c, getBody := captureQueryBody(t, emptyRows)
-	_, _ = c.From("clicks").SelectAll().FetchUntyped(context.Background())
-
-	body := getBody()
-	if body["select_all"] != true {
-		t.Fatalf("want select_all=true, got %v", body)
-	}
+// runFetch runs the query and discards the page — the request body is what these
+// tests assert on.
+func runFetch(ctx context.Context, q *QueryBuilder) error {
+	_, err := q.FetchUntyped(ctx)
+	return err
 }
 
-func TestQueryBuilder_BareQueryDefaultsToSelectAll(t *testing.T) {
-	c, getBody := captureQueryBody(t, emptyRows)
-	_, _ = c.From("clicks").Select().FetchUntyped(context.Background())
-
-	body := getBody()
-	if body["select_all"] != true {
-		t.Fatalf("bare query should default to select_all, got %v", body)
-	}
-}
-
-func TestQueryBuilder_AggregationOnlyNoSelectAll(t *testing.T) {
-	c, getBody := captureQueryBody(t, emptyRows)
-	_, _ = c.From("clicks").Select().Count("*", "n").FetchUntyped(context.Background())
-
-	body := getBody()
-	if body["select_all"] != nil {
-		t.Fatalf("aggregation-only query should not set select_all, got %v", body)
-	}
-}
-
-func TestQueryBuilder_Where(t *testing.T) {
-	c, getBody := captureQueryBody(t, emptyRows)
-	_, _ = c.From("clicks").Select("page").Where("score", OpGt, 10).FetchUntyped(context.Background())
-
-	body := getBody()
-	filters, ok := body["filters"].([]any)
-	if !ok || len(filters) != 1 {
-		t.Fatalf("want 1 filter, got %v", body["filters"])
-	}
-	f := filters[0].(map[string]any)
-	if f["column"] != "score" || f["op"] != "gt" {
-		t.Fatalf("want score/gt filter, got %v", f)
-	}
-}
-
+// TestQueryBuilder_AllOperators pins each SDK operator's wire spelling.
 func TestQueryBuilder_AllOperators(t *testing.T) {
 	ops := []struct {
 		sdk  FilterOp
@@ -136,157 +160,27 @@ func TestQueryBuilder_AllOperators(t *testing.T) {
 	}
 	for _, tt := range ops {
 		t.Run(tt.wire, func(t *testing.T) {
-			c, getBody := captureQueryBody(t, emptyRows)
-			_, _ = c.From("clicks").Select("x").Where("col", tt.sdk, "v").FetchUntyped(context.Background())
-			body := getBody()
-			filters := body["filters"].([]any)
-			f := filters[0].(map[string]any)
-			if f["op"] != tt.wire {
-				t.Errorf("want wire op %s, got %s", tt.wire, f["op"])
+			c, reqs := recordingClient(t, oneRow)
+			if err := runFetch(context.Background(), c.From("clicks").Select("x").Where("col", tt.sdk, "v")); err != nil {
+				t.Fatal(err)
+			}
+			want := fmt.Sprintf(`{"columns":["x"],"filters":[{"column":"col","op":%q,"value":"v"}],"limit":1000}`, tt.wire)
+			if got := string((<-reqs).body); got != want {
+				t.Fatalf("want %s, got %s", want, got)
 			}
 		})
 	}
 }
 
-func TestQueryBuilder_Aggregations(t *testing.T) {
-	c, getBody := captureQueryBody(t, emptyRows)
-	_, _ = c.From("clicks").Select().
-		Count("*", "total").
-		Sum("score", "").
-		Avg("score", "").
-		Min("score", "").
-		Max("score", "").
-		CountDistinct("page", "").
-		Aggregate("uniqExact", "user_id", "unique_users").
-		FetchUntyped(context.Background())
-
-	body := getBody()
-	aggs, ok := body["aggregations"].([]any)
-	if !ok || len(aggs) != 7 {
-		t.Fatalf("want 7 aggregations, got %v", body["aggregations"])
-	}
-}
-
-func TestQueryBuilder_GroupBy(t *testing.T) {
-	c, getBody := captureQueryBody(t, emptyRows)
-	_, _ = c.From("clicks").Select("page").GroupBy("page").FetchUntyped(context.Background())
-
-	body := getBody()
-	gb, ok := body["group_by"].([]any)
-	if !ok || len(gb) != 1 || gb[0] != "page" {
-		t.Fatalf("want [page], got %v", body["group_by"])
-	}
-}
-
-func TestQueryBuilder_OrderBy(t *testing.T) {
-	c, getBody := captureQueryBody(t, emptyRows)
-	_, _ = c.From("clicks").Select("page").OrderBy("page", "desc").FetchUntyped(context.Background())
-
-	body := getBody()
-	ob := body["order_by"].([]any)
-	o := ob[0].(map[string]any)
-	if o["column"] != "page" || o["dir"] != "desc" {
-		t.Fatalf("want page/desc, got %v", o)
-	}
-}
-
-func TestQueryBuilder_Limit(t *testing.T) {
-	c, getBody := captureQueryBody(t, emptyRows)
-	_, _ = c.From("clicks").Select("page").Limit(50).FetchUntyped(context.Background())
-
-	body := getBody()
-	if body["limit"] != float64(50) {
-		t.Fatalf("want 50, got %v", body["limit"])
-	}
-}
-
-func TestQueryBuilder_TimeRange(t *testing.T) {
-	c, getBody := captureQueryBody(t, emptyRows)
-	_, _ = c.From("clicks").Select("page").
-		TimeRange("received_timestamp", "1h", "").
-		FetchUntyped(context.Background())
-
-	body := getBody()
-	tr := body["time_range"].(map[string]any)
-	if tr["column"] != "received_timestamp" || tr["since"] != "1h" {
-		t.Fatalf("want received_timestamp/1h, got %v", tr)
-	}
-}
-
-func TestQueryBuilder_Pagination_HasMore(t *testing.T) {
-	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "a"}, {"id": "b"}})
-	}))
-
-	page, err := c.From("clicks").Select("id").OrderBy("id", "asc").Limit(2).FetchUntyped(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !page.HasMore {
-		t.Fatal("want hasMore=true")
-	}
-	if page.Next == nil {
-		t.Fatal("want next function")
-	}
-}
-
-func TestQueryBuilder_Pagination_NoOrderNoNext(t *testing.T) {
-	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "a"}, {"id": "b"}})
-	}))
-
-	page, err := c.From("clicks").Select("id").Limit(2).FetchUntyped(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !page.HasMore {
-		t.Fatal("want hasMore=true")
-	}
-	if page.Next != nil {
-		t.Fatal("want nil next — no order column for cursor")
-	}
-}
-
-func TestQueryBuilder_ComplexQuery(t *testing.T) {
-	c, getBody := captureQueryBody(t, emptyRows)
-	_, _ = c.From("clicks").
-		Select("page").
-		Where("score", OpGt, 10).
-		Count("*", "total").
-		GroupBy("page").
-		OrderBy("total", "desc").
-		Limit(50).
-		TimeRange("received_timestamp", "1h", "").
-		CacheTTL(60).
-		FetchUntyped(context.Background())
-
-	body := getBody()
-	if body["columns"].([]any)[0] != "page" {
-		t.Fatal("missing page column")
-	}
-	if body["limit"] != float64(50) {
-		t.Fatal("wrong limit")
-	}
-	if body["group_by"].([]any)[0] != "page" {
-		t.Fatal("wrong group_by")
-	}
-}
-
-// pagingServer returns limit-sized pages of rows and captures each request
-// body, so tests can walk page.Next and inspect the cursor filters sent.
-func pagingServer(t *testing.T, pages [][]map[string]any) (*Client, func() []map[string]any) {
+// pagingServer answers each request with the next fixture page (an empty page
+// once they run out) and records every request, so tests can walk page.Next
+// and inspect the cursor filters sent.
+func pagingServer(t *testing.T, pages [][]map[string]any) (*Client, <-chan recordedRequest) {
 	t.Helper()
 	var mu sync.Mutex
-	var bodies []map[string]any
 	call := 0
-	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		var body map[string]any
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.UseNumber() // keep int64 cursor values exact on the capture side too
-		_ = dec.Decode(&body)
+	return recordingClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
-		bodies = append(bodies, body)
 		idx := call
 		call++
 		mu.Unlock()
@@ -296,19 +190,11 @@ func pagingServer(t *testing.T, pages [][]map[string]any) (*Client, func() []map
 		}
 		_ = json.NewEncoder(w).Encode(page)
 	}))
-	return c, func() []map[string]any {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]map[string]any(nil), bodies...)
-	}
 }
 
-func filtersOf(t *testing.T, body map[string]any) []map[string]any {
+func filtersOf(t *testing.T, req recordedRequest) []map[string]any {
 	t.Helper()
-	raw, ok := body["filters"].([]any)
-	if !ok {
-		return nil
-	}
+	raw, _ := req.jsonBody(t)["filters"].([]any)
 	out := make([]map[string]any, len(raw))
 	for i, f := range raw {
 		out[i] = f.(map[string]any)
@@ -316,69 +202,77 @@ func filtersOf(t *testing.T, body map[string]any) []map[string]any {
 	return out
 }
 
-func TestQueryBuilder_Pagination_NextWalksPages(t *testing.T) {
-	c, getBodies := pagingServer(t, [][]map[string]any{
-		{{"id": "a"}, {"id": "b"}},
-		{{"id": "c"}, {"id": "d"}},
-		{{"id": "e"}},
-	})
-
-	page, err := c.From("clicks").Select("id").OrderBy("id", "asc").Limit(2).FetchUntyped(context.Background())
+// A full page always means HasMore, but Next only exists when there is an
+// order column to build a cursor from. The ordered half is covered by
+// TestQueryBuilder_PaginationCursor, which walks the cursor it hands back.
+func TestQueryBuilder_Pagination_NoOrderNoNext(t *testing.T) {
+	c, _ := pagingServer(t, [][]map[string]any{{{"id": "a"}, {"id": "b"}}})
+	page, err := c.From("clicks").Select("id").Limit(2).FetchUntyped(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	page2, err := page.Next(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	if !page.HasMore {
+		t.Fatal("a full page means hasMore=true")
 	}
-	if page2.Data[0]["id"] != "c" || !page2.HasMore || page2.Next == nil {
-		t.Fatalf("unexpected page 2: %+v", page2)
-	}
-	page3, err := page2.Next(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page3.Data) != 1 || page3.HasMore {
-		t.Fatalf("unexpected page 3: %+v", page3)
-	}
-
-	bodies := getBodies()
-	if len(bodies) != 3 {
-		t.Fatalf("want 3 requests, got %d", len(bodies))
-	}
-	if f := filtersOf(t, bodies[0]); len(f) != 0 {
-		t.Fatalf("page 1 must have no cursor filter, got %v", f)
-	}
-	// Page 2 and 3: exactly ONE cursor filter (replaced, not stacked), with
-	// the ascending op and the previous page's last cursor value.
-	for i, want := range []string{"b", "d"} {
-		f := filtersOf(t, bodies[i+1])
-		if len(f) != 1 {
-			t.Fatalf("page %d: want exactly 1 cursor filter, got %v", i+2, f)
-		}
-		if f[0]["column"] != "id" || f[0]["op"] != "gt" || f[0]["value"] != want {
-			t.Fatalf("page %d: unexpected cursor filter %v", i+2, f[0])
-		}
+	if page.Next != nil {
+		t.Fatal("want nil next — no order column for cursor")
 	}
 }
 
-func TestQueryBuilder_Pagination_DescUsesLt(t *testing.T) {
-	c, getBodies := pagingServer(t, [][]map[string]any{
-		{{"id": "z"}, {"id": "y"}},
-		{{"id": "x"}},
-	})
-
-	page, err := c.From("clicks").Select("id").OrderBy("id", "desc").Limit(2).FetchUntyped(context.Background())
-	if err != nil {
-		t.Fatal(err)
+// TestQueryBuilder_PaginationCursor: every follow-up request carries exactly
+// ONE cursor filter — replaced, never stacked — holding the previous page's
+// last value, with the operator implied by the sort direction.
+func TestQueryBuilder_PaginationCursor(t *testing.T) {
+	tests := []struct {
+		name    string
+		dir     string
+		op      string
+		pages   [][]map[string]any
+		cursors []string // expected cursor value per follow-up request
+	}{
+		{
+			name: "ascending walks forward with gt", dir: "asc", op: "gt",
+			pages:   [][]map[string]any{{{"id": "a"}, {"id": "b"}}, {{"id": "c"}, {"id": "d"}}, {{"id": "e"}}},
+			cursors: []string{"b", "d"},
+		},
+		{
+			name: "descending walks back with lt", dir: "desc", op: "lt",
+			pages:   [][]map[string]any{{{"id": "z"}, {"id": "y"}}, {{"id": "x"}}},
+			cursors: []string{"y"},
+		},
 	}
-	if _, err := page.Next(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	f := filtersOf(t, getBodies()[1])
-	if len(f) != 1 || f[0]["op"] != "lt" || f[0]["value"] != "y" {
-		t.Fatalf("desc cursor filter wrong: %v", f)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, reqs := pagingServer(t, tt.pages)
+			page, err := c.From("clicks").Select("id").OrderBy("id", tt.dir).Limit(2).FetchUntyped(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f := filtersOf(t, <-reqs); len(f) != 0 {
+				t.Fatalf("page 1 must have no cursor filter, got %v", f)
+			}
+			for i, want := range tt.cursors {
+				if page, err = page.Next(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				if got, want := page.Data[0]["id"], tt.pages[i+1][0]["id"]; got != want {
+					t.Fatalf("page %d: want first row %v, got %v", i+2, want, got)
+				}
+				f := filtersOf(t, <-reqs)
+				if len(f) != 1 {
+					t.Fatalf("page %d: want exactly 1 cursor filter, got %v", i+2, f)
+				}
+				if f[0]["column"] != "id" || f[0]["op"] != tt.op || f[0]["value"] != want {
+					t.Fatalf("page %d: unexpected cursor filter %v", i+2, f[0])
+				}
+			}
+			if page.HasMore {
+				t.Fatal("the last fixture page is short — want hasMore=false")
+			}
+			if n := len(reqs); n != 0 {
+				t.Fatalf("want no requests beyond the pages walked, got %d more", n)
+			}
+		})
 	}
 }
 
@@ -400,60 +294,63 @@ func TestQueryBuilder_Pagination_CursorColumnMissingEndsQuietly(t *testing.T) {
 	}
 }
 
-func TestQueryBuilder_Pagination_TypedInt64CursorKeepsPrecision(t *testing.T) {
+// TestQueryBuilder_PaginationCursorPrecision: the cursor value is read back off
+// the decoded row, so how the row decoded decides how much precision survives.
+// Typed rows keep int64 exactly; the untyped path decodes to float64 and loses
+// everything past 2^53 (the same ceiling the TS SDK's JS numbers have). Use
+// FetchTyped or codegen structs past 2^53 — documented in queries.md.
+func TestQueryBuilder_PaginationCursorPrecision(t *testing.T) {
 	type idRow struct {
 		ID int64 `json:"id"`
 	}
-	const bigID = int64(9007199254740993) // 2^53 + 1: float64 round-trip corrupts it
-	c, getBodies := pagingServer(t, [][]map[string]any{
-		{{"id": 1}, {"id": bigID}},
-		{},
-	})
+	const bigID = int64(9007199254740993) // 2^53 + 1: a float64 round-trip corrupts it
 
-	q := c.From("clicks").Select("id").OrderBy("id", "asc").Limit(2)
-	page, err := FetchTyped[idRow](context.Background(), q)
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name string
+		walk func(context.Context, *QueryBuilder) error
+		want string
+	}{
+		{
+			name: "typed rows keep int64 exactly",
+			walk: func(ctx context.Context, q *QueryBuilder) error {
+				page, err := FetchTyped[idRow](ctx, q)
+				if err != nil {
+					return err
+				}
+				_, err = page.Next(ctx)
+				return err
+			},
+			want: "9007199254740993",
+		},
+		{
+			name: "untyped rows hit the float64 ceiling",
+			walk: func(ctx context.Context, q *QueryBuilder) error {
+				page, err := q.FetchUntyped(ctx)
+				if err != nil {
+					return err
+				}
+				_, err = page.Next(ctx)
+				return err
+			},
+			want: "9007199254740992",
+		},
 	}
-	if _, err := page.Next(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	f := filtersOf(t, getBodies()[1])
-	if len(f) != 1 {
-		t.Fatalf("want 1 cursor filter, got %v", f)
-	}
-	// json.Number survives the round-trip; float64 would have sent ...992.
-	if got := fmt.Sprint(f[0]["value"]); got != "9007199254740993" {
-		t.Fatalf("cursor value lost precision: %s", got)
-	}
-}
-
-// TestQueryBuilder_Pagination_UntypedCursorFloat64Ceiling documents the known
-// ceiling on the untyped path: rows decode to float64, so an integer cursor
-// past 2^53 loses precision before pagination sees it (same as the TS SDK's
-// JS-number ceiling). Use FetchTyped or codegen structs past 2^53.
-func TestQueryBuilder_Pagination_UntypedCursorFloat64Ceiling(t *testing.T) {
-	c, getBodies := pagingServer(t, [][]map[string]any{
-		{{"id": 1}, {"id": int64(9007199254740993)}},
-		{},
-	})
-
-	page, err := c.From("clicks").Select("id").OrderBy("id", "asc").Limit(2).FetchUntyped(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := page.Next(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	f := filtersOf(t, getBodies()[1])
-	if len(f) != 1 {
-		t.Fatalf("want 1 cursor filter, got %v", f)
-	}
-	// float64 rounds 2^53+1 down to 2^53 — the documented untyped ceiling.
-	if got := fmt.Sprint(f[0]["value"]); got != "9007199254740992" {
-		t.Fatalf("untyped ceiling changed (update docs if intentional): %s", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, reqs := pagingServer(t, [][]map[string]any{{{"id": 1}, {"id": bigID}}, {}})
+			q := c.From("clicks").Select("id").OrderBy("id", "asc").Limit(2)
+			if err := tt.walk(context.Background(), q); err != nil {
+				t.Fatal(err)
+			}
+			<-reqs // page 1 carries no cursor
+			f := filtersOf(t, <-reqs)
+			if len(f) != 1 {
+				t.Fatalf("want 1 cursor filter, got %v", f)
+			}
+			if got := fmt.Sprint(f[0]["value"]); got != tt.want {
+				t.Fatalf("cursor value: want %s, got %s (update docs if intentional)", tt.want, got)
+			}
+		})
 	}
 }
 
