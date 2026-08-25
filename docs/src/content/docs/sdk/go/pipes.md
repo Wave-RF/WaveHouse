@@ -34,7 +34,7 @@ rows, err := wh.Pipe("top_pages", nil).FetchUntyped(ctx)
 
 ### `.Stream(opts)`
 
-Opens a live stream from the pipe's underlying query; see [Streaming](/sdk/go/streaming). It streams by table name using the pipe's own name, so it works only where that name is also a valid table name — the same limitation as the TypeScript SDK's `PipeRef.stream()`.
+Subscribes to live events using the pipe's name as a table name; see [Streaming](/sdk/go/streaming). The pipe's SQL and params are **not** applied — where a table of that name exists you receive its raw events, and otherwise the stream stays silent rather than erroring. This mirrors the TypeScript SDK's `PipeRef.stream()`; both wait on a pipe-aware stream endpoint ([#445](https://github.com/Wave-RF/WaveHouse/issues/445)).
 
 ```go
 stream := wh.Pipe("top_pages", nil).Stream(nil)

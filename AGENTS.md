@@ -410,7 +410,7 @@ Internal-only backend changes (middleware refactors, observability internals, de
 4. Use `testutil.MakeJWT(t, claims)` for auth tests, `testutil.NewTestSchemaRegistry(t, ...)` for schema-aware tests, `policy.NewMemoryStore(p)` for policy tests, `pipes.NewMemoryStore(queries...)` for pipes tests.
 5. Use `testutil.AssertJSONResponse` and `testutil.AssertJSONContains` for HTTP handler assertions.
 6. Run `make test` — it gates the unit-test coverage threshold from `.testcoverage.yml`, so a passing run already confirms coverage.
-7. Aim for 80%+ coverage on new code. The project-wide CI-enforced minimum is 80% (merged unit + integration + e2e via `.testcoverage.yml`'s `threshold.total`); per-suite minima are unit 80%, integration 20%, e2e 60%, sdk 50%.
+7. Aim for 80%+ coverage on new code. The project-wide CI-enforced minimum is 80% (merged unit + integration + e2e via `.testcoverage.yml`'s `threshold.total`); per-suite minima are unit 80%, integration 20%, e2e 60%, go-sdk 75%, ts-unit 40%, ts-e2e 40%, ts-total 50%.
 
 ## File Structure
 

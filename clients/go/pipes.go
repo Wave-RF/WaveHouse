@@ -96,9 +96,11 @@ func (p *PipeRef) FetchUntyped(ctx context.Context) ([]map[string]any, error) {
 	return Fetch[map[string]any](ctx, p)
 }
 
-// Stream opens a live event stream from the pipe's underlying query. It
-// subscribes by table name using the pipe's own name, so it only works when
-// the pipe name is also a valid table name.
+// Stream subscribes to live events using the pipe's name as a table name. The
+// pipe's SQL and params are NOT applied: where a table of that name exists the
+// caller receives its raw events, and otherwise the stream stays silent. Kept
+// for parity with the TypeScript SDK's PipeRef.stream(), which behaves the same
+// way; both wait on a pipe-aware stream endpoint (issue #445).
 func (p *PipeRef) Stream(opts *StreamOptions) *StreamController {
 	return p.createStream(p.name, opts)
 }

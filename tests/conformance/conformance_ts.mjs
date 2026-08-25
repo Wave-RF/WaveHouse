@@ -85,7 +85,7 @@ function applyQueryOps(wh, table, operations) {
   let q = wh.from(table).select();
   for (const op of operations) {
     if (AGGREGATIONS.has(op.method)) {
-      q = q[op.method](op.args[0] || undefined, op.args[1] || undefined);
+      q = q[op.method](op.args?.[0] || undefined, op.args?.[1] || undefined);
       continue;
     }
     switch (op.method) {

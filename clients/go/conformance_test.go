@@ -112,6 +112,14 @@ func TestConformance_WireFormat(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(Pipe{Name: "test", SQL: "SELECT 1"})
 				case r.URL.Path == "/v1/ops/pipes" && r.Method == "GET":
 					_ = json.NewEncoder(w).Encode([]Pipe{})
+				case strings.HasPrefix(r.URL.Path, "/v1/ingest"):
+					if r.Header.Get("Content-Type") == "application/x-ndjson" {
+						_ = json.NewEncoder(w).Encode(InsertResult{})
+					} else {
+						_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+					}
+				case r.URL.Path == "/v1/health":
+					_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
 				default:
 					_ = json.NewEncoder(w).Encode([]map[string]any{})
 				}
