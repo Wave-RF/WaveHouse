@@ -184,12 +184,10 @@ func chTypeToGo(chType string) string {
 	case chType == "Bool", chType == "Boolean":
 		return "bool"
 	}
-	// Numeric — map lookup. Generated structs target the structured-query and
-	// pipe paths (/v1/query, /v1/pipes/*), where the server scans ClickHouse
-	// values into Go types and re-marshals them — so 64-bit integers arrive
-	// as ordinary UNQUOTED JSON numbers and map to int64/uint64 exactly.
-	// (Only /v1/ops/query forwards ClickHouse's own JSON, which quotes
-	// 64-bit ints; use map[string]any with SQL[Row] there.)
+	// Numeric. Generated structs target /v1/query and /v1/pipes/*, where the
+	// server re-marshals ClickHouse values, so 64-bit integers arrive as
+	// unquoted JSON numbers. /v1/ops/query forwards ClickHouse's own JSON,
+	// which quotes them — use SQL[map[string]any] there.
 	if mapped, ok := map[string]string{
 		"UInt8": "uint8", "UInt16": "uint16", "UInt32": "uint32", "UInt64": "uint64",
 		"Int8": "int8", "Int16": "int16", "Int32": "int32", "Int64": "int64",

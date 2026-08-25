@@ -336,6 +336,21 @@ func TestBaseURLPathPrefixIsPreserved(t *testing.T) {
 	}
 }
 
+// headerCaptureServer answers any request with `[]` and hands that request's
+// headers back over the channel — a channel, not a shared variable, so -race
+// sees the edge between the server goroutine and the test.
+func headerCaptureServer(t *testing.T) (*httptest.Server, <-chan http.Header) {
+	t.Helper()
+	captured := make(chan http.Header, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured <- r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, captured
+}
+
 // TestConfiguredHeadersOnRESTRequests: ClientOptions.Headers apply to every
 // REST call, are matched case-insensitively, and always lose to the SDK's own
 // headers rather than appending alongside them.
@@ -376,14 +391,7 @@ func TestConfiguredHeadersOnRESTRequests(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var got http.Header
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				got = r.Header.Clone()
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, `[]`)
-			}))
-			defer srv.Close()
-
+			srv, headers := headerCaptureServer(t)
 			client := NewClient(Config{
 				BaseURL:    srv.URL,
 				Auth:       tc.auth,
@@ -393,6 +401,7 @@ func TestConfiguredHeadersOnRESTRequests(t *testing.T) {
 			if _, err := client.Schema.List(context.Background()); err != nil {
 				t.Fatalf("schema list: %v", err)
 			}
+			got := <-headers
 			if v := got.Values(tc.header); len(v) != 1 {
 				t.Fatalf("want exactly one %s header, got %v", tc.header, v)
 			}
@@ -406,14 +415,7 @@ func TestConfiguredHeadersOnRESTRequests(t *testing.T) {
 // TestConfiguredHeadersAreCopied: mutating the caller's map after NewClient
 // must not change what later requests send.
 func TestConfiguredHeadersAreCopied(t *testing.T) {
-	var got http.Header
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = r.Header.Clone()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `[]`)
-	}))
-	defer srv.Close()
-
+	srv, captured := headerCaptureServer(t)
 	headers := map[string]string{"X-Tenant-Id": "acme"}
 	client := NewClient(Config{
 		BaseURL:    srv.URL,
@@ -426,7 +428,7 @@ func TestConfiguredHeadersAreCopied(t *testing.T) {
 	if _, err := client.Schema.List(context.Background()); err != nil {
 		t.Fatalf("schema list: %v", err)
 	}
-	if v := got.Get("X-Tenant-Id"); v != "acme" {
+	if v := (<-captured).Get("X-Tenant-Id"); v != "acme" {
 		t.Fatalf("want the value captured at construction, got %q", v)
 	}
 }

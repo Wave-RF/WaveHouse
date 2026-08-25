@@ -119,7 +119,7 @@ stream := clicks.Stream(&wavehouse.StreamOptions{Since: "2026-01-01T00:00:00Z"})
 
 ## Query Builder
 
-Returned by `tableRef.Select()`. Immutable—every chain method returns a new `*QueryBuilder`. Unlike the TypeScript SDK, Go builders do not auto-execute; call `.FetchUntyped(ctx)` or `wavehouse.FetchTyped[Row](ctx, builder)` explicitly:
+Returned by `tableRef.Select(...)` or `tableRef.SelectAll()`. Immutable—every chain method returns a new `*QueryBuilder`. Unlike the TypeScript SDK, Go builders do not auto-execute; call `.FetchUntyped(ctx)` or `wavehouse.FetchTyped[Row](ctx, builder)` explicitly:
 
 ```go
 page, err := clicks.Select("page").Limit(10).FetchUntyped(ctx)
