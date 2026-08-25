@@ -11,16 +11,11 @@ import (
 // Error is the structured error returned by all SDK operations. Use
 // [errors.As] to extract it from wrapped errors.
 type Error struct {
-	// Status is the HTTP status code (0 for network/abort errors).
-	Status int `json:"status"`
-	// Code is a machine-readable error code (e.g. "HTTP_400", "NETWORK_ERROR", "ABORTED").
-	Code string `json:"code"`
-	// Message is a human-readable description.
-	Message string `json:"message"`
-	// Details contains the full parsed error body, if available.
-	Details map[string]any `json:"details,omitempty"`
-	// Retryable indicates whether the request can be retried.
-	Retryable bool `json:"retryable"`
+	Status    int            `json:"status"` // 0 for network/abort errors
+	Code      string         `json:"code"`   // e.g. "HTTP_400", "NETWORK_ERROR", "ABORTED"
+	Message   string         `json:"message"`
+	Details   map[string]any `json:"details,omitempty"` // full parsed error body, when present
+	Retryable bool           `json:"retryable"`
 }
 
 func (e *Error) Error() string {
@@ -44,13 +39,11 @@ func parseErrorResponse(res *http.Response) *Error {
 		_ = json.Unmarshal(raw, &body)
 	}
 
-	var msg string
+	msg := http.StatusText(res.StatusCode)
 	if s, ok := body["error"].(string); ok {
 		msg = s
 	} else if s, ok := body["message"].(string); ok {
 		msg = s
-	} else {
-		msg = http.StatusText(res.StatusCode)
 	}
 
 	retryable := res.StatusCode >= 500 || res.StatusCode == http.StatusTooManyRequests

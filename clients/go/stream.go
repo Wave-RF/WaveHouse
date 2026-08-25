@@ -30,15 +30,21 @@ type StreamController struct {
 	closed      bool
 }
 
-// newStreamController opens an SSE connection for the given table.
-func newStreamController(hctx httpContext, table string, opts *StreamOptions) *StreamController {
-	ctx, cancel := context.WithCancel(context.Background())
-	sc := &StreamController{
-		status:  StatusConnecting,
+// newController builds a controller whose event channel buffers from
+// construction, so events predating the first Events call are not lost.
+func newController(status StreamStatus, cancel context.CancelFunc) *StreamController {
+	return &StreamController{
+		status:  status,
 		eventCh: make(chan StreamEvent, 256),
 		cancel:  cancel,
 		done:    make(chan struct{}),
 	}
+}
+
+// newStreamController opens an SSE connection for the given table.
+func newStreamController(hctx httpContext, table string, opts *StreamOptions) *StreamController {
+	ctx, cancel := context.WithCancel(context.Background())
+	sc := newController(StatusConnecting, cancel)
 	go sc.run(ctx, hctx, table, opts)
 	return sc
 }
@@ -50,17 +56,16 @@ func (sc *StreamController) Status() StreamStatus {
 	return sc.status
 }
 
-// Subscribe registers callbacks for stream events. Returns an unsubscribe
-// function. The subscriber's Status callback fires immediately with the
-// current status.
+// Subscribe registers callbacks and returns an unsubscribe function. The
+// subscriber's Status callback fires immediately with the current status.
 func (sc *StreamController) Subscribe(sub *StreamSubscriber) func() {
 	sc.mu.Lock()
 	sc.subscribers = append(sc.subscribers, sub)
 	currentStatus := sc.status
 	sc.mu.Unlock()
 
-	// Benign race: setStatus also calls the subscriber, so a stale
-	// status here is immediately followed by the correct one.
+	// Benign race: setStatus also calls the subscriber, so a stale status here
+	// is immediately followed by the correct one.
 	if sub.Status != nil {
 		sub.Status(currentStatus)
 	}
@@ -77,12 +82,9 @@ func (sc *StreamController) Subscribe(sub *StreamSubscriber) func() {
 	}
 }
 
-// Events returns a read-only channel that receives stream events.
-// The channel is closed when the stream closes. Events buffer into it from
-// stream construction (matching the TS SDK), so events that arrive before
-// the first Events() call are not lost. A Subscribe-only consumer that never
-// calls Events() at most fills the 256-slot buffer and trips the one-time
-// drop log.
+// Events returns a read-only channel of stream events, closed when the stream
+// closes. A consumer that never reads it fills the buffer and trips a
+// one-time drop log.
 func (sc *StreamController) Events() <-chan StreamEvent {
 	return sc.eventCh
 }
@@ -101,8 +103,6 @@ func (sc *StreamController) Connected(ctx context.Context) error {
 	}
 	sc.mu.Unlock()
 
-	// Poll — simple and correct.
-	// TODO: switch to a condition variable if polling shows up in profiles.
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -136,16 +136,15 @@ func (sc *StreamController) Close() {
 	sc.closed = true
 	sc.mu.Unlock()
 
+	// Deliberately does not wait on sc.done: callbacks run on the stream
+	// goroutine, so waiting would deadlock a Close made from a callback.
 	sc.cancel()
-	// Don't block on <-sc.done: callbacks execute on the stream goroutine,
-	// so waiting here would deadlock if Close is called from a callback.
 }
 
 func (sc *StreamController) setStatus(s StreamStatus) {
 	sc.mu.Lock()
-	// StatusClosed is terminal: a filtered wrapper's inner controller can
-	// have copied its subscriber slice before unsub, so a stale Status
-	// callback may land after Close — it must not resurrect the status.
+	// StatusClosed is terminal: a stale Status callback can land after Close
+	// and must not resurrect the status.
 	if s == sc.status || sc.status == StatusClosed {
 		sc.mu.Unlock()
 		return
@@ -162,8 +161,8 @@ func (sc *StreamController) setStatus(s StreamStatus) {
 }
 
 // snapshotSubs copies the subscriber list under mu so callbacks run unlocked.
-// setStatus keeps its own inline copy: there the snapshot must share the
-// critical section with the status write to keep callback order consistent.
+// setStatus keeps its own inline copy so the snapshot shares a critical
+// section with the status write.
 func (sc *StreamController) snapshotSubs() []*StreamSubscriber {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
@@ -177,9 +176,7 @@ func (sc *StreamController) emitEvent(event StreamEvent) {
 		}
 	}
 
-	// Non-blocking send to the channel, which buffers from construction (TS
-	// parity) so events emitted before the first Events() call survive.
-	// Guarded by mu so the send and closeEventCh serialize — a late event can
+	// Guarded by mu so the send and closeEventCh serialize: a late event can
 	// never hit a closed channel.
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
@@ -203,8 +200,8 @@ func (sc *StreamController) emitError(err error) {
 	}
 }
 
-// closeEventCh marks the controller closed and closes the events channel.
-// Must serialize with emitEvent's send via mu.
+// closeEventCh marks the controller closed and closes the events channel. It
+// must serialize with emitEvent's send via mu.
 func (sc *StreamController) closeEventCh() {
 	sc.mu.Lock()
 	sc.closed = true
@@ -240,19 +237,15 @@ func (sc *StreamController) run(ctx context.Context, hctx httpContext, table str
 			return
 		}
 
-		// A connection that reached "live" resets the backoff so a long-lived
-		// stream doesn't inherit a maxed-out delay on its first drop.
+		// Reaching "live" resets the backoff so a long-lived stream doesn't
+		// inherit a maxed-out delay on its first drop.
 		if live {
 			attempt = 0
 		}
 
 		if err != nil {
-			// connect classifies its own failures (SSE_AUTH_ERROR,
-			// SSE_NETWORK_ERROR, SSE_REDIRECT, SSE_BAD_CONTENT_TYPE,
-			// SSE_READ_ERROR, HTTP_nnn), so pass the typed error straight
-			// through and let Retryable decide whether to reconnect. A
-			// non-retryable error is terminal: reconnecting can't fix a bad
-			// token, a missing table, or a proxy answering with HTML.
+			// connect classifies its own failures, so Retryable decides
+			// whether to reconnect: a non-retryable error is terminal.
 			var apiErr *Error
 			if errors.As(err, &apiErr) {
 				sc.emitError(apiErr)
@@ -260,51 +253,31 @@ func (sc *StreamController) run(ctx context.Context, hctx httpContext, table str
 					return
 				}
 			} else {
-				// Unclassified — retry, but keep the generic code so callers
-				// can still match on it.
-				sc.emitError(&Error{
-					Status:    0,
-					Code:      "SSE_ERROR",
-					Message:   err.Error(),
-					Retryable: true,
-				})
+				sc.emitError(sseError(0, "SSE_ERROR", err.Error(), true))
 			}
 		}
 
 		sc.setStatus(StatusReconnecting)
-		delay := backoff(attempt)
-		attempt++
-
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(delay):
+		case <-time.After(backoff(attempt)):
 		}
+		attempt++
 	}
 }
 
-// connect opens a single SSE connection and reads events until it closes.
-// Returns the last seen event ID (empty if none), whether the connection
-// reached the live state, and any error.
+// connect reads one SSE connection until it closes, returning the last seen
+// event ID, whether the connection ever reached the live state, and any error.
 func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table, since string) (string, bool, error) {
 	u, err := url.Parse(hctx.baseURL + "/v1/stream")
 	if err != nil {
-		return "", false, &Error{
-			Status:    0,
-			Code:      "SSE_CONNECT_ERROR",
-			Message:   fmt.Sprintf("invalid baseURL: %v", err),
-			Retryable: false,
-		}
+		return "", false, sseError(0, "SSE_CONNECT_ERROR", fmt.Sprintf("invalid baseURL: %v", err), false)
 	}
-	// A non-HTTP scheme can never carry SSE. Terminal, not retryable: retrying
-	// a ws:// or file:// baseURL just spins.
+	// A non-HTTP scheme can never carry SSE, so retrying one just spins.
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", false, &Error{
-			Status:    0,
-			Code:      "SSE_CONNECT_ERROR",
-			Message:   fmt.Sprintf("baseURL scheme %q is not http or https", u.Scheme),
-			Retryable: false,
-		}
+		return "", false, sseError(0, "SSE_CONNECT_ERROR",
+			fmt.Sprintf("baseURL scheme %q is not http or https", u.Scheme), false)
 	}
 	q := u.Query()
 	q.Set("table", table)
@@ -312,19 +285,15 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 		q.Set("since", since)
 	}
 
-	// Auth: Go SDK uses Authorization header (not ?token= like browser EventSource).
+	// Auth travels in the Authorization header, not ?token= as browser
+	// EventSource requires.
 	var authHeader string
 	if hctx.auth != nil {
 		token, err := hctx.auth(ctx)
 		if err != nil {
 			// Retryable: a token endpoint having a bad minute shouldn't tear
 			// down a healthy long-lived stream.
-			return "", false, &Error{
-				Status:    0,
-				Code:      "SSE_AUTH_ERROR",
-				Message:   err.Error(),
-				Retryable: true,
-			}
+			return "", false, sseError(0, "SSE_AUTH_ERROR", err.Error(), true)
 		}
 		if token != "" {
 			authHeader = "Bearer " + token
@@ -347,12 +316,9 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 	client := hctx.httpClient
 	credentialed := authHeader != "" || len(hctx.headers) > 0
 	if credentialed {
-		// Refuse to follow a redirect while carrying a credential. net/http
-		// drops Authorization on a cross-host hop but forwards custom headers
-		// verbatim, so following one would either downgrade the stream to
-		// default_role without saying so, or hand configured secrets to
-		// wherever the redirect points. Copy the client so a caller-supplied
-		// one keeps its own CheckRedirect for every other request.
+		// Never follow a redirect while carrying a credential: net/http drops
+		// Authorization across hosts but forwards custom headers verbatim.
+		// Copied so a caller-supplied client keeps its own CheckRedirect.
 		c := *client
 		c.CheckRedirect = func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -365,54 +331,36 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 		if ctx.Err() != nil {
 			return "", false, errAborted
 		}
-		return "", false, &Error{
-			Status:    0,
-			Code:      "SSE_NETWORK_ERROR",
-			Message:   err.Error(),
-			Retryable: true,
-		}
+		return "", false, sseError(0, "SSE_NETWORK_ERROR", err.Error(), true)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if credentialed && resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return "", false, &Error{
-			Status: resp.StatusCode,
-			Code:   "SSE_REDIRECT",
-			Message: fmt.Sprintf(
-				"stream endpoint redirected to %q and the SDK did not follow it; redirects are refused while the request carries a credential",
-				resp.Header.Get("Location")),
-			Retryable: false,
-		}
+		return "", false, sseError(resp.StatusCode, "SSE_REDIRECT", fmt.Sprintf(
+			"stream endpoint redirected to %q and the SDK did not follow it; redirects are refused while the request carries a credential",
+			resp.Header.Get("Location")), false)
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		return "", false, parseErrorResponse(resp)
 	}
 
-	// A 200 that isn't an event stream means something between the caller and
-	// WaveHouse answered — a captive portal or an auth gateway's login page.
-	// Without this check the stream sits in StatusLive and silently delivers
-	// nothing.
+	// A 200 that isn't an event stream means an intermediary answered; without
+	// this the stream would sit in StatusLive delivering nothing.
 	if ct := resp.Header.Get("Content-Type"); !isEventStream(ct) {
 		shown := ct
 		if shown == "" {
 			shown = "(none)"
 		}
-		return "", false, &Error{
-			Status:    resp.StatusCode,
-			Code:      "SSE_BAD_CONTENT_TYPE",
-			Message:   fmt.Sprintf("expected Content-Type text/event-stream, got %s", shown),
-			Retryable: false,
-		}
+		return "", false, sseError(resp.StatusCode, "SSE_BAD_CONTENT_TYPE",
+			fmt.Sprintf("expected Content-Type text/event-stream, got %s", shown), false)
 	}
 
 	sc.setStatus(StatusLive)
 
-	// Parse SSE frames.
 	scanner := bufio.NewScanner(resp.Body)
-	// 16 MiB max line: generous headroom over the ~1 MiB NATS MaxPayload
-	// ceiling on a single event envelope (oversized records are rejected at
-	// ingest publish and never reach the stream).
+	// 16 MiB max line: headroom over the ~1 MiB NATS MaxPayload ceiling on a
+	// single event envelope.
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	var eventID, dataLine string
 	lastID := since
@@ -425,7 +373,7 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 		line := scanner.Text()
 
 		if line == "" {
-			// Empty line = end of event frame.
+			// End of an event frame.
 			if dataLine != "" {
 				sc.handleSSEData(dataLine)
 				// Track last event ID for reconnect gap-fill.
@@ -438,8 +386,7 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 			continue
 		}
 
-		if strings.HasPrefix(line, ":") {
-			// Comment (keepalive or connected). Skip.
+		if strings.HasPrefix(line, ":") { // comment: keepalive or connected
 			continue
 		}
 
@@ -456,14 +403,14 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 	}
 
 	if scanErr := scanner.Err(); scanErr != nil {
-		return lastID, true, &Error{
-			Status:    0,
-			Code:      "SSE_READ_ERROR",
-			Message:   scanErr.Error(),
-			Retryable: true,
-		}
+		return lastID, true, sseError(0, "SSE_READ_ERROR", scanErr.Error(), true)
 	}
 	return lastID, true, nil
+}
+
+// sseError builds a stream [*Error] with the SDK's SSE_* taxonomy.
+func sseError(status int, code, msg string, retryable bool) *Error {
+	return &Error{Status: status, Code: code, Message: msg, Retryable: retryable}
 }
 
 // isEventStream reports whether a Content-Type header names text/event-stream,
@@ -486,25 +433,14 @@ type sseMessage struct {
 func (sc *StreamController) handleSSEData(data string) {
 	var msg sseMessage
 	if err := json.Unmarshal([]byte(data), &msg); err != nil {
-		// Delivered via the subscriber Error callback rather than the
-		// process-global logger, so consumers control visibility and a
-		// malformed-frame flood can't spam host-application logs. Payload
-		// deliberately omitted: event data can carry tenant/PII fields.
-		sc.emitError(&Error{
-			Status:    0,
-			Code:      "SSE_PARSE_ERROR",
-			Message:   fmt.Sprintf("malformed SSE message (%d bytes): %v", len(data), err),
-			Retryable: true,
-		})
+		// Reported through the subscriber rather than the global logger, and
+		// without the payload, which can carry tenant/PII fields.
+		sc.emitError(sseError(0, "SSE_PARSE_ERROR",
+			fmt.Sprintf("malformed SSE message (%d bytes): %v", len(data), err), true))
 		return
 	}
 
-	event := StreamEvent{
-		Table:     msg.TableName,
-		Timestamp: msg.ReceivedTimestamp,
-		Data:      msg.Data,
-	}
-	sc.emitEvent(event)
+	sc.emitEvent(StreamEvent{Table: msg.TableName, Timestamp: msg.ReceivedTimestamp, Data: msg.Data})
 }
 
 // newFilteredStreamController wraps a StreamController with client-side
@@ -512,19 +448,13 @@ func (sc *StreamController) handleSSEData(data string) {
 func newFilteredStreamController(inner *StreamController, filters []QueryFilter, columns []string) *StreamController {
 	compiled := compileFilters(filters)
 	ctx, cancel := context.WithCancel(context.Background())
-	sc := &StreamController{
-		status:  inner.Status(),
-		eventCh: make(chan StreamEvent, 256),
-		cancel:  cancel,
-		done:    make(chan struct{}),
-	}
+	sc := newController(inner.Status(), cancel)
 
 	go func() {
 		defer func() {
 			sc.setStatus(StatusClosed)
-			// closeEventCh serializes with any in-flight emitEvent (which
-			// runs on the inner controller's goroutine), so the channel is
-			// never closed under a pending send.
+			// closeEventCh serializes with any in-flight emitEvent on the
+			// inner goroutine, so the channel never closes under a send.
 			sc.closeEventCh()
 			close(sc.done)
 		}()
@@ -552,8 +482,8 @@ func newFilteredStreamController(inner *StreamController, filters []QueryFilter,
 			unsub()
 			inner.Close()
 		case <-inner.done:
-			// Inner closed on its own — still unsubscribe so the closed
-			// controller doesn't retain a reference to this wrapper.
+			// Unsubscribe anyway so the closed inner controller doesn't
+			// retain a reference to this wrapper.
 			unsub()
 		}
 	}()
@@ -568,9 +498,8 @@ type compiledFilter struct {
 	re *regexp.Regexp
 }
 
-// compileFilters precompiles LIKE/NOT LIKE patterns once per stream. A
-// controller's filters never change after construction, so this replaces a
-// per-event compile (and avoids any process-global pattern cache).
+// compileFilters precompiles LIKE/NOT LIKE patterns once per stream, which a
+// controller's immutable filter list makes safe.
 func compileFilters(filters []QueryFilter) []compiledFilter {
 	out := make([]compiledFilter, len(filters))
 	for i, f := range filters {
@@ -585,7 +514,7 @@ func compileFilters(filters []QueryFilter) []compiledFilter {
 }
 
 // compileLike converts a SQL LIKE pattern to a case-insensitive anchored
-// regex (matching the TS SDK). Returns nil if the pattern doesn't compile.
+// regex, returning nil if the pattern doesn't compile.
 func compileLike(pattern string) *regexp.Regexp {
 	escaped := regexp.QuoteMeta(pattern)
 	escaped = strings.ReplaceAll(escaped, "%", ".*")
@@ -600,8 +529,7 @@ func compileLike(pattern string) *regexp.Regexp {
 // matchesFilters evaluates all filters against a data row (AND).
 func matchesFilters(row map[string]any, filters []compiledFilter) bool {
 	for _, f := range filters {
-		val := row[f.Column]
-		if !evaluateFilter(val, f.Op, f.Value, f.re) {
+		if !evaluateFilter(row[f.Column], f.Op, f.Value, f.re) {
 			return false
 		}
 	}
@@ -639,11 +567,10 @@ func evaluateFilter(actual any, op string, expected any, re *regexp.Regexp) bool
 	}
 }
 
-// equalValues compares two values for equality, normalizing numeric types
-// (JSON decodes numbers as float64, but callers may pass int) and comparing
-// timestamps as instants rather than as text — see asInstant.
+// equalValues compares two values for equality, normalizing numeric types and
+// comparing timestamps as instants rather than as text (see asInstant).
 func equalValues(a, b any) bool {
-	// nil only equals nil: without this the fmt.Sprint fallback would match a
+	// nil only equals nil: otherwise the fmt.Sprint fallback would match a
 	// missing column against the literal string "<nil>".
 	if a == nil || b == nil {
 		return a == nil && b == nil
@@ -663,35 +590,20 @@ func equalValues(a, b any) bool {
 }
 
 // maxTimeOperandChars mirrors the server's row-filter pre-gate: the longest
-// spelling the ingest grammar accepts (RFC 3339 with nanoseconds and a numeric
-// offset) is 35 bytes, so 64 is generous slack while keeping a megabyte
-// "timestamp" from being scanned once per filter per event.
+// accepted spelling is 35 bytes, so this bounds per-event parse work.
 const maxTimeOperandChars = 64
 
-// asInstant reports the instant a value denotes, but only for spellings that
-// name one unambiguously — RFC 3339 with an explicit offset or `Z`.
-//
-// This exists because the server canonicalizes every top-level DateTime value
-// to RFC 3339 UTC before publishing (#402), so a payload reads `...T04:00:00Z`
-// while a caller's filter constant may name the same instant as
-// `...T06:00:00+02:00`. Comparing those as text is wrong in both directions:
-// lexically the payload sorts *below* the constant, so `gte` misses a row that
-// is chronologically equal. The server compares DateTime columns as instants
-// for exactly this reason; this is the client-side twin of that rule.
-//
-// Deliberately narrow. A zone-less spelling ("2026-06-21 04:00:00") names an
-// instant only relative to the column's declared timezone, which the server
-// reads from the schema and a stream subscriber does not have. Guessing UTC
-// would move the instant, so those fail to parse here and fall through to text
-// comparison rather than being silently reinterpreted.
+// asInstant reports the instant a value denotes, and only for RFC 3339
+// spellings carrying an explicit offset or `Z`. Zone-less spellings are
+// rejected on purpose: they name an instant only relative to the column's
+// timezone, which a subscriber does not know.
 func asInstant(v any) (time.Time, bool) {
 	s, ok := v.(string)
 	if !ok || len(s) > maxTimeOperandChars {
 		return time.Time{}, false
 	}
-	// ClickHouse has no ',' decimal separator, but Go's RFC3339Nano accepts one
-	// per ISO 8601. Reject it so the client can't admit a spelling the server
-	// would refuse.
+	// Go's RFC3339Nano accepts a ',' decimal separator per ISO 8601 but
+	// ClickHouse does not, so reject a spelling the server would refuse.
 	if strings.ContainsRune(s, ',') {
 		return time.Time{}, false
 	}
@@ -702,8 +614,8 @@ func asInstant(v any) (time.Time, bool) {
 	return t, true
 }
 
-// evaluateIn checks whether actual is contained in the expected slice.
-// Reflection handles []any and typed slices (e.g., []string, []int) alike.
+// evaluateIn reports whether actual is contained in the expected slice.
+// Reflection handles []any and typed slices alike.
 func evaluateIn(actual, expected any) bool {
 	rv := reflect.ValueOf(expected)
 	if rv.Kind() != reflect.Slice {
@@ -717,51 +629,40 @@ func evaluateIn(actual, expected any) bool {
 	return false
 }
 
+// order reports the sign of a-b, mirroring Go's comparison operators (so an
+// incomparable float pair such as NaN reports equal rather than ordered).
+func order[T float64 | string](a, b T) (int, bool) {
+	switch {
+	case a < b:
+		return -1, true
+	case a > b:
+		return 1, true
+	default:
+		return 0, true
+	}
+}
+
 // compareOrdered returns (-1, 0, or 1) and true for comparable ordered types,
 // or (0, false) when the types cannot be compared.
 func compareOrdered(actual, expected any) (int, bool) {
 	if a, aOK := toFloat64(actual); aOK {
 		if b, bOK := toFloat64(expected); bOK {
-			switch {
-			case a < b:
-				return -1, true
-			case a > b:
-				return 1, true
-			default:
-				return 0, true
-			}
+			return order(a, b)
 		}
 	}
-	// Timestamps compare chronologically, not lexically. If either side names
-	// an instant the other must too: ordering a canonicalized payload against a
-	// spelling that isn't a provable instant is meaningless, and text
-	// comparison there would admit rows the query path excludes. Fail closed,
-	// as the server's row filter does for a DateTime column.
+	// Timestamps compare chronologically and fail closed when only one side is
+	// a provable instant, matching the server's row filter.
 	aTime, aIsTime := asInstant(actual)
 	bTime, bIsTime := asInstant(expected)
 	if aIsTime || bIsTime {
 		if !aIsTime || !bIsTime {
 			return 0, false
 		}
-		switch {
-		case aTime.Before(bTime):
-			return -1, true
-		case aTime.After(bTime):
-			return 1, true
-		default:
-			return 0, true
-		}
+		return aTime.Compare(bTime), true
 	}
 	if aStr, ok := actual.(string); ok {
 		if bStr, ok := expected.(string); ok {
-			switch {
-			case aStr < bStr:
-				return -1, true
-			case aStr > bStr:
-				return 1, true
-			default:
-				return 0, true
-			}
+			return order(aStr, bStr)
 		}
 	}
 	return 0, false

@@ -96,11 +96,9 @@ func (p *PipeRef) FetchUntyped(ctx context.Context) ([]map[string]any, error) {
 	return Fetch[map[string]any](ctx, p)
 }
 
-// Stream opens a live event stream from the pipe's underlying query.
-//
-// This streams by table name, using the pipe's own name as the table — it
-// only works when the pipe name is also a valid table name. This matches
-// the TS SDK's PipeRef.stream(), which has the same limitation.
+// Stream opens a live event stream from the pipe's underlying query. It
+// subscribes by table name using the pipe's own name, so it only works when
+// the pipe name is also a valid table name.
 func (p *PipeRef) Stream(opts *StreamOptions) *StreamController {
 	return p.createStream(p.name, opts)
 }

@@ -20,8 +20,8 @@ type LiveQueryHandle struct {
 	closed    bool
 }
 
-// newLiveQuery starts a live query: opens the stream immediately, fetches
-// historical data, deduplicates buffered events, then goes live.
+// newLiveQuery buffers stream events while the historical fetch runs, then
+// replays the buffer minus anything the backfill already delivered.
 func newLiveQuery(
 	stream *StreamController,
 	fetchFn func(ctx context.Context) ([]map[string]any, error),
@@ -34,9 +34,8 @@ func newLiveQuery(
 		buffering: true,
 	}
 
-	// Step 1: Subscribe to live events and buffer them. User callbacks are
-	// invoked outside lq.mu so a subscriber may call Close() without
-	// deadlocking.
+	// User callbacks are invoked outside lq.mu so a subscriber may call Close
+	// without deadlocking.
 	lq.unsub = stream.Subscribe(&StreamSubscriber{
 		Next: func(event StreamEvent) {
 			lq.mu.Lock()
@@ -66,14 +65,12 @@ func newLiveQuery(
 		},
 	})
 
-	// Step 2–5: Fetch historical and flush.
 	go func() {
 		rows, err := fetchFn(ctx)
 		if ctx.Err() != nil || lq.isClosed() {
 			return
 		}
 
-		// Step 3: Deliver initial snapshot.
 		if sub.Initial != nil {
 			sub.Initial(rows, err)
 		}
@@ -86,10 +83,9 @@ func newLiveQuery(
 			return
 		}
 
-		// Step 4: Dedup bound — the maximum backfilled timestamp, compared as
-		// parsed times. OrderBy(..., "desc") makes the *last* row the oldest,
-		// and RFC3339 strings with varying fractional digits don't sort
-		// lexically, so neither "last row" nor raw string compare is safe.
+		// Dedup bound: the maximum backfilled timestamp as a parsed time. The
+		// last row can be the oldest, and RFC3339 strings with varying
+		// fractional digits do not sort lexically.
 		var lastTS time.Time
 		for _, row := range rows {
 			if s, ok := row["received_timestamp"].(string); ok {
@@ -99,9 +95,8 @@ func newLiveQuery(
 			}
 		}
 
-		// Step 5: Flush buffered events. buffering stays true until the
-		// buffer is provably empty under the lock — prevents concurrent
-		// sub.Next calls and preserves delivery order.
+		// buffering stays true until the buffer is provably empty under the
+		// lock, which keeps delivery ordered and single-threaded.
 		for {
 			lq.mu.Lock()
 			if lq.closed {
@@ -122,8 +117,6 @@ func newLiveQuery(
 					return
 				}
 				// Skip events already delivered in the backfill.
-				// Sub-millisecond received_timestamp precision makes
-				// boundary collisions rare.
 				if !lastTS.IsZero() {
 					if ts, perr := time.Parse(time.RFC3339Nano, event.Timestamp); perr == nil && !ts.After(lastTS) {
 						continue

@@ -26,8 +26,8 @@ type cliArgs struct {
 	pkg  string
 }
 
-// flagValue consumes and returns the value following os.Args[*i], erroring
-// out instead of silently falling back to the default when it's missing.
+// flagValue consumes and returns the value following os.Args[*i], exiting
+// rather than silently falling back to the default when it is missing.
 func flagValue(i *int) string {
 	flag := os.Args[*i]
 	*i++
@@ -103,12 +103,11 @@ func fetchSchemas(ctx context.Context, baseURL, auth string) (map[string]tableSc
 		return nil, fmt.Errorf("schema fetch failed: HTTP %d", resp.StatusCode)
 	}
 
-	// Server returns either []tableSchema or map[string]tableSchema.
+	// The server returns either []tableSchema or map[string]tableSchema.
 	var raw json.RawMessage
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("read schema response: %w", err)
 	}
-	// Try array first.
 	var arr []tableSchema
 	if err := json.Unmarshal(raw, &arr); err == nil {
 		m := make(map[string]tableSchema, len(arr))
@@ -124,27 +123,10 @@ func fetchSchemas(ctx context.Context, baseURL, auth string) (map[string]tableSc
 	return m, nil
 }
 
-// chTypeToGo maps a ClickHouse type string (as reported by /v1/ops/schema) to a
-// Go type name suitable for a JSON struct field.
-//
-// We deliberately don't import clickhouse-go's type catalog
-// (github.com/ClickHouse/clickhouse-go/v2/lib/column) for this. It's public
-// and does expose a real ClickHouse-type-string parser —
-// column.Type(chType).Column(name, sc).ScanType() — but it answers a
-// different question than the one we're asking. That catalog maps to the Go
-// types the *driver* scans query results into over the native protocol
-// (time.Time for Date/DateTime*, uuid.UUID for UUID, decimal.Decimal for
-// Decimal, net.IP for IPv4/IPv6, *big.Int for [U]Int128/256), not the types
-// that round-trip cleanly through the JSON the /v1/ops/schema and query
-// endpoints actually speak. ClickHouse's JSON output renders DateTime as
-// "2024-01-15 10:30:00" (no "T", no offset), which fails Go's default
-// time.Time JSON unmarshaling; big integers and decimals are similarly
-// rendered as JSON strings, not driver-native types. Adopting the driver's
-// ScanType() as-is would produce generated structs that don't unmarshal the
-// server's actual JSON, and would drag uuid/decimal/orb/net imports into
-// generated output that today has zero non-stdlib dependencies. So we keep
-// the hand-rolled JSON-oriented mapping below, informed by (but not bound
-// to) the type set clickhouse-go's lib/column recognizes.
+// chTypeToGo maps a ClickHouse type string (as reported by /v1/ops/schema) to
+// a Go type name suitable for a JSON struct field. The mapping targets what
+// round-trips through the server's JSON, not clickhouse-go's native scan
+// types, and keeps generated output free of non-stdlib imports.
 func chTypeToGo(chType string) string {
 	// Unwrap Nullable → pointer.
 	if strings.HasPrefix(chType, "Nullable(") && strings.HasSuffix(chType, ")") {
@@ -155,10 +137,8 @@ func chTypeToGo(chType string) string {
 	if strings.HasPrefix(chType, "LowCardinality(") && strings.HasSuffix(chType, ")") {
 		return chTypeToGo(chType[15 : len(chType)-1])
 	}
-	// Unwrap SimpleAggregateFunction(func, InnerType) — readable columns in
-	// AggregatingMergeTree/SummingMergeTree rollup tables. The value on the
-	// wire is just InnerType; the aggregate function name only describes how
-	// merges combine rows.
+	// Unwrap SimpleAggregateFunction(func, InnerType): the wire value is just
+	// InnerType, the function name only describes how merges combine rows.
 	if strings.HasPrefix(chType, "SimpleAggregateFunction(") && strings.HasSuffix(chType, ")") {
 		inner := chType[len("SimpleAggregateFunction(") : len(chType)-1]
 		if comma := findTopLevelComma(inner); comma != -1 {
@@ -173,9 +153,7 @@ func chTypeToGo(chType string) string {
 		chType == "UUID",
 		strings.HasPrefix(chType, "DateTime"),
 		strings.HasPrefix(chType, "Date"),
-		// Time/Time64 are ClickHouse's newer time-of-day types (distinct
-		// from DateTime); same JSON-string-not-RFC3339 story applies.
-		strings.HasPrefix(chType, "Time"),
+		strings.HasPrefix(chType, "Time"), // Time/Time64 time-of-day types
 		strings.HasPrefix(chType, "Enum8("),
 		strings.HasPrefix(chType, "Enum16("),
 		chType == "IPv4",
@@ -184,10 +162,10 @@ func chTypeToGo(chType string) string {
 	case chType == "Bool", chType == "Boolean":
 		return "bool"
 	}
-	// Numeric. Generated structs target /v1/query and /v1/pipes/*, where the
-	// server re-marshals ClickHouse values, so 64-bit integers arrive as
-	// unquoted JSON numbers. /v1/ops/query forwards ClickHouse's own JSON,
-	// which quotes them — use SQL[map[string]any] there.
+	// Generated structs target /v1/query and /v1/pipes/*, where the server
+	// re-marshals values so 64-bit integers arrive as unquoted JSON numbers.
+	// /v1/ops/query forwards ClickHouse's own JSON, which quotes them — use
+	// SQL[map[string]any] there.
 	if mapped, ok := map[string]string{
 		"UInt8": "uint8", "UInt16": "uint16", "UInt32": "uint32", "UInt64": "uint64",
 		"Int8": "int8", "Int16": "int16", "Int32": "int32", "Int64": "int64",
@@ -197,32 +175,24 @@ func chTypeToGo(chType string) string {
 	}
 	switch {
 	case strings.HasPrefix(chType, "Decimal"):
-		// Decimals are marshaled as quoted strings on the structured path
-		// (shopspring decimal.MarshalJSON quotes by default).
-		return "string"
+		return "string" // marshaled as a quoted string on the structured path
 	case strings.HasPrefix(chType, "UInt128"),
 		strings.HasPrefix(chType, "UInt256"),
 		strings.HasPrefix(chType, "Int128"),
 		strings.HasPrefix(chType, "Int256"):
-		// 128/256-bit ints scan into *big.Int server-side and marshal as
-		// unquoted JSON numbers of arbitrary width — json.Number preserves
-		// them exactly where int64/uint64 would overflow.
+		// Arbitrary-width unquoted JSON numbers; int64/uint64 would overflow.
 		return "json.Number"
 	}
-	// Array.
 	if strings.HasPrefix(chType, "Array(") && strings.HasSuffix(chType, ")") {
 		inner := chTypeToGo(chType[6 : len(chType)-1])
-		// Array(UInt8) is asymmetric on the wire: ingest requires a real JSON
-		// array, but /v1/query responses currently base64-encode it (the
-		// server scans into []byte and encoding/json base64s that — #436).
-		// json.RawMessage is the
-		// only shape that round-trips both directions without a decode error.
+		// Array(UInt8) is asymmetric on the wire — ingest takes a JSON array,
+		// /v1/query returns base64 (#436) — and only json.RawMessage
+		// round-trips both without a decode error.
 		if inner == "uint8" {
 			return "json.RawMessage"
 		}
 		return "[]" + inner
 	}
-	// Map.
 	if strings.HasPrefix(chType, "Map(") && strings.HasSuffix(chType, ")") {
 		inner := chType[4 : len(chType)-1]
 		comma := findTopLevelComma(inner)
@@ -270,9 +240,8 @@ func pascalCase(s string) string {
 	if result == "" {
 		return result
 	}
-	// Go identifiers can't start with a digit (e.g. a table named
-	// "2fa_events" would otherwise produce the invalid identifier
-	// "2faEvents"). Prefix with "X" to keep it a valid, exported name.
+	// Go identifiers can't start with a digit, so "2fa_events" needs a prefix
+	// to stay a valid exported name.
 	if unicode.IsDigit(rune(result[0])) { // digits are ASCII; no rune-slice needed
 		result = "X" + result
 	}
@@ -307,10 +276,8 @@ func generate(schemas map[string]tableSchema, pkg string) (string, error) {
 		sb.WriteString("import \"encoding/json\"\n\n")
 	}
 
-	// pascalCase is not injective ("user_id" and "userId" both yield
-	// "UserId"), and format.Source only parses — it doesn't type-check — so
-	// a duplicate identifier would be written as a non-compiling file with a
-	// success message. Fail loudly instead.
+	// pascalCase is not injective and format.Source only parses, so a
+	// collision would otherwise be written out as a non-compiling file.
 	seenTypes := make(map[string]string, len(names))
 	for _, name := range names {
 		schema := schemas[name]
@@ -330,10 +297,9 @@ func generate(schemas map[string]tableSchema, pkg string) (string, error) {
 			seenFields[fieldName] = col.Name
 			jsonTag := col.Name
 			if col.HasDefault {
-				// Pointer + omitempty is the Go spelling of the TS codegen's
-				// `field?: T`: nil omits the field (server default applies),
-				// while a pointer to the zero value still sends an explicit
-				// 0/false/"" instead of silently dropping it.
+				// Pointer + omitempty means nil omits the field so the server
+				// default applies, while a pointer to the zero value still
+				// sends an explicit 0/false/"".
 				jsonTag += ",omitempty"
 				if !strings.HasPrefix(goType, "*") {
 					goType = "*" + goType
@@ -370,9 +336,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// gofmt the output. A failure here means the generated source is not
-	// valid Go (e.g. a table/column name produced an invalid identifier);
-	// don't write unusable output and claim success.
+	// A format failure means the generated source is not valid Go; don't write
+	// unusable output and claim success.
 	formatted, err := format.Source([]byte(output))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: generated code is not valid Go: %v\n", err)

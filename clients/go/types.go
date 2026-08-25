@@ -2,28 +2,19 @@ package wavehouse
 
 import "context"
 
-// ── Structured query AST (matches backend wire format) ────────────────────
-
 // StructuredQuery is the wire format for POST /v1/query.
 type StructuredQuery struct {
-	// Columns to project. A literal "*" is a column named "*", not a wildcard.
-	// Omitting columns (with no aggregations and no select_all) selects nothing.
-	Columns []string `json:"columns,omitempty"`
-	// SelectAll requests every column the caller's role may read.
-	// Mutually exclusive with a non-empty Columns list.
-	SelectAll bool `json:"select_all,omitempty"`
-	// Aggregations (count, sum, avg, etc.).
+	// Columns names an explicit projection. A literal "*" is a column named
+	// "*", not a wildcard, and an empty list with no aggregations and no
+	// SelectAll selects nothing. Mutually exclusive with SelectAll.
+	Columns      []string      `json:"columns,omitempty"`
+	SelectAll    bool          `json:"select_all,omitempty"`
 	Aggregations []Aggregation `json:"aggregations,omitempty"`
-	// Filters (WHERE conditions, ANDed).
-	Filters []QueryFilter `json:"filters,omitempty"`
-	// GroupBy columns.
-	GroupBy []string `json:"group_by,omitempty"`
-	// OrderBy clauses.
-	OrderBy []OrderClause `json:"order_by,omitempty"`
-	// Limit caps the result set.
-	Limit *int `json:"limit,omitempty"`
-	// TimeRange filters by a time window.
-	TimeRange *TimeRange `json:"time_range,omitempty"`
+	Filters      []QueryFilter `json:"filters,omitempty"`
+	GroupBy      []string      `json:"group_by,omitempty"`
+	OrderBy      []OrderClause `json:"order_by,omitempty"`
+	Limit        *int          `json:"limit,omitempty"`
+	TimeRange    *TimeRange    `json:"time_range,omitempty"`
 }
 
 // Aggregation describes a single aggregation (e.g. count, sum).
@@ -81,8 +72,6 @@ var opMap = map[FilterOp]string{
 	OpNotLike: "not_like",
 }
 
-// ── Schema types ──────────────────────────────────────────────────────────
-
 // Column describes a single column in a table schema.
 type Column struct {
 	Name       string `json:"name"`
@@ -99,8 +88,6 @@ type TableSchema struct {
 
 // Schemas maps table names to their schemas.
 type Schemas map[string]TableSchema
-
-// ── Insert result ─────────────────────────────────────────────────────────
 
 // InsertRecordResult is a per-record outcome from a batch insert.
 type InsertRecordResult struct {
@@ -121,15 +108,11 @@ type InsertResult struct {
 	Results    []InsertRecordResult `json:"results,omitempty"`
 }
 
-// ── DLQ types ─────────────────────────────────────────────────────────────
-
 // DLQStats describes dead-letter-queue statistics.
 type DLQStats struct {
 	Tables map[string]int `json:"tables"`
 	Total  int            `json:"total"`
 }
-
-// ── Pipe types ────────────────────────────────────────────────────────────
 
 // Pipe describes a named query pipe definition.
 type Pipe struct {
@@ -148,13 +131,11 @@ type ParamDef struct {
 	Default  any    `json:"default,omitempty"`
 }
 
-// ── Policy types ──────────────────────────────────────────────────────────
-
 // Policy describes the server's access-control policy.
 type Policy struct {
 	DefaultRole string `json:"default_role,omitempty"`
-	// AdminRole is the role granted full access and the allowlist bypass.
-	// Empty means the server's default ("admin") applies.
+	// AdminRole grants full access and the allowlist bypass; empty means the
+	// server's default ("admin").
 	AdminRole string                 `json:"admin_role,omitempty"`
 	Tables    map[string]TablePolicy `json:"tables"`
 }
@@ -180,9 +161,8 @@ type RolePermissions struct {
 }
 
 // PolicyFilter describes a policy filter predicate. Fields are pointers with
-// omitempty so an intentional empty-string comparison (e.g. Eq pointing at "")
-// is sent as "", while an unset operator is omitted entirely — never null —
-// matching the server's absent-operator semantics.
+// omitempty so an intentional empty-string comparison is sent as "" while an
+// unset operator is omitted entirely, never null.
 type PolicyFilter struct {
 	Eq  *string `json:"_eq,omitempty"`
 	Neq *string `json:"_neq,omitempty"`
@@ -195,8 +175,6 @@ type PolicyFilter struct {
 type ValidationResult struct {
 	Valid bool `json:"valid"`
 }
-
-// ── Streaming types ───────────────────────────────────────────────────────
 
 // StreamStatus represents the connection state of a stream.
 type StreamStatus string
@@ -215,16 +193,13 @@ type StreamEvent struct {
 	Data      map[string]any `json:"data"`
 }
 
-// StreamSubscriber receives events from a stream.
+// StreamSubscriber receives events from a stream. Every callback is optional.
 type StreamSubscriber struct {
-	// Initial is called once with historical backfill data (live queries only).
+	// Initial fires once with the historical backfill (live queries only).
 	Initial func(rows []map[string]any, err error)
-	// Next is called for each live event.
-	Next func(event StreamEvent)
-	// Status is called when the connection status changes.
-	Status func(status StreamStatus)
-	// Error is called on stream errors.
-	Error func(err error)
+	Next    func(event StreamEvent)
+	Status  func(status StreamStatus)
+	Error   func(err error)
 }
 
 // StreamOptions configures a stream.
@@ -233,14 +208,10 @@ type StreamOptions struct {
 	Since string
 }
 
-// ── Fetch/page types ──────────────────────────────────────────────────────
-
 // Page wraps a result set with pagination metadata.
 type Page[T any] struct {
-	// Data is the result rows.
-	Data []T
-	// HasMore is true if more rows may be available.
+	Data    []T
 	HasMore bool
-	// Next fetches the next page. Nil when no cursor is available.
+	// Next fetches the next page, and is nil when no cursor is available.
 	Next func(ctx context.Context) (*Page[T], error)
 }

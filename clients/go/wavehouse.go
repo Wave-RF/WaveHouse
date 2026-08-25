@@ -14,6 +14,7 @@ package wavehouse
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 )
@@ -23,16 +24,14 @@ type Config struct {
 	// BaseURL of the WaveHouse server (e.g. "http://localhost:8080").
 	BaseURL string
 
-	// Auth provides a bearer token for authenticated requests. Called before
-	// each request; return "" to skip the Authorization header. Nil means
-	// unauthenticated access (the server falls back to default_role).
+	// Auth returns a bearer token, called once per request. Return "" to skip
+	// the Authorization header; nil means unauthenticated (server default_role).
 	Auth func(ctx context.Context) (string, error)
 
 	// Options tunes transport behavior.
 	Options *ClientOptions
 
-	// HTTPClient overrides the default http.Client. Useful for custom TLS,
-	// proxies, or test transports.
+	// HTTPClient overrides the default http.Client.
 	HTTPClient *http.Client
 }
 
@@ -42,19 +41,13 @@ type ClientOptions struct {
 	// Total attempts = MaxRetries + 1. Default: 2.
 	MaxRetries int
 
-	// Headers are sent on every request the client makes — REST calls and SSE
-	// streams alike. Use them for a gateway credential, a tenant selector, or
-	// tracing metadata that has no first-class option.
-	//
-	// The SDK's own headers win: Authorization, Accept, Content-Type, and the
-	// stream's Cache-Control are set after these and overwrite any entry that
-	// collides. Names are matched case-insensitively (canonicalized by
-	// net/http), and each entry replaces rather than appends.
+	// Headers are sent on every REST call and SSE stream. They are applied
+	// before the SDK's own headers, so Authorization, Accept, Content-Type and
+	// Cache-Control win any collision; names are canonicalized by net/http.
 	Headers map[string]string
 }
 
 // StaticToken returns an Auth function that always returns the same token.
-// Convenience for cases where the token doesn't rotate.
 func StaticToken(token string) func(context.Context) (string, error) {
 	return func(context.Context) (string, error) { return token, nil }
 }
@@ -63,16 +56,11 @@ func StaticToken(token string) func(context.Context) (string, error) {
 type Client struct {
 	ctx httpContext
 
-	// Schema provides admin-only schema introspection.
 	Schema *SchemaNamespace
-	// Policy provides admin-only access-control policy management.
 	Policy *PolicyNamespace
-	// DLQ provides admin-only dead-letter-queue statistics.
-	DLQ *DLQNamespace
-	// Sys provides system health checks.
-	Sys *SysNamespace
-	// Pipes provides admin-only named-pipe management.
-	Pipes *PipesNamespace
+	DLQ    *DLQNamespace
+	Sys    *SysNamespace
+	Pipes  *PipesNamespace
 }
 
 // NewClient creates a new WaveHouse client.
@@ -85,16 +73,13 @@ func NewClient(cfg Config) *Client {
 	// Copy so a later mutation of the caller's map can't reach into requests.
 	var headers map[string]string
 	if cfg.Options != nil && len(cfg.Options.Headers) > 0 {
-		headers = make(map[string]string, len(cfg.Options.Headers))
-		for k, v := range cfg.Options.Headers {
-			headers[k] = v
-		}
+		headers = maps.Clone(cfg.Options.Headers)
 	}
 
 	hc := cfg.HTTPClient
 	if hc == nil {
-		// Not http.DefaultClient: it's mutable global state another package
-		// could reconfigure (timeout, transport, redirects) after we're built.
+		// Not http.DefaultClient: another package could reconfigure that
+		// mutable global (timeout, transport, redirects) after we are built.
 		hc = &http.Client{}
 	}
 
@@ -137,9 +122,8 @@ func (c *Client) Pipe(name string, params map[string]any) *PipeRef {
 	}
 }
 
-// SQL executes a raw SQL query against ClickHouse. Requires the admin role.
-// The server proxies the SQL verbatim to ClickHouse's HTTP interface. Results
-// are decoded into []T; use [map[string]any] for dynamic schemas.
+// SQL executes a raw SQL query against ClickHouse, decoding results into []Row.
+// Requires the admin role; the server proxies the SQL verbatim.
 func SQL[Row any](ctx context.Context, c *Client, query string) ([]Row, error) {
 	var rows []Row
 	err := doRequest(ctx, c.ctx, requestOptions{
@@ -153,7 +137,6 @@ func SQL[Row any](ctx context.Context, c *Client, query string) ([]Row, error) {
 	return rows, nil
 }
 
-// createStream opens an SSE stream for the given table.
 func (c *Client) createStream(table string, opts *StreamOptions) *StreamController {
 	return newStreamController(c.ctx, table, opts)
 }

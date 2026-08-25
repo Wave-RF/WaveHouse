@@ -12,7 +12,6 @@ type SchemaNamespace struct {
 
 // List returns all table schemas discovered from ClickHouse. Admin-only.
 func (s *SchemaNamespace) List(ctx context.Context) (Schemas, error) {
-	// The backend returns []TableSchema; transform to map[string]TableSchema.
 	var raw []TableSchema
 	if err := doRequest(ctx, s.ctx, requestOptions{
 		method: "GET",

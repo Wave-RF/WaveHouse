@@ -6,12 +6,9 @@ import (
 	"net/url"
 )
 
-// DLQNamespace provides admin-only dead-letter-queue statistics.
-//
-// The server registers /v1/ops/dlq/stats only when the DLQ is enabled, so on a
-// deployment with dlq.enabled: false these calls return an [*Error] with
-// Status 404 — "the DLQ is switched off", not "the DLQ is empty". Check
-// Status before reading a zero DLQStats as a healthy result.
+// DLQNamespace provides admin-only dead-letter-queue statistics. A deployment
+// with the DLQ disabled answers these calls with an [*Error] of Status 404
+// rather than an empty DLQStats, so check Status before reading a zero total.
 type DLQNamespace struct {
 	ctx          httpContext
 	createStream func(table string, opts *StreamOptions) *StreamController

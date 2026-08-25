@@ -9,9 +9,8 @@ import (
 	"strings"
 )
 
-// TableRef is a reference to a table. Use it for queries, inserts, schema,
-// and streams. Safe for concurrent use: it holds no mutable state, and every
-// builder method returns a fresh value.
+// TableRef is a reference to a table, used for queries, inserts, schema and
+// streams. Safe for concurrent use: it holds no mutable state.
 type TableRef struct {
 	ctx          httpContext
 	table        string
@@ -53,10 +52,9 @@ func (t *TableRef) Insert(ctx context.Context, data any) (*InsertResult, error) 
 	return t.insertSingle(ctx, data)
 }
 
-// sliceValue reports whether data is a slice type, returning its
-// reflect.Value for iteration. []byte is excluded and treated as an opaque
-// single value (matching encoding/json's special-cased handling of byte
-// slices) rather than a batch of numbers.
+// sliceValue reports whether data is a slice, returning its reflect.Value for
+// iteration. []byte is excluded so it stays an opaque single value, as
+// encoding/json treats it, rather than a batch of numbers.
 func sliceValue(data any) (reflect.Value, bool) {
 	if data == nil {
 		return reflect.Value{}, false
@@ -107,15 +105,8 @@ func (t *TableRef) insertSingle(ctx context.Context, data any) (*InsertResult, e
 	}, &res); err != nil {
 		return nil, fmt.Errorf("insert into %q: %w", t.table, err)
 	}
-	ok := true
-	if res.OK != nil {
-		ok = *res.OK
-	}
-	result := &InsertResult{OK: ok}
-	if res.Duplicate != nil {
-		result.Duplicate = res.Duplicate
-	}
-	return result, nil
+	// An absent "ok" field means success.
+	return &InsertResult{OK: res.OK == nil || *res.OK, Duplicate: res.Duplicate}, nil
 }
 
 func emptyInsertResult() *InsertResult {
@@ -151,12 +142,9 @@ func (t *TableRef) insertBatch(ctx context.Context, rows []map[string]any) (*Ins
 	return t.sendNDJSON(ctx, ndjson)
 }
 
-// insertBatchReflect is the fallback batch path for any slice type other
-// than []map[string]any (the fast path in insertBatch above) — e.g. a
-// generated or user-defined row type such as []ClickRow. Each element is
-// marshaled to JSON individually and joined as NDJSON, exactly like
-// insertBatch, so the server's per-record batch summary (failed, results,
-// etc.) is preserved instead of being silently dropped by insertSingle.
+// insertBatchReflect is the batch path for slice types other than
+// []map[string]any. It builds the same NDJSON body as insertBatch so the
+// server's per-record summary survives instead of being dropped.
 func (t *TableRef) insertBatchReflect(ctx context.Context, rows reflect.Value) (*InsertResult, error) {
 	if rows.Len() == 0 {
 		return emptyInsertResult(), nil

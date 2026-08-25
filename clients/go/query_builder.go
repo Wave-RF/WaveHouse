@@ -8,8 +8,8 @@ import (
 	"net/url"
 )
 
-// DefaultLimit is applied when no explicit limit is set — deliberately tighter
-// than the backend's DefaultMaxRows (10000) safety cap.
+// DefaultLimit is applied when no explicit limit is set. It is deliberately
+// tighter than the backend's DefaultMaxRows (10000) safety cap.
 const DefaultLimit = 1000
 
 // queryState is the immutable core of a QueryBuilder.
@@ -26,8 +26,8 @@ type queryState struct {
 	cacheTTL     *int // client-side only, not sent to server (#280)
 }
 
-// QueryBuilder builds structured queries. Immutable — every chain method
-// returns a new builder. Use Fetch or FetchUntyped to execute.
+// QueryBuilder builds structured queries. It is immutable: every chain method
+// returns a new builder. Use [FetchTyped] or FetchUntyped to execute.
 type QueryBuilder struct {
 	ctx          httpContext
 	createStream func(table string, opts *StreamOptions) *StreamController
@@ -173,11 +173,9 @@ func FetchTyped[Row any](ctx context.Context, q *QueryBuilder) (*Page[Row], erro
 	hasMore := limit > 0 && len(rows) >= limit
 	page := &Page[Row]{Data: rows, HasMore: hasMore}
 
-	// Attach Next whenever we have an order column to build a cursor from.
-	// This doesn't check that the order column is present in the row
-	// projection — a Select() that omits it means fetchNextTyped can't find
-	// a cursor value and will quietly return an empty page (matches the TS
-	// SDK's QueryBuilder.fetch()/_fetchNext(), which has the same limitation).
+	// Attached whenever there is an order column to build a cursor from; a
+	// projection that omits that column yields an empty next page rather than
+	// an error.
 	if hasMore && len(q.state.orderBy) > 0 {
 		page.Next = func(ctx context.Context) (*Page[Row], error) {
 			return fetchNextTyped(ctx, q, rows)
@@ -202,9 +200,9 @@ func (q *QueryBuilder) Stream(opts *StreamOptions) *StreamController {
 	return newFilteredStreamController(raw, q.state.filters, q.state.columns)
 }
 
-// LiveQuery starts a live query: fetches historical data, then streams live
-// updates. The subscriber's Initial is called once, then Next fires for each
-// live event. Returns a LiveQuery handle with a Close method.
+// LiveQuery fetches historical data, then streams live updates: the
+// subscriber's Initial fires once, then Next fires per live event. Close the
+// returned handle to stop it.
 func (q *QueryBuilder) LiveQuery(sub *StreamSubscriber, opts *StreamOptions) *LiveQueryHandle {
 	stream := q.Stream(opts)
 	fetchFn := func(ctx context.Context) ([]map[string]any, error) {
@@ -247,22 +245,14 @@ func (q *QueryBuilder) buildAST(effectiveLimit int) *StructuredQuery {
 		ast.SelectAll = true
 	}
 
-	if hasAggs {
-		ast.Aggregations = q.state.aggregations
-	}
-	if len(q.state.filters) > 0 {
-		ast.Filters = q.state.filters
-	}
-	if len(q.state.groupBy) > 0 {
-		ast.GroupBy = q.state.groupBy
-	}
-	if len(q.state.orderBy) > 0 {
-		ast.OrderBy = q.state.orderBy
-	}
+	// Empty slices and a nil TimeRange are omitempty-elided, so these can be
+	// assigned unconditionally.
+	ast.Aggregations = q.state.aggregations
+	ast.Filters = q.state.filters
+	ast.GroupBy = q.state.groupBy
+	ast.OrderBy = q.state.orderBy
 	ast.Limit = &effectiveLimit
-	if q.state.timeRange != nil {
-		ast.TimeRange = q.state.timeRange
-	}
+	ast.TimeRange = q.state.timeRange
 	return ast
 }
 
@@ -272,38 +262,27 @@ func fetchNextTyped[Row any](ctx context.Context, q *QueryBuilder, prevRows []Ro
 	}
 	cursor := q.state.orderBy[0]
 
-	// Extract the last row's value for the cursor column.
 	lastRow := any(prevRows[len(prevRows)-1])
 	m, ok := lastRow.(map[string]any)
 	if !ok {
-		// TODO: marshal/unmarshal round-trip to get a map — optimize with reflect if perf matters.
-		// UseNumber keeps typed int64 cursor values exact past 2^53. The
-		// untyped path (FetchUntyped / TableRef.Fetch) doesn't get this
-		// protection: its rows were already decoded to float64 by
-		// encoding/json, so precision above 2^53 is gone before we get here —
-		// the same ceiling the TS SDK has with JS numbers. Use FetchTyped (or
-		// codegen structs — their 64-bit int columns are int64/uint64, and
-		// 128/256-bit are json.Number) when paging on >2^53 integer cursors.
+		// UseNumber keeps typed int64 cursor values exact past 2^53; rows that
+		// arrived through the untyped path were already float64 by then.
 		raw, err := json.Marshal(lastRow)
 		if err != nil {
-			// Row itself is unmarshalable (e.g. a func field absent from the
-			// response). Silently truncating the result set would look like
-			// normal end-of-pagination, so surface it.
+			// Surfaced rather than swallowed: an empty page here would be
+			// indistinguishable from normal end-of-pagination.
 			return nil, fmt.Errorf("wavehouse: marshal cursor row: %w", err)
 		}
 		m = make(map[string]any)
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
-		// Decode error is deliberate: a Row that marshals to a non-object
-		// (FetchTyped[[]any], a scalar row type) leaves m empty and ends
-		// pagination below, same as an absent cursor column. Tracked in #452.
+		// Ignored deliberately: a Row that marshals to a non-object leaves m
+		// empty and ends pagination below, as an absent cursor column does (#452).
 		_ = dec.Decode(&m)
 	}
 	lastValue, exists := m[cursor.Column]
 	if !exists {
-		// Cursor column wasn't in the projection (e.g. Select() omitted it) —
-		// no cursor value to page from, so end pagination quietly rather than
-		// erroring. Matches the TS SDK's _fetchNext().
+		// No cursor value to page from; end pagination quietly.
 		return &Page[Row]{}, nil
 	}
 
@@ -313,8 +292,8 @@ func fetchNextTyped[Row any](ctx context.Context, q *QueryBuilder, prevRows []Ro
 	}
 
 	next := q.clone(func(s *queryState) {
-		// Replace an existing cursor filter instead of appending — otherwise
-		// page N carries N stacked filters on the cursor column.
+		// Replace an existing cursor filter rather than appending, or page N
+		// would carry N stacked filters on the cursor column.
 		for i := range s.filters {
 			if s.filters[i].Column == cursor.Column && s.filters[i].Op == cursorOp {
 				s.filters[i].Value = lastValue

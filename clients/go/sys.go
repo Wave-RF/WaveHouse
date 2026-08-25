@@ -10,8 +10,8 @@ type SysNamespace struct {
 	ctx httpContext
 }
 
-// Health pings the server's public /v1/health endpoint. Returns nil when the
-// server is reachable and past boot, or an error describing the failure.
+// Health pings the server's public /v1/health endpoint, returning nil when the
+// server is reachable and past boot.
 func (s *SysNamespace) Health(ctx context.Context) error {
 	if err := doRequest(ctx, s.ctx, requestOptions{
 		method: "GET",

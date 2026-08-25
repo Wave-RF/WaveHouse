@@ -30,9 +30,8 @@ type httpContext struct {
 }
 
 // applyConfiguredHeaders writes the client's configured headers onto a request.
-// Call it *before* the SDK sets its own headers: Set replaces, so whatever the
-// SDK writes afterwards wins a collision. http.Header canonicalizes names, so
-// "x-tenant" and "X-Tenant" are the same entry.
+// Call it before the SDK sets its own headers: Set replaces, so the SDK's
+// later writes win any collision.
 func applyConfiguredHeaders(h http.Header, configured map[string]string) {
 	for k, v := range configured {
 		h.Set(k, v)
@@ -49,8 +48,8 @@ type requestOptions struct {
 	params      url.Values
 }
 
-// doRequest is the internal fetch wrapper with auth, retry, and backoff.
-// It decodes the response body into dst (unless dst is nil).
+// doRequest issues a request with auth, retry and backoff, decoding the
+// response body into dst unless dst is nil.
 func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst any) error {
 	reqURL := buildURL(hctx.baseURL, opts.path, opts.params)
 	ct := opts.contentType
@@ -85,8 +84,8 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 	var lastErr error
 	maxAttempts := hctx.maxRetries + 1
 
-	// Retries all methods including POST. For /v1/ingest, at-least-once delivery
-	// is the documented contract; dedup is the server-side safety net.
+	// Retries every method including POST: /v1/ingest documents at-least-once
+	// delivery, with server-side dedup as the safety net.
 	for attempt := range maxAttempts {
 		var bodyReader io.Reader
 		if bodyBytes != nil {
@@ -106,7 +105,6 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 
 		res, err := hctx.httpClient.Do(req)
 		if err != nil {
-			// Context cancellation — return immediately, no retry.
 			if ctx.Err() != nil {
 				return errAborted
 			}
@@ -146,7 +144,7 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 		apiErr := parseErrorResponse(res)
 		_ = res.Body.Close()
 
-		// 503/429 with Retry-After: wait the specified duration (capped).
+		// 503/429 with Retry-After: wait the header's duration, capped.
 		if res.StatusCode == http.StatusServiceUnavailable || res.StatusCode == http.StatusTooManyRequests {
 			if ra := res.Header.Get("Retry-After"); ra != "" && attempt < maxAttempts-1 {
 				if sleepErr := sleepWithContext(ctx, retryAfterDelay(ra, attempt)); sleepErr != nil {
@@ -157,7 +155,6 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 			}
 		}
 
-		// Retryable server errors (5xx).
 		if apiErr.Retryable && attempt < maxAttempts-1 {
 			if sleepErr := sleepWithContext(ctx, backoff(attempt)); sleepErr != nil {
 				return errAborted
@@ -186,9 +183,8 @@ func buildURL(base, path string, params url.Values) string {
 func retryAfterDelay(ra string, attempt int) time.Duration {
 	delay := backoff(attempt)
 	if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
-		// Compare before converting: time.Duration(secs) * time.Second wraps
-		// negative past ~9.2e9 seconds, and min() below would then pick the
-		// negative value, firing the retry timer instantly.
+		// Compare before converting: secs*time.Second wraps negative past
+		// ~9.2e9 seconds and min() below would then fire the timer instantly.
 		if secs > int(maxRetryAfter/time.Second) {
 			return maxRetryAfter
 		}
@@ -203,8 +199,8 @@ func retryAfterDelay(ra string, attempt int) time.Duration {
 
 func backoff(attempt int) time.Duration {
 	ms := 1000 * math.Pow(2, float64(attempt))
-	// ±20% jitter so clients failing at the same moment don't retry in
-	// lockstep; capped after jitter so the documented 30s max holds.
+	// ±20% jitter so simultaneous failures don't retry in lockstep; capped
+	// after jitter so the documented 30s maximum holds.
 	ms *= 0.8 + 0.4*rand.Float64() //nolint:gosec // retry jitter, not cryptographic
 	return time.Duration(min(ms, 30000)) * time.Millisecond
 }
