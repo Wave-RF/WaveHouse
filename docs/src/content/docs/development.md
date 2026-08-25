@@ -477,7 +477,7 @@ WaveHouse/
 ├── clients/                # Official SDKs
 │   ├── ts/                 # TypeScript SDK (@wavehouse/sdk)
 │   └── go/                 # Go SDK — a NESTED Go module (own go.mod, invisible
-│                           #   to root `go list`; hence the *-go-sdk make targets)
+│                           #   to root `go list`; hence the test-sdk-go* targets)
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)
 │   ├── conformance/        # TS half of the cross-SDK wire-format conformance suite

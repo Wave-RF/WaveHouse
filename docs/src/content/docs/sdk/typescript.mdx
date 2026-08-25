@@ -7,6 +7,8 @@ import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components
 
 Setup and caveats for `@wavehouse/sdk`, the TypeScript client: installation, runtimes, client construction, and the `Result<T>` error model. Usage is documented per topic, both languages side by side, starting at [Queries](/sdk/queries) — writing Go instead? [Go setup](/sdk/go) is the mirror of this page.
 
+`@wavehouse/sdk` has exactly one runtime dependency — `eventsource-parser` (~1.4 KB gzipped, itself dependency-free), which frames the SSE stream.
+
 ## Installation
 
 <Tabs syncKey="pkg">
@@ -472,7 +474,7 @@ explicit new Agent()      17    14    12    13
 An explicit `dispatcher` wins because the request never consults the shared symbol at all. An explicit `setGlobalDispatcher` call (below) wins the other way round — it overwrites the symbol after the first copy claimed it.
 :::
 
-Both casts are load-bearing, for one underlying reason: undici declares its own request/response types, separate from the ones behind your global `fetch`, so the two aren't structurally assignable. `{ ...init, dispatcher } as never` covers the split on `RequestInit`, which differs on `body` and `headers` (`never` is assignable to either spelling, so one snippet compiles whether or not your `lib` includes DOM); and the return cast handles the `Response` mismatch. The URL needs no cast — `FetchLike` declares it as `string`, which undici's `RequestInfo` accepts. They're safe because of the narrow runtime contract above — a string URL and a plain `RequestInit` in, and only the response members enumerated above read back. `undici` is a dependency you add on top of the SDK's single ~1.4 KB one.
+Both casts are load-bearing, for one underlying reason: undici declares its own request/response types, separate from the ones behind your global `fetch`, so the two aren't structurally assignable. `{ ...init, dispatcher } as never` covers the split on `RequestInit`, which differs on `body` and `headers` (`never` is assignable to either spelling, so one snippet compiles whether or not your `lib` includes DOM); and the return cast handles the `Response` mismatch. The URL needs no cast — `FetchLike` declares it as `string`, which undici's `RequestInfo` accepts. They're safe because of the narrow runtime contract above — a string URL and a plain `RequestInit` in, and only the response members enumerated above read back. `undici` is a dependency you add on top of `eventsource-parser`, the SDK's single ~1.4 KB runtime dependency.
 
 If you're genuinely pinned to an affected undici, the same snippet fixes it — your pinned version, with a dispatcher that never reuses a keep-alive socket: `new Agent({ pipelining: 0 })`. That costs a fresh connection per request, so prefer upgrading. Note that tuning `keepAliveTimeout` does **not** help: the retirement timer is starved by the same idle event loop that triggers the bug, so the socket is still there to be reused.
 

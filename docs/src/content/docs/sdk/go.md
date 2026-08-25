@@ -158,7 +158,7 @@ See [Reference → Error Handling](/sdk/reference#error-handling) for retry beha
 Both SDKs share a wire format and feature set, verified in CI against a shared `wire_cases.json` fixture that asserts equivalent HTTP requests for builder calls. The API shapes differ:
 
 - **No `Result<T>` union.** Go returns `(T, error)`; a non-nil `error` is the only failure signal. No `{ok, data, error}` objects, no `error: null` sentinels.
-- **`context.Context` instead of `AbortSignal`.** Non-streaming calls take `ctx context.Context` first; use a deadline or `cancel()`. See [Reference → Context Cancellation](/sdk/reference#cancellation).
+- **`context.Context` instead of `AbortSignal`.** Non-streaming calls take `ctx context.Context` first; use a deadline or `cancel()`. See [Reference → Cancellation](/sdk/reference#cancellation).
 - **Streams closed explicitly.** `TableRef.Stream` and `QueryBuilder.Stream` take no context; the returned `*StreamController` owns its goroutine and connection until `.Close()` (usually deferred). See [Streaming](/sdk/streaming).
 - **Generics on package functions.** Go has no type parameters on methods, so use `FetchTyped[Row]`, `Fetch[Row]`, or `SQL[Row]`.
 - **No implicit "await."** `QueryBuilder` is not `PromiseLike`; call `.FetchUntyped(ctx)` or `wavehouse.FetchTyped[Row](ctx, builder)` explicitly.
@@ -173,4 +173,4 @@ The topic pages cover both SDKs, tabbed by language — the tab you pick here fo
 - [Streaming & Live Queries](/sdk/streaming) — SSE streams, client-side filtering, and backfill-then-live queries.
 - [Pipes](/sdk/pipes) — Execute and manage named query pipes.
 - [Admin & System](/sdk/admin) — Schema introspection, access-control policy, DLQ stats, and health checks.
-- [Reference & CLI](/sdk/reference) — Error codes, context cancellation, API tree, and codegen CLI.
+- [Reference & CLI](/sdk/reference) — Error codes, cancellation, the full API tree, and the codegen CLIs.

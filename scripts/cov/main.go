@@ -71,8 +71,13 @@ var suiteModuleDir = map[string]string{"go-sdk": "clients/go"}
 
 // suiteTarget names the make target that populates a suite, for the
 // "did you run it?" hint. Only suites whose target isn't `test-<suite>`
-// need an entry.
-var suiteTarget = map[string]string{"go-sdk": "test-sdk-go"}
+// need an entry. One source of truth: every hint in this file routes
+// through makeTargetFor, so a target rename touches only this map.
+var suiteTarget = map[string]string{
+	"go-sdk":  "test-sdk-go",
+	"ts-unit": "test-sdk-ts",
+	"ts-e2e":  "test-e2e", // the orchestrator run, not a target of its own
+}
 
 // makeTargetFor returns the make target that populates the named suite.
 func makeTargetFor(suite string) string {
@@ -320,11 +325,7 @@ func merge(c *config) error {
 			dirs = append(dirs, d)
 			fmt.Printf("  %s✔%s %-13s %s\n", green, reset, s, d)
 		} else {
-			hint := "test-" + s
-			if s == "unit" {
-				hint = "test"
-			}
-			fmt.Printf("  %s✗%s %-13s (no covdata; run `make %s` to include)\n", yellow, reset, s, hint)
+			fmt.Printf("  %s✗%s %-13s (no covdata; run `make %s` to include)\n", yellow, reset, s, makeTargetFor(s))
 		}
 	}
 	if len(dirs) == 0 {
@@ -482,7 +483,7 @@ func mergeTS(c *config) error {
 				filepath.Join(root, name, "coverage-final.json"))
 		} else {
 			fmt.Printf("  %s✗%s %-9s (no coverage-final.json; run `make %s` to include)\n",
-				yellow, reset, name, ternary(name == "ts-unit", "test-sdk-ts", "test-e2e"))
+				yellow, reset, name, makeTargetFor(name))
 		}
 	}
 	if len(merged) == 0 {
@@ -767,15 +768,6 @@ func formatPctBare(covered, total int) string {
 
 // tsHTML is the vitest/nyc HTML report path for a TS suite.
 func tsHTML(suite string) string { return filepath.Join(root, suite, "index.html") }
-
-// ternary returns a if cond else b. Used inline to keep the merge log
-// branching from sprawling into a 5-line if/else.
-func ternary[T any](cond bool, a, b T) T {
-	if cond {
-		return a
-	}
-	return b
-}
 
 // copyFile streams src → dst, creating dst and overwriting if it exists.
 // Used to stage coverage-final.json files under suite-prefixed names

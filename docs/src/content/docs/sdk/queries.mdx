@@ -72,7 +72,7 @@ for _, row := range page.Data {
 
 Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table={table}`. A **slice/array** is serialized to NDJSON (one record per line) and sent as a single `application/x-ndjson` request, so a bad record no longer fails or hides the rest of the batch — per-record outcomes come back in the result.
 
-For a batch, the result is `ok` only when every record succeeded (`failed === 0`). Inspect the failure count and the per-record results (each carrying a **1-based** index) for partial failures — the call's top-level error is reserved for whole-request failures (network, `404` unknown table, `403` forbidden, `503` backpressure). An empty batch is a no-op and sends no request. The batch path sends one request regardless of size; bounded-concurrency chunking of very large batches is tracked in [#196](https://github.com/Wave-RF/WaveHouse/issues/196).
+For a batch, the result is `ok` only when every record succeeded (no records failed). Inspect the failure count and the per-record results (each carrying a **1-based** index) for partial failures — the call's top-level error is reserved for whole-request failures (network, `404` unknown table, `403` forbidden, `503` backpressure). An empty batch is a no-op and sends no request. The batch path sends one request regardless of size; bounded-concurrency chunking of very large batches is tracked in [#196](https://github.com/Wave-RF/WaveHouse/issues/196).
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -542,6 +542,10 @@ untyped, err := clicks.Select("page").OrderBy("page", "asc").Limit(50).FetchUnty
 
   </TabItem>
 </Tabs>
+
+### Streaming from a builder
+
+A builder can also open a stream instead of fetching — its filters and column projection are then applied client-side to the live events, which is the only place that client-side filtering happens. See [Streaming → Client-side stream filtering](/sdk/streaming#client-side-stream-filtering).
 
 ### Pagination
 

@@ -260,10 +260,10 @@ Top-level `DateTime`/`DateTime64` values inside `Data` arrive in canonical RFC 3
 
 ### Transport behavior
 
-A dropped stream reconnects on a jittered exponential backoff, capped at 30s, and resumes with `Last-Event-ID` so the server gap-fills what was missed. HTTP/2 is recommended. Reconnection is **unbounded**: a stream keeps re-dialing until it hits a terminal error or you close it. The client option that bounds retries applies to REST requests only and is never consulted here.
+A dropped stream reconnects on a jittered exponential backoff, capped at 30s, and resumes from the last event it saw so the server gap-fills what was missed. HTTP/2 is recommended. Reconnection is **unbounded**: a stream keeps re-dialing until it hits a terminal error or you close it. The client option that bounds retries applies to REST requests only and is never consulted here.
 
 :::caution[Resumption is at-least-once, and time-bounded]
-Delivery across a reconnect is **at-least-once**. The `Last-Event-ID` the client sends is the last event's `received_timestamp`, and the server replays from that instant *inclusively* — so the last event you already saw, and anything sharing its timestamp, arrives again. Neither SDK deduplicates live frames — a live query makes one pass at the backfill seam only — so key on `timestamp` plus your own row identity if duplicates matter.
+Delivery across a reconnect is **at-least-once**. The resume point the client sends is the last event's `received_timestamp` — a `Last-Event-ID` header in TypeScript, a `?since=` query parameter in Go; the server accepts either and replays from that instant *inclusively* — so the last event you already saw, and anything sharing its timestamp, arrives again. Neither SDK deduplicates live frames — a live query makes one pass at the backfill seam only — so key on `timestamp` plus your own row identity if duplicates matter.
 
 Replay is also bounded by the server's [`mq.gap_window_minutes`](/configuration#message-queue-nats) — 15 minutes by default. A drop longer than that resumes with a hole and no signal, because the purged messages are simply gone.
 :::
@@ -485,6 +485,8 @@ Dedup relies on `received_timestamp`. `.SelectAll()` (or no projection) includes
 :::caution[`OpLike` matching differs between backfill and live]
 Client-side `OpLike` is case-insensitive, but server-side backfills use ClickHouse `LIKE`, which is case-sensitive, so a live query filtering on `OpLike` may exclude rows from the backfill that it includes in the live stream ([#451](https://github.com/Wave-RF/WaveHouse/issues/451)). `OpNotLike` is rejected by `/v1/query` with a `400`, failing the `Initial` callback — see [Queries → Filtering](/sdk/queries#filtering).
 :::
+
+**When the backfill doesn't complete.** `Initial(rows, err)` fires with the error, the events buffered during the fetch window are discarded, and live delivery continues from there — so a live query can end up running normally with no snapshot behind it. Check `err` inside `Initial` and re-run the fetch if a missing backfill matters; leave it a moment first, since events reach a stream from the message queue before the ingest worker lands them in ClickHouse (see [Ingest pipeline](/ingest-pipeline)).
 
   </TabItem>
 </Tabs>

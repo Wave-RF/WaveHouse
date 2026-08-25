@@ -192,7 +192,7 @@ ACTIONLINT_VERSION := v1.7.12
 ACTIONLINT         := $(LOCAL_BIN)/actionlint-$(ACTIONLINT_VERSION)
 
 # --- Coverage Directories -----------------------------------------------------
-# One path per suite. Internal layout (managed by scripts/coverage.sh):
+# One path per suite. Internal layout (managed by scripts/cov):
 #   $(COV_X)/data/         binary covdata (covmeta.* / covcounters.*)
 #   $(COV_X)/coverage.txt  rendered textfmt profile
 #   $(COV_X)/coverage.html rendered HTML report
@@ -830,7 +830,7 @@ test-sdk-go: go-mod-download ## Run Go SDK (clients/go, a nested module) unit + 
 	@rm -rf $(COV_GOSDK)/data && mkdir -p $(COV_GOSDK)/data
 	@gotestsum=$$(go tool -n gotestsum) && cd $(GO_SDK_DIR) && \
 		GOCOVERDIR="$(CURDIR)/$(COV_GOSDK)/data" "$$gotestsum" --format $(GOTESTSUM_FMT) -- \
-		-cover -coverpkg=./... -race ./... $(ARGS) \
+		-cover -coverpkg=./... -race -timeout 60s ./... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_GOSDK)/data"
 	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render go-sdk; fi
 
