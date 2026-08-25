@@ -156,13 +156,11 @@ WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
 WH_PIPES_DIR=/etc/wavehouse/pipes
 
 # Settings directory (required): roles.json, policies.json, pipes.json,
-# config.json. Tenant tunables live in its config.json — dedupe
-# enabled/id_field/require_id (+ per-table overrides), query default_max_rows, schema
-# refresh_interval, CORS allowed_origins — and reload on file change, SIGHUP,
-# or POST /v1/ops/settings/reload. Create it with
-# `wavehouse init-settings /etc/wavehouse/settings`. The container images
-# ship none: mount a directory at /app/settings (WH_SETTINGS_DIR is preset
-# to it). See Configuration — Settings directory.
+# config.json — the hot-reloadable tenant tunables (see the Settings
+# Directory page). Create it with
+# `wavehouse init-settings /etc/wavehouse/settings`. In a container, leave
+# this unset — the image presets WH_SETTINGS_DIR=/app/settings — and mount
+# (or seed) your directory at /app/settings instead; the image ships none.
 WH_SETTINGS_DIR=/etc/wavehouse/settings
 
 # Cache tuning
