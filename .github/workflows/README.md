@@ -12,10 +12,12 @@ graph TB
     changes --> docsbuild["docs-build"]
     changes --> coverage["coverage — poll fragments → merge → gate"]
     docsbuild --> preview["docs-preview (PRs) — non-gating"]
+    changes --> preview
     unit -. "coverage-unit (poll)" .-> coverage
     integration -. "coverage-integration (poll)" .-> coverage
     e2e -. "coverage-e2e (poll)" .-> coverage
     title["title (PRs)"] --> ci["CI (aggregator — sole required check)"]
+    changes --> ci
     lint["lint"] --> ci
     coverage --> ci
     e2e --> ci
