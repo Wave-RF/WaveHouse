@@ -32,9 +32,14 @@
   // repairs WH001 in .md and only WH002 in .mdx:
   //   WH001  prose paragraphs must not be hard-wrapped   (autofix: joins them)
   //   WH002  MDX fence adjacent to a JSX tag needs a blank line (fixed in phase 1)
-  // Both are enabled in .markdownlint.json. WH001 is turned off for CI docs and
-  // agent prompts by .github/.markdownlint.json and .claude/.markdownlint.json,
-  // and applies everywhere else — a narrower exclusion than scripts/docs-prose.sh.
+  // Both are enabled in .markdownlint.json with no path-scoped carve-out of any
+  // kind — WH001 over every tracked Markdown file, exactly what CONTRIBUTING.md
+  // tells contributors; WH002 over every .mdx (it returns early on .md, where
+  // CommonMark has no JSX to sit beside a fence). Two subtree .markdownlint.json files used to switch WH001 off
+  // under .github/ and .claude/; #521 deleted them, and the last file that
+  // would have needed a special case (a vendored PostHog skill) was deleted
+  // with them. Don't reintroduce a rule-level override here or in a subtree
+  // config: silently contradicting CONTRIBUTING.md is what #521 was fixing.
   //
   // markdownlint-cli2 globs with dot:true, so `**/*.md` descends into hidden
   // dirs — including .worktrees/, where this repo nests git worktrees. Honor

@@ -1,30 +1,18 @@
 # Running `/pm-triage all` as a local routine
 
-The scheduled form of pm-triage: a daily local pass that reconciles status, re-checks the
-backlog, and sweeps new TODOs — applying safe changes itself and surfacing risky ones. Scope
-`all`, default run-mode `safe-auto`. Runs on your Mac (only when it's on — that's fine), set up
-as a routine in the **Claude desktop app**. It is **not** a cloud routine (this repo's gates,
-`gh` auth, and `make ci` deps don't exist in the cloud) and **not** a launchd / `claude -p` job.
+The scheduled form of pm-triage: a daily local pass that reconciles status, re-checks the backlog, and sweeps new TODOs — applying safe changes itself and surfacing risky ones. Scope `all`, default run-mode `safe-auto`. Runs on your Mac (only when it's on — that's fine), set up as a routine in the **Claude desktop app**. It is **not** a cloud routine (this repo's gates, `gh` auth, and `make ci` deps don't exist in the cloud) and **not** a launchd / `claude -p` job.
 
 ## State: a local-only orphan branch
 
-State lives on an **orphan branch `pm-triage-state`** — shares no history with main (its own
-thing), checked out in its own worktree at `<main>/.worktrees/pm-triage-state`, **never pushed
-by default** (private; teammates can't see an unpushed branch). `scripts/state.sh` manages it.
-Why this over the alternatives:
+State lives on an **orphan branch `pm-triage-state`** — shares no history with main (its own thing), checked out in its own worktree at `<main>/.worktrees/pm-triage-state`, **never pushed by default** (private; teammates can't see an unpushed branch). `scripts/state.sh` manages it. Why this over the alternatives:
 
 - **vs. a GitHub issue:** no API round-trips, no notifications, no teammate comments — the logic stays private.
 - **vs. `.git/pm-triage/`:** a real branch is legible and idiomatic, and it's versioned.
 - **vs. a plain gitignored dir:** untracked files are *per-worktree*, so a `.claude/pm-triage/` would fork across your 7 worktrees. The orphan worktree is one registered path, identical from everywhere.
 
-You get a **versioned audit trail** — each meaningful run commits, so `git -C <state-wt> log`
-shows when it changed what — and an easy **future sync** path: flip on `git push -u origin
-pm-triage-state` to share across machines (left OFF for now).
+You get a **versioned audit trail** — each meaningful run commits, so `git -C <state-wt> log` shows when it changed what — and an easy **future sync** path: flip on `git push -u origin pm-triage-state` to share across machines (left OFF for now).
 
-**No branch-switching, ever.** The skill never `git checkout`s between main and the state
-branch in one tree (that swaps your whole working dir and breaks on uncommitted work). It
-navigates by **path**: file I/O in the state worktree, and code/TODO reads against `origin/main`
-by ref (`git fetch`, then `git grep` / `git diff <last_sha>..origin/main`).
+**No branch-switching, ever.** The skill never `git checkout`s between main and the state branch in one tree (that swaps your whole working dir and breaks on uncommitted work). It navigates by **path**: file I/O in the state worktree, and code/TODO reads against `origin/main` by ref (`git fetch`, then `git grep` / `git diff <last_sha>..origin/main`).
 
 Files in the state worktree:
 
@@ -36,8 +24,7 @@ Files in the state worktree:
 
 ## safe-auto is the default (every invocation)
 
-The safe tier just happens — no proposal step — whether you run it by hand or it fires on
-schedule. Only the risky tier flexes:
+The safe tier just happens — no proposal step — whether you run it by hand or it fires on schedule. Only the risky tier flexes:
 
 - **You're watching** (manual `/pm-triage …`): it presents risky items and asks you right there.
 - **Unattended** (the routine): it appends them to `pending.md` for you to review later.
@@ -50,22 +37,17 @@ schedule. Only the risky tier flexes:
 
 ## Cadence
 
-Daily, weekday mornings. In the routine's schedule pick an off-`:00` minute (e.g. 9:07) so
-you're not landing on the same instant as everyone else.
+Daily, weekday mornings. In the routine's schedule pick an off-`:00` minute (e.g. 9:07) so you're not landing on the same instant as everyone else.
 
 ## Set it up in the Claude desktop app
 
-1. Open the WaveHouse repo as a local project in the desktop app, so the routine has the repo,
-   your keychain'd `gh`, and the `.claude/` skill.
+1. Open the WaveHouse repo as a local project in the desktop app, so the routine has the repo, your keychain'd `gh`, and the `.claude/` skill.
 2. Create a routine / scheduled task on a weekday-morning schedule and paste the prompt below.
-3. **On the first run, verify:** it read the skill (`SKILL.md`), `gh auth status` is good, and it
-   created the state worktree. Approve the `gh` / `git` / file tools it needs — or pre-grant them:
+3. **On the first run, verify:** it read the skill (`SKILL.md`), `gh auth status` is good, and it created the state worktree. Approve the `gh` / `git` / file tools it needs — or pre-grant them:
 
 ### Permissions (so an unattended run doesn't stop on a prompt)
 
-Pre-grant the reads/writes in **`.claude/settings.local.json`** (gitignored, per-user — *not*
-the shared `settings.json`). The shared `deny` list still blocks the dangerous ops, and `deny`
-beats `allow`:
+Pre-grant the reads/writes in **`.claude/settings.local.json`** (gitignored, per-user — *not* the shared `settings.json`). The shared `deny` list still blocks the dangerous ops, and `deny` beats `allow`:
 
 ```jsonc
 // .claude/settings.local.json  (gitignored — personal)
@@ -85,8 +67,7 @@ beats `allow`:
 }
 ```
 
-(Rules are prefix matches on the exact command string; the script rules assume the
-`bash .claude/skills/pm-triage/scripts/<name>.sh …` form the prompt uses.)
+(Rules are prefix matches on the exact command string; the script rules assume the `bash .claude/skills/pm-triage/scripts/<name>.sh …` form the prompt uses.)
 
 ## Dry run first (writes nothing)
 
