@@ -157,10 +157,10 @@ WH_PIPES_DIR=/etc/wavehouse/pipes
 
 # Settings directory (required): roles.json, policies.json, pipes.json,
 # config.json — the hot-reloadable tenant tunables (see the Settings
-# Directory page). Create it with
-# `wavehouse init-settings /etc/wavehouse/settings`. In a container, leave
-# this unset — the image presets WH_SETTINGS_DIR=/app/settings — and mount
-# (or seed) your directory at /app/settings instead; the image ships none.
+# Directory page). Seed it with `wavehouse init-settings <dir>` and point
+# this variable at it. Container images already preset
+# WH_SETTINGS_DIR=/app/settings and ship no directory: omit this line and
+# mount (or seed) your directory at /app/settings.
 WH_SETTINGS_DIR=/etc/wavehouse/settings
 
 # Cache tuning
