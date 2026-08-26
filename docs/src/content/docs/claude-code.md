@@ -60,7 +60,6 @@ Both markers are tree-keyed so commit-then-push works without a re-run when the 
 | `.claude/skills/pr-sync-with-main/SKILL.md` | "Fix this stale PR" workflow — merge origin/main, never rebase or force-push |
 | `.claude/skills/pr-review-locally/SKILL.md` | "Review PR <N> locally" workflow — `wt switch pr:<N>` + the relevant reviewers (code, docs, …) in parallel, no PR comments |
 | `.claude/skills/pm-triage/SKILL.md` | PM-review workflow — triage feedback / backlog / code TODOs and reconcile issue & PR status into well-scoped, tracked Task Board (project #7) issues; invoked as `/pm-triage` |
-| `.claude/skills/integration-astro-view-transitions/` | Vendored PostHog-authored skill (installed by the PostHog wizard, v1.21.1) — reference patterns for the docs-site analytics: web snippet, ClientRouter view-transitions guard, user identify |
 | `.claude/settings.local.json` | **Your personal overrides** — gitignored; put model choice, status line, allow lists, etc. here |
 | `.config/wt.toml` | Worktrunk project hooks (post-start, pre-merge, pre-remove) |
 
@@ -96,7 +95,6 @@ Skills load automatically into Claude's context when conversation patterns match
 | `pr-sync-with-main` | When a PR shows "out-of-date with base branch", or a user asks to "fix the PR" / "sync with main". Documents the merge-not-rebase procedure and the WaveHouse-specific reason long-lived branches need it. |
 | `pr-review-locally` | When a user asks to "review PR <N>", "audit PR <N>", "look at PR <N>" — pulls the PR down via `wt switch pr:<N>` (or `gh pr checkout`), runs the relevant reviewers (code, docs, …) in parallel in fresh context, surfaces their combined findings without commenting on the PR. |
 | `pm-triage` | When a user asks to triage dogfooding feedback, re-prioritize the backlog (P0–P3), sweep code TODOs, or check that work is tracked — runs a PM-style review against the Task Board (project #7) and proposes well-scoped issues. Invoked as `/pm-triage`. |
-| `integration-astro-view-transitions` | PostHog work on the Astro docs site (snippet patterns, view-transitions guard, identify). Vendored PostHog-authored content — wizard-installed, lightly edited only for markdownlint; the live setup (relay host, committed fallback) is documented in `PostHog.astro` itself and the CHANGELOG. |
 
 To add a skill: create `.claude/skills/<name>/SKILL.md` with frontmatter `name` + `description` and the workflow body. Description quality matters — that's what Claude matches against to load the skill.
 
@@ -169,7 +167,7 @@ None of these are committed at project level — pick what you actually use.
 - **[Grafana MCP](https://github.com/grafana/mcp-grafana)** — for querying Prometheus / Loki / Tempo / Pyroscope from Claude when debugging observability work. Useful if you touch `internal/observability/`.
 - **ClickHouse MCP** (community) — direct schema introspection + query against your local `make dev` ClickHouse. Useful for `internal/discovery/` and ingest work, but `make deps-shell` (clickhouse-client REPL) is often enough.
 
-When [issue #121](https://github.com/Wave-RF/WaveHouse/issues/121) lands a SigNoz dev stack with `make dev-obs`, Grafana MCP pointed at that dev environment will become a natural choice for trace / log inspection.
+`make obs-grafana` brings up a local Grafana LGTM stack (see [Deployment → Local Observability Stack](/deployment#local-observability-stack)), so Grafana MCP pointed at it is already the natural choice for trace / log inspection — no heavyweight cluster to stand up first.
 
 ## Permission posture
 
