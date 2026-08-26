@@ -167,7 +167,7 @@ None of these are committed at project level — pick what you actually use.
 - **[Grafana MCP](https://github.com/grafana/mcp-grafana)** — for querying Prometheus / Loki / Tempo / Pyroscope from Claude when debugging observability work. Useful if you touch `internal/observability/`.
 - **ClickHouse MCP** (community) — direct schema introspection + query against your local `make dev` ClickHouse. Useful for `internal/discovery/` and ingest work, but `make deps-shell` (clickhouse-client REPL) is often enough.
 
-When [issue #121](https://github.com/Wave-RF/WaveHouse/issues/121) lands a SigNoz dev stack with `make dev-obs`, Grafana MCP pointed at that dev environment will become a natural choice for trace / log inspection.
+`make obs-grafana` brings up a local Grafana LGTM stack (see [Deployment → Local Observability Stack](/deployment#local-observability-stack)), so Grafana MCP pointed at it is already the natural choice for trace / log inspection — no heavyweight cluster to stand up first.
 
 ## Permission posture
 
