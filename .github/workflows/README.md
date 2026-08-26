@@ -24,7 +24,6 @@ graph TB
     unit -. "coverage-unit (poll)" .-> coverage
     integration -. "coverage-integration (poll)" .-> coverage
     e2e -. "coverage-e2e (poll)" .-> coverage
-    coverage --> badge["badge (main) — non-gating"]
     title["title (PRs)"] --> ci["CI (aggregator — sole required check)"]
     lint["lint"] --> ci
     coverage --> ci
@@ -55,14 +54,12 @@ Break one of these knowingly or not at all.
    Go suites) and event-filtered jobs (title on pushes, deploys on PRs)
    never orphan the required check, and adding/renaming jobs never
    requires a ruleset edit. Consequence: every job that must gate merges
-   **must be in the aggregator's `needs` list**. Three jobs are deliberately
-   non-gating and excluded: `timing` (advisory wall-clock table),
+   **must be in the aggregator's `needs` list**. Two jobs are deliberately
+   non-gating and excluded: `timing` (advisory wall-clock table) and
    `docs-preview` (the convenience Cloudflare preview deploy — `docs-build`
    already validates the build and *is* a need, so only the build gates;
    the preview deploy reports its own "Docs preview" check but, slow or
-   failed, never delays or reds `CI`), and `badge` (publishes the README
-   coverage badge to the `badges` branch on main pushes — a badge push must
-   never block a merge; it reports its own "Coverage badge" status).
+   failed, never delays or reds `CI`).
 
 2. **A dedicated `coverage` job applies the consolidated gate, polling —
    not `needs`-ing — the suites.** Each suite (`unit`, `integration`,
@@ -151,15 +148,18 @@ gate blocks merges ([#133](https://github.com/Wave-RF/WaveHouse/issues/133)):
   public-preview feature can never red `CI`. Fork PRs skip (no `code-quality`
   token, per GitHub's own guard). Renders only once the repo's *Settings →
   Security → Code quality* is enabled.
-- **README badge** — on main pushes the job emits a shields.io endpoint JSON
-  for the merged Go total (`cov badge`, the exact gated number); the separate
-  non-gating `badge` job publishes it to the orphan `badges` branch, which the
-  README badge reads over `raw.githubusercontent.com` (public-repo only). The
-  `badge` job is the sole holder of `contents:write` and runs only on trusted
-  main, so a push to `badges` can't be influenced by PR code (invariant 5).
+- **README badge — retired** ([#509](https://github.com/Wave-RF/WaveHouse/issues/509)).
+  A `badge` job used to publish a shields.io endpoint JSON (`cov badge`) to an
+  orphan `badges` branch for a README badge. [#502](https://github.com/Wave-RF/WaveHouse/pull/502)
+  dropped the badge from the README and the pipeline ran on for weeks
+  publishing to nothing, so the job, `scripts/ci/publish-badge.sh`, the
+  `cov badge` subcommand, and the `badges` branch are gone. **Consequence
+  worth keeping**: `ci.yml` now declares no `contents: write` anywhere — the
+  `badge` job was its only holder. Restoring a badge means restoring that
+  permission, so weigh it against a `contents: read` alternative first.
 
 SDK (TS) coverage is gated by `make cov` but not yet published — extend with a
-`language: javascript` upload step and a second badge JSON when wanted.
+`language: javascript` upload step when wanted.
 
 ## Merge queue
 
