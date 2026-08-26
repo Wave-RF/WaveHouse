@@ -23,7 +23,6 @@
 #   AGENTS.md , CLAUDE.md       agent source-of-truth (the reviewer reads
 #                               these AS truth to check the other docs)
 #   *.draft.md , *.old.md       drafts / archives
-#   PERF-CLAIMS-REVIEW.md       internal review artifact
 #
 # CODE_OF_CONDUCT.md and SUPPORT.md ARE docs prose (they appear in `all`), but
 # the docs-reviewer only deep-reviews them when they changed or when a material
@@ -43,7 +42,7 @@ cd "$(git rev-parse --show-toplevel)" 2>/dev/null || exit 1
 is_docs_prose() {
   case "$1" in
     .claude/*|.github/*)                                    return 1 ;;
-    CHANGELOG.md|AGENTS.md|CLAUDE.md|PERF-CLAIMS-REVIEW.md) return 1 ;;
+    CHANGELOG.md|AGENTS.md|CLAUDE.md)                       return 1 ;;
     *.draft.md|*.old.md)                                   return 1 ;;
     *.md|*.mdx)                                             return 0 ;;
     *)                                                      return 1 ;;
