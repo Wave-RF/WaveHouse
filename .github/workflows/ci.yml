@@ -44,8 +44,10 @@ on:
   # Manual re-run escape hatch — `gh workflow run CI --ref <branch>`.
   workflow_dispatch:
 
-# Default-deny; each job below redeclares exactly what it needs. Only the
-# docs-preview job (sticky PR comment) holds a write scope.
+# Default-deny; each job below redeclares exactly what it needs. Two jobs
+# hold a write scope: docs-preview (sticky PR comment — issues,
+# pull-requests) and coverage (code-quality, for the PR coverage comment).
+# No job holds contents: write.
 permissions:
   contents: read
 

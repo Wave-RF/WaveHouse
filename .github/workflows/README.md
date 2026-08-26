@@ -151,12 +151,16 @@ gate blocks merges ([#133](https://github.com/Wave-RF/WaveHouse/issues/133)):
 - **README badge — retired** ([#509](https://github.com/Wave-RF/WaveHouse/issues/509)).
   A `badge` job used to publish a shields.io endpoint JSON (`cov badge`) to an
   orphan `badges` branch for a README badge. [#502](https://github.com/Wave-RF/WaveHouse/pull/502)
-  dropped the badge from the README and the pipeline ran on for weeks
-  publishing to nothing, so the job, `scripts/ci/publish-badge.sh`, the
-  `cov badge` subcommand, and the `badges` branch are gone. **Consequence
-  worth keeping**: `ci.yml` now declares no `contents: write` anywhere — the
-  `badge` job was its only holder. Restoring a badge means restoring that
-  permission, so weigh it against a `contents: read` alternative first.
+  dropped the badge from the README, and for the six days until this landed
+  the job kept publishing to nothing — so the job, `scripts/ci/publish-badge.sh`,
+  and the `cov badge` subcommand are gone. The orphan `badges` branch is
+  deleted separately once this lands: while the job still exists on main, the
+  next code push would just recreate it. **Consequence worth keeping**:
+  `ci.yml` now declares no `contents: write` anywhere — the `badge` job was
+  its only holder. Restoring the badge *in this shape* — publishing into the
+  repo — means restoring `contents: write` to a workflow that executes
+  PR-authored code. Prefer an endpoint hosted outside the repo, so a badge
+  costs no write scope at all.
 
 SDK (TS) coverage is gated by `make cov` but not yet published — extend with a
 `language: javascript` upload step when wanted.
