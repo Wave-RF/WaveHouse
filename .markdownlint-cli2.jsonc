@@ -35,8 +35,9 @@
   // Both are enabled in .markdownlint.json with no path-scoped carve-out of any
   // kind — WH001 over every tracked Markdown file, exactly what CONTRIBUTING.md
   // tells contributors; WH002 over every .mdx (it returns early on .md, where
-  // CommonMark has no JSX to sit beside a fence). Two subtree .markdownlint.json files used to switch WH001 off
-  // under .github/ and .claude/; #521 deleted them, and the last file that
+  // CommonMark has no JSX to sit beside a fence). Two subtree
+  // .markdownlint.json files used to switch WH001 off under .github/ and
+  // .claude/; #521 deleted them, and the last file that
   // would have needed a special case (a vendored PostHog skill) was deleted
   // with them. Don't reintroduce a rule-level override here or in a subtree
   // config: silently contradicting CONTRIBUTING.md is what #521 was fixing.
