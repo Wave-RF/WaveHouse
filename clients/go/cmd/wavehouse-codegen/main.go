@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"go/format"
+	"go/token"
 	"net"
 	"net/http"
 	"net/url"
@@ -243,11 +244,11 @@ func chTypeToGo(chType string) string {
 		if comma != -1 {
 			k := chTypeToGo(strings.TrimSpace(inner[:comma]))
 			v := chTypeToGo(strings.TrimSpace(inner[comma+1:]))
-			// ClickHouse restricts Map keys to comparable types, so this only
-			// fires on something a real server shouldn't send — but `map[[]T]V`
-			// parses fine and then fails to compile, and format.Source only
-			// parses. Fall back rather than emit source that can't build.
-			if !comparableGoType(k) {
+			// Go comparability is not enough: `map[[]T]V` parses and fails to
+			// compile, and `map[float64]V` compiles and then fails at
+			// Marshal/Unmarshal, which is worse. format.Source only parses, so
+			// neither is caught downstream. Fall back instead.
+			if !jsonMapKey(k) {
 				return "any"
 			}
 			return "map[" + k + "]" + v
@@ -257,10 +258,20 @@ func chTypeToGo(chType string) string {
 	return "any"
 }
 
-// comparableGoType reports whether t is usable as a Go map key. chTypeToGo
-// only ever returns primitives, slices ("[]T", json.RawMessage), or maps.
-func comparableGoType(t string) bool {
-	return !strings.HasPrefix(t, "[]") && !strings.HasPrefix(t, "map[") && t != "json.RawMessage"
+// jsonMapKey reports whether t is usable as a map key that encoding/json can
+// round-trip. It supports string-kinded and integer-kinded keys plus
+// encoding.TextMarshaler implementors; chTypeToGo returns none of the latter,
+// so this is the complete allow-list of its outputs. Everything else it can
+// return — bool, the floats, any, *T, []T, json.RawMessage, nested maps — is
+// either non-comparable or silently unmarshalable.
+func jsonMapKey(t string) bool {
+	switch t {
+	case "string", "json.Number",
+		"int8", "int16", "int32", "int64",
+		"uint8", "uint16", "uint32", "uint64":
+		return true
+	}
+	return false
 }
 
 func findTopLevelComma(s string) int {
@@ -321,18 +332,9 @@ func sortedKeys(m map[string]tableSchema) []string {
 // column name can otherwise close the struct and append arbitrary top-level
 // declarations to a file the caller then compiles.
 func validGoIdent(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i, r := range s {
-		switch {
-		case r == '_' || unicode.IsLetter(r):
-		case i > 0 && unicode.IsDigit(r):
-		default:
-			return false
-		}
-	}
-	return true
+	// token.IsIdentifier rejects the empty string and keywords; "_" satisfies
+	// it but is not a usable package or field name.
+	return s != "_" && token.IsIdentifier(s)
 }
 
 func generate(schemas map[string]tableSchema, pkg string) (string, error) {

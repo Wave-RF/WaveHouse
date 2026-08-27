@@ -445,9 +445,19 @@ func TestGenerate_RejectsInjectedNames(t *testing.T) {
 }
 
 func TestGenerate_RejectsInvalidPackageName(t *testing.T) {
-	_, err := generate(map[string]tableSchema{}, "main\n\nfunc\tPwn()\t{}")
-	if err == nil || !strings.Contains(err.Error(), "valid Go package name") {
-		t.Fatalf("want invalid-package error, got %v", err)
+	for _, pkg := range []string{
+		"main\n\nfunc\tPwn()\t{}", // injection
+		"type",                    // a keyword is not a package name
+		"_",                       // blank identifier
+		"",                        // empty
+		"2fa",                     // leading digit
+	} {
+		t.Run(pkg, func(t *testing.T) {
+			if _, err := generate(map[string]tableSchema{}, pkg); err == nil ||
+				!strings.Contains(err.Error(), "valid Go package name") {
+				t.Fatalf("generate(pkg=%q) error = %v, want an invalid-package error", pkg, err)
+			}
+		})
 	}
 }
 
@@ -455,6 +465,8 @@ func TestValidGoIdent(t *testing.T) {
 	tests := map[string]bool{
 		"Page": true, "X2fa": true, "_x": true, "A1_b2": true,
 		"": false, "2fa": false, "A`b": false, "A B": false, "A\tB": false, "A\nB": false, "A{}": false,
+		// Keywords and the blank identifier are not usable names.
+		"type": false, "func": false, "_": false,
 	}
 	for in, want := range tests {
 		if got := validGoIdent(in); got != want {
@@ -463,22 +475,57 @@ func TestValidGoIdent(t *testing.T) {
 	}
 }
 
-// Go map keys must be comparable. ClickHouse won't emit these key types, but
-// format.Source only parses, so an unguarded `map[[]T]V` would be written out
-// and then fail to compile in the caller's build.
-func TestChTypeToGo_NonComparableMapKey(t *testing.T) {
+// A generated map key has to survive two hurdles: Go comparability (or the
+// file won't compile) and encoding/json support (or it compiles and then fails
+// at Marshal/Unmarshal). format.Source only parses, so neither is caught
+// downstream — chTypeToGo falls back to `any` rather than emit either.
+func TestChTypeToGo_UnsupportedMapKey(t *testing.T) {
 	tests := map[string]string{
+		// Not comparable — would not compile.
 		"Map(Array(Map(Float64, String)), String)": "any",
 		"Map(Array(UInt8), String)":                "any",
 		"Map(Map(String, String), String)":         "any",
-		// Comparable keys are unaffected.
+		// Comparable, but encoding/json cannot use them as keys.
+		"Map(Float64, String)":          "any",
+		"Map(Float32, String)":          "any",
+		"Map(Bool, String)":             "any",
+		"Map(Nullable(String), String)": "any",
+		// Supported keys are unaffected.
 		"Map(String, String)":               "map[string]string",
 		"Map(LowCardinality(String), Int8)": "map[string]int8",
+		"Map(UInt64, String)":               "map[uint64]string",
+		"Map(UInt128, String)":              "map[json.Number]string",
+		"Map(DateTime64(3, 'UTC'), Int32)":  "map[string]int32",
 	}
 	for in, want := range tests {
 		if got := chTypeToGo(in); got != want {
 			t.Errorf("chTypeToGo(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestJSONMapKeyMatchesEncodingJSON pins the allow-list to encoding/json's
+// actual behavior rather than a reading of its docs: every type jsonMapKey
+// admits must round-trip as a map key, and the ones it rejects must not.
+func TestJSONMapKeyMatchesEncodingJSON(t *testing.T) {
+	// Non-comparable candidates ([]T, json.RawMessage, nested maps) can't be
+	// written as a map key at all, so they never reach encoding/json.
+	probes := map[string]any{
+		"string":      map[string]string{"k": "v"},
+		"json.Number": map[json.Number]string{"1": "v"},
+		"int64":       map[int64]string{1: "v"},
+		"uint8":       map[uint8]string{1: "v"},
+		"bool":        map[bool]string{true: "v"},
+		"float64":     map[float64]string{1.5: "v"},
+		"any":         map[any]string{"k": "v"},
+	}
+	for typ, v := range probes {
+		t.Run(typ, func(t *testing.T) {
+			_, err := json.Marshal(v)
+			if want := jsonMapKey(typ); (err == nil) != want {
+				t.Errorf("json.Marshal(map[%s]...) error = %v, but jsonMapKey(%q) = %v", typ, err, typ, want)
+			}
+		})
 	}
 }
 
