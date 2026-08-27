@@ -298,7 +298,7 @@ func TestQueryBuilder_Pagination_CursorColumnMissingEndsQuietly(t *testing.T) {
 // the decoded row, so how the row decoded decides how much precision survives.
 // Typed rows keep int64 exactly; the untyped path decodes to float64 and loses
 // everything past 2^53 (the same ceiling the TS SDK's JS numbers have). Use
-// FetchTyped or codegen structs past 2^53 — documented in queries.md.
+// FetchTyped with an int64 field past 2^53 — documented in queries.mdx.
 func TestQueryBuilder_PaginationCursorPrecision(t *testing.T) {
 	type idRow struct {
 		ID int64 `json:"id"`

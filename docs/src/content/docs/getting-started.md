@@ -105,7 +105,7 @@ The handful of things that most often trip up a first session — each is expect
 
 - **[Architecture](/architecture)** — how ingest, query, cache, and streaming fit together.
 - **[API Reference](/api)** — every endpoint, request/response shape, and error code.
-- **[Client SDKs](/sdk)** — official TypeScript and Go clients: query builder, live queries, streaming, and codegen.
+- **[Client SDKs](/sdk)** — official TypeScript and Go clients: query builder, live queries, streaming, and typed rows.
 - **[Configuration](/configuration)** — full YAML + environment variable reference.
 - **[Deployment](/deployment)** — Docker images, releases, health checks.
 - **[Development](/development)** — building from source, running tests, hot-reload workflow.

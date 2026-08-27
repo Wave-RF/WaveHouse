@@ -52,7 +52,7 @@ func main() {
 - [Streaming & Live Queries](https://wavehouse.dev/sdk/streaming) — SSE streams, client-side filtering, backfill-then-live.
 - [Pipes](https://wavehouse.dev/sdk/pipes) — execute and manage named query pipes.
 - [Admin & System](https://wavehouse.dev/sdk/admin) — schema, policy, DLQ stats, health.
-- [Reference & CLI](https://wavehouse.dev/sdk/reference) — error codes, the full API tree, and the `wavehouse-codegen` struct generator.
+- [Reference & CLI](https://wavehouse.dev/sdk/reference) — error codes, the full API tree, and the ClickHouse-to-Go field mapping for row structs.
 
 ## License
 

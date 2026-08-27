@@ -602,7 +602,7 @@ for page.HasMore && page.Next != nil {
 }
 ```
 
-On the untyped path (`FetchUntyped` / `TableRef.Fetch`), JSON numbers decode as `float64`, so integer cursors lose exactness past 2^53 and pagination can repeat or skip a row; `FetchTyped` with an `int64` field, or codegen structs, keep it exact.
+On the untyped path (`FetchUntyped` / `TableRef.Fetch`), JSON numbers decode as `float64`, so integer cursors lose exactness past 2^53 and pagination can repeat or skip a row; `FetchTyped` with an `int64` field keeps it exact.
 
   </TabItem>
 </Tabs>

@@ -1,11 +1,11 @@
 ---
 title: "Client SDKs"
-description: "Official WaveHouse clients for TypeScript and Go: query builder, real-time streaming, codegen."
+description: "Official WaveHouse clients for TypeScript and Go: query builder, real-time streaming, typed rows."
 ---
 
 import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components";
 
-WaveHouse ships two officially supported clients with full API-tree parity: **TypeScript** (`@wavehouse/sdk`) and **Go** (`github.com/Wave-RF/WaveHouse/clients/go`). Both give you a typed query builder, real-time SSE streaming over header-authenticated HTTP, live queries that backfill history before going live, and a codegen CLI that turns your ClickHouse schema into row types.
+WaveHouse ships two officially supported clients with full API-tree parity: **TypeScript** (`@wavehouse/sdk`) and **Go** (`github.com/Wave-RF/WaveHouse/clients/go`). Both give you a typed query builder, real-time SSE streaming over header-authenticated HTTP, live queries that backfill history before going live, and typed rows: TypeScript generates them from your ClickHouse schema, Go takes a struct you write.
 
 They speak the same wire format, and a shared fixture replayed by both test suites keeps it that way, so the topic pages below cover both languages side by side. Pick a language once and the tabs follow you across every page.
 
@@ -114,7 +114,7 @@ Installation, client construction, auth, and the error model are the only langua
   />
   <LinkCard
     title="Reference & CLI"
-    description="Error codes, cancellation, the full API tree, and the codegen CLIs."
+    description="Error codes, cancellation, the full API tree, and row types."
     href="/sdk/reference"
   />
 </CardGrid>

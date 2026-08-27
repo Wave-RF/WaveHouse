@@ -278,7 +278,7 @@ func TestEvaluateFilter(t *testing.T) {
 		{"Lt", float64(9), "lt", 10, true},
 		{"LteString", "a", "lte", "b", true},
 		{"GtIncomparable", "a", "gt", 10, false},
-		// Narrow/unsigned codegen-struct fields must compare, not silently drop.
+		// Narrow/unsigned row-struct fields must compare, not silently drop.
 		{"GtUnsignedOperand", float64(10), "gt", uint32(5), true},
 		{"InAnySlice", "b", "in", []any{"a", "b"}, true},
 		{"InTypedSlice", float64(2), "in", []int{1, 2}, true},

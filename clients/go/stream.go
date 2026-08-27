@@ -692,7 +692,7 @@ func toFloat64(v any) (float64, bool) {
 		f, err := n.Float64()
 		return f, err == nil
 	}
-	// All int/uint widths in two cases (codegen structs use the narrow ones).
+	// All int/uint widths in two cases (row structs often use the narrow ones).
 	rv := reflect.ValueOf(v)
 	switch {
 	case rv.CanInt():

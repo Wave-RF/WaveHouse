@@ -132,7 +132,7 @@ page, err := wavehouse.FetchTyped[ClickRow](ctx,
 // page.Data is []ClickRow
 ```
 
-Use the [codegen CLI](/sdk/reference#codegen-cli) to generate row structs from a running server. `FetchTyped`, `Fetch[Row]` (pipes), and `SQL[Row]` (raw SQL) are package-level generic functions because Go lacks generic methods; the untyped equivalents (`.FetchUntyped(ctx)`) are ordinary methods.
+Row structs are hand-written; see [Row types](/sdk/reference#row-types) for the ClickHouse-to-Go field mapping. `FetchTyped`, `Fetch[Row]` (pipes), and `SQL[Row]` (raw SQL) are package-level generic functions because Go lacks generic methods; the untyped equivalents (`.FetchUntyped(ctx)`) are ordinary methods.
 
 ## Error Handling
 
@@ -173,4 +173,4 @@ The topic pages cover both SDKs, tabbed by language. The tab you pick here follo
 - [Streaming & Live Queries](/sdk/streaming): SSE streams, client-side filtering, and backfill-then-live queries.
 - [Pipes](/sdk/pipes): Execute and manage named query pipes.
 - [Admin & System](/sdk/admin): Schema introspection, access-control policy, DLQ stats, and health checks.
-- [Reference & CLI](/sdk/reference): Error codes, cancellation, the full API tree, and the codegen CLIs.
+- [Reference & CLI](/sdk/reference): Error codes, cancellation, the full API tree, and row types.
