@@ -180,16 +180,6 @@ func TestGeneratedShapeDecodesStructuredQueryPayload(t *testing.T) {
 	}
 }
 
-// withArgs points os.Args at args for the duration of the test. parseArgs and
-// flagValue read the global directly, so tests driving them must not run in
-// parallel.
-func withArgs(t *testing.T, args []string) {
-	t.Helper()
-	saved := os.Args
-	t.Cleanup(func() { os.Args = saved })
-	os.Args = args
-}
-
 func TestFlagValue(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -203,9 +193,8 @@ func TestFlagValue(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			withArgs(t, tt.args)
 			i := 1
-			if got := flagValue(&i); got != tt.want {
+			if got := flagValue(tt.args, &i); got != tt.want {
 				t.Errorf("flagValue() = %q, want %q", got, tt.want)
 			}
 			if i != tt.wantI {
@@ -247,9 +236,7 @@ func TestParseArgs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("WAVEHOUSE_AUTH", tt.env) // empty reads back the same as unset
-			withArgs(t, tt.args)
-			if got := parseArgs(); got != tt.want {
+			if got := parseArgs(tt.args, tt.env); got != tt.want {
 				t.Errorf("parseArgs() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -265,8 +252,7 @@ const parseArgsChildEnv = "WAVEHOUSE_CODEGEN_TEST_ARGS"
 // output.
 func TestParseArgsExitPaths(t *testing.T) {
 	if raw, ok := os.LookupEnv(parseArgsChildEnv); ok {
-		withArgs(t, append([]string{"wavehouse-codegen"}, strings.Fields(raw)...))
-		parseArgs()
+		parseArgs(append([]string{"wavehouse-codegen"}, strings.Fields(raw)...), "")
 		t.Fatal("parseArgs returned instead of exiting")
 	}
 	tests := []struct {

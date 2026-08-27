@@ -60,7 +60,7 @@ Manage Hasura-style access control policies.
 const { data: policy } = await wh.policy.get();
 
 // Update policy
-await wh.policy.set({
+const policyDraft = {
   default_role: 'viewer',
   admin_role: 'admin',
   tables: {
@@ -74,7 +74,8 @@ await wh.policy.set({
       },
     },
   },
-});
+};
+await wh.policy.set(policyDraft);
 
 // Validate without applying (dry run)
 const { data } = await wh.policy.validate(policyDraft);

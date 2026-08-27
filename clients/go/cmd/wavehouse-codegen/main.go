@@ -26,30 +26,33 @@ type cliArgs struct {
 	pkg  string
 }
 
-// flagValue consumes and returns the value following os.Args[*i], exiting
+// flagValue consumes and returns the value following argv[*i], exiting
 // rather than silently falling back to the default when it is missing.
-func flagValue(i *int) string {
-	flag := os.Args[*i]
+func flagValue(argv []string, i *int) string {
+	flag := argv[*i]
 	*i++
-	if *i >= len(os.Args) {
+	if *i >= len(argv) {
 		fmt.Fprintf(os.Stderr, "Error: missing value for %s (use --help)\n", flag)
 		os.Exit(2)
 	}
-	return os.Args[*i]
+	return argv[*i]
 }
 
-func parseArgs() cliArgs {
+// parseArgs takes argv (including argv[0]) and the WAVEHOUSE_AUTH value rather
+// than reading os.Args / the environment itself, so tests drive it with their
+// own fixtures instead of mutating process-global state.
+func parseArgs(argv []string, envAuth string) cliArgs {
 	args := cliArgs{url: "http://localhost:8080", out: "./wavehouse_types.go", pkg: "main"}
-	for i := 1; i < len(os.Args); i++ {
-		switch os.Args[i] {
+	for i := 1; i < len(argv); i++ {
+		switch argv[i] {
 		case "--url", "-u":
-			args.url = flagValue(&i)
+			args.url = flagValue(argv, &i)
 		case "--out", "-o":
-			args.out = flagValue(&i)
+			args.out = flagValue(argv, &i)
 		case "--auth", "-a":
-			args.auth = flagValue(&i)
+			args.auth = flagValue(argv, &i)
 		case "--package", "-p":
-			args.pkg = flagValue(&i)
+			args.pkg = flagValue(argv, &i)
 		case "--help", "-h":
 			fmt.Println(`wavehouse-codegen — Generate Go types from WaveHouse schema
 
@@ -63,12 +66,12 @@ Options:
   --help, -h      Show this help`)
 			os.Exit(0)
 		default:
-			fmt.Fprintf(os.Stderr, "Error: unknown argument %q (use --help)\n", os.Args[i])
+			fmt.Fprintf(os.Stderr, "Error: unknown argument %q (use --help)\n", argv[i])
 			os.Exit(2)
 		}
 	}
 	if args.auth == "" {
-		args.auth = os.Getenv("WAVEHOUSE_AUTH")
+		args.auth = envAuth
 	}
 	return args
 }
@@ -314,7 +317,7 @@ func generate(schemas map[string]tableSchema, pkg string) (string, error) {
 }
 
 func main() {
-	args := parseArgs()
+	args := parseArgs(os.Args, os.Getenv("WAVEHOUSE_AUTH"))
 	fmt.Printf("Fetching schema from %s...\n", args.url)
 
 	schemas, err := fetchSchemas(context.Background(), args.url, args.auth)

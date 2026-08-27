@@ -17,7 +17,7 @@ Behavior:
 - **ts-unit**: `make test-sdk-ts` (TS SDK unit tests + coverage + gate against `suites.ts-unit`)
 - **ts-e2e**: emitted as a side effect of `make test-e2e` (the orchestrator always passes `--coverage` to the e2e vitest run; informational only, no standalone gate)
 - **ts-total**: `make cov` (runs `cov report` — one consolidated Go + TS summary with per-suite HTML links + all gates; fails if *no* suite has data)
-- **all**: `make test-all` (every suite sequentially + `make cov`)
+- **all**: `make test-all` (every coverage-producing suite sequentially + `make cov`; `test-sdk-go-e2e` is excluded, it needs a live server it did not start and runs uninstrumented)
 
 After the run completes:
 
