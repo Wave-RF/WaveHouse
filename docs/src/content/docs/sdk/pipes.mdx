@@ -22,16 +22,16 @@ const { data } = await wh.pipe('top_pages', { start_date: '2026-01-01', limit: 5
 const { data } = await wh.pipe('top_pages', { start_date: '2026-01-01', limit: 50 });
 ```
 
-`.fetch(opts?)` takes `PipeRequestOptions` — `{ signal }` only, narrower than the `.fetch(opts?)` on a [query builder](/sdk/queries#executing-the-query), which also accepts `limit`. Passing a `limit` is a compile error rather than a silent no-op.
+`.fetch(opts?)` takes `PipeRequestOptions`: `{ signal }` only, narrower than the `.fetch(opts?)` on a [query builder](/sdk/queries#executing-the-query), which also accepts `limit`. Passing a `limit` is a compile error rather than a silent no-op.
 
-`limit` is typed `never` rather than left out, so the rejection also catches a value passed in a variable — leaving it out would only reject an inline object. That cuts both ways: a value *declared* as `RequestOptions` is rejected whether or not it actually carries a limit, since the type permits one. If you share one options object across calls, type it as `PipeRequestOptions` — the table and query-builder `.fetch()` accept that too — or inline `{ signal }` at the pipe call.
+`limit` is typed `never` rather than left out, so the rejection also catches a value passed in a variable, where leaving it out would only reject an inline object. That cuts both ways: a value *declared* as `RequestOptions` is rejected whether or not it actually carries a limit, since the type permits one. If you share one options object across calls, type it as `PipeRequestOptions` (the table and query-builder `.fetch()` accept that too), or inline `{ signal }` at the pipe call.
 
   </TabItem>
   <TabItem label="Go">
 
 `client.Pipe(name, params)` returns a `*PipeRef`. Unlike the TypeScript SDK's `PromiseLike` `PipeRef`, you execute it explicitly. Pass `nil` for `params` if the pipe takes none, or only needs its server-side defaults.
 
-`wavehouse.Fetch[Row](ctx, pipeRef)` decodes results into `[]Row` — a package-level generic function, since Go has no generic methods (the same pattern as `FetchTyped` for queries and `SQL` for raw SQL). `.FetchUntyped(ctx)` is the non-generic method form, decoding into `[]map[string]any`.
+`wavehouse.Fetch[Row](ctx, pipeRef)` decodes results into `[]Row`. It is a package-level generic function, since Go has no generic methods (the same pattern as `FetchTyped` for queries and `SQL` for raw SQL). `.FetchUntyped(ctx)` is the non-generic method form, decoding into `[]map[string]any`.
 
 ```go
 type TopPage struct {
@@ -53,7 +53,7 @@ There is no per-call row cap here: the endpoint binds your params as the pipe's 
 
 ## Streaming a pipe
 
-Open a live stream from a pipe ref (see [Streaming](/sdk/streaming)). The pipe's SQL and params are **not** applied — the pipe's *name* is used as a table name, so where a table of that name exists you receive its raw events, and otherwise the stream stays silent rather than erroring. Both SDKs behave this way; both wait on a pipe-aware stream endpoint ([#445](https://github.com/Wave-RF/WaveHouse/issues/445)).
+Open a live stream from a pipe ref (see [Streaming](/sdk/streaming)). The pipe's SQL and params are **not** applied: the pipe's *name* is used as a table name, so where a table of that name exists you receive its raw events, and otherwise the stream stays silent rather than erroring. Both SDKs behave this way; both wait on a pipe-aware stream endpoint ([#445](https://github.com/Wave-RF/WaveHouse/issues/445)).
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -77,7 +77,7 @@ defer stream.Close()
 
 ## Managing pipe definitions
 
-Create, read, and delete pipe definitions. These sit behind the [admin gate](/sdk/admin) on `/v1/ops/*` — the admin role (`policy.admin_role`) or the [operator key](/api#authentication).
+Create, read, and delete pipe definitions. These sit behind the [admin gate](/sdk/admin) on `/v1/ops/*`: the admin role (`policy.admin_role`) or the [operator key](/api#authentication).
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">

@@ -13,7 +13,7 @@ Streams are Server-Sent Events over HTTP. The auth token rides in an `Authorizat
 
 ### The stream controller
 
-Returned by the stream method on a table ref, a query builder, a pipe ref, and the DLQ namespace (the DLQ variant is not yet functional server-side — [#197](https://github.com/Wave-RF/WaveHouse/issues/197)).
+Returned by the stream method on a table ref, a query builder, a pipe ref, and the DLQ namespace (the DLQ variant is not yet functional server-side, [#197](https://github.com/Wave-RF/WaveHouse/issues/197)).
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -61,11 +61,11 @@ const unsub = stream.subscribe({
   },
 });
 
-// Cleanup — closes the connection if no other subscribers remain
+// Cleanup: closes the connection if no other subscribers remain
 unsub();
 ```
 
-A handler that throws *during delivery* doesn't end the stream; the exception is logged and the connection keeps running. But delivery of that event stops at the handler that threw — your *later* subscribers, and any concurrent `for await`, do not get it. The first `status` call, the synchronous one `.subscribe()` makes before returning, isn't caught at all and throws back out at you. Wrap your handler bodies in your own `try`/`catch`; see [Error Handling](/sdk/reference#error-handling) for the carve-outs.
+A handler that throws *during delivery* doesn't end the stream; the exception is logged and the connection keeps running. But delivery of that event stops at the handler that threw: your *later* subscribers, and any concurrent `for await`, do not get it. The first `status` call, the synchronous one `.subscribe()` makes before returning, isn't caught at all and throws back out at you. Wrap your handler bodies in your own `try`/`catch`; see [Error Handling](/sdk/reference#error-handling) for the carve-outs.
 
   </TabItem>
   <TabItem label="Go">
@@ -87,7 +87,7 @@ unsub := stream.Subscribe(&wavehouse.StreamSubscriber{
     },
 })
 
-// Removes this subscriber only — the connection stays open for any others
+// Removes this subscriber only; the connection stays open for any others
 // and still needs stream.Close() when you're done with the stream itself.
 defer unsub()
 ```
@@ -129,7 +129,7 @@ for event := range stream.Events() {
 ```
 
 :::caution[`break` does not close the stream]
-Unlike the TypeScript SDK's async iterator, where breaking a `for await` loop closes the connection, breaking a Go `for range stream.Events()` loop only stops consumption — the background goroutine and HTTP connection persist. Always `defer stream.Close()`.
+Unlike the TypeScript SDK's async iterator, where breaking a `for await` loop closes the connection, breaking a Go `for range stream.Events()` loop only stops consumption: the background goroutine and HTTP connection persist. Always `defer stream.Close()`.
 :::
 
 :::note[`Events()` carries events only]
@@ -171,7 +171,7 @@ Unlike the TypeScript SDK's async iterator, where breaking a `for await` loop cl
 
 ### Waiting for the stream to go live
 
-Useful when you need the subscription established before doing something that depends on it — inserting a row you expect to see come back, for instance.
+Useful when you need the subscription established before doing something that depends on it, such as inserting a row you expect to see come back.
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -185,14 +185,14 @@ await stream.connected();          // wait until the transport is live
 await wh.from('clicks').insert({ page: '/home' });
 ```
 
-A *timeout* rejection does **not** stop the transport — reconnection is unbounded, so it means "not live yet", not "given up"; call `.close()` if you want it to stop. A rejection because the stream closed is different: there the transport has already stopped.
+A *timeout* rejection does **not** stop the transport: reconnection is unbounded, so it means "not live yet", not "given up"; call `.close()` if you want it to stop. A rejection because the stream closed is different: there the transport has already stopped.
 
 One way this rejects against a perfectly healthy stream: if a subscriber you registered *before* calling `.connected()` has a `status` handler that throws, the throw aborts the fan-out before `connected()`'s internal watcher sees `live`, so it times out while `.status` already reads `live`. See [Error Handling](/sdk/reference#error-handling).
 
   </TabItem>
   <TabItem label="Go">
 
-`.Connected(ctx)` blocks until the stream reaches `StatusLive` or `ctx` is canceled; it returns an error if the stream closes before connecting. The deadline is yours to set — there is no built-in default.
+`.Connected(ctx)` blocks until the stream reaches `StatusLive` or `ctx` is canceled; it returns an error if the stream closes before connecting. The deadline is yours to set: there is no built-in default.
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -222,7 +222,7 @@ if err := stream.Connected(ctx); err != nil {
 | ----- | ---- | ----------- |
 | `Since` | `string` | RFC3339 timestamp for gap-fill replay |
 
-There is no `Signal`/context field: a stream is not canceled by passing a `context.Context` into `.Stream()` — call `.Close()` instead.
+There is no `Signal`/context field: a stream is not canceled by passing a `context.Context` into `.Stream()`. Call `.Close()` instead.
 
   </TabItem>
 </Tabs>
@@ -240,7 +240,7 @@ interface StreamEvent<T> {
 }
 ```
 
-Row values of top-level `DateTime`/`DateTime64` columns inside `data` (not timestamps nested in `Array`/`Map`/`Tuple` columns) arrive in canonical RFC 3339 UTC (`2026-06-21T04:00:00.123Z`), matching what `/v1/query` returns for the same row — `new Date(value)` parses correctly with no zone fix-up. Values WaveHouse couldn't canonicalize (ingest is fail-open) stream in the producer's original spelling, and the `/v1/query` match doesn't hold for them: a spelling ClickHouse accepted anyway still queries back in canonical UTC (one it rejected never lands in the table at all), and a zone-less date-time is what `new Date()` reads as *local* time — though a date-only `YYYY-MM-DD` string is read as UTC, an ECMAScript quirk (see [Timestamp canonicalization](/api#timestamp-canonicalization)).
+Row values of top-level `DateTime`/`DateTime64` columns inside `data` (not timestamps nested in `Array`/`Map`/`Tuple` columns) arrive in canonical RFC 3339 UTC (`2026-06-21T04:00:00.123Z`), matching what `/v1/query` returns for the same row, so `new Date(value)` parses correctly with no zone fix-up. Values WaveHouse couldn't canonicalize (ingest is fail-open) stream in the producer's original spelling, and the `/v1/query` match doesn't hold for them: a spelling ClickHouse accepted anyway still queries back in canonical UTC (one it rejected never lands in the table at all), and a zone-less date-time is what `new Date()` reads as *local* time, though a date-only `YYYY-MM-DD` string is read as UTC, an ECMAScript quirk (see [Timestamp canonicalization](/api#timestamp-canonicalization)).
 
   </TabItem>
   <TabItem label="Go">
@@ -253,7 +253,7 @@ type StreamEvent struct {
 }
 ```
 
-Top-level `DateTime`/`DateTime64` values inside `Data` arrive in canonical RFC 3339 UTC, byte-identical to what `/v1/query` renders for the same stored value, because the ingest handler rewrites them before publishing — a live frame and a later query can't disagree on the spelling of an instant. So a value you sent as `2026-06-21T06:00:00.123+02:00` comes back as `2026-06-21T04:00:00.123Z` (same instant, different spelling), and the canonicalization is deliberately fail-open: a value the server can't parse, or whose zone it can't resolve, is published verbatim. See [Timestamp canonicalization](/api#timestamp-canonicalization).
+Top-level `DateTime`/`DateTime64` values inside `Data` arrive in canonical RFC 3339 UTC, byte-identical to what `/v1/query` renders for the same stored value, because the ingest handler rewrites them before publishing: a live frame and a later query can't disagree on the spelling of an instant. So a value you sent as `2026-06-21T06:00:00.123+02:00` comes back as `2026-06-21T04:00:00.123Z` (same instant, different spelling), and the canonicalization is deliberately fail-open: a value the server can't parse, or whose zone it can't resolve, is published verbatim. See [Timestamp canonicalization](/api#timestamp-canonicalization).
 
   </TabItem>
 </Tabs>
@@ -263,9 +263,9 @@ Top-level `DateTime`/`DateTime64` values inside `Data` arrive in canonical RFC 3
 A dropped stream reconnects on a jittered exponential backoff, capped at 30s, and resumes from the last event it saw so the server gap-fills what was missed. HTTP/2 is recommended. Reconnection is **unbounded**: a stream keeps re-dialing until it hits a terminal error or you close it. The client option that bounds retries applies to REST requests only and is never consulted here.
 
 :::caution[Resumption is at-least-once, and time-bounded]
-Delivery across a reconnect is **at-least-once**. The resume point the client sends is the last event's `received_timestamp` — a `Last-Event-ID` header in TypeScript, a `?since=` query parameter in Go; the server accepts either and replays from that instant *inclusively* — so the last event you already saw, and anything sharing its timestamp, arrives again. Neither SDK deduplicates live frames — a live query makes one pass at the backfill seam only — so key on `timestamp` plus your own row identity if duplicates matter.
+Delivery across a reconnect is **at-least-once**. The resume point the client sends is the last event's `received_timestamp`: a `Last-Event-ID` header in TypeScript, a `?since=` query parameter in Go. The server accepts either and replays from that instant *inclusively*, so the last event you already saw, and anything sharing its timestamp, arrives again. Neither SDK deduplicates live frames (a live query makes one pass at the backfill seam only), so key on `timestamp` plus your own row identity if duplicates matter.
 
-Replay is also bounded by the server's [`mq.gap_window_minutes`](/configuration#message-queue-nats) — 15 minutes by default. A drop longer than that resumes with a hole and no signal, because the purged messages are simply gone.
+Replay is also bounded by the server's [`mq.gap_window_minutes`](/configuration#message-queue-nats): 15 minutes by default. A drop longer than that resumes with a hole and no signal, because the purged messages are simply gone.
 :::
 
 <Tabs syncKey="lang">
@@ -274,28 +274,28 @@ Replay is also bounded by the server's [`mq.gap_window_minutes`](/configuration#
 The backoff schedule resets only after a connection has *held* for a few seconds, so a server accepting and immediately closing — slow-consumer eviction, a half-broken upstream — can't pin the client at sub-second retries.
 
 :::note[SSE connection limit]
-The SDK warns above 5 concurrent SSE connections — just under the browser's 6-per-domain limit for HTTP/1.1. HTTP/2 multiplexes over one connection, so the limit doesn't apply there.
+The SDK warns above 5 concurrent SSE connections, just under the browser's 6-per-domain limit for HTTP/1.1. HTTP/2 multiplexes over one connection, so the limit doesn't apply there.
 :::
 
-A `4xx` is terminal and surfaces through `error` with the real status code rather than an opaque connection failure — in a browser going cross-origin, only when the rejection passes CORS and the gateway answered whatever preflight the request triggers (`Authorization`, configured `headers`, or `Last-Event-ID` once the stream resumes); otherwise it arrives as a retryable network error instead — indistinguishable from a drop, and retried. It won't be an *authentication* rejection from WaveHouse, which leaves `/v1/stream` ungated and answers an expired token with a filtered view rather than a `401`; the only 4xx it raises itself is `400` for a missing or empty table name, and only on the stream route — a `404` or `405` means the request never reached it, usually a `baseURL` path prefix the proxy didn't strip. Anything else means something in front of it (an auth gateway, a proxy) turned the request away — and note the exception to "retrying wouldn't help": a `429` or `408` from a rate limiter *is* transient, but the stream still ends, so catch it and open a new one after a delay ([#469](https://github.com/Wave-RF/WaveHouse/issues/469)). See [Error Handling](/sdk/reference#error-handling) for every code a stream can report and which ones re-dial.
+A `4xx` is terminal and surfaces through `error` with the real status code rather than an opaque connection failure. In a browser going cross-origin, that only holds when the rejection passes CORS and the gateway answered whatever preflight the request triggers (`Authorization`, configured `headers`, or `Last-Event-ID` once the stream resumes); otherwise it arrives as a retryable network error instead, indistinguishable from a drop, and retried. It won't be an *authentication* rejection from WaveHouse, which leaves `/v1/stream` ungated and answers an expired token with a filtered view rather than a `401`; the only 4xx it raises itself is `400` for a missing or empty table name, and only on the stream route: a `404` or `405` means the request never reached it, usually a `baseURL` path prefix the proxy didn't strip. Anything else means something in front of it (an auth gateway, a proxy) turned the request away. Note the exception to "retrying wouldn't help": a `429` or `408` from a rate limiter *is* transient, but the stream still ends, so catch it and open a new one after a delay ([#469](https://github.com/Wave-RF/WaveHouse/issues/469)). See [Error Handling](/sdk/reference#error-handling) for every code a stream can report and which ones re-dial.
 
-Streams go through `options.fetch`, `options.headers`, and `options.fetchOptions` like every other request — which is what lets a stream reach a header-gated origin. A custom `fetch` is asked more of on this path; see [Supplying your own fetch](/sdk/typescript#supplying-your-own-fetch).
+Streams go through `options.fetch`, `options.headers`, and `options.fetchOptions` like every other request, which is what lets a stream reach a header-gated origin. A custom `fetch` is asked more of on this path; see [Supplying your own fetch](/sdk/setup/typescript#supplying-your-own-fetch).
 
   </TabItem>
   <TabItem label="Go">
 
-Reconnect covers transport failures and retryable responses (5xx/429, plus `SSE_AUTH_ERROR` and `SSE_READ_ERROR`). `SSE_PARSE_ERROR` is retryable but does *not* reconnect — the offending frame is dropped and the same connection carries on. Terminal failures fire the `Error` callback, set status `StatusClosed`, and stop: non-retryable HTTP statuses, `SSE_CONNECT_ERROR` (bad `BaseURL`), `SSE_REDIRECT` (a credentialed request was redirected), and `SSE_BAD_CONTENT_TYPE` (a `200` that wasn't an event stream). Every error reaches the callback as a `*wavehouse.Error`, so `errors.As` and `wavehouse.IsRetryable` work on all of them — see the [error-code table](/sdk/reference#error-handling).
+Reconnect covers transport failures and retryable responses (5xx/429, plus `SSE_AUTH_ERROR` and `SSE_READ_ERROR`). `SSE_PARSE_ERROR` is retryable but does *not* reconnect: the offending frame is dropped and the same connection carries on. Terminal failures fire the `Error` callback, set status `StatusClosed`, and stop: non-retryable HTTP statuses, `SSE_CONNECT_ERROR` (bad `BaseURL`), `SSE_REDIRECT` (a credentialed request was redirected), and `SSE_BAD_CONTENT_TYPE` (a `200` that wasn't an event stream). Every error reaches the callback as a `*wavehouse.Error`, so `errors.As` and `wavehouse.IsRetryable` work on all of them; see the [error-code table](/sdk/reference#error-handling).
 
-`/v1/stream` is not admin-gated, so WaveHouse itself never answers a stream with `401`; a `401` on a stream came from something in front of it. `Auth` provider errors during (re)connect are retryable (`SSE_ERROR`) and reconnects continue — `ClientOptions.MaxRetries` bounds request retries only, not stream reconnects — so call `.Close()` if the provider fails permanently. Auth goes as an `Authorization: Bearer` header on every connection, re-read from `Auth` per attempt ([note in Creating a client](/sdk/go#creating-a-client)).
+`/v1/stream` is not admin-gated, so WaveHouse itself never answers a stream with `401`; a `401` on a stream came from something in front of it. `Auth` provider errors during (re)connect are retryable (`SSE_ERROR`) and reconnects continue (`ClientOptions.MaxRetries` bounds request retries only, not stream reconnects), so call `.Close()` if the provider fails permanently. Auth goes as an `Authorization: Bearer` header on every connection, re-read from `Auth` per attempt ([note in Creating a client](/sdk/setup/go#creating-a-client)).
 
   </TabItem>
 </Tabs>
 
 ### Server-side policy filtering
 
-Access-control policy applies on the server before anything reaches the client: tables the connection's role can't `select` are skipped, denied columns are stripped from each event, and the role's row-level `filter` is evaluated per subscriber against the connection's JWT claims — on live frames and gap-fill replay alike. Claims are captured when the connection opens: a policy change applies from the next live event (an in-flight gap-fill replay finishes under the policy snapshot taken at connect), while token expiry or claim changes take effect on reconnect.
+Access-control policy applies on the server before anything reaches the client: tables the connection's role can't `select` are skipped, denied columns are stripped from each event, and the role's row-level `filter` is evaluated per subscriber against the connection's JWT claims, on live frames and gap-fill replay alike. Claims are captured when the connection opens: a policy change applies from the next live event (an in-flight gap-fill replay finishes under the policy snapshot taken at connect), while token expiry or claim changes take effect on reconnect.
 
-Two things follow. **Event-id gaps are normal on a filtered stream** — a gap means a row was withheld, not that a frame was dropped. And **the row filter fails closed**: a comparison the server can't prove — an unresolvable claim, a type it can't compare — withholds the row rather than passing it. See [Access control — where each rule is enforced](/access-control#where-each-rule-is-enforced).
+Two things follow. **Event-id gaps are normal on a filtered stream**: a gap means a row was withheld, not that a frame was dropped. And **the row filter fails closed**: a comparison the server can't prove (an unresolvable claim, a type it can't compare) withholds the row rather than passing it. See [Access control: where each rule is enforced](/access-control#where-each-rule-is-enforced).
 
 ### Client-side stream filtering
 
@@ -313,9 +313,9 @@ const stream = wh.from('clicks')
 // Only events where page === '/home' are emitted, with only page + button columns
 ```
 
-Supported operators: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `like`, `not_like` — the same `FilterOp` set `.where()` takes everywhere (the SDK maps them to wire tokens such as `eq`/`neq` internally).
+Supported operators: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `like`, `not_like`: the same `FilterOp` set `.where()` takes everywhere (the SDK maps them to wire tokens such as `eq`/`neq` internally).
 
-Two of them need care, for different reasons. `like` matches **case-insensitively** here, while ClickHouse's `LIKE` on the query path is case-sensitive — so inside a single `liveQuery()` the backfill rows arrive through the server's case-sensitive filter and the live frames through this one, and a pattern like `'/Home%'` can admit live events whose historical counterparts the backfill excluded. `not_like` has no server-side counterpart at all: `/v1/query` rejects it with a `400` (see the operator table in [Queries](/sdk/queries#filtering)), so a `liveQuery()` filtered on it gets an error `Result` in `initial()`, drops whatever was buffered during the backfill window, and runs live-only from there.
+Two of them need care, for different reasons. `like` matches **case-insensitively** here, while ClickHouse's `LIKE` on the query path is case-sensitive, so inside a single `liveQuery()` the backfill rows arrive through the server's case-sensitive filter and the live frames through this one, and a pattern like `'/Home%'` can admit live events whose historical counterparts the backfill excluded. `not_like` has no server-side counterpart at all: `/v1/query` rejects it with a `400` (see the operator table in [Queries](/sdk/queries#filtering)), so a `liveQuery()` filtered on it gets an error `Result` in `initial()`, drops whatever was buffered during the backfill window, and runs live-only from there.
 
   </TabItem>
   <TabItem label="Go">
@@ -329,18 +329,18 @@ stream := wh.From("clicks").
 // Only events where page == "/home" are emitted, with only page + button fields
 ```
 
-Supported operators: `OpEq`, `OpNeq`, `OpGt`, `OpGte`, `OpLt`, `OpLte`, `OpIn`, `OpLike`, `OpNotLike` — the `FilterOp` set `.Where()` takes everywhere. `OpLike`/`OpNotLike` use SQL LIKE semantics (`%`, `_`), case-insensitively, and `OpIn` accepts any Go slice type (e.g. `[]string`, `[]int`).
+Supported operators: `OpEq`, `OpNeq`, `OpGt`, `OpGte`, `OpLt`, `OpLte`, `OpIn`, `OpLike`, `OpNotLike`: the `FilterOp` set `.Where()` takes everywhere. `OpLike`/`OpNotLike` use SQL LIKE semantics (`%`, `_`), case-insensitively, and `OpIn` accepts any Go slice type (e.g. `[]string`, `[]int`).
 
 **How values are compared.** The client-side evaluator mirrors the server's row-filter comparison rules rather than comparing everything as text:
 
-- **Timestamps compare chronologically.** Since the server canonicalizes every top-level `DateTime`/`DateTime64` value to RFC 3339 UTC before publishing, a payload may read `2026-06-21T04:00:00Z` while your filter constant names the same instant as `2026-06-21T06:00:00+02:00`. Comparing those as text is wrong in both directions — lexically the payload sorts *below* the constant, so `OpGte` would miss a chronologically equal row. Both sides are parsed as instants instead.
+- **Timestamps compare chronologically.** Since the server canonicalizes every top-level `DateTime`/`DateTime64` value to RFC 3339 UTC before publishing, a payload may read `2026-06-21T04:00:00Z` while your filter constant names the same instant as `2026-06-21T06:00:00+02:00`. Comparing those as text is wrong in both directions: lexically the payload sorts *below* the constant, so `OpGte` would miss a chronologically equal row. Both sides are parsed as instants instead.
 - **Only unambiguous spellings count as instants:** RFC 3339 with an explicit offset or `Z`. A zone-less spelling like `2026-06-21 04:00:00` names an instant only relative to the column's declared timezone, which the server reads from the schema and a stream subscriber does not have, so it is not treated as a timestamp.
-- **Ordering an instant against a non-instant fails closed.** If one side parses as a timestamp and the other does not, `OpGt`/`OpGte`/`OpLt`/`OpLte` withhold the row rather than falling back to text comparison, which could admit rows the query path excludes. The usual cause is a zone-less filter constant — give it an offset.
+- **Ordering an instant against a non-instant fails closed.** If one side parses as a timestamp and the other does not, `OpGt`/`OpGte`/`OpLt`/`OpLte` withhold the row rather than falling back to text comparison, which could admit rows the query path excludes. The usual cause is a zone-less filter constant: give it an offset.
 - **A missing column equals only `nil`.** A column absent from the payload does not match the string `"<nil>"`.
 - **Numbers compare numerically**, so `9 < 100` as you would expect rather than as text.
 
 :::caution[Integer precision above 2^53]
-Event data decodes through `encoding/json` into `map[string]any`, so JSON numbers arrive as `float64`. An integer column beyond 2^53 has already lost exactness before any filter runs, and the server compares such columns in their exact storage domain — so a client-side filter on a very large `UInt64` can disagree with the server's verdict. Filter on a string or timestamp column instead when exactness at that magnitude matters.
+Event data decodes through `encoding/json` into `map[string]any`, so JSON numbers arrive as `float64`. An integer column beyond 2^53 has already lost exactness before any filter runs, and the server compares such columns in their exact storage domain, so a client-side filter on a very large `UInt64` can disagree with the server's verdict. Filter on a string or timestamp column instead when exactness at that magnitude matters.
 :::
 
   </TabItem>
@@ -350,7 +350,7 @@ Event data decodes through `encoding/json` into `map[string]any`, so JSON number
 
 ## Live Queries
 
-Live queries combine a historical backfill with a real-time stream, providing a seamless initial load + live updates experience. They exist only on the query builder — there is no table-ref shortcut in either SDK.
+Live queries combine a historical backfill with a real-time stream, providing a seamless initial load + live updates experience. They exist only on the query builder: there is no table-ref shortcut in either SDK.
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -441,12 +441,12 @@ Unlike the TypeScript SDK's `initial: (result: Result<T[]>) => void`, Go's `Live
 3. Deduplicates buffered events against the backfill.
 4. Flushes remaining buffered events and switches to live mode.
 
-This "stream-first" approach is what closes the window between the fetch and the stream starting — events arriving during the fetch are buffered rather than missed. It holds only when the backfill completes cleanly.
+This "stream-first" approach is what closes the window between the fetch and the stream starting: events arriving during the fetch are buffered rather than missed. It holds only when the backfill completes cleanly.
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
 
-Step 2 is skipped entirely if the fetch itself throws (see below). Step 3 deduplicates against the **last row** of the backfill result — which is the newest only when the query orders ascending. A `desc` query (like the example above) puts the oldest row last, so for live frames the boundary is the oldest timestamp and this step filters nothing. With a `since` gap-fill in flight it works the other way — replay lands in the same buffer, so replayed events at or older than that row are dropped before reaching `next()`. A projection that omits `received_timestamp` skips the pass entirely. Tracked in [#449](https://github.com/Wave-RF/WaveHouse/issues/449).
+Step 2 is skipped entirely if the fetch itself throws (see below). Step 3 deduplicates against the **last row** of the backfill result, which is the newest only when the query orders ascending. A `desc` query (like the example above) puts the oldest row last, so for live frames the boundary is the oldest timestamp and this step filters nothing. With a `since` gap-fill in flight it works the other way: replay lands in the same buffer, so replayed events at or older than that row are dropped before reaching `next()`. A projection that omits `received_timestamp` skips the pass entirely. Tracked in [#449](https://github.com/Wave-RF/WaveHouse/issues/449).
 
 #### When the backfill doesn't complete
 
@@ -454,22 +454,22 @@ Here is how it doesn't, and what each case looks like from your subscriber. "Buf
 
 | What happened | `initial()` | Live events | `error` | Buffered events |
 |---|---|---|---|---|
-| Backfill returns an error `Result` | fires, `result.error` set | delivered | — | none delivered |
-| Your `initial()` throws | fires, then throws | delivered | — | none delivered — the flush never starts |
-| Your `next()` throws during the flush | fires normally | delivered, after the flush stops | — | none after the throw |
-| `auth` rejects, the stream connects anyway | never fires | delivered | — | none delivered |
+| Backfill returns an error `Result` | fires, `result.error` set | delivered | n/a | none delivered |
+| Your `initial()` throws | fires, then throws | delivered | n/a | none delivered, the flush never starts |
+| Your `next()` throws during the flush | fires normally | delivered, after the flush stops | n/a | none after the throw |
+| `auth` rejects, the stream connects anyway | never fires | delivered | n/a | none delivered |
 | `auth` rejects for a few attempts, then recovers | never fires | delivered once it recovers | `SSE_AUTH_ERROR` per failed attempt | none delivered |
-| `auth` keeps rejecting | never fires | none — never reaches `live` | `SSE_AUTH_ERROR` per attempt | none delivered |
-| Relative `baseURL` | never fires | none — the stream is terminated too | terminal `SSE_CONNECT_ERROR` | none delivered |
-| Your `status` handler throws on the first, synchronous call | never fires | none — buffered where you can't reach them | — | none delivered |
+| `auth` keeps rejecting | never fires | none, never reaches `live` | `SSE_AUTH_ERROR` per attempt | none delivered |
+| Relative `baseURL` | never fires | none, the stream is terminated too | terminal `SSE_CONNECT_ERROR` | none delivered |
+| Your `status` handler throws on the first, synchronous call | never fires | none, buffered where you can't reach them | n/a | none delivered |
 
 **The `status`-throw row is the odd one out**, and everything below is written for the others. It is the one case where the backfill never *starts*: the throw escapes `liveQuery()` before the constructor reaches it, so you get no handle back, nothing can `.close()` the stream, and — because the buffering phase never ends — every event accumulates in an object you have no reference to, indefinitely. `next()` is never called at all. Passing `opts.signal` is the only way to stop it; not throwing is the fix. Throwing on any *later* `status` transition is isolated and logged like `next`. See [Error Handling](/sdk/reference#error-handling).
 
-**What to do about the rest.** Check `result.error` inside `initial()`, keep the flush handlers total, and — if a missing backfill matters — treat `initial()` never firing as its own failure. Where `auth` rejects and the stream connects anyway nothing else will tell you, and where the other rows *do* raise an error it names `auth` or the URL, never the backfill. Re-run the fetch then; you never have to work out which row you hit. Leave it a moment first: events reach a stream from the message queue before the ingest worker lands them in ClickHouse, and its per-table batcher flushes on size or a deadline with the insert still to complete after that (see [Ingest pipeline](/ingest-pipeline)), so an immediate re-fetch can miss the newest rows.
+**What to do about the rest.** Check `result.error` inside `initial()`, keep the flush handlers total, and if a missing backfill matters, treat `initial()` never firing as its own failure. Where `auth` rejects and the stream connects anyway nothing else will tell you, and where the other rows *do* raise an error it names `auth` or the URL, never the backfill. Re-run the fetch then; you never have to work out which row you hit. Leave it a moment first: events reach a stream from the message queue before the ingest worker lands them in ClickHouse, and its per-table batcher flushes on size or a deadline with the insert still to complete after that (see [Ingest pipeline](/ingest-pipeline)), so an immediate re-fetch can miss the newest rows.
 
-**Why `auth` splits the way it does.** The backfill makes the *first* `auth()` call and gets exactly one shot — the token is minted above the REST retry loop, so a rejection there is never retried and the whole backfill is gone. The stream calls `auth()` again on every connection attempt and treats the same rejection as transient. That asymmetry is the entire reason a live query can end up running normally with no snapshot behind it, and why nothing announces it: `error` never fires, and the only trace is that `initial()` didn't. That is the case worth guarding against, because it is the one that looks like success.
+**Why `auth` splits the way it does.** The backfill makes the *first* `auth()` call and gets exactly one shot: the token is minted above the REST retry loop, so a rejection there is never retried and the whole backfill is gone. The stream calls `auth()` again on every connection attempt and treats the same rejection as transient. That asymmetry is the entire reason a live query can end up running normally with no snapshot behind it, and why nothing announces it: `error` never fires, and the only trace is that `initial()` didn't. That is the case worth guarding against, because it is the one that looks like success.
 
-**What the live stream can lose.** In every row where the backfill runs at all: nothing, except in one window — events arriving after the stream goes `live` but before the backfill fails are buffered, and the failure discards the buffer. On the `auth` rows that window opens only if the rejection arrives *after* the connection does: the backfill fails as soon as its own `auth()` call rejects, while the stream needs a second `auth()` call resolved **and** a connection opened. Which way that goes depends on your token provider, and you don't need to know — the recovery above covers both.
+**What the live stream can lose.** In every row where the backfill runs at all: nothing, except in one window: events arriving after the stream goes `live` but before the backfill fails are buffered, and the failure discards the buffer. On the `auth` rows that window opens only if the rejection arrives *after* the connection does: the backfill fails as soon as its own `auth()` call rejects, while the stream needs a second `auth()` call resolved **and** a connection opened. Which way that goes depends on your token provider, and you don't need to know: the recovery above covers both.
 
 Tracked in [#473](https://github.com/Wave-RF/WaveHouse/issues/473).
 
@@ -479,14 +479,14 @@ Tracked in [#473](https://github.com/Wave-RF/WaveHouse/issues/473).
 Step 2 runs `.FetchUntyped(ctx)` and then calls `sub.Initial(rows, err)`. Step 3 deduplicates against the maximum `received_timestamp` in the backfill (not necessarily the last row).
 
 :::caution[Dedup needs `received_timestamp` in the projection]
-Dedup relies on `received_timestamp`. `.SelectAll()` (or no projection) includes it; a `.Select(...)` omitting it disables dedup, so events in the overlap window are delivered twice — once via `Initial`, once via `Next`.
+Dedup relies on `received_timestamp`. `.SelectAll()` (or no projection) includes it; a `.Select(...)` omitting it disables dedup, so events in the overlap window are delivered twice: once via `Initial`, once via `Next`.
 :::
 
 :::caution[`OpLike` matching differs between backfill and live]
-Client-side `OpLike` is case-insensitive, but server-side backfills use ClickHouse `LIKE`, which is case-sensitive, so a live query filtering on `OpLike` may exclude rows from the backfill that it includes in the live stream ([#451](https://github.com/Wave-RF/WaveHouse/issues/451)). `OpNotLike` is rejected by `/v1/query` with a `400`, failing the `Initial` callback — see [Queries → Filtering](/sdk/queries#filtering).
+Client-side `OpLike` is case-insensitive, but server-side backfills use ClickHouse `LIKE`, which is case-sensitive, so a live query filtering on `OpLike` may exclude rows from the backfill that it includes in the live stream ([#451](https://github.com/Wave-RF/WaveHouse/issues/451)). `OpNotLike` is rejected by `/v1/query` with a `400`, failing the `Initial` callback; see [Queries → Filtering](/sdk/queries#filtering).
 :::
 
-**When the backfill doesn't complete.** `Initial(rows, err)` fires with the error, the events buffered during the fetch window are discarded, and live delivery continues from there — so a live query can end up running normally with no snapshot behind it. Check `err` inside `Initial` and re-run the fetch if a missing backfill matters; leave it a moment first, since events reach a stream from the message queue before the ingest worker lands them in ClickHouse (see [Ingest pipeline](/ingest-pipeline)).
+**When the backfill doesn't complete.** `Initial(rows, err)` fires with the error, the events buffered during the fetch window are discarded, and live delivery continues from there, so a live query can end up running normally with no snapshot behind it. Check `err` inside `Initial` and re-run the fetch if a missing backfill matters; leave it a moment first, since events reach a stream from the message queue before the ingest worker lands them in ClickHouse (see [Ingest pipeline](/ingest-pipeline)).
 
   </TabItem>
 </Tabs>

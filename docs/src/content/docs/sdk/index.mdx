@@ -1,13 +1,13 @@
 ---
 title: "Client SDKs"
-description: "Official WaveHouse clients for TypeScript and Go — query builder, real-time streaming, codegen."
+description: "Official WaveHouse clients for TypeScript and Go: query builder, real-time streaming, codegen."
 ---
 
 import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components";
 
 WaveHouse ships two officially supported clients with full API-tree parity: **TypeScript** (`@wavehouse/sdk`) and **Go** (`github.com/Wave-RF/WaveHouse/clients/go`). Both give you a typed query builder, real-time SSE streaming over header-authenticated HTTP, live queries that backfill history before going live, and a codegen CLI that turns your ClickHouse schema into row types.
 
-They speak the same wire format — a shared fixture replayed by both test suites keeps it that way — so the topic pages below cover both languages side by side. Pick a language once and the tabs follow you across every page.
+They speak the same wire format, and a shared fixture replayed by both test suites keeps it that way, so the topic pages below cover both languages side by side. Pick a language once and the tabs follow you across every page.
 
 ## Install
 
@@ -18,7 +18,7 @@ They speak the same wire format — a shared fixture replayed by both test suite
 npm install @wavehouse/sdk
 ```
 
-Other package managers, the CDN build, and runtime support: [TypeScript setup](/sdk/typescript#installation).
+Other package managers, the CDN build, and runtime support: [TypeScript setup](/sdk/setup/typescript#installation).
 
   </TabItem>
   <TabItem label="Go">
@@ -27,7 +27,7 @@ Other package managers, the CDN build, and runtime support: [TypeScript setup](/
 go get github.com/Wave-RF/WaveHouse/clients/go
 ```
 
-Import path, Go version floor, and client construction: [Go setup](/sdk/go#installation).
+Import path, Go version floor, and client construction: [Go setup](/sdk/setup/go#installation).
 
   </TabItem>
 </Tabs>
@@ -77,20 +77,15 @@ func main() {
   </TabItem>
 </Tabs>
 
-## Setup & caveats, per language
+## Setup
 
-Installation, client construction, auth, custom headers, and the error model are language-specific — each SDK has its own page for them.
+Installation, client construction, auth, and the error model are the only language-specific parts. [`/sdk/setup`](/sdk/setup) has the package name, install command, and version floor for each client.
 
 <CardGrid>
   <LinkCard
-    title="TypeScript setup"
-    description="Install across package managers and runtimes, createClient, custom headers and fetch, the Result type."
-    href="/sdk/typescript"
-  />
-  <LinkCard
-    title="Go setup"
-    description="go get, NewClient, Config and ClientOptions, typed rows via generics, the (T, error) model."
-    href="/sdk/go"
+    title="SDK setup"
+    description="Package names, version floors, and the per-language setup guides for TypeScript and Go."
+    href="/sdk/setup"
   />
 </CardGrid>
 

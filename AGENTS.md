@@ -382,9 +382,9 @@ Internal-only backend changes (middleware refactors, observability internals, de
 The SDK docs are **topic-first, not language-first** — the decision from PR #313, carried into the Go SDK in PR #434. Adding a third language must not change the shape:
 
 - **One page per topic, shared by every language**: `/sdk/queries`, `/sdk/streaming`, `/sdk/pipes`, `/sdk/admin`, `/sdk/reference`. Prose that holds for every client stays outside the tabs; the language-specific code and caveats go inside a `<Tabs syncKey="lang">` block, one `<TabItem>` per language. The `syncKey` is `lang` everywhere, so a reader picks a language once and it follows them across the whole tree.
-- **One setup/caveats page per language**: `/sdk/typescript`, `/sdk/go`. Installation, client construction, auth, and the error model are genuinely per-language and live here.
+- **One setup/caveats page per language, under `/sdk/setup/`**: `/sdk/setup/typescript`, `/sdk/setup/go`. Installation, client construction, auth, and the error model are genuinely per-language and live here. `/sdk/setup` itself is the hub — a table of every client (package, install command, version floor) plus cards to each language's page.
 - **`/sdk` is the language-neutral overview.** No language sits at the root of `/sdk` — that was the trap the Go SDK's first draft fell into, leaving TypeScript un-prefixed and undocumented as a language.
-- **Adding a language** = one new setup page + one new `<TabItem>` per topic page + one sidebar entry. It is never a parallel `/sdk/<lang>/<topic>` tree, because that churns the topic URLs and doubles the pages to keep in sync.
+- **Adding a language** = one new `/sdk/setup/<lang>` page + a row in the `/sdk/setup` table + one new `<TabItem>` per topic page + one entry in the sidebar's nested `Setup` group (which mirrors the `/sdk/setup/` route segment). It is never a parallel `/sdk/<lang>/<topic>` tree, because that churns the topic URLs and doubles the pages to keep in sync.
 - Because tabs need MDX, the topic pages are `.mdx` — remember §Markdown authoring rules: `make fix` does not auto-fix MDX, so unwrap WH001 wrapping by hand and keep a blank line between a JSX tag and a code fence.
 
 ## Common Tasks

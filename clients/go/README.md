@@ -2,7 +2,7 @@
 
 Official Go client for [WaveHouse](https://github.com/Wave-RF/WaveHouse) — a schema-aware real-time API gateway for ClickHouse. Zero third-party runtime dependencies, SSE parser included.
 
-**Full documentation: [wavehouse.dev/sdk/go](https://wavehouse.dev/sdk/go)** (setup); the usage guides below cover both SDKs, tabbed by language.
+**Full documentation: [wavehouse.dev/sdk/go](https://wavehouse.dev/sdk/setup/go)** (setup); the usage guides below cover both SDKs, tabbed by language.
 
 ## Install
 
@@ -47,7 +47,7 @@ func main() {
 
 ## Documentation
 
-- [Go SDK setup](https://wavehouse.dev/sdk/go) — client config, auth, typed rows via generics, error handling.
+- [Go SDK setup](https://wavehouse.dev/sdk/setup/go) — client config, auth, typed rows via generics, error handling.
 - [Queries](https://wavehouse.dev/sdk/queries) — tables, the query builder, inserts, pagination, raw SQL.
 - [Streaming & Live Queries](https://wavehouse.dev/sdk/streaming) — SSE streams, client-side filtering, backfill-then-live.
 - [Pipes](https://wavehouse.dev/sdk/pipes) — execute and manage named query pipes.

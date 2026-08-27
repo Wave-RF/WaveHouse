@@ -5,7 +5,7 @@ description: "Tables, the chainable query builder, pagination, and raw SQL in th
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
-Reading and writing data: table references, the chainable query builder, cursor pagination, and the admin-only raw-SQL escape hatch. Both SDKs speak the same wire format and expose the same surface — pick your language with the tabs below and the choice follows you across every page. Setup, client construction, and the error model live on the per-language pages: [TypeScript](/sdk/typescript) and [Go](/sdk/go).
+Reading and writing data: table references, the chainable query builder, cursor pagination, and the admin-only raw-SQL escape hatch. Both SDKs speak the same wire format and expose the same surface. Pick your language with the tabs below and the choice follows you across every page. Setup, client construction, and the error model live on the per-language pages: [TypeScript](/sdk/setup/typescript) and [Go](/sdk/setup/go).
 
 ## Tables
 
@@ -20,7 +20,7 @@ The entry point is a table reference. It performs no request, so it is safe to s
 const clicks = wh.from('clicks');
 ```
 
-Every call returns the SDK's [`Result<T>`](/sdk/typescript#result-type) — nothing throws for anything the server returns (see [Error Handling](/sdk/reference#error-handling) for the caller and environment errors that do).
+Every call returns the SDK's [`Result<T>`](/sdk/setup/typescript#result-type): nothing throws for anything the server returns (see [Error Handling](/sdk/reference#error-handling) for the caller and environment errors that do).
 
   </TabItem>
   <TabItem label="Go">
@@ -31,16 +31,16 @@ Every call returns the SDK's [`Result<T>`](/sdk/typescript#result-type) — noth
 clicks := wh.From("clicks")
 ```
 
-Every request-response operation takes a `context.Context` first and returns `(T, error)` — the chainable builder methods and `.Stream(opts)` excepted. See [Error Handling](/sdk/go#error-handling).
+Every request-response operation takes a `context.Context` first and returns `(T, error)`, with the chainable builder methods and `.Stream(opts)` excepted. See [Error Handling](/sdk/setup/go#error-handling).
 
   </TabItem>
 </Tabs>
 
 ### Fetching every column
 
-Shortcut for "select every column", with a default limit of 1000. When an access-control policy restricts your role's columns, the server returns only the columns your role is allowed to read — this is never a way around `deny_columns`/`allow_columns` (see [Access control](/access-control#column-permissions)). Ordering, grouping, or filtering by a column your role can't read is rejected, so a column-restricted role must reference only readable columns in those clauses.
+Shortcut for "select every column", with a default limit of 1000. When an access-control policy restricts your role's columns, the server returns only the columns your role is allowed to read. This is never a way around `deny_columns`/`allow_columns` (see [Access control](/access-control#column-permissions)). Ordering, grouping, or filtering by a column your role can't read is rejected, so a column-restricted role must reference only readable columns in those clauses.
 
-To paginate, chain an explicit order — a bare fetch sends no default order (see [Pagination](#pagination)).
+To paginate, chain an explicit order: a bare fetch sends no default order (see [Pagination](#pagination)).
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -70,9 +70,9 @@ for _, row := range page.Data {
 
 ### Inserting rows
 
-Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table={table}`. A **slice/array** is serialized to NDJSON (one record per line) and sent as a single `application/x-ndjson` request, so a bad record no longer fails or hides the rest of the batch — per-record outcomes come back in the result.
+Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table={table}`. A **slice/array** is serialized to NDJSON (one record per line) and sent as a single `application/x-ndjson` request, so a bad record no longer fails or hides the rest of the batch: per-record outcomes come back in the result.
 
-For a batch, the result is `ok` only when every record succeeded (no records failed). Inspect the failure count and the per-record results (each carrying a **1-based** index) for partial failures — the call's top-level error is reserved for whole-request failures (network, `404` unknown table, `403` forbidden, `503` backpressure). An empty batch is a no-op and sends no request. The batch path sends one request regardless of size; bounded-concurrency chunking of very large batches is tracked in [#196](https://github.com/Wave-RF/WaveHouse/issues/196).
+For a batch, the result is `ok` only when every record succeeded (no records failed). Inspect the failure count and the per-record results (each carrying a **1-based** index) for partial failures. The call's top-level error is reserved for whole-request failures (network, `404` unknown table, `403` forbidden, `503` backpressure). An empty batch is a no-op and sends no request. The batch path sends one request regardless of size; bounded-concurrency chunking of very large batches is tracked in [#196](https://github.com/Wave-RF/WaveHouse/issues/196).
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -107,7 +107,7 @@ res, err = clicks.Insert(ctx, []map[string]any{
 })
 // res.OK, res.Total, res.Succeeded, res.Failed, res.Duplicates, res.Results
 
-// Many rows (typed slice) — same NDJSON path, via reflection
+// Many rows (typed slice): same NDJSON path, via reflection
 type ClickRow struct {
     Page   string `json:"page"`
     Button string `json:"button"`
@@ -168,12 +168,12 @@ res, err = clicks.InsertNDJSON(ctx, string(raw))
 
 ### Table schema
 
-Fetch the table's column definitions from ClickHouse. This hits `/v1/ops/schema`, an **admin-only** endpoint: the caller must pass the admin gate — resolve to the policy admin role or present the non-JWT [operator key](/api#authentication) — or it returns `403`.
+Fetch the table's column definitions from ClickHouse. This hits `/v1/ops/schema`, an **admin-only** endpoint: the caller must pass the admin gate by resolving to the policy admin role or presenting the non-JWT [operator key](/api#authentication), or it returns `403`.
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
 
-Send the operator key via [`options.headers`](/sdk/typescript#custom-headers).
+Send the operator key via [`options.headers`](/sdk/setup/typescript#custom-headers).
 
 ```ts
 const { data } = await clicks.schema();
@@ -185,7 +185,7 @@ const { data } = await clicks.schema();
   </TabItem>
   <TabItem label="Go">
 
-Send the operator key via [`ClientOptions.Headers`](/sdk/go#clientoptions).
+Send the operator key via [`ClientOptions.Headers`](/sdk/setup/go#clientoptions).
 
 ```go
 schema, err := clicks.Schema(ctx)
@@ -198,7 +198,7 @@ schema, err := clicks.Schema(ctx)
 
 ### Selecting columns
 
-Starts a query builder chain — see [Query Builder](#query-builder) for the chainable methods and how to execute it.
+Starts a query builder chain. See [Query Builder](#query-builder) for the chainable methods and how to execute it.
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -222,7 +222,7 @@ page, err := clicks.Select("page", "button").
 
 ### Selecting every column explicitly
 
-`selectAll` selects **every column your role is allowed to read** — the explicit form of what a bare fetch does. Mutually exclusive with an explicit column list and with aggregations; for a column-restricted role the server expands it to exactly that role's allowed columns rather than a bare `SELECT *` (unrestricted/admin roles do get `SELECT *`) and never bypasses `deny_columns`/`allow_columns`. See [Access control → Column permissions](/access-control#column-permissions).
+`selectAll` selects **every column your role is allowed to read**: the explicit form of what a bare fetch does. Mutually exclusive with an explicit column list and with aggregations; for a column-restricted role the server expands it to exactly that role's allowed columns rather than a bare `SELECT *` (unrestricted/admin roles do get `SELECT *`) and never bypasses `deny_columns`/`allow_columns`. See [Access control → Column permissions](/access-control#column-permissions).
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -267,7 +267,7 @@ defer stream.Close()
 
 ## Query Builder
 
-Returned by the table ref's select methods. Immutable — every chain method returns a new builder, leaving the original unchanged.
+Returned by the table ref's select methods. Immutable: every chain method returns a new builder, leaving the original unchanged.
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -294,7 +294,7 @@ page, err := clicks.Select("page").Limit(10).FetchUntyped(ctx)
 
 ### Appending columns
 
-Append columns to the SELECT clause. A literal `*` is the column *named* `*`, not a wildcard — use the `selectAll` form for all columns.
+Append columns to the SELECT clause. A literal `*` is the column *named* `*`, not a wildcard. Use the `selectAll` form for all columns.
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -334,7 +334,7 @@ clicks.select('page').where('score', '>', 10).where('page', 'like', '/home%')
 | `'<='` | `lte` | Less than or equal |
 | `'in'` | `in` | Value in array |
 | `'like'` | `like` | SQL LIKE pattern. Case-**sensitive** on `/v1/query`; the client-side filter used by `.stream()` / `.liveQuery()` matches case-**insensitively** |
-| `'not_like'` | `not_like` | SQL NOT LIKE — **client-side only** (live-query / stream filtering); the `/v1/query` backend rejects it |
+| `'not_like'` | `not_like` | SQL NOT LIKE, **client-side only** (live-query / stream filtering); the `/v1/query` backend rejects it |
 
   </TabItem>
   <TabItem label="Go">
@@ -355,7 +355,7 @@ clicks.Select("page").
 | `wavehouse.OpLte` | `lte` | Less than or equal |
 | `wavehouse.OpIn` | `in` | Value in array (accepts any Go slice) |
 | `wavehouse.OpLike` | `like` | SQL LIKE pattern. Case-**sensitive** on `/v1/query`; the client-side filter used by `.Stream()` / `.LiveQuery()` matches case-**insensitively** |
-| `wavehouse.OpNotLike` | `not_like` | SQL NOT LIKE — **client-side only**; `/v1/query` rejects this token |
+| `wavehouse.OpNotLike` | `not_like` | SQL NOT LIKE, **client-side only**; `/v1/query` rejects this token |
 
   </TabItem>
 </Tabs>
@@ -447,7 +447,7 @@ clicks.Select().Limit(100) // wavehouse.DefaultLimit otherwise
 
 ### Time ranges
 
-Filter by a time window. Both bounds accept RFC3339 timestamps or relative durations (`1h`, `30m`, `7d`, `2w` — day and week suffixes expand to hours, so `7d` is `168h`).
+Filter by a time window. Both bounds accept RFC3339 timestamps or relative durations (`1h`, `30m`, `7d`, `2w`; day and week suffixes expand to hours, so `7d` is `168h`).
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -478,20 +478,20 @@ clicks.Select("page").TimeRange(
 
 ### Cache TTL
 
-Records a desired result-cache TTL on the builder. **Currently client-side state only** — the value is never sent to the server, which derives each result's cache TTL adaptively from query execution time. Wiring it through the wire format is tracked in [#280](https://github.com/Wave-RF/WaveHouse/issues/280).
+Records a desired result-cache TTL on the builder. **Currently client-side state only**: the value is never sent to the server, which derives each result's cache TTL adaptively from query execution time. Wiring it through the wire format is tracked in [#280](https://github.com/Wave-RF/WaveHouse/issues/280).
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
 
 ```ts
-clicks.select('page').count().cacheTTL(300) // not yet honored server-side — see #280
+clicks.select('page').count().cacheTTL(300) // not yet honored server-side, see #280
 ```
 
   </TabItem>
   <TabItem label="Go">
 
 ```go
-clicks.Select("page").Count("", "").CacheTTL(300) // not yet honored server-side — see #280
+clicks.Select("page").Count("", "").CacheTTL(300) // not yet honored server-side, see #280
 ```
 
   </TabItem>
@@ -512,14 +512,14 @@ if (hasMore && next) {
 }
 ```
 
-**Options** — `RequestOptions`:
+**Options** (`RequestOptions`):
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `signal` | `AbortSignal` | Cancel the request |
 | `limit` | `number` | Override builder limit for this fetch |
 
-A pipe's `.fetch()` takes the narrower `PipeRequestOptions` instead — see [Pipes](/sdk/pipes#executing-a-pipe).
+A pipe's `.fetch()` takes the narrower `PipeRequestOptions` instead. See [Pipes](/sdk/pipes#executing-a-pipe).
 
   </TabItem>
   <TabItem label="Go">
@@ -545,13 +545,13 @@ untyped, err := clicks.Select("page").OrderBy("page", "asc").Limit(50).FetchUnty
 
 ### Streaming from a builder
 
-A builder can also open a stream instead of fetching — its filters and column projection are then applied client-side to the live events, which is the only place that client-side filtering happens. See [Streaming → Client-side stream filtering](/sdk/streaming#client-side-stream-filtering).
+A builder can also open a stream instead of fetching: its filters and column projection are then applied client-side to the live events, which is the only place that client-side filtering happens. See [Streaming → Client-side stream filtering](/sdk/streaming#client-side-stream-filtering).
 
 ### Pagination
 
-When a limit is set and the result contains at least that many rows, the result reports that more rows are available. Cursor-based pagination walks an **order column** — it adds a filter on that column using the last row's value — so the `next` cursor is only attached when the query has an explicit order. With no order column the result still reports "has more" honestly, but there is no cursor to build.
+When a limit is set and the result contains at least that many rows, the result reports that more rows are available. Cursor-based pagination walks an **order column** (it adds a filter on that column using the last row's value), so the `next` cursor is only attached when the query has an explicit order. With no order column the result still reports "has more" honestly, but there is no cursor to build.
 
-The cursor filter is strict (`gt`/`lt` against the last row's value) and uses only that one order column, with no tie-breaker — so rows sharing the boundary value with the last row of a page are skipped. Paginate on a column that is unique per row (or made unique by a monotonic timestamp), or accept that ties at a page edge can be dropped. Both SDKs share this limitation ([#452](https://github.com/Wave-RF/WaveHouse/issues/452)).
+The cursor filter is strict (`gt`/`lt` against the last row's value) and uses only that one order column, with no tie-breaker, so rows sharing the boundary value with the last row of a page are skipped. Paginate on a column that is unique per row (or made unique by a monotonic timestamp), or accept that ties at a page edge can be dropped. Both SDKs share this limitation ([#452](https://github.com/Wave-RF/WaveHouse/issues/452)).
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -616,7 +616,7 @@ Execute a raw SQL query. `/v1/ops/query` is admin-only: the caller must resolve 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
 
-The SDK has no first-class option for the server's non-JWT [operator key](/api#authentication) — an operator can send its `X-Operator-Key` header via [`options.headers`](/sdk/typescript#custom-headers).
+The SDK has no first-class option for the server's non-JWT [operator key](/api#authentication): an operator can send its `X-Operator-Key` header via [`options.headers`](/sdk/setup/typescript#custom-headers).
 
 ```ts
 const { data, error } = await wh.sql('SELECT page, count() FROM clicks GROUP BY page LIMIT 10');
@@ -625,7 +625,7 @@ const { data, error } = await wh.sql('SELECT page, count() FROM clicks GROUP BY 
   </TabItem>
   <TabItem label="Go">
 
-An operator key authorizes `/v1/ops/*` as well; send it via [`ClientOptions.Headers`](/sdk/go#clientoptions). Use `map[string]any` for dynamic schemas.
+An operator key authorizes `/v1/ops/*` as well; send it via [`ClientOptions.Headers`](/sdk/setup/go#clientoptions). Use `map[string]any` for dynamic schemas.
 
 ```go
 rows, err := wavehouse.SQL[map[string]any](ctx, wh,
@@ -633,7 +633,7 @@ rows, err := wavehouse.SQL[map[string]any](ctx, wh,
 
 // Or decode into a struct that matches the projected columns/aliases.
 // NOTE: this path forwards ClickHouse's own JSON, which QUOTES 64-bit
-// integers (count() is UInt64) — decode them with the `,string` tag, or
+// integers (count() is UInt64), so decode them with the `,string` tag, or
 // use map[string]any. See Reference → Codegen CLI for the full story.
 type PageTotal struct {
     Page  string `json:"page"`
@@ -647,5 +647,5 @@ typed, err := wavehouse.SQL[PageTotal](ctx, wh,
 </Tabs>
 
 :::note[No parameter binding through the SDK]
-Positional `?` substitution is not supported, and neither SDK can forward ClickHouse-style named params (the `WHERE id = {id:UInt32}` + `param_id=42` query-string combo) — the proxy doesn't forward arbitrary query-string params and the raw-SQL entry point exposes no hook to add them. Inline literals into the SQL, or — for safe binding from user-supplied input — use the structured query builder.
+Positional `?` substitution is not supported, and neither SDK can forward ClickHouse-style named params (the `WHERE id = {id:UInt32}` + `param_id=42` query-string combo): the proxy doesn't forward arbitrary query-string params and the raw-SQL entry point exposes no hook to add them. Inline literals into the SQL, or — for safe binding from user-supplied input — use the structured query builder.
 :::

@@ -3,7 +3,7 @@ title: "Go SDK setup"
 description: "Installing the WaveHouse Go client, creating a client, typed rows via generics, and the (T, error) model."
 ---
 
-Setup and caveats for `github.com/Wave-RF/WaveHouse/clients/go`, the Go client: installation, client construction, typed rows, and the `(T, error)` model. Usage is documented per topic, both languages side by side, starting at [Queries](/sdk/queries) — writing TypeScript instead? [TypeScript setup](/sdk/typescript) is the mirror of this page.
+Setup and caveats for `github.com/Wave-RF/WaveHouse/clients/go`, the Go client: installation, client construction, typed rows, and the `(T, error)` model. Usage is documented per topic, both languages side by side, starting at [Queries](/sdk/queries). Writing TypeScript instead? [TypeScript setup](/sdk/setup/typescript) is the mirror of this page.
 
 ## Installation
 
@@ -69,13 +69,13 @@ wh := wavehouse.NewClient(wavehouse.Config{
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `BaseURL` | `string` | — | Required WaveHouse server URL, optionally with a path prefix. A trailing `/` is trimmed and every request path is appended on both transports, so a server under `https://app.example.com/wavehouse` works as-is. |
+| `BaseURL` | `string` | none | Required WaveHouse server URL, optionally with a path prefix. A trailing `/` is trimmed and every request path is appended on both transports, so a server under `https://app.example.com/wavehouse` works as-is. |
 | `Auth` | `func(context.Context) (string, error)` | `nil` | Token provider called before each request. `nil` means unauthenticated access. |
 | `Options` | `*ClientOptions` | `nil` | Transport tuning (see below). |
 | `HTTPClient` | `*http.Client` | fresh `&http.Client{}` | Override for custom TLS, proxies, or test transports. |
 
 :::caution[Timeouts: use contexts, not `http.Client.Timeout`]
-The default client sets no `Timeout`; use a `context.Context` deadline to prevent hangs. Leave `Timeout` unset on a custom `HTTPClient` too — it would kill long-lived SSE streams and force reconnect loops. Use `Transport`-level dial/TLS/response-header timeouts instead.
+The default client sets no `Timeout`; use a `context.Context` deadline to prevent hangs. Leave `Timeout` unset on a custom `HTTPClient` too: it would kill long-lived SSE streams and force reconnect loops. Use `Transport`-level dial/TLS/response-header timeouts instead.
 :::
 
 ### `ClientOptions`
@@ -83,34 +83,34 @@ The default client sets no `Timeout`; use a `context.Context` deadline to preven
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `MaxRetries` | `int` | `2` | Retry attempts for retryable errors (5xx, 429, network failures). |
-| `Headers` | `map[string]string` | `nil` | Sent on every request the client makes — REST calls and SSE streams alike. |
+| `Headers` | `map[string]string` | `nil` | Sent on every request the client makes: REST calls and SSE streams alike. |
 
-`*Client` is safe for concurrent use — state is immutable after `NewClient` and builder chains copy — provided your `Auth` function is concurrency-safe.
+`*Client` is safe for concurrent use (state is immutable after `NewClient` and builder chains copy), provided your `Auth` function is concurrency-safe.
 
 :::caution[`Options` opts you out of the default, not just in]
-The 2-retry default applies only when `Config.Options` is `nil`. Passing `&wavehouse.ClientOptions{}` leaves `MaxRetries` at Go's zero value (`0`), which disables retries — set it explicitly.
+The 2-retry default applies only when `Config.Options` is `nil`. Passing `&wavehouse.ClientOptions{}` leaves `MaxRetries` at Go's zero value (`0`), which disables retries: set it explicitly.
 :::
 
-`Headers` is the Go analog of the TypeScript SDK's [`options.headers`](/sdk/typescript#custom-headers) — a gateway credential, a tenant selector, or tracing metadata with no first-class option. It is also how an operator sends the server's non-JWT [operator key](/api#authentication):
+`Headers` is the Go analog of the TypeScript SDK's [`options.headers`](/sdk/setup/typescript#custom-headers): a gateway credential, a tenant selector, or tracing metadata with no first-class option. It is also how an operator sends the server's non-JWT [operator key](/api#authentication):
 
 ```go
 wh := wavehouse.NewClient(wavehouse.Config{
     BaseURL: "http://localhost:8080",
     Options: &wavehouse.ClientOptions{
-        MaxRetries: 2, // Options opts out of the default — set it explicitly.
+        MaxRetries: 2, // Options opts out of the default: set it explicitly.
         Headers:    map[string]string{"X-Operator-Key": os.Getenv("WH_OPERATOR_KEY")},
     },
 })
 ```
 
-The SDK's own headers win: `Authorization`, `Accept`, `Content-Type`, and the stream's `Cache-Control` are set after yours and overwrite any collision, matched case-insensitively and replacing rather than appending. The map is copied at `NewClient`, so later mutation changes nothing. There is no Go field for `options.fetch` or `options.fetchOptions` because `Config.HTTPClient` covers both — supply your own `*http.Client`, or a custom `http.RoundTripper` on its `Transport`.
+The SDK's own headers win: `Authorization`, `Accept`, `Content-Type`, and the stream's `Cache-Control` are set after yours and overwrite any collision, matched case-insensitively and replacing rather than appending. The map is copied at `NewClient`, so later mutation changes nothing. There is no Go field for `options.fetch` or `options.fetchOptions` because `Config.HTTPClient` covers both: supply your own `*http.Client`, or a custom `http.RoundTripper` on its `Transport`.
 
 :::note[How the token is transmitted]
-The SDK sends `Authorization: Bearer <token>` on every request, SSE streams included, and never uses a `?token=` query fallback. The TypeScript SDK streams over `fetch` rather than `EventSource` for exactly this reason, so header auth is shared behavior rather than a Go-only property (see its [equivalent note](/sdk/typescript#creating-a-client)). The token is re-read from `Auth` on every reconnect attempt, so a rotating token keeps a long-lived stream alive.
+The SDK sends `Authorization: Bearer <token>` on every request, SSE streams included, and never uses a `?token=` query fallback. The TypeScript SDK streams over `fetch` rather than `EventSource` for exactly this reason, so header auth is shared behavior rather than a Go-only property (see its [equivalent note](/sdk/setup/typescript#creating-a-client)). The token is re-read from `Auth` on every reconnect attempt, so a rotating token keeps a long-lived stream alive.
 :::
 
 :::caution[A credentialed stream will not follow a redirect]
-When the stream request carries a credential — an `Auth` token or a `ClientOptions.Headers` entry — the SDK refuses any 3xx and fails the stream with a terminal `SSE_REDIRECT`. Following it would either strip `Authorization` on a cross-host hop and silently downgrade the stream to `default_role`, or forward your configured headers to wherever the redirect points. Uncredentialed streams follow redirects normally.
+When the stream request carries a credential (an `Auth` token or a `ClientOptions.Headers` entry), the SDK refuses any 3xx and fails the stream with a terminal `SSE_REDIRECT`. Following it would either strip `Authorization` on a cross-host hop and silently downgrade the stream to `default_role`, or forward your configured headers to wherever the redirect points. Uncredentialed streams follow redirects normally.
 :::
 
 Use `https://` for any authenticated server outside a trusted network. The SDK allows `http://` for local development and private networks, but bearer tokens over plaintext are insecure.
@@ -167,10 +167,10 @@ Both SDKs share a wire format and feature set, verified in CI against a shared `
 
 ## Where to go next
 
-The topic pages cover both SDKs, tabbed by language — the tab you pick here follows you across all of them.
+The topic pages cover both SDKs, tabbed by language. The tab you pick here follows you across all of them.
 
-- [Queries](/sdk/queries) — Tables, chainable query builder, inserts, pagination, and raw SQL.
-- [Streaming & Live Queries](/sdk/streaming) — SSE streams, client-side filtering, and backfill-then-live queries.
-- [Pipes](/sdk/pipes) — Execute and manage named query pipes.
-- [Admin & System](/sdk/admin) — Schema introspection, access-control policy, DLQ stats, and health checks.
-- [Reference & CLI](/sdk/reference) — Error codes, cancellation, the full API tree, and the codegen CLIs.
+- [Queries](/sdk/queries): Tables, chainable query builder, inserts, pagination, and raw SQL.
+- [Streaming & Live Queries](/sdk/streaming): SSE streams, client-side filtering, and backfill-then-live queries.
+- [Pipes](/sdk/pipes): Execute and manage named query pipes.
+- [Admin & System](/sdk/admin): Schema introspection, access-control policy, DLQ stats, and health checks.
+- [Reference & CLI](/sdk/reference): Error codes, cancellation, the full API tree, and the codegen CLIs.

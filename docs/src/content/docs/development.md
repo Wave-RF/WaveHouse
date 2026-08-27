@@ -194,7 +194,7 @@ WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml make dev
 
 See the [SDK guide](/sdk) for the client API and examples in both languages.
 
-Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { createClient } from '@wavehouse/sdk'` and point `baseURL: 'http://localhost:8080'`; CORS is permissive so cross-origin browser requests just work. Go services do the same with `wavehouse.NewClient(wavehouse.Config{BaseURL: "http://localhost:8080"})` — see [Go setup](/sdk/go).
+Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { createClient } from '@wavehouse/sdk'` and point `baseURL: 'http://localhost:8080'`; CORS is permissive so cross-origin browser requests just work. Go services do the same with `wavehouse.NewClient(wavehouse.Config{BaseURL: "http://localhost:8080"})` — see [Go setup](/sdk/setup/go).
 
 ### Validating tokens
 

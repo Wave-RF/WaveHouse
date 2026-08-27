@@ -5,7 +5,7 @@ description: "Installing @wavehouse/sdk, creating a client, custom headers and f
 
 import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components";
 
-Setup and caveats for `@wavehouse/sdk`, the TypeScript client: installation, runtimes, client construction, and the `Result<T>` error model. Usage is documented per topic, both languages side by side, starting at [Queries](/sdk/queries) — writing Go instead? [Go setup](/sdk/go) is the mirror of this page.
+Setup and caveats for `@wavehouse/sdk`, the TypeScript client: installation, runtimes, client construction, and the `Result<T>` error model. Usage is documented per topic, both languages side by side, starting at [Queries](/sdk/queries) — writing Go instead? [Go setup](/sdk/setup/go) is the mirror of this page.
 
 `@wavehouse/sdk` has exactly one runtime dependency — `eventsource-parser` (~1.4 KB gzipped, itself dependency-free), which frames the SSE stream.
 
@@ -562,6 +562,6 @@ The topic pages cover both SDKs, tabbed by language — the tab you pick here fo
   <LinkCard
     title="Go SDK setup"
     description="The same surface in Go — context.Context, generics for typed rows, and a codegen CLI."
-    href="/sdk/go"
+    href="/sdk/setup/go"
   />
 </CardGrid>
