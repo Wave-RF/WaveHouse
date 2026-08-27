@@ -9,9 +9,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/format"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -87,16 +90,54 @@ type tableSchema struct {
 	Columns []column `json:"columns"`
 }
 
+// requireSecureAuthURL refuses to put a bearer token on the wire in cleartext.
+// Loopback is exempt: it is the default target and never leaves the machine.
+func requireSecureAuthURL(u *url.URL) error {
+	if u.Scheme == "https" || isLoopback(u.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf("refusing to send credentials to %s over %s: use an https:// URL, or drop --auth/WAVEHOUSE_AUTH", u.Host, u.Scheme)
+}
+
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// refuseCredentialedRedirect stops a redirect from carrying the bearer token
+// somewhere it wasn't meant for. net/http drops Authorization only when the
+// host changes, ignoring scheme and port, so its default policy would hand the
+// token to a plaintext hop on the same host. The SDK takes the same stance on
+// streams (SSE_REDIRECT).
+func refuseCredentialedRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	prev := via[len(via)-1].URL
+	if req.URL.Scheme != prev.Scheme || req.URL.Host != prev.Host {
+		return fmt.Errorf("refusing redirect from %s://%s to %s://%s while sending credentials",
+			prev.Scheme, prev.Host, req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
+
 func fetchSchemas(ctx context.Context, baseURL, auth string) (map[string]tableSchema, error) {
 	url := strings.TrimRight(baseURL, "/") + "/v1/ops/schema"
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build schema request for %s: %w", url, err)
 	}
-	if auth != "" {
-		req.Header.Set("Authorization", "Bearer "+auth)
-	}
 	client := &http.Client{Timeout: 30 * time.Second}
+	if auth != "" {
+		if err := requireSecureAuthURL(req.URL); err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+auth)
+		client.CheckRedirect = refuseCredentialedRedirect
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch schema from %s: %w", url, err)
@@ -202,11 +243,24 @@ func chTypeToGo(chType string) string {
 		if comma != -1 {
 			k := chTypeToGo(strings.TrimSpace(inner[:comma]))
 			v := chTypeToGo(strings.TrimSpace(inner[comma+1:]))
+			// ClickHouse restricts Map keys to comparable types, so this only
+			// fires on something a real server shouldn't send — but `map[[]T]V`
+			// parses fine and then fails to compile, and format.Source only
+			// parses. Fall back rather than emit source that can't build.
+			if !comparableGoType(k) {
+				return "any"
+			}
 			return "map[" + k + "]" + v
 		}
 		return "map[string]any"
 	}
 	return "any"
+}
+
+// comparableGoType reports whether t is usable as a Go map key. chTypeToGo
+// only ever returns primitives, slices ("[]T", json.RawMessage), or maps.
+func comparableGoType(t string) bool {
+	return !strings.HasPrefix(t, "[]") && !strings.HasPrefix(t, "map[") && t != "json.RawMessage"
 }
 
 func findTopLevelComma(s string) int {
@@ -260,8 +314,33 @@ func sortedKeys(m map[string]tableSchema) []string {
 	return names
 }
 
+// validGoIdent reports whether s is a legal Go identifier. Schema names reach
+// the generated source as identifiers via pascalCase, which only splits on
+// space/_/-/. — tabs, newlines, braces and backticks survive it verbatim. Since
+// identifiers are written unquoted and format.Source only *parses*, a crafted
+// column name can otherwise close the struct and append arbitrary top-level
+// declarations to a file the caller then compiles.
+func validGoIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_' || unicode.IsLetter(r):
+		case i > 0 && unicode.IsDigit(r):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func generate(schemas map[string]tableSchema, pkg string) (string, error) {
 	var sb strings.Builder
+
+	if !validGoIdent(pkg) {
+		return "", fmt.Errorf("--package %q is not a valid Go package name", pkg)
+	}
 
 	names := sortedKeys(schemas)
 
@@ -279,12 +358,16 @@ func generate(schemas map[string]tableSchema, pkg string) (string, error) {
 		sb.WriteString("import \"encoding/json\"\n\n")
 	}
 
-	// pascalCase is not injective and format.Source only parses, so a
-	// collision would otherwise be written out as a non-compiling file.
+	// pascalCase is neither injective nor escaping, and format.Source only
+	// parses: an unchecked name is a non-compiling file at best and injected
+	// source at worst.
 	seenTypes := make(map[string]string, len(names))
 	for _, name := range names {
 		schema := schemas[name]
 		typeName := pascalCase(name) + "Row"
+		if !validGoIdent(typeName) {
+			return "", fmt.Errorf("table %q does not map to a usable Go type name (got %q)", name, typeName)
+		}
 		if prev, dup := seenTypes[typeName]; dup {
 			return "", fmt.Errorf("tables %q and %q both map to type %q; rename one or generate separately", prev, name, typeName)
 		}
@@ -294,6 +377,9 @@ func generate(schemas map[string]tableSchema, pkg string) (string, error) {
 		for _, col := range schema.Columns {
 			goType := chTypeToGo(col.Type)
 			fieldName := pascalCase(col.Name)
+			if !validGoIdent(fieldName) {
+				return "", fmt.Errorf("table %q: column %q does not map to a usable Go field name (got %q)", name, col.Name, fieldName)
+			}
 			if prev, dup := seenFields[fieldName]; dup {
 				return "", fmt.Errorf("table %q: columns %q and %q both map to field %q", name, prev, col.Name, fieldName)
 			}

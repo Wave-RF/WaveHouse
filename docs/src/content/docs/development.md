@@ -475,7 +475,7 @@ WaveHouse/
 │   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
 │   └── testutil/           # Shared test helpers and mocks
 ├── clients/                # Official SDKs
-│   ├── ts/                 # TypeScript SDK (@wavehouse/sdk)
+│   ├── ts/                 # TypeScript SDK (@wavehouse/sdk, pnpm workspace)
 │   └── go/                 # Go SDK — a NESTED Go module (own go.mod, invisible
 │                           #   to root `go list`; hence the test-sdk-go* targets)
 ├── tests/                  # Integration & E2E tests
@@ -484,8 +484,6 @@ WaveHouse/
 │   └── e2e/                # E2E suite (orchestrator + ClickHouse testcontainer)
 │       ├── fixtures/       # ClickHouse DDL + config/policy fixtures
 │       └── sdk/            # E2E specs driven through the TypeScript SDK (Vitest)
-├── clients/                # Client SDKs
-│   └── ts/                 # TypeScript SDK (@wavehouse/sdk, pnpm workspace)
 ├── deployments/
 │   ├── compose/            # Docker Compose files (standalone.yaml, dependencies.yaml)
 │   ├── Dockerfile          # Runtime image

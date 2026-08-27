@@ -318,6 +318,8 @@ go run ./cmd/wavehouse-codegen --url http://localhost:8080 --out ./db_types.go
 
 Prefer `WAVEHOUSE_AUTH` over `--auth <jwt>` to keep tokens out of shell history and process listings.
 
+When a token is supplied, the URL must be `https://` or a loopback host: the CLI refuses to send credentials in cleartext, and refuses any redirect that changes scheme, host, or port rather than let `net/http` carry the token along (it drops `Authorization` only on a host change, ignoring scheme and port). Unauthenticated runs are unrestricted.
+
 **Options:**
 
 | Flag | Description | Default |

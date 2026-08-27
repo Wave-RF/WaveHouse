@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"reflect"
@@ -400,4 +401,166 @@ func TestSortedKeys(t *testing.T) {
 	if want := []string{"acks", "clicks", "views"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("sortedKeys() = %v, want %v", got, want)
 	}
+}
+
+// injectedColumnName is the payload that reached valid Go before identifiers
+// were validated: pascalCase splits on space/_/-/. only, so tabs and newlines
+// pass through and keywords inside a part keep their lowercase. It closed the
+// struct and appended a function that format.Source accepted without error.
+const injectedColumnName = "x string\n}\n\nfunc\tPwn()\tstring\t{\n\treturn\t\"owned\"\n}\n\ntype\tT2Row\tstruct\t{\n\tY"
+
+func TestGenerate_RejectsInjectedNames(t *testing.T) {
+	tests := []struct {
+		name    string
+		schemas map[string]tableSchema
+		wantErr string
+	}{
+		{
+			name:    "column name breaks out of the struct",
+			schemas: map[string]tableSchema{"t": {Name: "t", Columns: []column{{Name: injectedColumnName, Type: "String"}}}},
+			wantErr: "usable Go field name",
+		},
+		{
+			name:    "backtick in a column name would close the struct tag",
+			schemas: map[string]tableSchema{"t": {Name: "t", Columns: []column{{Name: "a`b", Type: "String"}}}},
+			wantErr: "usable Go field name",
+		},
+		{
+			name:    "table name breaks out of the declaration",
+			schemas: map[string]tableSchema{injectedColumnName: {Name: injectedColumnName, Columns: []column{{Name: "a", Type: "String"}}}},
+			wantErr: "usable Go type name",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := generate(tt.schemas, "main")
+			if err == nil {
+				t.Fatalf("generate() succeeded; output was:\n%s", out)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestGenerate_RejectsInvalidPackageName(t *testing.T) {
+	_, err := generate(map[string]tableSchema{}, "main\n\nfunc\tPwn()\t{}")
+	if err == nil || !strings.Contains(err.Error(), "valid Go package name") {
+		t.Fatalf("want invalid-package error, got %v", err)
+	}
+}
+
+func TestValidGoIdent(t *testing.T) {
+	tests := map[string]bool{
+		"Page": true, "X2fa": true, "_x": true, "A1_b2": true,
+		"": false, "2fa": false, "A`b": false, "A B": false, "A\tB": false, "A\nB": false, "A{}": false,
+	}
+	for in, want := range tests {
+		if got := validGoIdent(in); got != want {
+			t.Errorf("validGoIdent(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// Go map keys must be comparable. ClickHouse won't emit these key types, but
+// format.Source only parses, so an unguarded `map[[]T]V` would be written out
+// and then fail to compile in the caller's build.
+func TestChTypeToGo_NonComparableMapKey(t *testing.T) {
+	tests := map[string]string{
+		"Map(Array(Map(Float64, String)), String)": "any",
+		"Map(Array(UInt8), String)":                "any",
+		"Map(Map(String, String), String)":         "any",
+		// Comparable keys are unaffected.
+		"Map(String, String)":               "map[string]string",
+		"Map(LowCardinality(String), Int8)": "map[string]int8",
+	}
+	for in, want := range tests {
+		if got := chTypeToGo(in); got != want {
+			t.Errorf("chTypeToGo(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRequireSecureAuthURL(t *testing.T) {
+	tests := []struct {
+		raw     string
+		wantErr bool
+	}{
+		{raw: "https://wh.example.com/v1/ops/schema"},
+		{raw: "http://localhost:8080/v1/ops/schema"},
+		{raw: "http://127.0.0.1:8080/v1/ops/schema"},
+		{raw: "http://[::1]:8080/v1/ops/schema"},
+		{raw: "http://wh.example.com/v1/ops/schema", wantErr: true},
+		{raw: "http://10.0.0.5:8080/v1/ops/schema", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			u, err := url.Parse(tt.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := requireSecureAuthURL(u); (err != nil) != tt.wantErr {
+				t.Errorf("requireSecureAuthURL(%q) error = %v, wantErr %v", tt.raw, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestFetchSchemas_RefusesCleartextCredentials(t *testing.T) {
+	// Fails before any connection is attempted, so the unroutable host is safe.
+	_, err := fetchSchemas(t.Context(), "http://wh.example.com", "tok-123")
+	if err == nil || !strings.Contains(err.Error(), "refusing to send credentials") {
+		t.Fatalf("want cleartext-credential refusal, got %v", err)
+	}
+	// Without credentials there is nothing to protect, so the scheme check
+	// must not fire; this one fails at connect instead.
+	if _, err := fetchSchemas(t.Context(), "http://wh.invalid", ""); err != nil &&
+		strings.Contains(err.Error(), "refusing to send credentials") {
+		t.Errorf("unauthenticated request was refused for its scheme: %v", err)
+	}
+}
+
+func TestFetchSchemas_RedirectsWithCredentials(t *testing.T) {
+	const body = `{"clicks":{"name":"clicks","columns":[{"name":"page","type":"String"}]}}`
+
+	t.Run("cross-origin redirect is refused", func(t *testing.T) {
+		// A second server means a different port, so this also covers the
+		// port change that net/http's own policy ignores.
+		dst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, body)
+		}))
+		defer dst.Close()
+		src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, dst.URL+"/v1/ops/schema", http.StatusFound)
+		}))
+		defer src.Close()
+
+		if _, err := fetchSchemas(t.Context(), src.URL, "tok-123"); err == nil ||
+			!strings.Contains(err.Error(), "refusing redirect") {
+			t.Fatalf("want redirect refusal, got %v", err)
+		}
+	})
+
+	t.Run("same-origin redirect is followed", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/moved" {
+				http.Redirect(w, r, "/moved", http.StatusFound)
+				return
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer tok-123" {
+				t.Errorf("Authorization after same-origin redirect = %q", got)
+			}
+			_, _ = io.WriteString(w, body)
+		}))
+		defer srv.Close()
+
+		got, err := fetchSchemas(t.Context(), srv.URL, "tok-123")
+		if err != nil {
+			t.Fatalf("fetchSchemas: %v", err)
+		}
+		if _, ok := got["clicks"]; !ok {
+			t.Errorf("schemas = %v, want a clicks entry", got)
+		}
+	})
 }
