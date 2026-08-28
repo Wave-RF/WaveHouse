@@ -129,7 +129,7 @@ func TestConformance_WireFormat(t *testing.T) {
 			c := NewClient(Config{
 				BaseURL:    srv.URL,
 				HTTPClient: srv.Client(),
-				Options:    &ClientOptions{MaxRetries: 0},
+				Options:    &ClientOptions{MaxRetries: Ptr(0)},
 			})
 			ctx := context.Background()
 

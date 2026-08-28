@@ -29,7 +29,7 @@ func e2eClient(t *testing.T) *Client {
 
 	cfg := Config{
 		BaseURL: base,
-		Options: &ClientOptions{MaxRetries: 1},
+		Options: &ClientOptions{MaxRetries: Ptr(1)},
 	}
 	if tok := os.Getenv("WAVEHOUSE_AUTH"); tok != "" {
 		cfg.Auth = StaticToken(tok)

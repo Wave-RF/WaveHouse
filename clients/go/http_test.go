@@ -44,7 +44,7 @@ func queryTestCtx(t *testing.T, handler http.Handler) *Client {
 	return NewClient(Config{
 		BaseURL:    srv.URL,
 		HTTPClient: srv.Client(),
-		Options:    &ClientOptions{MaxRetries: 0},
+		Options:    &ClientOptions{MaxRetries: Ptr(0)},
 	})
 }
 
@@ -463,5 +463,66 @@ func TestConfiguredHeadersAreCopied(t *testing.T) {
 	}
 	if v := (<-reqs).header.Get("X-Tenant-Id"); v != "acme" {
 		t.Fatalf("want the value captured at construction, got %q", v)
+	}
+}
+
+// TestRESTRedirectsWithCredentials pins the REST half of the invariant that
+// TestStream_TerminalConnectFailures pins for SSE: net/http strips only its own
+// four sensitive headers across hosts and forwards configured ones verbatim, so
+// following a 3xx while credentialed would hand X-Operator-Key (or a bearer
+// token, on a same-host hop) to whatever Location names.
+func TestRESTRedirectsWithCredentials(t *testing.T) {
+	// The redirect target records anything that reaches it. Nothing should.
+	var leaked http.Header
+	dst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked = r.Header.Clone()
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	defer dst.Close()
+
+	redirector := func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, dst.URL+r.URL.Path, http.StatusFound)
+	}
+
+	tests := []struct {
+		name    string
+		opts    *ClientOptions
+		auth    func(context.Context) (string, error)
+		wantErr bool
+	}{
+		{name: "configured header", opts: &ClientOptions{Headers: map[string]string{"X-Operator-Key": "secret"}}, wantErr: true},
+		{name: "bearer token", auth: StaticToken("secret"), wantErr: true},
+		// Nothing to protect, so the ordinary redirect-following stands.
+		{name: "no credential follows the redirect", wantErr: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			leaked = nil
+			src := httptest.NewServer(http.HandlerFunc(redirector))
+			defer src.Close()
+
+			client := NewClient(Config{BaseURL: src.URL, Auth: tt.auth, Options: tt.opts, HTTPClient: src.Client()})
+			_, err := client.Schema.List(context.Background())
+
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("uncredentialed request should follow the redirect, got %v", err)
+				}
+				return
+			}
+			var apiErr *Error
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("want a *wavehouse.Error, got %v", err)
+			}
+			if apiErr.Code != "REDIRECT" {
+				t.Errorf("want code REDIRECT, got %q (%v)", apiErr.Code, apiErr)
+			}
+			if apiErr.Retryable {
+				t.Error("a refused redirect is terminal, not retryable")
+			}
+			if leaked != nil {
+				t.Errorf("credentialed request reached the redirect target: %v", leaked)
+			}
+		})
 	}
 }

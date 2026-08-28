@@ -27,9 +27,30 @@ func TestNewClient(t *testing.T) {
 		},
 		{
 			name:           "MaxRetries is honored",
-			cfg:            Config{BaseURL: "http://localhost:8080", Options: &ClientOptions{MaxRetries: 5}},
+			cfg:            Config{BaseURL: "http://localhost:8080", Options: &ClientOptions{MaxRetries: Ptr(5)}},
 			wantBaseURL:    "http://localhost:8080",
 			wantMaxRetries: 5,
+		},
+		{
+			// The regression a plain int caused: options set for an unrelated
+			// reason silently disabled retries, because 0 is both "unset" and
+			// "none". Headers is the field the docs push operators toward.
+			name:           "options set only for Headers keep the default",
+			cfg:            Config{BaseURL: "http://localhost:8080", Options: &ClientOptions{Headers: map[string]string{"X-Operator-Key": "k"}}},
+			wantBaseURL:    "http://localhost:8080",
+			wantMaxRetries: 2,
+		},
+		{
+			name:           "Ptr(0) disables retries",
+			cfg:            Config{BaseURL: "http://localhost:8080", Options: &ClientOptions{MaxRetries: Ptr(0)}},
+			wantBaseURL:    "http://localhost:8080",
+			wantMaxRetries: 0,
+		},
+		{
+			name:           "a negative MaxRetries clamps to 0",
+			cfg:            Config{BaseURL: "http://localhost:8080", Options: &ClientOptions{MaxRetries: Ptr(-3)}},
+			wantBaseURL:    "http://localhost:8080",
+			wantMaxRetries: 0,
 		},
 	}
 	for _, tt := range tests {

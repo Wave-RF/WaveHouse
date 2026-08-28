@@ -12,7 +12,7 @@ import (
 // [errors.As] to extract it from wrapped errors.
 type Error struct {
 	Status    int            `json:"status"` // 0 for network/abort errors
-	Code      string         `json:"code"`   // e.g. "HTTP_400", "NETWORK_ERROR", "ABORTED"
+	Code      string         `json:"code"`   // e.g. "HTTP_400", "NETWORK_ERROR", "ABORTED", "REDIRECT"
 	Message   string         `json:"message"`
 	Details   map[string]any `json:"details,omitempty"` // full parsed error body, when present
 	Retryable bool           `json:"retryable"`

@@ -114,7 +114,7 @@ result, err := wh.Policy.Validate(ctx, policyDraft)
 // result.Valid == true, or err wraps the validation failure details
 ```
 
-`PolicyFilter` fields (`Eq`, `Neq`, `Gt`, `Lt`, `In`) are `*string`, so an empty string is distinguishable from an absent operator, hence the `tenantFilter` variable above, or a `func strPtr(s string) *string { return &s }` helper.
+`PolicyFilter` fields (`Eq`, `Neq`, `Gt`, `Lt`, `In`) are `*string`, so an empty string is distinguishable from an absent operator, hence the `tenantFilter` variable above, or `wavehouse.Ptr("...")`.
 
   </TabItem>
 </Tabs>

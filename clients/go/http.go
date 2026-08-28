@@ -81,6 +81,21 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 		}
 	}
 
+	// Never follow a redirect while carrying a credential: net/http drops
+	// Authorization across hosts but forwards custom headers verbatim, so a 302
+	// would hand a configured X-Operator-Key to whatever Location names. The
+	// SSE path takes the same stance (SSE_REDIRECT in stream.go). Copied so a
+	// caller-supplied client keeps its own CheckRedirect.
+	client := hctx.httpClient
+	credentialed := authHeader != "" || len(hctx.headers) > 0
+	if credentialed {
+		c := *client
+		c.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		client = &c
+	}
+
 	var lastErr error
 	maxAttempts := hctx.maxRetries + 1
 
@@ -103,7 +118,7 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 			req.Header.Set("Authorization", authHeader)
 		}
 
-		res, err := hctx.httpClient.Do(req)
+		res, err := client.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
 				return errAborted
@@ -139,6 +154,19 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 				}
 			}
 			return nil
+		}
+
+		if credentialed && res.StatusCode >= 300 && res.StatusCode < 400 {
+			loc := res.Header.Get("Location")
+			_ = res.Body.Close()
+			return &Error{
+				Status: res.StatusCode,
+				Code:   "REDIRECT",
+				Message: fmt.Sprintf(
+					"request redirected to %q and the SDK did not follow it; redirects are refused while the request carries a credential",
+					loc),
+				Retryable: false,
+			}
 		}
 
 		apiErr := parseErrorResponse(res)

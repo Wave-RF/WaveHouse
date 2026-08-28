@@ -82,14 +82,10 @@ The default client sets no `Timeout`; use a `context.Context` deadline to preven
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `MaxRetries` | `int` | `2` | Retry attempts for retryable errors (5xx, 429, network failures). |
+| `MaxRetries` | `*int` | `2` | Retry attempts for retryable errors (5xx, 429, network failures). `nil` takes the default; `wavehouse.Ptr(0)` turns retries off. A negative value is treated as `0`. |
 | `Headers` | `map[string]string` | `nil` | Sent on every request the client makes: REST calls and SSE streams alike. |
 
 `*Client` is safe for concurrent use (state is immutable after `NewClient` and builder chains copy), provided your `Auth` function is concurrency-safe.
-
-:::caution[`Options` opts you out of the default, not just in]
-The 2-retry default applies only when `Config.Options` is `nil`. Passing `&wavehouse.ClientOptions{}` leaves `MaxRetries` at Go's zero value (`0`), which disables retries: set it explicitly.
-:::
 
 `Headers` is the Go analog of the TypeScript SDK's [`options.headers`](/sdk/setup/typescript#custom-headers): a gateway credential, a tenant selector, or tracing metadata with no first-class option. It is also how an operator sends the server's non-JWT [operator key](/api#authentication):
 
@@ -97,13 +93,12 @@ The 2-retry default applies only when `Config.Options` is `nil`. Passing `&waveh
 wh := wavehouse.NewClient(wavehouse.Config{
     BaseURL: "http://localhost:8080",
     Options: &wavehouse.ClientOptions{
-        MaxRetries: 2, // Options opts out of the default: set it explicitly.
-        Headers:    map[string]string{"X-Operator-Key": os.Getenv("WH_OPERATOR_KEY")},
+        Headers: map[string]string{"X-Operator-Key": os.Getenv("WH_OPERATOR_KEY")},
     },
 })
 ```
 
-The SDK's own headers win: `Authorization`, `Accept`, `Content-Type`, and the stream's `Cache-Control` are set after yours and overwrite any collision, matched case-insensitively and replacing rather than appending. The map is copied at `NewClient`, so later mutation changes nothing. There is no Go field for `options.fetch` or `options.fetchOptions` because `Config.HTTPClient` covers both: supply your own `*http.Client`, or a custom `http.RoundTripper` on its `Transport`.
+The SDK's own headers win: `Authorization`, `Accept`, `Content-Type`, and the stream's `Cache-Control` are set after yours and overwrite any collision, matched case-insensitively and replacing rather than appending. The map is copied at `NewClient`, so later mutation changes nothing. Because a configured header can carry a credential, the SDK refuses to follow a redirect on any request that carries one, on REST calls and streams alike: `net/http` strips only its own four sensitive headers across hosts and forwards yours verbatim. A refused REST redirect surfaces as a non-retryable `REDIRECT`; a stream reports `SSE_REDIRECT`. There is no Go field for `options.fetch` or `options.fetchOptions` because `Config.HTTPClient` covers both: supply your own `*http.Client`, or a custom `http.RoundTripper` on its `Transport`.
 
 :::note[How the token is transmitted]
 The SDK sends `Authorization: Bearer <token>` on every request, SSE streams included, and never uses a `?token=` query fallback. The TypeScript SDK streams over `fetch` rather than `EventSource` for exactly this reason, so header auth is shared behavior rather than a Go-only property (see its [equivalent note](/sdk/setup/typescript#creating-a-client)). The token is re-read from `Auth` on every reconnect attempt, so a rotating token keeps a long-lived stream alive.

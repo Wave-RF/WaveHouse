@@ -19,6 +19,9 @@ import (
 	"strings"
 )
 
+// defaultMaxRetries is used when [ClientOptions.MaxRetries] is nil.
+const defaultMaxRetries = 2
+
 // Config configures a [Client].
 type Config struct {
 	// BaseURL of the WaveHouse server (e.g. "http://localhost:8080").
@@ -38,14 +41,22 @@ type Config struct {
 // ClientOptions tunes transport behavior.
 type ClientOptions struct {
 	// MaxRetries is the maximum number of retry attempts for retryable errors.
-	// Total attempts = MaxRetries + 1. Default: 2.
-	MaxRetries int
+	// Total attempts = MaxRetries + 1. nil means unset and uses the default of
+	// 2; use [Ptr] to set it, including Ptr(0) to turn retries off. A pointer
+	// is required because a plain int could not tell an explicit 0 from a
+	// caller who set only Headers. Negative values are treated as 0.
+	MaxRetries *int
 
 	// Headers are sent on every REST call and SSE stream. They are applied
 	// before the SDK's own headers, so Authorization, Accept, Content-Type and
 	// Cache-Control win any collision; names are canonicalized by net/http.
 	Headers map[string]string
 }
+
+// Ptr returns a pointer to v, for the optional fields where nil means "unset"
+// and a pointer to the zero value is a deliberate choice — [ClientOptions.MaxRetries]
+// and the [PolicyFilter] operators. wavehouse.Ptr(0) disables retries.
+func Ptr[T any](v T) *T { return &v }
 
 // StaticToken returns an Auth function that always returns the same token.
 func StaticToken(token string) func(context.Context) (string, error) {
@@ -65,9 +76,9 @@ type Client struct {
 
 // NewClient creates a new WaveHouse client.
 func NewClient(cfg Config) *Client {
-	maxRetries := 2
-	if cfg.Options != nil && cfg.Options.MaxRetries >= 0 {
-		maxRetries = cfg.Options.MaxRetries
+	maxRetries := defaultMaxRetries
+	if cfg.Options != nil && cfg.Options.MaxRetries != nil {
+		maxRetries = max(*cfg.Options.MaxRetries, 0)
 	}
 
 	// Copy so a later mutation of the caller's map can't reach into requests.

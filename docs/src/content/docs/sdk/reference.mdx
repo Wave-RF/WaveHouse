@@ -118,6 +118,7 @@ The SDK never panics on API or network failures, mirroring the TypeScript SDK's 
 | 503 | `HTTP_503` | Yes | Service unavailable (auto-retries, honoring `Retry-After`, capped at 30s) |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `context.Context` |
+| *3xx* | `REDIRECT` | No | The request carried a credential and was redirected; the SDK refused to follow it |
 | 0 | `SSE_AUTH_ERROR` | Yes | The `Auth` provider returned an error for this attempt; the stream retries, so a token endpoint having a bad minute doesn't tear down a healthy stream |
 | 0 | `SSE_NETWORK_ERROR` | Yes | Transport failure opening or holding the stream connection |
 | 0 | `SSE_CONNECT_ERROR` | No | `BaseURL` is unparseable, or its scheme is not `http`/`https`; retrying cannot fix it |
