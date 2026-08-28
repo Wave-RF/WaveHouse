@@ -14,6 +14,8 @@ dist/
 # Build directories
 build/
 bin/
+# `go build ./cmd/wavehouse` with no -o drops the binary in the repo root
+/wavehouse
 
 # Stray binaries from `go build ./scripts/<name>` — Go helpers under scripts/
 # are meant to be run via `go run` (the Makefile drives them that way), but a
