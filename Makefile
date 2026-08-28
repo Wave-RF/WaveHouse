@@ -253,8 +253,14 @@ $(CONFIG_FILES): .%.local.yaml: %.yaml
 		echo "$(YELLOW)⚠️  $< is newer than $@ — port the change over, or delete $@ to re-seed it$(RESET)"; \
 	fi
 
+# Dev settings directory: the hot-reloadable half of config. Seeded once from
+# the embedded seed (never edit internal/settings/seed in place); gitignored.
+settings/config.json:
+	@echo "⚙️  Seeding dev settings directory: ./settings (wavehouse bootstrap)"
+	@go run ./cmd/wavehouse bootstrap settings
+
 .PHONY: dev
-dev: deps-up $(AIR) $(CONFIG_FILES) ## Hot-reload dev server: ClickHouse + WaveHouse via air on :8080
+dev: deps-up $(AIR) $(CONFIG_FILES) settings/config.json ## Hot-reload dev server: ClickHouse + WaveHouse via air on :8080
 	@echo "$(CYAN)==> Starting WaveHouse with air hot-reload (Ctrl+C to stop)$(RESET)"
 	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)  (CORS=*, auth disabled by default)"
 	@echo "    ClickHouse: $(GREEN)http://localhost:8123$(RESET)  (HTTP), $(GREEN)localhost:9000$(RESET) (native)"

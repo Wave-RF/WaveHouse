@@ -7,6 +7,8 @@
 
 # Build artifacts
 tmp/
+# Dev settings directory, seeded by `make dev` (wavehouse bootstrap settings)
+/settings/
 dist/
 
 # Build directories

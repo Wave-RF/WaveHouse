@@ -77,7 +77,7 @@ pipes:
 # previous settings. `wavehouse bootstrap [dir]` writes a starter
 # directory with every key at its default; `wavehouse validate [dir]` checks
 # one (both resolve dir the same way: the argument, else WH_SETTINGS_DIR).
-# This points at the checked-in seed for local dev — to experiment,
-# `wavehouse bootstrap ./settings` and point here instead.
+# `make dev` seeds ./settings (gitignored) from the embedded seed on first
+# run, so local edits never touch the checked-in internal/settings/seed.
 settings:
-  dir: internal/settings/seed
+  dir: settings

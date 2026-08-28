@@ -228,12 +228,11 @@ curl -s -X POST http://localhost:8080/v1/ops/query \
 
 ### Enable Dedup (Optional)
 
-`make dev` points `settings.dir` at the checked-in seed, which ships with `dedupe.enabled: false`. Write your own settings directory and flip it there (the seed is committed — don't edit it in place):
+`make dev` seeds `./settings` (gitignored) from the embedded seed on first run and points `settings.dir` at it; the seed ships with `dedupe.enabled: false`. Flip it there — never in the checked-in `internal/settings/seed`, which is what `wavehouse bootstrap` writes for everyone:
 
 ```bash
-./tmp/wavehouse bootstrap ./settings   # or: go run ./cmd/wavehouse bootstrap ./settings
-# set "enabled": true under "dedupe" in ./settings/config.json,
-# and settings.dir: ./settings in .config.local.yaml
+# ./settings already exists after the first `make dev` (or: make settings/config.json)
+# set "enabled": true under "dedupe" in ./settings/config.json
 ```
 
 The key hot-reloads, so once the server is running you can toggle it by editing `config.json` — no restart. Records dedupe on their `event_id` field by default; the same file overrides the field globally or per table (see [Settings Directory — Deduplication](/settings-directory#deduplication)).
