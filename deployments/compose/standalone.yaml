@@ -56,8 +56,10 @@ services:
       - wavehouse-data:/app/data
       - ./dev-policy.yaml:/app/policy.yaml:ro    # permissive trial policy (public role, demo tables) — tune for prod
       - ./settings:/app/settings    # checked-in seed with clickhouse.addr=clickhouse:9000; hot-reloads on edit
-      # - wavehouse-settings:/app/settings    # or a named volume, seeded once with
-      #     `docker compose -f deployments/compose/standalone.yaml run --rm wavehouse bootstrap`
+      # - wavehouse-settings:/app/settings    # or a named volume: swap this line for the
+      #     one above (bootstrap refuses a non-empty /app/settings, so the bind mount
+      #     must be gone), seed it once with
+      #     `docker compose -f deployments/compose/standalone.yaml run --rm wavehouse bootstrap`,
       #     then edit clickhouse.addr to clickhouse:9000 (the seed says localhost)
       # - ./my-pipes:/app/pipes:ro    # uncomment alongside WH_PIPES_DIR
     depends_on:
