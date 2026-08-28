@@ -20,11 +20,11 @@ import (
 
 // StructuredQueryHandler handles POST /v1/query?table={table}
 type StructuredQueryHandler struct {
-	CHConn      driver.Conn
-	Cache       cache.Cache
-	Registry    *discovery.SchemaRegistry
-	PolicyStore *policy.Store
-	sf          singleflight.Group
+	CHConn       driver.Conn
+	Cache        cache.Cache
+	Registry     *discovery.SchemaRegistry
+	PolicySource policy.Source
+	sf           singleflight.Group
 	// queryTimeout bounds each query, read per request
 	// (chconn.Manager.QueryTimeout in production) so a settings reload
 	// applies without a restart.
@@ -53,7 +53,7 @@ func NewStructuredQueryHandler(
 	conn driver.Conn,
 	c cache.Cache,
 	registry *discovery.SchemaRegistry,
-	policyStore *policy.Store,
+	policyStore policy.Source,
 	bucketSecs func() int,
 	queryTimeout func() time.Duration,
 	defaultMaxRows func() int,
@@ -63,7 +63,7 @@ func NewStructuredQueryHandler(
 		CHConn:         conn,
 		Cache:          c,
 		Registry:       registry,
-		PolicyStore:    policyStore,
+		PolicySource:   policyStore,
 		bucketSecs:     bucketSecs,
 		queryTimeout:   queryTimeout,
 		defaultMaxRows: defaultMaxRows,
@@ -105,7 +105,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Resolve permissions.
-	p := h.PolicyStore.Get()
+	p := h.PolicySource()
 	role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
 	claims, _ := auth.ClaimsFromContext(r.Context())
 	perms := policy.Evaluate(p, role, table, "select", claims)

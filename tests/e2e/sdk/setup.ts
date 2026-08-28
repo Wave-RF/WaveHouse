@@ -14,7 +14,9 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Policy } from "@wavehouse/sdk";
 import { CH_URL, makeJWT, WH_URL } from "./helpers.js";
+import { setPolicy } from "./settings.js";
 import { allTableSpecs, TABLE_DDL } from "./tables.js";
 
 const setupAuth = () => `Bearer ${makeJWT({ sub: "e2e-setup", role: "admin", tenant_id: "acme" })}`;
@@ -71,31 +73,19 @@ async function refreshSchema(): Promise<void> {
 
 async function bootstrapTestPolicy(): Promise<void> {
   const rolePerms = (extra?: Record<string, unknown>) => ({
-    "*": { allow_columns: ["*"], ...extra },
     viewer: { allow_columns: ["*"], ...extra },
     admin: { allow_columns: ["*"], ...extra },
   });
   // Permissive select+insert for every generated table. Tests that exercise
   // policy enforcement snapshot this baseline, mutate their own table's entry,
   // and restore it (the suite runs sequentially, so the snapshot/restore is
-  // race-free — see tables.ts).
+  // race-free — see tables.ts). Written to the run's settings directory and
+  // adopted via POST /v1/ops/settings/reload — files are the only write path.
   const tables: Record<string, { select: unknown; insert: unknown }> = {};
   for (const { name } of allTableSpecs()) {
     tables[name] = { select: rolePerms(), insert: rolePerms() };
   }
-  const policy = { tables };
-
-  const res = await fetch(`${WH_URL}/v1/ops/policy`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: setupAuth(),
-    },
-    body: JSON.stringify(policy),
-  });
-  if (!res.ok) {
-    throw new Error(`Failed to bootstrap test policy: ${res.status} ${await res.text()}`);
-  }
+  await setPolicy({ tables } as Policy);
 }
 
 /**
@@ -132,6 +122,7 @@ export async function setup(): Promise<void> {
   reportRuntime();
   console.log(`  CLICKHOUSE_URL=${CH_URL}`);
   console.log(`  WAVEHOUSE_URL=${WH_URL}`);
+  console.log(`  WAVEHOUSE_SETTINGS_DIR=${process.env.WAVEHOUSE_SETTINGS_DIR ?? "(unset)"}`);
 
   if (!(await probe(`${CH_URL}/ping`))) {
     throw new Error(

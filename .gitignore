@@ -87,4 +87,3 @@ pnpm-debug.log*
 
 # local config files
 .config.local.yaml
-.policy.local.yaml

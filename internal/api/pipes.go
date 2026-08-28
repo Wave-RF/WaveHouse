@@ -16,13 +16,15 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// PipesHandler handles named query pipe endpoints.
+// PipesHandler serves named query pipes: execution for callers, read-only
+// listing for admins. Pipes are defined in the settings directory's
+// pipes.json and read per request, so a reload applies immediately.
 type PipesHandler struct {
-	Store       *pipes.Store
-	PolicyStore *policy.Store // resolves empty role to default_role; may be nil
-	CHConn      driver.Conn
-	Cache       cache.Cache
-	sf          singleflight.Group
+	Source       pipes.Source
+	PolicySource policy.Source // resolves empty role to default_role; may be nil
+	CHConn       driver.Conn
+	Cache        cache.Cache
+	sf           singleflight.Group
 	// queryTimeout bounds each pipe execution, read per request
 	// (chconn.Manager.QueryTimeout in production) so a settings reload
 	// applies without a restart.
@@ -30,21 +32,21 @@ type PipesHandler struct {
 	logger       *slog.Logger
 
 	// maxRequestBytes optionally overrides the default inbound request body
-	// cap (maxControlBodyBytes) for the body-decoding paths (Put, Execute).
+	// cap (maxControlBodyBytes) for the body-decoding path (Execute).
 	// When 0, the default applies. Test-only seam (pin the cap-overflow path
 	// without allocating 1 MiB per run); not a production knob. Mirrors
 	// StructuredQueryHandler / QueryHandler.
 	maxRequestBytes int64
 }
 
-func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout func() time.Duration, logger *slog.Logger) *PipesHandler {
-	return &PipesHandler{Store: store, PolicyStore: policyStore, CHConn: conn, Cache: c, queryTimeout: queryTimeout, logger: logger}
+func NewPipesHandler(source pipes.Source, policySource policy.Source, conn driver.Conn, c cache.Cache, queryTimeout func() time.Duration, logger *slog.Logger) *PipesHandler {
+	return &PipesHandler{Source: source, PolicySource: policySource, CHConn: conn, Cache: c, queryTimeout: queryTimeout, logger: logger}
 }
 
 // List returns all named queries (admin endpoint).
 func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	q := h.Store.List()
+	q := h.Source.Pipes()
 	if q == nil {
 		q = []*pipes.NamedQuery{}
 	}
@@ -54,7 +56,7 @@ func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
 // Get returns a specific named query (admin endpoint).
 func (h *PipesHandler) Get(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	q := h.Store.Get(name)
+	q := h.Source.Pipe(name)
 	if q == nil {
 		writeJSONError(w, http.StatusNotFound, "pipe not found")
 		return
@@ -63,50 +65,10 @@ func (h *PipesHandler) Get(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(q)
 }
 
-// Put creates or updates a named query (admin endpoint).
-func (h *PipesHandler) Put(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
-
-	reqCap := int64(maxControlBodyBytes)
-	if h.maxRequestBytes > 0 {
-		reqCap = h.maxRequestBytes
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
-
-	var q pipes.NamedQuery
-	if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
-		if writeMaxBytesError(w, err, reqCap) {
-			return
-		}
-		writeJSONError(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-	q.Name = name
-
-	if err := h.Store.Put(r.Context(), &q); err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-}
-
-// Delete removes a named query (admin endpoint).
-func (h *PipesHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
-	if err := h.Store.Delete(r.Context(), name); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-}
-
 // Execute runs a named query with the provided parameters.
 func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	q := h.Store.Get(name)
+	q := h.Source.Pipe(name)
 	if q == nil {
 		writeJSONError(w, http.StatusNotFound, "pipe not found")
 		return
@@ -122,8 +84,8 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	// against them (mirrors Evaluate's admin bypass). A pipe with no
 	// allowed_roles therefore authorizes nobody but admin (fails closed).
 	var p *policy.Policy
-	if h.PolicyStore != nil {
-		p = h.PolicyStore.Get()
+	if h.PolicySource != nil {
+		p = h.PolicySource()
 	}
 	role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
 	if !policy.RoleAllowed(p, role, q.AllowedRoles) {

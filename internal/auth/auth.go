@@ -108,7 +108,7 @@ func newVerifier(cfg Config, requireFetch bool, logger *slog.Logger) (*verifier,
 // operator key is boot config and never changes.
 type Authenticator struct {
 	operatorKey string
-	store       *policy.Store
+	store       policy.Source
 	logger      *slog.Logger
 	mu          sync.Mutex // serializes Reconfigure
 	cur         atomic.Pointer[verifier]
@@ -116,7 +116,7 @@ type Authenticator struct {
 
 // NewAuthenticator builds the boot-time verifier from cfg. An unreachable
 // JWKS endpoint is an error so boot fails loudly rather than degraded.
-func NewAuthenticator(cfg Config, store *policy.Store, logger *slog.Logger) (*Authenticator, error) {
+func NewAuthenticator(cfg Config, store policy.Source, logger *slog.Logger) (*Authenticator, error) {
 	v, err := newVerifier(cfg, true, logger)
 	if err != nil {
 		return nil, err
@@ -210,7 +210,7 @@ var operatorKeyFailures, _ = otel.Meter("wavehouse-auth").Int64Counter(
 // wavehouse_auth_operator_key_failures_total (a probing signal), then falls
 // through like any unauthenticated request. Both store and logger may be nil
 // when no operator key is configured.
-func middleware(current func() *verifier, operatorKeyCfg string, store *policy.Store, logger *slog.Logger) func(http.Handler) http.Handler {
+func middleware(current func() *verifier, operatorKeyCfg string, store policy.Source, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// One verifier per request: the swap is atomic, so a reload lands
@@ -231,8 +231,8 @@ func middleware(current func() *verifier, operatorKeyCfg string, store *policy.S
 			// context: the live admin role — so the policy evaluator's admin bypass
 			// grants unrestricted data-plane access while a policy exists — and an
 			// operator bit, which RequireAdmin honors even when the policy is
-			// nil/deleted, so the operator can still reach the admin surface to
-			// restore a wiped policy.
+			// nil (policies.json empty), so the operator can still reach the admin
+			// surface to inspect the policy and trigger a settings reload.
 			if operatorKeyCfg != "" {
 				// Resolve the presented credential once. An empty credential
 				// (no operator header at all) never matches and is not a failed
@@ -262,7 +262,7 @@ func middleware(current func() *verifier, operatorKeyCfg string, store *policy.S
 					}
 					var p *policy.Policy
 					if store != nil {
-						p = store.Get()
+						p = store()
 					}
 					ctx := WithOperator(r.Context())
 					ctx = WithRole(ctx, policy.AdminRole(p))

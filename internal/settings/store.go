@@ -5,6 +5,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Wave-RF/WaveHouse/internal/pipes"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
 
 // Store owns the settings snapshot a running instance has adopted. Open
@@ -106,6 +109,35 @@ func (s *Store) AfterAdopt(fn func()) {
 // leaves the previous document in place.
 func (s *Store) doc() *Document {
 	return s.snap.Load()
+}
+
+// Policy returns the adopted access-control policy (policies.json). nil is
+// the deliberate lockout an empty document spells: every token-based
+// request is denied until a policy is adopted. Satisfies policy.Source.
+func (s *Store) Policy() *policy.Policy {
+	return s.doc().Policy
+}
+
+// Pipe returns the adopted named query, or nil when pipes.json defines
+// none by that name. Satisfies pipes.Source with Pipes.
+func (s *Store) Pipe(name string) *pipes.NamedQuery {
+	ps := s.doc().Pipes
+	for i := range ps {
+		if ps[i].Name == name {
+			return &ps[i]
+		}
+	}
+	return nil
+}
+
+// Pipes returns every adopted named query.
+func (s *Store) Pipes() []*pipes.NamedQuery {
+	ps := s.doc().Pipes
+	out := make([]*pipes.NamedQuery, len(ps))
+	for i := range ps {
+		out[i] = &ps[i]
+	}
+	return out
 }
 
 // DedupeEnabled reports the adopted dedupe.enabled switch.

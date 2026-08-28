@@ -8,6 +8,7 @@ import {
   testId,
   waitForCondition,
 } from "./helpers.js";
+import { setPolicy } from "./settings.js";
 import { suiteTables } from "./tables.js";
 
 describe("Streaming", () => {
@@ -55,13 +56,13 @@ describe("Streaming", () => {
       anon: { allow_columns: ["event_id", "type", "user_id", "source", "received_timestamp"] },
     };
 
-    await admin.policy.set(publicPolicy);
+    await setPolicy(publicPolicy);
   });
 
   afterAll(async () => {
     // Clean up to ensure we don't bleed public access into other test files
     if (baselinePolicy) {
-      await admin.policy.set(baselinePolicy);
+      await setPolicy(baselinePolicy);
     }
   });
 

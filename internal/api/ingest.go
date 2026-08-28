@@ -44,7 +44,7 @@ type IngestHandler struct {
 	// documents' values. Dedup is skipped when nil.
 	DedupeSettings func(table string) (enabled bool, idField string, requireID bool)
 	Publisher      mq.Publisher
-	PolicyStore    *policy.Store
+	PolicySource   policy.Source
 	logger         *slog.Logger
 
 	// maxRequestBytes optionally overrides the default inbound request body cap
@@ -158,8 +158,8 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	var perms *policy.ResolvedPermissions
 	var role string
 
-	if h.PolicyStore != nil {
-		p := h.PolicyStore.Get()
+	if h.PolicySource != nil {
+		p := h.PolicySource()
 		role = policy.ResolveRole(p, auth.RoleFromContext(ctx))
 		claims, _ := auth.ClaimsFromContext(ctx)
 		perms = policy.Evaluate(p, role, table, "insert", claims)

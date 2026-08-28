@@ -56,7 +56,14 @@ export class PipeRef<Row = Record<string, unknown>> implements PromiseLike<Resul
   }
 }
 
-/** Admin namespace for managing named query pipes. */
+/**
+ * Admin namespace for reading named query pipes.
+ *
+ * Pipes are defined in the server's settings directory (`pipes.json`, with
+ * every `allowed_roles` entry declared in `roles.json`); files are the only
+ * write path. Edit the files and the server re-adopts them on change, on
+ * SIGHUP, or on `wh.settings.reload()` (POST /v1/ops/settings/reload).
+ */
 export class PipesNamespace {
   private readonly _ctx: HttpContext;
 
@@ -84,32 +91,5 @@ export class PipesNamespace {
     });
     if (error) return err(error);
     return ok(data!);
-  }
-
-  /** Create or update a pipe. */
-  async set(
-    name: string,
-    def: Omit<Pipe, "name">,
-    opts?: { signal?: AbortSignal },
-  ): Promise<Result<void>> {
-    const { error } = await request<{ ok: boolean }>(this._ctx, {
-      method: "PUT",
-      path: `/v1/ops/pipes/${encodeURIComponent(name)}`,
-      body: def,
-      signal: opts?.signal,
-    });
-    if (error) return err<void>(error);
-    return ok(undefined as undefined);
-  }
-
-  /** Delete a pipe by name. */
-  async delete(name: string, opts?: { signal?: AbortSignal }): Promise<Result<void>> {
-    const { error } = await request<{ ok: boolean }>(this._ctx, {
-      method: "DELETE",
-      path: `/v1/ops/pipes/${encodeURIComponent(name)}`,
-      signal: opts?.signal,
-    });
-    if (error) return err<void>(error);
-    return ok(undefined as undefined);
   }
 }

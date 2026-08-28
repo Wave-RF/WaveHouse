@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -tags="${BUILD_TAGS}" -ldflags="-s -w" -o /bin/wavehouse ./cmd/wavehouse
 
-# Create the parent state and pipes-bootstrap directories owned by the nonroot
+# Create the parent state and settings directories owned by the nonroot
 # user (UID 65532 in distroless). The binary creates `nats/` and `pebble/`
 # subdirectories itself when NATS/Pebble open their stores — pre-creating
 # them here would buy nothing and obscures intent. Named-volume copy-up runs
@@ -39,7 +39,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # to boot instead of running on defaults nobody chose. Not a VOLUME either
 # (unlike /app/data): it's config, not state, and an anonymous volume would
 # hide a forgotten mount.
-RUN mkdir -p /app/data /app/pipes /app/settings && chown -R 65532:65532 /app
+RUN mkdir -p /app/data /app/settings && chown -R 65532:65532 /app
 
 # Stage 2: Final minimal image
 FROM gcr.io/distroless/static-debian12
@@ -73,8 +73,9 @@ LABEL com.docker.extension.icon="https://raw.githubusercontent.com/Wave-RF/WaveH
 # every restart). Doesn't override or interact with explicit `-v` /
 # compose `volumes:` declarations; those still take precedence.
 #
-# Pipes (/app/pipes) is intentionally NOT a VOLUME — it's a read-only
-# bootstrap source, not state. See docs/deployment.md.
+# The settings directory (/app/settings) is intentionally NOT a VOLUME — it's
+# operator config the process only reads, and an anonymous volume would hide
+# a missing mount instead of refusing to boot. See docs/deployment.md.
 VOLUME ["/app/data"]
 
 # Default listen port. ENV is just a default — compose `environment:` or

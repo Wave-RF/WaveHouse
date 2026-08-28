@@ -16,7 +16,7 @@ import (
 
 func TestPolicyHandler_Get_NilPolicy(t *testing.T) {
 	t.Parallel()
-	store := policy.NewMemoryStore(nil)
+	store := policy.Static(nil)
 	h := NewPolicyHandler(store)
 
 	w := httptest.NewRecorder()
@@ -38,7 +38,7 @@ func TestPolicyHandler_Get_WithPolicy(t *testing.T) {
 			},
 		},
 	}
-	store := policy.NewMemoryStore(p)
+	store := policy.Static(p)
 	h := NewPolicyHandler(store)
 
 	w := httptest.NewRecorder()
@@ -53,7 +53,7 @@ func TestPolicyHandler_Get_WithPolicy(t *testing.T) {
 
 func TestPolicyHandler_Validate_Valid(t *testing.T) {
 	t.Parallel()
-	store := policy.NewMemoryStore(nil)
+	store := policy.Static(nil)
 	h := NewPolicyHandler(store)
 
 	p := policy.Policy{
@@ -76,7 +76,7 @@ func TestPolicyHandler_Validate_Valid(t *testing.T) {
 
 func TestPolicyHandler_Validate_InvalidJSON(t *testing.T) {
 	t.Parallel()
-	store := policy.NewMemoryStore(nil)
+	store := policy.Static(nil)
 	h := NewPolicyHandler(store)
 
 	w := httptest.NewRecorder()
@@ -88,22 +88,8 @@ func TestPolicyHandler_Validate_InvalidJSON(t *testing.T) {
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
-func TestPolicyHandler_Put_InvalidJSON(t *testing.T) {
-	t.Parallel()
-	store := policy.NewMemoryStore(nil)
-	h := NewPolicyHandler(store)
-
-	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/v1/ops/policy", bytes.NewReader([]byte(`{bad}`)))
-	h.Put(w, r)
-
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "invalid json")
-	testutil.AssertJSONErrorResponse(t, w)
-}
-
 // TestPolicyHandler_RequestBodyCap pins the control-plane body cap on the admin
-// policy decoders (#315) — both Put and Validate. An oversized body returns
+// policy decoder (#315) — Validate. An oversized body returns
 // 413, not 400 "invalid json". maxRequestBytes is tiny so we don't allocate
 // 1 MiB per run.
 func TestPolicyHandler_RequestBodyCap(t *testing.T) {
@@ -129,13 +115,12 @@ func TestPolicyHandler_RequestBodyCap(t *testing.T) {
 		path   string
 		call   func(*PolicyHandler, http.ResponseWriter, *http.Request)
 	}{
-		{"put", http.MethodPut, "/v1/ops/policy", (*PolicyHandler).Put},
 		{"validate", http.MethodPost, "/v1/ops/policy/validate", (*PolicyHandler).Validate},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			h := NewPolicyHandler(policy.NewMemoryStore(nil))
+			h := NewPolicyHandler(policy.Static(nil))
 			h.maxRequestBytes = testCap
 			w := httptest.NewRecorder()
 			r := httptest.NewRequestWithContext(context.Background(), tt.method, tt.path, bytes.NewReader(body))
@@ -150,7 +135,7 @@ func TestPolicyHandler_RequestBodyCap(t *testing.T) {
 
 func TestPolicyHandler_Validate_InvalidPolicy(t *testing.T) {
 	t.Parallel()
-	store := policy.NewMemoryStore(nil)
+	store := policy.Static(nil)
 	h := NewPolicyHandler(store)
 
 	p := policy.Policy{

@@ -13,16 +13,11 @@ auth:
   # operator_key: "" # non-JWT full-access operator credential (Authorization: Operator, or X-Operator-Key); unset in the rig
 
 
-policy:
-  # Resolved relative to wavehouse-cov's cwd — the orchestrator pins that
-  # to the repo root.
-  file_path: tests/e2e/fixtures/policy.yaml
-
 # Tenant tunables (schema refresh_interval 5s so schema-discovery tests don't
 # wait a minute; dedupe enabled + id_field; DLQ on; CORS "*"; a 1 GiB NATS
-# stream budget so the testcontainer stays tiny) live in the
-# settings directory — see settings/config.json. Same cwd-relative resolution
-# as policy.file_path.
+# stream budget so the testcontainer stays tiny), the policy, and the pipes
+# live in the settings directory — see settings/. Resolved relative to
+# wavehouse-cov's cwd, which the orchestrator pins to the repo root.
 
 settings:
   dir: tests/e2e/fixtures/settings

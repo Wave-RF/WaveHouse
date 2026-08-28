@@ -54,6 +54,7 @@ internal/
 ├── api/         HTTP layer (Chi router, handlers, middleware)
 ├── auth/        JWT/JWKS authentication middleware (HMAC or JWKS, role extraction)
 ├── cache/       In-process Ristretto cache with singleflight coalescing
+├── chconn/      The one ClickHouse driver.Conn every consumer holds; reload swaps the connection behind it
 ├── chsql/       Shared ClickHouse SQL helpers (identifier quoting, bind-safety)
 ├── config/      YAML + env var configuration loading
 ├── dedupe/      Optional deduplication (Pebble)
@@ -61,8 +62,8 @@ internal/
 ├── ingest/      Batch buffering, DLQ, and Active Sweeper
 ├── mq/          Message queue abstraction (embedded NATS)
 ├── observability/ OpenTelemetry pipeline (traces/metrics/logs + Prometheus exposition)
-├── pipes/       Named query pipes (NATS KV store + SQL file bootstrap)
-├── policy/      Hasura-style access control (policy types, evaluation, NATS KV store)
+├── pipes/       Named query pipes (NamedQuery type, parameter binding, Source)
+├── policy/      Hasura-style access control (policy types, evaluation, Source)
 ├── query/       Structured query AST, SQL builder, and timestamp bucketing
 ├── settings/    Settings directory: validate the JSON files, hold the adopted snapshot, reload on watch / SIGHUP / API
 └── stream/      SSE fan-out: event Hub (project once per role), Subscriber queue, Bucket fan-out, keepalive Heartbeater wheel
@@ -72,10 +73,10 @@ internal/
 
 The API layer uses [Chi](https://github.com/go-chi/chi) for routing with RequestID, a CORS middleware, and a custom JSON recoverer (`jsonRecoverer`) that emits a JSON `500` on panic instead of chi's plain-text `middleware.Recoverer`.
 
-- **router.go** — Route definitions. Public: `/livez`, `/readyz`, and the content-free `/v1/health` SDK ping (plus the permanent `/healthz` alias and the deprecated `/health`, `/ready` aliases). Policy-gated: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream`. Admin-only (`RequireAdmin` — role == `policy.admin_role`, or a request bearing the operator key's operator bit, which passes even under a nil policy): `/v1/ops/schema/*`, `/v1/ops/dlq/stats`, `/v1/ops/policy`, `/v1/ops/pipes/*`, `/v1/ops/settings/reload`, `/v1/ops/query` (raw SQL — same gate as the rest of `/v1/ops/*`).
+- **router.go** — Route definitions. Public: `/livez`, `/readyz`, and the content-free `/v1/health` SDK ping (plus the permanent `/healthz` alias and the deprecated `/health`, `/ready` aliases). Policy-gated: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream`. Admin-only (`RequireAdmin` — role == `policy.admin_role`, or a request bearing the operator key's operator bit, which passes even under a nil policy): `/v1/ops/schema/*`, `/v1/ops/dlq/stats`, `GET /v1/ops/policy` + `POST /v1/ops/policy/validate`, `GET /v1/ops/pipes[/{name}]`, `/v1/ops/settings/reload`, `/v1/ops/query` (raw SQL — same gate as the rest of `/v1/ops/*`).
 - **auth middleware** — the JWT/JWKS authentication middleware is its own package, [`auth/`](#auth--authentication); the router runs it on every `/v1/*` route.
-- **policy.go** — CRUD handler for access control policies (`/v1/ops/policy`).
-- **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
+- **policy.go** — Read-only policy handler (`GET /v1/ops/policy` returns the adopted policy from its `policy.Source`; `POST /v1/ops/policy/validate` dry-runs a document). The settings directory's `policies.json` is the only write path.
+- **pipes.go** — Named query pipe handlers: admin listing (`GET /v1/ops/pipes[/{name}]`, read per request from its `pipes.Source`) and execution with parameter binding. `pipes.json` is the only write path.
 - **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
 - **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`. When dedup is on, a row missing the configured `id_field` can't be deduped: it is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total` (labeled by `table`), then published un-deduped — or rejected when `dedupe.require_id` is set ([#219](https://github.com/Wave-RF/WaveHouse/issues/219)).
 - **query.go** — Proxies raw SQL for `POST /v1/ops/query` straight to ClickHouse's HTTP interface. **Not cached** — sets `Cache-Control: no-store` so every request hits ClickHouse; DateTime is rendered ISO-8601 via `date_time_output_format=iso` (the Go-side type conversion lives in the structured-query / pipes path, not here).
@@ -96,7 +97,7 @@ The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https:/
 
 ### `auth/` — Authentication
 
-- **auth.go** — `Middleware(cfg, store, logger)`: the auth middleware. Verifies JWT tokens with HMAC **or** JWKS (never both), with the accepted `alg` pinned to the active verifier and checked before any key is consulted (rejects `alg: none` and cross-family confusion). Extracts the caller's role from a configurable dot-path claim (`auth.role_claim`, default `role`). Claims parse with `jwt.WithJSONNumber()`, so a numeric claim reaches the policy engine as its exact digits (`json.Number`, never a rounded float64) — part of the row-visibility guarantee (AGENTS.md invariant 12). It always runs and never rejects — a missing/invalid/expired token yields an empty role (resolved to `default_role` downstream), with the token error stashed in context so a denying gate can fail loud (`401`, not a bare `403`). Before the Bearer token it checks a non-JWT operator key (`auth.operator_key`): a constant-time match on the presented credential — an `Authorization: Operator <key>` header, or the `X-Operator-Key` alias — stamps the live admin role plus an operator bit (`auth.WithOperator`) that `RequireAdmin` honors even under a nil policy — a full-access break-glass credential, audit-logged at Info with no client IP (`store`/`logger` back this path). A presented-but-wrong operator key is logged at `WARN` and counted by `wavehouse_auth_operator_key_failures_total` — a probing signal on the most privileged credential — then falls through like any unauthenticated request (the middleware never rejects).
+- **auth.go** — `NewAuthenticator(cfg, policySource, logger)` owns the verifier; its `Middleware()` reads the current one per request, and `Reconfigure(cfg)` swaps the whole verifier — key source plus its pinned `alg` allowlist — atomically after a settings reload (`auth.jwks_url` / `auth.role_claim`; see [Settings Directory — Authentication](/settings-directory#authentication)). Verifies JWT tokens with HMAC **or** JWKS (never both), with the accepted `alg` pinned to the active verifier and checked before any key is consulted (rejects `alg: none` and cross-family confusion). Extracts the caller's role from a configurable dot-path claim (`auth.role_claim`, default `role`). Claims parse with `jwt.WithJSONNumber()`, so a numeric claim reaches the policy engine as its exact digits (`json.Number`, never a rounded float64) — part of the row-visibility guarantee (AGENTS.md invariant 12). It always runs and never rejects — a missing/invalid/expired token yields an empty role (resolved to `default_role` downstream), with the token error stashed in context so a denying gate can fail loud (`401`, not a bare `403`). Before the Bearer token it checks a non-JWT operator key (`auth.operator_key`): a constant-time match on the presented credential — an `Authorization: Operator <key>` header, or the `X-Operator-Key` alias — stamps the live admin role plus an operator bit (`auth.WithOperator`) that `RequireAdmin` honors even under a nil policy — a full-access break-glass credential, audit-logged at Info with no client IP (`store`/`logger` back this path). A presented-but-wrong operator key is logged at `WARN` and counted by `wavehouse_auth_operator_key_failures_total` — a probing signal on the most privileged credential — then falls through like any unauthenticated request (the middleware never rejects).
 - **context.go** — request-context accessors and their setters for the role, claims, and token error (`RoleFromContext`, `ClaimsFromContext`, `AuthErrorFromContext`, and the matching `With*` helpers).
 
 ### `cache/` — Query Cache
@@ -107,7 +108,7 @@ The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https:/
 
 ### `config/` — Configuration
 
-- **config.go** — Loads *boot* configuration from a YAML file with environment variable overrides (using [cleanenv](https://github.com/ilyakaznacheev/cleanenv)); every key has a `WH_`-prefixed env var. Boot config is only what can't change under a running process — resource sizing, listeners, observability exporters, the policy/pipes/settings paths, and the secrets (`clickhouse.password`, `auth.jwt_secret`, `auth.operator_key`). Everything tenant-tunable lives in the settings directory (`settings/`). The YAML is strict: `rejectUnknownKeys` refuses to boot naming every key the struct doesn't declare, so a tunable that moved to the settings directory can't be read, ignored, and believed. See [Configuration Reference](/configuration).
+- **config.go** — Loads *boot* configuration from a YAML file with environment variable overrides (using [cleanenv](https://github.com/ilyakaznacheev/cleanenv)); every key has a `WH_`-prefixed env var. Boot config is only what can't change under a running process — resource sizing, listeners, observability exporters, the settings-directory path, and the secrets (`clickhouse.password`, `auth.jwt_secret`, `auth.operator_key`). Everything tenant-tunable lives in the settings directory (`settings/`). The YAML is strict: `rejectUnknownKeys` refuses to boot naming every key the struct doesn't declare, so a tunable that moved to the settings directory can't be read, ignored, and believed. See [Configuration Reference](/configuration).
 
 ### `dedupe/` — Deduplication (Optional)
 
@@ -148,11 +149,11 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 - **rowfilter.go** — the in-memory row-visibility twin of the SQL `WHERE`: `HasRowFilter`, `RowVisible` (evaluates the resolved predicates against a decoded event, per subscriber), and `ColumnSpec` — the per-column comparison contract (`ColumnKind` `Numeric`/`Text`/`Time`/`Opaque`, plus each kind's parameters: the caller-supplied instant parser for `Time`, the `NumericSpec` storage model for `Numeric`) whose zero value is the fail-closed floor: numeric columns compare in the column's **storage domain** (operands rendered by canonical.go, compared by numeric.go — next two bullets), `String` bytewise, `DateTime`/`DateTime64` chronologically (both operands through the ingest grammar; either side unreadable ⇒ withheld), and everything else (including any column with no usable schema) admits byte-equality only, failing `!=`/`>`/`<` closed.
 - **canonical.go** — the one rendering layer for comparison operands: every value a `filter` or `check` compares — a JWT claim (`CanonicalScalar`), a policy-authored literal (`CanonicalNumericLiteral`), an ingested payload value (`numericCanonical`) — converges on one exact canonical decimal form (positional, digit-bounded, never a float64 round-trip), so what a read filter binds and what the stream compares can't drift; `scalarString` is the deliberate exception, the raw byte rendering that `Text`/`Opaque` equality compares.
 - **numeric.go** — compares canonical forms the way the column that stores them would: `compareCanonicalDecimals` orders by exact digit-string arithmetic, and `NumericSpec` first narrows both operands the way ClickHouse narrows the stored value and the bound constant — `Float32`/`Float64` width rounding, `Decimal` scale truncation, integers exact at any width, with an operand outside the column's width or a `Decimal`'s precision budget refused rather than modeled; the `tests/integration` differential oracle holds in-range verdicts equal to a live ClickHouse's and asserts the never-admit-where-SQL-hides direction for the refused out-of-range operands.
-- **store.go** — `Store` backed by NATS KV bucket `WAVEHOUSE_POLICY`. Supports file-based bootstrap (YAML/JSON), cluster-wide sync via KV Watch, local caching.
+- **source.go** — `Source`, a `func() *Policy` every consumer (the auth middleware, ingest, structured query, pipes, the stream hub, the `/v1/ops` gate) reads per call, so a settings reload applies to the very next request. In production it is `settings.Store.Policy`; `Static(p)` fixes one for tests. A `nil` result is a deliberate lockout.
 
 ### `pipes/` — Named Query Pipes
 
-- **pipes.go** — `NamedQuery` type with SQL template and parameter definitions, `Store` backed by NATS KV bucket `WAVEHOUSE_PIPES`. Supports `.sql` file directory bootstrap. `BindParams()` resolves `{{param}}` / `{{param:default}}` placeholders by inlining escaped literal values into the SQL (strings single-quote-escaped; arrays rendered as escaped `(…)` `IN`-lists). A non-scalar value with no SQL form (a JSON object, or an empty array) is rejected rather than emitted raw.
+- **pipes.go** — `NamedQuery` type with SQL template and parameter definitions, and `Source` (`Pipe(name)` / `Pipes()`), read per request — `settings.Store` in production (`pipes.json`), `Static(q...)` in tests. `BindParams()` resolves `{{param}}` / `{{param:default}}` placeholders by inlining escaped literal values into the SQL (strings single-quote-escaped; arrays rendered as escaped `(…)` `IN`-lists). A non-scalar value with no SQL form (a JSON object, or an empty array) is rejected rather than emitted raw.
 
 ### `query/` — Structured Query Engine
 
@@ -161,13 +162,17 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 
 ### `settings/` — Settings Directory
 
-The hot-reloadable half of configuration: a directory of four JSON files (`config.json`, `roles.json`, `policies.json`, `pipes.json`) that the server validates at boot and re-adopts while running. See [Settings Directory](/settings-directory).
+The hot-reloadable half of configuration: a directory of four JSON files (`config.json`, `roles.json`, `policies.json`, `pipes.json`) that the server validates at boot and re-adopts while running — `Validate` is the single gate (strict decode, per-file shape rules, and the cross-file check that every role a policy grant or pipe allowlist names is declared in `roles.json`), and `Store` holds the adopted `Document` as one atomic snapshot. `Store` is also the runtime authority for access control and pipes: it implements `policy.Source` (`Store.Policy`, nil when `policies.json` is `{}` — fail closed) and `pipes.Source`, and there is no other copy — the files are the only write path. See [Settings Directory](/settings-directory).
 
 - **validate.go** — `Validate(dir)` reads, decodes, and checks the directory in one pass (strict JSON — unknown fields and duplicate keys are errors; per-file shape rules; cross-file role references) and returns every `Finding` at once. Shared by `wavehouse validate`, boot, and every reload.
 - **finding.go** — `Finding` / `Severity`: errors make the directory invalid, warnings don't block adoption. The JSON shape is part of the ops API (`POST /v1/ops/settings/reload` returns them).
 - **store.go** — `Store` owns the adopted snapshot. `Open` validates and adopts at boot; `Reload` re-validates and swaps the document atomically when there are no errors (a rejected reload keeps the previous snapshot). Consumers read typed accessors per call (`ClickHouse()`, `Auth()`, `DedupeFor(table)`, `DLQFor(table)`, `Keepalive()`, …) rather than holding values, and `AfterAdopt` registers hooks (dedupe store open/close, keepalive-wheel rebuild) that run after each successful reload.
 - **watch.go** — fsnotify on the *directory* (not the files, so atomic-writer replaces and Kubernetes ConfigMap symlink swaps aren't lost), debounced into one reload; reloads once as soon as the watch exists so an edit between the boot read and the watch is never missed. `SIGHUP` and the reload endpoint funnel through the same serialized `Reload`.
 - **seed.go** / **seed/** — The `go:embed`ded starter directory with every key at its default. The binary carries no compiled defaults: `wavehouse bootstrap [dir]` writes this seed, and the compose stack and e2e fixture ship copies of it.
+
+### `chconn/` — ClickHouse Connection Manager
+
+- **chconn.go** — `Manager` is a `driver.Conn` whose backing connection is swapped by `Reconfigure(Params)` after a settings reload changes the ClickHouse wiring (`clickhouse.addr` / `http_port` / `http_scheme` / `database` / `username` / `query_timeout`, combined with the boot-config password). Like `clickhouse.Open` it never dials, so boot tolerates an unreachable ClickHouse (schema discovery retries) and a bad address surfaces where reachability is already handled (`/readyz`, query errors). The replaced connection closes after a `query_timeout` grace so in-flight queries finish. `Target()` / `Database()` / `QueryTimeout()` expose the current wiring for the HTTP-interface consumers (ingest INSERTs, raw-SQL proxy).
 
 ### `chsql/` — ClickHouse SQL Helpers
 
@@ -227,7 +232,7 @@ Client POST /v1/ops/query
     roleless exception)
   → /v1/ops RequireAdmin (resolved role == policy.admin_role, or the
     operator-key bit) — single gate shared with the rest of /v1/ops/*
-    (policy CRUD, pipes CRUD, schema discovery, DLQ stats). A denial is
+    (policy/pipes inspection, settings reload, schema discovery, DLQ stats). A denial is
     401 when a stashed error shows the caller presented an invalid token,
     else 403. Raw SQL has no per-statement scope check (a full SQL parser
     would be needed to authorize predicates), so the role gate is the

@@ -35,33 +35,27 @@ services:
       # Treat it as an admin secret.
       # WH_AUTH_OPERATOR_KEY: "change-me-operator-key"
       #
-      # Seed a policy on first boot. WaveHouse is fail-closed: with no policy,
-      # every request (even admin) is denied. dev-policy.yaml ships a permissive
-      # "public" trial policy (read/write the demo tables, NOT admin) so the
-      # quickstart works tokenless. Tune it before production — see that file.
-      WH_POLICY_FILE_PATH: /app/policy.yaml
       # Settings directory (roles.json, policies.json, pipes.json, config.json)
-      # — required, and the image ships none (same as the policy file): the
-      # image sets WH_SETTINGS_DIR=/app/settings and ./settings (checked in
-      # next to this file) is bind-mounted there. It is the seed
-      # (`wavehouse bootstrap`) with one edit: clickhouse.addr points at
-      # the clickhouse service. Everything in its config.json reloads live
-      # (file watch / SIGHUP / POST /v1/ops/settings/reload) — edit the files
-      # on the host and the running container picks them up.
-      # Optional: bootstrap pipes from .sql files. Mount your pipes dir
-      # read-only and uncomment WH_PIPES_DIR. The directory is a seed for
-      # NATS KV — runtime pipe edits go through the API, not the files.
-      # WH_PIPES_DIR: /app/pipes
+      # — required, and the image ships none: the image sets
+      # WH_SETTINGS_DIR=/app/settings and ./settings (checked in next to this
+      # file) is bind-mounted there. It is the `wavehouse bootstrap` seed with
+      # two edits: clickhouse.addr points at the clickhouse service, and
+      # policies.json/roles.json carry a permissive "public" TRIAL policy —
+      # WaveHouse is fail-closed (no policy = every request denied), so the
+      # quickstart works tokenless: public can read/write the demo tables
+      # (clicks, events) and nothing else (no admin, no raw SQL). Tune it
+      # before production. All four files reload live (file watch / SIGHUP /
+      # POST /v1/ops/settings/reload) — edit them on the host and the running
+      # container picks them up; the files are the only write path.
     volumes:
       - wavehouse-data:/app/data
-      - ./dev-policy.yaml:/app/policy.yaml:ro    # permissive trial policy (public role, demo tables) — tune for prod
-      - ./settings:/app/settings    # checked-in seed with clickhouse.addr=clickhouse:9000; hot-reloads on edit
+      - ./settings:/app/settings    # checked-in seed + trial policy, clickhouse.addr=clickhouse:9000; hot-reloads on edit
       # - wavehouse-settings:/app/settings    # or a named volume: swap this line for the
       #     one above (bootstrap refuses a non-empty /app/settings, so the bind mount
       #     must be gone), seed it once with
       #     `docker compose -f deployments/compose/standalone.yaml run --rm wavehouse bootstrap`,
-      #     then edit clickhouse.addr to clickhouse:9000 (the seed says localhost)
-      # - ./my-pipes:/app/pipes:ro    # uncomment alongside WH_PIPES_DIR
+      #     then edit clickhouse.addr to clickhouse:9000 (the seed says localhost) and
+      #     add a policy to policies.json (the seed ships none: fail closed)
     depends_on:
       - clickhouse
 

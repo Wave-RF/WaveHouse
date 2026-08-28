@@ -139,23 +139,18 @@ WH_CH_PASSWORD=<clickhouse-password>
 WH_AUTH_JWT_SECRET=<strong-random-secret>
 # Optional non-JWT operator credential (Authorization: Operator <key>, or the
 # X-Operator-Key alias): full-access
-# admin for bootstrap/break-glass, honored even if the policy is wiped. Treat it
+# admin for break-glass, honored even when no policy is adopted. Treat it
 # as an admin secret — inject from your secret store, serve only over TLS.
 WH_AUTH_OPERATOR_KEY=<strong-random-operator-key>
 
-# Access control & pipes — both bootstrap paths are opt-in (no default). When
-# WH_POLICY_FILE_PATH is set, the file MUST exist, parse, and pass policy
-# validation (including the {{ jwt.… }} claim-path grammar) when the store is
-# seeded from it, or the process refuses to boot (silent fail-closed is the
-# alternative). Leave unset to skip bootstrap and seed via PUT /v1/ops/policy.
-WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
-WH_PIPES_DIR=/etc/wavehouse/pipes
-
 # Settings directory (required): roles.json, policies.json, pipes.json,
-# config.json — the hot-reloadable configuration, including the ClickHouse
+# config.json — the hot-reloadable configuration: the access-control policy
+# and its roles, the named pipes, and the tunables including the ClickHouse
 # wiring (see the Settings Directory page). Seed it with
-# `wavehouse bootstrap [dir]`, set clickhouse.addr in its config.json,
-# and point this variable at it. Container images already preset
+# `wavehouse bootstrap [dir]`, set clickhouse.addr in its config.json, write
+# your policy to policies.json (the seed ships none — every request is
+# denied until you do), and point this variable at it. The directory must
+# exist and validate or the process refuses to boot. Container images already preset
 # WH_SETTINGS_DIR=/app/settings and ship no directory: omit this line and
 # mount (or seed) your directory at /app/settings.
 WH_SETTINGS_DIR=/etc/wavehouse/settings
@@ -168,7 +163,7 @@ WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DI
 - `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `stream.gap_window_minutes` window (settings directory) of history that powers SSE gap-fill across restarts.
 - `<data_dir>/pebble` — Pebble dedup KV. Only used while `dedupe.enabled` is `true` in the settings directory's `config.json` (opened and closed on reload).
 
-In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data`, `/app/pipes`, and `/app/settings` owned by the nonroot user (UID 65532); the binary creates the `nats/` and `pebble/` subdirectories under `/app/data` itself on first run.
+In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data` and `/app/settings` owned by the nonroot user (UID 65532); the binary creates the `nats/` and `pebble/` subdirectories under `/app/data` itself on first run.
 
 If `data_dir` resolves into the container's writable overlay layer instead, **JetStream state is wiped on every restart**: in-flight events are lost, gap-fill stops bridging restarts, and disk usage accumulates inside `/var/lib/docker` instead of the volume the operator chose.
 
@@ -195,7 +190,7 @@ volumes:
   - wavehouse-data:/app/data
 ```
 
-On first attach to an empty named volume, Docker performs a "copy-up": the contents and ownership of `/app/data` *from the image* are copied into the volume. The bundled `Dockerfile` and `Dockerfile.goreleaser` both pre-create `/app/data`, `/app/pipes`, and `/app/settings` with `chown -R 65532:65532`, so the volume inherits the right ownership automatically. **No host-side `chown` needed.** Subsequent restarts reuse whatever's in the volume.
+On first attach to an empty named volume, Docker performs a "copy-up": the contents and ownership of `/app/data` *from the image* are copied into the volume. The bundled `Dockerfile` and `Dockerfile.goreleaser` both pre-create `/app/data` and `/app/settings` with `chown -R 65532:65532`, so the volume inherits the right ownership automatically. **No host-side `chown` needed.** Subsequent restarts reuse whatever's in the volume.
 
 **Settings directory.** The [settings directory](/settings-directory) is *required* — the image ships none, so an unmounted `/app/settings` refuses to boot. It's config, not state, so unlike `/app/data` it is deliberately *not* a `VOLUME` (an anonymous volume would hide the missing mount), and the natural mount is a **bind mount** of a directory you edit on the host: the reference compose file mounts the checked-in `deployments/compose/settings/` (the `bootstrap` seed with `clickhouse.addr` pointed at the `clickhouse` service). The server only reads it, so the files just need to be world-readable (which `bootstrap` writes), and it re-reads them on change with no restart. A named volume works too — the image pre-creates `/app/settings` owned by UID 65532, so seeding it with the image's own `bootstrap` gets the ownership right:
 
@@ -203,7 +198,7 @@ On first attach to an empty named volume, Docker performs a "copy-up": the conte
 docker compose -f deployments/compose/standalone.yaml run --rm -v wavehouse-settings:/app/settings wavehouse bootstrap
 ```
 
-— then edit `clickhouse.addr` in the volume's `config.json` (the seed says `localhost:9000`), since the ClickHouse wiring lives there rather than in env.
+— then swap the service's `./settings:/app/settings` bind mount for `wavehouse-settings:/app/settings` in `standalone.yaml` (the commented-out line next to it; `bootstrap` refuses a non-empty directory, so the bind mount must be gone), edit `clickhouse.addr` in the volume's `config.json` (the seed says `localhost:9000`), and add a policy to its `policies.json` (the seed ships none — fail closed).
 
 **Bind mounts** (host directory):
 
@@ -229,30 +224,7 @@ sudo chown -R 65532:65532 /srv/wavehouse
 
 UID 65532 is the canonical distroless `nonroot` user; the same number works regardless of whether your host has a matching name in `/etc/passwd`. The error log includes this remediation hint, so if you see "permission denied" at startup, copy the suggested `chown` command and re-run.
 
-**Pipes bind mount** follows the same rule — but mount it **read-only** since pipes is a seed, not state:
-
-```yaml
-volumes:
-  - ./my-pipes:/app/pipes:ro    # :ro is intentional, see below
-```
-
-Read-only mounts don't need write permission for the container user, so `chown` isn't strictly required — but matching ownership keeps everything consistent.
-
-## Pipes Bootstrap (optional, read-only)
-
-Named query pipes live in NATS KV (`WAVEHOUSE_PIPES`). On first run, you can seed them from `.sql` files by setting `WH_PIPES_DIR` and bind-mounting the directory **read-only**:
-
-```yaml
-services:
-  wavehouse:
-    environment:
-      WH_PIPES_DIR: /app/pipes
-    volumes:
-      - wavehouse-data:/app/data
-      - ./my-pipes:/app/pipes:ro     # ← read-only seed
-```
-
-The directory is a *seed*, not authoritative storage: after bootstrap, the API + KV are the source of truth. Runtime pipe edits go through `PUT /v1/ops/pipes/{name}`, not by editing the files. The `:ro` mount makes that contract explicit and prevents accidental writes from confusing future readers. Empty default (`WH_PIPES_DIR=""`) skips bootstrap entirely — most users will create pipes via the API.
+**Settings-directory bind mount** follows the same rule when you seed it with `wavehouse bootstrap` from inside the container (the seed is written as UID 65532); a directory you bootstrap on the host only needs to be readable by that user, since WaveHouse only ever reads it. Named pipes and the access-control policy live in that directory (`pipes.json`, `policies.json`, `roles.json`) and hot-reload on edit — see [Settings Directory](/settings-directory).
 
 ## Health Checks
 

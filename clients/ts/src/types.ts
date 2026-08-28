@@ -383,6 +383,26 @@ export interface ValidationResult {
   valid: boolean;
 }
 
+// --- Settings types ---
+
+/** One validation finding from the server's settings directory. */
+export interface SettingsFinding {
+  severity: "error" | "warning";
+  /** Settings file the finding is about; absent for directory-level findings. */
+  file?: string;
+  /** Dotted JSON path within the file; absent for whole-file findings. */
+  path?: string;
+  message: string;
+}
+
+/** Body of POST /v1/ops/settings/reload. */
+export interface SettingsReloadResult {
+  /** Whether the directory was adopted; false leaves the previous settings in effect. */
+  adopted: boolean;
+  /** Every finding from the validation pass (warnings included on success). */
+  findings: SettingsFinding[];
+}
+
 // --- Per-call request options ---
 
 /**

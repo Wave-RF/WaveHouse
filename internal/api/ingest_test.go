@@ -233,7 +233,7 @@ func TestIngest_Policy_Forbidden(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Select: map[string]policy.RolePermissions{
@@ -260,7 +260,7 @@ func TestIngest_Policy_ColumnDenied(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -289,7 +289,7 @@ func TestIngest_Policy_CheckClause_Mismatch(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -321,7 +321,7 @@ func TestIngest_Policy_CheckClause_Match(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -359,7 +359,7 @@ func TestIngest_Policy_CheckClause_NumericSpellingMatch(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	countTemplate := "{{ jwt.max_count }}"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -407,7 +407,7 @@ func TestIngest_Policy_CheckClause_StaticNumericSpelling(t *testing.T) {
 			pub := &testutil.MockPublisher{}
 			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 			staticCount := "1.0"
-			h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+			h.PolicySource = policy.Static(&policy.Policy{
 				Tables: map[string]policy.TablePolicy{
 					"clicks": {
 						Insert: map[string]policy.RolePermissions{
@@ -456,7 +456,7 @@ func TestIngest_Policy_CheckClause_StringClaimStrictEquality(t *testing.T) {
 			pub := &testutil.MockPublisher{}
 			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 			orgTemplate := "{{ jwt.org_id }}"
-			h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+			h.PolicySource = policy.Static(&policy.Policy{
 				Tables: map[string]policy.TablePolicy{
 					"clicks": {
 						Insert: map[string]policy.RolePermissions{
@@ -493,7 +493,7 @@ func TestIngest_Policy_CheckClause_NullValue_FailsClosed(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -526,7 +526,7 @@ func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -560,9 +560,9 @@ func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
 // checkInStore builds a policy whose insert check restricts org_id to the set
 // carried by the token's `orgs` claim (an _in check) — the multi-tenant
 // "a writer may only insert rows for tenants they belong to" case (#224).
-func checkInStore() *policy.Store {
+func checkInStore() policy.Source {
 	orgsTemplate := "{{ jwt.orgs }}"
-	return policy.NewMemoryStore(&policy.Policy{
+	return policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -577,7 +577,7 @@ func TestIngest_Policy_CheckIn_InSet(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = checkInStore()
+	h.PolicySource = checkInStore()
 
 	// org_id is one of the token's allowed orgs — should pass.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": "org-b"})
@@ -596,7 +596,7 @@ func TestIngest_Policy_CheckIn_NotInSet(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = checkInStore()
+	h.PolicySource = checkInStore()
 
 	// org_id is NOT one of the token's allowed orgs — forging another tenant's row.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": "org-z"})
@@ -621,7 +621,7 @@ func TestIngest_Policy_CheckIn_NullValue_FailsClosed(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = checkInStore()
+	h.PolicySource = checkInStore()
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": nil})
 	ctx := auth.WithRole(req.Context(), "user")
@@ -640,7 +640,7 @@ func TestIngest_Policy_CheckIn_Absent_FailsClosed(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = checkInStore()
+	h.PolicySource = checkInStore()
 
 	// org_id omitted — unlike _eq there's no single value to auto-inject, so the
 	// insert is rejected (fail closed) rather than stamped with an arbitrary org.
@@ -667,7 +667,7 @@ func TestIngest_Policy_CheckIn_AbsentClaim_FailsClosed(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = checkInStore()
+	h.PolicySource = checkInStore()
 
 	// The `orgs` claim is absent entirely, so the _in set resolves to a typed-nil
 	// []any; org_id is omitted too. The insert must be rejected (fail closed), not
@@ -759,7 +759,7 @@ func TestIngest_Policy_DenyColumns(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -786,7 +786,7 @@ func TestIngest_AdminRole_NoPolicy(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {},
 		},
@@ -1044,7 +1044,7 @@ func TestIngest_NDJSON_Policy_ColumnDenied_PerLine(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -1079,7 +1079,7 @@ func TestIngest_NDJSON_Policy_TableForbidden(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Select: map[string]policy.RolePermissions{"viewer": {}},
@@ -1107,7 +1107,7 @@ func TestIngest_NDJSON_Policy_CheckClause_PerLineAndAutoInject(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -1639,7 +1639,7 @@ func TestIngest_AutoInjectedLiteralTimestampCanonicalized(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(tsRegistry(t), pub, testutil.NopLogger())
 	staticTS := "2026-06-21 04:00:00"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"events": {
 				Insert: map[string]policy.RolePermissions{

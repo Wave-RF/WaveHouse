@@ -9,6 +9,7 @@ import {
   WH_URL,
   waitForCondition,
 } from "./helpers.js";
+import { setPolicy } from "./settings.js";
 import { suiteTables } from "./tables.js";
 
 describe("Ingest", () => {
@@ -174,7 +175,7 @@ describe("Ingest", () => {
 
     // 3. Update the policy to allow the viewer client to insert into this new table
     const currentPolicyRes = await admin.policy.get();
-    await admin.policy.set({
+    await setPolicy({
       tables: {
         ...(currentPolicyRes.data as any).tables,
         [weirdTableName]: {
@@ -230,7 +231,7 @@ describe("Ingest", () => {
 
     // 3. Update the policy to allow inserts into this weird table
     const currentPolicyRes = await admin.policy.get();
-    await admin.policy.set({
+    await setPolicy({
       tables: {
         ...(currentPolicyRes.data as any).tables,
         [maliciousName]: {
@@ -293,7 +294,7 @@ describe("Ingest", () => {
     expect(currentPolicyRes.data).not.toBeNull();
 
     // Restrict this suite's clicks inserts so the 'country' column MUST be 'US'
-    await admin.policy.set({
+    await setPolicy({
       tables: {
         ...(currentPolicyRes.data as any).tables,
         [T.clicks]: {
@@ -346,7 +347,7 @@ describe("Ingest", () => {
     }, 10_000);
 
     // Restore policy
-    await admin.policy.set(currentPolicyRes.data!);
+    await setPolicy(currentPolicyRes.data!);
   });
 
   it("rejects invalid JSON queries", async () => {
@@ -364,7 +365,7 @@ describe("Ingest", () => {
     expect(currentPolicyRes.data).not.toBeNull();
 
     // Restrict viewer to only return 2 rows max from this suite's clicks
-    await admin.policy.set({
+    await setPolicy({
       tables: {
         ...(currentPolicyRes.data as any).tables,
         [T.clicks]: {
@@ -382,6 +383,6 @@ describe("Ingest", () => {
     expect(result.data).toHaveLength(2);
 
     // Restore policy
-    await admin.policy.set(currentPolicyRes.data!);
+    await setPolicy(currentPolicyRes.data!);
   });
 });

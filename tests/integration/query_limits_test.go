@@ -92,7 +92,7 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 			// actually executes against ClickHouse (no cross-case cache hit
 			// masking enforcement). defaultMaxRows 0 falls back to the builder's
 			// constant. singleflight's zero value is ready to use.
-			store := policy.NewMemoryStore(&policy.Policy{
+			store := policy.Static(&policy.Policy{
 				AdminRole: "admin",
 				Tables: map[string]policy.TablePolicy{
 					table: {Select: map[string]policy.RolePermissions{"viewer": tt.perms}},

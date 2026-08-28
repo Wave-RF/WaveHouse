@@ -25,7 +25,6 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
-	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
@@ -164,8 +163,7 @@ func run() int {
 	// Settings directory — the hot-reloadable half of configuration (dedupe,
 	// dlq, query, schema, stream, cors — see settings.TenantConfig). Required:
 	// config.Validate already
-	// rejected an empty settings.dir, and an invalid directory refuses boot —
-	// the same fail-loud contract as policy.file_path. The binary carries no
+	// rejected an empty settings.dir, and an invalid directory refuses boot. The binary carries no
 	// compiled defaults; `wavehouse bootstrap` writes the seed. A *reload*
 	// of an invalid directory merely keeps the previous snapshot.
 	settingsStore, _ := settings.Open(cfg.Settings.Dir, logger)
@@ -188,9 +186,9 @@ func run() int {
 
 	cfg.Auth.OperatorKey = strings.TrimSpace(cfg.Auth.OperatorKey)
 	if cfg.Auth.OperatorKey == "" {
-		logger.Warn("no auth.operator_key set: if you lose the JWT secret, lose control of the JWKS endpoint, or lose your HMAC secret — or the policy is wiped — you will be locked out remotely and will need SSH access to restore the policy file and reboot")
+		logger.Warn("no auth.operator_key set: if you lose the JWT secret, lose control of the JWKS endpoint, or lose your HMAC secret — or policies.json is emptied — every token-based request is denied and the only recovery is editing the settings directory on the host")
 	} else {
-		logger.Info("operator key is set: requests presenting it via 'Authorization: Operator <key>' (or the X-Operator-Key alias) are authorized as a full-access platform operator, and can restore a wiped policy over HTTP")
+		logger.Info("operator key is set: requests presenting it via 'Authorization: Operator <key>' (or the X-Operator-Key alias) are authorized as a full-access platform operator, and can inspect the adopted policy and trigger a settings reload over HTTP while it is locked out")
 	}
 
 	ctx := context.Background()
@@ -432,18 +430,12 @@ func run() int {
 	cache := l1
 	defer func() { _ = cache.Close() }()
 
-	// Policy store (NATS KV + optional file bootstrap).
-	policyStore, err := policy.NewStore(ctx, embeddedMQ.JetStream(), cfg.Policy.FilePath, logger)
-	if err != nil {
-		logger.Error("policy store init", "error", err)
-		return 1
-	}
-
-	// Pipes store (NATS KV + optional SQL file directory).
-	pipesStore, err := pipes.NewStore(ctx, embeddedMQ.JetStream(), cfg.Pipes.Dir, logger)
-	if err != nil {
-		logger.Error("pipes store init", "error", err)
-		return 1
+	// Access-control policy and named pipes come from the settings directory
+	// (policies.json / pipes.json) and are read per request off the adopted
+	// snapshot, so a reload applies to the next request with no hook.
+	policySource := policy.Source(settingsStore.Policy)
+	if settingsStore.Policy() == nil {
+		logger.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
 	}
 
 	// Active sweeper — purges messages that are both written to CH and
@@ -455,10 +447,7 @@ func run() int {
 	// handler (write counts), and the Hub that projects/serializes each event once
 	// per (topic, role) and pushes it to that role's subscribers.
 	sseMetrics := stream.NewMetrics()
-	streamHub := stream.NewHub(policyStore, registry, sseMetrics)
-
-	// Start policy watch for cluster-wide updates.
-	go policyStore.Watch(ctx)
+	streamHub := stream.NewHub(policySource, registry, sseMetrics)
 
 	// Start batch consumer → ClickHouse.
 	ingestCleanup, err := ingest.StartIngestWorker(
@@ -492,7 +481,7 @@ func run() int {
 	// Build handlers.
 	js := embeddedMQ.JetStream()
 	ingestHandler := api.NewIngestHandler(registry, embeddedMQ, logger)
-	ingestHandler.PolicyStore = policyStore
+	ingestHandler.PolicySource = policySource
 	ingestHandler.Dedup = dedup
 	ingestHandler.DedupeSettings = settingsStore.DedupeFor
 
@@ -535,7 +524,7 @@ func run() int {
 			OperatorKey: cfg.Auth.OperatorKey,
 		}
 	}
-	authn, err := auth.NewAuthenticator(authConfig(), policyStore, logger)
+	authn, err := auth.NewAuthenticator(authConfig(), policySource, logger)
 	if err != nil {
 		logger.Error("auth middleware init", "error", err)
 		return 1
@@ -578,16 +567,16 @@ func run() int {
 		Version:         api.NewVersionHandler(Version, GitCommit, BuildTime),
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
-		Policy:          api.NewPolicyHandler(policyStore),
-		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, chConn.QueryTimeout, logger),
-		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, settingsStore.TimestampBucketSeconds, chConn.QueryTimeout, settingsStore.DefaultMaxRows, logger),
+		Policy:          api.NewPolicyHandler(policySource),
+		Pipes:           api.NewPipesHandler(settingsStore, policySource, chConn, cache, chConn.QueryTimeout, logger),
+		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policySource, settingsStore.TimestampBucketSeconds, chConn.QueryTimeout, settingsStore.DefaultMaxRows, logger),
 
-		AuthMW:      authMW,
-		PolicyStore: policyStore,
-		Logger:      logger,
-		JS:          js,
-		CORSOrigins: settingsStore.CORSOrigins,
-		Settings:    api.NewSettingsHandler(settingsStore, logger),
+		AuthMW:       authMW,
+		PolicySource: policySource,
+		Logger:       logger,
+		JS:           js,
+		CORSOrigins:  settingsStore.CORSOrigins,
+		Settings:     api.NewSettingsHandler(settingsStore, logger),
 	}
 
 	// Prometheus /metrics routing: same-port → mount on API router,

@@ -9,8 +9,8 @@
 //     bound to it (WH_SERVER_PORT) with auth enabled. Random port avoids
 //     conflicts with `make dev`, dev servers, and previous runs that may
 //     have leaked sockets.
-//  3. Run the vitest harness against the running stack. CLICKHOUSE_URL
-//     and WAVEHOUSE_URL come in via env.
+//  3. Run the vitest harness against the running stack. CLICKHOUSE_URL,
+//     WAVEHOUSE_URL, and WAVEHOUSE_SETTINGS_DIR come in via env.
 //  4. SIGINT the cover binary (flushes coverage), terminate the
 //     testcontainer.
 //
@@ -189,15 +189,15 @@ func run() error {
 	// #nosec G204 — binPath is filepath.Join(repoRoot, "bin", "wavehouse-cov"),
 	// not user-controlled. The test harness must launch the cover binary.
 	whCmd := exec.CommandContext(ctx, binPath)
-	// Pin cwd so the fixture's relative paths (policy.file_path, etc.)
-	// resolve from the repo root regardless of where the orchestrator
-	// itself was launched from.
+	// Pin cwd so any relative path in the fixture resolves from the repo
+	// root regardless of where the orchestrator itself was launched from.
 	whCmd.Dir = repoRoot
-	// Static boot config (secrets, otel, mq sizing, policy path) lives in
-	// tests/e2e/fixtures/config.yaml and the tunables in
-	// tests/e2e/fixtures/settings — edit them there, not here. The vars below
-	// are the per-run dynamic overrides (port, scratch paths, the patched
-	// settings copy) plus GOCOVERDIR and WH_CONFIG, which can't live in YAML.
+	// Static boot config (secrets, otel, mq sizing) lives in
+	// tests/e2e/fixtures/config.yaml and the tunables, policy, roles, and
+	// pipes in tests/e2e/fixtures/settings — edit them there, not here. The
+	// vars below are the per-run dynamic overrides (port, scratch paths, the
+	// patched settings copy) plus GOCOVERDIR and WH_CONFIG, which can't live
+	// in YAML.
 	whCmd.Env = append(os.Environ(),
 		"GOCOVERDIR="+coverDir,
 		"WH_CONFIG="+filepath.Join(repoRoot, "tests", "e2e", "fixtures", "config.yaml"),
@@ -269,9 +269,13 @@ func run() error {
 	// #nosec G204 — args are a fixed string slice, not user input.
 	vitest := exec.CommandContext(ctx, "pnpm", args...)
 	vitest.Dir = filepath.Join(repoRoot, "tests", "e2e", "sdk")
+	// WAVEHOUSE_SETTINGS_DIR is the per-run settings copy the server reads:
+	// the suite edits policies.json / roles.json / pipes.json there and
+	// triggers POST /v1/ops/settings/reload (files are the only write path).
 	vitest.Env = append(os.Environ(),
 		"WAVEHOUSE_URL="+whURL,
 		"CLICKHOUSE_URL="+chHTTPURL,
+		"WAVEHOUSE_SETTINGS_DIR="+settingsDir,
 	)
 	vitest.Stdout = os.Stdout
 	vitest.Stderr = os.Stderr

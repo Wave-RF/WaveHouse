@@ -2,8 +2,8 @@ package policy
 
 // defaultAdminRole is the role granted full administrative access when a
 // (non-nil) policy does not configure an explicit admin_role. A nil policy
-// grants admin to nobody (see IsAdmin) — a fresh or policy-deleted deployment is
-// bootstrapped from the policy file (loaded server-side), not by an "admin" token.
+// grants admin to nobody (see IsAdmin) — a deployment gets its policy from the
+// settings directory's policies.json (adopted server-side), not from an "admin" token.
 const defaultAdminRole = "admin"
 
 // AdminRole returns the role string that grants full administrative access for a
@@ -12,7 +12,7 @@ const defaultAdminRole = "admin"
 // policy loaded there is no admin role, so a deleted/empty policy can never hand
 // back a usable admin role at the source. This is defense-in-depth behind
 // IsAdmin's own nil guard: recovery from a lost policy is server-side only
-// (restore the policy file and reboot); an "admin" token cannot re-open the
+// (fix policies.json; it reloads); an "admin" token cannot re-open the
 // deployment over HTTP.
 func AdminRole(p *Policy) string {
 	if p == nil {
@@ -24,12 +24,12 @@ func AdminRole(p *Policy) string {
 	return defaultAdminRole
 }
 
-// IsAdmin reports whether role is the privileged admin role. A nil policy (none
-// configured yet, or deleted from KV) admits nobody — not even "admin": "no
+// IsAdmin reports whether role is the privileged admin role. A nil policy
+// (policies.json empty) admits nobody — not even "admin": "no
 // policy" is a total lockout, so an implicit admin grant can't re-open a
 // deliberately-emptied or lost deployment, and a deployment with a custom
-// admin_role can't have the literal "admin" silently re-privileged. A fresh
-// deployment is bootstrapped from the policy file, not over HTTP. An empty/absent
+// admin_role can't have the literal "admin" silently re-privileged. A
+// deployment's policy comes from policies.json, never over HTTP. An empty/absent
 // role is never admin either, regardless of how admin_role is configured — a
 // roleless request must never inherit admin via an empty-string match. This is
 // the single source of truth for the admin check; Evaluate, ResolveRole,

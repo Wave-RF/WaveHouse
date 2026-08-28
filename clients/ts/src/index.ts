@@ -9,6 +9,7 @@ export { PipeRef, PipesNamespace } from "./pipes.js";
 export { PolicyNamespace } from "./policy.js";
 export { QueryBuilder } from "./query-builder.js";
 export { SchemaNamespace } from "./schema.js";
+export { SettingsNamespace } from "./settings.js";
 export { StreamController } from "./stream/controller.js";
 export { LiveQuery } from "./stream/live-query.js";
 export { SysNamespace } from "./sys.js";
@@ -48,6 +49,8 @@ export type {
   Result,
   RolePermissions,
   Schemas,
+  SettingsFinding,
+  SettingsReloadResult,
   StreamEvent,
   StreamOptions,
   // Streaming

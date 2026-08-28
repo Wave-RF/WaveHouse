@@ -96,17 +96,16 @@ createClient<DB>(config) → WaveHouseClient
 │   └── .stream(opts?) → StreamController
 ├── .pipes (admin)
 │   ├── .list() → Promise<Result<Pipe[]>>
-│   ├── .get(name) → Promise<Result<Pipe>>
-│   ├── .set(name, def) → Promise<Result<void>>
-│   └── .delete(name) → Promise<Result<void>>
+│   └── .get(name) → Promise<Result<Pipe>>
 ├── .sql(query, opts?) → Promise<Result<Row[]>>   (admin)
 ├── .schema (admin)
 │   ├── .list() → Promise<Result<Schemas>>
 │   └── .refresh() → Promise<Result<void>>
 ├── .policy (admin)
 │   ├── .get() → Promise<Result<Policy>>
-│   ├── .set(policy) → Promise<Result<void>>
 │   └── .validate(policy) → Promise<Result<ValidationResult>>
+├── .settings (admin)
+│   └── .reload(opts?) → Promise<Result<SettingsReloadResult>>
 ├── .dlq (admin)
 │   ├── .list() → Promise<Result<DLQStats>>
 │   ├── .table(name) → Promise<Result<DLQStats>>

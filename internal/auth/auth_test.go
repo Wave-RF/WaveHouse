@@ -47,7 +47,7 @@ func run(t *testing.T, cfg Config, setup func(*http.Request)) captured {
 
 // runOp is run with an explicit policy store and logger, so the operator-key
 // path (which reads the live admin role from the store) can be exercised.
-func runOp(t *testing.T, cfg Config, store *policy.Store, logger *slog.Logger, setup func(*http.Request)) captured {
+func runOp(t *testing.T, cfg Config, store policy.Source, logger *slog.Logger, setup func(*http.Request)) captured {
 	t.Helper()
 	var c captured
 	a, err := NewAuthenticator(cfg, store, logger)
@@ -364,7 +364,7 @@ func TestMiddleware_JWKSEmptyKeySet_TokenDoesNotAuthenticate(t *testing.T) {
 
 func TestMiddleware_OperatorKey(t *testing.T) {
 	t.Parallel()
-	adminStore := func() *policy.Store { return policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"}) }
+	adminStore := func() policy.Source { return policy.Static(&policy.Policy{AdminRole: "admin"}) }
 	// A valid JWT (signed with the test secret) for the fall-through / precedence cases.
 	editorJWT := testutil.MakeJWT(t, map[string]any{"role": "editor"})
 	withBoth := func(opKey string) func(*http.Request) {
@@ -377,7 +377,7 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 	tests := []struct {
 		name       string
 		cfg        Config
-		store      *policy.Store
+		store      policy.Source
 		logger     *slog.Logger
 		setup      func(*http.Request)
 		wantOp     bool
@@ -396,7 +396,7 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 		{
 			name:     "stamped role tracks a custom admin_role, read live",
 			cfg:      Config{OperatorKey: testOperatorKey},
-			store:    policy.NewMemoryStore(&policy.Policy{AdminRole: "superuser"}),
+			store:    policy.Static(&policy.Policy{AdminRole: "superuser"}),
 			setup:    operatorHeader(testOperatorKey),
 			wantOp:   true,
 			wantRole: "superuser",
@@ -404,10 +404,10 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 		{
 			// Break-glass: a nil/deleted policy makes the admin role resolve to "",
 			// but the operator bit is still set so RequireAdmin can admit the request
-			// to restore the policy over HTTP.
+			// to the admin surface (inspect policy, reload settings) while locked out.
 			name:   "nil policy sets the operator bit but an empty role (break-glass)",
 			cfg:    Config{OperatorKey: testOperatorKey},
-			store:  policy.NewMemoryStore(nil),
+			store:  policy.Static(nil),
 			setup:  operatorHeader(testOperatorKey),
 			wantOp: true,
 		},
@@ -509,7 +509,7 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 // which it was until the bearerToken call was hoisted above the operator branch.
 func TestMiddleware_OperatorKey_StripsQueryToken(t *testing.T) {
 	t.Parallel()
-	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	store := policy.Static(&policy.Policy{AdminRole: "admin"})
 	query := testutil.MakeJWT(t, map[string]any{"role": "viewer"})
 	c := runOp(t, Config{OperatorKey: testOperatorKey}, store, nil, func(r *http.Request) {
 		r.URL.RawQuery = "table=clicks&token=" + query
@@ -541,7 +541,7 @@ func infoBufLogger() (*slog.Logger, *bytes.Buffer) {
 func TestMiddleware_OperatorKey_FailedAttemptLogged(t *testing.T) {
 	t.Parallel()
 	cfg := Config{OperatorKey: testOperatorKey}
-	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	store := policy.Static(&policy.Policy{AdminRole: "admin"})
 
 	t.Run("wrong key via X-Operator-Key logs WARN and falls through", func(t *testing.T) {
 		t.Parallel()

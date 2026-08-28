@@ -20,8 +20,6 @@ type Config struct {
 	ClickHouse ClickHouse `yaml:"clickhouse"`
 	Cache      Cache      `yaml:"cache"`
 	Auth       Auth       `yaml:"auth"`
-	Policy     Policy     `yaml:"policy"`
-	Pipes      Pipes      `yaml:"pipes"`
 	OTel       OTel       `yaml:"otel"`
 	Prometheus Prometheus `yaml:"prometheus"`
 	Settings   Settings   `yaml:"settings"`
@@ -38,7 +36,7 @@ const EnvSettingsDir = "WH_SETTINGS_DIR"
 // documents (roles.json, policies.json, pipes.json, config.json) validated by
 // internal/settings. Boot-tier by necessity: it's the pointer the reload
 // machinery follows, so it can't live behind itself. REQUIRED, with no
-// default, same reasoning as policy.file_path: a baked-in path would turn a
+// default: a baked-in path would turn a
 // missing mount into silent misconfiguration instead of an explicit operator
 // choice, and the binary has no compiled tunable defaults to fall back on —
 // `wavehouse bootstrap [dir]` writes the starter directory (the container
@@ -137,39 +135,11 @@ type Cache struct {
 // deployment: a request presenting it via an "Authorization: Operator <key>"
 // header (or the X-Operator-Key alias) is authorized as a full-access platform
 // operator, independent of the JWT verifier, and keeps working even if the
-// policy is missing/deleted (break-glass recovery). Empty (the default) disables
+// policy is missing/deleted (break-glass recovery, e.g. fixing policies.json). Empty (the default) disables
 // it. Treat it as an admin secret.
 type Auth struct {
 	JWTSecret   string `yaml:"jwt_secret" env:"WH_AUTH_JWT_SECRET"`
 	OperatorKey string `yaml:"operator_key" env:"WH_AUTH_OPERATOR_KEY"`
-}
-
-// Policy configures the access control policy engine.
-//
-// FilePath has no default on purpose. When set, the file MUST exist and parse
-// cleanly — policy.NewStore returns a fatal error otherwise, so a typo or a
-// missing mount surfaces as a refused boot instead of a silent fail-closed
-// (every request 403s, including admin). When left empty, the store comes up
-// with no cached policy and the operator seeds via PUT /v1/ops/policy.
-//
-// A baked-in default like "policy.yaml" would re-introduce the silent-lockout
-// failure mode for any deployment that didn't ship that exact file at CWD,
-// and it would imply a convention the operator never opted into — keep the
-// path an explicit choice.
-type Policy struct {
-	FilePath string `yaml:"file_path" env:"WH_POLICY_FILE_PATH"`
-}
-
-// Pipes configures named query pipes.
-//
-// Dir is an OPTIONAL bootstrap source: on startup, any `.sql` files in it are
-// loaded into the NATS KV pipe store. After bootstrap, the API/KV is the
-// authoritative store — the directory is read-only at runtime and not
-// rewritten. Empty default skips bootstrap entirely (most users will create
-// pipes via the API). When set, mount the directory read-only in containers
-// (e.g. `./my-pipes:/app/pipes:ro`) so it's clear it's a seed, not state.
-type Pipes struct {
-	Dir string `yaml:"dir" env:"WH_PIPES_DIR" env-default:""`
 }
 
 // Validate checks the loaded configuration for logical consistency.

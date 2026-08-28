@@ -2,16 +2,14 @@
 title: "Access Control"
 description: "Roles, policies, and row/column permissions — how WaveHouse decides what each caller can read and write."
 cloudCta:
-  body: "Designing your row and column policies stays your call — it encodes your tenancy model. Running the JWT verification, the policy store, and its sync across every node does not have to be. WaveHouse Cloud operates that half."
+  body: "Designing your row and column policies stays your call — it encodes your tenancy model. Running the JWT verification, writing the policy files, and syncing them across every node does not have to be. WaveHouse Cloud operates that half."
 sidebar:
   order: 5
 ---
 
-import { Tabs, TabItem } from "@astrojs/starlight/components";
+WaveHouse authorizes every request against a single **access control policy**: a per-table, per-role document that decides which columns a caller may see, which rows they may touch, what they may aggregate, and how much work a query may do. It is Hasura-style — column-level and row-level permissions with JWT claim templating — kept in the [settings directory](/settings-directory#policiesjson) and applied on every read, write, and live stream.
 
-WaveHouse authorizes every request against a single **access control policy**: a per-table, per-role document that decides which columns a caller may see, which rows they may touch, what they may aggregate, and how much work a query may do. It is Hasura-style — column-level and row-level permissions with JWT claim templating — stored centrally and applied on every read, write, and live stream.
-
-This guide explains the whole model: where roles come from, how to write a policy, how each rule is enforced, and how the policy is loaded and changed at runtime. For the raw config knobs see [Configuration](/configuration#access-control-policy); for the HTTP surface see the [API reference](/api#authentication). Named query pipes have their own, simpler authorization model — see [Named Pipes](/pipes).
+This guide explains the whole model: where roles come from, how to write a policy, how each rule is enforced, and how the policy is loaded and changed at runtime. For the file format and validation rules see [Settings Directory — `policies.json`](/settings-directory#policiesjson); for the HTTP surface see the [API reference](/api#authentication). Named query pipes have their own, simpler authorization model — see [Named Pipes](/pipes).
 
 ## How a request is authorized
 
@@ -33,7 +31,7 @@ flowchart TD
 
 Two things make this safe by default:
 
-- **Fail-closed.** A role only gets what the policy explicitly grants it. No policy entry for a table, operation, or role means *denied* — there is no implicit allow. If there is no policy at all (none seeded yet, or it was deleted), **every token-based** request is denied, including the admin role — the lone exception is the [operator key](#operator-key), below.
+- **Fail-closed.** A role only gets what the policy explicitly grants it. No policy entry for a table, operation, or role means *denied* — there is no implicit allow. If there is no policy at all (an empty `policies.json`), **every token-based** request is denied, including the admin role — the lone exception is the [operator key](#operator-key), below.
 - **The empty role matches nothing.** A request with no role never matches a policy entry by accident. It is authorized only after `default_role` deliberately maps it to a concrete role, or via the admin role.
 
 ## Roles
@@ -64,19 +62,19 @@ Setting `default_role` equal to `admin_role` is permitted — it makes every una
 `admin_role` (default: `"admin"`) is the one role that bypasses the entire policy:
 
 - It is granted **full, unrestricted access** to every table and operation. An admin is **never** column-scoped or row-scoped, even by a policy entry that explicitly names the admin role — admin is an unconditional bypass, not a scoped grant.
-- It is the gate for the whole `/v1/ops/*` tree — raw SQL, policy CRUD, pipe CRUD, schema discovery, and DLQ stats. The gate reads `admin_role` live from the policy, so changing it applies without a restart.
+- It is the gate for the whole `/v1/ops/*` tree — raw SQL, policy and pipe inspection, settings reload, schema discovery, and DLQ stats. The gate reads `admin_role` live from the policy, so changing it applies without a restart.
 
 There is no separate `service` role. To reach an admin endpoint or to read data beyond what `default_role` grants, present a valid token whose `role_claim` is the admin role (or another granted role) — **or** present the non-JWT [operator key](#operator-key) described below.
 
 :::caution[A missing policy locks everyone out — including admin]
-`admin_role` only grants access while a policy is loaded. Deleting the policy from the store sets it to `nil`, and a `nil` policy denies every **token-based** caller, by design: an implicit admin grant must never re-open a deliberately-emptied deployment. The one credential that still works is the [operator key](#operator-key) — configure one to recover over HTTP; without it, recovery is server-side only (restore the [bootstrap file](#bootstrapping-and-the-policy-lifecycle) and reboot).
+`admin_role` only grants access while a policy is adopted. An empty `policies.json` (`{}`) adopts **no policy**, and no policy denies every **token-based** caller, by design: an implicit admin grant must never re-open a deliberately-emptied deployment. Recovery is a file edit: write a policy to `policies.json` and let the watcher pick it up (or `SIGHUP`, or `POST /v1/ops/settings/reload`) — see [the policy lifecycle](#the-policy-lifecycle). The one credential that still works meanwhile is the [operator key](#operator-key), which can inspect the adopted policy and trigger the reload over HTTP.
 :::
 
 ### Operator key
 
-`auth.operator_key` (config; presented in an `Authorization: Operator <key>` header, or the `X-Operator-Key` alias) is a static, role-free credential for the person running the deployment, meant for bootstrap and break-glass recovery. A request presenting it is authorized as a **full-access platform operator** — the entire data plane *and* the `/v1/ops/*` management surface — without minting a JWT, and independently of the JWT verifier (`jwt_secret`/`jwks_url`).
+`auth.operator_key` (config; presented in an `Authorization: Operator <key>` header, or the `X-Operator-Key` alias) is a static, role-free credential for the person running the deployment, meant for break-glass recovery. A request presenting it is authorized as a **full-access platform operator** — the entire data plane *and* the `/v1/ops/*` management surface — without minting a JWT, and independently of the JWT verifier (`jwt_secret`/`jwks_url`).
 
-Unlike `admin_role`, the operator key is honored **even when the policy is `nil`** (deleted, or never seeded), so it is the one HTTP path that can restore a wiped policy — the break-glass case the caution above describes. It is matched in constant time, takes precedence over any Bearer token on the same request, and is disabled when empty (the default). Treat it as an admin secret: load it from a secret store, serve it only over TLS, and rotate it like any other credential. See [Configuration — Authentication](/configuration#authentication).
+Unlike `admin_role`, the operator key is honored **even when no policy is adopted** (an empty `policies.json`), so it is the one HTTP credential that still reaches `/v1/ops/*` — `GET /v1/ops/policy` to see what is adopted and `POST /v1/ops/settings/reload` once the file is fixed — the break-glass case the caution above describes. It is matched in constant time, takes precedence over any Bearer token on the same request, and is disabled when empty (the default). Treat it as an admin secret: load it from a secret store, serve it only over TLS, and rotate it like any other credential. See [Configuration — Authentication](/configuration#authentication).
 
 Generate a high-entropy value (≥ 256 bits of randomness) and load it from a secret manager rather than committing it:
 
@@ -96,7 +94,7 @@ curl -H "Authorization: Operator $(cat operator.key)" https://wavehouse.example.
 
 ## Anatomy of a policy
 
-A policy is a YAML or JSON document with three top-level fields:
+A policy is a JSON document — the settings directory's [`policies.json`](/settings-directory#policiesjson) — with three top-level fields:
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
@@ -105,23 +103,6 @@ A policy is a YAML or JSON document with three top-level fields:
 | `tables` | map | Per-table permissions, keyed by ClickHouse table name. |
 
 Each table entry holds permissions for two operations — `select` (reads) and `insert` (writes) — and each operation maps **role → permissions**:
-
-<Tabs syncKey="policy">
-  <TabItem label="YAML">
-
-```yaml
-tables:
-  events:                 # ClickHouse table name
-    select:               # read permissions
-      viewer:             # role → what "viewer" may read
-        allow_columns: ["page", "score"]
-    insert:               # write permissions
-      writer:             # role → what "writer" may insert
-        allow_columns: ["page", "score", "user_id"]
-```
-
-  </TabItem>
-  <TabItem label="JSON">
 
 ```json
 {
@@ -142,27 +123,11 @@ tables:
 }
 ```
 
-  </TabItem>
-</Tabs>
-
 A role with no entry under the operation it is attempting is denied. The set of permission fields below applies to both `select` and `insert` entries, though some (row `filter`, aggregations, limits) only take effect on the read path and some (`check`) only on the write path — the [enforcement table](#where-each-rule-is-enforced) maps which is which.
 
 ## Column permissions
 
 `allow_columns` and `deny_columns` control which columns a role can read (on `select`) or write (on `insert`).
-
-<Tabs syncKey="policy">
-  <TabItem label="YAML">
-
-```yaml
-select:
-  viewer:
-    allow_columns: ["page", "button", "received_timestamp"]
-    deny_columns: ["user_email", "ip_address"]
-```
-
-  </TabItem>
-  <TabItem label="JSON">
 
 ```json
 {
@@ -175,9 +140,6 @@ select:
 }
 ```
 
-  </TabItem>
-</Tabs>
-
 The rules, in order:
 
 1. **`deny_columns` always wins.** A column in the deny list is rejected even if it is also allowed.
@@ -189,20 +151,6 @@ On a structured query (`POST /v1/query?table={table}`) the allowlist is a **hard
 ## Row-level security
 
 `filter` restricts *which rows* a role can read. Like the per-column decision above, one resolution drives **both** read surfaces: a structured query gets the predicates injected as a `WHERE` clause in the generated SQL, and the live stream evaluates the *same* resolved predicates in memory against each subscriber's claims before delivering an event — so row visibility can't drift between the two paths (the stream's in-memory comparison has a fail-closed boundary; see [the enforcement caution below](#where-each-rule-is-enforced)). Each entry maps a column to a comparison whose value is usually a **JWT claim template**:
-
-<Tabs syncKey="policy">
-  <TabItem label="YAML">
-
-```yaml
-select:
-  viewer:
-    filter:
-      tenant_id:
-        _eq: "{{ jwt.app_metadata.tenant_id }}"
-```
-
-  </TabItem>
-  <TabItem label="JSON">
 
 ```json
 {
@@ -217,9 +165,6 @@ select:
   }
 }
 ```
-
-  </TabItem>
-</Tabs>
 
 This produces `WHERE (tenant_id = ?)` with the caller's `app_metadata.tenant_id` claim bound as the parameter — so a `viewer` only ever sees rows for their own tenant, and the value comes from the signed token, not from anything the client sends.
 
@@ -248,30 +193,13 @@ Values are always bound as SQL **parameters**, never concatenated into the query
 
 "Can't be resolved" means the claim path is **absent** from the token (or `null`) — or resolves to a JSON **object or array** rather than a scalar, which usually means a dropped path segment (`{{ jwt.app_metadata }}` where `{{ jwt.app_metadata.tenant_id }}` was meant); the one structured shape with defined semantics is the bare-claim `_in` array above. Scalar claims — strings, booleans, and numbers — resolve normally. A numeric claim binds in **canonical decimal form**, not the token's spelling: an integer id keeps every digit — up to a 100-digit bound, far past any real id — while `1.0` or `1e3` binds as `1` and `1000`, so spelling differences between issuers never change the bound value. What must fit the bound is the value's **exact decimal form**, exponent applied — roughly 100 digits (the exact-form gate allows 102 characters, whatever they are) — so `1e400` can't be resolved, but neither can `1e150` or `1e-150`, whose short spellings expand to 151- and 152-character exact forms even though a float64 could hold them; prefer issuing integer ids as integers. Type the scoped column to match: an integer column — or a `Decimal` whose scale covers the claim's fractional digits — keeps the comparison exact, while a `Float32`/`Float64` column rounds the stored value and quietly gives that exactness back (`col = '9007199254740993'` matches a stored `9007199254740992` there). A claim that is *present but empty* is a value the token vouches for: it resolves to `''` and binds normally, so `_neq` against an empty-string claim still emits `col != ''`. Make sure your identity provider actually issues the claims your policy templates reference — and omits unset claims rather than issuing them as empty strings.
 
-Claim paths may contain only letters, digits, `_`, and `.` (the segment separator). Any `{{ … }}` fragment that is not a well-formed `{{ jwt.<path> }}` template — a path outside that grammar (a hyphen: `{{ jwt.tenant-id }}`; a namespaced claim: `{{ jwt.https://app.example.com/tenant_id }}`), a missing or misspelled `jwt.` prefix, or an unterminated `{{` — is **not** recognized as a template, and left unchecked the resolver would bind the literal `{{ … }}` text as a value. (Policy values have no other placeholder syntax; a pipe's `{{param}}` placeholders are a different mechanism and are not accepted here.) That is *not* fail-closed: on a read filter `_neq`/`_lt` would then match essentially every row (a leak), and on a write `check` the literal text would be stamped into every inserted row (silent corruption). So such a policy is **rejected when it is written**: a bootstrap policy file carrying one makes WaveHouse refuse to start when the store is seeded from it (a populated KV store skips the file), and a `PUT` on `/v1/ops/policy` (or a `POST` to `/v1/ops/policy/validate`) returns `400`. A policy already stored in NATS KV is *not* re-validated when a node loads it ([#461](https://github.com/Wave-RF/WaveHouse/issues/461)), so after upgrading, re-`PUT` your policy once to surface a template written before this rule existed — until you do, that stored policy keeps binding the literal text, and the leak above stays live for it. Flatten hyphenated or namespaced claims into a supported path at your identity provider — on Auth0, an [Action can set a flat custom claim](https://auth0.com/docs/secure/tokens/json-web-tokens/create-custom-claims) outside the registered OIDC names (its legacy Rules required URL namespacing, which established tenants often still carry), and namespacing is a common OIDC convention elsewhere, so a namespaced claim is the shape you are most likely to meet first.
+Claim paths may contain only letters, digits, `_`, and `.` (the segment separator). Any `{{ … }}` fragment that is not a well-formed `{{ jwt.<path> }}` template — a path outside that grammar (a hyphen: `{{ jwt.tenant-id }}`; a namespaced claim: `{{ jwt.https://app.example.com/tenant_id }}`), a missing or misspelled `jwt.` prefix, or an unterminated `{{` — is **not** recognized as a template, and left unchecked the resolver would bind the literal `{{ … }}` text as a value. (Policy values have no other placeholder syntax; a pipe's `{{param}}` placeholders are a different mechanism and are not accepted here.) That is *not* fail-closed: on a read filter `_neq`/`_lt` would then match essentially every row (a leak), and on a write `check` the literal text would be stamped into every inserted row (silent corruption). So such a policy is **rejected when it is validated**: a `policies.json` carrying one refuses boot, is refused by a reload (the previous good policy stays in effect), fails `wavehouse validate`, and a `POST` to `/v1/ops/policy/validate` returns `400`. Every adoption runs the current rules, so an upgrade that tightens validation re-checks the file on the next boot or reload. Flatten hyphenated or namespaced claims into a supported path at your identity provider — on Auth0, an [Action can set a flat custom claim](https://auth0.com/docs/secure/tokens/json-web-tokens/create-custom-claims) outside the registered OIDC names (its legacy Rules required URL namespacing, which established tenants often still carry), and namespacing is a common OIDC convention elsewhere, so a namespaced claim is the shape you are most likely to meet first.
 
 Row filters apply on the structured-query path and, per subscriber, on the live SSE stream — the stream evaluates the same resolved predicates in memory against each subscriber's token claims (see the [enforcement caution](#where-each-rule-is-enforced) for what its in-memory comparison can and cannot decide). Named pipes authorize by `allowed_roles` membership alone — scope a pipe's exposure in its SQL text, since neither the table policy's row `filter` nor its column allow/deny list is applied on the pipe path (see [Named Pipes](/pipes#authorizing-a-pipe)).
 
 ## Insert checks
 
-`check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It supports `_eq` (the inserted value must equal the claim) and `_in` (it must be one of a claim-derived set); the comparison operators `_neq`/`_gt`/`_lt` have no insert-time meaning and are **rejected when the policy is written** (the same boundary as malformed templates above), as is setting both `_eq` and `_in` on one column (use exactly one).
-
-<Tabs syncKey="policy">
-  <TabItem label="YAML">
-
-```yaml
-insert:
-  writer:
-    allow_columns: ["page", "score", "user_id", "tenant_id"]
-    check:
-      user_id:
-        _eq: "{{ jwt.sub }}"
-      tenant_id:
-        _eq: "{{ jwt.app_metadata.tenant_id }}"
-```
-
-  </TabItem>
-  <TabItem label="JSON">
+`check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It supports `_eq` (the inserted value must equal the claim) and `_in` (it must be one of a claim-derived set); the comparison operators `_neq`/`_gt`/`_lt` have no insert-time meaning and are **rejected when the policy is validated** (the same boundary as malformed templates above), as is setting both `_eq` and `_in` on one column (use exactly one).
 
 ```json
 {
@@ -291,9 +219,6 @@ insert:
 }
 ```
 
-  </TabItem>
-</Tabs>
-
 For each checked column, on `POST /v1/ingest?table={table}`:
 
 - **If the request body includes the column**, its value must satisfy the check — equal the claim-derived value (`_eq`), or be one of the claim-derived set (`_in`) — or the insert is rejected with `403 check failed for column "x"`. Equality is decided on **canonical scalar form**, the same rule the claim side follows: a numeric body value matches by value, not spelling (`1.0` satisfies a check against claim `1`); a body value with no canonical form — an object, array, or `null` — satisfies no check, so a `check` on a `Map` or `Array` column rejects every insert that names it; and the 100-digit bound applies to the body's literal too, so an over-long numeric value is this same `403`, not a schema error. A **template-free** `_eq` check value carries no JSON type, so it matches by either reading — a static `_eq: "1.0"` accepts an inserted `1.0` (number) and an inserted `"1.0"` (string) alike, while auto-injecting exactly as written. A claim-derived value keeps strict canonical equality: a string-typed claim matches only its exact text, so a claim of `"1e3"` never accepts an inserted `1000`. On an integer or `Decimal` column a `writer` therefore cannot forge a row for another user or tenant — equal canonical forms store equal values. On a `Float32`/`Float64` column the rounding [noted above](#jwt-claim-templating) applies to the write side too: the stored value can land on a neighboring id. And on a `String` column the guarantee is narrower in a different way: the check compares canonical forms but ClickHouse stores the body's raw spelling, so a body value that is an alternate numeric spelling of the claim (`1e3` for a claim of `1000`) passes the check yet stores differently than the auto-injected value would — and a literal's numeric reading shares this property (`_eq: "1.0"` accepting an inserted `1` stores the text `1`, not `1.0`).
@@ -307,22 +232,6 @@ This pairs naturally with a matching `filter` on the `select` side: `check` stam
 
 `allowed_aggregations` and `denied_aggregations` restrict which aggregation functions a role may use in a structured query (`count`, `sum`, `avg`, `quantile`, …). Matching is case-insensitive and follows the same precedence as columns:
 
-<Tabs syncKey="policy">
-  <TabItem label="YAML">
-
-```yaml
-select:
-  viewer:
-    # blocklist: everything else is allowed
-    denied_aggregations: ["quantile", "median"]
-  analyst:
-    # allowlist: only these three
-    allowed_aggregations: ["count", "sum", "avg"]
-```
-
-  </TabItem>
-  <TabItem label="JSON">
-
 ```json
 {
   "select": {
@@ -335,9 +244,6 @@ select:
   }
 }
 ```
-
-  </TabItem>
-</Tabs>
 
 - `denied_aggregations` always wins.
 - An empty `allowed_aggregations` means all non-denied functions are allowed; a non-empty list is an allowlist.
@@ -359,21 +265,6 @@ Four fields cap the cost of a single structured query for this role. All must be
 
 **`max_execution_time` and `max_memory_usage` accept a human-readable value or a number.** Set `max_execution_time` as a duration string (`"5s"`, `"500ms"`) or a bare number of **milliseconds**; set `max_memory_usage` as a size string (`"4GiB"`, `"512MiB"` — IEC vs SI is respected, so `"4GB"` is 4×10<sup>9</sup> and `"4GiB"` is 4×2<sup>30</sup>) or a bare number of **bytes**. The API always **returns** them as those numbers (ms and bytes), so SDK consumers read a plain integer.
 
-<Tabs syncKey="policy">
-  <TabItem label="YAML">
-
-```yaml
-select:
-  viewer:
-    max_rows: 1000
-    max_execution_time: "5s"
-    max_rows_to_read: 50000000      # reject a read that scans > 50M rows
-    max_memory_usage: "4GiB"        # peak memory per query
-```
-
-  </TabItem>
-  <TabItem label="JSON">
-
 ```json
 {
   "select": {
@@ -386,9 +277,6 @@ select:
   }
 }
 ```
-
-  </TabItem>
-</Tabs>
 
 These bound a role's blast radius on the cached read path. They do not apply to raw admin SQL, which is unbounded by design (other than the 64 MiB response cap noted in the [API reference](/api)).
 
@@ -432,101 +320,44 @@ The resource limits (`max_rows`, `max_execution_time`, `max_rows_to_read`, `max_
 
 ## Managing the policy
 
-The policy lives behind three admin endpoints (all require `admin_role`):
+The policy is the settings directory's `policies.json`, and the files are the only write path: edit the file (standalone: on the host; on WaveHouse Cloud the control plane writes it) and the running server re-validates and adopts it on file change, `SIGHUP`, or `POST /v1/ops/settings/reload` — see [Settings Directory — Loading and hot reload](/settings-directory#loading-and-hot-reload). Every role a grant names must be declared in `roles.json` alongside it.
+
+Two admin endpoints (both require `admin_role`) read and dry-run it:
 
 | Method | Endpoint | Purpose |
 | ------ | -------- | ------- |
-| `GET` | `/v1/ops/policy` | Fetch the current policy. Returns `{"tables":{}}` when none is set. |
-| `PUT` | `/v1/ops/policy` | Replace the **entire** policy. Validated before it is saved. |
-| `POST` | `/v1/ops/policy/validate` | Dry-run validation — returns `{"valid": true}` or the error, without saving. |
+| `GET` | `/v1/ops/policy` | Fetch the adopted policy. Returns `{"tables":{}}` when none is adopted. |
+| `POST` | `/v1/ops/policy/validate` | Dry-run validation of a policy document — returns `{"valid": true}` or the error, without adopting anything. |
 
-`PUT` is a full replace, not a merge: send the complete document every time. Validation rejects empty role names, negative limits, [malformed claim templates](#jwt-claim-templating), and unsupported `check` operators — `_neq`/`_gt`/`_lt`, or `_eq` and `_in` together on one column (but it intentionally allows `default_role == admin_role`, warning instead). Once accepted, the policy is written to NATS KV and propagated to every node via KV Watch — changes apply cluster-wide within moments, no restart.
+Validation rejects empty role names, negative limits, [malformed claim templates](#jwt-claim-templating), and unsupported `check` operators — `_neq`/`_gt`/`_lt`, or `_eq` and `_in` together on one column (but it intentionally allows `default_role == admin_role`, warning instead). `wavehouse validate` runs the same checks on the whole directory — including the cross-file role references the dry-run endpoint can't see — so gate a policy change with it before it reaches a running instance.
 
 ```bash
-# Replace the policy (admin token required). POST the same body to
-# /v1/ops/policy/validate first for a dry run that doesn't save.
-curl -X PUT http://localhost:8080/v1/ops/policy \
+# Dry-run a policy document (admin token required) without adopting it.
+curl -X POST http://localhost:8080/v1/ops/policy/validate \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d @policy.json
+  -d @policies.json
+
+# Then write it to the settings directory; the watcher adopts it, or force it:
+curl -X POST http://localhost:8080/v1/ops/settings/reload \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-The full request and response shapes for these endpoints live in the [API Reference](/api); the [TypeScript SDK](/sdk) wraps them as `client.policy.get()`, `client.policy.set(policy)`, and `client.policy.validate(policy)`.
+The full request and response shapes for these endpoints live in the [API Reference](/api); the [TypeScript SDK](/sdk) wraps them as `client.policy.get()`, `client.policy.validate(policy)`, and `client.settings.reload()`.
 
-## Bootstrapping and the policy lifecycle
+## The policy lifecycle
 
-NATS KV is the **source of truth** for the live policy. A file is only ever a *seed* for an empty store:
+The settings directory is the **source of truth** for the live policy — there is no other copy:
 
-- `policy.file_path` (config) points at a YAML or JSON policy file. On startup, **if and only if the KV store is empty**, the file is loaded, validated, and written to KV. On every subsequent boot the file is ignored — KV already has the authoritative copy, and runtime edits flow through `PUT /v1/ops/policy`.
-- **When `policy.file_path` is set, the file must exist, parse, and pass policy validation**, or WaveHouse refuses to boot. That turns a typo, a missing mount, or a policy invalid under a newly-tightened rule — such as the [malformed-template rejection](#jwt-claim-templating) above — into a loud failure instead of a silent fail-closed deployment that denies everything.
-- **When `policy.file_path` is empty and KV is empty**, the store comes up with no policy — every **token-based** request is denied (logged loudly, admin included). Seed one via `PUT /v1/ops/policy` using the [operator key](#operator-key), the deliberate break-glass that works under a `nil` policy — or set `policy.file_path` and reboot.
+- At boot, `policies.json` (with `roles.json`, `pipes.json`, and `config.json`) must exist, parse, and pass validation, or WaveHouse refuses to start. That turns a typo, a missing mount, or a policy invalid under a newly-tightened rule — such as the [malformed-template rejection](#jwt-claim-templating) above — into a loud failure instead of a silent fail-closed deployment that denies everything.
+- An **empty** `policies.json` (`{}`) is valid but adopts no policy — every **token-based** request is denied (logged loudly, admin included). `wavehouse bootstrap` writes it that way, so a fresh directory is closed until you write a policy.
+- A **reload** that fails validation keeps the previous good policy in effect and reports the findings (in the log, and in the `POST /v1/ops/settings/reload` response), so an operator mid-edit never breaks a running server. A reload that passes applies to the very next request.
 
-:::caution
-Validation guards only the **seed** path. A policy already in KV is not re-validated when a node loads it ([#461](https://github.com/Wave-RF/WaveHouse/issues/461)), so upgrading WaveHouse never re-checks the stored policy — after an upgrade that tightens validation (like the [claim-template rules](#jwt-claim-templating) above), re-`PUT` your policy once; until you do, a policy the new rules would reject keeps its old runtime behavior.
-:::
-
-In `config.yaml` (or the matching environment variable):
-
-<Tabs syncKey="cfg">
-<TabItem label="YAML">
-
-```yaml
-policy:
-  # seed on first boot only; KV wins thereafter
-  file_path: /etc/wavehouse/policy.yaml
-```
-
-</TabItem>
-<TabItem label="Environment">
-
-```ini
-WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
-```
-
-</TabItem>
-</Tabs>
-
-Because a deleted policy locks out every *token-based* caller (including admin), treat the bootstrap file as your recovery path — unless you configured an [operator key](#operator-key), which restores a policy over HTTP without a reboot. Keep the bootstrap file in version control, mount it read-only, and you can always restore a known-good policy by clearing KV state and rebooting. See [Configuration — Access Control Policy](/configuration#access-control-policy) for the exact knobs.
+Because no policy locks out every *token-based* caller (including admin), keep the settings directory in version control so a known-good policy is always a file away, and configure an [operator key](#operator-key) so you can inspect and reload over HTTP without shell access.
 
 ## A complete example
 
-A multi-tenant analytics deployment: anonymous callers get nothing, `viewer` reads its own tenant's rows with sensitive columns masked and expensive aggregations blocked, `writer` ingests events that are stamped with the caller's identity, and `admin` is unrestricted. Save it as your `policy.file_path` bootstrap file (`policy.yaml` or `policy.json` — both parse identically), or `PUT` it to `/v1/ops/policy`:
-
-<Tabs syncKey="policy">
-<TabItem label="YAML">
-
-```yaml
-# admin: full access + the /v1/ops/* gate (this is also the default)
-admin_role: admin
-# "" = closed: a request with no/!valid token is denied
-default_role: ""
-
-tables:
-  events:
-    select:
-      viewer:
-        # See every column except PII, only for your own tenant, and don't
-        # allow distribution-revealing aggregations or runaway scans.
-        deny_columns: ["user_email", "ip_address"]
-        filter:
-          tenant_id:
-            _eq: "{{ jwt.app_metadata.tenant_id }}"
-        denied_aggregations: ["quantile", "median"]
-        max_rows: 1000
-        max_execution_time: "5s"
-    insert:
-      writer:
-        # Clients send business fields; the policy stamps identity from the token.
-        allow_columns: ["event_name", "page", "score", "user_id", "tenant_id"]
-        check:
-          user_id:
-            _eq: "{{ jwt.sub }}"
-          tenant_id:
-            _eq: "{{ jwt.app_metadata.tenant_id }}"
-```
-
-</TabItem>
-<TabItem label="JSON">
+A multi-tenant analytics deployment: anonymous callers get nothing, `viewer` reads its own tenant's rows with sensitive columns masked and expensive aggregations blocked, `writer` ingests events that are stamped with the caller's identity, and `admin` is unrestricted. Save it as the settings directory's `policies.json`, with `{ "roles": ["admin", "viewer", "writer"] }` in `roles.json`:
 
 ```json
 {
@@ -565,15 +396,12 @@ tables:
 }
 ```
 
-</TabItem>
-</Tabs>
-
-With this policy loaded:
+With this policy adopted:
 
 - A request with **no token** has the empty role, which `default_role: ""` leaves empty → **denied** everywhere.
 - A `viewer` token can `POST /v1/query?table=events` but only sees its tenant's rows, never `user_email`/`ip_address`, can't run `quantile`, and is capped at 1000 rows / 5s.
 - A `writer` token can `POST /v1/ingest?table=events` sending `{"event_name":"click","page":"/home","score":1}`; WaveHouse auto-injects `user_id` and `tenant_id` from the token, and rejects any body that tries to set them to someone else.
-- An `admin` token can do all of the above plus raw SQL, schema, DLQ, and policy/pipe management — unscoped.
+- An `admin` token can do all of the above plus raw SQL, schema, DLQ, settings reload, and policy/pipe inspection — unscoped.
 
 ## Field reference
 
@@ -583,8 +411,8 @@ Per-role permissions (`tables.<table>.select.<role>` and `.insert.<role>`):
 | ----- | ---- | ---------- | ----------- |
 | `allow_columns` | string[] | select, insert | Allowlist of columns. Empty or `["*"]` = all columns (minus `deny_columns`). |
 | `deny_columns` | string[] | select, insert | Blocklist of columns. Always wins over `allow_columns`. |
-| `filter` | map | select | Row-level predicates (`_eq`/`_neq`/`_gt`/`_lt`/`_in`), ANDed together — injected as a SQL `WHERE` on structured reads and evaluated per subscriber on the live stream (see [enforcement](#where-each-rule-is-enforced)). `_in` takes a single claim → `col IN (…)`: an array-valued claim contributes each element, a scalar claim acts as a one-element set. Values support `{{ jwt.path }}` templating; a claim the token doesn't carry fails the filter closed (no rows on either surface), and a malformed template is rejected when the policy is written. |
-| `check` | map | insert | Required insert values (`_eq`, or `_in` for a claim-derived set; `_neq`/`_gt`/`_lt`, and setting both `_eq` and `_in`, are rejected when the policy is written). `_eq` is enforced if present and auto-injected if absent; `_in` requires the column be present and in-set. Supports templating. |
+| `filter` | map | select | Row-level predicates (`_eq`/`_neq`/`_gt`/`_lt`/`_in`), ANDed together — injected as a SQL `WHERE` on structured reads and evaluated per subscriber on the live stream (see [enforcement](#where-each-rule-is-enforced)). `_in` takes a single claim → `col IN (…)`: an array-valued claim contributes each element, a scalar claim acts as a one-element set. Values support `{{ jwt.path }}` templating; a claim the token doesn't carry fails the filter closed (no rows on either surface), and a malformed template is rejected when the policy is validated. |
+| `check` | map | insert | Required insert values (`_eq`, or `_in` for a claim-derived set; `_neq`/`_gt`/`_lt`, and setting both `_eq` and `_in`, are rejected when the policy is validated). `_eq` is enforced if present and auto-injected if absent; `_in` requires the column be present and in-set. Supports templating. |
 | `allowed_aggregations` | string[] | select | Allowlist of aggregation functions. Empty = all (minus denied). Case-insensitive. |
 | `denied_aggregations` | string[] | select | Blocklist of aggregation functions. Always wins. |
 | `max_rows` | int | select | Caps the query `LIMIT`. `0` = no limit (the `query.default_max_rows` config default applies). Must be non-negative. |
@@ -595,5 +423,5 @@ Per-role permissions (`tables.<table>.select.<role>` and `.insert.<role>`):
 ## See also
 
 - **[Named Pipes](/pipes)** — pre-defined, parameterized SQL with their own `allowed_roles` allowlist.
-- **[Configuration — Access Control Policy](/configuration#access-control-policy)** — the `policy.file_path` and auth config knobs.
+- **[Settings Directory](/settings-directory#policiesjson)** — the `policies.json` / `roles.json` file rules and the reload triggers; [Configuration — Authentication](/configuration#authentication) for the secrets.
 - **[API Reference — Authentication](/api#authentication)** — token format, the admin endpoints, and error codes.

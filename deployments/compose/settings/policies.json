@@ -1,1 +1,37 @@
-{}
+{
+  "default_role": "public",
+  "tables": {
+    "clicks": {
+      "select": {
+        "public": {
+          "allow_columns": [
+            "*"
+          ]
+        }
+      },
+      "insert": {
+        "public": {
+          "allow_columns": [
+            "*"
+          ]
+        }
+      }
+    },
+    "events": {
+      "select": {
+        "public": {
+          "allow_columns": [
+            "*"
+          ]
+        }
+      },
+      "insert": {
+        "public": {
+          "allow_columns": [
+            "*"
+          ]
+        }
+      }
+    }
+  }
+}

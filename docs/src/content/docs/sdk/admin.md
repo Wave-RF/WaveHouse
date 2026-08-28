@@ -1,6 +1,6 @@
 ---
 title: "SDK Admin & System"
-description: "Schema introspection, access-control policy, DLQ stats, and health checks in @wavehouse/sdk."
+description: "Schema introspection, access-control policy, settings reload, DLQ stats, and health checks in @wavehouse/sdk."
 ---
 
 Operational surfaces of `@wavehouse/sdk`. With one exception, everything on this page sits behind the server's admin gate: the caller must resolve to the admin role (`policy.admin_role`) or present the non-JWT [operator key](/api#authentication) — the SDK has no first-class operator-key option, but [`options.headers`](/sdk#custom-headers) can carry the `X-Operator-Key` header. The exception is `wh.sys.health()`, which calls the public, content-free `/v1/health` route and needs no credentials. See [Access Control](/access-control) for how roles resolve. Examples import from `@wavehouse/sdk` or `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
@@ -26,14 +26,14 @@ Individual table schema is also available via `wh.from('clicks').schema()`.
 
 ## Policy — `wh.policy`
 
-Manage Hasura-style access control policies. Requires the admin gate — the admin role (`policy.admin_role`) or the [operator key](/api#authentication).
+Inspect and dry-run the Hasura-style access control policy. Requires the admin gate — the admin role (`policy.admin_role`) or the [operator key](/api#authentication). The policy itself is the server's settings directory `policies.json` — files are the only write path, so there is no `set`: edit the file and let the server pick it up, or call [`wh.settings.reload()`](#settings--whsettings).
 
 ```ts
-// Get current policy
+// Get the adopted policy
 const { data: policy } = await wh.policy.get();
 
-// Update policy
-await wh.policy.set({
+// Validate a draft without adopting it (dry run)
+const { data } = await wh.policy.validate({
   default_role: 'viewer',
   admin_role: 'admin',
   tables: {
@@ -43,15 +43,25 @@ await wh.policy.set({
           allow_columns: ['page', 'button', 'received_timestamp'],
           filter: { tenant_id: { _eq: '{{ jwt.app_metadata.tenant_id }}' } },
         },
-        admin: { allow_columns: ['*'] },
       },
     },
   },
 });
-
-// Validate without applying (dry run)
-const { data } = await wh.policy.validate(policyDraft);
 // data: { valid: true } or error with validation details
+```
+
+---
+
+## Settings — `wh.settings`
+
+Trigger a reload of the server's [settings directory](/settings-directory) — `roles.json`, `policies.json`, `pipes.json`, `config.json` — the same path the file watcher and `SIGHUP` use. Requires the admin gate.
+
+```ts
+// Re-validate and adopt the settings directory
+const { data, error } = await wh.settings.reload();
+// data: { adopted: true, findings: [...] } — warnings are included on success
+// error: a 422 when the directory was rejected; error.details carries
+//        { adopted: false, findings } and the previous settings stay in effect
 ```
 
 ---

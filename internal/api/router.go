@@ -33,10 +33,10 @@ type Dependencies struct {
 	// directory is configured (nothing to reload).
 	Settings *SettingsHandler
 	AuthMW   func(http.Handler) http.Handler
-	// PolicyStore backs the RequireAdmin gate: the admin role (policy.AdminRole)
-	// is read live from the policy, so admin_role changes apply without a restart.
-	PolicyStore *policy.Store
-	JS          jetstream.JetStream // for SSE gap-fill
+	// PolicySource backs the RequireAdmin gate: the admin role (policy.AdminRole)
+	// is read live from the adopted policy, so admin_role changes apply on reload.
+	PolicySource policy.Source
+	JS           jetstream.JetStream // for SSE gap-fill
 	// CORSOrigins returns the allowed CORS origins, read per request so a
 	// settings reload applies immediately (settings.Store.CORSOrigins in
 	// production). Nil func, an empty list, or ["*"] all mean allow-all.
@@ -139,7 +139,7 @@ func NewRouter(deps Dependencies) http.Handler {
 		// is policy.AdminRole (configurable via admin_role, "admin" by default),
 		// read live from the policy store so changes apply without a restart.
 		// Declaring it once keeps the gate consistent across the tree.
-		requireAdmin := RequireAdmin(deps.PolicyStore, deps.Logger)
+		requireAdmin := RequireAdmin(deps.PolicySource, deps.Logger)
 
 		r.Post("/ingest", deps.Ingest.Handle)
 		r.Get("/stream", deps.SSE.Handle)
@@ -184,14 +184,11 @@ func NewRouter(deps Dependencies) http.Handler {
 
 			if deps.Policy != nil {
 				r.Get("/policy", deps.Policy.Get)
-				r.Put("/policy", deps.Policy.Put)
 				r.Post("/policy/validate", deps.Policy.Validate)
 			}
 			if deps.Pipes != nil {
 				r.Get("/pipes", deps.Pipes.List)
 				r.Get("/pipes/{name}", deps.Pipes.Get)
-				r.Put("/pipes/{name}", deps.Pipes.Put)
-				r.Delete("/pipes/{name}", deps.Pipes.Delete)
 			}
 			if deps.Settings != nil {
 				r.Post("/settings/reload", deps.Settings.Reload)
@@ -246,27 +243,28 @@ func jsonRecoverer(next http.Handler) http.Handler {
 // RequireAdmin restricts a route to the policy admin role (policy.AdminRole —
 // configurable via admin_role, "admin" by default). The role established by the
 // auth middleware and the live policy are read per request, so an admin_role
-// change applies without a restart. A nil policy (none configured yet, or
-// deleted from KV) admits nobody via a role — IsAdmin(nil) is false — so a
-// role-based caller can't bootstrap by writing the first policy over this gate.
-// The exception is the operator key: auth.IsOperator passes this gate even under
-// a nil policy, so an operator can restore a wiped policy over HTTP (break-glass).
+// change applies on reload. A nil policy (policies.json empty) admits nobody
+// via a role — IsAdmin(nil) is false — so no token can re-open a locked-out
+// deployment through this gate. The exception is the operator key:
+// auth.IsOperator passes this gate even under a nil policy, so an operator can
+// still inspect the adopted policy and trigger a settings reload after fixing
+// the files (break-glass).
 //
 // Authentication is decoupled from this gate: a missing/invalid/expired token
 // resolves to an empty (non-admin) role and is denied here. Denials go through
 // writeAuthzDenied, so a present-but-invalid token fails loud (401 + token
 // reason) rather than as a bare 403.
-func RequireAdmin(store *policy.Store, logger *slog.Logger) func(http.Handler) http.Handler {
+func RequireAdmin(store policy.Source, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var p *policy.Policy
 			if store != nil {
-				p = store.Get()
+				p = store()
 			}
 			// The operator key (Authorization: Operator <key>, or the X-Operator-Key
 			// alias) authorizes the admin surface independently of the policy, so it
-			// passes even when p is nil — the break-glass path for restoring a wiped
-			// policy over HTTP.
+			// passes even when p is nil — the break-glass path that keeps the admin
+			// surface (GET policy, settings reload) reachable while locked out.
 			role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
 			if auth.IsOperator(r.Context()) || policy.IsAdmin(p, role) {
 				next.ServeHTTP(w, r)

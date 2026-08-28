@@ -40,8 +40,6 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 10, cfg.Server.ShutdownTimeout)
 	assert.Equal(t, "", cfg.ClickHouse.Password)
 	assert.Empty(t, cfg.Auth.OperatorKey, "operator key is empty by default (feature off)")
-	assert.Empty(t, cfg.Policy.FilePath, "no default bootstrap file — operators opt in explicitly so a missing file never produces a silent fail-closed boot")
-	assert.Equal(t, "", cfg.Pipes.Dir)
 	assert.Equal(t, "./data", cfg.DataDir)
 	assert.False(t, cfg.OTel.Enabled)
 	assert.True(t, cfg.OTel.Traces.Enabled)

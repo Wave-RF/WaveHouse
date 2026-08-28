@@ -5,7 +5,7 @@ sidebar:
   order: 7
 ---
 
-Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, and the admin-gated `/v1/ops/*` surface (raw SQL, schema introspection, DLQ stats, policy and pipe CRUD) — with request/response formats, error codes, and examples. The JWT middleware always runs; what a caller can do is driven by the policy; see [Configuration](/configuration#authentication) for the full auth config surface.
+Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, and the admin-gated `/v1/ops/*` surface (raw SQL, schema introspection, DLQ stats, policy and pipe inspection, settings reload) — with request/response formats, error codes, and examples. The JWT middleware always runs; what a caller can do is driven by the policy; see [Configuration](/configuration#authentication) for the full auth config surface.
 
 ## Authentication
 
@@ -29,7 +29,7 @@ Prefer the header wherever you can. The TypeScript SDK streams over `fetch` and 
 
 **Authentication is decoupled from authorization.** A request with **no token**, or an **invalid/expired/malformed** one, is *not* rejected outright — it falls back to an empty role that resolves to the policy `default_role`, and authorization is decided downstream. Because the bad-token reason is remembered, a request that is then denied for lacking permission fails loud (`401` "invalid/expired token") instead of a bare `403`. Elevated access requires a valid token whose role is granted (or equals the `admin_role`). A `403` body has two forms: a request that resolves to **no role at all** (no token and no `default_role` configured) returns `{"error":"forbidden: request has no role and no public default_role is configured"}`, while a request carrying a concrete-but-unauthorized role returns the bare `{"error":"forbidden"}` shown in the tables below.
 
-**Public (unauthenticated) access is driven by the policy.** Define a usable `default_role` and no-token requests are evaluated as that role (see [Roles & Access Control](#roles--access-control)); remove it and roleless requests are denied. Setting `default_role` equal to the `admin_role` is allowed — it makes every unauthenticated request admin (including `/v1/ops/*`), handy for local/dev — but it is logged loudly on every node that loads such a policy and must not be used in production. `/v1/ops/*` (raw SQL, policy/pipe CRUD, schema, DLQ) is admin-only, and a pipe with **no `allowed_roles` authorizes nobody but the admin role** — but a pipe *can* be reached by the public when its `allowed_roles` lists the role the `default_role` resolves to (pipe access is plain allowlist membership, the same as any other role).
+**Public (unauthenticated) access is driven by the policy.** Define a usable `default_role` and no-token requests are evaluated as that role (see [Roles & Access Control](#roles--access-control)); remove it and roleless requests are denied. Setting `default_role` equal to the `admin_role` is allowed — it makes every unauthenticated request admin (including `/v1/ops/*`), handy for local/dev — but it is logged loudly on every node that loads such a policy and must not be used in production. `/v1/ops/*` (raw SQL, policy and pipe inspection, settings reload, schema, DLQ) is admin-only, and a pipe with **no `allowed_roles` authorizes nobody but the admin role** — but a pipe *can* be reached by the public when its `allowed_roles` lists the role the `default_role` resolves to (pipe access is plain allowlist membership, the same as any other role).
 
 **Operator key (non-JWT, break-glass).** A separate, role-free credential — `auth.operator_key` — authorizes a caller as a **full-access platform operator**: the entire data plane *and* the `/v1/ops/*` surface, without a JWT and independently of the token verifier. Present it in the standard `Authorization` header with the `Operator` scheme (forwarded verbatim by proxies, no collision with Bearer JWTs), or via the `X-Operator-Key` alias:
 
@@ -39,14 +39,14 @@ Authorization: Operator <operator-key>
 X-Operator-Key: <operator-key>
 ```
 
-It is checked *before* the Bearer token (so it wins when both are present), compared in constant time, and — unlike a JWT bearing the `admin_role` — is honored **even when the policy is `nil`/deleted**, making it the only credential that can restore a wiped policy over HTTP. This deliberately bends "authentication is decoupled from authorization": a matching key both authenticates and authorizes in one step. It is disabled when empty (the default). See [Configuration — Authentication](/configuration#authentication) and [Access Control — Operator key](/access-control#operator-key).
+It is checked *before* the Bearer token (so it wins when both are present), compared in constant time, and — unlike a JWT bearing the `admin_role` — is honored **even when no policy is adopted** (an empty `policies.json`), making it the only credential that can still inspect the policy and trigger `POST /v1/ops/settings/reload` over HTTP after the file is fixed. This deliberately bends "authentication is decoupled from authorization": a matching key both authenticates and authorizes in one step. It is disabled when empty (the default). See [Configuration — Authentication](/configuration#authentication) and [Access Control — Operator key](/access-control#operator-key).
 
 ### Roles & Access Control
 
 WaveHouse extracts the role from a configurable JWT claim path (`auth.role_claim`, default: `role`). Role handling:
 
 - **`admin_role`** (policy field, `"admin"` by default, exact case-sensitive match) — Full access to all tables, raw SQL, and admin endpoints. There is no separate `service` role, though the non-JWT operator key (above) reaches the same surface without a token.
-- **Other roles** — Access determined by the access control policy (see Admin endpoints below).
+- **Other roles** — Access determined by the access control policy, the settings directory's [`policies.json`](/settings-directory#policiesjson).
 
 Policies support Hasura-style row-level and column-level permissions with JWT claim templating (e.g., `{{ jwt.app_metadata.tenant_id }}`).
 
@@ -614,9 +614,9 @@ curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z
 
 ### Admin Endpoints
 
-Every admin-gated surface lives under the `/v1/ops/*` prefix, behind a single `RequireAdmin` gate: schema discovery, DLQ stats, and the policy and pipe CRUD below, plus the raw-SQL passthrough [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse) documented with the query endpoints above. They require the policy `admin_role` (`"admin"` by default, exact case-sensitive match) — or the non-JWT [operator key](#authentication), which reaches the same surface without a token; other callers get 401 (present-but-invalid token) / 403, and the quickstart's trial `public` role cannot call any of them. There is no separate `service` role. The JWT middleware always runs — a tokenless request (or a valid token without a role claim) resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is denied `403`, while a present-but-invalid token keeps its stashed verification error and is denied `401`.
+Every admin-gated surface lives under the `/v1/ops/*` prefix, behind a single `RequireAdmin` gate: schema discovery, DLQ stats, and the policy, pipe, and settings-reload endpoints below, plus the raw-SQL passthrough [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse) documented with the query endpoints above. They require the policy `admin_role` (`"admin"` by default, exact case-sensitive match) — or the non-JWT [operator key](#authentication), which reaches the same surface without a token; other callers get 401 (present-but-invalid token) / 403, and the quickstart's trial `public` role cannot call any of them. There is no separate `service` role. The JWT middleware always runs — a tokenless request (or a valid token without a role claim) resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is denied `403`, while a present-but-invalid token keeps its stashed verification error and is denied `401`.
 
-The admin endpoints in this section that accept a request body — `PUT /v1/ops/policy`, `POST /v1/ops/policy/validate`, and `PUT /v1/ops/pipes/{name}` — cap it at 1 MiB (the same 1 MiB parameter/AST-body cap as `POST /v1/query`); an over-cap body is rejected with `413 {"error":"request body exceeded 1048576 bytes"}`. A policy document or pipe definition is bounded, so this never binds legitimate use. The raw-SQL `POST /v1/ops/query` instead carries the 16 MiB bulk-payload cap documented with the query endpoints above.
+The one admin endpoint in this section that accepts a request body — `POST /v1/ops/policy/validate` — caps it at 1 MiB (the same 1 MiB parameter/AST-body cap as `POST /v1/query`); an over-cap body is rejected with `413 {"error":"request body exceeded 1048576 bytes"}`. A policy document is bounded, so this never binds legitimate use. The raw-SQL `POST /v1/ops/query` instead carries the 16 MiB bulk-payload cap documented with the query endpoints above.
 
 #### `GET /v1/ops/schema` — List All Table Schemas
 
@@ -725,13 +725,9 @@ Returns per-table message counts in the Dead Letter Queue. Admin-only, like the 
 
 #### `GET /v1/ops/policy` — Get Access Control Policy
 
-Returns the current access control policy.
+Returns the adopted access control policy — the settings directory's [`policies.json`](/settings-directory#policiesjson) as of the last successful boot or reload; `{"tables":{}}` when none is adopted. The policy has no write endpoint: edit the file and reload (see [`POST /v1/ops/settings/reload`](#post-v1opssettingsreload--reload-settings-directory)).
 
-#### `PUT /v1/ops/policy` — Update Access Control Policy
-
-Replaces the entire access control policy. Validated before saving.
-
-**Request:**
+**Response:**
 
 ```json
 {
@@ -767,37 +763,34 @@ The `default_role` field (optional) is the role assigned to any request that rea
 
 #### `POST /v1/ops/policy/validate` — Validate Policy (Dry Run)
 
-Validates a policy without saving it. Returns `{"valid": true}` or an error.
+Validates a policy document (the body, in the shape above) without adopting anything. Returns `{"valid": true}` or a `400` with the error. It checks the document alone; the cross-file role references against `roles.json` are checked by `wavehouse validate` and on reload.
 
 #### `GET /v1/ops/pipes` — List Named Pipes
 
-Returns all registered named query pipes.
+Returns every adopted named query pipe — the settings directory's [`pipes.json`](/settings-directory#pipesjson). Pipes have no write endpoints: edit the file and reload.
 
 #### `GET /v1/ops/pipes/{name}` — Get Named Pipe
 
-Returns a specific named pipe definition.
-
-#### `PUT /v1/ops/pipes/{name}` — Create/Update Named Pipe
+Returns a specific named pipe definition:
 
 ```json
 {
+  "name": "top_pages",
   "sql": "SELECT page, count() as views FROM clicks WHERE received_timestamp >= {{start_date}} GROUP BY page LIMIT {{limit}}",
   "parameters": [
     {"name": "start_date", "type": "string", "required": true},
     {"name": "limit", "type": "number", "required": false, "default": 100}
   ],
   "description": "Top pages by view count",
-  "allowed_roles": ["viewer", "admin"]
+  "allowed_roles": ["viewer"]
 }
 ```
 
 **`allowed_roles`** restricts execution: the caller's role (a tokenless or roleless request is first resolved to the policy `default_role`) must appear in the list. The admin role (`admin_role`) always passes. Matching is exact — there is no `"*"` wildcard — and empty-string entries are ignored. An empty or omitted list authorizes **nobody but the admin role**, and a request whose role is absent or unlisted is denied (fails closed).
 
-#### `DELETE /v1/ops/pipes/{name}` — Delete Named Pipe
-
 #### `POST /v1/ops/settings/reload` — Reload Settings Directory
 
-Re-validates the [settings directory](/settings-directory) and adopts it when no finding is an error — the same serialized reload path the file watcher and `SIGHUP` use.
+Re-validates the [settings directory](/settings-directory) — `roles.json`, `policies.json`, `pipes.json`, and `config.json` — and adopts it as one snapshot when no finding is an error — the same serialized reload path the file watcher and `SIGHUP` use. This is how a policy or pipe edit is applied on demand.
 
 ```json
 {

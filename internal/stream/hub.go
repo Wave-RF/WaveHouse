@@ -26,7 +26,7 @@ import (
 type Hub struct {
 	mu       sync.RWMutex
 	topics   map[string]*topicRoutes
-	policy   *policy.Store             // nil ⇒ policy filtering not configured (legacy passthrough)
+	policy   policy.Source             // nil ⇒ policy filtering not configured (legacy passthrough)
 	registry *discovery.SchemaRegistry // nil ⇒ no column types; row-filter comparison degrades fail-closed (see columnSpecs)
 	metric   *Metrics                  // nil-safe
 }
@@ -42,7 +42,7 @@ type topicRoutes struct {
 // every column's type unknown, so row-filter comparison degrades FAIL-CLOSED:
 // equality/set predicates admit only a byte-identical value and ordering/!= admit
 // nothing (see policy.ColumnKind); metric may be nil.
-func NewHub(policyStore *policy.Store, registry *discovery.SchemaRegistry, metric *Metrics) *Hub {
+func NewHub(policyStore policy.Source, registry *discovery.SchemaRegistry, metric *Metrics) *Hub {
 	return &Hub{topics: make(map[string]*topicRoutes), policy: policyStore, registry: registry, metric: metric}
 }
 
@@ -274,7 +274,7 @@ func (h *Hub) snapshotPolicy() (p *policy.Policy, filter bool) {
 	if h.policy == nil {
 		return nil, false
 	}
-	return h.policy.Get(), true
+	return h.policy(), true
 }
 
 // ReplayProjector returns the projection function for one connection's gap-fill:

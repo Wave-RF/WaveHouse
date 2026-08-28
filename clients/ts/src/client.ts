@@ -2,6 +2,7 @@ import { DLQNamespace } from "./dlq.js";
 import { PipeRef, PipesNamespace } from "./pipes.js";
 import { PolicyNamespace } from "./policy.js";
 import { SchemaNamespace } from "./schema.js";
+import { SettingsNamespace } from "./settings.js";
 import { sql } from "./sql.js";
 import { StreamController } from "./stream/controller.js";
 import { SSETransport } from "./stream/sse.js";
@@ -30,6 +31,8 @@ export class WaveHouseClient<DB extends Database = Database> {
   readonly sys: SysNamespace;
   /** Named query pipes admin namespace. */
   readonly pipes: PipesNamespace;
+  /** Settings directory namespace (admin). */
+  readonly settings: SettingsNamespace;
 
   constructor(config: ClientConfig<DB>) {
     this._ctx = {
@@ -48,6 +51,7 @@ export class WaveHouseClient<DB extends Database = Database> {
     this.dlq = new DLQNamespace(this._ctx, (table, opts) => this._createStream(table, opts));
     this.sys = new SysNamespace(this._ctx);
     this.pipes = new PipesNamespace(this._ctx);
+    this.settings = new SettingsNamespace(this._ctx);
   }
 
   /** Get a table reference for building queries, inserts, and streams. */

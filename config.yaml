@@ -48,14 +48,7 @@ cache:
 # is the default_role — a pure public deployment. Only the secrets live here.
 auth:
   jwt_secret: change-me-in-production
-  operator_key: "" # non-JWT full-access operator credential (Authorization: Operator <key>, or X-Operator-Key) for bootstrap/break-glass; empty disables
-
-# Optional bootstrap source for named query pipes. When set, .sql files in
-# this directory are loaded into the NATS KV pipe store on startup. Empty
-# default skips bootstrap. Mount read-only in containers (e.g. `:ro`) — the
-# directory is a seed, not authoritative storage.
-pipes:
-  dir: ""
+  operator_key: "" # non-JWT full-access operator credential (Authorization: Operator <key>, or X-Operator-Key) for break-glass; empty disables
 
 # Settings directory (REQUIRED): roles.json, policies.json, pipes.json,
 # config.json. The behavioral configuration lives in its config.json —
@@ -64,7 +57,8 @@ pipes:
 # require_id + per-table overrides), dlq.enabled (+ per table),
 # query.default_max_rows / timestamp_bucket_seconds,
 # schema.refresh_interval, stream keepalive_interval / keepalive_buckets /
-# gap_window_minutes, cors.allowed_origins — and every key is required: the
+# gap_window_minutes, mq.max_bytes_gb, cors.allowed_origins — and every key
+# is required: the
 # binary has no compiled defaults, so what's adopted is exactly what the
 # files say. The server validates the directory at boot (invalid or missing
 # refuses to start) and reloads it on SIGHUP, on file change, or via

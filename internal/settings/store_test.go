@@ -127,7 +127,7 @@ func TestStore_SeedIsValid(t *testing.T) {
 	assert.False(t, HasErrors(findings))
 	// The one expected finding: an empty policies.json is fail-closed and
 	// says so. The seed ships no policy on purpose — a policy is a tenant's
-	// decision (dev-policy.yaml is the opt-in trial one).
+	// decision (deployments/compose/settings ships the opt-in trial one).
 	assert.Len(t, findings, 1, "findings: %s", findingStrings(findings))
 	assert.Contains(t, findingStrings(findings), "no policy")
 	_, id, req := s.DedupeFor("anything")
@@ -208,4 +208,26 @@ func TestStore_AfterAdoptRunsOnlyOnAdoption(t *testing.T) {
 	_, adopted = s.Reload("test")
 	require.False(t, adopted)
 	assert.Equal(t, []bool{true}, seen, "rejected reload must not fire the hook")
+}
+
+func TestStore_PolicyAndPipesAccessors(t *testing.T) {
+	t.Parallel()
+	s := newLoadedStore(t, nil) // validFiles: default_role public, one pipe "top_clicks" for analyst
+
+	p := s.Policy()
+	require.NotNil(t, p)
+	assert.Equal(t, "public", p.DefaultRole)
+
+	q := s.Pipe("top_clicks")
+	require.NotNil(t, q)
+	assert.Equal(t, []string{"analyst"}, q.AllowedRoles)
+	assert.Nil(t, s.Pipe("missing"))
+	require.Len(t, s.Pipes(), 1)
+	assert.Same(t, q, s.Pipes()[0])
+
+	// Empty documents: nil policy (lockout) and no pipes — never a panic.
+	empty := newLoadedStore(t, map[string]string{FilePolicies: `{}`, FilePipes: `{}`})
+	assert.Nil(t, empty.Policy())
+	assert.Nil(t, empty.Pipe("top_clicks"))
+	assert.Empty(t, empty.Pipes())
 }

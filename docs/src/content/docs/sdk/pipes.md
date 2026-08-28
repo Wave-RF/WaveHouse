@@ -1,9 +1,9 @@
 ---
 title: "SDK Pipes"
-description: "Execute and manage named query pipes with @wavehouse/sdk."
+description: "Execute and inspect named query pipes with @wavehouse/sdk."
 ---
 
-Named pipes are server-defined, parameterized queries (see [Named Pipes guide](/pipes)). The SDK executes pipes for allowed roles and manages their definitions under the admin role. Examples import from `@wavehouse/sdk` or `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
+Named pipes are server-defined, parameterized queries (see [Named Pipes guide](/pipes)). The SDK executes pipes for allowed roles and lists their definitions under the admin role. Examples import from `@wavehouse/sdk` or `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 
 ## Named Pipes — `wh.pipe(name, params?)`
 
@@ -31,7 +31,7 @@ Open a live stream (see [Streaming](/sdk/streaming)).
 
 ## Pipes Admin — `wh.pipes`
 
-Manage named query pipes. Requires the admin gate — the admin role (`policy.admin_role`) or the [operator key](/api#authentication).
+Inspect the adopted named query pipes. Requires the admin gate — the admin role (`policy.admin_role`) or the [operator key](/api#authentication). Pipes are defined in the server's settings directory `pipes.json` — files are the only write path, so there is no `set` or `delete`: edit the file and let the server pick it up, or call [`wh.settings.reload()`](/sdk/admin#settings--whsettings).
 
 ```ts
 // List all pipes
@@ -39,15 +39,5 @@ const { data: pipes } = await wh.pipes.list();
 
 // Get a single pipe definition
 const { data: pipe } = await wh.pipes.get('top_pages');
-
-// Create or update
-await wh.pipes.set('top_pages', {
-  sql: 'SELECT page, count() as views FROM clicks GROUP BY page LIMIT {{limit}}',
-  parameters: [{ name: 'limit', type: 'number', required: false, default: 100 }],
-  description: 'Top pages by view count',
-  allowed_roles: ['viewer', 'admin'],
-});
-
-// Delete
-await wh.pipes.delete('old_pipe');
+// pipe: { name, sql, parameters, description, allowed_roles }
 ```

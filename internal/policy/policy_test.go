@@ -13,9 +13,9 @@ import (
 
 func TestEvaluate_NilPolicy(t *testing.T) {
 	t.Parallel()
-	// A nil policy (none configured yet, or deleted from KV) fails fully closed:
-	// nobody passes, not even the admin role — deleting the policy is a total
-	// lockout. A fresh deployment is bootstrapped from the policy file, not over HTTP.
+	// A nil policy (policies.json empty) fails fully closed: nobody passes, not
+	// even the admin role — emptying the policy is a total lockout. A policy
+	// only ever arrives via the settings directory, never over HTTP.
 	assert.False(t, Evaluate(nil, "viewer", "clicks", "select", nil).Allowed,
 		"nil policy must deny a non-admin role")
 	assert.False(t, Evaluate(nil, "", "clicks", "select", nil).Allowed,

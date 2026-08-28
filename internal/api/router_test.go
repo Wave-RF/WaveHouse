@@ -11,6 +11,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -20,7 +21,7 @@ import (
 
 func TestRequireAdmin_AdminAllowed(t *testing.T) {
 	t.Parallel()
-	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequireAdmin(policy.Static(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	ctx := auth.WithRole(context.Background(), "admin")
@@ -32,7 +33,7 @@ func TestRequireAdmin_AdminAllowed(t *testing.T) {
 
 func TestRequireAdmin_NonAdminForbidden(t *testing.T) {
 	t.Parallel()
-	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequireAdmin(policy.Static(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
 	ctx := auth.WithRole(context.Background(), "viewer")
@@ -62,7 +63,7 @@ func TestRequireAdmin_NoRoleForbidden(t *testing.T) {
 // literal "admin" is an ordinary (denied) role under a custom admin_role.
 func TestRequireAdmin_CustomAdminRole(t *testing.T) {
 	t.Parallel()
-	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "superuser"})
+	store := policy.Static(&policy.Policy{AdminRole: "superuser"})
 	handler := RequireAdmin(store, testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -96,7 +97,7 @@ func TestRequireAdmin_InvalidTokenFailsLoud(t *testing.T) {
 // non-admin one.
 func TestRequireAdmin_OperatorBypass(t *testing.T) {
 	t.Parallel()
-	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequireAdmin(policy.Static(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	ctx := auth.WithOperator(auth.WithRole(context.Background(), "viewer"))
@@ -108,7 +109,7 @@ func TestRequireAdmin_OperatorBypass(t *testing.T) {
 
 // TestRequireAdmin_OperatorBypassesNilPolicy: break-glass — with no policy at
 // all (IsAdmin admits nobody), the operator bit still admits the request so the
-// operator can restore a wiped policy over HTTP.
+// operator can inspect the policy and trigger a settings reload while locked out.
 func TestRequireAdmin_OperatorBypassesNilPolicy(t *testing.T) {
 	t.Parallel()
 	handler := RequireAdmin(nil, testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -327,16 +328,18 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	t.Cleanup(func() { _ = emb.Close() })
 
 	deps := Dependencies{
-		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
-		Query:       &QueryHandler{},
-		SSE:         NewStreamHandler(hub, nil),
-		Health:      &HealthHandler{},
-		Version:     NewVersionHandler("test", "test", "test"),
-		Schema:      NewSchemaHandler(reg),
-		DLQ:         NewDLQHandler(emb.JetStream(), testutil.NopLogger()),
-		AuthMW:      func(next http.Handler) http.Handler { return next },
-		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
-		Logger:      testutil.NopLogger(),
+		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Query:        &QueryHandler{},
+		SSE:          NewStreamHandler(hub, nil),
+		Health:       &HealthHandler{},
+		Version:      NewVersionHandler("test", "test", "test"),
+		Schema:       NewSchemaHandler(reg),
+		DLQ:          NewDLQHandler(emb.JetStream(), testutil.NopLogger()),
+		Policy:       NewPolicyHandler(policy.Static(&policy.Policy{})),
+		Pipes:        NewPipesHandler(pipes.Static(), policy.Static(&policy.Policy{}), nil, nil, nil, testutil.NopLogger()),
+		AuthMW:       func(next http.Handler) http.Handler { return next },
+		PolicySource: policy.Static(&policy.Policy{}),
+		Logger:       testutil.NopLogger(),
 	}
 
 	router := NewRouter(deps)
@@ -366,6 +369,14 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		{http.MethodGet, "/v1/ops/schema?table=events", "admin", http.StatusOK},
 		{http.MethodPost, "/v1/ops/schema/refresh", "admin", http.StatusOK},
 		{http.MethodGet, "/v1/ops/dlq/stats", "admin", http.StatusOK},
+		// Policy and pipes are read-only over HTTP: the settings directory is
+		// the only write path. The reads stay; the former writes must never
+		// come back (405 = path registered, method not).
+		{http.MethodGet, "/v1/ops/policy", "admin", http.StatusOK},
+		{http.MethodGet, "/v1/ops/pipes", "admin", http.StatusOK},
+		{http.MethodPut, "/v1/ops/policy", "admin", http.StatusMethodNotAllowed},
+		{http.MethodPut, "/v1/ops/pipes/x", "admin", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/v1/ops/pipes/x", "admin", http.StatusMethodNotAllowed},
 		// Pre-/v1/ops paths, removed with no aliases: they must stay 404.
 		// Roleless, so re-registering an alias fails this row whether the
 		// alias is gated (403) or — the real hazard — ungated (200).
@@ -473,14 +484,14 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
-		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
-		Query:       &QueryHandler{},
-		SSE:         NewStreamHandler(hub, nil),
-		Health:      &HealthHandler{},
-		Schema:      NewSchemaHandler(reg),
-		AuthMW:      func(next http.Handler) http.Handler { return next },
-		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
-		Logger:      testutil.NopLogger(),
+		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Query:        &QueryHandler{},
+		SSE:          NewStreamHandler(hub, nil),
+		Health:       &HealthHandler{},
+		Schema:       NewSchemaHandler(reg),
+		AuthMW:       func(next http.Handler) http.Handler { return next },
+		PolicySource: policy.Static(&policy.Policy{}),
+		Logger:       testutil.NopLogger(),
 	})
 
 	post := func(role string) *httptest.ResponseRecorder {
@@ -534,14 +545,14 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	hub := stream.NewHub(nil, nil, nil)
 
 	deps := Dependencies{
-		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
-		Query:       &QueryHandler{},
-		SSE:         NewStreamHandler(hub, nil),
-		Health:      &HealthHandler{},
-		Schema:      NewSchemaHandler(reg),
-		AuthMW:      func(next http.Handler) http.Handler { return next },
-		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
-		Logger:      testutil.NopLogger(),
+		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Query:        &QueryHandler{},
+		SSE:          NewStreamHandler(hub, nil),
+		Health:       &HealthHandler{},
+		Schema:       NewSchemaHandler(reg),
+		AuthMW:       func(next http.Handler) http.Handler { return next },
+		PolicySource: policy.Static(&policy.Policy{}),
+		Logger:       testutil.NopLogger(),
 	}
 
 	// Should not panic.
@@ -726,14 +737,14 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
-		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
-		Query:       &QueryHandler{},
-		SSE:         NewStreamHandler(hub, nil),
-		Health:      &HealthHandler{},
-		Schema:      NewSchemaHandler(reg),
-		AuthMW:      func(next http.Handler) http.Handler { return next },
-		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
-		Logger:      testutil.NopLogger(),
+		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Query:        &QueryHandler{},
+		SSE:          NewStreamHandler(hub, nil),
+		Health:       &HealthHandler{},
+		Schema:       NewSchemaHandler(reg),
+		AuthMW:       func(next http.Handler) http.Handler { return next },
+		PolicySource: policy.Static(&policy.Policy{}),
+		Logger:       testutil.NopLogger(),
 	})
 
 	get := func(path, role string) *httptest.ResponseRecorder {

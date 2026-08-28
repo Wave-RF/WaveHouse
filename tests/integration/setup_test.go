@@ -305,13 +305,13 @@ func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Dura
 // admin-gated endpoints without minting JWTs. Auth-enforcement coverage lives
 // in the internal/auth unit tests and the e2e SDK suite.
 //
-// The RequireAdmin gate resolves that stamped role against PolicyStore, so the
+// The RequireAdmin gate resolves that stamped role against PolicySource, so the
 // server is wired with an in-memory policy whose admin_role is "admin". A nil
 // store would deny every admin-gated route (IsAdmin(nil) is false by design).
 func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, logger *slog.Logger) (*httptest.Server, error) {
 	js := embeddedMQ.JetStream()
 
-	policyStore := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	policyStore := policy.Static(&policy.Policy{AdminRole: "admin"})
 	streamHub := stream.NewHub(policyStore, registry, nil)
 
 	deps := api.Dependencies{
@@ -322,11 +322,11 @@ func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discover
 		Query: api.NewQueryHandler(func() chconn.Target {
 			return chconn.Target{URL: ch.httpURL(), Username: testCHUser, Password: testCHPassword, Database: testCHDatabase}
 		}, func() time.Duration { return 30 * time.Second }),
-		SSE:         api.NewStreamHandler(streamHub, js),
-		Health:      api.NewHealthHandler(ch.conn),
-		Schema:      api.NewSchemaHandler(registry),
-		DLQ:         api.NewDLQHandler(js, logger),
-		PolicyStore: policyStore,
+		SSE:          api.NewStreamHandler(streamHub, js),
+		Health:       api.NewHealthHandler(ch.conn),
+		Schema:       api.NewSchemaHandler(registry),
+		DLQ:          api.NewDLQHandler(js, logger),
+		PolicySource: policyStore,
 		AuthMW: func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				next.ServeHTTP(w, r.WithContext(auth.WithRole(r.Context(), "admin")))

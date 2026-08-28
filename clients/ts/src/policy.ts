@@ -2,7 +2,15 @@ import { err, ok } from "./errors.js";
 import { request } from "./http.js";
 import type { HttpContext, Policy, Result, ValidationResult } from "./types.js";
 
-/** Namespace for access control policy management. Requires the admin role (the configured `admin_role`, `"admin"` by default). */
+/**
+ * Namespace for reading and validating the access control policy. Requires
+ * the admin role (the configured `admin_role`, `"admin"` by default).
+ *
+ * The policy is defined in the server's settings directory (`policies.json`,
+ * with every referenced role declared in `roles.json`); files are the only
+ * write path. Edit the files and the server re-adopts them on change, on
+ * SIGHUP, or on `wh.settings.reload()` (POST /v1/ops/settings/reload).
+ */
 export class PolicyNamespace {
   private readonly _ctx: HttpContext;
 
@@ -19,18 +27,6 @@ export class PolicyNamespace {
     });
     if (error) return err(error);
     return ok(data!);
-  }
-
-  /** Replace the entire access control policy. */
-  async set(policy: Policy, opts?: { signal?: AbortSignal }): Promise<Result<void>> {
-    const { error } = await request<{ ok: boolean }>(this._ctx, {
-      method: "PUT",
-      path: "/v1/ops/policy",
-      body: policy,
-      signal: opts?.signal,
-    });
-    if (error) return err<void>(error);
-    return ok(undefined as undefined);
   }
 
   /** Validate a policy without applying it (dry run). */
