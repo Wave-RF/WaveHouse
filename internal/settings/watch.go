@@ -58,7 +58,7 @@ func (s *Store) Watch(ctx context.Context) error {
 	// an edit that landed in between (a ConfigMap update during a rolling
 	// restart, say) fired no event and would otherwise sit unnoticed, with
 	// every pod looking healthy, until something touched the directory again.
-	s.TriggerReload("watch")
+	s.Reload("watch")
 
 	// The timer starts disarmed; each relevant event re-arms it, so the
 	// reload fires watchDebounce after the *last* event of a burst.
@@ -98,7 +98,7 @@ func (s *Store) Watch(ctx context.Context) error {
 			// still exists. Failure (directory currently absent) is expected
 			// mid-replace; the next parent event retries.
 			_ = w.Add(dir)
-			s.TriggerReload("watch")
+			s.Reload("watch")
 		}
 	}
 }

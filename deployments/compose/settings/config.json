@@ -1,6 +1,6 @@
 {
   "clickhouse": {
-    "addr": "localhost:9000",
+    "addr": "clickhouse:9000",
     "http_port": 8123,
     "http_scheme": "http",
     "database": "default",
@@ -12,7 +12,7 @@
     "role_claim": "role"
   },
   "dedupe": {
-    "enabled": true,
+    "enabled": false,
     "id_field": "event_id",
     "require_id": false,
     "tables": {}
@@ -26,7 +26,7 @@
     "timestamp_bucket_seconds": 60
   },
   "schema": {
-    "refresh_interval": 5
+    "refresh_interval": 60
   },
   "stream": {
     "keepalive_interval": 30,
@@ -34,6 +34,8 @@
     "gap_window_minutes": 15
   },
   "cors": {
-    "allowed_origins": ["*"]
+    "allowed_origins": [
+      "*"
+    ]
   }
 }

@@ -20,14 +20,17 @@ import (
 // ClickHouse down freezes purging; catastrophic outage fills to MaxBytes
 // and triggers backpressure via DiscardNew.
 type Sweeper struct {
-	js        jetstream.JetStream
-	gapWindow time.Duration
+	js jetstream.JetStream
+	// gapWindow is read on every sweep (settings.Store.GapWindow in
+	// production) so a reload of stream.gap_window_minutes applies from the
+	// next sweep without a restart.
+	gapWindow func() time.Duration
 	logger    *slog.Logger
 }
 
-// NewSweeper creates an Active Sweeper.
+// NewSweeper creates an Active Sweeper. gapWindow is resolved per sweep.
 // TODO: (future) need leader election or shared lock to only run one instance of the sweeper in clustered mode
-func NewSweeper(js jetstream.JetStream, gapWindow time.Duration, logger *slog.Logger) *Sweeper {
+func NewSweeper(js jetstream.JetStream, gapWindow func() time.Duration, logger *slog.Logger) *Sweeper {
 	return &Sweeper{
 		js:        js,
 		gapWindow: gapWindow,
@@ -120,7 +123,7 @@ func (s *Sweeper) findGapSequence(ctx context.Context, stream jetstream.Stream) 
 		return 0, nil
 	}
 
-	cutoff := time.Now().Add(-s.gapWindow)
+	cutoff := time.Now().Add(-s.gapWindow())
 
 	// If the oldest message is already within the window, keep everything.
 	oldest, err := stream.GetMsg(ctx, first)

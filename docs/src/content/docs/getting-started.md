@@ -20,10 +20,10 @@ The fastest path uses Docker Compose — it launches ClickHouse and a single `wa
 ```bash
 git clone https://github.com/Wave-RF/WaveHouse.git
 cd WaveHouse
-# Seed the settings directory once — the image ships none
-docker compose -f deployments/compose/standalone.yaml run --rm wavehouse init-settings /app/settings
 docker compose -f deployments/compose/standalone.yaml up -d
 ```
+
+The stack bind-mounts `deployments/compose/settings/` as WaveHouse's [settings directory](/settings-directory) — the hot-reloadable configuration, ClickHouse address included — so there is nothing to seed; edit those files and the running container picks the change up.
 
 This exposes:
 
@@ -115,4 +115,4 @@ The handful of things that most often trip up a first session — each is expect
 ## Going further
 
 - **Validate JWTs**: set `WH_AUTH_JWT_SECRET=<secret>` (the middleware always runs; without a secret every request is the policy `default_role`) and replace the shipped trial policy (`deployments/compose/dev-policy.yaml`) with a least-privilege one — see [API Reference — Authentication](/api#authentication) and [Access Control](/access-control).
-- **Enable deduplication**: set `dedupe.enabled` to `true` in the settings directory's `config.json` (it hot-reloads, no restart) — records dedupe on their `event_id` field by default; pick a different field (globally or per table) in the same file — see [Configuration — Deduplication](/settings-directory#deduplication).
+- **Enable deduplication**: set `dedupe.enabled` to `true` in the settings directory's `config.json` (it hot-reloads, no restart) — records dedupe on their `event_id` field by default; pick a different field (globally or per table) in the same file — see [Settings Directory — Deduplication](/settings-directory#deduplication).

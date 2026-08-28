@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/nats-io/nats.go"
@@ -35,12 +36,17 @@ type IngestWorker struct {
 	httpClient *http.Client
 	cache      cache.Cache
 	logger     *slog.Logger
-	chURL      string
-	user       string
-	password   string
-	db         string
-	maxBatch   int
-	maxWait    time.Duration
+	// target resolves the ClickHouse HTTP wiring per insert
+	// (chconn.Manager.Target in production) so a settings reload that
+	// re-points ClickHouse applies to the next flush.
+	target   func() chconn.Target
+	maxBatch int
+	maxWait  time.Duration
+	// dlqEnabled reports, per table, whether a row that still fails after
+	// row-by-row isolation is parked on the DLQ (settings.Store.DLQFor in
+	// production; nil means always). Resolved at the moment of the failure, so
+	// a settings reload applies to the next poison row without a restart.
+	dlqEnabled func(table string) bool
 
 	// wg tracks the dispatch loop; ackWg tracks backgrounded DoubleAck goroutines.
 	// Separate so shutdown can drain inserts (wg → tableWg) before waiting on the
@@ -72,13 +78,17 @@ const (
 
 func StartIngestWorker(
 	ctx context.Context, nc *nats.Conn, cache cache.Cache,
-	chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string,
+	target func() chconn.Target,
+	dlqEnabled func(table string) bool,
 ) (func(context.Context) error, error) {
 	if nc == nil {
 		return nil, fmt.Errorf("nats connection is nil")
 	}
 	if cache == nil {
 		return nil, fmt.Errorf("cache is nil")
+	}
+	if target == nil {
+		return nil, fmt.Errorf("clickhouse target is nil")
 	}
 
 	js, err := jetstream.New(nc)
@@ -95,11 +105,6 @@ func StartIngestWorker(
 	})
 	if err != nil {
 		return nil, err
-	}
-
-	host, _, err := net.SplitHostPort(chHost)
-	if err != nil {
-		host = chHost // If it fails to split, assume it's just a raw host/IP
 	}
 
 	// Tune the HTTP Transport for high-throughput ClickHouse ingestion
@@ -124,14 +129,12 @@ func StartIngestWorker(
 			Transport: customTransport,
 			Timeout:   30 * time.Second,
 		},
-		cache:    cache,
-		logger:   slog.Default().With("component", "ingest_worker"),
-		chURL:    fmt.Sprintf("%s://%s:%s", chHTTPScheme, host, chHTTPPort),
-		user:     chUser,
-		password: chPassword,
-		db:       chDB,
-		maxBatch: defaultMaxBatch,
-		maxWait:  defaultMaxWait,
+		cache:      cache,
+		logger:     slog.Default().With("component", "ingest_worker"),
+		target:     target,
+		maxBatch:   defaultMaxBatch,
+		maxWait:    defaultMaxWait,
+		dlqEnabled: dlqEnabled,
 	}
 
 	workerCtx, workerCancel := context.WithCancel(ctx)
@@ -391,8 +394,11 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m jetstream.Msg) (parsedMsg
 // flushTable inserts one table's batch into ClickHouse, then (on success) kicks
 // off cache invalidation + backgrounded acks via handleSuccess. On bulk failure
 // it falls back to 1-by-1 isolation: each row that re-inserts cleanly is acked,
-// each that fails again is sent to the DLQ. tableLoop guarantees at most one
-// concurrent flushTable per table; different tables may flush concurrently.
+// each that fails again is sent to the DLQ — or, with the DLQ switched off for
+// the table, left unacked so NATS redelivers it (the row is never dropped, it
+// retries until it inserts or the DLQ is switched on). tableLoop guarantees at
+// most one concurrent flushTable per table; different tables may flush
+// concurrently.
 func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg) {
 	if len(msgs) == 0 {
 		return
@@ -412,6 +418,10 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 	for _, pm := range msgs {
 		singleErr := w.insertToClickHouse(ctx, tableName, []parsedMsg{pm})
 		if singleErr != nil {
+			if w.dlqEnabled != nil && !w.dlqEnabled(tableName) {
+				w.logger.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "table", tableName, "error", singleErr)
+				continue
+			}
 			w.logger.ErrorContext(ctx, "isolated bad row, sending to DLQ", "table", tableName, "error", singleErr)
 			w.sendToDLQ(ctx, tableName, pm, singleErr.Error())
 		} else {
@@ -427,19 +437,20 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 		buf.WriteString("\n")
 	}
 
+	t := w.target()
 	q := url.Values{}
-	q.Set("database", w.db)
+	q.Set("database", t.Database)
 	q.Set("param_target_table", tableName)
 	q.Set("query", "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow")
 	q.Set("date_time_input_format", "best_effort")
 
-	req, err := http.NewRequestWithContext(ctx, "POST", w.chURL+"?"+q.Encode(), &buf)
+	req, err := http.NewRequestWithContext(ctx, "POST", t.URL+"?"+q.Encode(), &buf)
 	if err != nil {
 		return fmt.Errorf("failed to create http request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-ClickHouse-User", w.user)
-	req.Header.Set("X-ClickHouse-Key", w.password)
+	req.Header.Set("X-ClickHouse-User", t.Username)
+	req.Header.Set("X-ClickHouse-Key", t.Password)
 
 	// TODO: future optimization: could build list for cache invalidation here while waiting on the network request
 	resp, err := w.httpClient.Do(req)

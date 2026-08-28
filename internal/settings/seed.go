@@ -11,7 +11,7 @@ import (
 // seedFS holds the starter settings directory: every file present, every
 // key set to its default. The checked-in seed/ directory is the ONE place
 // defaults live — the binary has no compiled fallbacks. Its one consumer is
-// this embed, so `wavehouse init-settings` can write the directory anywhere
+// this embed, so `wavehouse bootstrap` can write the directory anywhere
 // without a source tree; the container images ship no settings (the operator
 // mounts or seeds /app/settings), same as they ship no policy file.
 //
@@ -36,7 +36,7 @@ func Seed() (map[string][]byte, error) {
 // existing settings directory is someone's config, never something to
 // overwrite.
 func WriteSeed(dir string) error {
-	// World-readable on purpose: the operator who runs init-settings is
+	// World-readable on purpose: the operator who runs bootstrap is
 	// routinely not the user the server runs as (root on the host, UID 65532
 	// in the container), and the server only needs to read it.
 	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: config directory the server reads as another user

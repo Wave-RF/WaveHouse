@@ -35,7 +35,7 @@ type reloadResponse struct {
 // directory was adopted (warnings included in the body), 422 when validation
 // rejected it and the previous settings remain in effect.
 func (h *SettingsHandler) Reload(w http.ResponseWriter, _ *http.Request) {
-	findings, adopted := h.Store.TriggerReload("api")
+	findings, adopted := h.Store.Reload("api")
 	if findings == nil {
 		findings = []settings.Finding{}
 	}

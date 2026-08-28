@@ -49,7 +49,7 @@ Exit codes: 0 valid (warnings allowed), 1 invalid, 2 usage.
 		return 2
 	}
 
-	findings := settings.Validate(dir)
+	_, findings := settings.Validate(dir)
 	var errs, warns int
 	for _, f := range findings {
 		fmt.Println(f)

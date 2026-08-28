@@ -11,14 +11,12 @@ mq:
   max_bytes_gb: 1
 
 # JWT validation. The suite signs test tokens with this fixed dev secret;
-# don't reuse outside the e2e rig.
+# don't reuse outside the e2e rig. role_claim / jwks_url live in
+# settings/config.json.
 auth:
   jwt_secret: sdk-dev-secret
-  role_claim: role
   # operator_key: "" # non-JWT full-access operator credential (Authorization: Operator, or X-Operator-Key); unset in the rig
 
-dlq:
-  enabled: true
 
 policy:
   # Resolved relative to wavehouse-cov's cwd — the orchestrator pins that
@@ -26,8 +24,10 @@ policy:
   file_path: tests/e2e/fixtures/policy.yaml
 
 # Tenant tunables (schema refresh_interval 5s so schema-discovery tests don't
-# wait a minute; dedupe enabled + id_field; CORS "*") live in the settings directory —
-# see settings/config.json. Same cwd-relative resolution as policy.file_path.
+# wait a minute; dedupe enabled + id_field; DLQ on; CORS "*") live in the
+# settings directory — see settings/config.json. Same cwd-relative resolution
+# as policy.file_path.
+
 settings:
   dir: tests/e2e/fixtures/settings
 

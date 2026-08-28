@@ -35,7 +35,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # by the nonroot user so a named volume copies that ownership up) but
 # deliberately EMPTY: the image ships no settings, same as it ships no
 # policy. The operator mounts a directory there — or seeds a volume once
-# with `wavehouse init-settings /app/settings` — and a missing mount refuses
+# with `wavehouse bootstrap /app/settings` — and a missing mount refuses
 # to boot instead of running on defaults nobody chose. Not a VOLUME either
 # (unlike /app/data): it's config, not state, and an anonymous volume would
 # hide a forgotten mount.

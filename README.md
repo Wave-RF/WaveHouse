@@ -102,7 +102,7 @@ git clone https://github.com/Wave-RF/WaveHouse.git && cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 ```
 
-The stack has a permissive dev policy, so you can ingest without a token. Create a table in ClickHouse (or import existing schema), then ingest — see the [getting-started walkthrough](https://wavehouse.dev/getting-started) for the full ingest → query → stream tour.
+The stack bind-mounts `deployments/compose/settings/` as its [settings directory](https://wavehouse.dev/settings-directory) and has a permissive dev policy, so you can ingest without a token. Create a table in ClickHouse (or import existing schema), then ingest — see the [getting-started walkthrough](https://wavehouse.dev/getting-started) for the full ingest → query → stream tour.
 
 ### B. Prebuilt container image
 
@@ -128,11 +128,11 @@ go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 ```
 
 ```bash
-wavehouse init-settings ./settings   # starter settings directory, every key at its default
+wavehouse bootstrap ./settings   # starter settings directory, every key at its default
 WH_SETTINGS_DIR=./settings wavehouse
 ```
 
-The settings directory is required (no default; the container images ship none — mount one at `/app/settings`). You'll still need ClickHouse reachable. Point WaveHouse at it by setting `WH_CH_ADDR` (defaults to `localhost:9000`). See [Configuration](https://wavehouse.dev/configuration) for more information.
+The settings directory is required (no default; the container images ship none — mount one at `/app/settings`). You'll still need ClickHouse reachable: the seed points at `localhost:9000`; for anything else, edit `clickhouse.addr` in `./settings/config.json` (it hot-reloads). See [Settings Directory](https://wavehouse.dev/settings-directory) and [Configuration](https://wavehouse.dev/configuration) for more information.
 
 ## Project status
 

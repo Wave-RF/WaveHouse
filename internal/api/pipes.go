@@ -18,13 +18,16 @@ import (
 
 // PipesHandler handles named query pipe endpoints.
 type PipesHandler struct {
-	Store           *pipes.Store
-	PolicyStore     *policy.Store // resolves empty role to default_role; may be nil
-	CHConn          driver.Conn
-	Cache           cache.Cache
-	sf              singleflight.Group
-	maxQueryTimeout time.Duration
-	logger          *slog.Logger
+	Store       *pipes.Store
+	PolicyStore *policy.Store // resolves empty role to default_role; may be nil
+	CHConn      driver.Conn
+	Cache       cache.Cache
+	sf          singleflight.Group
+	// queryTimeout bounds each pipe execution, read per request
+	// (chconn.Manager.QueryTimeout in production) so a settings reload
+	// applies without a restart.
+	queryTimeout func() time.Duration
+	logger       *slog.Logger
 
 	// maxRequestBytes optionally overrides the default inbound request body
 	// cap (maxControlBodyBytes) for the body-decoding paths (Put, Execute).
@@ -34,8 +37,8 @@ type PipesHandler struct {
 	maxRequestBytes int64
 }
 
-func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration, logger *slog.Logger) *PipesHandler {
-	return &PipesHandler{Store: store, PolicyStore: policyStore, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout, logger: logger}
+func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout func() time.Duration, logger *slog.Logger) *PipesHandler {
+	return &PipesHandler{Store: store, PolicyStore: policyStore, CHConn: conn, Cache: c, queryTimeout: queryTimeout, logger: logger}
 }
 
 // List returns all named queries (admin endpoint).
@@ -185,7 +188,8 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		queryCtx, cancel := context.WithTimeout(r.Context(), h.maxQueryTimeout)
+		queryCtx, cancel := context.WithTimeout(r.Context(), h.queryTimeout())
+
 		defer cancel()
 
 		start := time.Now()

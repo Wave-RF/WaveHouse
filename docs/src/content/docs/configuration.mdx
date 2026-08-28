@@ -16,6 +16,7 @@ WaveHouse is configured via a YAML file with environment variable overrides. All
 1. If a config file exists at the specified path (default: `config.yaml`), it is loaded first.
 2. Environment variables override any values from the YAML file.
 3. If no config file exists, all values are read from environment variables. Every key has a default except `settings.dir` (`WH_SETTINGS_DIR`), which must be set either way.
+4. The YAML file is **strict**: a key this page doesn't list — a typo, or a tunable that has moved to the settings directory (`dlq.enabled`, `clickhouse.addr`, `stream.*`, …) — refuses to boot and names every offending key, so nothing is read, ignored, and believed.
 
 Set `WH_CONFIG` to change the config file path:
 
@@ -40,34 +41,21 @@ This page is boot config only — what the platform operator owns (wiring, lifec
 | `server.port` | `WH_SERVER_PORT` | `8080` | HTTP server listen port. |
 | `server.shutdown_timeout` | `WH_SERVER_SHUTDOWN_TIMEOUT` | `10` | Graceful shutdown timeout in seconds. |
 
-The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate TLS at a [reverse proxy](/reverse-proxy#tls) for internet-facing deployments. (The `clickhouse.http_scheme` option below is the *outbound* WaveHouse → ClickHouse hop, unrelated to your clients' TLS.)
-
-### Streaming (SSE)
-
-| YAML Key | Env Var | Default | Description |
-| --- | --- | ------- | ----------- |
-| `stream.keepalive_interval` | `WH_STREAM_KEEPALIVE_INTERVAL` | `30s` | Effective per-connection keepalive period — the longest a quiet `GET /v1/stream` connection goes without a write before the server sends a `:` keepalive comment. Keep it under your proxy/tunnel idle timeout. |
-| `stream.keepalive_buckets` | `WH_STREAM_KEEPALIVE_BUCKETS` | `3` | Advanced load-spreading knob: connections are spread across N buckets so each internal tick (`keepalive_interval ÷ keepalive_buckets`) nudges only ~1/N of live streams instead of all at once. Most deployments leave this at `3`. |
-
-`keepalive_interval` is the number you tune: the **maximum time a connection can sit idle before it's nudged**. The default **30s** clears the common 55–60s proxy/load-balancer idle windows (nginx and ingress-nginx `proxy_read_timeout`, AWS ALB, Heroku) with roughly 2× safety margin, and comfortably clears Cloudflare's ~120s edge. Lower it if you front WaveHouse with something tighter — Azure Application Gateway (20s) or CloudFront (30s) — see [Behind a reverse proxy → Idle timeouts](/reverse-proxy#idle-timeouts-by-provider) for a per-provider table. `keepalive_buckets` only changes how the writes are *spread in time*, not the period: the wheel fires one bucket every `keepalive_interval ÷ keepalive_buckets`, so a full rotation always spans exactly `keepalive_interval` regardless of bucket count. A value of `0` for either falls back to the default; a negative value is rejected at startup.
+The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate TLS at a [reverse proxy](/reverse-proxy#tls) for internet-facing deployments. (The settings directory's `clickhouse.http_scheme` is the *outbound* WaveHouse → ClickHouse hop, unrelated to your clients' TLS.)
 
 ### ClickHouse
 
+Only the secret is boot config. The wiring — native address, HTTP port and scheme, database, username, query timeout — is the settings directory's [`clickhouse` block](/settings-directory#clickhouse), where a change re-dials without a restart.
+
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `clickhouse.addr` | `WH_CH_ADDR` | `localhost:9000` | ClickHouse native protocol address. |
-| `clickhouse.http_port` | `WH_CH_HTTP_PORT` | `8123` | ClickHouse HTTP interface port. Used by the ingest worker (`internal/ingest`) for bulk INSERT and by the raw-SQL proxy (`POST /v1/ops/query`, `internal/api/query.go`) to forward SQL to ClickHouse. Schema discovery uses the native protocol on `addr` instead. |
-| `clickhouse.http_scheme` | `WH_CH_HTTP_SCHEME` | `http` | HTTP scheme for the ClickHouse HTTP interface (`http` or `https`). Set to `https` for TLS-encrypted ClickHouse connections. |
-| `clickhouse.database` | `WH_CH_DATABASE` | `default` | Database name. Tables are discovered from this database. |
-| `clickhouse.username` | `WH_CH_USERNAME` | `default` | Authentication username. |
-| `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password. |
-| `clickhouse.query_timeout` | `WH_CH_QUERY_TIMEOUT` | `30s` | Maximum wall-clock time WaveHouse waits for a read. It bounds the client context deadline, from which the driver derives a server-side `max_execution_time`. |
+| `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password, combined with the settings directory's `clickhouse.username` on every (re)connect. A secret, so it never lives in a tracked JSON file; rotating it is a restart. |
 
 ### Server-side resource limits
 
 WaveHouse enforces a role's **per-role** resource caps (from the [access-control policy](/access-control#resource-limits)) by attaching them to each query as ClickHouse settings. **Server-wide** limits — the backstop that applies to *every* query regardless of role, including raw admin SQL — are configured in **ClickHouse itself**, via its [settings profiles](https://clickhouse.com/docs/operations/settings/settings-profiles) and [quotas](https://clickhouse.com/docs/operations/quotas). This keeps one authoritative place for global governance, has ClickHouse enforce it natively (defense-in-depth, even against a WaveHouse bug), and lets you use standard ClickHouse operations.
 
-Set the backstop on the profile of the ClickHouse user WaveHouse connects as (`clickhouse.username`). For example, in `users.xml`:
+Set the backstop on the profile of the ClickHouse user WaveHouse connects as (the settings directory's `clickhouse.username`). For example, in `users.xml`:
 
 ```xml
 <clickhouse>
@@ -107,8 +95,7 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `mq.gap_window_minutes` | `WH_MQ_GAP_WINDOW_MINUTES` | `15` | How many minutes of messages to retain in NATS for SSE gap-fill. The Active Sweeper will not purge messages newer than this window. |
-| `mq.max_bytes_gb` | `WH_MQ_MAX_BYTES_GB` | `50` | Maximum NATS JetStream stream size in GB. When full, new publishes are rejected with `DiscardNew` policy, triggering 503 backpressure on the ingest endpoint. |
+| `mq.max_bytes_gb` | `WH_MQ_MAX_BYTES_GB` | `50` | Maximum NATS JetStream stream size in GB. When full, new publishes are rejected with `DiscardNew` policy, triggering 503 backpressure on the ingest endpoint. The SSE gap window the sweeper keeps inside that budget is `stream.gap_window_minutes` in the [Settings Directory](/settings-directory#streaming). |
 
 **Durability.** The embedded server runs with JetStream `SyncAlways`, so every event is `fsync`'d to disk before `POST /v1/ingest` returns `200`. This makes your storage's `fsync` latency your ingest latency floor — see [Durability & Storage](/durability) to check whether your substrate can sustain it. There is no knob to relax this today ([#139](https://github.com/Wave-RF/WaveHouse/issues/139) tracks a configurable group-commit interval).
 
@@ -116,16 +103,15 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `cache.l1_max_cost` | `WH_CACHE_L1_MAX_COST` | `67108864` | Maximum L1 cache size in bytes (~64 MB). |
-| `cache.timestamp_bucket_seconds` | `WH_CACHE_TIMESTAMP_BUCKET_SECONDS` | `60` | Bucket size (seconds) for time-range truncation in structured queries. Improves cache hit rate by normalizing timestamps. |
+| `cache.l1_max_cost` | `WH_CACHE_L1_MAX_COST` | `67108864` | Maximum L1 cache size in bytes (~64 MB). The time-range bucket structured queries normalize to is `query.timestamp_bucket_seconds` in the [Settings Directory](/settings-directory#configjson-keys). |
 
 ### Authentication
 
+Only the secrets are boot config. The verifier wiring — `jwks_url` and `role_claim` — is the settings directory's [`auth` block](/settings-directory#authentication), where a change rebuilds the verifier without a restart.
+
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `auth.jwt_secret` | `WH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. Set this (or `jwks_url`) so presented tokens are verified; see [Access Control](/access-control). |
-| `auth.jwks_url` | `WH_AUTH_JWKS_URL` | *(empty)* | JWKS endpoint URL for public key validation (e.g., `https://auth.example.com/.well-known/jwks.json`). When set, JWKS is the **sole** verifier and `jwt_secret` is ignored (not a per-token fallback); the endpoint must be reachable at startup or the server fails to boot. |
-| `auth.role_claim` | `WH_AUTH_ROLE_CLAIM` | `role` | Dot-separated JWT claim path for role extraction (e.g., `app_metadata.role`). |
+| `auth.jwt_secret` | `WH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. Set this (or the settings directory's `auth.jwks_url`) so presented tokens are verified; see [Access Control](/access-control). Ignored while `jwks_url` is set. |
 | `auth.operator_key` | `WH_AUTH_OPERATOR_KEY` | *(empty)* | Non-JWT operator credential. A request presenting it — in an `Authorization: Operator <key>` header, or the `X-Operator-Key` alias — is authorized as a full-access platform operator (the whole data plane *and* the `/v1/ops/*` management surface), independent of the JWT verifier, and it is honored even when the policy is missing/deleted (break-glass). Empty disables it. Treat it as an admin secret. See below and [Access Control](/access-control). |
 
 WaveHouse accepts only the signing algorithms matching the active verifier — `HS256`/`HS384`/`HS512` for the HMAC secret, or the asymmetric family (`RS*`/`ES*`/`PS*`/`EdDSA`) for JWKS — and validates the token's `alg` before any key is used, so your IdP must sign with one of these and `alg: none` is always rejected.
@@ -138,12 +124,6 @@ WaveHouse accepts only the signing algorithms matching the active verifier — `
 **Operator key (break-glass).** `auth.operator_key`, when set, is a non-JWT credential for the person running the deployment. A request presenting it — in the standard `Authorization: Operator <key>` header (forwarded verbatim by proxies, no collision with Bearer JWTs), or the `X-Operator-Key` alias — is authorized as a full-access platform operator (the whole data plane plus `/v1/ops/*`) without minting a JWT, and it is honored even when the policy is nil or deleted, so an operator can restore a wiped policy over HTTP (the one recovery path that otherwise requires SSH). It is matched with a constant-time comparison and is independent of `jwt_secret`/`jwks_url`; it takes precedence over any Bearer token on the same request. Because it is effectively an admin secret, load it from a secret store, serve it only over TLS, and leave it empty on deployments that do not need it.
 
 See [API — Authentication](/api#authentication).
-
-### Dead Letter Queue (DLQ)
-
-| YAML Key | Env Var | Default | Description |
-| --- | --- | ------- | ----------- |
-| `dlq.enabled` | `WH_DLQ_ENABLED` | `true` | Enable the Dead Letter Queue. A failed batch insert is retried row by row; the rows that fail again are published to the `WAVEHOUSE_DLQ` NATS stream instead of blocking retries. |
 
 ### Access Control Policy
 
@@ -163,7 +143,7 @@ The one boot-config key for the [Settings Directory](/settings-directory) is whe
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `settings.dir` | `WH_SETTINGS_DIR` | *(required)* | Path to the settings directory. The server loads it at boot; the `wavehouse validate` CLI — like `wavehouse health` — resolves its input directly from the `[dir]` argument or `WH_SETTINGS_DIR` without loading this file, so a value set only in the YAML key validates on boot but not via the bare CLI. No default, same reasoning as `policy.file_path`: a baked-in path would turn a missing mount into silent misconfiguration instead of an explicit operator choice. The container images preset it to `/app/settings` but ship no files there — mount a directory (or seed a volume with `init-settings`). |
+| `settings.dir` | `WH_SETTINGS_DIR` | *(required)* | Path to the settings directory. The server loads it at boot; the `wavehouse validate` CLI — like `wavehouse health` — resolves its input directly from the `[dir]` argument or `WH_SETTINGS_DIR` without loading this file, so a value set only in the YAML key validates on boot but not via the bare CLI. No default, same reasoning as `policy.file_path`: a baked-in path would turn a missing mount into silent misconfiguration instead of an explicit operator choice. The container images preset it to `/app/settings` but ship no files there — mount a directory (or seed a volume with `bootstrap`). |
 
 ### OTel
 
@@ -212,35 +192,19 @@ server:
   port: 8080
   shutdown_timeout: 10
 
-stream:
-  keepalive_interval: 30s  # max idle time before a keepalive; keep under your proxy's idle window
-  keepalive_buckets: 3     # advanced: spread keepalive writes across N buckets
-
 clickhouse:
-  addr: localhost:9000
-  http_port: 8123
-  http_scheme: http
-  database: default
-  username: default
-  password: ""
-  query_timeout: 30s
+  password: ""           # the only ClickHouse key here — addr, ports, database,
+                         # username, query_timeout are settings (config.json)
 
 mq:
-  gap_window_minutes: 15
   max_bytes_gb: 50
 
 cache:
   l1_max_cost: 67108864
-  timestamp_bucket_seconds: 60
 
 auth:
-  jwt_secret: change-me-in-production
-  jwks_url: ""
-  role_claim: role
+  jwt_secret: change-me-in-production   # jwks_url and role_claim are settings (config.json)
   operator_key: "" # non-JWT full-access operator credential (Authorization: Operator <key>, or X-Operator-Key); empty disables
-
-dlq:
-  enabled: true
 
 policy:
   file_path: ""          # empty = skip bootstrap (seed via PUT /v1/ops/policy);
@@ -255,7 +219,8 @@ settings:
                          # policies/pipes/config .json), validated at boot,
                          # reloaded on file change, SIGHUP, or
                          # POST /v1/ops/settings/reload; create one with
-                         # `wavehouse init-settings ./settings`
+                         # `wavehouse bootstrap ./settings` (dedupe, dlq,
+                         # query, schema, stream, cors keys live there)
 
 otel:
   enabled: false         # master switch — set true to export via OTLP gRPC
@@ -286,35 +251,25 @@ WH_DATA_DIR=./data
 WH_SERVER_PORT=8080
 WH_SERVER_SHUTDOWN_TIMEOUT=10
 
-WH_STREAM_KEEPALIVE_INTERVAL=30s
-WH_STREAM_KEEPALIVE_BUCKETS=3
-
-WH_CH_ADDR=localhost:9000
-WH_CH_HTTP_PORT=8123
-WH_CH_HTTP_SCHEME=http
-WH_CH_DATABASE=default
-WH_CH_USERNAME=default
 WH_CH_PASSWORD=
-WH_CH_QUERY_TIMEOUT=30s
 
-WH_MQ_GAP_WINDOW_MINUTES=15
 WH_MQ_MAX_BYTES_GB=50
 
 WH_CACHE_L1_MAX_COST=67108864
-WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60
 
 WH_AUTH_JWT_SECRET=change-me-in-production
-WH_AUTH_JWKS_URL=
-WH_AUTH_ROLE_CLAIM=role
 WH_AUTH_OPERATOR_KEY=
-
-WH_DLQ_ENABLED=true
 
 WH_POLICY_FILE_PATH=
 
 WH_PIPES_DIR=
 
-WH_SETTINGS_DIR=./settings  # required, no default (`wavehouse init-settings ./settings`); the container images preset /app/settings; you mount a directory there
+# Required, no default: `wavehouse bootstrap ./settings` writes a starter
+# directory (edit clickhouse.addr in its config.json if ClickHouse is not on
+# localhost:9000). The container images preset WH_SETTINGS_DIR=/app/settings
+# and ship no files there; you mount a directory at that path instead.
+# (Comments stay on their own line — an env_file does not strip inline ones.)
+WH_SETTINGS_DIR=./settings
 
 WH_OTEL_ENABLED=false
 WH_OTEL_TRACES_ENABLED=true

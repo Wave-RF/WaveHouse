@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,13 +23,12 @@ func TestMain(m *testing.M) {
 func TestValidate_SettingsDirRequired(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: 30 * time.Second},
+		Server: Server{Port: 8080},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "settings.dir")
-	assert.Contains(t, err.Error(), "init-settings")
+	assert.Contains(t, err.Error(), "bootstrap")
 }
 
 func TestLoad_Defaults(t *testing.T) {
@@ -40,16 +38,8 @@ func TestLoad_Defaults(t *testing.T) {
 
 	assert.Equal(t, 8080, cfg.Server.Port)
 	assert.Equal(t, 10, cfg.Server.ShutdownTimeout)
-	assert.Equal(t, "localhost:9000", cfg.ClickHouse.Addr)
-	assert.Equal(t, "8123", cfg.ClickHouse.HTTPPort)
-	assert.Equal(t, "http", cfg.ClickHouse.HTTPScheme)
-	assert.Equal(t, "default", cfg.ClickHouse.Database)
-	assert.Equal(t, "default", cfg.ClickHouse.Username)
 	assert.Equal(t, "", cfg.ClickHouse.Password)
-	assert.Equal(t, time.Duration(30)*time.Second, cfg.ClickHouse.QueryTimeout)
-	assert.Equal(t, "role", cfg.Auth.RoleClaim)
 	assert.Empty(t, cfg.Auth.OperatorKey, "operator key is empty by default (feature off)")
-	assert.True(t, cfg.DLQ.Enabled)
 	assert.Empty(t, cfg.Policy.FilePath, "no default bootstrap file — operators opt in explicitly so a missing file never produces a silent fail-closed boot")
 	assert.Equal(t, "", cfg.Pipes.Dir)
 	assert.Equal(t, "./data", cfg.DataDir)
@@ -68,9 +58,7 @@ func TestLoad_FromYAML(t *testing.T) {
 server:
   port: 9090
 clickhouse:
-  addr: "clickhouse:9000"
-  database: "mydb"
-  http_scheme: "https"
+  password: "ch-pass"
 auth:
   jwt_secret: "test-secret"
   operator_key: "op-key"
@@ -82,10 +70,7 @@ auth:
 	require.NoError(t, err)
 
 	assert.Equal(t, 9090, cfg.Server.Port)
-	assert.Equal(t, "clickhouse:9000", cfg.ClickHouse.Addr)
-	assert.Equal(t, "mydb", cfg.ClickHouse.Database)
-	assert.Equal(t, "https", cfg.ClickHouse.HTTPScheme)
-	assert.Equal(t, time.Duration(30)*time.Second, cfg.ClickHouse.QueryTimeout)
+	assert.Equal(t, "ch-pass", cfg.ClickHouse.Password)
 	assert.Equal(t, "test-secret", cfg.Auth.JWTSecret)
 	assert.Equal(t, "op-key", cfg.Auth.OperatorKey)
 }
@@ -95,53 +80,6 @@ func TestLoad_OperatorKey_FromEnv(t *testing.T) {
 	cfg, err := Load("nonexistent.yaml")
 	require.NoError(t, err)
 	assert.Equal(t, "env-operator-key", cfg.Auth.OperatorKey)
-}
-
-func TestValidate_KeepaliveValues(t *testing.T) {
-	t.Parallel()
-	base := func() Config {
-		return Config{
-			Server:     Server{Port: 8080},
-			Settings:   Settings{Dir: "./settings"},
-			ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: 30 * time.Second},
-		}
-	}
-
-	tests := []struct {
-		name    string
-		mutate  func(*Config) // tweak the otherwise-valid base config
-		wantErr string        // substring expected in the error; "" means no error
-	}{
-		{
-			name:    "negative interval is rejected",
-			mutate:  func(c *Config) { c.Stream.KeepaliveInterval = -time.Second },
-			wantErr: "keepalive_interval",
-		},
-		{
-			name:    "negative buckets is rejected",
-			mutate:  func(c *Config) { c.Stream.KeepaliveBuckets = -1 },
-			wantErr: "keepalive_buckets",
-		},
-		{
-			name:    "zero means use default, not an error",
-			mutate:  func(*Config) {}, // Stream left at zero values
-			wantErr: "",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			cfg := base()
-			tt.mutate(&cfg)
-			err := cfg.Validate()
-			if tt.wantErr == "" {
-				assert.NoError(t, err)
-				return
-			}
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tt.wantErr)
-		})
-	}
 }
 
 func TestLoad_EnvOverridesYAML(t *testing.T) {
@@ -184,9 +122,8 @@ func TestValidate_PortOutOfRange(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
-				Server:     Server{Port: tt.port},
-				Settings:   Settings{Dir: "./settings"},
-				ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
+				Server:   Server{Port: tt.port},
+				Settings: Settings{Dir: "./settings"},
 			}
 			err := cfg.Validate()
 			require.Error(t, err)
@@ -198,50 +135,12 @@ func TestValidate_PortOutOfRange(t *testing.T) {
 func TestValidate_NegativeShutdownTimeout(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Server:     Server{Port: 8080, ShutdownTimeout: -1},
-		Settings:   Settings{Dir: "./settings"},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
+		Server:   Server{Port: 8080, ShutdownTimeout: -1},
+		Settings: Settings{Dir: "./settings"},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "shutdown_timeout")
-}
-
-func TestValidate_NegativeQueryTime(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Server:     Server{Port: 8080},
-		Settings:   Settings{Dir: "./settings"},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: -1},
-	}
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "clickhouse.query_timeout")
-}
-
-func TestValidate_ZeroQueryTime(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Server:     Server{Port: 8080},
-		Settings:   Settings{Dir: "./settings"},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: 0},
-	}
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "clickhouse.query_timeout")
-}
-
-func TestValidate_NegativeGapWindow(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Server:     Server{Port: 8080},
-		Settings:   Settings{Dir: "./settings"},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-		MQ:         MQ{GapWindowMinutes: -1},
-	}
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "gap_window_minutes")
 }
 
 func TestValidate_TracesSampleRateOutOfRange(t *testing.T) {
@@ -258,9 +157,8 @@ func TestValidate_TracesSampleRateOutOfRange(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
-				Server:     Server{Port: 8080},
-				Settings:   Settings{Dir: "./settings"},
-				ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
+				Server:   Server{Port: 8080},
+				Settings: Settings{Dir: "./settings"},
 				OTel: OTel{
 					Enabled: true,
 					Traces:  OTelTraces{Enabled: true, SampleRate: tc.rate},
@@ -277,9 +175,8 @@ func TestValidate_TracesSampleRateOutOfRange(t *testing.T) {
 func TestValidate_LogsSampleRateOutOfRange(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Server:     Server{Port: 8080},
-		Settings:   Settings{Dir: "./settings"},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
+		Server:   Server{Port: 8080},
+		Settings: Settings{Dir: "./settings"},
 		OTel: OTel{
 			Enabled: true,
 			Traces:  OTelTraces{Enabled: true, SampleRate: 0.10},
@@ -297,9 +194,8 @@ func TestValidate_SampleRatesIgnoredWhenObservabilityDisabled(t *testing.T) {
 	// the rates are unused so policing them would surprise operators iterating on
 	// config that they haven't enabled yet.
 	cfg := Config{
-		Server:     Server{Port: 8080},
-		Settings:   Settings{Dir: "./settings"},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
+		Server:   Server{Port: 8080},
+		Settings: Settings{Dir: "./settings"},
 		OTel: OTel{
 			Enabled: false,
 			Traces:  OTelTraces{SampleRate: 99},
@@ -314,9 +210,8 @@ func TestValidate_SampleRatesIgnoredWhenSignalDisabled(t *testing.T) {
 	// Same idea one level down — when the master switch is on but the individual
 	// signal is off, its sample_rate is unused and should not gate startup.
 	cfg := Config{
-		Server:     Server{Port: 8080},
-		Settings:   Settings{Dir: "./settings"},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
+		Server:   Server{Port: 8080},
+		Settings: Settings{Dir: "./settings"},
 		OTel: OTel{
 			Enabled: true,
 			Traces:  OTelTraces{Enabled: false, SampleRate: 99},
@@ -339,9 +234,8 @@ func TestLoad_Defaults_PrometheusDisabled(t *testing.T) {
 func TestValidate_PrometheusPortCollidesWithServerPort(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Server:     Server{Port: 8080},
-		Settings:   Settings{Dir: "./settings"},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
+		Server:   Server{Port: 8080},
+		Settings: Settings{Dir: "./settings"},
 		Prometheus: Prometheus{
 			Enabled: true,
 			Path:    "/metrics",
@@ -367,9 +261,8 @@ func TestValidate_PrometheusPortOutOfRange(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
-				Server:     Server{Port: 8080},
-				Settings:   Settings{Dir: "./settings"},
-				ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
+				Server:   Server{Port: 8080},
+				Settings: Settings{Dir: "./settings"},
 				Prometheus: Prometheus{
 					Enabled: true,
 					Path:    "/metrics",
@@ -386,9 +279,8 @@ func TestValidate_PrometheusPortOutOfRange(t *testing.T) {
 func TestValidate_PrometheusPathMustStartWithSlash(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Server:     Server{Port: 8080},
-		Settings:   Settings{Dir: "./settings"},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
+		Server:   Server{Port: 8080},
+		Settings: Settings{Dir: "./settings"},
 		Prometheus: Prometheus{
 			Enabled: true,
 			Path:    "metrics", // missing leading slash
@@ -424,7 +316,6 @@ func TestValidate_PrometheusPathReservedConflicts(t *testing.T) {
 			cfg := Config{
 				Server:     Server{Port: 8080},
 				Settings:   Settings{Dir: "./settings"},
-				ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 				Prometheus: Prometheus{Enabled: true, Path: tc.path, Port: tc.port},
 			}
 			err := cfg.Validate()
@@ -442,7 +333,6 @@ func TestValidate_PrometheusV1PathAllowedOnSidecarPort(t *testing.T) {
 	cfg := Config{
 		Server:     Server{Port: 8080},
 		Settings:   Settings{Dir: "./settings"},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Prometheus: Prometheus{Enabled: true, Path: "/v1/metrics", Port: 9091},
 	}
 	assert.NoError(t, cfg.Validate())
@@ -455,7 +345,6 @@ func TestValidate_PrometheusOnly_NoOTel(t *testing.T) {
 	cfg := Config{
 		Server:     Server{Port: 8080},
 		Settings:   Settings{Dir: "./settings"},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Prometheus: Prometheus{Enabled: true, Path: "/metrics", Port: 0},
 	}
 	assert.NoError(t, cfg.Validate())
@@ -467,9 +356,8 @@ func TestValidate_PrometheusIgnoredWhenDisabled(t *testing.T) {
 	// prometheus.enabled is false — operators iterating on yaml shouldn't
 	// get yelled at about unused fields.
 	cfg := Config{
-		Server:     Server{Port: 8080},
-		Settings:   Settings{Dir: "./settings"},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
+		Server:   Server{Port: 8080},
+		Settings: Settings{Dir: "./settings"},
 		Prometheus: Prometheus{
 			Enabled: false,
 			Path:    "garbage",
@@ -477,19 +365,6 @@ func TestValidate_PrometheusIgnoredWhenDisabled(t *testing.T) {
 		},
 	}
 	assert.NoError(t, cfg.Validate())
-}
-
-func TestValidate_InvalidHTTPScheme(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Server:     Server{Port: 8080},
-		Settings:   Settings{Dir: "./settings"},
-		ClickHouse: ClickHouse{HTTPScheme: "ftp", QueryTimeout: time.Duration(30) * time.Second}, // Intentionally invalid ftp
-	}
-
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "clickhouse.http_scheme must be 'http' or 'https'")
 }
 
 // TestEnvSettingsDir_MatchesStructTag pins the exported constant to the
@@ -502,4 +377,34 @@ func TestEnvSettingsDir_MatchesStructTag(t *testing.T) {
 	field, ok := reflect.TypeFor[Settings]().FieldByName("Dir")
 	require.True(t, ok)
 	assert.Equal(t, EnvSettingsDir, field.Tag.Get("env"))
+}
+
+// TestLoad_RejectsUnknownKeys pins the strict-YAML contract: a key the
+// struct doesn't declare — a tunable that moved to the settings directory,
+// or a typo — fails Load and names every offender, nested or top-level.
+func TestLoad_RejectsUnknownKeys(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	yamlContent := `
+server:
+  port: 9090
+  cors_allowed_origins: ["*"]
+dlq:
+  enabled: false
+clickhouse:
+  addr: localhost:9000
+  password: x
+settings:
+  dir: ./settings
+`
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o600))
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown key(s)")
+	assert.Contains(t, err.Error(), "clickhouse.addr")
+	assert.Contains(t, err.Error(), "dlq")
+	assert.Contains(t, err.Error(), "server.cors_allowed_origins")
+	assert.NotContains(t, err.Error(), "clickhouse.password", "declared keys are never reported")
+	assert.NotContains(t, err.Error(), "settings.dir")
 }

@@ -18,7 +18,7 @@ import (
 // fullConfig is a complete config.json (every key is required) with the
 // given query.default_max_rows.
 func fullConfig(maxRows int) string {
-	return fmt.Sprintf(`{"dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}, "query": {"default_max_rows": %d}, "schema": {"refresh_interval": 60}, "cors": {"allowed_origins": ["*"]}}`, maxRows)
+	return fmt.Sprintf(`{"clickhouse": {"addr": "localhost:9000", "http_port": 8123, "http_scheme": "http", "database": "default", "username": "default", "query_timeout": 30}, "auth": {"jwks_url": "", "role_claim": "role"}, "dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}, "dlq": {"enabled": true}, "query": {"default_max_rows": %d, "timestamp_bucket_seconds": 60}, "schema": {"refresh_interval": 60}, "stream": {"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": 15}, "cors": {"allowed_origins": ["*"]}}`, maxRows)
 }
 
 // writeSettingsFixture materializes a minimal valid settings directory whose

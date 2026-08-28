@@ -1,3 +1,5 @@
+# This file is strict: a key the server doesn't declare (a typo, or a tunable
+# that moved to the settings directory) refuses to boot and is named.
 # Root for embedded state. NATS lives at <data_dir>/nats; Pebble (when dedupe
 # is enabled) lives at <data_dir>/pebble. In a container, this MUST be on a
 # host-backed volume — the relative default is for local binary use only.
@@ -28,46 +30,30 @@ prometheus:
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
 
+# Only the password is boot config; addr, http_port, http_scheme, database,
+# username, query_timeout are the settings directory's clickhouse block.
 clickhouse:
-  addr: localhost:9000
-  http_port: 8123
-  http_scheme: http
-  database: default
-  username: default
   password: ""
-  query_timeout: 30s
 
-# Server-Sent Events keepalive for GET /v1/stream. A shared ticker pushes a ":"
-# comment to idle streams so they survive reverse-proxy/tunnel idle timeouts.
-# keepalive_interval is the effective per-connection period; keep it under your
-# proxy's idle window (30s clears the common 55-60s nginx/ALB/Heroku timeouts).
-# See docs/reverse-proxy for per-provider timeout values.
-stream:
-  keepalive_interval: 30s          # max idle time before a keepalive (0 falls back to 30s)
-  keepalive_buckets: 3             # spread writes across N buckets (advanced; 0 falls back to 3)
-
+# Disk budget for the embedded JetStream stream. The SSE gap window kept
+# inside it (stream.gap_window_minutes) and the keepalives are settings keys.
 mq:
-  gap_window_minutes: 15
   max_bytes_gb: 50
 
+# In-process L1 cache size. The query time-bucket
+# (query.timestamp_bucket_seconds) is a settings key.
 cache:
   l1_max_cost: 67108864
-  timestamp_bucket_seconds: 60
 
 # Auth has no on/off switch — the JWT middleware always runs. A request with no
 # token, or an invalid/expired one, falls back to the policy default_role;
 # elevated access needs a valid token whose role_claim matches a granted role
-# (or the policy admin_role). With neither jwt_secret nor jwks_url set, no token
-# can validate, so every request is the default_role — a pure public deployment.
+# (or the policy admin_role). With neither jwt_secret (here) nor jwks_url (a
+# settings key, with role_claim) set, no token can validate, so every request
+# is the default_role — a pure public deployment. Only the secrets live here.
 auth:
   jwt_secret: change-me-in-production
-  jwks_url: ""
-  role_claim: role
   operator_key: "" # non-JWT full-access operator credential (Authorization: Operator <key>, or X-Operator-Key) for bootstrap/break-glass; empty disables
-
-dlq:
-  enabled: true
-
 
 # Optional bootstrap source for named query pipes. When set, .sql files in
 # this directory are loaded into the NATS KV pipe store on startup. Empty
@@ -77,17 +63,21 @@ pipes:
   dir: ""
 
 # Settings directory (REQUIRED): roles.json, policies.json, pipes.json,
-# config.json. The tenant tunables live in its config.json — dedupe
-# enabled/id_field/require_id (+ per-table overrides), query.default_max_rows,
-# schema.refresh_interval, cors.allowed_origins — and every key is required:
-# the binary has no compiled defaults, so what's adopted is exactly what the
+# config.json. The behavioral configuration lives in its config.json —
+# clickhouse wiring (addr, http_port, http_scheme, database, username,
+# query_timeout), auth (jwks_url, role_claim), dedupe (enabled/id_field/
+# require_id + per-table overrides), dlq.enabled (+ per table),
+# query.default_max_rows / timestamp_bucket_seconds,
+# schema.refresh_interval, stream keepalive_interval / keepalive_buckets /
+# gap_window_minutes, cors.allowed_origins — and every key is required: the
+# binary has no compiled defaults, so what's adopted is exactly what the
 # files say. The server validates the directory at boot (invalid or missing
 # refuses to start) and reloads it on SIGHUP, on file change, or via
 # POST /v1/ops/settings/reload; a reload that fails validation keeps the
-# previous settings. `wavehouse init-settings <dir>` writes a starter
+# previous settings. `wavehouse bootstrap [dir]` writes a starter
 # directory with every key at its default; `wavehouse validate [dir]` checks
-# one (both honor WH_SETTINGS_DIR). This points at the checked-in seed for
-# local dev — to experiment, `wavehouse init-settings ./settings` and point
-# here instead.
+# one (both resolve dir the same way: the argument, else WH_SETTINGS_DIR).
+# This points at the checked-in seed for local dev — to experiment,
+# `wavehouse bootstrap ./settings` and point here instead.
 settings:
   dir: internal/settings/seed

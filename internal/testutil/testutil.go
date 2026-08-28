@@ -33,7 +33,7 @@ func NopLogger() *slog.Logger {
 // IsNullable derived from the type string), not the caller's structs.
 func NewTestSchemaRegistry(t testing.TB, tables []*discovery.TableSchema) *discovery.SchemaRegistry {
 	t.Helper()
-	reg := discovery.NewSchemaRegistry(&schemaConn{tables: tables}, "test", time.Hour, NopLogger())
+	reg := discovery.NewSchemaRegistry(&schemaConn{tables: tables}, func() string { return "test" }, func() time.Duration { return time.Hour }, NopLogger())
 	require.NoError(t, reg.Refresh(context.Background()))
 	return reg
 }

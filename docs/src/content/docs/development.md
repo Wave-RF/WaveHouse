@@ -231,12 +231,12 @@ curl -s -X POST http://localhost:8080/v1/ops/query \
 `make dev` points `settings.dir` at the checked-in seed, which ships with `dedupe.enabled: false`. Write your own settings directory and flip it there (the seed is committed — don't edit it in place):
 
 ```bash
-./tmp/wavehouse init-settings ./settings   # or: go run ./cmd/wavehouse init-settings ./settings
+./tmp/wavehouse bootstrap ./settings   # or: go run ./cmd/wavehouse bootstrap ./settings
 # set "enabled": true under "dedupe" in ./settings/config.json,
 # and settings.dir: ./settings in .config.local.yaml
 ```
 
-The key hot-reloads, so once the server is running you can toggle it by editing `config.json` — no restart. Records dedupe on their `event_id` field by default; the same file overrides the field globally or per table (see [Configuration — Deduplication](/settings-directory#deduplication)).
+The key hot-reloads, so once the server is running you can toggle it by editing `config.json` — no restart. Records dedupe on their `event_id` field by default; the same file overrides the field globally or per table (see [Settings Directory — Deduplication](/settings-directory#deduplication)).
 
 Then include the dedup field in your ingest body:
 
@@ -256,8 +256,9 @@ curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 ### Using an .env File
 
 ```bash
-# .env
-export WH_CH_ADDR=localhost:9000
+# .env — boot config only (secrets, sizing, exporters); the ClickHouse
+# address and the rest of the wiring are settings-directory keys
+export WH_CH_PASSWORD=
 ```
 
 Then:
@@ -380,7 +381,7 @@ The orchestrator always provisions its own stack — a fresh ClickHouse testcont
 WH_CONFIG=tests/e2e/fixtures/config.yaml go run ./cmd/wavehouse
 ```
 
-The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `policy.file_path` is relative to the working directory. The fixture pins no ClickHouse address, so the server looks for one on `localhost:9000`; point it elsewhere with `WH_CH_ADDR` / `WH_CH_HTTP_PORT` if yours isn't there.
+The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `policy.file_path` is relative to the working directory. The fixture's settings directory points at ClickHouse on `localhost:9000`; if yours isn't there, edit `clickhouse.addr` / `http_port` in `tests/e2e/fixtures/settings/config.json` (the orchestrator patches them itself for its testcontainer).
 
 Prefixing the variable to `make dev` does **not** work: that recipe pins `WH_CONFIG=.config.local.yaml` inline, which overrides anything inherited from the environment.
 

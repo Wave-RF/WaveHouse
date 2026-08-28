@@ -33,14 +33,14 @@ func TestStore_ReloadAdoptsAndRejects(t *testing.T) {
 	// Break the directory: the reload must report the error and keep the
 	// previous snapshot — a bad edit can never evict the last good document.
 	require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": -1}}`)), 0o600))
-	findings, adopted := s.Reload()
+	findings, adopted := s.Reload("test")
 	assert.False(t, adopted)
 	assert.True(t, HasErrors(findings))
 	assert.Equal(t, 500, s.DefaultMaxRows(), "rejected reload must keep the previous snapshot")
 
 	// Fix it: the next reload adopts again.
 	require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 700}}`)), 0o600))
-	findings, adopted = s.Reload()
+	findings, adopted = s.Reload("test")
 	require.True(t, adopted, "findings: %s", findingStrings(findings))
 	assert.Equal(t, 700, s.DefaultMaxRows())
 }
@@ -51,7 +51,7 @@ func TestStore_ReloadWithWarningsAdopts(t *testing.T) {
 		FilePolicies: `{}`, // empty policy: legal, warned (total lockout)
 		FilePipes:    `{}`, // drop the pipe so its analyst role reference doesn't dangle
 	})
-	findings, adopted := s.Reload()
+	findings, adopted := s.Reload("test")
 	assert.True(t, adopted, "warnings alone must not block adoption")
 	assert.NotEmpty(t, findings)
 	assert.False(t, HasErrors(findings))
@@ -106,7 +106,7 @@ func TestStore_SurvivesVanishedDirectory(t *testing.T) {
 		FileConfig: configJSON(`{"query": {"default_max_rows": 42}}`),
 	})
 	require.NoError(t, os.RemoveAll(s.Dir()))
-	findings, adopted := s.Reload()
+	findings, adopted := s.Reload("test")
 	assert.False(t, adopted)
 	assert.True(t, HasErrors(findings))
 	assert.Equal(t, 42, s.DefaultMaxRows())
@@ -116,7 +116,7 @@ func TestStore_SurvivesVanishedDirectory(t *testing.T) {
 }
 
 // TestStore_SeedIsValid pins that the shipped starter directory passes its
-// own gate: `wavehouse init-settings` must never write something
+// own gate: `wavehouse bootstrap` must never write something
 // `wavehouse validate` rejects, and the defaults are readable back.
 func TestStore_SeedIsValid(t *testing.T) {
 	t.Parallel()
@@ -133,8 +133,16 @@ func TestStore_SeedIsValid(t *testing.T) {
 	_, id, req := s.DedupeFor("anything")
 	assert.Equal(t, "event_id", id)
 	assert.False(t, req)
+	assert.Equal(t, ClickHouse{Addr: "localhost:9000", HTTPPort: 8123, HTTPScheme: "http", Database: "default", Username: "default", QueryTimeout: 30 * time.Second}, s.ClickHouse())
+	assert.Equal(t, Auth{JWKSURL: "", RoleClaim: "role"}, s.Auth())
+	assert.True(t, s.DLQFor("anything"))
 	assert.Equal(t, 10000, s.DefaultMaxRows())
+	assert.Equal(t, 60, s.TimestampBucketSeconds())
 	assert.Equal(t, 60*time.Second, s.SchemaRefreshInterval())
+	period, buckets := s.Keepalive()
+	assert.Equal(t, 30*time.Second, period)
+	assert.Equal(t, 3, buckets)
+	assert.Equal(t, 15*time.Minute, s.GapWindow())
 	assert.Equal(t, []string{"*"}, s.CORSOrigins())
 
 	// Non-empty directory: refused, contents untouched.
@@ -149,11 +157,35 @@ func TestStore_SeedIsValid(t *testing.T) {
 func TestStore_TypedAccessors(t *testing.T) {
 	t.Parallel()
 	s := newLoadedStore(t, map[string]string{
-		FileConfig: configJSON(`{"query": {"default_max_rows": 250}, "schema": {"refresh_interval": 5}, "cors": {"allowed_origins": ["https://app.example.com"]}}`),
+		FileConfig: configJSON(`{"query": {"default_max_rows": 250, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 5}, "stream": {"keepalive_interval": 10, "keepalive_buckets": 2, "gap_window_minutes": 0}, "cors": {"allowed_origins": ["https://app.example.com"]}}`),
 	})
 	assert.Equal(t, 250, s.DefaultMaxRows())
+	assert.Equal(t, 0, s.TimestampBucketSeconds())
 	assert.Equal(t, 5*time.Second, s.SchemaRefreshInterval())
+	period, buckets := s.Keepalive()
+	assert.Equal(t, 10*time.Second, period)
+	assert.Equal(t, 2, buckets)
+	assert.Equal(t, time.Duration(0), s.GapWindow())
 	assert.Equal(t, []string{"https://app.example.com"}, s.CORSOrigins())
+}
+
+func TestStore_ClickHouseAndAuthAccessors(t *testing.T) {
+	t.Parallel()
+	s := newLoadedStore(t, map[string]string{
+		FileConfig: configJSON(`{"clickhouse": {"addr": "ch.internal:9440", "http_port": 8443, "http_scheme": "https", "database": "analytics", "username": "wh", "query_timeout": 5}, "auth": {"jwks_url": "https://idp.example/.well-known/jwks.json", "role_claim": "app_metadata.role"}}`),
+	})
+	assert.Equal(t, ClickHouse{Addr: "ch.internal:9440", HTTPPort: 8443, HTTPScheme: "https", Database: "analytics", Username: "wh", QueryTimeout: 5 * time.Second}, s.ClickHouse())
+	assert.Equal(t, Auth{JWKSURL: "https://idp.example/.well-known/jwks.json", RoleClaim: "app_metadata.role"}, s.Auth())
+}
+
+func TestStore_DLQFor_Cascade(t *testing.T) {
+	t.Parallel()
+	s := newLoadedStore(t, map[string]string{
+		FileConfig: configJSON(`{"dlq": {"enabled": true, "tables": {"clicks": {"enabled": false}, "views": {}}}}`),
+	})
+	assert.False(t, s.DLQFor("clicks"), "table override wins")
+	assert.True(t, s.DLQFor("views"), "an override that sets nothing inherits the global switch")
+	assert.True(t, s.DLQFor("other"), "unlisted table gets the global switch")
 }
 
 // TestStore_AfterAdoptRunsOnlyOnAdoption pins the lifecycle hook contract:
@@ -166,12 +198,12 @@ func TestStore_AfterAdoptRunsOnlyOnAdoption(t *testing.T) {
 	s.AfterAdopt(func() { seen = append(seen, s.DedupeEnabled()) })
 
 	require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), FileConfig), []byte(configJSON(`{"dedupe": {"enabled": true}}`)), 0o600))
-	_, adopted := s.Reload()
+	_, adopted := s.Reload("test")
 	require.True(t, adopted)
 	assert.Equal(t, []bool{true}, seen, "hook sees the newly adopted snapshot")
 
 	require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 0}}`)), 0o600))
-	_, adopted = s.Reload()
+	_, adopted = s.Reload("test")
 	require.False(t, adopted)
 	assert.Equal(t, []bool{true}, seen, "rejected reload must not fire the hook")
 }

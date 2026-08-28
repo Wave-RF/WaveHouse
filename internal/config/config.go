@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/ilyakaznacheev/cleanenv"
 )
@@ -22,12 +21,10 @@ type Config struct {
 	MQ         MQ         `yaml:"mq"`
 	Cache      Cache      `yaml:"cache"`
 	Auth       Auth       `yaml:"auth"`
-	DLQ        DLQ        `yaml:"dlq"`
 	Policy     Policy     `yaml:"policy"`
 	Pipes      Pipes      `yaml:"pipes"`
 	OTel       OTel       `yaml:"otel"`
 	Prometheus Prometheus `yaml:"prometheus"`
-	Stream     Stream     `yaml:"stream"`
 	Settings   Settings   `yaml:"settings"`
 }
 
@@ -45,7 +42,7 @@ const EnvSettingsDir = "WH_SETTINGS_DIR"
 // default, same reasoning as policy.file_path: a baked-in path would turn a
 // missing mount into silent misconfiguration instead of an explicit operator
 // choice, and the binary has no compiled tunable defaults to fall back on —
-// `wavehouse init-settings <dir>` writes the starter directory (the container
+// `wavehouse bootstrap [dir]` writes the starter directory (the container
 // images preset WH_SETTINGS_DIR=/app/settings and expect a mount there).
 type Settings struct {
 	Dir string `yaml:"dir" env:"WH_SETTINGS_DIR"`
@@ -105,50 +102,44 @@ type OTelLogs struct {
 }
 
 // Server holds listener wiring. The CORS allowlist is a tenant tunable and
-// lives in the settings directory's config.json (internal/settings).
+// lives in the settings directory's config.json (internal/settings), as do
+// the SSE keepalive and gap-window knobs (stream.*).
 type Server struct {
 	Port            int `yaml:"port" env:"WH_SERVER_PORT" env-default:"8080"`
 	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT" env-default:"10"`
 }
 
-type Stream struct {
-	// KeepaliveInterval is the effective per-connection SSE keepalive period: the
-	// longest a quiet GET /v1/stream connection goes without a write before the
-	// server sends a ":" keepalive comment. Keep it under your proxy/tunnel idle
-	// timeout (default 30s clears the common 55–60s nginx/ALB/Heroku window).
-	KeepaliveInterval time.Duration `yaml:"keepalive_interval" env:"WH_STREAM_KEEPALIVE_INTERVAL" env-default:"30s"`
-	// KeepaliveBuckets spreads keepalive writes across the interval so the server
-	// nudges ~1/N of connections per tick instead of all at once. Advanced knob;
-	// most deployments never change it.
-	KeepaliveBuckets int `yaml:"keepalive_buckets" env:"WH_STREAM_KEEPALIVE_BUCKETS" env-default:"3"`
-}
-
+// ClickHouse holds only the password. The wiring — address, HTTP port and
+// scheme, database, username, query timeout — is the settings directory's
+// `clickhouse` block (hot-reloadable: a change swaps the connection). The password stays here because secrets
+// don't belong in a tracked JSON file; it is combined with the adopted
+// wiring on every (re)connect.
 type ClickHouse struct {
-	Addr         string        `yaml:"addr" env:"WH_CH_ADDR" env-default:"localhost:9000"`
-	HTTPPort     string        `yaml:"http_port" env:"WH_CH_HTTP_PORT" env-default:"8123"`
-	HTTPScheme   string        `yaml:"http_scheme" env:"WH_CH_HTTP_SCHEME" env-default:"http"`
-	Database     string        `yaml:"database" env:"WH_CH_DATABASE" env-default:"default"`
-	Username     string        `yaml:"username" env:"WH_CH_USERNAME" env-default:"default"`
-	Password     string        `yaml:"password" env:"WH_CH_PASSWORD"`
-	QueryTimeout time.Duration `yaml:"query_timeout" env:"WH_CH_QUERY_TIMEOUT" env-default:"30s"`
+	Password string `yaml:"password" env:"WH_CH_PASSWORD"`
 }
 
+// MQ sizes the embedded JetStream stream on disk. The gap window the sweeper
+// keeps for SSE gap-fill is a settings-directory key
+// (stream.gap_window_minutes) — it is a replay budget, not a disk budget.
 type MQ struct {
-	GapWindowMinutes int `yaml:"gap_window_minutes" env:"WH_MQ_GAP_WINDOW_MINUTES" env-default:"15"`
-	MaxBytesGB       int `yaml:"max_bytes_gb" env:"WH_MQ_MAX_BYTES_GB" env-default:"50"`
+	MaxBytesGB int `yaml:"max_bytes_gb" env:"WH_MQ_MAX_BYTES_GB" env-default:"50"`
 }
 
+// Cache sizes the in-process L1 cache. The time-range bucket structured
+// queries normalize to is a settings-directory key
+// (query.timestamp_bucket_seconds) — query shaping, not process memory.
 type Cache struct {
-	L1MaxCost              int64 `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
-	TimestampBucketSeconds int   `yaml:"timestamp_bucket_seconds" env:"WH_CACHE_TIMESTAMP_BUCKET_SECONDS" env-default:"60"`
+	L1MaxCost int64 `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
 }
 
-// Auth configures JWT validation. There is no on/off switch: the middleware
-// always runs. A request with no token, or an invalid/expired one, falls back
-// to the policy default_role; elevated access requires a valid token whose role
-// claim matches a granted role (or the policy admin_role). With neither
-// JWTSecret nor JWKSURL set, no token can validate, so every request is the
-// default role — a pure public deployment.
+// Auth holds the authentication secrets. The verifier wiring — `jwks_url`,
+// `role_claim` — is the settings directory's `auth` block (hot-reloadable:
+// a change rebuilds the verifier). There is no on/off switch: the middleware always runs. A request
+// with no token, or an invalid/expired one, falls back to the policy
+// default_role; elevated access requires a valid token whose role claim
+// matches a granted role (or the policy admin_role). With neither JWTSecret
+// nor a jwks_url set, no token can validate, so every request is the default
+// role — a pure public deployment.
 //
 // OperatorKey is an optional non-JWT credential for the operator running the
 // deployment: a request presenting it via an "Authorization: Operator <key>"
@@ -158,8 +149,6 @@ type Cache struct {
 // it. Treat it as an admin secret.
 type Auth struct {
 	JWTSecret   string `yaml:"jwt_secret" env:"WH_AUTH_JWT_SECRET"`
-	JWKSURL     string `yaml:"jwks_url" env:"WH_AUTH_JWKS_URL"`
-	RoleClaim   string `yaml:"role_claim" env:"WH_AUTH_ROLE_CLAIM" env-default:"role"`
 	OperatorKey string `yaml:"operator_key" env:"WH_AUTH_OPERATOR_KEY"`
 }
 
@@ -191,17 +180,8 @@ type Pipes struct {
 	Dir string `yaml:"dir" env:"WH_PIPES_DIR" env-default:""`
 }
 
-// DLQ configures the Dead Letter Queue for failed batch inserts.
-type DLQ struct {
-	Enabled bool `yaml:"enabled" env:"WH_DLQ_ENABLED" env-default:"true"`
-}
-
 // Validate checks the loaded configuration for logical consistency.
 func (c *Config) Validate() error {
-	if c.ClickHouse.HTTPScheme != "http" && c.ClickHouse.HTTPScheme != "https" {
-		return fmt.Errorf("clickhouse.http_scheme must be 'http' or 'https'")
-	}
-
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port %d out of range 1-65535", c.Server.Port)
 	}
@@ -211,22 +191,7 @@ func (c *Config) Validate() error {
 	}
 
 	if strings.TrimSpace(c.Settings.Dir) == "" {
-		return fmt.Errorf("settings.dir (%s) is required: point it at a settings directory, or create one with `wavehouse init-settings <dir>`", EnvSettingsDir)
-	}
-
-	if c.Stream.KeepaliveInterval < 0 {
-		return fmt.Errorf("stream.keepalive_interval must be non-negative, got %s", c.Stream.KeepaliveInterval)
-	}
-	if c.Stream.KeepaliveBuckets < 0 {
-		return fmt.Errorf("stream.keepalive_buckets must be non-negative, got %d", c.Stream.KeepaliveBuckets)
-	}
-
-	if c.ClickHouse.QueryTimeout <= time.Duration(0) {
-		return fmt.Errorf("clickhouse.query_timeout must be > 0, got %s", c.ClickHouse.QueryTimeout)
-	}
-
-	if c.MQ.GapWindowMinutes < 0 {
-		return fmt.Errorf("mq.gap_window_minutes must be non-negative")
+		return fmt.Errorf("settings.dir (%s) is required: point it at a settings directory, or create one with `wavehouse bootstrap [dir]`", EnvSettingsDir)
 	}
 
 	if c.OTel.Enabled {
@@ -280,11 +245,18 @@ func (c *Config) Validate() error {
 }
 
 // Load reads config from a YAML file (if it exists) with env var overrides.
+// The YAML is strict: a key the Config struct doesn't declare is an error
+// naming every such key, so a tunable that moved to the settings directory
+// (or a typo) can't be silently ignored. Environment variables can't be
+// checked the same way — the environment always carries unrelated names.
 func Load(path string) (*Config, error) {
 	var cfg Config
 	if _, err := os.Stat(path); err == nil {
 		if err := cleanenv.ReadConfig(path, &cfg); err != nil {
 			return nil, fmt.Errorf("read config: %w", err)
+		}
+		if err := rejectUnknownKeys(path); err != nil {
+			return nil, err
 		}
 	} else {
 		if err := cleanenv.ReadEnv(&cfg); err != nil {

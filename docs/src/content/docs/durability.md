@@ -100,6 +100,6 @@ If you see any of these, benchmark the `<data_dir>/nats` volume as above:
 
 ## See also
 
-- [Configuration → Message Queue (NATS)](/configuration#message-queue-nats) — the `mq.*` knobs (`gap_window_minutes`, `max_bytes_gb`).
+- [Configuration → Message Queue (NATS)](/configuration#message-queue-nats) — `mq.max_bytes_gb`, the stream's disk budget; the SSE gap window inside it is [`stream.gap_window_minutes`](/settings-directory#streaming) in the settings directory.
 - [Deployment → Persistent Storage](/deployment#persistent-storage-required-for-containers) — `data_dir` must resolve to a host-backed volume.
 - [Ingest Pipeline → Backpressure and durability knobs](/ingest-pipeline#backpressure-and-durability-knobs) — the worker-side ack cost and the in-flight backpressure layers.

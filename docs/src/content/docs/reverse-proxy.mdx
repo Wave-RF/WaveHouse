@@ -33,8 +33,8 @@ The body-size caps below exist in **both** layers on purpose. Your proxy limit i
 
 WaveHouse speaks plain HTTP and has no certificate management. Terminate TLS at the proxy and forward cleartext to `http://<wavehouse-host>:8080`.
 
-:::caution[`WH_CH_HTTP_SCHEME` is a different setting]
-The `clickhouse.http_scheme` / `WH_CH_HTTP_SCHEME` option in the [Configuration reference](/configuration) controls TLS on the **WaveHouse → ClickHouse** hop, not the inbound edge. It has nothing to do with terminating TLS for your clients — that's the proxy's job.
+:::caution[`clickhouse.http_scheme` is a different setting]
+The `clickhouse.http_scheme` key in the [settings directory](/settings-directory#clickhouse) controls TLS on the **WaveHouse → ClickHouse** hop, not the inbound edge. It has nothing to do with terminating TLS for your clients — that's the proxy's job.
 :::
 
 ## Path prefixes
@@ -117,11 +117,11 @@ A proxy that buffers the upstream response will hold events until a buffer fills
 
 ### 2. Keepalive and idle timeouts
 
-WaveHouse sends a minimal SSE keepalive comment — a bare `:` line — on every stream (alongside the `: connected` comment on open), so even an otherwise-quiet connection keeps producing bytes between events and an intermediary's idle timeout never trips on a slow table. By default each connection is nudged at least every **30 seconds** ([`stream.keepalive_interval`](/configuration#streaming-sse)), comfortably under the common 55–60s proxy and load-balancer idle windows (nginx's default `proxy_read_timeout` is 60s) and Cloudflare's ~120s edge. A single shared ticker drives keepalives for every connection; the comment is invisible to clients — `EventSource` and any spec-compliant parser ignore SSE comment lines, and `curl` simply prints them.
+WaveHouse sends a minimal SSE keepalive comment — a bare `:` line — on every stream (alongside the `: connected` comment on open), so even an otherwise-quiet connection keeps producing bytes between events and an intermediary's idle timeout never trips on a slow table. By default each connection is nudged at least every **30 seconds** ([`stream.keepalive_interval`](/settings-directory#streaming), a hot-reloadable settings-directory key), comfortably under the common 55–60s proxy and load-balancer idle windows (nginx's default `proxy_read_timeout` is 60s) and Cloudflare's ~120s edge. A single shared ticker drives keepalives for every connection; the comment is invisible to clients — `EventSource` and any spec-compliant parser ignore SSE comment lines, and `curl` simply prints them.
 
 This resolved [#226](https://github.com/Wave-RF/WaveHouse/issues/226): before it, a quiet stream sent nothing after `: connected`, so an intermediary's idle timeout reset the connection — Cloudflare's edge dropped quiet streams about every two minutes in dogfooding. Browsers masked it (`EventSource` auto-reconnects and resumes via `Last-Event-ID` gap-fill); `curl` and backend consumers saw repeated drops, each re-running gap-fill.
 
-**Why a keepalive works without raising any timeout:** nearly every proxy idle timeout is a *read* timeout measured as time-since-the-last-byte from the upstream, and **any** byte — including a keepalive comment — resets it. So WaveHouse only has to write more often than the tightest such timeout in the path; it does not need to be anywhere near as frequent as the events themselves. The exceptions are absolute, total-duration caps that traffic does *not* reset (some serverless and managed-LB request limits) — a keepalive can't save a stream from those, so they need an operator config change or a client reconnect. Both kinds are tabulated in [Idle timeouts by provider](#idle-timeouts-by-provider) below. Pick a [`keepalive_interval`](/configuration#streaming-sse) safely under the tightest idle timeout your traffic crosses; the 30s default already clears the common self-hosted and reverse-proxy cases (a handful of CDNs and gateways are tighter — see the table).
+**Why a keepalive works without raising any timeout:** nearly every proxy idle timeout is a *read* timeout measured as time-since-the-last-byte from the upstream, and **any** byte — including a keepalive comment — resets it. So WaveHouse only has to write more often than the tightest such timeout in the path; it does not need to be anywhere near as frequent as the events themselves. The exceptions are absolute, total-duration caps that traffic does *not* reset (some serverless and managed-LB request limits) — a keepalive can't save a stream from those, so they need an operator config change or a client reconnect. Both kinds are tabulated in [Idle timeouts by provider](#idle-timeouts-by-provider) below. Pick a [`keepalive_interval`](/settings-directory#streaming) safely under the tightest idle timeout your traffic crosses; the 30s default already clears the common self-hosted and reverse-proxy cases (a handful of CDNs and gateways are tighter — see the table).
 
 Raising the proxy's read/idle timeout for `/v1/stream` is therefore no longer required, though it's harmless if you'd rather not lean on the keepalive's margin:
 
@@ -143,7 +143,7 @@ The SDK streams over `fetch` and sends the JWT as an `Authorization` header, the
 
 ## Idle timeouts by provider
 
-A reference for picking [`stream.keepalive_interval`](/configuration#streaming-sse). These defaults change over time — each row links its source so you can re-check. The **30s default clears every "reset-by-traffic" row below except the 30s-and-tighter rows** (Azure Application Gateway 20s, Azure Front Door 30s, CloudFront 30s, Fastly ~10s); if your edge is one of those, lower the interval. (Absolute caps like API Gateway's 29s aren't fixable by any keepalive — see the second table.) Values are defaults for a streaming/`text/event-stream` response and may differ on enterprise tiers.
+A reference for picking [`stream.keepalive_interval`](/settings-directory#streaming). These defaults change over time — each row links its source so you can re-check. The **30s default clears every "reset-by-traffic" row below except the 30s-and-tighter rows** (Azure Application Gateway 20s, Azure Front Door 30s, CloudFront 30s, Fastly ~10s); if your edge is one of those, lower the interval. (Absolute caps like API Gateway's 29s aren't fixable by any keepalive — see the second table.) Values are defaults for a streaming/`text/event-stream` response and may differ on enterprise tiers.
 
 ### Reset-by-traffic idle timeouts — a keepalive handles these
 

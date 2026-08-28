@@ -26,7 +26,7 @@ type Store struct {
 	logger *slog.Logger
 
 	// mu serializes Reload: concurrent triggers queue rather than racing
-	// parse-then-swap sequences (a stale parse must not overwrite a newer one).
+	// validate-then-swap sequences (a stale document must not overwrite a newer one).
 	mu   sync.Mutex
 	snap atomic.Pointer[Document]
 	// afterAdopt runs under mu after every successful swap, in registration
@@ -41,7 +41,7 @@ type Store struct {
 // refuses to start; it must never run without adopted settings.
 func Open(dir string, logger *slog.Logger) (*Store, []Finding) {
 	s := &Store{dir: dir, logger: logger}
-	findings, adopted := s.TriggerReload("boot")
+	findings, adopted := s.Reload("boot")
 	if !adopted {
 		return nil, findings
 	}
@@ -54,36 +54,20 @@ func (s *Store) Dir() string { return s.dir }
 // Reload re-validates the directory and adopts the parsed document when no
 // finding is an error (warnings don't block adoption, matching `wavehouse
 // validate`). On a rejected reload the previous snapshot stays in place.
-// The returned bool reports whether the document was adopted.
-func (s *Store) Reload() ([]Finding, bool) {
+// The returned bool reports whether the document was adopted. trigger names
+// the path that fired ("boot", "sighup", "watch", "api") and tags every log
+// line so operators can tell them apart.
+func (s *Store) Reload(trigger string) ([]Finding, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	doc, findings := parse(s.dir)
-	if doc == nil {
-		return findings, false
+	doc, findings := Validate(s.dir)
+	adopted := doc != nil
+	if adopted {
+		s.snap.Store(doc)
+		for _, fn := range s.afterAdopt {
+			fn()
+		}
 	}
-	s.snap.Store(doc)
-	for _, fn := range s.afterAdopt {
-		fn()
-	}
-	return findings, true
-}
-
-// AfterAdopt registers fn to run after each subsequent successful reload,
-// serialized with the reload itself. Open's boot adoption has already
-// happened by the time a caller can register, so the caller applies the
-// boot state itself.
-func (s *Store) AfterAdopt(fn func()) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.afterAdopt = append(s.afterAdopt, fn)
-}
-
-// TriggerReload is Reload plus outcome logging, tagged with the trigger's
-// name ("boot", "sighup", "watch", "api") so operators can tell which path
-// fired from the log line alone.
-func (s *Store) TriggerReload(trigger string) ([]Finding, bool) {
-	findings, adopted := s.Reload()
 	if s.logger != nil {
 		var errs, warns int
 		for _, f := range findings {
@@ -105,6 +89,16 @@ func (s *Store) TriggerReload(trigger string) ([]Finding, bool) {
 		}
 	}
 	return findings, adopted
+}
+
+// AfterAdopt registers fn to run after each subsequent successful reload,
+// serialized with the reload itself. Open's boot adoption has already
+// happened by the time a caller can register, so the caller applies the
+// boot state itself.
+func (s *Store) AfterAdopt(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.afterAdopt = append(s.afterAdopt, fn)
 }
 
 // doc returns the current snapshot. Never nil for a Store returned by Open:
@@ -138,9 +132,77 @@ func (s *Store) DedupeFor(table string) (enabled bool, idField string, requireID
 	return enabled, idField, requireID
 }
 
+// ClickHouse is the adopted connection wiring, resolved as one value from
+// one snapshot so a reconnect never mixes the address of one document with
+// the database of another. The password is not here — it is boot config.
+type ClickHouse struct {
+	Addr         string
+	HTTPPort     int
+	HTTPScheme   string
+	Database     string
+	Username     string
+	QueryTimeout time.Duration
+}
+
+// ClickHouse returns the adopted ClickHouse wiring.
+func (s *Store) ClickHouse() ClickHouse {
+	c := s.doc().Config.ClickHouse
+	return ClickHouse{
+		Addr:         *c.Addr,
+		HTTPPort:     *c.HTTPPort,
+		HTTPScheme:   *c.HTTPScheme,
+		Database:     *c.Database,
+		Username:     *c.Username,
+		QueryTimeout: time.Duration(*c.QueryTimeout) * time.Second,
+	}
+}
+
+// Auth is the adopted verifier wiring (secrets excluded — boot config).
+type Auth struct {
+	JWKSURL   string
+	RoleClaim string
+}
+
+// Auth returns the adopted verifier wiring.
+func (s *Store) Auth() Auth {
+	a := s.doc().Config.Auth
+	return Auth{JWKSURL: *a.JWKSURL, RoleClaim: *a.RoleClaim}
+}
+
+// DLQFor reports whether a poison row for table is parked on the DLQ (true)
+
+// or left unacked for redelivery (false): the table override when present,
+// the global switch otherwise.
+func (s *Store) DLQFor(table string) bool {
+	d := s.doc().Config.DLQ
+	if td, ok := d.Tables[table]; ok && td.Enabled != nil {
+		return *td.Enabled
+	}
+	return *d.Enabled
+}
+
 // DefaultMaxRows returns the fallback result LIMIT for structured queries.
 func (s *Store) DefaultMaxRows() int {
 	return *s.doc().Config.Query.DefaultMaxRows
+}
+
+// TimestampBucketSeconds returns the time-range bucket structured queries
+// truncate to (0 = no bucketing).
+func (s *Store) TimestampBucketSeconds() int {
+	return *s.doc().Config.Query.TimestampBucketSeconds
+}
+
+// Keepalive returns the SSE keepalive period and bucket count together,
+// from one snapshot, so the wheel is never rebuilt from a mixed pair.
+func (s *Store) Keepalive() (period time.Duration, buckets int) {
+	st := s.doc().Config.Stream
+	return time.Duration(*st.KeepaliveInterval) * time.Second, *st.KeepaliveBuckets
+}
+
+// GapWindow returns how much ACKed history the sweeper keeps for SSE
+// gap-fill.
+func (s *Store) GapWindow() time.Duration {
+	return time.Duration(*s.doc().Config.Stream.GapWindowMinutes) * time.Minute
 }
 
 // SchemaRefreshInterval returns the schema-discovery auto-refresh period.

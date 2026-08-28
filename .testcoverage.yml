@@ -79,8 +79,8 @@ exclude:
       # rejection path, the seed writer) are unit territory and the unit
       # suite covers them thoroughly; per-suite excludes don't touch the
       # merged total, so nothing is hidden project-wide. Same for the
-      # settings CLI entry points (`validate`, `init-settings`), which e2e
+      # settings CLI entry points (`validate`, `bootstrap`), which e2e
       # never runs. Revisit if e2e grows a reload-rejection scenario.
       - ^internal/settings/
       - ^cmd/wavehouse/validate\.go$
-      - ^cmd/wavehouse/init_settings\.go$
+      - ^cmd/wavehouse/bootstrap\.go$

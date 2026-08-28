@@ -28,6 +28,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -114,6 +115,12 @@ func run() error {
 	}
 	dataDir := filepath.Join(repoRoot, "tmp", "data")
 	_ = os.RemoveAll(dataDir)
+	// The settings directory is copied per run so the testcontainer's dynamic
+	// ClickHouse ports can be patched into config.json's clickhouse block —
+	// that wiring is a settings key, not env, so there is no env override
+	// for it. Everything else in the fixture is used as-is.
+	settingsDir := filepath.Join(repoRoot, "tmp", "settings")
+	_ = os.RemoveAll(settingsDir)
 
 	// Capture WH output to a file rather than the orchestrator's console.
 	// V=1 reverts to streaming for interactive debugging.
@@ -168,6 +175,9 @@ func run() error {
 	chAddr := fmt.Sprintf("%s:%s", chHost, chNativePort.Port())
 	chHTTPURL := fmt.Sprintf("http://%s:%s", chHost, chHTTPPort.Port())
 	log.Printf("✓ ClickHouse ready: native=%s http=%s", chAddr, chHTTPURL)
+	if err := writeRunSettings(filepath.Join(repoRoot, "tests", "e2e", "fixtures", "settings"), settingsDir, chAddr, mustAtoi(chHTTPPort.Port())); err != nil {
+		return fmt.Errorf("settings dir: %w", err)
+	}
 
 	whPort, err := pickFreePort(ctx)
 	if err != nil {
@@ -183,20 +193,16 @@ func run() error {
 	// resolve from the repo root regardless of where the orchestrator
 	// itself was launched from.
 	whCmd.Dir = repoRoot
-	// Static config knobs (auth, dedupe, otel, mq, schema, dlq, cors, ...) live
-	// in tests/e2e/fixtures/config.yaml — edit them there, not here. The vars
-	// below are the per-run dynamic overrides (ports, addresses, scratch
-	// paths) plus GOCOVERDIR and WH_CONFIG, which can't live in YAML.
+	// Static boot config (secrets, otel, mq sizing, policy path) lives in
+	// tests/e2e/fixtures/config.yaml and the tunables in
+	// tests/e2e/fixtures/settings — edit them there, not here. The vars below
+	// are the per-run dynamic overrides (port, scratch paths, the patched
+	// settings copy) plus GOCOVERDIR and WH_CONFIG, which can't live in YAML.
 	whCmd.Env = append(os.Environ(),
 		"GOCOVERDIR="+coverDir,
 		"WH_CONFIG="+filepath.Join(repoRoot, "tests", "e2e", "fixtures", "config.yaml"),
 		"WH_SERVER_PORT="+strconv.Itoa(whPort),
-		"WH_CH_ADDR="+chAddr,
-		// Without WH_CH_HTTP_PORT, ingest worker's HTTP path falls back to the
-		// default :8123 and writes silently land on whatever CH is sitting
-		// on that port (e.g. a `make dev` instance), while tests verify
-		// against the testcontainer's CH which has zero rows.
-		"WH_CH_HTTP_PORT="+chHTTPPort.Port(),
+		"WH_SETTINGS_DIR="+settingsDir,
 		"WH_DATA_DIR="+dataDir,
 	)
 
@@ -461,4 +467,55 @@ func isExpectedExit(err error) bool {
 		return ee.ProcessState.Sys().(syscall.WaitStatus).Signal() == syscall.SIGINT
 	}
 	return false
+}
+
+// writeRunSettings copies the fixture settings directory to dst and rewrites
+// config.json's clickhouse.addr / clickhouse.http_port to the
+// testcontainer's mapped ports. Without the http_port patch the ingest
+// worker's HTTP path would land writes on whatever ClickHouse sits on
+// :8123 (e.g. a `make dev` instance) while the tests verify against the
+// testcontainer, which has zero rows.
+func writeRunSettings(src, dst, chAddr string, chHTTPPort int) error {
+	if err := os.MkdirAll(dst, 0o750); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(src, e.Name())) //nolint:gosec // G304/G703: entries of the fixture directory under the repo root, not user input
+		if err != nil {
+			return err
+		}
+		if e.Name() == "config.json" {
+			var doc map[string]json.RawMessage
+			if err := json.Unmarshal(data, &doc); err != nil {
+				return fmt.Errorf("config.json: %w", err)
+			}
+			var ch map[string]any
+			if err := json.Unmarshal(doc["clickhouse"], &ch); err != nil {
+				return fmt.Errorf("config.json clickhouse: %w", err)
+			}
+			ch["addr"], ch["http_port"] = chAddr, chHTTPPort
+			if doc["clickhouse"], err = json.Marshal(ch); err != nil {
+				return err
+			}
+			if data, err = json.MarshalIndent(doc, "", "  "); err != nil {
+				return err
+			}
+		}
+		if err := os.WriteFile(filepath.Join(dst, e.Name()), data, 0o600); err != nil { //nolint:gosec // G703: dst is tmp/settings under the repo root; names come from the fixture directory
+			return err
+		}
+	}
+	return nil
+}
+
+func mustAtoi(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		panic(fmt.Sprintf("port %q is not numeric: %v", s, err))
+	}
+	return n
 }

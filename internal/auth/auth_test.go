@@ -50,9 +50,9 @@ func run(t *testing.T, cfg Config, setup func(*http.Request)) captured {
 func runOp(t *testing.T, cfg Config, store *policy.Store, logger *slog.Logger, setup func(*http.Request)) captured {
 	t.Helper()
 	var c captured
-	mw, err := Middleware(cfg, store, logger)
+	a, err := NewAuthenticator(cfg, store, logger)
 	require.NoError(t, err)
-	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := a.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c.called = true
 		c.role = RoleFromContext(r.Context())
 		c.claims, c.hasClaims = ClaimsFromContext(r.Context())
@@ -322,7 +322,7 @@ func TestMiddleware_JWKSUnreachableAtBoot_FailsLoud(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Middleware(Config{JWKSURL: srv.URL}, nil, nil)
+	_, err := NewAuthenticator(Config{JWKSURL: srv.URL}, nil, nil)
 	require.Error(t, err, "an unreachable/erroring JWKS at boot must fail loudly")
 }
 
@@ -334,9 +334,9 @@ func TestMiddleware_JWKSReachableAtBoot_OK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mw, err := Middleware(Config{JWKSURL: srv.URL}, nil, nil)
+	a, err := NewAuthenticator(Config{JWKSURL: srv.URL}, nil, nil)
 	require.NoError(t, err, "a reachable JWKS endpoint must construct successfully")
-	require.NotNil(t, mw)
+	require.NotNil(t, a.Middleware())
 }
 
 func TestMiddleware_JWKSEmptyKeySet_TokenDoesNotAuthenticate(t *testing.T) {
@@ -631,4 +631,67 @@ func TestExtractClaim(t *testing.T) {
 			assert.Equal(t, tt.want, extractClaim(tt.claims, tt.path))
 		})
 	}
+}
+
+// TestAuthenticator_ReconfigureSwapsRoleClaim pins the reload contract: the
+// middleware reads the current verifier per request, so a Reconfigure that
+// changes role_claim is visible to the next request with no rebuild.
+func TestAuthenticator_ReconfigureSwapsRoleClaim(t *testing.T) {
+	t.Parallel()
+	a, err := NewAuthenticator(Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role"}, nil, nil)
+	require.NoError(t, err)
+	var got string
+	h := a.Middleware()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = RoleFromContext(r.Context()) }))
+
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"role": "old", "app_metadata": map[string]any{"role": "new"}, "exp": time.Now().Add(time.Hour).Unix()})
+	signed, err := tok.SignedString([]byte(testutil.TestJWTSecret))
+	require.NoError(t, err)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+signed)
+
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	assert.Equal(t, "old", got)
+
+	a.Reconfigure(Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "app_metadata.role"})
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	assert.Equal(t, "new", got, "the next request sees the reconfigured claim path")
+}
+
+// TestAuthenticator_ReconfigureAppliesUnreachableJWKS pins "settings are the
+// authority": a reload pointing at an unreachable JWKS swaps the verifier
+// anyway, so the HMAC token stops validating (fail closed) instead of the
+// previous verifier lingering. Boot stays strict (see the NewAuthenticator
+// test above).
+func TestAuthenticator_ReconfigureAppliesUnreachableJWKS(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	a, err := NewAuthenticator(Config{JWTSecret: testutil.TestJWTSecret}, nil, nil)
+	require.NoError(t, err)
+
+	var got string
+	h := a.Middleware()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = RoleFromContext(r.Context()) }))
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"role": "analyst", "exp": time.Now().Add(time.Hour).Unix()})
+	signed, err := tok.SignedString([]byte(testutil.TestJWTSecret))
+	require.NoError(t, err)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+signed)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	require.Equal(t, "analyst", got)
+
+	a.Reconfigure(Config{JWTSecret: testutil.TestJWTSecret, JWKSURL: srv.URL})
+	got = ""
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	assert.Empty(t, got, "the unreachable JWKS is applied: the HMAC token no longer authenticates")
+
+	// A reachable JWKS on the next reload swaps again (still asymmetric-only).
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"keys":[]}`)) }))
+	defer ok.Close()
+	a.Reconfigure(Config{JWTSecret: testutil.TestJWTSecret, JWKSURL: ok.URL})
+	got = ""
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	assert.Empty(t, got)
 }
