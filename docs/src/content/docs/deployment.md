@@ -159,10 +159,6 @@ WH_PIPES_DIR=/etc/wavehouse/pipes
 # WH_SETTINGS_DIR=/app/settings and ship no directory: omit this line and
 # mount (or seed) your directory at /app/settings.
 WH_SETTINGS_DIR=/etc/wavehouse/settings
-
-# Max NATS JetStream disk usage (triggers backpressure). The SSE gap window,
-# the query time-bucket, and the DLQ switch are settings-directory keys, not env.
-WH_MQ_MAX_BYTES_GB=50
 ```
 
 ## Persistent Storage (REQUIRED for containers)

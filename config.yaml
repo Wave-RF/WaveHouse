@@ -35,11 +35,6 @@ prometheus:
 clickhouse:
   password: ""
 
-# Disk budget for the embedded JetStream stream. The SSE gap window kept
-# inside it (stream.gap_window_minutes) and the keepalives are settings keys.
-mq:
-  max_bytes_gb: 50
-
 # In-process L1 cache size. The query time-bucket
 # (query.timestamp_bucket_seconds) is a settings key.
 cache:

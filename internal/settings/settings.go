@@ -59,7 +59,7 @@ type PipesFile struct {
 // TenantConfig is the shape of config.json: the behavioral tunables that
 // migrate out of boot config. Boot config (config.yaml/env) keeps only what
 // cannot change under a running process — resource sizing (`data_dir`,
-// `mq.max_bytes_gb`, `cache.l1_max_cost`), listeners, the observability
+// `cache.l1_max_cost`), listeners, the observability
 // exporters — and the secrets (`clickhouse.password`, `auth.jwt_secret`,
 // `auth.operator_key`), which never belong in a tracked JSON file. Every
 // block and every top-level key inside it is REQUIRED: the binary carries no
@@ -75,6 +75,7 @@ type TenantConfig struct {
 	Query      *QueryConfig      `json:"query"`
 	Schema     *SchemaConfig     `json:"schema"`
 	Stream     *StreamConfig     `json:"stream"`
+	MQ         *MQConfig         `json:"mq"`
 	CORS       *CORSConfig       `json:"cors"`
 }
 
@@ -188,6 +189,17 @@ type StreamConfig struct {
 	// keeps in NATS for SSE gap-fill (Last-Event-ID replay). Must be >= 0;
 	// applies from the next sweep.
 	GapWindowMinutes *int `json:"gap_window_minutes"`
+}
+
+// MQConfig sizes the embedded JetStream streams on disk.
+type MQConfig struct {
+	// MaxBytesGB caps the WAVEHOUSE ingest stream (the DLQ stream gets a
+	// tenth of it). Must be >= 1. A reload updates the live streams in
+	// place: growing takes effect immediately; shrinking below what is
+	// currently buffered makes the ingest stream refuse new publishes
+	// (DiscardNew → 503 backpressure) until the worker drains it — nothing
+	// already buffered is dropped.
+	MaxBytesGB *int `json:"max_bytes_gb"`
 }
 
 // CORSConfig carries the per-request CORS allowlist. ["*"] allows any

@@ -93,9 +93,7 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 
 ### Message Queue (NATS)
 
-| YAML Key | Env Var | Default | Description |
-| --- | --- | ------- | ----------- |
-| `mq.max_bytes_gb` | `WH_MQ_MAX_BYTES_GB` | `50` | Maximum NATS JetStream stream size in GB. When full, new publishes are rejected with `DiscardNew` policy, triggering 503 backpressure on the ingest endpoint. The SSE gap window the sweeper keeps inside that budget is `stream.gap_window_minutes` in the [Settings Directory](/settings-directory#streaming). |
+The stream's disk budget, `mq.max_bytes_gb`, is a hot-reloadable key in the [Settings Directory](/settings-directory#message-queue) — there is no boot-config knob for it.
 
 **Durability.** The embedded server runs with JetStream `SyncAlways`, so every event is `fsync`'d to disk before `POST /v1/ingest` returns `200`. This makes your storage's `fsync` latency your ingest latency floor — see [Durability & Storage](/durability) to check whether your substrate can sustain it. There is no knob to relax this today ([#139](https://github.com/Wave-RF/WaveHouse/issues/139) tracks a configurable group-commit interval).
 
@@ -196,9 +194,6 @@ clickhouse:
   password: ""           # the only ClickHouse key here — addr, ports, database,
                          # username, query_timeout are settings (config.json)
 
-mq:
-  max_bytes_gb: 50
-
 cache:
   l1_max_cost: 67108864
 
@@ -252,8 +247,6 @@ WH_SERVER_PORT=8080
 WH_SERVER_SHUTDOWN_TIMEOUT=10
 
 WH_CH_PASSWORD=
-
-WH_MQ_MAX_BYTES_GB=50
 
 WH_CACHE_L1_MAX_COST=67108864
 

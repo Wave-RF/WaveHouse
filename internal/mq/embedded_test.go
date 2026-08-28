@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -109,4 +110,18 @@ func TestSlogNATSLogger_Levels(t *testing.T) {
 	l.Debugf("dbg")
 	l.Tracef("trc")
 	l.Fatalf("fatal %d", 42) // slog.Error; no os.Exit here
+}
+
+func TestEmbeddedNATS_Resize(t *testing.T) {
+	e := newTestEmbedded(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	require.NoError(t, e.Resize(ctx, 128<<20))
+	info, err := e.js.Stream(ctx, StreamName())
+	require.NoError(t, err)
+	assert.Equal(t, int64(128<<20), info.CachedInfo().Config.MaxBytes)
+	// Everything but the limit is preserved.
+	assert.Equal(t, []string{"ingest.>"}, info.CachedInfo().Config.Subjects)
+	assert.Equal(t, jetstream.DiscardNew, info.CachedInfo().Config.Discard)
 }

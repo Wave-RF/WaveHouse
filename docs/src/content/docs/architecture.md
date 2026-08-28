@@ -131,7 +131,7 @@ The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https:/
 ### `mq/` — Message Queue
 
 - **mq.go** — `Publisher` and `Subscriber` interfaces. `Message` struct with `DoubleAck(ctx)`, `Ack()`, and `Nak()`.
-- **embedded.go** — In-process NATS server with JetStream. Creates stream `WAVEHOUSE` with subjects `ingest.>`.
+- **embedded.go** — In-process NATS server with JetStream. Creates stream `WAVEHOUSE` with subjects `ingest.>`, capped at the settings directory's `mq.max_bytes_gb`; `Resize` updates the cap on the live stream after a reload.
 
 ### `observability/` — OpenTelemetry Pipeline
 

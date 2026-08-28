@@ -34,7 +34,7 @@ Because the publish blocks on `fsync`, **your typical ingest latency is your sto
 
 - Publishes block for the duration of the `fsync`, so a multi-second `fsync` tail is a multi-second ingest tail.
 - The embedded server's stream/consumer setup and every publish run under the JetStream client's request timeout; a slow-enough substrate makes them exceed it. The boot-time symptom is `create stream: ... context deadline exceeded`.
-- If the worker cannot drain to ClickHouse faster than producers publish, the stream fills toward `mq.max_bytes_gb` and the API returns `503` ([backpressure by construction](/ingest-pipeline#backpressure-and-durability-knobs)).
+- If the worker cannot drain to ClickHouse faster than producers publish, the stream fills toward [`mq.max_bytes_gb`](/settings-directory#message-queue) and the API returns `503` ([backpressure by construction](/ingest-pipeline#backpressure-and-durability-knobs)).
 
 ## Where `SyncAlways` is cheap vs. expensive
 
@@ -100,6 +100,6 @@ If you see any of these, benchmark the `<data_dir>/nats` volume as above:
 
 ## See also
 
-- [Configuration → Message Queue (NATS)](/configuration#message-queue-nats) — `mq.max_bytes_gb`, the stream's disk budget; the SSE gap window inside it is [`stream.gap_window_minutes`](/settings-directory#streaming) in the settings directory.
+- [Settings Directory → Message Queue](/settings-directory#message-queue) — `mq.max_bytes_gb`, the stream's disk budget (hot-reloadable); the SSE gap window inside it is [`stream.gap_window_minutes`](/settings-directory#streaming).
 - [Deployment → Persistent Storage](/deployment#persistent-storage-required-for-containers) — `data_dir` must resolve to a host-backed volume.
 - [Ingest Pipeline → Backpressure and durability knobs](/ingest-pipeline#backpressure-and-durability-knobs) — the worker-side ack cost and the in-flight backpressure layers.

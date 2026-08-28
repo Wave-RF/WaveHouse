@@ -263,8 +263,8 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"empty override id_field", FileConfig, `{"dedupe": {"tables": {"clicks": {"id_field": ""}}}}`, "dedupe.tables.clicks.id_field: must not be empty"},
 		{"negative max rows", FileConfig, `{"query": {"default_max_rows": -1}}`, "must be >= 1"},
 		{"zero max rows", FileConfig, `{"query": {"default_max_rows": 0}}`, "must be >= 1"},
-		{"missing dedupe block", FileConfig, `{"dlq": {"enabled": true}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "cors": {"allowed_origins": []}}`, "dedupe: required"},
-		{"missing dlq block", FileConfig, `{"dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "cors": {"allowed_origins": []}}`, "dlq: required"},
+		{"missing dedupe block", FileConfig, `{"dlq": {"enabled": true}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 1}, "cors": {"allowed_origins": []}}`, "dedupe: required"},
+		{"missing dlq block", FileConfig, `{"dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 1}, "cors": {"allowed_origins": []}}`, "dlq: required"},
 		{"missing dlq.enabled", FileConfig, `{"dlq": {"tables": {}}}`, "dlq.enabled: required"},
 		{"empty dlq override table name", FileConfig, `{"dlq": {"tables": {"": {"enabled": false}}}}`, "table name must not be empty"},
 		{"dlq override table whitespace", FileConfig, `{"dlq": {"tables": {"clicks ": {"enabled": false}}}}`, "surrounding whitespace"},
@@ -285,8 +285,8 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"missing cors.allowed_origins", FileConfig, `{"cors": {}}`, "cors.allowed_origins: required"},
 		{"empty config document", FileConfig, `{}`, "cors: required"},
 		{"otel is boot config", FileConfig, `{"otel": {"enabled": true}}`, "unknown field"},
-		{"missing clickhouse block", FileConfig, `{"auth": {"jwks_url": "", "role_claim": "role"}, "dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}, "dlq": {"enabled": true}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "cors": {"allowed_origins": []}}`, "clickhouse: required"},
-		{"missing auth block", FileConfig, `{"clickhouse": {"addr": "h:9000", "http_port": 8123, "http_scheme": "http", "database": "d", "username": "u", "query_timeout": 1}, "dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}, "dlq": {"enabled": true}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "cors": {"allowed_origins": []}}`, "auth: required"},
+		{"missing clickhouse block", FileConfig, `{"auth": {"jwks_url": "", "role_claim": "role"}, "dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}, "dlq": {"enabled": true}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 1}, "cors": {"allowed_origins": []}}`, "clickhouse: required"},
+		{"missing auth block", FileConfig, `{"clickhouse": {"addr": "h:9000", "http_port": 8123, "http_scheme": "http", "database": "d", "username": "u", "query_timeout": 1}, "dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}, "dlq": {"enabled": true}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 1}, "cors": {"allowed_origins": []}}`, "auth: required"},
 		{"missing clickhouse.addr", FileConfig, `{"clickhouse": {"http_port": 8123, "http_scheme": "http", "database": "d", "username": "u", "query_timeout": 1}}`, "clickhouse.addr: required"},
 		{"clickhouse.addr without port", FileConfig, `{"clickhouse": {"addr": "localhost"}}`, "must be host:port"},
 		{"clickhouse.http_port out of range", FileConfig, `{"clickhouse": {"http_port": 70000}}`, "clickhouse.http_port: must be in 1-65535"},
@@ -302,6 +302,8 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"auth.role_claim padded", FileConfig, `{"auth": {"role_claim": " role"}}`, "auth.role_claim: must be a non-empty claim path"},
 
 		{"zero refresh interval", FileConfig, `{"schema": {"refresh_interval": 0}}`, "must be >= 1"},
+		{"missing mq.max_bytes_gb", FileConfig, `{"mq": {}}`, "mq.max_bytes_gb: required"},
+		{"zero mq.max_bytes_gb", FileConfig, `{"mq": {"max_bytes_gb": 0}}`, "mq.max_bytes_gb: must be >= 1 GB"},
 		{"empty cors origin", FileConfig, `{"cors": {"allowed_origins": [" "]}}`, "origin must not be empty"},
 	}
 	for _, tt := range tests {

@@ -57,6 +57,7 @@ The tenant tunables. Every key is required (a missing one is a validation error)
 | `stream.keepalive_interval` | `30` | Seconds (`>= 1`) a quiet `GET /v1/stream` connection may go without a write before the server sends a `:` keepalive comment — keep it under your proxy's idle timeout; see [Streaming](#streaming). |
 | `stream.keepalive_buckets` | `3` | Load-spreading (`>= 1`): connections are spread across N buckets so each tick nudges ~1/N of live streams. Most deployments leave it. |
 | `stream.gap_window_minutes` | `15` | Minutes (`>= 0`) of written-to-ClickHouse history the Active Sweeper keeps in NATS for `Last-Event-ID` gap-fill; applies from the next sweep. |
+| `mq.max_bytes_gb` | `50` | Disk budget (GB, `>= 1`) for the embedded NATS `WAVEHOUSE` ingest stream; the `WAVEHOUSE_DLQ` stream gets a tenth of it. A reload updates the live streams in place. See [Message Queue](#message-queue). |
 | `cors.allowed_origins` | `["*"]` | Allowed CORS origins, applied per request. `"*"` allows any browser origin. WaveHouse is a Bearer-token API — `Access-Control-Allow-Credentials` is intentionally never sent, so this allowlist controls *which origins can read responses*, not cookie scope. Tighten to your frontend's exact origin(s) in production (e.g. `["https://dashboard.example.com", "http://localhost:3000"]`). An empty list `[]` is **not** "no origins" — it is equivalent to `["*"]` and validation warns about it; to restrict browser origins, list only the ones you allow. |
 
 ```json
@@ -91,7 +92,7 @@ The tenant tunables. Every key is required (a missing one is a validation error)
 }
 ```
 
-What stays in boot config is only what cannot change under a running process — resource sizing (`data_dir`, `mq.max_bytes_gb`, `cache.l1_max_cost`), the listeners, the observability exporters — and the **secrets**: `clickhouse.password`, `auth.jwt_secret`, `auth.operator_key`. Secrets never belong in a tracked JSON file, so they stay in the environment and are combined with the wiring here on every (re)connect; rotating one is a restart. See [Configuration](/configuration). Everything else lives here and reloads.
+What stays in boot config is only what cannot change under a running process — resource sizing (`data_dir`, `cache.l1_max_cost`), the listeners, the observability exporters — and the **secrets**: `clickhouse.password`, `auth.jwt_secret`, `auth.operator_key`. Secrets never belong in a tracked JSON file, so they stay in the environment and are combined with the wiring here on every (re)connect; rotating one is a restart. See [Configuration](/configuration). Everything else lives here and reloads.
 
 ## Deduplication
 
@@ -121,10 +122,14 @@ A failed batch insert is retried row by row; a row that fails again on its own i
 
 The `WAVEHOUSE_DLQ` stream always exists (an empty stream costs nothing) and the stats endpoint is always registered — the switch is purely behavioral, which is what makes it safe to reload.
 
+## Message Queue
+
+- `mq.max_bytes_gb` (seed default `50`) — disk budget for the embedded JetStream `WAVEHOUSE` stream that buffers ingested events until the worker writes them to ClickHouse; the `WAVEHOUSE_DLQ` stream gets a tenth of it. The stream runs `DiscardNew`, so when it's full new publishes are rejected and `POST /v1/ingest` returns `503` — [backpressure by construction](/ingest-pipeline#backpressure-and-durability-knobs). A reload updates both streams' limits in place without touching what's buffered: growing takes effect immediately; shrinking below what's currently on disk makes the stream refuse new publishes until the worker drains it back under the limit — nothing already accepted is dropped. If NATS rejects the update, the previous limit stays in effect and the failure is logged. Size it from [Durability & Storage](/durability).
+
 ## Streaming
 
 `GET /v1/stream` keepalives and gap-fill are tuned here:
 
 - `stream.keepalive_interval` (seed default `30`) — seconds a quiet connection may go without a write before the server sends a `:` keepalive comment. It exists to stay under whatever idle timeout sits between WaveHouse and the client; the default clears the common 55–60s proxy windows with margin, and a tighter edge (Azure Application Gateway 20s, CloudFront 30s) wants a lower value — see [Behind a reverse proxy → Idle timeouts](/reverse-proxy#idle-timeouts-by-provider). A reload rebuilds the keepalive wheel in place: live connections stay open and are redistributed across the new ring, each getting at most one full new period before its next keepalive.
 - `stream.keepalive_buckets` (seed default `3`) — spreads the keepalive writes across the interval (one bucket fires every `keepalive_interval ÷ keepalive_buckets`) so the server nudges ~1/N of connections per tick instead of all at once. It changes only how the writes are spread in time, never the period.
-- `stream.gap_window_minutes` (seed default `15`) — minutes of already-written-to-ClickHouse history the Active Sweeper keeps in NATS so a reconnecting client's `Last-Event-ID` replay can bridge the gap; a drop longer than this resumes with a hole. Bounded by the stream's disk budget, `mq.max_bytes_gb` (boot config). A reload applies from the next sweep (every minute).
+- `stream.gap_window_minutes` (seed default `15`) — minutes of already-written-to-ClickHouse history the Active Sweeper keeps in NATS so a reconnecting client's `Last-Event-ID` replay can bridge the gap; a drop longer than this resumes with a hole. Bounded by the stream's disk budget, [`mq.max_bytes_gb`](#message-queue). A reload applies from the next sweep (every minute).

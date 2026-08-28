@@ -463,6 +463,14 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		}
 	}
 
+	if m := c.MQ; m == nil {
+		v.required("mq")
+	} else if m.MaxBytesGB == nil {
+		v.required("mq.max_bytes_gb")
+	} else if *m.MaxBytesGB < 1 {
+		v.errorf(FileConfig, "mq.max_bytes_gb", "must be >= 1 GB, got %d", *m.MaxBytesGB)
+	}
+
 	switch co := c.CORS; {
 	case co == nil:
 		v.required("cors")

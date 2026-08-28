@@ -5,11 +5,6 @@
 # the orchestrator via env vars. Everything below is pinned here so the
 # rig config is visible and editable without recompiling Go.
 
-mq:
-  # 1 GiB keeps the testcontainer's NATS stream tiny; the suite never
-  # writes anywhere near that.
-  max_bytes_gb: 1
-
 # JWT validation. The suite signs test tokens with this fixed dev secret;
 # don't reuse outside the e2e rig. role_claim / jwks_url live in
 # settings/config.json.
@@ -24,7 +19,8 @@ policy:
   file_path: tests/e2e/fixtures/policy.yaml
 
 # Tenant tunables (schema refresh_interval 5s so schema-discovery tests don't
-# wait a minute; dedupe enabled + id_field; DLQ on; CORS "*") live in the
+# wait a minute; dedupe enabled + id_field; DLQ on; CORS "*"; a 1 GiB NATS
+# stream budget so the testcontainer stays tiny) live in the
 # settings directory — see settings/config.json. Same cwd-relative resolution
 # as policy.file_path.
 

@@ -143,6 +143,7 @@ func TestStore_SeedIsValid(t *testing.T) {
 	assert.Equal(t, 30*time.Second, period)
 	assert.Equal(t, 3, buckets)
 	assert.Equal(t, 15*time.Minute, s.GapWindow())
+	assert.Equal(t, int64(50)<<30, s.MQMaxBytes())
 	assert.Equal(t, []string{"*"}, s.CORSOrigins())
 
 	// Non-empty directory: refused, contents untouched.
@@ -157,7 +158,7 @@ func TestStore_SeedIsValid(t *testing.T) {
 func TestStore_TypedAccessors(t *testing.T) {
 	t.Parallel()
 	s := newLoadedStore(t, map[string]string{
-		FileConfig: configJSON(`{"query": {"default_max_rows": 250, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 5}, "stream": {"keepalive_interval": 10, "keepalive_buckets": 2, "gap_window_minutes": 0}, "cors": {"allowed_origins": ["https://app.example.com"]}}`),
+		FileConfig: configJSON(`{"query": {"default_max_rows": 250, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 5}, "stream": {"keepalive_interval": 10, "keepalive_buckets": 2, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 2}, "cors": {"allowed_origins": ["https://app.example.com"]}}`),
 	})
 	assert.Equal(t, 250, s.DefaultMaxRows())
 	assert.Equal(t, 0, s.TimestampBucketSeconds())
@@ -166,6 +167,7 @@ func TestStore_TypedAccessors(t *testing.T) {
 	assert.Equal(t, 10*time.Second, period)
 	assert.Equal(t, 2, buckets)
 	assert.Equal(t, time.Duration(0), s.GapWindow())
+	assert.Equal(t, int64(2)<<30, s.MQMaxBytes())
 	assert.Equal(t, []string{"https://app.example.com"}, s.CORSOrigins())
 }
 

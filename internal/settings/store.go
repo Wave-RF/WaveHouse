@@ -205,6 +205,11 @@ func (s *Store) GapWindow() time.Duration {
 	return time.Duration(*s.doc().Config.Stream.GapWindowMinutes) * time.Minute
 }
 
+// MQMaxBytes returns the ingest stream's disk budget in bytes.
+func (s *Store) MQMaxBytes() int64 {
+	return int64(*s.doc().Config.MQ.MaxBytesGB) << 30
+}
+
 // SchemaRefreshInterval returns the schema-discovery auto-refresh period.
 func (s *Store) SchemaRefreshInterval() time.Duration {
 	return time.Duration(*s.doc().Config.Schema.RefreshInterval) * time.Second

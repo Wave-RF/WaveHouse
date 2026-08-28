@@ -375,7 +375,7 @@ func run() int {
 	// Embedded MQ (NATS).
 	config.WarnIfFreshDataDir(logger, "nats", natsDir)
 
-	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
+	maxBytes := settingsStore.MQMaxBytes()
 	embeddedMQ, err := mq.NewEmbedded(natsDir, maxBytes)
 	if err != nil {
 		config.LogStorageInitError(logger, "mq", natsDir, err)
@@ -401,6 +401,26 @@ func run() int {
 		logger.Error("dlq stream init", "error", err)
 		return 1
 	}
+
+	// mq.max_bytes_gb is hot-reloadable: after each adoption both streams'
+	// limits are updated in place (the DLQ keeps a tenth of the budget).
+	appliedMaxBytes := maxBytes
+	settingsStore.AfterAdopt(func() {
+		mb := settingsStore.MQMaxBytes()
+		if mb == appliedMaxBytes {
+			return
+		}
+		if err := embeddedMQ.Resize(ctx, mb); err != nil {
+			logger.Error("mq stream resize failed; previous limit stays in effect", "error", err)
+			return
+		}
+		if err := api.EnsureDLQStream(ctx, embeddedMQ.JetStream(), mb/10); err != nil {
+			logger.Error("dlq stream resize failed; previous limit stays in effect", "error", err)
+			return
+		}
+		logger.Info("mq stream limits reconciled with settings", "max_bytes_gb", mb>>30)
+		appliedMaxBytes = mb
+	})
 
 	// L1 cache only in standalone mode.
 	l1, err := cache.NewLocal(cfg.Cache.L1MaxCost)

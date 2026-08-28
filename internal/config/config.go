@@ -18,7 +18,6 @@ type Config struct {
 	DataDir    string     `yaml:"data_dir" env:"WH_DATA_DIR" env-default:"./data"`
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
-	MQ         MQ         `yaml:"mq"`
 	Cache      Cache      `yaml:"cache"`
 	Auth       Auth       `yaml:"auth"`
 	Policy     Policy     `yaml:"policy"`
@@ -116,13 +115,6 @@ type Server struct {
 // wiring on every (re)connect.
 type ClickHouse struct {
 	Password string `yaml:"password" env:"WH_CH_PASSWORD"`
-}
-
-// MQ sizes the embedded JetStream stream on disk. The gap window the sweeper
-// keeps for SSE gap-fill is a settings-directory key
-// (stream.gap_window_minutes) — it is a replay budget, not a disk budget.
-type MQ struct {
-	MaxBytesGB int `yaml:"max_bytes_gb" env:"WH_MQ_MAX_BYTES_GB" env-default:"50"`
 }
 
 // Cache sizes the in-process L1 cache. The time-range bucket structured

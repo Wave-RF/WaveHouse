@@ -93,24 +93,39 @@ func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*Embe
 		return nil, fmt.Errorf("jetstream new: %w", err)
 	}
 
-	// LimitsPolicy: standard append-only log. The Active Sweeper handles
-	// message purging. MaxBytes caps disk usage to protect the shared
-	// ClickHouse/NATS disk. DiscardNew rejects new messages when full,
-	// propagating backpressure to the upstream API.
-	_, err = js.CreateOrUpdateStream(context.Background(), jetstream.StreamConfig{
-		Name:      StreamName(),
-		Subjects:  []string{"ingest.>"},
-		Retention: jetstream.LimitsPolicy,
-		MaxBytes:  maxBytes,
-		Discard:   jetstream.DiscardNew,
-	})
-	if err != nil {
+	if _, err := js.CreateOrUpdateStream(context.Background(), ingestStreamConfig(maxBytes)); err != nil {
 		nc.Close()
 		ns.Shutdown()
 		return nil, fmt.Errorf("create stream: %w", err)
 	}
 
 	return &EmbeddedNATS{server: ns, conn: nc, js: js}, nil
+}
+
+// ingestStreamConfig is the WAVEHOUSE stream. LimitsPolicy: standard
+// append-only log; the Active Sweeper handles message purging. MaxBytes caps
+// disk usage to protect the shared ClickHouse/NATS disk. DiscardNew rejects
+// new messages when full, propagating backpressure to the upstream API.
+func ingestStreamConfig(maxBytes int64) jetstream.StreamConfig {
+	return jetstream.StreamConfig{
+		Name:      StreamName(),
+		Subjects:  []string{"ingest.>"},
+		Retention: jetstream.LimitsPolicy,
+		MaxBytes:  maxBytes,
+		Discard:   jetstream.DiscardNew,
+	}
+}
+
+// Resize updates the ingest stream's MaxBytes in place (the hot-reloadable
+// mq.max_bytes_gb). JetStream applies a limit change to a live stream
+// without touching its messages: growing takes effect immediately; shrinking
+// below the current size makes DiscardNew refuse new publishes until the
+// worker drains it — nothing buffered is dropped.
+func (e *EmbeddedNATS) Resize(ctx context.Context, maxBytes int64) error {
+	if _, err := e.js.UpdateStream(ctx, ingestStreamConfig(maxBytes)); err != nil {
+		return fmt.Errorf("resize stream: %w", err)
+	}
+	return nil
 }
 
 func (e *EmbeddedNATS) Publish(ctx context.Context, subject string, data []byte, opts ...PublishOpt) error {

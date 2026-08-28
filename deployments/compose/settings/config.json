@@ -33,6 +33,9 @@
     "keepalive_buckets": 3,
     "gap_window_minutes": 15
   },
+  "mq": {
+    "max_bytes_gb": 50
+  },
   "cors": {
     "allowed_origins": [
       "*"
