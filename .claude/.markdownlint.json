@@ -1,4 +1,0 @@
-{
-  "extends": "../.markdownlint.json",
-  "WH001": false
-}

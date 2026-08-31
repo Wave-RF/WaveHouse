@@ -20,7 +20,7 @@ Read `.github/prompts/docs-review.md` first; it is the canonical docs-review rub
 
 ## What counts as docs prose (scope)
 
-The canonical set is resolved by `scripts/docs-prose.sh` — a **denylist**: every tracked `*.md`/`*.mdx` file EXCEPT `.claude/**`, `.github/**`, `CHANGELOG.md`, `AGENTS.md`, `CLAUDE.md`, `*.draft.md`, `*.old.md`, `PERF-CLAIMS-REVIEW.md`. That is the Astro Starlight site under `docs/src/content/` **plus** the user-facing governance docs (`README.md`, `clients/ts/README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `SUPPORT.md`) — and any doc added later, automatically.
+The canonical set is resolved by `scripts/docs-prose.sh` — a **denylist**: every tracked `*.md`/`*.mdx` file EXCEPT `.claude/**`, `.github/**`, `CHANGELOG.md`, `AGENTS.md`, `CLAUDE.md`, `*.draft.md`, `*.old.md`. That is the Astro Starlight site under `docs/src/content/` **plus** the user-facing governance docs (`README.md`, `clients/ts/README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `SUPPORT.md`) — and any doc added later, automatically.
 
 - `scripts/docs-prose.sh all` — every docs-prose file (the full reading list).
 - `scripts/docs-prose.sh changed` — the docs-prose files changed on this branch (`main...HEAD`).
