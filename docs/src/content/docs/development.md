@@ -260,6 +260,7 @@ Then:
 
 ```bash
 source .env
+make settings/config.json   # seeds the gitignored ./settings that config.yaml points at (no-op if it exists)
 go run ./cmd/wavehouse
 ```
 
@@ -278,7 +279,7 @@ go build -o bin/wavehouse ./cmd/wavehouse
 | What you want | Command |
 | ------------- | ------- |
 | Hot-reload standalone dev server | `make dev` |
-| Standalone binary (default config) | `make build && ./bin/wavehouse` |
+| Standalone binary (default config) | `make settings/config.json && make build && ./bin/wavehouse` |
 | Standalone via Docker Compose | `docker compose -f deployments/compose/standalone.yaml up -d` |
 | Infrastructure deps only (ClickHouse) | `docker compose -f deployments/compose/dependencies.yaml up -d clickhouse` |
 

@@ -48,6 +48,10 @@ This starts:
 ### Binary
 
 ```bash
+# Seed the settings directory config.yaml points at (gitignored ./settings;
+# no-op if it already exists)
+make settings/config.json
+
 # Build
 make build
 
