@@ -227,7 +227,7 @@ func startClickHouse(ctx context.Context) (*chInstance, error) {
 		// Pinned: 26.8 reads bare numbers in DateTime64 columns as epoch seconds,
 		// not ticks at column precision — CanonicalizeTimestamps still models the
 		// pre-26.8 rule (TestTimestampCanonicalization_DifferentialAgainstClickHouse
-		// catches the divergence). Bump the pin together with the canonicalizer.
+		// catches the divergence). Bump the pin together with the canonicalizer (#536).
 		Image:        "clickhouse/clickhouse-server:26.6.3.62",
 		ExposedPorts: []string{"9000/tcp", "8123/tcp"},
 		Env:          map[string]string{"CLICKHOUSE_PASSWORD": testCHPassword},
