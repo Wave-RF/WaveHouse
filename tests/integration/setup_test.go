@@ -224,7 +224,11 @@ func (c *chInstance) httpURL() string    { return fmt.Sprintf("http://%s:%s", c.
 // race; the dominant flake mode tracked in #70.
 func startClickHouse(ctx context.Context) (*chInstance, error) {
 	chReq := testcontainers.ContainerRequest{
-		Image:        "clickhouse/clickhouse-server:latest",
+		// Pinned: 26.8 reads bare numbers in DateTime64 columns as epoch seconds,
+		// not ticks at column precision — CanonicalizeTimestamps still models the
+		// pre-26.8 rule (TestTimestampCanonicalization_DifferentialAgainstClickHouse
+		// catches the divergence). Bump the pin together with the canonicalizer.
+		Image:        "clickhouse/clickhouse-server:26.6.3.62",
 		ExposedPorts: []string{"9000/tcp", "8123/tcp"},
 		Env:          map[string]string{"CLICKHOUSE_PASSWORD": testCHPassword},
 		WaitingFor: wait.ForAll(
