@@ -147,7 +147,7 @@ dev: deps-up $(AIR)
 
 ### Dev convenience targets
 
-These are the small targets behind `make dev` — useful directly when you want to run WaveHouse outside of air (e.g. `make build && ./bin/wavehouse`), or when you need to poke at ClickHouse:
+These are the small targets behind `make dev` — useful directly when you want to run WaveHouse outside of air (e.g. `make settings/config.json && make build && ./bin/wavehouse`), or when you need to poke at ClickHouse:
 
 | Target | What it does |
 | ------ | ------------ |

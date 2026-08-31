@@ -133,7 +133,7 @@ The one boot-config key for the [Settings Directory](/settings-directory) is whe
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `settings.dir` | `WH_SETTINGS_DIR` | *(required)* | Path to the settings directory. The server loads it at boot; the `wavehouse validate` and `wavehouse bootstrap` CLIs — like `wavehouse health` — resolve their input directly from the `[dir]` argument or `WH_SETTINGS_DIR` without loading this file, so a value set only in the YAML key validates on boot but not via the bare CLI. No default: a baked-in path would turn a missing mount into silent misconfiguration instead of an explicit operator choice. The container images preset it to `/app/settings` but ship no files there — mount a directory (or seed a volume with `bootstrap`). |
+| `settings.dir` | `WH_SETTINGS_DIR` | *(required)* | Path to the settings directory. The server loads it at boot; the `wavehouse validate` and `wavehouse bootstrap` CLIs — like `wavehouse health` — resolve their input directly from the `[dir]` argument or `WH_SETTINGS_DIR` without loading this file, so a value set only in the YAML key validates on boot but not via the bare CLI. No default: a baked-in path would turn a missing mount into silent misconfiguration instead of an explicit operator choice. The container images preset it to `/app/settings` but ship no files there — bind-mount a directory you wrote with `bootstrap`. |
 
 ### OTel
 
