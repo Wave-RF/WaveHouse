@@ -50,12 +50,6 @@ services:
     volumes:
       - wavehouse-data:/app/data
       - ./settings:/app/settings    # checked-in seed + trial policy, clickhouse.addr=clickhouse:9000; hot-reloads on edit
-      # - wavehouse-settings:/app/settings    # or a named volume: swap this line for the
-      #     one above (bootstrap refuses a non-empty /app/settings, so the bind mount
-      #     must be gone), seed it once with
-      #     `docker compose -f deployments/compose/standalone.yaml run --rm wavehouse bootstrap`,
-      #     then edit clickhouse.addr to clickhouse:9000 (the seed says localhost) and
-      #     add a policy to policies.json (the seed ships none: fail closed)
     depends_on:
       - clickhouse
 

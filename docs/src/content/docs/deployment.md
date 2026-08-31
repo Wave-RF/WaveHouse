@@ -192,13 +192,7 @@ volumes:
 
 On first attach to an empty named volume, Docker performs a "copy-up": the contents and ownership of `/app/data` *from the image* are copied into the volume. The bundled `Dockerfile` and `Dockerfile.goreleaser` both pre-create `/app/data` and `/app/settings` with `chown -R 65532:65532`, so the volume inherits the right ownership automatically. **No host-side `chown` needed.** Subsequent restarts reuse whatever's in the volume.
 
-**Settings directory.** The [settings directory](/settings-directory) is *required* — the image ships none, so an unmounted `/app/settings` refuses to boot. It's config, not state, so unlike `/app/data` it is deliberately *not* a `VOLUME` (an anonymous volume would hide the missing mount), and the natural mount is a **bind mount** of a directory you edit on the host: the reference compose file mounts the checked-in `deployments/compose/settings/` (the `bootstrap` seed with `clickhouse.addr` pointed at the `clickhouse` service). The server only reads it, so the files just need to be world-readable (which `bootstrap` writes), and it re-reads them on change with no restart. A named volume works too — the image pre-creates `/app/settings` owned by UID 65532, so seeding it with the image's own `bootstrap` gets the ownership right:
-
-```bash
-docker compose -f deployments/compose/standalone.yaml run --rm -v wavehouse-settings:/app/settings wavehouse bootstrap
-```
-
-— then swap the service's `./settings:/app/settings` bind mount for `wavehouse-settings:/app/settings` in `standalone.yaml` (the commented-out line next to it; `bootstrap` refuses a non-empty directory, so the bind mount must be gone), edit `clickhouse.addr` in the volume's `config.json` (the seed says `localhost:9000`), and add a policy to its `policies.json` (the seed ships none — fail closed).
+**Settings directory.** The [settings directory](/settings-directory) is *required* — the image ships none, so an unmounted `/app/settings` refuses to boot. It's config, not state, so unlike `/app/data` it is deliberately *not* a `VOLUME` (an anonymous volume would hide the missing mount), and the mount is always a **bind mount** of a directory you edit on the host: the reference compose file mounts the checked-in `deployments/compose/settings/` (the `bootstrap` seed with `clickhouse.addr` pointed at the `clickhouse` service). The server only reads it, so the files just need to be world-readable (which `bootstrap` writes), and it re-reads them on change with no restart. Don't reach for a named volume here: the image is distroless, so there is no shell to edit the files inside the volume — and editing them is the point.
 
 **Bind mounts** (host directory):
 
