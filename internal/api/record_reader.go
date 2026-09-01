@@ -238,56 +238,49 @@ func ingestFormat(ct string) (IngestFormat, error) {
 	}
 }
 
-// newRecordReader picks a reader from the declared Content-Type, using a peek at
-// the body only to choose arity within the JSON family ('[' → array, else →
-// single object). The header is authoritative: an NDJSON body is read as NDJSON
-// whatever its first byte, so a line that isn't a JSON object fails as a
-// per-record error rather than silently re-framing the whole request. batch is
-// false only for the single-object path; true for array/NDJSON. format is
-// meaningful even when err is errEmptyBody — the declaration resolves before the
-// body is read at all — and is FormatJSON alongside errUnsupportedContentType,
-// where nothing was declared to resolve. The caller is expected to have already
-// bounded body via http.MaxBytesReader.
-func newRecordReader(contentType string, body io.Reader) (rr recordReader, format IngestFormat, batch bool, err error) {
-	format, err = ingestFormat(contentType)
-	if err != nil {
-		return nil, format, false, err
-	}
-
-	br := bufio.NewReader(body)
-	first, perr := peekFirstNonSpace(br)
-	if perr != nil {
-		return nil, format, false, errEmptyBody
+// newRecordReader picks a reader for an already-resolved format over an
+// already-buffered body, looking at the bytes only to choose arity within the
+// JSON family ('[' → array, else → single object). The declared format is
+// authoritative: an NDJSON body is read as NDJSON whatever its first byte, so a
+// line that isn't a JSON object fails as a per-record error rather than silently
+// re-framing the whole request. batch is false only for the single-object path;
+// true for array/NDJSON. The caller resolves the format with ingestFormat (which
+// owns the 415) and is expected to have bounded the body via
+// http.MaxBytesReader before buffering it.
+func newRecordReader(format IngestFormat, body []byte) (rr recordReader, batch bool, err error) {
+	first, ok := firstNonSpace(body)
+	if !ok {
+		return nil, false, errEmptyBody
 	}
 
 	if format == FormatNDJSON {
-		sc := bufio.NewScanner(br)
+		sc := bufio.NewScanner(bytes.NewReader(body))
 		sc.Buffer(make([]byte, 0, 64*1024), maxNDJSONLineBytes)
-		return &lineReader{sc: sc}, format, true, nil
+		return &lineReader{sc: sc}, true, nil
 	}
 
-	dec := json.NewDecoder(br)
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	if first == '[' {
-		return &arrayReader{dec: dec}, format, true, nil
+		return &arrayReader{dec: dec}, true, nil
 	}
-	return &objectReader{dec: dec}, format, false, nil
+	return &objectReader{dec: dec}, false, nil
 }
 
-// peekFirstNonSpace returns the first non-whitespace byte of the body without
-// consuming it (the chosen decoder still sees the whole body). It returns
-// errEmptyBody when there is no such byte within the sniff window.
-func peekFirstNonSpace(br *bufio.Reader) (byte, error) {
-	buf, _ := br.Peek(maxSniffBytes) // short read at EOF is fine; we only need the first token
-	for _, c := range buf {
+// firstNonSpace returns the body's first non-whitespace byte. ok is false when
+// there is none within the sniff window — the same bound the streaming reader
+// used, kept so a body of leading whitespace longer than the window still reads
+// as empty rather than changing meaning now that the whole body is in memory.
+func firstNonSpace(body []byte) (byte, bool) {
+	for _, c := range body[:min(len(body), maxSniffBytes)] {
 		switch c {
 		case ' ', '\t', '\n', '\r':
 			continue
 		default:
-			return c, nil
+			return c, true
 		}
 	}
-	return 0, errEmptyBody
+	return 0, false
 }
 
 // emptyBodyMessage tailors the empty-body 400 message to the declared format so
