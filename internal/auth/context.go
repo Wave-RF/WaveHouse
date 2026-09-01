@@ -71,7 +71,7 @@ func WithAuthError(ctx context.Context, err error) context.Context {
 // The operator bit authorizes the admin surface independently of the policy —
 // RequireAdmin honors it even when the policy is nil (policies.json empty) —
 // so it is the break-glass path that keeps the admin surface reachable while
-// locked out (inspect the adopted policy, reload after fixing the files).
+// locked out (trigger a reload after fixing the files).
 func WithOperator(ctx context.Context) context.Context {
 	return context.WithValue(ctx, contextKeyOperator, true)
 }

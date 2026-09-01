@@ -101,9 +101,6 @@ createClient<DB>(config) → WaveHouseClient
 ├── .schema (admin)
 │   ├── .list() → Promise<Result<Schemas>>
 │   └── .refresh() → Promise<Result<void>>
-├── .policy (admin)
-│   ├── .get() → Promise<Result<Policy>>
-│   └── .validate(policy) → Promise<Result<ValidationResult>>
 ├── .settings (admin)
 │   └── .reload(opts?) → Promise<Result<SettingsReloadResult>>
 ├── .dlq (admin)

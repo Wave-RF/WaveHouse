@@ -14,9 +14,9 @@ import (
 )
 
 // Millis and ByteSize are the human-friendly-in / number-out value types for the
-// policy's resource caps. On the way IN (a config file or a hand-crafted API
-// body), they accept either a readable string ("10s", "4GiB") or a bare number
-// in the canonical unit. On the way OUT (GET /v1/ops/policy and any read-back)
+// policy's resource caps. On the way IN (a policies.json document), they accept
+// either a readable string ("10s", "4GiB") or a bare number in the canonical
+// unit. On the way OUT (any read-back or re-serialization)
 // they marshal as that bare number — they implement no Marshaler, so the default
 // integer encoding applies — so SDKs consume a plain int and never reimplement
 // the humanization. The canonical units are milliseconds (time) and bytes

@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createClient, WaveHouseClient } from "./client.js";
 import { DLQNamespace } from "./dlq.js";
 import { PipeRef, PipesNamespace } from "./pipes.js";
-import { PolicyNamespace } from "./policy.js";
 import { SchemaNamespace } from "./schema.js";
 import { SysNamespace } from "./sys.js";
 import { TableRef } from "./table.js";
@@ -71,10 +70,6 @@ describe("WaveHouseClient namespaces", () => {
 
   it("has schema namespace", () => {
     expect(client.schema).toBeInstanceOf(SchemaNamespace);
-  });
-
-  it("has policy namespace", () => {
-    expect(client.policy).toBeInstanceOf(PolicyNamespace);
   });
 
   it("has dlq namespace", () => {

@@ -9,7 +9,7 @@ import {
   WH_URL,
   waitForCondition,
 } from "./helpers.js";
-import { setPolicy } from "./settings.js";
+import { readPolicyFile, setPolicy } from "./settings.js";
 import { suiteTables } from "./tables.js";
 
 describe("Ingest", () => {
@@ -174,10 +174,10 @@ describe("Ingest", () => {
     await admin.schema.refresh();
 
     // 3. Update the policy to allow the viewer client to insert into this new table
-    const currentPolicyRes = await admin.policy.get();
+    const currentPolicy = readPolicyFile();
     await setPolicy({
       tables: {
-        ...(currentPolicyRes.data as any).tables,
+        ...currentPolicy.tables,
         [weirdTableName]: {
           insert: {
             viewer: { allow_columns: ["*"] },
@@ -230,10 +230,10 @@ describe("Ingest", () => {
     await admin.schema.refresh();
 
     // 3. Update the policy to allow inserts into this weird table
-    const currentPolicyRes = await admin.policy.get();
+    const currentPolicy = readPolicyFile();
     await setPolicy({
       tables: {
-        ...(currentPolicyRes.data as any).tables,
+        ...currentPolicy.tables,
         [maliciousName]: {
           insert: {
             viewer: { allow_columns: ["*"] },
@@ -289,16 +289,13 @@ describe("Ingest", () => {
   });
 
   it("enforces policy check clauses (reject and auto-inject)", async () => {
-    const admin = adminClient();
-    const currentPolicyRes = await admin.policy.get();
-    expect(currentPolicyRes.data).not.toBeNull();
-
+    const currentPolicy = readPolicyFile();
     // Restrict this suite's clicks inserts so the 'country' column MUST be 'US'
     await setPolicy({
       tables: {
-        ...(currentPolicyRes.data as any).tables,
+        ...currentPolicy.tables,
         [T.clicks]: {
-          ...((currentPolicyRes.data as any).tables[T.clicks] || {}),
+          ...(currentPolicy.tables[T.clicks] || {}),
           insert: {
             // We MUST override the `*` wildcard policy as well because WaveHouse
             // grants access if ANY matching role allows it, and the setup script
@@ -347,7 +344,7 @@ describe("Ingest", () => {
     }, 10_000);
 
     // Restore policy
-    await setPolicy(currentPolicyRes.data!);
+    await setPolicy(currentPolicy);
   });
 
   it("rejects invalid JSON queries", async () => {
@@ -360,16 +357,13 @@ describe("Ingest", () => {
   });
 
   it("enforces max_rows policy limit", async () => {
-    const admin = adminClient();
-    const currentPolicyRes = await admin.policy.get();
-    expect(currentPolicyRes.data).not.toBeNull();
-
+    const currentPolicy = readPolicyFile();
     // Restrict viewer to only return 2 rows max from this suite's clicks
     await setPolicy({
       tables: {
-        ...(currentPolicyRes.data as any).tables,
+        ...currentPolicy.tables,
         [T.clicks]: {
-          ...((currentPolicyRes.data as any).tables[T.clicks] || {}),
+          ...(currentPolicy.tables[T.clicks] || {}),
           select: {
             viewer: { allow_columns: ["*"], max_rows: 2 },
           },
@@ -383,6 +377,6 @@ describe("Ingest", () => {
     expect(result.data).toHaveLength(2);
 
     // Restore policy
-    await setPolicy(currentPolicyRes.data!);
+    await setPolicy(currentPolicy);
   });
 });

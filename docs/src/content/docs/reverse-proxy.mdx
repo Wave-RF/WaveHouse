@@ -90,7 +90,7 @@ WaveHouse caps the inbound request body it will decode, as a memory-safety backs
 
 | Endpoints | Cap | Over-cap response |
 | --- | --- | --- |
-| `POST /v1/query`, `GET/POST /v1/pipes/{name}`, `POST /v1/ops/policy/validate` (parameter / AST / policy bodies) | **1 MiB** | `413 {"error":"request body exceeded 1048576 bytes"}` |
+| `POST /v1/query`, `GET/POST /v1/pipes/{name}` (parameter / AST bodies) | **1 MiB** | `413 {"error":"request body exceeded 1048576 bytes"}` |
 | `POST /v1/ingest`, `POST /v1/ops/query` (bulk payload bodies) | **16 MiB** | `413 {"error":"request body exceeded 16777216 bytes"}` |
 
 These caps are **fixed and not configurable** — they aren't a tuning knob, they're an invariant. A JSON request body amplifies roughly an order of magnitude when decoded into memory (a large array of small values explodes into Go's in-memory representation), so an *uncapped* decoder on a public endpoint is a single-request out-of-memory vector. A query or pipe-parameter body is bounded by nature — a real one is far under 1 MiB even with a large `in`-list — so the 1 MiB cap is generous headroom that never binds legitimate use.
@@ -200,7 +200,7 @@ WaveHouse does **not** derive a client IP from forwarded headers — it does no 
 
 ## Fencing the admin surface
 
-Every admin-gated endpoint — raw SQL, policy and pipe inspection, settings reload, schema discovery, DLQ stats — lives under the single `/v1/ops/` prefix, so one proxy rule covers the entire management surface: an nginx `location /v1/ops/ { deny all; }` on the public vhost (serving it only on an internal listener), or an IP allowlist on that prefix. If you deny the prefix outright, keep an internal listener that still serves it — `POST /v1/ops/settings/reload` with the [operator key](/access-control#operator-key) is the one HTTP path that re-adopts a fixed `policies.json` without a restart, and a blanket fence with no internal route removes that break-glass too. Under a [path prefix](#path-prefixes), fence `<prefix>/v1/ops/` instead. This is belt-and-braces, not a requirement — the server's `RequireAdmin` gate remains the authorization boundary and denies non-admin callers on its own — but keeping the management surface off the public vhost removes it from unauthenticated reach entirely.
+Every admin-gated endpoint — raw SQL, pipe inspection, settings reload, schema discovery, DLQ stats — lives under the single `/v1/ops/` prefix, so one proxy rule covers the entire management surface: an nginx `location /v1/ops/ { deny all; }` on the public vhost (serving it only on an internal listener), or an IP allowlist on that prefix. If you deny the prefix outright, keep an internal listener that still serves it — `POST /v1/ops/settings/reload` with the [operator key](/access-control#operator-key) is the one HTTP path that re-adopts a fixed `policies.json` without a restart, and a blanket fence with no internal route removes that break-glass too. Under a [path prefix](#path-prefixes), fence `<prefix>/v1/ops/` instead. This is belt-and-braces, not a requirement — the server's `RequireAdmin` gate remains the authorization boundary and denies non-admin callers on its own — but keeping the management surface off the public vhost removes it from unauthenticated reach entirely.
 
 ## Health probes
 
