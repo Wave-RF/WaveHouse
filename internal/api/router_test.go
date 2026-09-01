@@ -248,7 +248,7 @@ func TestCORSMiddleware_NoCredentialsHeader(t *testing.T) {
 		origin  string
 	}{
 		{"wildcard", []string{"*"}, "https://anything.example.com"},
-		{"empty-allowlist-is-wildcard", nil, "https://anything.example.com"},
+		{"empty-allowlist-denies", nil, "https://anything.example.com"},
 		{"allowlist-hit", []string{"https://app.example.com"}, "https://app.example.com"},
 	}
 	for _, tc := range cases {

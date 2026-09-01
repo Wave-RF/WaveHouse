@@ -38,7 +38,8 @@ type Dependencies struct {
 	JS           jetstream.JetStream // for SSE gap-fill
 	// CORSOrigins returns the allowed CORS origins, read per request so a
 	// settings reload applies immediately (settings.Store.CORSOrigins in
-	// production). Nil func, an empty list, or ["*"] all mean allow-all.
+	// production). An empty or nil list — including a nil func — denies every
+	// browser origin; ["*"] is the only allow-all spelling.
 	CORSOrigins func() []string
 	Logger      *slog.Logger
 	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
