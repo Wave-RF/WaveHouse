@@ -416,6 +416,25 @@ func (h *IngestHandler) processRecord(
 			}
 		}
 		for col, requiredVal := range perms.Insert.CheckClauses {
+			// A check on a column the table does not have can never be satisfied,
+			// and — since the published row carries only schema columns, by
+			// position — an auto-injected value for one would be dropped on the
+			// way out: the record would insert WITHOUT the value the policy
+			// requires, silently. Reject instead, naming the column, so a policy
+			// naming a column that does not exist is loud rather than invisible.
+			//
+			// The supplied-value case never reaches here (schema validation above
+			// already rejects an unknown column), so in practice this fires on the
+			// omitted-and-auto-injected path. The check is at the top of the loop
+			// anyway, so it does not depend on that ordering holding.
+			if !schema.HasColumn(col) {
+				h.logger.ErrorContext(ctx, "policy check references a column the table does not have",
+					"column", col, "table", table, "role", role)
+				return false, &recordReject{
+					Status:  http.StatusForbidden,
+					Message: fmt.Sprintf("policy check references column %q, which table %q does not have", col, table),
+				}, nil
+			}
 			// A []any value is an _in check: the inserted value must be present and
 			// one of the allowed set. Unlike the scalar _eq case there is no single
 			// value to auto-inject, so an absent column fails closed.

@@ -1784,3 +1784,88 @@ func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Len(t, pub.Messages, 1, "published without idempotency, not 500")
 }
+
+// checkColumnPolicy grants "viewer" insert on clicks with an _eq check on col.
+func checkColumnPolicy(t *testing.T, col, required string) *policy.Policy {
+	t.Helper()
+	return &policy.Policy{Tables: map[string]policy.TablePolicy{
+		"clicks": {"viewer": {Insert: &policy.InsertPermissions{
+			Check: map[string]policy.Filter{col: {Eq: &required}},
+		}}},
+	}}
+}
+
+// TestIngest_CheckColumnNotInSchema_Rejected: a check clause naming a column the
+// table does not have can never be satisfied, and the auto-injected value would
+// be dropped by the positional encoder — the record would insert without the
+// value the policy requires, silently. It must be rejected, naming the column.
+func TestIngest_CheckColumnNotInSchema_Rejected(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h.PolicySource = policy.Static(checkColumnPolicy(t, "tenant_id", "acme"))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a"}))
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "tenant_id", "the message names the offending column")
+	assert.Contains(t, w.Body.String(), "which table")
+	assert.Empty(t, pub.Messages, "a record that cannot carry the required value must not publish")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+// TestIngest_CheckColumnInSchema_StillInjects is the other half: the guard must
+// not disturb the case it sits next to. A record omitting a checked column that
+// DOES exist still gets the value injected, canonicalized, and carried in the
+// encoded row at that column's position.
+func TestIngest_CheckColumnInSchema_StillInjects(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h.PolicySource = policy.Static(checkColumnPolicy(t, "org_id", "org-42"))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a"}))
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	require.Len(t, pub.Messages, 1)
+	row := publishedRow(t, pub.Messages[0].Data)
+	assert.Equal(t, "/a", row["page"])
+	assert.Equal(t, "org-42", row["org_id"], "the injected value rides in its column's slot")
+}
+
+// TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord: the guard is a
+// per-record rejection, not a whole-request abort — the batch is still read to
+// the end and reports every record, rather than failing the request outright.
+//
+// Every record fails here, and that is not an artifact of the fixture: the
+// condition is a property of (table, role, policy), identical for every record
+// in the request, so there is no sibling this guard could spare. A record
+// SUPPLYING the missing column is rejected too, one step earlier, by schema
+// validation — with its own message, which this pins so the two stay
+// distinguishable.
+func TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h.PolicySource = policy.Static(checkColumnPolicy(t, "tenant_id", "acme"))
+
+	req := rawIngestRequest(t, "clicks", "application/json",
+		`[{"page":"/a"},{"page":"/b","tenant_id":"acme"},{"page":"/c"}]`)
+	req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "a misconfigured policy must not abort the request")
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 3, resp.Total)
+	assert.Equal(t, 3, resp.Failed)
+	assert.Zero(t, resp.Succeeded)
+	require.Len(t, resp.Results, 3)
+	assert.Contains(t, resp.Results[0].Error, "which table", "omitted ⇒ the new guard")
+	assert.Contains(t, resp.Results[1].Error, "unknown column", "supplied ⇒ schema validation, one step earlier")
+	assert.Contains(t, resp.Results[2].Error, "which table")
+	assert.Empty(t, pub.Messages)
+}

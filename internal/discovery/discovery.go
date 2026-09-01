@@ -64,6 +64,19 @@ func (ts *TableSchema) ColumnNames() []string {
 	return names
 }
 
+// HasColumn reports whether the table declares a column of this name. Matching
+// is exact, as ClickHouse's own column resolution is. Linear over Columns, which
+// is the right shape for the per-record call sites: schemas are small and the
+// caller asks about one or two columns.
+func (ts *TableSchema) HasColumn(name string) bool {
+	for _, c := range ts.Columns {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // SchemaRegistry discovers and caches ClickHouse table schemas.
 type SchemaRegistry struct {
 	conn driver.Conn
