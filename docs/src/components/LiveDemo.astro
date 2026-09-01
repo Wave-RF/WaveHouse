@@ -1,18 +1,22 @@
 ---
 // Live demo panel — the hero's visual is a real WaveHouse consumer, not a
 // mock. Counts and the activity feed come from the public read-only role on
-// the WaveHouse instance behind stats.wavehouse.dev (our own GitHub-activity
-// dogfood deployment, Wave-RF/WaveHouse-Stats), fetched in the visitor's
-// browser through @wavehouse/sdk: every number from one cached gh_summary
-// pipe (Stats#19), the feed from the server-curated gh_activity_recent pipe
-// (Stats#18) plus a live SSE tail. The pre-pipe reads (per-number pipes, a
-// structured-query backfill) remain as fallbacks so a stats-stack rollback
-// degrades the panel to slower, not blank. Server-side this renders a stable
-// skeleton ("—" counts, fixed-height feed) so the page is layout-complete
-// without JS and degrades to that skeleton if the demo is unreachable.
+// our own GitHub-activity dogfood deployment (Wave-RF/WaveHouse-Stats), which
+// now runs on WaveHouse Cloud and is presented at stats.wavehouse.dev, fetched
+// in the visitor's browser through @wavehouse/sdk: every number from one
+// cached gh_summary pipe (Stats#19), the feed from the server-curated
+// gh_activity_recent pipe (Stats#18) plus a live SSE tail. The pre-pipe reads
+// (per-number pipes, a structured-query backfill) remain as fallbacks so a
+// stats-stack rollback degrades the panel to slower, not blank. Server-side
+// this renders a stable skeleton ("—" counts, fixed-height feed) so the page
+// is layout-complete without JS and degrades to that skeleton if the demo is
+// unreachable.
 import ExternalIcon from "./ExternalIcon.astro";
 
 const REPO_URL = "https://github.com/Wave-RF/WaveHouse";
+// The demo *site* — the chrome label and the "Full demo" link. The API origin
+// it reads from is BASE_URL in the script below; the two are deliberately
+// separate now that the backend runs on WaveHouse Cloud.
 const DEMO_HOST = "stats.wavehouse.dev";
 ---
 
@@ -119,9 +123,12 @@ const DEMO_HOST = "stats.wavehouse.dev";
 <script>
   import { createClient } from "@wavehouse/sdk";
 
-  // Build-time overridable so a fork / staging docs build can point elsewhere.
+  // The WaveHouse Cloud deployment serving the stats demo (the site itself
+  // stays at DEMO_HOST). Build-time overridable so a fork / staging docs build
+  // can point elsewhere.
   const BASE_URL: string =
-    import.meta.env.PUBLIC_WAVEHOUSE_STATS_URL || "https://stats.wavehouse.dev";
+    import.meta.env.PUBLIC_WAVEHOUSE_STATS_URL ||
+    "https://iefrrvavd5akvphk7pq3.wavehouse.app";
 
   type GhRow = {
     event_type: string;
