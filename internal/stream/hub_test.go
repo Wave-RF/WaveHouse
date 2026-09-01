@@ -1260,3 +1260,31 @@ func TestHub_ReplayProjector_SchemaTrackingIsIndependentOfLive(t *testing.T) {
 	assert.Equal(t, []string{"page"}, frameColumns(t, frames[0]))
 	assert.Equal(t, KindReplay, frames[1].Kind)
 }
+
+// TestHub_SchemaFrame_DroppedAnnouncementDropsItsRow: a full queue must not
+// split an announcement from the row it describes. Dropping only the
+// announcement would leave the client zipping that row against a stale column
+// list — silent mislabeling, where a dropped row is a visible gap. The next
+// event announces again, so a transient full queue doesn't break the connection
+// for good.
+func TestHub_SchemaFrame_DroppedAnnouncementDropsItsRow(t *testing.T) {
+	t.Parallel()
+	hub := NewHub(nil, nil, nil)
+	const topic = "ingest.clicks"
+	sub := newSubscriber(1, nil) // cap-1: room for the announcement, not the row
+	hub.Add(topic, "public", sub)
+
+	// Occupy the only slot, so this event's announcement is the frame that drops.
+	require.True(t, sub.Send(Frame{Kind: KindKeepalive, Data: []byte(": x\n\n")}))
+	hub.Broadcast(topic, rawEventCols(t, "clicks", "t1", []string{"page"}, map[string]any{"page": "/a"}))
+
+	assert.Equal(t, ": x\n\n", string(recvFrame(t, sub).Data),
+		"the row is withheld with its dropped announcement, not delivered alone")
+	assertNoFrame(t, sub)
+
+	// Nothing was recorded, so the drained connection is announced to again
+	// rather than being sent rows it has no column list for.
+	hub.Broadcast(topic, rawEventCols(t, "clicks", "t2", []string{"page"}, map[string]any{"page": "/b"}))
+	assert.Equal(t, []string{"page"}, frameColumns(t, recvFrame(t, sub)),
+		"the next event re-announces, so a transient full queue is recoverable")
+}

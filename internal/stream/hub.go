@@ -211,11 +211,19 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 
 // deliver queues one role's frames for a subscriber, sending the schema frame
 // first whenever this connection has not been told this projected column list —
-// on its first event, and again if the list drifts. A data frame is never the
-// first thing a connection sees.
+// on its first event, and again if the list drifts.
+//
+// A row is never queued without its announcement. If the queue is full when the
+// announcement is offered, the row is dropped too and nothing is recorded, so
+// the next event announces again: a slow consumer loses a row (visible as a gap)
+// rather than receiving one it would zip against a stale column list (silent
+// mislabeling). Send counts both drops under their own frame kinds.
 func deliver(sub *Subscriber, plan rolePlan) {
-	if plan.schema != nil && sub.schemaChanged(plan.sig) {
-		sub.Send(*plan.schema)
+	if plan.schema != nil && sub.needsSchema(plan.sig) {
+		if !sub.Send(*plan.schema) {
+			return
+		}
+		sub.recordSchema(plan.sig)
 	}
 	sub.Send(plan.data)
 }
@@ -464,9 +472,13 @@ func (h *Hub) SubscribeSchemaFrame(table, role string, sub *Subscriber) (Frame, 
 	}
 	_, projected := projectIndices(schema.ColumnNames(), perms)
 	sig := schemaSignature(table, projected)
-	if !sub.schemaChanged(sig) {
+	if !sub.needsSchema(sig) {
 		return Frame{}, false // already announced (a live event beat us here)
 	}
+	// Recorded on build rather than on a successful write: the caller writes
+	// this frame straight to the socket, and a failed write there ends the
+	// connection outright, so there is no state left to be wrong about.
+	sub.recordSchema(sig)
 	return Frame{Kind: KindSchema, Data: schemaFrame(table, projected)}, true
 }
 

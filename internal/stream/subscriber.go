@@ -61,17 +61,22 @@ type Subscriber struct {
 	lastSchema string
 }
 
-// schemaChanged reports whether sig differs from the column list last announced
-// to this connection, recording sig when it does — so the caller that gets true
-// is the one that must send the schema frame, exactly once.
-func (s *Subscriber) schemaChanged(sig string) bool {
+// needsSchema reports whether sig differs from the column list last announced to
+// this connection. It deliberately does NOT record: the caller records only once
+// the frame is actually queued (see recordSchema), so an announcement dropped by
+// a full queue leaves the connection still due one rather than silently
+// unsynchronized for every row until the list next changes.
+func (s *Subscriber) needsSchema(sig string) bool {
 	s.schemaMu.Lock()
 	defer s.schemaMu.Unlock()
-	if s.lastSchema == sig {
-		return false
-	}
+	return s.lastSchema != sig
+}
+
+// recordSchema notes that sig has been announced to this connection.
+func (s *Subscriber) recordSchema(sig string) {
+	s.schemaMu.Lock()
+	defer s.schemaMu.Unlock()
 	s.lastSchema = sig
-	return true
 }
 
 // NewSubscriber returns a Subscriber ready to register with a Heartbeater and the
