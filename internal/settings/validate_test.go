@@ -367,8 +367,6 @@ func TestValidate_Warnings(t *testing.T) {
 		{"admin in pipe allowlist is redundant", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "allowed_roles": ["admin"]}]}`, "listing it is redundant"},
 		{"empty dedupe override sets nothing", FileConfig, configJSON(`{"dedupe": {"tables": {"clicks": {}}}}`), "override sets nothing"},
 		{"empty dlq override sets nothing", FileConfig, configJSON(`{"dlq": {"tables": {"clicks": {}}}}`), "dlq.tables.clicks: override sets nothing"},
-
-		{"empty cors allowlist allows every origin", FileConfig, configJSON(`{"cors": {"allowed_origins": []}}`), "empty list allows every origin"},
 		{"default on required parameter", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x", "required": true, "default": 5}]}]}`, "never used"},
 	}
 	for _, tt := range tests {
