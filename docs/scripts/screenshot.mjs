@@ -40,7 +40,7 @@ try {
       });
       const page = await ctx.newPage();
       // "load", not "networkidle": the landing page holds a live SSE stream
-      // open to stats.wavehouse.dev, so the network never goes idle and a
+      // open to the stats demo backend, so the network never goes idle and a
       // networkidle wait would time the goto out.
       await page.goto(`${BASE}${p.url}`, { waitUntil: "load" });
       await page.evaluate((t) => {
