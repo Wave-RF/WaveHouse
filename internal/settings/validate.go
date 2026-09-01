@@ -475,12 +475,6 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		v.required("cors")
 	case co.AllowedOrigins == nil:
 		v.required("cors.allowed_origins")
-	case len(co.AllowedOrigins) == 0:
-		// An empty list is not "no origins": corsMiddleware treats it as
-		// allow-all, and [] is the natural spelling for "none" in a
-		// hand-edited file — so name the trap before it hot-reloads into
-		// effect.
-		v.warnf(FileConfig, "cors.allowed_origins", `empty list allows every origin — write ["*"] to say so explicitly, or list the origins to allow`)
 	default:
 		for i, origin := range co.AllowedOrigins {
 			if strings.TrimSpace(origin) == "" {

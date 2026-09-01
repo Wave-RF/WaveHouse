@@ -248,7 +248,7 @@ func TestCORSMiddleware_NoCredentialsHeader(t *testing.T) {
 		origin  string
 	}{
 		{"wildcard", []string{"*"}, "https://anything.example.com"},
-		{"empty-allowlist-is-wildcard", nil, "https://anything.example.com"},
+		{"empty-allowlist-denies", nil, "https://anything.example.com"},
 		{"allowlist-hit", []string{"https://app.example.com"}, "https://app.example.com"},
 	}
 	for _, tc := range cases {
@@ -577,10 +577,11 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-// An absent getter, a nil list, and an empty list all mean allow-all — an
-// empty allowlist is NOT "no origins". The validator warns on [] for exactly
-// this reason; this pins the behavior the warning describes.
-func TestCORSMiddleware_EmptyOrigins_AllowAll(t *testing.T) {
+// An absent getter, a nil list, and an empty list are all an empty allowlist:
+// no origin gets CORS headers, and "*" is the only allow-all spelling (#515).
+// Vary: Origin is still set so a shared cache can't replay the headerless
+// reject to an origin a later reload allows.
+func TestCORSMiddleware_EmptyOrigins_DenyAll(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
@@ -591,19 +592,29 @@ func TestCORSMiddleware_EmptyOrigins_AllowAll(t *testing.T) {
 		{"empty list", func() []string { return []string{} }},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			handler := corsMiddleware(tt.origins)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(http.StatusOK)
-			}))
+		for _, method := range []string{http.MethodGet, http.MethodOptions} {
+			t.Run(tt.name+" "+method, func(t *testing.T) {
+				t.Parallel()
+				handler := corsMiddleware(tt.origins)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				}))
 
-			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
-			req.Header.Set("Origin", "https://anything.example.com")
-			w := httptest.NewRecorder()
-			handler.ServeHTTP(w, req)
+				req := httptest.NewRequestWithContext(context.Background(), method, "/", nil)
+				req.Header.Set("Origin", "https://anything.example.com")
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, req)
 
-			assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
-		})
+				assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+				assert.Empty(t, w.Header().Get("Access-Control-Allow-Methods"))
+				assert.Empty(t, w.Header().Get("Access-Control-Allow-Headers"))
+				assert.Equal(t, "Origin", w.Header().Get("Vary"))
+				if method == http.MethodOptions {
+					assert.Equal(t, http.StatusNoContent, w.Code)
+				} else {
+					assert.Equal(t, http.StatusOK, w.Code)
+				}
+			})
+		}
 	}
 }
 

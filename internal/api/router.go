@@ -38,7 +38,8 @@ type Dependencies struct {
 	JS           jetstream.JetStream // for SSE gap-fill
 	// CORSOrigins returns the allowed CORS origins, read per request so a
 	// settings reload applies immediately (settings.Store.CORSOrigins in
-	// production). Nil func, an empty list, or ["*"] all mean allow-all.
+	// production). An empty or nil list — including a nil func — denies every
+	// browser origin; ["*"] is the only allow-all spelling.
 	CORSOrigins func() []string
 	Logger      *slog.Logger
 	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
@@ -272,11 +273,14 @@ func RequireAdmin(store policy.Source, logger *slog.Logger) func(http.Handler) h
 // corsMiddleware handles CORS preflight and response headers.
 //
 // Origin policy:
-//   - allowedOrigins == nil/empty OR contains "*": any origin is accepted.
-//     The response echoes "*" (no Vary), which is correct for our Bearer-auth
-//     API because no credentials are required to read the response.
+//   - allowedOrigins contains "*": any origin is accepted. The response
+//     echoes "*" (no Vary), which is correct for our Bearer-auth API because
+//     no credentials are required to read the response.
 //   - Otherwise: only origins in the allowlist receive Access-Control-Allow-Origin
-//     (echoed back, with Vary: Origin so caches key on it).
+//     (echoed back, with Vary: Origin so caches key on it). An empty or nil
+//     list — including a nil getter, i.e. no settings source wired — is an
+//     empty allowlist: every browser origin is denied. "*" is the only
+//     allow-all spelling, so [] can't hot-reload into allow-all by accident.
 //
 // Credentials: we deliberately do NOT emit Access-Control-Allow-Credentials.
 // WaveHouse is a Bearer-token API (see internal/auth) — clients
@@ -306,7 +310,7 @@ func corsMiddleware(origins func() []string) func(http.Handler) http.Handler {
 			if origins != nil {
 				allowedOrigins = origins()
 			}
-			allowAll := len(allowedOrigins) == 0
+			allowAll := false
 			originListed := false
 			for _, o := range allowedOrigins {
 				if o == "*" {

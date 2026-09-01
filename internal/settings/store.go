@@ -246,8 +246,8 @@ func (s *Store) SchemaRefreshInterval() time.Duration {
 	return time.Duration(*s.doc().Config.Schema.RefreshInterval) * time.Second
 }
 
-// CORSOrigins returns the allowed CORS origins; the middleware treats an
-// empty list and ["*"] identically (allow-all).
+// CORSOrigins returns the allowed CORS origins; an empty list denies every
+// browser origin and ["*"] is the only allow-all spelling.
 func (s *Store) CORSOrigins() []string {
 	return s.doc().Config.CORS.AllowedOrigins
 }
