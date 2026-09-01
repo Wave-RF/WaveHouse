@@ -91,12 +91,6 @@ describe("Admin", () => {
       },
     };
 
-    it("validates a policy (dry run)", async () => {
-      const result = await wh.policy.validate(testPolicy);
-      expect(result.error).toBeNull();
-      expect(result.data).toBeDefined();
-    });
-
     it("adopts a policy from policies.json and reads it back", async () => {
       // Spread the baseline so we override only this suite's clicks entry —
       // writing the bare testPolicy would wipe every other suite's tables from

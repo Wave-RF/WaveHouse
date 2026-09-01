@@ -246,6 +246,9 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"role whitespace", FileRoles, `{"roles": [" analyst"]}`, "surrounding whitespace"},
 		{"duplicate role", FileRoles, `{"roles": ["analyst", "analyst"]}`, "duplicate role"},
 		{"check uses _gt", FilePolicies, `{"tables": {"clicks": {"insert": {"analyst": {"check": {"region": {"_gt": "1"}}}}}}}`, "check does not honor"},
+		{"operator-less filter", FilePolicies, `{"tables": {"clicks": {"select": {"analyst": {"filter": {"region": {}}}}}}}`, "sets no operator"},
+		{"operator-less check", FilePolicies, `{"tables": {"clicks": {"insert": {"analyst": {"check": {"region": {}}}}}}}`, "sets no operator"},
+		{"filter under insert", FilePolicies, `{"tables": {"clicks": {"insert": {"analyst": {"filter": {"region": {"_eq": "x"}}}}}}}`, "no effect on insert"},
 		{"unknown filter operator", FilePolicies, `{"tables": {"clicks": {"select": {"analyst": {"filter": {"region": {"_like": "x"}}}}}}}`, "unknown field"},
 		{"empty grant role", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"select": {"": {}}}}}`, "grant role must not be empty"},
 		{"empty allowlist role", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "allowed_roles": [""]}]}`, "allowed_roles[0]: role must not be empty"},
@@ -449,34 +452,4 @@ func TestValidate_DocumentGating(t *testing.T) {
 	doc, findings = Validate(filepath.Join(t.TempDir(), "nope"))
 	assert.Nil(t, doc)
 	assert.True(t, HasErrors(findings))
-}
-
-// TestValidatePolicyDocument pins the standalone policies.json gate the
-// /v1/ops/policy/validate dry run shares with adoption (#514): the same
-// syntax checks and policy rules, minus the cross-file role references.
-func TestValidatePolicyDocument(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		data     []byte
-		wantErrs bool
-		want     string
-	}{
-		{"valid document", []byte(`{"tables": {"clicks": {"select": {"analyst": {"max_rows": 100}}}}}`), false, ""},
-		{"empty document warns only", []byte(`{}`), false, "fail closed"},
-		{"unknown key", []byte(`{"tables": {"clicks": {"select": {"user": {"filter": {"tenant_id": {"eq": "x"}}}}}}}`), true, "unknown field"},
-		{"operator-less filter", []byte(`{"tables": {"clicks": {"select": {"user": {"filter": {"tenant_id": {}}}}}}}`), true, "sets no operator"},
-		{"policy rule", []byte(`{"tables": {"clicks": {"select": {"analyst": {"max_rows": -1}}}}}`), true, "max_rows"},
-		{"nil data", nil, true, "file is empty"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			findings := ValidatePolicyDocument(tt.data)
-			assert.Equal(t, tt.wantErrs, HasErrors(findings), "findings: %s", findingStrings(findings))
-			if tt.want != "" {
-				assert.Contains(t, findingStrings(findings), tt.want)
-			}
-		})
-	}
 }

@@ -184,7 +184,6 @@ func NewRouter(deps Dependencies) http.Handler {
 
 			if deps.Policy != nil {
 				r.Get("/policy", deps.Policy.Get)
-				r.Post("/policy/validate", deps.Policy.Validate)
 			}
 			if deps.Pipes != nil {
 				r.Get("/pipes", deps.Pipes.List)

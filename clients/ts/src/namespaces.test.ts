@@ -110,16 +110,6 @@ describe("PolicyNamespace", () => {
     expect(result.data).toEqual(policy);
     expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/policy");
   });
-
-  it("validate() POSTs /v1/ops/policy/validate", async () => {
-    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ valid: true }), { status: 200 }));
-
-    const ns = new PolicyNamespace(makeCtx());
-    const result = await ns.validate({ tables: {} });
-
-    expect(result.data).toEqual({ valid: true });
-    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/policy/validate");
-  });
 });
 
 describe("DLQNamespace", () => {

@@ -379,10 +379,6 @@ export interface PolicyFilter {
   _in?: string;
 }
 
-export interface ValidationResult {
-  valid: boolean;
-}
-
 // --- Settings types ---
 
 /** One validation finding from the server's settings directory. */

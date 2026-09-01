@@ -60,6 +60,5 @@ export type {
   TablePolicy,
   TableSchema,
   TimeRange,
-  ValidationResult,
   WaveHouseError,
 } from "./types.js";

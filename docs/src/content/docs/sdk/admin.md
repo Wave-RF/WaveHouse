@@ -26,28 +26,11 @@ Individual table schema is also available via `wh.from('clicks').schema()`.
 
 ## Policy — `wh.policy`
 
-Inspect and dry-run the Hasura-style access control policy. Requires the admin gate — the admin role (`policy.admin_role`) or the [operator key](/api#authentication). The policy itself is the server's settings directory `policies.json` — files are the only write path, so there is no `set`: edit the file and let the server pick it up, or call [`wh.settings.reload()`](#settings--whsettings).
+Inspect the Hasura-style access control policy. Requires the admin gate — the admin role (`policy.admin_role`) or the [operator key](/api#authentication). The policy itself is the server's settings directory `policies.json` — files are the only write path, so there is no `set`: edit the file (checking it first with the server's `wavehouse validate` command) and let the server pick it up, or call [`wh.settings.reload()`](#settings--whsettings).
 
 ```ts
 // Get the adopted policy
 const { data: policy } = await wh.policy.get();
-
-// Validate a draft without adopting it (dry run)
-const { data } = await wh.policy.validate({
-  default_role: 'viewer',
-  admin_role: 'admin',
-  tables: {
-    clicks: {
-      select: {
-        viewer: {
-          allow_columns: ['page', 'button', 'received_timestamp'],
-          filter: { tenant_id: { _eq: '{{ jwt.app_metadata.tenant_id }}' } },
-        },
-      },
-    },
-  },
-});
-// data: { valid: true } or error with validation details
 ```
 
 ---

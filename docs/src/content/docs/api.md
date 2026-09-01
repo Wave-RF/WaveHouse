@@ -616,7 +616,7 @@ curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z
 
 Every admin-gated surface lives under the `/v1/ops/*` prefix, behind a single `RequireAdmin` gate: schema discovery, DLQ stats, and the policy, pipe, and settings-reload endpoints below, plus the raw-SQL passthrough [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse) documented with the query endpoints above. They require the policy `admin_role` (`"admin"` by default, exact case-sensitive match) — or the non-JWT [operator key](#authentication), which reaches the same surface without a token; other callers get 401 (present-but-invalid token) / 403, and the quickstart's trial `public` role cannot call any of them. There is no separate `service` role. The JWT middleware always runs — a tokenless request (or a valid token without a role claim) resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is denied `403`, while a present-but-invalid token keeps its stashed verification error and is denied `401`.
 
-The one admin endpoint in this section that accepts a request body — `POST /v1/ops/policy/validate` — caps it at 1 MiB (the same 1 MiB parameter/AST-body cap as `POST /v1/query`); an over-cap body is rejected with `413 {"error":"request body exceeded 1048576 bytes"}`. A policy document is bounded, so this never binds legitimate use. The raw-SQL `POST /v1/ops/query` instead carries the 16 MiB bulk-payload cap documented with the query endpoints above.
+No admin endpoint in this section accepts a request body — they are reads and triggers; the settings directory's files are the only write path. The raw-SQL `POST /v1/ops/query` carries the 16 MiB bulk-payload cap documented with the query endpoints above.
 
 #### `GET /v1/ops/schema` — List All Table Schemas
 
@@ -758,9 +758,7 @@ Returns the adopted access control policy — the settings directory's [`policie
 
 The `default_role` field (optional) is the role assigned to any request that reaches the policy engine **without** a role — a valid token carrying no role claim, a request with no token at all, or one whose token was invalid/expired. **Setting it enables unauthenticated access:** roleless requests are evaluated as that role and receive exactly its permissions (or are denied if it grants none on the table/operation). If `default_role` is unset, a roleless request is denied. Setting it equal to the `admin_role` is allowed — every roleless request then becomes admin (including `/v1/ops/*`), which is handy for local/dev — but each node that loads such a policy logs a loud warning, and it must not be used in production.
 
-#### `POST /v1/ops/policy/validate` — Validate Policy (Dry Run)
-
-Validates a policy document (the body, in the shape above) without adopting anything, running the same per-document checks a reload runs on `policies.json`: strict decoding — an unknown or misspelled key (`eq` for `_eq`) or a duplicate key is rejected, never silently dropped — plus the policy rules themselves. Returns `{"valid": true}` or a `400` with every error found. Warnings that would not block adoption (such as the fail-closed warning on an empty `{}` document) do not fail the dry run. It checks the document alone; the cross-file role references against `roles.json` are checked by `wavehouse validate` and on reload.
+To check a draft policy before it reaches the settings directory, run `wavehouse validate` on the edited directory — it enforces everything adoption enforces, including the cross-file role references against `roles.json`. With files as the only write path, validation happens where the files are edited; there is no HTTP dry run.
 
 #### `GET /v1/ops/pipes` — List Named Pipes
 
