@@ -450,3 +450,33 @@ func TestValidate_DocumentGating(t *testing.T) {
 	assert.Nil(t, doc)
 	assert.True(t, HasErrors(findings))
 }
+
+// TestValidatePolicyDocument pins the standalone policies.json gate the
+// /v1/ops/policy/validate dry run shares with adoption (#514): the same
+// syntax checks and policy rules, minus the cross-file role references.
+func TestValidatePolicyDocument(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		data     []byte
+		wantErrs bool
+		want     string
+	}{
+		{"valid document", []byte(`{"tables": {"clicks": {"select": {"analyst": {"max_rows": 100}}}}}`), false, ""},
+		{"empty document warns only", []byte(`{}`), false, "fail closed"},
+		{"unknown key", []byte(`{"tables": {"clicks": {"select": {"user": {"filter": {"tenant_id": {"eq": "x"}}}}}}}`), true, "unknown field"},
+		{"operator-less filter", []byte(`{"tables": {"clicks": {"select": {"user": {"filter": {"tenant_id": {}}}}}}}`), true, "sets no operator"},
+		{"policy rule", []byte(`{"tables": {"clicks": {"select": {"analyst": {"max_rows": -1}}}}}`), true, "max_rows"},
+		{"nil data", nil, true, "file is empty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			findings := ValidatePolicyDocument(tt.data)
+			assert.Equal(t, tt.wantErrs, HasErrors(findings), "findings: %s", findingStrings(findings))
+			if tt.want != "" {
+				assert.Contains(t, findingStrings(findings), tt.want)
+			}
+		})
+	}
+}

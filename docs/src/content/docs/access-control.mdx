@@ -182,6 +182,8 @@ Supported comparison operators:
 
 Multiple columns (and multiple operators on one column) are combined with `AND`. The policy-derived predicate is ANDed with whatever filters the caller's own query supplies, so a caller can never widen their row visibility past the policy.
 
+Every `filter` entry must set at least one operator: an operator-less entry (`"tenant_id": {}`) would contribute no predicate — no row restriction at all — so validation rejects it. And `filter` belongs to `select` grants only: under an `insert` grant it would be resolved and then ignored, so validation rejects that too — constrain inserted values with [`check`](#insert-checks).
+
 ### JWT claim templating
 
 Any `filter` or `check` operator value may interpolate token claims with `{{ jwt.<dot.path> }}` (other policy fields, like `allow_columns`, take their values literally):
@@ -199,7 +201,7 @@ Row filters apply on the structured-query path and, per subscriber, on the live 
 
 ## Insert checks
 
-`check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It supports `_eq` (the inserted value must equal the claim) and `_in` (it must be one of a claim-derived set); the comparison operators `_neq`/`_gt`/`_lt` have no insert-time meaning and are **rejected when the policy is validated** (the same boundary as malformed templates above), as is setting both `_eq` and `_in` on one column (use exactly one).
+`check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It supports `_eq` (the inserted value must equal the claim) and `_in` (it must be one of a claim-derived set); the comparison operators `_neq`/`_gt`/`_lt` have no insert-time meaning and are **rejected when the policy is validated** (the same boundary as malformed templates above), as is setting both `_eq` and `_in` on one column (use exactly one) — or neither, since an operator-less entry would constrain nothing.
 
 ```json
 {
@@ -329,7 +331,7 @@ Two admin endpoints (both require `admin_role`) read and dry-run it:
 | `GET` | `/v1/ops/policy` | Fetch the adopted policy. Returns `{"tables":{}}` when none is adopted. |
 | `POST` | `/v1/ops/policy/validate` | Dry-run validation of a policy document — returns `{"valid": true}` or the error, without adopting anything. |
 
-Validation rejects empty role names, negative limits, [malformed claim templates](#jwt-claim-templating), and unsupported `check` operators — `_neq`/`_gt`/`_lt`, or `_eq` and `_in` together on one column (but it intentionally allows `default_role == admin_role`, warning instead). `wavehouse validate` runs the same checks on the whole directory — including the cross-file role references the dry-run endpoint can't see — so gate a policy change with it before it reaches a running instance.
+Validation decodes the document strictly — an unknown or misspelled key (`eq` for `_eq`) or a duplicate key is rejected, never silently dropped as "no rule" — and rejects every rule the engine would not honor: empty role names, negative limits, [malformed claim templates](#jwt-claim-templating), a `filter` or `check` entry that sets no operator (it would constrain nothing), `filter` under an `insert` grant (inserts are constrained by `check`), and unsupported `check` operators — `_neq`/`_gt`/`_lt`, or `_eq` and `_in` together on one column (but it intentionally allows `default_role == admin_role`, warning instead). The dry-run endpoint runs the identical per-document checks, so it never certifies a document a reload would refuse. `wavehouse validate` runs the same checks on the whole directory — including the cross-file role references the dry-run endpoint can't see — so gate a policy change with it before it reaches a running instance.
 
 ```bash
 # Dry-run a policy document (admin token required) without adopting it.

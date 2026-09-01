@@ -53,6 +53,24 @@ func Validate(dir string) (*Document, []Finding) {
 	return doc, v.findings
 }
 
+// ValidatePolicyDocument checks data as a candidate policies.json document,
+// running the identical per-file gate an adoption runs — the syntax checks
+// (strict decode, duplicate-key scan, BOM/empty/null rejection) and
+// policy.Validate — so a dry run can never certify a document a reload would
+// refuse (#514). Cross-file role references need roles.json and are therefore
+// out of scope, exactly as documented for POST /v1/ops/policy/validate; the
+// full-directory Validate checks them on adoption.
+func ValidatePolicyDocument(data []byte) []Finding {
+	if data == nil {
+		// parseFile treats nil as "missing file, already reported" and stays
+		// silent; a caller-supplied document must instead hit the empty check.
+		data = []byte{}
+	}
+	v := &validator{}
+	v.parsePolicies(data)
+	return v.findings
+}
+
 type validator struct {
 	findings []Finding
 }

@@ -60,6 +60,14 @@ type Filter struct {
 	In  *string `json:"_in,omitempty" yaml:"_in,omitempty"`
 }
 
+// hasOperator reports whether any of the five operators is set. An
+// operator-less entry resolves to zero predicates — on the filter path that is
+// no WHERE clause at all, row security silently off — so validateRolePerms
+// rejects it at write time.
+func (f Filter) hasOperator() bool {
+	return f.Eq != nil || f.Neq != nil || f.Gt != nil || f.Lt != nil || f.In != nil
+}
+
 // ResolvedPermissions is the result of evaluating a policy against JWT claims.
 type ResolvedPermissions struct {
 	Allowed      bool
@@ -649,6 +657,10 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 	if perms.MaxMemoryUsage < 0 {
 		return fmt.Errorf("table %q, op %q, role %q: max_memory_usage must be non-negative", table, op, role)
 	}
+
+	if op == "insert" && len(perms.Filter) > 0 {
+		return fmt.Errorf("table %q, op %q, role %q: filter has no effect on insert — use check to constrain inserted values", table, op, role)
+	}
 	// Filter and check column names are interpolated into SQL (backtick-quoted) at
 	// query time, so a '?' in one would shift clickhouse-go's positional value
 	// binding. Refuse such a policy at write time, mirroring the query builder's
@@ -657,9 +669,10 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 		if chsql.BindUnsafe(col) {
 			return fmt.Errorf("table %q, op %q, role %q: filter column %q contains '?' (unsupported)", table, op, role, col)
 		}
-		// The filter path enforces every operator (_eq/_neq/_gt/_lt/_in), so no
-		// operator is rejected here. A malformed claim template IS rejected: the
-		// resolver would bind it as a literal, a fail-open for _neq/_lt (#385/#457).
+
+		if !f.hasOperator() {
+			return fmt.Errorf("table %q, op %q, role %q: filter column %q sets no operator — use _eq, _neq, _gt, _lt, or _in", table, op, role, col)
+		}
 		if err := rejectMalformedTemplates(table, op, role, "filter", col, f); err != nil {
 			return err
 		}
@@ -667,6 +680,10 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 	for col, f := range perms.Check {
 		if chsql.BindUnsafe(col) {
 			return fmt.Errorf("table %q, op %q, role %q: check column %q contains '?' (unsupported)", table, op, role, col)
+		}
+
+		if !f.hasOperator() {
+			return fmt.Errorf("table %q, op %q, role %q: check column %q sets no operator — use _eq or _in", table, op, role, col)
 		}
 		// The check/insert path honors only _eq (a required value) and _in (a
 		// required set); the comparison operators have no insert-time semantics and

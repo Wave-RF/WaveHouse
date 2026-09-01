@@ -760,7 +760,7 @@ The `default_role` field (optional) is the role assigned to any request that rea
 
 #### `POST /v1/ops/policy/validate` — Validate Policy (Dry Run)
 
-Validates a policy document (the body, in the shape above) without adopting anything. Returns `{"valid": true}` or a `400` with the error. It checks the document alone; the cross-file role references against `roles.json` are checked by `wavehouse validate` and on reload.
+Validates a policy document (the body, in the shape above) without adopting anything, running the same per-document checks a reload runs on `policies.json`: strict decoding — an unknown or misspelled key (`eq` for `_eq`) or a duplicate key is rejected, never silently dropped — plus the policy rules themselves. Returns `{"valid": true}` or a `400` with every error found. Warnings that would not block adoption (such as the fail-closed warning on an empty `{}` document) do not fail the dry run. It checks the document alone; the cross-file role references against `roles.json` are checked by `wavehouse validate` and on reload.
 
 #### `GET /v1/ops/pipes` — List Named Pipes
 

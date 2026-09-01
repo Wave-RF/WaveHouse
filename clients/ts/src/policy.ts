@@ -29,7 +29,13 @@ export class PolicyNamespace {
     return ok(data!);
   }
 
-  /** Validate a policy without applying it (dry run). */
+  /**
+   * Validate a policy without applying it (dry run). Runs the same strict
+   * per-document checks a reload runs on `policies.json` — an unknown or
+   * misspelled key, a duplicate key, or a rule the engine would not honor is
+   * rejected, never silently dropped. Cross-file role references against
+   * `roles.json` are checked only on reload / `wavehouse validate`.
+   */
   async validate(
     policy: Policy,
     opts?: { signal?: AbortSignal },
