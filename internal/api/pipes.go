@@ -151,7 +151,6 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
 		queryCtx, cancel := context.WithTimeout(r.Context(), h.queryTimeout())
-
 		defer cancel()
 
 		start := time.Now()

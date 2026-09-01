@@ -740,9 +740,6 @@ Returns the adopted access control policy — the settings directory's [`policie
           "filter": {
             "tenant_id": {"_eq": "{{ jwt.app_metadata.tenant_id }}"}
           }
-        },
-        "admin": {
-          "allow_columns": ["*"]
         }
       },
       "insert": {

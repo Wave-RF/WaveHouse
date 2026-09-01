@@ -345,7 +345,6 @@ func (v *validator) checkClickHouse(ch *ClickHouseConfig) {
 }
 
 // required reports a missing key. Every top-level tunable is required so the
-
 // adopted snapshot never depends on a value the files don't state.
 func (v *validator) required(path string) {
 	v.errorf(FileConfig, path, "required — run `wavehouse bootstrap` for a complete starter config.json")

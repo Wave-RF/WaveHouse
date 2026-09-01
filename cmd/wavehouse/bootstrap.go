@@ -56,7 +56,6 @@ Exit codes: 0 written, 1 failed, 2 usage.
 		return 2
 	}
 	if err := settings.WriteSeed(dir); err != nil {
-
 		fmt.Fprintf(os.Stderr, "wavehouse bootstrap: %v\n", err)
 		return 1
 	}

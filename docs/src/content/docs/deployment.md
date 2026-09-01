@@ -49,7 +49,8 @@ This starts:
 
 ```bash
 # Seed the settings directory config.yaml points at (gitignored ./settings;
-# no-op if it already exists)
+# no-op if it already exists): the bootstrap seed plus the compose stack's
+# permissive "public" trial policy — replace policies.json before production
 make settings/config.json
 
 # Build

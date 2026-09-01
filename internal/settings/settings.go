@@ -203,7 +203,6 @@ type MQConfig struct {
 }
 
 // CORSConfig carries the per-request CORS allowlist. ["*"] allows any
-
 // browser origin; see corsMiddleware in internal/api for why that is safe
 // for a Bearer-token API.
 type CORSConfig struct {

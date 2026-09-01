@@ -31,14 +31,14 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # against `/app/data` regardless; bind mounts mask the image dir entirely
 # and rely on host-side ownership matching UID 65532.
 #
-# /app/settings is the settings-directory mount point, pre-created (owned
-# by the nonroot user so a named volume copies that ownership up) but
+# /app/settings is the settings-directory mount point, pre-created but
 # deliberately EMPTY: the image ships no settings, same as it ships no
-# policy. The operator mounts a directory there — or seeds a volume once
-# with `wavehouse bootstrap /app/settings` — and a missing mount refuses
-# to boot instead of running on defaults nobody chose. Not a VOLUME either
-# (unlike /app/data): it's config, not state, and an anonymous volume would
-# hide a forgotten mount.
+# policy. The operator bind-mounts a directory there, written on the host
+# with `wavehouse bootstrap` (a bind mount, not a named volume: the image
+# is distroless, with no shell to edit files inside a volume), and a
+# missing mount refuses to boot instead of running on defaults nobody
+# chose. Not a VOLUME either (unlike /app/data): it's config, not state,
+# and an anonymous volume would hide a forgotten mount.
 RUN mkdir -p /app/data /app/settings && chown -R 65532:65532 /app
 
 # Stage 2: Final minimal image

@@ -184,11 +184,11 @@ Ship a curated "top pages" endpoint that the public dashboard can call with no t
 
 1. **Open public access** so roleless requests assume a `viewer` identity — set `default_role` in `policies.json` ([Access Control](/access-control#default_role--public-unauthenticated-access)) and declare the role in `roles.json`. A pipe authorizes through its own `allowed_roles`, independent of any table-level `select` rules, so `default_role` is all the policy needs here:
 
-   ```json
+   ```json title="policies.json"
    { "default_role": "viewer", "tables": {} }
    ```
 
-   ```json
+   ```json title="roles.json"
    { "roles": ["viewer"] }
    ```
 

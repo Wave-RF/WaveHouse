@@ -62,11 +62,11 @@ func (v *verifier) keyFunc(t *jwt.Token) (any, error) {
 // is fetched synchronously; with requireFetch (boot) an unreachable or
 // misconfigured endpoint is an error so the process refuses to start rather
 // than run where no token can validate. Without it (reload) the adopted
-// URL is applied regardless: until the background refresh (or the refresh
-// an unknown key id triggers) succeeds, no JWT validates and requests fall
-// to the policy default_role — the same fail-closed posture as an
-// unreachable ClickHouse, fixed by the next reload. Refresh failures are
-// logged through logger when non-nil.
+// URL is applied regardless of the fetch's outcome: until the background
+// refresh (or the refresh an unknown key id triggers) succeeds, no JWT
+// validates and requests fall to the policy default_role — the same
+// fail-closed posture as an unreachable ClickHouse, fixed by the next
+// reload. Refresh failures are logged through logger when non-nil.
 func newVerifier(cfg Config, requireFetch bool, logger *slog.Logger) (*verifier, error) {
 	v := &verifier{secret: cfg.JWTSecret, roleClaim: cfg.RoleClaim, url: cfg.JWKSURL}
 	if v.roleClaim == "" {
@@ -128,8 +128,9 @@ func NewAuthenticator(cfg Config, store policy.Source, logger *slog.Logger) (*Au
 
 // Reconfigure replaces the verifier with one built from cfg's JWKSURL,
 // RoleClaim, and JWTSecret when any of them changed. The adopted settings
-// are the authority, so the swap does not wait on the JWKS fetch (see
-// newVerifier). The replaced verifier's JWKS refresh is stopped.
+// are the authority, so the swap does not depend on the JWKS fetch
+// succeeding (see newVerifier). The replaced verifier's JWKS refresh is
+// stopped.
 func (a *Authenticator) Reconfigure(cfg Config) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

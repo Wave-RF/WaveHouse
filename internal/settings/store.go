@@ -202,7 +202,6 @@ func (s *Store) Auth() Auth {
 }
 
 // DLQFor reports whether a poison row for table is parked on the DLQ (true)
-
 // or left unacked for redelivery (false): the table override when present,
 // the global switch otherwise.
 func (s *Store) DLQFor(table string) bool {
