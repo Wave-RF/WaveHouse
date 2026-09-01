@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,7 +32,13 @@ type errsThenSuccessConn struct {
 	calls atomic.Int32
 }
 
-func (c *errsThenSuccessConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, error) {
+// Query serves both of Refresh's result sets. Only the system.columns call
+// advances the error sequence and the counter, so `calls` still counts refresh
+// ATTEMPTS rather than statements.
+func (c *errsThenSuccessConn) Query(_ context.Context, q string, _ ...any) (driver.Rows, error) {
+	if strings.Contains(q, "system.tables") {
+		return &chainEmptyRows{}, nil
+	}
 	n := c.calls.Add(1)
 	if int(n) <= len(c.errs) {
 		return nil, c.errs[n-1]
@@ -39,8 +46,9 @@ func (c *errsThenSuccessConn) Query(_ context.Context, _ string, _ ...any) (driv
 	return &chainEmptyRows{}, nil
 }
 
-// QueryRow answers the SELECT timezone() probe Refresh issues before the
-// system.columns query (#372); the error sequencing above stays keyed on Query.
+// QueryRow answers the SELECT timezone() (#372) and SELECT version() probes
+// Refresh issues before the system.columns query; the error sequencing above
+// stays keyed on Query.
 func (c *errsThenSuccessConn) QueryRow(context.Context, string, ...any) driver.Row {
 	return testutil.UTCRow{}
 }

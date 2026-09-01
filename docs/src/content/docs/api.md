@@ -629,9 +629,10 @@ Returns all discovered ClickHouse table schemas.
   {
     "name": "clicks",
     "columns": [
-      {"name": "page", "type": "String", "is_nullable": false, "has_default": false},
-      {"name": "button", "type": "String", "is_nullable": false, "has_default": false},
-      {"name": "score", "type": "Float64", "is_nullable": true, "has_default": false}
+      {"name": "page", "type": "String", "is_nullable": false, "has_default": false, "position": 1},
+      {"name": "button", "type": "String", "is_nullable": false, "has_default": false, "position": 2},
+      {"name": "score", "type": "Float64", "is_nullable": false, "has_default": false, "position": 3},
+      {"name": "received_timestamp", "type": "DateTime64(3, 'UTC')", "is_nullable": false, "has_default": true, "default_expression": "now64(3, 'UTC')", "position": 4}
     ]
   }
 ]
@@ -649,11 +650,13 @@ Returns the schema for a specific table.
 {
   "name": "clicks",
   "columns": [
-    {"name": "page", "type": "String", "is_nullable": false, "has_default": false},
-    {"name": "button", "type": "String", "is_nullable": false, "has_default": false}
+    {"name": "page", "type": "String", "is_nullable": false, "has_default": false, "position": 1},
+    {"name": "button", "type": "String", "is_nullable": false, "has_default": false, "position": 2}
   ]
 }
 ```
+
+Per-column fields: `name`, `type` and `is_nullable` describe the column; `position` is its 1-based ordinal in the table's declaration order (always present, and the order `columns` itself is in); `has_default` says whether it declares any default at all, while `default_expression` says what that default is, omitted when the column declares none. The table's `CREATE TABLE` statement is captured on the same refresh but is deliberately **not** exposed here — for a table backed by an external engine it carries that engine's credentials.
 
 **Error responses:**
 
@@ -683,7 +686,7 @@ Triggers an immediate re-discovery of ClickHouse table schemas, then returns the
   {
     "name": "clicks",
     "columns": [
-      {"name": "page", "type": "String", "is_nullable": false, "has_default": false}
+      {"name": "page", "type": "String", "is_nullable": false, "has_default": false, "position": 1}
     ]
   }
 ]

@@ -67,7 +67,7 @@ Fetch the table's column definitions from ClickHouse. `.schema()` hits `/v1/ops/
 ```ts
 const { data } = await clicks.schema();
 // data: { name: 'clicks', columns: [
-//   { name: 'page', type: 'String', is_nullable: false, has_default: false }, ...
+//   { name: 'page', type: 'String', is_nullable: false, has_default: false, position: 1 }, ...
 // ] }
 ```
 
