@@ -1,7 +1,7 @@
 import type { Pipe, Policy } from "@wavehouse/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { adminClient } from "./helpers.js";
-import { readPipesFile, setPipes, setPolicy } from "./settings.js";
+import { readPipesFile, readPolicyFile, setPipes, setPolicy } from "./settings.js";
 import { suiteTables } from "./tables.js";
 
 describe("Admin", () => {
@@ -17,9 +17,7 @@ describe("Admin", () => {
   let baselinePolicy: Policy | undefined;
 
   beforeAll(async () => {
-    const res = await wh.policy.get();
-    if (res.error) throw new Error(`Failed to fetch baseline policy: ${res.error.message}`);
-    baselinePolicy = structuredClone(res.data);
+    baselinePolicy = structuredClone(readPolicyFile());
     baselinePipes = readPipesFile();
   });
 
@@ -91,13 +89,7 @@ describe("Admin", () => {
       },
     };
 
-    it("validates a policy (dry run)", async () => {
-      const result = await wh.policy.validate(testPolicy);
-      expect(result.error).toBeNull();
-      expect(result.data).toBeDefined();
-    });
-
-    it("adopts a policy from policies.json and reads it back", async () => {
+    it("adopts a policy from policies.json", async () => {
       // Spread the baseline so we override only this suite's clicks entry —
       // writing the bare testPolicy would wipe every other suite's tables from
       // the live policy until afterAll restores it.
@@ -107,14 +99,9 @@ describe("Admin", () => {
         tables: { ...(baselinePolicy?.tables ?? {}), ...testPolicy.tables },
       });
 
-      const getResult = await wh.policy.get();
-      expect(getResult.error).toBeNull();
-      expect(getResult.data).toBeDefined();
-      expect(getResult.data).toHaveProperty("tables");
-      expect(getResult.data).toMatchObject({
-        default_role: "viewer",
-        admin_role: "admin",
-      });
+      // setPolicy throws unless the reload reported adopted — that IS the
+      // assertion. There is no HTTP read of the policy, and reading back the
+      // file we just wrote would only exercise the filesystem.
     });
   });
 

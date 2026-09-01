@@ -232,8 +232,8 @@ func middleware(current func() *verifier, operatorKeyCfg string, store policy.So
 			// context: the live admin role — so the policy evaluator's admin bypass
 			// grants unrestricted data-plane access while a policy exists — and an
 			// operator bit, which RequireAdmin honors even when the policy is
-			// nil (policies.json empty), so the operator can still reach the admin
-			// surface to inspect the policy and trigger a settings reload.
+			// nil (policies.json empty), so the operator can still reach the
+			// admin surface to trigger a settings reload.
 			if operatorKeyCfg != "" {
 				// Resolve the presented credential once. An empty credential
 				// (no operator header at all) never matches and is not a failed

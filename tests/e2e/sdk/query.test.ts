@@ -8,7 +8,7 @@ import {
   WH_URL,
   waitForCondition,
 } from "./helpers.js";
-import { setPolicy } from "./settings.js";
+import { readPolicyFile, setPolicy } from "./settings.js";
 import { suiteTables } from "./tables.js";
 
 describe("Query", () => {
@@ -185,10 +185,10 @@ describe("Query", () => {
     await admin.schema.refresh();
 
     // 2. Add it to the policy
-    const currentPolicyRes = await admin.policy.get();
+    const currentPolicy = readPolicyFile();
     await setPolicy({
       tables: {
-        ...(currentPolicyRes.data as any).tables,
+        ...currentPolicy.tables,
         [weirdName]: {
           select: { viewer: { allow_columns: ["*"] } },
         },
@@ -216,10 +216,10 @@ describe("Query", () => {
     await admin.schema.refresh();
 
     // 2. Grant the viewer role read access via policy.
-    const currentPolicyRes = await admin.policy.get();
+    const currentPolicy = readPolicyFile();
     await setPolicy({
       tables: {
-        ...(currentPolicyRes.data as any).tables,
+        ...currentPolicy.tables,
         [noTsTable]: {
           select: { viewer: { allow_columns: ["*"] } },
         },
@@ -252,18 +252,14 @@ describe("Query", () => {
   });
 
   it("rejects queries requesting unauthorized columns (403)", async () => {
-    const admin = adminClient();
-    const currentPolicyRes = await admin.policy.get();
-
-    // Assert it's not null so the test fails cleanly if something goes wrong
-    expect(currentPolicyRes.data).not.toBeNull();
+    const currentPolicy = readPolicyFile();
 
     // Temporarily restrict this suite's clicks table so 'user_id' can't be selected
     await setPolicy({
       tables: {
-        ...(currentPolicyRes.data as any).tables,
+        ...currentPolicy.tables,
         [T.clicks]: {
-          ...((currentPolicyRes.data as any).tables[T.clicks] || {}),
+          ...(currentPolicy.tables[T.clicks] || {}),
           select: {
             viewer: { allow_columns: ["page", "duration_ms"] },
           },
@@ -277,7 +273,7 @@ describe("Query", () => {
     expect(result.error!.status).toBe(403);
 
     // Restore the baseline policy using the non-null assertion (!)
-    await setPolicy(currentPolicyRes.data!);
+    await setPolicy(currentPolicy);
   });
 
   // ── #223: the column allowlist is a hard cap on EVERY read shape ────────────
@@ -297,9 +293,8 @@ describe("Query", () => {
     perms: Record<string, unknown>,
     body: () => Promise<void>,
   ): Promise<void> {
-    const admin = adminClient();
-    const snapshot = await admin.policy.get();
-    const tables = (snapshot.data as any).tables;
+    const snapshot = readPolicyFile();
+    const tables = snapshot.tables;
     await setPolicy({
       tables: {
         ...tables,
@@ -309,7 +304,7 @@ describe("Query", () => {
     try {
       await body();
     } finally {
-      await setPolicy(snapshot.data!);
+      await setPolicy(snapshot);
     }
   }
 
@@ -422,15 +417,14 @@ describe("Query", () => {
   });
 
   it("enforces max_execution_time policy limit", async () => {
-    const admin = adminClient();
-    const currentPolicyRes = await admin.policy.get();
+    const currentPolicy = readPolicyFile();
 
     // Temporarily restrict viewer queries to an impossibly fast 1ms timeout
     await setPolicy({
       tables: {
-        ...(currentPolicyRes.data as any).tables,
+        ...currentPolicy.tables,
         [T.clicks]: {
-          ...((currentPolicyRes.data as any).tables[T.clicks] || {}),
+          ...(currentPolicy.tables[T.clicks] || {}),
           select: {
             viewer: {
               allow_columns: ["*"],
@@ -468,7 +462,7 @@ describe("Query", () => {
       expect(deadlineError!.status).toBe(500);
     } finally {
       // Restore policy even if test fails so that others don't too
-      await setPolicy(currentPolicyRes.data!);
+      await setPolicy(currentPolicy);
     }
   });
 

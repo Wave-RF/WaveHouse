@@ -610,12 +610,75 @@ func TestCanonicalNumericLiteral(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	t.Parallel()
+	tmpl := "{{ jwt.tenant_id }}"
 	tests := []struct {
 		name    string
 		policy  *Policy
 		wantErr bool
 		wantMsg string
 	}{
+		{
+			// The explicit spelling of #460's fail-open: an operator-less filter
+			// entry resolves to zero predicates (no row restriction). The typo
+			// route to the same shape is closed by strict decoding.
+			name: "operator-less filter entry rejected",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						Select: map[string]RolePermissions{
+							"viewer": {Filter: map[string]Filter{"tenant_id": {}}},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			wantMsg: `filter column "tenant_id" sets no operator`,
+		},
+		{
+			name: "operator-less check entry rejected",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						Insert: map[string]RolePermissions{
+							"writer": {Check: map[string]Filter{"user_id": {}}},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			wantMsg: `check column "user_id" sets no operator`,
+		},
+		{
+			name: "filter under insert grant rejected",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						Insert: map[string]RolePermissions{
+							"writer": {Filter: map[string]Filter{"tenant_id": {Eq: &tmpl}}},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			wantMsg: "filter has no effect on insert",
+		},
+		{
+			// The mirror, and the fail-open direction: the author believes reads
+			// are row-scoped, but nothing on the select/stream paths reads a
+			// check entry — every viewer would see every row.
+			name: "check under select grant rejected",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						Select: map[string]RolePermissions{
+							"viewer": {Check: map[string]Filter{"tenant_id": {Eq: &tmpl}}},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			wantMsg: "check has no effect on select",
+		},
 		{
 			name:    "nil policy",
 			policy:  nil,

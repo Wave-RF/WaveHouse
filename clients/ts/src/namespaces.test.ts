@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DLQNamespace } from "./dlq.js";
-import { PolicyNamespace } from "./policy.js";
 import { SchemaNamespace } from "./schema.js";
 import { SettingsNamespace } from "./settings.js";
 import { sql } from "./sql.js";
@@ -89,36 +88,6 @@ describe("SchemaNamespace", () => {
     expect(result.error).toBeNull();
     expect(fetchSpy.mock.calls[0][1].method).toBe("POST");
     expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/schema/refresh");
-  });
-});
-
-describe("PolicyNamespace", () => {
-  beforeEach(() => {
-    fetchSpy = vi.fn();
-    vi.stubGlobal("fetch", fetchSpy);
-  });
-
-  afterEach(() => vi.restoreAllMocks());
-
-  it("get() GETs /v1/ops/policy", async () => {
-    const policy = { tables: {} };
-    fetchSpy.mockResolvedValue(new Response(JSON.stringify(policy), { status: 200 }));
-
-    const ns = new PolicyNamespace(makeCtx());
-    const result = await ns.get();
-
-    expect(result.data).toEqual(policy);
-    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/policy");
-  });
-
-  it("validate() POSTs /v1/ops/policy/validate", async () => {
-    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ valid: true }), { status: 200 }));
-
-    const ns = new PolicyNamespace(makeCtx());
-    const result = await ns.validate({ tables: {} });
-
-    expect(result.data).toEqual({ valid: true });
-    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/policy/validate");
   });
 });
 

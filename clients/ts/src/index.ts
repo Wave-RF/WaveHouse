@@ -6,7 +6,6 @@
 export { createClient, WaveHouseClient } from "./client.js";
 export { DLQNamespace } from "./dlq.js";
 export { PipeRef, PipesNamespace } from "./pipes.js";
-export { PolicyNamespace } from "./policy.js";
 export { QueryBuilder } from "./query-builder.js";
 export { SchemaNamespace } from "./schema.js";
 export { SettingsNamespace } from "./settings.js";
@@ -60,6 +59,5 @@ export type {
   TablePolicy,
   TableSchema,
   TimeRange,
-  ValidationResult,
   WaveHouseError,
 } from "./types.js";

@@ -1,26 +1,17 @@
 import type { Policy } from "@wavehouse/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  adminClient,
-  authClient,
-  dataClient,
-  publicClient,
-  testId,
-  waitForCondition,
-} from "./helpers.js";
-import { setPolicy } from "./settings.js";
+import { authClient, dataClient, publicClient, testId, waitForCondition } from "./helpers.js";
+import { readPolicyFile, setPolicy } from "./settings.js";
 import { suiteTables } from "./tables.js";
 
 describe("Streaming", () => {
-  const admin = adminClient();
   const T = suiteTables("streaming");
   let baselinePolicy: Policy | undefined;
 
   beforeAll(async () => {
-    // Fetch the baseline policy to restore after tests finish
-    const res = await admin.policy.get();
-    if (res.error) throw new Error(`Failed to fetch baseline policy: ${res.error.message}`);
-    baselinePolicy = structuredClone(res.data);
+    // Snapshot the baseline policy (the adopted policies.json) to restore
+    // after tests finish.
+    baselinePolicy = structuredClone(readPolicyFile());
 
     // Configure the backend to assign the "anon" role to unauthenticated requests
     const publicPolicy = structuredClone(baselinePolicy);
