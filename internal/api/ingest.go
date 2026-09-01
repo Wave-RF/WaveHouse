@@ -184,11 +184,19 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
 
-	// Pick a reader from the body shape (Content-Type is only a hint).
-	rr, batch, err := newRecordReader(r.Header.Get("Content-Type"), r.Body)
+	// Pick a reader from the DECLARED format; the body only chooses arity
+	// within the JSON family. An undeclared or unreadable Content-Type is a 415.
+	contentType := r.Header.Get("Content-Type")
+	rr, format, batch, err := newRecordReader(contentType, r.Body)
 	if err != nil {
-		h.logger.ErrorContext(ctx, "empty ingest body", "table", table)
-		writeJSONError(w, http.StatusBadRequest, emptyBodyMessage(r.Header.Get("Content-Type")))
+		if errors.Is(err, errUnsupportedContentType) {
+			h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
+				"content_type", contentType, "table", table)
+			writeJSONError(w, http.StatusUnsupportedMediaType, unsupportedContentTypeMessage(contentType))
+			return
+		}
+		h.logger.ErrorContext(ctx, "empty ingest body", "table", table, "format", format.String())
+		writeJSONError(w, http.StatusBadRequest, emptyBodyMessage(format))
 		return
 	}
 

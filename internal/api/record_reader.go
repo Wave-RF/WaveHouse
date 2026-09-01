@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
+	"strings"
 )
 
 const (
@@ -46,6 +48,52 @@ func (e *recordSyntaxError) Error() string { return e.msg }
 // errEmptyBody is returned by newRecordReader when the body has no content (no
 // non-whitespace byte within the sniff window). The handler maps it to a 400.
 var errEmptyBody = errors.New("empty body")
+
+// errUnsupportedContentType is returned when the request declares no
+// Content-Type, or one ingest does not read. The handler maps it to a 415.
+var errUnsupportedContentType = errors.New("unsupported content type")
+
+// IngestFormat is the wire format of an ingest request body. It comes from the
+// request's declared Content-Type and nothing else: the body never overrides
+// what the client said it sent, so a caller can always tell how their bytes
+// will be read without knowing what the first one happens to be.
+type IngestFormat int
+
+const (
+	// FormatJSON is the application/json family: one flat object, or a
+	// top-level array of them. Which of the two is the body's own business —
+	// the first non-whitespace byte picks it — because both are the same
+	// format, differing only in arity.
+	FormatJSON IngestFormat = iota
+	// FormatNDJSON is newline-delimited JSON: one flat object per line. A line
+	// that is not a JSON object is a per-record error, never a reason to
+	// re-read the body as something else.
+	FormatNDJSON
+	// FormatCSV plugs in here once ingest reads CSV: add the media types to
+	// ingestFormat's switch and the reader to newRecordReader's.
+)
+
+// String renders a format for error messages and logs.
+func (f IngestFormat) String() string {
+	switch f {
+	case FormatJSON:
+		return "json"
+	case FormatNDJSON:
+		return "ndjson"
+	default:
+		return "unknown"
+	}
+}
+
+// supportedContentTypes lists, in the order the 415 message names them, every
+// media type ingest reads. The first of each family is the canonical spelling.
+var supportedContentTypes = []string{
+	"application/json",
+	"application/x-ndjson",
+	"application/ndjson",
+	"application/jsonl",
+	"application/jsonlines",
+}
 
 // errUnterminatedArray marks a JSON array body that ended before its closing
 // ']' (a truncated / cut-off upload). It is deliberately NOT io.EOF so the
@@ -168,36 +216,62 @@ func (l *lineReader) Next() (map[string]any, error) {
 	return nil, io.EOF
 }
 
-// newRecordReader picks a reader from the Content-Type and a peek at the body.
-// Content-Type is a hint, not a requirement: the first non-whitespace byte wins
-// for the JSON family ('[' → array, else → single object), and an explicit
-// application/x-ndjson type selects line-framing only when the body doesn't
-// start with '[' (so a mislabeled JSON array still works). batch is false only
-// for the single-object path; true for array/NDJSON. This is what makes ingest
-// forgiving: a JSON array, a single object, or NDJSON all work regardless of the
-// header. The caller is expected to have already bounded body via
-// http.MaxBytesReader.
-func newRecordReader(contentType string, body io.Reader) (rr recordReader, batch bool, err error) {
+// ingestFormat resolves a declared Content-Type to the format ingest will read
+// the body as. A missing, empty, or unrecognized type is errUnsupportedContentType
+// (a 415): the format is the client's declaration, so there is nothing to fall
+// back to. Parameters such as "; charset=utf-8" are ignored.
+func ingestFormat(ct string) (IngestFormat, error) {
+	if strings.TrimSpace(ct) == "" {
+		return FormatJSON, errUnsupportedContentType
+	}
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return FormatJSON, errUnsupportedContentType
+	}
+	switch mediaType {
+	case "application/json":
+		return FormatJSON, nil
+	case "application/x-ndjson", "application/ndjson", "application/jsonl", "application/jsonlines":
+		return FormatNDJSON, nil
+	default:
+		return FormatJSON, errUnsupportedContentType
+	}
+}
+
+// newRecordReader picks a reader from the declared Content-Type, using a peek at
+// the body only to choose arity within the JSON family ('[' → array, else →
+// single object). The header is authoritative: an NDJSON body is read as NDJSON
+// whatever its first byte, so a line that isn't a JSON object fails as a
+// per-record error rather than silently re-framing the whole request. batch is
+// false only for the single-object path; true for array/NDJSON. format is
+// meaningful even when err is errEmptyBody — the declaration resolves before the
+// body is read at all — and is FormatJSON alongside errUnsupportedContentType,
+// where nothing was declared to resolve. The caller is expected to have already
+// bounded body via http.MaxBytesReader.
+func newRecordReader(contentType string, body io.Reader) (rr recordReader, format IngestFormat, batch bool, err error) {
+	format, err = ingestFormat(contentType)
+	if err != nil {
+		return nil, format, false, err
+	}
+
 	br := bufio.NewReader(body)
 	first, perr := peekFirstNonSpace(br)
 	if perr != nil {
-		return nil, false, errEmptyBody
+		return nil, format, false, errEmptyBody
 	}
 
-	// Explicit NDJSON wins for line-framing, unless the body is actually an
-	// array. (CSV plugs in here later: isCSVContentType(contentType) && first != '['.)
-	if isNDJSONContentType(contentType) && first != '[' {
+	if format == FormatNDJSON {
 		sc := bufio.NewScanner(br)
 		sc.Buffer(make([]byte, 0, 64*1024), maxNDJSONLineBytes)
-		return &lineReader{sc: sc}, true, nil
+		return &lineReader{sc: sc}, format, true, nil
 	}
 
 	dec := json.NewDecoder(br)
 	dec.UseNumber()
 	if first == '[' {
-		return &arrayReader{dec: dec}, true, nil
+		return &arrayReader{dec: dec}, format, true, nil
 	}
-	return &objectReader{dec: dec}, false, nil
+	return &objectReader{dec: dec}, format, false, nil
 }
 
 // peekFirstNonSpace returns the first non-whitespace byte of the body without
@@ -218,30 +292,20 @@ func peekFirstNonSpace(br *bufio.Reader) (byte, error) {
 
 // emptyBodyMessage tailors the empty-body 400 message to the declared format so
 // an NDJSON caller still gets the familiar "empty ndjson body".
-func emptyBodyMessage(contentType string) string {
-	if isNDJSONContentType(contentType) {
+func emptyBodyMessage(format IngestFormat) string {
+	if format == FormatNDJSON {
 		return "empty ndjson body"
 	}
 	return "empty body"
 }
 
-// isNDJSONContentType reports whether the request Content-Type explicitly
-// selects NDJSON line-framing. It matches application/x-ndjson and common
-// synonyms (application/ndjson, application/jsonl, application/jsonlines),
-// ignoring parameters such as "; charset=utf-8". Anything else — including a
-// missing type or application/json — leaves the format to the body sniffer.
-func isNDJSONContentType(ct string) bool {
-	if ct == "" {
-		return false
+// unsupportedContentTypeMessage is the 415 body: it says what was declared (or
+// that nothing was) and lists every media type ingest reads, so a caller can fix
+// the request from the response alone.
+func unsupportedContentTypeMessage(ct string) string {
+	declared := "no Content-Type"
+	if strings.TrimSpace(ct) != "" {
+		declared = fmt.Sprintf("Content-Type %q", ct)
 	}
-	mediaType, _, err := mime.ParseMediaType(ct)
-	if err != nil {
-		return false
-	}
-	switch mediaType {
-	case "application/x-ndjson", "application/ndjson", "application/jsonl", "application/jsonlines":
-		return true
-	default:
-		return false
-	}
+	return fmt.Sprintf("%s: ingest requires one of %s", declared, strings.Join(supportedContentTypes, ", "))
 }

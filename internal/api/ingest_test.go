@@ -41,7 +41,10 @@ func ingestRequest(t *testing.T, table string, body any) *http.Request {
 	data, err := json.Marshal(body)
 	require.NoError(t, err)
 
-	return httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest?table="+url.QueryEscape(table), bytes.NewReader(data))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest?table="+url.QueryEscape(table), bytes.NewReader(data))
+	// Ingest requires a declared format: an undeclared Content-Type is a 415.
+	req.Header.Set("Content-Type", "application/json")
+	return req
 }
 
 func TestIngest_ValidPayload(t *testing.T) {
@@ -136,7 +139,7 @@ func TestIngest_InvalidJSON(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest?table=clicks", bytes.NewReader([]byte("not json")))
+	r := rawIngestRequest(t, "clicks", "application/json", "not json")
 
 	w := httptest.NewRecorder()
 	h.Handle(w, r)
@@ -1140,30 +1143,90 @@ func TestIngest_NDJSON_ErrorsTruncated(t *testing.T) {
 	assert.Empty(t, pub.Messages)
 }
 
-func TestIsNDJSONContentType(t *testing.T) {
+// TestIngestFormat: the declared Content-Type — and only it — decides the
+// format. Every accepted media type maps to its family; anything else, including
+// a missing header, is refused rather than guessed at.
+func TestIngestFormat(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		ct   string
-		want bool
+		ct      string
+		want    IngestFormat
+		wantErr bool
 	}{
-		{"application/x-ndjson", true},
-		{"application/x-ndjson; charset=utf-8", true},
-		{"application/ndjson", true},
-		{"application/jsonl", true},
-		{"application/jsonlines", true},
-		{"application/json", false},
-		{"application/json; charset=utf-8", false},
-		{"text/plain", false},
-		{"", false},
-		{"???not-a-media-type", false},
+		{ct: "application/json", want: FormatJSON},
+		{ct: "application/json; charset=utf-8", want: FormatJSON},
+		{ct: "application/x-ndjson", want: FormatNDJSON},
+		{ct: "application/x-ndjson; charset=utf-8", want: FormatNDJSON},
+		{ct: "application/ndjson", want: FormatNDJSON},
+		{ct: "application/jsonl", want: FormatNDJSON},
+		{ct: "application/jsonlines", want: FormatNDJSON},
+		{ct: "text/plain", wantErr: true},
+		{ct: "text/csv", wantErr: true},
+		{ct: "", wantErr: true},
+		{ct: "   ", wantErr: true},
+		{ct: "???not-a-media-type", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.ct, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, isNDJSONContentType(tt.ct))
+			got, err := ingestFormat(tt.ct)
+			if tt.wantErr {
+				require.ErrorIs(t, err, errUnsupportedContentType)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// TestIngest_UndeclaredOrUnsupportedContentType_415: an undeclared or unreadable
+// Content-Type is refused before the body is parsed, and the message names every
+// type ingest reads so the caller can fix the request from the response alone.
+func TestIngest_UndeclaredOrUnsupportedContentType_415(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		ct   string
+	}{
+		{"no content-type", ""},
+		{"text/plain", "text/plain"},
+		{"text/csv", "text/csv"},
+		{"malformed media type", "???not-a-media-type"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			w := httptest.NewRecorder()
+			h.Handle(w, rawIngestRequest(t, "clicks", tt.ct, `{"page":"/a"}`))
+
+			assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+			assert.Contains(t, w.Body.String(), "application/json")
+			assert.Contains(t, w.Body.String(), "application/x-ndjson")
+			assert.Empty(t, pub.Messages, "a refused request must not publish")
+		})
+	}
+}
+
+// TestIngest_DeclaredNDJSON_ArrayBodyIsNotReframed: the header is authoritative.
+// A JSON array sent as NDJSON is read as NDJSON — one line, not a JSON object —
+// so it fails as a per-record error instead of silently being re-read as a batch.
+func TestIngest_DeclaredNDJSON_ArrayBodyIsNotReframed(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	w := httptest.NewRecorder()
+	h.Handle(w, rawIngestRequest(t, "clicks", "application/x-ndjson", `[{"page":"/a"},{"page":"/b"}]`))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 1, resp.Total, "the array is one NDJSON line, not two records")
+	assert.Equal(t, 1, resp.Failed)
+	assert.Empty(t, pub.Messages)
 }
 
 // ── Forgiving multi-format ingest (JSON array, sniffing, body cap) ──────────
@@ -1370,23 +1433,6 @@ func TestIngest_JSONArray_Empty(t *testing.T) {
 	assert.Empty(t, pub.Messages)
 }
 
-func TestIngest_Sniff_ArrayBodyBeatsNDJSONHeader(t *testing.T) {
-	t.Parallel()
-	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-
-	// Body starts with '[' → array path, even though the header says NDJSON.
-	req := rawIngestRequest(t, "clicks", "application/x-ndjson", `[{"page":"/a"},{"page":"/b"}]`)
-	w := httptest.NewRecorder()
-	h.Handle(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeBatchResult(t, w)
-	assert.Equal(t, 2, resp.Total)
-	assert.Equal(t, 2, resp.Succeeded)
-	assert.Len(t, pub.Messages, 2)
-}
-
 func TestIngest_SingleObject_PrettyPrinted(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
@@ -1410,10 +1456,10 @@ func TestIngest_Unlabeled_ConcatenatedObjects_FirstOnly(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 
-	// Two concatenated objects with no NDJSON header take the single-object
-	// path and ingest only the first (matching the historical behavior — send
-	// application/x-ndjson to batch them).
-	req := rawIngestRequest(t, "clicks", "", `{"page":"/first"}{"page":"/second"}`)
+	// Two concatenated objects declared as application/json take the
+	// single-object path and ingest only the first (matching the historical
+	// behavior — send application/x-ndjson to batch them).
+	req := rawIngestRequest(t, "clicks", "application/json", `{"page":"/first"}{"page":"/second"}`)
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
 
@@ -1470,9 +1516,10 @@ func TestIngest_EmptyBody(t *testing.T) {
 		body        string
 		wantMsg     string
 	}{
-		{name: "no content type", contentType: "", body: "", wantMsg: "empty body"},
+		{name: "json empty", contentType: "application/json", body: "", wantMsg: "empty body"},
 		{name: "whitespace only", contentType: "application/json", body: "   \n\t ", wantMsg: "empty body"},
 		{name: "ndjson empty", contentType: "application/x-ndjson", body: "", wantMsg: "empty ndjson body"},
+		{name: "ndjson whitespace only", contentType: "application/jsonl", body: "  \n ", wantMsg: "empty ndjson body"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
