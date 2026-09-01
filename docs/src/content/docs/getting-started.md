@@ -23,12 +23,14 @@ cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 ```
 
+The stack bind-mounts `deployments/compose/settings/` as WaveHouse's [settings directory](/settings-directory) — the hot-reloadable configuration, ClickHouse address included — so there is nothing to seed; edit those files and the running container picks the change up.
+
 This exposes:
 
 - WaveHouse API on `http://localhost:8080`
 - ClickHouse on ports `8123` (HTTP) and `9000` (native)
 
-WaveHouse is **fail-closed** — with no policy loaded, every request is denied. So the standalone stack ships a permissive **trial policy** (`deployments/compose/dev-policy.yaml`, mounted read-only and wired in via `WH_POLICY_FILE_PATH`): a non-admin [`public` role](/access-control#default_role--public-unauthenticated-access) that can read and write the demo tables (`clicks`, `events`) with no token, so the quickstart just works. It's *not* admin — it can't run raw SQL or manage policy/pipes — and it names specific tables, so it grants nothing in a real deployment (those tables won't exist there). It seeds into NATS KV on first boot; after that KV is authoritative (see [Access Control — Bootstrapping](/access-control#bootstrapping-and-the-policy-lifecycle)). It's deliberately lenient for trialing — a real deployment should [tune it](/access-control): your own roles, real tables, scoped columns, and usually tokens instead of a public default.
+WaveHouse is **fail-closed** — with no policy adopted, every request is denied. So the standalone stack ships a permissive **trial policy** in the bind-mounted [settings directory](/settings-directory) (`deployments/compose/settings/policies.json` + `roles.json`): a non-admin [`public` role](/access-control#default_role--public-unauthenticated-access) that can read and write the demo tables (`clicks`, `events`) with no token, so the quickstart just works. It's *not* admin — it can't run raw SQL or reach the `/v1/ops/*` surface — and it names specific tables, so it grants nothing in a real deployment (those tables won't exist there). Edit the files on the host and the running container adopts them (see [Access Control — The policy lifecycle](/access-control#the-policy-lifecycle)). It's deliberately lenient for trialing — a real deployment should [tune it](/access-control): your own roles, real tables, scoped columns, and usually tokens instead of a public default.
 
 ## 2. Create a ClickHouse table
 
@@ -95,7 +97,7 @@ curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z
 
 The handful of things that most often trip up a first session — each is expected behavior with a quick fix:
 
-- **`404 unknown table: clicks` on the first ingest.** Schema discovery refreshes every 60 seconds (`WH_SCHEMA_REFRESH_INTERVAL`), so a just-created table may not be visible yet. Wait and retry — worst case the next refresh is a full 60 seconds out. (`POST /v1/ops/schema/refresh` forces it, but that endpoint is admin-only — the trial `public` role can't call it.)
+- **`404 unknown table: clicks` on the first ingest.** Schema discovery refreshes every 60 seconds (`schema.refresh_interval` in the [settings directory](/settings-directory)), so a just-created table may not be visible yet. Wait and retry — worst case the next refresh is a full 60 seconds out. (`POST /v1/ops/schema/refresh` forces it, but that endpoint is admin-only — the trial `public` role can't call it.)
 - **The query returns `[]` right after an ingest succeeded.** Ingest acknowledges as soon as the event is durable in the WAL; the batch worker flushes to ClickHouse every few seconds. If you query within that window the rows simply aren't in ClickHouse yet — re-query after ~5 seconds. (The [SSE stream](#5-subscribe-to-real-time-updates) sees events *immediately* — it's broadcast before the flush.)
 - **`403` on a table you created yourself.** WaveHouse is fail-closed and the trial policy grants the `public` role access to the *named demo tables only* (`clicks`, `events`). A new table needs a policy entry — see [Access Control](/access-control) for granting roles per table.
 - **A port is already taken.** The stack binds `8080` (WaveHouse) and `8123`/`9000` (ClickHouse). Stop whatever holds the port or edit the `ports:` mappings in `deployments/compose/standalone.yaml`.
@@ -112,5 +114,5 @@ The handful of things that most often trip up a first session — each is expect
 
 ## Going further
 
-- **Validate JWTs**: set `WH_AUTH_JWT_SECRET=<secret>` (the middleware always runs; without a secret every request is the policy `default_role`) and replace the shipped trial policy (`deployments/compose/dev-policy.yaml`) with a least-privilege one — see [API Reference — Authentication](/api#authentication) and [Access Control](/access-control).
-- **Enable deduplication**: set `WH_DEDUPE_ENABLED=true` and `WH_DEDUPE_ID_FIELD=event_id` — see [Configuration — Deduplication](/configuration#deduplication).
+- **Validate JWTs**: set `WH_AUTH_JWT_SECRET=<secret>` (the middleware always runs; without a secret every request is the policy `default_role`) and replace the shipped trial policy (`deployments/compose/settings/policies.json`) with a least-privilege one — see [API Reference — Authentication](/api#authentication) and [Access Control](/access-control).
+- **Enable deduplication**: set `dedupe.enabled` to `true` in the settings directory's `config.json` (it hot-reloads, no restart) — records dedupe on their `event_id` field by default; pick a different field (globally or per table) in the same file — see [Settings Directory — Deduplication](/settings-directory#deduplication).

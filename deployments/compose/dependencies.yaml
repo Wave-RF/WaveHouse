@@ -11,7 +11,10 @@ name: wavehouse-dev
 
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:latest
+    # Pinned to match tests/integration/setup_test.go (26.8 changed numeric
+    # DateTime64 parsing; see the comment there) so the dev server behaves
+    # like the one the tests assert against.
+    image: clickhouse/clickhouse-server:26.6.3.62
     ports:
       - "8123:8123"
       - "9000:9000"

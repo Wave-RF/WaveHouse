@@ -101,26 +101,4 @@ describe("PipesNamespace", () => {
     expect(result.data?.name).toBe("p1");
     expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/pipes/p1");
   });
-
-  it("set() PUTs /v1/ops/pipes/{name}", async () => {
-    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
-
-    const ns = new PipesNamespace(makeCtx());
-    const result = await ns.set("p1", { sql: "SELECT 1" });
-
-    expect(result.error).toBeNull();
-    const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toContain("/v1/ops/pipes/p1");
-    expect(init.method).toBe("PUT");
-  });
-
-  it("delete() DELETEs /v1/ops/pipes/{name}", async () => {
-    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
-
-    const ns = new PipesNamespace(makeCtx());
-    const result = await ns.delete("p1");
-
-    expect(result.error).toBeNull();
-    expect(fetchSpy.mock.calls[0][1].method).toBe("DELETE");
-  });
 });

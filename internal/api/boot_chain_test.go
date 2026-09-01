@@ -75,7 +75,7 @@ func TestBoot_Chain_DegradedThenRecovers(t *testing.T) {
 	conn := &errsThenSuccessConn{errs: []error{connRefused, connRefused, dbMissing}}
 
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	registry := discovery.NewSchemaRegistry(conn, "test", time.Hour, logger)
+	registry := discovery.NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, logger)
 
 	// Phase 0 — synchronous boot Refresh fails. main.go records the
 	// diagnostic in BootState and proceeds with the retry loop in a

@@ -150,7 +150,7 @@ func TestSweep(t *testing.T) {
 				},
 			}
 
-			s := NewSweeper(js, gw, testutil.NopLogger())
+			s := NewSweeper(js, func() time.Duration { return gw }, testutil.NopLogger())
 			s.sweep(context.Background())
 
 			if ms != nil {
@@ -265,7 +265,7 @@ func TestFindGapSequence(t *testing.T) {
 				GetMsgFn: tt.getMsgFn,
 			}
 
-			s := NewSweeper(nil, tt.gapWindow, testutil.NopLogger())
+			s := NewSweeper(nil, func() time.Duration { return tt.gapWindow }, testutil.NopLogger())
 			seq, err := s.findGapSequence(context.Background(), ms)
 
 			if tt.wantErrSub != "" {
@@ -290,7 +290,8 @@ func TestStart_ContextCancellation(t *testing.T) {
 		},
 	}
 
-	s := NewSweeper(js, 5*time.Minute, testutil.NopLogger())
+	s := NewSweeper(js, func() time.Duration { return 5 * time.Minute }, testutil.NopLogger())
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately.
 

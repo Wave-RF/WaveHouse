@@ -15,11 +15,13 @@ const (
 // Finding is one validation result, located as precisely as the failure
 // allows: File is empty for directory-level findings, Path is a dotted JSON
 // path ("tables.clicks.select.analyst") and empty for whole-file findings.
+// The JSON shape is part of the ops API: POST /v1/ops/settings/reload returns
+// findings verbatim.
 type Finding struct {
-	Severity Severity
-	File     string
-	Path     string
-	Message  string
+	Severity Severity `json:"severity"`
+	File     string   `json:"file,omitempty"`
+	Path     string   `json:"path,omitempty"`
+	Message  string   `json:"message"`
 }
 
 // String renders "error: policies.json: tables.clicks.select.admin: <message>",

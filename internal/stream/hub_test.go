@@ -33,10 +33,10 @@ import (
 // nested-object claims decode unchanged, so literal maps stay faithful there.
 func jwtClaims(t *testing.T, claims map[string]any) map[string]any {
 	t.Helper()
-	mw, err := auth.Middleware(auth.Config{JWTSecret: testutil.TestJWTSecret}, nil, nil)
+	authn, err := auth.NewAuthenticator(auth.Config{JWTSecret: testutil.TestJWTSecret}, nil, nil)
 	require.NoError(t, err)
 	var got map[string]any
-	h := mw(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	h := authn.Middleware()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		c, ok := auth.ClaimsFromContext(r.Context())
 		require.True(t, ok, "test token must authenticate")
 		got = map[string]any(c)
@@ -127,7 +127,7 @@ func TestHub_ProjectsPerRole_ColumnFilterAndDenial(t *testing.T) {
 			},
 		},
 	}
-	hub := NewHub(policy.NewMemoryStore(p), nil, nil)
+	hub := NewHub(policy.Static(p), nil, nil)
 	const topic = "ingest.clicks"
 
 	viewer := NewSubscriber(nil, nil)
@@ -191,7 +191,7 @@ func TestHub_ProjectsPerRole_DistinctRolesGetDistinctFrames(t *testing.T) {
 			},
 		},
 	}
-	hub := NewHub(policy.NewMemoryStore(p), nil, nil)
+	hub := NewHub(policy.Static(p), nil, nil)
 	const topic = "ingest.clicks"
 
 	viewer, editor := NewSubscriber(nil, nil), NewSubscriber(nil, nil)
@@ -245,7 +245,7 @@ func rowFilterPolicy() *policy.Policy {
 // matching the constant-false predicate the query path binds for it.
 func TestHub_RowFilter_PerSubscriberIsolation(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
+	hub := NewHub(policy.Static(rowFilterPolicy()), nil, nil)
 	const topic = "ingest.clicks"
 
 	acme := NewSubscriber(jwtClaims(t, map[string]any{"tenant": "acme"}), nil)
@@ -289,7 +289,7 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 			}},
 		},
 	}
-	hub := NewHub(policy.NewMemoryStore(p), nil, nil)
+	hub := NewHub(policy.Static(p), nil, nil)
 	const topic = "ingest.clicks"
 
 	org := map[string]any{"tenant": "globex"}
@@ -316,7 +316,7 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 			}},
 		},
 	}
-	inHub := NewHub(policy.NewMemoryStore(inPolicy), nil, nil)
+	inHub := NewHub(policy.Static(inPolicy), nil, nil)
 	tenants := []any{"globex"}
 	inSub := NewSubscriber(map[string]any{"tenants": tenants}, nil)
 	inHub.Add(topic, "viewer", inSub)
@@ -335,7 +335,7 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 // column can't be proven visible, so it is withheld rather than leaked.
 func TestHub_RowFilter_MissingColumn_FailsClosed(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
+	hub := NewHub(policy.Static(rowFilterPolicy()), nil, nil)
 	const topic = "ingest.clicks"
 
 	acme := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
@@ -352,7 +352,7 @@ func TestHub_RowFilter_MissingColumn_FailsClosed(t *testing.T) {
 // per-subscriber, not the serialization.
 func TestHub_RowFilter_SharedProjectionAcrossSameClaims(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
+	hub := NewHub(policy.Static(rowFilterPolicy()), nil, nil)
 	const topic = "ingest.clicks"
 
 	a := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
@@ -391,7 +391,7 @@ func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 			}},
 		},
 	}
-	hub := NewHub(policy.NewMemoryStore(p), reg, nil)
+	hub := NewHub(policy.Static(p), reg, nil)
 	const topic = "ingest.clicks"
 
 	sub := NewSubscriber(nil, nil) // constant filter value ⇒ no claims needed
@@ -406,7 +406,7 @@ func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 	// Same policy, no schema registry: an ordering predicate can't be proven either
 	// way, so both rows are withheld — including the one the schema-informed path
 	// delivers above.
-	noSchema := NewHub(policy.NewMemoryStore(p), nil, nil)
+	noSchema := NewHub(policy.Static(p), nil, nil)
 	blind := NewSubscriber(nil, nil)
 	noSchema.Add(topic, "viewer", blind)
 	noSchema.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"amount": float64(9), "page": "/a"}))
@@ -432,7 +432,7 @@ func TestHub_RowFilter_FloatNarrowing_SchemaInformed(t *testing.T) {
 			}},
 		},
 	}
-	hub := NewHub(policy.NewMemoryStore(p), reg, nil)
+	hub := NewHub(policy.Static(p), reg, nil)
 	const topic = "ingest.clicks"
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
@@ -471,7 +471,7 @@ func TestHub_PassthroughAndFailClosed(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
-		store    *policy.Store
+		store    policy.Source
 		payload  string
 		wantData string // "" ⇒ expect no frame (event skipped)
 	}{
@@ -488,7 +488,7 @@ func TestHub_PassthroughAndFailClosed(t *testing.T) {
 		},
 		{
 			name:    "non-EventMessage is dropped (fail closed) when a policy store is wired",
-			store:   policy.NewMemoryStore(&policy.Policy{}),
+			store:   policy.Static(&policy.Policy{}),
 			payload: `{"custom":"data","value":42}`,
 		},
 	}
@@ -583,7 +583,7 @@ func TestHub_ReplayProjector(t *testing.T) {
 			"clicks": {Select: map[string]policy.RolePermissions{"viewer": {AllowColumns: []string{"page"}}}},
 		},
 	}
-	hub := NewHub(policy.NewMemoryStore(p), nil, nil)
+	hub := NewHub(policy.Static(p), nil, nil)
 	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z", map[string]any{"page": "/home", "secret": "x"})
 
 	tests := []struct {
@@ -624,7 +624,7 @@ func TestHub_ReplayProjector(t *testing.T) {
 // gap-fill event is projected only when the connection's claims satisfy the filter.
 func TestHub_ReplayProjector_RowFilter(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
+	hub := NewHub(policy.Static(rowFilterPolicy()), nil, nil)
 	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
 		map[string]any{"tenant_id": "acme", "page": "/a", "secret": "x"})
 
@@ -685,7 +685,7 @@ func TestHub_ConcurrentAddRemoveBroadcast_Race(t *testing.T) {
 // racing silently on a security decision.
 func TestHub_ConcurrentRowFilteredBroadcast_Race(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
+	hub := NewHub(policy.Static(rowFilterPolicy()), nil, nil)
 	const topic = "ingest.clicks"
 	raw := rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "acme", "page": "/a"})
 
@@ -736,7 +736,7 @@ func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
 			}},
 		},
 	}
-	hub := NewHub(policy.NewMemoryStore(p), reg, nil)
+	hub := NewHub(policy.Static(p), reg, nil)
 	const topic = "ingest.clicks"
 
 	// Claims come from real signed tokens through the production middleware, so a
@@ -780,7 +780,7 @@ func TestHub_RowFilter_TimestampInstantMatch(t *testing.T) {
 			}},
 		},
 	}
-	hub := NewHub(policy.NewMemoryStore(p), reg, nil)
+	hub := NewHub(policy.Static(p), reg, nil)
 	const topic = "ingest.clicks"
 
 	sub := NewSubscriber(nil, nil)
@@ -813,7 +813,7 @@ func TestHub_RowFilterWithheldIncrementsMetric(t *testing.T) {
 		otel.SetMeterProvider(savedMP)
 	})
 
-	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, NewMetrics())
+	hub := NewHub(policy.Static(rowFilterPolicy()), nil, NewMetrics())
 	const topic = "ingest.clicks"
 	acme := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
 	globex := NewSubscriber(map[string]any{"tenant": "globex"}, nil)
@@ -847,7 +847,7 @@ func BenchmarkBroadcast_RowFilteredFanout(b *testing.B) {
 
 	for _, n := range []int{100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("subscribers=%d", n), func(b *testing.B) {
-			hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
+			hub := NewHub(policy.Static(rowFilterPolicy()), nil, nil)
 			subs := make([]*Subscriber, n)
 			for i := range n {
 				tenant := "acme"

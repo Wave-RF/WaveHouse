@@ -1,0 +1,198 @@
+---
+title: "Settings Directory"
+description: "The hot-reloadable half of configuration — roles, policy, pipes, and the config.json keys; reload triggers; and the validate / bootstrap CLI."
+cloudCta:
+  body: "Everything on this page is what a tenant tunes — id fields, query limits, CORS origins. On WaveHouse Cloud these are the settings you edit in the dashboard, and the files, the reload, and the validation happen for you."
+sidebar:
+  order: 10
+---
+
+Boot config — the YAML file and `WH_*` environment variables on the [Configuration](/configuration) page — is what only a restart can change: resource sizing, listeners, exporters, and the secrets. This page covers everything else: the **settings directory**, the behavioral configuration a running instance re-reads without restarting — the access-control policy and its role registry, the named pipes, and the tunables including the ClickHouse and auth wiring.
+
+The settings directory holds WaveHouse's file-based settings as exactly four JSON documents: [`roles.json`](#rolesjson), [`policies.json`](#policiesjson), [`pipes.json`](#pipesjson), and [`config.json`](#configjson-keys). The files are the only write path — standalone, you edit them on the host; on WaveHouse Cloud the control plane writes them — and there is no API that writes back to them. Every file must exist (an empty document is `{}` — a missing file always means deletion or a wrong path, never "defaults"), and any other entry in the directory is an error, so a typoed filename or a stray backup fails loudly instead of being silently ignored. Dot-prefixed entries are the one exception: editor swap files and the `..data` machinery Kubernetes ConfigMap mounts publish through are ignored.
+
+Create one with `wavehouse bootstrap [dir]`: it writes all four files with every key at its default and refuses a non-empty directory, so an existing settings directory is never overwritten. The binary carries no compiled defaults — the seed is the one place they live, and what the server adopts is exactly what the files say. The seed ships no policy (`policies.json` is `{}`, `roles.json` and `pipes.json` are empty lists), so a freshly bootstrapped directory boots fail-closed — every request is denied until you write a policy. The container images ship no settings directory: they preset `WH_SETTINGS_DIR=/app/settings` and expect a bind mount there — a host directory you wrote with `bootstrap` (the reference compose file mounts the checked-in `deployments/compose/settings/`, the seed with `clickhouse.addr` pointed at the `clickhouse` service and a permissive `public` trial policy in `policies.json` / `roles.json`). A bind mount, not a named volume: the images are distroless, with no shell to edit files inside a volume. A missing mount refuses to boot rather than running on defaults nobody chose.
+
+Check a directory with `wavehouse validate [dir]`. Both commands resolve the directory the same way — the argument, falling back to `WH_SETTINGS_DIR`, and a usage error (exit `2`) with neither — so the path you seed is the path you validate, and inside the container images (which preset `WH_SETTINGS_DIR=/app/settings`) both work with no argument at all. `validate` validates without starting the server (JSON syntax including unknown fields and duplicate keys, per-file shape rules including the required keys, and cross-file role references), prints every finding in one pass, and exits `0` for valid (warnings allowed), `1` for invalid, `2` for usage — so operators and CI can gate a settings change before it reaches a running instance.
+
+Where the directory lives is the one boot-config key involved: `settings.dir` / `WH_SETTINGS_DIR`, documented in [Configuration — Settings Directory](/configuration#settings-directory). It's required with no default; the container images preset it to `/app/settings`.
+
+## Loading and hot reload
+
+The server validates and adopts the directory at boot — a missing or invalid directory refuses to start, so a typo, a missing mount, or an invalid policy surfaces immediately instead of silently denying every request (run `wavehouse validate` to reproduce the findings, `wavehouse bootstrap` to create a starter directory).
+
+A running instance re-validates and re-adopts on any of three triggers, all funneling through one serialized reload path:
+
+- **File change** — the directory is watched; a burst of writes (an editor save, a Kubernetes ConfigMap republish) coalesces into one reload, and a directory that is deleted and recreated (or renamed over) is picked up again.
+- **`SIGHUP`** — `kill -HUP <pid>`.
+- **`POST /v1/ops/settings/reload`** (admin-only) — returns `{"adopted": bool, "findings": [...]}`; `200` when adopted, `422` when rejected.
+
+A reload that fails validation is logged (and reported by the endpoint) and the previous good settings stay in effect — an operator mid-edit, a deleted file, even a vanished directory degrades to a log line, never to a broken server. Warnings don't block adoption, matching `wavehouse validate`.
+
+"Previous good settings" is the in-memory snapshot of the running process, nothing more: there is no persisted copy of the files. A restart re-validates the directory from scratch and refuses to start on the same findings the reload rejected, so bad files never survive a restart silently — fix them (or run `wavehouse validate`) before bouncing the server.
+
+Every adoption — boot and every reload — goes through the same `Validate`, so the policy, the roles, and the pipes are checked with the current rules each time they are read; there is no stored copy that can skip validation. All four files are adopted as one snapshot: a request is evaluated against the policy, pipes, and tunables of a single adoption, never a mix.
+
+Every file is decoded strictly: an unknown key, a duplicate key, a UTF-8 byte order mark, an all-whitespace file, or a top-level `null` is an error, so a misspelled rule can never load as "no rule".
+
+## `roles.json`
+
+The role registry — every role a policy grant or a pipe allowlist may name:
+
+```json
+{ "roles": ["admin", "analyst", "public"] }
+```
+
+Rules: each name must be non-empty, without surrounding whitespace, and unique. Cross-file, every role referenced elsewhere must be declared here: `policies.json`'s `default_role` and `admin_role`, every role under a table's `select` / `insert`, and every entry in a pipe's `allowed_roles`. An undeclared reference is an error, so a typo in a grant fails validation instead of silently matching nobody.
+
+Does the admin role belong in this list? Only if `policies.json` names it: setting `admin_role` (or using the admin role as `default_role`) requires declaring that role here, like any other reference. Leaving `admin_role` unset — the built-in default `admin` — requires nothing; the reference compose seed's `roles.json` is just `["public"]` and validates clean for exactly this reason. Naming the admin role inside a table grant or a pipe's `allowed_roles` never requires a declaration either — admin is an [unconditional bypass](/access-control#admin_role--the-privileged-role), so such an entry is dead config and only warns.
+
+## `policies.json`
+
+The access-control policy — one [policy document](/access-control#anatomy-of-a-policy) (`default_role`, `admin_role`, `tables`), the same shape `GET /v1/ops/policy` returns and `POST /v1/ops/policy/validate` checks:
+
+```json
+{
+  "default_role": "public",
+  "admin_role": "admin",
+  "tables": {
+    "events": {
+      "select": { "public": { "allow_columns": ["*"] } },
+      "insert": { "public": { "allow_columns": ["*"] } }
+    }
+  }
+}
+```
+
+An empty document (`{}`) means **no policy**: it validates with a warning, and the server adopts it fail-closed — every request is denied, including one carrying the admin role; only the [operator key](/access-control#operator-key) gets through. A non-empty document must pass the full [policy validation](/access-control#anatomy-of-a-policy) (column and row rules, the claim-template grammar, resource limits), and its roles must be declared in `roles.json`. Two states warn rather than fail: `default_role` equal to the admin role (every roleless request is admin — dev only), and a grant keyed by the admin role (admin is an unconditional bypass, so the grant has no effect).
+
+A reload applies to the very next request: the policy is read per request off the adopted snapshot, and a live `GET /v1/stream` connection's role is re-evaluated against the new policy on the next event.
+
+## `pipes.json`
+
+The [named pipes](/pipes):
+
+```json
+{
+  "pipes": [
+    {
+      "name": "top_pages",
+      "description": "Most-visited pages over a window",
+      "sql": "SELECT page, count() AS hits FROM events WHERE ts > now() - INTERVAL {{hours:24}} HOUR GROUP BY page ORDER BY hits DESC LIMIT {{limit}}",
+      "parameters": [
+        { "name": "hours", "type": "number", "default": 24 },
+        { "name": "limit", "type": "number", "required": true }
+      ],
+      "allowed_roles": ["analyst"]
+    }
+  ]
+}
+```
+
+Each pipe carries `name`, `sql`, optional `description`, optional `parameters` (`name`, `type`, `required`, `default`), and `allowed_roles`. Rules: names unique and non-empty; `sql` non-empty; parameter names non-empty and unique within the pipe; `type` one of `string`, `number`, `boolean`, `array` (or omitted); every `allowed_roles` entry non-empty and declared in `roles.json`. A `default` on a `required` parameter warns (it is never used), and listing the admin role in `allowed_roles` warns (admin can always execute). A pipe with no `allowed_roles` authorizes nobody but the admin role. Table and column existence are not checked — that is schema discovery's job at execution time.
+
+Pipes are read per request, so a reload changes what the next `GET /v1/pipes/{name}` executes and what `GET /v1/ops/pipes` lists.
+
+## `config.json` keys
+
+The tenant tunables. Every key is required (a missing one is a validation error) except the per-table overrides; the "Seed" column is what `wavehouse bootstrap` writes:
+
+| Key | Seed | Description |
+| --- | ---- | ----------- |
+| `clickhouse.addr` | `localhost:9000` | Native-protocol `host:port` — schema discovery, structured queries, pipes, `/readyz`. See [ClickHouse](#clickhouse). |
+| `clickhouse.http_port` | `8123` | HTTP interface port on the same host (ingest `INSERT`s and the raw-SQL proxy), `1–65535`. |
+| `clickhouse.http_scheme` | `http` | `http` or `https` for that HTTP hop (the *outbound* TLS setting, unrelated to your clients' TLS). |
+| `clickhouse.database` | `default` | Database tables are discovered from. |
+| `clickhouse.username` | `default` | Connection user; the password is boot config (`WH_CH_PASSWORD`). |
+| `clickhouse.query_timeout` | `30` | Seconds (`>= 1`) a read may take; bounds the client deadline, from which the driver derives a server-side `max_execution_time`. |
+| `auth.jwks_url` | `""` | JWKS endpoint (absolute `http(s)` URL). When set, JWKS is the **sole** verifier and `jwt_secret` is ignored. See [Authentication](#authentication). |
+| `auth.role_claim` | `role` | Dot-separated JWT claim path the role is read from (e.g. `app_metadata.role`). |
+| `dedupe.enabled` | `false` | Turn deduplication on; a reload opens or closes the Pebble store — see [Deduplication](#deduplication). |
+| `dedupe.id_field` | `event_id` | Dedup key field — see [Deduplication](#deduplication). |
+| `dedupe.require_id` | `false` | Reject rows missing the id field — see [Deduplication](#deduplication). |
+| `dedupe.tables.<table>.{id_field, require_id}` | `{}` | Optional per-table overrides; each entry overrides only the fields it names and inherits the rest. |
+| `dlq.enabled` | `true` | Park rows that still fail after row-by-row isolation on the `WAVEHOUSE_DLQ` stream (`false`: leave them unacked for redelivery) — see [Dead Letter Queue](#dead-letter-queue). |
+| `dlq.tables.<table>.enabled` | `{}` | Optional per-table override of the switch. |
+| `query.timestamp_bucket_seconds` | `60` | Bucket (seconds, `>= 0`) that a structured query's relative time range is truncated to, so near-identical queries share a cache entry; `0` disables bucketing. Read per query. |
+| `query.default_max_rows` | `10000` | Fallback result `LIMIT` (`>= 1`) applied to a structured query when the caller and policy specify none. A result-**shaping** default, not a resource limit — server-wide limits (memory, rows scanned, execution time) belong in ClickHouse, see [Server-side resource limits](/configuration#server-side-resource-limits). |
+| `schema.refresh_interval` | `60` | Seconds between ClickHouse table-schema re-discoveries (`>= 1`); a reloaded value takes effect from the next refresh cycle. Schemas are also refreshable on demand via `POST /v1/ops/schema/refresh` (admin-only). |
+| `stream.keepalive_interval` | `30` | Seconds (`>= 1`) a quiet `GET /v1/stream` connection may go without a write before the server sends a `:` keepalive comment — keep it under your proxy's idle timeout; see [Streaming](#streaming). |
+| `stream.keepalive_buckets` | `3` | Load-spreading (`>= 1`): connections are spread across N buckets so each tick nudges ~1/N of live streams. Most deployments leave it. |
+| `stream.gap_window_minutes` | `15` | Minutes (`>= 0`) of written-to-ClickHouse history the Active Sweeper keeps in NATS for `Last-Event-ID` gap-fill; applies from the next sweep. |
+| `mq.max_bytes_gb` | `50` | Disk budget (GB, `>= 1`) for the embedded NATS `WAVEHOUSE` ingest stream; the `WAVEHOUSE_DLQ` stream gets a tenth of it. A reload updates the live streams in place. See [Message Queue](#message-queue). |
+| `cors.allowed_origins` | `["*"]` | Allowed CORS origins, applied per request. `"*"` allows any browser origin. WaveHouse is a Bearer-token API — `Access-Control-Allow-Credentials` is intentionally never sent, so this allowlist controls *which origins can read responses*, not cookie scope. Tighten to your frontend's exact origin(s) in production (e.g. `["https://dashboard.example.com", "http://localhost:3000"]`). An empty list `[]` is **not** "no origins" — it is equivalent to `["*"]` and validation warns about it; to restrict browser origins, list only the ones you allow. |
+
+```json
+{
+  "clickhouse": {
+    "addr": "clickhouse.internal:9000",
+    "http_port": 8123,
+    "http_scheme": "http",
+    "database": "analytics",
+    "username": "wavehouse",
+    "query_timeout": 30
+  },
+  "auth": { "jwks_url": "https://auth.example.com/.well-known/jwks.json", "role_claim": "app_metadata.role" },
+  "dedupe": {
+    "enabled": false,
+    "id_field": "event_id",
+    "require_id": false,
+    "tables": {
+      "clicks": { "id_field": "click_id" }
+    }
+  },
+  "dlq": {
+    "enabled": true,
+    "tables": {
+      "audit_log": { "enabled": false }
+    }
+  },
+  "query": { "default_max_rows": 10000, "timestamp_bucket_seconds": 60 },
+  "schema": { "refresh_interval": 60 },
+  "stream": { "keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": 15 },
+  "mq": { "max_bytes_gb": 50 },
+  "cors": { "allowed_origins": ["*"] }
+}
+```
+
+What stays in boot config is only what cannot change under a running process — resource sizing (`data_dir`, `cache.l1_max_cost`), the listeners, the observability exporters — and the **secrets**: `clickhouse.password`, `auth.jwt_secret`, `auth.operator_key`. Secrets never belong in a tracked JSON file, so they stay in the environment and are combined with the wiring here on every (re)connect; rotating one is a restart. See [Configuration](/configuration). Everything else lives here and reloads.
+
+## Deduplication
+
+Every dedupe knob lives here — there are no boot-config keys for it. The switch and its fields are resolved per record from one snapshot (table override → global value):
+
+- `dedupe.enabled` (seed default `false`) — turns deduplication on. Hot-reloadable: a reload that flips it opens the embedded Pebble store at `<data_dir>/pebble` (or closes it), so no restart is needed; seen ids persist across an off/on cycle. If the store fails to open on a reload, the failure is logged and ingest fails closed (`500 dedupe failed`) until the next reload or restart — the files asked for dedupe, so publishing un-deduped is not a fallback. At boot a failed open refuses to start, like every other store. A record that lands in the instant of the flip itself is published un-deduped: if the settings already say on but the store is not yet open, it's counted by `wavehouse_ingest_dedupe_disabled_total`; in the reverse case (settings already say off, store still open) the handler skips dedupe like any other disabled record and nothing is counted. That counter should only ever tick during a reload, so a steadily climbing rate means the store and the settings have come apart.
+- `dedupe.id_field` (seed default `event_id`) — JSON field name in the ingest body used as the dedup key.
+- `dedupe.require_id` (seed default `false`) — controls what happens to a row missing `id_field` (which can't be deduped, so idempotency wouldn't apply to it). Such a row is always logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`, in both modes. `false`: it is then published un-deduped. `true` rejects it instead (`400` for a single insert; a per-record failure in a batch) — a server-side tripwire for producers that must guarantee the id.
+- `dedupe.tables.<table>.{id_field, require_id}` — per-table overrides; each entry overrides only the fields it names and inherits the rest.
+
+## ClickHouse
+
+The `clickhouse` block is the connection wiring, minus the password. A reload that changes any of it swaps the connection behind every consumer (schema discovery, structured queries, pipes, `/readyz`, the ingest worker's HTTP `INSERT`s, and the raw-SQL proxy — the HTTP-side ones re-read the target per request). The replaced connection stays open for one `query_timeout` so in-flight queries finish. The swap is **unconditional**: the adopted settings are the authority, so an address that isn't reachable is applied all the same and shows up where reachability already does — schema discovery retries and logs, `/readyz` fails, queries return errors — until the next reload fixes it. Validation checks shape only (`host:port`, port range, scheme, non-empty database and user, timeout `>= 1`); reachability is a runtime concern, so `wavehouse validate` needs no ClickHouse. At boot the address is dialed lazily, as before: an unreachable ClickHouse degrades `/livez` and retries rather than refusing to start.
+
+Ingest traffic is unaffected by a migration: events land in the embedded queue regardless, and the worker's next flush uses the new target.
+
+## Authentication
+
+The `auth` block is the verifier wiring, minus the secrets. `jwks_url` (absolute `http(s)` URL, or `""`) and `role_claim` reload live: a reload builds a new verifier and swaps it in atomically, so a request never sees a JWKS key source paired with the HMAC algorithm allowlist. The swap is unconditional: if `jwks_url` can't be fetched, the new verifier is in place with no keys, so no JWT validates and every request falls to the policy `default_role` (fail closed) until the key set is reachable — the fetch is retried in the background and on the first unknown key id — or the next reload. At boot an unreachable JWKS refuses to start, as before. Switching between HMAC (`jwt_secret` set, `jwks_url` empty) and JWKS is therefore a file edit. The operator key and the HMAC secret are boot config.
+
+## Dead Letter Queue
+
+A failed batch insert is retried row by row; a row that fails again on its own is a poison row. `dlq.enabled` (seed default `true`) decides what happens to it, resolved per table (`dlq.tables.<table>.enabled` → global) at the moment of the failure, so a reload applies to the next poison row:
+
+- `true` — the row is published to the `WAVEHOUSE_DLQ` NATS stream under `dlq.<table>` with the ClickHouse error in its headers, and its original is acked. Inspect it with `GET /v1/ops/dlq/stats` (admin-only).
+- `false` — the row is left unacked, so NATS redelivers it and it retries until it inserts or the switch is flipped back. Nothing is ever dropped either way; the choice is *park it* versus *keep retrying*.
+
+The `WAVEHOUSE_DLQ` stream always exists (an empty stream costs nothing) and the stats endpoint is always registered — the switch is purely behavioral, which is what makes it safe to reload.
+
+## Message Queue
+
+- `mq.max_bytes_gb` (seed default `50`) — disk budget for the embedded JetStream `WAVEHOUSE` stream that buffers ingested events until the worker writes them to ClickHouse; the `WAVEHOUSE_DLQ` stream gets a tenth of it. The stream runs `DiscardNew`, so when it's full new publishes are rejected and `POST /v1/ingest` returns `503` — [backpressure by construction](/ingest-pipeline#backpressure-and-durability-knobs). A reload updates both streams' limits in place without touching what's buffered: growing takes effect immediately; shrinking below what's currently on disk makes the stream refuse new publishes until the worker drains it back under the limit — nothing already accepted is dropped. If NATS rejects the update, the previous limit stays in effect and the failure is logged. Size it from [Durability & Storage](/durability).
+
+## Streaming
+
+`GET /v1/stream` keepalives and gap-fill are tuned here:
+
+- `stream.keepalive_interval` (seed default `30`) — seconds a quiet connection may go without a write before the server sends a `:` keepalive comment. It exists to stay under whatever idle timeout sits between WaveHouse and the client; the default clears the common 55–60s proxy windows with margin, and a tighter edge (Azure Application Gateway 20s, CloudFront 30s) wants a lower value — see [Behind a reverse proxy → Idle timeouts](/reverse-proxy#idle-timeouts-by-provider). A reload rebuilds the keepalive wheel in place: live connections stay open and are redistributed across the new ring, each getting at most one full new period before its next keepalive.
+- `stream.keepalive_buckets` (seed default `3`) — spreads the keepalive writes across the interval (one bucket fires every `keepalive_interval ÷ keepalive_buckets`) so the server nudges ~1/N of connections per tick instead of all at once. It changes only how the writes are spread in time, never the period.
+- `stream.gap_window_minutes` (seed default `15`) — minutes of already-written-to-ClickHouse history the Active Sweeper keeps in NATS so a reconnecting client's `Last-Event-ID` replay can bridge the gap; a drop longer than this resumes with a hole. Bounded by the stream's disk budget, [`mq.max_bytes_gb`](#message-queue). A reload applies from the next sweep (every minute).

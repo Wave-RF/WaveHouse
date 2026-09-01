@@ -24,19 +24,29 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -tags="${BUILD_TAGS}" -ldflags="-s -w" -o /bin/wavehouse ./cmd/wavehouse
 
-# Create the parent state and pipes-bootstrap directories owned by the nonroot
+# Create the parent state and settings directories owned by the nonroot
 # user (UID 65532 in distroless). The binary creates `nats/` and `pebble/`
 # subdirectories itself when NATS/Pebble open their stores — pre-creating
 # them here would buy nothing and obscures intent. Named-volume copy-up runs
 # against `/app/data` regardless; bind mounts mask the image dir entirely
 # and rely on host-side ownership matching UID 65532.
-RUN mkdir -p /app/data /app/pipes && chown -R 65532:65532 /app
+#
+# /app/settings is the settings-directory mount point, pre-created but
+# deliberately EMPTY: the image ships no settings, same as it ships no
+# policy. The operator bind-mounts a directory there, written on the host
+# with `wavehouse bootstrap` (a bind mount, not a named volume: the image
+# is distroless, with no shell to edit files inside a volume), and a
+# missing mount refuses to boot instead of running on defaults nobody
+# chose. Not a VOLUME either (unlike /app/data): it's config, not state,
+# and an anonymous volume would hide a forgotten mount.
+RUN mkdir -p /app/data /app/settings && chown -R 65532:65532 /app
 
 # Stage 2: Final minimal image
 FROM gcr.io/distroless/static-debian12
 
 WORKDIR /app
 USER nonroot:nonroot
+ENV WH_SETTINGS_DIR=/app/settings
 
 COPY --from=builder --chown=nonroot:nonroot /app /app
 COPY --from=builder --chown=nonroot:nonroot /bin/wavehouse /app/wavehouse
@@ -63,8 +73,9 @@ LABEL com.docker.extension.icon="https://raw.githubusercontent.com/Wave-RF/WaveH
 # every restart). Doesn't override or interact with explicit `-v` /
 # compose `volumes:` declarations; those still take precedence.
 #
-# Pipes (/app/pipes) is intentionally NOT a VOLUME — it's a read-only
-# bootstrap source, not state. See docs/deployment.md.
+# The settings directory (/app/settings) is intentionally NOT a VOLUME — it's
+# operator config the process only reads, and an anonymous volume would hide
+# a missing mount instead of refusing to boot. See docs/deployment.md.
 VOLUME ["/app/data"]
 
 # Default listen port. ENV is just a default — compose `environment:` or

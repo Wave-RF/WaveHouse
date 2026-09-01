@@ -47,16 +47,22 @@ func (ts *TableSchema) ColumnNames() []string {
 
 // SchemaRegistry discovers and caches ClickHouse table schemas.
 type SchemaRegistry struct {
-	conn            driver.Conn
-	database        string
-	refreshInterval time.Duration
+	conn driver.Conn
+	// database supplies the database to discover from on each Refresh, so a
+	// ClickHouse reconfigure that changes clickhouse.database is honored by
+	// the next refresh (chconn.Manager.Database in production).
+	database func() string
+	// refreshInterval supplies the auto-refresh interval on each tick, so a
+	// settings reload retunes the cadence without restarting the loop
+	// (settings.Store.SchemaRefreshInterval in production).
+	refreshInterval func() time.Duration
 	logger          *slog.Logger
 	mu              sync.RWMutex
 	tables          map[string]*TableSchema
 }
 
 // NewSchemaRegistry creates a registry that discovers schemas from system.columns.
-func NewSchemaRegistry(conn driver.Conn, database string, refreshInterval time.Duration, logger *slog.Logger) *SchemaRegistry {
+func NewSchemaRegistry(conn driver.Conn, database func() string, refreshInterval func() time.Duration, logger *slog.Logger) *SchemaRegistry {
 	return &SchemaRegistry{
 		conn:            conn,
 		database:        database,
@@ -95,7 +101,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		 WHERE database = ?
 		   AND table NOT LIKE '.%'
 		 ORDER BY table, position`,
-		sr.database,
+		sr.database(),
 	)
 	if err != nil {
 		return fmt.Errorf("query system.columns: %w", err)
@@ -211,9 +217,13 @@ func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxB
 }
 
 // StartAutoRefresh runs a background goroutine that refreshes schemas
-// at the configured interval. Blocks until ctx is cancelled.
+// at the configured interval. Blocks until ctx is cancelled. The interval is
+// re-read after every tick, so a changed setting applies from the next cycle
+// — an in-flight wait finishes at the old cadence rather than resetting,
+// which keeps a reload from ever deferring an imminent refresh.
 func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
-	ticker := time.NewTicker(sr.refreshInterval)
+	interval := sr.refreshInterval()
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -222,6 +232,10 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 		case <-ticker.C:
 			if err := sr.Refresh(ctx); err != nil {
 				sr.logger.Error("schema auto-refresh failed", "error", err)
+			}
+			if next := sr.refreshInterval(); next != interval {
+				interval = next
+				ticker.Reset(interval)
 			}
 		}
 	}

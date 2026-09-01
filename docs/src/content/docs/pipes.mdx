@@ -5,9 +5,7 @@ sidebar:
   order: 6
 ---
 
-import { Tabs, TabItem } from "@astrojs/starlight/components";
-
-A **named pipe** is a saved SQL query, registered under a name, that callers run by name with parameters — without ever sending raw SQL. They turn an ad-hoc query into a stable, cached, access-controlled endpoint: you write the SQL once as an operator, expose it at `GET/POST /v1/pipes/{name}`, and clients supply only the declared parameters.
+A **named pipe** is a saved SQL query, registered under a name, that callers run by name with parameters — without ever sending raw SQL. They turn an ad-hoc query into a stable, cached, access-controlled endpoint: you write the SQL once as an operator in the settings directory's [`pipes.json`](/settings-directory#pipesjson), expose it at `GET/POST /v1/pipes/{name}`, and clients supply only the declared parameters.
 
 Pipes are the right tool when a query is reusable and shouldn't live in client code — dashboards, reports, public APIs over curated slices of data. They sit on the **cached read path** (shared L1 + singleflight, same as structured queries), and authorize through a simple per-pipe allowlist rather than the full [policy engine](/access-control).
 
@@ -17,7 +15,7 @@ A pipe is defined by five fields:
 
 | Field | Type | Required | Description |
 | ----- | ---- | -------- | ----------- |
-| `name` | string | yes | The pipe's identifier; the last path segment of `/v1/pipes/{name}`. Set from the URL on create. |
+| `name` | string | yes | The pipe's identifier; the last path segment of `/v1/pipes/{name}`. Unique within `pipes.json`. |
 | `sql` | string | yes | A SQL template with `{{param}}` placeholders. Sent verbatim to ClickHouse after binding. |
 | `parameters` | object[] | no | Formal parameter declarations (see [Parameters](#parameters)). |
 | `description` | string | no | Human-readable note shown in the admin listing. |
@@ -25,18 +23,19 @@ A pipe is defined by five fields:
 
 ```json
 {
+  "name": "top_pages",
   "sql": "SELECT page, count() AS views FROM clicks WHERE received_timestamp >= {{start_date}} GROUP BY page ORDER BY views DESC LIMIT {{limit}}",
   "parameters": [
     {"name": "start_date", "type": "string", "required": true},
     {"name": "limit", "type": "number", "required": false, "default": 100}
   ],
   "description": "Top pages by view count since a given date",
-  "allowed_roles": ["viewer", "admin"]
+  "allowed_roles": ["viewer"]
 }
 ```
 
-:::caution[Pipe SQL is operator-authored and admin-only to write]
-Anyone who can create or edit a pipe can run arbitrary SQL, so pipe management lives entirely behind the admin gate. Callers of a pipe never send SQL — only parameter values. Keep that boundary in mind when you design a pipe: the SQL is your trusted code, the parameters are untrusted input.
+:::caution[Pipe SQL is operator-authored]
+Anyone who can write a pipe can run arbitrary SQL, so pipe definitions live only in the settings directory — a file the platform operator controls — and there is no API that writes them. Callers of a pipe never send SQL — only parameter values. Keep that boundary in mind when you design a pipe: the SQL is your trusted code, the parameters are untrusted input.
 :::
 
 ## Parameters
@@ -50,7 +49,7 @@ The `parameters` array formally declares a parameter with metadata:
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `name` | string | Placeholder name; matches `{{name}}` in the SQL. |
-| `type` | string | Documents the expected value type (`"string"`, `"number"`, `"boolean"`, `"array"`). Descriptive — it advertises intent to callers and the SDK; binding itself keys off the runtime value. |
+| `type` | string | Documents the expected value type — one of `"string"`, `"number"`, `"boolean"`, `"array"` (any other value fails validation). Descriptive — it advertises intent to callers and the SDK; binding itself keys off the runtime value. |
 | `required` | bool | If `true`, the caller must supply a value, even if the placeholder doesn't appear in the SQL. A missing required parameter is a `400`. |
 | `default` | any | Value used when the caller supplies none. |
 
@@ -123,32 +122,33 @@ This is the *only* authorization check on the execute path — pipes deliberatel
 
 ## Creating and managing pipes
 
-Pipe CRUD is admin-only, under `/v1/ops/pipes`:
+Pipes are defined in the settings directory's `pipes.json` — a `{"pipes": [...]}` list of the definitions above — and the files are the only write path: edit the file (standalone: on the host; on WaveHouse Cloud the control plane writes it) and the running server re-validates and adopts it on file change, `SIGHUP`, or `POST /v1/ops/settings/reload`, so a create, update, or delete applies without a restart. Validation (`wavehouse validate`, boot, and every reload) rejects an unknown key, a duplicate or empty name, empty SQL, an unknown parameter `type`, and an `allowed_roles` entry not declared in `roles.json`; a rejected reload keeps the previous pipes in effect. See [Settings Directory — `pipes.json`](/settings-directory#pipesjson) for the full rules.
+
+```json
+{
+  "pipes": [
+    {
+      "name": "top_pages",
+      "sql": "SELECT page, count() AS views FROM clicks WHERE received_timestamp >= {{start_date}} GROUP BY page ORDER BY views DESC LIMIT {{limit}}",
+      "parameters": [
+        {"name": "start_date", "type": "string", "required": true},
+        {"name": "limit", "type": "number", "required": false, "default": 100}
+      ],
+      "description": "Top pages by view count",
+      "allowed_roles": ["viewer"]
+    }
+  ]
+}
+```
+
+Two admin-only read endpoints, under `/v1/ops/pipes`, show what is adopted:
 
 | Method | Endpoint | Purpose |
 | ------ | -------- | ------- |
 | `GET` | `/v1/ops/pipes` | List all pipes. |
 | `GET` | `/v1/ops/pipes/{name}` | Get one pipe's definition. |
-| `PUT` | `/v1/ops/pipes/{name}` | Create or replace a pipe. |
-| `DELETE` | `/v1/ops/pipes/{name}` | Delete a pipe. |
 
-```bash
-# Create / update a pipe (admin token required)
-curl -X PUT http://localhost:8080/v1/ops/pipes/top_pages \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sql": "SELECT page, count() AS views FROM clicks WHERE received_timestamp >= {{start_date}} GROUP BY page ORDER BY views DESC LIMIT {{limit}}",
-    "parameters": [
-      {"name": "start_date", "type": "string", "required": true},
-      {"name": "limit", "type": "number", "required": false, "default": 100}
-    ],
-    "description": "Top pages by view count",
-    "allowed_roles": ["viewer", "admin"]
-  }'
-```
-
-A `PUT` is a full replace of that named pipe; `name` is taken from the URL. Definitions are stored in NATS KV and synced across nodes, so a create/update/delete applies cluster-wide without a restart. The [TypeScript SDK](/sdk) exposes the same operations as `client.pipes.list()`, `client.pipes.get(name)`, `client.pipes.set(name, def)`, and `client.pipes.delete(name)`.
+The [TypeScript SDK](/sdk) exposes them as `client.pipes.list()` and `client.pipes.get(name)`, and the reload as `client.settings.reload()`.
 
 ## Executing a pipe
 
@@ -178,57 +178,33 @@ The response is a JSON array of rows. Results flow through the shared in-process
 | 400 | `{"error":"missing required parameter: x"}` | A required parameter wasn't supplied |
 | 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL form — a JSON object (directly, or nested in an array). An empty array is likewise rejected (`array parameter must not be empty`). |
 
-## Bootstrapping from `.sql` files
-
-For version-controlled, deploy-time pipe definitions, point `pipes.dir` (in `config.yaml`, or its environment twin) at a directory of `.sql` files:
-
-<Tabs syncKey="cfg">
-<TabItem label="YAML">
-
-```yaml
-pipes:
-  dir: /app/pipes        # seed .sql files into KV on startup
-```
-
-</TabItem>
-<TabItem label="Environment">
-
-```ini
-WH_PIPES_DIR=/app/pipes
-```
-
-</TabItem>
-</Tabs>
-
-On startup, each top-level `*.sql` file is loaded as a pipe whose **name is the filename** (without the extension) and whose **SQL is the file contents**. So `pipes/top_pages.sql` becomes the pipe `top_pages`. The directory is a one-time **seed**, not authoritative storage:
-
-- It will **not overwrite** a pipe that already exists in KV — once a pipe is in the store (seeded earlier, or created via the API), the file is skipped.
-- After bootstrap, the API and KV are the source of truth; the directory is read-only at runtime. Mount it read-only in containers (e.g. `./my-pipes:/app/pipes:ro`).
-
-:::caution[Bootstrapped pipes are admin-only until you grant roles]
-A `.sql` file carries only the SQL — there's no way to express `allowed_roles`, `parameters`, or a `description` in the file. A pipe seeded this way therefore has an empty `allowed_roles`, which (fails-closed) means **admin only**. To expose it to other roles or add formal parameters, `PUT` the full definition through `/v1/ops/pipes/{name}` after boot. Inline `{{name:default}}` placeholders still work in a bootstrapped file, so the SQL can be parameter-ready even without formal declarations.
-:::
-
 ## End-to-end example
 
 Ship a curated "top pages" endpoint that the public dashboard can call with no token.
 
-1. **Open public access** so roleless requests assume a `viewer` identity — set `default_role` in the policy ([Access Control](/access-control#default_role--public-unauthenticated-access)). A pipe authorizes through its own `allowed_roles`, independent of any table-level `select` rules, so `default_role` is all the policy needs here:
+1. **Open public access** so roleless requests assume a `viewer` identity — set `default_role` in `policies.json` ([Access Control](/access-control#default_role--public-unauthenticated-access)) and declare the role in `roles.json`. A pipe authorizes through its own `allowed_roles`, independent of any table-level `select` rules, so `default_role` is all the policy needs here:
 
-   ```yaml
-   default_role: viewer
+   ```json title="policies.json"
+   { "default_role": "viewer", "tables": {} }
    ```
 
-2. **Register the pipe**, allowing `viewer`:
+   ```json title="roles.json"
+   { "roles": ["viewer"] }
+   ```
 
-   ```bash
-   curl -X PUT http://localhost:8080/v1/ops/pipes/top_pages \
-     -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-     -d '{
-       "sql": "SELECT page, count() AS views FROM clicks WHERE received_timestamp >= {{since:2024-01-01}} GROUP BY page ORDER BY views DESC LIMIT {{limit:50}}",
-       "description": "Top pages by view count",
-       "allowed_roles": ["viewer"]
-     }'
+2. **Define the pipe** in `pipes.json`, allowing `viewer`; the watcher adopts the edit (or `kill -HUP` the server, or `POST /v1/ops/settings/reload`):
+
+   ```json
+   {
+     "pipes": [
+       {
+         "name": "top_pages",
+         "sql": "SELECT page, count() AS views FROM clicks WHERE received_timestamp >= {{since:2024-01-01}} GROUP BY page ORDER BY views DESC LIMIT {{limit:50}}",
+         "description": "Top pages by view count",
+         "allowed_roles": ["viewer"]
+       }
+     ]
+   }
    ```
 
 3. **Call it with no token** — the request resolves to `viewer`, which is allowed:
@@ -241,5 +217,5 @@ Ship a curated "top pages" endpoint that the public dashboard can call with no t
 ## See also
 
 - **[Access Control](/access-control)** — roles, `default_role`, and the table-level policy engine that pipe `allowed_roles` builds on.
-- **[Configuration — Named Pipes](/configuration#named-pipes)** — the `pipes.dir` bootstrap knob.
+- **[Settings Directory — `pipes.json`](/settings-directory#pipesjson)** — the file rules and reload triggers.
 - **[API Reference](/api)** — the pipe execute and admin endpoints, with full error tables.

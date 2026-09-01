@@ -7,11 +7,15 @@
 
 # Build artifacts
 tmp/
+# Dev settings directory, seeded by `make dev` (wavehouse bootstrap settings)
+/settings/
 dist/
 
 # Build directories
 build/
 bin/
+# `go build ./cmd/wavehouse` with no -o drops the binary in the repo root
+/wavehouse
 
 # Stray binaries from `go build ./scripts/<name>` — Go helpers under scripts/
 # are meant to be run via `go run` (the Makefile drives them that way), but a
@@ -83,4 +87,3 @@ pnpm-debug.log*
 
 # local config files
 .config.local.yaml
-.policy.local.yaml

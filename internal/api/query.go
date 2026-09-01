@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 )
 
 // QueryHandler handles POST /v1/ops/query.
@@ -41,16 +43,14 @@ import (
 //     earlier commit; this completes the simplification.
 type QueryHandler struct {
 	HTTPClient *http.Client
-	// Endpoint is the ClickHouse HTTP base URL (e.g.
-	// `http://localhost:8123`). The handler appends query-string params
-	// (`default_format`, `database`, `date_time_output_format`) per request
-	// and POSTs the SQL as the request body.
-	Endpoint string
-	Username string
-	Password string
-	Database string
-	// maxQueryTimeout optionally ends an in-flight query when time is reached.
-	maxQueryTimeout time.Duration
+	// target resolves the ClickHouse HTTP wiring per request (chconn.Manager
+	// in production): the base URL (e.g. `http://localhost:8123`) the handler
+	// appends query-string params (`default_format`, `database`,
+	// `date_time_output_format`) to and POSTs the SQL against, plus the
+	// credentials and database. queryTimeout bounds each proxied query.
+	// Funcs, not values, so a settings reload applies to the next request.
+	target       func() chconn.Target
+	queryTimeout func() time.Duration
 	// maxResponseBytes optionally overrides the default upstream response
 	// buffer cap (maxCHResponseBytes). When 0, the default applies. Exists
 	// so same-package tests can pin the cap-overflow path without
@@ -100,21 +100,21 @@ const (
 )
 
 // NewQueryHandler builds a handler that proxies to ClickHouse over HTTP.
-// endpoint should be the base URL (`http://host:8123`); username/password
-// are forwarded via ClickHouse's `X-ClickHouse-User` / `X-ClickHouse-Key`
-// headers (matching the ingest worker's convention in internal/ingest).
-// database is set as the `?database=` query-string parameter when non-empty.
+// target supplies the base URL (`http://host:8123`), the username/password
+// forwarded via ClickHouse's `X-ClickHouse-User` / `X-ClickHouse-Key`
+// headers (matching the ingest worker's convention in internal/ingest), and
+// the database set as the `?database=` query-string parameter when non-empty.
 //
 // The HTTP client itself has no Timeout — every request gets a queryTimeout deadline
 // from a context derived from the inbound request (see Handle), which
 // bounds the whole exchange including body read. Setting `Timeout` here
 // too would just duplicate that bound (and silently truncate any
 // inbound context longer than queryTimeout).
-func NewQueryHandler(endpoint, username, password, database string, queryTimeout time.Duration) *QueryHandler {
+func NewQueryHandler(target func() chconn.Target, queryTimeout func() time.Duration) *QueryHandler {
 	return &QueryHandler{
 		HTTPClient: &http.Client{
 			// ClickHouse's HTTP interface doesn't 3xx in normal operation,
-			// and h.Endpoint is operator-controlled config (not user
+			// and the target URL is operator-controlled config (not user
 			// input). Don't chase redirects — if an operator misconfigures
 			// the endpoint to point at something that 3xx's, surface the
 			// 3xx response as-is. Our status-mapping below classifies
@@ -123,11 +123,8 @@ func NewQueryHandler(endpoint, username, password, database string, queryTimeout
 				return http.ErrUseLastResponse
 			},
 		},
-		Endpoint:        endpoint,
-		Username:        username,
-		Password:        password,
-		Database:        database,
-		maxQueryTimeout: queryTimeout,
+		target:       target,
+		queryTimeout: queryTimeout,
 	}
 }
 
@@ -191,7 +188,8 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := url.Parse(h.Endpoint)
+	target, timeout := h.target(), h.queryTimeout()
+	u, err := url.Parse(target.URL)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "invalid clickhouse endpoint: "+err.Error())
 		return
@@ -202,14 +200,14 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// re-parse ClickHouse's default `YYYY-MM-DD HH:MM:SS`. Matches the prior
 	// handler's RFC3339Nano output close enough for downstream callers.
 	q.Set("date_time_output_format", "iso")
-	if h.Database != "" {
-		q.Set("database", h.Database)
+	if target.Database != "" {
+		q.Set("database", target.Database)
 	}
 	u.RawQuery = q.Encode()
 
 	// Bound the upstream call with a deadline derived from the inbound
 	// request context — client disconnect cancels the ClickHouse call too.
-	ctx, cancel := context.WithTimeout(r.Context(), h.maxQueryTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
 	// Defensive: NewQueryHandler always sets HTTPClient, but a zero-value
@@ -227,11 +225,11 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpReq.Header.Set("Content-Type", "text/plain; charset=utf-8")
-	if h.Username != "" {
-		httpReq.Header.Set("X-ClickHouse-User", h.Username)
+	if target.Username != "" {
+		httpReq.Header.Set("X-ClickHouse-User", target.Username)
 	}
-	if h.Password != "" {
-		httpReq.Header.Set("X-ClickHouse-Key", h.Password)
+	if target.Password != "" {
+		httpReq.Header.Set("X-ClickHouse-Key", target.Password)
 	}
 
 	resp, err := h.HTTPClient.Do(httpReq)

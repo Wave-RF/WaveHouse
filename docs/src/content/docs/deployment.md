@@ -16,7 +16,7 @@ WaveHouse runs as one process with embedded NATS and optional Pebble dedup. The 
 ### Quick Start with Docker Compose
 
 ```bash
-# Start ClickHouse + WaveHouse
+# Start ClickHouse + WaveHouse (the stack bind-mounts deployments/compose/settings/ as the settings directory)
 docker compose -f deployments/compose/standalone.yaml up -d
 
 # Create your tables in ClickHouse (WaveHouse discovers schemas automatically)
@@ -48,6 +48,11 @@ This starts:
 ### Binary
 
 ```bash
+# Seed the settings directory config.yaml points at (gitignored ./settings;
+# no-op if it already exists): the bootstrap seed plus the compose stack's
+# permissive "public" trial policy — replace policies.json before production
+make settings/config.json
+
 # Build
 make build
 
@@ -55,11 +60,11 @@ make build
 ./bin/wavehouse
 ```
 
-Or override any config with environment variables:
+Or override any boot-config key with environment variables (the ClickHouse address and the rest of the wiring are settings-directory keys, edited in `config.json`):
 
 ```bash
-WH_CH_ADDR=clickhouse.example.com:9000 \
-WH_SCHEMA_REFRESH_INTERVAL=30 \
+WH_CH_PASSWORD=s3cret \
+WH_SERVER_PORT=9090 \
 ./bin/wavehouse
 ```
 
@@ -129,67 +134,41 @@ All configuration can be set via environment variables. This is the recommended 
 Key variables for production:
 
 ```bash
-# Required
-WH_CH_ADDR=clickhouse:9000
-# Port for HTTP inserts + /v1/ops/query proxy (default: 8123)
-WH_CH_HTTP_PORT=8123
-WH_CH_HTTP_SCHEME=http              # Scheme for the same (http/https)
+# ClickHouse: only the password is env. The address, HTTP port/scheme,
+# database, and user are clickhouse.* in the settings directory's config.json.
+WH_CH_PASSWORD=<clickhouse-password>
 
-# Schema discovery
-WH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes
-
-# CORS — comma-separated allowlist (or "*" for any origin).
-# WaveHouse is a Bearer-token API; no cookies are used and the middleware
-# deliberately omits Access-Control-Allow-Credentials, so this allowlist only
-# controls *which origins can read responses*, not cookie scope.
-WH_SERVER_CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
-
-# Auth (the JWT middleware always runs — set a secret/JWKS to validate tokens;
-# without one, every request resolves to the policy default_role)
+# Auth secrets (the JWT middleware always runs — set a secret, or auth.jwks_url
+# in the settings directory, to validate tokens; without one, every request
+# resolves to the policy default_role). role_claim is a settings key too.
 WH_AUTH_JWT_SECRET=<strong-random-secret>
-WH_AUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
-WH_AUTH_ROLE_CLAIM=app_metadata.role
 # Optional non-JWT operator credential (Authorization: Operator <key>, or the
 # X-Operator-Key alias): full-access
-# admin for bootstrap/break-glass, honored even if the policy is wiped. Treat it
+# admin for break-glass, honored even when no policy is adopted. Treat it
 # as an admin secret — inject from your secret store, serve only over TLS.
 WH_AUTH_OPERATOR_KEY=<strong-random-operator-key>
 
-# Access control & pipes — both bootstrap paths are opt-in (no default). When
-# WH_POLICY_FILE_PATH is set, the file MUST exist, parse, and pass policy
-# validation (including the {{ jwt.… }} claim-path grammar) when the store is
-# seeded from it, or the process refuses to boot (silent fail-closed is the
-# alternative). Leave unset to skip bootstrap and seed via PUT /v1/ops/policy.
-WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
-WH_PIPES_DIR=/etc/wavehouse/pipes
-
-# Cache tuning
-WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60
-
-# Optional dedup
-WH_DEDUPE_ENABLED=true
-WH_DEDUPE_ID_FIELD=event_id
-# Reject rows missing the id field instead of publishing them un-deduped
-# (default false → such rows are logged + counted, not rejected).
-WH_DEDUPE_REQUIRE_ID=false
-
-# Standalone tuning
-WH_MQ_GAP_WINDOW_MINUTES=15       # Minutes of NATS history for SSE gap-fill
-# Max NATS JetStream disk usage (triggers backpressure)
-WH_MQ_MAX_BYTES_GB=50
-
-# DLQ
-WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
+# Settings directory (required): roles.json, policies.json, pipes.json,
+# config.json — the hot-reloadable configuration: the access-control policy
+# and its roles, the named pipes, and the tunables including the ClickHouse
+# wiring (see the Settings Directory page). Seed it with
+# `wavehouse bootstrap [dir]`, set clickhouse.addr in its config.json, write
+# your policy to policies.json (the seed ships none — every request is
+# denied until you do), and point this variable at it. The directory must
+# exist and validate or the process refuses to boot. Container images already preset
+# WH_SETTINGS_DIR=/app/settings and ship no directory: omit this line and
+# mount (or seed) your directory at /app/settings.
+WH_SETTINGS_DIR=/etc/wavehouse/settings
 ```
 
 ## Persistent Storage (REQUIRED for containers)
 
 WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
 
-- `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE gap-fill across restarts.
-- `<data_dir>/pebble` — Pebble dedup KV. Only used when `WH_DEDUPE_ENABLED=true`.
+- `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `stream.gap_window_minutes` window (settings directory) of history that powers SSE gap-fill across restarts.
+- `<data_dir>/pebble` — Pebble dedup KV. Only used while `dedupe.enabled` is `true` in the settings directory's `config.json` (opened and closed on reload).
 
-In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data` and `/app/pipes` owned by the nonroot user (UID 65532); the binary creates the `nats/` and `pebble/` subdirectories under `/app/data` itself on first run.
+In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data` and `/app/settings` owned by the nonroot user (UID 65532); the binary creates the `nats/` and `pebble/` subdirectories under `/app/data` itself on first run.
 
 If `data_dir` resolves into the container's writable overlay layer instead, **JetStream state is wiped on every restart**: in-flight events are lost, gap-fill stops bridging restarts, and disk usage accumulates inside `/var/lib/docker` instead of the volume the operator chose.
 
@@ -216,7 +195,9 @@ volumes:
   - wavehouse-data:/app/data
 ```
 
-On first attach to an empty named volume, Docker performs a "copy-up": the contents and ownership of `/app/data` *from the image* are copied into the volume. The bundled `Dockerfile` and `Dockerfile.goreleaser` both pre-create `/app/data` and `/app/pipes` with `chown -R 65532:65532`, so the volume inherits the right ownership automatically. **No host-side `chown` needed.** Subsequent restarts reuse whatever's in the volume.
+On first attach to an empty named volume, Docker performs a "copy-up": the contents and ownership of `/app/data` *from the image* are copied into the volume. The bundled `Dockerfile` and `Dockerfile.goreleaser` both pre-create `/app/data` and `/app/settings` with `chown -R 65532:65532`, so the volume inherits the right ownership automatically. **No host-side `chown` needed.** Subsequent restarts reuse whatever's in the volume.
+
+**Settings directory.** The [settings directory](/settings-directory) is *required* — the image ships none, so an unmounted `/app/settings` refuses to boot. It's config, not state, so unlike `/app/data` it is deliberately *not* a `VOLUME` (an anonymous volume would hide the missing mount), and the mount is always a **bind mount** of a directory you edit on the host: the reference compose file mounts the checked-in `deployments/compose/settings/` (the `bootstrap` seed with `clickhouse.addr` pointed at the `clickhouse` service). The server only reads it, so the files just need to be world-readable (which `bootstrap` writes), and it re-reads them on change with no restart. Don't reach for a named volume here: the image is distroless, so there is no shell to edit the files inside the volume — and editing them is the point.
 
 **Bind mounts** (host directory):
 
@@ -242,30 +223,7 @@ sudo chown -R 65532:65532 /srv/wavehouse
 
 UID 65532 is the canonical distroless `nonroot` user; the same number works regardless of whether your host has a matching name in `/etc/passwd`. The error log includes this remediation hint, so if you see "permission denied" at startup, copy the suggested `chown` command and re-run.
 
-**Pipes bind mount** follows the same rule — but mount it **read-only** since pipes is a seed, not state:
-
-```yaml
-volumes:
-  - ./my-pipes:/app/pipes:ro    # :ro is intentional, see below
-```
-
-Read-only mounts don't need write permission for the container user, so `chown` isn't strictly required — but matching ownership keeps everything consistent.
-
-## Pipes Bootstrap (optional, read-only)
-
-Named query pipes live in NATS KV (`WAVEHOUSE_PIPES`). On first run, you can seed them from `.sql` files by setting `WH_PIPES_DIR` and bind-mounting the directory **read-only**:
-
-```yaml
-services:
-  wavehouse:
-    environment:
-      WH_PIPES_DIR: /app/pipes
-    volumes:
-      - wavehouse-data:/app/data
-      - ./my-pipes:/app/pipes:ro     # ← read-only seed
-```
-
-The directory is a *seed*, not authoritative storage: after bootstrap, the API + KV are the source of truth. Runtime pipe edits go through `PUT /v1/ops/pipes/{name}`, not by editing the files. The `:ro` mount makes that contract explicit and prevents accidental writes from confusing future readers. Empty default (`WH_PIPES_DIR=""`) skips bootstrap entirely — most users will create pipes via the API.
+**Settings-directory bind mount** follows the same rule when you seed it with `wavehouse bootstrap` from inside the container (the seed is written as UID 65532); a directory you bootstrap on the host only needs to be readable by that user, since WaveHouse only ever reads it. Named pipes and the access-control policy live in that directory (`pipes.json`, `policies.json`, `roles.json`) and hot-reload on edit — see [Settings Directory](/settings-directory).
 
 ## Health Checks
 
@@ -369,11 +327,11 @@ CREATE TABLE IF NOT EXISTS clicks (
 ORDER BY (page);
 ```
 
-WaveHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (default: 60). You can also trigger an immediate refresh via `POST /v1/ops/schema/refresh` (admin-only).
+WaveHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (settings directory; seed default 60). You can also trigger an immediate refresh via `POST /v1/ops/schema/refresh` (admin-only).
 
 ## Dead Letter Queue (DLQ)
 
-When `dlq.enabled` is `true` (default), a failed batch insert is retried row by row and the rows that fail again are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}`. This prevents infinite retry loops. Monitor DLQ depth via `GET /v1/ops/dlq/stats`.
+A failed batch insert is retried row by row; while `dlq.enabled` is `true` for the table (the seed default — a hot-reloadable [settings directory](/settings-directory#dead-letter-queue) key, overridable per table), the rows that fail again are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}` instead of retrying forever. Monitor DLQ depth via `GET /v1/ops/dlq/stats`.
 
 ## Observability
 

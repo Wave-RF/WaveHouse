@@ -241,7 +241,7 @@ help: ## Show this help menu
 DEV_COMPOSE_FILE := deployments/compose/dependencies.yaml
 DEV_COMPOSE      := docker compose -f $(DEV_COMPOSE_FILE)
 
-CONFIG_FILES = .config.local.yaml # .policy.local.yaml
+CONFIG_FILES = .config.local.yaml
 # This strips the leading '.' and trailing '.local.yaml' to find the base name,
 # then appends '.yaml' to find the source file.
 # TODO: if we add a validate subcommand to the binary we could test that here too
@@ -249,12 +249,23 @@ $(CONFIG_FILES): .%.local.yaml: %.yaml
 	@if [ ! -f $@ ]; then \
 		echo "⚙️  Creating local config: $@ from $<..."; \
 		cp $< $@; \
+	else \
+		echo "$(YELLOW)⚠️  $< is newer than $@ — port the change over, or delete $@ to re-seed it$(RESET)"; \
 	fi
 
+# Dev settings directory: the hot-reloadable config, policy, and pipes. Seeded
+# once from the embedded seed (never edit internal/settings/seed in place),
+# then given the compose stack's permissive "public" trial policy so a fresh
+# `make dev` isn't fail-closed (the seed ships no policy). Gitignored.
+settings/config.json:
+	@echo "⚙️  Seeding dev settings directory: ./settings (wavehouse bootstrap + trial policy)"
+	@go run ./cmd/wavehouse bootstrap settings
+	@cp deployments/compose/settings/policies.json deployments/compose/settings/roles.json settings/
+
 .PHONY: dev
-dev: deps-up $(AIR) $(CONFIG_FILES) ## Hot-reload dev server: ClickHouse + WaveHouse via air on :8080
+dev: deps-up $(AIR) $(CONFIG_FILES) settings/config.json ## Hot-reload dev server: ClickHouse + WaveHouse via air on :8080
 	@echo "$(CYAN)==> Starting WaveHouse with air hot-reload (Ctrl+C to stop)$(RESET)"
-	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)  (CORS=*, auth disabled by default)"
+	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)  (CORS=*, trial public policy — no token needed)"
 	@echo "    ClickHouse: $(GREEN)http://localhost:8123$(RESET)  (HTTP), $(GREEN)localhost:9000$(RESET) (native)"
 	WH_CONFIG=.config.local.yaml $(AIR) -c .air.toml
 

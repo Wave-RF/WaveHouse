@@ -121,8 +121,8 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	// early exit is the only admin branch, so every return below is the non-admin
 	// path and denies plainly. It also folds in the nil-policy case: IsAdmin(nil)
 	// is false (a deleted/absent policy is a total lockout — nobody passes, not
-	// even admin; a fresh deployment is bootstrapped from the policy file, not
-	// over HTTP), so a nil policy falls through to the deny just below. Mirrors
+	// even admin; a deployment's policy comes from policies.json, never over
+	// HTTP), so a nil policy falls through to the deny just below. Mirrors
 	// RoleAllowed's admin short-circuit on the pipe path.
 	if IsAdmin(p, role) {
 		return &ResolvedPermissions{Allowed: true}
@@ -597,8 +597,8 @@ func Validate(p *Policy) error {
 // indexing, or an unterminated `{{`. resolveTemplate binds such a fragment as
 // literal text, which is a fail-open on the filter path (`_neq`/`_lt` match ~every
 // row) and silent row corruption on the check path, so validateRolePerms rejects
-// it at write time — Store.Put, i.e. bootstrap-file adoption or an admin PUT; a
-// policy already in KV is not re-validated when a node loads it (#461). A
+// it on every adoption: boot and every reload run the same Validate over
+// policies.json, so there is no stored copy that skips it (#461). A
 // well-formed template — with or without surrounding literal
 // text, e.g. "acct-{{ jwt.org_id }}" — returns ("", false).
 func malformedTemplate(v string) (string, bool) {

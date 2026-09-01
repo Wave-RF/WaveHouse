@@ -301,7 +301,7 @@ func TestResolveTimestampSpecs(t *testing.T) {
 func TestRefresh_PrecomputesSpecs(t *testing.T) {
 	t.Parallel()
 	conn := &fakeConn{columns: [][4]string{{"t", "ts", "DateTime", ""}}}
-	reg := NewSchemaRegistry(conn, "test", time.Hour, discardLogger())
+	reg := NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, discardLogger())
 	require.NoError(t, reg.Refresh(context.Background()))
 	col := reg.Get("t").Columns[0]
 	require.NotNil(t, col.tsSpec)

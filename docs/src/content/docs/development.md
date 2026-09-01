@@ -83,19 +83,15 @@ WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 - **Embedded NATS** (JetStream) — no external MQ needed
 - **L1 cache only** (Ristretto) — no external cache needed
-- **Fail-closed** by default — `config.yaml` seeds no policy, so every request is denied until you seed one (see [Test the API](#test-the-api))
+- **Trial policy** — the dev settings directory `./settings` is seeded on first run with the compose stack's permissive `public` policy, so tokenless requests to the demo tables work (see [Test the API](#test-the-api))
 - **Dedup disabled** by default — no Pebble needed
 - **Schema discovery** — automatically finds your ClickHouse tables
 
 ### Test the API
 
-`make dev` is **fail-closed** — `config.yaml` seeds no policy, so every request is denied. Point it at the shipped dev policy (the `public` trial role: read/write `clicks`/`events`, no token) and (re)start it:
+On first run `make dev` seeds the gitignored `./settings` directory with `wavehouse bootstrap` and copies in the compose stack's trial policy (`deployments/compose/settings/policies.json` + `roles.json` — the `public` role: read/write `clicks`/`events`, no token). WaveHouse is otherwise fail-closed (the bootstrap seed ships no policy), so a `./settings` you emptied by hand denies every request until you put a policy back. Edits to any file in `./settings` hot-reload without a restart.
 
-```bash
-WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml make dev
-```
-
-Then the tokenless data-plane calls work (create a `clicks` table first — see the [Getting Started](/getting-started) walkthrough):
+The tokenless data-plane calls work (create a `clicks` table first — see the [Getting Started](/getting-started) walkthrough):
 
 ```bash
 # Ingest an event
@@ -138,20 +134,20 @@ dev: deps-up $(AIR)
     air -c .air.toml
 ```
 
-`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` (the `.go` and `.yaml` files within them), rebuilds `tmp/wavehouse` on change, and restarts the binary. Config is **not** hot-reloaded: `make dev` runs the binary with `WH_CONFIG=.config.local.yaml` — a gitignored personal copy seeded **once** from `config.yaml` on first run (it won't re-copy if it already exists). So to change dev config, edit `.config.local.yaml` (not `config.yaml`) and restart `make dev`; air watches neither root file.
+`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` (the `.go` and `.yaml` files within them), rebuilds `tmp/wavehouse` on change, and restarts the binary. Boot config is **not** hot-reloaded (the settings directory it points at is — see [Enable Dedup](#enable-dedup-optional)): `make dev` runs the binary with `WH_CONFIG=.config.local.yaml` — a gitignored personal copy seeded **once** from `config.yaml` on first run (it won't re-copy if it already exists). So to change dev config, edit `.config.local.yaml` (not `config.yaml`) and restart `make dev`; air watches neither root file. The flip side: when `config.yaml` gains a key your copy lacks, your copy is stale — `make dev` warns when `config.yaml` is newer than `.config.local.yaml`, and the fix is to port the change over or delete `.config.local.yaml` to re-seed it. `settings.dir` is the one key that will stop the server outright if it's missing (it's required with no default), so a checkout whose local copy predates it fails at config validation until re-seeded.
 
 `air` is pinned to a specific version and installed via `go install` rather than a `go.mod` tool directive — its transitive deps (Hugo, godartsass, Sass libs) would bloat `go.sum` for everyone. Same exclusion principle as `golangci-lint`.
 
 **While `make dev` is running you get:**
 
-- WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based app on any localhost port can hit the API directly.
-- A placeholder JWT secret (`change-me-in-production`) ships in `config.yaml`, but **no policy** is seeded — so the stack is fail-closed until you seed one (see [Test the API](#test-the-api)). Override the secret via `WH_AUTH_JWT_SECRET`.
+- WaveHouse on `http://localhost:8080` with the default allow-all CORS posture, so a browser-based app on any localhost port can hit the API directly.
+- A placeholder JWT secret (`change-me-in-production`) ships in `config.yaml`, and the trial `public` policy in `./settings` (see [Test the API](#test-the-api)). Override the secret via `WH_AUTH_JWT_SECRET`.
 - ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
-- Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Config isn't hot-reloaded — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
+- Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Boot config isn't hot-reloaded (settings-directory files are) — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
 
 ### Dev convenience targets
 
-These are the small targets behind `make dev` — useful directly when you want to run WaveHouse outside of air (e.g. `make build && ./bin/wavehouse`), or when you need to poke at ClickHouse:
+These are the small targets behind `make dev` — useful directly when you want to run WaveHouse outside of air (e.g. `make settings/config.json && make build && ./bin/wavehouse`), or when you need to poke at ClickHouse:
 
 | Target | What it does |
 | ------ | ------------ |
@@ -186,10 +182,10 @@ They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear
 
 ### Using the SDK against `make dev`
 
-There's no bundled playground — point the published `@wavehouse/sdk` client at your local server (`baseURL: "http://localhost:8080"`), with the dev policy seeded so requests are authorized:
+There's no bundled playground — point the published `@wavehouse/sdk` client at your local server (`baseURL: "http://localhost:8080"`); the trial policy `make dev` seeds into `./settings` authorizes the demo-table requests:
 
 ```bash
-WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml make dev
+make dev
 ```
 
 See the [SDK guide](/sdk) for the client API and examples.
@@ -198,17 +194,17 @@ Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { c
 
 ### Validating tokens
 
-There is no auth on/off switch — the JWT middleware always runs, but authorization is the policy's job (a `nil`/unseeded policy denies every token-based caller, admins included — only the operator key below still reaches the admin surface). To exercise token auth in dev, seed a policy *and* set a known secret — the dev policy's `admin_role` defaults to `admin`, so a JWT with `role: admin` unlocks the admin surface:
+There is no auth on/off switch — the JWT middleware always runs, but authorization is the policy's job (an empty `policies.json` adopts no policy and denies every token-based caller, admins included — only the operator key below still reaches the admin surface). To exercise token auth in dev, set a known secret — the trial policy's `admin_role` defaults to `admin`, so a JWT with `role: admin` unlocks the admin surface:
 
 ```bash
-WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml WH_AUTH_JWT_SECRET=my-secret make dev
+WH_AUTH_JWT_SECRET=my-secret make dev
 ```
 
-The **operator key** is a non-JWT alternative: set one and send it in an `Authorization: Operator <key>` header (or the `X-Operator-Key` alias). Before any policy is seeded it reaches the **admin surface** — enough to seed or restore a policy over HTTP (the break-glass path). Once a policy is loaded, the key's role resolves to `admin`, so it then has full data-plane access too (pipes, queries, streaming, ingest) — handy for trialing without minting a JWT:
+The **operator key** is a non-JWT alternative: set one and send it in an `Authorization: Operator <key>` header (or the `X-Operator-Key` alias). Even with no policy adopted it reaches the **admin surface** — enough to inspect the policy and trigger a settings reload over HTTP after fixing `policies.json` (the break-glass path). Once a policy is adopted, the key's role resolves to `admin`, so it then has full data-plane access too (pipes, queries, streaming, ingest) — handy for trialing without minting a JWT:
 
 ```bash
 WH_AUTH_OPERATOR_KEY=dev-operator-key make dev
-# ...then, in another shell — the admin surface works even with no policy seeded:
+# ...then, in another shell — the admin surface works even with no policy adopted:
 curl -H "Authorization: Operator dev-operator-key" http://localhost:8080/v1/ops/policy
 # the X-Operator-Key alias works too:
 curl -H "X-Operator-Key: dev-operator-key" http://localhost:8080/v1/ops/policy
@@ -228,11 +224,14 @@ curl -s -X POST http://localhost:8080/v1/ops/query \
 
 ### Enable Dedup (Optional)
 
-Set `WH_DEDUPE_ENABLED=true` and `WH_DEDUPE_ID_FIELD=event_id`:
+`make dev` seeds `./settings` (gitignored) from the embedded seed on first run and points `settings.dir` at it; the seed ships with `dedupe.enabled: false`. Flip it there — never in the checked-in `internal/settings/seed`, which is what `wavehouse bootstrap` writes for everyone:
 
 ```bash
-WH_DEDUPE_ENABLED=true WH_DEDUPE_ID_FIELD=event_id make dev
+# ./settings already exists after the first `make dev` (or: make settings/config.json)
+# set "enabled": true under "dedupe" in ./settings/config.json
 ```
+
+The key hot-reloads, so once the server is running you can toggle it by editing `config.json` — no restart. Records dedupe on their `event_id` field by default; the same file overrides the field globally or per table (see [Settings Directory — Deduplication](/settings-directory#deduplication)).
 
 Then include the dedup field in your ingest body:
 
@@ -252,14 +251,16 @@ curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 ### Using an .env File
 
 ```bash
-# .env
-export WH_CH_ADDR=localhost:9000
+# .env — boot config only (secrets, sizing, exporters); the ClickHouse
+# address and the rest of the wiring are settings-directory keys
+export WH_CH_PASSWORD=
 ```
 
 Then:
 
 ```bash
 source .env
+make settings/config.json   # seeds the gitignored ./settings that config.yaml points at (no-op if it exists)
 go run ./cmd/wavehouse
 ```
 
@@ -278,7 +279,7 @@ go build -o bin/wavehouse ./cmd/wavehouse
 | What you want | Command |
 | ------------- | ------- |
 | Hot-reload standalone dev server | `make dev` |
-| Standalone binary (default config) | `make build && ./bin/wavehouse` |
+| Standalone binary (default config) | `make settings/config.json && make build && ./bin/wavehouse` |
 | Standalone via Docker Compose | `docker compose -f deployments/compose/standalone.yaml up -d` |
 | Infrastructure deps only (ClickHouse) | `docker compose -f deployments/compose/dependencies.yaml up -d clickhouse` |
 
@@ -358,7 +359,7 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 **Architecture**:
 
 - `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved. CI runs the exact same path.
-- `tests/e2e/sdk/setup.ts` — `globalSetup`. Probes the `CLICKHOUSE_URL` / `WAVEHOUSE_URL` the orchestrator injects, creates the per-suite tables, refreshes the schema, and bootstraps the baseline policy. It starts nothing itself and fails fast if either URL isn't up. It also prints the active Node/undici version, warning when the local Node major differs from `.nvmrc` — a runtime-specific transport bug is otherwise indistinguishable from a code failure (see [#440](https://github.com/Wave-RF/WaveHouse/issues/440)).
+- `tests/e2e/sdk/setup.ts` — `globalSetup`. Probes the `CLICKHOUSE_URL` / `WAVEHOUSE_URL` the orchestrator injects, creates the per-suite tables, refreshes the schema, and writes the baseline policy into the run's settings directory (adopted via `POST /v1/ops/settings/reload` — files are the only write path). It starts nothing itself and fails fast if either URL isn't up. It also prints the active Node/undici version, warning when the local Node major differs from `.nvmrc` — a runtime-specific transport bug is otherwise indistinguishable from a code failure (see [#440](https://github.com/Wave-RF/WaveHouse/issues/440)).
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
 
 **Running E2E tests**:
@@ -376,7 +377,7 @@ The orchestrator always provisions its own stack — a fresh ClickHouse testcont
 WH_CONFIG=tests/e2e/fixtures/config.yaml go run ./cmd/wavehouse
 ```
 
-The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `policy.file_path` is relative to the working directory. The fixture pins no ClickHouse address, so the server looks for one on `localhost:9000`; point it elsewhere with `WH_CH_ADDR` / `WH_CH_HTTP_PORT` if yours isn't there.
+The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `settings.dir` is relative to the working directory. The fixture's settings directory (policy, pipes, and tunables) points at ClickHouse on `localhost:9000`; if yours isn't there, edit `clickhouse.addr` / `http_port` in `tests/e2e/fixtures/settings/config.json` (the orchestrator patches them itself for its testcontainer).
 
 Prefixing the variable to `make dev` does **not** work: that recipe pins `WH_CONFIG=.config.local.yaml` inline, which overrides anything inherited from the environment.
 
@@ -448,6 +449,7 @@ WaveHouse/
 │   ├── api/                # HTTP handlers, router, middleware
 │   ├── auth/               # JWT/JWKS authentication middleware
 │   ├── cache/              # L1 (Ristretto) + L2 caching
+│   ├── chconn/             # ClickHouse connection manager (swapped on settings reload)
 │   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration
 │   ├── dedupe/             # Optional deduplication (Pebble)
@@ -455,15 +457,16 @@ WaveHouse/
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
 │   ├── mq/                 # NATS message queue abstraction
 │   ├── observability/      # OpenTelemetry pipeline (traces/metrics/logs + Prometheus)
-│   ├── pipes/              # Named query pipes (NATS KV + .sql bootstrap)
-│   ├── policy/             # Access control policies (evaluation + NATS KV store)
+│   ├── pipes/              # Named query pipes (types + parameter binding)
+│   ├── policy/             # Access control policies (types + evaluation)
 │   ├── query/              # Structured query AST + SQL builder
+│   ├── settings/           # Settings directory: validate, adopted snapshot, reload
 │   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
 │   └── testutil/           # Shared test helpers and mocks
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)
 │   └── e2e/                # E2E suite (orchestrator + ClickHouse testcontainer)
-│       ├── fixtures/       # ClickHouse DDL + config/policy fixtures
+│       ├── fixtures/       # ClickHouse DDL + config and settings-directory fixtures
 │       └── sdk/            # E2E specs driven through the TypeScript SDK (Vitest)
 ├── clients/                # Client SDKs
 │   └── ts/                 # TypeScript SDK (@wavehouse/sdk, pnpm workspace)

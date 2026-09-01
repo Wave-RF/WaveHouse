@@ -40,7 +40,7 @@ func newStructuredQueryHandler(t testing.TB) *StructuredQueryHandler {
 			},
 		},
 	})
-	return NewStructuredQueryHandler(nil, nil, reg, nil, 60, 5*time.Second, 0, testutil.NopLogger())
+	return NewStructuredQueryHandler(nil, nil, reg, nil, func() int { return 60 }, func() time.Duration { return 5 * time.Second }, nil, testutil.NopLogger())
 }
 
 func TestStructuredQuery_MissingTable(t *testing.T) {
@@ -164,7 +164,7 @@ func TestStructuredQuery_PolicyForbidden(t *testing.T) {
 		},
 	}
 	h := newStructuredQueryHandler(t)
-	h.PolicyStore = policy.NewMemoryStore(p)
+	h.PolicySource = policy.Static(p)
 
 	sq := query.StructuredQuery{Columns: []string{"page"}}
 	r := structuredQueryRequest(t, "clicks", sq)
@@ -192,7 +192,7 @@ func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
 		},
 	}
 	h := newStructuredQueryHandler(t)
-	h.PolicyStore = policy.NewMemoryStore(p)
+	h.PolicySource = policy.Static(p)
 
 	// Request "count" column which is not in AllowColumns.
 	sq := query.StructuredQuery{Columns: []string{"count"}}
@@ -225,7 +225,7 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 		},
 	}
 	h := newStructuredQueryHandler(t)
-	h.PolicyStore = policy.NewMemoryStore(p)
+	h.PolicySource = policy.Static(p)
 
 	sq := query.StructuredQuery{
 		Aggregations: []query.Aggregation{
@@ -246,19 +246,19 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
-func TestStructuredQuery_NoPolicyAllowsAll(t *testing.T) {
+func TestStructuredQuery_NilPolicyFailsClosed(t *testing.T) {
 	t.Parallel()
 	h := newStructuredQueryHandler(t)
-	// No PolicyStore — all queries should be allowed (past policy).
+	// An adopted-but-empty policies.json yields a nil policy: total lockout,
+	// nobody passes (AGENTS.md invariant 11). A PolicySource is always wired
+	// in production; this pins the value it returns, not its absence.
+	h.PolicySource = policy.Static(nil)
 	sq := query.StructuredQuery{Columns: []string{"page"}}
 	r := structuredQueryRequest(t, "clicks", sq)
 	w := httptest.NewRecorder()
-	safeHandle(h.Handle, w, r)
+	h.Handle(w, r)
 
-	// Will fail at executeQuery (nil CH conn) but should get past the policy checks.
-	assert.NotEqual(t, http.StatusForbidden, w.Code)
-	assert.NotEqual(t, http.StatusBadRequest, w.Code)
-	assert.NotEqual(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
 // ─── #223: column allowlist is a hard cap on every read, end-to-end ──────────
@@ -295,7 +295,7 @@ func newCapturingHandler(t *testing.T, conn driver.Conn, p *policy.Policy) *Stru
 			},
 		},
 	})
-	return NewStructuredQueryHandler(conn, nil, reg, policy.NewMemoryStore(p), 60, 5*time.Second, 0, testutil.NopLogger())
+	return NewStructuredQueryHandler(conn, nil, reg, policy.Static(p), func() int { return 60 }, func() time.Duration { return 5 * time.Second }, nil, testutil.NopLogger())
 }
 
 func viewerRequest(t *testing.T, sq query.StructuredQuery) *http.Request {

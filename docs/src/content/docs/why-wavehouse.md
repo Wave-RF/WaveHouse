@@ -110,7 +110,7 @@ flowchart TB
 
 ### No row/column access control
 
-ClickHouse has users and role grants, but nothing like row-level security driven by a JWT claim. If your product serves multiple tenants from a shared table, you're writing middleware to inject `WHERE tenant_id = ?` on every query — and hoping you never miss one. WaveHouse ships Hasura-style policies stored in NATS KV: per-role `allow_columns`, row-level `filter` with JWT claim templating (`{{ jwt.app_metadata.tenant_id }}`), bootstrapped from a YAML file, synced cluster-wide via KV Watch.
+ClickHouse has users and role grants, but nothing like row-level security driven by a JWT claim. If your product serves multiple tenants from a shared table, you're writing middleware to inject `WHERE tenant_id = ?` on every query — and hoping you never miss one. WaveHouse ships Hasura-style policies as a JSON file in the settings directory: per-role `allow_columns`, row-level `filter` with JWT claim templating (`{{ jwt.app_metadata.tenant_id }}`), validated on every load and hot-reloaded on edit.
 
 ## Part II — What people actually build instead
 
@@ -196,7 +196,7 @@ Tinybird wins on "zero ops to start." WaveHouse wins on "own your data plane and
 | Real-time push (SSE) | ✗ | Custom service | ✗ | ✓ native, gap-fill |
 | Thundering-herd coalescing | ✗ | Custom | ✓ | ✓ Ristretto + singleflight |
 | Row/column policies with JWT claims | ✗ | Custom | Tokens only | ✓ Hasura-style |
-| Named parameterized pipes | ✗ | Custom | ✓ | ✓ stored in NATS KV |
+| Named parameterized pipes | ✗ | Custom | ✓ | ✓ defined in `pipes.json` |
 | Type-safe client SDK with codegen | ✗ | Per team | Partial | ✓ `@wavehouse/sdk` |
 | Cost model | Infra only | Infra + eng time | Per-vCPU SaaS | Infra only |
 

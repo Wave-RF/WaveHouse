@@ -23,7 +23,7 @@ func TestValidate_NonRegularFile(t *testing.T) {
 	dir := writeDir(t, files)
 	require.NoError(t, syscall.Mkfifo(filepath.Join(dir, FilePipes), 0o600))
 
-	doc, findings := parse(dir)
+	doc, findings := Validate(dir)
 	assert.Nil(t, doc)
 	out := findingStrings(findings)
 	assert.Contains(t, out, "pipes.json: not a regular file")
@@ -44,7 +44,7 @@ func TestValidate_SymlinkedFiles(t *testing.T) {
 		require.NoError(t, os.Symlink(filepath.Join(dataDir, name), filepath.Join(dir, name)))
 	}
 
-	doc, findings := parse(dir)
+	doc, findings := Validate(dir)
 	require.NotNil(t, doc, "findings: %s", findingStrings(findings))
 	assert.Empty(t, findings)
 }

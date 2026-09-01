@@ -5,11 +5,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -19,7 +21,7 @@ import (
 
 func TestRequireAdmin_AdminAllowed(t *testing.T) {
 	t.Parallel()
-	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequireAdmin(policy.Static(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	ctx := auth.WithRole(context.Background(), "admin")
@@ -31,7 +33,7 @@ func TestRequireAdmin_AdminAllowed(t *testing.T) {
 
 func TestRequireAdmin_NonAdminForbidden(t *testing.T) {
 	t.Parallel()
-	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequireAdmin(policy.Static(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
 	ctx := auth.WithRole(context.Background(), "viewer")
@@ -61,7 +63,7 @@ func TestRequireAdmin_NoRoleForbidden(t *testing.T) {
 // literal "admin" is an ordinary (denied) role under a custom admin_role.
 func TestRequireAdmin_CustomAdminRole(t *testing.T) {
 	t.Parallel()
-	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "superuser"})
+	store := policy.Static(&policy.Policy{AdminRole: "superuser"})
 	handler := RequireAdmin(store, testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -95,7 +97,7 @@ func TestRequireAdmin_InvalidTokenFailsLoud(t *testing.T) {
 // non-admin one.
 func TestRequireAdmin_OperatorBypass(t *testing.T) {
 	t.Parallel()
-	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequireAdmin(policy.Static(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	ctx := auth.WithOperator(auth.WithRole(context.Background(), "viewer"))
@@ -107,7 +109,7 @@ func TestRequireAdmin_OperatorBypass(t *testing.T) {
 
 // TestRequireAdmin_OperatorBypassesNilPolicy: break-glass — with no policy at
 // all (IsAdmin admits nobody), the operator bit still admits the request so the
-// operator can restore a wiped policy over HTTP.
+// operator can inspect the policy and trigger a settings reload while locked out.
 func TestRequireAdmin_OperatorBypassesNilPolicy(t *testing.T) {
 	t.Parallel()
 	handler := RequireAdmin(nil, testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -120,9 +122,43 @@ func TestRequireAdmin_OperatorBypassesNilPolicy(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code, "operator bit admits even a nil-policy request (break-glass)")
 }
 
+// TestCORSMiddleware_OriginsReloadBetweenRequests pins that the allowlist is
+// resolved per request, not captured at router construction: a settings
+// reload that changes cors.allowed_origins must apply to the very next
+// request without rebuilding the middleware.
+func TestCORSMiddleware_OriginsReloadBetweenRequests(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	origins := []string{"https://old.example.com"}
+	handler := corsMiddleware(func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return origins
+	})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+
+	get := func(origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+		req.Header.Set("Origin", origin)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+
+	assert.Equal(t, "https://old.example.com", get("https://old.example.com").Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, get("https://new.example.com").Header().Get("Access-Control-Allow-Origin"), "not yet allowed")
+
+	// "Reload": swap the list the getter returns.
+	mu.Lock()
+	origins = []string{"https://new.example.com"}
+	mu.Unlock()
+
+	assert.Equal(t, "https://new.example.com", get("https://new.example.com").Header().Get("Access-Control-Allow-Origin"), "new allowlist applies on the next request")
+	assert.Empty(t, get("https://old.example.com").Header().Get("Access-Control-Allow-Origin"), "old origin no longer allowed")
+}
+
 func TestCORSMiddleware_Preflight(t *testing.T) {
 	t.Parallel()
-	handler := corsMiddleware([]string{"*"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func() []string { return []string{"*"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("should not reach handler on OPTIONS")
 	}))
 
@@ -142,7 +178,7 @@ func TestCORSMiddleware_Preflight(t *testing.T) {
 func TestCORSMiddleware_NormalRequest(t *testing.T) {
 	t.Parallel()
 	var called bool
-	handler := corsMiddleware([]string{"*"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func() []string { return []string{"*"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -160,7 +196,7 @@ func TestCORSMiddleware_NormalRequest(t *testing.T) {
 func TestCORSMiddleware_AllowListedOrigin(t *testing.T) {
 	t.Parallel()
 	var called bool
-	handler := corsMiddleware([]string{"https://app.example.com"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func() []string { return []string{"https://app.example.com"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -179,7 +215,7 @@ func TestCORSMiddleware_AllowListedOrigin(t *testing.T) {
 func TestCORSMiddleware_BlockedOrigin(t *testing.T) {
 	t.Parallel()
 	var called bool
-	handler := corsMiddleware([]string{"https://allowed.com"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func() []string { return []string{"https://allowed.com"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -218,7 +254,7 @@ func TestCORSMiddleware_NoCredentialsHeader(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			handler := corsMiddleware(tc.allowed)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			handler := corsMiddleware(func() []string { return tc.allowed })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			}))
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
@@ -235,7 +271,7 @@ func TestCORSMiddleware_NoCredentialsHeader(t *testing.T) {
 // callers don't get CORS response headers stamped onto every response.
 func TestCORSMiddleware_NoOriginIsPassthrough(t *testing.T) {
 	t.Parallel()
-	handler := corsMiddleware([]string{"*"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func() []string { return []string{"*"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
@@ -253,7 +289,7 @@ func TestCORSMiddleware_NoOriginIsPassthrough(t *testing.T) {
 // that as a preflight failure, so the actual request never fires.
 func TestCORSMiddleware_BlockedOriginPreflight(t *testing.T) {
 	t.Parallel()
-	handler := corsMiddleware([]string{"https://allowed.com"})(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func() []string { return []string{"https://allowed.com"} })(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatal("should not reach handler on OPTIONS")
 	}))
 
@@ -292,16 +328,18 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	t.Cleanup(func() { _ = emb.Close() })
 
 	deps := Dependencies{
-		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
-		Query:       &QueryHandler{},
-		SSE:         NewStreamHandler(hub, nil),
-		Health:      &HealthHandler{},
-		Version:     NewVersionHandler("test", "test", "test"),
-		Schema:      NewSchemaHandler(reg),
-		DLQ:         NewDLQHandler(emb.JetStream(), testutil.NopLogger()),
-		AuthMW:      func(next http.Handler) http.Handler { return next },
-		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
-		Logger:      testutil.NopLogger(),
+		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Query:        &QueryHandler{},
+		SSE:          NewStreamHandler(hub, nil),
+		Health:       &HealthHandler{},
+		Version:      NewVersionHandler("test", "test", "test"),
+		Schema:       NewSchemaHandler(reg),
+		DLQ:          NewDLQHandler(emb.JetStream(), testutil.NopLogger()),
+		Policy:       NewPolicyHandler(policy.Static(&policy.Policy{})),
+		Pipes:        NewPipesHandler(pipes.Static(), policy.Static(&policy.Policy{}), nil, nil, nil, testutil.NopLogger()),
+		AuthMW:       func(next http.Handler) http.Handler { return next },
+		PolicySource: policy.Static(&policy.Policy{}),
+		Logger:       testutil.NopLogger(),
 	}
 
 	router := NewRouter(deps)
@@ -331,6 +369,14 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		{http.MethodGet, "/v1/ops/schema?table=events", "admin", http.StatusOK},
 		{http.MethodPost, "/v1/ops/schema/refresh", "admin", http.StatusOK},
 		{http.MethodGet, "/v1/ops/dlq/stats", "admin", http.StatusOK},
+		// Policy and pipes are read-only over HTTP: the settings directory is
+		// the only write path. The reads stay; the former writes must never
+		// come back (405 = path registered, method not).
+		{http.MethodGet, "/v1/ops/policy", "admin", http.StatusOK},
+		{http.MethodGet, "/v1/ops/pipes", "admin", http.StatusOK},
+		{http.MethodPut, "/v1/ops/policy", "admin", http.StatusMethodNotAllowed},
+		{http.MethodPut, "/v1/ops/pipes/x", "admin", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/v1/ops/pipes/x", "admin", http.StatusMethodNotAllowed},
 		// Pre-/v1/ops paths, removed with no aliases: they must stay 404.
 		// Roleless, so re-registering an alias fails this row whether the
 		// alias is gated (403) or — the real hazard — ungated (200).
@@ -368,7 +414,7 @@ func TestNewRouter_CORSOnStream(t *testing.T) {
 		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
 		AuthMW:      func(next http.Handler) http.Handler { return next },
-		CORSOrigins: []string{"https://app.example.com"},
+		CORSOrigins: func() []string { return []string{"https://app.example.com"} },
 		Logger:      testutil.NopLogger(),
 	})
 
@@ -438,14 +484,14 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
-		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
-		Query:       &QueryHandler{},
-		SSE:         NewStreamHandler(hub, nil),
-		Health:      &HealthHandler{},
-		Schema:      NewSchemaHandler(reg),
-		AuthMW:      func(next http.Handler) http.Handler { return next },
-		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
-		Logger:      testutil.NopLogger(),
+		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Query:        &QueryHandler{},
+		SSE:          NewStreamHandler(hub, nil),
+		Health:       &HealthHandler{},
+		Schema:       NewSchemaHandler(reg),
+		AuthMW:       func(next http.Handler) http.Handler { return next },
+		PolicySource: policy.Static(&policy.Policy{}),
+		Logger:       testutil.NopLogger(),
 	})
 
 	post := func(role string) *httptest.ResponseRecorder {
@@ -499,14 +545,14 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	hub := stream.NewHub(nil, nil, nil)
 
 	deps := Dependencies{
-		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
-		Query:       &QueryHandler{},
-		SSE:         NewStreamHandler(hub, nil),
-		Health:      &HealthHandler{},
-		Schema:      NewSchemaHandler(reg),
-		AuthMW:      func(next http.Handler) http.Handler { return next },
-		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
-		Logger:      testutil.NopLogger(),
+		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Query:        &QueryHandler{},
+		SSE:          NewStreamHandler(hub, nil),
+		Health:       &HealthHandler{},
+		Schema:       NewSchemaHandler(reg),
+		AuthMW:       func(next http.Handler) http.Handler { return next },
+		PolicySource: policy.Static(&policy.Policy{}),
+		Logger:       testutil.NopLogger(),
 	}
 
 	// Should not panic.
@@ -529,18 +575,34 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// An absent getter, a nil list, and an empty list all mean allow-all — an
+// empty allowlist is NOT "no origins". The validator warns on [] for exactly
+// this reason; this pins the behavior the warning describes.
 func TestCORSMiddleware_EmptyOrigins_AllowAll(t *testing.T) {
 	t.Parallel()
-	handler := corsMiddleware(nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+	tests := []struct {
+		name    string
+		origins func() []string
+	}{
+		{"nil getter", nil},
+		{"nil list", func() []string { return nil }},
+		{"empty list", func() []string { return []string{} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			handler := corsMiddleware(tt.origins)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
-	req.Header.Set("Origin", "https://anything.example.com")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+			req.Header.Set("Origin", "https://anything.example.com")
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
 
-	assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
+			assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
+		})
+	}
 }
 
 func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
@@ -675,14 +737,14 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
-		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
-		Query:       &QueryHandler{},
-		SSE:         NewStreamHandler(hub, nil),
-		Health:      &HealthHandler{},
-		Schema:      NewSchemaHandler(reg),
-		AuthMW:      func(next http.Handler) http.Handler { return next },
-		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
-		Logger:      testutil.NopLogger(),
+		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Query:        &QueryHandler{},
+		SSE:          NewStreamHandler(hub, nil),
+		Health:       &HealthHandler{},
+		Schema:       NewSchemaHandler(reg),
+		AuthMW:       func(next http.Handler) http.Handler { return next },
+		PolicySource: policy.Static(&policy.Policy{}),
+		Logger:       testutil.NopLogger(),
 	})
 
 	get := func(path, role string) *httptest.ResponseRecorder {

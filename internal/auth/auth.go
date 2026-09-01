@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/MicahParks/keyfunc/v3"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
@@ -16,12 +18,150 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// Config holds configuration for the JWT authentication middleware.
+// Config holds configuration for the JWT authentication middleware. JWKSURL
+// and RoleClaim are settings-directory keys (hot-reloadable via
+// Authenticator.Reconfigure); JWTSecret and OperatorKey are boot-config
+// secrets, fixed for the process lifetime.
 type Config struct {
 	JWTSecret   string
 	JWKSURL     string
 	RoleClaim   string // dot-separated claim path, e.g. "role" or "app_metadata.role"
 	OperatorKey string // optional non-JWT operator credential; a match on the presented credential (Authorization: Operator <key>, or the X-Operator-Key alias) authorizes a full-access platform operator (see Middleware)
+}
+
+// verifier is one immutable JWT verification setup: the key source, the
+// signing-algorithm allowlist pinned to it, and the role claim path. The
+// Authenticator swaps a whole verifier atomically, so a request never sees
+// a JWKS key source paired with the HMAC allowlist.
+type verifier struct {
+	jwks         keyfunc.Keyfunc
+	secret       string
+	roleClaim    string
+	validMethods []string
+	// cancel stops the JWKS background refresh once the verifier is replaced.
+	cancel context.CancelFunc
+	// url is the JWKS URL this verifier was built from (for the no-op check).
+	url string
+}
+
+func (v *verifier) jwksURL() string { return v.url }
+
+func (v *verifier) keyFunc(t *jwt.Token) (any, error) {
+	// JWKS-or-HMAC, JWKS first: when configured it is the sole verifier; the
+	// HMAC shared secret is reached only when JWKS isn't in play.
+	if v.jwks != nil {
+		return v.jwks.Keyfunc(t)
+	}
+	if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+		return nil, jwt.ErrSignatureInvalid
+	}
+	return []byte(v.secret), nil
+}
+
+// newVerifier builds a verifier from cfg. When JWKSURL is set the JWK Set
+// is fetched synchronously; with requireFetch (boot) an unreachable or
+// misconfigured endpoint is an error so the process refuses to start rather
+// than run where no token can validate. Without it (reload) the adopted
+// URL is applied regardless of the fetch's outcome: until the background
+// refresh (or the refresh an unknown key id triggers) succeeds, no JWT
+// validates and requests fall to the policy default_role — the same
+// fail-closed posture as an unreachable ClickHouse, fixed by the next
+// reload. Refresh failures are logged through logger when non-nil.
+func newVerifier(cfg Config, requireFetch bool, logger *slog.Logger) (*verifier, error) {
+	v := &verifier{secret: cfg.JWTSecret, roleClaim: cfg.RoleClaim, url: cfg.JWKSURL}
+	if v.roleClaim == "" {
+		v.roleClaim = "role"
+	}
+	if cfg.JWKSURL != "" {
+		ctx, cancel := context.WithCancel(context.Background())
+		noErrorReturnFirstHTTPReq := !requireFetch
+		override := keyfunc.Override{NoErrorReturnFirstHTTPReq: &noErrorReturnFirstHTTPReq}
+		if logger != nil {
+			override.RefreshErrorHandlerFunc = func(u string) func(context.Context, error) {
+				return func(_ context.Context, err error) {
+					logger.Warn("jwks refresh failed; no token validates until it succeeds", "url", u, "error", err)
+				}
+			}
+		}
+		jwks, err := keyfunc.NewDefaultOverrideCtx(ctx, []string{cfg.JWKSURL}, override)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("initialize JWKS from %q: %w", cfg.JWKSURL, err)
+		}
+		v.jwks, v.cancel = jwks, cancel
+	}
+	// Restrict accepted signing algorithms to the active verifier's family, so
+	// jwt.Parse rejects an unexpected alg (including "none") before keyFunc runs
+	// — defense-in-depth against alg-confusion and alg:none attacks. Keyed off
+	// the runtime verifier (jwks != nil), not just cfg.
+	if v.jwks != nil {
+		v.validMethods = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512", "EdDSA"}
+	} else {
+		v.validMethods = []string{"HS256", "HS384", "HS512"}
+	}
+	return v, nil
+}
+
+// Authenticator owns the verifier behind the middleware so a settings
+// reload can replace it without restarting: Reconfigure builds a new
+// verifier from the adopted settings and swaps it in unconditionally. The
+// operator key is boot config and never changes.
+type Authenticator struct {
+	operatorKey string
+	store       policy.Source
+	logger      *slog.Logger
+	mu          sync.Mutex // serializes Reconfigure
+	cur         atomic.Pointer[verifier]
+}
+
+// NewAuthenticator builds the boot-time verifier from cfg. An unreachable
+// JWKS endpoint is an error so boot fails loudly rather than degraded.
+func NewAuthenticator(cfg Config, store policy.Source, logger *slog.Logger) (*Authenticator, error) {
+	v, err := newVerifier(cfg, true, logger)
+	if err != nil {
+		return nil, err
+	}
+	a := &Authenticator{operatorKey: cfg.OperatorKey, store: store, logger: logger}
+	a.cur.Store(v)
+	return a, nil
+}
+
+// Reconfigure replaces the verifier with one built from cfg's JWKSURL,
+// RoleClaim, and JWTSecret when any of them changed. The adopted settings
+// are the authority, so the swap does not depend on the JWKS fetch
+// succeeding (see newVerifier). The replaced verifier's JWKS refresh is
+// stopped.
+func (a *Authenticator) Reconfigure(cfg Config) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	old := a.cur.Load()
+	roleClaim := cfg.RoleClaim
+	if roleClaim == "" {
+		roleClaim = "role"
+	}
+	if old != nil && old.roleClaim == roleClaim && old.secret == cfg.JWTSecret && (old.jwks != nil) == (cfg.JWKSURL != "") && old.jwksURL() == cfg.JWKSURL {
+		return
+	}
+	// The URL was validated as absolute http(s) and the first fetch is not
+	// required, so construction cannot fail; a nil verifier would fail closed
+	// anyway (every token rejected), matching the fetch-pending state.
+	v, err := newVerifier(cfg, false, a.logger)
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Error("auth reconfigure: build verifier", "error", err)
+		}
+		return
+	}
+	a.cur.Store(v)
+	if old != nil && old.cancel != nil {
+		old.cancel()
+	}
+}
+
+// Middleware returns the http middleware bound to this Authenticator; it
+// reads the current verifier on every request.
+func (a *Authenticator) Middleware() func(http.Handler) http.Handler {
+	return middleware(a.cur.Load, a.operatorKey, a.store, a.logger)
 }
 
 var (
@@ -58,9 +198,9 @@ var operatorKeyFailures, _ = otel.Meter("wavehouse-auth").Int64Counter(
 // neither JWKSURL nor JWTSecret configured, no token can validate and every
 // request falls back to the default role — i.e. a pure public deployment.
 //
-// If JWKSURL is set but its JWK Set can't be fetched at startup, Middleware
-// returns an error so the caller can fail fast instead of booting into a
-// degraded state where no token can validate.
+// If JWKSURL is set but its JWK Set can't be fetched at startup,
+// NewAuthenticator returns an error so the caller can fail fast instead of
+// booting into a degraded state where no token can validate.
 //
 // When cfg.OperatorKey is set, a non-JWT operator path is checked before the
 // Bearer token (see operatorKey below): a constant-time match on the presented
@@ -71,55 +211,13 @@ var operatorKeyFailures, _ = otel.Meter("wavehouse-auth").Int64Counter(
 // wavehouse_auth_operator_key_failures_total (a probing signal), then falls
 // through like any unauthenticated request. Both store and logger may be nil
 // when no operator key is configured.
-func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http.Handler) http.Handler, error) {
-	roleClaim := cfg.RoleClaim
-	if roleClaim == "" {
-		roleClaim = "role"
-	}
-
-	var jwks keyfunc.Keyfunc
-	if cfg.JWKSURL != "" {
-		// Force a synchronous initial fetch (NoErrorReturnFirstHTTPReq=false) so an
-		// unreachable or misconfigured JWKS endpoint fails startup loudly instead of
-		// silently booting into a state where no token can validate. keyfunc keeps
-		// refreshing in the background once this succeeds, so a JWKS outage *after*
-		// boot is tolerated — only boot-time unreachability is fatal.
-		noErrorReturnFirstHTTPReq := false
-		var err error
-		jwks, err = keyfunc.NewDefaultOverrideCtx(context.Background(), []string{cfg.JWKSURL}, keyfunc.Override{
-			NoErrorReturnFirstHTTPReq: &noErrorReturnFirstHTTPReq,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("initialize JWKS from %q: %w", cfg.JWKSURL, err)
-		}
-	}
-
-	keyFunc := func(t *jwt.Token) (any, error) {
-		// JWKS-or-HMAC, JWKS first: when configured it is the sole verifier; the
-		// HMAC shared secret is reached only when JWKS isn't in play.
-		if jwks != nil {
-			return jwks.Keyfunc(t)
-		}
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
-		}
-		return []byte(cfg.JWTSecret), nil
-	}
-
-	// Restrict accepted signing algorithms to the active verifier's family, so
-	// jwt.Parse rejects an unexpected alg (including "none") before keyFunc runs
-	// — defense-in-depth against alg-confusion and alg:none attacks. Keyed off the
-	// runtime verifier (jwks != nil), not just cfg, so a failed JWKS init that
-	// falls back to HMAC still gets the HMAC allowlist.
-	var validMethods []string
-	if jwks != nil {
-		validMethods = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512", "EdDSA"}
-	} else {
-		validMethods = []string{"HS256", "HS384", "HS512"}
-	}
-
+func middleware(current func() *verifier, operatorKeyCfg string, store policy.Source, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// One verifier per request: the swap is atomic, so a reload lands
+			// between requests, never inside one.
+			v := current()
+
 			// Resolved before the operator branch purely for its side effect: it
 			// strips ?token from r.URL, and an operator-key match returns without
 			// ever reaching the Bearer path. Leaving it below would exempt the
@@ -134,9 +232,9 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 			// context: the live admin role — so the policy evaluator's admin bypass
 			// grants unrestricted data-plane access while a policy exists — and an
 			// operator bit, which RequireAdmin honors even when the policy is
-			// nil/deleted, so the operator can still reach the admin surface to
-			// restore a wiped policy.
-			if cfg.OperatorKey != "" {
+			// nil (policies.json empty), so the operator can still reach the admin
+			// surface to inspect the policy and trigger a settings reload.
+			if operatorKeyCfg != "" {
 				// Resolve the presented credential once. An empty credential
 				// (no operator header at all) never matches and is not a failed
 				// attempt — it's just an ordinary request that falls through to
@@ -145,7 +243,7 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 				// header was sent is not secret.
 				presented := operatorKey(r)
 				match := presented != "" &&
-					subtle.ConstantTimeCompare([]byte(presented), []byte(cfg.OperatorKey)) == 1
+					subtle.ConstantTimeCompare([]byte(presented), []byte(operatorKeyCfg)) == 1
 				if match {
 					if logger != nil {
 						// Audit at Info (not Debug): the operator key is the most
@@ -165,7 +263,7 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 					}
 					var p *policy.Policy
 					if store != nil {
-						p = store.Get()
+						p = store()
 					}
 					ctx := WithOperator(r.Context())
 					ctx = WithRole(ctx, policy.AdminRole(p))
@@ -211,11 +309,11 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 			// one deliberate tightening: a literal exp of 0, which float64
 			// decoding special-cased as "no expiry", now reads as the epoch and
 			// is expired (see CHANGELOG).
-			token, err := jwt.Parse(tokenStr, keyFunc, jwt.WithValidMethods(validMethods), jwt.WithJSONNumber())
+			token, err := jwt.Parse(tokenStr, v.keyFunc, jwt.WithValidMethods(v.validMethods), jwt.WithJSONNumber())
 			if err == nil && token.Valid {
 				if claims, ok := token.Claims.(jwt.MapClaims); ok {
 					ctx := WithClaims(r.Context(), claims)
-					ctx = WithRole(ctx, extractClaim(claims, roleClaim))
+					ctx = WithRole(ctx, extractClaim(claims, v.roleClaim))
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -236,7 +334,7 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 			r = r.WithContext(WithAuthError(r.Context(), tokenError(err)))
 			next.ServeHTTP(w, r)
 		})
-	}, nil
+	}
 }
 
 // authScheme returns the credential following the given Authorization

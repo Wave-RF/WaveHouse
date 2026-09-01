@@ -1,9 +1,6 @@
 package pipes
 
 import (
-	"context"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -169,104 +166,6 @@ func TestBindParams_NilParam(t *testing.T) {
 	assert.Equal(t, "SELECT * FROM t WHERE col = NULL", sql)
 }
 
-func TestMemoryStore_GetListPut(t *testing.T) {
-	t.Parallel()
-	store := NewMemoryStore(
-		&NamedQuery{Name: "q1", SQL: "SELECT 1"},
-		&NamedQuery{Name: "q2", SQL: "SELECT 2"},
-	)
-
-	// Get.
-	q := store.Get("q1")
-	require.NotNil(t, q)
-	assert.Equal(t, "SELECT 1", q.SQL)
-
-	assert.Nil(t, store.Get("missing"))
-
-	// List.
-	all := store.List()
-	assert.Len(t, all, 2)
-
-	// Put (memory store doesn't have KV, so Put won't work without kv).
-	// Verify cached state directly.
-	store.mu.Lock()
-	store.cached["q3"] = &NamedQuery{Name: "q3", SQL: "SELECT 3"}
-	store.mu.Unlock()
-
-	assert.NotNil(t, store.Get("q3"))
-	assert.Len(t, store.List(), 3)
-}
-
-func TestMemoryStore_Empty(t *testing.T) {
-	t.Parallel()
-	store := NewMemoryStore()
-	assert.Empty(t, store.List())
-	assert.Nil(t, store.Get("anything"))
-}
-
-func TestStore_Put_ValidatesRequiredFields(t *testing.T) {
-	t.Parallel()
-	store := NewMemoryStore()
-	ctx := context.Background()
-
-	err := store.Put(ctx, &NamedQuery{SQL: "SELECT 1"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "name is required")
-
-	err = store.Put(ctx, &NamedQuery{Name: "only_name"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SQL is required")
-}
-
-func TestStore_Put_CachesWithoutKV(t *testing.T) {
-	t.Parallel()
-	store := NewMemoryStore()
-	ctx := context.Background()
-
-	q := &NamedQuery{Name: "count_clicks", SQL: "SELECT count() FROM clicks"}
-	require.NoError(t, store.Put(ctx, q))
-
-	got := store.Get("count_clicks")
-	require.NotNil(t, got)
-	assert.Equal(t, q.SQL, got.SQL)
-}
-
-func TestStore_Delete_RemovesFromCacheWithoutKV(t *testing.T) {
-	t.Parallel()
-	store := NewMemoryStore(
-		&NamedQuery{Name: "a", SQL: "SELECT 1"},
-		&NamedQuery{Name: "b", SQL: "SELECT 2"},
-	)
-	ctx := context.Background()
-
-	require.NoError(t, store.Delete(ctx, "a"))
-	assert.Nil(t, store.Get("a"))
-	assert.NotNil(t, store.Get("b"))
-	assert.Len(t, store.List(), 1)
-}
-
-func TestStore_LoadFromDirectory_MissingDirIsOK(t *testing.T) {
-	t.Parallel()
-	store := NewMemoryStore()
-	ctx := context.Background()
-	// Non-existent directory returns nil (not an error).
-	assert.NoError(t, store.loadFromDirectory(ctx, filepath.Join(t.TempDir(), "does-not-exist")))
-}
-
-func TestStore_LoadFromDirectory_EmptyDirReturnsNil(t *testing.T) {
-	t.Parallel()
-	store := NewMemoryStore()
-	ctx := context.Background()
-	// Empty directory: ReadDir succeeds, no entries to iterate. kv is never touched.
-	assert.NoError(t, store.loadFromDirectory(ctx, t.TempDir()))
-
-	// Directory with only non-.sql files: each is skipped before kv is touched.
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "notes.md"), []byte("ignored"), 0o600))
-	require.NoError(t, os.Mkdir(filepath.Join(dir, "sub"), 0o750))
-	assert.NoError(t, store.loadFromDirectory(ctx, dir))
-}
-
 func TestFormatParamValue_OK(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -386,4 +285,15 @@ func TestBindParams_EmptyArrayRejected(t *testing.T) {
 	_, _, err := BindParams(q, map[string]any{"ids": []any{}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "array parameter must not be empty")
+}
+
+func TestStatic_PipeAndPipes(t *testing.T) {
+	t.Parallel()
+	a := &NamedQuery{Name: "a", SQL: "SELECT 1"}
+	b := &NamedQuery{Name: "b", SQL: "SELECT 2"}
+	src := Static(a, b)
+	assert.Same(t, a, src.Pipe("a"))
+	assert.Nil(t, src.Pipe("missing"))
+	assert.Len(t, src.Pipes(), 2)
+	assert.Empty(t, Static().Pipes())
 }

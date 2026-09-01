@@ -53,7 +53,7 @@ curl -N "http://localhost:8080/v1/stream?table=events" & sleep 1
 ```
 
 > [!IMPORTANT]
-> No auth is needed to ingest with the default dev policy. The policy is VERY permissive, and not intended for production deployments.
+> No auth is needed to ingest with the trial policy the stack mounts from `deployments/compose/settings/`. The policy is VERY permissive, and not intended for production deployments.
 
 ```bash
 curl -sX POST "http://localhost:8080/v1/ingest?table=events" \
@@ -74,7 +74,7 @@ If you're building user-facing analytics, WaveHouse is like **Supabase for Click
 - **Ingest** — async durable WAL (embedded NATS JetStream), `200 OK` instantly, background batch-flush; schema-validated against `system.columns`; optional ID-based dedup (idempotent ingest); dead-letter queue for failed inserts.
 - **Query** — in-process Ristretto cache + `singleflight` coalescing; type-safe structured query AST; Tinybird-style named pipes (parameterized SQL endpoints).
 - **Real-time** — native SSE push, broadcast *before* the ClickHouse flush, with JetStream gap-fill for late/reconnecting clients.
-- **Security** — Hasura-style per-table, per-role column + row policies with JWT claim templating, stored in NATS KV.
+- **Security** — Hasura-style per-table, per-role column + row policies with JWT claim templating, defined in the hot-reloadable settings directory.
 - **Client** — `@wavehouse/sdk`: TypeScript client with query builder, live queries, streaming, and schema codegen; one runtime dependency (an SSE frame parser, ~1.4 KB gzipped).
 
 ## How it compares
@@ -102,7 +102,7 @@ git clone https://github.com/Wave-RF/WaveHouse.git && cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 ```
 
-The stack has a permissive dev policy, so you can ingest without a token. Create a table in ClickHouse (or import existing schema), then ingest — see the [getting-started walkthrough](https://wavehouse.dev/getting-started) for the full ingest → query → stream tour.
+The stack bind-mounts `deployments/compose/settings/` as its [settings directory](https://wavehouse.dev/settings-directory) whose `policies.json` / `roles.json` carry a permissive trial policy, so you can ingest without a token; edit the files on the host and the running container adopts them. Create a table in ClickHouse (or import existing schema), then ingest — see the [getting-started walkthrough](https://wavehouse.dev/getting-started) for the full ingest → query → stream tour.
 
 ### B. Prebuilt container image
 
@@ -127,7 +127,12 @@ Swap in `:vX.Y.Z` and `release.yml` for a release image. Pin the signer either w
 go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 ```
 
-You'll still need ClickHouse reachable. Point WaveHouse at it by setting `WH_CH_ADDR` (defaults to `localhost:9000`). See [Configuration](https://wavehouse.dev/configuration) for more information.
+```bash
+wavehouse bootstrap ./settings   # starter settings directory, every key at its default
+WH_SETTINGS_DIR=./settings wavehouse
+```
+
+The settings directory is required (no default; the container images ship none — mount one at `/app/settings`). The seed ships no policy, so every request is denied until you write one to `./settings/policies.json` (and declare its roles in `roles.json`) — copy `deployments/compose/settings/policies.json` for the permissive trial policy. You'll still need ClickHouse reachable: the seed points at `localhost:9000`; for anything else, edit `clickhouse.addr` in `./settings/config.json`. Everything in the directory hot-reloads. See [Settings Directory](https://wavehouse.dev/settings-directory) and [Configuration](https://wavehouse.dev/configuration) for more information.
 
 ## Project status
 

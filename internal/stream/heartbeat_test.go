@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewHeartbeater(t *testing.T) {
@@ -186,4 +187,88 @@ func TestHeartbeater_ConcurrentAddRemovePush_Race(t *testing.T) {
 	wg.Wait()
 
 	assert.Equal(t, 0, hb.Len(), "every added subscriber is removed; the ring drains")
+}
+
+func TestHeartbeater_ReconfigureRebuildsRingKeepingSubscribers(t *testing.T) {
+	t.Parallel()
+	hb := NewHeartbeater(time.Hour, 3)
+	subs := make([]*Subscriber, 5)
+	for i := range subs {
+		subs[i] = NewSubscriber(nil, nil)
+		hb.Add(subs[i])
+	}
+	require.Equal(t, 5, hb.Len())
+
+	// Shrink the ring: every subscriber survives, spread across the new buckets.
+	hb.Reconfigure(time.Minute, 2)
+	assert.Len(t, hb.buckets, 2)
+	assert.Equal(t, 30*time.Second, hb.tickInterval)
+	assert.Equal(t, 5, hb.Len(), "a rebuild carries every live subscriber over")
+	assert.Equal(t, 3, hb.buckets[0].Len())
+	assert.Equal(t, 2, hb.buckets[1].Len())
+
+	// Remove after the rebuild must hit the NEW ring — a subscriber still
+	// registered in a discarded bucket would be nudged forever.
+	for _, sub := range subs {
+		hb.Remove(sub)
+	}
+	assert.Equal(t, 0, hb.Len())
+
+	// Same shape again is a no-op: the ring object is untouched.
+	before := hb.buckets
+	hb.Reconfigure(time.Minute, 2)
+	assert.Equal(t, before[0], hb.buckets[0])
+}
+
+func TestHeartbeater_ReconfigureRetimesRunningWheel(t *testing.T) {
+	t.Parallel()
+	// Start slow enough that no keepalive would land within the test, then
+	// reconfigure to a tiny period: the running ticker must pick it up.
+	hb := NewHeartbeater(time.Hour, 1)
+	go hb.Run(t.Context())
+
+	sub := NewSubscriber(nil, nil)
+	hb.Add(sub)
+	defer hb.Remove(sub)
+
+	hb.Reconfigure(5*time.Millisecond, 1)
+	select {
+	case got := <-sub.Frames():
+		assert.Equal(t, KindKeepalive, got.Kind)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a keepalive at the reconfigured period")
+	}
+}
+
+// TestHeartbeater_ReconfigureConcurrent_Race churns subscribers while the
+// ring is rebuilt under it; the race detector is the assertion, and a fully
+// drained ring proves no subscriber was stranded in a discarded bucket.
+func TestHeartbeater_ReconfigureConcurrent_Race(t *testing.T) {
+	t.Parallel()
+	hb := NewHeartbeater(10*time.Millisecond, 3)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hb.Run(ctx)
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 500 {
+				sub := NewSubscriber(nil, nil)
+				hb.Add(sub)
+				hb.Remove(sub)
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := range 200 {
+			hb.Reconfigure(time.Duration(5+i%7)*time.Millisecond, 1+i%4)
+		}
+	}()
+	wg.Wait()
+	assert.Equal(t, 0, hb.Len())
 }

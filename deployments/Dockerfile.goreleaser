@@ -17,7 +17,9 @@
 # once natively and COPY'ing into each target image is correct AND
 # removes the binfmt/QEMU dependency entirely.
 FROM --platform=$BUILDPLATFORM alpine:3 AS layout
-RUN mkdir -p /app/data /app/pipes && chown -R 65532:65532 /app
+# /app/settings is the empty settings-directory mount point — see the same
+# RUN in deployments/Dockerfile; keep the two in lockstep.
+RUN mkdir -p /app/data /app/settings && chown -R 65532:65532 /app
 
 FROM gcr.io/distroless/static-debian12
 
@@ -26,6 +28,7 @@ ARG TARGETPLATFORM
 
 WORKDIR /app
 USER nonroot:nonroot
+ENV WH_SETTINGS_DIR=/app/settings
 
 # Pre-created state directories owned by the nonroot user (UID 65532) so
 # the binary can mkdir under /app/data without a volume mount, and so
@@ -59,8 +62,9 @@ LABEL com.docker.extension.icon="https://raw.githubusercontent.com/Wave-RF/WaveH
 # every restart). Doesn't override or interact with explicit `-v` /
 # compose `volumes:` declarations; those still take precedence.
 #
-# Pipes (/app/pipes) is intentionally NOT a VOLUME — it's a read-only
-# bootstrap source, not state. See docs/deployment.md.
+# The settings directory (/app/settings) is intentionally NOT a VOLUME — it's
+# operator config the process only reads, and an anonymous volume would hide
+# a missing mount instead of refusing to boot. See docs/deployment.md.
 VOLUME ["/app/data"]
 
 # Default listen port. ENV is just a default — compose `environment:` or

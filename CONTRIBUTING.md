@@ -43,7 +43,8 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
 
 3. Update documentation if your change affects:
    - API endpoints → update `docs/src/content/docs/api.md`
-   - Configuration options → update `docs/src/content/docs/configuration.mdx`
+   - Boot configuration options → update `docs/src/content/docs/configuration.mdx`
+   - Settings-directory keys (`config.json` / `roles.json` / `policies.json` / `pipes.json`) → update `docs/src/content/docs/settings-directory.mdx` plus the seed and fixture copies (see AGENTS.md §Documentation Sync)
    - Deployment → update `docs/src/content/docs/deployment.md`
    - Architecture → update `docs/src/content/docs/architecture.md`
 

@@ -1,14 +1,15 @@
-import type { Policy } from "@wavehouse/sdk";
+import type { Pipe, Policy } from "@wavehouse/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { adminClient } from "./helpers.js";
+import { readPipesFile, setPipes, setPolicy } from "./settings.js";
 import { suiteTables } from "./tables.js";
 
 describe("Admin", () => {
   const wh = adminClient();
   const T = suiteTables("admin");
 
-  // Track resources created during tests for cleanup
-  const createdPipes: string[] = [];
+  // Snapshot of pipes.json before this suite adds any, restored in afterAll.
+  let baselinePipes: Pipe[] | undefined;
   let policyWasSet = false;
   // Snapshot of the real (multi-suite) baseline policy, captured before any
   // mutation so afterAll restores exactly what setup.ts bootstrapped — not a
@@ -19,16 +20,17 @@ describe("Admin", () => {
     const res = await wh.policy.get();
     if (res.error) throw new Error(`Failed to fetch baseline policy: ${res.error.message}`);
     baselinePolicy = structuredClone(res.data);
+    baselinePipes = readPipesFile();
   });
 
   afterAll(async () => {
-    // Clean up test pipes
-    for (const name of createdPipes) {
-      await wh.pipes.delete(name);
-    }
     // Restore the captured baseline policy if we modified it.
     if (policyWasSet && baselinePolicy) {
-      await wh.policy.set(baselinePolicy);
+      await setPolicy(baselinePolicy);
+    }
+    // Write pipes.json back to what it was before this suite's pipes.
+    if (baselinePipes) {
+      await setPipes(baselinePipes);
     }
   });
 
@@ -95,16 +97,15 @@ describe("Admin", () => {
       expect(result.data).toBeDefined();
     });
 
-    it("sets and gets a policy", async () => {
+    it("adopts a policy from policies.json and reads it back", async () => {
       // Spread the baseline so we override only this suite's clicks entry —
-      // setting the bare testPolicy would wipe every other suite's tables from
+      // writing the bare testPolicy would wipe every other suite's tables from
       // the live policy until afterAll restores it.
-      const setResult = await wh.policy.set({
+      policyWasSet = true;
+      await setPolicy({
         ...testPolicy,
         tables: { ...(baselinePolicy?.tables ?? {}), ...testPolicy.tables },
       });
-      expect(setResult.error).toBeNull();
-      policyWasSet = true;
 
       const getResult = await wh.policy.get();
       expect(getResult.error).toBeNull();
@@ -119,18 +120,25 @@ describe("Admin", () => {
 
   describe("Pipes", () => {
     const pipeName = `test_pipe_${Date.now()}`;
+    const inPipe = `test_pipe_in_${Date.now()}`;
 
-    it("creates a pipe", async () => {
-      const result = await wh.pipes.set(pipeName, {
-        sql: `SELECT page, count() as views FROM default.${T.clicks} GROUP BY page ORDER BY views DESC LIMIT {{limit:10}}`,
-        description: "E2E test pipe",
-        allowed_roles: ["admin", "viewer"],
-      });
+    it("adopts a pipe from pipes.json", async () => {
+      await setPipes([
+        ...readPipesFile(),
+        {
+          name: pipeName,
+          sql: `SELECT page, count() as views FROM default.${T.clicks} GROUP BY page ORDER BY views DESC LIMIT {{limit:10}}`,
+          description: "E2E test pipe",
+          allowed_roles: ["admin", "viewer"],
+        },
+      ]);
+
+      const result = await wh.pipes.get(pipeName);
       expect(result.error).toBeNull();
-      createdPipes.push(pipeName);
+      expect(result.data).toMatchObject({ name: pipeName, description: "E2E test pipe" });
     });
 
-    it("lists pipes and finds the created one", async () => {
+    it("lists pipes and finds the adopted one", async () => {
       const result = await wh.pipes.list();
       expect(result.error).toBeNull();
       expect(result.data).toBeInstanceOf(Array);
@@ -155,15 +163,16 @@ describe("Admin", () => {
     });
 
     it("executes a pipe with an array (IN list) param", async () => {
-      const inPipe = `test_pipe_in_${Date.now()}`;
-      const created = await wh.pipes.set(inPipe, {
-        sql: `SELECT page, count() AS views FROM default.${T.clicks} WHERE page IN {{pages}} GROUP BY page`,
-        parameters: [{ name: "pages", type: "array", required: true }],
-        description: "E2E test pipe (IN list)",
-        allowed_roles: ["admin", "viewer"],
-      });
-      expect(created.error).toBeNull();
-      createdPipes.push(inPipe);
+      await setPipes([
+        ...readPipesFile(),
+        {
+          name: inPipe,
+          sql: `SELECT page, count() AS views FROM default.${T.clicks} WHERE page IN {{pages}} GROUP BY page`,
+          parameters: [{ name: "pages", type: "array", required: true }],
+          description: "E2E test pipe (IN list)",
+          allowed_roles: ["admin", "viewer"],
+        },
+      ]);
 
       // The array renders to `page IN ('/home', '/about', 'o''brien')` — every
       // element escaped (#317). The single quote in `o'brien` must stay inside
@@ -179,18 +188,17 @@ describe("Admin", () => {
       }
     });
 
-    it("deletes a pipe", async () => {
-      const result = await wh.pipes.delete(pipeName);
-      expect(result.error).toBeNull();
+    it("drops a pipe removed from pipes.json", async () => {
+      await setPipes(readPipesFile().filter((p) => p.name !== pipeName));
 
-      // Remove from cleanup list since we already deleted it
-      const idx = createdPipes.indexOf(pipeName);
-      if (idx >= 0) createdPipes.splice(idx, 1);
-
-      // Verify it's gone
       const list = await wh.pipes.list();
+      expect(list.error).toBeNull();
       const names = (list.data ?? []).map((p: any) => p.name);
       expect(names).not.toContain(pipeName);
+      expect(names).toContain(inPipe);
+
+      const result = await wh.pipes.get(pipeName);
+      expect(result.error?.status).toBe(404);
     });
   });
 

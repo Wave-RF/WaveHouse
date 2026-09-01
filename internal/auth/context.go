@@ -69,8 +69,9 @@ func WithAuthError(ctx context.Context, err error) context.Context {
 // by the middleware when a valid operator key is presented (Authorization:
 // Operator <key>, or the X-Operator-Key alias).
 // The operator bit authorizes the admin surface independently of the policy —
-// RequireAdmin honors it even when the policy is nil/deleted — so it is the
-// break-glass path for restoring a wiped policy over HTTP.
+// RequireAdmin honors it even when the policy is nil (policies.json empty) —
+// so it is the break-glass path that keeps the admin surface reachable while
+// locked out (inspect the adopted policy, reload after fixing the files).
 func WithOperator(ctx context.Context) context.Context {
 	return context.WithValue(ctx, contextKeyOperator, true)
 }

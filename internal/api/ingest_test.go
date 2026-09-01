@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
+	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -163,7 +164,7 @@ func TestIngest_Dedup_FirstTime(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.IDField = "event_id"
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", false }
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "evt-1"})
 	w := httptest.NewRecorder()
@@ -179,7 +180,7 @@ func TestIngest_Dedup_Duplicate(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.IDField = "event_id"
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", false }
 
 	// First call.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "dup-1"})
@@ -232,7 +233,7 @@ func TestIngest_Policy_Forbidden(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Select: map[string]policy.RolePermissions{
@@ -259,7 +260,7 @@ func TestIngest_Policy_ColumnDenied(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -288,7 +289,7 @@ func TestIngest_Policy_CheckClause_Mismatch(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -320,7 +321,7 @@ func TestIngest_Policy_CheckClause_Match(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -358,7 +359,7 @@ func TestIngest_Policy_CheckClause_NumericSpellingMatch(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	countTemplate := "{{ jwt.max_count }}"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -406,7 +407,7 @@ func TestIngest_Policy_CheckClause_StaticNumericSpelling(t *testing.T) {
 			pub := &testutil.MockPublisher{}
 			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 			staticCount := "1.0"
-			h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+			h.PolicySource = policy.Static(&policy.Policy{
 				Tables: map[string]policy.TablePolicy{
 					"clicks": {
 						Insert: map[string]policy.RolePermissions{
@@ -455,7 +456,7 @@ func TestIngest_Policy_CheckClause_StringClaimStrictEquality(t *testing.T) {
 			pub := &testutil.MockPublisher{}
 			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 			orgTemplate := "{{ jwt.org_id }}"
-			h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+			h.PolicySource = policy.Static(&policy.Policy{
 				Tables: map[string]policy.TablePolicy{
 					"clicks": {
 						Insert: map[string]policy.RolePermissions{
@@ -492,7 +493,7 @@ func TestIngest_Policy_CheckClause_NullValue_FailsClosed(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -525,7 +526,7 @@ func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -559,9 +560,9 @@ func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
 // checkInStore builds a policy whose insert check restricts org_id to the set
 // carried by the token's `orgs` claim (an _in check) — the multi-tenant
 // "a writer may only insert rows for tenants they belong to" case (#224).
-func checkInStore() *policy.Store {
+func checkInStore() policy.Source {
 	orgsTemplate := "{{ jwt.orgs }}"
-	return policy.NewMemoryStore(&policy.Policy{
+	return policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -576,7 +577,7 @@ func TestIngest_Policy_CheckIn_InSet(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = checkInStore()
+	h.PolicySource = checkInStore()
 
 	// org_id is one of the token's allowed orgs — should pass.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": "org-b"})
@@ -595,7 +596,7 @@ func TestIngest_Policy_CheckIn_NotInSet(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = checkInStore()
+	h.PolicySource = checkInStore()
 
 	// org_id is NOT one of the token's allowed orgs — forging another tenant's row.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": "org-z"})
@@ -620,7 +621,7 @@ func TestIngest_Policy_CheckIn_NullValue_FailsClosed(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = checkInStore()
+	h.PolicySource = checkInStore()
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": nil})
 	ctx := auth.WithRole(req.Context(), "user")
@@ -639,7 +640,7 @@ func TestIngest_Policy_CheckIn_Absent_FailsClosed(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = checkInStore()
+	h.PolicySource = checkInStore()
 
 	// org_id omitted — unlike _eq there's no single value to auto-inject, so the
 	// insert is rejected (fail closed) rather than stamped with an arbitrary org.
@@ -666,7 +667,7 @@ func TestIngest_Policy_CheckIn_AbsentClaim_FailsClosed(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = checkInStore()
+	h.PolicySource = checkInStore()
 
 	// The `orgs` claim is absent entirely, so the _in set resolves to a typed-nil
 	// []any; org_id is omitted too. The insert must be rejected (fail closed), not
@@ -691,9 +692,9 @@ func TestIngest_Dedup_MissingIDField(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.IDField = "event_id"
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", false }
 
-	// Payload omits event_id and require_id is off (the default): the row skips
+	// Payload omits event_id and require_id is off: the row skips
 	// dedup and is still published — the warn+counter path, not a rejection (#219).
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
 	w := httptest.NewRecorder()
@@ -710,8 +711,7 @@ func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = testutil.NewMockDeduplicator()
-	h.IDField = "event_id"
-	h.RequireID = true
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", true }
 
 	w := httptest.NewRecorder()
 	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
@@ -733,8 +733,7 @@ func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = testutil.NewMockDeduplicator()
-	h.IDField = "event_id"
-	h.RequireID = true
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", true }
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
@@ -760,7 +759,7 @@ func TestIngest_Policy_DenyColumns(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -787,7 +786,7 @@ func TestIngest_AdminRole_NoPolicy(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {},
 		},
@@ -986,7 +985,7 @@ func TestIngest_NDJSON_Dedup(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.IDField = "event_id"
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", false }
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
@@ -1045,7 +1044,7 @@ func TestIngest_NDJSON_Policy_ColumnDenied_PerLine(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -1080,7 +1079,7 @@ func TestIngest_NDJSON_Policy_TableForbidden(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Select: map[string]policy.RolePermissions{"viewer": {}},
@@ -1108,7 +1107,7 @@ func TestIngest_NDJSON_Policy_CheckClause_PerLineAndAutoInject(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				Insert: map[string]policy.RolePermissions{
@@ -1640,7 +1639,7 @@ func TestIngest_AutoInjectedLiteralTimestampCanonicalized(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(tsRegistry(t), pub, testutil.NopLogger())
 	staticTS := "2026-06-21 04:00:00"
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"events": {
 				Insert: map[string]policy.RolePermissions{
@@ -1724,4 +1723,53 @@ func TestIngest_Batch_MixedTimestampSpellings(t *testing.T) {
 		"banana",               // unparseable — passed through verbatim
 		"2026-06-21T04:00:00Z", // Unix seconds — canonicalized
 	}, spellings)
+}
+
+// TestIngest_Dedup_DisabledBySettings pins the hot-reloadable switch: with
+// dedupe.enabled false the deduplicator is never consulted (an Err that would
+// otherwise 500 is proof), the missing-id tripwire doesn't fire even in
+// strict mode, and the record publishes.
+func TestIngest_Dedup_DisabledBySettings(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{name: "with id: not consulted", body: map[string]any{"event_id": "e1", "page": "/home"}},
+		{name: "without id: strict mode does not reject", body: map[string]any{"page": "/home"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			dedup := testutil.NewMockDeduplicator()
+			dedup.Err = errors.New("must not be called while disabled")
+			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h.Dedup = dedup
+			h.DedupeSettings = func(string) (bool, string, bool) { return false, "event_id", true }
+
+			w := httptest.NewRecorder()
+			h.Handle(w, ingestRequest(t, "clicks", tt.body))
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Len(t, pub.Messages, 1, "record publishes, neither deduped nor rejected")
+		})
+	}
+}
+
+// TestIngest_Dedup_DisabledMidReload pins the reload window: the settings
+// snapshot still says enabled but the deduplicator has already been switched
+// off (or not yet on). The record publishes un-deduped instead of failing.
+func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	dedup := testutil.NewMockDeduplicator()
+	dedup.Err = dedupe.ErrDisabled
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h.Dedup = dedup
+	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", true }
+
+	w := httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"event_id": "e1", "page": "/home"}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Len(t, pub.Messages, 1, "published without idempotency, not 500")
 }

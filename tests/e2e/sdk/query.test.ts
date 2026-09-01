@@ -8,6 +8,7 @@ import {
   WH_URL,
   waitForCondition,
 } from "./helpers.js";
+import { setPolicy } from "./settings.js";
 import { suiteTables } from "./tables.js";
 
 describe("Query", () => {
@@ -185,7 +186,7 @@ describe("Query", () => {
 
     // 2. Add it to the policy
     const currentPolicyRes = await admin.policy.get();
-    await admin.policy.set({
+    await setPolicy({
       tables: {
         ...(currentPolicyRes.data as any).tables,
         [weirdName]: {
@@ -216,7 +217,7 @@ describe("Query", () => {
 
     // 2. Grant the viewer role read access via policy.
     const currentPolicyRes = await admin.policy.get();
-    await admin.policy.set({
+    await setPolicy({
       tables: {
         ...(currentPolicyRes.data as any).tables,
         [noTsTable]: {
@@ -258,7 +259,7 @@ describe("Query", () => {
     expect(currentPolicyRes.data).not.toBeNull();
 
     // Temporarily restrict this suite's clicks table so 'user_id' can't be selected
-    await admin.policy.set({
+    await setPolicy({
       tables: {
         ...(currentPolicyRes.data as any).tables,
         [T.clicks]: {
@@ -276,7 +277,7 @@ describe("Query", () => {
     expect(result.error!.status).toBe(403);
 
     // Restore the baseline policy using the non-null assertion (!)
-    await admin.policy.set(currentPolicyRes.data!);
+    await setPolicy(currentPolicyRes.data!);
   });
 
   // ── #223: the column allowlist is a hard cap on EVERY read shape ────────────
@@ -299,7 +300,7 @@ describe("Query", () => {
     const admin = adminClient();
     const snapshot = await admin.policy.get();
     const tables = (snapshot.data as any).tables;
-    await admin.policy.set({
+    await setPolicy({
       tables: {
         ...tables,
         [T.clicks]: { ...(tables[T.clicks] || {}), select: { viewer: perms } },
@@ -308,7 +309,7 @@ describe("Query", () => {
     try {
       await body();
     } finally {
-      await admin.policy.set(snapshot.data!);
+      await setPolicy(snapshot.data!);
     }
   }
 
@@ -425,7 +426,7 @@ describe("Query", () => {
     const currentPolicyRes = await admin.policy.get();
 
     // Temporarily restrict viewer queries to an impossibly fast 1ms timeout
-    await admin.policy.set({
+    await setPolicy({
       tables: {
         ...(currentPolicyRes.data as any).tables,
         [T.clicks]: {
@@ -467,7 +468,7 @@ describe("Query", () => {
       expect(deadlineError!.status).toBe(500);
     } finally {
       // Restore policy even if test fails so that others don't too
-      await admin.policy.set(currentPolicyRes.data!);
+      await setPolicy(currentPolicyRes.data!);
     }
   });
 

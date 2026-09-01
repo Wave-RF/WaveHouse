@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"maps"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,23 +15,17 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
 
-// Validate checks a settings directory and returns every finding it can
-// discover in one pass — an operator fixing a hand-edited directory wants the
-// whole list, not a fix-rerun-fix loop. Checking only: no side effects, and
-// no parsed data escapes. Callers translate the result per their own
+// Validate reads, decodes, and checks a settings directory in one pass and
+// returns every finding it can discover — an operator fixing a hand-edited
+// directory wants the whole list, not a fix-rerun-fix loop. No side effects:
+// no network, no ClickHouse, nothing written. The Document is returned only
+// when no finding is an error (warnings alone leave it usable), so what a
+// node adopts is byte-for-byte what was validated — this is the single
+// checking path, and every consumer (the `wavehouse validate` CLI, boot, a
+// live reload) goes through it. Callers translate the result per their own
 // contract: the CLI exits non-zero, boot refuses to start, and a live reload
 // keeps serving the previous good document.
-func Validate(dir string) []Finding {
-	_, findings := parse(dir)
-	return findings
-}
-
-// parse reads, decodes, and validates the directory in one pass; the Document
-// is returned only when no finding is an error (warnings alone leave it
-// usable). Unexported on purpose: the future loader must consume THIS result,
-// so what a node adopts is byte-for-byte what was validated — a separate
-// load path could drift from the validator and adopt what it never checked.
-func parse(dir string) (*Document, []Finding) {
+func Validate(dir string) (*Document, []Finding) {
 	v := &validator{}
 
 	files, ok := v.checkDir(dir)
@@ -283,22 +279,75 @@ func (v *validator) parsePipes(data []byte) []pipes.NamedQuery {
 	return f.Pipes
 }
 
-// checkIDField rejects an explicit id_field value that could never match a
-// JSON key: empty or whitespace-only (the author wrote a value that names
-// nothing) and surrounding whitespace (an exact-match lookup would silently
-// miss every row). Absent (nil) is always fine — it means inherit, and the
-// compiled default floors the cascade. Interior whitespace stays legal:
-// "click id" is a valid JSON key.
-func (v *validator) checkIDField(path string, val *string, omitHint string) {
+// checkIDField rejects an id_field value that could never match a JSON key:
+// empty or whitespace-only (the author wrote a value that names nothing) and
+// surrounding whitespace (an exact-match lookup would silently miss every
+// row). nil is the caller's concern — required at the top level, inherit in
+// a table override. Interior whitespace stays legal: "click id" is a valid
+// JSON key.
+func (v *validator) checkIDField(path string, val *string) {
 	if val == nil {
 		return
 	}
 	switch {
 	case strings.TrimSpace(*val) == "":
-		v.errorf(FileConfig, path, "must not be empty — %s", omitHint)
+		v.errorf(FileConfig, path, "must not be empty")
 	case strings.TrimSpace(*val) != *val:
 		v.errorf(FileConfig, path, "id_field %q has surrounding whitespace", *val)
 	}
+}
+
+// checkTableName rejects a per-table override key that could never match a
+// table: empty, or carrying surrounding whitespace. Shared by the dedupe and
+// dlq override maps.
+func (v *validator) checkTableName(mapPath, table string) {
+	switch {
+	case table == "":
+		v.errorf(FileConfig, mapPath, "table name must not be empty")
+	case strings.TrimSpace(table) != table:
+		v.errorf(FileConfig, mapPath+"."+table, "table name %q has surrounding whitespace", table)
+	}
+}
+
+// checkClickHouse validates the connection wiring: every field required, the
+// native address a host:port, the HTTP port in range, the scheme http or
+// https, and the timeout positive. Reachability is deliberately not checked
+// — Validate is pure, and adoption is unconditional; an unreachable address
+// surfaces through schema discovery and /readyz like any other outage.
+func (v *validator) checkClickHouse(ch *ClickHouseConfig) {
+	if ch.Addr == nil {
+		v.required("clickhouse.addr")
+	} else if host, port, err := net.SplitHostPort(*ch.Addr); err != nil || host == "" || port == "" {
+		v.errorf(FileConfig, "clickhouse.addr", "must be host:port, got %q", *ch.Addr)
+	}
+	if ch.HTTPPort == nil {
+		v.required("clickhouse.http_port")
+	} else if *ch.HTTPPort < 1 || *ch.HTTPPort > 65535 {
+		v.errorf(FileConfig, "clickhouse.http_port", "must be in 1-65535, got %d", *ch.HTTPPort)
+	}
+	if ch.HTTPScheme == nil {
+		v.required("clickhouse.http_scheme")
+	} else if *ch.HTTPScheme != "http" && *ch.HTTPScheme != "https" {
+		v.errorf(FileConfig, "clickhouse.http_scheme", "must be \"http\" or \"https\", got %q", *ch.HTTPScheme)
+	}
+	for path, val := range map[string]*string{"clickhouse.database": ch.Database, "clickhouse.username": ch.Username} {
+		if val == nil {
+			v.required(path)
+		} else if strings.TrimSpace(*val) == "" {
+			v.errorf(FileConfig, path, "must not be empty")
+		}
+	}
+	if ch.QueryTimeout == nil {
+		v.required("clickhouse.query_timeout")
+	} else if *ch.QueryTimeout < 1 {
+		v.errorf(FileConfig, "clickhouse.query_timeout", "must be >= 1 second, got %d", *ch.QueryTimeout)
+	}
+}
+
+// required reports a missing key. Every top-level tunable is required so the
+// adopted snapshot never depends on a value the files don't state.
+func (v *validator) required(path string) {
+	v.errorf(FileConfig, path, "required — run `wavehouse bootstrap` for a complete starter config.json")
 }
 
 func (v *validator) parseConfig(data []byte) TenantConfig {
@@ -309,35 +358,130 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		// files; the document is discarded whenever any error exists.
 		return TenantConfig{}
 	}
-	if d := c.Dedupe; d != nil {
-		v.checkIDField("dedupe.id_field", d.IDField, "omit it to use the default")
+	if ch := c.ClickHouse; ch == nil {
+		v.required("clickhouse")
+	} else {
+		v.checkClickHouse(ch)
+	}
+	if a := c.Auth; a == nil {
+		v.required("auth")
+	} else {
+		if a.JWKSURL == nil {
+			v.required("auth.jwks_url")
+		} else if *a.JWKSURL != "" {
+			u, err := url.Parse(*a.JWKSURL)
+			switch {
+			case err != nil:
+				v.errorf(FileConfig, "auth.jwks_url", "not a valid URL: %v", err)
+			case (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
+				v.errorf(FileConfig, "auth.jwks_url", "must be an absolute http(s) URL, got %q", *a.JWKSURL)
+			}
+		}
+		if a.RoleClaim == nil {
+			v.required("auth.role_claim")
+		} else if strings.TrimSpace(*a.RoleClaim) == "" || strings.TrimSpace(*a.RoleClaim) != *a.RoleClaim {
+			v.errorf(FileConfig, "auth.role_claim", "must be a non-empty claim path with no surrounding whitespace, got %q", *a.RoleClaim)
+		}
+	}
+	if d := c.Dedupe; d == nil {
+		v.required("dedupe")
+	} else {
+		if d.Enabled == nil {
+			v.required("dedupe.enabled")
+		}
+		if d.IDField == nil {
+			v.required("dedupe.id_field")
+		}
+		if d.RequireID == nil {
+			v.required("dedupe.require_id")
+		}
+		v.checkIDField("dedupe.id_field", d.IDField)
 		// Sorted iteration keeps finding order deterministic across runs.
 		for _, table := range slices.Sorted(maps.Keys(d.Tables)) {
 			td := d.Tables[table]
 			path := "dedupe.tables." + table
-			switch {
-			case table == "":
-				v.errorf(FileConfig, "dedupe.tables", "table name must not be empty")
-			case strings.TrimSpace(table) != table:
-				v.errorf(FileConfig, path, "table name %q has surrounding whitespace", table)
-			}
-			v.checkIDField(path+".id_field", td.IDField, "omit it to inherit the global value")
+			v.checkTableName("dedupe.tables", table)
+			v.checkIDField(path+".id_field", td.IDField)
 			if td.IDField == nil && td.RequireID == nil {
 				v.warnf(FileConfig, path, "override sets nothing — remove it, or set id_field or require_id")
 			}
 		}
 	}
-	if q := c.Query; q != nil {
-		if q.DefaultMaxRows != nil && *q.DefaultMaxRows < 0 {
-			v.errorf(FileConfig, "query.default_max_rows", "must be non-negative, got %d", *q.DefaultMaxRows)
+	if d := c.DLQ; d == nil {
+		v.required("dlq")
+	} else {
+		if d.Enabled == nil {
+			v.required("dlq.enabled")
+		}
+		for _, table := range slices.Sorted(maps.Keys(d.Tables)) {
+			path := "dlq.tables." + table
+			v.checkTableName("dlq.tables", table)
+			if d.Tables[table].Enabled == nil {
+				v.warnf(FileConfig, path, "override sets nothing — remove it, or set enabled")
+			}
 		}
 	}
-	if s := c.Schema; s != nil {
-		if s.RefreshInterval != nil && *s.RefreshInterval < 1 {
-			v.errorf(FileConfig, "schema.refresh_interval", "must be >= 1 second, got %d", *s.RefreshInterval)
+	if q := c.Query; q == nil {
+		v.required("query")
+	} else {
+		if q.DefaultMaxRows == nil {
+			v.required("query.default_max_rows")
+		} else if *q.DefaultMaxRows < 1 {
+			v.errorf(FileConfig, "query.default_max_rows", "must be >= 1, got %d", *q.DefaultMaxRows)
+		}
+		if q.TimestampBucketSeconds == nil {
+			v.required("query.timestamp_bucket_seconds")
+		} else if *q.TimestampBucketSeconds < 0 {
+			v.errorf(FileConfig, "query.timestamp_bucket_seconds", "must be >= 0 (0 disables bucketing), got %d", *q.TimestampBucketSeconds)
 		}
 	}
-	if co := c.CORS; co != nil {
+	if s := c.Schema; s == nil {
+		v.required("schema")
+	} else if s.RefreshInterval == nil {
+		v.required("schema.refresh_interval")
+	} else if *s.RefreshInterval < 1 {
+		v.errorf(FileConfig, "schema.refresh_interval", "must be >= 1 second, got %d", *s.RefreshInterval)
+	}
+	if s := c.Stream; s == nil {
+		v.required("stream")
+	} else {
+		if s.KeepaliveInterval == nil {
+			v.required("stream.keepalive_interval")
+		} else if *s.KeepaliveInterval < 1 {
+			v.errorf(FileConfig, "stream.keepalive_interval", "must be >= 1 second, got %d", *s.KeepaliveInterval)
+		}
+		if s.KeepaliveBuckets == nil {
+			v.required("stream.keepalive_buckets")
+		} else if *s.KeepaliveBuckets < 1 {
+			v.errorf(FileConfig, "stream.keepalive_buckets", "must be >= 1, got %d", *s.KeepaliveBuckets)
+		}
+		if s.GapWindowMinutes == nil {
+			v.required("stream.gap_window_minutes")
+		} else if *s.GapWindowMinutes < 0 {
+			v.errorf(FileConfig, "stream.gap_window_minutes", "must be >= 0, got %d", *s.GapWindowMinutes)
+		}
+	}
+
+	if m := c.MQ; m == nil {
+		v.required("mq")
+	} else if m.MaxBytesGB == nil {
+		v.required("mq.max_bytes_gb")
+	} else if *m.MaxBytesGB < 1 {
+		v.errorf(FileConfig, "mq.max_bytes_gb", "must be >= 1 GB, got %d", *m.MaxBytesGB)
+	}
+
+	switch co := c.CORS; {
+	case co == nil:
+		v.required("cors")
+	case co.AllowedOrigins == nil:
+		v.required("cors.allowed_origins")
+	case len(co.AllowedOrigins) == 0:
+		// An empty list is not "no origins": corsMiddleware treats it as
+		// allow-all, and [] is the natural spelling for "none" in a
+		// hand-edited file — so name the trap before it hot-reloads into
+		// effect.
+		v.warnf(FileConfig, "cors.allowed_origins", `empty list allows every origin — write ["*"] to say so explicitly, or list the origins to allow`)
+	default:
 		for i, origin := range co.AllowedOrigins {
 			if strings.TrimSpace(origin) == "" {
 				v.errorf(FileConfig, fmt.Sprintf("cors.allowed_origins[%d]", i), "origin must not be empty")

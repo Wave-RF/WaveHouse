@@ -401,7 +401,7 @@ Everything else reaches streams normally — including `mode` from the example a
 :::
 
 :::note[`credentials: 'include'` needs a proxy that owns CORS]
-Sending cookies cross-origin is a common reason to reach for this, but it can't work against WaveHouse's own CORS: it deliberately never emits `Access-Control-Allow-Credentials` (it's a Bearer-token API), and the default `cors_allowed_origins: "*"` makes `include` a hard browser failure regardless. It applies where a fronting proxy answers CORS itself — see [Behind a reverse proxy](/reverse-proxy#header-and-auth-forwarding). Same-origin deployments already send cookies without it.
+Sending cookies cross-origin is a common reason to reach for this, but it can't work against WaveHouse's own CORS: it deliberately never emits `Access-Control-Allow-Credentials` (it's a Bearer-token API), and the default allow-all CORS allowlist (`cors.allowed_origins`) makes `include` a hard browser failure regardless. It applies where a fronting proxy answers CORS itself — see [Behind a reverse proxy](/reverse-proxy#header-and-auth-forwarding). Same-origin deployments already send cookies without it.
 :::
 
 The fields the SDK controls — `method`, `headers`, `body`, and `signal` — always win, so this can't corrupt the request itself. In particular `headers` here is ignored; use `options.headers`, which merges properly.
@@ -542,12 +542,12 @@ The full error-code table lives in [Error Handling](/sdk/reference#error-handlin
   />
   <LinkCard
     title="Pipes"
-    description="Execute and manage named query pipes."
+    description="Execute and inspect named query pipes."
     href="/sdk/pipes"
   />
   <LinkCard
     title="Admin & System"
-    description="Schema introspection, access-control policy, DLQ stats, and health checks."
+    description="Schema introspection, access-control policy, settings reload, DLQ stats, and health checks."
     href="/sdk/admin"
   />
   <LinkCard

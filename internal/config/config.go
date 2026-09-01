@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/ilyakaznacheev/cleanenv"
 )
@@ -19,18 +18,10 @@ type Config struct {
 	DataDir    string     `yaml:"data_dir" env:"WH_DATA_DIR" env-default:"./data"`
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
-	MQ         MQ         `yaml:"mq"`
-	Dedupe     Dedupe     `yaml:"dedupe"`
 	Cache      Cache      `yaml:"cache"`
 	Auth       Auth       `yaml:"auth"`
-	Schema     Schema     `yaml:"schema"`
-	DLQ        DLQ        `yaml:"dlq"`
-	Policy     Policy     `yaml:"policy"`
-	Pipes      Pipes      `yaml:"pipes"`
 	OTel       OTel       `yaml:"otel"`
 	Prometheus Prometheus `yaml:"prometheus"`
-	Query      Query      `yaml:"query"`
-	Stream     Stream     `yaml:"stream"`
 	Settings   Settings   `yaml:"settings"`
 }
 
@@ -44,24 +35,14 @@ const EnvSettingsDir = "WH_SETTINGS_DIR"
 // Settings locates the hot-reloadable settings directory — the four JSON
 // documents (roles.json, policies.json, pipes.json, config.json) validated by
 // internal/settings. Boot-tier by necessity: it's the pointer the reload
-// machinery follows, so it can't live behind itself. No default, same
-// reasoning as policy.file_path: a baked-in path would turn a missing mount
-// into silent misconfiguration instead of an explicit operator choice.
+// machinery follows, so it can't live behind itself. REQUIRED, with no
+// default: a baked-in path would turn a
+// missing mount into silent misconfiguration instead of an explicit operator
+// choice, and the binary has no compiled tunable defaults to fall back on —
+// `wavehouse bootstrap [dir]` writes the starter directory (the container
+// images preset WH_SETTINGS_DIR=/app/settings and expect a mount there).
 type Settings struct {
 	Dir string `yaml:"dir" env:"WH_SETTINGS_DIR"`
-}
-
-// Query holds query-shaping defaults. Server-wide *resource* limits (memory,
-// rows scanned, execution time) deliberately live in ClickHouse itself — its
-// settings profiles and quotas, see docs/configuration — so they apply
-// uniformly to every query (including raw admin SQL) and compose with the
-// per-role caps WaveHouse adds via per-query settings. This block holds only
-// the result-shaping default that is genuinely WaveHouse's to own.
-type Query struct {
-	// DefaultMaxRows is the result LIMIT applied to a structured query when the
-	// caller and policy specify none — the visible, tunable form of what used to
-	// be the hard-coded query.DefaultMaxRows. 0 falls back to that constant.
-	DefaultMaxRows int `yaml:"default_max_rows" env:"WH_QUERY_DEFAULT_MAX_ROWS" env-default:"10000"`
 }
 
 // OTel configures the OpenTelemetry pipeline. `enabled` is the master switch;
@@ -117,114 +98,52 @@ type OTelLogs struct {
 	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_LOGS_SAMPLE_RATE" env-default:"1.0"`
 }
 
+// Server holds listener wiring. The CORS allowlist is a tenant tunable and
+// lives in the settings directory's config.json (internal/settings), as do
+// the SSE keepalive and gap-window knobs (stream.*).
 type Server struct {
-	Port               int      `yaml:"port" env:"WH_SERVER_PORT" env-default:"8080"`
-	ShutdownTimeout    int      `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT" env-default:"10"`
-	CORSAllowedOrigins []string `yaml:"cors_allowed_origins" env:"WH_SERVER_CORS_ALLOWED_ORIGINS" env-default:"*"`
+	Port            int `yaml:"port" env:"WH_SERVER_PORT" env-default:"8080"`
+	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT" env-default:"10"`
 }
 
-type Stream struct {
-	// KeepaliveInterval is the effective per-connection SSE keepalive period: the
-	// longest a quiet GET /v1/stream connection goes without a write before the
-	// server sends a ":" keepalive comment. Keep it under your proxy/tunnel idle
-	// timeout (default 30s clears the common 55–60s nginx/ALB/Heroku window).
-	KeepaliveInterval time.Duration `yaml:"keepalive_interval" env:"WH_STREAM_KEEPALIVE_INTERVAL" env-default:"30s"`
-	// KeepaliveBuckets spreads keepalive writes across the interval so the server
-	// nudges ~1/N of connections per tick instead of all at once. Advanced knob;
-	// most deployments never change it.
-	KeepaliveBuckets int `yaml:"keepalive_buckets" env:"WH_STREAM_KEEPALIVE_BUCKETS" env-default:"3"`
-}
-
+// ClickHouse holds only the password. The wiring — address, HTTP port and
+// scheme, database, username, query timeout — is the settings directory's
+// `clickhouse` block (hot-reloadable: a change swaps the connection). The password stays here because secrets
+// don't belong in a tracked JSON file; it is combined with the adopted
+// wiring on every (re)connect.
 type ClickHouse struct {
-	Addr         string        `yaml:"addr" env:"WH_CH_ADDR" env-default:"localhost:9000"`
-	HTTPPort     string        `yaml:"http_port" env:"WH_CH_HTTP_PORT" env-default:"8123"`
-	HTTPScheme   string        `yaml:"http_scheme" env:"WH_CH_HTTP_SCHEME" env-default:"http"`
-	Database     string        `yaml:"database" env:"WH_CH_DATABASE" env-default:"default"`
-	Username     string        `yaml:"username" env:"WH_CH_USERNAME" env-default:"default"`
-	Password     string        `yaml:"password" env:"WH_CH_PASSWORD"`
-	QueryTimeout time.Duration `yaml:"query_timeout" env:"WH_CH_QUERY_TIMEOUT" env-default:"30s"`
+	Password string `yaml:"password" env:"WH_CH_PASSWORD"`
 }
 
-type MQ struct {
-	GapWindowMinutes int `yaml:"gap_window_minutes" env:"WH_MQ_GAP_WINDOW_MINUTES" env-default:"15"`
-	MaxBytesGB       int `yaml:"max_bytes_gb" env:"WH_MQ_MAX_BYTES_GB" env-default:"50"`
-}
-
-type Dedupe struct {
-	Enabled   bool   `yaml:"enabled" env:"WH_DEDUPE_ENABLED" env-default:"false"`
-	IDField   string `yaml:"id_field" env:"WH_DEDUPE_ID_FIELD" env-default:"event_id"`
-	RequireID bool   `yaml:"require_id" env:"WH_DEDUPE_REQUIRE_ID" env-default:"false"`
-}
-
+// Cache sizes the in-process L1 cache. The time-range bucket structured
+// queries normalize to is a settings-directory key
+// (query.timestamp_bucket_seconds) — query shaping, not process memory.
 type Cache struct {
-	L1MaxCost              int64 `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
-	TimestampBucketSeconds int   `yaml:"timestamp_bucket_seconds" env:"WH_CACHE_TIMESTAMP_BUCKET_SECONDS" env-default:"60"`
+	L1MaxCost int64 `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
 }
 
-// Auth configures JWT validation. There is no on/off switch: the middleware
-// always runs. A request with no token, or an invalid/expired one, falls back
-// to the policy default_role; elevated access requires a valid token whose role
-// claim matches a granted role (or the policy admin_role). With neither
-// JWTSecret nor JWKSURL set, no token can validate, so every request is the
-// default role — a pure public deployment.
+// Auth holds the authentication secrets. The verifier wiring — `jwks_url`,
+// `role_claim` — is the settings directory's `auth` block (hot-reloadable:
+// a change rebuilds the verifier). There is no on/off switch: the middleware always runs. A request
+// with no token, or an invalid/expired one, falls back to the policy
+// default_role; elevated access requires a valid token whose role claim
+// matches a granted role (or the policy admin_role). With neither JWTSecret
+// nor a jwks_url set, no token can validate, so every request is the default
+// role — a pure public deployment.
 //
 // OperatorKey is an optional non-JWT credential for the operator running the
 // deployment: a request presenting it via an "Authorization: Operator <key>"
 // header (or the X-Operator-Key alias) is authorized as a full-access platform
 // operator, independent of the JWT verifier, and keeps working even if the
-// policy is missing/deleted (break-glass recovery). Empty (the default) disables
+// policy is missing/deleted (break-glass recovery, e.g. fixing policies.json). Empty (the default) disables
 // it. Treat it as an admin secret.
 type Auth struct {
 	JWTSecret   string `yaml:"jwt_secret" env:"WH_AUTH_JWT_SECRET"`
-	JWKSURL     string `yaml:"jwks_url" env:"WH_AUTH_JWKS_URL"`
-	RoleClaim   string `yaml:"role_claim" env:"WH_AUTH_ROLE_CLAIM" env-default:"role"`
 	OperatorKey string `yaml:"operator_key" env:"WH_AUTH_OPERATOR_KEY"`
-}
-
-// Policy configures the access control policy engine.
-//
-// FilePath has no default on purpose. When set, the file MUST exist and parse
-// cleanly — policy.NewStore returns a fatal error otherwise, so a typo or a
-// missing mount surfaces as a refused boot instead of a silent fail-closed
-// (every request 403s, including admin). When left empty, the store comes up
-// with no cached policy and the operator seeds via PUT /v1/ops/policy.
-//
-// A baked-in default like "policy.yaml" would re-introduce the silent-lockout
-// failure mode for any deployment that didn't ship that exact file at CWD,
-// and it would imply a convention the operator never opted into — keep the
-// path an explicit choice.
-type Policy struct {
-	FilePath string `yaml:"file_path" env:"WH_POLICY_FILE_PATH"`
-}
-
-// Pipes configures named query pipes.
-//
-// Dir is an OPTIONAL bootstrap source: on startup, any `.sql` files in it are
-// loaded into the NATS KV pipe store. After bootstrap, the API/KV is the
-// authoritative store — the directory is read-only at runtime and not
-// rewritten. Empty default skips bootstrap entirely (most users will create
-// pipes via the API). When set, mount the directory read-only in containers
-// (e.g. `./my-pipes:/app/pipes:ro`) so it's clear it's a seed, not state.
-type Pipes struct {
-	Dir string `yaml:"dir" env:"WH_PIPES_DIR" env-default:""`
-}
-
-// Schema configures ClickHouse schema discovery.
-type Schema struct {
-	RefreshInterval int `yaml:"refresh_interval" env:"WH_SCHEMA_REFRESH_INTERVAL" env-default:"60"` // seconds
-}
-
-// DLQ configures the Dead Letter Queue for failed batch inserts.
-type DLQ struct {
-	Enabled bool `yaml:"enabled" env:"WH_DLQ_ENABLED" env-default:"true"`
 }
 
 // Validate checks the loaded configuration for logical consistency.
 func (c *Config) Validate() error {
-	if c.ClickHouse.HTTPScheme != "http" && c.ClickHouse.HTTPScheme != "https" {
-		return fmt.Errorf("clickhouse.http_scheme must be 'http' or 'https'")
-	}
-
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port %d out of range 1-65535", c.Server.Port)
 	}
@@ -233,31 +152,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("server.shutdown_timeout must be non-negative")
 	}
 
-	if c.Stream.KeepaliveInterval < 0 {
-		return fmt.Errorf("stream.keepalive_interval must be non-negative, got %s", c.Stream.KeepaliveInterval)
-	}
-	if c.Stream.KeepaliveBuckets < 0 {
-		return fmt.Errorf("stream.keepalive_buckets must be non-negative, got %d", c.Stream.KeepaliveBuckets)
-	}
-
-	if c.Schema.RefreshInterval < 1 {
-		return fmt.Errorf("schema.refresh_interval must be >= 1 second")
-	}
-
-	if c.ClickHouse.QueryTimeout <= time.Duration(0) {
-		return fmt.Errorf("clickhouse.query_timeout must be > 0, got %s", c.ClickHouse.QueryTimeout)
-	}
-
-	// query.default_max_rows is the fallback result LIMIT. 0 (or a directly-built
-	// config that omits it) means "use the built-in query.DefaultMaxRows" — the
-	// builder substitutes the constant for any non-positive value — so only a
-	// negative value is an error.
-	if c.Query.DefaultMaxRows < 0 {
-		return fmt.Errorf("query.default_max_rows must be non-negative, got %d", c.Query.DefaultMaxRows)
-	}
-
-	if c.MQ.GapWindowMinutes < 0 {
-		return fmt.Errorf("mq.gap_window_minutes must be non-negative")
+	if strings.TrimSpace(c.Settings.Dir) == "" {
+		return fmt.Errorf("settings.dir (%s) is required: point it at a settings directory, or create one with `wavehouse bootstrap [dir]`", EnvSettingsDir)
 	}
 
 	if c.OTel.Enabled {
@@ -311,11 +207,18 @@ func (c *Config) Validate() error {
 }
 
 // Load reads config from a YAML file (if it exists) with env var overrides.
+// The YAML is strict: a key the Config struct doesn't declare is an error
+// naming every such key, so a tunable that moved to the settings directory
+// (or a typo) can't be silently ignored. Environment variables can't be
+// checked the same way — the environment always carries unrelated names.
 func Load(path string) (*Config, error) {
 	var cfg Config
 	if _, err := os.Stat(path); err == nil {
 		if err := cleanenv.ReadConfig(path, &cfg); err != nil {
 			return nil, fmt.Errorf("read config: %w", err)
+		}
+		if err := rejectUnknownKeys(path); err != nil {
+			return nil, err
 		}
 	} else {
 		if err := cleanenv.ReadEnv(&cfg); err != nil {

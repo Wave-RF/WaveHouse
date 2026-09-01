@@ -60,7 +60,7 @@ func warnBufLogger() (*slog.Logger, *bytes.Buffer) {
 func TestRequireAdmin_DenialLogsStructuredWarn(t *testing.T) {
 	t.Parallel()
 	logger, buf := warnBufLogger()
-	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}), logger)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	handler := RequireAdmin(policy.Static(&policy.Policy{}), logger)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler must not run on a denied request")
 	}))
 
@@ -88,7 +88,7 @@ func TestRequireAdmin_DenialLogsStructuredWarn(t *testing.T) {
 func TestRequireAdmin_EmptyRoleDenialLogsResolvedRole(t *testing.T) {
 	t.Parallel()
 	logger, buf := warnBufLogger()
-	store := policy.NewMemoryStore(&policy.Policy{DefaultRole: "viewer"})
+	store := policy.Static(&policy.Policy{DefaultRole: "viewer"})
 	handler := RequireAdmin(store, logger)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler must not run on a denied request")
 	}))
@@ -133,10 +133,10 @@ func TestRequireAdmin_InvalidTokenDenialLogsFailLoudReason(t *testing.T) {
 func TestPipesHandler_Execute_DenialLogsAllowedRoles(t *testing.T) {
 	t.Parallel()
 	logger, buf := warnBufLogger()
-	store := pipes.NewMemoryStore(
+	store := pipes.Static(
 		&pipes.NamedQuery{Name: "report", SQL: "SELECT * FROM clicks", AllowedRoles: []string{"analyst", "viewer"}},
 	)
-	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, logger)
+	h := NewPipesHandler(store, policy.Static(&policy.Policy{}), nil, nil, noTimeout, logger)
 
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
 	r = r.WithContext(auth.WithRole(r.Context(), "guest"))
@@ -162,7 +162,7 @@ func TestIngest_DenialLogsPolicyGate(t *testing.T) {
 	t.Parallel()
 	logger, buf := warnBufLogger()
 	h := NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, logger)
-	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {Select: map[string]policy.RolePermissions{"viewer": {}}}, // no insert for viewer
 		},
@@ -192,14 +192,14 @@ func TestAuthzDenied_LogsChiRoutePattern(t *testing.T) {
 	logger, buf := warnBufLogger()
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	router := NewRouter(Dependencies{
-		Ingest:      NewIngestHandler(reg, &testutil.MockPublisher{}, logger),
-		Query:       &QueryHandler{},
-		SSE:         NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
-		Health:      &HealthHandler{},
-		Schema:      NewSchemaHandler(reg),
-		AuthMW:      func(next http.Handler) http.Handler { return next },
-		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
-		Logger:      logger,
+		Ingest:       NewIngestHandler(reg, &testutil.MockPublisher{}, logger),
+		Query:        &QueryHandler{},
+		SSE:          NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
+		Health:       &HealthHandler{},
+		Schema:       NewSchemaHandler(reg),
+		AuthMW:       func(next http.Handler) http.Handler { return next },
+		PolicySource: policy.Static(&policy.Policy{}),
+		Logger:       logger,
 	})
 
 	ctx := auth.WithRole(context.Background(), "viewer")

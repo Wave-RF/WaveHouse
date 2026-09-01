@@ -47,12 +47,12 @@ func run(t *testing.T, cfg Config, setup func(*http.Request)) captured {
 
 // runOp is run with an explicit policy store and logger, so the operator-key
 // path (which reads the live admin role from the store) can be exercised.
-func runOp(t *testing.T, cfg Config, store *policy.Store, logger *slog.Logger, setup func(*http.Request)) captured {
+func runOp(t *testing.T, cfg Config, store policy.Source, logger *slog.Logger, setup func(*http.Request)) captured {
 	t.Helper()
 	var c captured
-	mw, err := Middleware(cfg, store, logger)
+	a, err := NewAuthenticator(cfg, store, logger)
 	require.NoError(t, err)
-	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := a.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c.called = true
 		c.role = RoleFromContext(r.Context())
 		c.claims, c.hasClaims = ClaimsFromContext(r.Context())
@@ -322,7 +322,7 @@ func TestMiddleware_JWKSUnreachableAtBoot_FailsLoud(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Middleware(Config{JWKSURL: srv.URL}, nil, nil)
+	_, err := NewAuthenticator(Config{JWKSURL: srv.URL}, nil, nil)
 	require.Error(t, err, "an unreachable/erroring JWKS at boot must fail loudly")
 }
 
@@ -334,9 +334,9 @@ func TestMiddleware_JWKSReachableAtBoot_OK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mw, err := Middleware(Config{JWKSURL: srv.URL}, nil, nil)
+	a, err := NewAuthenticator(Config{JWKSURL: srv.URL}, nil, nil)
 	require.NoError(t, err, "a reachable JWKS endpoint must construct successfully")
-	require.NotNil(t, mw)
+	require.NotNil(t, a.Middleware())
 }
 
 func TestMiddleware_JWKSEmptyKeySet_TokenDoesNotAuthenticate(t *testing.T) {
@@ -364,7 +364,7 @@ func TestMiddleware_JWKSEmptyKeySet_TokenDoesNotAuthenticate(t *testing.T) {
 
 func TestMiddleware_OperatorKey(t *testing.T) {
 	t.Parallel()
-	adminStore := func() *policy.Store { return policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"}) }
+	adminStore := func() policy.Source { return policy.Static(&policy.Policy{AdminRole: "admin"}) }
 	// A valid JWT (signed with the test secret) for the fall-through / precedence cases.
 	editorJWT := testutil.MakeJWT(t, map[string]any{"role": "editor"})
 	withBoth := func(opKey string) func(*http.Request) {
@@ -377,7 +377,7 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 	tests := []struct {
 		name       string
 		cfg        Config
-		store      *policy.Store
+		store      policy.Source
 		logger     *slog.Logger
 		setup      func(*http.Request)
 		wantOp     bool
@@ -396,7 +396,7 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 		{
 			name:     "stamped role tracks a custom admin_role, read live",
 			cfg:      Config{OperatorKey: testOperatorKey},
-			store:    policy.NewMemoryStore(&policy.Policy{AdminRole: "superuser"}),
+			store:    policy.Static(&policy.Policy{AdminRole: "superuser"}),
 			setup:    operatorHeader(testOperatorKey),
 			wantOp:   true,
 			wantRole: "superuser",
@@ -404,10 +404,10 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 		{
 			// Break-glass: a nil/deleted policy makes the admin role resolve to "",
 			// but the operator bit is still set so RequireAdmin can admit the request
-			// to restore the policy over HTTP.
+			// to the admin surface (inspect policy, reload settings) while locked out.
 			name:   "nil policy sets the operator bit but an empty role (break-glass)",
 			cfg:    Config{OperatorKey: testOperatorKey},
-			store:  policy.NewMemoryStore(nil),
+			store:  policy.Static(nil),
 			setup:  operatorHeader(testOperatorKey),
 			wantOp: true,
 		},
@@ -509,7 +509,7 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 // which it was until the bearerToken call was hoisted above the operator branch.
 func TestMiddleware_OperatorKey_StripsQueryToken(t *testing.T) {
 	t.Parallel()
-	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	store := policy.Static(&policy.Policy{AdminRole: "admin"})
 	query := testutil.MakeJWT(t, map[string]any{"role": "viewer"})
 	c := runOp(t, Config{OperatorKey: testOperatorKey}, store, nil, func(r *http.Request) {
 		r.URL.RawQuery = "table=clicks&token=" + query
@@ -541,7 +541,7 @@ func infoBufLogger() (*slog.Logger, *bytes.Buffer) {
 func TestMiddleware_OperatorKey_FailedAttemptLogged(t *testing.T) {
 	t.Parallel()
 	cfg := Config{OperatorKey: testOperatorKey}
-	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	store := policy.Static(&policy.Policy{AdminRole: "admin"})
 
 	t.Run("wrong key via X-Operator-Key logs WARN and falls through", func(t *testing.T) {
 		t.Parallel()
@@ -631,4 +631,67 @@ func TestExtractClaim(t *testing.T) {
 			assert.Equal(t, tt.want, extractClaim(tt.claims, tt.path))
 		})
 	}
+}
+
+// TestAuthenticator_ReconfigureSwapsRoleClaim pins the reload contract: the
+// middleware reads the current verifier per request, so a Reconfigure that
+// changes role_claim is visible to the next request with no rebuild.
+func TestAuthenticator_ReconfigureSwapsRoleClaim(t *testing.T) {
+	t.Parallel()
+	a, err := NewAuthenticator(Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role"}, nil, nil)
+	require.NoError(t, err)
+	var got string
+	h := a.Middleware()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = RoleFromContext(r.Context()) }))
+
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"role": "old", "app_metadata": map[string]any{"role": "new"}, "exp": time.Now().Add(time.Hour).Unix()})
+	signed, err := tok.SignedString([]byte(testutil.TestJWTSecret))
+	require.NoError(t, err)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+signed)
+
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	assert.Equal(t, "old", got)
+
+	a.Reconfigure(Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "app_metadata.role"})
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	assert.Equal(t, "new", got, "the next request sees the reconfigured claim path")
+}
+
+// TestAuthenticator_ReconfigureAppliesUnreachableJWKS pins "settings are the
+// authority": a reload pointing at an unreachable JWKS swaps the verifier
+// anyway, so the HMAC token stops validating (fail closed) instead of the
+// previous verifier lingering. Boot stays strict (see the NewAuthenticator
+// test above).
+func TestAuthenticator_ReconfigureAppliesUnreachableJWKS(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	a, err := NewAuthenticator(Config{JWTSecret: testutil.TestJWTSecret}, nil, nil)
+	require.NoError(t, err)
+
+	var got string
+	h := a.Middleware()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = RoleFromContext(r.Context()) }))
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"role": "analyst", "exp": time.Now().Add(time.Hour).Unix()})
+	signed, err := tok.SignedString([]byte(testutil.TestJWTSecret))
+	require.NoError(t, err)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+signed)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	require.Equal(t, "analyst", got)
+
+	a.Reconfigure(Config{JWTSecret: testutil.TestJWTSecret, JWKSURL: srv.URL})
+	got = ""
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	assert.Empty(t, got, "the unreachable JWKS is applied: the HMAC token no longer authenticates")
+
+	// A reachable JWKS on the next reload swaps again (still asymmetric-only).
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"keys":[]}`)) }))
+	defer ok.Close()
+	a.Reconfigure(Config{JWTSecret: testutil.TestJWTSecret, JWKSURL: ok.URL})
+	got = ""
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	assert.Empty(t, got)
 }

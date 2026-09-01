@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DLQNamespace } from "./dlq.js";
 import { PolicyNamespace } from "./policy.js";
 import { SchemaNamespace } from "./schema.js";
+import { SettingsNamespace } from "./settings.js";
 import { sql } from "./sql.js";
 import { SysNamespace } from "./sys.js";
 import type { HttpContext } from "./types.js";
@@ -110,16 +111,6 @@ describe("PolicyNamespace", () => {
     expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/policy");
   });
 
-  it("set() PUTs /v1/ops/policy", async () => {
-    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
-
-    const ns = new PolicyNamespace(makeCtx());
-    const result = await ns.set({ tables: {} });
-
-    expect(result.error).toBeNull();
-    expect(fetchSpy.mock.calls[0][1].method).toBe("PUT");
-  });
-
   it("validate() POSTs /v1/ops/policy/validate", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({ valid: true }), { status: 200 }));
 
@@ -189,5 +180,40 @@ describe("SysNamespace", () => {
     expect(result.ok).toBe(true);
     expect(result.error).toBeNull();
     expect(fetchSpy.mock.calls[0][0]).toContain("/v1/health");
+  });
+});
+
+describe("SettingsNamespace", () => {
+  beforeEach(() => {
+    fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("reload() POSTs to /v1/ops/settings/reload and returns the body", async () => {
+    const body = { adopted: true, findings: [] };
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+
+    const ns = new SettingsNamespace(makeCtx());
+    const result = await ns.reload();
+
+    expect(result.data).toEqual(body);
+    expect(fetchSpy.mock.calls[0][1].method).toBe("POST");
+    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/settings/reload");
+  });
+
+  it("reload() surfaces a 422 rejection as an error", async () => {
+    const body = {
+      adopted: false,
+      findings: [{ severity: "error", file: "roles.json", message: "duplicate role" }],
+    };
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify(body), { status: 422 }));
+
+    const ns = new SettingsNamespace(makeCtx());
+    const result = await ns.reload();
+
+    expect(result.data).toBeNull();
+    expect(result.error?.status).toBe(422);
   });
 });

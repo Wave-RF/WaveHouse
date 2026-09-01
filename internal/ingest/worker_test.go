@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -39,10 +40,9 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockJetStream
 		httpClient: &http.Client{Transport: rt},
 		cache:      cache,
 		logger:     testutil.NopLogger(),
-		chURL:      "http://test-clickhouse:8123",
-		user:       "test_user",
-		password:   "test_pass",
-		db:         "test_db",
+		target: func() chconn.Target {
+			return chconn.Target{URL: "http://test-clickhouse:8123", Username: "test_user", Password: "test_pass", Database: "test_db"}
+		},
 	}
 	return w, js, cache, func() { w.ackWg.Wait() }
 }
@@ -123,7 +123,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 			t.Parallel()
 			nc, c := tt.setup(t)
 			_, err := StartIngestWorker(context.Background(), nc, c,
-				"localhost", "8123", "http", "user", "pass", "db")
+				func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrSub)
 		})
@@ -189,12 +189,11 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cache:      cache,
 		logger:     testutil.NopLogger(),
-		chURL:      fmt.Sprintf("http://%s:%s", host, port),
-		user:       "u",
-		password:   "p",
-		db:         "db",
-		maxBatch:   defaultMaxBatch,
-		maxWait:    200 * time.Millisecond,
+		target: func() chconn.Target {
+			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
+		},
+		maxBatch: defaultMaxBatch,
+		maxWait:  200 * time.Millisecond,
 	}
 	worker.wg.Add(1)
 	go worker.dispatchLoop(ctx, cons)
@@ -262,7 +261,9 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	t.Cleanup(cancel)
 
 	stopFn, err := StartIngestWorker(ctx, emb.NatsConn(), &testutil.MockCache{},
-		host, port, "http", "u", "p", "db")
+		func() chconn.Target {
+			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
+		}, nil)
 	require.NoError(t, err)
 
 	// Publish so there's an in-flight insert blocking on `release`.
@@ -297,7 +298,7 @@ func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 	// chURL is never dialed: with no messages there is no flush, so a dummy
 	// host/port is fine.
 	stopFn, err := StartIngestWorker(context.Background(), emb.NatsConn(), &testutil.MockCache{},
-		"localhost", "8123", "http", "u", "p", "db")
+		func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
 	require.NoError(t, err)
 
 	// Nothing to flush, so shutdown drains immediately and returns nil before the
@@ -858,8 +859,41 @@ func TestFlushTable_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 	assert.Contains(t, published[0].Header.Get("X-DLQ-Error"), "Code: 60")
 }
 
+func TestFlushTable_BadRow_DLQDisabledForTable_LeftUnacked(t *testing.T) {
+	t.Parallel()
+	// Same poison batch, but the settings say the DLQ is off for this table:
+	// the poison row must be neither published nor acked, so NATS redelivers
+	// it — nothing is ever dropped — while the good rows still ack normally.
+	rt := &testutil.MockRoundTripper{
+		Fn: func(req *http.Request) (*http.Response, error) {
+			body, _ := io.ReadAll(req.Body)
+			s := string(body)
+			if strings.Count(s, "\n") > 1 || strings.Contains(s, `"poison":true`) {
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Body:       io.NopCloser(bytes.NewBufferString("Code: 60. bad row")),
+				}, nil
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
+		},
+	}
+	w, js, _, wait := newTestWorker(rt)
+	w.dlqEnabled = func(table string) bool { return table != "events" }
+
+	good := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	poison := newIngestMsg(t, "events", "", map[string]any{"id": 2, "poison": true})
+
+	w.flushTable(context.Background(), "events", parseAll(t, w, good, poison))
+	wait()
+
+	assert.True(t, good.DoubleAcked.Load(), "good row must still be acked")
+	assert.False(t, poison.DoubleAcked.Load(), "poison row must stay unacked for redelivery")
+	assert.Empty(t, js.Published(), "nothing reaches the DLQ while it is disabled for the table")
+}
+
 // ---------------------------------------------------------------------------
 // tableBatcher — coalescing, the flushQueued latch, and drain.
+
 //
 // These are white-box: they drive the per-table state machine's methods
 // directly (the way tableLoop's select does), setting `flushing`/`flushQueued`
@@ -1050,12 +1084,11 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cache:      &testutil.MockCache{},
 		logger:     testutil.NopLogger(),
-		chURL:      fmt.Sprintf("http://%s:%s", host, port),
-		user:       "u",
-		password:   "p",
-		db:         "db",
-		maxBatch:   maxBatch,
-		maxWait:    maxWait,
+		target: func() chconn.Target {
+			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
+		},
+		maxBatch: maxBatch,
+		maxWait:  maxWait,
 	}
 	worker.wg.Add(1)
 	go worker.dispatchLoop(ctx, cons)
@@ -1152,12 +1185,11 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cache:      &testutil.MockCache{},
 		logger:     testutil.NopLogger(),
-		chURL:      fmt.Sprintf("http://%s:%s", host, port),
-		user:       "u",
-		password:   "p",
-		db:         "db",
-		maxBatch:   maxBatch,
-		maxWait:    maxWait,
+		target: func() chconn.Target {
+			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
+		},
+		maxBatch: maxBatch,
+		maxWait:  maxWait,
 	}
 	worker.wg.Add(1)
 	go worker.dispatchLoop(ctx, cons)

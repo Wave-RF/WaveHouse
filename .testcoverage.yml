@@ -72,13 +72,15 @@ exclude:
       # that would shrink main.go enough to drop this exclude entirely.
       - ^cmd/wavehouse/main\.go$
     e2e:
-      # internal/settings and the validate CLI entry point are currently
-      # reachable only via `wavehouse validate`, which the e2e suite
-      # (server-focused) never runs — they sat at 0% and dragged the e2e
-      # gate below its floor. The unit suite covers both thoroughly, and
-      # per-suite excludes don't touch the merged total, so nothing is
-      # hidden project-wide. Drop these excludes once the settings
-      # directory is wired into the running server and e2e can exercise
-      # them.
+      # internal/settings is mostly validation: the e2e suite (server-
+      # focused) only walks the happy path — boot adopts a valid fixture
+      # directory — which measures ~46% for the package and pulls the e2e
+      # gate to 58.9%, under its 60% floor. The remaining branches (every
+      # rejection path, the seed writer) are unit territory and the unit
+      # suite covers them thoroughly; per-suite excludes don't touch the
+      # merged total, so nothing is hidden project-wide. Same for the
+      # settings CLI entry points (`validate`, `bootstrap`), which e2e
+      # never runs. Revisit if e2e grows a reload-rejection scenario.
       - ^internal/settings/
       - ^cmd/wavehouse/validate\.go$
+      - ^cmd/wavehouse/bootstrap\.go$

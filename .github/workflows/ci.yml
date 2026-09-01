@@ -232,7 +232,7 @@ jobs:
       # the same tag is safe — dockerd dedupes layer downloads). Image tag
       # must match tests/integration/setup_test.go.
       - name: Prefetch ClickHouse image (background)
-        run: docker pull -q clickhouse/clickhouse-server:latest >/tmp/clickhouse-pull.log 2>&1 &
+        run: docker pull -q clickhouse/clickhouse-server:26.6.3.62 >/tmp/clickhouse-pull.log 2>&1 &
       - id: setup
         uses: ./.github/actions/setup-env
         with:
@@ -269,7 +269,7 @@ jobs:
       # the same tag is safe — dockerd dedupes layer downloads). Image tag
       # must match scripts/orchestrator/main.go.
       - name: Prefetch ClickHouse image (background)
-        run: docker pull -q clickhouse/clickhouse-server:latest >/tmp/clickhouse-pull.log 2>&1 &
+        run: docker pull -q clickhouse/clickhouse-server:26.6.3.62 >/tmp/clickhouse-pull.log 2>&1 &
       # Suffix is -e2e-cov, not -e2e: this cache must carry the
       # cover-instrumented server objects build-cover compiles below, but
       # saves are gated on an exact-key miss — the pre-existing -e2e entry

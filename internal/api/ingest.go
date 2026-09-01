@@ -36,13 +36,16 @@ const maxReportedResults = 10000
 
 // IngestHandler handles POST /v1/ingest?table={table}
 type IngestHandler struct {
-	Registry    *discovery.SchemaRegistry
-	Dedup       dedupe.Deduplicator // nil if dedup disabled
-	IDField     string              // dedup key field name (e.g. "event_id")
-	RequireID   bool                // reject rows missing IDField instead of publishing un-deduped (dedupe.require_id)
-	Publisher   mq.Publisher
-	PolicyStore *policy.Store
-	logger      *slog.Logger
+	Registry *discovery.SchemaRegistry
+	Dedup    dedupe.Deduplicator // nil when no dedupe store is wired (tests)
+	// DedupeSettings resolves the effective dedupe id_field/require_id for a
+	// table (settings.Store.DedupeFor in production). Called once per record so
+	// a settings reload lands at a record boundary — one record never mixes two
+	// documents' values. Dedup is skipped when nil.
+	DedupeSettings func(table string) (enabled bool, idField string, requireID bool)
+	Publisher      mq.Publisher
+	PolicySource   policy.Source
+	logger         *slog.Logger
 
 	// maxRequestBytes optionally overrides the default inbound request body cap
 	// (maxRequestBodyBytes). When 0, the default applies. Exists so same-package
@@ -58,6 +61,15 @@ func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher, logg
 var dedupeMissingIDCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 	"wavehouse_ingest_dedupe_missing_id_total",
 	metric.WithDescription("Ingested records missing the configured dedupe id_field (idempotency skipped)"),
+)
+
+// dedupeDisabledCounter counts records published un-deduped because the
+// settings snapshot said dedupe was on while the store was switched off —
+// transient across a reload; a climbing rate means the store and the
+// settings have come apart.
+var dedupeDisabledCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
+	"wavehouse_ingest_dedupe_disabled_total",
+	metric.WithDescription("Ingested records published without dedupe because the store was switched off while settings said enabled (reload window)"),
 )
 
 // batchResult is the response body for any multi-record ingest (a JSON array,
@@ -146,8 +158,8 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	var perms *policy.ResolvedPermissions
 	var role string
 
-	if h.PolicyStore != nil {
-		p := h.PolicyStore.Get()
+	if h.PolicySource != nil {
+		p := h.PolicySource()
 		role = policy.ResolveRole(p, auth.RoleFromContext(ctx))
 		claims, _ := auth.ClaimsFromContext(ctx)
 		perms = policy.Evaluate(p, role, table, "insert", claims)
@@ -422,29 +434,45 @@ func (h *IngestHandler) processRecord(
 	// enforces) after the permission checks: check clauses keep pre-#372 semantics.
 	discovery.CanonicalizeTimestamps(schema, data)
 
-	// Optional deduplication.
-	if h.Dedup != nil && h.IDField != "" {
-		idVal, ok := data[h.IDField]
-		if !ok {
-			dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
-			if h.RequireID {
-				h.logger.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", h.IDField, "table", table)
-				return false, &recordReject{
-					Status:  http.StatusBadRequest,
-					Message: fmt.Sprintf("missing dedupe id field %q", h.IDField),
-				}, nil
-			}
-			h.logger.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", h.IDField, "table", table)
-		} else {
-			eventID := fmt.Sprint(idVal)
-			dup, err := h.Dedup.CheckAndMark(ctx, eventID)
-			if err != nil {
-				h.logger.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
-				return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
-			}
-			if dup {
-				h.logger.InfoContext(ctx, "duplicate event skipped", "event_id", eventID)
-				return true, nil, nil
+	// Optional deduplication. enabled/id_field/require_id resolve per record
+	// from one snapshot (table override → global; the settings directory
+	// always states them, so no compiled fallback is needed), so a reload
+	// lands at a record boundary. A Deduplicator without a settings source is
+	// a wiring bug, not a mode — main wires both or neither.
+	if h.Dedup != nil && h.DedupeSettings != nil {
+		if enabled, idField, requireID := h.DedupeSettings(table); enabled {
+			idVal, ok := data[idField]
+			if !ok {
+				dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
+				if requireID {
+					h.logger.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", idField, "table", table)
+					return false, &recordReject{
+						Status:  http.StatusBadRequest,
+						Message: fmt.Sprintf("missing dedupe id field %q", idField),
+					}, nil
+				}
+				h.logger.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", idField, "table", table)
+			} else {
+				eventID := fmt.Sprint(idVal)
+				dup, err := h.Dedup.CheckAndMark(ctx, eventID)
+				switch {
+				case errors.Is(err, dedupe.ErrDisabled):
+					// A reload flipped dedupe.enabled between the snapshot
+					// read above and this call (the two transition at
+					// different instants). Publish un-deduped, as a record
+					// under the other setting would have been. The counter
+					// carries the signal (a burst is a reload; a steady rate
+					// is the store and settings out of step), so the line is
+					// Debug rather than a WARN per record.
+					dedupeDisabledCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
+					h.logger.DebugContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "event_id", eventID, "table", table)
+				case err != nil:
+					h.logger.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
+					return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
+				case dup:
+					h.logger.InfoContext(ctx, "duplicate event skipped", "event_id", eventID)
+					return true, nil, nil
+				}
 			}
 		}
 	}

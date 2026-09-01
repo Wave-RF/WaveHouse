@@ -100,14 +100,14 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
   Ristretto cache plus Go `singleflight` coalesces identical concurrent queries — dashboards survive thundering herds without an extra cache tier to operate.
  </Card>
  <Card title="Hasura-style access control" icon="seti:lock">
-  Per-table, per-role column and row-level policies with JWT claim templating. Stored in NATS KV with file-based bootstrap and cluster sync.
+  Per-table, per-role column and row-level policies with JWT claim templating, defined in the hot-reloadable settings directory.
  </Card>
  <Card title="TypeScript SDK" icon="seti:typescript">
   `@wavehouse/sdk` — a type-safe query builder, live queries, real-time streaming, and codegen from your schemas, with one runtime dependency of ~1.4 KB gzipped.
  </Card>
 </CardGrid>
 
-**Plus** — optional [deduplication](/configuration#deduplication) (idempotent ingest by ID), a dead-letter queue for failed batch inserts, and Tinybird-style [named pipes](/pipes) with parameter binding and per-role restrictions.
+**Plus** — optional [deduplication](/settings-directory#deduplication) (idempotent ingest by ID), a dead-letter queue for failed batch inserts, and Tinybird-style [named pipes](/pipes) with parameter binding and per-role restrictions.
 
 ## Query it like a database. Subscribe to it like a socket
 
@@ -178,7 +178,7 @@ curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 curl -N "http://localhost:8080/v1/stream?table=clicks"
 ```
 
-WaveHouse is fail-closed, so the standalone stack ships a permissive trial policy (a non-admin `public` role that can read/write the demo tables, seeded on first boot) — then it's five minutes from `git clone` to a live event stream. See [Getting Started](/getting-started).
+WaveHouse is fail-closed, so the standalone stack ships a permissive trial policy (a non-admin `public` role that can read/write the demo tables, in the bind-mounted settings directory) — then it's five minutes from `git clone` to a live event stream. See [Getting Started](/getting-started).
 
 **How it ships:** one `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external dependency is ClickHouse.** Same binary on a laptop, in Docker, or on a production host.
 

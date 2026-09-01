@@ -200,7 +200,7 @@ Several layers throttle the pipeline, inner to outer:
 2. **`msgChan`** (cap `maxBatch*2`) — when full, the consume callback blocks and delivery pauses.
 3. **`pullMaxMessages`** — nats.go's client-side prefetch buffer in front of `msgChan`.
 4. **`maxAckPending`** — the server suspends delivery once this many messages are delivered-but-unacked. The outermost in-memory bound.
-5. **`MaxBytes` + `DiscardNew`** on the stream — when disk fills (e.g. ClickHouse is down so nothing acks/purges), new publishes are rejected and the API returns 503.
+5. **`MaxBytes` + `DiscardNew`** on the stream (`mq.max_bytes_gb` in the [settings directory](/settings-directory#message-queue), resized in place on reload) — when disk fills (e.g. ClickHouse is down so nothing acks/purges), new publishes are rejected and the API returns 503.
 
 | Knob | Default | Meaning / invariant |
 | --- | --- | --- |

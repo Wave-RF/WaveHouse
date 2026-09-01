@@ -20,15 +20,26 @@ import (
 
 // StructuredQueryHandler handles POST /v1/query?table={table}
 type StructuredQueryHandler struct {
-	CHConn          driver.Conn
-	Cache           cache.Cache
-	Registry        *discovery.SchemaRegistry
-	PolicyStore     *policy.Store
-	BucketSecs      int
-	sf              singleflight.Group
-	maxQueryTimeout time.Duration
-	defaultMaxRows  int
-	logger          *slog.Logger
+	CHConn       driver.Conn
+	Cache        cache.Cache
+	Registry     *discovery.SchemaRegistry
+	PolicySource policy.Source
+	sf           singleflight.Group
+	// queryTimeout bounds each query, read per request
+	// (chconn.Manager.QueryTimeout in production) so a settings reload
+	// applies without a restart.
+	queryTimeout func() time.Duration
+
+	// bucketSecs returns the current time-range bucket
+	// (settings.Store.TimestampBucketSeconds in production) and defaultMaxRows
+	// the current fallback result LIMIT (settings.Store.DefaultMaxRows) —
+	// funcs, not ints, so a settings reload takes effect on the next query
+	// without a restart. A nil bucketSecs means no bucketing; a nil
+	// defaultMaxRows or a non-positive return means the builder's compiled
+	// constant.
+	bucketSecs     func() int
+	defaultMaxRows func() int
+	logger         *slog.Logger
 
 	// maxRequestBytes optionally overrides the default inbound request body
 	// cap (maxControlBodyBytes). When 0, the default applies. Exists so
@@ -42,21 +53,21 @@ func NewStructuredQueryHandler(
 	conn driver.Conn,
 	c cache.Cache,
 	registry *discovery.SchemaRegistry,
-	policyStore *policy.Store,
-	bucketSecs int,
-	queryTimeout time.Duration,
-	defaultMaxRows int,
+	policyStore policy.Source,
+	bucketSecs func() int,
+	queryTimeout func() time.Duration,
+	defaultMaxRows func() int,
 	logger *slog.Logger,
 ) *StructuredQueryHandler {
 	return &StructuredQueryHandler{
-		CHConn:          conn,
-		Cache:           c,
-		Registry:        registry,
-		PolicyStore:     policyStore,
-		BucketSecs:      bucketSecs,
-		maxQueryTimeout: queryTimeout,
-		defaultMaxRows:  defaultMaxRows,
-		logger:          logger,
+		CHConn:         conn,
+		Cache:          c,
+		Registry:       registry,
+		PolicySource:   policyStore,
+		bucketSecs:     bucketSecs,
+		queryTimeout:   queryTimeout,
+		defaultMaxRows: defaultMaxRows,
+		logger:         logger,
 	}
 }
 
@@ -94,7 +105,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Resolve permissions.
-	p := h.PolicyStore.Get()
+	p := h.PolicySource()
 	role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
 	claims, _ := auth.ClaimsFromContext(r.Context())
 	perms := policy.Evaluate(p, role, table, "select", claims)
@@ -115,7 +126,15 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// skip the check. The role's row-filter predicate and max_rows cap are emitted
 	// by Build too, structurally (#322). A policy denial returns a typed error we
 	// map to 403; a malformed query maps to 400.
-	result, err := query.Build(table, &sq, schema, perms, h.BucketSecs, h.defaultMaxRows)
+	maxRows := 0 // non-positive → the builder's compiled constant
+	if h.defaultMaxRows != nil {
+		maxRows = h.defaultMaxRows()
+	}
+	bucketSecs := 0
+	if h.bucketSecs != nil {
+		bucketSecs = h.bucketSecs()
+	}
+	result, err := query.Build(table, &sq, schema, perms, bucketSecs, maxRows)
 	if err != nil {
 		// A query that selects nothing — no columns, no aggregations, no
 		// select_all — is a request for no data, not an error: return an empty
@@ -162,7 +181,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		timeout := h.maxQueryTimeout
+		timeout := h.queryTimeout()
 		if perms.MaxExecutionTime > 0 {
 			timeout = min(perms.MaxExecutionTime.Duration(), timeout)
 		}

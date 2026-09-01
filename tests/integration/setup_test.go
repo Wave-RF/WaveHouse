@@ -29,6 +29,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
@@ -153,7 +154,7 @@ func setup() (int, func()) {
 		return 1, cleanup
 	}
 
-	registry := discovery.NewSchemaRegistry(ch.conn, testCHDatabase, time.Minute, logger)
+	registry := discovery.NewSchemaRegistry(ch.conn, func() string { return testCHDatabase }, func() time.Duration { return time.Minute }, logger)
 	if err := registry.Refresh(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: schema refresh: %v\n", err)
 		return 1, cleanup
@@ -170,14 +171,13 @@ func setup() (int, func()) {
 		ctx,
 		embeddedMQ.NatsConn(),
 		localCache,
-		ch.nativeAddr(),
-		ch.httpPort,
-		"http",
-		testCHUser,
-		testCHPassword,
-		testCHDatabase,
+		func() chconn.Target {
+			return chconn.Target{URL: ch.httpURL(), Username: testCHUser, Password: testCHPassword, Database: testCHDatabase}
+		},
+		nil,
 	); err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: ingest worker: %v\n", err)
+
 		return 1, cleanup
 	}
 
@@ -224,7 +224,11 @@ func (c *chInstance) httpURL() string    { return fmt.Sprintf("http://%s:%s", c.
 // race; the dominant flake mode tracked in #70.
 func startClickHouse(ctx context.Context) (*chInstance, error) {
 	chReq := testcontainers.ContainerRequest{
-		Image:        "clickhouse/clickhouse-server:latest",
+		// Pinned: 26.8 reads bare numbers in DateTime64 columns as epoch seconds,
+		// not ticks at column precision — CanonicalizeTimestamps still models the
+		// pre-26.8 rule (TestTimestampCanonicalization_DifferentialAgainstClickHouse
+		// catches the divergence). Bump the pin together with the canonicalizer (#536).
+		Image:        "clickhouse/clickhouse-server:26.6.3.62",
 		ExposedPorts: []string{"9000/tcp", "8123/tcp"},
 		Env:          map[string]string{"CLICKHOUSE_PASSWORD": testCHPassword},
 		WaitingFor: wait.ForAll(
@@ -305,13 +309,13 @@ func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Dura
 // admin-gated endpoints without minting JWTs. Auth-enforcement coverage lives
 // in the internal/auth unit tests and the e2e SDK suite.
 //
-// The RequireAdmin gate resolves that stamped role against PolicyStore, so the
+// The RequireAdmin gate resolves that stamped role against PolicySource, so the
 // server is wired with an in-memory policy whose admin_role is "admin". A nil
 // store would deny every admin-gated route (IsAdmin(nil) is false by design).
 func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, logger *slog.Logger) (*httptest.Server, error) {
 	js := embeddedMQ.JetStream()
 
-	policyStore := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	policyStore := policy.Static(&policy.Policy{AdminRole: "admin"})
 	streamHub := stream.NewHub(policyStore, registry, nil)
 
 	deps := api.Dependencies{
@@ -319,12 +323,14 @@ func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discover
 		// /v1/ops/query proxies straight to ClickHouse's HTTP interface,
 		// so the handler needs the HTTP URL + creds rather than the
 		// native-protocol driver.Conn other handlers use.
-		Query:       api.NewQueryHandler(ch.httpURL(), testCHUser, testCHPassword, testCHDatabase, time.Second*time.Duration(30)),
-		SSE:         api.NewStreamHandler(streamHub, js),
-		Health:      api.NewHealthHandler(ch.conn),
-		Schema:      api.NewSchemaHandler(registry),
-		DLQ:         api.NewDLQHandler(js, logger),
-		PolicyStore: policyStore,
+		Query: api.NewQueryHandler(func() chconn.Target {
+			return chconn.Target{URL: ch.httpURL(), Username: testCHUser, Password: testCHPassword, Database: testCHDatabase}
+		}, func() time.Duration { return 30 * time.Second }),
+		SSE:          api.NewStreamHandler(streamHub, js),
+		Health:       api.NewHealthHandler(ch.conn),
+		Schema:       api.NewSchemaHandler(registry),
+		DLQ:          api.NewDLQHandler(js, logger),
+		PolicySource: policyStore,
 		AuthMW: func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				next.ServeHTTP(w, r.WithContext(auth.WithRole(r.Context(), "admin")))
