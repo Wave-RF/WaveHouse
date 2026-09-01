@@ -198,7 +198,7 @@ Accepts a single flat JSON object, a JSON array of objects, or a newline-delimit
 
 Parameters are ignored, so `application/json; charset=utf-8` is `application/json`.
 
-The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse)). For uploads larger than that, use the streaming NDJSON form below rather than one big body, and set your own outer limit at the [reverse proxy](/reverse-proxy#request-body-size-limits).
+The inbound request body is capped at 16 MiB and rejected with `413` above it — **every form, NDJSON included**: the body is read in full before parsing, so an NDJSON batch is bounded exactly like a JSON array. An upload larger than the cap has to be split across requests. Set your own outer limit at the [reverse proxy](/reverse-proxy#request-body-size-limits).
 
 The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
@@ -229,6 +229,8 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 - Null values for non-nullable columns without a default are rejected.
 - Type compatibility: `String` accepts JSON strings, numbers, and booleans (ClickHouse coerces the non-strings); `FixedString`/`UUID` accept the same at validation, but ClickHouse rejects a non-string value there, so it surfaces in the DLQ; `DateTime`/`Date`/`Enum` accept JSON strings or numbers; `IPv*` accepts JSON strings (a number passes validation but ClickHouse rejects it → DLQ); `Int*`/`Float*`/`Decimal` accept JSON numbers or strings — a string lets JavaScript callers avoid 64-bit precision loss, and its contents are ClickHouse's to judge (a non-numeric string is accepted here and surfaces in the DLQ, not as a `400`); `Bool` accepts JSON booleans and the numbers `0`/`1` (any other number, and *any* string — including `"true"` — passes validation but is rejected by ClickHouse → DLQ); `Array` accepts JSON arrays; `Map` accepts JSON objects; `Tuple` accepts JSON arrays or objects at validation, but ClickHouse takes an array only for an *unnamed* tuple and an object only for a *named* one — the other shape surfaces in the DLQ; any other ClickHouse type (`JSON`, `Variant`, `Dynamic`, geo, …) accepts any JSON value — WaveHouse defers to ClickHouse, so a bad value surfaces in the DLQ rather than as a `400`.
 - `Nullable()` and `LowCardinality()` wrappers are handled transparently.
+- **`MATERIALIZED` and `ALIAS` columns cannot be inserted** — ClickHouse computes them. A record naming one is rejected (`400 column "x" of table "t" is materialized and cannot be inserted`); omit it and the server fills it in.
+- **An omitted column takes its default — except on a `Nullable` column.** A positional row has one value per column and no way to say "absent", so a column the record leaves out rides as an explicit `null` on the wire; for a **non-nullable** column with a default the insert turns that back into the default, exactly as omitting the key used to. **On a `Nullable` column it does not:** ClickHouse stores an explicit `null` as `NULL` there, and only an *absent* key ever took the default — so a `Nullable(T) DEFAULT …` column now stores `NULL` where it previously took its default. A transitional divergence, called out in the CHANGELOG. (One case changes only on a server explicitly running `input_format_null_as_default=0`: an explicit `null` for a non-nullable column with a default now takes the default there rather than failing the row into the DLQ, because WaveHouse pins the setting instead of inheriting it. On a default-configured server this was already the behavior.)
 - Top-level `DateTime`/`DateTime64` values are rewritten to a canonical wire form on ingest — see [Timestamp canonicalization](#timestamp-canonicalization).
 
 **Response (accepted):**
@@ -249,11 +251,13 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | ------ | ---- | ----- |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure (unknown fields, type mismatches, missing required columns, null in a non-nullable column with no default). The body is the validator's message verbatim — there is no `validation failed:` prefix. |
+| 400 | `{"error":"column \"x\" of table \"t\" is materialized and cannot be inserted"}` (also `… is alias …`) | The record supplies a value for a column ClickHouse computes. Omit it — the server fills it in |
 | 400 | `{"error":"missing dedupe id field \"event_id\""}` | Only when dedupe is enabled with `dedupe.require_id: true` and the row lacks the configured `id_field`. With `require_id: false` (the default) the row is instead published un-deduped. Either way — reject or publish — the row is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`. In a batch this is a per-record failure, not a whole-request error. |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason rather than silently falling back to `default_role`) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table |
 | 403 | `{"error":"column \"x\" not allowed for insert"}` | The record names a column the role's `allow_columns`/`deny_columns` forbids ([Access control → Column permissions](/access-control#column-permissions)) |
 | 403 | `{"error":"check failed for column \"x\""}` | The record's value for a checked column doesn't satisfy the policy `check` (`_eq`/`_in`), or an `_in`-checked column is omitted ([Access control → Insert checks](/access-control#insert-checks)). On the batch path both this and the column error above are per-record failures reported in `results`, not whole-request rejections |
+| 403 | `{"error":"policy check references column \"x\", which table \"t\" does not have"}` (also `… which is materialized and cannot be inserted`) | A **policy misconfiguration**, not a bad request: the role's `check` names a column the table lacks, or one no record may write, so the check can never be enforced. Per-record like the rejections above. `wavehouse validate` cannot catch this (it doesn't know the table's columns), so it surfaces here on every insert by that role |
 | 404 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
 | 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …`) | The request declared no `Content-Type`, or one ingest doesn't read. Checked before the body is parsed |
@@ -311,7 +315,7 @@ Examples for a `DateTime64(3, 'America/New_York')` column: `"2026-06-21 00:00:00
 A **JSON array** of objects (`[{…}, {…}]`) or an **NDJSON** body (`Content-Type: application/x-ndjson`, one JSON object per line) ingests a batch in a single request. Each record is validated, authorized, deduplicated, and published independently, so **one malformed or rejected record never blocks the rest of the batch**. (The SDK's `insert([...])` array helper uses the NDJSON form automatically; both forms return the same response.)
 
 - **JSON array** — the most convenient form from most HTTP clients. A structural JSON syntax error fails the whole request (`400`), but a wrong-typed element (a non-object) is reported per-record like any other rejection. An explicit empty array (`[]`) is a valid, record-less batch (`200`, `total: 0`).
-- **NDJSON** — the streaming-friendly form for very large uploads. Blank lines are skipped, and a single malformed *line* is reported and skipped (the newline reframes the next record).
+- **NDJSON** — the line-framed form. Blank lines are skipped, and a single malformed *line* is reported and skipped (the newline reframes the next record). It carries no size advantage over a JSON array: the 16 MiB body cap applies identically.
 
 **Request (JSON array):**
 
@@ -319,7 +323,7 @@ A **JSON array** of objects (`[{…}, {…}]`) or an **NDJSON** body (`Content-T
 POST /v1/ingest?table=clicks
 Content-Type: application/json
 
-[{"page": "/home", "score": 42.5}, {"page": "/about"}, {"page": "/pricing", "score": 7}]
+[{"page": "/home", "button": "signup", "score": 42.5}, {"page": "/about", "button": "nav", "score": 3}, {"page": "/pricing", "button": "cta", "score": 7, "referrer": "/home"}]
 ```
 
 **Request (NDJSON):**
@@ -328,9 +332,9 @@ Content-Type: application/json
 POST /v1/ingest?table=clicks
 Content-Type: application/x-ndjson
 
-{"page": "/home", "score": 42.5}
-{"page": "/about"}
-{"page": "/pricing", "score": 7}
+{"page": "/home", "button": "signup", "score": 42.5}
+{"page": "/about", "button": "nav", "score": 3}
+{"page": "/pricing", "button": "cta", "score": 7, "referrer": "/home"}
 ```
 
 **Response (`200`):** a per-record summary. Each `results` entry mirrors the single-object response (`ok` / `duplicate` / `error`) plus its 1-based `index`.
@@ -379,7 +383,7 @@ A batch aborted partway (a `503`/`500`, or a JSON-array syntax error, after some
 ```bash
 curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
-  -d '[{"page":"/home"},{"page":"/about"}]'
+  -d '[{"page":"/home","button":"signup","score":42.5},{"page":"/about","button":"nav","score":3}]'
 ```
 
 **curl example (NDJSON):**
@@ -387,7 +391,7 @@ curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 ```bash
 curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/x-ndjson" \
-  --data-binary $'{"page":"/home"}\n{"page":"/about"}\n'
+  --data-binary $'{"page":"/home","button":"signup","score":42.5}\n{"page":"/about","button":"nav","score":3}\n'
 ```
 
 ---
@@ -584,18 +588,20 @@ Opens a persistent SSE connection for real-time event streaming. Supports histor
 
 **Response:** SSE stream (`text/event-stream`). Data events include an `id:` field set to the event's `received_timestamp`. The stream opens with a `: connected` comment and emits a minimal `:` keepalive comment periodically (every 30 seconds by default), which keeps a quiet connection from being closed by a proxy; both are standard SSE comments that `EventSource` ignores (raw consumers should skip `:`-prefixed lines).
 
-**Row values arrive positionally, and the column names are announced separately.** Before the first row, and again whenever the column list changes, the stream sends an `event: schema` frame naming the columns of the rows that follow — in order, already reduced to what the caller's role may read. Every data frame's `row` array then has exactly one value per announced column, in that order. A schema frame carries **no** `id:` line, so it never moves the client's `Last-Event-ID`.
+**Row values arrive positionally, and the column names are announced separately.** Before the first row, and again whenever the column list changes, the stream sends an `event: schema` frame naming the columns of the rows that follow — in order, already reduced to what the caller's role may read. Every data frame's `row` array then has exactly one value per announced column, in that order. A schema frame carries **no** `id:` line, so it never moves the client's `Last-Event-ID`. The list below is three columns because it is a *projection* — what a role allowed only `page`, `button` and `received_timestamp` may read; the envelope behind it is wider. Note that a data frame's own `received_timestamp` is **WaveHouse's receipt time for the event**, not a column value — it is the frame's metadata, and it is what the `id:` line carries. The first data frame's third slot is the producer's own timestamp, distinct from the frame's receipt time; the `null` in the second is that column omitted, which ClickHouse fills from its `DEFAULT` on insert. A positional row has one value per column and no way to say "absent", so an omitted column streams as `null` whether or not it is `Nullable`.
 
 ```text
 event: schema
-data: {"table_name":"clicks","columns":["page","button"]}
+data: {"table_name":"clicks","columns":["page","button","received_timestamp"]}
 
 id: 2026-03-24T12:00:00.123Z
-data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","row":["/home","signup"]}
+data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","row":["/home","signup","2026-03-24T11:59:58.512Z"]}
 
 id: 2026-03-24T12:00:01.456Z
-data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","row":["/pricing",null]}
+data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","row":["/pricing","cta",null]}
 ```
+
+If a table's columns change while a client is connected *and* that client gap-fill-replays across the change, live rows after the replay may not be preceded by a fresh `event: schema` frame until the columns next change or the client reconnects — a known limitation deferred to the schema-versioning work ([#543](https://github.com/Wave-RF/WaveHouse/issues/543)). A consumer that drops a row whose length disagrees with its last announced list (as the SDK does) loses rows there rather than mislabeling them. A **same-length** change is the residual case an arity check cannot see: a `RENAME COLUMN`, or a drop paired with an add, zips values under the wrong names until the next announcement. Reconnecting resynchronizes either way.
 
 A raw consumer must keep the most recent announced column list and zip each `row` against it; a value the record did not carry arrives as `null` in its slot rather than being omitted, so positions never shift. The TypeScript SDK does this for you and still yields row objects — `.stream()` and `.liveQuery()` are unchanged. The announcement is **per connection**, so a client that joins mid-stream is told the columns before it is sent a row, and a reconnect is told again.
 
@@ -643,7 +649,7 @@ Returns all discovered ClickHouse table schemas.
       {"name": "page", "type": "String", "is_nullable": false, "has_default": false, "position": 1},
       {"name": "button", "type": "String", "is_nullable": false, "has_default": false, "position": 2},
       {"name": "score", "type": "Float64", "is_nullable": false, "has_default": false, "position": 3},
-      {"name": "received_timestamp", "type": "DateTime64(3, 'UTC')", "is_nullable": false, "has_default": true, "default_expression": "now64(3, 'UTC')", "position": 4}
+      {"name": "received_timestamp", "type": "DateTime64(3, 'UTC')", "is_nullable": false, "has_default": true, "default_kind": "DEFAULT", "default_expression": "now64(3, 'UTC')", "position": 4}
     ]
   }
 ]
@@ -667,7 +673,7 @@ Returns the schema for a specific table.
 }
 ```
 
-Per-column fields: `name`, `type` and `is_nullable` describe the column; `position` is its 1-based ordinal in the table's declaration order (always present, and the order `columns` itself is in); `has_default` says whether it declares any default at all, while `default_expression` says what that default is, omitted when the column declares none. The table's `CREATE TABLE` statement is captured on the same refresh but is deliberately **not** exposed here — for a table backed by an external engine it carries that engine's credentials.
+Per-column fields: `name`, `type` and `is_nullable` describe the column; `position` is its 1-based ordinal in the table's declaration order (always present, and the order `columns` itself is in); `has_default` says whether it declares any default at all, while `default_kind` (`DEFAULT`, `MATERIALIZED`, `ALIAS`, `EPHEMERAL`) and `default_expression` say which and what — both omitted when the column declares none. A `MATERIALIZED` or `ALIAS` column is **not** insertable: naming one in an ingest record is rejected (see [Schema Validation](#post-v1ingesttabletable--ingest-data)). The table's `CREATE TABLE` statement is captured on the same refresh but is deliberately **not** exposed here — for a table backed by an external engine it carries that engine's credentials.
 
 **Error responses:**
 
@@ -791,8 +797,8 @@ The message format used on NATS JetStream between ingest and the batch consumer:
   "scope": "",
   "received_timestamp": "2026-03-24T12:00:00.123456789Z",
   "format": "JSONCompactEachRow",
-  "columns": ["page", "button", "score"],
-  "row": ["/home", "signup", 42.5]
+  "columns": ["page", "button", "score", "received_timestamp"],
+  "row": ["/home", "signup", 42.5, null]
 }
 ```
 
@@ -802,18 +808,30 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 | `scope` | string | Reserved; currently always empty. |
 | `received_timestamp` | string | RFC 3339 nano timestamp when WaveHouse received the event. |
 | `format` | string | Row format. Always `JSONCompactEachRow` today; stated on the wire so a reader can tell an envelope it understands from one it doesn't. |
-| `columns` | string[] | Column names in the table's declaration order — what each position in `row` means. |
-| `row` | array | One `JSONCompactEachRow` line: one value per entry in `columns`, in that order. A column the request body omitted is `null` here, and the insert turns it back into the column's default. Parseable `DateTime`/`DateTime64` values are rewritten to canonical RFC 3339 UTC (see [timestamp canonicalization](#timestamp-canonicalization)); other values as originally sent. |
+| `columns` | string[] | Column names in the table's declaration order — what each position in `row` means. Only the table's **insertable** columns: a `MATERIALIZED` or `ALIAS` column is computed by ClickHouse and never appears here, so it is absent from SSE `event: schema` frames and DLQ envelopes too. |
+| `row` | array | One `JSONCompactEachRow` line: one value per entry in `columns`, in that order. A column the request body omitted is `null` here; for a **non-nullable** column with a default the insert turns that back into the default, while a `Nullable` column stores the `NULL` — see [Schema Validation](#post-v1ingesttabletable--ingest-data). Parseable `DateTime`/`DateTime64` values are rewritten to canonical RFC 3339 UTC (see [timestamp canonicalization](#timestamp-canonicalization)); other values as originally sent. |
 
-`columns` and `row` are only meaningful together: a reader that cannot pair them — a length mismatch, an undecodable row — has no way to map a value to a column, and both the batch consumer and the SSE fan-out drop such an envelope rather than guess.
+`columns` and `row` are only meaningful together: a reader that cannot pair them — a length mismatch, an undecodable row — has no way to map a value to a column. The SSE fan-out withholds such an envelope from every subscriber; the batch consumer parks it on the [DLQ](#dead-letter-queue-dlq) rather than inserting it. Neither guesses.
 
 ### Client-Facing Format (SSE)
 
-The same positional row, with the column list delivered once per connection as its own `event: schema` frame rather than repeated on every event — see [`GET /v1/stream`](#get-v1stream--server-sent-events-stream) for the frame sequence. The announced list is the caller's **projected** columns (the role's allow/deny rules applied), so it can be narrower than the envelope's.
+The same positional row, in a **narrower** body: a data frame carries `table_name`, `received_timestamp` and `row`, and neither `scope` nor `format` — those are envelope fields and do not cross to the client. The column list travels separately, in its own `event: schema` frame sent before the first row and again whenever the list drifts, rather than repeated on every event — see [`GET /v1/stream`](#get-v1stream--server-sent-events-stream) for the frame sequence. The announced list is the caller's **projected** columns (the role's allow/deny rules applied), so both it and the `row` it describes can be narrower than the envelope's — the row carries exactly one value per announced column, not per envelope column.
+
+```json
+{
+  "table_name": "clicks",
+  "received_timestamp": "2026-03-24T12:00:00.123456789Z",
+  "row": ["/home", "signup", 42.5]
+}
+```
+
+Three values, where the envelope above has four: this is the frame a role restricted to `page`, `button` and `score` receives, and its `event: schema` frame announces exactly those three.
 
 ## Dead Letter Queue (DLQ)
 
 When a batch insert to ClickHouse fails (e.g., type errors, connection issues), the worker re-inserts the batch row by row: rows that succeed are acked, and only the rows that fail again are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — those messages are ACKed from the main stream and moved to the DLQ for inspection. The DLQ message body is the published `EventMessage` envelope (`{"table_name":…,"received_timestamp":…,"format":…,"columns":[…],"row":[…]}` — the failed row is the `row` array, read against `columns`, its `DateTime`/`DateTime64` values as published: canonicalized where WaveHouse could parse them, otherwise the producer's original spelling — see [timestamp canonicalization](#timestamp-canonicalization)); the failure reason, table, and time travel in the `X-DLQ-Table` / `X-DLQ-Error` / `X-DLQ-Timestamp` message headers.
+
+An envelope the worker cannot **read** — one left in the queue from before the wire shape changed, or whose `columns` and `row` do not pair — is parked here too, with the reason in `X-DLQ-Error`. It is poison by construction, so it is never redelivered: with the DLQ switched off for the table it is instead acked and dropped, logged at `ERROR` and counted by `wavehouse_ingest_poison_dropped_total` (labeled by `table` and `reason` — `malformed`, `unknown_format`, `unpairable`). Draining the ingest queue before upgrading across a wire-format change avoids the situation entirely.
 
 Use `GET /v1/ops/dlq/stats` to monitor DLQ depth.
 
@@ -832,5 +850,5 @@ export TOKEN=$(jwt encode --secret "change-me-in-production" '{"role": "admin", 
 curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"page": "/home"}'
+  -d '{"page": "/home", "button": "signup", "score": 42.5}'
 ```

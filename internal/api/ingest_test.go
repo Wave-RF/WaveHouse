@@ -1206,6 +1206,7 @@ func TestIngest_UndeclaredOrUnsupportedContentType_415(t *testing.T) {
 			h.Handle(w, rawIngestRequest(t, "clicks", tt.ct, `{"page":"/a"}`))
 
 			assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+			testutil.AssertJSONErrorResponse(t, w)
 			assert.Contains(t, w.Body.String(), "application/json")
 			assert.Contains(t, w.Body.String(), "application/x-ndjson")
 			assert.Empty(t, pub.Messages, "a refused request must not publish")
@@ -1254,7 +1255,8 @@ func TestIngest_JSONArray_AllValid(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 
-	// A bare JSON array with no Content-Type must be accepted as a batch.
+	// A JSON array declared as application/json is a batch: within the JSON
+	// family the body's first byte picks array-vs-object.
 	req := ingestRequest(t, "clicks", []map[string]any{
 		{"page": "/a", "count": 1},
 		{"page": "/b", "count": 2},
@@ -1298,8 +1300,9 @@ func TestIngest_JSONArray_WithJSONContentType(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 
-	// Content-Type: application/json must NOT force the single-object path when
-	// the body is an array — the sniffer wins.
+	// Within the declared JSON family the body picks arity: an array body is a
+	// batch, not a single object. (The header is authoritative about the FORMAT;
+	// it does not claim the arity.)
 	req := rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"},{"page":"/b"}]`)
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
@@ -1554,8 +1557,9 @@ func TestIngest_BodyCap_413(t *testing.T) {
 		{name: "single object", ct: "application/json", body: big, cap: 50},
 		{name: "json array mid-element", ct: "application/json", body: "[" + big + "]", cap: 50},
 		// Cap lands exactly between elements (just past '[' + the first element,
-		// before the comma) so the overflow surfaces at arrayReader's
-		// More()/Token boundary — the path that used to swallow the read error
+		// before the comma). Since the body is read up front the overflow now
+		// surfaces there rather than at arrayReader's More()/Token boundary, but
+		// the case is kept: it is the shape that used to swallow the read error
 		// and silently truncate to a partial 200 instead of 413.
 		{name: "json array between elements", ct: "application/json", body: "[" + elem + "," + elem + "]", cap: int64(1 + len(elem))},
 		// NDJSON over cap surfaces via the scanner's Err() (MaxBytesError).
@@ -1783,4 +1787,185 @@ func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
 	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"event_id": "e1", "page": "/home"}))
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Len(t, pub.Messages, 1, "published without idempotency, not 500")
+}
+
+// checkColumnPolicy grants "viewer" insert on clicks with an _eq check on col.
+func checkColumnPolicy(t *testing.T, col, required string) *policy.Policy {
+	t.Helper()
+	return &policy.Policy{Tables: map[string]policy.TablePolicy{
+		"clicks": {"viewer": {Insert: &policy.InsertPermissions{
+			Check: map[string]policy.Filter{col: {Eq: &required}},
+		}}},
+	}}
+}
+
+// TestIngest_CheckColumnNotInSchema_Rejected: a check clause naming a column the
+// table does not have can never be satisfied, and the auto-injected value would
+// be dropped by the positional encoder — the record would insert without the
+// value the policy requires, silently. It must be rejected, naming the column.
+func TestIngest_CheckColumnNotInSchema_Rejected(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h.PolicySource = policy.Static(checkColumnPolicy(t, "tenant_id", "acme"))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a"}))
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "tenant_id", "the message names the offending column")
+	assert.Contains(t, w.Body.String(), "which table")
+	assert.Empty(t, pub.Messages, "a record that cannot carry the required value must not publish")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+// TestIngest_CheckOnComputedColumn_Rejected is the second way into the same
+// failure the guard above exists to stop. The column IS in the table, so a
+// presence check passes it — but no record may write it, so the row has no slot
+// for it and the auto-injected value would be dropped on the way out, leaving
+// the record inserted WITHOUT the value the policy requires.
+func TestIngest_CheckOnComputedColumn_Rejected(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ col, kind string }{
+		{"digest", "materialized"},
+		{"doubled", "alias"},
+	} {
+		t.Run(tt.col, func(t *testing.T) {
+			t.Parallel()
+			required := "must-be-this"
+			p := &policy.Policy{Tables: map[string]policy.TablePolicy{
+				"clicks": {"viewer": {Insert: &policy.InsertPermissions{
+					Check: map[string]policy.Filter{tt.col: {Eq: &required}},
+				}}},
+			}}
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(computedRegistry(t), pub, testutil.NopLogger())
+			h.PolicySource = policy.Static(p)
+
+			w := httptest.NewRecorder()
+			h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a"}))
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), tt.col)
+			assert.Contains(t, w.Body.String(), tt.kind+" and cannot be inserted",
+				"the message says WHY, distinctly from the absent-column case")
+			assert.Empty(t, pub.Messages, "never publish a record the check could not be enforced on")
+		})
+	}
+}
+
+// TestIngest_CheckColumnInSchema_StillInjects is the other half: the guard must
+// not disturb the case it sits next to. A record omitting a checked column that
+// DOES exist still gets the value injected, canonicalized, and carried in the
+// encoded row at that column's position.
+func TestIngest_CheckColumnInSchema_StillInjects(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h.PolicySource = policy.Static(checkColumnPolicy(t, "org_id", "org-42"))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a"}))
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	require.Len(t, pub.Messages, 1)
+	row := publishedRow(t, pub.Messages[0].Data)
+	assert.Equal(t, "/a", row["page"])
+	assert.Equal(t, "org-42", row["org_id"], "the injected value rides in its column's slot")
+}
+
+// TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord: the guard is a
+// per-record rejection, not a whole-request abort — the batch is still read to
+// the end and reports every record, rather than failing the request outright.
+//
+// Every record fails here, and that is not an artifact of the fixture: the
+// condition is a property of (table, role, policy), identical for every record
+// in the request, so there is no sibling this guard could spare. A record
+// SUPPLYING the missing column is rejected too, one step earlier, by schema
+// validation — with its own message, which this pins so the two stay
+// distinguishable.
+func TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h.PolicySource = policy.Static(checkColumnPolicy(t, "tenant_id", "acme"))
+
+	req := rawIngestRequest(t, "clicks", "application/json",
+		`[{"page":"/a"},{"page":"/b","tenant_id":"acme"},{"page":"/c"}]`)
+	req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "a misconfigured policy must not abort the request")
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 3, resp.Total)
+	assert.Equal(t, 3, resp.Failed)
+	assert.Zero(t, resp.Succeeded)
+	require.Len(t, resp.Results, 3)
+	assert.Contains(t, resp.Results[0].Error, "which table", "omitted ⇒ the new guard")
+	assert.Contains(t, resp.Results[1].Error, "unknown column", "supplied ⇒ schema validation, one step earlier")
+	assert.Contains(t, resp.Results[2].Error, "which table")
+	assert.Empty(t, pub.Messages)
+}
+
+// computedRegistry is a clicks table carrying both kinds of computed column,
+// the shape ClickHouse refuses to have named in an INSERT column list.
+func computedRegistry(t testing.TB) *discovery.SchemaRegistry {
+	return testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
+		{
+			Name: "clicks",
+			Columns: []discovery.Column{
+				{Name: "page", Type: "String"},
+				{Name: "digest", Type: "String", DefaultKind: "MATERIALIZED", HasDefault: true},
+				{Name: "country", Type: "String", HasDefault: true},
+				{Name: "doubled", Type: "UInt64", DefaultKind: "ALIAS", HasDefault: true},
+			},
+		},
+	})
+}
+
+// TestIngest_ComputedColumnsExcludedFromEnvelope is the regression guard for
+// the class that broke ingest outright: the worker builds
+// `INSERT INTO … (cols) FORMAT JSONCompactEachRow` from the envelope's column
+// list, and ClickHouse refuses a MATERIALIZED column there (code 44) or an
+// ALIAS one (code 16). Naming them meant every row of such a table went to the
+// DLQ. They must not reach the envelope at all.
+func TestIngest_ComputedColumnsExcludedFromEnvelope(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(computedRegistry(t), pub, testutil.NopLogger())
+
+	w := httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/a"}))
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	require.Len(t, pub.Messages, 1)
+
+	var evt ingest.EventMessage
+	require.NoError(t, json.Unmarshal(pub.Messages[0].Data, &evt))
+	assert.Equal(t, []string{"page", "country"}, evt.Columns,
+		"only the columns an INSERT may name, in declaration order")
+	assert.JSONEq(t, `["/a",null]`, string(evt.Row), "the row has one slot per named column")
+}
+
+// TestIngest_SuppliedComputedColumn_Rejected: a record that DOES name a
+// computed column is refused loudly rather than having the value silently
+// dropped on the way out.
+func TestIngest_SuppliedComputedColumn_Rejected(t *testing.T) {
+	t.Parallel()
+	for _, col := range []string{"digest", "doubled"} {
+		t.Run(col, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(computedRegistry(t), pub, testutil.NopLogger())
+
+			w := httptest.NewRecorder()
+			h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/a", col: "x"}))
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Contains(t, w.Body.String(), "cannot be inserted")
+			assert.Contains(t, w.Body.String(), col)
+			assert.Empty(t, pub.Messages)
+		})
+	}
 }

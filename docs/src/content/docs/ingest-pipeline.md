@@ -14,11 +14,11 @@ It is deliberately detailed: this is a hot, concurrency-heavy path, and the goro
 | File | Contents |
 | --- | --- |
 | `worker.go` | `StartIngestWorker`, the `dispatchLoop`, `parseMsg` (+ `rejectPoison` for an envelope it cannot read), the per-table `tableBatcher`/`tableLoop`, `flushTable` (splits a batch per column list via `groupByColumns`) and `flushGroup` (bulk insert with a row-by-row poison-isolation fallback), `insertToClickHouse`, `handleSuccess` (cache invalidation + acks), `sendToDLQ`/`parkOnDLQ` |
-| `compact.go` | `EncodeCompactRow` — renders one record as a `JSONCompactEachRow` line over the table's columns, in declaration order. Serialization only: it validates nothing and judges no value |
+| `compact.go` | `EncodeCompactRow` — renders one record as a `JSONCompactEachRow` line over the table's insertable columns, in declaration order. Serialization only: it validates nothing and judges no value |
 | `sweeper.go` | The **Active Sweeper** — purges stream messages that are both written to ClickHouse and past the SSE gap window |
 | `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |
 
-The pipeline is **insert-only**. The wire format carries `{table_name, scope, received_timestamp, format, columns, row}`: `row` is one `JSONCompactEachRow` line — a positional JSON array — and `columns` names its positions in the table's declaration order. (`scope` is reserved and always `""` today.) Each NATS message is its own envelope, so the names ride along per record; where they are carried once is the `INSERT` the worker emits per group. The worker parses the envelope, groups a batch by column list, and bulk-`INSERT`s each group as `INSERT INTO … (cols) FORMAT JSONCompactEachRow` — schema validation already happened at the HTTP ingest handler, before publish. Non-insert mutations go through `POST /v1/ops/query` (admin-only).
+The pipeline is **insert-only**. The wire format carries `{table_name, scope, received_timestamp, format, columns, row}`: `row` is one `JSONCompactEachRow` line — a positional JSON array — and `columns` names its positions in the table's declaration order — over the table's **insertable** columns, since a `MATERIALIZED` or `ALIAS` column cannot be named in an INSERT. (`scope` is reserved and always `""` today.) Each NATS message is its own envelope, so the names ride along per record; where they are carried once is the `INSERT` the worker emits per group. The worker parses the envelope, groups a batch by column list, and bulk-`INSERT`s each group as `INSERT INTO … (cols) FORMAT JSONCompactEachRow` — schema validation already happened at the HTTP ingest handler, before publish. Non-insert mutations go through `POST /v1/ops/query` (admin-only).
 
 ## High-level shape
 

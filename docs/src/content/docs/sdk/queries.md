@@ -48,6 +48,8 @@ For an array insert, `data.ok` is `true` only when every record succeeded (`fail
 
 Insert pre-formatted NDJSON you already have — a `.ndjson` file, a byte stream, or a string — without first parsing it into objects. Accepts a `string`, `Uint8Array`, `Blob`/`File`, or `ReadableStream<Uint8Array>`; non-string sources are read fully into memory before sending. Returns the same per-record summary as an array `insert`.
 
+The server caps the request body at **16 MiB** whatever the form — NDJSON is read in full before parsing, exactly like a JSON array — and answers `413` above it. Split a larger export across several calls; see [Batch Ingest](/api#batch-ingest).
+
 ```ts
 // From a string
 await clicks.insertNDJSON('{"page":"/a"}\n{"page":"/b"}\n');
@@ -67,8 +69,14 @@ Fetch the table's column definitions from ClickHouse. `.schema()` hits `/v1/ops/
 ```ts
 const { data } = await clicks.schema();
 // data: { name: 'clicks', columns: [
-//   { name: 'page', type: 'String', is_nullable: false, has_default: false, position: 1 }, ...
+//   { name: 'page', type: 'String', is_nullable: false, has_default: false, position: 1 },
+//   { name: 'received_timestamp', type: "DateTime64(3, 'UTC')", is_nullable: false,
+//     has_default: true, default_kind: 'DEFAULT',
+//     default_expression: "now64(3, 'UTC')", position: 4 }, ...
 // ] }
+// `position` is the declaration ordinal; `default_kind`/`default_expression`
+// appear only when the column declares a default. A MATERIALIZED or ALIAS
+// column is computed by ClickHouse and cannot be inserted.
 ```
 
 ### `.select(...columns)`

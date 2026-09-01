@@ -416,6 +416,37 @@ func (h *IngestHandler) processRecord(
 			}
 		}
 		for col, requiredVal := range perms.Insert.CheckClauses {
+			// A check the published row cannot carry can never be enforced: the
+			// row holds one slot per INSERTABLE column, by position, so an
+			// auto-injected value for anything outside that set is dropped on the
+			// way out and the record inserts WITHOUT the value the policy
+			// requires — silently. Two ways in, both refused here: a column the
+			// table does not have at all, and one it has but computes
+			// (MATERIALIZED/ALIAS), which no record may write.
+			//
+			// The supplied-value case never reaches here — schema validation
+			// above rejects both an unknown column and a computed one — so in
+			// practice this fires on the omitted-and-auto-injected path. The
+			// check sits at the top of the loop anyway, so it does not depend on
+			// that ordering holding.
+			schemaCol, known := schema.Lookup(col)
+			switch {
+			case !known:
+				h.logger.ErrorContext(ctx, "policy check references a column the table does not have",
+					"column", col, "table", table, "role", role)
+				return false, &recordReject{
+					Status:  http.StatusForbidden,
+					Message: fmt.Sprintf("policy check references column %q, which table %q does not have", col, table),
+				}, nil
+			case !schemaCol.IsInsertable():
+				h.logger.ErrorContext(ctx, "policy check references a column no record may write",
+					"column", col, "table", table, "role", role, "default_kind", schemaCol.DefaultKind)
+				return false, &recordReject{
+					Status: http.StatusForbidden,
+					Message: fmt.Sprintf("policy check references column %q of table %q, which is %s and cannot be inserted",
+						col, table, strings.ToLower(schemaCol.DefaultKind)),
+				}, nil
+			}
 			// A []any value is an _in check: the inserted value must be present and
 			// one of the allowed set. Unlike the scalar _eq case there is no single
 			// value to auto-inject, so an absent column fails closed.
@@ -509,11 +540,14 @@ func (h *IngestHandler) processRecord(
 		}
 	}
 
-	// Render the record positionally against the table's declaration order. The
-	// column names ride alongside in the envelope rather than in the row, so a
-	// batch of rows for one table carries the names once — and the reader can
-	// tell a schema change mid-stream from a reordering.
-	row, err := ingest.EncodeCompactRow(schema.Columns, data)
+	// Render the record positionally against the table's declaration order,
+	// over the columns a record may actually carry: naming a MATERIALIZED or
+	// ALIAS column in the INSERT the worker builds from this is an error, so
+	// they are not part of the row's contract. The column names ride alongside
+	// in the envelope rather than in the row, so the reader can tell a schema
+	// change mid-stream from a reordering.
+	cols := schema.InsertableColumns()
+	row, err := ingest.EncodeCompactRow(cols, data)
 	if err != nil {
 		h.logger.ErrorContext(ctx, "failed to encode compact row", "error", err, "table", table)
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
@@ -524,7 +558,7 @@ func (h *IngestHandler) processRecord(
 		Scope:             scope,
 		ReceivedTimestamp: now.Format(time.RFC3339Nano),
 		Format:            ingest.FormatJSONCompactEachRow,
-		Columns:           schema.ColumnNames(),
+		Columns:           schema.InsertableColumnNames(),
 		Row:               row,
 	}
 

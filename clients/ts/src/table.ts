@@ -140,9 +140,11 @@ export class TableRef<Row = Record<string, unknown>> {
    * file or a stream produced by another system. For in-memory rows, prefer
    * {@link insert}.
    *
-   * Non-string sources are read fully into memory before sending (the server
-   * streams the parse). Returns the same per-record batch summary as an array
-   * `insert`.
+   * Non-string sources are read fully into memory before sending, and the
+   * server reads the whole body before parsing it, so the 16 MiB request cap
+   * applies here exactly as it does to an array `insert` — split a larger
+   * export across several calls. Returns the same per-record batch summary as
+   * an array `insert`.
    */
   async insertNDJSON(
     source: NDJSONSource,

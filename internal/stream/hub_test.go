@@ -1293,3 +1293,27 @@ func TestHub_SchemaFrame_DroppedAnnouncementDropsItsRow(t *testing.T) {
 // announcement comes from the registry while every event's list comes from the
 // envelope, which carries only insertable columns. If the two disagreed, the
 // very first event would force a pointless drift re-announcement.
+func TestHub_SubscribeSchemaFrame_ExcludesComputedColumns(t *testing.T) {
+	t.Parallel()
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
+		{Name: "clicks", Columns: []discovery.Column{
+			{Name: "page", Type: "String"},
+			{Name: "digest", Type: "String", DefaultKind: "MATERIALIZED", HasDefault: true},
+			{Name: "country", Type: "String"},
+		}},
+	})
+	hub := NewHub(nil, reg, nil)
+
+	sub := NewSubscriber(nil, nil)
+	f, ok := hub.SubscribeSchemaFrame("clicks", "public", sub)
+	require.True(t, ok)
+	cols := frameColumns(t, f)
+	assert.Equal(t, []string{"page", "country"}, cols)
+
+	// The first event announces nothing new, because the lists agree.
+	hub.Add("ingest.clicks", "public", sub)
+	hub.Broadcast("ingest.clicks", rawEventCols(t, "clicks", "t1", cols,
+		map[string]any{"page": "/a", "country": "US"}))
+	_, row := recvEventCols(t, sub, cols)
+	assert.Equal(t, "/a", row["page"])
+}

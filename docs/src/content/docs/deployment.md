@@ -313,7 +313,9 @@ WaveHouse serves plain HTTP on `:8080` and does **not** terminate TLS, manage ce
 
 ## ClickHouse Schema
 
-WaveHouse uses a **Bring Your Own Schema** model. You create your tables in ClickHouse with whatever columns and engines you need. WaveHouse discovers the schemas automatically via `system.columns` and validates ingest data against them.
+WaveHouse uses a **Bring Your Own Schema** model. You create your tables in ClickHouse with whatever columns and engines you need. WaveHouse discovers the schemas automatically via `system.columns` and validates ingest data against them — see [Schema Validation](/api#post-v1ingesttabletable--ingest-data) for the rules a record must satisfy.
+
+Two schema-design consequences are worth knowing before you write the DDL. A `MATERIALIZED` or `ALIAS` column is computed by ClickHouse and cannot be inserted: omit it from your records, and a record that names one is rejected. And a `Nullable(T) DEFAULT …` column never takes its default through ingest at all: an omitted key stores `NULL`, because an absent field travels as an explicit null in its slot and ClickHouse stores an explicit null on a nullable column as `NULL` — only an *absent* key ever took the default, and a positional row has no way to express absence. A **non-nullable** column with a default is unaffected: the insert turns that null back into the default.
 
 Example table:
 
