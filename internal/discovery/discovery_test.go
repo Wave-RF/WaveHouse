@@ -3,6 +3,7 @@ package discovery
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -64,11 +65,21 @@ func TestNewSchemaRegistry_ConstructorDefaults(t *testing.T) {
 // name-keyed schemas — Get finds them, List returns them all.
 func TestRefresh_PopulatesAndLookups(t *testing.T) {
 	t.Parallel()
-	conn := &fakeConn{columns: [][4]string{
-		{"clicks", "id", "String", ""},
-		{"clicks", "page", "String", "DEFAULT"},
-		{"users", "id", "UInt64", ""},
-	}}
+	conn := &fakeConn{
+		version: "25.3.1.1",
+		columns: []fakeColumn{
+			{table: "clicks", name: "id", chType: "String", position: 1},
+			{table: "clicks", name: "page", chType: "String", defaultKind: "DEFAULT", defaultExpr: "'/'", position: 2},
+			{table: "users", name: "id", chType: "UInt64", position: 1},
+		},
+		tables: [][2]string{
+			{"clicks", "CREATE TABLE test.clicks (`id` String) ENGINE = MergeTree"},
+			{"users", "CREATE TABLE test.users (`id` UInt64) ENGINE = MergeTree"},
+			// Listed in system.tables but with no system.columns rows — skipped,
+			// never published as a column-less schema.
+			{"ghost", "CREATE TABLE test.ghost (`x` String) ENGINE = MergeTree"},
+		},
+	}
 	sr := NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, discardLogger())
 	require.NoError(t, sr.Refresh(context.Background()))
 
@@ -77,9 +88,59 @@ func TestRefresh_PopulatesAndLookups(t *testing.T) {
 	assert.Equal(t, []string{"id", "page"}, clicks.ColumnNames())
 	assert.False(t, clicks.Columns[0].HasDefault)
 	assert.True(t, clicks.Columns[1].HasDefault, "non-empty default_kind ⇒ HasDefault")
+	assert.Empty(t, clicks.Columns[0].DefaultExpression)
+	assert.Equal(t, "'/'", clicks.Columns[1].DefaultExpression)
+	assert.Equal(t, uint64(1), clicks.Columns[0].Position)
+	assert.Equal(t, uint64(2), clicks.Columns[1].Position)
+	assert.Equal(t, "CREATE TABLE test.clicks (`id` String) ENGINE = MergeTree", clicks.DDL)
 	require.NotNil(t, sr.Get("users"))
+	assert.Nil(t, sr.Get("ghost"), "a table with no columns is not a schema")
 	assert.Nil(t, sr.Get("missing"))
 	assert.Len(t, sr.List(), 2)
+	assert.Equal(t, "25.3.1.1", sr.ServerVersion())
+}
+
+// TestRefresh_DDLIsNotSerialized: the schema endpoint marshals TableSchema
+// straight to the client, and an external-engine table carries its credentials
+// in create_table_query — so DDL must never appear in the JSON.
+func TestRefresh_DDLIsNotSerialized(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{
+		columns: []fakeColumn{{table: "clicks", name: "id", chType: "String", position: 1}},
+		tables:  [][2]string{{"clicks", "CREATE TABLE test.clicks (`id` String) ENGINE = S3('https://x', 'AKIA…', 'secret…')"}},
+	}
+	sr := NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, discardLogger())
+	require.NoError(t, sr.Refresh(context.Background()))
+
+	encoded, err := json.Marshal(sr.Get("clicks"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "secret")
+	assert.NotContains(t, string(encoded), "CREATE TABLE")
+	assert.Contains(t, string(encoded), `"position":1`)
+}
+
+// TestRefresh_ServerVersionQueryFails: version() is probed on the same
+// connection as timezone(), so its failure fails the refresh rather than
+// publishing a registry with no idea what server produced it.
+func TestRefresh_ServerVersionQueryFails(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{versionErr: errors.New("code: 497, not enough privileges")}
+	sr := NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, discardLogger())
+	require.ErrorContains(t, sr.Refresh(context.Background()), "query server version")
+	assert.Empty(t, sr.ServerVersion())
+}
+
+// TestRefresh_TablesQueryFails: system.tables is part of the same refresh, so a
+// failure there keeps the prior cache instead of publishing DDL-less schemas.
+func TestRefresh_TablesQueryFails(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{
+		columns:   []fakeColumn{{table: "clicks", name: "id", chType: "String", position: 1}},
+		tablesErr: errors.New("connection reset"),
+	}
+	sr := NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, discardLogger())
+	require.ErrorContains(t, sr.Refresh(context.Background()), "query system.tables")
+	assert.Nil(t, sr.Get("clicks"), "a failed DDL scan must not publish a registry")
 }
 
 // TestRefresh_EmptyDatabase: zero system.columns rows yield an empty, usable
@@ -100,12 +161,28 @@ type fakeConn struct {
 	driver.Conn
 	errsThenSuccess []error
 	calls           atomic.Int32
-	tz              string      // SELECT timezone() answer; "" ⇒ "UTC"
-	columns         [][4]string // system.columns rows served on success; nil ⇒ none
-	iterErr         error       // rows.Err() after the served rows; nil ⇒ clean iteration
+	tz              string       // SELECT timezone() answer; "" ⇒ "UTC"
+	version         string       // SELECT version() answer; "" ⇒ "24.1.1.1"
+	versionErr      error        // non-nil ⇒ the version() probe fails
+	columns         []fakeColumn // system.columns rows served on success; nil ⇒ none
+	iterErr         error        // rows.Err() after the served rows; nil ⇒ clean iteration
+	tables          [][2]string  // system.tables rows: {name, create_table_query}
+	tablesErr       error        // non-nil ⇒ the system.tables query fails
 }
 
-func (c *fakeConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, error) {
+// Query serves both of Refresh's result sets. Only the system.columns call
+// advances errsThenSuccess and the calls counter, so the retry tests still count
+// refresh attempts rather than statements.
+func (c *fakeConn) Query(_ context.Context, q string, _ ...any) (driver.Rows, error) {
+	if strings.Contains(q, "system.tables") {
+		if c.tablesErr != nil {
+			return nil, c.tablesErr
+		}
+		if c.tables == nil {
+			return &emptyRows{}, nil
+		}
+		return &fakeTableRows{rows: c.tables}, nil
+	}
 	n := c.calls.Add(1)
 	if int(n) <= len(c.errsThenSuccess) {
 		return nil, c.errsThenSuccess[n-1]
@@ -116,28 +193,44 @@ func (c *fakeConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, er
 	return &emptyRows{}, nil
 }
 
-// QueryRow answers the SELECT timezone() probe Refresh issues before the
-// system.columns query (#372); errsThenSuccess sequencing stays keyed on Query.
-func (c *fakeConn) QueryRow(context.Context, string, ...any) driver.Row {
-	if c.tz != "" {
-		return tzRow{tz: c.tz}
+// QueryRow answers the SELECT timezone() (#372) and SELECT version() probes
+// Refresh issues before the system.columns query; errsThenSuccess sequencing
+// stays keyed on Query.
+func (c *fakeConn) QueryRow(_ context.Context, q string, _ ...any) driver.Row {
+	if strings.Contains(q, "version()") {
+		if c.versionErr != nil {
+			return scalarRow{err: c.versionErr}
+		}
+		if c.version != "" {
+			return scalarRow{val: c.version}
+		}
+		return scalarRow{val: "24.1.1.1"}
 	}
-	return tzRow{tz: "UTC"}
+	if c.tz != "" {
+		return scalarRow{val: c.tz}
+	}
+	return scalarRow{val: "UTC"}
 }
 
-type tzRow struct {
+// scalarRow answers a one-column probe (timezone(), version()) with a string,
+// or with a canned error.
+type scalarRow struct {
 	driver.Row
-	tz string
+	val string
+	err error
 }
 
-func (r tzRow) Scan(dest ...any) error {
+func (r scalarRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
 	if len(dest) == 1 {
 		if s, ok := dest[0].(*string); ok {
-			*s = r.tz
+			*s = r.val
 			return nil
 		}
 	}
-	return errors.New("unexpected timezone scan")
+	return errors.New("unexpected scalar probe scan")
 }
 
 type emptyRows struct {
@@ -151,11 +244,21 @@ func (*emptyRows) ColumnTypes() []driver.ColumnType {
 	return nil
 }
 
-// fakeRows plays a system.columns result set: one [table, name, type,
-// default_kind] row per column, in the given order.
+// fakeColumn is one system.columns row the fake serves, in the select order
+// Refresh scans: table, name, type, default_kind, default_expression, position.
+type fakeColumn struct {
+	table       string
+	name        string
+	chType      string
+	defaultKind string
+	defaultExpr string
+	position    uint64
+}
+
+// fakeRows plays a system.columns result set, in the given order.
 type fakeRows struct {
 	driver.Rows
-	rows [][4]string
+	rows []fakeColumn
 	next int
 	err  error // returned from Err() once iteration ends
 }
@@ -167,21 +270,58 @@ func (r *fakeRows) Next() bool {
 
 func (r *fakeRows) Scan(dest ...any) error {
 	row := r.rows[r.next-1]
-	if len(dest) != len(row) {
+	if len(dest) != 6 {
 		return errors.New("unexpected system.columns scan shape")
+	}
+	strs := []string{row.table, row.name, row.chType, row.defaultKind, row.defaultExpr}
+	for i, want := range strs {
+		s, ok := dest[i].(*string)
+		if !ok {
+			return errors.New("system.columns scan dest must be *string")
+		}
+		*s = want
+	}
+	pos, ok := dest[5].(*uint64)
+	if !ok {
+		return errors.New("system.columns position dest must be *uint64")
+	}
+	*pos = row.position
+	return nil
+}
+
+func (*fakeRows) Close() error { return nil }
+func (r *fakeRows) Err() error { return r.err }
+
+// fakeTableRows plays a system.tables result set: one {name,
+// create_table_query} pair per table.
+type fakeTableRows struct {
+	driver.Rows
+	rows [][2]string
+	next int
+}
+
+func (r *fakeTableRows) Next() bool {
+	r.next++
+	return r.next <= len(r.rows)
+}
+
+func (r *fakeTableRows) Scan(dest ...any) error {
+	row := r.rows[r.next-1]
+	if len(dest) != len(row) {
+		return errors.New("unexpected system.tables scan shape")
 	}
 	for i, d := range dest {
 		s, ok := d.(*string)
 		if !ok {
-			return errors.New("system.columns scan dest must be *string")
+			return errors.New("system.tables scan dest must be *string")
 		}
 		*s = row[i]
 	}
 	return nil
 }
 
-func (*fakeRows) Close() error { return nil }
-func (r *fakeRows) Err() error { return r.err }
+func (*fakeTableRows) Close() error { return nil }
+func (*fakeTableRows) Err() error   { return nil }
 
 func newFakeRegistry(t *testing.T, errs []error) (*SchemaRegistry, *fakeConn) {
 	t.Helper()
@@ -206,7 +346,7 @@ func TestRefresh_UnresolvableServerTimezone_NotFatal(t *testing.T) {
 func TestRefresh_RowsIterationError_Fails(t *testing.T) {
 	t.Parallel()
 	conn := &fakeConn{
-		columns: [][4]string{{"events", "id", "String", ""}},
+		columns: []fakeColumn{{table: "events", name: "id", chType: "String", position: 1}},
 		iterErr: errors.New("network drop mid-stream"),
 	}
 	sr := NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, discardLogger())
