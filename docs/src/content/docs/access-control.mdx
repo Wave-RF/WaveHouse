@@ -9,7 +9,7 @@ sidebar:
 
 WaveHouse authorizes every request against a single **access control policy**: a per-table, per-role document that decides which columns a caller may see, which rows they may touch, what they may aggregate, and how much work a query may do. It is Hasura-style — column-level and row-level permissions with JWT claim templating — kept in the [settings directory](/settings-directory#policiesjson) and applied on every read, write, and live stream.
 
-This guide explains the whole model: where roles come from, how to write a policy, how each rule is enforced, and how the policy is loaded and changed at runtime. For the file format and validation rules see [Settings Directory — `policies.json`](/settings-directory#policiesjson); for the HTTP surface see the [API reference](/api#authentication). Named query pipes have their own, simpler authorization model — see [Named Pipes](/pipes).
+This guide explains the whole model: where roles come from, how to write a policy, how each rule is enforced, and how the policy is loaded and changed at runtime. For the file format and validation rules see [Settings Directory — `policies.json`](/settings-directory#policiesjson); for the request-level auth surface — token format, the operator key, and the denial codes — see the [API reference](/api#authentication). Named query pipes have their own, simpler authorization model — see [Named Pipes](/pipes).
 
 ## How a request is authorized
 
@@ -326,7 +326,7 @@ The policy is the settings directory's `policies.json`, and the files are the on
 
 The policy has no HTTP surface — the file is where it is read, edited, and validated.
 
-Validation decodes the document strictly — an unknown or misspelled key (`eq` for `_eq`) or a duplicate key is rejected, never silently dropped as "no rule" — and rejects every rule the engine would not honor: empty role names, negative limits, [malformed claim templates](#jwt-claim-templating), a `filter` or `check` entry that sets no operator (it would constrain nothing), `filter` under an `insert` grant (inserts are constrained by `check`), and unsupported `check` operators — `_neq`/`_gt`/`_lt`, or `_eq` and `_in` together on one column (but it intentionally allows `default_role == admin_role`, warning instead). `wavehouse validate` runs these checks on the whole directory — including the cross-file role references — so gate a policy change with it before the edit reaches a running instance; a reload runs the same validation and rejects a bad directory, keeping the previous good policy in effect.
+Validation decodes the document strictly — an unknown or misspelled key (`eq` for `_eq`) or a duplicate key is rejected, never silently dropped as "no rule" — and rejects rules the engine would not honor: empty role names, negative limits, [malformed claim templates](#jwt-claim-templating), a `filter` or `check` entry that sets no operator (it would constrain nothing), `filter` under an `insert` grant (inserts are constrained by `check`), and unsupported `check` operators — `_neq`/`_gt`/`_lt`, or `_eq` and `_in` together on one column (but it intentionally allows `default_role == admin_role`, warning instead). `wavehouse validate` runs these checks on the whole directory — including the cross-file role references — so gate a policy change with it before the edit reaches a running instance; a reload runs the same validation and rejects a bad directory, keeping the previous good policy in effect.
 
 ```bash
 # Check the edited settings directory before the server sees it:
@@ -347,7 +347,7 @@ The settings directory is the **source of truth** for the live policy — there 
 - An **empty** `policies.json` (`{}`) is valid but adopts no policy — every **token-based** request is denied (logged loudly, admin included). `wavehouse bootstrap` writes it that way, so a fresh directory is closed until you write a policy.
 - A **reload** that fails validation keeps the previous good policy in effect and reports the findings (in the log, and in the `POST /v1/ops/settings/reload` response), so an operator mid-edit never breaks a running server. A reload that passes applies to the very next request.
 
-Because no policy locks out every *token-based* caller (including admin), keep the settings directory in version control so a known-good policy is always a file away, and configure an [operator key](#operator-key) so you can inspect and reload over HTTP without shell access.
+Because no policy locks out every *token-based* caller (including admin), keep the settings directory in version control so a known-good policy is always a file away, and configure an [operator key](#operator-key) so you can trigger a reload over HTTP without shell access.
 
 ## A complete example
 
@@ -395,7 +395,7 @@ With this policy adopted:
 - A request with **no token** has the empty role, which `default_role: ""` leaves empty → **denied** everywhere.
 - A `viewer` token can `POST /v1/query?table=events` but only sees its tenant's rows, never `user_email`/`ip_address`, can't run `quantile`, and is capped at 1000 rows / 5s.
 - A `writer` token can `POST /v1/ingest?table=events` sending `{"event_name":"click","page":"/home","score":1}`; WaveHouse auto-injects `user_id` and `tenant_id` from the token, and rejects any body that tries to set them to someone else.
-- An `admin` token can do all of the above plus raw SQL, schema, DLQ, settings reload, and policy/pipe inspection — unscoped.
+- An `admin` token can do all of the above plus raw SQL, schema, DLQ, settings reload, and pipe inspection — unscoped.
 
 ## Field reference
 

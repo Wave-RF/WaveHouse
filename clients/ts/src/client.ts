@@ -22,7 +22,6 @@ export class WaveHouseClient<DB extends Database = Database> {
 
   /** Schema introspection namespace. */
   readonly schema: SchemaNamespace;
-  /** Access control policy namespace (admin). */
   /** Dead Letter Queue namespace. */
   readonly dlq: DLQNamespace;
   /** System health/readiness namespace. */

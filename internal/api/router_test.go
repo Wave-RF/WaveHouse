@@ -109,7 +109,7 @@ func TestRequireAdmin_OperatorBypass(t *testing.T) {
 
 // TestRequireAdmin_OperatorBypassesNilPolicy: break-glass — with no policy at
 // all (IsAdmin admits nobody), the operator bit still admits the request so the
-// operator can inspect the policy and trigger a settings reload while locked out.
+// operator can trigger a settings reload while locked out.
 func TestRequireAdmin_OperatorBypassesNilPolicy(t *testing.T) {
 	t.Parallel()
 	handler := RequireAdmin(nil, testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

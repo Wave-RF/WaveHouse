@@ -188,7 +188,7 @@ func run() int {
 	if cfg.Auth.OperatorKey == "" {
 		logger.Warn("no auth.operator_key set: if you lose the JWT secret, lose control of the JWKS endpoint, or lose your HMAC secret — or policies.json is emptied — every token-based request is denied and the only recovery is editing the settings directory on the host")
 	} else {
-		logger.Info("operator key is set: requests presenting it via 'Authorization: Operator <key>' (or the X-Operator-Key alias) are authorized as a full-access platform operator, and can inspect the adopted policy and trigger a settings reload over HTTP while it is locked out")
+		logger.Info("operator key is set: requests presenting it via 'Authorization: Operator <key>' (or the X-Operator-Key alias) are authorized as a full-access platform operator, and can trigger a settings reload over HTTP while it is locked out")
 	}
 
 	ctx := context.Background()

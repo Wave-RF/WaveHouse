@@ -231,7 +231,7 @@ Client POST /v1/ops/query
     roleless exception)
   → /v1/ops RequireAdmin (resolved role == policy.admin_role, or the
     operator-key bit) — single gate shared with the rest of /v1/ops/*
-    (policy/pipes inspection, settings reload, schema discovery, DLQ stats). A denial is
+    (pipes inspection, settings reload, schema discovery, DLQ stats). A denial is
     401 when a stashed error shows the caller presented an invalid token,
     else 403. Raw SQL has no per-statement scope check (a full SQL parser
     would be needed to authorize predicates), so the role gate is the

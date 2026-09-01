@@ -242,8 +242,7 @@ func jsonRecoverer(next http.Handler) http.Handler {
 // via a role — IsAdmin(nil) is false — so no token can re-open a locked-out
 // deployment through this gate. The exception is the operator key:
 // auth.IsOperator passes this gate even under a nil policy, so an operator can
-// still inspect the adopted policy and trigger a settings reload after fixing
-// the files (break-glass).
+// still trigger a settings reload after fixing the files (break-glass).
 //
 // Authentication is decoupled from this gate: a missing/invalid/expired token
 // resolves to an empty (non-admin) role and is denied here. Denials go through
@@ -259,7 +258,7 @@ func RequireAdmin(store policy.Source, logger *slog.Logger) func(http.Handler) h
 			// The operator key (Authorization: Operator <key>, or the X-Operator-Key
 			// alias) authorizes the admin surface independently of the policy, so it
 			// passes even when p is nil — the break-glass path that keeps the admin
-			// surface (GET policy, settings reload) reachable while locked out.
+			// surface (settings reload, pipes/schema reads) reachable while locked out.
 			role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
 			if auth.IsOperator(r.Context()) || policy.IsAdmin(p, role) {
 				next.ServeHTTP(w, r)
