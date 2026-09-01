@@ -13,15 +13,16 @@ It is deliberately detailed: this is a hot, concurrency-heavy path, and the goro
 
 | File | Contents |
 | --- | --- |
-| `worker.go` | `StartIngestWorker`, the `dispatchLoop`, the per-table `tableBatcher`/`tableLoop`, `flushTable` (bulk insert with a row-by-row poison-isolation fallback), `insertToClickHouse`, `handleSuccess` (cache invalidation + acks), `sendToDLQ` |
+| `worker.go` | `StartIngestWorker`, the `dispatchLoop`, `parseMsg` (+ `rejectPoison` for an envelope it cannot read), the per-table `tableBatcher`/`tableLoop`, `flushTable` (splits a batch per column list via `groupByColumns`) and `flushGroup` (bulk insert with a row-by-row poison-isolation fallback), `insertToClickHouse`, `handleSuccess` (cache invalidation + acks), `sendToDLQ`/`parkOnDLQ` |
+| `compact.go` | `EncodeCompactRow` — renders one record as a `JSONCompactEachRow` line over the table's columns, in declaration order. Serialization only: it validates nothing and judges no value |
 | `sweeper.go` | The **Active Sweeper** — purges stream messages that are both written to ClickHouse and past the SSE gap window |
 | `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |
 
-The pipeline is **insert-only**. The wire format carries `{table_name, received_timestamp, data}` and nothing else — `EventMessage` also declares a reserved `scope` field, but it is `omitempty` and always set to `""` today, so it never reaches the wire; the worker parses the envelope and bulk-`INSERT`s — schema validation already happened at the HTTP ingest handler, before publish. Non-insert mutations go through `POST /v1/ops/query` (admin-only).
+The pipeline is **insert-only**. The wire format carries `{table_name, scope, received_timestamp, format, columns, row}`: `row` is one `JSONCompactEachRow` line — a positional JSON array — and `columns` names its positions in the table's declaration order. (`scope` is reserved and always `""` today.) Each NATS message is its own envelope, so the names ride along per record; where they are carried once is the `INSERT` the worker emits per group. The worker parses the envelope, groups a batch by column list, and bulk-`INSERT`s each group as `INSERT INTO … (cols) FORMAT JSONCompactEachRow` — schema validation already happened at the HTTP ingest handler, before publish. Non-insert mutations go through `POST /v1/ops/query` (admin-only).
 
 ## High-level shape
 
-One process consumes a single durable JetStream consumer and fans events out to a goroutine per table. Each table batches independently and POSTs to ClickHouse over the HTTP interface (`JSONEachRow`). On a bulk-insert failure the batch is re-inserted row by row, so a single poison row can't sink it: clean rows ack, and only the rows that fail again go to the dead-letter stream. A separate sweeper reclaims stream storage.
+One process consumes a single durable JetStream consumer and fans events out to a goroutine per table. Each table batches independently and POSTs to ClickHouse over the HTTP interface (`JSONCompactEachRow`). On a bulk-insert failure the batch is re-inserted row by row, so a single poison row can't sink it: clean rows ack, and only the rows that fail again go to the dead-letter stream. An envelope the worker cannot *read* — malformed JSON, an unknown row `format` (what a pre-v2 message looks like), or columns and a row that don't pair — never reaches a table loop at all: `parseMsg` parks it on the same dead-letter stream, or, where the DLQ is off for the table, acks and drops it rather than redelivering a message that can never insert. A separate sweeper reclaims stream storage.
 
 ```mermaid
 flowchart LR
@@ -42,10 +43,11 @@ flowchart LR
         D --> TLc["tableLoop: ..."]
     end
 
-    TLa -->|"JSONEachRow POST"| CH[("ClickHouse")]
+    TLa -->|"JSONCompactEachRow POST"| CH[("ClickHouse")]
     TLb --> CH
     TLc --> CH
     TLa -.->|"poison rows"| DLQ["WAVEHOUSE_DLQ<br/>dlq.TABLE"]
+    D -.->|"unreadable envelope"| DLQ
 
     Sweep["Active Sweeper"] -.->|"reads AckFloor, purges"| Stream
     Stream -.->|"DeliverByStartTime gap-fill"| Hub["hub-bridge consumer<br/>(SSE fan-out)"]
@@ -70,11 +72,11 @@ sequenceDiagram
     P->>JS: publish ingest.clicks (EventMessage)
     JS->>CB: deliver (prefetch up to pullMaxMessages)
     CB->>D: msgChan channel send
-    D->>D: parseMsg (route key = table_name)
+    D->>D: parseMsg (validate envelope, route key = table_name)
     D->>TL: per-table channel send
     TL->>TL: add row#59; arm deadline timer on first row
     Note over TL: flush on size (maxBatch) OR deadline (maxWait)
-    TL->>CH: POST JSONEachRow (flush goroutine)
+    TL->>CH: POST JSONCompactEachRow (flush goroutine)
     CH-->>TL: 200 OK
     TL->>JS: DoubleAck each row (background, ackWg)
     Note over JS: consumer AckFloor advances#59; Sweeper may now purge
@@ -104,7 +106,7 @@ Three `WaitGroup`s form a strict containment hierarchy, which is what makes shut
 
 ## Why per table? The bug this design fixes
 
-A single shared batch across all tables couples them: a high-volume table can trip the size trigger and strand a low-volume table's rows in a batch that then waits for the time trigger, and vice-versa. Routing each table to its own `tableLoop` gives every table an **independent** size trigger and timer, so one table's traffic never delays another's. (`dispatchLoop` does no batching itself — it only parses enough to pick the route key.)
+A single shared batch across all tables couples them: a high-volume table can trip the size trigger and strand a low-volume table's rows in a batch that then waits for the time trigger, and vice-versa. Routing each table to its own `tableLoop` gives every table an **independent** size trigger and timer, so one table's traffic never delays another's. (`dispatchLoop` does no batching itself — it parses the envelope, pairs `columns` with `row`, and picks the route key; an envelope it cannot read never reaches a `tableLoop`.)
 
 ## The `tableBatcher` state machine
 

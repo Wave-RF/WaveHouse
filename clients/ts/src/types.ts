@@ -264,6 +264,7 @@ export interface Column {
   name: string;
   type: string;
   is_nullable: boolean;
+  /** Whether the column declares any default at all. */
   has_default: boolean;
   /** 1-based ordinal in the table's declaration order — the order `columns` itself is in. Always present. */
   position: number;

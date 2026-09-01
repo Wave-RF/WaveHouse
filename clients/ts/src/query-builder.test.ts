@@ -356,6 +356,46 @@ describe("QueryBuilder", () => {
     expect(result).toBe(ctrl);
   });
 
+  it("keeps a __proto__ column when projecting a selected row", () => {
+    // A `.select(...)` stream reprojects each row through projectColumns. On a
+    // plain object literal `result["__proto__"] = v` hits the inherited setter
+    // and the column vanishes — the same hazard the SSE transport avoids with a
+    // null prototype, and which sdk/streaming.md promises for every row.
+    let next: ((e: any) => void) | undefined;
+    mockCreateStream.mockReturnValue({
+      subscribe(sub: any) {
+        next = sub.next;
+        return () => {};
+      },
+      close() {},
+    } as any);
+
+    const received: any[] = [];
+    const ctrl = builder().select("__proto__", "page").stream();
+    ctrl.subscribe({ next: (e: any) => received.push(e.data) });
+
+    // defineProperty, not `row.__proto__ = …`: on this null-prototype object the
+    // plain assignment is an ordinary own-property write, but Biome's noProto
+    // rule cannot tell that from prototype mutation and `--error-on-warnings`
+    // makes the warning fatal.
+    const row: Record<string, unknown> = Object.create(null);
+    Object.defineProperty(row, "__proto__", {
+      value: { polluted: true },
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    row.page = "/home";
+    next?.({ table: "clicks", timestamp: "t", data: row });
+
+    expect(received).toHaveLength(1);
+    expect(Object.hasOwn(received[0], "__proto__")).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(received[0], "__proto__")?.value).toEqual({
+      polluted: true,
+    });
+    expect(received[0].page).toBe("/home");
+  });
+
   // --- Complex chain ---
 
   it("builds a complex query", async () => {

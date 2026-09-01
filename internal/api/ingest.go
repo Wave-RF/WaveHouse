@@ -509,11 +509,23 @@ func (h *IngestHandler) processRecord(
 		}
 	}
 
+	// Render the record positionally against the table's declaration order. The
+	// column names ride alongside in the envelope rather than in the row, so a
+	// batch of rows for one table carries the names once — and the reader can
+	// tell a schema change mid-stream from a reordering.
+	row, err := ingest.EncodeCompactRow(schema.Columns, data)
+	if err != nil {
+		h.logger.ErrorContext(ctx, "failed to encode compact row", "error", err, "table", table)
+		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
+	}
+
 	evt := ingest.EventMessage{
 		TableName:         table,
 		Scope:             scope,
 		ReceivedTimestamp: now.Format(time.RFC3339Nano),
-		Data:              data, // Put the data back in the envelope
+		Format:            ingest.FormatJSONCompactEachRow,
+		Columns:           schema.ColumnNames(),
+		Row:               row,
 	}
 
 	payload, err := json.Marshal(evt)
