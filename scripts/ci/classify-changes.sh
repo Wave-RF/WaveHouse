@@ -46,13 +46,38 @@ if [ -z "$files" ]; then
 fi
 
 # Pure classification of the file list, then the push/merge-group override.
+#
+# Capture the classifier's output and its EXIT STATUS before parsing. Reading it
+# through process substitution (`done < <(…)`) discards the status, so a
+# classifier that aborted mid-run left code/docs empty or half-set — every
+# `needs.changes.outputs.code == 'true'` job would skip and the `CI` aggregator
+# would go green having run nothing. Same fail-closed rule as the empty-list
+# case above: if we cannot classify, run everything.
+# Capture the status into rc first: `if ! cmd` inverts the test AND resets $?,
+# so reading $? inside the branch always yields 0 — the diagnostic would lie
+# about the very failure it exists to report.
+classified=""; rc=0
+classified="$(printf '%s\n' "$files" | "$here/../classify-paths.sh")" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "classify-changes: classifier failed (exit $rc) — failing closed, running everything" >&2
+  emit true true
+  exit 0
+fi
+
 code=""; docs=""
 while IFS='=' read -r key value; do
   case "$key" in
     code) code="$value" ;;
     docs) docs="$value" ;;
   esac
-done < <(printf '%s\n' "$files" | "$here/../classify-paths.sh")
+done <<<"$classified"
+
+# A partial or unparseable answer is as untrustworthy as a failed one.
+if [ -z "$code" ] || [ -z "$docs" ]; then
+  echo "classify-changes: incomplete classification (code='$code' docs='$docs') — failing closed" >&2
+  emit true true
+  exit 0
+fi
 
 if [ "${GITHUB_EVENT_NAME}" = "push" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
   code=true

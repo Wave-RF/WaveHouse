@@ -49,6 +49,42 @@ check mixed-docs-go     true   true   docs/x.md internal/a.go
 # Empty change set (no paths) — the empty guard, distinct from "a blank line".
 check empty             false  false
 
+# A failing grep must abort, not answer. Without this the script reads exit 2
+# ("grep couldn't run") as exit 1 ("no match") and prints a confident wrong
+# answer — which is how a transient failure under parallel load silently
+# skipped the docs build. Stub grep onto PATH so it always exits 2.
+stub="$(mktemp -d)"
+printf '#!/bin/sh\nexit 2\n' > "$stub/grep"
+chmod +x "$stub/grep"
+out="$(printf 'docs/x.md\n' | PATH="$stub:$PATH" "$classify" 2>&1)"
+rc=$?
+rm -rf "$stub"
+if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q 'grep failed'; then
+  printf '  ok   %-18s aborts instead of answering\n' "grep-failure"
+else
+  printf '  FAIL %-18s want exit 2 + diagnostic, got exit %s: %s\n' "grep-failure" "$rc" "$out" >&2
+  fails=$((fails + 1))
+fi
+
+# A large change set must classify normally. `grep -q` exits at the first match,
+# so feeding it through a pipe made the upstream printf die of SIGPIPE once the
+# list outgrew the pipe buffer — which `pipefail` reported as a grep failure and
+# the script turned into an abort. In CI that abort is silent: the wrapper reads
+# the classifier through process substitution, so every code job would skip and
+# the aggregator would report green having run nothing.
+big="$(mktemp)"
+i=0
+while [ "$i" -lt 5000 ]; do printf 'docs/file%05d.md\n' "$i" >> "$big"; i=$((i + 1)); done
+big_out="$(env "$classify" < "$big")"
+big_rc=$?
+rm -f "$big"
+if [ "$big_rc" -eq 0 ] && printf '%s' "$big_out" | grep -qx 'docs=true' && printf '%s' "$big_out" | grep -qx 'code=false'; then
+  printf '  ok   %-18s classifies without SIGPIPE\n' "large-input"
+else
+  printf '  FAIL %-18s want exit 0 + code=false/docs=true, got exit %s: %s\n' "large-input" "$big_rc" "$(printf '%s' "$big_out" | tr '\n' ' ')" >&2
+  fails=$((fails + 1))
+fi
+
 if [ "$fails" -gt 0 ]; then
   printf '\n%d case(s) failed\n' "$fails" >&2
   exit 1
