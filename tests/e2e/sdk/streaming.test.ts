@@ -22,30 +22,36 @@ describe("Streaming", () => {
     // limited to the caller's own country claim — so the SSE fan-out exercises the
     // row-level-security path (ResolvedPermissions.RowVisible) end to end, not just
     // column projection.
-    publicPolicy.tables[T.clicks].select = {
-      ...(publicPolicy.tables[T.clicks].select || {}),
-      anon: { allow_columns: ["*"] },
+    Object.assign(publicPolicy.tables[T.clicks], {
+      anon: { select: { allow_columns: ["*"] } },
       scoped: {
-        allow_columns: ["*"],
-        filter: { country: { _eq: "{{ jwt.country }}" } },
+        select: {
+          allow_columns: ["*"],
+          filter: { country: { _eq: "{{ jwt.country }}" } },
+        },
       },
       // 'metered' carries a numeric literal bound, so the SSE fan-out exercises
       // the storage-domain numeric comparison (canonical decimal + integer range
       // gate) end to end, not just String equality scoping.
       metered: {
-        allow_columns: ["*"],
-        filter: { duration_ms: { _gt: "100" } },
+        select: {
+          allow_columns: ["*"],
+          filter: { duration_ms: { _gt: "100" } },
+        },
       },
-    };
+    });
     // `anon` deliberately cannot see `payload` here, which is what makes the
     // Authorization-header test below discriminating: `viewer` keeps the
     // baseline `["*"]`, so the two roles observe different frames. Role
     // matching is exact (internal/policy: no "*" any-role wildcard), so this
     // entry is the only thing `anon` gets on this table.
-    publicPolicy.tables[T.events].select = {
-      ...(publicPolicy.tables[T.events].select || {}),
-      anon: { allow_columns: ["event_id", "type", "user_id", "source", "received_timestamp"] },
-    };
+    Object.assign(publicPolicy.tables[T.events], {
+      anon: {
+        select: {
+          allow_columns: ["event_id", "type", "user_id", "source", "received_timestamp"],
+        },
+      },
+    });
 
     await setPolicy(publicPolicy);
   });

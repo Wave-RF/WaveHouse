@@ -105,9 +105,9 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 	if err != nil {
 		return nil, fmt.Errorf("building WHERE clause: %w", err)
 	}
-	if perms != nil && perms.WhereClause != "" {
-		whereParts = append([]string{"(" + perms.WhereClause + ")"}, whereParts...)
-		params = append(params, perms.WhereParams...)
+	if perms != nil && perms.Select.WhereClause != "" {
+		whereParts = append([]string{"(" + perms.Select.WhereClause + ")"}, whereParts...)
+		params = append(params, perms.Select.WhereParams...)
 	}
 	params = append(params, whereParams...)
 	if len(whereParts) > 0 {
@@ -145,8 +145,8 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 	if maxRows <= 0 {
 		maxRows = DefaultMaxRows
 	}
-	if perms != nil && perms.MaxRows > 0 && perms.MaxRows < maxRows {
-		maxRows = perms.MaxRows
+	if perms != nil && perms.Select.MaxRows > 0 && perms.Select.MaxRows < maxRows {
+		maxRows = perms.Select.MaxRows
 	}
 	if q.Limit > 0 && q.Limit <= maxRows {
 		sql += fmt.Sprintf(" LIMIT %d", q.Limit)
@@ -189,7 +189,7 @@ func aggregationExpr(a Aggregation) string {
 // all-rows token, not a column.
 func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, perms *policy.ResolvedPermissions) error {
 	authorize := func(col string) error {
-		if !perms.IsColumnAllowed(col) {
+		if !perms.IsColumnAllowed(col, false) {
 			return &ForbiddenColumnError{Column: col}
 		}
 		return nil

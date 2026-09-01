@@ -11,8 +11,22 @@ import (
 // once for a whole role bucket (no filter) or must be checked per subscriber against
 // that subscriber's claims (filter present). A nil receiver (no policy applies) has
 // no filter.
+//
+// It answers YES for a denied grant and for one whose read side was never
+// resolved, neither of which has a predicate to speak of. That is deliberate:
+// this is the GATE in front of RowVisible, and a "no filter" answer sends the
+// caller down the deliver-to-the-whole-bucket fast path where RowVisible is
+// never consulted. Saying yes forces the per-subscriber path, where RowVisible
+// denies. Same shape and same reason as RestrictsColumns, which guards the
+// builder's SELECT * expansion.
 func (p *ResolvedPermissions) HasRowFilter() bool {
-	return p != nil && len(p.rowFilter) > 0
+	if p == nil {
+		return false
+	}
+	if !p.Allowed || p.Select.unresolved {
+		return true
+	}
+	return len(p.Select.rowFilter) > 0
 }
 
 // maxTimeOperandChars is the same O(1) pre-gate for timestamp operands: the
@@ -115,10 +129,12 @@ func (p *ResolvedPermissions) RowVisible(row map[string]any, cols map[string]Col
 	}
 	// A denied role sees no rows — fail closed, mirroring the !Allowed guard on
 	// IsColumnAllowed, so a denied receiver never reads as "no filter ⇒ all visible".
-	if !p.Allowed {
+	// A grant resolved for INSERT is refused here for the same reason: its empty
+	// read side would otherwise read as "no filter", admitting every row.
+	if !p.Allowed || p.Select.unresolved {
 		return false
 	}
-	for _, pred := range p.rowFilter {
+	for _, pred := range p.Select.rowFilter {
 		if !pred.matches(row, cols[pred.Column]) {
 			return false
 		}
@@ -128,7 +144,7 @@ func (p *ResolvedPermissions) RowVisible(row map[string]any, cols map[string]Col
 
 // matches evaluates one predicate against the row, failing closed (false) whenever
 // the value is absent or can't be compared as required.
-func (pred resolvedPredicate) matches(row map[string]any, spec ColumnSpec) bool {
+func (pred ResolvedPredicate) matches(row map[string]any, spec ColumnSpec) bool {
 	// No values ⇒ matches nothing: an empty/unresolvable "in" set, or a scalar
 	// whose constant was unrenderable — the in-memory twin of the `1 = 0`
 	// predicatesToSQL emits for the same cases.

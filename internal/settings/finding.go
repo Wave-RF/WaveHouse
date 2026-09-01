@@ -14,7 +14,7 @@ const (
 
 // Finding is one validation result, located as precisely as the failure
 // allows: File is empty for directory-level findings, Path is a dotted JSON
-// path ("tables.clicks.select.analyst") and empty for whole-file findings.
+// path ("tables.clicks.analyst") and empty for whole-file findings.
 // The JSON shape is part of the ops API: POST /v1/ops/settings/reload returns
 // findings verbatim.
 type Finding struct {
@@ -24,7 +24,7 @@ type Finding struct {
 	Message  string   `json:"message"`
 }
 
-// String renders "error: policies.json: tables.clicks.select.admin: <message>",
+// String renders "error: policies.json: tables.clicks.admin: <message>",
 // dropping the locators a finding doesn't have.
 func (f Finding) String() string {
 	parts := make([]string, 0, 3)

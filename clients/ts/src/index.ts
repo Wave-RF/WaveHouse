@@ -32,6 +32,7 @@ export type {
   FetchLike,
   // Query
   FilterOp,
+  InsertPermissions,
   // Ingest
   InsertRecordResult,
   InsertResult,
@@ -48,6 +49,7 @@ export type {
   Result,
   RolePermissions,
   Schemas,
+  SelectPermissions,
   SettingsFinding,
   SettingsReloadResult,
   StreamEvent,

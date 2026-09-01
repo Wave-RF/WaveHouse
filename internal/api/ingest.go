@@ -375,7 +375,7 @@ func (h *IngestHandler) processRecord(
 	// DEEP AUTH: column-level allow/deny + check clauses.
 	if perms != nil {
 		for col := range data {
-			if !perms.IsColumnAllowed(col) {
+			if !perms.IsColumnAllowed(col, true) {
 				h.logger.WarnContext(ctx, "column insertion forbidden", "column", col, "role", role)
 				return false, &recordReject{
 					Status:  http.StatusForbidden,
@@ -383,7 +383,7 @@ func (h *IngestHandler) processRecord(
 				}, nil
 			}
 		}
-		for col, requiredVal := range perms.CheckClauses {
+		for col, requiredVal := range perms.Insert.CheckClauses {
 			// A []any value is an _in check: the inserted value must be present and
 			// one of the allowed set. Unlike the scalar _eq case there is no single
 			// value to auto-inject, so an absent column fails closed.

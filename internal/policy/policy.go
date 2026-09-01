@@ -23,18 +23,29 @@ type Policy struct {
 	Tables    map[string]TablePolicy `json:"tables" yaml:"tables"`
 }
 
-// TablePolicy defines access control for a single table.
-type TablePolicy struct {
-	Select map[string]RolePermissions `json:"select,omitempty" yaml:"select,omitempty"`
-	Insert map[string]RolePermissions `json:"insert,omitempty" yaml:"insert,omitempty"`
+// TablePolicy defines access control for a single table, keyed by role name.
+// This is the v2 role-first layout: a role appears once per table and states
+// what it may do, instead of appearing under each operation. Matching is exact
+// and case-sensitive; there is no "*" any-role wildcard.
+type TablePolicy map[string]RolePermissions
+
+// RolePermissions is one role's grant on one table, split by operation. A nil
+// Select means the role cannot read the table; a nil Insert means it cannot
+// write to it. The two sides carry genuinely different fields — row filters and
+// query limits are read-side, check clauses are write-side — so they are
+// separate types rather than one struct whose halves are inert per operation.
+type RolePermissions struct {
+	Select *SelectPermissions `json:"select,omitempty" yaml:"select,omitempty"`
+	Insert *InsertPermissions `json:"insert,omitempty" yaml:"insert,omitempty"`
 }
 
-// RolePermissions defines what a role can do on a table for a specific operation.
-type RolePermissions struct {
+// SelectPermissions is a role's read grant on a table: which columns it may
+// project, which rows it may see, which aggregations it may run, and the
+// resource ceilings its queries run under.
+type SelectPermissions struct {
 	AllowColumns        []string          `json:"allow_columns,omitempty" yaml:"allow_columns,omitempty"`
 	DenyColumns         []string          `json:"deny_columns,omitempty" yaml:"deny_columns,omitempty"`
 	Filter              map[string]Filter `json:"filter,omitempty" yaml:"filter,omitempty"`
-	Check               map[string]Filter `json:"check,omitempty" yaml:"check,omitempty"`
 	AllowedAggregations []string          `json:"allowed_aggregations,omitempty" yaml:"allowed_aggregations,omitempty"`
 	DeniedAggregations  []string          `json:"denied_aggregations,omitempty" yaml:"denied_aggregations,omitempty"`
 	MaxRows             int               `json:"max_rows,omitempty" yaml:"max_rows,omitempty"`
@@ -51,6 +62,15 @@ type RolePermissions struct {
 	MaxMemoryUsage   ByteSize `json:"max_memory_usage,omitempty" yaml:"max_memory_usage,omitempty"`
 }
 
+// InsertPermissions is a role's write grant on a table: which columns it may
+// set, and the check clauses every inserted record must satisfy. There is no
+// row filter or query limit here — those have no insert-time meaning.
+type InsertPermissions struct {
+	AllowColumns []string          `json:"allow_columns,omitempty" yaml:"allow_columns,omitempty"`
+	DenyColumns  []string          `json:"deny_columns,omitempty" yaml:"deny_columns,omitempty"`
+	Check        map[string]Filter `json:"check,omitempty" yaml:"check,omitempty"`
+}
+
 // Filter represents a single comparison operation.
 type Filter struct {
 	Eq  *string `json:"_eq,omitempty" yaml:"_eq,omitempty"`
@@ -62,31 +82,74 @@ type Filter struct {
 
 // hasOperator reports whether any of the five operators is set. An
 // operator-less entry resolves to zero predicates — on the filter path that is
-// no WHERE clause at all, row security silently off — so validateRolePerms
+// no WHERE clause at all, row security silently off — so validateSelectPerms/validateInsertPerms
 // rejects it at write time.
 func (f Filter) hasOperator() bool {
 	return f.Eq != nil || f.Neq != nil || f.Gt != nil || f.Lt != nil || f.In != nil
 }
 
 // ResolvedPermissions is the result of evaluating a policy against JWT claims.
+// Allowed is the whole-operation verdict; the resolved per-operation state hangs
+// off Select or Insert, whichever operation Evaluate was called for.
+//
+// The side Evaluate did NOT resolve is marked unresolved and denies everything.
+// That marking is load-bearing, not tidiness: an unresolved side is zero, and a
+// zero side is an empty allow list plus an empty deny list, which every accessor
+// here reads as "all columns" — so without it, asking a select-resolved grant an
+// insert question (or the reverse) would answer yes to every column of a table
+// the role may not write at all. Reading the wrong side is a caller bug, and the
+// ACCESSORS on this type now fail closed on it rather than widening.
+//
+// That guarantee covers the methods only, and cannot cover a bare field read: an
+// unresolved Select.WhereClause is "" (no WHERE), its MaxRows is 0 (no cap), an
+// unresolved Insert.CheckClauses is nil (no checks). Nothing can defend those but
+// asking for the operation you actually resolved.
 type ResolvedPermissions struct {
-	Allowed      bool
+	Allowed bool
+	Select  ResolvedSelect
+	Insert  ResolvedInsert
+}
+
+// ResolvedSelect is the read-side state of a resolved grant.
+type ResolvedSelect struct {
+	// unresolved marks the side Evaluate did not resolve — see
+	// ResolvedPermissions. Only this package sets it, because only Evaluate
+	// knows which question it was asked; a hand-built value is a deliberate
+	// assertion by its author and keeps the plain allow/deny reading.
+	unresolved   bool
 	AllowColumns []string
 	DenyColumns  []string
 	WhereClause  string
 	WhereParams  []any
 	// rowFilter is the same row-level-security predicate as WhereClause/WhereParams,
 	// kept in resolved form so the stream path can evaluate it in memory (RowVisible)
-	// while the query path renders it to SQL. Both derive from one resolvePredicates
+	// while the query path renders it to SQL. Both derive from one ResolvePredicates
 	// call in Evaluate, so the two read surfaces can't drift. See rowfilter.go.
-	rowFilter           []resolvedPredicate
-	CheckClauses        map[string]any // column → required value (for inserts)
+	rowFilter           []ResolvedPredicate
 	AllowedAggregations []string
 	DeniedAggregations  []string
 	MaxRows             int
 	MaxExecutionTime    Millis
 	MaxRowsToRead       int64
 	MaxMemoryUsage      ByteSize
+}
+
+// ResolvedInsert is the write-side state of a resolved grant.
+type ResolvedInsert struct {
+	// unresolved marks the side Evaluate did not resolve — see ResolvedSelect.
+	unresolved   bool
+	AllowColumns []string
+	DenyColumns  []string
+	// CheckClauses is column → required value, the form the ingest path
+	// enforces and auto-injects from. A []any value marks an _in set.
+	CheckClauses map[string]any
+	// CheckPredicates is the same check rules in render-agnostic predicate form
+	// — the insert-side twin of ResolvedSelect.rowFilter. It follows
+	// ResolvePredicates' fail-closed rule (an unresolvable claim yields no
+	// values), which is deliberately NOT CheckClauses' rule: a check value that
+	// cannot be resolved still auto-injects as "" there (#463). Populated for a
+	// consumer that does not exist yet; CheckClauses remains what ingest reads.
+	CheckPredicates []ResolvedPredicate
 }
 
 // claimTemplateRe matches {{ jwt.claim.path }} templates.
@@ -149,20 +212,6 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		return &ResolvedPermissions{Allowed: false}
 	}
 
-	var rolePerms map[string]RolePermissions
-	switch operation {
-	case "select":
-		rolePerms = tp.Select
-	case "insert":
-		rolePerms = tp.Insert
-	default:
-		return &ResolvedPermissions{Allowed: false}
-	}
-
-	if rolePerms == nil {
-		return &ResolvedPermissions{Allowed: false}
-	}
-
 	// An empty/absent role must never match a role entry — a roleless request is
 	// authorized only after ResolveRole maps it to a concrete default_role above,
 	// or via the admin role (handled by the short-circuit at the top). A stray ""
@@ -171,34 +220,60 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	// exact — there is no "*" any-role wildcard.
 	perms, ok := RolePermissions{}, false
 	if role != "" {
-		perms, ok = rolePerms[role]
+		perms, ok = tp[role]
 	}
 	if !ok {
 		return &ResolvedPermissions{Allowed: false}
 	}
 
+	// One operation per call, as before: the caller asked about select OR
+	// insert, and gets a verdict for exactly that. An operation the role's grant
+	// leaves out (a nil block) is a plain deny, the role-first spelling of the
+	// missing per-operation entry the previous layout used.
+	switch operation {
+	case "select":
+		return evaluateSelect(perms.Select, claims)
+	case "insert":
+		return evaluateInsert(perms.Insert, claims)
+	default:
+		return &ResolvedPermissions{Allowed: false}
+	}
+}
+
+// evaluateSelect resolves one role's read grant against claims. A nil grant
+// means the role may not read this table.
+func evaluateSelect(perms *SelectPermissions, claims map[string]any) *ResolvedPermissions {
+	if perms == nil {
+		return &ResolvedPermissions{Allowed: false}
+	}
+
 	resolved := &ResolvedPermissions{
-		Allowed:             true,
-		AllowColumns:        perms.AllowColumns,
-		DenyColumns:         perms.DenyColumns,
-		AllowedAggregations: perms.AllowedAggregations,
-		DeniedAggregations:  perms.DeniedAggregations,
-		MaxRows:             perms.MaxRows,
-		MaxExecutionTime:    perms.MaxExecutionTime,
-		MaxRowsToRead:       perms.MaxRowsToRead,
-		MaxMemoryUsage:      perms.MaxMemoryUsage,
+		Allowed: true,
+		// This call answered a select question; the insert side was never
+		// resolved and must not read as an empty (permissive) grant.
+		Insert: ResolvedInsert{unresolved: true},
+		Select: ResolvedSelect{
+			AllowColumns:        perms.AllowColumns,
+			DenyColumns:         perms.DenyColumns,
+			AllowedAggregations: perms.AllowedAggregations,
+			DeniedAggregations:  perms.DeniedAggregations,
+			MaxRows:             perms.MaxRows,
+			MaxExecutionTime:    perms.MaxExecutionTime,
+			MaxRowsToRead:       perms.MaxRowsToRead,
+			MaxMemoryUsage:      perms.MaxMemoryUsage,
+		},
 	}
 
 	// Resolve filters into WHERE clause. A bind-unsafe filter column can't be
 	// emitted safely — a '?' in it would shift clickhouse-go's positional value
 	// binding, including this RLS filter's own bound value — so deny the role
 	// fail-closed rather than drop the predicate (which would widen row access)
-	// or emit a mis-bound query. validateRolePerms rejects such a policy at write
-	// time; this guards the query path as defense-in-depth (Evaluate does not
-	// re-validate the policy it is handed).
+	// or emit a mis-bound query. validateSelectPerms rejects such a policy at
+	// write time; this guards the query path as defense-in-depth (Evaluate does
+	// not re-validate the policy it is handed).
 	if len(perms.Filter) > 0 {
-		for col := range perms.Filter {
-			if chsql.BindUnsafe(col) {
+		for col, f := range perms.Filter {
+			if chsql.BindUnsafe(col) || !f.hasOperator() {
 				return &ResolvedPermissions{Allowed: false}
 			}
 		}
@@ -206,18 +281,51 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		// from that single source so they can't drift: the query path binds them into
 		// a SQL WHERE here; the stream path evaluates the same predicates in memory
 		// (ResolvedPermissions.RowVisible).
-		preds := resolvePredicates(perms.Filter, claims)
-		resolved.rowFilter = preds
+		preds := ResolvePredicates(perms.Filter, claims)
+		resolved.Select.rowFilter = preds
 		clauses, params := predicatesToSQL(preds)
 		if len(clauses) > 0 {
-			resolved.WhereClause = strings.Join(clauses, " AND ")
-			resolved.WhereParams = params
+			resolved.Select.WhereClause = strings.Join(clauses, " AND ")
+			resolved.Select.WhereParams = params
 		}
+	}
+
+	return resolved
+}
+
+// evaluateInsert resolves one role's write grant against claims. A nil grant
+// means the role may not insert into this table.
+func evaluateInsert(perms *InsertPermissions, claims map[string]any) *ResolvedPermissions {
+	if perms == nil {
+		return &ResolvedPermissions{Allowed: false}
+	}
+
+	resolved := &ResolvedPermissions{
+		Allowed: true,
+		// Mirror of evaluateSelect: the read side was never resolved here.
+		Select: ResolvedSelect{unresolved: true},
+		Insert: ResolvedInsert{
+			AllowColumns: perms.AllowColumns,
+			DenyColumns:  perms.DenyColumns,
+		},
 	}
 
 	// Resolve check rules (for inserts).
 	if len(perms.Check) > 0 {
-		resolved.CheckClauses = make(map[string]any, len(perms.Check))
+		// Same defense-in-depth as evaluateSelect's bind-unsafe deny above: the
+		// resolver below honors only _eq and _in, so a check validateInsertPerms
+		// rejects at write time would resolve to *no* clause here and authorize the
+		// insert with the rule silently gone. Deny fail-closed instead — Evaluate
+		// does not re-validate the policy it is handed, and policy.Static is a
+		// Validate-free Source.
+		for col, f := range perms.Check {
+			if chsql.BindUnsafe(col) || !f.hasOperator() ||
+				f.Neq != nil || f.Gt != nil || f.Lt != nil ||
+				(f.Eq != nil && f.In != nil) {
+				return &ResolvedPermissions{Allowed: false}
+			}
+		}
+		resolved.Insert.CheckClauses = make(map[string]any, len(perms.Check))
 		for col, f := range perms.Check {
 			switch {
 			case f.Eq != nil:
@@ -228,49 +336,53 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 				// stays a plain string and keeps strict canonical equality.
 				v, _ := resolveTemplate(*f.Eq, claims)
 				if !claimTemplateRe.MatchString(*f.Eq) {
-					resolved.CheckClauses[col] = LiteralValue(v)
+					resolved.Insert.CheckClauses[col] = LiteralValue(v)
 				} else {
-					resolved.CheckClauses[col] = v
+					resolved.Insert.CheckClauses[col] = v
 				}
 			case f.In != nil:
 				// A []any value marks a set-membership check (vs a scalar required
 				// value); ingest enforces "inserted value must be one of these".
-				resolved.CheckClauses[col] = resolveInValues(*f.In, claims)
+				resolved.Insert.CheckClauses[col] = resolveInValues(*f.In, claims)
 			}
 		}
+		// The same rules in predicate form, for a consumer that does not exist
+		// yet. Nothing reads it today, so it cannot widen a grant; see the field
+		// comment for why its unresolvable-claim rule differs from CheckClauses'.
+		resolved.Insert.CheckPredicates = ResolvePredicates(perms.Check, claims)
 	}
 
 	return resolved
 }
 
-// resolvedPredicate is one row-filter comparison with its claim templates already
-// resolved to concrete string values — the shared, render-agnostic form the query
+// ResolvedPredicate is one row-filter or check comparison with its claim templates
+// already resolved to concrete string values — the shared, render-agnostic form the query
 // path turns into SQL (predicatesToSQL) and the stream path evaluates in memory
 // (RowVisible). Op is one of "=", "!=", ">", "<", "in". Values holds one element
 // for the scalar operators and zero-or-more for "in"; an EMPTY Values matches no
 // rows on either surface — an empty/unresolvable "in" set, or a scalar whose
 // constant was unresolvable (an absent/null claim, a structured value, or one with
 // no canonical form — see resolveTemplate/CanonicalScalar).
-type resolvedPredicate struct {
+type ResolvedPredicate struct {
 	Column string
 	Op     string
 	Values []string
 }
 
-// resolvePredicates resolves each filter's claim templates once into predicates.
+// ResolvePredicates resolves each filter's claim templates once into predicates.
 // Both read surfaces derive from this single result so they can't drift; the
 // operator order within a column (=, !=, >, <, in) mirrors the former inline SQL.
-func resolvePredicates(filters map[string]Filter, claims map[string]any) []resolvedPredicate {
-	var preds []resolvedPredicate
+func ResolvePredicates(filters map[string]Filter, claims map[string]any) []ResolvedPredicate {
+	var preds []ResolvedPredicate
 	// An unresolvable constant (ok=false from resolveTemplate) yields a predicate
 	// with NO values, which matches no rows on either surface (#385) — never a
 	// synthesized stand-in that could match some other principal's rows.
-	scalar := func(col, op, tmpl string) resolvedPredicate {
+	scalar := func(col, op, tmpl string) ResolvedPredicate {
 		v, ok := resolveTemplate(tmpl, claims)
 		if !ok {
-			return resolvedPredicate{Column: col, Op: op}
+			return ResolvedPredicate{Column: col, Op: op}
 		}
-		return resolvedPredicate{Column: col, Op: op, Values: []string{v}}
+		return ResolvedPredicate{Column: col, Op: op, Values: []string{v}}
 	}
 	for col, f := range filters {
 		if f.Eq != nil {
@@ -286,14 +398,14 @@ func resolvePredicates(filters map[string]Filter, claims map[string]any) []resol
 			preds = append(preds, scalar(col, "<", *f.Lt))
 		}
 		if f.In != nil {
-			preds = append(preds, resolvedPredicate{col, "in", toStrings(resolveInValues(*f.In, claims))})
+			preds = append(preds, ResolvedPredicate{col, "in", toStrings(resolveInValues(*f.In, claims))})
 		}
 	}
 	return preds
 }
 
 // predicatesToSQL renders resolved predicates into WHERE clauses and bound params.
-func predicatesToSQL(preds []resolvedPredicate) ([]string, []any) {
+func predicatesToSQL(preds []ResolvedPredicate) ([]string, []any) {
 	var clauses []string
 	var params []any
 	for _, p := range preds {
@@ -335,11 +447,11 @@ func predicatesToSQL(preds []resolvedPredicate) ([]string, []any) {
 // resolveFilters converts filter definitions with claim templates into SQL WHERE
 // clauses. Retained as the predicates→SQL composition the query-path tests target.
 func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string, []any) {
-	return predicatesToSQL(resolvePredicates(filters, claims))
+	return predicatesToSQL(ResolvePredicates(filters, claims))
 }
 
 // toStrings normalizes resolveInValues' []any (already canonical strings) to the
-// []string a resolvedPredicate carries.
+// []string a ResolvedPredicate carries.
 func toStrings(vals []any) []string {
 	if len(vals) == 0 {
 		return nil
@@ -445,18 +557,30 @@ func navigateClaims(claims map[string]any, parts []string) any {
 }
 
 // IsColumnAllowed checks if a column is permitted by the resolved permissions.
-// A nil receiver means no policy applies — all columns are allowed.
+// insert selects which side of the grant answers: false for a read (query
+// builder, stream projection), true for a write (ingest). A nil receiver means
+// no policy applies — all columns are allowed.
 //
-// This is the single source of truth for the per-column read decision. Every
-// read path defers to it: the query builder checks every column a structured
-// query references against it (internal/query.Build), and the stream path's
-// filterColumns drops any event field it rejects. Keep it the one decision
-// function so the surfaces can never drift apart.
-func (rp *ResolvedPermissions) IsColumnAllowed(col string) bool {
+// This is the single source of truth for the per-column decision on BOTH sides.
+// Every path defers to it: the query builder checks every column a structured
+// query references against it (internal/query.Build), the stream path's
+// filterColumns drops any event column it rejects, and ingest rejects any
+// record field it rejects. Keep it the one decision function so the surfaces can never
+// drift apart.
+func (rp *ResolvedPermissions) IsColumnAllowed(col string, insert bool) bool {
 	if rp == nil {
 		return true
 	}
 	if !rp.Allowed {
+		return false
+	}
+	allowColumns, denyColumns, unresolved := rp.Select.AllowColumns, rp.Select.DenyColumns, rp.Select.unresolved
+	if insert {
+		allowColumns, denyColumns, unresolved = rp.Insert.AllowColumns, rp.Insert.DenyColumns, rp.Insert.unresolved
+	}
+	// Asking about the operation this grant was not resolved for: the lists are
+	// empty because nothing was evaluated, not because everything is permitted.
+	if unresolved {
 		return false
 	}
 	// Precedence is most-restrictive-wins: the deny list is consulted before the
@@ -471,7 +595,7 @@ func (rp *ResolvedPermissions) IsColumnAllowed(col string) bool {
 	// wildcard is the caller's SelectAll, expanded by AllowedProjection — never a
 	// bare "*" run through this function, which was the #223 footgun and is now
 	// closed structurally.
-	for _, d := range rp.DenyColumns {
+	for _, d := range denyColumns {
 		if d == col {
 			return false
 		}
@@ -479,10 +603,10 @@ func (rp *ResolvedPermissions) IsColumnAllowed(col string) bool {
 	// An empty allow list (or one containing the "*" wildcard token) means "all
 	// columns": every non-denied column is permitted. A non-empty allow list
 	// without "*" is an allowlist — only its members (never the denied) pass.
-	if len(rp.AllowColumns) == 0 {
+	if len(allowColumns) == 0 {
 		return true
 	}
-	for _, a := range rp.AllowColumns {
+	for _, a := range allowColumns {
 		if a == "*" || a == col {
 			return true
 		}
@@ -491,18 +615,18 @@ func (rp *ResolvedPermissions) IsColumnAllowed(col string) bool {
 }
 
 // AllowedProjection returns the subset of cols this role may read, preserving
-// input order. It is the batch form of IsColumnAllowed and the single source of
-// truth for expanding an unqualified "all columns" read (the SQL the builder
-// would otherwise emit as SELECT *) into the concrete set a role is permitted to
-// see — the projection counterpart to the stream path's filterColumns. A
-// nil receiver (no policy) returns cols unchanged.
+// input order. It is the read-side batch form of IsColumnAllowed and the single
+// source of truth for expanding an unqualified "all columns" read (the SQL the
+// builder would otherwise emit as SELECT *) into the concrete set a role is
+// permitted to see — the projection counterpart to the stream path's
+// filterColumns. A nil receiver (no policy) returns cols unchanged.
 func (rp *ResolvedPermissions) AllowedProjection(cols []string) []string {
 	if rp == nil {
 		return cols
 	}
 	out := make([]string, 0, len(cols))
 	for _, c := range cols {
-		if rp.IsColumnAllowed(c) {
+		if rp.IsColumnAllowed(c, false) {
 			out = append(out, c)
 		}
 	}
@@ -510,7 +634,7 @@ func (rp *ResolvedPermissions) AllowedProjection(cols []string) []string {
 }
 
 // RestrictsColumns reports whether this role constrains which columns may be
-// read — whether any column-level allow/deny rule applies. It is false only when
+// read (the select side; the builder is its only caller) — whether any column-level allow/deny rule applies. It is false only when
 // the role can read every column (no deny list, and an allow list that is empty
 // or a bare "*" wildcard); there a SELECT * exposes nothing the role isn't
 // already entitled to, so the builder leaves it untouched. When true, the
@@ -528,16 +652,16 @@ func (rp *ResolvedPermissions) RestrictsColumns() bool {
 	// `Allowed:false` receiver while IsColumnAllowed denies all — and
 	// resolveProjection's SelectAll branch trusts RestrictsColumns, so the
 	// disagreement would emit a bare `SELECT *` over every column. Fail closed.
-	if !rp.Allowed {
+	if !rp.Allowed || rp.Select.unresolved {
 		return true
 	}
-	if len(rp.DenyColumns) > 0 {
+	if len(rp.Select.DenyColumns) > 0 {
 		return true
 	}
-	if len(rp.AllowColumns) == 0 {
+	if len(rp.Select.AllowColumns) == 0 {
 		return false
 	}
-	for _, a := range rp.AllowColumns {
+	for _, a := range rp.Select.AllowColumns {
 		if a == "*" {
 			return false
 		}
@@ -551,23 +675,25 @@ func (rp *ResolvedPermissions) IsAggregationAllowed(fn string) bool {
 	if rp == nil {
 		return true
 	}
-	if !rp.Allowed {
+	// An unresolved read side denies, for the same reason IsColumnAllowed does:
+	// its empty allow list means "not evaluated", not "everything".
+	if !rp.Allowed || rp.Select.unresolved {
 		return false
 	}
 	// Normalize case once so both deny and allow checks are case-insensitive;
 	// otherwise a cased aggregation (SUM) bypasses a lowercase deny entry (sum).
 	fn = strings.ToLower(fn)
 	// Check deny list.
-	for _, d := range rp.DeniedAggregations {
+	for _, d := range rp.Select.DeniedAggregations {
 		if strings.ToLower(d) == fn {
 			return false
 		}
 	}
 	// If allow list is empty, all non-denied are allowed.
-	if len(rp.AllowedAggregations) == 0 {
+	if len(rp.Select.AllowedAggregations) == 0 {
 		return true
 	}
-	for _, a := range rp.AllowedAggregations {
+	for _, a := range rp.Select.AllowedAggregations {
 		if strings.ToLower(a) == fn {
 			return true
 		}
@@ -585,13 +711,18 @@ func Validate(p *Policy) error {
 	// store warns loudly when such a policy is adopted (see
 	// DefaultRoleGrantsAdmin); it is not a validation error.
 	for tableName, tp := range p.Tables {
-		for role, perms := range tp.Select {
-			if err := validateRolePerms(tableName, "select", role, perms); err != nil {
+		for role, perms := range tp {
+			if strings.TrimSpace(role) == "" {
+				return fmt.Errorf("table %q: empty role name is not allowed", tableName)
+			}
+			// BOTH sides are validated for every role, always — never one loop
+			// over one operation. The insert side carries the check-clause rules
+			// (rejected operators, ambiguous _eq+_in, malformed templates) that
+			// nothing else enforces before the record path trusts them.
+			if err := validateSelectPerms(tableName, role, perms.Select); err != nil {
 				return err
 			}
-		}
-		for role, perms := range tp.Insert {
-			if err := validateRolePerms(tableName, "insert", role, perms); err != nil {
+			if err := validateInsertPerms(tableName, role, perms.Insert); err != nil {
 				return err
 			}
 		}
@@ -604,7 +735,7 @@ func Validate(p *Policy) error {
 // grammar (a hyphen, a namespaced OIDC URL), a wrong or absent `jwt.` prefix,
 // indexing, or an unterminated `{{`. resolveTemplate binds such a fragment as
 // literal text, which is a fail-open on the filter path (`_neq`/`_lt` match ~every
-// row) and silent row corruption on the check path, so validateRolePerms rejects
+// row) and silent row corruption on the check path, so validateSelectPerms/validateInsertPerms rejects
 // it on every adoption: boot and every reload run the same Validate over
 // policies.json, so there is no stored copy that skips it (#461). A
 // well-formed template — with or without surrounding literal
@@ -641,10 +772,13 @@ func rejectMalformedTemplates(table, op, role, kind, col string, f Filter) error
 	return nil
 }
 
-func validateRolePerms(table, op, role string, perms RolePermissions) error {
-	if strings.TrimSpace(role) == "" {
-		return fmt.Errorf("table %q, op %q: empty role name is not allowed", table, op)
+// validateSelectPerms checks one role's read grant. A nil grant (the role may
+// not read the table) has nothing to check.
+func validateSelectPerms(table, role string, perms *SelectPermissions) error {
+	if perms == nil {
+		return nil
 	}
+	const op = "select"
 	if perms.MaxRows < 0 {
 		return fmt.Errorf("table %q, op %q, role %q: max_rows must be non-negative", table, op, role)
 	}
@@ -657,34 +791,47 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 	if perms.MaxMemoryUsage < 0 {
 		return fmt.Errorf("table %q, op %q, role %q: max_memory_usage must be non-negative", table, op, role)
 	}
-
-	if op == "insert" && len(perms.Filter) > 0 {
-		return fmt.Errorf("table %q, op %q, role %q: filter has no effect on insert — use check to constrain inserted values", table, op, role)
-	}
-	if op == "select" && len(perms.Check) > 0 {
-		return fmt.Errorf("table %q, op %q, role %q: check has no effect on select — use filter to constrain visible rows", table, op, role)
-	}
-	// Filter and check column names are interpolated into SQL (backtick-quoted) at
-	// query time, so a '?' in one would shift clickhouse-go's positional value
+	// Filter column names are interpolated into SQL (backtick-quoted) at query
+	// time, so a '?' in one would shift clickhouse-go's positional value
 	// binding. Refuse such a policy at write time, mirroring the query builder's
 	// chsql.BindUnsafe guard on caller-supplied columns.
 	for col, f := range perms.Filter {
 		if chsql.BindUnsafe(col) {
 			return fmt.Errorf("table %q, op %q, role %q: filter column %q contains '?' (unsupported)", table, op, role, col)
 		}
-
+		// An entry naming no operator resolves to no predicate, so the row-level
+		// restriction the author declared would silently not apply — Evaluate would
+		// answer HasRowFilter() false and RowVisible true for every row. Refuse it
+		// here; the resolver's matching deny is defense-in-depth.
 		if !f.hasOperator() {
 			return fmt.Errorf("table %q, op %q, role %q: filter column %q sets no operator — use _eq, _neq, _gt, _lt, or _in", table, op, role, col)
 		}
+		// The filter path enforces every operator (_eq/_neq/_gt/_lt/_in), so no
+		// operator is rejected here. A malformed claim template IS rejected: the
+		// resolver would bind it as a literal, a fail-open for _neq/_lt (#385/#457).
 		if err := rejectMalformedTemplates(table, op, role, "filter", col, f); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+// validateInsertPerms checks one role's write grant. A nil grant (the role may
+// not insert into the table) has nothing to check.
+func validateInsertPerms(table, role string, perms *InsertPermissions) error {
+	if perms == nil {
+		return nil
+	}
+	const op = "insert"
+	// Check column names are subject to the same bind-safety rule as filter
+	// columns above.
 	for col, f := range perms.Check {
 		if chsql.BindUnsafe(col) {
 			return fmt.Errorf("table %q, op %q, role %q: check column %q contains '?' (unsupported)", table, op, role, col)
 		}
-
+		// A check naming no operator carries no required value, so it resolves to
+		// no clause and the rule silently does not apply — same failure as an
+		// operator-less filter above.
 		if !f.hasOperator() {
 			return fmt.Errorf("table %q, op %q, role %q: check column %q sets no operator — use _eq or _in", table, op, role, col)
 		}

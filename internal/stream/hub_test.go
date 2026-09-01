@@ -120,10 +120,8 @@ func TestHub_ProjectsPerRole_ColumnFilterAndDenial(t *testing.T) {
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Select: map[string]policy.RolePermissions{
-					"viewer": {AllowColumns: []string{"page"}}, // only "page"
-					// "blocked" has no entry ⇒ denied.
-				},
+				// "viewer" may read only "page"; "blocked" has no entry ⇒ denied.
+				"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	}
@@ -184,10 +182,8 @@ func TestHub_ProjectsPerRole_DistinctRolesGetDistinctFrames(t *testing.T) {
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Select: map[string]policy.RolePermissions{
-					"viewer": {AllowColumns: []string{"page"}},           // page only
-					"editor": {AllowColumns: []string{"page", "secret"}}, // page + secret
-				},
+				"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}},           // page only
+				"editor": {Select: &policy.SelectPermissions{AllowColumns: []string{"page", "secret"}}}, // page + secret
 			},
 		},
 	}
@@ -226,12 +222,10 @@ func rowFilterPolicy() *policy.Policy {
 	return &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Select: map[string]policy.RolePermissions{
-					"viewer": {
-						AllowColumns: []string{"page"},
-						Filter:       map[string]policy.Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}},
-					},
-				},
+				"viewer": {Select: &policy.SelectPermissions{
+					AllowColumns: []string{"page"},
+					Filter:       map[string]policy.Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}},
+				}},
 			},
 		},
 	}
@@ -284,9 +278,7 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 	t.Parallel()
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
-			"clicks": {Select: map[string]policy.RolePermissions{
-				"viewer": {Filter: map[string]policy.Filter{"tenant_id": {Eq: new("{{ jwt.org.tenant }}")}}},
-			}},
+			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"tenant_id": {Eq: new("{{ jwt.org.tenant }}")}}}}},
 		},
 	}
 	hub := NewHub(policy.Static(p), nil, nil)
@@ -311,9 +303,7 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 	// subscriber's row entitlement either.
 	inPolicy := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
-			"clicks": {Select: map[string]policy.RolePermissions{
-				"viewer": {Filter: map[string]policy.Filter{"tenant_id": {In: new("{{ jwt.tenants }}")}}},
-			}},
+			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"tenant_id": {In: new("{{ jwt.tenants }}")}}}}},
 		},
 	}
 	inHub := NewHub(policy.Static(inPolicy), nil, nil)
@@ -386,9 +376,7 @@ func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 	})
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
-			"clicks": {Select: map[string]policy.RolePermissions{
-				"viewer": {Filter: map[string]policy.Filter{"amount": {Gt: new("100")}}},
-			}},
+			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"amount": {Gt: new("100")}}}}},
 		},
 	}
 	hub := NewHub(policy.Static(p), reg, nil)
@@ -427,9 +415,7 @@ func TestHub_RowFilter_FloatNarrowing_SchemaInformed(t *testing.T) {
 	})
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
-			"clicks": {Select: map[string]policy.RolePermissions{
-				"viewer": {Filter: map[string]policy.Filter{"score": {Gt: new("16777216")}}},
-			}},
+			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"score": {Gt: new("16777216")}}}}},
 		},
 	}
 	hub := NewHub(policy.Static(p), reg, nil)
@@ -580,7 +566,7 @@ func TestHub_ReplayProjector(t *testing.T) {
 	t.Parallel()
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
-			"clicks": {Select: map[string]policy.RolePermissions{"viewer": {AllowColumns: []string{"page"}}}},
+			"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}},
 		},
 	}
 	hub := NewHub(policy.Static(p), nil, nil)
@@ -731,9 +717,7 @@ func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
 	})
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
-			"clicks": {Select: map[string]policy.RolePermissions{
-				"viewer": {Filter: map[string]policy.Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}}},
-			}},
+			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}}}}},
 		},
 	}
 	hub := NewHub(policy.Static(p), reg, nil)
@@ -773,11 +757,11 @@ func TestHub_RowFilter_TimestampInstantMatch(t *testing.T) {
 	})
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
-			"clicks": {Select: map[string]policy.RolePermissions{
+			"clicks": {
 				// Zone-less constant, read in the column's zone (UTC here) on both
 				// surfaces — the one spelling that works for the query path's SQL too.
-				"viewer": {Filter: map[string]policy.Filter{"created_at": {Eq: new("2026-06-21 04:00:00")}}},
-			}},
+				"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"created_at": {Eq: new("2026-06-21 04:00:00")}}}},
+			},
 		},
 	}
 	hub := NewHub(policy.Static(p), reg, nil)

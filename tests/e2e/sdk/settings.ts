@@ -53,9 +53,13 @@ export function referencedRoles(policy: Policy, pipes: Pipe[]): string[] {
   const roles = new Set<string>();
   if (policy.default_role) roles.add(policy.default_role);
   if (policy.admin_role) roles.add(policy.admin_role);
+  // The policy layout is role-first (tables.<table>.<role>.<operation>), so a
+  // table's own keys ARE the roles it grants. Walking `table.select` here
+  // instead derives an empty role set and every reload is rejected with
+  // "role ... is not declared in roles.json" — and tsc cannot catch it, because
+  // indexing a Record<string, RolePermissions> with "select" type-checks.
   for (const table of Object.values(policy.tables ?? {})) {
-    for (const role of Object.keys(table.select ?? {})) roles.add(role);
-    for (const role of Object.keys(table.insert ?? {})) roles.add(role);
+    for (const role of Object.keys(table)) roles.add(role);
   }
   for (const pipe of pipes) {
     for (const role of pipe.allowed_roles ?? []) roles.add(role);
