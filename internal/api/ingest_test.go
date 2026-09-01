@@ -14,6 +14,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
@@ -1593,17 +1594,32 @@ func tsRegistry(t testing.TB) *discovery.SchemaRegistry {
 	})
 }
 
-// publishedData decodes the inner data object of the last published envelope —
-// what the stream fans out and the worker inserts.
+// publishedData decodes the last published envelope and zips its positional row
+// back into a name→value map — what the stream fans out and the worker inserts,
+// read the way both of them read it.
 func publishedData(t *testing.T, pub *testutil.MockPublisher) map[string]any {
 	t.Helper()
 	msg := pub.LastMessage()
 	require.NotNil(t, msg)
-	var evt struct {
-		Data map[string]any `json:"data"`
+	return publishedRow(t, msg.Data)
+}
+
+// publishedRow decodes one published envelope and zips its row by column name.
+// A column the record omitted rides as an explicit null, exactly as it does on
+// the wire, so a caller can tell "absent" from "present and null" only by value.
+func publishedRow(t *testing.T, payload []byte) map[string]any {
+	t.Helper()
+	var evt ingest.EventMessage
+	require.NoError(t, json.Unmarshal(payload, &evt))
+	require.Equal(t, ingest.FormatJSONCompactEachRow, evt.Format)
+	var cells []any
+	require.NoError(t, json.Unmarshal(evt.Row, &cells))
+	require.Len(t, cells, len(evt.Columns), "the row must have one value per announced column")
+	out := make(map[string]any, len(cells))
+	for i, c := range evt.Columns {
+		out[c] = cells[i]
 	}
-	require.NoError(t, json.Unmarshal(msg.Data, &evt))
-	return evt.Data
+	return out
 }
 
 // TestIngest_TimestampsCanonicalized is the #372 contract: whatever spelling a
@@ -1711,11 +1727,7 @@ func TestIngest_Batch_MixedTimestampSpellings(t *testing.T) {
 
 	var spellings []string
 	for _, msg := range pub.Messages {
-		var evt struct {
-			Data map[string]any `json:"data"`
-		}
-		require.NoError(t, json.Unmarshal(msg.Data, &evt))
-		spellings = append(spellings, evt.Data["ts"].(string))
+		spellings = append(spellings, publishedRow(t, msg.Data)["ts"].(string))
 	}
 	assert.Equal(t, []string{
 		"2026-06-21T04:00:00Z", // already canonical

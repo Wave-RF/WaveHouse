@@ -16,6 +16,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/nats-io/nats.go"
@@ -28,7 +29,16 @@ type parsedMsg struct {
 	natsSafeSubject string
 	tableName       string // routing key for per-table batching; raw (unencoded) name
 	scope           string
-	rawJSON         []byte
+	columns         []string        // envelope column names, in declaration order
+	colSig          string          // columns joined; the within-table batch key
+	row             json.RawMessage // one JSONCompactEachRow line, no trailing newline
+}
+
+// columnSignature renders a column list as a map key. The separator is a byte
+// that cannot appear in a ClickHouse identifier's UTF-8 encoding, so no pair of
+// distinct column lists can collide on it.
+func columnSignature(cols []string) string {
+	return strings.Join(cols, "\x00")
 }
 
 type IngestWorker struct {
@@ -367,17 +377,26 @@ func (w *IngestWorker) tableLoop(ctx context.Context, table string, in <-chan pa
 
 // parseMsg unmarshals one envelope into a parsedMsg. A malformed envelope is a
 // poison pill: it is acked-and-dropped here (so NATS won't redeliver it) and ok
-// is false so the caller skips it.
+// is false so the caller skips it. An envelope whose columns and row can't be
+// paired — no columns, no row — is poison for the same reason: the row is
+// positional, so without the names there is no INSERT to write.
 func (w *IngestWorker) parseMsg(ctx context.Context, m jetstream.Msg) (parsedMsg, bool) {
-	var envelope struct {
-		UnsafeTableName   string          `json:"table_name"`
-		UnsafeScope       string          `json:"scope"`
-		ReceivedTimestamp string          `json:"received_timestamp"`
-		Data              json.RawMessage `json:"data"`
-	}
+	var envelope EventMessage
 
 	if err := json.Unmarshal(m.Data(), &envelope); err != nil {
 		w.logger.ErrorContext(ctx, "failed to parse event envelope", "error", err)
+		_ = m.DoubleAck(ctx)
+		return parsedMsg{}, false
+	}
+	if envelope.Format != FormatJSONCompactEachRow {
+		w.logger.ErrorContext(ctx, "event envelope declares an unknown row format",
+			"format", envelope.Format, "table", envelope.TableName)
+		_ = m.DoubleAck(ctx)
+		return parsedMsg{}, false
+	}
+	if len(envelope.Columns) == 0 || len(envelope.Row) == 0 {
+		w.logger.ErrorContext(ctx, "event envelope carries no columns or no row",
+			"table", envelope.TableName, "columns", len(envelope.Columns))
 		_ = m.DoubleAck(ctx)
 		return parsedMsg{}, false
 	}
@@ -385,9 +404,11 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m jetstream.Msg) (parsedMsg
 	return parsedMsg{
 		natsMsg:         m,
 		natsSafeSubject: strings.TrimPrefix(m.Subject(), "ingest."),
-		tableName:       envelope.UnsafeTableName,
-		scope:           envelope.UnsafeScope,
-		rawJSON:         envelope.Data, // only the inner payload goes to ClickHouse
+		tableName:       envelope.TableName,
+		scope:           envelope.Scope,
+		columns:         envelope.Columns,
+		colSig:          columnSignature(envelope.Columns),
+		row:             envelope.Row,
 	}, true
 }
 
@@ -404,9 +425,42 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 		return
 	}
 
-	err := w.insertToClickHouse(ctx, tableName, msgs)
+	// One INSERT per distinct column list. The row is positional, so rows
+	// written under different column lists — a schema change mid-stream —
+	// cannot share a statement. In steady state a table has exactly one
+	// signature and this is a single group.
+	for _, group := range groupByColumns(msgs) {
+		w.flushGroup(ctx, tableName, group)
+	}
+}
+
+// groupByColumns splits a table's batch into runs of identical column lists,
+// preserving arrival order both within a group and across groups. Returns the
+// input as a single group in the common case where every row agrees.
+func groupByColumns(msgs []parsedMsg) [][]parsedMsg {
+	groups := make([][]parsedMsg, 0, 1)
+	index := make(map[string]int, 1)
+	for _, pm := range msgs {
+		i, ok := index[pm.colSig]
+		if !ok {
+			index[pm.colSig] = len(groups)
+			groups = append(groups, []parsedMsg{pm})
+			continue
+		}
+		groups[i] = append(groups[i], pm)
+	}
+	return groups
+}
+
+// flushGroup inserts one (table, column list) batch, falling back to row-by-row
+// isolation on failure. Every message in group shares a column signature, so the
+// first one's columns describe them all.
+func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group []parsedMsg) {
+	cols := group[0].columns
+
+	err := w.insertToClickHouse(ctx, tableName, cols, group)
 	if err == nil {
-		w.handleSuccess(ctx, tableName, msgs)
+		w.handleSuccess(ctx, tableName, group)
 		return
 	}
 
@@ -415,8 +469,8 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 	// ISOLATE & DLQ: re-insert one row at a time so a single poison row can't
 	// sink the whole batch.
 	// TODO: potentially could try a binary search or something eventually maybe? unclear if faster...
-	for _, pm := range msgs {
-		singleErr := w.insertToClickHouse(ctx, tableName, []parsedMsg{pm})
+	for _, pm := range group {
+		singleErr := w.insertToClickHouse(ctx, tableName, cols, []parsedMsg{pm})
 		if singleErr != nil {
 			if w.dlqEnabled != nil && !w.dlqEnabled(tableName) {
 				w.logger.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "table", tableName, "error", singleErr)
@@ -430,19 +484,34 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 	}
 }
 
-func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, msgs []parsedMsg) error {
+func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg) error {
 	var buf bytes.Buffer
 	for _, m := range msgs {
-		buf.Write(m.rawJSON)
+		buf.Write(m.row)
 		buf.WriteString("\n")
+	}
+
+	// The row is positional, so the statement must name the columns in the same
+	// order the envelope did. The table still binds as a server-side Identifier
+	// parameter; a column LIST has no such parameter, so each name is quoted
+	// client-side by the one helper that renders an identifier as SQL.
+	quoted := make([]string, len(columns))
+	for i, c := range columns {
+		quoted[i] = chsql.QuoteIdent(c)
 	}
 
 	t := w.target()
 	q := url.Values{}
 	q.Set("database", t.Database)
 	q.Set("param_target_table", tableName)
-	q.Set("query", "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow")
+	q.Set("query", fmt.Sprintf("INSERT INTO {target_table:Identifier} (%s) FORMAT JSONCompactEachRow", strings.Join(quoted, ", ")))
 	q.Set("date_time_input_format", "best_effort")
+	// A field the record omitted rides as null in its column's position. This
+	// setting is what turns that null back into the column's default, matching
+	// what omitting the field did under JSONEachRow. TRANSITIONAL DIVERGENCE: a
+	// Nullable column WITH a DEFAULT expression now takes its default instead of
+	// storing NULL. Every other column type behaves as before.
+	q.Set("input_format_null_as_default", "1")
 
 	req, err := http.NewRequestWithContext(ctx, "POST", t.URL+"?"+q.Encode(), &buf)
 	if err != nil {

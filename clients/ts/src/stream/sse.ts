@@ -118,6 +118,17 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
   private _retryFloorMs = 0;
   /** Cuts a reconnect gap short when set — see `_sleep`. */
   private _wake: (() => void) | null = null;
+  /**
+   * Column names for the rows currently arriving, from the most recent
+   * `event: schema` frame. Rows travel positionally, so this is what turns one
+   * back into an object; `null` means none has been announced yet, and a data
+   * frame arriving in that state is unreadable rather than merely unlabeled.
+   *
+   * Reset at the start of every connection attempt: a reconnect re-announces,
+   * and zipping a new connection's rows under the previous one's list would
+   * silently mislabel every value.
+   */
+  private _columns: string[] | null = null;
 
   onEvent: ((event: StreamEvent<T>) => void) | null = null;
   onStatus: ((status: StreamStatus) => void) | null = null;
@@ -221,6 +232,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
   private async _attempt(): Promise<AttemptResult> {
     const ac = new AbortController();
     this._abort = ac;
+    this._columns = null;
 
     // A URL that won't build is deterministic — every retry produces the same
     // failure — so it ends the stream rather than looping.
@@ -460,6 +472,12 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       onEvent: (msg) => {
         if (msg.id) this._lastEventId = msg.id;
         if (!msg.data) return;
+        // The server announces the column list before the rows that use it,
+        // and again whenever it changes mid-stream.
+        if (msg.event === "schema") {
+          this._applySchema(msg.data);
+          return;
+        }
         this._dispatch(msg.data);
       },
       onRetry: (ms) => {
@@ -505,7 +523,31 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
   }
 
   /**
+   * Record the column list an `event: schema` frame announces. Rows that follow
+   * are zipped against it, so a malformed announcement drops the list rather
+   * than keeping a stale one: mislabeling values is worse than delivering none.
+   */
+  private _applySchema(data: string): void {
+    try {
+      const msg = JSON.parse(data) as { table_name?: string; columns?: unknown };
+      if (!Array.isArray(msg.columns) || msg.columns.some((c) => typeof c !== "string")) {
+        throw new Error("columns must be an array of strings");
+      }
+      this._columns = msg.columns as string[];
+    } catch {
+      this._columns = null;
+      console.warn("[wavehouse] SSE received a malformed schema event:", data);
+    }
+  }
+
+  /**
    * Turn one frame's `data` into a StreamEvent.
+   *
+   * The row arrives positionally — a JSON array — and is zipped back into an
+   * object against the announced column list, so the public API still yields
+   * row objects. A row with no announcement, or one whose length disagrees with
+   * the list, cannot be read: there is no way to say which value is which, so
+   * it is dropped rather than delivered under guessed names.
    *
    * Guarded like `_emitError` and `_emitStatus`: `parser.feed()` dispatches
    * every complete frame in a chunk synchronously, so a subscriber that closes
@@ -525,9 +567,25 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       const msg = JSON.parse(data) as {
         table_name: string;
         received_timestamp: string;
-        data: T;
+        row: unknown;
       };
-      event = { table: msg.table_name, timestamp: msg.received_timestamp, data: msg.data };
+      const columns = this._columns;
+      if (!columns) {
+        console.warn("[wavehouse] SSE received a row before any schema event:", data);
+        return;
+      }
+      if (!Array.isArray(msg.row) || msg.row.length !== columns.length) {
+        console.warn(
+          `[wavehouse] SSE row does not match the announced ${columns.length} column(s):`,
+          data,
+        );
+        return;
+      }
+      const row: Record<string, unknown> = {};
+      for (let i = 0; i < columns.length; i++) {
+        row[columns[i]] = msg.row[i];
+      }
+      event = { table: msg.table_name, timestamp: msg.received_timestamp, data: row as T };
     } catch {
       console.warn("[wavehouse] SSE received malformed message:", data);
       return; // ignore malformed messages

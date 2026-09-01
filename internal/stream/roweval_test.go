@@ -64,7 +64,8 @@ func TestHub_RowEvaluatorSeam_LiveBroadcast(t *testing.T) {
 
 			assert.Equal(t, 1, eval.calls, "the live path must consult the seam")
 			if tt.visible {
-				assert.NotEmpty(t, recvFrame(t, sub).Data)
+				f, _, _ := recvEvent(t, sub)
+				assert.NotEmpty(t, f.Data)
 			} else {
 				assertNoFrame(t, sub)
 			}
@@ -80,12 +81,12 @@ func TestHub_RowEvaluatorSeam_Replay(t *testing.T) {
 	hub := NewHub(policy.Static(filteredPolicy()), nil, nil)
 	hub.RowEvaluator = eval
 
-	project := hub.ReplayProjector("viewer", map[string]any{"tenant": "t1"})
+	project := hub.ReplayProjector("viewer", NewSubscriber(map[string]any{"tenant": "t1"}, nil))
 	// tenant_id "t1" matches the claim: the real predicate would admit this row.
-	_, ok := project(rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
+	frames := project(rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
 		map[string]any{"tenant_id": "t1", "page": "/a"}))
 
-	assert.False(t, ok, "the seam's verdict decides replay too")
+	assert.Empty(t, frames, "the seam's verdict decides replay too")
 	assert.Equal(t, 1, eval.calls)
 }
 
@@ -105,5 +106,6 @@ func TestHub_DefaultRowEvaluator_WhenUnwired(t *testing.T) {
 
 	hub.Broadcast("ingest.clicks", rawEvent(t, "clicks", "2026-06-26T00:00:01Z",
 		map[string]any{"tenant_id": "t1", "page": "/a"}))
-	assert.NotEmpty(t, recvFrame(t, sub).Data)
+	f, _, _ := recvEvent(t, sub)
+	assert.NotEmpty(t, f.Data)
 }

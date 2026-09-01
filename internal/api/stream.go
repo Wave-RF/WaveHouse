@@ -87,6 +87,22 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// dropped together. A consumer that cares keys on timestamp plus its own row
 	// identity.
 	sub := stream.NewSubscriber(claims, h.Metrics)
+
+	// Announce the column list BEFORE registering for live events: rows travel
+	// positionally, so a client that hasn't been told the columns can't read one.
+	// Sending it here rather than after Add means a live event arriving during
+	// setup finds the announcement already recorded and doesn't repeat it; if the
+	// registry can't supply the columns yet, the event path announces them before
+	// the first data frame instead.
+	if f, ok := h.Hub.SubscribeSchemaFrame(table, role, sub); ok {
+		n, err := w.Write(f.Data)
+		if err != nil {
+			return
+		}
+		flusher.Flush()
+		h.Metrics.FrameSent(f.Kind, n)
+	}
+
 	h.Hub.Add(topic, role, sub)
 	defer h.Hub.Remove(topic, role, sub)
 
@@ -103,18 +119,18 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		// low-volume and one-time, unlike the per-role live fan-out), write, and count
 		// the replayed frame. A write error means the client is gone, so stop the
 		// gap-fill and let the deferred cleanup unwind.
-		project := h.Hub.ReplayProjector(role, claims)
+		project := h.Hub.ReplayProjector(role, sub)
 		sendReplay := func(data []byte) bool {
-			f, ok := project(data)
-			if !ok {
-				return true // filtered for this role — skip
+			// Zero frames means the event is filtered out for this role; two means
+			// the column list changed and is announced before the row.
+			for _, f := range project(data) {
+				n, err := w.Write(f.Data)
+				if err != nil {
+					return false
+				}
+				flusher.Flush()
+				h.Metrics.FrameSent(f.Kind, n)
 			}
-			n, err := w.Write(f.Data)
-			if err != nil {
-				return false
-			}
-			flusher.Flush()
-			h.Metrics.FrameSent(f.Kind, n)
 			return true
 		}
 		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.JS != nil {

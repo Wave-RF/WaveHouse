@@ -1,5 +1,7 @@
 package stream
 
+import "sync"
+
 // defaultSubscriberQueue is the per-connection outbound buffer. A cap >1 (the
 // keepalive-only queue was cap 1) lets live event frames queue while the handler
 // is mid-write instead of being dropped on the spot; 64 matches the per-subscriber
@@ -47,6 +49,29 @@ type Subscriber struct {
 	// producer — the event fan-out, replay, the keepalive wheel — is covered without
 	// each call site remembering to count. Nil-safe (nil in tests).
 	metric *Metrics
+
+	// schemaMu guards lastSchema. Both the live fan-out (one goroutine per
+	// delivered message, which may run concurrently) and this connection's own
+	// replay loop record against it, so the check-and-set must be atomic: two
+	// racing events must not both decide they are the one announcing the columns.
+	schemaMu sync.Mutex
+	// lastSchema is the signature of the column list most recently announced to
+	// this connection ("" ⇒ none yet). Rows travel positionally, so a client that
+	// has not been told the column list cannot read one.
+	lastSchema string
+}
+
+// schemaChanged reports whether sig differs from the column list last announced
+// to this connection, recording sig when it does — so the caller that gets true
+// is the one that must send the schema frame, exactly once.
+func (s *Subscriber) schemaChanged(sig string) bool {
+	s.schemaMu.Lock()
+	defer s.schemaMu.Unlock()
+	if s.lastSchema == sig {
+		return false
+	}
+	s.lastSchema = sig
+	return true
 }
 
 // NewSubscriber returns a Subscriber ready to register with a Heartbeater and the

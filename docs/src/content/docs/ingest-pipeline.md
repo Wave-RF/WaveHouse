@@ -17,11 +17,11 @@ It is deliberately detailed: this is a hot, concurrency-heavy path, and the goro
 | `sweeper.go` | The **Active Sweeper** — purges stream messages that are both written to ClickHouse and past the SSE gap window |
 | `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |
 
-The pipeline is **insert-only**. The wire format carries `{table_name, received_timestamp, data}` and nothing else — `EventMessage` also declares a reserved `scope` field, but it is `omitempty` and always set to `""` today, so it never reaches the wire; the worker parses the envelope and bulk-`INSERT`s — schema validation already happened at the HTTP ingest handler, before publish. Non-insert mutations go through `POST /v1/ops/query` (admin-only).
+The pipeline is **insert-only**. The wire format carries `{table_name, scope, received_timestamp, format, columns, row}`: `row` is one `JSONCompactEachRow` line — a positional JSON array — and `columns` names its positions in the table's declaration order, so a batch of rows for one table carries the names once. (`scope` is reserved and always `""` today.) The worker parses the envelope, groups a batch by column list, and bulk-`INSERT`s each group as `INSERT INTO … (cols) FORMAT JSONCompactEachRow` — schema validation already happened at the HTTP ingest handler, before publish. Non-insert mutations go through `POST /v1/ops/query` (admin-only).
 
 ## High-level shape
 
-One process consumes a single durable JetStream consumer and fans events out to a goroutine per table. Each table batches independently and POSTs to ClickHouse over the HTTP interface (`JSONEachRow`). On a bulk-insert failure the batch is re-inserted row by row, so a single poison row can't sink it: clean rows ack, and only the rows that fail again go to the dead-letter stream. A separate sweeper reclaims stream storage.
+One process consumes a single durable JetStream consumer and fans events out to a goroutine per table. Each table batches independently and POSTs to ClickHouse over the HTTP interface (`JSONCompactEachRow`). On a bulk-insert failure the batch is re-inserted row by row, so a single poison row can't sink it: clean rows ack, and only the rows that fail again go to the dead-letter stream. A separate sweeper reclaims stream storage.
 
 ```mermaid
 flowchart LR
@@ -42,7 +42,7 @@ flowchart LR
         D --> TLc["tableLoop: ..."]
     end
 
-    TLa -->|"JSONEachRow POST"| CH[("ClickHouse")]
+    TLa -->|"JSONCompactEachRow POST"| CH[("ClickHouse")]
     TLb --> CH
     TLc --> CH
     TLa -.->|"poison rows"| DLQ["WAVEHOUSE_DLQ<br/>dlq.TABLE"]
@@ -74,7 +74,7 @@ sequenceDiagram
     D->>TL: per-table channel send
     TL->>TL: add row#59; arm deadline timer on first row
     Note over TL: flush on size (maxBatch) OR deadline (maxWait)
-    TL->>CH: POST JSONEachRow (flush goroutine)
+    TL->>CH: POST JSONCompactEachRow (flush goroutine)
     CH-->>TL: 200 OK
     TL->>JS: DoubleAck each row (background, ackWg)
     Note over JS: consumer AckFloor advances#59; Sweeper may now purge

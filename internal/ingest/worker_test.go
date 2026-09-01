@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -47,23 +50,32 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockJetStream
 	return w, js, cache, func() { w.ackWg.Wait() }
 }
 
-// makeEnvelope returns the JSON wire format the worker reads off NATS.
+// makeEnvelope returns the JSON wire format the worker reads off NATS. Column
+// order is the sorted key order, which is deterministic; production uses the
+// table's declaration order.
 func makeEnvelope(t *testing.T, tableName, scope string, data map[string]any) []byte {
 	t.Helper()
-	rawData, err := json.Marshal(data)
+	return makeEnvelopeCols(t, tableName, scope, slices.Sorted(maps.Keys(data)), data)
+}
+
+// makeEnvelopeCols is makeEnvelope with an explicit column list, for the tests
+// that publish two different schemas for one table.
+func makeEnvelopeCols(t *testing.T, tableName, scope string, cols []string, data map[string]any) []byte {
+	t.Helper()
+	schema := make([]discovery.Column, len(cols))
+	for i, c := range cols {
+		schema[i] = discovery.Column{Name: c, Position: uint64(i + 1)}
+	}
+	row, err := EncodeCompactRow(schema, data)
 	require.NoError(t, err)
-	env := struct {
-		TableName         string          `json:"table_name"`
-		Scope             string          `json:"scope,omitempty"`
-		ReceivedTimestamp string          `json:"received_timestamp"`
-		Data              json.RawMessage `json:"data"`
-	}{
+	out, err := json.Marshal(EventMessage{
 		TableName:         tableName,
 		Scope:             scope,
 		ReceivedTimestamp: "2026-01-01T00:00:00Z",
-		Data:              rawData,
-	}
-	out, err := json.Marshal(env)
+		Format:            FormatJSONCompactEachRow,
+		Columns:           cols,
+		Row:               row,
+	})
 	require.NoError(t, err)
 	return out
 }
@@ -216,7 +228,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 
 	gotMu.Lock()
 	require.Len(t, bodies, 1)
-	assert.Equal(t, `{"id":1,"v":"x"}`+"\n", bodies[0])
+	assert.Equal(t, "[1,\"x\"]\n", bodies[0])
 	assert.Equal(t, "events", params[0])
 	gotMu.Unlock()
 
@@ -323,11 +335,14 @@ func TestInsertToClickHouse_BuildsCorrectRequest(t *testing.T) {
 			q := req.URL.Query()
 			assert.Equal(t, "test_db", q.Get("database"))
 			assert.Equal(t, "events", q.Get("param_target_table"))
-			assert.Equal(t, "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow", q.Get("query"))
+			assert.Equal(t, "INSERT INTO {target_table:Identifier} (`id`) FORMAT JSONCompactEachRow", q.Get("query"))
 			// #372: the insert pins best_effort — the server default since
 			// ClickHouse 26.5; older 'basic' defaults reject the canonical
 			// form's zone suffix.
 			assert.Equal(t, "best_effort", q.Get("date_time_input_format"))
+			// A field the record omitted rides as null in its column's slot;
+			// this is what turns it back into the column's default.
+			assert.Equal(t, "1", q.Get("input_format_null_as_default"))
 
 			assert.Equal(t, "application/json", req.Header.Get("Content-Type"))
 			assert.Equal(t, "test_user", req.Header.Get("X-ClickHouse-User"))
@@ -335,37 +350,37 @@ func TestInsertToClickHouse_BuildsCorrectRequest(t *testing.T) {
 
 			body, err := io.ReadAll(req.Body)
 			require.NoError(t, err)
-			assert.Equal(t, `{"id":1}`+"\n", string(body))
+			assert.Equal(t, "[1]\n", string(body))
 
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
 		},
 	}
 	w, _, _, _ := newTestWorker(rt)
 
-	err := w.insertToClickHouse(context.Background(), "events", []parsedMsg{
-		{rawJSON: []byte(`{"id":1}`)},
+	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
+		{row: []byte(`[1]`)},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), rt.Hits())
 }
 
-func TestInsertToClickHouse_MultipleMessages_JSONEachRow(t *testing.T) {
+func TestInsertToClickHouse_MultipleMessages_JSONCompactEachRow(t *testing.T) {
 	t.Parallel()
 	rt := &testutil.MockRoundTripper{
 		Fn: func(req *http.Request) (*http.Response, error) {
 			body, err := io.ReadAll(req.Body)
 			require.NoError(t, err)
-			// JSONEachRow: newline-separated, each row's own JSON object.
-			assert.Equal(t, `{"id":1}`+"\n"+`{"id":2}`+"\n"+`{"id":3}`+"\n", string(body))
+			// JSONCompactEachRow: newline-separated, each row a positional array.
+			assert.Equal(t, "[1]\n[2]\n[3]\n", string(body))
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
 		},
 	}
 	w, _, _, _ := newTestWorker(rt)
 
-	err := w.insertToClickHouse(context.Background(), "events", []parsedMsg{
-		{rawJSON: []byte(`{"id":1}`)},
-		{rawJSON: []byte(`{"id":2}`)},
-		{rawJSON: []byte(`{"id":3}`)},
+	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
+		{row: []byte(`[1]`)},
+		{row: []byte(`[2]`)},
+		{row: []byte(`[3]`)},
 	})
 	require.NoError(t, err)
 }
@@ -376,8 +391,8 @@ func TestInsertToClickHouse_SafelyParameterizesTableName(t *testing.T) {
 	rt := &testutil.MockRoundTripper{
 		Fn: func(req *http.Request) (*http.Response, error) {
 			q := req.URL.Query()
-			// Static query string — no interpolation of the table name.
-			assert.Equal(t, "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow", q.Get("query"))
+			// Static table reference — no interpolation of the table name.
+			assert.Equal(t, "INSERT INTO {target_table:Identifier} (`id`) FORMAT JSONCompactEachRow", q.Get("query"))
 			// Malicious table name lives in the out-of-band parameter,
 			// where ClickHouse will quote it as an Identifier.
 			assert.Equal(t, malicious, q.Get("param_target_table"))
@@ -386,8 +401,8 @@ func TestInsertToClickHouse_SafelyParameterizesTableName(t *testing.T) {
 	}
 	w, _, _, _ := newTestWorker(rt)
 
-	err := w.insertToClickHouse(context.Background(), malicious, []parsedMsg{
-		{rawJSON: []byte(`{"id":1}`)},
+	err := w.insertToClickHouse(context.Background(), malicious, []string{"id"}, []parsedMsg{
+		{row: []byte(`[1]`)},
 	})
 	require.NoError(t, err)
 }
@@ -404,8 +419,8 @@ func TestInsertToClickHouse_HTTPError_ReturnsBody(t *testing.T) {
 	}
 	w, _, _, _ := newTestWorker(rt)
 
-	err := w.insertToClickHouse(context.Background(), "missing_table", []parsedMsg{
-		{rawJSON: []byte(`{"id":1}`)},
+	err := w.insertToClickHouse(context.Background(), "missing_table", []string{"id"}, []parsedMsg{
+		{row: []byte(`[1]`)},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HTTP 400")
@@ -424,8 +439,8 @@ func TestInsertToClickHouse_500Error(t *testing.T) {
 	}
 	w, _, _, _ := newTestWorker(rt)
 
-	err := w.insertToClickHouse(context.Background(), "events", []parsedMsg{
-		{rawJSON: []byte(`{"id":1}`)},
+	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
+		{row: []byte(`[1]`)},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HTTP 500")
@@ -440,8 +455,8 @@ func TestInsertToClickHouse_NetworkError(t *testing.T) {
 	}
 	w, _, _, _ := newTestWorker(rt)
 
-	err := w.insertToClickHouse(context.Background(), "events", []parsedMsg{
-		{rawJSON: []byte(`{"id":1}`)},
+	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
+		{row: []byte(`[1]`)},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "connection refused")
@@ -677,7 +692,8 @@ func TestParseMsg(t *testing.T) {
 		assert.Equal(t, "org_42", pm.scope)
 		// natsSafeSubject is the subject sans the "ingest." prefix (cache version key).
 		assert.Equal(t, "events.org_42", pm.natsSafeSubject)
-		assert.JSONEq(t, `{"id":1}`, string(pm.rawJSON))
+		assert.JSONEq(t, `[1]`, string(pm.row))
+		assert.Equal(t, []string{"id"}, pm.columns)
 		assert.False(t, m.DoubleAcked.Load(), "valid message must not be acked by parseMsg")
 	})
 
@@ -807,9 +823,10 @@ func TestFlushTable_BulkFails_FallsBackToOneByOne(t *testing.T) {
 
 func TestFlushTable_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 	t.Parallel()
-	// Bulk insert fails; on per-row retry, the row carrying `"poison":true`
-	// fails again. That single row should end up in the DLQ while the rest
-	// of the batch is acked normally.
+	// Bulk insert fails; on per-row retry, the row whose `poison` column is true
+	// fails again. That single row should end up in the DLQ while the rest of the
+	// batch is acked normally. Every row carries the same columns, so the batch is
+	// one group and one bulk attempt — see groupByColumns.
 	rt := &testutil.MockRoundTripper{
 		Fn: func(req *http.Request) (*http.Response, error) {
 			body, _ := io.ReadAll(req.Body)
@@ -823,8 +840,9 @@ func TestFlushTable_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 				}, nil
 			}
 
-			// Single-row body: fail only if it contains the poison marker.
-			if strings.Contains(s, `"poison":true`) {
+			// Single-row body: fail only if the poison column is set. The row is
+			// positional now, so the marker is the value, not a named field.
+			if strings.Contains(s, "true") {
 				return &http.Response{
 					StatusCode: http.StatusBadRequest,
 					Body:       io.NopCloser(bytes.NewBufferString("Code: 60. bad row")),
@@ -835,9 +853,9 @@ func TestFlushTable_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 	}
 	w, js, _, wait := newTestWorker(rt)
 
-	goodA := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	goodA := newIngestMsg(t, "events", "", map[string]any{"id": 1, "poison": false})
 	poison := newIngestMsg(t, "events", "", map[string]any{"id": 2, "poison": true})
-	goodB := newIngestMsg(t, "events", "", map[string]any{"id": 3})
+	goodB := newIngestMsg(t, "events", "", map[string]any{"id": 3, "poison": false})
 
 	w.flushTable(context.Background(), "events", parseAll(t, w, goodA, poison, goodB))
 	wait()
@@ -868,7 +886,7 @@ func TestFlushTable_BadRow_DLQDisabledForTable_LeftUnacked(t *testing.T) {
 		Fn: func(req *http.Request) (*http.Response, error) {
 			body, _ := io.ReadAll(req.Body)
 			s := string(body)
-			if strings.Count(s, "\n") > 1 || strings.Contains(s, `"poison":true`) {
+			if strings.Count(s, "\n") > 1 || strings.Contains(s, "true") {
 				return &http.Response{
 					StatusCode: http.StatusBadRequest,
 					Body:       io.NopCloser(bytes.NewBufferString("Code: 60. bad row")),
@@ -880,7 +898,7 @@ func TestFlushTable_BadRow_DLQDisabledForTable_LeftUnacked(t *testing.T) {
 	w, js, _, wait := newTestWorker(rt)
 	w.dlqEnabled = func(table string) bool { return table != "events" }
 
-	good := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	good := newIngestMsg(t, "events", "", map[string]any{"id": 1, "poison": false})
 	poison := newIngestMsg(t, "events", "", map[string]any{"id": 2, "poison": true})
 
 	w.flushTable(context.Background(), "events", parseAll(t, w, good, poison))
@@ -1046,7 +1064,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 
-	// CH stub: count rows (newlines in the JSONEachRow body) per target table.
+	// CH stub: count rows (newlines in the JSONCompactEachRow body) per target table.
 	var (
 		mu          sync.Mutex
 		rowsByTable = map[string]int{}
