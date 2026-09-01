@@ -567,7 +567,6 @@ func run() int {
 		Version:         api.NewVersionHandler(Version, GitCommit, BuildTime),
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
-		Policy:          api.NewPolicyHandler(policySource),
 		Pipes:           api.NewPipesHandler(settingsStore, policySource, chConn, cache, chConn.QueryTimeout, logger),
 		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policySource, settingsStore.TimestampBucketSeconds, chConn.QueryTimeout, settingsStore.DefaultMaxRows, logger),
 

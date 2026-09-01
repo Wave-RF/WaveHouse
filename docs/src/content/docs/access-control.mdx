@@ -62,19 +62,19 @@ Setting `default_role` equal to `admin_role` is permitted — it makes every una
 `admin_role` (default: `"admin"`) is the one role that bypasses the entire policy:
 
 - It is granted **full, unrestricted access** to every table and operation. An admin is **never** column-scoped or row-scoped, even by a policy entry that explicitly names the admin role — admin is an unconditional bypass, not a scoped grant.
-- It is the gate for the whole `/v1/ops/*` tree — raw SQL, policy and pipe inspection, settings reload, schema discovery, and DLQ stats. The gate reads `admin_role` live from the policy, so changing it applies without a restart.
+- It is the gate for the whole `/v1/ops/*` tree — raw SQL, pipe inspection, settings reload, schema discovery, and DLQ stats. The gate reads `admin_role` live from the policy, so changing it applies without a restart.
 
 There is no separate `service` role. To reach an admin endpoint or to read data beyond what `default_role` grants, present a valid token whose `role_claim` is the admin role (or another granted role) — **or** present the non-JWT [operator key](#operator-key) described below.
 
 :::caution[A missing policy locks everyone out — including admin]
-`admin_role` only grants access while a policy is adopted. An empty `policies.json` (`{}`) adopts **no policy**, and no policy denies every **token-based** caller, by design: an implicit admin grant must never re-open a deliberately-emptied deployment. Recovery is a file edit: write a policy to `policies.json` and let the watcher pick it up (or `SIGHUP`, or `POST /v1/ops/settings/reload`) — see [the policy lifecycle](#the-policy-lifecycle). The one credential that still works meanwhile is the [operator key](#operator-key), which can inspect the adopted policy and trigger the reload over HTTP.
+`admin_role` only grants access while a policy is adopted. An empty `policies.json` (`{}`) adopts **no policy**, and no policy denies every **token-based** caller, by design: an implicit admin grant must never re-open a deliberately-emptied deployment. Recovery is a file edit: write a policy to `policies.json` and let the watcher pick it up (or `SIGHUP`, or `POST /v1/ops/settings/reload`) — see [the policy lifecycle](#the-policy-lifecycle). The one credential that still works meanwhile is the [operator key](#operator-key), which can trigger the reload over HTTP.
 :::
 
 ### Operator key
 
 `auth.operator_key` (config; presented in an `Authorization: Operator <key>` header, or the `X-Operator-Key` alias) is a static, role-free credential for the person running the deployment, meant for break-glass recovery. A request presenting it is authorized as a **full-access platform operator** — the entire data plane *and* the `/v1/ops/*` management surface — without minting a JWT, and independently of the JWT verifier (`jwt_secret`/`jwks_url`).
 
-Unlike `admin_role`, the operator key is honored **even when no policy is adopted** (an empty `policies.json`), so it is the one HTTP credential that still reaches `/v1/ops/*` — `GET /v1/ops/policy` to see what is adopted and `POST /v1/ops/settings/reload` once the file is fixed — the break-glass case the caution above describes. It is matched in constant time, takes precedence over any Bearer token on the same request, and is disabled when empty (the default). Treat it as an admin secret: load it from a secret store, serve it only over TLS, and rotate it like any other credential. See [Configuration — Authentication](/configuration#authentication).
+Unlike `admin_role`, the operator key is honored **even when no policy is adopted** (an empty `policies.json`), so it is the one HTTP credential that still reaches `/v1/ops/*` — `POST /v1/ops/settings/reload` once the file is fixed, whose findings report exactly why a rejected directory was refused — the break-glass case the caution above describes. It is matched in constant time, takes precedence over any Bearer token on the same request, and is disabled when empty (the default). Treat it as an admin secret: load it from a secret store, serve it only over TLS, and rotate it like any other credential. See [Configuration — Authentication](/configuration#authentication).
 
 Generate a high-entropy value (≥ 256 bits of randomness) and load it from a secret manager rather than committing it:
 
@@ -87,7 +87,7 @@ head -c 32 /dev/urandom | base64
 Set the result via `WH_AUTH_OPERATOR_KEY` (or `auth.operator_key`) and present it as `Authorization: Operator <key>` (or `X-Operator-Key: <key>`):
 
 ```bash
-curl -H "Authorization: Operator $(cat operator.key)" https://wavehouse.example.com/v1/ops/policy
+curl -X POST -H "Authorization: Operator $(cat operator.key)" https://wavehouse.example.com/v1/ops/settings/reload
 ```
 
 **Monitor failed attempts.** A successful operator authentication is audit-logged at `INFO`; a request presenting a *wrong* operator key is logged at `WARN` (`operator key authentication failed`) and counted by the `wavehouse_auth_operator_key_failures_total` metric, then handled as an ordinary unauthenticated request (the middleware never rejects). A wrong operator key is never sent by accident, so a nonzero rate is a strong probing/brute-force signal against your most privileged credential — alert on it.
@@ -324,11 +324,7 @@ The resource limits (`max_rows`, `max_execution_time`, `max_rows_to_read`, `max_
 
 The policy is the settings directory's `policies.json`, and the files are the only write path: edit the file (standalone: on the host; on WaveHouse Cloud the control plane writes it) and the running server re-validates and adopts it on file change, `SIGHUP`, or `POST /v1/ops/settings/reload` — see [Settings Directory — Loading and hot reload](/settings-directory#loading-and-hot-reload). Every role a grant names must be declared in `roles.json` alongside it.
 
-One admin endpoint (requires `admin_role`) reads it:
-
-| Method | Endpoint | Purpose |
-| ------ | -------- | ------- |
-| `GET` | `/v1/ops/policy` | Fetch the adopted policy. Returns `{"tables":{}}` when none is adopted. |
+The policy has no HTTP surface — the file is where it is read, edited, and validated.
 
 Validation decodes the document strictly — an unknown or misspelled key (`eq` for `_eq`) or a duplicate key is rejected, never silently dropped as "no rule" — and rejects every rule the engine would not honor: empty role names, negative limits, [malformed claim templates](#jwt-claim-templating), a `filter` or `check` entry that sets no operator (it would constrain nothing), `filter` under an `insert` grant (inserts are constrained by `check`), and unsupported `check` operators — `_neq`/`_gt`/`_lt`, or `_eq` and `_in` together on one column (but it intentionally allows `default_role == admin_role`, warning instead). `wavehouse validate` runs these checks on the whole directory — including the cross-file role references — so gate a policy change with it before the edit reaches a running instance; a reload runs the same validation and rejects a bad directory, keeping the previous good policy in effect.
 
@@ -341,7 +337,7 @@ curl -X POST http://localhost:8080/v1/ops/settings/reload \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-The full request and response shapes for these endpoints live in the [API Reference](/api); the [TypeScript SDK](/sdk) wraps them as `client.policy.get()` and `client.settings.reload()`.
+The reload endpoint's request and response shapes live in the [API Reference](/api); the [TypeScript SDK](/sdk) wraps it as `client.settings.reload()`.
 
 ## The policy lifecycle
 

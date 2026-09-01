@@ -335,7 +335,6 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		Version:      NewVersionHandler("test", "test", "test"),
 		Schema:       NewSchemaHandler(reg),
 		DLQ:          NewDLQHandler(emb.JetStream(), testutil.NopLogger()),
-		Policy:       NewPolicyHandler(policy.Static(&policy.Policy{})),
 		Pipes:        NewPipesHandler(pipes.Static(), policy.Static(&policy.Policy{}), nil, nil, nil, testutil.NopLogger()),
 		AuthMW:       func(next http.Handler) http.Handler { return next },
 		PolicySource: policy.Static(&policy.Policy{}),
@@ -369,12 +368,15 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		{http.MethodGet, "/v1/ops/schema?table=events", "admin", http.StatusOK},
 		{http.MethodPost, "/v1/ops/schema/refresh", "admin", http.StatusOK},
 		{http.MethodGet, "/v1/ops/dlq/stats", "admin", http.StatusOK},
-		// Policy and pipes are read-only over HTTP: the settings directory is
-		// the only write path. The reads stay; the former writes must never
-		// come back (405 = path registered, method not).
-		{http.MethodGet, "/v1/ops/policy", "admin", http.StatusOK},
+		// The policy has no HTTP surface at all — the settings directory's
+		// files are read and written where they live, and the former
+		// endpoints must never come back (404 = no path registered). Pipes
+		// keep their reads; the former pipe writes must never come back
+		// either (405 = path registered, method not).
+		{http.MethodGet, "/v1/ops/policy", "admin", http.StatusNotFound},
+		{http.MethodPost, "/v1/ops/policy/validate", "admin", http.StatusNotFound},
+		{http.MethodPut, "/v1/ops/policy", "admin", http.StatusNotFound},
 		{http.MethodGet, "/v1/ops/pipes", "admin", http.StatusOK},
-		{http.MethodPut, "/v1/ops/policy", "admin", http.StatusMethodNotAllowed},
 		{http.MethodPut, "/v1/ops/pipes/x", "admin", http.StatusMethodNotAllowed},
 		{http.MethodDelete, "/v1/ops/pipes/x", "admin", http.StatusMethodNotAllowed},
 		// Pre-/v1/ops paths, removed with no aliases: they must stay 404.

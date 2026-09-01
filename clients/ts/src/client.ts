@@ -1,6 +1,5 @@
 import { DLQNamespace } from "./dlq.js";
 import { PipeRef, PipesNamespace } from "./pipes.js";
-import { PolicyNamespace } from "./policy.js";
 import { SchemaNamespace } from "./schema.js";
 import { SettingsNamespace } from "./settings.js";
 import { sql } from "./sql.js";
@@ -24,7 +23,6 @@ export class WaveHouseClient<DB extends Database = Database> {
   /** Schema introspection namespace. */
   readonly schema: SchemaNamespace;
   /** Access control policy namespace (admin). */
-  readonly policy: PolicyNamespace;
   /** Dead Letter Queue namespace. */
   readonly dlq: DLQNamespace;
   /** System health/readiness namespace. */
@@ -47,7 +45,6 @@ export class WaveHouseClient<DB extends Database = Database> {
     };
 
     this.schema = new SchemaNamespace(this._ctx);
-    this.policy = new PolicyNamespace(this._ctx);
     this.dlq = new DLQNamespace(this._ctx, (table, opts) => this._createStream(table, opts));
     this.sys = new SysNamespace(this._ctx);
     this.pipes = new PipesNamespace(this._ctx);

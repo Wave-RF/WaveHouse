@@ -25,7 +25,6 @@ type Dependencies struct {
 	Version         *VersionHandler
 	Schema          *SchemaHandler
 	DLQ             *DLQHandler
-	Policy          *PolicyHandler
 	Pipes           *PipesHandler
 	StructuredQuery *StructuredQueryHandler
 	// Settings, if non-nil, mounts POST /v1/ops/settings/reload — the API
@@ -182,9 +181,6 @@ func NewRouter(deps Dependencies) http.Handler {
 			// queries (`/v1/query?table={table}`), or named pipes.
 			r.Post("/query", deps.Query.Handle)
 
-			if deps.Policy != nil {
-				r.Get("/policy", deps.Policy.Get)
-			}
 			if deps.Pipes != nil {
 				r.Get("/pipes", deps.Pipes.List)
 				r.Get("/pipes/{name}", deps.Pipes.Get)

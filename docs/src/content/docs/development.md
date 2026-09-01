@@ -200,14 +200,14 @@ There is no auth on/off switch — the JWT middleware always runs, but authoriza
 WH_AUTH_JWT_SECRET=my-secret make dev
 ```
 
-The **operator key** is a non-JWT alternative: set one and send it in an `Authorization: Operator <key>` header (or the `X-Operator-Key` alias). Even with no policy adopted it reaches the **admin surface** — enough to inspect the policy and trigger a settings reload over HTTP after fixing `policies.json` (the break-glass path). Once a policy is adopted, the key's role resolves to `admin`, so it then has full data-plane access too (pipes, queries, streaming, ingest) — handy for trialing without minting a JWT:
+The **operator key** is a non-JWT alternative: set one and send it in an `Authorization: Operator <key>` header (or the `X-Operator-Key` alias). Even with no policy adopted it reaches the **admin surface** — enough to trigger a settings reload over HTTP after fixing `policies.json` (the break-glass path). Once a policy is adopted, the key's role resolves to `admin`, so it then has full data-plane access too (pipes, queries, streaming, ingest) — handy for trialing without minting a JWT:
 
 ```bash
 WH_AUTH_OPERATOR_KEY=dev-operator-key make dev
 # ...then, in another shell — the admin surface works even with no policy adopted:
-curl -H "Authorization: Operator dev-operator-key" http://localhost:8080/v1/ops/policy
+curl -X POST -H "Authorization: Operator dev-operator-key" http://localhost:8080/v1/ops/settings/reload
 # the X-Operator-Key alias works too:
-curl -H "X-Operator-Key: dev-operator-key" http://localhost:8080/v1/ops/policy
+curl -H "X-Operator-Key: dev-operator-key" http://localhost:8080/v1/ops/pipes
 ```
 
 Then mint a token (role == the policy `admin_role`) and call an admin endpoint:

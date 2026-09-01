@@ -1,6 +1,6 @@
 ---
 title: "SDK Admin & System"
-description: "Schema introspection, access-control policy, settings reload, DLQ stats, and health checks in @wavehouse/sdk."
+description: "Schema introspection, settings reload, DLQ stats, and health checks in @wavehouse/sdk."
 ---
 
 Operational surfaces of `@wavehouse/sdk`. With one exception, everything on this page sits behind the server's admin gate: the caller must resolve to the admin role (`policy.admin_role`) or present the non-JWT [operator key](/api#authentication) — the SDK has no first-class operator-key option, but [`options.headers`](/sdk#custom-headers) can carry the `X-Operator-Key` header. The exception is `wh.sys.health()`, which calls the public, content-free `/v1/health` route and needs no credentials. See [Access Control](/access-control) for how roles resolve. Examples import from `@wavehouse/sdk` or `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
@@ -21,17 +21,6 @@ await wh.schema.refresh();
 Individual table schema is also available via `wh.from('clicks').schema()`.
 
 > `wh.schema.list()`, `wh.schema.refresh()`, and `wh.from(t).schema()` hit `/v1/ops/schema*`, which are **admin-only** endpoints: the caller must pass the admin gate — resolve to the policy admin role (`admin_role`, `"admin"` by default) or present the non-JWT [operator key](/api#authentication). Unless the deployment deliberately sets `default_role` to the admin role (the loudly-warned dev-only setting), construct the client with an admin-role token — or send the operator key via [`options.headers`](/sdk#custom-headers) — or these calls return `403`.
-
----
-
-## Policy — `wh.policy`
-
-Inspect the Hasura-style access control policy. Requires the admin gate — the admin role (`policy.admin_role`) or the [operator key](/api#authentication). The policy itself is the server's settings directory `policies.json` — files are the only write path, so there is no `set`: edit the file (checking it first with the server's `wavehouse validate` command) and let the server pick it up, or call [`wh.settings.reload()`](#settings--whsettings).
-
-```ts
-// Get the adopted policy
-const { data: policy } = await wh.policy.get();
-```
 
 ---
 

@@ -7,7 +7,7 @@
  * The orchestrator copies tests/e2e/fixtures/settings to a per-run scratch
  * directory and exports it as WAVEHOUSE_SETTINGS_DIR; these helpers write the
  * files there and trigger the reload endpoint, so a test's read-modify-write
- * (`policy.get()` → mutate → `setPolicy()`) lands synchronously.
+ * (`readPolicyFile()` → mutate → `setPolicy()`) lands synchronously.
  *
  * `roles.json` is derived, never hand-written: every role a policy or pipe
  * references must be declared or validation rejects the directory, so each
@@ -86,7 +86,7 @@ export async function reloadSettings(): Promise<void> {
 /**
  * Replace the whole policy (`policies.json`), regenerate `roles.json` from it
  * and the pipes on disk, and reload. Accepts the full document so callers keep
- * the read-modify-write pattern: `policy.get()` → mutate → `setPolicy()`.
+ * the read-modify-write pattern: `readPolicyFile()` → mutate → `setPolicy()`.
  */
 export async function setPolicy(policy: Policy): Promise<void> {
   writeJSON("roles.json", { roles: referencedRoles(policy, readPipesFile()) });
