@@ -53,14 +53,14 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		perms       policy.RolePermissions // viewer's per-table select caps
+		perms       policy.SelectPermissions // viewer's per-table select caps
 		wantStatus  int
 		wantBodyHas string // substring required in the response body
 	}{
 		{
 			// Control: identical query, no resource cap → full result set.
 			name:        "no cap returns all rows",
-			perms:       policy.RolePermissions{AllowColumns: []string{"*"}},
+			perms:       policy.SelectPermissions{AllowColumns: []string{"*"}},
 			wantStatus:  http.StatusOK,
 			wantBodyHas: `"row-24"`,
 		},
@@ -70,7 +70,7 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 			// error code 158 == TOO_MANY_ROWS (the native driver surfaces the
 			// numeric code, not the HTTP interface's symbolic suffix).
 			name:        "per-role max_rows_to_read is enforced (code 158 TOO_MANY_ROWS)",
-			perms:       policy.RolePermissions{AllowColumns: []string{"*"}, MaxRowsToRead: 1},
+			perms:       policy.SelectPermissions{AllowColumns: []string{"*"}, MaxRowsToRead: 1},
 			wantStatus:  http.StatusInternalServerError,
 			wantBodyHas: "code: 158",
 		},
@@ -80,7 +80,7 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 			// the floor any query allocates. Code 241 == MEMORY_LIMIT_EXCEEDED.
 			// (ByteSize literal 1 == 1 byte.)
 			name:        "per-role max_memory_usage is enforced (code 241 MEMORY_LIMIT_EXCEEDED)",
-			perms:       policy.RolePermissions{AllowColumns: []string{"*"}, MaxMemoryUsage: 1},
+			perms:       policy.SelectPermissions{AllowColumns: []string{"*"}, MaxMemoryUsage: 1},
 			wantStatus:  http.StatusInternalServerError,
 			wantBodyHas: "code: 241",
 		},
@@ -95,7 +95,7 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 			store := policy.Static(&policy.Policy{
 				AdminRole: "admin",
 				Tables: map[string]policy.TablePolicy{
-					table: {Select: map[string]policy.RolePermissions{"viewer": tt.perms}},
+					table: {"viewer": {Select: &tt.perms}},
 				},
 			})
 			h := api.NewStructuredQueryHandler(

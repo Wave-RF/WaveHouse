@@ -734,16 +734,14 @@ Returns the adopted access control policy — the settings directory's [`policie
   "default_role": "viewer",
   "tables": {
     "clicks": {
-      "select": {
-        "viewer": {
+      "viewer": {
+        "select": {
           "allow_columns": ["page", "button", "timestamp"],
           "filter": {
             "tenant_id": {"_eq": "{{ jwt.app_metadata.tenant_id }}"}
           }
-        }
-      },
-      "insert": {
-        "viewer": {
+        },
+        "insert": {
           "allow_columns": ["page", "button", "user_id", "tenant_id"],
           "check": {
             "user_id": {"_eq": "{{ jwt.sub }}"},

@@ -11,6 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// ptr returns a pointer to v — the Filter operator fields are *string so a
+// policy can tell "unset" from "set to empty".
+func ptr[T any](v T) *T { return &v }
+
 func TestEvaluate_NilPolicy(t *testing.T) {
 	t.Parallel()
 	// A nil policy (policies.json empty) fails fully closed: nobody passes, not
@@ -43,15 +47,13 @@ func TestEvaluate_ExactRoleMatch(t *testing.T) {
 	p := &Policy{
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Select: map[string]RolePermissions{
-					"viewer": {AllowColumns: []string{"page", "count"}},
-				},
+				"viewer": {Select: &SelectPermissions{AllowColumns: []string{"page", "count"}}},
 			},
 		},
 	}
 	perms := Evaluate(p, "viewer", "clicks", "select", nil)
 	assert.True(t, perms.Allowed)
-	assert.Equal(t, []string{"page", "count"}, perms.AllowColumns)
+	assert.Equal(t, []string{"page", "count"}, perms.Select.AllowColumns)
 }
 
 func TestEvaluate_NoMatchingRole_NonAdminDenied(t *testing.T) {
@@ -59,9 +61,7 @@ func TestEvaluate_NoMatchingRole_NonAdminDenied(t *testing.T) {
 	p := &Policy{
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Select: map[string]RolePermissions{
-					"editor": {},
-				},
+				"editor": {Select: &SelectPermissions{}},
 			},
 		},
 	}
@@ -74,9 +74,7 @@ func TestEvaluate_NoMatchingRole_AdminAllowed(t *testing.T) {
 	p := &Policy{
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Select: map[string]RolePermissions{
-					"editor": {},
-				},
+				"editor": {Select: &SelectPermissions{}},
 			},
 		},
 	}
@@ -92,15 +90,13 @@ func TestEvaluate_ExplicitAdminEntry_AdminStillUnrestricted(t *testing.T) {
 	p := &Policy{
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Select: map[string]RolePermissions{
-					"admin": {AllowColumns: []string{"page"}},
-				},
+				"admin": {Select: &SelectPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	}
 	perms := Evaluate(p, "admin", "clicks", "select", nil)
 	assert.True(t, perms.Allowed)
-	assert.Empty(t, perms.AllowColumns, "admin is never column-restricted, even by an explicit admin entry")
+	assert.Empty(t, perms.Select.AllowColumns, "admin is never column-restricted, even by an explicit admin entry")
 }
 
 func TestEvaluate_UnknownOperation(t *testing.T) {
@@ -120,22 +116,18 @@ func TestEvaluate_FilterWithClaimTemplate(t *testing.T) {
 	p := &Policy{
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Select: map[string]RolePermissions{
-					"user": {
-						Filter: map[string]Filter{
-							"org_id": {Eq: &eqVal},
-						},
-					},
-				},
+				"user": {Select: &SelectPermissions{Filter: map[string]Filter{
+					"org_id": {Eq: &eqVal},
+				}}},
 			},
 		},
 	}
 	claims := map[string]any{"org_id": "org-123"}
 	perms := Evaluate(p, "user", "clicks", "select", claims)
 	assert.True(t, perms.Allowed)
-	assert.Contains(t, perms.WhereClause, "`org_id` = ?")
-	require.Len(t, perms.WhereParams, 1)
-	assert.Equal(t, "org-123", perms.WhereParams[0])
+	assert.Contains(t, perms.Select.WhereClause, "`org_id` = ?")
+	require.Len(t, perms.Select.WhereParams, 1)
+	assert.Equal(t, "org-123", perms.Select.WhereParams[0])
 }
 
 func TestEvaluate_CheckClauses(t *testing.T) {
@@ -144,21 +136,17 @@ func TestEvaluate_CheckClauses(t *testing.T) {
 	p := &Policy{
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Insert: map[string]RolePermissions{
-					"user": {
-						Check: map[string]Filter{
-							"org_id": {Eq: &eqVal},
-						},
-					},
-				},
+				"user": {Insert: &InsertPermissions{Check: map[string]Filter{
+					"org_id": {Eq: &eqVal},
+				}}},
 			},
 		},
 	}
 	claims := map[string]any{"org_id": "org-456"}
 	perms := Evaluate(p, "user", "clicks", "insert", claims)
 	assert.True(t, perms.Allowed)
-	require.Contains(t, perms.CheckClauses, "org_id")
-	assert.Equal(t, "org-456", perms.CheckClauses["org_id"])
+	require.Contains(t, perms.Insert.CheckClauses, "org_id")
+	assert.Equal(t, "org-456", perms.Insert.CheckClauses["org_id"])
 }
 
 // TestEvaluate_CheckClauses_StaticLiteralTyped: a placeholder-free check
@@ -171,20 +159,16 @@ func TestEvaluate_CheckClauses_StaticLiteralTyped(t *testing.T) {
 	p := &Policy{
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Insert: map[string]RolePermissions{
-					"user": {
-						Check: map[string]Filter{
-							"count": {Eq: &eqVal},
-						},
-					},
-				},
+				"user": {Insert: &InsertPermissions{Check: map[string]Filter{
+					"count": {Eq: &eqVal},
+				}}},
 			},
 		},
 	}
 	perms := Evaluate(p, "user", "clicks", "insert", map[string]any{})
 	assert.True(t, perms.Allowed)
-	require.Contains(t, perms.CheckClauses, "count")
-	assert.Equal(t, LiteralValue("1.0"), perms.CheckClauses["count"])
+	require.Contains(t, perms.Insert.CheckClauses, "count")
+	assert.Equal(t, LiteralValue("1.0"), perms.Insert.CheckClauses["count"])
 }
 
 func TestEvaluate_AggregationLimits(t *testing.T) {
@@ -192,65 +176,75 @@ func TestEvaluate_AggregationLimits(t *testing.T) {
 	p := &Policy{
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Select: map[string]RolePermissions{
-					"analyst": {
-						AllowedAggregations: []string{"count", "sum"},
-						DeniedAggregations:  []string{"avg"},
-						MaxRows:             1000,
-						MaxExecutionTime:    Millis(5000),
-						MaxRowsToRead:       2_000_000,
-						MaxMemoryUsage:      4 << 30,
-					},
-				},
+				"analyst": {Select: &SelectPermissions{
+					AllowedAggregations: []string{"count", "sum"},
+					DeniedAggregations:  []string{"avg"},
+					MaxRows:             1000,
+					MaxExecutionTime:    Millis(5000),
+					MaxRowsToRead:       2_000_000,
+					MaxMemoryUsage:      4 << 30,
+				}},
 			},
 		},
 	}
 	perms := Evaluate(p, "analyst", "clicks", "select", nil)
 	assert.True(t, perms.Allowed)
-	assert.Equal(t, []string{"count", "sum"}, perms.AllowedAggregations)
-	assert.Equal(t, []string{"avg"}, perms.DeniedAggregations)
-	assert.Equal(t, 1000, perms.MaxRows)
+	assert.Equal(t, []string{"count", "sum"}, perms.Select.AllowedAggregations)
+	assert.Equal(t, []string{"avg"}, perms.Select.DeniedAggregations)
+	assert.Equal(t, 1000, perms.Select.MaxRows)
 	// The server-side resource caps (#316) must survive Evaluate so the query
 	// path can turn them into ClickHouse settings.
-	assert.Equal(t, Millis(5000), perms.MaxExecutionTime)
-	assert.Equal(t, 5*time.Second, perms.MaxExecutionTime.Duration())
-	assert.Equal(t, int64(2_000_000), perms.MaxRowsToRead)
-	assert.Equal(t, ByteSize(4<<30), perms.MaxMemoryUsage)
+	assert.Equal(t, Millis(5000), perms.Select.MaxExecutionTime)
+	assert.Equal(t, 5*time.Second, perms.Select.MaxExecutionTime.Duration())
+	assert.Equal(t, int64(2_000_000), perms.Select.MaxRowsToRead)
+	assert.Equal(t, ByteSize(4<<30), perms.Select.MaxMemoryUsage)
 }
 
 func TestIsColumnAllowed(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name  string
-		perms *ResolvedPermissions
-		col   string
-		want  bool
+		name   string
+		perms  *ResolvedPermissions
+		col    string
+		insert bool
+		want   bool
 	}{
-		{"nil perms", nil, "any", true},
-		{"no lists - all allowed", &ResolvedPermissions{Allowed: true}, "any", true},
-		{"in allow list", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"a", "b"}}, "a", true},
-		{"not in allow list", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"a", "b"}}, "c", false},
-		{"wildcard allow", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}}, "anything", true},
-		{"in deny list", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret"}}, "secret", false},
-		{"not in deny list", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret"}}, "page", true},
-		{"deny overrides allow", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"a"}, DenyColumns: []string{"a"}}, "a", false},
+		{"nil perms", nil, "any", false, true},
+		{"no lists - all allowed", &ResolvedPermissions{Allowed: true}, "any", false, true},
+		{"in allow list", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"a", "b"}}}, "a", false, true},
+		{"not in allow list", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"a", "b"}}}, "c", false, false},
+		{"wildcard allow", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}}}, "anything", false, true},
+		{"in deny list", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"secret"}}}, "secret", false, false},
+		{"not in deny list", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"secret"}}}, "page", false, true},
+		{"deny overrides allow", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"a"}, DenyColumns: []string{"a"}}}, "a", false, false},
 		// "*" is now a LITERAL column name, not a wildcard sentinel: it follows the
 		// same allow/deny rules as any column. (The all-columns wildcard is the
 		// caller's SelectAll, expanded by AllowedProjection — never run through
 		// here, which is what closed the #223 footgun structurally.) The builder
 		// additionally gates it on schema membership, so it only resolves when a
 		// real column is named "*".
-		{"literal star, empty allow → allowed", &ResolvedPermissions{Allowed: true}, "*", true},
-		{"literal star, wildcard allow → allowed", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}}, "*", true},
-		{"literal star, deny of another column → allowed", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret"}}, "*", true},
-		{"literal star, specific allow without it → denied", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"page"}}, "*", false},
-		{"literal star, explicitly denied → denied", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"*"}}, "*", false},
-		{"star arg, denied table → denied", &ResolvedPermissions{Allowed: false}, "*", false},
+		{"literal star, empty allow → allowed", &ResolvedPermissions{Allowed: true}, "*", false, true},
+		{"literal star, wildcard allow → allowed", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}}}, "*", false, true},
+		{"literal star, deny of another column → allowed", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"secret"}}}, "*", false, true},
+		{"literal star, specific allow without it → denied", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"page"}}}, "*", false, false},
+		{"literal star, explicitly denied → denied", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"*"}}}, "*", false, false},
+		{"star arg, denied table → denied", &ResolvedPermissions{Allowed: false}, "*", false, false},
+		// The insert flag picks the OTHER side's lists. The two sides are
+		// independent: a role may read a column it may not write, and vice versa.
+		{"insert: in allow list", &ResolvedPermissions{Allowed: true, Insert: ResolvedInsert{AllowColumns: []string{"a"}}}, "a", true, true},
+		{"insert: not in allow list", &ResolvedPermissions{Allowed: true, Insert: ResolvedInsert{AllowColumns: []string{"a"}}}, "b", true, false},
+		{"insert: in deny list", &ResolvedPermissions{Allowed: true, Insert: ResolvedInsert{DenyColumns: []string{"secret"}}}, "secret", true, false},
+		{"insert: deny overrides allow", &ResolvedPermissions{Allowed: true, Insert: ResolvedInsert{AllowColumns: []string{"a"}, DenyColumns: []string{"a"}}}, "a", true, false},
+		{"insert: denied role → denied", &ResolvedPermissions{Allowed: false, Insert: ResolvedInsert{AllowColumns: []string{"a"}}}, "a", true, false},
+		// Cross-side independence: the select list must not answer an insert
+		// question, and the insert list must not answer a select question.
+		{"select list does not gate insert", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"a"}}}, "a", true, true},
+		{"insert list does not gate select", &ResolvedPermissions{Allowed: true, Insert: ResolvedInsert{DenyColumns: []string{"a"}}}, "a", false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := tt.perms.IsColumnAllowed(tt.col)
+			got := tt.perms.IsColumnAllowed(tt.col, tt.insert)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -269,25 +263,25 @@ func TestAllowedProjection(t *testing.T) {
 		{"no lists - all pass", &ResolvedPermissions{Allowed: true}, all, all},
 		{
 			"allow list keeps order and subset",
-			&ResolvedPermissions{Allowed: true, AllowColumns: []string{"ts", "page"}},
+			&ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"ts", "page"}}},
 			all,
 			[]string{"page", "ts"}, // preserves input order, not allow-list order
 		},
 		{
 			"deny list drops denied",
-			&ResolvedPermissions{Allowed: true, DenyColumns: []string{"payload"}},
+			&ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"payload"}}},
 			all,
 			[]string{"page", "user_id", "ts"},
 		},
 		{
 			"wildcard allow with deny drops only denied",
-			&ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}},
+			&ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}}},
 			all,
 			[]string{"page", "user_id", "ts"},
 		},
 		{
 			"allow list disjoint from schema yields empty",
-			&ResolvedPermissions{Allowed: true, AllowColumns: []string{"nonexistent"}},
+			&ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"nonexistent"}}},
 			all,
 			[]string{},
 		},
@@ -318,11 +312,11 @@ func TestRestrictsColumns(t *testing.T) {
 		{"nil perms - unrestricted", nil, false},
 		{"denied role - restricts everything", &ResolvedPermissions{Allowed: false}, true},
 		{"no lists - unrestricted", &ResolvedPermissions{Allowed: true}, false},
-		{"bare wildcard allow - unrestricted", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}}, false},
-		{"wildcard among allows - unrestricted", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"page", "*"}}, false},
-		{"concrete allow list - restricted", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"page"}}, true},
-		{"deny list - restricted", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"payload"}}, true},
-		{"wildcard allow but deny set - restricted", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}}, true},
+		{"bare wildcard allow - unrestricted", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}}}, false},
+		{"wildcard among allows - unrestricted", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"page", "*"}}}, false},
+		{"concrete allow list - restricted", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"page"}}}, true},
+		{"deny list - restricted", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"payload"}}}, true},
+		{"wildcard allow but deny set - restricted", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -344,11 +338,11 @@ func TestColumnPrimitives_AgreeOnVisibility(t *testing.T) {
 	cases := []*ResolvedPermissions{
 		{Allowed: false}, // denied role: restricted, sees nothing
 		{Allowed: true},
-		{Allowed: true, AllowColumns: []string{"*"}},
-		{Allowed: true, AllowColumns: []string{"page", "*"}},
-		{Allowed: true, AllowColumns: []string{"page"}},
-		{Allowed: true, DenyColumns: []string{"payload"}},
-		{Allowed: true, AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}},
+		{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}}},
+		{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"page", "*"}}},
+		{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"page"}}},
+		{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"payload"}}},
+		{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}}},
 	}
 	for i, perms := range cases {
 		t.Run(fmt.Sprintf("case-%d", i), func(t *testing.T) {
@@ -375,15 +369,15 @@ func TestIsAggregationAllowed(t *testing.T) {
 	}{
 		{"nil perms", nil, "count", true},
 		{"no lists", &ResolvedPermissions{Allowed: true}, "count", true},
-		{"in denied list", &ResolvedPermissions{Allowed: true, DeniedAggregations: []string{"avg"}}, "avg", false},
-		{"not in denied", &ResolvedPermissions{Allowed: true, DeniedAggregations: []string{"avg"}}, "count", true},
-		{"in allowed list", &ResolvedPermissions{Allowed: true, AllowedAggregations: []string{"count", "sum"}}, "count", true},
-		{"not in allowed", &ResolvedPermissions{Allowed: true, AllowedAggregations: []string{"count"}}, "sum", false},
-		{"empty allowed = all", &ResolvedPermissions{Allowed: true, AllowedAggregations: []string{}}, "anything", true},
-		{"denied wins despite caller upper-case", &ResolvedPermissions{Allowed: true, DeniedAggregations: []string{"sum"}}, "SUM", false},
-		{"denied wins despite caller mixed-case", &ResolvedPermissions{Allowed: true, DeniedAggregations: []string{"sum"}}, "Sum", false},
-		{"allowed despite caller upper-case", &ResolvedPermissions{Allowed: true, AllowedAggregations: []string{"count"}}, "COUNT", true},
-		{"denied beats allowed despite caller upper-case", &ResolvedPermissions{Allowed: true, DeniedAggregations: []string{"sum"}, AllowedAggregations: []string{"sum"}}, "SUM", false},
+		{"in denied list", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DeniedAggregations: []string{"avg"}}}, "avg", false},
+		{"not in denied", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DeniedAggregations: []string{"avg"}}}, "count", true},
+		{"in allowed list", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowedAggregations: []string{"count", "sum"}}}, "count", true},
+		{"not in allowed", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowedAggregations: []string{"count"}}}, "sum", false},
+		{"empty allowed = all", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowedAggregations: []string{}}}, "anything", true},
+		{"denied wins despite caller upper-case", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DeniedAggregations: []string{"sum"}}}, "SUM", false},
+		{"denied wins despite caller mixed-case", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DeniedAggregations: []string{"sum"}}}, "Sum", false},
+		{"allowed despite caller upper-case", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowedAggregations: []string{"count"}}}, "COUNT", true},
+		{"denied beats allowed despite caller upper-case", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DeniedAggregations: []string{"sum"}, AllowedAggregations: []string{"sum"}}}, "SUM", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -627,9 +621,7 @@ func TestValidate(t *testing.T) {
 			policy: &Policy{
 				Tables: map[string]TablePolicy{
 					"clicks": {
-						Select: map[string]RolePermissions{
-							"viewer": {AllowColumns: []string{"page"}, MaxRows: 100},
-						},
+						"viewer": {Select: &SelectPermissions{AllowColumns: []string{"page"}, MaxRows: 100}},
 					},
 				},
 			},
@@ -640,9 +632,7 @@ func TestValidate(t *testing.T) {
 			policy: &Policy{
 				Tables: map[string]TablePolicy{
 					"clicks": {
-						Select: map[string]RolePermissions{
-							"viewer": {MaxRows: -1},
-						},
+						"viewer": {Select: &SelectPermissions{MaxRows: -1}},
 					},
 				},
 			},
@@ -654,9 +644,7 @@ func TestValidate(t *testing.T) {
 			policy: &Policy{
 				Tables: map[string]TablePolicy{
 					"clicks": {
-						Insert: map[string]RolePermissions{
-							"user": {MaxExecutionTime: Millis(-500)},
-						},
+						"user": {Select: &SelectPermissions{MaxExecutionTime: Millis(-500)}},
 					},
 				},
 			},
@@ -668,9 +656,7 @@ func TestValidate(t *testing.T) {
 			policy: &Policy{
 				Tables: map[string]TablePolicy{
 					"clicks": {
-						Select: map[string]RolePermissions{
-							"viewer": {MaxRowsToRead: -1},
-						},
+						"viewer": {Select: &SelectPermissions{MaxRowsToRead: -1}},
 					},
 				},
 			},
@@ -682,9 +668,7 @@ func TestValidate(t *testing.T) {
 			policy: &Policy{
 				Tables: map[string]TablePolicy{
 					"clicks": {
-						Select: map[string]RolePermissions{
-							"viewer": {MaxMemoryUsage: -1},
-						},
+						"viewer": {Select: &SelectPermissions{MaxMemoryUsage: -1}},
 					},
 				},
 			},
@@ -696,14 +680,47 @@ func TestValidate(t *testing.T) {
 			policy: &Policy{
 				Tables: map[string]TablePolicy{
 					"clicks": {
-						Select: map[string]RolePermissions{
-							"": {AllowColumns: []string{"page"}},
-						},
+						"": {Select: &SelectPermissions{AllowColumns: []string{"page"}}},
 					},
 				},
 			},
 			wantErr: true,
 			wantMsg: "empty role",
+		},
+		{
+			// The role-first layout puts both sides of a grant in one entry.
+			// Validate must still check BOTH: a valid select block must not let
+			// the insert block's check rules go unvalidated.
+			name: "valid select does not excuse an invalid insert",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						"viewer": {
+							Select: &SelectPermissions{AllowColumns: []string{"page"}},
+							Insert: &InsertPermissions{Check: map[string]Filter{"region": {Gt: ptr("1")}}},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			wantMsg: "check does not honor",
+		},
+		{
+			// The mirror: an invalid select block is caught even when the insert
+			// block is fine.
+			name: "valid insert does not excuse an invalid select",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						"viewer": {
+							Select: &SelectPermissions{MaxRows: -1},
+							Insert: &InsertPermissions{AllowColumns: []string{"page"}},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			wantMsg: "max_rows",
 		},
 	}
 	for _, tt := range tests {
@@ -724,7 +741,7 @@ func TestEvaluate_NilRolePermsMap_AdminAllowed(t *testing.T) {
 	t.Parallel()
 	p := &Policy{
 		Tables: map[string]TablePolicy{
-			"clicks": {}, // No select/insert maps.
+			"clicks": {}, // No role entries at all.
 		},
 	}
 	perms := Evaluate(p, "admin", "clicks", "select", nil)
@@ -764,9 +781,7 @@ func TestEvaluate_EmptyRoleDoesNotMatchEmptyKey(t *testing.T) {
 	p := &Policy{
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Select: map[string]RolePermissions{
-					"": {AllowColumns: []string{"page"}},
-				},
+				"": {Select: &SelectPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	}
@@ -784,9 +799,7 @@ func TestEvaluate_WildcardRoleKeyDoesNotGrant(t *testing.T) {
 	p := &Policy{
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Select: map[string]RolePermissions{
-					"*": {AllowColumns: []string{"page"}},
-				},
+				"*": {Select: &SelectPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	}
@@ -958,14 +971,12 @@ func TestEvaluate_CheckUnresolvableClaim_ResolvesEmptyString(t *testing.T) {
 	t.Parallel()
 	eq := "{{ jwt.org_id }}"
 	p := &Policy{Tables: map[string]TablePolicy{
-		"clicks": {Insert: map[string]RolePermissions{
-			"user": {Check: map[string]Filter{"org_id": {Eq: &eq}}},
-		}},
+		"clicks": {"user": {Insert: &InsertPermissions{Check: map[string]Filter{"org_id": {Eq: &eq}}}}},
 	}}
 	perms := Evaluate(p, "user", "clicks", "insert", map[string]any{"role": "user"}) // no org_id claim
 	require.True(t, perms.Allowed)
-	require.Contains(t, perms.CheckClauses, "org_id")
-	assert.Equal(t, "", perms.CheckClauses["org_id"])
+	require.Contains(t, perms.Insert.CheckClauses, "org_id")
+	assert.Equal(t, "", perms.Insert.CheckClauses["org_id"])
 }
 
 // TestEvaluate_FilterUnresolvableClaim_FailsClosed: the issue #385 scenario
@@ -976,14 +987,12 @@ func TestEvaluate_FilterUnresolvableClaim_FailsClosed(t *testing.T) {
 	t.Parallel()
 	eq := "{{ jwt.tenant_id }}"
 	p := &Policy{Tables: map[string]TablePolicy{
-		"clicks": {Select: map[string]RolePermissions{
-			"user": {Filter: map[string]Filter{"tenant_id": {Eq: &eq}}},
-		}},
+		"clicks": {"user": {Select: &SelectPermissions{Filter: map[string]Filter{"tenant_id": {Eq: &eq}}}}},
 	}}
 	perms := Evaluate(p, "user", "clicks", "select", map[string]any{"role": "user"})
 	require.True(t, perms.Allowed)
-	assert.Equal(t, "1 = 0", perms.WhereClause)
-	assert.Empty(t, perms.WhereParams)
+	assert.Equal(t, "1 = 0", perms.Select.WhereClause)
+	assert.Empty(t, perms.Select.WhereParams)
 }
 
 // TestValidate_RejectsBindUnsafeFilterColumn: a policy whose row-filter column
@@ -993,9 +1002,7 @@ func TestValidate_RejectsBindUnsafeFilterColumn(t *testing.T) {
 	t.Parallel()
 	eq := "{{ jwt.org }}"
 	p := &Policy{Tables: map[string]TablePolicy{
-		"clicks": {Select: map[string]RolePermissions{
-			"viewer": {Filter: map[string]Filter{"weird?col": {Eq: &eq}}},
-		}},
+		"clicks": {"viewer": {Select: &SelectPermissions{Filter: map[string]Filter{"weird?col": {Eq: &eq}}}}},
 	}}
 	err := Validate(p)
 	require.Error(t, err)
@@ -1022,16 +1029,12 @@ func TestValidate_RejectsMalformedClaimTemplate(t *testing.T) {
 			t.Parallel()
 			val := tmpl
 			filterPolicy := &Policy{Tables: map[string]TablePolicy{
-				"clicks": {Select: map[string]RolePermissions{
-					"viewer": {Filter: map[string]Filter{"tenant_id": {Neq: &val}}},
-				}},
+				"clicks": {"viewer": {Select: &SelectPermissions{Filter: map[string]Filter{"tenant_id": {Neq: &val}}}}},
 			}}
 			require.Error(t, Validate(filterPolicy), "malformed template must be rejected on the filter path")
 
 			checkPolicy := &Policy{Tables: map[string]TablePolicy{
-				"clicks": {Insert: map[string]RolePermissions{
-					"writer": {Check: map[string]Filter{"tenant_id": {Eq: &val}}},
-				}},
+				"clicks": {"writer": {Insert: &InsertPermissions{Check: map[string]Filter{"tenant_id": {Eq: &val}}}}},
 			}}
 			require.Error(t, Validate(checkPolicy), "malformed template must be rejected on the check path")
 		})
@@ -1054,9 +1057,7 @@ func TestValidate_AcceptsWellFormedTemplates(t *testing.T) {
 			t.Parallel()
 			val := tmpl
 			p := &Policy{Tables: map[string]TablePolicy{
-				"clicks": {Select: map[string]RolePermissions{
-					"viewer": {Filter: map[string]Filter{"tenant_id": {Eq: &val}}},
-				}},
+				"clicks": {"viewer": {Select: &SelectPermissions{Filter: map[string]Filter{"tenant_id": {Eq: &val}}}}},
 			}}
 			require.NoError(t, Validate(p))
 		})
@@ -1230,15 +1231,13 @@ func TestEvaluate_FilterInClause(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.app_metadata.tenant_ids }}"
 	p := &Policy{Tables: map[string]TablePolicy{
-		"clicks": {Select: map[string]RolePermissions{
-			"user": {Filter: map[string]Filter{"tenant_id": {In: &in}}},
-		}},
+		"clicks": {"user": {Select: &SelectPermissions{Filter: map[string]Filter{"tenant_id": {In: &in}}}}},
 	}}
 	claims := map[string]any{"app_metadata": map[string]any{"tenant_ids": []any{"t1", "t2"}}}
 	perms := Evaluate(p, "user", "clicks", "select", claims)
 	require.True(t, perms.Allowed)
-	assert.Contains(t, perms.WhereClause, "`tenant_id` IN (?,?)")
-	assert.Equal(t, []any{"t1", "t2"}, perms.WhereParams)
+	assert.Contains(t, perms.Select.WhereClause, "`tenant_id` IN (?,?)")
+	assert.Equal(t, []any{"t1", "t2"}, perms.Select.WhereParams)
 }
 
 // TestEvaluate_CheckInResolvesToSet: an _in check resolves to a []any set in
@@ -1248,15 +1247,13 @@ func TestEvaluate_CheckInResolvesToSet(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.tenants }}"
 	p := &Policy{Tables: map[string]TablePolicy{
-		"clicks": {Insert: map[string]RolePermissions{
-			"writer": {Check: map[string]Filter{"tenant_id": {In: &in}}},
-		}},
+		"clicks": {"writer": {Insert: &InsertPermissions{Check: map[string]Filter{"tenant_id": {In: &in}}}}},
 	}}
 	claims := map[string]any{"tenants": []any{"a", "b"}}
 	perms := Evaluate(p, "writer", "clicks", "insert", claims)
 	require.True(t, perms.Allowed)
-	require.Contains(t, perms.CheckClauses, "tenant_id")
-	assert.Equal(t, []any{"a", "b"}, perms.CheckClauses["tenant_id"])
+	require.Contains(t, perms.Insert.CheckClauses, "tenant_id")
+	assert.Equal(t, []any{"a", "b"}, perms.Insert.CheckClauses["tenant_id"])
 }
 
 // TestValidate_AllowsFilterIn: _in is now enforced on the filter path (#224), so
@@ -1265,9 +1262,7 @@ func TestValidate_AllowsFilterIn(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.tenants }}"
 	p := &Policy{Tables: map[string]TablePolicy{
-		"clicks": {Select: map[string]RolePermissions{
-			"viewer": {Filter: map[string]Filter{"tenant_id": {In: &in}}},
-		}},
+		"clicks": {"viewer": {Select: &SelectPermissions{Filter: map[string]Filter{"tenant_id": {In: &in}}}}},
 	}}
 	require.NoError(t, Validate(p))
 }
@@ -1287,9 +1282,7 @@ func TestValidate_RejectsComparisonCheckOps(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			p := &Policy{Tables: map[string]TablePolicy{
-				"clicks": {Insert: map[string]RolePermissions{
-					"writer": {Check: map[string]Filter{"user_id": f}},
-				}},
+				"clicks": {"writer": {Insert: &InsertPermissions{Check: map[string]Filter{"user_id": f}}}},
 			}}
 			err := Validate(p)
 			require.Error(t, err)
@@ -1308,9 +1301,7 @@ func TestValidate_RejectsMixedCheckOps(t *testing.T) {
 	v := "{{ jwt.sub }}"
 	set := "{{ jwt.tenants }}"
 	p := &Policy{Tables: map[string]TablePolicy{
-		"clicks": {Insert: map[string]RolePermissions{
-			"writer": {Check: map[string]Filter{"tenant_id": {Eq: &v, In: &set}}},
-		}},
+		"clicks": {"writer": {Insert: &InsertPermissions{Check: map[string]Filter{"tenant_id": {Eq: &v, In: &set}}}}},
 	}}
 	err := Validate(p)
 	require.Error(t, err)
@@ -1326,12 +1317,8 @@ func TestValidate_AllowsEnforcedOperators(t *testing.T) {
 	set := "{{ jwt.tenants }}"
 	p := &Policy{Tables: map[string]TablePolicy{
 		"clicks": {
-			Select: map[string]RolePermissions{
-				"viewer": {Filter: map[string]Filter{"a": {Eq: &v}, "b": {Neq: &v}, "c": {Gt: &v}, "d": {Lt: &v}, "e": {In: &set}}},
-			},
-			Insert: map[string]RolePermissions{
-				"writer": {Check: map[string]Filter{"user_id": {Eq: &v}, "tenant_id": {In: &set}}},
-			},
+			"viewer": {Select: &SelectPermissions{Filter: map[string]Filter{"a": {Eq: &v}, "b": {Neq: &v}, "c": {Gt: &v}, "d": {Lt: &v}, "e": {In: &set}}}},
+			"writer": {Insert: &InsertPermissions{Check: map[string]Filter{"user_id": {Eq: &v}, "tenant_id": {In: &set}}}},
 		},
 	}}
 	require.NoError(t, Validate(p))
@@ -1344,9 +1331,7 @@ func TestEvaluate_DeniesBindUnsafeFilterColumn(t *testing.T) {
 	t.Parallel()
 	eq := "{{ jwt.org }}"
 	p := &Policy{Tables: map[string]TablePolicy{
-		"clicks": {Select: map[string]RolePermissions{
-			"viewer": {AllowColumns: []string{"page"}, Filter: map[string]Filter{"weird?col": {Eq: &eq}}},
-		}},
+		"clicks": {"viewer": {Select: &SelectPermissions{AllowColumns: []string{"page"}, Filter: map[string]Filter{"weird?col": {Eq: &eq}}}}},
 	}}
 	perms := Evaluate(p, "viewer", "clicks", "select", map[string]any{"org": "o1"})
 	assert.False(t, perms.Allowed, "a bind-unsafe filter column must deny the role")
@@ -1397,15 +1382,13 @@ func TestEvaluate_DefaultRoleSubstitution(t *testing.T) {
 		DefaultRole: "viewer",
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Select: map[string]RolePermissions{
-					"viewer": {AllowColumns: []string{"page"}},
-				},
+				"viewer": {Select: &SelectPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	}
 	perms := Evaluate(p, "", "clicks", "select", nil)
 	assert.True(t, perms.Allowed, "empty role should resolve to default_role viewer")
-	assert.Equal(t, []string{"page"}, perms.AllowColumns)
+	assert.Equal(t, []string{"page"}, perms.Select.AllowColumns)
 }
 
 // TestEvaluate_DefaultRoleUnset_RolelessDenied: with no default_role a roleless
@@ -1415,9 +1398,7 @@ func TestEvaluate_DefaultRoleUnset_RolelessDenied(t *testing.T) {
 	p := &Policy{
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Select: map[string]RolePermissions{
-					"viewer": {AllowColumns: []string{"page"}},
-				},
+				"viewer": {Select: &SelectPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	}
@@ -1433,16 +1414,14 @@ func TestEvaluate_DefaultRole_DoesNotClobberRealRole(t *testing.T) {
 		DefaultRole: "viewer",
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Select: map[string]RolePermissions{
-					"viewer": {AllowColumns: []string{"page"}},
-					"editor": {AllowColumns: []string{"page", "secret"}},
-				},
+				"viewer": {Select: &SelectPermissions{AllowColumns: []string{"page"}}},
+				"editor": {Select: &SelectPermissions{AllowColumns: []string{"page", "secret"}}},
 			},
 		},
 	}
 	perms := Evaluate(p, "editor", "clicks", "select", nil)
 	assert.True(t, perms.Allowed)
-	assert.Equal(t, []string{"page", "secret"}, perms.AllowColumns, "editor keeps its own perms")
+	assert.Equal(t, []string{"page", "secret"}, perms.Select.AllowColumns, "editor keeps its own perms")
 }
 
 // TestEvaluate_DefaultRoleAdmin_GrantsAdmin: a default_role equal to the admin
@@ -1455,9 +1434,7 @@ func TestEvaluate_DefaultRoleAdmin_GrantsAdmin(t *testing.T) {
 		DefaultRole: "admin",
 		Tables: map[string]TablePolicy{
 			"clicks": {
-				Select: map[string]RolePermissions{
-					"viewer": {AllowColumns: []string{"page"}},
-				},
+				"viewer": {Select: &SelectPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	}

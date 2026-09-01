@@ -164,7 +164,7 @@ func TestIngest_DenialLogsPolicyGate(t *testing.T) {
 	h := NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, logger)
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
-			"clicks": {Select: map[string]policy.RolePermissions{"viewer": {}}}, // no insert for viewer
+			"clicks": {"viewer": {Select: &policy.SelectPermissions{}}}, // no insert for viewer
 		},
 	})
 

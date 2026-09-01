@@ -200,7 +200,7 @@ func streamVerdict(t *testing.T, table, op, constant string, payload any, spec p
 		t.Fatalf("unknown op %q", op)
 	}
 	p := &policy.Policy{Tables: map[string]policy.TablePolicy{
-		table: {Select: map[string]policy.RolePermissions{"r": {Filter: map[string]policy.Filter{"v": f}}}},
+		table: {"r": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"v": f}}}},
 	}}
 	perms := policy.Evaluate(p, "r", table, "select", nil)
 	require.True(t, perms.Allowed)

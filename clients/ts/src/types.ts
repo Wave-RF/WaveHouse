@@ -341,16 +341,23 @@ export interface Policy {
   tables: Record<string, TablePolicy>;
 }
 
-export interface TablePolicy {
-  select?: Record<string, RolePermissions>;
-  insert?: Record<string, RolePermissions>;
-}
+/**
+ * Access control for one table, keyed by role name. A role appears once per
+ * table and states what it may do; omit `select` to deny reads, omit `insert`
+ * to deny writes.
+ */
+export type TablePolicy = Record<string, RolePermissions>;
 
 export interface RolePermissions {
+  select?: SelectPermissions;
+  insert?: InsertPermissions;
+}
+
+/** A role's read grant on a table. */
+export interface SelectPermissions {
   allow_columns?: string[];
   deny_columns?: string[];
   filter?: Record<string, PolicyFilter>;
-  check?: Record<string, PolicyFilter>;
   allowed_aggregations?: string[];
   denied_aggregations?: string[];
   /** Caps the query result LIMIT. 0 = no limit. */
@@ -369,6 +376,13 @@ export interface RolePermissions {
    * number of bytes.
    */
   max_memory_usage?: number | string;
+}
+
+/** A role's write grant on a table. */
+export interface InsertPermissions {
+  allow_columns?: string[];
+  deny_columns?: string[];
+  check?: Record<string, PolicyFilter>;
 }
 
 export interface PolicyFilter {

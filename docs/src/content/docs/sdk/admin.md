@@ -38,8 +38,8 @@ const { data } = await wh.policy.validate({
   admin_role: 'admin',
   tables: {
     clicks: {
-      select: {
-        viewer: {
+      viewer: {
+        select: {
           allow_columns: ['page', 'button', 'received_timestamp'],
           filter: { tenant_id: { _eq: '{{ jwt.app_metadata.tenant_id }}' } },
         },

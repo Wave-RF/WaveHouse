@@ -236,9 +236,7 @@ func TestIngest_Policy_Forbidden(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Select: map[string]policy.RolePermissions{
-					"viewer": {},
-				},
+				"viewer": {Select: &policy.SelectPermissions{}},
 				// No insert permissions for viewer.
 			},
 		},
@@ -263,11 +261,7 @@ func TestIngest_Policy_ColumnDenied(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"writer": {
-						AllowColumns: []string{"page"},
-					},
-				},
+				"writer": {Insert: &policy.InsertPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	})
@@ -292,13 +286,9 @@ func TestIngest_Policy_CheckClause_Mismatch(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {
-						Check: map[string]policy.Filter{
-							"org_id": {Eq: &orgTemplate},
-						},
-					},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+					"org_id": {Eq: &orgTemplate},
+				}}},
 			},
 		},
 	})
@@ -324,13 +314,9 @@ func TestIngest_Policy_CheckClause_Match(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {
-						Check: map[string]policy.Filter{
-							"org_id": {Eq: &orgTemplate},
-						},
-					},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+					"org_id": {Eq: &orgTemplate},
+				}}},
 			},
 		},
 	})
@@ -362,13 +348,9 @@ func TestIngest_Policy_CheckClause_NumericSpellingMatch(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {
-						Check: map[string]policy.Filter{
-							"count": {Eq: &countTemplate},
-						},
-					},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+					"count": {Eq: &countTemplate},
+				}}},
 			},
 		},
 	})
@@ -410,13 +392,9 @@ func TestIngest_Policy_CheckClause_StaticNumericSpelling(t *testing.T) {
 			h.PolicySource = policy.Static(&policy.Policy{
 				Tables: map[string]policy.TablePolicy{
 					"clicks": {
-						Insert: map[string]policy.RolePermissions{
-							"user": {
-								Check: map[string]policy.Filter{
-									"count": {Eq: &staticCount},
-								},
-							},
-						},
+						"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+							"count": {Eq: &staticCount},
+						}}},
 					},
 				},
 			})
@@ -459,13 +437,9 @@ func TestIngest_Policy_CheckClause_StringClaimStrictEquality(t *testing.T) {
 			h.PolicySource = policy.Static(&policy.Policy{
 				Tables: map[string]policy.TablePolicy{
 					"clicks": {
-						Insert: map[string]policy.RolePermissions{
-							"user": {
-								Check: map[string]policy.Filter{
-									"org_id": {Eq: &orgTemplate},
-								},
-							},
-						},
+						"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+							"org_id": {Eq: &orgTemplate},
+						}}},
 					},
 				},
 			})
@@ -496,13 +470,9 @@ func TestIngest_Policy_CheckClause_NullValue_FailsClosed(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {
-						Check: map[string]policy.Filter{
-							"org_id": {Eq: &orgTemplate},
-						},
-					},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+					"org_id": {Eq: &orgTemplate},
+				}}},
 			},
 		},
 	})
@@ -529,13 +499,9 @@ func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {
-						Check: map[string]policy.Filter{
-							"org_id": {Eq: &orgTemplate},
-						},
-					},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+					"org_id": {Eq: &orgTemplate},
+				}}},
 			},
 		},
 	})
@@ -565,9 +531,7 @@ func checkInStore() policy.Source {
 	return policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {Check: map[string]policy.Filter{"org_id": {In: &orgsTemplate}}},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{"org_id": {In: &orgsTemplate}}}},
 			},
 		},
 	})
@@ -762,11 +726,7 @@ func TestIngest_Policy_DenyColumns(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"writer": {
-						DenyColumns: []string{"count"},
-					},
-				},
+				"writer": {Insert: &policy.InsertPermissions{DenyColumns: []string{"count"}}},
 			},
 		},
 	})
@@ -1047,9 +1007,7 @@ func TestIngest_NDJSON_Policy_ColumnDenied_PerLine(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"writer": {AllowColumns: []string{"page"}},
-				},
+				"writer": {Insert: &policy.InsertPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	})
@@ -1082,7 +1040,7 @@ func TestIngest_NDJSON_Policy_TableForbidden(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Select: map[string]policy.RolePermissions{"viewer": {}},
+				"viewer": {Select: &policy.SelectPermissions{}},
 				// No insert permission for viewer.
 			},
 		},
@@ -1110,9 +1068,7 @@ func TestIngest_NDJSON_Policy_CheckClause_PerLineAndAutoInject(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {Check: map[string]policy.Filter{"org_id": {Eq: &orgTemplate}}},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{"org_id": {Eq: &orgTemplate}}}},
 			},
 		},
 	})
@@ -1642,13 +1598,9 @@ func TestIngest_AutoInjectedLiteralTimestampCanonicalized(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"events": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {
-						Check: map[string]policy.Filter{
-							"ts": {Eq: &staticTS},
-						},
-					},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+					"ts": {Eq: &staticTS},
+				}}},
 			},
 		},
 	})

@@ -43,7 +43,7 @@ The role registry — every role a policy grant or a pipe allowlist may name:
 { "roles": ["admin", "analyst", "public"] }
 ```
 
-Rules: each name must be non-empty, without surrounding whitespace, and unique. Cross-file, every role referenced elsewhere must be declared here: `policies.json`'s `default_role` and `admin_role`, every role under a table's `select` / `insert`, and every entry in a pipe's `allowed_roles`. An undeclared reference is an error, so a typo in a grant fails validation instead of silently matching nobody.
+Rules: each name must be non-empty, without surrounding whitespace, and unique. Cross-file, every role referenced elsewhere must be declared here: `policies.json`'s `default_role` and `admin_role`, every role keyed under a table's grants, and every entry in a pipe's `allowed_roles`. An undeclared reference is an error, so a typo in a grant fails validation instead of silently matching nobody.
 
 Does the admin role belong in this list? Only if `policies.json` names it: setting `admin_role` (or using the admin role as `default_role`) requires declaring that role here, like any other reference. Leaving `admin_role` unset — the built-in default `admin` — requires nothing; the reference compose seed's `roles.json` is just `["public"]` and validates clean for exactly this reason. Naming the admin role inside a table grant or a pipe's `allowed_roles` never requires a declaration either — admin is an [unconditional bypass](/access-control#admin_role--the-privileged-role), so such an entry is dead config and only warns.
 
@@ -57,14 +57,16 @@ The access-control policy — one [policy document](/access-control#anatomy-of-a
   "admin_role": "admin",
   "tables": {
     "events": {
-      "select": { "public": { "allow_columns": ["*"] } },
-      "insert": { "public": { "allow_columns": ["*"] } }
+      "public": {
+        "select": { "allow_columns": ["*"] },
+        "insert": { "allow_columns": ["*"] }
+      }
     }
   }
 }
 ```
 
-An empty document (`{}`) means **no policy**: it validates with a warning, and the server adopts it fail-closed — every request is denied, including one carrying the admin role; only the [operator key](/access-control#operator-key) gets through. A non-empty document must pass the full [policy validation](/access-control#anatomy-of-a-policy) (column and row rules, the claim-template grammar, resource limits), and its roles must be declared in `roles.json`. Two states warn rather than fail: `default_role` equal to the admin role (every roleless request is admin — dev only), and a grant keyed by the admin role (admin is an unconditional bypass, so the grant has no effect).
+An empty document (`{}`) means **no policy**: it validates with a warning, and the server adopts it fail-closed — every request is denied, including one carrying the admin role; only the [operator key](/access-control#operator-key) gets through. A non-empty document must pass the full [policy validation](/access-control#anatomy-of-a-policy) (column and row rules, the claim-template grammar, resource limits), and its roles must be declared in `roles.json`. The layout is **role-first** — `tables.<table>.<role>.select` — and a document still using the pre-v2 operation-first nesting is rejected with a pointer to [the migration note](/access-control#migrating-from-the-operation-first-layout). Two states warn rather than fail: `default_role` equal to the admin role (every roleless request is admin — dev only), and a grant keyed by the admin role (admin is an unconditional bypass, so the grant has no effect).
 
 A reload applies to the very next request: the policy is read per request off the adopted snapshot, and a live `GET /v1/stream` connection's role is re-evaluated against the new policy on the next event.
 

@@ -32,9 +32,7 @@ func TestPolicyHandler_Get_WithPolicy(t *testing.T) {
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Select: map[string]policy.RolePermissions{
-					"viewer": {AllowColumns: []string{"page", "count"}},
-				},
+				"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page", "count"}}},
 			},
 		},
 	}
@@ -59,9 +57,7 @@ func TestPolicyHandler_Validate_Valid(t *testing.T) {
 	p := policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Select: map[string]policy.RolePermissions{
-					"viewer": {AllowColumns: []string{"page"}},
-				},
+				"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	}
@@ -98,9 +94,7 @@ func TestPolicyHandler_RequestBodyCap(t *testing.T) {
 	// A valid policy whose JSON comfortably exceeds the tiny test cap.
 	p := policy.Policy{
 		Tables: map[string]policy.TablePolicy{
-			"clicks": {Select: map[string]policy.RolePermissions{
-				"viewer": {AllowColumns: []string{"page", "button", "count"}},
-			}},
+			"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page", "button", "count"}}}},
 		},
 	}
 	body, err := json.Marshal(p)
@@ -141,9 +135,7 @@ func TestPolicyHandler_Validate_InvalidPolicy(t *testing.T) {
 	p := policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Select: map[string]policy.RolePermissions{
-					"viewer": {MaxRows: -1},
-				},
+				"viewer": {Select: &policy.SelectPermissions{MaxRows: -1}},
 			},
 		},
 	}

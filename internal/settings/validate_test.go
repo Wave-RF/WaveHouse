@@ -25,7 +25,7 @@ func writeDir(t *testing.T, files map[string]string) string {
 func validFiles() map[string]string {
 	return map[string]string{
 		FileRoles:    `{"roles": ["public", "analyst", "admin"]}`,
-		FilePolicies: `{"default_role": "public", "tables": {"clicks": {"select": {"analyst": {"max_rows": 100}}}}}`,
+		FilePolicies: `{"default_role": "public", "tables": {"clicks": {"analyst": {"select": {"max_rows": 100}}}}}`,
 		FilePipes:    `{"pipes": [{"name": "top_clicks", "sql": "SELECT 1", "allowed_roles": ["analyst"], "parameters": [{"name": "limit", "type": "number"}]}]}`,
 		FileConfig:   configJSON(`{"dedupe": {"tables": {"clicks": {"id_field": "click_id"}}}}`),
 	}
@@ -218,7 +218,7 @@ func TestValidate_FileSyntax(t *testing.T) {
 		{"unknown field", FilePolicies, `{"default_roll": "public"}`, "unknown field"},
 		{"trailing content", FileConfig, `{} {}`, "trailing content"},
 		{"duplicate key", FileConfig, `{"dedupe": {"id_field": "a"}, "dedupe": {"id_field": "b"}}`, "dedupe: duplicate key"},
-		{"nested duplicate key", FilePolicies, `{"tables": {"clicks": {"select": {"a": {}, "a": {}}}}}`, "tables.clicks.select.a: duplicate key"},
+		{"nested duplicate key", FilePolicies, `{"tables": {"clicks": {"a": {"select": {}}, "a": {"select": {}}}}}`, "tables.clicks.a: duplicate key"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -245,9 +245,9 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"empty role name", FileRoles, `{"roles": [""]}`, "roles[0]: role name must not be empty"},
 		{"role whitespace", FileRoles, `{"roles": [" analyst"]}`, "surrounding whitespace"},
 		{"duplicate role", FileRoles, `{"roles": ["analyst", "analyst"]}`, "duplicate role"},
-		{"check uses _gt", FilePolicies, `{"tables": {"clicks": {"insert": {"analyst": {"check": {"region": {"_gt": "1"}}}}}}}`, "check does not honor"},
-		{"unknown filter operator", FilePolicies, `{"tables": {"clicks": {"select": {"analyst": {"filter": {"region": {"_like": "x"}}}}}}}`, "unknown field"},
-		{"empty grant role", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"select": {"": {}}}}}`, "grant role must not be empty"},
+		{"check uses _gt", FilePolicies, `{"tables": {"clicks": {"analyst": {"insert": {"check": {"region": {"_gt": "1"}}}}}}}`, "check does not honor"},
+		{"unknown filter operator", FilePolicies, `{"tables": {"clicks": {"analyst": {"select": {"filter": {"region": {"_like": "x"}}}}}}}`, "unknown field"},
+		{"empty grant role", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"": {"select": {}}}}}`, "grant role must not be empty"},
 		{"empty allowlist role", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "allowed_roles": [""]}]}`, "allowed_roles[0]: role must not be empty"},
 		{"empty pipe name", FilePipes, `{"pipes": [{"name": "", "sql": "SELECT 1"}]}`, "pipe name must not be empty"},
 		{"duplicate pipe", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1"}, {"name": "a", "sql": "SELECT 2"}]}`, "duplicate pipe"},
@@ -325,13 +325,13 @@ func TestValidate_RoleReferences(t *testing.T) {
 	t.Run("undeclared roles are errors", func(t *testing.T) {
 		t.Parallel()
 		files := validFiles()
-		files[FilePolicies] = `{"default_role": "ghost", "tables": {"clicks": {"select": {"phantom": {}}}}}`
+		files[FilePolicies] = `{"default_role": "ghost", "tables": {"clicks": {"phantom": {"select": {}}}}}`
 		files[FilePipes] = `{"pipes": [{"name": "a", "sql": "SELECT 1", "allowed_roles": ["specter"]}]}`
 		doc, findings := Validate(writeDir(t, files))
 		assert.Nil(t, doc)
 		out := findingStrings(findings)
 		assert.Contains(t, out, `default_role: role "ghost" is not declared`)
-		assert.Contains(t, out, `tables.clicks.select.phantom: role "phantom" is not declared`)
+		assert.Contains(t, out, `tables.clicks.phantom: role "phantom" is not declared`)
 		assert.Contains(t, out, `pipes[0].allowed_roles[0]: role "specter" is not declared`)
 	})
 
@@ -362,7 +362,7 @@ func TestValidate_Warnings(t *testing.T) {
 		body string
 		want string
 	}{
-		{"admin grant is dead config", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"select": {"admin": {"max_rows": 5}}}}}`, "unconditional bypass"},
+		{"admin grant is dead config", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"admin": {"select": {"max_rows": 5}}}}}`, "unconditional bypass"},
 		{"default_role equals admin", FilePolicies, `{"default_role": "admin", "tables": {}}`, "every roleless request gets full admin"},
 		{"admin in pipe allowlist is redundant", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "allowed_roles": ["admin"]}]}`, "listing it is redundant"},
 		{"empty dedupe override sets nothing", FileConfig, configJSON(`{"dedupe": {"tables": {"clicks": {}}}}`), "override sets nothing"},
@@ -370,6 +370,7 @@ func TestValidate_Warnings(t *testing.T) {
 
 		{"empty cors allowlist allows every origin", FileConfig, configJSON(`{"cors": {"allowed_origins": []}}`), "empty list allows every origin"},
 		{"default on required parameter", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x", "required": true, "default": 5}]}]}`, "never used"},
+		{"grant with neither operation", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"analyst": {}}}}`, "neither select nor insert"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -382,6 +383,61 @@ func TestValidate_Warnings(t *testing.T) {
 			assert.Contains(t, findingStrings(findings), tt.want)
 		})
 	}
+}
+
+// TestValidate_LegacyPolicyLayout: a pre-v2 (operation-first) policies.json must
+// be named as such. Without the detector it lands as an "unknown field" strict
+// decode error — or, for an empty operation block, silently as a role named
+// "select" with no grants.
+func TestValidate_LegacyPolicyLayout(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			"select block holding role grants",
+			`{"default_role": "public", "tables": {"clicks": {"select": {"analyst": {"max_rows": 5}}}}}`,
+			"tables.clicks.select: pre-v2 operation-first layout",
+		},
+		{
+			"insert block holding role grants",
+			`{"default_role": "public", "tables": {"clicks": {"insert": {"analyst": {"check": {"region": {"_eq": "eu"}}}}}}}`,
+			"tables.clicks.insert: pre-v2 operation-first layout",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			files := validFiles()
+			files[FilePolicies] = tt.body
+			doc, findings := Validate(writeDir(t, files))
+			assert.Nil(t, doc)
+			require.True(t, HasErrors(findings), "findings: %s", findingStrings(findings))
+			out := findingStrings(findings)
+			assert.Contains(t, out, tt.want)
+			assert.Contains(t, out, "role-first")
+			assert.NotContains(t, out, "unknown field", "the migration note replaces the strict-decode error")
+		})
+	}
+}
+
+// TestValidate_V2LayoutNotFlaggedAsLegacy: the detector must not misread a real
+// v2 document whose grant happens to nest a select/insert block.
+func TestValidate_V2LayoutNotFlaggedAsLegacy(t *testing.T) {
+	t.Parallel()
+	files := validFiles()
+	files[FilePolicies] = `{"default_role": "public", "tables": {"clicks": {"analyst": {` +
+		`"select": {"allow_columns": ["page"], "filter": {"region": {"_eq": "eu"}}},` +
+		`"insert": {"check": {"region": {"_eq": "eu"}}}}}}}`
+	files[FileRoles] = `{"roles": ["public", "analyst"]}`
+	doc, findings := Validate(writeDir(t, files))
+	require.NotNil(t, doc, "findings: %s", findingStrings(findings))
+	assert.NotContains(t, findingStrings(findings), "pre-v2")
+	require.NotNil(t, doc.Policy.Tables["clicks"]["analyst"].Select)
+	require.NotNil(t, doc.Policy.Tables["clicks"]["analyst"].Insert)
+	assert.Equal(t, []string{"page"}, doc.Policy.Tables["clicks"]["analyst"].Select.AllowColumns)
 }
 
 // TestValidate_MultipleFaults pins the one-pass contract head-on: independent
@@ -410,7 +466,7 @@ func TestValidate_MultipleFaults(t *testing.T) {
 func TestValidate_ErrorAndWarningMix(t *testing.T) {
 	t.Parallel()
 	files := validFiles()
-	files[FilePolicies] = `{"default_role": "public", "tables": {"clicks": {"select": {"admin": {}}}}}` // warning: admin grant is dead config
+	files[FilePolicies] = `{"default_role": "public", "tables": {"clicks": {"admin": {"select": {}}}}}` // warning: admin grant is dead config
 	files[FileConfig] = configJSON(`{"schema": {"refresh_interval": 0}}`)                               // error: bounds violation
 	doc, findings := Validate(writeDir(t, files))
 	assert.Nil(t, doc, "one error rejects the directory even when the rest only warns")

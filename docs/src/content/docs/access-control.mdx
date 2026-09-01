@@ -102,19 +102,19 @@ A policy is a JSON document — the settings directory's [`policies.json`](/sett
 | `admin_role` | string | Role granted full, unrestricted access and the `/v1/ops/*` gate. Optional; defaults to `"admin"`. |
 | `tables` | map | Per-table permissions, keyed by ClickHouse table name. |
 
-Each table entry holds permissions for two operations — `select` (reads) and `insert` (writes) — and each operation maps **role → permissions**:
+Each table entry maps **role → grant**, and each grant states what that role may do with two optional blocks — `select` (reads) and `insert` (writes):
 
 ```json
 {
   "tables": {
     "events": {
-      "select": {
-        "viewer": {
+      "viewer": {
+        "select": {
           "allow_columns": ["page", "score"]
         }
       },
-      "insert": {
-        "writer": {
+      "writer": {
+        "insert": {
           "allow_columns": ["page", "score", "user_id"]
         }
       }
@@ -123,7 +123,51 @@ Each table entry holds permissions for two operations — `select` (reads) and `
 }
 ```
 
-A role with no entry under the operation it is attempting is denied. The set of permission fields below applies to both `select` and `insert` entries, though some (row `filter`, aggregations, limits) only take effect on the read path and some (`check`) only on the write path — the [enforcement table](#where-each-rule-is-enforced) maps which is which.
+A role with no entry on the table — or an entry whose block for the operation it is attempting is absent — is denied. `select` and `insert` carry genuinely different fields: row `filter`, aggregation rules, and the resource limits are read-side only; `check` is write-side only; `allow_columns`/`deny_columns` appear on both. The [enforcement table](#where-each-rule-is-enforced) maps which is which, and the [field reference](#field-reference) lists each block's fields.
+
+**Upgrading?** Earlier versions nested the other way round — `tables.<table>.select.<role>`. A file in the old shape is rejected at validation with a pointer to [Migrating from the operation-first layout](#migrating-from-the-operation-first-layout), which has a before/after.
+
+### Migrating from the operation-first layout
+
+Before this release a table entry was keyed by operation first, with the roles underneath:
+
+```json
+{
+  "tables": {
+    "events": {
+      "select": {
+        "viewer": { "allow_columns": ["page", "score"] },
+        "analyst": { "allow_columns": ["*"], "max_rows": 1000 }
+      },
+      "insert": {
+        "viewer": { "allow_columns": ["*"], "check": { "user_id": { "_eq": "{{ jwt.sub }}" } } }
+      }
+    }
+  }
+}
+```
+
+Now the role comes first and the operations sit inside its grant. The permission fields themselves are unchanged — only the nesting moves, and each role that appeared under both operations collapses into one entry:
+
+```json
+{
+  "tables": {
+    "events": {
+      "viewer": {
+        "select": { "allow_columns": ["page", "score"] },
+        "insert": { "allow_columns": ["*"], "check": { "user_id": { "_eq": "{{ jwt.sub }}" } } }
+      },
+      "analyst": {
+        "select": { "allow_columns": ["*"], "max_rows": 1000 }
+      }
+    }
+  }
+}
+```
+
+Two fields moved sides in the process, matching where they were ever enforced: `filter`, `allowed_aggregations`, `denied_aggregations`, and the four `max_*` limits are accepted only under `select`; `check` only under `insert`. A file that puts one on the wrong side now fails validation instead of being silently ignored.
+
+There is no automatic conversion — the file is the source of truth and rewriting it in place would be a write path WaveHouse deliberately does not have. Convert `policies.json` by hand (or with the mapping above), then check it with `wavehouse validate` before restarting. A document still in the old layout is reported as one clear error naming the table and operation, not a decode failure.
 
 ## Column permissions
 
@@ -131,8 +175,8 @@ A role with no entry under the operation it is attempting is denied. The set of 
 
 ```json
 {
-  "select": {
-    "viewer": {
+  "viewer": {
+    "select": {
       "allow_columns": ["page", "button", "received_timestamp"],
       "deny_columns": ["user_email", "ip_address"]
     }
@@ -154,8 +198,8 @@ On a structured query (`POST /v1/query?table={table}`) the allowlist is a **hard
 
 ```json
 {
-  "select": {
-    "viewer": {
+  "viewer": {
+    "select": {
       "filter": {
         "tenant_id": {
           "_eq": "{{ jwt.app_metadata.tenant_id }}"
@@ -203,8 +247,8 @@ Row filters apply on the structured-query path and, per subscriber, on the live 
 
 ```json
 {
-  "insert": {
-    "writer": {
+  "writer": {
+    "insert": {
       "allow_columns": ["page", "score", "user_id", "tenant_id"],
       "check": {
         "user_id": {
@@ -234,11 +278,13 @@ This pairs naturally with a matching `filter` on the `select` side: `check` stam
 
 ```json
 {
-  "select": {
-    "viewer": {
+  "viewer": {
+    "select": {
       "denied_aggregations": ["quantile", "median"]
-    },
-    "analyst": {
+    }
+  },
+  "analyst": {
+    "select": {
       "allowed_aggregations": ["count", "sum", "avg"]
     }
   }
@@ -267,8 +313,8 @@ Four fields cap the cost of a single structured query for this role. All must be
 
 ```json
 {
-  "select": {
-    "viewer": {
+  "viewer": {
+    "select": {
       "max_rows": 1000,
       "max_execution_time": "5s",
       "max_rows_to_read": 50000000,
@@ -365,8 +411,8 @@ A multi-tenant analytics deployment: anonymous callers get nothing, `viewer` rea
   "default_role": "",
   "tables": {
     "events": {
-      "select": {
-        "viewer": {
+      "viewer": {
+        "select": {
           "deny_columns": ["user_email", "ip_address"],
           "filter": {
             "tenant_id": {
@@ -378,8 +424,8 @@ A multi-tenant analytics deployment: anonymous callers get nothing, `viewer` rea
           "max_execution_time": "5s"
         }
       },
-      "insert": {
-        "writer": {
+      "writer": {
+        "insert": {
           "allow_columns": ["event_name", "page", "score", "user_id", "tenant_id"],
           "check": {
             "user_id": {
@@ -405,7 +451,7 @@ With this policy adopted:
 
 ## Field reference
 
-Per-role permissions (`tables.<table>.select.<role>` and `.insert.<role>`):
+Per-role permissions (`tables.<table>.<role>.select` and `.insert`):
 
 | Field | Type | Applies to | Description |
 | ----- | ---- | ---------- | ----------- |

@@ -74,18 +74,16 @@ describe("Admin", () => {
       admin_role: "admin",
       tables: {
         [T.clicks]: {
-          select: {
-            viewer: {
+          viewer: {
+            select: {
               allow_columns: ["page", "country", "duration_ms", "received_timestamp"],
               filter: { country: { _eq: "{{ jwt.country }}" } },
             },
-            admin: {
-              allow_columns: ["*"] as string[],
-            },
+            insert: { allow_columns: ["*"] as string[] },
           },
-          insert: {
-            viewer: { allow_columns: ["*"] as string[] },
-            admin: { allow_columns: ["*"] as string[] },
+          admin: {
+            select: { allow_columns: ["*"] as string[] },
+            insert: { allow_columns: ["*"] as string[] },
           },
         },
       },

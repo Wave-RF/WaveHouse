@@ -2,15 +2,13 @@
   "default_role": "public",
   "tables": {
     "clicks": {
-      "select": {
-        "public": {
+      "public": {
+        "select": {
           "allow_columns": [
             "*"
           ]
-        }
-      },
-      "insert": {
-        "public": {
+        },
+        "insert": {
           "allow_columns": [
             "*"
           ]
@@ -18,15 +16,13 @@
       }
     },
     "events": {
-      "select": {
-        "public": {
+      "public": {
+        "select": {
           "allow_columns": [
             "*"
           ]
-        }
-      },
-      "insert": {
-        "public": {
+        },
+        "insert": {
           "allow_columns": [
             "*"
           ]

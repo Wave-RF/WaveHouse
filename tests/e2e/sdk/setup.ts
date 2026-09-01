@@ -72,18 +72,19 @@ async function refreshSchema(): Promise<void> {
 }
 
 async function bootstrapTestPolicy(): Promise<void> {
-  const rolePerms = (extra?: Record<string, unknown>) => ({
-    viewer: { allow_columns: ["*"], ...extra },
-    admin: { allow_columns: ["*"], ...extra },
+  const grant = () => ({
+    select: { allow_columns: ["*"] as string[] },
+    insert: { allow_columns: ["*"] as string[] },
   });
-  // Permissive select+insert for every generated table. Tests that exercise
+  // Permissive select+insert for every generated table, in the role-first
+  // policy layout (tables.<table>.<role>.<operation>). Tests that exercise
   // policy enforcement snapshot this baseline, mutate their own table's entry,
   // and restore it (the suite runs sequentially, so the snapshot/restore is
   // race-free — see tables.ts). Written to the run's settings directory and
   // adopted via POST /v1/ops/settings/reload — files are the only write path.
-  const tables: Record<string, { select: unknown; insert: unknown }> = {};
+  const tables: Record<string, Record<string, ReturnType<typeof grant>>> = {};
   for (const { name } of allTableSpecs()) {
-    tables[name] = { select: rolePerms(), insert: rolePerms() };
+    tables[name] = { viewer: grant(), admin: grant() };
   }
   await setPolicy({ tables } as Policy);
 }

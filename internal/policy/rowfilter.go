@@ -12,7 +12,7 @@ import (
 // that subscriber's claims (filter present). A nil receiver (no policy applies) has
 // no filter.
 func (p *ResolvedPermissions) HasRowFilter() bool {
-	return p != nil && len(p.rowFilter) > 0
+	return p != nil && len(p.Select.rowFilter) > 0
 }
 
 // maxTimeOperandChars is the same O(1) pre-gate for timestamp operands: the
@@ -118,7 +118,7 @@ func (p *ResolvedPermissions) RowVisible(row map[string]any, cols map[string]Col
 	if !p.Allowed {
 		return false
 	}
-	for _, pred := range p.rowFilter {
+	for _, pred := range p.Select.rowFilter {
 		if !pred.matches(row, cols[pred.Column]) {
 			return false
 		}
@@ -128,7 +128,7 @@ func (p *ResolvedPermissions) RowVisible(row map[string]any, cols map[string]Col
 
 // matches evaluates one predicate against the row, failing closed (false) whenever
 // the value is absent or can't be compared as required.
-func (pred resolvedPredicate) matches(row map[string]any, spec ColumnSpec) bool {
+func (pred ResolvedPredicate) matches(row map[string]any, spec ColumnSpec) bool {
 	// No values ⇒ matches nothing: an empty/unresolvable "in" set, or a scalar
 	// whose constant was unrenderable — the in-memory twin of the `1 = 0`
 	// predicatesToSQL emits for the same cases.
