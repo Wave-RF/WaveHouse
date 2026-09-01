@@ -249,6 +249,7 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"operator-less filter", FilePolicies, `{"tables": {"clicks": {"select": {"analyst": {"filter": {"region": {}}}}}}}`, "sets no operator"},
 		{"operator-less check", FilePolicies, `{"tables": {"clicks": {"insert": {"analyst": {"check": {"region": {}}}}}}}`, "sets no operator"},
 		{"filter under insert", FilePolicies, `{"tables": {"clicks": {"insert": {"analyst": {"filter": {"region": {"_eq": "x"}}}}}}}`, "no effect on insert"},
+		{"check under select", FilePolicies, `{"tables": {"clicks": {"select": {"analyst": {"check": {"region": {"_eq": "x"}}}}}}}`, "no effect on select"},
 		{"unknown filter operator", FilePolicies, `{"tables": {"clicks": {"select": {"analyst": {"filter": {"region": {"_like": "x"}}}}}}}`, "unknown field"},
 		{"empty grant role", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"select": {"": {}}}}}`, "grant role must not be empty"},
 		{"empty allowlist role", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "allowed_roles": [""]}]}`, "allowed_roles[0]: role must not be empty"},

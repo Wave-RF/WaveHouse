@@ -123,7 +123,7 @@ Each table entry holds permissions for two operations — `select` (reads) and `
 }
 ```
 
-A role with no entry under the operation it is attempting is denied. The set of permission fields below applies to both `select` and `insert` entries, though some (row `filter`, aggregations, limits) only take effect on the read path and some (`check`) only on the write path — the [enforcement table](#where-each-rule-is-enforced) maps which is which.
+A role with no entry under the operation it is attempting is denied. Two fields are operation-specific and **rejected when the policy is validated** if they appear under the wrong one: row `filter` belongs to `select` entries and `check` to `insert` entries. The rest of the permission fields are accepted under both, though aggregations and the `max_*` limits only take effect on the read path — the [enforcement table](#where-each-rule-is-enforced) maps which is which.
 
 ## Column permissions
 
@@ -201,7 +201,7 @@ Row filters apply on the structured-query path and, per subscriber, on the live 
 
 ## Insert checks
 
-`check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It supports `_eq` (the inserted value must equal the claim) and `_in` (it must be one of a claim-derived set); the comparison operators `_neq`/`_gt`/`_lt` have no insert-time meaning and are **rejected when the policy is validated** (the same boundary as malformed templates above), as is setting both `_eq` and `_in` on one column (use exactly one) — or neither, since an operator-less entry would constrain nothing.
+`check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It supports `_eq` (the inserted value must equal the claim) and `_in` (it must be one of a claim-derived set); the comparison operators `_neq`/`_gt`/`_lt` have no insert-time meaning and are **rejected when the policy is validated** (the same boundary as malformed templates above), as is setting both `_eq` and `_in` on one column (use exactly one) — or neither, since an operator-less entry would constrain nothing. And `check` belongs to `insert` grants only: under a `select` grant nothing would read it, so validation rejects that too — the mirror of the `filter`-under-`insert` rejection.
 
 ```json
 {
@@ -326,13 +326,13 @@ The policy is the settings directory's `policies.json`, and the files are the on
 
 The policy has no HTTP surface — the file is where it is read, edited, and validated.
 
-Validation decodes the document strictly — an unknown or misspelled key (`eq` for `_eq`) or a duplicate key is rejected, never silently dropped as "no rule" — and rejects rules the engine would not honor: empty role names, negative limits, [malformed claim templates](#jwt-claim-templating), a `filter` or `check` entry that sets no operator (it would constrain nothing), `filter` under an `insert` grant (inserts are constrained by `check`), and unsupported `check` operators — `_neq`/`_gt`/`_lt`, or `_eq` and `_in` together on one column (but it intentionally allows `default_role == admin_role`, warning instead). `wavehouse validate` runs these checks on the whole directory — including the cross-file role references — so gate a policy change with it before the edit reaches a running instance; a reload runs the same validation and rejects a bad directory, keeping the previous good policy in effect.
+Validation decodes the document strictly — an unknown or misspelled key (`eq` for `_eq`) or a duplicate key is rejected, never silently dropped as "no rule" — and rejects rules the engine would not honor: empty role names, negative limits, [malformed claim templates](#jwt-claim-templating), a `filter` or `check` entry that sets no operator (it would constrain nothing), `filter` under an `insert` grant (inserts are constrained by `check`), `check` under a `select` grant (visible rows are constrained by `filter`), and unsupported `check` operators — `_neq`/`_gt`/`_lt`, or `_eq` and `_in` together on one column (but it intentionally allows `default_role == admin_role`, warning instead). `wavehouse validate` runs these checks on the whole directory — including the cross-file role references — so gate a policy change with it before the edit reaches a running instance; a reload runs the same validation and rejects a bad directory, keeping the previous good policy in effect.
 
 ```bash
-# Check the edited settings directory before the server sees it:
+# Gate the change in CI, or on the copy you're about to deploy:
 wavehouse validate ./settings
 
-# Then let the watcher adopt the change, or force it:
+# On the running instance: the watcher picks the edit up, or force it:
 curl -X POST http://localhost:8080/v1/ops/settings/reload \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```

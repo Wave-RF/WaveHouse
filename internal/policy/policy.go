@@ -661,6 +661,9 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 	if op == "insert" && len(perms.Filter) > 0 {
 		return fmt.Errorf("table %q, op %q, role %q: filter has no effect on insert — use check to constrain inserted values", table, op, role)
 	}
+	if op == "select" && len(perms.Check) > 0 {
+		return fmt.Errorf("table %q, op %q, role %q: check has no effect on select — use filter to constrain visible rows", table, op, role)
+	}
 	// Filter and check column names are interpolated into SQL (backtick-quoted) at
 	// query time, so a '?' in one would shift clickhouse-go's positional value
 	// binding. Refuse such a policy at write time, mirroring the query builder's

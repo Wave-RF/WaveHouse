@@ -99,13 +99,9 @@ describe("Admin", () => {
         tables: { ...(baselinePolicy?.tables ?? {}), ...testPolicy.tables },
       });
 
-      // setPolicy throws unless the reload reported adopted, so reaching this
-      // line means the server took the document; the file on disk IS the
-      // adopted policy (there is no HTTP read of it).
-      expect(readPolicyFile()).toMatchObject({
-        default_role: "viewer",
-        admin_role: "admin",
-      });
+      // setPolicy throws unless the reload reported adopted — that IS the
+      // assertion. There is no HTTP read of the policy, and reading back the
+      // file we just wrote would only exercise the filesystem.
     });
   });
 

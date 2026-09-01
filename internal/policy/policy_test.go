@@ -663,6 +663,23 @@ func TestValidate(t *testing.T) {
 			wantMsg: "filter has no effect on insert",
 		},
 		{
+			// The mirror, and the fail-open direction: the author believes reads
+			// are row-scoped, but nothing on the select/stream paths reads a
+			// check entry — every viewer would see every row.
+			name: "check under select grant rejected",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						Select: map[string]RolePermissions{
+							"viewer": {Check: map[string]Filter{"tenant_id": {Eq: &tmpl}}},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			wantMsg: "check has no effect on select",
+		},
+		{
 			name:    "nil policy",
 			policy:  nil,
 			wantErr: true,
