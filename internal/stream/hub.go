@@ -411,8 +411,16 @@ func (h *Hub) ReplayProjector(role string, sub *Subscriber) func(raw []byte) []F
 	// lastSchema. Replay writes straight to the socket while live events queue
 	// behind it, so sharing the state would let a live event's announcement
 	// claim the slot and leave a replayed row ahead of it with nothing to zip
-	// against. Announcing independently costs at most one redundant schema
-	// frame per connection, which a client simply re-records.
+	// against.
+	//
+	// KNOWN LIMITATION, deferred to the schema-versioning work: the two states
+	// are not reconciled when they disagree. If the table's columns change while
+	// a client is connected AND that client gap-fills across the change, replay
+	// can leave the client's last-announced list older than the one the live
+	// path already recorded at subscribe time — so live rows after the replay
+	// arrive with no fresh announcement until the next drift or a reconnect. The
+	// client does not mislabel them: a row whose length disagrees with its list
+	// is dropped, not guessed at. The cost is availability, not correctness.
 	lastSig := ""
 	return func(raw []byte) []Frame {
 		ev := newEventView(raw)

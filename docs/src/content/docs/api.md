@@ -597,6 +597,8 @@ id: 2026-03-24T12:00:01.456Z
 data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","row":["/pricing",null]}
 ```
 
+If a table's columns change while a client is connected *and* that client gap-fill-replays across the change, live rows after the replay may not be preceded by a fresh `event: schema` frame until the columns next change or the client reconnects — a known limitation deferred to the schema-versioning work. A consumer that drops a row whose length disagrees with its last announced list (as the SDK does) loses rows there rather than mislabeling them.
+
 A raw consumer must keep the most recent announced column list and zip each `row` against it; a value the record did not carry arrives as `null` in its slot rather than being omitted, so positions never shift. The TypeScript SDK does this for you and still yields row objects — `.stream()` and `.liveQuery()` are unchanged. The announcement is **per connection**, so a client that joins mid-stream is told the columns before it is sent a row, and a reconnect is told again.
 
 Each SSE connection is bound to a single `?table=`; to consume multiple tables, open one connection per table.

@@ -15,7 +15,7 @@ const defaultSubscriberQueue = 64
 // frame dropped by a full queue is never counted as sent. Producers (the keepalive
 // wheel, the event Hub) fan frames in with Send; the handler writes Data verbatim.
 type Frame struct {
-	Kind string // a Kind* constant: keepalive, event, or replay
+	Kind string // a Kind* constant: keepalive, schema, event, or replay
 	Data []byte // the exact bytes written to the client
 }
 
@@ -50,10 +50,19 @@ type Subscriber struct {
 	// each call site remembering to count. Nil-safe (nil in tests).
 	metric *Metrics
 
-	// schemaMu guards lastSchema. Both the live fan-out (one goroutine per
-	// delivered message, which may run concurrently) and this connection's own
-	// replay loop record against it, so the check-and-set must be atomic: two
-	// racing events must not both decide they are the one announcing the columns.
+	// schemaMu guards lastSchema against the connection's own handler goroutine,
+	// which reads nothing here but may run alongside the fan-out.
+	//
+	// It does NOT make Hub.deliver's check→send→record sequence atomic, and
+	// deliver does not need it to be: Broadcast runs on ONE goroutine — the
+	// single jetstream Consume callback the hub bridge registers in
+	// cmd/wavehouse/main.go, invoked inline per message — so no two events race
+	// to announce the same connection's columns. A future change that fans
+	// Broadcast out across goroutines must hold a lock across that whole
+	// sequence, or two events will both send an announcement (harmless) while a
+	// third slips a row between a check and its record (not harmless: the client
+	// zips it against the previous list). Replay does not touch this field at
+	// all — it tracks drift in its own closure; see Hub.ReplayProjector.
 	schemaMu sync.Mutex
 	// lastSchema is the signature of the column list most recently announced to
 	// this connection ("" ⇒ none yet). Rows travel positionally, so a client that

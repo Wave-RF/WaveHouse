@@ -1254,7 +1254,8 @@ func TestIngest_JSONArray_AllValid(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 
-	// A bare JSON array with no Content-Type must be accepted as a batch.
+	// A JSON array declared as application/json is a batch: within the JSON
+	// family the body's first byte picks array-vs-object.
 	req := ingestRequest(t, "clicks", []map[string]any{
 		{"page": "/a", "count": 1},
 		{"page": "/b", "count": 2},
@@ -1298,8 +1299,9 @@ func TestIngest_JSONArray_WithJSONContentType(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 
-	// Content-Type: application/json must NOT force the single-object path when
-	// the body is an array — the sniffer wins.
+	// Within the declared JSON family the body picks arity: an array body is a
+	// batch, not a single object. (The header is authoritative about the FORMAT;
+	// it does not claim the arity.)
 	req := rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"},{"page":"/b"}]`)
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
@@ -1554,8 +1556,9 @@ func TestIngest_BodyCap_413(t *testing.T) {
 		{name: "single object", ct: "application/json", body: big, cap: 50},
 		{name: "json array mid-element", ct: "application/json", body: "[" + big + "]", cap: 50},
 		// Cap lands exactly between elements (just past '[' + the first element,
-		// before the comma) so the overflow surfaces at arrayReader's
-		// More()/Token boundary — the path that used to swallow the read error
+		// before the comma). Since the body is read up front the overflow now
+		// surfaces there rather than at arrayReader's More()/Token boundary, but
+		// the case is kept: it is the shape that used to swallow the read error
 		// and silently truncate to a partial 200 instead of 413.
 		{name: "json array between elements", ct: "application/json", body: "[" + elem + "," + elem + "]", cap: int64(1 + len(elem))},
 		// NDJSON over cap surfaces via the scanner's Err() (MaxBytesError).

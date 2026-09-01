@@ -434,9 +434,12 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 	}
 }
 
-// groupByColumns splits a table's batch into runs of identical column lists,
-// preserving arrival order both within a group and across groups. Returns the
-// input as a single group in the common case where every row agrees.
+// groupByColumns splits a table's batch by column list. Arrival order is
+// preserved WITHIN each group; the groups themselves are ordered by where their
+// column list first appeared, so a row can be inserted before an earlier row
+// that used a different list. Returns the input as a single group in the common
+// case where every row agrees, which is the only case where the batch's arrival
+// order survives end to end.
 func groupByColumns(msgs []parsedMsg) [][]parsedMsg {
 	groups := make([][]parsedMsg, 0, 1)
 	index := make(map[string]int, 1)
