@@ -75,6 +75,11 @@ describe("TableRef", () => {
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toContain("/v1/ingest?table=clicks");
     expect(init.method).toBe("POST");
+    // Declared explicitly at the call site, not inherited from request()'s
+    // default. Unpinned, that line is deletable in a refactor with every test
+    // green — against a server that now hard-415s an undeclared type. The
+    // NDJSON paths already pin theirs.
+    expect(init.headers["Content-Type"]).toBe("application/json");
     expect(JSON.parse(init.body)).toEqual({ page: "/home", score: 42 });
   });
 

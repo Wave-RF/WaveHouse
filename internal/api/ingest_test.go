@@ -1143,6 +1143,26 @@ func TestIngest_NDJSON_ErrorsTruncated(t *testing.T) {
 	assert.Empty(t, pub.Messages)
 }
 
+// wantAcceptedTypes is the accepted-media-type list exactly as api.md's two 415
+// rows quote it. Deliberately a literal and not strings.Join(supportedContentTypes,
+// ", "): the point is to pin the advertised list against the docs, and an
+// expectation derived from the slice under test cannot do that.
+const wantAcceptedTypes = "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines"
+
+// TestAcceptedTypesAreAllResolvable is the inverse of the 415 assertions: those
+// pin that the advertised list does not shrink below what is accepted, this pins
+// that it does not grow beyond it. Without it the message could advertise a type
+// ingestFormatOne refuses, and every other test would stay green.
+func TestAcceptedTypesAreAllResolvable(t *testing.T) {
+	t.Parallel()
+	for _, ct := range supportedContentTypes {
+		_, err := resolveContentType([]string{ct})
+		require.NoError(t, err, "advertised type %q must resolve", ct)
+	}
+	assert.Equal(t, wantAcceptedTypes, strings.Join(supportedContentTypes, ", "),
+		"the advertised list and the accepted set must stay in step, and match api.md")
+}
+
 // TestIngestFormat: the declared Content-Type — and only it — decides the
 // format. Every accepted media type maps to its family; anything else, including
 // a missing header, is refused rather than guessed at.
@@ -1288,17 +1308,14 @@ func TestIngest_UndeclaredOrUnsupportedContentType_415(t *testing.T) {
 			testutil.AssertJSONErrorResponse(t, w)
 			assert.Contains(t, jsonErrorMessage(t, w), tt.wantPrefix,
 				"the 415 body must echo what was declared, or say nothing was")
-			// The body must name every accepted type, in order. Asserting the
-			// joined list rather than looping: `application/json` and
-			// `application/jsonl` are both SUBSTRINGS of `application/jsonlines`,
-			// so a per-entry Contains loop can never fail for those two while the
-			// longest entry renders — dropping `application/json`, the type api.md
-			// quotes first in both 415 rows, from the message shipped green.
-			//
-			// Note what this still does not pin: an alias removed from
-			// supportedContentTypes itself, since the assertion is built from the
-			// same slice. It pins the message against the list.
-			assert.Contains(t, jsonErrorMessage(t, w), strings.Join(supportedContentTypes, ", "),
+			// The body must name every accepted type, in order — asserted against
+			// a LITERAL, the same list api.md's 415 rows quote. An expectation
+			// built from supportedContentTypes moves with the thing it is meant
+			// to pin: removing an alias, or reordering the slice, changes the
+			// message and the expectation together and ships green. A per-entry
+			// Contains loop was weaker still, since `application/json` and
+			// `application/jsonl` are SUBSTRINGS of `application/jsonlines`.
+			assert.Contains(t, jsonErrorMessage(t, w), wantAcceptedTypes,
 				"the 415 body must name every accepted type, in order")
 			assert.Empty(t, pub.Messages, "a refused request must not publish")
 		})
