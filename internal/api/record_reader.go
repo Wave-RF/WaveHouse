@@ -219,13 +219,22 @@ func (l *lineReader) Next() (map[string]any, error) {
 // ingestFormat resolves a declared Content-Type to the format ingest will read
 // the body as. A missing, empty, or unrecognized type is errUnsupportedContentType
 // (a 415): the format is the client's declaration, so there is nothing to fall
-// back to. Parameters such as "; charset=utf-8" are ignored.
+// back to.
+//
+// Parameters are ignored, and a malformed one does not cost the request. Go
+// reports "application/json; charset" (a parameter with no value), "; boundary="
+// and a trailing ";" as ErrInvalidMediaParameter *together with* a usable media
+// type, so refusing on any error would 415 requests that this endpoint read fine
+// before the header became authoritative. A type Go cannot resolve to a media
+// type at all still fails: "application/json, application/json" — what a proxy
+// produces when it joins two Content-Type headers — is a different error and
+// yields an empty media type, and there is no single declaration to honor.
 func ingestFormat(ct string) (IngestFormat, error) {
 	if strings.TrimSpace(ct) == "" {
 		return FormatJSON, errUnsupportedContentType
 	}
 	mediaType, _, err := mime.ParseMediaType(ct)
-	if err != nil {
+	if err != nil && !errors.Is(err, mime.ErrInvalidMediaParameter) {
 		return FormatJSON, errUnsupportedContentType
 	}
 	switch mediaType {

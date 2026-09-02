@@ -1161,11 +1161,22 @@ func TestIngestFormat(t *testing.T) {
 		{ct: "application/ndjson", want: FormatNDJSON},
 		{ct: "application/jsonl", want: FormatNDJSON},
 		{ct: "application/jsonlines", want: FormatNDJSON},
+		// A malformed *parameter* still leaves a usable media type, and these
+		// all worked before the header became authoritative — refusing them
+		// would be a regression, not the intended tightening.
+		{ct: "application/json; charset", want: FormatJSON},
+		{ct: "application/json; boundary=", want: FormatJSON},
+		{ct: "application/json;;", want: FormatJSON},
+		{ct: `application/json; charset="unterminated`, want: FormatJSON},
+		{ct: "application/x-ndjson;charset", want: FormatNDJSON},
 		{ct: "text/plain", wantErr: true},
 		{ct: "text/csv", wantErr: true},
 		{ct: "", wantErr: true},
 		{ct: "   ", wantErr: true},
 		{ct: "???not-a-media-type", wantErr: true},
+		// No usable media type at all: a proxy joining two Content-Type headers
+		// leaves two declarations and no way to pick one.
+		{ct: "application/json, application/json", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.ct, func(t *testing.T) {
