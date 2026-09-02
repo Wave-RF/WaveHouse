@@ -1205,9 +1205,10 @@ func TestIngestFormat(t *testing.T) {
 		{ct: "application/json; charset=utf-8, application/x-ndjson", wantErr: true},
 		{ct: "application/x-ndjson; charset=utf-8, application/json", wantErr: true},
 		{ct: "application/json, text/csv", wantErr: true},
-		// A comma inside a quoted parameter value splits into parts that
-		// disagree, so it is still refused — the deliberate price, pinned so a
-		// future quoted-string-aware splitter cannot flip it with the suite green.
+		// This one's quoted comma splits into parts that disagree, so it is
+		// refused — the deliberate price of not parsing quoted strings, pinned so
+		// a future quoted-string-aware splitter cannot flip it with the suite
+		// green.
 		{ct: `application/json; foo="x,y"`, wantErr: true},
 		// ...but "any quoted comma is refused" would be the wrong rule to state:
 		// this one splits into parts that AGREE, so it is accepted. Pinned so the
