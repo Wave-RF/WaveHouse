@@ -226,7 +226,7 @@ func (l *lineReader) Next() (map[string]any, error) {
 // refuse a request that names a type this endpoint reads. mime.ParseMediaType
 // refuses a parameter with no value ("; charset"), an empty one (";;"), an
 // unterminated quoted value, and a duplicate name ("; charset=a; charset=b") —
-// every one of which this endpoint read fine before the header became
+// every one of which this endpoint accepted before the header became
 // authoritative, and none of which changes what the body is.
 //
 // A comma is the exception, and it is refused before anything else: it means two

@@ -1187,6 +1187,10 @@ func TestIngestFormat(t *testing.T) {
 		{ct: "application/json; charset=utf-8, application/json", wantErr: true},
 		{ct: "application/json; charset=utf-8, application/x-ndjson", wantErr: true},
 		{ct: "application/x-ndjson; charset=utf-8, application/json", wantErr: true},
+		// The deliberate price of a plain comma check: a comma inside a quoted
+		// parameter value is refused too. Pinned so a future "smarter,
+		// quoted-string-aware" guard cannot flip it silently with the suite green.
+		{ct: `application/json; foo="x,y"`, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.ct, func(t *testing.T) {
@@ -1277,6 +1281,49 @@ func rawIngestRequest(t *testing.T, table, contentType, body string) *http.Reque
 		req.Header.Set("Content-Type", contentType)
 	}
 	return req
+}
+
+// TestIngest_DuplicateContentTypeHeaders: Go keeps repeated header LINES
+// separately and Header.Get returns only the first, so a request declaring both
+// JSON and NDJSON would otherwise take the JSON path silently — and an NDJSON
+// body read as a single object ingests record one and discards the rest,
+// answering 200. Same silent truncation the comma guard prevents, reached by the
+// spelling curl and many proxies actually produce. Disagreement is refused;
+// repeating an identical declaration still works, so the guard cannot reject a
+// request that was never ambiguous.
+func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
+	t.Parallel()
+
+	const ndjson = "{\"page\":\"/a\"}\n{\"page\":\"/b\"}\n"
+
+	t.Run("disagreeing declarations are refused", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		req := rawIngestRequest(t, "clicks", "application/json", ndjson)
+		req.Header.Add("Content-Type", "application/x-ndjson")
+
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+		testutil.AssertJSONErrorResponse(t, w)
+		assert.Empty(t, pub.Messages, "nothing may be ingested from an ambiguous declaration")
+	})
+
+	t.Run("an identical declaration repeated is not ambiguous", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		req := rawIngestRequest(t, "clicks", "application/x-ndjson", ndjson)
+		req.Header.Add("Content-Type", "application/x-ndjson")
+
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Len(t, pub.Messages, 2, "both NDJSON records ride through")
+	})
 }
 
 func TestIngest_JSONArray_AllValid(t *testing.T) {
