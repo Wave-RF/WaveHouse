@@ -105,6 +105,10 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 	if err != nil {
 		return nil, fmt.Errorf("building WHERE clause: %w", err)
 	}
+	// perms is whatever the caller resolved; Build has one caller and it resolves
+	// for "select", so Select is the resolved side. An insert-resolved grant would
+	// present an empty Select here and silently drop the row filter — see
+	// ResolvedPermissions on why the unresolved side reads as unrestricted.
 	if perms != nil && perms.Select.WhereClause != "" {
 		whereParts = append([]string{"(" + perms.Select.WhereClause + ")"}, whereParts...)
 		params = append(params, perms.Select.WhereParams...)
