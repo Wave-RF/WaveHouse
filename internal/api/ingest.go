@@ -198,7 +198,8 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// happened to emit.
 	values := r.Header.Values("Content-Type")
 	contentType := r.Header.Get("Content-Type")
-	if _, err := resolveContentType(values); err != nil {
+	format, err := resolveContentType(values)
+	if err != nil {
 		conflicting := errors.Is(err, errConflictingContentType)
 		if conflicting {
 			// Logged, unlike the plain unsupported case: this is the one refusal
@@ -215,9 +216,12 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The declaration already resolved above, so the only error left here is an
-	// empty body.
-	rr, format, batch, err := newRecordReader(contentType, r.Body)
+	// The declaration is already resolved, and the resolved format — not the
+	// first header line — is what the reader is built from. Handing it
+	// `Header.Get` here would resolve a second time over one line, and a leading
+	// EMPTY line would then fail that second resolution while the set as a whole
+	// succeeded. The only error left is an empty body.
+	rr, batch, err := newRecordReader(format, r.Body)
 	if err != nil {
 		h.logger.ErrorContext(ctx, "empty ingest body", "table", table, "format", format.String())
 		writeJSONError(w, http.StatusBadRequest, emptyBodyMessage(format))

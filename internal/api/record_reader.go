@@ -313,30 +313,25 @@ func ingestFormatOne(ct string) (IngestFormat, error) {
 // body is read at all — and is FormatJSON alongside errUnsupportedContentType,
 // where nothing was declared to resolve. The caller is expected to have already
 // bounded body via http.MaxBytesReader.
-func newRecordReader(contentType string, body io.Reader) (rr recordReader, format IngestFormat, batch bool, err error) {
-	format, err = ingestFormat(contentType)
-	if err != nil {
-		return nil, format, false, err
-	}
-
+func newRecordReader(format IngestFormat, body io.Reader) (rr recordReader, batch bool, err error) {
 	br := bufio.NewReader(body)
 	first, perr := peekFirstNonSpace(br)
 	if perr != nil {
-		return nil, format, false, errEmptyBody
+		return nil, false, errEmptyBody
 	}
 
 	if format == FormatNDJSON {
 		sc := bufio.NewScanner(br)
 		sc.Buffer(make([]byte, 0, 64*1024), maxNDJSONLineBytes)
-		return &lineReader{sc: sc}, format, true, nil
+		return &lineReader{sc: sc}, true, nil
 	}
 
 	dec := json.NewDecoder(br)
 	dec.UseNumber()
 	if first == '[' {
-		return &arrayReader{dec: dec}, format, true, nil
+		return &arrayReader{dec: dec}, true, nil
 	}
-	return &objectReader{dec: dec}, format, false, nil
+	return &objectReader{dec: dec}, false, nil
 }
 
 // peekFirstNonSpace returns the first non-whitespace byte of the body without
@@ -376,7 +371,8 @@ func emptyBodyMessage(format IngestFormat) string {
 // lines and a joined value describing the same disagreement now read alike.
 func contentTypeMessage(values []string, conflicting bool) string {
 	decls := declaredContentTypes(values)
-	accepted := "ingest requires one of " + strings.Join(supportedContentTypes, ", ")
+	list := strings.Join(supportedContentTypes, ", ")
+	accepted := "ingest requires one of " + list
 
 	quoted := make([]string, len(decls))
 	for i, d := range decls {
@@ -386,7 +382,7 @@ func contentTypeMessage(values []string, conflicting bool) string {
 
 	switch {
 	case conflicting:
-		return fmt.Sprintf("conflicting Content-Type declarations %s: ingest reads one format per request, and %s", joined, accepted)
+		return fmt.Sprintf("conflicting Content-Type declarations %s: ingest reads one format per request, and requires one of %s", joined, list)
 	case len(decls) == 0:
 		return "no Content-Type: " + accepted
 	default:

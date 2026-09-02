@@ -1505,19 +1505,41 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	// An empty second line is not a disagreement: the caller declared one type
 	// and nothing else. Refusing it would be an over-reject, and this spelling
 	// arrives on the wire from intermediaries that append a bare header.
-	t.Run("an empty second line is ignored", func(t *testing.T) {
-		t.Parallel()
-		pub := &testutil.MockPublisher{}
-		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-		req := rawIngestRequest(t, "clicks", "application/x-ndjson", ndjson)
-		req.Header.Add("Content-Type", "")
+	// Both orderings, and both empty spellings. Order matters here in a way it
+	// must not: with the empty line FIRST, `Header.Get` returns it, so anything
+	// that re-resolves the first line alone rather than the resolved format
+	// disagrees with the set-level answer — a request the whole set accepts would
+	// fail that second resolution and be reported as an empty body.
+	for name, empty := range map[string]string{"blank": "", "comma": ",", "spaces": "   "} {
+		t.Run("an empty second line is ignored ("+name+")", func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			req := rawIngestRequest(t, "clicks", "application/x-ndjson", ndjson)
+			req.Header.Add("Content-Type", empty)
 
-		w := httptest.NewRecorder()
-		h.Handle(w, req)
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
 
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.Len(t, pub.Messages, 2, "one real declaration plus nothing is not ambiguous")
-	})
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Len(t, pub.Messages, 2, "one real declaration plus nothing is not ambiguous")
+		})
+
+		t.Run("an empty FIRST line is ignored ("+name+")", func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			req := rawIngestRequest(t, "clicks", empty, ndjson)
+			req.Header.Add("Content-Type", "application/x-ndjson")
+
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+
+			assert.Equal(t, http.StatusOK, w.Code,
+				"the set declares NDJSON; which line arrived first must not change that")
+			assert.Len(t, pub.Messages, 2, "and it must be read as NDJSON, not as one JSON object")
+		})
+	}
 
 	// Two unsupported declarations AGREE — both resolve to (JSON, error) — so
 	// this is the unsupported path, not the conflict path. The message must name
@@ -1554,8 +1576,9 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
 		msg := jsonErrorMessage(t, w)
-		assert.Contains(t, msg, `conflicting Content-Type declarations "application/json", "application/x-ndjson"`)
-		assert.Contains(t, msg, "ingest requires one of", "the conflict message must still list what is accepted")
+		assert.Contains(t, msg, `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of `,
+			"the whole sentence is quoted in api.md's 415 tables, so all of it is contract")
+		assert.Contains(t, msg, "application/jsonlines", "the conflict message must still list what is accepted")
 		assert.Empty(t, pub.Messages)
 	})
 
