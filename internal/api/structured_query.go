@@ -182,6 +182,10 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
 		timeout := h.queryTimeout()
+		// Bare Select reads are safe here for the same reason as ingest.go's bare
+		// Insert read: this handler resolved the grant for "select" (above), so
+		// Select is the resolved side. See ResolvedPermissions for why the other
+		// side would read as unrestricted if it were consulted.
 		if perms.Select.MaxExecutionTime > 0 {
 			timeout = min(perms.Select.MaxExecutionTime.Duration(), timeout)
 		}

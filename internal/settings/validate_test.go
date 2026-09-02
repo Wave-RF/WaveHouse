@@ -446,6 +446,71 @@ func TestValidate_V2LayoutNotFlaggedAsLegacy(t *testing.T) {
 // problems in different files are all reported together — a syntax error in
 // one file must not suppress content or reference findings in another — and
 // exactly once, so the operator gets the whole list without noise.
+// TestValidate_RoleNamedAfterAnOperation_DecodesAsWritten pins the detector's
+// ACCEPT path end to end. Every other outcome is a rejection, so a mistake there
+// fails loudly; accepting is the only branch where getting it wrong changes
+// privileges silently — which is exactly what the withdrawn first attempt did
+// (it adopted a pre-v2 document as v2 and handed a role named `select` an INSERT
+// it never had). Declining to flag is therefore not enough to assert: check the
+// document decodes to the grant the file actually describes.
+func TestValidate_RoleNamedAfterAnOperation_DecodesAsWritten(t *testing.T) {
+	t.Parallel()
+
+	files := validFiles()
+	files[FileRoles] = `{"roles": ["select"]}`
+	files[FilePolicies] = `{"tables":{"clicks":{"select":{"select":{"allow_columns":["page"]}}}}}`
+	files[FilePipes] = `{}`
+	doc, findings := Validate(writeDir(t, files))
+
+	require.False(t, HasErrors(findings), "the readings agree, so this must adopt: %v", findingStrings(findings))
+	require.NotNil(t, doc)
+
+	grant, ok := doc.Policy.Tables["clicks"]["select"]
+	require.True(t, ok, "the grant must be keyed by the ROLE named select, not by the operation")
+	require.NotNil(t, grant.Select, "the inner `select` key is the operation — it must land on the select side")
+	assert.Equal(t, []string{"page"}, grant.Select.AllowColumns)
+	assert.Nil(t, grant.Insert, "nothing in the document grants insert; reading it as one would be the escalation")
+}
+
+// TestValidate_EmptyLegacyOperationBlock pins the exception both .mdx pages
+// document: an empty operation block carries no role names, so the layout
+// detector abstains and the strict decode reads it as a role literally named
+// `select` with neither side set. Which of the two outcomes an operator sees
+// depends on roles.json, and the docs claim both — so both are asserted here,
+// or the prose can drift away from the code.
+func TestValidate_EmptyLegacyOperationBlock(t *testing.T) {
+	t.Parallel()
+
+	const legacy = `{"tables":{"clicks":{"select":{}}}}`
+
+	t.Run("role select undeclared — the usual case, an error", func(t *testing.T) {
+		t.Parallel()
+		files := validFiles()
+		files[FileRoles] = `{"roles": ["viewer"]}`
+		files[FilePolicies] = legacy
+		files[FilePipes] = `{}`
+		doc, findings := Validate(writeDir(t, files))
+		require.True(t, HasErrors(findings))
+		assert.Nil(t, doc)
+		joined := findingStrings(findings)
+		assert.Contains(t, joined, `role "select" is not declared in roles.json`)
+		assert.NotContains(t, joined, "pre-v2 operation-first layout",
+			"an empty block gives the detector nothing to go on — it must abstain, not claim the file is legacy")
+	})
+
+	t.Run("role select declared — warns and adopts", func(t *testing.T) {
+		t.Parallel()
+		files := validFiles()
+		files[FileRoles] = `{"roles": ["select"]}`
+		files[FilePolicies] = legacy
+		files[FilePipes] = `{}`
+		doc, findings := Validate(writeDir(t, files))
+		require.False(t, HasErrors(findings), "%v", findingStrings(findings))
+		require.NotNil(t, doc, "the document adopts")
+		assert.Contains(t, findingStrings(findings), "grant sets neither select nor insert")
+	})
+}
+
 func TestValidate_MultipleFaults(t *testing.T) {
 	t.Parallel()
 	doc, findings := Validate(writeDir(t, map[string]string{
