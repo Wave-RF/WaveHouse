@@ -383,6 +383,12 @@ func (h *IngestHandler) processRecord(
 				}, nil
 			}
 		}
+		// Reading CheckClauses directly is the one place the `unresolved` marker
+		// cannot defend: a half-resolved grant would present an empty map and
+		// every check would vacuously pass. Unreachable today — Evaluate only
+		// returns Allowed with both sides resolved, and a denied grant never
+		// reaches here — but if that ever changes, this loop needs an explicit
+		// resolved check, not a nil guard.
 		for col, requiredVal := range perms.Insert.CheckClauses {
 			// A []any value is an _in check: the inserted value must be present and
 			// one of the allowed set. Unlike the scalar _eq case there is no single

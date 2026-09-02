@@ -143,13 +143,6 @@ type ResolvedInsert struct {
 	// CheckClauses is column → required value, the form the ingest path
 	// enforces and auto-injects from. A []any value marks an _in set.
 	CheckClauses map[string]any
-	// CheckPredicates is the same check rules in render-agnostic predicate form
-	// — the insert-side twin of ResolvedSelect.rowFilter. It follows
-	// ResolvePredicates' fail-closed rule (an unresolvable claim yields no
-	// values), which is deliberately NOT CheckClauses' rule: a check value that
-	// cannot be resolved still auto-injects as "" there (#463). Populated for a
-	// consumer that does not exist yet; CheckClauses remains what ingest reads.
-	CheckPredicates []ResolvedPredicate
 }
 
 // claimTemplateRe matches {{ jwt.claim.path }} templates.
@@ -346,10 +339,6 @@ func evaluateInsert(perms *InsertPermissions, claims map[string]any) *ResolvedPe
 				resolved.Insert.CheckClauses[col] = resolveInValues(*f.In, claims)
 			}
 		}
-		// The same rules in predicate form, for a consumer that does not exist
-		// yet. Nothing reads it today, so it cannot widen a grant; see the field
-		// comment for why its unresolvable-claim rule differs from CheckClauses'.
-		resolved.Insert.CheckPredicates = ResolvePredicates(perms.Check, claims)
 	}
 
 	return resolved

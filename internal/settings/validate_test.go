@@ -246,6 +246,8 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"role whitespace", FileRoles, `{"roles": [" analyst"]}`, "surrounding whitespace"},
 		{"duplicate role", FileRoles, `{"roles": ["analyst", "analyst"]}`, "duplicate role"},
 		{"check uses _gt", FilePolicies, `{"tables": {"clicks": {"analyst": {"insert": {"check": {"region": {"_gt": "1"}}}}}}}`, "check does not honor"},
+		{"operator-less filter", FilePolicies, `{"tables": {"clicks": {"analyst": {"select": {"filter": {"region": {}}}}}}}`, "sets no operator"},
+		{"operator-less check", FilePolicies, `{"tables": {"clicks": {"analyst": {"insert": {"check": {"region": {}}}}}}}`, "sets no operator"},
 		{"unknown filter operator", FilePolicies, `{"tables": {"clicks": {"analyst": {"select": {"filter": {"region": {"_like": "x"}}}}}}}`, "unknown field"},
 		{"filter under insert grant", FilePolicies, `{"tables": {"clicks": {"analyst": {"insert": {"filter": {"region": {"_eq": "x"}}}}}}}`, "unknown field"},
 		{"check under select grant", FilePolicies, `{"tables": {"clicks": {"analyst": {"select": {"check": {"region": {"_eq": "x"}}}}}}}`, "unknown field"},

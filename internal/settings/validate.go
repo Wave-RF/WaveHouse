@@ -362,14 +362,13 @@ func looksLikeRoleMap(raw json.RawMessage, fields map[string]bool) bool {
 	if json.Unmarshal(raw, &obj) != nil || len(obj) == 0 {
 		return false
 	}
-	// A v2 RolePermissions object — {"select": {...}} / {"insert": {...}} — is
-	// what a role literally NAMED "select" or "insert" nests, and it is not a
-	// role map. Without this, tables.clicks.select.select (a valid v2 grant for a
-	// role called "select") reads as operation-first and the document is rejected
-	// before the strict decode ever sees it. A pre-v2 operation map whose every
-	// role is itself named "select"/"insert" is the genuinely ambiguous case, and
-	// it loses — a v2 role with an operation-shaped name is far likelier than a
-	// v1 policy whose only roles are named after operations.
+	// A key that names a permission field (columns, filter, limit, …) means this
+	// is the operation's own permission object, not a map of roles; and every
+	// value must itself be an object, as a grant is. Blocks whose keys are all
+	// operation names — what a role literally NAMED "select"/"insert" nests
+	// under v2 — do read as role maps here, by design: the caller hands those to
+	// operationNamedRoles, which accepts the ones whose two readings agree and
+	// refuses the ones that diverge rather than picking a winner.
 	for k, val := range obj {
 		if fields[k] {
 			return false

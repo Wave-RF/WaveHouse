@@ -1612,41 +1612,6 @@ func TestEvaluate_InsertCheckOpsValidateRejects_DenyFailClosed(t *testing.T) {
 	}
 }
 
-func TestEvaluate_CheckPredicatesDifferFromCheckClausesOnUnresolvableClaim(t *testing.T) {
-	t.Parallel()
-	// CheckPredicates has no reader yet. Pin the one documented way it disagrees
-	// with CheckClauses so a future consumer cannot adopt the wrong one silently:
-	// an unresolvable claim template still auto-injects as "" via CheckClauses
-	// (#463), while ResolvePredicates drops the predicate.
-	tmpl := "{{ jwt.tenant }}"
-	p := &Policy{Tables: map[string]TablePolicy{
-		"clicks": {"writer": {Insert: &InsertPermissions{
-			AllowColumns: []string{"page", "tenant_id"},
-			Check:        map[string]Filter{"tenant_id": {Eq: &tmpl}},
-		}}},
-	}}
-
-	resolved := Evaluate(p, "writer", "clicks", "insert", map[string]any{"tenant": "acme"})
-	require.True(t, resolved.Allowed)
-	assert.Equal(t, "acme", resolved.Insert.CheckClauses["tenant_id"])
-	require.Len(t, resolved.Insert.CheckPredicates, 1)
-	assert.Equal(t, []string{"acme"}, resolved.Insert.CheckPredicates[0].Values)
-
-	// No claims: CheckClauses keeps the rule with an empty required *value* and
-	// ingest auto-injects that (#463); CheckPredicates keeps the predicate but
-	// resolves it to *no values at all*. Same policy input, different answer to
-	// "what must the row equal" — that is the drift risk worth pinning, and it is
-	// exactly the rule the field comment states.
-	unresolvable := Evaluate(p, "writer", "clicks", "insert", nil)
-	require.True(t, unresolvable.Allowed)
-	assert.Equal(t, "", unresolvable.Insert.CheckClauses["tenant_id"],
-		"an unresolvable claim still auto-injects an empty required value")
-	require.Len(t, unresolvable.Insert.CheckPredicates, 1,
-		"the predicate survives — it is its values that do not")
-	assert.Empty(t, unresolvable.Insert.CheckPredicates[0].Values,
-		"ResolvePredicates is fail-closed on an unresolvable claim; do not read this as CheckClauses' \"\"")
-}
-
 func TestEvaluate_OperatorLessFilterAndCheckDenyFailClosed(t *testing.T) {
 	t.Parallel()
 	// `"tenant_id": {}` survives a strict decode — every Filter operator is
