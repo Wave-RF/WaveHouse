@@ -554,6 +554,11 @@ func TestReportLegacyPolicyLayout_RoleNamedAfterAnOperation(t *testing.T) {
 	for name, doc := range map[string]string{
 		"operation-first select": `{"tables":{"clicks":{"select":{"viewer":{"allow_columns":["page"]}}}}}`,
 		"operation-first insert": `{"tables":{"clicks":{"insert":{"writer":{"allow_columns":["page"]}}}}}`,
+		// A real pre-v2 block that happens to carry one operation-named role
+		// beside a real one. `operationNamedRoles` bails on the first key that
+		// is neither operation, so the real name settles the reading: pre-v2,
+		// migration message, not the ambiguity refusal.
+		"operation-first with an operation-named role": `{"tables":{"clicks":{"select":{"viewer":{"allow_columns":["page"]},"insert":{"allow_columns":["page"]}}}}}`,
 	} {
 		v := &validator{}
 		require.True(t, v.reportLegacyPolicyLayout([]byte(doc)), "%s", name)
