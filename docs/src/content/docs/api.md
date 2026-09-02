@@ -660,7 +660,7 @@ Returns the schema for a specific table.
 }
 ```
 
-Per-column fields: `name`, `type` and `is_nullable` describe the column; `position` is its 1-based ordinal in the table's declaration order (always present, and the order `columns` itself is in); `has_default` says whether it declares any default at all, while `default_expression` says what that default is, omitted when the column declares none. The table's `CREATE TABLE` statement is captured on the same refresh but is deliberately **not** exposed here — for a table backed by an external engine it carries that engine's credentials.
+Per-column fields: `name`, `type` and `is_nullable` describe the column; `position` is its 1-based ordinal in the table's declaration order (always present, and the order `columns` itself is in); `has_default` says whether it declares any default at all, while `default_expression` says what that default is, omitted when the column declares none. The table's `CREATE TABLE` statement is captured on the same refresh but is deliberately **not** exposed here — for a table backed by an external engine it renders that engine's wiring — endpoint, bucket/host, database, username, access key id. (ClickHouse masks the password as `[HIDDEN]` from ~23.9; the topology is what is withheld here.)
 
 **Error responses:**
 
