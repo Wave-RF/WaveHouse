@@ -1184,19 +1184,32 @@ func TestIngestFormat(t *testing.T) {
 		{ct: "", wantErr: true},
 		{ct: "   ", wantErr: true},
 		{ct: "???not-a-media-type", wantErr: true},
-		// A proxy joining two Content-Type headers leaves two declarations and no
-		// way to pick one. The parameterized spellings are the likelier form —
-		// most clients emit "; charset=utf-8" — and honoring the first would read
-		// an NDJSON body as a single JSON object, dropping every record past the
-		// first. All four are refused.
-		{ct: "application/json, application/json", wantErr: true},
-		{ct: "application/json; charset=utf-8, application/json", wantErr: true},
+		// A comma means an intermediary joined duplicate Content-Type header
+		// LINES into one value. That is the same situation as two separate lines,
+		// so it takes the same rule: resolve every declaration and require
+		// agreement. Agreeing forms are accepted — refusing them would make the
+		// outcome depend on which spelling an intermediary the caller does not
+		// control happened to emit, and the two-line spelling of each of these is
+		// accepted by TestIngest_DuplicateContentTypeHeaders.
+		{ct: "application/json, application/json", want: FormatJSON},
+		{ct: "application/json; charset=utf-8, application/json", want: FormatJSON},
+		{ct: "application/x-ndjson, application/ndjson", want: FormatNDJSON},
+		// Genuinely conflicting joined declarations stay refused: honoring the
+		// first would read an NDJSON body as a single JSON object and drop every
+		// record past the first.
 		{ct: "application/json; charset=utf-8, application/x-ndjson", wantErr: true},
 		{ct: "application/x-ndjson; charset=utf-8, application/json", wantErr: true},
-		// The deliberate price of a plain comma check: a comma inside a quoted
-		// parameter value is refused too. Pinned so a future "smarter,
-		// quoted-string-aware" guard cannot flip it silently with the suite green.
+		{ct: "application/json, text/csv", wantErr: true},
+		// A comma inside a quoted parameter value splits into parts that
+		// disagree, so it is still refused — the deliberate price, pinned so a
+		// future quoted-string-aware splitter cannot flip it with the suite green.
 		{ct: `application/json; foo="x,y"`, wantErr: true},
+		// Near misses. The switch is exact-match; rewriting it as a prefix or
+		// substring test would leave the suite green while these start ingesting.
+		{ct: "application/json5", wantErr: true},
+		{ct: "application/jsonlines2", wantErr: true},
+		{ct: "application/ndjson-seq", wantErr: true},
+		{ct: "application/x-ndjson2", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.ct, func(t *testing.T) {
@@ -1273,6 +1286,33 @@ func jsonErrorMessage(t *testing.T, w *httptest.ResponseRecorder) string {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	return body.Error
+}
+
+// TestIngest_ContentTypeRefusalBeatsEmptyBody: the PR's headline ordering claim
+// — "checked before the body is parsed" — is what lets a caller trust that a 415
+// describes their header and not their payload. Nothing pinned it: every 415 case
+// sent a non-empty body, so a reordering that peeked at the body first would have
+// turned these into 400s with the suite still green.
+func TestIngest_ContentTypeRefusalBeatsEmptyBody(t *testing.T) {
+	t.Parallel()
+
+	for name, ct := range map[string]string{
+		"absent":      "",
+		"unsupported": "text/plain",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			w := httptest.NewRecorder()
+			h.Handle(w, rawIngestRequest(t, "clicks", ct, ""))
+
+			assert.Equal(t, http.StatusUnsupportedMediaType, w.Code,
+				"the header is resolved before the body is read, so this is a 415 and not an empty-body 400")
+			assert.Contains(t, jsonErrorMessage(t, w), "ingest requires one of")
+			assert.Empty(t, pub.Messages)
+		})
+	}
 }
 
 // TestIngest_DeclaredNDJSON_ArrayBodyIsNotReframed: the header is authoritative.
