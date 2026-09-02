@@ -1194,6 +1194,11 @@ func TestIngestFormat(t *testing.T) {
 		{ct: "application/json, application/json", want: FormatJSON},
 		{ct: "application/json; charset=utf-8, application/json", want: FormatJSON},
 		{ct: "application/x-ndjson, application/ndjson", want: FormatNDJSON},
+		// Three declarations, not two: the rule says EVERY part is resolved, and
+		// at N=2 a SplitN(ct, ",", 2) would satisfy the suite while never looking
+		// past the second.
+		{ct: "application/json, application/json; charset=utf-8, application/json;;", want: FormatJSON},
+		{ct: "application/json, application/json; charset=utf-8, application/x-ndjson", wantErr: true},
 		// Genuinely conflicting joined declarations stay refused: honoring the
 		// first would read an NDJSON body as a single JSON object and drop every
 		// record past the first.
@@ -1204,6 +1209,10 @@ func TestIngestFormat(t *testing.T) {
 		// disagree, so it is still refused — the deliberate price, pinned so a
 		// future quoted-string-aware splitter cannot flip it with the suite green.
 		{ct: `application/json; foo="x,y"`, wantErr: true},
+		// ...but "any quoted comma is refused" would be the wrong rule to state:
+		// this one splits into parts that AGREE, so it is accepted. Pinned so the
+		// comment and api.md keep saying "whenever the parts disagree".
+		{ct: `application/json; foo="a,application/json;q=1"`, want: FormatJSON},
 		// Near misses. The switch is exact-match; rewriting it as a prefix or
 		// substring test would leave the suite green while these start ingesting.
 		{ct: "application/json5", wantErr: true},
@@ -1420,6 +1429,58 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Len(t, pub.Messages, 2, "same format, different spelling — not ambiguous")
+	})
+
+	// A third line, disagreeing. At N=2 the guard's `values[1:]` could be
+	// `values[1:2]` — a one-character off-by-one — and the suite would stay green
+	// while three lines from a two-proxy chain silently took the JSON path and
+	// truncated an NDJSON batch to its first record.
+	t.Run("a third line that disagrees is refused", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		req := rawIngestRequest(t, "clicks", "application/json", ndjson)
+		req.Header.Add("Content-Type", "application/json")
+		req.Header.Add("Content-Type", "application/x-ndjson")
+
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+		assert.Empty(t, pub.Messages, "the third declaration must be resolved like the rest")
+	})
+
+	// The two guards compose: a value may itself carry joined declarations while
+	// sitting alongside another header line. Both orders, because the first value
+	// and the rest travel through different call sites — resolving either with
+	// the single-declaration helper instead of the full rule would mis-frame a
+	// joined value, and nothing else in the suite would notice.
+	t.Run("a joined value alongside a plain line, joined first", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		req := rawIngestRequest(t, "clicks", "application/x-ndjson, application/ndjson", ndjson)
+		req.Header.Add("Content-Type", "application/jsonl")
+
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Len(t, pub.Messages, 2, "all three declarations name NDJSON")
+	})
+
+	t.Run("a joined value alongside a plain line, joined second", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		req := rawIngestRequest(t, "clicks", "application/x-ndjson", ndjson)
+		req.Header.Add("Content-Type", "application/ndjson, application/jsonl")
+
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Len(t, pub.Messages, 2, "all three declarations name NDJSON")
 	})
 
 	t.Run("an identical declaration repeated is not ambiguous", func(t *testing.T) {

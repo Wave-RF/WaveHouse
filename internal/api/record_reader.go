@@ -232,9 +232,14 @@ func (l *lineReader) Next() (map[string]any, error) {
 //
 // Agreement is on (format, acceptedness), not on text, so `application/x-ndjson`
 // and `application/ndjson; charset=utf-8` agree, while a supported and an
-// unsupported declaration do not — and `application/json; foo="x,y"` splits into
-// parts that disagree, so a comma inside a quoted parameter value is still
-// refused.
+// unsupported declaration do not. A comma inside a quoted parameter value is
+// split like any other, so such a header is refused whenever the parts it
+// produces disagree — `application/json; foo="x,y"` does. That is usual but not
+// universal: `application/json; foo="a,application/json;q=1"` splits into parts
+// that agree and is accepted. Not parsing quoted strings is the deliberate
+// price, and it is bounded — acceptance requires every part to match the
+// LEADING declaration, so the worst case is an over-reject, never a body framed
+// as something the caller did not declare.
 func ingestFormat(ct string) (IngestFormat, error) {
 	parts := strings.Split(ct, ",")
 	first, firstErr := ingestFormatOne(parts[0])
