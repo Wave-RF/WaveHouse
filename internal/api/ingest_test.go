@@ -1143,10 +1143,15 @@ func TestIngest_NDJSON_ErrorsTruncated(t *testing.T) {
 	assert.Empty(t, pub.Messages)
 }
 
-// wantAcceptedTypes is the accepted-media-type list exactly as api.md's two 415
-// rows quote it. Deliberately a literal and not strings.Join(supportedContentTypes,
-// ", "): the point is to pin the advertised list against the docs, and an
-// expectation derived from the slice under test cannot do that.
+// wantAcceptedTypes is the accepted-media-type list as the 415 body renders it.
+// Deliberately a literal and not strings.Join(supportedContentTypes, ", "): the
+// point is to pin the advertised list against the docs, and an expectation
+// derived from the slice under test cannot do that.
+//
+// api.md's two 415 rows quote a truncated prefix of this ("… application/json,
+// application/x-ndjson, …"), so they do NOT need editing when the set changes.
+// The prose sites that spell the list out, and would: api.md's body/Content-Type
+// table, and architecture.md's "the four NDJSON spellings" count.
 const wantAcceptedTypes = "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines"
 
 // TestAcceptedTypesAreAllResolvable is the inverse of the 415 assertions: those

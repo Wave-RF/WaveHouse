@@ -75,10 +75,15 @@ describe("TableRef", () => {
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toContain("/v1/ingest?table=clicks");
     expect(init.method).toBe("POST");
-    // Declared explicitly at the call site, not inherited from request()'s
-    // default. Unpinned, that line is deletable in a refactor with every test
-    // green — against a server that now hard-415s an undeclared type. The
-    // NDJSON paths already pin theirs.
+    // Pins the header that reaches the server, NOT the explicit declaration at
+    // the call site. Those are indistinguishable here: http.ts defaults to
+    // `opts.contentType ?? "application/json"`, so deleting the declaration
+    // produces byte-identical requests and every test still passes (verified).
+    // What this does catch is the default drifting while the declaration is
+    // absent — the two together are what make the request wrong. The NDJSON
+    // paths differ from the default, so theirs are genuine pins; this one is
+    // not, and a real one would have to observe the options handed to
+    // request() rather than the fetch call.
     expect(init.headers["Content-Type"]).toBe("application/json");
     expect(JSON.parse(init.body)).toEqual({ page: "/home", score: 42 });
   });
