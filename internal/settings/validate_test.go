@@ -446,6 +446,23 @@ func TestValidate_V2LayoutNotFlaggedAsLegacy(t *testing.T) {
 // problems in different files are all reported together — a syntax error in
 // one file must not suppress content or reference findings in another — and
 // exactly once, so the operator gets the whole list without noise.
+func TestValidate_MultipleFaults(t *testing.T) {
+	t.Parallel()
+	doc, findings := Validate(writeDir(t, map[string]string{
+		FileRoles:    `{"roles": ["analyst", "analyst"]}`,               // duplicate role
+		FilePolicies: `{"default_role": "ghost", "tables": {}}`,         // undeclared role
+		FilePipes:    `{"pipes": [`,                                     // truncated JSON
+		FileConfig:   configJSON(`{"query": {"default_max_rows": -1}}`), // bounds violation
+	}))
+	assert.Nil(t, doc)
+	out := findingStrings(findings)
+	assert.Contains(t, out, "duplicate role")
+	assert.Contains(t, out, `role "ghost" is not declared`)
+	assert.Contains(t, out, "unexpected EOF")
+	assert.Contains(t, out, "must be >= 1")
+	assert.Len(t, findings, 4, "every fault reported exactly once, no noise:\n%s", out)
+}
+
 // TestValidate_RoleNamedAfterAnOperation_DecodesAsWritten pins the detector's
 // ACCEPT path end to end. Every other outcome is a rejection, so a mistake there
 // fails loudly; accepting is the only branch where getting it wrong changes
@@ -496,6 +513,8 @@ func TestValidate_EmptyLegacyOperationBlock(t *testing.T) {
 		assert.Contains(t, joined, `role "select" is not declared in roles.json`)
 		assert.NotContains(t, joined, "pre-v2 operation-first layout",
 			"an empty block gives the detector nothing to go on — it must abstain, not claim the file is legacy")
+		assert.NotContains(t, joined, "grant sets neither select nor insert",
+			"the undeclared-role error short-circuits the reference walk, so the warning is never reached — the docs say so")
 	})
 
 	t.Run("role select declared — warns and adopts", func(t *testing.T) {
@@ -509,23 +528,6 @@ func TestValidate_EmptyLegacyOperationBlock(t *testing.T) {
 		require.NotNil(t, doc, "the document adopts")
 		assert.Contains(t, findingStrings(findings), "grant sets neither select nor insert")
 	})
-}
-
-func TestValidate_MultipleFaults(t *testing.T) {
-	t.Parallel()
-	doc, findings := Validate(writeDir(t, map[string]string{
-		FileRoles:    `{"roles": ["analyst", "analyst"]}`,               // duplicate role
-		FilePolicies: `{"default_role": "ghost", "tables": {}}`,         // undeclared role
-		FilePipes:    `{"pipes": [`,                                     // truncated JSON
-		FileConfig:   configJSON(`{"query": {"default_max_rows": -1}}`), // bounds violation
-	}))
-	assert.Nil(t, doc)
-	out := findingStrings(findings)
-	assert.Contains(t, out, "duplicate role")
-	assert.Contains(t, out, `role "ghost" is not declared`)
-	assert.Contains(t, out, "unexpected EOF")
-	assert.Contains(t, out, "must be >= 1")
-	assert.Len(t, findings, 4, "every fault reported exactly once, no noise:\n%s", out)
 }
 
 // TestValidate_ErrorAndWarningMix pins that a warning is still reported
