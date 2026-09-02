@@ -1205,8 +1205,17 @@ func TestIngest_UndeclaredOrUnsupportedContentType_415(t *testing.T) {
 			h.Handle(w, rawIngestRequest(t, "clicks", tt.ct, `{"page":"/a"}`))
 
 			assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
-			assert.Contains(t, w.Body.String(), "application/json")
-			assert.Contains(t, w.Body.String(), "application/x-ndjson")
+			testutil.AssertJSONErrorResponse(t, w)
+			// The body must name every accepted type, not just the two spellings a
+			// reader is likeliest to try. Note what this does and does not pin:
+			// iterating supportedContentTypes cannot catch an alias being dropped
+			// from that list (the loop would simply check one fewer). It pins the
+			// message against the list — if unsupportedContentTypeMessage stops
+			// rendering one of them, a client is told to use a type the server
+			// accepts but never names. Verified by truncating the Join.
+			for _, ct := range supportedContentTypes {
+				assert.Contains(t, w.Body.String(), ct, "the 415 body must name every accepted type")
+			}
 			assert.Empty(t, pub.Messages, "a refused request must not publish")
 		})
 	}

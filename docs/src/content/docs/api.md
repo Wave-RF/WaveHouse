@@ -188,7 +188,7 @@ Where those values come from depends on how the binary was built:
 
 Accepts a single flat JSON object, a JSON array of objects, or a newline-delimited JSON (NDJSON) batch, validates each record against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.
 
-**`Content-Type` is required and authoritative.** The format is what the caller declares, not what the bytes look like: a body declared as NDJSON is read as NDJSON whatever its first byte, so a line that isn't a JSON object fails as a per-record error rather than silently re-framing the whole request. A request with **no** `Content-Type`, or one ingest doesn't read, is rejected with `415` and a message listing the accepted types — nothing is guessed. The one thing the body still decides is *arity within the JSON family*: the first non-whitespace byte picks a top-level array (`[`) or a single object.
+**`Content-Type` is required and authoritative.** The format is what the caller declares, not what the bytes look like: a body declared as NDJSON is read as NDJSON whatever its first byte, so a line that isn't a JSON object fails as a per-record error rather than silently re-framing the whole request. A request with **no** `Content-Type`, one that is malformed (anything `mime.ParseMediaType` cannot read), or one whose media type is not in the accepted list, is rejected with `415` and a message listing the accepted types — nothing is guessed. The one thing the body still decides is *arity within the JSON family*: the first non-whitespace byte picks a top-level array (`[`) or a single object.
 
 | Body | `Content-Type` | Response |
 | ---- | -------------- | -------- |
@@ -256,7 +256,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 403 | `{"error":"check failed for column \"x\""}` | The record's value for a checked column doesn't satisfy the policy `check` (`_eq`/`_in`), or an `_in`-checked column is omitted ([Access control → Insert checks](/access-control#insert-checks)). On the batch path both this and the column error above are per-record failures reported in `results`, not whole-request rejections |
 | 404 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
-| 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …`) | The request declared no `Content-Type`, or one ingest doesn't read. Checked before the body is parsed |
+| 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …`) | The request declared no `Content-Type`, or an unsupported one. Checked before the body is parsed |
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
 | 500 | `{"error":"publish failed"}` | Message queue error |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Response includes `Retry-After: 30` header. |
@@ -366,7 +366,7 @@ A `200` is returned whenever the body was read and the records were processed �
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (same auth gate as the single-object path; surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table (checked once, before any record) |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
-| 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …`) | The request declared no `Content-Type`, or one ingest doesn't read. Checked before the body is parsed |
+| 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …`) | The request declared no `Content-Type`, or an unsupported one. Checked before the body is parsed |
 | 500 | `{"error":"publish failed"}` / `{"error":"dedupe failed"}` | Message-queue or dedup-backend failure mid-batch |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream full (backpressure) mid-batch; includes `Retry-After: 30` |
 
