@@ -26,7 +26,7 @@ WaveHouse and your proxy are layers of one system, not substitutes. The proxy ow
 | Health probes | ✓ (serves `/livez`, `/readyz`, `/v1/health`) | Route / expose appropriately |
 
 :::note[Defense in depth, not either/or]
-The body-size caps below exist in **both** layers on purpose. Your proxy limit is the tunable first line you size to your deployment; WaveHouse's in-code cap is the backstop that guarantees no **single request** can OOM the server even if the proxy limit is missing (Caddy and Cloudflare don't cap by default), too loose, or bypassed by something reaching `:8080` directly. Bounding the *total* across concurrent requests is still the proxy's job — see the note under [Request-body size limits](#request-body-size-limits).
+The body-size caps below exist in **both** layers on purpose. Your proxy limit is the tunable first line you size to your deployment; WaveHouse's in-code cap is the backstop that bounds what a **single request** can allocate even if the proxy limit is missing (Caddy and Cloudflare don't cap by default), too loose, or bypassed by something reaching `:8080` directly. It bounds exposure, not outcomes: the handler buffers the whole body and `bytes.Buffer` grows by doubling, so one request can allocate past the cap before it trips, and a deployment whose memory limit sits below that peak can still be pushed over by a single request sized just under the limit. Bounding the *total* across concurrent requests is still the proxy's job — see the note under [Request-body size limits](#request-body-size-limits).
 :::
 
 ## TLS

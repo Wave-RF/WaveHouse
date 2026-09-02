@@ -165,6 +165,7 @@ func TestIngest_DefaultChecker_WhenUnwired(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a", "org_id": "wrong"}))
 	assert.Equal(t, http.StatusForbidden, w.Code)
+	testutil.AssertJSONErrorResponse(t, w)
 	assert.Empty(t, pub.Messages)
 }
 
