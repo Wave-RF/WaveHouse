@@ -1150,9 +1150,14 @@ func TestIngestFormat(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		ct      string
-		want    IngestFormat
-		wantErr bool
+		ct   string
+		want IngestFormat
+		// wantErr is any 415; wantConflict narrows it to the disagreement
+		// sentinel. Pinned separately because they produce different bodies —
+		// routing a disagreement through the unsupported wording tells the caller
+		// "ingest requires one of …" and lists the types they just declared.
+		wantErr      bool
+		wantConflict bool
 	}{
 		{ct: "application/json", want: FormatJSON},
 		{ct: "application/json; charset=utf-8", want: FormatJSON},
@@ -1198,24 +1203,32 @@ func TestIngestFormat(t *testing.T) {
 		// at N=2 a SplitN(ct, ",", 2) would satisfy the suite while never looking
 		// past the second.
 		{ct: "application/json, application/json; charset=utf-8, application/json;;", want: FormatJSON},
-		{ct: "application/json, application/json; charset=utf-8, application/x-ndjson", wantErr: true},
+		{ct: "application/json, application/json; charset=utf-8, application/x-ndjson", wantErr: true, wantConflict: true},
 		// Genuinely conflicting joined declarations stay refused: honoring the
 		// first would read an NDJSON body as a single JSON object and drop every
 		// record past the first.
-		{ct: "application/json; charset=utf-8, application/x-ndjson", wantErr: true},
-		{ct: "application/x-ndjson; charset=utf-8, application/json", wantErr: true},
-		{ct: "application/json, text/csv", wantErr: true},
+		{ct: "application/json; charset=utf-8, application/x-ndjson", wantErr: true, wantConflict: true},
+		{ct: "application/x-ndjson; charset=utf-8, application/json", wantErr: true, wantConflict: true},
+		{ct: "application/json, text/csv", wantErr: true, wantConflict: true},
 		// This one's quoted comma splits into parts that disagree, so it is
 		// refused — the deliberate price of not parsing quoted strings, pinned so
 		// a future quoted-string-aware splitter cannot flip it with the suite
 		// green.
-		{ct: `application/json; foo="x,y"`, wantErr: true},
+		{ct: `application/json; foo="x,y"`, wantErr: true, wantConflict: true},
 		// ...but "any quoted comma is refused" would be the wrong rule to state:
 		// this one splits into parts that AGREE, so it is accepted. Pinned so the
 		// comment and api.md keep saying "whenever the parts disagree".
 		{ct: `application/json; foo="a,application/json;q=1"`, want: FormatJSON},
 		// Near misses. The switch is exact-match; rewriting it as a prefix or
 		// substring test would leave the suite green while these start ingesting.
+		// An empty declaration says nothing rather than contradicting something —
+		// RFC 9110 §5.6.1.2 ignores empty list members — so these are the declared
+		// type, not a conflict. All-empty is the absent case.
+		{ct: "application/json,", want: FormatJSON},
+		{ct: ",application/json", want: FormatJSON},
+		{ct: "application/json, ,application/json", want: FormatJSON},
+		{ct: ",", wantErr: true},
+		{ct: " , ", wantErr: true},
 		{ct: "application/json5", wantErr: true},
 		{ct: "application/jsonlines2", wantErr: true},
 		{ct: "application/ndjson-seq", wantErr: true},
@@ -1226,7 +1239,12 @@ func TestIngestFormat(t *testing.T) {
 			t.Parallel()
 			got, err := ingestFormat(tt.ct)
 			if tt.wantErr {
-				require.ErrorIs(t, err, errUnsupportedContentType)
+				if tt.wantConflict {
+					require.ErrorIs(t, err, errConflictingContentType,
+						"declarations that disagree must be distinguishable from an unsupported one")
+				} else {
+					require.ErrorIs(t, err, errUnsupportedContentType)
+				}
 				return
 			}
 			require.NoError(t, err)
@@ -1389,7 +1407,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		testutil.AssertJSONErrorResponse(t, w)
 		// The body text is documented verbatim in api.md's 415 tables, so it is
 		// contract, not phrasing — pin it here rather than let it drift silently.
-		assert.Contains(t, jsonErrorMessage(t, w), "conflicting Content-Type headers: application/json, application/x-ndjson")
+		assert.Contains(t, jsonErrorMessage(t, w), `conflicting Content-Type declarations "application/json", "application/x-ndjson"`)
 		assert.Empty(t, pub.Messages, "nothing may be ingested from an ambiguous declaration")
 	})
 
@@ -1411,7 +1429,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
 		testutil.AssertJSONErrorResponse(t, w)
-		assert.Contains(t, jsonErrorMessage(t, w), "conflicting Content-Type headers: application/json, text/csv")
+		assert.Contains(t, jsonErrorMessage(t, w), `conflicting Content-Type declarations "application/json", "text/csv"`)
 		assert.Empty(t, pub.Messages, "an ambiguous declaration may not publish a truncated batch")
 	})
 
@@ -1482,6 +1500,63 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Len(t, pub.Messages, 2, "all three declarations name NDJSON")
+	})
+
+	// An empty second line is not a disagreement: the caller declared one type
+	// and nothing else. Refusing it would be an over-reject, and this spelling
+	// arrives on the wire from intermediaries that append a bare header.
+	t.Run("an empty second line is ignored", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		req := rawIngestRequest(t, "clicks", "application/x-ndjson", ndjson)
+		req.Header.Add("Content-Type", "")
+
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Len(t, pub.Messages, 2, "one real declaration plus nothing is not ambiguous")
+	})
+
+	// Two unsupported declarations AGREE — both resolve to (JSON, error) — so
+	// this is the unsupported path, not the conflict path. The message must name
+	// both, or the caller never learns the second was sent.
+	t.Run("two unsupported lines name both", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		req := rawIngestRequest(t, "clicks", "text/csv", ndjson)
+		req.Header.Add("Content-Type", "text/plain")
+
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+		msg := jsonErrorMessage(t, w)
+		assert.Contains(t, msg, `"text/csv"`)
+		assert.Contains(t, msg, `"text/plain"`, "a declaration the caller sent must not vanish from the message")
+		assert.NotContains(t, msg, "conflicting", "agreeing-but-unsupported is not a conflict")
+		assert.Empty(t, pub.Messages)
+	})
+
+	// The two spellings of one disagreement now read alike. Previously a joined
+	// value fell through to the unsupported wording and listed the very types the
+	// caller had declared as the ones ingest requires.
+	t.Run("a joined disagreement reads like the repeated-line one", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		req := rawIngestRequest(t, "clicks", "application/json, application/x-ndjson", ndjson)
+
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+		msg := jsonErrorMessage(t, w)
+		assert.Contains(t, msg, `conflicting Content-Type declarations "application/json", "application/x-ndjson"`)
+		assert.Contains(t, msg, "ingest requires one of", "the conflict message must still list what is accepted")
+		assert.Empty(t, pub.Messages)
 	})
 
 	t.Run("an identical declaration repeated is not ambiguous", func(t *testing.T) {

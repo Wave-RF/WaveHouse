@@ -187,42 +187,38 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Pick a reader from the DECLARED format; the body only chooses arity
 	// within the JSON family. An undeclared or unreadable Content-Type is a 415.
 	//
-	// Duplicate Content-Type headers are refused when they disagree. Go keeps
-	// repeated header LINES separately and Header.Get returns only the first, so
-	// without this a request declaring both application/json and
-	// application/x-ndjson would silently take the JSON path — and an NDJSON body
-	// read as a single object ingests record one and discards the rest, answering
-	// 200. That is the same silent truncation ingestFormat's comma guard exists to
-	// prevent, reached by the sibling spelling: a proxy joins duplicates with a
-	// comma, curl and many proxies keep them as separate lines. Repeating an
-	// identical declaration is harmless and still works — only disagreement is
-	// refused, so this cannot reject a request that was unambiguous.
+	// A caller may declare the type more than once — Go keeps repeated header
+	// LINES separately and Header.Get returns only the first, and an intermediary
+	// may join duplicates into one line with a comma. Without resolving all of
+	// them, a request declaring both application/json and application/x-ndjson
+	// would silently take the JSON path: an NDJSON body read as a single object
+	// ingests record one, discards the rest, and answers 200. resolveContentType
+	// flattens both spellings and applies one agreement rule, so the outcome
+	// cannot depend on which spelling an intermediary the caller does not control
+	// happened to emit.
+	values := r.Header.Values("Content-Type")
 	contentType := r.Header.Get("Content-Type")
-	if values := r.Header.Values("Content-Type"); len(values) > 1 {
-		first, firstErr := ingestFormat(contentType)
-		for _, v := range values[1:] {
-			f, err := ingestFormat(v)
-			if f != first || (err == nil) != (firstErr == nil) {
-				// Logged like the neighbouring 415: this is the one refusal whose
-				// cause is usually NOT the caller's own doing — a proxy that starts
-				// duplicating the header would otherwise produce a wall of
-				// client-side 415s and no server-side signal at all.
-				h.logger.WarnContext(ctx, "conflicting ingest content-type headers",
-					"content_types", values, "table", table)
-				writeJSONError(w, http.StatusUnsupportedMediaType,
-					"conflicting Content-Type headers: "+strings.Join(values, ", "))
-				return
-			}
-		}
-	}
-	rr, format, batch, err := newRecordReader(contentType, r.Body)
-	if err != nil {
-		if errors.Is(err, errUnsupportedContentType) {
+	if _, err := resolveContentType(values); err != nil {
+		conflicting := errors.Is(err, errConflictingContentType)
+		if conflicting {
+			// Logged, unlike the plain unsupported case: this is the one refusal
+			// whose cause is usually NOT the caller's own doing, and a proxy that
+			// starts duplicating the header would otherwise produce a wall of
+			// client-side 415s and no server-side signal at all.
+			h.logger.WarnContext(ctx, "conflicting ingest content-type declarations",
+				"content_types", values, "table", table)
+		} else {
 			h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
 				"content_type", contentType, "table", table)
-			writeJSONError(w, http.StatusUnsupportedMediaType, unsupportedContentTypeMessage(contentType))
-			return
 		}
+		writeJSONError(w, http.StatusUnsupportedMediaType, contentTypeMessage(values, conflicting))
+		return
+	}
+
+	// The declaration already resolved above, so the only error left here is an
+	// empty body.
+	rr, format, batch, err := newRecordReader(contentType, r.Body)
+	if err != nil {
 		h.logger.ErrorContext(ctx, "empty ingest body", "table", table, "format", format.String())
 		writeJSONError(w, http.StatusBadRequest, emptyBodyMessage(format))
 		return
