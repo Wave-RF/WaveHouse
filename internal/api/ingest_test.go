@@ -1288,16 +1288,18 @@ func TestIngest_UndeclaredOrUnsupportedContentType_415(t *testing.T) {
 			testutil.AssertJSONErrorResponse(t, w)
 			assert.Contains(t, jsonErrorMessage(t, w), tt.wantPrefix,
 				"the 415 body must echo what was declared, or say nothing was")
-			// The body must name every accepted type, not just the two spellings a
-			// reader is likeliest to try. Note what this does and does not pin:
-			// iterating supportedContentTypes cannot catch an alias being dropped
-			// from that list (the loop would simply check one fewer). It pins the
-			// message against the list — if contentTypeMessage stops
-			// rendering one of them, a client is told to use a type the server
-			// accepts but never names. Verified by truncating the Join.
-			for _, ct := range supportedContentTypes {
-				assert.Contains(t, w.Body.String(), ct, "the 415 body must name every accepted type")
-			}
+			// The body must name every accepted type, in order. Asserting the
+			// joined list rather than looping: `application/json` and
+			// `application/jsonl` are both SUBSTRINGS of `application/jsonlines`,
+			// so a per-entry Contains loop can never fail for those two while the
+			// longest entry renders — dropping `application/json`, the type api.md
+			// quotes first in both 415 rows, from the message shipped green.
+			//
+			// Note what this still does not pin: an alias removed from
+			// supportedContentTypes itself, since the assertion is built from the
+			// same slice. It pins the message against the list.
+			assert.Contains(t, jsonErrorMessage(t, w), strings.Join(supportedContentTypes, ", "),
+				"the 415 body must name every accepted type, in order")
 			assert.Empty(t, pub.Messages, "a refused request must not publish")
 		})
 	}
