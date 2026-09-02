@@ -1221,11 +1221,19 @@ func TestIngest_UndeclaredOrUnsupportedContentType_415(t *testing.T) {
 	tests := []struct {
 		name string
 		ct   string
+		// wantPrefix is the message's declared-vs-undeclared half, which api.md's
+		// 415 rows quote verbatim ("no Content-Type: …" and the declared variant
+		// `Content-Type "text/plain": …`). Unasserted, the whole branch could
+		// collapse to the undeclared spelling with the suite still green — and a
+		// caller would lose the echo telling them what the server actually read.
+		// The %q also matters: it renders a header with embedded quotes
+		// unambiguously.
+		wantPrefix string
 	}{
-		{"no content-type", ""},
-		{"text/plain", "text/plain"},
-		{"text/csv", "text/csv"},
-		{"malformed media type", "???not-a-media-type"},
+		{"no content-type", "", "no Content-Type: "},
+		{"text/plain", "text/plain", `Content-Type "text/plain": `},
+		{"text/csv", "text/csv", `Content-Type "text/csv": `},
+		{"malformed media type", "???not-a-media-type", `Content-Type "???not-a-media-type": `},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1237,6 +1245,8 @@ func TestIngest_UndeclaredOrUnsupportedContentType_415(t *testing.T) {
 
 			assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
 			testutil.AssertJSONErrorResponse(t, w)
+			assert.Contains(t, jsonErrorMessage(t, w), tt.wantPrefix,
+				"the 415 body must echo what was declared, or say nothing was")
 			// The body must name every accepted type, not just the two spellings a
 			// reader is likeliest to try. Note what this does and does not pin:
 			// iterating supportedContentTypes cannot catch an alias being dropped
@@ -1250,6 +1260,19 @@ func TestIngest_UndeclaredOrUnsupportedContentType_415(t *testing.T) {
 			assert.Empty(t, pub.Messages, "a refused request must not publish")
 		})
 	}
+}
+
+// jsonErrorMessage returns the decoded "error" field. Assert against this rather
+// than the raw body: the body is JSON, so a message containing quotes — the 415
+// echoes the declared Content-Type through %q — appears escaped there and a
+// substring check on the raw bytes tests the encoding, not the contract.
+func jsonErrorMessage(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Error string `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	return body.Error
 }
 
 // TestIngest_DeclaredNDJSON_ArrayBodyIsNotReframed: the header is authoritative.
@@ -1316,7 +1339,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		testutil.AssertJSONErrorResponse(t, w)
 		// The body text is documented verbatim in api.md's 415 tables, so it is
 		// contract, not phrasing — pin it here rather than let it drift silently.
-		assert.Contains(t, w.Body.String(), "conflicting Content-Type headers")
+		assert.Contains(t, jsonErrorMessage(t, w), "conflicting Content-Type headers: application/json, application/x-ndjson")
 		assert.Empty(t, pub.Messages, "nothing may be ingested from an ambiguous declaration")
 	})
 
@@ -1338,7 +1361,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
 		testutil.AssertJSONErrorResponse(t, w)
-		assert.Contains(t, w.Body.String(), "conflicting Content-Type headers")
+		assert.Contains(t, jsonErrorMessage(t, w), "conflicting Content-Type headers: application/json, text/csv")
 		assert.Empty(t, pub.Messages, "an ambiguous declaration may not publish a truncated batch")
 	})
 
