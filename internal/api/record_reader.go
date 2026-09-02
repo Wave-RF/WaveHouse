@@ -50,7 +50,8 @@ var errEmptyBody = errors.New("empty body")
 
 // errUnsupportedContentType is returned when the request declares no
 // Content-Type, one whose media type is not in the accepted list, or several
-// that disagree. The handler maps it to a 415.
+// that AGREE on being unreadable. Declarations that disagree are
+// errConflictingContentType. The handler maps both to a 415.
 var errUnsupportedContentType = errors.New("unsupported content type")
 
 // errConflictingContentType is returned when the request declares the type more
@@ -77,7 +78,7 @@ const (
 	// re-read the body as something else.
 	FormatNDJSON
 	// FormatCSV plugs in here once ingest reads CSV: add the media types to
-	// ingestFormat's switch and the reader to newRecordReader's.
+	// ingestFormatOne's switch and the reader to newRecordReader's.
 )
 
 // String renders a format for error messages and logs.
@@ -276,12 +277,6 @@ func resolveContentType(values []string) (IngestFormat, error) {
 	return first, firstErr
 }
 
-// ingestFormat resolves ONE header value, which may itself carry several
-// comma-joined declarations. It is resolveContentType over a single line.
-func ingestFormat(ct string) (IngestFormat, error) {
-	return resolveContentType([]string{ct})
-}
-
 // ingestFormatOne resolves ONE declaration. The media type is everything before
 // the first ";", trimmed and lowercased; parameters are ignored entirely rather
 // than parsed, because the rule is "parameters do not affect the format" and
@@ -303,16 +298,19 @@ func ingestFormatOne(ct string) (IngestFormat, error) {
 	}
 }
 
-// newRecordReader picks a reader from the declared Content-Type, using a peek at
-// the body only to choose arity within the JSON family ('[' → array, else →
+// newRecordReader picks a reader from the ALREADY-RESOLVED format, using a peek
+// at the body only to choose arity within the JSON family ('[' → array, else →
 // single object). The header is authoritative: an NDJSON body is read as NDJSON
 // whatever its first byte, so a line that isn't a JSON object fails as a
 // per-record error rather than silently re-framing the whole request. batch is
-// false only for the single-object path; true for array/NDJSON. format is
-// meaningful even when err is errEmptyBody — the declaration resolves before the
-// body is read at all — and is FormatJSON alongside errUnsupportedContentType,
-// where nothing was declared to resolve. The caller is expected to have already
-// bounded body via http.MaxBytesReader.
+// false only for the single-object path; true for array/NDJSON.
+//
+// It takes the format rather than a Content-Type on purpose. Resolving here as
+// well as in the handler meant the two could disagree — a leading empty
+// declaration resolved fine for the header SET and failed for the first line
+// alone, turning a good request into an empty-body 400. The only error this can
+// return now is errEmptyBody. The caller is expected to have already bounded
+// body via http.MaxBytesReader.
 func newRecordReader(format IngestFormat, body io.Reader) (rr recordReader, batch bool, err error) {
 	br := bufio.NewReader(body)
 	first, perr := peekFirstNonSpace(br)

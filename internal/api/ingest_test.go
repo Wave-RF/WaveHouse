@@ -1237,7 +1237,7 @@ func TestIngestFormat(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.ct, func(t *testing.T) {
 			t.Parallel()
-			got, err := ingestFormat(tt.ct)
+			got, err := resolveContentType([]string{tt.ct})
 			if tt.wantErr {
 				if tt.wantConflict {
 					require.ErrorIs(t, err, errConflictingContentType,
@@ -1292,7 +1292,7 @@ func TestIngest_UndeclaredOrUnsupportedContentType_415(t *testing.T) {
 			// reader is likeliest to try. Note what this does and does not pin:
 			// iterating supportedContentTypes cannot catch an alias being dropped
 			// from that list (the loop would simply check one fewer). It pins the
-			// message against the list — if unsupportedContentTypeMessage stops
+			// message against the list — if contentTypeMessage stops
 			// rendering one of them, a client is told to use a type the server
 			// accepts but never names. Verified by truncating the Join.
 			for _, ct := range supportedContentTypes {
@@ -1529,7 +1529,13 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
 			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-			req := rawIngestRequest(t, "clicks", empty, ndjson)
+			// Built with no header and two Adds, not rawIngestRequest's ct
+			// argument: that argument SKIPS Header.Set when it is "", so the
+			// blank spelling would build a one-line set and pin nothing — and
+			// blank ("a bare `Content-Type:` line") is the very spelling the
+			// docs and CHANGELOG name as the motivating wire case.
+			req := rawIngestRequest(t, "clicks", "", ndjson)
+			req.Header.Add("Content-Type", empty)
 			req.Header.Add("Content-Type", "application/x-ndjson")
 
 			w := httptest.NewRecorder()

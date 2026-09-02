@@ -202,10 +202,11 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		conflicting := errors.Is(err, errConflictingContentType)
 		if conflicting {
-			// Logged, unlike the plain unsupported case: this is the one refusal
-			// whose cause is usually NOT the caller's own doing, and a proxy that
-			// starts duplicating the header would otherwise produce a wall of
-			// client-side 415s and no server-side signal at all.
+			// Logged with the whole declaration set, not just the first line:
+			// this is the one refusal whose cause is usually NOT the caller's own
+			// doing, and a proxy that starts duplicating the header would
+			// otherwise produce a wall of client-side 415s whose server-side
+			// record named only one of the two declarations involved.
 			h.logger.WarnContext(ctx, "conflicting ingest content-type declarations",
 				"content_types", values, "table", table)
 		} else {
