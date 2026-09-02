@@ -123,9 +123,9 @@ type ResolvedSelect struct {
 	WhereParams  []any
 	// rowFilter is the same row-level-security predicate as WhereClause/WhereParams,
 	// kept in resolved form so the stream path can evaluate it in memory (RowVisible)
-	// while the query path renders it to SQL. Both derive from one ResolvePredicates
+	// while the query path renders it to SQL. Both derive from one resolvePredicates
 	// call in Evaluate, so the two read surfaces can't drift. See rowfilter.go.
-	rowFilter           []ResolvedPredicate
+	rowFilter           []resolvedPredicate
 	AllowedAggregations []string
 	DeniedAggregations  []string
 	MaxRows             int
@@ -274,7 +274,7 @@ func evaluateSelect(perms *SelectPermissions, claims map[string]any) *ResolvedPe
 		// from that single source so they can't drift: the query path binds them into
 		// a SQL WHERE here; the stream path evaluates the same predicates in memory
 		// (ResolvedPermissions.RowVisible).
-		preds := ResolvePredicates(perms.Filter, claims)
+		preds := resolvePredicates(perms.Filter, claims)
 		resolved.Select.rowFilter = preds
 		clauses, params := predicatesToSQL(preds)
 		if len(clauses) > 0 {
@@ -344,7 +344,7 @@ func evaluateInsert(perms *InsertPermissions, claims map[string]any) *ResolvedPe
 	return resolved
 }
 
-// ResolvedPredicate is one row-filter or check comparison with its claim templates
+// resolvedPredicate is one row-filter or check comparison with its claim templates
 // already resolved to concrete string values — the shared, render-agnostic form the query
 // path turns into SQL (predicatesToSQL) and the stream path evaluates in memory
 // (RowVisible). Op is one of "=", "!=", ">", "<", "in". Values holds one element
@@ -352,26 +352,26 @@ func evaluateInsert(perms *InsertPermissions, claims map[string]any) *ResolvedPe
 // rows on either surface — an empty/unresolvable "in" set, or a scalar whose
 // constant was unresolvable (an absent/null claim, a structured value, or one with
 // no canonical form — see resolveTemplate/CanonicalScalar).
-type ResolvedPredicate struct {
+type resolvedPredicate struct {
 	Column string
 	Op     string
 	Values []string
 }
 
-// ResolvePredicates resolves each filter's claim templates once into predicates.
+// resolvePredicates resolves each filter's claim templates once into predicates.
 // Both read surfaces derive from this single result so they can't drift; the
 // operator order within a column (=, !=, >, <, in) mirrors the former inline SQL.
-func ResolvePredicates(filters map[string]Filter, claims map[string]any) []ResolvedPredicate {
-	var preds []ResolvedPredicate
+func resolvePredicates(filters map[string]Filter, claims map[string]any) []resolvedPredicate {
+	var preds []resolvedPredicate
 	// An unresolvable constant (ok=false from resolveTemplate) yields a predicate
 	// with NO values, which matches no rows on either surface (#385) — never a
 	// synthesized stand-in that could match some other principal's rows.
-	scalar := func(col, op, tmpl string) ResolvedPredicate {
+	scalar := func(col, op, tmpl string) resolvedPredicate {
 		v, ok := resolveTemplate(tmpl, claims)
 		if !ok {
-			return ResolvedPredicate{Column: col, Op: op}
+			return resolvedPredicate{Column: col, Op: op}
 		}
-		return ResolvedPredicate{Column: col, Op: op, Values: []string{v}}
+		return resolvedPredicate{Column: col, Op: op, Values: []string{v}}
 	}
 	for col, f := range filters {
 		if f.Eq != nil {
@@ -387,14 +387,14 @@ func ResolvePredicates(filters map[string]Filter, claims map[string]any) []Resol
 			preds = append(preds, scalar(col, "<", *f.Lt))
 		}
 		if f.In != nil {
-			preds = append(preds, ResolvedPredicate{col, "in", toStrings(resolveInValues(*f.In, claims))})
+			preds = append(preds, resolvedPredicate{col, "in", toStrings(resolveInValues(*f.In, claims))})
 		}
 	}
 	return preds
 }
 
 // predicatesToSQL renders resolved predicates into WHERE clauses and bound params.
-func predicatesToSQL(preds []ResolvedPredicate) ([]string, []any) {
+func predicatesToSQL(preds []resolvedPredicate) ([]string, []any) {
 	var clauses []string
 	var params []any
 	for _, p := range preds {
@@ -436,11 +436,11 @@ func predicatesToSQL(preds []ResolvedPredicate) ([]string, []any) {
 // resolveFilters converts filter definitions with claim templates into SQL WHERE
 // clauses. Retained as the predicates→SQL composition the query-path tests target.
 func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string, []any) {
-	return predicatesToSQL(ResolvePredicates(filters, claims))
+	return predicatesToSQL(resolvePredicates(filters, claims))
 }
 
 // toStrings normalizes resolveInValues' []any (already canonical strings) to the
-// []string a ResolvedPredicate carries.
+// []string a resolvedPredicate carries.
 func toStrings(vals []any) []string {
 	if len(vals) == 0 {
 		return nil
