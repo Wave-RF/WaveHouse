@@ -265,6 +265,10 @@ export interface Column {
   type: string;
   is_nullable: boolean;
   has_default: boolean;
+  /** 1-based ordinal in the table's declaration order — the order `columns` itself is in. Always present. */
+  position: number;
+  /** The column's DEFAULT expression, absent when it declares none. */
+  default_expression?: string;
 }
 
 export interface TableSchema {

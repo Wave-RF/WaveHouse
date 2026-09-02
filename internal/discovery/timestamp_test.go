@@ -300,7 +300,7 @@ func TestResolveTimestampSpecs(t *testing.T) {
 // the testutil mock-conn path alike — exercise the same precomputed path.
 func TestRefresh_PrecomputesSpecs(t *testing.T) {
 	t.Parallel()
-	conn := &fakeConn{columns: [][4]string{{"t", "ts", "DateTime", ""}}}
+	conn := &fakeConn{columns: []fakeColumn{{table: "t", name: "ts", chType: "DateTime", position: 1}}}
 	reg := NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, discardLogger())
 	require.NoError(t, reg.Refresh(context.Background()))
 	col := reg.Get("t").Columns[0]

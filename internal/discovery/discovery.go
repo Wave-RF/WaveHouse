@@ -18,6 +18,16 @@ type Column struct {
 	Type       string `json:"type"`
 	IsNullable bool   `json:"is_nullable"`
 	HasDefault bool   `json:"has_default"`
+	// DefaultExpression is the column's DEFAULT/MATERIALIZED/ALIAS expression
+	// as ClickHouse stores it (system.columns.default_expression), empty when
+	// the column declares none. HasDefault stays the boolean form (a non-empty
+	// default_kind) so the two never disagree about whether one exists.
+	DefaultExpression string `json:"default_expression,omitempty"`
+	// Position is the column's 1-based ordinal in the table's declaration order
+	// (system.columns.position). Columns is already ordered by it; the field
+	// carries the ordinal itself so a caller holding a lone Column still knows
+	// where it sits.
+	Position uint64 `json:"position"`
 
 	// tsSpec is a DateTime/DateTime64 column's canonicalization spec, resolved
 	// once at schema build (Refresh). nil for non-timestamp columns, hand-built
@@ -26,10 +36,26 @@ type Column struct {
 	tsSpec *timestampSpec
 }
 
-// TableSchema holds the discovered schema for one ClickHouse table.
+// TableSchema holds the discovered schema for one ClickHouse table. Columns is
+// in declaration order (system.columns.position; see Refresh), which is the
+// order positional row formats such as JSONCompactEachRow use.
 type TableSchema struct {
 	Name    string   `json:"name"`
 	Columns []Column `json:"columns"`
+	// DDL is the table's CREATE TABLE statement as ClickHouse renders it
+	// (system.tables.create_table_query). Deliberately NOT serialized: the
+	// schema HTTP endpoint marshals TableSchema straight to the client, and an
+	// external-engine table (S3, MySQL, PostgreSQL, Kafka) renders its wiring
+	// there unconditionally — endpoint, bucket or host, database, username, S3
+	// access key id, ZooKeeper replica paths. The password specifically is
+	// rendered `[HIDDEN]` by ClickHouse >= ~23.9 (verified on 26.7.3), so the
+	// leak is the topology rather than the secret — except on an older server,
+	// or one with `display_secrets_in_show_and_select` enabled, where the
+	// password is in there too. Internal consumers read the field directly.
+	// Empty when the table was discovered from system.columns but had gone from
+	// system.tables by the time the second query ran — the two scans are not one
+	// snapshot, so a consumer must not treat an empty DDL as "no such table".
+	DDL string `json:"-"`
 }
 
 // ColumnNames returns the table's column names in their discovered order
@@ -59,6 +85,9 @@ type SchemaRegistry struct {
 	logger          *slog.Logger
 	mu              sync.RWMutex
 	tables          map[string]*TableSchema
+	// serverVersion is the ClickHouse version string from the last successful
+	// Refresh, guarded by mu alongside tables.
+	serverVersion string
 }
 
 // NewSchemaRegistry creates a registry that discovers schemas from system.columns.
@@ -73,7 +102,8 @@ func NewSchemaRegistry(conn driver.Conn, database func() string, refreshInterval
 }
 
 // Refresh rebuilds the in-memory schema cache: it discovers the server's default
-// time zone, queries system.columns, and precomputes timestamp column specs.
+// time zone and version, queries system.columns, attaches each table's DDL from
+// system.tables, and precomputes timestamp column specs.
 func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
 	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
@@ -85,6 +115,23 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	if err := sr.conn.QueryRow(ctx, "SELECT timezone()").Scan(&tzName); err != nil {
 		return fmt.Errorf("query server timezone: %w", err)
 	}
+	// The server version is metadata about the schema source, probed on the same
+	// refresh so a stale version cannot outlive the schemas it describes.
+	//
+	// It is NOT a same-server guarantee: chconn.Manager resolves the connection
+	// per call, so a reload changing clickhouse.addr between this probe and the
+	// system.columns query below would pair a version from one server with
+	// schemas from another. Narrow, self-correcting on the next refresh, and
+	// shared with the timezone probe above — but do not read this as atomic.
+	//
+	// Nor is the read side: ServerVersion() and Get()/List() take separate
+	// RLocks, so a caller doing both across a refresh boundary pairs version N
+	// with schemas N+1. They are published together; nothing reads them together.
+	var serverVersion string
+	if err := sr.conn.QueryRow(ctx, "SELECT version()").Scan(&serverVersion); err != nil {
+		return fmt.Errorf("query server version: %w", err)
+	}
+
 	var serverTZ *time.Location
 	if loc, err := loadLocation(tzName); err == nil {
 		serverTZ = loc
@@ -95,13 +142,20 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 			"timezone", tzName, "error", err)
 	}
 
+	// One database per refresh. `database` is a live getter so a ClickHouse
+	// reconfigure is honored on the NEXT refresh — reading it twice would let a
+	// reconfigure land between the system.columns and system.tables queries and
+	// attach DDL from the new database to same-named schemas discovered from the
+	// old one.
+	database := sr.database()
+
 	rows, err := sr.conn.Query(ctx,
-		`SELECT table, name, type, default_kind
+		`SELECT table, name, type, default_kind, default_expression, position
 		 FROM system.columns
 		 WHERE database = ?
 		   AND table NOT LIKE '.%'
 		 ORDER BY table, position`,
-		sr.database(),
+		database,
 	)
 	if err != nil {
 		return fmt.Errorf("query system.columns: %w", err)
@@ -110,8 +164,9 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 
 	tables := make(map[string]*TableSchema)
 	for rows.Next() {
-		var tableName, colName, colType, defaultKind string
-		if err := rows.Scan(&tableName, &colName, &colType, &defaultKind); err != nil {
+		var tableName, colName, colType, defaultKind, defaultExpr string
+		var position uint64
+		if err := rows.Scan(&tableName, &colName, &colType, &defaultKind, &defaultExpr, &position); err != nil {
 			return fmt.Errorf("scan column row: %w", err)
 		}
 		ts, ok := tables[tableName]
@@ -120,10 +175,12 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 			tables[tableName] = ts
 		}
 		col := Column{
-			Name:       colName,
-			Type:       colType,
-			IsNullable: isNullable(colType),
-			HasDefault: defaultKind != "",
+			Name:              colName,
+			Type:              colType,
+			IsNullable:        isNullable(colType),
+			HasDefault:        defaultKind != "",
+			DefaultExpression: defaultExpr,
+			Position:          position,
 		}
 		ts.Columns = append(ts.Columns, col)
 	}
@@ -134,16 +191,65 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		return fmt.Errorf("iterate system.columns: %w", err)
 	}
 
+	if err := sr.attachDDL(ctx, database, tables); err != nil {
+		return err
+	}
+
 	for _, ts := range tables {
 		resolveTimestampSpecs(ts, serverTZ, sr.logger)
 	}
 
 	sr.mu.Lock()
 	sr.tables = tables
+	sr.serverVersion = serverVersion
 	sr.mu.Unlock()
-	sr.logger.Info("schema registry refreshed", "tables", len(tables), "server_tz", tzName)
+	sr.logger.Info("schema registry refreshed", "tables", len(tables), "server_tz", tzName, "server_version", serverVersion)
 
 	return nil
+}
+
+// attachDDL fills each discovered table's DDL from system.tables. A table listed
+// there but absent from tables — a view or table whose columns the system.columns
+// scan didn't return, and one created between the two queries — is skipped rather
+// than added: a TableSchema with no columns is not a schema, and the two queries
+// are not a snapshot.
+func (sr *SchemaRegistry) attachDDL(ctx context.Context, database string, tables map[string]*TableSchema) error {
+	rows, err := sr.conn.Query(ctx,
+		`SELECT name, create_table_query
+		 FROM system.tables
+		 WHERE database = ?
+		   AND name NOT LIKE '.%'`,
+		database,
+	)
+	if err != nil {
+		return fmt.Errorf("query system.tables: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var name, ddl string
+		if err := rows.Scan(&name, &ddl); err != nil {
+			return fmt.Errorf("scan table row: %w", err)
+		}
+		if ts, ok := tables[name]; ok {
+			ts.DDL = ddl
+		}
+	}
+	// Same reasoning as the system.columns scan: a mid-stream driver error
+	// leaves rows.Next() reporting false, so consult Err() rather than publish
+	// a registry whose tables are missing their DDL.
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate system.tables: %w", err)
+	}
+	return nil
+}
+
+// ServerVersion returns the ClickHouse version string captured by the last
+// successful Refresh, or "" before the first one.
+func (sr *SchemaRegistry) ServerVersion() string {
+	sr.mu.RLock()
+	defer sr.mu.RUnlock()
+	return sr.serverVersion
 }
 
 // Get returns the schema for a table, or nil if not found.

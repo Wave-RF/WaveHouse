@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,8 +30,9 @@ func NopLogger() *slog.Logger {
 // built by the real discovery path — NewSchemaRegistry + Refresh — so
 // timestamp column specs are precomputed exactly as in production.
 //
-// The registry holds schemas rebuilt from those rows (Name, Type, HasDefault;
-// IsNullable derived from the type string), not the caller's structs.
+// The registry holds schemas rebuilt from those rows (Name, Type, HasDefault,
+// DefaultExpression, Position, DDL; IsNullable derived from the type string),
+// not the caller's structs.
 func NewTestSchemaRegistry(t testing.TB, tables []*discovery.TableSchema) *discovery.SchemaRegistry {
 	t.Helper()
 	reg := discovery.NewSchemaRegistry(&schemaConn{tables: tables}, func() string { return "test" }, func() time.Duration { return time.Hour }, NopLogger())
@@ -38,36 +40,62 @@ func NewTestSchemaRegistry(t testing.TB, tables []*discovery.TableSchema) *disco
 	return reg
 }
 
-// schemaConn is a mock driver.Conn serving exactly the two queries Refresh
-// issues: the SELECT timezone() probe (always "UTC") and the system.columns
-// scan (rows synthesized from tables). The nil embedded interface panics on
-// any other method — nothing else is part of Refresh's contract.
+// TestServerVersion is the ClickHouse version NewTestSchemaRegistry's mock
+// connection reports, so a test can assert against ServerVersion() without
+// hardcoding the same literal twice.
+const TestServerVersion = "24.8.1.1"
+
+// schemaConn is a mock driver.Conn serving exactly the queries Refresh issues:
+// the SELECT timezone() (always "UTC") and SELECT version() probes, the
+// system.columns scan (rows synthesized from tables), and the system.tables DDL
+// scan. The nil embedded interface panics on any other method — nothing else is
+// part of Refresh's contract.
 type schemaConn struct {
 	driver.Conn
 	tables []*discovery.TableSchema
 }
 
-func (c *schemaConn) QueryRow(context.Context, string, ...any) driver.Row {
+func (c *schemaConn) QueryRow(_ context.Context, q string, _ ...any) driver.Row {
+	if strings.Contains(q, "version()") {
+		return scalarRow{val: TestServerVersion}
+	}
 	return UTCRow{}
 }
 
-func (c *schemaConn) Query(context.Context, string, ...any) (driver.Rows, error) {
+func (c *schemaConn) Query(_ context.Context, q string, _ ...any) (driver.Rows, error) {
+	if strings.Contains(q, "system.tables") {
+		r := &tableRows{}
+		for _, t := range c.tables {
+			ddl := t.DDL
+			if ddl == "" {
+				ddl = "CREATE TABLE test." + t.Name + " (…) ENGINE = MergeTree"
+			}
+			r.rows = append(r.rows, [2]string{t.Name, ddl})
+		}
+		return r, nil
+	}
 	r := &columnRows{}
 	for _, t := range c.tables {
-		for _, col := range t.Columns {
+		for i, col := range t.Columns {
 			kind := ""
 			if col.HasDefault {
 				kind = "DEFAULT"
 			}
-			r.rows = append(r.rows, [4]string{t.Name, col.Name, col.Type, kind})
+			r.rows = append(r.rows, columnRow{
+				vals: [5]string{t.Name, col.Name, col.Type, kind, col.DefaultExpression},
+				// Declaration order is the slice order the caller wrote, so the
+				// synthesized position matches what a real system.columns scan
+				// (ORDER BY position) would have produced.
+				position: uint64(i + 1),
+			})
 		}
 	}
 	return r, nil
 }
 
-// UTCRow is a driver.Row stub answering the SELECT timezone() probe Refresh
-// issues with "UTC" — for any mock driver.Conn that must satisfy the
-// schema-refresh path.
+// UTCRow is a driver.Row stub answering Refresh's single-string probes with
+// "UTC" — for any mock driver.Conn that must satisfy the schema-refresh path
+// without caring which probe it is answering.
 type UTCRow struct{ driver.Row }
 
 func (UTCRow) Scan(dest ...any) error {
@@ -77,14 +105,36 @@ func (UTCRow) Scan(dest ...any) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("unexpected timezone scan into %d dest(s)", len(dest))
+	return fmt.Errorf("unexpected scalar probe scan into %d dest(s)", len(dest))
 }
 
-// columnRows plays a system.columns result set: one [table, name, type,
-// default_kind] row per column, in the given order.
+// scalarRow answers a one-column probe with a canned string.
+type scalarRow struct {
+	driver.Row
+	val string
+}
+
+func (r scalarRow) Scan(dest ...any) error {
+	if len(dest) == 1 {
+		if s, ok := dest[0].(*string); ok {
+			*s = r.val
+			return nil
+		}
+	}
+	return fmt.Errorf("unexpected scalar probe scan into %d dest(s)", len(dest))
+}
+
+// columnRow is one synthesized system.columns row: the five string columns
+// Refresh scans plus the numeric position.
+type columnRow struct {
+	vals     [5]string // table, name, type, default_kind, default_expression
+	position uint64
+}
+
+// columnRows plays a system.columns result set, in the given order.
 type columnRows struct {
 	driver.Rows
-	rows [][4]string
+	rows []columnRow
 	next int
 }
 
@@ -94,6 +144,42 @@ func (r *columnRows) Next() bool {
 }
 
 func (r *columnRows) Scan(dest ...any) error {
+	row := r.rows[r.next-1]
+	if len(dest) != len(row.vals)+1 {
+		return fmt.Errorf("expected %d scan dests, got %d", len(row.vals)+1, len(dest))
+	}
+	for i, want := range row.vals {
+		s, ok := dest[i].(*string)
+		if !ok {
+			return fmt.Errorf("dest %d: expected *string, got %T", i, dest[i])
+		}
+		*s = want
+	}
+	pos, ok := dest[len(row.vals)].(*uint64)
+	if !ok {
+		return fmt.Errorf("dest %d: expected *uint64, got %T", len(row.vals), dest[len(row.vals)])
+	}
+	*pos = row.position
+	return nil
+}
+
+func (*columnRows) Close() error { return nil }
+func (*columnRows) Err() error   { return nil }
+
+// tableRows plays a system.tables result set: one {name, create_table_query}
+// pair per table.
+type tableRows struct {
+	driver.Rows
+	rows [][2]string
+	next int
+}
+
+func (r *tableRows) Next() bool {
+	r.next++
+	return r.next <= len(r.rows)
+}
+
+func (r *tableRows) Scan(dest ...any) error {
 	row := r.rows[r.next-1]
 	if len(dest) != len(row) {
 		return fmt.Errorf("expected %d scan dests, got %d", len(row), len(dest))
@@ -108,8 +194,8 @@ func (r *columnRows) Scan(dest ...any) error {
 	return nil
 }
 
-func (*columnRows) Close() error { return nil }
-func (*columnRows) Err() error   { return nil }
+func (*tableRows) Close() error { return nil }
+func (*tableRows) Err() error   { return nil }
 
 // AssertJSONResponse checks that rec has the expected status code and that
 // the response body, decoded as JSON, matches expected (compared as Go values).
