@@ -1169,6 +1169,12 @@ func TestIngestFormat(t *testing.T) {
 		{ct: "application/json;;", want: FormatJSON},
 		{ct: `application/json; charset="unterminated`, want: FormatJSON},
 		{ct: "application/x-ndjson;charset", want: FormatNDJSON},
+		// Optional whitespace before the ";" is legal (RFC 9110 §8.3
+		// `parameters = *( OWS ";" OWS [ parameter ] )`) and mime.ParseMediaType
+		// accepted it, so the TrimSpace that preserves parity must stay. Without
+		// it the media type keeps the trailing space and 415s.
+		{ct: "application/json ; charset=utf-8", want: FormatJSON},
+		{ct: "application/x-ndjson ; charset=utf-8", want: FormatNDJSON},
 		// A duplicate parameter is the case mime.ParseMediaType refuses outright;
 		// ignoring parameters entirely is what makes it a non-event.
 		{ct: "application/json; charset=utf-8; charset=utf-16", want: FormatJSON},
@@ -1308,6 +1314,9 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
 		testutil.AssertJSONErrorResponse(t, w)
+		// The body text is documented verbatim in api.md's 415 tables, so it is
+		// contract, not phrasing — pin it here rather than let it drift silently.
+		assert.Contains(t, w.Body.String(), "conflicting Content-Type headers")
 		assert.Empty(t, pub.Messages, "nothing may be ingested from an ambiguous declaration")
 	})
 
@@ -1329,6 +1338,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
 		testutil.AssertJSONErrorResponse(t, w)
+		assert.Contains(t, w.Body.String(), "conflicting Content-Type headers")
 		assert.Empty(t, pub.Messages, "an ambiguous declaration may not publish a truncated batch")
 	})
 
