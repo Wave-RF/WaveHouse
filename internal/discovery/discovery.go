@@ -44,10 +44,17 @@ type TableSchema struct {
 	Columns []Column `json:"columns"`
 	// DDL is the table's CREATE TABLE statement as ClickHouse renders it
 	// (system.tables.create_table_query). Deliberately NOT serialized: the
-	// schema HTTP endpoint marshals TableSchema straight to the client, and a
-	// table backed by an external engine (S3, MySQL, PostgreSQL, Kafka) carries
-	// its connection credentials in that statement. Internal consumers read the
-	// field directly.
+	// schema HTTP endpoint marshals TableSchema straight to the client, and an
+	// external-engine table (S3, MySQL, PostgreSQL, Kafka) renders its wiring
+	// there unconditionally — endpoint, bucket or host, database, username, S3
+	// access key id, ZooKeeper replica paths. The password specifically is
+	// rendered `[HIDDEN]` by ClickHouse >= ~23.9 (verified on 26.7.3), so the
+	// leak is the topology rather than the secret — except on an older server,
+	// or one with `display_secrets_in_show_and_select` enabled, where the
+	// password is in there too. Internal consumers read the field directly.
+	// Empty when the table was discovered from system.columns but had gone from
+	// system.tables by the time the second query ran — the two scans are not one
+	// snapshot, so a consumer must not treat an empty DDL as "no such table".
 	DDL string `json:"-"`
 }
 
@@ -108,8 +115,18 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	if err := sr.conn.QueryRow(ctx, "SELECT timezone()").Scan(&tzName); err != nil {
 		return fmt.Errorf("query server timezone: %w", err)
 	}
-	// The server version is metadata about the schema source, refreshed with it
-	// so the two can never describe different servers.
+	// The server version is metadata about the schema source, probed on the same
+	// refresh so a stale version cannot outlive the schemas it describes.
+	//
+	// It is NOT a same-server guarantee: chconn.Manager resolves the connection
+	// per call, so a reload changing clickhouse.addr between this probe and the
+	// system.columns query below would pair a version from one server with
+	// schemas from another. Narrow, self-correcting on the next refresh, and
+	// shared with the timezone probe above — but do not read this as atomic.
+	//
+	// Nor is the read side: ServerVersion() and Get()/List() take separate
+	// RLocks, so a caller doing both across a refresh boundary pairs version N
+	// with schemas N+1. They are published together; nothing reads them together.
 	var serverVersion string
 	if err := sr.conn.QueryRow(ctx, "SELECT version()").Scan(&serverVersion); err != nil {
 		return fmt.Errorf("query server version: %w", err)
@@ -125,13 +142,20 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 			"timezone", tzName, "error", err)
 	}
 
+	// One database per refresh. `database` is a live getter so a ClickHouse
+	// reconfigure is honored on the NEXT refresh — reading it twice would let a
+	// reconfigure land between the system.columns and system.tables queries and
+	// attach DDL from the new database to same-named schemas discovered from the
+	// old one.
+	database := sr.database()
+
 	rows, err := sr.conn.Query(ctx,
 		`SELECT table, name, type, default_kind, default_expression, position
 		 FROM system.columns
 		 WHERE database = ?
 		   AND table NOT LIKE '.%'
 		 ORDER BY table, position`,
-		sr.database(),
+		database,
 	)
 	if err != nil {
 		return fmt.Errorf("query system.columns: %w", err)
@@ -167,7 +191,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		return fmt.Errorf("iterate system.columns: %w", err)
 	}
 
-	if err := sr.attachDDL(ctx, tables); err != nil {
+	if err := sr.attachDDL(ctx, database, tables); err != nil {
 		return err
 	}
 
@@ -189,13 +213,13 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 // scan didn't return, and one created between the two queries — is skipped rather
 // than added: a TableSchema with no columns is not a schema, and the two queries
 // are not a snapshot.
-func (sr *SchemaRegistry) attachDDL(ctx context.Context, tables map[string]*TableSchema) error {
+func (sr *SchemaRegistry) attachDDL(ctx context.Context, database string, tables map[string]*TableSchema) error {
 	rows, err := sr.conn.Query(ctx,
 		`SELECT name, create_table_query
 		 FROM system.tables
 		 WHERE database = ?
 		   AND name NOT LIKE '.%'`,
-		sr.database(),
+		database,
 	)
 	if err != nil {
 		return fmt.Errorf("query system.tables: %w", err)
