@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"strings"
 )
 
@@ -221,20 +220,30 @@ func (l *lineReader) Next() (map[string]any, error) {
 // (a 415): the format is the client's declaration, so there is nothing to fall
 // back to.
 //
-// Parameters are ignored, and a malformed one does not cost the request. Go
-// reports "application/json; charset" (a parameter with no value), "; boundary="
-// and a trailing ";" as ErrInvalidMediaParameter *together with* a usable media
-// type, so refusing on any error would 415 requests that this endpoint read fine
-// before the header became authoritative. A type Go cannot resolve to a media
-// type at all still fails: "application/json, application/json" — what a proxy
-// produces when it joins two Content-Type headers — is a different error and
-// yields an empty media type, and there is no single declaration to honor.
+// The media type is everything before the first ";", trimmed and lowercased.
+// Parameters are ignored entirely rather than parsed, because the rule is
+// "parameters do not affect the format" and parsing them only creates ways to
+// refuse a request that names a type this endpoint reads. mime.ParseMediaType
+// refuses a parameter with no value ("; charset"), an empty one (";;"), an
+// unterminated quoted value, and a duplicate name ("; charset=a; charset=b") —
+// every one of which this endpoint read fine before the header became
+// authoritative, and none of which changes what the body is.
+//
+// A comma is the exception, and it is refused before anything else: it means two
+// declarations joined into one header, which is what a proxy does with duplicate
+// Content-Types. Honoring the first would pick a format the client may not have
+// declared — "application/json; charset=utf-8, application/x-ndjson" would read
+// an NDJSON body as a single JSON object and silently drop every record after
+// the first. No accepted media type contains a comma, so refusing costs nothing
+// real; a comma inside a quoted parameter value is refused too, which is the
+// deliberate price.
 func ingestFormat(ct string) (IngestFormat, error) {
-	if strings.TrimSpace(ct) == "" {
+	if strings.Contains(ct, ",") {
 		return FormatJSON, errUnsupportedContentType
 	}
-	mediaType, _, err := mime.ParseMediaType(ct)
-	if err != nil && !errors.Is(err, mime.ErrInvalidMediaParameter) {
+	base, _, _ := strings.Cut(ct, ";")
+	mediaType := strings.ToLower(strings.TrimSpace(base))
+	if mediaType == "" {
 		return FormatJSON, errUnsupportedContentType
 	}
 	switch mediaType {

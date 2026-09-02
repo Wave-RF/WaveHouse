@@ -1169,14 +1169,24 @@ func TestIngestFormat(t *testing.T) {
 		{ct: "application/json;;", want: FormatJSON},
 		{ct: `application/json; charset="unterminated`, want: FormatJSON},
 		{ct: "application/x-ndjson;charset", want: FormatNDJSON},
+		// A duplicate parameter is the case mime.ParseMediaType refuses outright;
+		// ignoring parameters entirely is what makes it a non-event.
+		{ct: "application/json; charset=utf-8; charset=utf-16", want: FormatJSON},
+		{ct: "APPLICATION/JSON", want: FormatJSON},
 		{ct: "text/plain", wantErr: true},
 		{ct: "text/csv", wantErr: true},
 		{ct: "", wantErr: true},
 		{ct: "   ", wantErr: true},
 		{ct: "???not-a-media-type", wantErr: true},
-		// No usable media type at all: a proxy joining two Content-Type headers
-		// leaves two declarations and no way to pick one.
+		// A proxy joining two Content-Type headers leaves two declarations and no
+		// way to pick one. The parameterized spellings are the likelier form —
+		// most clients emit "; charset=utf-8" — and honoring the first would read
+		// an NDJSON body as a single JSON object, dropping every record past the
+		// first. All four are refused.
 		{ct: "application/json, application/json", wantErr: true},
+		{ct: "application/json; charset=utf-8, application/json", wantErr: true},
+		{ct: "application/json; charset=utf-8, application/x-ndjson", wantErr: true},
+		{ct: "application/x-ndjson; charset=utf-8, application/json", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.ct, func(t *testing.T) {
@@ -1249,11 +1259,12 @@ func TestIngest_DeclaredNDJSON_ArrayBodyIsNotReframed(t *testing.T) {
 	assert.Empty(t, pub.Messages)
 }
 
-// ── Forgiving multi-format ingest (JSON array, sniffing, body cap) ──────────
+// ── Multi-format ingest (JSON array, arity sniffing, body cap) ─────────────
 
 // rawIngestRequest builds a POST /v1/ingest request with a verbatim body and an
 // optional Content-Type (empty string → no header), so tests can exercise the
-// body sniffer and malformed-input paths directly.
+// 415 path and malformed-input paths directly. Sniffing now decides only arity
+// within the JSON family, never the family itself.
 func rawIngestRequest(t *testing.T, table, contentType, body string) *http.Request {
 	t.Helper()
 	req := httptest.NewRequestWithContext(
@@ -1273,7 +1284,8 @@ func TestIngest_JSONArray_AllValid(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 
-	// A bare JSON array with no Content-Type must be accepted as a batch.
+	// A JSON array declared as application/json is read as a batch — the body's
+	// first byte picks arity within the family ingestRequest declares.
 	req := ingestRequest(t, "clicks", []map[string]any{
 		{"page": "/a", "count": 1},
 		{"page": "/b", "count": 2},
