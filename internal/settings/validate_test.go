@@ -506,3 +506,55 @@ func TestValidate_DocumentGating(t *testing.T) {
 	assert.Nil(t, doc)
 	assert.True(t, HasErrors(findings))
 }
+
+// TestReportLegacyPolicyLayout_RoleNamedAfterAnOperation: a role literally named
+// after an operation nests a RolePermissions, which looks like an operation map.
+// Where the two readings AGREE the v2 decode is accepted; where they DIVERGE the
+// document is refused rather than guessed at, because the readings differ on
+// which role, which operation, or both — so either guess grants access the file
+// never contained. Raised by CodeRabbit on #551, and the divergent case by the
+// pre-push reviewer after the first fix guessed v2 and widened a grant.
+func TestReportLegacyPolicyLayout_RoleNamedAfterAnOperation(t *testing.T) {
+	t.Parallel()
+
+	// Readings agree — role "select" reads the table either way. Accepted.
+	for name, doc := range map[string]string{
+		"role named select": `{"tables":{"clicks":{"select":{"select":{"allow_columns":["page"]}}}}}`,
+		"role named insert": `{"tables":{"clicks":{"insert":{"insert":{"allow_columns":["page"]}}}}}`,
+	} {
+		v := &validator{}
+		assert.False(t, v.reportLegacyPolicyLayout([]byte(doc)), "%s: the readings agree, so the v2 decode is safe", name)
+	}
+
+	// Readings diverge — they differ on which role, which operation, or both, so
+	// the two-key shapes below mean different grants under each reading and the
+	// single-key ones name a different role entirely. Refused, and NOT with the
+	// migration message, which would
+	// send the operator to convert a file that may already be v2.
+	for name, doc := range map[string]string{
+		"select block granting a role named insert": `{"tables":{"clicks":{"select":{"select":{"allow_columns":["a"]},"insert":{"allow_columns":["b"]}}}}}`,
+		"insert block granting a role named select": `{"tables":{"clicks":{"insert":{"insert":{"allow_columns":["a"]},"select":{"allow_columns":["b"]}}}}}`,
+		// Single-key divergent shapes: a write-only role named `select`, and its
+		// mirror. These are what a real v2 policy produces, and they carry no
+		// same-named key to fall back on — the sub-case whose diagnostic was
+		// wrong until the reviewer caught it.
+		"select block keyed only by insert": `{"tables":{"clicks":{"select":{"insert":{"allow_columns":["a"]}}}}}`,
+		"insert block keyed only by select": `{"tables":{"clicks":{"insert":{"select":{"allow_columns":["a"]}}}}}`,
+	} {
+		v := &validator{}
+		require.True(t, v.reportLegacyPolicyLayout([]byte(doc)), "%s: an ambiguous grant must be refused", name)
+		joined := findingStrings(v.findings)
+		assert.Contains(t, joined, "ambiguous between the role-first and operation-first layouts", "%s", name)
+		assert.NotContains(t, joined, "pre-v2 operation-first layout", "%s: must not claim the file is definitely pre-v2", name)
+	}
+
+	// The genuine pre-v2 shape is still caught, with the migration message.
+	for name, doc := range map[string]string{
+		"operation-first select": `{"tables":{"clicks":{"select":{"viewer":{"allow_columns":["page"]}}}}}`,
+		"operation-first insert": `{"tables":{"clicks":{"insert":{"writer":{"allow_columns":["page"]}}}}}`,
+	} {
+		v := &validator{}
+		require.True(t, v.reportLegacyPolicyLayout([]byte(doc)), "%s", name)
+		assert.Contains(t, findingStrings(v.findings), "pre-v2 operation-first layout", "%s", name)
+	}
+}
