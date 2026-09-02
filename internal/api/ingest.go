@@ -185,7 +185,35 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Resolve the DECLARED format before touching the body: an undeclared or
 	// unreadable Content-Type is a 415, and there is no reason to read (let
 	// alone buffer) bytes for a request already known to be unreadable.
+	//
+	// A caller may declare the type more than once. Go keeps repeated header
+	// LINES separately and Header.Get returns only the first, so without this a
+	// request declaring both application/json and application/x-ndjson would
+	// silently take the JSON path — and an NDJSON body read as a single object
+	// ingests record one and discards the rest, answering 200. ingestFormat
+	// applies the identical rule WITHIN one value, where an intermediary may have
+	// joined declarations with a comma; this applies it ACROSS lines. Agreement
+	// is on (format, acceptedness), so repeating a declaration, or spelling it
+	// differently, is harmless — only disagreement is refused, and this cannot
+	// reject a request that was unambiguous.
 	contentType := r.Header.Get("Content-Type")
+	if values := r.Header.Values("Content-Type"); len(values) > 1 {
+		first, firstErr := ingestFormat(contentType)
+		for _, v := range values[1:] {
+			f, err := ingestFormat(v)
+			if f != first || (err == nil) != (firstErr == nil) {
+				// Logged like the neighbouring 415: this is the one refusal whose
+				// cause is usually NOT the caller's own doing — a proxy that starts
+				// duplicating the header would otherwise produce a wall of
+				// client-side 415s and no server-side signal at all.
+				h.logger.WarnContext(ctx, "conflicting ingest content-type headers",
+					"content_types", values, "table", table)
+				writeJSONError(w, http.StatusUnsupportedMediaType,
+					"conflicting Content-Type headers: "+strings.Join(values, ", "))
+				return
+			}
+		}
+	}
 	format, err := ingestFormat(contentType)
 	if err != nil {
 		h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
@@ -415,6 +443,14 @@ func (h *IngestHandler) processRecord(
 				}, nil
 			}
 		}
+		// Reading CheckClauses directly is the one place the `unresolved` marker
+		// cannot defend: a select-resolved grant presents an empty map here and
+		// every check passes vacuously. What makes it safe is narrower than
+		// "Evaluate resolves both sides" — it does not; it marks the side it
+		// skipped `unresolved` precisely so accessors deny on it. It is safe
+		// because this handler called Evaluate with "insert" (above), so Insert
+		// IS the resolved side. If this loop ever stops being on the insert
+		// path, it needs an explicit resolved check, not a nil guard.
 		for col, requiredVal := range perms.Insert.CheckClauses {
 			// A []any value is an _in check: the inserted value must be present and
 			// one of the allowed set. Unlike the scalar _eq case there is no single

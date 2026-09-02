@@ -246,6 +246,8 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"role whitespace", FileRoles, `{"roles": [" analyst"]}`, "surrounding whitespace"},
 		{"duplicate role", FileRoles, `{"roles": ["analyst", "analyst"]}`, "duplicate role"},
 		{"check uses _gt", FilePolicies, `{"tables": {"clicks": {"analyst": {"insert": {"check": {"region": {"_gt": "1"}}}}}}}`, "check does not honor"},
+		{"operator-less filter", FilePolicies, `{"tables": {"clicks": {"analyst": {"select": {"filter": {"region": {}}}}}}}`, "sets no operator"},
+		{"operator-less check", FilePolicies, `{"tables": {"clicks": {"analyst": {"insert": {"check": {"region": {}}}}}}}`, "sets no operator"},
 		{"unknown filter operator", FilePolicies, `{"tables": {"clicks": {"analyst": {"select": {"filter": {"region": {"_like": "x"}}}}}}}`, "unknown field"},
 		{"filter under insert grant", FilePolicies, `{"tables": {"clicks": {"analyst": {"insert": {"filter": {"region": {"_eq": "x"}}}}}}}`, "unknown field"},
 		{"check under select grant", FilePolicies, `{"tables": {"clicks": {"analyst": {"select": {"check": {"region": {"_eq": "x"}}}}}}}`, "unknown field"},
@@ -461,6 +463,73 @@ func TestValidate_MultipleFaults(t *testing.T) {
 	assert.Len(t, findings, 4, "every fault reported exactly once, no noise:\n%s", out)
 }
 
+// TestValidate_RoleNamedAfterAnOperation_DecodesAsWritten pins the detector's
+// ACCEPT path end to end. Every other outcome is a rejection, so a mistake there
+// fails loudly; accepting is the only branch where getting it wrong changes
+// privileges silently — which is exactly what the withdrawn first attempt did
+// (it adopted a pre-v2 document as v2 and handed a role named `select` an INSERT
+// it never had). Declining to flag is therefore not enough to assert: check the
+// document decodes to the grant the file actually describes.
+func TestValidate_RoleNamedAfterAnOperation_DecodesAsWritten(t *testing.T) {
+	t.Parallel()
+
+	files := validFiles()
+	files[FileRoles] = `{"roles": ["select"]}`
+	files[FilePolicies] = `{"tables":{"clicks":{"select":{"select":{"allow_columns":["page"]}}}}}`
+	files[FilePipes] = `{}`
+	doc, findings := Validate(writeDir(t, files))
+
+	require.False(t, HasErrors(findings), "the readings agree, so this must adopt: %v", findingStrings(findings))
+	require.NotNil(t, doc)
+
+	grant, ok := doc.Policy.Tables["clicks"]["select"]
+	require.True(t, ok, "the grant must be keyed by the ROLE named select, not by the operation")
+	require.NotNil(t, grant.Select, "the inner `select` key is the operation — it must land on the select side")
+	assert.Equal(t, []string{"page"}, grant.Select.AllowColumns)
+	assert.Nil(t, grant.Insert, "nothing in the document grants insert; reading it as one would be the escalation")
+}
+
+// TestValidate_EmptyLegacyOperationBlock pins the exception both .mdx pages
+// document: an empty operation block carries no role names, so the layout
+// detector abstains and the strict decode reads it as a role literally named
+// `select` with neither side set. Which of the two outcomes an operator sees
+// depends on roles.json, and the docs claim both — so both are asserted here,
+// or the prose can drift away from the code.
+func TestValidate_EmptyLegacyOperationBlock(t *testing.T) {
+	t.Parallel()
+
+	const legacy = `{"tables":{"clicks":{"select":{}}}}`
+
+	t.Run("role select undeclared — the usual case, an error", func(t *testing.T) {
+		t.Parallel()
+		files := validFiles()
+		files[FileRoles] = `{"roles": ["viewer"]}`
+		files[FilePolicies] = legacy
+		files[FilePipes] = `{}`
+		doc, findings := Validate(writeDir(t, files))
+		require.True(t, HasErrors(findings))
+		assert.Nil(t, doc)
+		joined := findingStrings(findings)
+		assert.Contains(t, joined, `role "select" is not declared in roles.json`)
+		assert.NotContains(t, joined, "pre-v2 operation-first layout",
+			"an empty block gives the detector nothing to go on — it must abstain, not claim the file is legacy")
+		assert.NotContains(t, joined, "grant sets neither select nor insert",
+			"the undeclared-role error short-circuits the reference walk, so the warning is never reached — the docs say so")
+	})
+
+	t.Run("role select declared — warns and adopts", func(t *testing.T) {
+		t.Parallel()
+		files := validFiles()
+		files[FileRoles] = `{"roles": ["select"]}`
+		files[FilePolicies] = legacy
+		files[FilePipes] = `{}`
+		doc, findings := Validate(writeDir(t, files))
+		require.False(t, HasErrors(findings), "%v", findingStrings(findings))
+		require.NotNil(t, doc, "the document adopts")
+		assert.Contains(t, findingStrings(findings), "grant sets neither select nor insert")
+	})
+}
+
 // TestValidate_ErrorAndWarningMix pins that a warning is still reported
 // alongside an error, and that the error alone decides rejection.
 func TestValidate_ErrorAndWarningMix(t *testing.T) {
@@ -505,4 +574,61 @@ func TestValidate_DocumentGating(t *testing.T) {
 	doc, findings = Validate(filepath.Join(t.TempDir(), "nope"))
 	assert.Nil(t, doc)
 	assert.True(t, HasErrors(findings))
+}
+
+// TestReportLegacyPolicyLayout_RoleNamedAfterAnOperation: a role literally named
+// after an operation nests a RolePermissions, which looks like an operation map.
+// Where the two readings AGREE the v2 decode is accepted; where they DIVERGE the
+// document is refused rather than guessed at, because the readings differ on
+// which role, which operation, or both — so either guess grants access the file
+// never contained. Raised by CodeRabbit on #551, and the divergent case by the
+// pre-push reviewer after the first fix guessed v2 and widened a grant.
+func TestReportLegacyPolicyLayout_RoleNamedAfterAnOperation(t *testing.T) {
+	t.Parallel()
+
+	// Readings agree — role "select" reads the table either way. Accepted.
+	for name, doc := range map[string]string{
+		"role named select": `{"tables":{"clicks":{"select":{"select":{"allow_columns":["page"]}}}}}`,
+		"role named insert": `{"tables":{"clicks":{"insert":{"insert":{"allow_columns":["page"]}}}}}`,
+	} {
+		v := &validator{}
+		assert.False(t, v.reportLegacyPolicyLayout([]byte(doc)), "%s: the readings agree, so the v2 decode is safe", name)
+	}
+
+	// Readings diverge — they differ on which role, which operation, or both, so
+	// the two-key shapes below mean different grants under each reading and the
+	// single-key ones name a different role entirely. Refused, and NOT with the
+	// migration message, which would
+	// send the operator to convert a file that may already be v2.
+	for name, doc := range map[string]string{
+		"select block granting a role named insert": `{"tables":{"clicks":{"select":{"select":{"allow_columns":["a"]},"insert":{"allow_columns":["b"]}}}}}`,
+		"insert block granting a role named select": `{"tables":{"clicks":{"insert":{"insert":{"allow_columns":["a"]},"select":{"allow_columns":["b"]}}}}}`,
+		// Single-key divergent shapes: a write-only role named `select`, and its
+		// mirror. These are what a real v2 policy produces, and they carry no
+		// same-named key to fall back on — the sub-case whose diagnostic was
+		// wrong until the reviewer caught it.
+		"select block keyed only by insert": `{"tables":{"clicks":{"select":{"insert":{"allow_columns":["a"]}}}}}`,
+		"insert block keyed only by select": `{"tables":{"clicks":{"insert":{"select":{"allow_columns":["a"]}}}}}`,
+	} {
+		v := &validator{}
+		require.True(t, v.reportLegacyPolicyLayout([]byte(doc)), "%s: an ambiguous grant must be refused", name)
+		joined := findingStrings(v.findings)
+		assert.Contains(t, joined, "ambiguous between the role-first and operation-first layouts", "%s", name)
+		assert.NotContains(t, joined, "pre-v2 operation-first layout", "%s: must not claim the file is definitely pre-v2", name)
+	}
+
+	// The genuine pre-v2 shape is still caught, with the migration message.
+	for name, doc := range map[string]string{
+		"operation-first select": `{"tables":{"clicks":{"select":{"viewer":{"allow_columns":["page"]}}}}}`,
+		"operation-first insert": `{"tables":{"clicks":{"insert":{"writer":{"allow_columns":["page"]}}}}}`,
+		// A real pre-v2 block that happens to carry one operation-named role
+		// beside a real one. `operationNamedRoles` bails on the first key that
+		// is neither operation, so the real name settles the reading: pre-v2,
+		// migration message, not the ambiguity refusal.
+		"operation-first with an operation-named role": `{"tables":{"clicks":{"select":{"viewer":{"allow_columns":["page"]},"insert":{"allow_columns":["page"]}}}}}`,
+	} {
+		v := &validator{}
+		require.True(t, v.reportLegacyPolicyLayout([]byte(doc)), "%s", name)
+		assert.Contains(t, findingStrings(v.findings), "pre-v2 operation-first layout", "%s", name)
+	}
 }

@@ -144,7 +144,7 @@ func (p *ResolvedPermissions) RowVisible(row map[string]any, cols map[string]Col
 
 // matches evaluates one predicate against the row, failing closed (false) whenever
 // the value is absent or can't be compared as required.
-func (pred ResolvedPredicate) matches(row map[string]any, spec ColumnSpec) bool {
+func (pred resolvedPredicate) matches(row map[string]any, spec ColumnSpec) bool {
 	// No values ⇒ matches nothing: an empty/unresolvable "in" set, or a scalar
 	// whose constant was unrenderable — the in-memory twin of the `1 = 0`
 	// predicatesToSQL emits for the same cases.

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"strings"
 )
 
@@ -50,7 +49,8 @@ func (e *recordSyntaxError) Error() string { return e.msg }
 var errEmptyBody = errors.New("empty body")
 
 // errUnsupportedContentType is returned when the request declares no
-// Content-Type, or one ingest does not read. The handler maps it to a 415.
+// Content-Type, one whose media type is not in the accepted list, or several
+// that disagree. The handler maps it to a 415.
 var errUnsupportedContentType = errors.New("unsupported content type")
 
 // IngestFormat is the wire format of an ingest request body. It comes from the
@@ -219,16 +219,51 @@ func (l *lineReader) Next() (map[string]any, error) {
 // ingestFormat resolves a declared Content-Type to the format ingest will read
 // the body as. A missing, empty, or unrecognized type is errUnsupportedContentType
 // (a 415): the format is the client's declaration, so there is nothing to fall
-// back to. Parameters such as "; charset=utf-8" are ignored.
+// back to.
+//
+// One header value may carry SEVERAL declarations: an intermediary that merges
+// duplicate Content-Type header lines joins them with a comma. That is the same
+// situation as two separate header lines, which the handler resolves and
+// compares, so it is judged by the same rule here — resolve every part and
+// require them to agree. Judging it any other way would make the outcome depend
+// on which spelling an intermediary the caller does not control happened to
+// emit: `application/json, application/json` says exactly what two identical
+// header lines say.
+//
+// Agreement is on (format, acceptedness), not on text, so `application/x-ndjson`
+// and `application/ndjson; charset=utf-8` agree, while a supported and an
+// unsupported declaration do not. A comma inside a quoted parameter value is
+// split like any other, so such a header is refused whenever the parts it
+// produces disagree — `application/json; foo="x,y"` does. That is usual but not
+// universal: `application/json; foo="a,application/json;q=1"` splits into parts
+// that agree and is accepted. Not parsing quoted strings is the deliberate
+// price, and it is bounded — acceptance requires every part to match the
+// LEADING declaration, so the worst case is an over-reject, never a body framed
+// as something the caller did not declare.
 func ingestFormat(ct string) (IngestFormat, error) {
-	if strings.TrimSpace(ct) == "" {
-		return FormatJSON, errUnsupportedContentType
+	parts := strings.Split(ct, ",")
+	first, firstErr := ingestFormatOne(parts[0])
+	for _, p := range parts[1:] {
+		f, err := ingestFormatOne(p)
+		if f != first || (err == nil) != (firstErr == nil) {
+			return FormatJSON, errUnsupportedContentType
+		}
 	}
-	mediaType, _, err := mime.ParseMediaType(ct)
-	if err != nil {
-		return FormatJSON, errUnsupportedContentType
-	}
-	switch mediaType {
+	return first, firstErr
+}
+
+// ingestFormatOne resolves ONE declaration. The media type is everything before
+// the first ";", trimmed and lowercased; parameters are ignored entirely rather
+// than parsed, because the rule is "parameters do not affect the format" and
+// parsing them only creates ways to refuse a request that names a type this
+// endpoint reads. mime.ParseMediaType refuses a parameter with no value
+// ("; charset"), an empty one (";;"), an unterminated quoted value, and a
+// duplicate name ("; charset=a; charset=b") — every one of which this endpoint
+// accepted before the header became authoritative, and none of which changes
+// what the body is.
+func ingestFormatOne(ct string) (IngestFormat, error) {
+	base, _, _ := strings.Cut(ct, ";")
+	switch strings.ToLower(strings.TrimSpace(base)) {
 	case "application/json":
 		return FormatJSON, nil
 	case "application/x-ndjson", "application/ndjson", "application/jsonl", "application/jsonlines":
