@@ -203,6 +203,12 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		for _, v := range values[1:] {
 			f, err := ingestFormat(v)
 			if f != first || (err == nil) != (firstErr == nil) {
+				// Logged like the neighbouring 415: this is the one refusal whose
+				// cause is usually NOT the caller's own doing — a proxy that starts
+				// duplicating the header would otherwise produce a wall of
+				// client-side 415s and no server-side signal at all.
+				h.logger.WarnContext(ctx, "conflicting ingest content-type headers",
+					"content_types", values, "table", table)
 				writeJSONError(w, http.StatusUnsupportedMediaType,
 					"conflicting Content-Type headers: "+strings.Join(values, ", "))
 				return

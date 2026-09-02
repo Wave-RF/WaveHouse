@@ -1311,6 +1311,44 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		assert.Empty(t, pub.Messages, "nothing may be ingested from an ambiguous declaration")
 	})
 
+	// The json-vs-ndjson case above is caught by the format comparison alone. This
+	// one is caught ONLY by the error-state conjunct: both lines resolve to
+	// FormatJSON (the unsupported branch returns FormatJSON with an error), so a
+	// format-only guard would let it through — and an NDJSON body then takes the
+	// single-object path and publishes 1 of 2 records with a 200. Pins the half of
+	// the comparison a "simplification" could delete with the suite still green.
+	t.Run("a supported and an unsupported declaration are refused", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		req := rawIngestRequest(t, "clicks", "application/json", ndjson)
+		req.Header.Add("Content-Type", "text/csv")
+
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+		testutil.AssertJSONErrorResponse(t, w)
+		assert.Empty(t, pub.Messages, "an ambiguous declaration may not publish a truncated batch")
+	})
+
+	// Two spellings of the same family are not ambiguous: the guard compares
+	// resolved FORMATS, not header text, so a proxy re-adding the type with a
+	// charset or a different accepted alias must not cost the request.
+	t.Run("different spellings of the same format are accepted", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		req := rawIngestRequest(t, "clicks", "application/x-ndjson", ndjson)
+		req.Header.Add("Content-Type", "application/ndjson; charset=utf-8")
+
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Len(t, pub.Messages, 2, "same format, different spelling — not ambiguous")
+	})
+
 	t.Run("an identical declaration repeated is not ambiguous", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
