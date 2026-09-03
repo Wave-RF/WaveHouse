@@ -1355,6 +1355,7 @@ func TestIngest_ContentTypeRefusalBeatsEmptyBody(t *testing.T) {
 
 			assert.Equal(t, http.StatusUnsupportedMediaType, w.Code,
 				"the header is resolved before the body is read, so this is a 415 and not an empty-body 400")
+			testutil.AssertJSONErrorResponse(t, w)
 			assert.Contains(t, jsonErrorMessage(t, w), "ingest requires one of")
 			assert.Empty(t, pub.Messages)
 		})
@@ -1492,6 +1493,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 				h.Handle(w, rawIngestRequest(t, "clicks", ct, ndjson))
 
 				assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+				testutil.AssertJSONErrorResponse(t, w)
 				assert.Empty(t, pub.Messages, "must not ingest record one and drop the rest behind a 200")
 			})
 		}
@@ -1565,6 +1567,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		h.Handle(w, req)
 
 		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+		testutil.AssertJSONErrorResponse(t, w)
 		assert.Empty(t, pub.Messages, "the third declaration must be resolved like the rest")
 	})
 
@@ -1591,6 +1594,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 				h.Handle(w, req)
 
 				assert.Equal(t, http.StatusUnsupportedMediaType, w.Code, "empty first=%v", first)
+				testutil.AssertJSONErrorResponse(t, w)
 				assert.Empty(t, pub.Messages)
 			}
 		})
@@ -1610,6 +1614,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		h.Handle(w, req)
 
 		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+		testutil.AssertJSONErrorResponse(t, w)
 		msg := jsonErrorMessage(t, w)
 		assert.Contains(t, msg, `"text/csv"`)
 		assert.Contains(t, msg, `"text/plain"`, "a declaration the caller sent must not vanish from the message")
