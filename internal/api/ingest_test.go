@@ -1931,11 +1931,12 @@ func TestIngest_BodyCap_413(t *testing.T) {
 		{name: "single object", ct: "application/json", body: big, cap: 50},
 		{name: "json array mid-element", ct: "application/json", body: "[" + big + "]", cap: 50},
 		// Cap lands exactly between elements (just past '[' + the first element,
-		// before the comma) so the overflow surfaces at arrayReader's
-		// More()/Token boundary — the path that used to swallow the read error
-		// and silently truncate to a partial 200 instead of 413.
+		// before the comma). Kept as a distinct case because it is the shape that
+		// used to truncate to a partial 200 — but note all four now trip in the
+		// same place: `body.ReadFrom` in the handler, before a reader is built.
+		// The readers run over an in-memory slice, so no cap error can reach
+		// them.
 		{name: "json array between elements", ct: "application/json", body: "[" + elem + "," + elem + "]", cap: int64(1 + len(elem))},
-		// NDJSON over cap surfaces via the scanner's Err() (MaxBytesError).
 		{name: "ndjson", ct: "application/x-ndjson", body: big, cap: 50},
 	}
 	for _, tt := range tests {

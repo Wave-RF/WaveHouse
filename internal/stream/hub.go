@@ -33,7 +33,9 @@ type Hub struct {
 	// RowEvaluator is the seam a native type layer will take over: the one
 	// place a row's visibility under a role's row-filter is decided. nil means
 	// the default implementation, which delegates to ResolvedPermissions.RowVisible
-	// — today's behavior unchanged. Exported so it can be swapped; every
+	// — today's behavior unchanged. Wired once before the Hub serves traffic and
+	// not safe to mutate afterwards: rowAdmitted reads it from the consumer
+	// goroutine and from SSE handler goroutines without holding h.mu. Every
 	// delivery path reaches it through rowAdmitted, never directly.
 	RowEvaluator RowEvaluator
 }

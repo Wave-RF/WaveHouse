@@ -150,7 +150,7 @@ func (o *objectReader) Next() (map[string]any, error) {
 	o.done = true
 	var m map[string]any
 	if err := o.dec.Decode(&m); err != nil {
-		return nil, err // fatal: handler maps MaxBytes → 413, else 400 invalid json
+		return nil, err // fatal: handler maps this to 400 invalid json
 	}
 	return m, nil
 }
@@ -180,13 +180,16 @@ func (a *arrayReader) Next() (map[string]any, error) {
 	if !a.dec.More() {
 		a.done = true
 		// More() reports false not only at a clean ']', but also on a read error
-		// (the body cap tripping *between* elements) and on a truncated array
-		// (EOF before ']'), swallowing both — which would let dropped records
-		// masquerade as a complete partial-200 insert. Read the closing token to
-		// tell the cases apart: only a ']' ends the batch. A read error
-		// (MaxBytesError → 413, else 400) and a missing/non-']' close (the upload
-		// was cut off → 400, via errUnterminatedArray which is NOT io.EOF) both
-		// fail the whole request.
+		// and on a truncated array (EOF before ']'), swallowing both — which
+		// would let dropped records masquerade as a complete partial-200 insert.
+		// Read the closing token to tell the cases apart: only a ']' ends the
+		// batch; a missing or non-']' close means the upload was cut off (→ 400,
+		// via errUnterminatedArray, which is NOT io.EOF) and fails the whole
+		// request.
+		//
+		// The body-cap case no longer reaches here — the handler buffers the
+		// whole body first, so a cap overflow is a 413 before any reader exists,
+		// and this operates on an in-memory slice that cannot fail a read.
 		tok, err := a.dec.Token()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -241,9 +244,9 @@ func (l *lineReader) Next() (map[string]any, error) {
 		return m, nil
 	}
 	if err := l.sc.Err(); err != nil {
-		// A line exceeding maxNDJSONLineBytes (bufio.ErrTooLong) or a body read
-		// error (possibly the MaxBytes cap) — the scanner can't resume, so fail
-		// the request.
+		// A line exceeding maxNDJSONLineBytes (bufio.ErrTooLong) — the scanner
+		// can't resume, so fail the request. Not the body cap: that trips in the
+		// handler before this reader is built.
 		return nil, err
 	}
 	return nil, io.EOF
