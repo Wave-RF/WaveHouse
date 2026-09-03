@@ -1215,10 +1215,11 @@ func TestIngestFormat(t *testing.T) {
 		// case-normalized, so `UTF-8` and `utf-8` count as differing.
 		{ct: "application/json; charset=utf-8; charset=utf-16", wantErr: true},
 		{ct: "application/json; charset=utf-8; charset=utf-8", want: FormatJSON},
-		// The fourth tightening, and the one with no joined content anywhere in
+		// The tightening with no joined content anywhere in
 		// it: the comma guard is line-wide, so a well-formed quoted comma loses
 		// its tolerance when some OTHER parameter on the line is malformed. Both
-		// halves are accepted alone (rows above). This row is what would catch a guard
+		// halves are accepted alone (both are separate rows in this table). This row
+		// is what would catch a guard
 		// narrowed to "a comma after the last parsed parameter" — the known-limit
 		// test would not, since that case's unparsed remainder also has a comma.
 		// Tracked in #563.
@@ -1240,8 +1241,9 @@ func TestIngestFormat(t *testing.T) {
 		// singleton field (§8.3) and §5.3 forbids the repetition that produces the
 		// joined form, so there is no list here to resolve — §8.3 warns that
 		// picking a member of the pseudo-list is itself the interoperability and
-		// security hazard. These are "unexpected content after media subtype" to
-		// the parser: no usable media type, so 415 rather than a conflict.
+		// security hazard. These leave no media type at all — "unexpected content
+		// after media subtype", or "no media type" for a leading comma — so 415
+		// rather than a conflict.
 		{ct: "application/json, application/x-ndjson", wantErr: true},
 		{ct: "application/json, application/json", wantErr: true},
 		{ct: "application/json,", wantErr: true},
@@ -1467,10 +1469,12 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		assert.Len(t, pub.Messages, 2, "same format, different spelling — not ambiguous")
 	})
 
-	// A comma-joined value is refused outright — no usable media type — so it can
-	// never resolve to one member and read an NDJSON body as a single object.
-	// These were the splitter's over-rejections and known divergences; with the
-	// stdlib parser the joined form simply does not parse.
+	// A comma-joined value is refused, so it can never resolve to one member and
+	// read an NDJSON body as a single object. Note WHY: for most of these the
+	// media type reads fine — `application/json; charset=utf-8, application/x-ndjson`
+	// yields "application/json". They are refused because a comma on a line that
+	// did not parse cleanly may be a second declaration joined on, and the error
+	// cannot tell that from a comma inside data.
 	t.Run("a comma-joined value is refused, whatever it joins", func(t *testing.T) {
 		t.Parallel()
 		for name, ct := range map[string]string{
@@ -1493,14 +1497,13 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		}
 	})
 
-	// A quoted comma is data, so this is one media type and is accepted. The
-	// splitter refused it; the row guards against reintroducing one.
 	// KNOWN LIMIT, pinned so it cannot widen unnoticed. Joining is lossy, so the
 	// joined and repeated spellings still answer differently in both directions —
 	// now as a consequence of the grammar rather than of a hand-rolled split.
-	// Under-rejects when the joined line's quotes happen to balance (it IS one
-	// valid media type); over-rejects when they do not (no usable type, so we
-	// fail closed). Narrowing the second is #563.
+	// Under-rejects when the joined line's quotes happen to balance, making it one
+	// valid media type; over-rejects when they do not — there the media type still
+	// reads fine, but a comma sits on a line that did not parse cleanly, so we fail
+	// closed rather than guess. Narrowing the second is #563.
 	t.Run("joined and repeated still diverge — known limit", func(t *testing.T) {
 		t.Parallel()
 		for name, tc := range map[string]struct {

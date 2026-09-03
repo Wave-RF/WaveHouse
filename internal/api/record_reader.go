@@ -302,10 +302,9 @@ func ingestFormatOne(v string) (IngestFormat, error) {
 // per-record error rather than silently re-framing the whole request. batch is
 // false only for the single-object path; true for array/NDJSON.
 //
-// It takes the format rather than a Content-Type on purpose. Resolving here as
-// well as in the handler meant the two could disagree — a leading empty
-// declaration resolved fine for the header SET and failed for the first line
-// alone, turning a good request into an empty-body 400. The only error this can
+// It takes the format rather than a Content-Type on purpose: resolving here as
+// well as in the handler would put one rule in two places, which is how the
+// joined and repeated paths came to disagree before. The only error this can
 // return now is errEmptyBody. The caller is expected to have already bounded
 // body via http.MaxBytesReader.
 func newRecordReader(format IngestFormat, body io.Reader) (rr recordReader, batch bool, err error) {
@@ -364,11 +363,12 @@ func emptyBodyMessage(format IngestFormat) string {
 // application/json, application/x-ndjson, …" — listing as acceptable the two
 // types they just declared, and explaining nothing.
 //
-// A comma-joined value does NOT reach that wording: it is a single header line
-// that fails to parse, so it never reaches the agreement loop and gets the
-// unsupported text, quoting the line whole. That is the same confusing shape
-// described above, and it is the honest report — nothing was resolved, so
-// nothing disagreed. api.md buckets it under "does not parse".
+// When a comma-joined value is the request's ONLY header line it does not reach
+// that wording: it fails to parse, so the agreement loop never runs and it gets
+// the unsupported text quoting the line whole. That is the honest report there —
+// nothing resolved, so nothing disagreed. Alongside another line it can still
+// come out as a disagreement, which is equally honest. api.md buckets the
+// single-line case under "does not parse".
 func contentTypeMessage(values []string, conflicting bool) string {
 	decls := values
 	list := strings.Join(supportedContentTypes, ", ")
