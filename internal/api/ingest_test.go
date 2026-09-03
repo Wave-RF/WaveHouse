@@ -1745,7 +1745,7 @@ func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
 	schema := &discovery.TableSchema{
 		Name: "loose",
 		Columns: []discovery.Column{
-			{Name: "a", Type: "String", IsNullable: true},
+			{Name: "a", Type: "Nullable(String)", IsNullable: true},
 			{Name: "b", Type: "String", HasDefault: true},
 		},
 	}

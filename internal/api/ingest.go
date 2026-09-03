@@ -77,8 +77,9 @@ var dedupeDisabledCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 // readable and the records were processed; per-record rejections (malformed
 // JSON, schema or permission failures) are reported in Results without failing
 // the whole request, so one bad record never obscures the rest of the batch
-// (issue #195). Whole-request conditions (backpressure, publish/dedup backend
-// failure) abort with the usual non-200 status instead.
+// (issue #195). Whole-request conditions abort with a non-200 status instead —
+// see requestAbort for the list, which lives there and only there, because
+// stating it in three places is how two of them went stale.
 type batchResult struct {
 	Total      int            `json:"total"`      // records read from the body
 	Succeeded  int            `json:"succeeded"`  // records validated + published
@@ -256,9 +257,8 @@ func (h *IngestHandler) handleSingle(
 // single insert. A record that fails validation or a PER-RECORD permission rule
 // (a denied column, a failed check clause) — or that the reader couldn't decode
 // — is recorded against its index and the batch continues; a whole-request
-// condition aborts it (backpressure, publish/dedup backend failure, or an insert
-// grant resolved for the other operation — see requestAbort). Returns 200 with a per-record summary once the body
-// is consumed.
+// condition aborts it (see requestAbort). Returns 200 with a per-record summary
+// once the body is consumed.
 func (h *IngestHandler) handleBatch(
 	ctx context.Context,
 	w http.ResponseWriter,
