@@ -343,7 +343,10 @@ func TestColumnPrimitives_AgreeOnVisibility(t *testing.T) {
 	schema := []string{"page", "user_id", "payload", "ts"}
 	cases := []*ResolvedPermissions{
 		{Allowed: false}, // denied role: restricted, sees nothing
-		{Allowed: true},
+		{Allowed: true, Select: &ResolvedSelect{}},
+		// The nil read side belongs in this agreement check too: every primitive
+		// must report the RESTRICTED reading, not the unrestricted one above.
+		{Allowed: true, Insert: &ResolvedInsert{}},
 		{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"*"}}},
 		{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"page", "*"}}},
 		{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"page"}}},
@@ -1499,12 +1502,11 @@ func TestValidate_AllowsNormalDefaultRole(t *testing.T) {
 	assert.NoError(t, Validate(&Policy{DefaultRole: "viewer", Tables: map[string]TablePolicy{}}))
 }
 
-// TestEvaluate_UnresolvedSideFailsClosed: Evaluate answers one operation, and
-// the side it did not resolve is zero — an empty allow list plus an empty deny
-// list, which every accessor otherwise reads as "all columns". So a caller that
-// asks the wrong side must be denied, not handed the whole table. This is the
-// invariant the seams in this package are handed to a follow-up on; a hand-built
-// value is unaffected, since its author asserted both sides deliberately.
+// TestEvaluate_UnresolvedSideFailsClosed: Evaluate answers one operation and
+// leaves the other side nil. An EMPTY side would be an empty allow list plus an
+// empty deny list, which every accessor reads as "all columns" — that is what an
+// admin grant is — so the two must not share a representation. A caller that asks
+// the wrong side is denied, not handed the whole table.
 func TestEvaluate_UnresolvedSideFailsClosed(t *testing.T) {
 	t.Parallel()
 	tmpl := "{{ jwt.tenant }}"

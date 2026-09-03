@@ -383,15 +383,26 @@ func (h *IngestHandler) processRecord(
 				}, nil
 			}
 		}
-		// This handler called Evaluate with "insert" (above), so Insert is non-nil.
-		// A mis-resolved grant does not reach this line: schema validation rejects
-		// a record with no columns, and any record WITH columns runs the
-		// IsColumnAllowed loop above, which denies on a nil Insert. Both were
-		// verified by running them, not by reading. The bare read is the backstop
-		// if that ordering changes — it would panic rather than present an empty
-		// map whose checks all pass vacuously. Do not add a nil guard: that
-		// restores the vacuous pass.
-		for col, requiredVal := range perms.Insert.CheckClauses {
+		// Through the accessor, not a bare read. The check loop iterates a side's
+		// map rather than asking about a column, so IsColumnAllowed cannot cover it,
+		// and a bare read presents an empty map on an unresolved side — every check
+		// then passes vacuously. ok=false REJECTS the record; it must never be read
+		// as "no checks to run".
+		//
+		// Reachable, unlike the query path's bare reads: discovery.Validate only
+		// requires a column that is neither nullable nor defaulted, so a table whose
+		// columns are all nullable or all defaulted accepts `{}`, and the column loop
+		// above then runs zero times.
+		checks, resolved := perms.CheckClauses()
+		if !resolved {
+			h.logger.ErrorContext(ctx, "insert checks consulted on a grant resolved for another operation",
+				"table", table, "role", role)
+			return false, &recordReject{
+				Status:  http.StatusForbidden,
+				Message: "insert permissions were not resolved for this request",
+			}, nil
+		}
+		for col, requiredVal := range checks {
 			// A []any value is an _in check: the inserted value must be present and
 			// one of the allowed set. Unlike the scalar _eq case there is no single
 			// value to auto-inject, so an absent column fails closed.

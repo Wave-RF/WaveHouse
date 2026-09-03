@@ -964,9 +964,25 @@ func TestBuild_PermissiveAliases_Accepted(t *testing.T) {
 func TestBuild_InsertResolvedGrantIsRejected(t *testing.T) {
 	t.Parallel()
 	insertResolved := &policy.ResolvedPermissions{Allowed: true, Insert: &policy.ResolvedInsert{}}
-	res, err := Build("clicks", &StructuredQuery{Columns: []string{"page"}}, testSchema(), insertResolved, 0, DefaultMaxRows)
-	require.Error(t, err, "a grant resolved for the wrong operation must not build a query")
-	assert.Nil(t, res)
+	// One shape per denier: a named column reaches IsColumnAllowed, select_all
+	// reaches RestrictsColumns/AllowedProjection, and a bare aggregation reaches
+	// IsAggregationAllowed. Only the first was covered before, which left the two
+	// column-free shapes — the ones that skip validateAndAuthorizeColumns
+	// entirely — unpinned.
+	for name, q := range map[string]*StructuredQuery{
+		"names a column":   {Columns: []string{"page"}},
+		"select_all only":  {SelectAll: true},
+		"aggregation only": {Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "n"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			res, err := Build("clicks", q, testSchema(), insertResolved, 0, DefaultMaxRows)
+			require.Error(t, err, "a grant resolved for the wrong operation must not build a query")
+			assert.Nil(t, res)
+		})
+	}
+	var res *BuildResult
+	var err error
 
 	// The control: the same query with a select-resolved grant builds.
 	selectResolved := &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{}}

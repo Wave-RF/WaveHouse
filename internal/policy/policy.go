@@ -603,6 +603,22 @@ func (rp *ResolvedPermissions) IsColumnAllowed(col string, insert bool) bool {
 	return false
 }
 
+// CheckClauses returns the insert side's check clauses, and false when the
+// insert side was never resolved.
+//
+// It exists because the check-clause loop is the one consumer that iterates a
+// side's map rather than asking a question about a column, so it cannot go
+// through IsColumnAllowed. A bare `perms.Insert.CheckClauses` read presents an
+// empty map on an unresolved side and every check then passes VACUOUSLY — the
+// silent direction. Callers must treat ok=false as "reject this record", not as
+// "no checks to run".
+func (rp *ResolvedPermissions) CheckClauses() (map[string]any, bool) {
+	if rp == nil || !rp.Allowed || rp.Insert == nil {
+		return nil, false
+	}
+	return rp.Insert.CheckClauses, true
+}
+
 // AllowedProjection returns the subset of cols this role may read, preserving
 // input order. It is the read-side batch form of IsColumnAllowed and the single
 // source of truth for expanding an unqualified "all columns" read (the SQL the
