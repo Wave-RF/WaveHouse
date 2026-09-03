@@ -297,17 +297,26 @@ func declaredContentTypes(values []string) []string {
 // then judges it. It is not a blanket refusal —
 // `application/json; foo=a"b, application/x-ndjson` is refused as a conflict,
 // while `application/json; foo=a"b` alone still resolves to application/json,
-// because parameters never decide the format. `profile="a,b"` is a valid header
-// and is untouched by any of this.
+// because parameters never decide the format. `profile="a,b"` on its own is a
+// valid header and is untouched — but see the KNOWN LIMIT below: joined
+// alongside a declaration that ends mid-quote, even its comma loses protection.
 //
-// KNOWN LIMIT. This restores joined/repeated agreement for a value whose own
-// quotes are unbalanced, but not for a PAIR of lines that are each unbalanced
-// and balance only once joined: `application/json; a="` plus
-// `application/x-ndjson; b="` conflicts as two lines and resolves to JSON when
-// joined. That is not fixable here — joining is lossy, and the joined string is
-// an unambiguously valid single media type, so no value-local rule can recover
-// the line boundary. Pinned in TestIngest_DuplicateContentTypeHeaders so it
-// cannot widen unnoticed.
+// KNOWN LIMIT. Joined and repeated agree only when EVERY declaration's own
+// quotes balance. Once any of them ends mid-quote, the fallback splits the whole
+// value naively — which also strips protection from a sibling's well-formed
+// quoted comma — and the two spellings can diverge in either direction:
+//
+//   - mixed pair, joined OVER-rejects. `application/json; p="x,y"` plus
+//     `application/json; q="` is 200 as two lines and 415 joined, because the
+//     naive split tears `p="x,y"` apart.
+//   - both mid-quote, joined UNDER-rejects. `application/json; a="` plus
+//     `application/x-ndjson; b="` conflicts as two lines and resolves to JSON
+//     joined, because the quotes re-balance into one valid media type.
+//
+// Only the second is unfixable here (joining is lossy and the joined string is a
+// valid single media type, so the line boundary is gone). The first could be
+// narrowed by naive-splitting only the trailing segment; tracked separately.
+// Both are pinned in TestIngest_DuplicateContentTypeHeaders.
 func splitDeclarations(v string) []string {
 	var out []string
 	start, inQuotes := 0, false

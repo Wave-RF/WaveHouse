@@ -1474,8 +1474,8 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	// FormatJSON (the unsupported branch returns FormatJSON with an error), so a
 	// format-only guard would let it through — and an NDJSON body then takes the
 	// single-object path and publishes 1 of 2 records with a 200. Pins the half of
-	// the comparison a "simplification" could delete. (Two TestIngestFormat rows
-	// also fail on that mutation; this is the handler-level statement of it.)
+	// the comparison a "simplification" could delete. (TestIngestFormat rows fail on
+	// that mutation too; this is the handler-level statement of it.)
 	t.Run("a supported and an unsupported declaration are refused", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
@@ -1512,7 +1512,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	// Spelling-independence when ONE value's quotes are unbalanced. This is the
 	// invariant the run-to-end reading broke: the joined form must not absorb a
 	// declaration the repeated form would conflict with.
-	t.Run("one unbalanced value answers alike joined and repeated", func(t *testing.T) {
+	t.Run("an unbalanced value must not absorb the next declaration", func(t *testing.T) {
 		t.Parallel()
 		for name, build := range map[string]func(*testing.T) *http.Request{
 			"joined": func(t *testing.T) *http.Request {
@@ -1536,6 +1536,30 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 					"neither spelling may ingest record one and drop the rest behind a 200")
 			})
 		}
+	})
+
+	// The OTHER direction of the same limit: one balanced declaration carrying a
+	// quoted comma, joined with one that ends mid-quote. The fallback splits the
+	// whole value, so the well-formed sibling's comma loses its protection too —
+	// repeated accepts, joined refuses. Unlike the case below this one IS
+	// narrowable (split only the trailing segment); tracked separately, pinned
+	// here so the current behavior is visible rather than surprising.
+	t.Run("a mixed pair diverges the other way — known limit", func(t *testing.T) {
+		t.Parallel()
+		pubR := &testutil.MockPublisher{}
+		hR := NewIngestHandler(testRegistry(t), pubR, testutil.NopLogger())
+		reqR := rawIngestRequest(t, "clicks", `application/json; p="x,y"`, `{"page":"/a"}`)
+		reqR.Header.Add("Content-Type", `application/json; q="`)
+		wR := httptest.NewRecorder()
+		hR.Handle(wR, reqR)
+		assert.Equal(t, http.StatusOK, wR.Code, "repeated: each value resolves to application/json")
+
+		pubJ := &testutil.MockPublisher{}
+		hJ := NewIngestHandler(testRegistry(t), pubJ, testutil.NopLogger())
+		wJ := httptest.NewRecorder()
+		hJ.Handle(wJ, rawIngestRequest(t, "clicks", `application/json; p="x,y", application/json; q="`, `{"page":"/a"}`))
+		assert.Equal(t, http.StatusUnsupportedMediaType, wJ.Code,
+			"joined: the naive fallback tears the sibling's quoted comma apart")
 	})
 
 	// KNOWN DIVERGENCE, pinned so it cannot widen unnoticed. Two lines that EACH
@@ -1593,7 +1617,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	// and the rest travel through different call sites — resolving either with
 	// the single-declaration helper instead of the full rule would mis-frame a
 	// joined value. Only the joined-SECOND order is unique to these subtests —
-	// eleven TestIngestFormat rows already cover joined-first — but both are kept
+	// TestIngestFormat rows already cover joined-first — but both are kept
 	// because the pair is what shows the two guards composing.
 	t.Run("a joined value alongside a plain line, joined first", func(t *testing.T) {
 		t.Parallel()

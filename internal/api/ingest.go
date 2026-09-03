@@ -195,12 +195,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// ingests record one, discards the rest, and answers 200. resolveContentType
 	// flattens both spellings and applies one agreement rule, so for declarations
 	// whose own quotes balance the outcome does not depend on which spelling an
-	// intermediary the caller does not control happened to emit. Two lines that
-	// EACH end mid-quote are the documented exception — joining them yields a
-	// valid single media type and the boundary is unrecoverable; see
-	// splitDeclarations.
+	// intermediary the caller does not control happened to emit. Once ANY
+	// declaration ends mid-quote the two spellings can diverge, in either
+	// direction; see the KNOWN LIMIT on splitDeclarations.
 	values := r.Header.Values("Content-Type")
-	contentType := r.Header.Get("Content-Type")
 	format, err := resolveContentType(values)
 	if err != nil {
 		conflicting := errors.Is(err, errConflictingContentType)
@@ -213,8 +211,13 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			h.logger.WarnContext(ctx, "conflicting ingest content-type declarations",
 				"content_types", values, "table", table)
 		} else {
+			// Logs the whole set, like the conflicting branch: the response body
+			// names every declaration, so logging only Header.Get would make the
+			// server-side record disagree with what the caller was told — for
+			// ["", "text/csv"] the client sees `Content-Type "text/csv"` while
+			// the log said content_type="".
 			h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
-				"content_type", contentType, "table", table)
+				"content_types", values, "table", table)
 		}
 		writeJSONError(w, http.StatusUnsupportedMediaType, contentTypeMessage(values, conflicting))
 		return
