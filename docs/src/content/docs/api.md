@@ -364,7 +364,7 @@ A `200` is returned whenever the body was read and the records were processed �
 | ------ | ---- | ----- |
 | 400 | `{"error":"empty body"}` / `{"error":"empty ndjson body"}` | The body has no records |
 | 400 | `{"error":"invalid request body"}` | The body could not be read at all — a malformed transfer encoding, or a truncated upload |
-| 400 | `{"error":"invalid json: ..."}` | A structural JSON syntax error, a single NDJSON line over 10 MiB, or a truncated/unterminated JSON array (e.g. a cut-off upload — the whole request fails rather than reporting a partial success), or an oversized NDJSON line |
+| 400 | `{"error":"invalid json: ..."}` | A structural JSON syntax error, a single NDJSON line over 10 MiB, or a JSON array that ends before its closing `]` — a body that transferred completely but was generated truncated. The whole request fails rather than reporting a partial success. A body cut off in transit is the row above, not this one |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (same auth gate as the single-object path; surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table (checked once, before any record) |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
