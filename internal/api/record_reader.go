@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"strings"
 )
 
@@ -249,122 +250,24 @@ func (l *lineReader) Next() (map[string]any, error) {
 	return nil, io.EOF
 }
 
-// declaredContentTypes flattens the Content-Type header set into one entry per
-// declaration. A caller may declare the type more than once: as repeated header
-// LINES, and an intermediary that merges duplicates joins them into one line
-// with a comma. Both spellings mean the same thing, so both are flattened here
-// and judged by ONE predicate — keeping the rule in two places is exactly how
-// the joined and repeated paths came to disagree before.
+// resolveContentType resolves the declared Content-Type header set to the
+// format ingest reads the body as. Every header LINE is resolved and they must
+// agree on (format, acceptedness) — `application/x-ndjson` and
+// `application/ndjson; charset=utf-8` do — so an accepted request can only be
+// framed as what all of them declared. Disagreement is errConflictingContentType.
 //
-// Empty declarations are dropped. A bare `Content-Type:` line, or the trailing
-// element of `application/json,`, declares nothing rather than contradicting
-// anything, and RFC 9110 §5.6.1.2 says to ignore empty members of a list. If
-// nothing survives, the request declared no type at all.
-func declaredContentTypes(values []string) []string {
-	out := make([]string, 0, len(values))
-	for _, v := range values {
-		for _, p := range splitDeclarations(v) {
-			if p = strings.TrimSpace(p); p != "" {
-				out = append(out, p)
-			}
-		}
-	}
-	return out
-}
-
-// splitDeclarations splits one header value on the commas that separate
-// declarations, leaving commas inside a WELL-FORMED quoted parameter value
-// alone. When the quotes do not balance, no comma is protected.
-//
-// A plain strings.Split would tear `application/json; profile="a,b"` — one
-// valid media type — into two declarations, the second of which resolves to
-// nothing, and refuse the request. RFC 9110 §5.6.6 makes a quoted-string
-// opaque: a comma inside one is data, not a separator. Parameters never affect
-// which format is selected, so they must not be able to cost a caller the
-// request either.
-//
-// An UNBALANCED quote is not treated forgivingly. Running such a value to the
-// end would let a lone `"` — in an unquoted parameter, or a genuinely
-// unterminated one — swallow every declaration after it, so
-// `application/json; foo=a"b, application/x-ndjson` would resolve to JSON and
-// read an NDJSON body as a single object, ingesting record one and dropping the
-// rest behind a 200. That is the exact failure the agreement rule exists to
-// prevent, and it would reappear only in the joined spelling, breaking the
-// invariant that both spellings answer alike.
-//
-// Such a value has no valid parse (RFC 9110 §5.6.4), so no comma in it is
-// protected: the naive split exposes whatever follows and the agreement rule
-// then judges it. It is not a blanket refusal —
-// `application/json; foo=a"b, application/x-ndjson` is refused as a conflict,
-// while `application/json; foo=a"b` alone still resolves to application/json,
-// because parameters never decide the format. `profile="a,b"` on its own is a
-// valid header and is untouched — but see the KNOWN LIMIT below: joined
-// alongside a declaration that ends mid-quote, even its comma loses protection.
-//
-// KNOWN LIMIT. Joined and repeated agree only when EVERY declaration's own
-// quotes balance. Once any of them ends mid-quote, the fallback splits the whole
-// value naively — which also strips protection from a sibling's well-formed
-// quoted comma — and the two spellings can diverge in either direction:
-//
-//   - mixed pair, joined OVER-rejects. `application/json; p="x,y"` plus
-//     `application/json; q="` is 200 as two lines and 415 joined, because the
-//     naive split tears `p="x,y"` apart.
-//   - both mid-quote, joined UNDER-rejects. `application/json; a="` plus
-//     `application/x-ndjson; b="` conflicts as two lines and resolves to JSON
-//     joined, because the quotes re-balance into one valid media type.
-//
-// Only the second is unfixable here (joining is lossy and the joined string is a
-// valid single media type, so the line boundary is gone). The first could be
-// narrowed by naive-splitting only the trailing segment; tracked in #563.
-// Both are pinned in TestIngest_DuplicateContentTypeHeaders.
-func splitDeclarations(v string) []string {
-	var out []string
-	start, inQuotes := 0, false
-	for i := 0; i < len(v); i++ {
-		switch v[i] {
-		case '\\':
-			if inQuotes {
-				i++ // the escaped octet is data, whatever it is
-			}
-		case '"':
-			inQuotes = !inQuotes
-		case ',':
-			if !inQuotes {
-				out = append(out, v[start:i])
-				start = i + 1
-			}
-		}
-	}
-	if inQuotes {
-		return strings.Split(v, ",")
-	}
-	return append(out, v[start:])
-}
-
-// resolveContentType resolves the whole declared header set to the format ingest
-// will read the body as. Declarations must agree on (format, acceptedness):
-// `application/x-ndjson` and `application/ndjson; charset=utf-8` agree, a
-// supported and an unsupported declaration do not. Disagreement is
-// errConflictingContentType; nothing readable at all is errUnsupportedContentType.
-//
-// Agreement is what makes accepting safe — the choice of which declaration to
-// honor stops mattering. Only commas outside a WELL-FORMED quoted parameter
-// value separate declarations (see splitDeclarations, which protects nothing
-// when the quotes do not balance); a comma inside one is data (RFC 9110
-// §5.6.6), so `application/json; foo="x,y"` is a single declaration. An
-// UNQUOTED comma still separates, which is right — a comma is not a tchar, so
-// `application/json; foo=a,b` has no reading as one parameter. A genuinely joined
-// disagreement is refused rather than resolved to the first, and acceptance
-// requires every declaration to match the leading one, so a request that IS
-// accepted can only be framed as its own leading declaration.
+// Content-Type is a singleton field (RFC 9110 §8.3) and §5.3 forbids repeating
+// it, so both the repeated and the comma-joined forms are malformed. §8.3 warns
+// that resolving them by "using the last syntactically valid member of the list"
+// causes "interoperability and security issues", so we pick no member: joined
+// values are refused (see ingestFormatOne) and repeated ones must agree.
 func resolveContentType(values []string) (IngestFormat, error) {
-	parts := declaredContentTypes(values)
-	if len(parts) == 0 {
+	if len(values) == 0 {
 		return FormatJSON, errUnsupportedContentType
 	}
-	first, firstErr := ingestFormatOne(parts[0])
-	for _, p := range parts[1:] {
-		f, err := ingestFormatOne(p)
+	first, firstErr := ingestFormatOne(values[0])
+	for _, v := range values[1:] {
+		f, err := ingestFormatOne(v)
 		if f != first || (err == nil) != (firstErr == nil) {
 			return FormatJSON, errConflictingContentType
 		}
@@ -372,18 +275,25 @@ func resolveContentType(values []string) (IngestFormat, error) {
 	return first, firstErr
 }
 
-// ingestFormatOne resolves ONE declaration. The media type is everything before
-// the first ";", trimmed and lowercased; parameters are ignored entirely rather
-// than parsed, because the rule is "parameters do not affect the format" and
-// parsing them only creates ways to refuse a request that names a type this
-// endpoint reads. mime.ParseMediaType refuses a parameter with no value
-// ("; charset"), an empty one (";;"), an unterminated quoted value, and a
-// duplicate name ("; charset=a; charset=b") — every one of which this endpoint
-// accepted before the header became authoritative, and none of which changes
-// what the body is.
-func ingestFormatOne(ct string) (IngestFormat, error) {
-	base, _, _ := strings.Cut(ct, ";")
-	mediaType := strings.ToLower(strings.TrimSpace(base))
+// ingestFormatOne resolves ONE header line. mime.ParseMediaType does the
+// parsing — lowercasing, stripping parameters, and treating a quoted-string as
+// opaque, so `profile="a,b"` is one media type (RFC 9110 §5.6.6) with no
+// splitting of our own.
+//
+// A malformed PARAMETER is survivable (";;", "; charset", a value left
+// mid-quote): the media type parsed, and parameters never decide the format.
+// But ParseMediaType reports that same ErrInvalidMediaParameter when a second
+// declaration was comma-joined on after a parameter — `application/json;
+// charset=utf-8, application/x-ndjson` yields "application/json" — and honoring
+// the first member there is exactly the §8.3 hazard: an NDJSON body read as one
+// object, ingesting record one and dropping the rest behind a 200. The two are
+// indistinguishable from the error alone, so a comma anywhere on a line that
+// did not parse cleanly is refused.
+func ingestFormatOne(v string) (IngestFormat, error) {
+	mediaType, _, err := mime.ParseMediaType(v)
+	if err != nil && (!errors.Is(err, mime.ErrInvalidMediaParameter) || strings.ContainsRune(v, ',')) {
+		return FormatJSON, errUnsupportedContentType
+	}
 	for _, a := range acceptedContentTypes {
 		if a.mediaType == mediaType {
 			return a.format, nil
@@ -462,7 +372,7 @@ func emptyBodyMessage(format IngestFormat) string {
 // The spelling of the request no longer selects the message either: repeated
 // lines and a joined value describing the same disagreement now read alike.
 func contentTypeMessage(values []string, conflicting bool) string {
-	decls := declaredContentTypes(values)
+	decls := values
 	list := strings.Join(supportedContentTypes, ", ")
 	accepted := "ingest requires one of " + list
 

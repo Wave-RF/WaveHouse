@@ -184,20 +184,12 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
 
-	// Pick a reader from the DECLARED format; the body only chooses arity
-	// within the JSON family. An undeclared or unreadable Content-Type is a 415.
-	//
-	// A caller may declare the type more than once — Go keeps repeated header
-	// LINES separately and Header.Get returns only the first, and an intermediary
-	// may join duplicates into one line with a comma. Without resolving all of
-	// them, a request declaring both application/json and application/x-ndjson
-	// would silently take the JSON path: an NDJSON body read as a single object
-	// ingests record one, discards the rest, and answers 200. resolveContentType
-	// flattens both spellings and applies one agreement rule, so for declarations
-	// whose own quotes balance the outcome does not depend on which spelling an
-	// intermediary the caller does not control happened to emit. Once ANY
-	// declaration ends mid-quote the two spellings can diverge, in either
-	// direction; see the KNOWN LIMIT on splitDeclarations.
+	// Pick a reader from the DECLARED format; the body only chooses arity within
+	// the JSON family. Resolving every header line and requiring agreement is what
+	// stops a request declaring both application/json and application/x-ndjson
+	// from silently taking the JSON path — an NDJSON body read as one object
+	// ingests record one and drops the rest behind a 200. See resolveContentType
+	// for why a comma-joined value is refused rather than split.
 	values := r.Header.Values("Content-Type")
 	format, err := resolveContentType(values)
 	if err != nil {
