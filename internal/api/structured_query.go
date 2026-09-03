@@ -182,8 +182,13 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
 		timeout := h.queryTimeout()
-		if perms.MaxExecutionTime > 0 {
-			timeout = min(perms.MaxExecutionTime.Duration(), timeout)
+		// Bare Select reads: this handler resolved the grant for "select" (above),
+		// so Select is non-nil, and query.Build has already rejected a mis-resolved
+		// grant before this closure runs. If that changed, these would panic rather
+		// than silently apply no caps — do not add a nil guard, which would drop the
+		// limits instead.
+		if perms.Select.MaxExecutionTime > 0 {
+			timeout = min(perms.Select.MaxExecutionTime.Duration(), timeout)
 		}
 
 		queryCtx, cancel := context.WithTimeout(r.Context(), timeout)
@@ -197,11 +202,11 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		// when the role set a time cap; otherwise the context deadline (=
 		// query_timeout) is the time bound the driver derives.
 		limits := chQueryLimits{
-			MaxResultRows:  perms.MaxRows,
-			MaxRowsToRead:  perms.MaxRowsToRead,
-			MaxMemoryBytes: perms.MaxMemoryUsage.Bytes(),
+			MaxResultRows:  perms.Select.MaxRows,
+			MaxRowsToRead:  perms.Select.MaxRowsToRead,
+			MaxMemoryBytes: perms.Select.MaxMemoryUsage.Bytes(),
 		}
-		if perms.MaxExecutionTime > 0 {
+		if perms.Select.MaxExecutionTime > 0 {
 			limits.ExecutionTime = timeout
 		}
 		if settings := chReadSettings(limits); settings != nil {

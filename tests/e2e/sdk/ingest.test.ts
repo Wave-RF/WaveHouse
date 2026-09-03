@@ -179,9 +179,7 @@ describe("Ingest", () => {
       tables: {
         ...currentPolicy.tables,
         [weirdTableName]: {
-          insert: {
-            viewer: { allow_columns: ["*"] },
-          },
+          viewer: { insert: { allow_columns: ["*"] } },
         },
       },
     });
@@ -235,9 +233,7 @@ describe("Ingest", () => {
       tables: {
         ...currentPolicy.tables,
         [maliciousName]: {
-          insert: {
-            viewer: { allow_columns: ["*"] },
-          },
+          viewer: { insert: { allow_columns: ["*"] } },
         },
       },
     });
@@ -296,15 +292,12 @@ describe("Ingest", () => {
         ...currentPolicy.tables,
         [T.clicks]: {
           ...(currentPolicy.tables[T.clicks] || {}),
-          insert: {
-            // We MUST override the `*` wildcard policy as well because WaveHouse
-            // grants access if ANY matching role allows it, and the setup script
-            // defaults `*` to allow everything.
-            "*": {
-              allow_columns: ["*"],
-              check: { country: { _eq: "US" } },
-            },
-            viewer: {
+          // Override only viewer's INSERT side; its select grant rides through
+          // the spread untouched. There is no `*` any-role wildcard, and setup
+          // seeds only viewer and admin, so viewer is the whole story here.
+          viewer: {
+            ...(currentPolicy.tables[T.clicks]?.viewer || {}),
+            insert: {
               allow_columns: ["*"],
               check: { country: { _eq: "US" } },
             },
@@ -364,8 +357,9 @@ describe("Ingest", () => {
         ...currentPolicy.tables,
         [T.clicks]: {
           ...(currentPolicy.tables[T.clicks] || {}),
-          select: {
-            viewer: { allow_columns: ["*"], max_rows: 2 },
+          viewer: {
+            ...(currentPolicy.tables[T.clicks]?.viewer || {}),
+            select: { allow_columns: ["*"], max_rows: 2 },
           },
         },
       },

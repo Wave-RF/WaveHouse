@@ -22,7 +22,7 @@ func intNumeric() ColumnSpec {
 func evalRowFilter(t *testing.T, filter map[string]Filter, claims map[string]any) *ResolvedPermissions {
 	t.Helper()
 	p := &Policy{Tables: map[string]TablePolicy{
-		"t": {Select: map[string]RolePermissions{"r": {Filter: filter}}},
+		"t": {"r": {Select: &SelectPermissions{Filter: filter}}},
 	}}
 	return Evaluate(p, "r", "t", "select", claims)
 }
@@ -347,8 +347,8 @@ func TestRowFilter_UnresolvableClaim_NoRowsOnBothPaths(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			perms := evalRowFilter(t, tt.filter, tt.claims)
-			assert.Equal(t, "1 = 0", perms.WhereClause, "query path: constant-false predicate")
-			assert.Empty(t, perms.WhereParams)
+			assert.Equal(t, "1 = 0", perms.Select.WhereClause, "query path: constant-false predicate")
+			assert.Empty(t, perms.Select.WhereParams)
 			assert.True(t, perms.HasRowFilter(), "failed predicate must keep the stream on the per-subscriber path")
 			assert.False(t, perms.RowVisible(map[string]any{"tenant_id": "acme"}, nil), "stream path: every row withheld")
 		})

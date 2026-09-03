@@ -2,6 +2,7 @@ package settings
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net"
@@ -215,6 +216,12 @@ func (v *validator) parseRoles(data []byte) ([]string, bool) {
 // but flagged with a warning: the total lockout should announce itself at
 // validation time, not be discovered one 403 at a time.
 func (v *validator) parsePolicies(data []byte) *policy.Policy {
+	// Run the layout check first: a pre-v2 document decodes into either a
+	// baffling "unknown field" error or, for an empty operation block, a silent
+	// no-op grant. Neither says "your file is the old shape".
+	if v.reportLegacyPolicyLayout(data) {
+		return nil
+	}
 	var p policy.Policy
 	if !v.parseFile(FilePolicies, data, &p) {
 		return nil
@@ -227,6 +234,150 @@ func (v *validator) parsePolicies(data []byte) *policy.Policy {
 		v.errorf(FilePolicies, "", "%v", err)
 	}
 	return &p
+}
+
+// selectPermFields and insertPermFields are the JSON field names of
+// policy.SelectPermissions and policy.InsertPermissions. They exist only to tell
+// a v2 operation block apart from a pre-v2 map of role grants; keep them in sync
+// with those structs (a stale entry costs a missed diagnostic, never a wrong
+// decode — strict decoding still owns correctness).
+var (
+	selectPermFields = map[string]bool{
+		"allow_columns": true, "deny_columns": true, "filter": true,
+		"allowed_aggregations": true, "denied_aggregations": true,
+		"max_rows": true, "max_execution_time": true,
+		"max_rows_to_read": true, "max_memory_usage": true,
+	}
+	insertPermFields = map[string]bool{
+		"allow_columns": true, "deny_columns": true, "check": true,
+	}
+)
+
+// reportLegacyPolicyLayout detects the pre-v2 operation-first layout —
+// tables.<table>.select.<role> — and reports it as one clear finding, returning
+// true when it did. In v2 the nesting is tables.<table>.<role>.select, so an old
+// document's "select" block is a map of role names to grant objects rather than
+// the permission object v2 expects.
+//
+// The evidence required is deliberately strong: a non-empty object under
+// "select"/"insert" whose every value is itself an object and none of whose keys
+// is a v2 permission field.
+//
+// A role literally NAMED after an operation is the hard case, because its v2
+// grant nests {"select": …}/{"insert": …} — which looks like an operation map.
+// Two sub-cases, and they are not alike:
+//
+//   - inner keys are exactly the SAME operation (select.select): the v1 and v2
+//     readings mean the same thing — role "select" reads this table either way —
+//     so accepting the v2 reading is free.
+//   - inner keys include the OTHER operation (select.insert): the readings
+//     DIVERGE — they differ on which role, which operation, or both. Guessing
+//     either way silently grants access the file never contained (for
+//     select.insert: v1 means a read-only role `insert`, v2 a write-only role
+//     `select`), so this refuses to guess and errors.
+//
+// A malformed document is left alone; the JSON parse error is the better message.
+func (v *validator) reportLegacyPolicyLayout(data []byte) bool {
+	var doc struct {
+		Tables map[string]map[string]json.RawMessage `json:"tables"`
+	}
+	if json.Unmarshal(data, &doc) != nil {
+		return false
+	}
+	// Sorted so a document with two legacy tables names the same one every run —
+	// map order would make the finding nondeterministic. Matches parseConfig's
+	// convention further down this file.
+	for _, table := range slices.Sorted(maps.Keys(doc.Tables)) {
+		tp := doc.Tables[table]
+		for _, op := range []string{"select", "insert"} {
+			raw, ok := tp[op]
+			if !ok {
+				continue
+			}
+			fields := selectPermFields
+			if op == "insert" {
+				fields = insertPermFields
+			}
+			if !looksLikeRoleMap(raw, fields) {
+				continue
+			}
+			if same, divergent := operationNamedRoles(raw, op); same {
+				// Both readings agree; the v2 decode is safe.
+				continue
+			} else if divergent {
+				v.errorf(FilePolicies, fmt.Sprintf("tables.%s.%s", table, op),
+					"ambiguous between the role-first and operation-first layouts: every key under tables.%s.%s is an operation name, so pre-v2 those keys are role names under the %[2]q operation, and v2 they are operations under a role named %[2]q — different access either way. Rename the role",
+					table, op)
+				return true
+			}
+			v.errorf(FilePolicies, fmt.Sprintf("tables.%s.%s", table, op),
+				"pre-v2 operation-first layout (tables.%s.%s.<role>); v2 is role-first (tables.%s.<role>.%s) — see wavehouse.dev/access-control#migrating-from-the-operation-first-layout",
+				table, op, table, op)
+			return true
+		}
+	}
+	return false
+}
+
+// operationNamedRoles classifies an operation block whose keys are all operation
+// names — the shape a role literally named "select"/"insert" produces under v2.
+//
+//   - same: the only key is op itself (select.select). Both readings assign the
+//     identical (role=op, operation=op, perms) triple. They cannot diverge on
+//     the perms either: v2's field sets are strict subsets of v1's, so a grant
+//     that would decode differently fails the strict decode anyway.
+//   - divergent: a key names the OTHER operation (select.insert), with or
+//     without op itself. The readings then differ on which role, which
+//     operation, or both — so the caller must refuse rather than pick one.
+//
+// Both false means the block is an ordinary role map and the legacy heuristic
+// stands.
+func operationNamedRoles(raw json.RawMessage, op string) (same, divergent bool) {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil || len(obj) == 0 {
+		return false, false
+	}
+	other := "insert"
+	if op == "insert" {
+		other = "select"
+	}
+	sawOther := false
+	for k := range obj {
+		switch k {
+		case op:
+		case other:
+			sawOther = true
+		default:
+			return false, false // a real role name: an ordinary role map
+		}
+	}
+	return !sawOther, sawOther
+}
+
+// looksLikeRoleMap reports whether raw is a non-empty JSON object that reads as
+// a map of role name → grant object rather than as an operation's permission
+// object (whose keys would be in fields).
+func looksLikeRoleMap(raw json.RawMessage, fields map[string]bool) bool {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil || len(obj) == 0 {
+		return false
+	}
+	// A key that names a permission field (columns, filter, limit, …) means this
+	// is the operation's own permission object, not a map of roles; and every
+	// value must itself be an object, as a grant is. Blocks whose keys are all
+	// operation names — what a role literally NAMED "select"/"insert" nests
+	// under v2 — do read as role maps here, by design: the caller hands those to
+	// operationNamedRoles, which accepts the ones whose two readings agree and
+	// refuses the ones that diverge rather than picking a winner.
+	for k, val := range obj {
+		if fields[k] {
+			return false
+		}
+		if len(bytes.TrimSpace(val)) == 0 || bytes.TrimSpace(val)[0] != '{' {
+			return false
+		}
+	}
+	return true
 }
 
 // validParamType reports whether t is a documented ParamDef.Type ("" =
@@ -509,20 +660,26 @@ func (v *validator) checkRoleRefs(roles []string, p *policy.Policy, queries []pi
 			v.warnf(FilePolicies, "default_role", "default_role equals the admin role — every roleless request gets full admin; avoid outside local dev")
 		}
 		for table, tp := range p.Tables {
-			for op, grants := range map[string]map[string]policy.RolePermissions{"select": tp.Select, "insert": tp.Insert} {
-				for role := range grants {
-					path := fmt.Sprintf("tables.%s.%s.%s", table, op, role)
-					if role == "" {
-						v.errorf(FilePolicies, path, "grant role must not be empty — an empty role matches no request")
-						continue
-					}
-					if role == admin {
-						v.warnf(FilePolicies, path, "admin is an unconditional bypass — this grant has no effect")
-						continue
-					}
-					if !declared[role] {
-						v.errorf(FilePolicies, path, "role %q is not declared in %s", role, FileRoles)
-					}
+			for role, grant := range tp {
+				path := fmt.Sprintf("tables.%s.%s", table, role)
+				if role == "" {
+					v.errorf(FilePolicies, path, "grant role must not be empty — an empty role matches no request")
+					continue
+				}
+				if role == admin {
+					v.warnf(FilePolicies, path, "admin is an unconditional bypass — this grant has no effect")
+					continue
+				}
+				if !declared[role] {
+					v.errorf(FilePolicies, path, "role %q is not declared in %s", role, FileRoles)
+					continue
+				}
+				// A grant with neither operation authorizes nothing. Legal, but
+				// almost always a half-finished edit — and the shape a pre-v2
+				// `"select": {}` block silently decodes into, which the layout
+				// detector cannot flag. Say so rather than let it read as a grant.
+				if grant.Select == nil && grant.Insert == nil {
+					v.warnf(FilePolicies, path, "grant sets neither select nor insert — this role gets no access to the table")
 				}
 			}
 		}

@@ -181,11 +181,7 @@ func TestBuild_TimeRange(t *testing.T) {
 // permsWithFilter returns resolved permissions carrying a row-filter predicate,
 // shaped exactly as policy.Evaluate emits one (quoted column, positional '?').
 func permsWithFilter() *policy.ResolvedPermissions {
-	return &policy.ResolvedPermissions{
-		Allowed:     true,
-		WhereClause: "`org_id` = ?",
-		WhereParams: []any{"org-1"},
-	}
+	return &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{WhereClause: "`org_id` = ?", WhereParams: []any{"org-1"}}}
 }
 
 // TestBuild_PolicyPredicate pins the structural emission of the row-level-
@@ -288,7 +284,7 @@ func TestBuild_PolicyMaxRows(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			schema := &discovery.TableSchema{Name: "clicks", Columns: []discovery.Column{{Name: tt.column, Type: "String"}}}
-			perms := &policy.ResolvedPermissions{Allowed: true, MaxRows: tt.maxRows}
+			perms := &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{MaxRows: tt.maxRows}}
 			sq := &StructuredQuery{Columns: []string{tt.column}, Limit: tt.limit}
 			result, err := Build("clicks", sq, schema, perms, 0, DefaultMaxRows)
 			require.NoError(t, err)
@@ -682,7 +678,7 @@ func TestBuild_FilterInOp_InvalidValueType(t *testing.T) {
 func TestBuild_AuthorizesEveryClause(t *testing.T) {
 	t.Parallel()
 	// viewer may read page/ts/count; org_id (a tenant key) is denied.
-	perms := &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"page", "ts", "count"}}
+	perms := &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{AllowColumns: []string{"page", "ts", "count"}}}
 	const denied = "org_id"
 
 	tests := []struct {
@@ -711,7 +707,7 @@ func TestBuild_AuthorizesEveryClause(t *testing.T) {
 // allowed columns in every clause build successfully.
 func TestBuild_AllowsAuthorizedColumnsInEveryClause(t *testing.T) {
 	t.Parallel()
-	perms := &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"page", "ts", "count"}}
+	perms := &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{AllowColumns: []string{"page", "ts", "count"}}}
 	sq := &StructuredQuery{
 		Columns:   []string{"page"},
 		Filters:   []Filter{{Column: "count", Op: "gt", Value: 1}},
@@ -744,27 +740,27 @@ func TestBuild_SelectAllProjection(t *testing.T) {
 		},
 		{
 			name:     "unrestricted (wildcard allow) keeps SELECT *",
-			perms:    &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}},
+			perms:    &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{AllowColumns: []string{"*"}}},
 			selectIs: "*",
 		},
 		{
 			name:     "restricted expands to allowed projection (schema order)",
-			perms:    &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"count", "page"}},
+			perms:    &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{AllowColumns: []string{"count", "page"}}},
 			selectIs: "`page`, `count`",
 		},
 		{
 			name:     "deny-list with empty allow expands and drops denied",
-			perms:    &policy.ResolvedPermissions{Allowed: true, DenyColumns: []string{"org_id"}},
+			perms:    &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{DenyColumns: []string{"org_id"}}},
 			selectIs: "`page`, `button`, `count`, `ts`",
 		},
 		{
 			name:     "deny-list with wildcard allow drops denied",
-			perms:    &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}, DenyColumns: []string{"org_id", "button"}},
+			perms:    &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{AllowColumns: []string{"*"}, DenyColumns: []string{"org_id", "button"}}},
 			selectIs: "`page`, `count`, `ts`",
 		},
 		{
 			name:    "restricted with zero readable columns fails closed",
-			perms:   &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"nonexistent"}},
+			perms:   &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{AllowColumns: []string{"nonexistent"}}},
 			wantErr: ErrNoReadableColumns,
 		},
 	}
@@ -789,7 +785,7 @@ func TestBuild_SelectAllProjection(t *testing.T) {
 // error (→ HTTP 403), distinct from an unsupported function (→ 400).
 func TestBuild_ForbiddenAggregation(t *testing.T) {
 	t.Parallel()
-	perms := &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"count"}, DeniedAggregations: []string{"sum"}}
+	perms := &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{AllowColumns: []string{"count"}, DeniedAggregations: []string{"sum"}}}
 	sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "sum", Column: "count", Alias: "total"}}}
 	_, err := Build("clicks", sq, testSchema(), perms, 0, DefaultMaxRows)
 	var fae *ForbiddenAggregationError
@@ -803,7 +799,7 @@ func TestBuild_ForbiddenAggregation(t *testing.T) {
 // query is not wrongly rejected for a column-restricted role.
 func TestBuild_OrderByAliasSkipsColumnPolicy(t *testing.T) {
 	t.Parallel()
-	perms := &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"page"}}
+	perms := &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{AllowColumns: []string{"page"}}}
 	sq := &StructuredQuery{
 		Columns:      []string{"page"},
 		Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "n"}},
@@ -820,7 +816,7 @@ func TestBuild_OrderByAliasSkipsColumnPolicy(t *testing.T) {
 // column values, and is governed by aggregation policy + row-level filters.
 func TestBuild_CountStarWithoutReadableColumns(t *testing.T) {
 	t.Parallel()
-	perms := &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"nonexistent"}}
+	perms := &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{AllowColumns: []string{"nonexistent"}}}
 	sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "n"}}}
 	result, err := Build("clicks", sq, testSchema(), perms, 0, DefaultMaxRows)
 	require.NoError(t, err)
@@ -951,4 +947,58 @@ func TestBuild_PermissiveAliases_Accepted(t *testing.T) {
 			require.NoErrorf(t, err, "alias %q must be accepted — containment is an escaping concern, not a rejection", alias)
 		})
 	}
+}
+
+// TestBuild_InsertResolvedGrantIsRejected: a grant resolved for the wrong
+// operation never produces a query, by whichever denier the query's shape
+// reaches first. Each shape asserts its OWN error — a bare require.Error would
+// pass just as happily if all three collapsed onto one denier, which is exactly
+// the claim this test exists to check.
+//
+// Note the three do not divide into "names columns" vs "skips
+// validateAndAuthorizeColumns": aggregation-only ENTERS that function and is
+// denied inside it, in the aggregation loop. Only select_all traverses it
+// without reaching an accessor.
+func TestBuild_InsertResolvedGrantIsRejected(t *testing.T) {
+	t.Parallel()
+	insertResolved := &policy.ResolvedPermissions{Allowed: true, Insert: &policy.ResolvedInsert{}}
+	for name, tc := range map[string]struct {
+		q      *StructuredQuery
+		assert func(t *testing.T, err error)
+	}{
+		"names a column → IsColumnAllowed": {
+			q: &StructuredQuery{Columns: []string{"page"}},
+			assert: func(t *testing.T, err error) {
+				var e *ForbiddenColumnError
+				assert.ErrorAs(t, err, &e)
+			},
+		},
+		"select_all → AllowedProjection": {
+			q: &StructuredQuery{SelectAll: true},
+			assert: func(t *testing.T, err error) {
+				assert.ErrorIs(t, err, ErrNoReadableColumns)
+			},
+		},
+		"aggregation only → IsAggregationAllowed": {
+			q: &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "n"}}},
+			assert: func(t *testing.T, err error) {
+				var e *ForbiddenAggregationError
+				assert.ErrorAs(t, err, &e)
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			res, err := Build("clicks", tc.q, testSchema(), insertResolved, 0, DefaultMaxRows)
+			require.Error(t, err, "a grant resolved for the wrong operation must not build a query")
+			assert.Nil(t, res)
+			tc.assert(t, err)
+		})
+	}
+
+	// The control: the same query with a select-resolved grant builds.
+	selectResolved := &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{}}
+	res, err := Build("clicks", &StructuredQuery{Columns: []string{"page"}}, testSchema(), selectResolved, 0, DefaultMaxRows)
+	require.NoError(t, err)
+	assert.NotNil(t, res)
 }

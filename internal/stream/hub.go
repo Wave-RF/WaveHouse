@@ -370,7 +370,7 @@ func filterColumns(data map[string]any, perms *policy.ResolvedPermissions) map[s
 	}
 	filtered := make(map[string]any, len(data))
 	for col, val := range data {
-		if perms.IsColumnAllowed(col) {
+		if perms.IsColumnAllowed(col, false) {
 			filtered[col] = val
 		}
 	}

@@ -105,9 +105,23 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 	if err != nil {
 		return nil, fmt.Errorf("building WHERE clause: %w", err)
 	}
-	if perms != nil && perms.WhereClause != "" {
-		whereParts = append([]string{"(" + perms.WhereClause + ")"}, whereParts...)
-		params = append(params, perms.WhereParams...)
+	// Build's one caller resolves for "select", so Select is non-nil here. A
+	// mis-resolved grant never reaches this line, but by THREE different deniers
+	// depending on the query's shape — naming only one would leave the other two
+	// looking unguarded:
+	//
+	//   - names columns    → validateAndAuthorizeColumns → IsColumnAllowed
+	//   - select_all only  → resolveProjection → RestrictsColumns/AllowedProjection
+	//   - aggregations only → validateAndAuthorizeColumns → IsAggregationAllowed
+	//
+	// All three fail closed on a nil Select; all three are pinned by
+	// TestBuild_InsertResolvedGrantIsRejected. The bare read is the backstop if
+	// that ordering changes — it would panic rather than skip the filter. Do NOT
+	// add a `perms.Select != nil` guard: it would emit an unfiltered query, the
+	// silent widening the pointer shape exists to prevent.
+	if perms != nil && perms.Select.WhereClause != "" {
+		whereParts = append([]string{"(" + perms.Select.WhereClause + ")"}, whereParts...)
+		params = append(params, perms.Select.WhereParams...)
 	}
 	params = append(params, whereParams...)
 	if len(whereParts) > 0 {
@@ -145,8 +159,8 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 	if maxRows <= 0 {
 		maxRows = DefaultMaxRows
 	}
-	if perms != nil && perms.MaxRows > 0 && perms.MaxRows < maxRows {
-		maxRows = perms.MaxRows
+	if perms != nil && perms.Select.MaxRows > 0 && perms.Select.MaxRows < maxRows {
+		maxRows = perms.Select.MaxRows
 	}
 	if q.Limit > 0 && q.Limit <= maxRows {
 		sql += fmt.Sprintf(" LIMIT %d", q.Limit)
@@ -189,7 +203,7 @@ func aggregationExpr(a Aggregation) string {
 // all-rows token, not a column.
 func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, perms *policy.ResolvedPermissions) error {
 	authorize := func(col string) error {
-		if !perms.IsColumnAllowed(col) {
+		if !perms.IsColumnAllowed(col, false) {
 			return &ForbiddenColumnError{Column: col}
 		}
 		return nil

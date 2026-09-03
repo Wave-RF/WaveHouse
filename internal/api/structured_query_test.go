@@ -157,9 +157,7 @@ func TestStructuredQuery_PolicyForbidden(t *testing.T) {
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Select: map[string]policy.RolePermissions{
-					"admin": {AllowColumns: []string{"page"}},
-				},
+				"admin": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	}
@@ -185,9 +183,7 @@ func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Select: map[string]policy.RolePermissions{
-					"viewer": {AllowColumns: []string{"page"}},
-				},
+				"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	}
@@ -215,12 +211,10 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Select: map[string]policy.RolePermissions{
-					"viewer": {
-						AllowColumns:       []string{"page", "count"},
-						DeniedAggregations: []string{"avg"},
-					},
-				},
+				"viewer": {Select: &policy.SelectPermissions{
+					AllowColumns:       []string{"page", "count"},
+					DeniedAggregations: []string{"avg"},
+				}},
 			},
 		},
 	}
@@ -305,10 +299,10 @@ func viewerRequest(t *testing.T, sq query.StructuredQuery) *http.Request {
 	return r.WithContext(ctx)
 }
 
-func policyWithViewer(perms policy.RolePermissions) *policy.Policy {
+func policyWithViewer(perms policy.SelectPermissions) *policy.Policy {
 	return &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
-			"clicks": {Select: map[string]policy.RolePermissions{"viewer": perms}},
+			"clicks": {"viewer": {Select: &perms}},
 		},
 	}
 }
@@ -320,7 +314,7 @@ func policyWithViewer(perms policy.RolePermissions) *policy.Policy {
 func TestStructuredQuery_SelectAll_RestrictedRoleGetsAllowedProjection(t *testing.T) {
 	t.Parallel()
 	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{AllowColumns: []string{"page", "ts"}}))
+	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page", "ts"}}))
 
 	w := httptest.NewRecorder()
 	h.Handle(w, viewerRequest(t, query.StructuredQuery{SelectAll: true}))
@@ -343,7 +337,7 @@ func TestStructuredQuery_RowFilterAndMaxRows_ReachClickHouse(t *testing.T) {
 	t.Parallel()
 	eq := "{{ jwt.org_id }}"
 	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{
+	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{
 		Filter:  map[string]policy.Filter{"user_id": {Eq: &eq}},
 		MaxRows: 100,
 	}))
@@ -369,7 +363,7 @@ func TestStructuredQuery_RowFilterAndMaxRows_ReachClickHouse(t *testing.T) {
 func TestStructuredQuery_OmittedColumns_ReturnsNothing(t *testing.T) {
 	t.Parallel()
 	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{AllowColumns: []string{"page", "ts"}}))
+	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page", "ts"}}))
 
 	w := httptest.NewRecorder()
 	h.Handle(w, viewerRequest(t, query.StructuredQuery{}))
@@ -384,7 +378,7 @@ func TestStructuredQuery_OmittedColumns_ReturnsNothing(t *testing.T) {
 func TestStructuredQuery_SelectAll_DenyListExpands(t *testing.T) {
 	t.Parallel()
 	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{DenyColumns: []string{"payload"}}))
+	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{DenyColumns: []string{"payload"}}))
 
 	w := httptest.NewRecorder()
 	h.Handle(w, viewerRequest(t, query.StructuredQuery{SelectAll: true}))
@@ -400,7 +394,7 @@ func TestStructuredQuery_SelectAll_DenyListExpands(t *testing.T) {
 func TestStructuredQuery_LiteralStarColumn_Unknown(t *testing.T) {
 	t.Parallel()
 	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{AllowColumns: []string{"*"}}))
+	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
 
 	w := httptest.NewRecorder()
 	h.Handle(w, viewerRequest(t, query.StructuredQuery{Columns: []string{"*"}}))
@@ -415,7 +409,7 @@ func TestStructuredQuery_LiteralStarColumn_Unknown(t *testing.T) {
 func TestStructuredQuery_UnrestrictedRoleKeepsSelectStar(t *testing.T) {
 	t.Parallel()
 	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{AllowColumns: []string{"*"}}))
+	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
 
 	w := httptest.NewRecorder()
 	h.Handle(w, viewerRequest(t, query.StructuredQuery{SelectAll: true}))
@@ -461,7 +455,7 @@ func TestStructuredQuery_DeniedColumnInAnyClause_Returns403(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			conn := &sqlCapturingConn{}
-			h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{AllowColumns: []string{"page", "ts"}}))
+			h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page", "ts"}}))
 
 			w := httptest.NewRecorder()
 			h.Handle(w, viewerRequest(t, tt.sq))
@@ -480,7 +474,7 @@ func TestStructuredQuery_DeniedColumnInAnyClause_Returns403(t *testing.T) {
 func TestStructuredQuery_NoReadableColumns_Returns403(t *testing.T) {
 	t.Parallel()
 	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{AllowColumns: []string{"nonexistent"}}))
+	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"nonexistent"}}))
 
 	w := httptest.NewRecorder()
 	h.Handle(w, viewerRequest(t, query.StructuredQuery{SelectAll: true}))
@@ -496,7 +490,7 @@ func TestStructuredQuery_NoReadableColumns_Returns403(t *testing.T) {
 func TestStructuredQuery_UnauthenticatedUsesDefaultRoleProjection(t *testing.T) {
 	t.Parallel()
 	conn := &sqlCapturingConn{}
-	p := policyWithViewer(policy.RolePermissions{AllowColumns: []string{"page"}})
+	p := policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page"}})
 	p.DefaultRole = "viewer" // public access resolves to the restricted viewer role
 	h := newCapturingHandler(t, conn, p)
 
@@ -519,10 +513,10 @@ func TestStructuredQuery_UnauthenticatedUsesDefaultRoleProjection(t *testing.T) 
 func TestStructuredQuery_CacheKeyIsolatesColumnVisibility(t *testing.T) {
 	t.Parallel()
 	p := &policy.Policy{Tables: map[string]policy.TablePolicy{
-		"clicks": {Select: map[string]policy.RolePermissions{
-			"viewer":  {AllowColumns: []string{"page"}},
-			"auditor": {AllowColumns: []string{"page", "user_id"}},
-		}},
+		"clicks": {
+			"viewer":  {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}},
+			"auditor": {Select: &policy.SelectPermissions{AllowColumns: []string{"page", "user_id"}}},
+		},
 	}}
 	sqlFor := func(role string) string {
 		conn := &sqlCapturingConn{}

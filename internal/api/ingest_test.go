@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
@@ -236,9 +237,7 @@ func TestIngest_Policy_Forbidden(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Select: map[string]policy.RolePermissions{
-					"viewer": {},
-				},
+				"viewer": {Select: &policy.SelectPermissions{}},
 				// No insert permissions for viewer.
 			},
 		},
@@ -263,11 +262,7 @@ func TestIngest_Policy_ColumnDenied(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"writer": {
-						AllowColumns: []string{"page"},
-					},
-				},
+				"writer": {Insert: &policy.InsertPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	})
@@ -292,13 +287,9 @@ func TestIngest_Policy_CheckClause_Mismatch(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {
-						Check: map[string]policy.Filter{
-							"org_id": {Eq: &orgTemplate},
-						},
-					},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+					"org_id": {Eq: &orgTemplate},
+				}}},
 			},
 		},
 	})
@@ -324,13 +315,9 @@ func TestIngest_Policy_CheckClause_Match(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {
-						Check: map[string]policy.Filter{
-							"org_id": {Eq: &orgTemplate},
-						},
-					},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+					"org_id": {Eq: &orgTemplate},
+				}}},
 			},
 		},
 	})
@@ -362,13 +349,9 @@ func TestIngest_Policy_CheckClause_NumericSpellingMatch(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {
-						Check: map[string]policy.Filter{
-							"count": {Eq: &countTemplate},
-						},
-					},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+					"count": {Eq: &countTemplate},
+				}}},
 			},
 		},
 	})
@@ -410,13 +393,9 @@ func TestIngest_Policy_CheckClause_StaticNumericSpelling(t *testing.T) {
 			h.PolicySource = policy.Static(&policy.Policy{
 				Tables: map[string]policy.TablePolicy{
 					"clicks": {
-						Insert: map[string]policy.RolePermissions{
-							"user": {
-								Check: map[string]policy.Filter{
-									"count": {Eq: &staticCount},
-								},
-							},
-						},
+						"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+							"count": {Eq: &staticCount},
+						}}},
 					},
 				},
 			})
@@ -459,13 +438,9 @@ func TestIngest_Policy_CheckClause_StringClaimStrictEquality(t *testing.T) {
 			h.PolicySource = policy.Static(&policy.Policy{
 				Tables: map[string]policy.TablePolicy{
 					"clicks": {
-						Insert: map[string]policy.RolePermissions{
-							"user": {
-								Check: map[string]policy.Filter{
-									"org_id": {Eq: &orgTemplate},
-								},
-							},
-						},
+						"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+							"org_id": {Eq: &orgTemplate},
+						}}},
 					},
 				},
 			})
@@ -496,13 +471,9 @@ func TestIngest_Policy_CheckClause_NullValue_FailsClosed(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {
-						Check: map[string]policy.Filter{
-							"org_id": {Eq: &orgTemplate},
-						},
-					},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+					"org_id": {Eq: &orgTemplate},
+				}}},
 			},
 		},
 	})
@@ -529,13 +500,9 @@ func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {
-						Check: map[string]policy.Filter{
-							"org_id": {Eq: &orgTemplate},
-						},
-					},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+					"org_id": {Eq: &orgTemplate},
+				}}},
 			},
 		},
 	})
@@ -565,9 +532,7 @@ func checkInStore() policy.Source {
 	return policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {Check: map[string]policy.Filter{"org_id": {In: &orgsTemplate}}},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{"org_id": {In: &orgsTemplate}}}},
 			},
 		},
 	})
@@ -762,11 +727,7 @@ func TestIngest_Policy_DenyColumns(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"writer": {
-						DenyColumns: []string{"count"},
-					},
-				},
+				"writer": {Insert: &policy.InsertPermissions{DenyColumns: []string{"count"}}},
 			},
 		},
 	})
@@ -1047,9 +1008,7 @@ func TestIngest_NDJSON_Policy_ColumnDenied_PerLine(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"writer": {AllowColumns: []string{"page"}},
-				},
+				"writer": {Insert: &policy.InsertPermissions{AllowColumns: []string{"page"}}},
 			},
 		},
 	})
@@ -1082,7 +1041,7 @@ func TestIngest_NDJSON_Policy_TableForbidden(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Select: map[string]policy.RolePermissions{"viewer": {}},
+				"viewer": {Select: &policy.SelectPermissions{}},
 				// No insert permission for viewer.
 			},
 		},
@@ -1110,9 +1069,7 @@ func TestIngest_NDJSON_Policy_CheckClause_PerLineAndAutoInject(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {Check: map[string]policy.Filter{"org_id": {Eq: &orgTemplate}}},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{"org_id": {Eq: &orgTemplate}}}},
 			},
 		},
 	})
@@ -1642,13 +1599,9 @@ func TestIngest_AutoInjectedLiteralTimestampCanonicalized(t *testing.T) {
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"events": {
-				Insert: map[string]policy.RolePermissions{
-					"user": {
-						Check: map[string]policy.Filter{
-							"ts": {Eq: &staticTS},
-						},
-					},
-				},
+				"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+					"ts": {Eq: &staticTS},
+				}}},
 			},
 		},
 	})
@@ -1772,4 +1725,51 @@ func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
 	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"event_id": "e1", "page": "/home"}))
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Len(t, pub.Messages, 1, "published without idempotency, not 500")
+}
+
+// TestProcessRecord_UnresolvedInsertSideAborts pins two things that are prose
+// everywhere else in this file.
+//
+// First, that an insert grant resolved for the OTHER operation aborts the whole
+// request rather than rejecting per record. perms is resolved once per request,
+// so the condition is true for every record or none; as a reject, a 10k batch
+// would report 10k independent permission failures for one mis-wired grant.
+//
+// Second, the reachability claim at the CheckClauses call site. The column loop
+// above it iterates the RECORD's columns, so it runs zero times for `{}` — and
+// discovery.Validate accepts `{}` here because every column is nullable or
+// defaulted. I previously asserted this path was unreachable, having tested only
+// against a schema with a required column; it is not.
+func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
+	t.Parallel()
+	schema := &discovery.TableSchema{
+		Name: "loose",
+		Columns: []discovery.Column{
+			{Name: "a", Type: "Nullable(String)", IsNullable: true},
+			{Name: "b", Type: "String", HasDefault: true},
+		},
+	}
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{schema})
+	h := NewIngestHandler(reg, &testutil.MockPublisher{}, testutil.NopLogger())
+
+	// A grant resolved for SELECT, reaching the insert path.
+	selectResolved := policy.Evaluate(&policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"loose": {"viewer": {Select: &policy.SelectPermissions{}}},
+		},
+	}, "viewer", "loose", "select", nil)
+	require.True(t, selectResolved.Allowed)
+
+	// An empty record really does clear validation and the column loop.
+	require.NoError(t, discovery.Validate(schema, map[string]any{}),
+		"all-nullable/defaulted columns accept an empty record — this is what makes the read reachable")
+
+	dup, reject, abort := h.processRecord(
+		context.Background(), "loose", "", schema, selectResolved, "viewer", map[string]any{}, time.Now())
+
+	assert.False(t, dup)
+	assert.Nil(t, reject, "a request-scoped condition must not be reported per record")
+	require.NotNil(t, abort, "an unresolved insert side must abort the request")
+	assert.Equal(t, http.StatusForbidden, abort.Status)
+	assert.Empty(t, abort.RetryAfter, "not a transient condition — retrying cannot help")
 }

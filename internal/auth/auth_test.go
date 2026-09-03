@@ -125,14 +125,12 @@ func TestMiddleware_LargeIntegerClaim_ExactThroughPolicy(t *testing.T) {
 
 	eq := "{{ jwt.tenant_id }}"
 	p := &policy.Policy{Tables: map[string]policy.TablePolicy{
-		"clicks": {Select: map[string]policy.RolePermissions{
-			"viewer": {Filter: map[string]policy.Filter{"tenant_id": {Eq: &eq}}},
-		}},
+		"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"tenant_id": {Eq: &eq}}}}},
 	}}
 	perms := policy.Evaluate(p, "viewer", "clicks", "select", c.claims)
 	require.True(t, perms.Allowed)
-	assert.Equal(t, "`tenant_id` = ?", perms.WhereClause)
-	assert.Equal(t, []any{"1234567890123456789"}, perms.WhereParams)
+	assert.Equal(t, "`tenant_id` = ?", perms.Select.WhereClause)
+	assert.Equal(t, []any{"1234567890123456789"}, perms.Select.WhereParams)
 }
 
 // TestMiddleware_NumericClaimSpelling_BindsCanonically: json.Number keeps the
@@ -161,13 +159,11 @@ func TestMiddleware_NumericClaimSpelling_BindsCanonically(t *testing.T) {
 
 			eq := "{{ jwt.tenant_id }}"
 			p := &policy.Policy{Tables: map[string]policy.TablePolicy{
-				"clicks": {Select: map[string]policy.RolePermissions{
-					"viewer": {Filter: map[string]policy.Filter{"tenant_id": {Eq: &eq}}},
-				}},
+				"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"tenant_id": {Eq: &eq}}}}},
 			}}
 			perms := policy.Evaluate(p, "viewer", "clicks", "select", c.claims)
 			require.True(t, perms.Allowed)
-			assert.Equal(t, []any{tt.want}, perms.WhereParams)
+			assert.Equal(t, []any{tt.want}, perms.Select.WhereParams)
 		})
 	}
 }

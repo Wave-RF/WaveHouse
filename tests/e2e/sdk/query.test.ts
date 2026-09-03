@@ -190,7 +190,7 @@ describe("Query", () => {
       tables: {
         ...currentPolicy.tables,
         [weirdName]: {
-          select: { viewer: { allow_columns: ["*"] } },
+          viewer: { select: { allow_columns: ["*"] } },
         },
       },
     });
@@ -221,7 +221,7 @@ describe("Query", () => {
       tables: {
         ...currentPolicy.tables,
         [noTsTable]: {
-          select: { viewer: { allow_columns: ["*"] } },
+          viewer: { select: { allow_columns: ["*"] } },
         },
       },
     });
@@ -260,8 +260,9 @@ describe("Query", () => {
         ...currentPolicy.tables,
         [T.clicks]: {
           ...(currentPolicy.tables[T.clicks] || {}),
-          select: {
-            viewer: { allow_columns: ["page", "duration_ms"] },
+          viewer: {
+            ...(currentPolicy.tables[T.clicks]?.viewer || {}),
+            select: { allow_columns: ["page", "duration_ms"] },
           },
         },
       },
@@ -298,7 +299,10 @@ describe("Query", () => {
     await setPolicy({
       tables: {
         ...tables,
-        [T.clicks]: { ...(tables[T.clicks] || {}), select: { viewer: perms } },
+        [T.clicks]: {
+          ...(tables[T.clicks] || {}),
+          viewer: { ...(tables[T.clicks]?.viewer || {}), select: perms },
+        },
       },
     });
     try {
@@ -425,8 +429,9 @@ describe("Query", () => {
         ...currentPolicy.tables,
         [T.clicks]: {
           ...(currentPolicy.tables[T.clicks] || {}),
-          select: {
-            viewer: {
+          viewer: {
+            ...(currentPolicy.tables[T.clicks]?.viewer || {}),
+            select: {
               allow_columns: ["*"],
               max_execution_time: "1ms", // human-readable duration
             },

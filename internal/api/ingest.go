@@ -77,8 +77,9 @@ var dedupeDisabledCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 // readable and the records were processed; per-record rejections (malformed
 // JSON, schema or permission failures) are reported in Results without failing
 // the whole request, so one bad record never obscures the rest of the batch
-// (issue #195). Whole-request conditions (backpressure, publish/dedup backend
-// failure) abort with the usual non-200 status instead.
+// (issue #195). Whole-request conditions abort with a non-200 status instead —
+// see requestAbort for the list, which lives there and only there, because
+// stating it in three places is how two of them went stale.
 type batchResult struct {
 	Total      int            `json:"total"`      // records read from the body
 	Succeeded  int            `json:"succeeded"`  // records validated + published
@@ -107,11 +108,19 @@ type recordReject struct {
 	Message string
 }
 
-// requestAbort is a whole-request failure: the system can't accept this record
-// (or any that follow) right now — publish backpressure (503), a publish/marshal
-// failure (500), or a dedup backend error (500). Both paths stop and return the
-// status; the batch path abandons the remaining records so the caller can retry
-// the batch rather than silently lose the tail.
+// requestAbort is a whole-request failure: this record and every one that
+// follows is refused. Both paths stop and return the status; the batch path
+// abandons the remaining records rather than silently losing the tail.
+//
+// Most causes are TRANSIENT system conditions, where abandoning the tail is what
+// makes the batch safe to retry: publish backpressure (503), a publish/marshal
+// failure (500), a dedup backend error (500).
+//
+// One is not. An insert grant that resolved for the other operation is a 403 and
+// a caller/config bug — retrying cannot help. It aborts rather than rejecting
+// per record because the grant is resolved ONCE per request, so it is true for
+// every record or none; as a per-record reject a 10k batch would report 10k
+// independent permission failures for a single mis-wired grant.
 type requestAbort struct {
 	Status     int
 	Message    string
@@ -245,11 +254,11 @@ func (h *IngestHandler) handleSingle(
 
 // handleBatch ingests a multi-record body (JSON array or NDJSON), running each
 // record through the same validate → authorize → dedup → publish pipeline as a
-// single insert. A record that fails validation or a permission rule — or that
-// the reader couldn't decode — is recorded against its index and the batch
-// continues; a whole-request condition (backpressure, publish/dedup backend
-// failure) aborts the batch. Returns 200 with a per-record summary once the body
-// is consumed.
+// single insert. A record that fails validation or a PER-RECORD permission rule
+// (a denied column, a failed check clause) — or that the reader couldn't decode
+// — is recorded against its index and the batch continues; a whole-request
+// condition aborts it (see requestAbort). Returns 200 with a per-record summary
+// once the body is consumed.
 func (h *IngestHandler) handleBatch(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -290,9 +299,8 @@ func (h *IngestHandler) handleBatch(
 		idx := result.Total
 		dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now)
 		if abort != nil {
-			// Whole-request failure (backpressure / publish / dedup backend):
-			// stop and surface the status so the caller retries the batch
-			// instead of treating a system outage as per-record loss.
+			// Whole-request failure: surface the status rather than recording a
+			// request-scoped condition as per-record loss (see requestAbort).
 			writeAbort(w, abort)
 			return
 		}
@@ -375,7 +383,7 @@ func (h *IngestHandler) processRecord(
 	// DEEP AUTH: column-level allow/deny + check clauses.
 	if perms != nil {
 		for col := range data {
-			if !perms.IsColumnAllowed(col) {
+			if !perms.IsColumnAllowed(col, true) {
 				h.logger.WarnContext(ctx, "column insertion forbidden", "column", col, "role", role)
 				return false, &recordReject{
 					Status:  http.StatusForbidden,
@@ -383,7 +391,30 @@ func (h *IngestHandler) processRecord(
 				}, nil
 			}
 		}
-		for col, requiredVal := range perms.CheckClauses {
+		// Through the accessor, not a bare read. The check loop iterates a side's
+		// map rather than asking about a column, so IsColumnAllowed cannot cover it,
+		// and a bare read presents an empty map on an unresolved side — every check
+		// then passes vacuously. ok=false ABORTS the request; it must never be read
+		// as "no checks to run".
+		//
+		// Reachable, unlike the query path's bare reads: discovery.Validate only
+		// requires a column that is neither nullable nor defaulted, so a table whose
+		// columns are all nullable or all defaulted accepts `{}`, and the column loop
+		// above then runs zero times.
+		checks, resolved := perms.CheckClauses()
+		if !resolved {
+			// ABORT, not a per-record reject: perms is resolved once per request,
+			// so this is true for every record or none. As a reject, a 10k-record
+			// batch would emit 10k ERROR lines and report 10k independent
+			// permission failures for one mis-wired grant.
+			h.logger.ErrorContext(ctx, "insert checks consulted on a grant resolved for another operation",
+				"table", table, "role", role)
+			return false, nil, &requestAbort{
+				Status:  http.StatusForbidden,
+				Message: "insert permissions were not resolved for this request",
+			}
+		}
+		for col, requiredVal := range checks {
 			// A []any value is an _in check: the inserted value must be present and
 			// one of the allowed set. Unlike the scalar _eq case there is no single
 			// value to auto-inject, so an absent column fails closed.
