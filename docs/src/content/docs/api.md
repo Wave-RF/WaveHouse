@@ -198,7 +198,7 @@ Accepts a single flat JSON object, a JSON array of objects, or a newline-delimit
 
 Parameters are ignored, so `application/json; charset=utf-8` is `application/json`.
 
-The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse)). For uploads larger than that, use the streaming NDJSON form below rather than one big body, and set your own outer limit at the [reverse proxy](/reverse-proxy#request-body-size-limits).
+The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse)). The cap applies to **every** body shape, NDJSON included — the whole body is read before it is parsed, so a line-framed batch is bounded exactly like a JSON array. Split an upload larger than the cap across several requests, and set your own outer limit at the [reverse proxy](/reverse-proxy#request-body-size-limits).
 
 The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
@@ -311,7 +311,7 @@ Examples for a `DateTime64(3, 'America/New_York')` column: `"2026-06-21 00:00:00
 A **JSON array** of objects (`[{…}, {…}]`) or an **NDJSON** body (`Content-Type: application/x-ndjson`, one JSON object per line) ingests a batch in a single request. Each record is validated, authorized, deduplicated, and published independently, so **one malformed or rejected record never blocks the rest of the batch**. (The SDK's `insert([...])` array helper uses the NDJSON form automatically; both forms return the same response.)
 
 - **JSON array** — the most convenient form from most HTTP clients. A structural JSON syntax error fails the whole request (`400`), but a wrong-typed element (a non-object) is reported per-record like any other rejection. An explicit empty array (`[]`) is a valid, record-less batch (`200`, `total: 0`).
-- **NDJSON** — the streaming-friendly form for very large uploads. Blank lines are skipped, and a single malformed *line* is reported and skipped (the newline reframes the next record).
+- **NDJSON** — one record per line. Its advantages are per-record error reporting and cheap client-side generation, not a larger ceiling: the body cap applies to it exactly as to a JSON array. Blank lines are skipped, and a single malformed *line* is reported and skipped (the newline reframes the next record).
 
 **Request (JSON array):**
 

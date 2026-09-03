@@ -1952,6 +1952,13 @@ func TestIngest_BodyCap_413(t *testing.T) {
 			assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
 			assert.Contains(t, w.Body.String(), "request body exceeded")
 			testutil.AssertJSONErrorResponse(t, w)
+			// The 413 is atomic now, which is the user-visible half of buffering
+			// the body. Previously the readers ran over the live connection, so
+			// handleBatch published each record as it decoded it and the cap
+			// surfaced mid-iteration — a 413 left the already-published prefix in
+			// NATS, and a client retrying it double-inserted that prefix. Nothing
+			// pinned that, so the change could have regressed silently.
+			assert.Empty(t, pub.Messages, "an over-cap request must publish nothing at all")
 		})
 	}
 }
