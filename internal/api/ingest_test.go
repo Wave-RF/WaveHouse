@@ -1253,13 +1253,19 @@ func TestIngestFormat(t *testing.T) {
 		{ct: `application/x-ndjson; profile="a,b,c"`, want: FormatNDJSON},
 		// An escaped quote does not end the value, so the comma after it is data.
 		{ct: `application/json; foo="a\",b"`, want: FormatJSON},
-		// An UNBALANCED quote has no valid parse (RFC 9110 §5.6.4), so it is
-		// refused rather than allowed to swallow whatever follows it. Running it
-		// to end-of-value would make `foo=a"b, application/x-ndjson` resolve to
-		// JSON — reading an NDJSON body as one object and dropping every record
-		// past the first behind a 200 — and only in the joined spelling, which
-		// would break the invariant that both spellings answer alike.
+		// An UNBALANCED quote has no valid parse (RFC 9110 §5.6.4), so no comma in
+		// it is protected and the agreement rule judges whatever the naive split
+		// exposes. That is NOT a blanket refusal — the row below shows one
+		// accepted — but it stops the joined spelling silently absorbing a
+		// declaration the repeated spelling would conflict with. Running such a
+		// value to end-of-value instead made `foo=a"b, application/x-ndjson`
+		// resolve to JSON, reading an NDJSON body as one object and dropping
+		// every record past the first behind a 200, in the joined spelling only.
 		{ct: `application/json; foo="a,b`, wantErr: true, wantConflict: true},
+		// The boundary: an unbalanced quote whose exposed declarations agree is
+		// accepted, because parameters never decide the format.
+		{ct: `application/json; foo=a"b`, want: FormatJSON},
+		{ct: `application/json; p="a, application/json`, want: FormatJSON},
 		{ct: `application/json; foo=a"b, application/x-ndjson`, wantErr: true, wantConflict: true},
 		{ct: `application/x-ndjson; foo="x, application/json`, wantErr: true, wantConflict: true},
 		// The valid header this splitter exists for is still accepted — and it is
@@ -1503,11 +1509,10 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		assert.Len(t, pub.Messages, 2, "same format, different spelling — not ambiguous")
 	})
 
-	// Spelling-independence for the unbalanced-quote case specifically. This is
-	// the invariant the run-to-end reading broke: joined and repeated must answer
-	// alike, and an unbalanced quote must not let the joined form absorb a
+	// Spelling-independence when ONE value's quotes are unbalanced. This is the
+	// invariant the run-to-end reading broke: the joined form must not absorb a
 	// declaration the repeated form would conflict with.
-	t.Run("an unbalanced quote answers alike joined and repeated", func(t *testing.T) {
+	t.Run("one unbalanced value answers alike joined and repeated", func(t *testing.T) {
 		t.Parallel()
 		for name, build := range map[string]func(*testing.T) *http.Request{
 			"joined": func(t *testing.T) *http.Request {
@@ -1531,6 +1536,33 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 					"neither spelling may ingest record one and drop the rest behind a 200")
 			})
 		}
+	})
+
+	// KNOWN DIVERGENCE, pinned so it cannot widen unnoticed. Two lines that EACH
+	// end mid-quote balance once joined, and the joined string is an
+	// unambiguously valid single media type per RFC 9110 — so the line boundary
+	// is unrecoverable and no value-local rule can restore agreement here.
+	// Repeated conflicts; joined resolves to JSON and reads an NDJSON body as one
+	// object. Documented as a limit in splitDeclarations rather than claimed
+	// fixed.
+	t.Run("two odd-quote lines diverge when joined — known limit", func(t *testing.T) {
+		t.Parallel()
+		pubR := &testutil.MockPublisher{}
+		hR := NewIngestHandler(testRegistry(t), pubR, testutil.NopLogger())
+		reqR := rawIngestRequest(t, "clicks", `application/json; a="`, ndjson)
+		reqR.Header.Add("Content-Type", `application/x-ndjson; b="`)
+		wR := httptest.NewRecorder()
+		hR.Handle(wR, reqR)
+		assert.Equal(t, http.StatusUnsupportedMediaType, wR.Code, "repeated: the two lines conflict")
+		assert.Empty(t, pubR.Messages)
+
+		pubJ := &testutil.MockPublisher{}
+		hJ := NewIngestHandler(testRegistry(t), pubJ, testutil.NopLogger())
+		wJ := httptest.NewRecorder()
+		hJ.Handle(wJ, rawIngestRequest(t, "clicks", `application/json; a=", application/x-ndjson; b="`, ndjson))
+		assert.Equal(t, http.StatusOK, wJ.Code, "joined: one valid media type with a quoted parameter")
+		assert.Len(t, pubJ.Messages, 1,
+			"and it reads the NDJSON body as one JSON object — the divergence, pinned not endorsed")
 	})
 
 	// A third line, disagreeing. resolveContentType flattens every declaration

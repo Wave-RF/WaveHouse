@@ -273,7 +273,8 @@ func declaredContentTypes(values []string) []string {
 }
 
 // splitDeclarations splits one header value on the commas that separate
-// declarations, leaving commas inside a quoted parameter value alone.
+// declarations, leaving commas inside a WELL-FORMED quoted parameter value
+// alone. When the quotes do not balance, no comma is protected.
 //
 // A plain strings.Split would tear `application/json; profile="a,b"` — one
 // valid media type — into two declarations, the second of which resolves to
@@ -291,9 +292,22 @@ func declaredContentTypes(values []string) []string {
 // prevent, and it would reappear only in the joined spelling, breaking the
 // invariant that both spellings answer alike.
 //
-// Such a value has no valid parse (RFC 9110 §5.6.4), so it falls back to the
-// naive split and is refused. That is not the over-rejection this function was
-// written to fix: `profile="a,b"` is a VALID header and stays accepted.
+// Such a value has no valid parse (RFC 9110 §5.6.4), so no comma in it is
+// protected: the naive split exposes whatever follows and the agreement rule
+// then judges it. It is not a blanket refusal —
+// `application/json; foo=a"b, application/x-ndjson` is refused as a conflict,
+// while `application/json; foo=a"b` alone still resolves to application/json,
+// because parameters never decide the format. `profile="a,b"` is a valid header
+// and is untouched by any of this.
+//
+// KNOWN LIMIT. This restores joined/repeated agreement for a value whose own
+// quotes are unbalanced, but not for a PAIR of lines that are each unbalanced
+// and balance only once joined: `application/json; a="` plus
+// `application/x-ndjson; b="` conflicts as two lines and resolves to JSON when
+// joined. That is not fixable here — joining is lossy, and the joined string is
+// an unambiguously valid single media type, so no value-local rule can recover
+// the line boundary. Pinned in TestIngest_DuplicateContentTypeHeaders so it
+// cannot widen unnoticed.
 func splitDeclarations(v string) []string {
 	var out []string
 	start, inQuotes := 0, false
@@ -325,8 +339,9 @@ func splitDeclarations(v string) []string {
 // errConflictingContentType; nothing readable at all is errUnsupportedContentType.
 //
 // Agreement is what makes accepting safe — the choice of which declaration to
-// honor stops mattering. Only commas OUTSIDE a quoted parameter value separate
-// declarations (see splitDeclarations); a comma inside one is data (RFC 9110
+// honor stops mattering. Only commas outside a WELL-FORMED quoted parameter
+// value separate declarations (see splitDeclarations, which protects nothing
+// when the quotes do not balance); a comma inside one is data (RFC 9110
 // §5.6.6), so `application/json; foo="x,y"` is a single declaration. An
 // UNQUOTED comma still separates, which is right — a comma is not a tchar, so
 // `application/json; foo=a,b` has no reading as one parameter. A genuinely joined

@@ -193,9 +193,12 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// them, a request declaring both application/json and application/x-ndjson
 	// would silently take the JSON path: an NDJSON body read as a single object
 	// ingests record one, discards the rest, and answers 200. resolveContentType
-	// flattens both spellings and applies one agreement rule, so the outcome
-	// cannot depend on which spelling an intermediary the caller does not control
-	// happened to emit.
+	// flattens both spellings and applies one agreement rule, so for declarations
+	// whose own quotes balance the outcome does not depend on which spelling an
+	// intermediary the caller does not control happened to emit. Two lines that
+	// EACH end mid-quote are the documented exception — joining them yields a
+	// valid single media type and the boundary is unrecoverable; see
+	// splitDeclarations.
 	values := r.Header.Values("Content-Type")
 	contentType := r.Header.Get("Content-Type")
 	format, err := resolveContentType(values)
