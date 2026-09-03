@@ -1204,17 +1204,24 @@ func TestIngestFormat(t *testing.T) {
 		{ct: `application/json; charset="unterminated`, want: FormatJSON},
 		{ct: "application/x-ndjson;charset", want: FormatNDJSON},
 		// Optional whitespace before the ";" is legal (RFC 9110 §8.3
-		// `parameters = *( OWS ";" OWS [ parameter ] )`) and mime.ParseMediaType
-		// accepted it, so the TrimSpace that preserves parity must stay. Without
-		// it the media type keeps the trailing space and 415s.
+		// `parameters = *( OWS ";" OWS [ parameter ] )`). ParseMediaType trims it
+		// for us — the hand-rolled resolver needed its own TrimSpace here, and a
+		// future editor should not restore one.
 		{ct: "application/json ; charset=utf-8", want: FormatJSON},
 		{ct: "application/x-ndjson ; charset=utf-8", want: FormatNDJSON},
-		// A repeated parameter name is fatal to ParseMediaType — no media type at
-		// all, rather than ErrInvalidMediaParameter — but ONLY when the values
-		// differ; an exact repeat parses cleanly. The comparison is not
-		// case-normalized, so `UTF-8` and `utf-8` count as differing.
-		{ct: "application/json; charset=utf-8; charset=utf-16", wantErr: true},
+		// A repeated parameter name is the one malformed shape ParseMediaType
+		// reports WITHOUT a media type, so tolerating ErrInvalidMediaParameter
+		// alone would refuse it while accepting `; charset` and `;;` — a line
+		// drawn by Go's error taxonomy rather than by "parameters never decide
+		// the format". ingestFormatOne re-parses the media type alone, so all of
+		// these agree. Both value spellings, since Go compares them
+		// case-sensitively and would otherwise split this row's fate.
+		{ct: "application/json; charset=utf-8; charset=utf-16", want: FormatJSON},
+		{ct: "application/json; charset=UTF-8; charset=utf-8", want: FormatJSON},
 		{ct: "application/json; charset=utf-8; charset=utf-8", want: FormatJSON},
+		// ...but the re-parse must not resurrect a joined declaration: a comma
+		// on an unparsed line is refused before it is reached.
+		{ct: "application/json; charset=a; charset=b, application/x-ndjson", wantErr: true},
 		// The tightening with no joined content anywhere in
 		// it: the comma guard is line-wide, so a well-formed quoted comma loses
 		// its tolerance when some OTHER parameter on the line is malformed. Both
@@ -1499,14 +1506,19 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		}
 	})
 
-	// KNOWN LIMIT, pinned so it cannot widen unnoticed. Joining is lossy, so the
-	// joined and repeated spellings still answer differently in both directions —
-	// now as a consequence of the grammar rather than of a hand-rolled split.
-	// Under-rejects when the joined line's quotes happen to balance, making it one
-	// valid media type; over-rejects when they do not — there the media type still
-	// reads fine, but a comma sits on a line that did not parse cleanly, so we fail
-	// closed rather than guess. Narrowing the second is #563.
-	t.Run("joined and repeated still diverge — known limit", func(t *testing.T) {
+	// Joining is lossy, so the two spellings answer differently in both
+	// directions. Only one of them is a shortcoming:
+	//
+	//   - accepts joined / refuses repeated. CORRECT, not a limit. When the joined
+	//     line's quotes balance it really is one media type with an odd parameter
+	//     (a comma inside a quoted value is legal qdtext), and the server cannot
+	//     know an intermediary built it by illegally joining two singleton lines.
+	//   - refuses joined / accepts repeated. Our deliberate fail-closed: the media
+	//     type still reads fine, but a comma sits on a line that did not parse
+	//     cleanly and may be a joined declaration. Narrowing it is #563.
+	//
+	// Pinned in both directions so neither can move unnoticed.
+	t.Run("joined and repeated answer differently, by construction", func(t *testing.T) {
 		t.Parallel()
 		for name, tc := range map[string]struct {
 			joined   string
@@ -1823,7 +1835,7 @@ func TestIngest_SingleObject_PrettyPrinted(t *testing.T) {
 	assert.Len(t, pub.Messages, 1)
 }
 
-func TestIngest_Unlabeled_ConcatenatedObjects_FirstOnly(t *testing.T) {
+func TestIngest_DeclaredJSON_ConcatenatedObjects_FirstOnly(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())

@@ -272,20 +272,35 @@ func resolveContentType(values []string) (IngestFormat, error) {
 	return first, firstErr
 }
 
-// ingestFormatOne resolves ONE header line, parsed per RFC 9110 §8.3.
+// ingestFormatOne resolves ONE header line, parsed per RFC 9110 §8.3. Only the
+// media type decides the format; no malformed parameter costs the request.
 //
-// ErrInvalidMediaParameter means only a PARAMETER is malformed (";;", "; charset",
-// a value left mid-quote), which we tolerate — parameters never decide the format.
-// But ParseMediaType reports the same error when a second declaration was
-// comma-joined on after a parameter: `application/json; charset=utf-8,
-// application/x-ndjson` yields "application/json", where honoring the first member
-// would read an NDJSON body as one object and drop every record past it. The two
-// are indistinguishable from the error alone, so a comma on a line that did not
-// parse cleanly is refused.
+// That rule needs two steps, because Go splits parse failures in a way the rule
+// does not. ErrInvalidMediaParameter leaves the media type parsed and returned,
+// so tolerating it is enough. A duplicate parameter name does not — it returns
+// no media type — so without the re-parse below the tolerance would be drawn by
+// Go's error taxonomy rather than by the rule, and `; charset=a; charset=b`
+// would be refused while `; charset` and `;;` were accepted.
+//
+// The exception is a comma. On a line that did not parse cleanly it may be a
+// second declaration joined on — `application/json; charset=utf-8,
+// application/x-ndjson` yields "application/json" — and honoring the first
+// member there reads an NDJSON body as one object, dropping every record past
+// it behind a 200. The error cannot distinguish that from a comma inside data,
+// so such a line is refused rather than guessed at (#563).
 func ingestFormatOne(v string) (IngestFormat, error) {
 	mediaType, _, err := mime.ParseMediaType(v)
-	if err != nil && (!errors.Is(err, mime.ErrInvalidMediaParameter) || strings.ContainsRune(v, ',')) {
-		return FormatJSON, errUnsupportedContentType
+	if err != nil {
+		if strings.ContainsRune(v, ',') {
+			return FormatJSON, errUnsupportedContentType
+		}
+		if !errors.Is(err, mime.ErrInvalidMediaParameter) {
+			base, _, baseErr := mime.ParseMediaType(mediaTypePrefix(v))
+			if baseErr != nil {
+				return FormatJSON, errUnsupportedContentType
+			}
+			mediaType = base
+		}
 	}
 	for _, a := range acceptedContentTypes {
 		if a.mediaType == mediaType {
@@ -293,6 +308,14 @@ func ingestFormatOne(v string) (IngestFormat, error) {
 		}
 	}
 	return FormatJSON, errUnsupportedContentType
+}
+
+// mediaTypePrefix is everything before the first ";" — the media type without
+// its parameters. Only ingestFormatOne's re-parse uses it, and only on a line
+// with no comma, so it cannot resurrect a joined declaration.
+func mediaTypePrefix(v string) string {
+	base, _, _ := strings.Cut(v, ";")
+	return base
 }
 
 // newRecordReader picks a reader from the ALREADY-RESOLVED format, using a peek
