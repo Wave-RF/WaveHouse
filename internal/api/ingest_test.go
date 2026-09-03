@@ -1243,15 +1243,20 @@ func TestIngestFormat(t *testing.T) {
 		{ct: "application/json; charset=utf-8, application/x-ndjson", wantErr: true, wantConflict: true},
 		{ct: "application/x-ndjson; charset=utf-8, application/json", wantErr: true, wantConflict: true},
 		{ct: "application/json, text/csv", wantErr: true, wantConflict: true},
-		// This one's quoted comma splits into parts that disagree, so it is
-		// refused — the deliberate price of not parsing quoted strings, pinned so
-		// a future quoted-string-aware splitter cannot flip it with the suite
-		// green.
-		{ct: `application/json; foo="x,y"`, wantErr: true, wantConflict: true},
-		// ...but "any quoted comma is refused" would be the wrong rule to state:
-		// this one splits into parts that AGREE, so it is accepted. Pinned so the
-		// comment and api.md keep saying "whenever the parts disagree".
+		// A comma inside a quoted parameter value is data, not a separator
+		// (RFC 9110 §5.6.6), so these are ONE declaration and the parameter has
+		// no say in the format. Splitting naively tore the first into
+		// `application/json; foo="x` plus `y"` and refused the request — an
+		// over-reject on a perfectly valid header.
+		{ct: `application/json; foo="x,y"`, want: FormatJSON},
 		{ct: `application/json; foo="a,application/json;q=1"`, want: FormatJSON},
+		{ct: `application/x-ndjson; profile="a,b,c"`, want: FormatNDJSON},
+		// An escaped quote does not end the value, so the comma after it is data.
+		{ct: `application/json; foo="a\",b"`, want: FormatJSON},
+		// An unterminated quote runs to the end of the value: one declaration.
+		{ct: `application/json; foo="a,b`, want: FormatJSON},
+		// A genuinely joined pair still separates — those commas are outside quotes.
+		{ct: `application/json; foo="x,y", application/x-ndjson`, wantErr: true, wantConflict: true},
 		// Near misses. The switch is exact-match; rewriting it as a prefix or
 		// substring test would leave the suite green while these start ingesting.
 		// An empty declaration says nothing rather than contradicting something —

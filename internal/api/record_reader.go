@@ -263,13 +263,46 @@ func (l *lineReader) Next() (map[string]any, error) {
 func declaredContentTypes(values []string) []string {
 	out := make([]string, 0, len(values))
 	for _, v := range values {
-		for _, p := range strings.Split(v, ",") {
+		for _, p := range splitDeclarations(v) {
 			if p = strings.TrimSpace(p); p != "" {
 				out = append(out, p)
 			}
 		}
 	}
 	return out
+}
+
+// splitDeclarations splits one header value on the commas that separate
+// declarations, leaving commas inside a quoted parameter value alone.
+//
+// A plain strings.Split would tear `application/json; profile="a,b"` — one
+// valid media type — into two declarations, the second of which resolves to
+// nothing, and refuse the request. RFC 9110 §5.6.6 makes a quoted-string
+// opaque: a comma inside one is data, not a separator. Parameters never affect
+// which format is selected, so they must not be able to cost a caller the
+// request either.
+//
+// An unterminated quote runs to the end of the value, which is the same
+// forgiving reading ingestFormatOne already gives it.
+func splitDeclarations(v string) []string {
+	var out []string
+	start, inQuotes := 0, false
+	for i := 0; i < len(v); i++ {
+		switch v[i] {
+		case '\\':
+			if inQuotes {
+				i++ // the escaped octet is data, whatever it is
+			}
+		case '"':
+			inQuotes = !inQuotes
+		case ',':
+			if !inQuotes {
+				out = append(out, v[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(out, v[start:])
 }
 
 // resolveContentType resolves the whole declared header set to the format ingest
