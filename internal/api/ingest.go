@@ -299,9 +299,8 @@ func (h *IngestHandler) handleBatch(
 		idx := result.Total
 		dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now)
 		if abort != nil {
-			// Whole-request failure (backpressure / publish / dedup backend):
-			// stop and surface the status so the caller retries the batch
-			// instead of treating a system outage as per-record loss.
+			// Whole-request failure: surface the status rather than recording a
+			// request-scoped condition as per-record loss (see requestAbort).
 			writeAbort(w, abort)
 			return
 		}
