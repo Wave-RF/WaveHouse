@@ -1253,8 +1253,22 @@ func TestIngestFormat(t *testing.T) {
 		{ct: `application/x-ndjson; profile="a,b,c"`, want: FormatNDJSON},
 		// An escaped quote does not end the value, so the comma after it is data.
 		{ct: `application/json; foo="a\",b"`, want: FormatJSON},
-		// An unterminated quote runs to the end of the value: one declaration.
-		{ct: `application/json; foo="a,b`, want: FormatJSON},
+		// An UNBALANCED quote has no valid parse (RFC 9110 §5.6.4), so it is
+		// refused rather than allowed to swallow whatever follows it. Running it
+		// to end-of-value would make `foo=a"b, application/x-ndjson` resolve to
+		// JSON — reading an NDJSON body as one object and dropping every record
+		// past the first behind a 200 — and only in the joined spelling, which
+		// would break the invariant that both spellings answer alike.
+		{ct: `application/json; foo="a,b`, wantErr: true, wantConflict: true},
+		{ct: `application/json; foo=a"b, application/x-ndjson`, wantErr: true, wantConflict: true},
+		{ct: `application/x-ndjson; foo="x, application/json`, wantErr: true, wantConflict: true},
+		// The valid header this splitter exists for is still accepted — and it is
+		// the literal api.md and the CHANGELOG both quote.
+		{ct: `application/json; profile="a,b"`, want: FormatJSON},
+		// ...but an UNQUOTED comma still separates. A comma is not a tchar, so
+		// this has no reading as a single parameter, and the docs say so rather
+		// than promising that no parameter shape can cost the request.
+		{ct: `application/json; foo=a,b`, wantErr: true, wantConflict: true},
 		// A genuinely joined pair still separates — those commas are outside quotes.
 		{ct: `application/json; foo="x,y", application/x-ndjson`, wantErr: true, wantConflict: true},
 		// Near misses. The switch is exact-match; rewriting it as a prefix or
@@ -1487,6 +1501,36 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Len(t, pub.Messages, 2, "same format, different spelling — not ambiguous")
+	})
+
+	// Spelling-independence for the unbalanced-quote case specifically. This is
+	// the invariant the run-to-end reading broke: joined and repeated must answer
+	// alike, and an unbalanced quote must not let the joined form absorb a
+	// declaration the repeated form would conflict with.
+	t.Run("an unbalanced quote answers alike joined and repeated", func(t *testing.T) {
+		t.Parallel()
+		for name, build := range map[string]func(*testing.T) *http.Request{
+			"joined": func(t *testing.T) *http.Request {
+				return rawIngestRequest(t, "clicks", `application/json; foo=a"b, application/x-ndjson`, ndjson)
+			},
+			"repeated": func(t *testing.T) *http.Request {
+				r := rawIngestRequest(t, "clicks", `application/json; foo=a"b`, ndjson)
+				r.Header.Add("Content-Type", "application/x-ndjson")
+				return r
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				pub := &testutil.MockPublisher{}
+				h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+				w := httptest.NewRecorder()
+				h.Handle(w, build(t))
+
+				assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+				assert.Empty(t, pub.Messages,
+					"neither spelling may ingest record one and drop the rest behind a 200")
+			})
+		}
 	})
 
 	// A third line, disagreeing. resolveContentType flattens every declaration

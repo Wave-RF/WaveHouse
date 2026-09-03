@@ -282,8 +282,18 @@ func declaredContentTypes(values []string) []string {
 // which format is selected, so they must not be able to cost a caller the
 // request either.
 //
-// An unterminated quote runs to the end of the value, which is the same
-// forgiving reading ingestFormatOne already gives it.
+// An UNBALANCED quote is not treated forgivingly. Running such a value to the
+// end would let a lone `"` — in an unquoted parameter, or a genuinely
+// unterminated one — swallow every declaration after it, so
+// `application/json; foo=a"b, application/x-ndjson` would resolve to JSON and
+// read an NDJSON body as a single object, ingesting record one and dropping the
+// rest behind a 200. That is the exact failure the agreement rule exists to
+// prevent, and it would reappear only in the joined spelling, breaking the
+// invariant that both spellings answer alike.
+//
+// Such a value has no valid parse (RFC 9110 §5.6.4), so it falls back to the
+// naive split and is refused. That is not the over-rejection this function was
+// written to fix: `profile="a,b"` is a VALID header and stays accepted.
 func splitDeclarations(v string) []string {
 	var out []string
 	start, inQuotes := 0, false
@@ -302,6 +312,9 @@ func splitDeclarations(v string) []string {
 			}
 		}
 	}
+	if inQuotes {
+		return strings.Split(v, ",")
+	}
 	return append(out, v[start:])
 }
 
@@ -314,8 +327,9 @@ func splitDeclarations(v string) []string {
 // Agreement is what makes accepting safe — the choice of which declaration to
 // honor stops mattering. Only commas OUTSIDE a quoted parameter value separate
 // declarations (see splitDeclarations); a comma inside one is data (RFC 9110
-// §5.6.6), so `application/json; foo="x,y"` is a single declaration and
-// parameters still cannot cost a caller the request. A genuinely joined
+// §5.6.6), so `application/json; foo="x,y"` is a single declaration. An
+// UNQUOTED comma still separates, which is right — a comma is not a tchar, so
+// `application/json; foo=a,b` has no reading as one parameter. A genuinely joined
 // disagreement is refused rather than resolved to the first, and acceptance
 // requires every declaration to match the leading one, so a request that IS
 // accepted can only be framed as its own leading declaration.
