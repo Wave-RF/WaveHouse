@@ -210,36 +210,42 @@ func TestIsColumnAllowed(t *testing.T) {
 		want   bool
 	}{
 		{"nil perms", nil, "any", false, true},
-		{"no lists - all allowed", &ResolvedPermissions{Allowed: true}, "any", false, true},
-		{"in allow list", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"a", "b"}}}, "a", false, true},
-		{"not in allow list", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"a", "b"}}}, "c", false, false},
-		{"wildcard allow", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}}}, "anything", false, true},
-		{"in deny list", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"secret"}}}, "secret", false, false},
-		{"not in deny list", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"secret"}}}, "page", false, true},
-		{"deny overrides allow", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"a"}, DenyColumns: []string{"a"}}}, "a", false, false},
+		{"no lists - all allowed", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{}}, "any", false, true},
+		{"in allow list", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"a", "b"}}}, "a", false, true},
+		{"not in allow list", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"a", "b"}}}, "c", false, false},
+		{"wildcard allow", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"*"}}}, "anything", false, true},
+		{"in deny list", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{DenyColumns: []string{"secret"}}}, "secret", false, false},
+		{"not in deny list", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{DenyColumns: []string{"secret"}}}, "page", false, true},
+		{"deny overrides allow", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"a"}, DenyColumns: []string{"a"}}}, "a", false, false},
 		// "*" is now a LITERAL column name, not a wildcard sentinel: it follows the
 		// same allow/deny rules as any column. (The all-columns wildcard is the
 		// caller's SelectAll, expanded by AllowedProjection — never run through
 		// here, which is what closed the #223 footgun structurally.) The builder
 		// additionally gates it on schema membership, so it only resolves when a
 		// real column is named "*".
-		{"literal star, empty allow → allowed", &ResolvedPermissions{Allowed: true}, "*", false, true},
-		{"literal star, wildcard allow → allowed", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}}}, "*", false, true},
-		{"literal star, deny of another column → allowed", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"secret"}}}, "*", false, true},
-		{"literal star, specific allow without it → denied", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"page"}}}, "*", false, false},
-		{"literal star, explicitly denied → denied", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"*"}}}, "*", false, false},
+		{"literal star, empty allow → allowed", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{}}, "*", false, true},
+		{"literal star, wildcard allow → allowed", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"*"}}}, "*", false, true},
+		{"literal star, deny of another column → allowed", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{DenyColumns: []string{"secret"}}}, "*", false, true},
+		{"literal star, specific allow without it → denied", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"page"}}}, "*", false, false},
+		{"literal star, explicitly denied → denied", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{DenyColumns: []string{"*"}}}, "*", false, false},
 		{"star arg, denied table → denied", &ResolvedPermissions{Allowed: false}, "*", false, false},
 		// The insert flag picks the OTHER side's lists. The two sides are
 		// independent: a role may read a column it may not write, and vice versa.
-		{"insert: in allow list", &ResolvedPermissions{Allowed: true, Insert: ResolvedInsert{AllowColumns: []string{"a"}}}, "a", true, true},
-		{"insert: not in allow list", &ResolvedPermissions{Allowed: true, Insert: ResolvedInsert{AllowColumns: []string{"a"}}}, "b", true, false},
-		{"insert: in deny list", &ResolvedPermissions{Allowed: true, Insert: ResolvedInsert{DenyColumns: []string{"secret"}}}, "secret", true, false},
-		{"insert: deny overrides allow", &ResolvedPermissions{Allowed: true, Insert: ResolvedInsert{AllowColumns: []string{"a"}, DenyColumns: []string{"a"}}}, "a", true, false},
-		{"insert: denied role → denied", &ResolvedPermissions{Allowed: false, Insert: ResolvedInsert{AllowColumns: []string{"a"}}}, "a", true, false},
+		{"insert: in allow list", &ResolvedPermissions{Allowed: true, Insert: &ResolvedInsert{AllowColumns: []string{"a"}}}, "a", true, true},
+		{"insert: not in allow list", &ResolvedPermissions{Allowed: true, Insert: &ResolvedInsert{AllowColumns: []string{"a"}}}, "b", true, false},
+		{"insert: in deny list", &ResolvedPermissions{Allowed: true, Insert: &ResolvedInsert{DenyColumns: []string{"secret"}}}, "secret", true, false},
+		{"insert: deny overrides allow", &ResolvedPermissions{Allowed: true, Insert: &ResolvedInsert{AllowColumns: []string{"a"}, DenyColumns: []string{"a"}}}, "a", true, false},
+		{"insert: denied role → denied", &ResolvedPermissions{Allowed: false, Insert: &ResolvedInsert{AllowColumns: []string{"a"}}}, "a", true, false},
 		// Cross-side independence: the select list must not answer an insert
-		// question, and the insert list must not answer a select question.
-		{"select list does not gate insert", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"a"}}}, "a", true, true},
-		{"insert list does not gate select", &ResolvedPermissions{Allowed: true, Insert: ResolvedInsert{DenyColumns: []string{"a"}}}, "a", false, true},
+		// question, and the insert list must not answer a select question. BOTH
+		// sides are present here on purpose — with one side nil the question would
+		// be denied for being unresolved, which would pass this test for entirely
+		// the wrong reason.
+		{"select list does not gate insert", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{DenyColumns: []string{"a"}}, Insert: &ResolvedInsert{}}, "a", true, true},
+		{"insert list does not gate select", &ResolvedPermissions{Allowed: true, Insert: &ResolvedInsert{DenyColumns: []string{"a"}}, Select: &ResolvedSelect{}}, "a", false, true},
+		// ...and the unresolved reading, which the value type could not express.
+		{"unresolved select side denies", &ResolvedPermissions{Allowed: true, Insert: &ResolvedInsert{}}, "a", false, false},
+		{"unresolved insert side denies", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{}}, "a", true, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -260,28 +266,28 @@ func TestAllowedProjection(t *testing.T) {
 		want  []string
 	}{
 		{"nil perms returns input unchanged", nil, all, all},
-		{"no lists - all pass", &ResolvedPermissions{Allowed: true}, all, all},
+		{"no lists - all pass", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{}}, all, all},
 		{
 			"allow list keeps order and subset",
-			&ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"ts", "page"}}},
+			&ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"ts", "page"}}},
 			all,
 			[]string{"page", "ts"}, // preserves input order, not allow-list order
 		},
 		{
 			"deny list drops denied",
-			&ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"payload"}}},
+			&ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{DenyColumns: []string{"payload"}}},
 			all,
 			[]string{"page", "user_id", "ts"},
 		},
 		{
 			"wildcard allow with deny drops only denied",
-			&ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}}},
+			&ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}}},
 			all,
 			[]string{"page", "user_id", "ts"},
 		},
 		{
 			"allow list disjoint from schema yields empty",
-			&ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"nonexistent"}}},
+			&ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"nonexistent"}}},
 			all,
 			[]string{},
 		},
@@ -291,7 +297,7 @@ func TestAllowedProjection(t *testing.T) {
 			all,
 			[]string{},
 		},
-		{"empty input yields empty", &ResolvedPermissions{Allowed: true}, []string{}, []string{}},
+		{"empty input yields empty", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{}}, []string{}, []string{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -311,12 +317,12 @@ func TestRestrictsColumns(t *testing.T) {
 	}{
 		{"nil perms - unrestricted", nil, false},
 		{"denied role - restricts everything", &ResolvedPermissions{Allowed: false}, true},
-		{"no lists - unrestricted", &ResolvedPermissions{Allowed: true}, false},
-		{"bare wildcard allow - unrestricted", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}}}, false},
-		{"wildcard among allows - unrestricted", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"page", "*"}}}, false},
-		{"concrete allow list - restricted", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"page"}}}, true},
-		{"deny list - restricted", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"payload"}}}, true},
-		{"wildcard allow but deny set - restricted", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}}}, true},
+		{"no lists - unrestricted", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{}}, false},
+		{"bare wildcard allow - unrestricted", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"*"}}}, false},
+		{"wildcard among allows - unrestricted", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"page", "*"}}}, false},
+		{"concrete allow list - restricted", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"page"}}}, true},
+		{"deny list - restricted", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{DenyColumns: []string{"payload"}}}, true},
+		{"wildcard allow but deny set - restricted", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -338,11 +344,11 @@ func TestColumnPrimitives_AgreeOnVisibility(t *testing.T) {
 	cases := []*ResolvedPermissions{
 		{Allowed: false}, // denied role: restricted, sees nothing
 		{Allowed: true},
-		{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}}},
-		{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"page", "*"}}},
-		{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"page"}}},
-		{Allowed: true, Select: ResolvedSelect{DenyColumns: []string{"payload"}}},
-		{Allowed: true, Select: ResolvedSelect{AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}}},
+		{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"*"}}},
+		{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"page", "*"}}},
+		{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"page"}}},
+		{Allowed: true, Select: &ResolvedSelect{DenyColumns: []string{"payload"}}},
+		{Allowed: true, Select: &ResolvedSelect{AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}}},
 	}
 	for i, perms := range cases {
 		t.Run(fmt.Sprintf("case-%d", i), func(t *testing.T) {
@@ -368,16 +374,16 @@ func TestIsAggregationAllowed(t *testing.T) {
 		want  bool
 	}{
 		{"nil perms", nil, "count", true},
-		{"no lists", &ResolvedPermissions{Allowed: true}, "count", true},
-		{"in denied list", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DeniedAggregations: []string{"avg"}}}, "avg", false},
-		{"not in denied", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DeniedAggregations: []string{"avg"}}}, "count", true},
-		{"in allowed list", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowedAggregations: []string{"count", "sum"}}}, "count", true},
-		{"not in allowed", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowedAggregations: []string{"count"}}}, "sum", false},
-		{"empty allowed = all", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowedAggregations: []string{}}}, "anything", true},
-		{"denied wins despite caller upper-case", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DeniedAggregations: []string{"sum"}}}, "SUM", false},
-		{"denied wins despite caller mixed-case", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DeniedAggregations: []string{"sum"}}}, "Sum", false},
-		{"allowed despite caller upper-case", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{AllowedAggregations: []string{"count"}}}, "COUNT", true},
-		{"denied beats allowed despite caller upper-case", &ResolvedPermissions{Allowed: true, Select: ResolvedSelect{DeniedAggregations: []string{"sum"}, AllowedAggregations: []string{"sum"}}}, "SUM", false},
+		{"no lists", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{}}, "count", true},
+		{"in denied list", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{DeniedAggregations: []string{"avg"}}}, "avg", false},
+		{"not in denied", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{DeniedAggregations: []string{"avg"}}}, "count", true},
+		{"in allowed list", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowedAggregations: []string{"count", "sum"}}}, "count", true},
+		{"not in allowed", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowedAggregations: []string{"count"}}}, "sum", false},
+		{"empty allowed = all", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowedAggregations: []string{}}}, "anything", true},
+		{"denied wins despite caller upper-case", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{DeniedAggregations: []string{"sum"}}}, "SUM", false},
+		{"denied wins despite caller mixed-case", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{DeniedAggregations: []string{"sum"}}}, "Sum", false},
+		{"allowed despite caller upper-case", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{AllowedAggregations: []string{"count"}}}, "COUNT", true},
+		{"denied beats allowed despite caller upper-case", &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{DeniedAggregations: []string{"sum"}, AllowedAggregations: []string{"sum"}}}, "SUM", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1544,19 +1550,42 @@ func TestEvaluate_UnresolvedSideFailsClosed(t *testing.T) {
 	assert.False(t, sel.RowVisible(map[string]any{"tenant_id": "globex"}, nil))
 }
 
-// TestHandBuiltPermissions_KeepPlainReading: the marker is set only by Evaluate,
-// so a value assembled by hand — every test fixture in the tree, and any future
-// caller constructing one deliberately — keeps the plain allow/deny reading on
-// both sides.
-func TestHandBuiltPermissions_KeepPlainReading(t *testing.T) {
+// TestHandBuiltPermissions_PresentSidesKeepPlainReading: a value assembled by
+// hand with both sides PRESENT keeps the plain allow/deny reading. Empty lists
+// mean "no restrictions", which is what an admin grant looks like.
+func TestHandBuiltPermissions_PresentSidesKeepPlainReading(t *testing.T) {
 	t.Parallel()
-	rp := &ResolvedPermissions{Allowed: true}
+	rp := &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{}, Insert: &ResolvedInsert{}}
 	assert.False(t, rp.HasRowFilter())
 	assert.True(t, rp.IsColumnAllowed("anything", false))
 	assert.True(t, rp.IsColumnAllowed("anything", true))
 	assert.True(t, rp.IsAggregationAllowed("count"))
 	assert.False(t, rp.RestrictsColumns())
 	assert.True(t, rp.RowVisible(map[string]any{"a": 1}, nil))
+}
+
+// TestHandBuiltPermissions_NilSideDenies: the counterpart, and the reason the
+// sides are pointers. An absent side is "this operation was never resolved", not
+// "no restrictions" — the two were the same zero value before, so a caller
+// outside this package could not express the first and every accessor read it as
+// the second. Every accessor denies on it.
+func TestHandBuiltPermissions_NilSideDenies(t *testing.T) {
+	t.Parallel()
+	insertOnly := &ResolvedPermissions{Allowed: true, Insert: &ResolvedInsert{}}
+	assert.False(t, insertOnly.IsColumnAllowed("anything", false), "select side was never resolved")
+	assert.True(t, insertOnly.IsColumnAllowed("anything", true), "insert side is present and unrestricted")
+	assert.False(t, insertOnly.IsAggregationAllowed("count"))
+	assert.True(t, insertOnly.RestrictsColumns(), "an unresolved read side restricts everything")
+	// HasRowFilter says YES on an unresolved read side on purpose: it routes the
+	// hub onto the per-subscriber path where RowVisible denies, instead of the
+	// no-filter fast path that never consults RowVisible at all.
+	assert.True(t, insertOnly.HasRowFilter(), "must not take the no-filter fast path")
+	assert.False(t, insertOnly.RowVisible(map[string]any{"a": 1}, nil), "and the per-row check denies")
+	assert.Empty(t, insertOnly.AllowedProjection([]string{"a", "b"}))
+
+	selectOnly := &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{}}
+	assert.True(t, selectOnly.IsColumnAllowed("anything", false))
+	assert.False(t, selectOnly.IsColumnAllowed("anything", true), "insert side was never resolved")
 }
 
 func TestEvaluate_OperationMismatchDenied(t *testing.T) {

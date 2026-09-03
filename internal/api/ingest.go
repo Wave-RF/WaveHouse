@@ -383,14 +383,14 @@ func (h *IngestHandler) processRecord(
 				}, nil
 			}
 		}
-		// Reading CheckClauses directly is the one place the `unresolved` marker
-		// cannot defend: a select-resolved grant presents an empty map here and
-		// every check passes vacuously. What makes it safe is narrower than
-		// "Evaluate resolves both sides" — it does not; it marks the side it
-		// skipped `unresolved` precisely so accessors deny on it. It is safe
-		// because this handler called Evaluate with "insert" (above), so Insert
-		// IS the resolved side. If this loop ever stops being on the insert
-		// path, it needs an explicit resolved check, not a nil guard.
+		// This handler called Evaluate with "insert" (above), so Insert is non-nil.
+		// A mis-resolved grant does not reach this line: schema validation rejects
+		// a record with no columns, and any record WITH columns runs the
+		// IsColumnAllowed loop above, which denies on a nil Insert. Both were
+		// verified by running them, not by reading. The bare read is the backstop
+		// if that ordering changes — it would panic rather than present an empty
+		// map whose checks all pass vacuously. Do not add a nil guard: that
+		// restores the vacuous pass.
 		for col, requiredVal := range perms.Insert.CheckClauses {
 			// A []any value is an _in check: the inserted value must be present and
 			// one of the allowed set. Unlike the scalar _eq case there is no single

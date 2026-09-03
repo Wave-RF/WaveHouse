@@ -105,10 +105,13 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 	if err != nil {
 		return nil, fmt.Errorf("building WHERE clause: %w", err)
 	}
-	// perms is whatever the caller resolved; Build has one caller and it resolves
-	// for "select", so Select is the resolved side. An insert-resolved grant would
-	// present an empty Select here and silently drop the row filter — see
-	// ResolvedPermissions on why the unresolved side reads as unrestricted.
+	// Build's one caller resolves for "select", so Select is non-nil here. A
+	// mis-resolved grant does not reach this line at all: validateAndAuthorizeColumns
+	// above calls IsColumnAllowed, which denies on a nil side, so Build errors out
+	// first (pinned by TestBuild_InsertResolvedGrantIsRejected). The bare read is
+	// the backstop if that ordering ever changes — it would panic rather than skip
+	// the filter. Do NOT add a `perms.Select != nil` guard here: it would emit an
+	// unfiltered query, which is the silent widening the pointer shape prevents.
 	if perms != nil && perms.Select.WhereClause != "" {
 		whereParts = append([]string{"(" + perms.Select.WhereClause + ")"}, whereParts...)
 		params = append(params, perms.Select.WhereParams...)
