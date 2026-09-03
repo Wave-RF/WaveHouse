@@ -186,6 +186,8 @@ Client POST /v1/ingest?table={table}
   → JWT auth middleware (always runs; token optional)
   → Look up table schema from SchemaRegistry
   → Policy check: role allowed to insert into this table (before the body is parsed)
+  → Resolve the declared Content-Type into the body's format (415 if absent,
+    unsupported, or if declarations disagree; before the body is read)
   → Validate JSON body against schema (type checks, required columns)
   → Policy column rules + check clauses (disallowed columns rejected;
     claim-derived values enforced or injected)
