@@ -250,17 +250,14 @@ func (l *lineReader) Next() (map[string]any, error) {
 	return nil, io.EOF
 }
 
-// resolveContentType resolves the declared Content-Type header set to the
-// format ingest reads the body as. Every header LINE is resolved and they must
-// agree on (format, acceptedness) — `application/x-ndjson` and
-// `application/ndjson; charset=utf-8` do — so an accepted request can only be
-// framed as what all of them declared. Disagreement is errConflictingContentType.
-//
-// Content-Type is a singleton field (RFC 9110 §8.3) and §5.3 forbids repeating
-// it, so both the repeated and the comma-joined forms are malformed. §8.3 warns
-// that resolving them by "using the last syntactically valid member of the list"
-// causes "interoperability and security issues", so we pick no member: joined
-// values are refused (see ingestFormatOne) and repeated ones must agree.
+// resolveContentType resolves the Content-Type header set to the format ingest
+// reads the body as. Content-Type is a singleton field (RFC 9110 §8.3) and §5.3
+// forbids repeating it, so a duplicate is malformed however it is spelled. §8.3
+// warns that resolving the resulting pseudo-list by "using the last syntactically
+// valid member" causes "interoperability and security issues", so we take no
+// member: a comma-joined value is refused in ingestFormatOne, and repeated LINES
+// must agree on (format, acceptedness) — `application/x-ndjson` and
+// `application/ndjson; charset=utf-8` do. Disagreement is errConflictingContentType.
 func resolveContentType(values []string) (IngestFormat, error) {
 	if len(values) == 0 {
 		return FormatJSON, errUnsupportedContentType
@@ -275,20 +272,16 @@ func resolveContentType(values []string) (IngestFormat, error) {
 	return first, firstErr
 }
 
-// ingestFormatOne resolves ONE header line. mime.ParseMediaType does the
-// parsing — lowercasing, stripping parameters, and treating a quoted-string as
-// opaque, so `profile="a,b"` is one media type (RFC 9110 §5.6.6) with no
-// splitting of our own.
+// ingestFormatOne resolves ONE header line, parsed per RFC 9110 §8.3.
 //
-// A malformed PARAMETER is survivable (";;", "; charset", a value left
-// mid-quote): the media type parsed, and parameters never decide the format.
-// But ParseMediaType reports that same ErrInvalidMediaParameter when a second
-// declaration was comma-joined on after a parameter — `application/json;
-// charset=utf-8, application/x-ndjson` yields "application/json" — and honoring
-// the first member there is exactly the §8.3 hazard: an NDJSON body read as one
-// object, ingesting record one and dropping the rest behind a 200. The two are
-// indistinguishable from the error alone, so a comma anywhere on a line that
-// did not parse cleanly is refused.
+// ErrInvalidMediaParameter means only a PARAMETER is malformed (";;", "; charset",
+// a value left mid-quote), which we tolerate — parameters never decide the format.
+// But ParseMediaType reports the same error when a second declaration was
+// comma-joined on after a parameter: `application/json; charset=utf-8,
+// application/x-ndjson` yields "application/json", where honoring the first member
+// would read an NDJSON body as one object and drop every record past it. The two
+// are indistinguishable from the error alone, so a comma on a line that did not
+// parse cleanly is refused.
 func ingestFormatOne(v string) (IngestFormat, error) {
 	mediaType, _, err := mime.ParseMediaType(v)
 	if err != nil && (!errors.Is(err, mime.ErrInvalidMediaParameter) || strings.ContainsRune(v, ',')) {
