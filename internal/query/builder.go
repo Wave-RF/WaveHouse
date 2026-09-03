@@ -112,7 +112,7 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 	//
 	//   - names columns    → validateAndAuthorizeColumns → IsColumnAllowed
 	//   - select_all only  → resolveProjection → RestrictsColumns/AllowedProjection
-	//   - aggregations only → IsAggregationAllowed
+	//   - aggregations only → validateAndAuthorizeColumns → IsAggregationAllowed
 	//
 	// All three fail closed on a nil Select; all three are pinned by
 	// TestBuild_InsertResolvedGrantIsRejected. The bare read is the backstop if

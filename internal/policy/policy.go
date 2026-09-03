@@ -610,10 +610,19 @@ func (rp *ResolvedPermissions) IsColumnAllowed(col string, insert bool) bool {
 // side's map rather than asking a question about a column, so it cannot go
 // through IsColumnAllowed. A bare `perms.Insert.CheckClauses` read presents an
 // empty map on an unresolved side and every check then passes VACUOUSLY — the
-// silent direction. Callers must treat ok=false as "reject this record", not as
+// silent direction. Callers must treat ok=false as "refuse the write", not as
 // "no checks to run".
+//
+// A nil receiver means no policy applies, so there are no checks to run and ok
+// is TRUE — the same convention as IsColumnAllowed and the other accessors. The
+// fail-closed answer is for the case that actually matters: a grant that WAS
+// resolved, for the other operation. Returning false for a nil receiver would
+// make a deployment with no policy store refuse every ingest.
 func (rp *ResolvedPermissions) CheckClauses() (map[string]any, bool) {
-	if rp == nil || !rp.Allowed || rp.Insert == nil {
+	if rp == nil {
+		return nil, true
+	}
+	if !rp.Allowed || rp.Insert == nil {
 		return nil, false
 	}
 	return rp.Insert.CheckClauses, true

@@ -1534,6 +1534,12 @@ func TestEvaluate_UnresolvedSideFailsClosed(t *testing.T) {
 	assert.False(t, ins.IsColumnAllowed("page", false),
 		"a select question on an insert-resolved grant must not answer yes")
 
+	// The write side's own accessor, in both directions.
+	_, selChecks := sel.CheckClauses()
+	assert.False(t, selChecks, "a select-resolved grant must refuse to answer for insert checks")
+	_, insChecks := ins.CheckClauses()
+	assert.True(t, insChecks, "the insert-resolved grant answers normally")
+
 	// The other read-side accessors share the failure mode and the answer: an
 	// empty unresolved side would read as unrestricted / all-aggregations /
 	// no-row-filter, each of which widens rather than denies.
@@ -1564,6 +1570,12 @@ func TestHandBuiltPermissions_PresentSidesKeepPlainReading(t *testing.T) {
 	assert.True(t, rp.IsAggregationAllowed("count"))
 	assert.False(t, rp.RestrictsColumns())
 	assert.True(t, rp.RowVisible(map[string]any{"a": 1}, nil))
+	// An EMPTY insert side has no checks and is resolved — not the same answer as
+	// a nil one below. A slip to `rp.Insert != nil && len(...) > 0` would break
+	// exactly here.
+	checks, ok := rp.CheckClauses()
+	assert.True(t, ok)
+	assert.Empty(t, checks)
 }
 
 // TestHandBuiltPermissions_NilSideDenies: the counterpart, and the reason the
@@ -1585,9 +1597,21 @@ func TestHandBuiltPermissions_NilSideDenies(t *testing.T) {
 	assert.False(t, insertOnly.RowVisible(map[string]any{"a": 1}, nil), "and the per-row check denies")
 	assert.Empty(t, insertOnly.AllowedProjection([]string{"a", "b"}))
 
+	_, insertChecksOK := insertOnly.CheckClauses()
+	assert.True(t, insertChecksOK, "the insert side IS resolved here")
+
 	selectOnly := &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{}}
 	assert.True(t, selectOnly.IsColumnAllowed("anything", false))
 	assert.False(t, selectOnly.IsColumnAllowed("anything", true), "insert side was never resolved")
+	_, selectChecksOK := selectOnly.CheckClauses()
+	assert.False(t, selectChecksOK, "and its check clauses must refuse the write, not read as none")
+
+	// The nil receiver is the OPPOSITE answer, deliberately: no policy means no
+	// checks to run, matching IsColumnAllowed and the other accessors. Returning
+	// false here would make a deployment with no policy store refuse every ingest.
+	var noPolicy *ResolvedPermissions
+	_, noPolicyOK := noPolicy.CheckClauses()
+	assert.True(t, noPolicyOK, "a nil receiver means no policy applies, not refuse")
 }
 
 func TestEvaluate_OperationMismatchDenied(t *testing.T) {

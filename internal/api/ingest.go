@@ -395,12 +395,16 @@ func (h *IngestHandler) processRecord(
 		// above then runs zero times.
 		checks, resolved := perms.CheckClauses()
 		if !resolved {
+			// ABORT, not a per-record reject: perms is resolved once per request,
+			// so this is true for every record or none. As a reject, a 10k-record
+			// batch would emit 10k ERROR lines and report 10k independent
+			// permission failures for one mis-wired grant.
 			h.logger.ErrorContext(ctx, "insert checks consulted on a grant resolved for another operation",
 				"table", table, "role", role)
-			return false, &recordReject{
+			return false, nil, &requestAbort{
 				Status:  http.StatusForbidden,
 				Message: "insert permissions were not resolved for this request",
-			}, nil
+			}
 		}
 		for col, requiredVal := range checks {
 			// A []any value is an _in check: the inserted value must be present and

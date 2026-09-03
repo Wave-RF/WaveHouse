@@ -950,43 +950,55 @@ func TestBuild_PermissiveAliases_Accepted(t *testing.T) {
 }
 
 // TestBuild_InsertResolvedGrantIsRejected: a grant resolved for the wrong
-// operation never produces a query.
+// operation never produces a query, by whichever denier the query's shape
+// reaches first. Each shape asserts its OWN error — a bare require.Error would
+// pass just as happily if all three collapsed onto one denier, which is exactly
+// the claim this test exists to check.
 //
-// I expected this to panic on Build's bare `perms.Select.WhereClause` read, and
-// it does not — validateAndAuthorizeColumns runs first and calls IsColumnAllowed,
-// which denies on a nil side, so Build returns an error before the bare read is
-// reached. That layering is the real guarantee here: the accessor fails closed
-// FIRST, and the bare read below it is a backstop that would panic only if that
-// ordering ever changed.
-//
-// Either outcome is acceptable; a silently unfiltered query is not. If this test
-// ever starts returning a *result*, the row filter has gone missing.
+// Note the three do not divide into "names columns" vs "skips
+// validateAndAuthorizeColumns": aggregation-only ENTERS that function and is
+// denied inside it, in the aggregation loop. Only select_all traverses it
+// without reaching an accessor.
 func TestBuild_InsertResolvedGrantIsRejected(t *testing.T) {
 	t.Parallel()
 	insertResolved := &policy.ResolvedPermissions{Allowed: true, Insert: &policy.ResolvedInsert{}}
-	// One shape per denier: a named column reaches IsColumnAllowed, select_all
-	// reaches RestrictsColumns/AllowedProjection, and a bare aggregation reaches
-	// IsAggregationAllowed. Only the first was covered before, which left the two
-	// column-free shapes — the ones that skip validateAndAuthorizeColumns
-	// entirely — unpinned.
-	for name, q := range map[string]*StructuredQuery{
-		"names a column":   {Columns: []string{"page"}},
-		"select_all only":  {SelectAll: true},
-		"aggregation only": {Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "n"}}},
+	for name, tc := range map[string]struct {
+		q      *StructuredQuery
+		assert func(t *testing.T, err error)
+	}{
+		"names a column → IsColumnAllowed": {
+			q: &StructuredQuery{Columns: []string{"page"}},
+			assert: func(t *testing.T, err error) {
+				var e *ForbiddenColumnError
+				assert.ErrorAs(t, err, &e)
+			},
+		},
+		"select_all → AllowedProjection": {
+			q: &StructuredQuery{SelectAll: true},
+			assert: func(t *testing.T, err error) {
+				assert.ErrorIs(t, err, ErrNoReadableColumns)
+			},
+		},
+		"aggregation only → IsAggregationAllowed": {
+			q: &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "n"}}},
+			assert: func(t *testing.T, err error) {
+				var e *ForbiddenAggregationError
+				assert.ErrorAs(t, err, &e)
+			},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			res, err := Build("clicks", q, testSchema(), insertResolved, 0, DefaultMaxRows)
+			res, err := Build("clicks", tc.q, testSchema(), insertResolved, 0, DefaultMaxRows)
 			require.Error(t, err, "a grant resolved for the wrong operation must not build a query")
 			assert.Nil(t, res)
+			tc.assert(t, err)
 		})
 	}
-	var res *BuildResult
-	var err error
 
 	// The control: the same query with a select-resolved grant builds.
 	selectResolved := &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{}}
-	res, err = Build("clicks", &StructuredQuery{Columns: []string{"page"}}, testSchema(), selectResolved, 0, DefaultMaxRows)
+	res, err := Build("clicks", &StructuredQuery{Columns: []string{"page"}}, testSchema(), selectResolved, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.NotNil(t, res)
 }
