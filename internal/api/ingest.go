@@ -107,11 +107,19 @@ type recordReject struct {
 	Message string
 }
 
-// requestAbort is a whole-request failure: the system can't accept this record
-// (or any that follow) right now — publish backpressure (503), a publish/marshal
-// failure (500), or a dedup backend error (500). Both paths stop and return the
-// status; the batch path abandons the remaining records so the caller can retry
-// the batch rather than silently lose the tail.
+// requestAbort is a whole-request failure: this record and every one that
+// follows is refused. Both paths stop and return the status; the batch path
+// abandons the remaining records rather than silently losing the tail.
+//
+// Most causes are TRANSIENT system conditions, where abandoning the tail is what
+// makes the batch safe to retry: publish backpressure (503), a publish/marshal
+// failure (500), a dedup backend error (500).
+//
+// One is not. An insert grant that resolved for the other operation is a 403 and
+// a caller/config bug — retrying cannot help. It aborts rather than rejecting
+// per record because the grant is resolved ONCE per request, so it is true for
+// every record or none; as a per-record reject a 10k batch would report 10k
+// independent permission failures for a single mis-wired grant.
 type requestAbort struct {
 	Status     int
 	Message    string
@@ -245,10 +253,11 @@ func (h *IngestHandler) handleSingle(
 
 // handleBatch ingests a multi-record body (JSON array or NDJSON), running each
 // record through the same validate → authorize → dedup → publish pipeline as a
-// single insert. A record that fails validation or a permission rule — or that
-// the reader couldn't decode — is recorded against its index and the batch
-// continues; a whole-request condition (backpressure, publish/dedup backend
-// failure) aborts the batch. Returns 200 with a per-record summary once the body
+// single insert. A record that fails validation or a PER-RECORD permission rule
+// (a denied column, a failed check clause) — or that the reader couldn't decode
+// — is recorded against its index and the batch continues; a whole-request
+// condition aborts it (backpressure, publish/dedup backend failure, or an insert
+// grant resolved for the other operation — see requestAbort). Returns 200 with a per-record summary once the body
 // is consumed.
 func (h *IngestHandler) handleBatch(
 	ctx context.Context,
@@ -386,7 +395,7 @@ func (h *IngestHandler) processRecord(
 		// Through the accessor, not a bare read. The check loop iterates a side's
 		// map rather than asking about a column, so IsColumnAllowed cannot cover it,
 		// and a bare read presents an empty map on an unresolved side — every check
-		// then passes vacuously. ok=false REJECTS the record; it must never be read
+		// then passes vacuously. ok=false ABORTS the request; it must never be read
 		// as "no checks to run".
 		//
 		// Reachable, unlike the query path's bare reads: discovery.Validate only
