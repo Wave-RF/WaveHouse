@@ -1564,6 +1564,35 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 			"joined: the naive fallback tears the sibling's quoted comma apart")
 	})
 
+	// The same over-rejection with only ONE declaration, which is what makes the
+	// trigger the header LINE's quote parity rather than the declaration count.
+	// Each half is fine alone; together on one line the trailing mid-quote
+	// parameter strips the protection from the earlier well-formed value's
+	// comma. api.md's "no parameter shape short of one containing an unquoted
+	// comma can cost you the request" names this as its one exception, so it is
+	// pinned here rather than only described. Narrowable with #563.
+	t.Run("a single declaration loses a quoted comma to a later mid-quote parameter", func(t *testing.T) {
+		t.Parallel()
+		for name, ct := range map[string]string{
+			"quoted comma alone":    `application/json; p="x,y"`,
+			"mid-quote alone":       `application/json; q="`,
+			"both on the same line": `application/json; p="x,y"; q="`,
+		} {
+			want := http.StatusOK
+			if strings.Contains(name, "both") {
+				want = http.StatusUnsupportedMediaType
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				pub := &testutil.MockPublisher{}
+				h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+				w := httptest.NewRecorder()
+				h.Handle(w, rawIngestRequest(t, "clicks", ct, `{"page":"/a"}`))
+				assert.Equal(t, want, w.Code, "one media type, one header line, no unquoted comma")
+			})
+		}
+	})
+
 	// KNOWN DIVERGENCE, pinned so it cannot widen unnoticed. Two lines that EACH
 	// end mid-quote balance once joined, and the joined string is an
 	// unambiguously valid single media type per RFC 9110 — so the line boundary
