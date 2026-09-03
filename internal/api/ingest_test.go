@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
@@ -1913,6 +1914,41 @@ func TestIngest_EmptyBody(t *testing.T) {
 			assert.Contains(t, w.Body.String(), tt.wantMsg)
 			testutil.AssertJSONErrorResponse(t, w)
 			assert.Empty(t, pub.Messages)
+		})
+	}
+}
+
+// TestIngest_BodyReadFailure_400: the one new user-visible response shape this
+// PR adds. It is documented in both ingest error tables in api.md and in the
+// CHANGELOG, and nothing exercised it — no test in the tree hands ingest a body
+// reader that fails, so the status, the string, and the nothing-published
+// property were all unpinned and a refactor could have turned it into a 500 or
+// a non-JSON body with the suite green.
+//
+// Distinct from the 413: MaxBytesReader's overflow is caught one branch above.
+// This is the transport failing outright — a reset, a short Content-Length, a
+// malformed chunked encoding.
+func TestIngest_BodyReadFailure_400(t *testing.T) {
+	t.Parallel()
+
+	for _, ct := range []string{"application/json", "application/x-ndjson"} {
+		t.Run(ct, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+				"/v1/ingest?table=clicks", iotest.ErrReader(errors.New("connection reset by peer")))
+			req.Header.Set("Content-Type", ct)
+
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			testutil.AssertJSONErrorResponse(t, w)
+			assert.Equal(t, "invalid request body", jsonErrorMessage(t, w),
+				"documented verbatim in both api.md ingest error tables")
+			assert.Empty(t, pub.Messages, "a body that could not be read must publish nothing")
 		})
 	}
 }
