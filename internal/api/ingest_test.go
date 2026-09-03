@@ -1226,9 +1226,9 @@ func TestIngestFormat(t *testing.T) {
 		// it: the comma guard is line-wide, so a well-formed quoted comma loses
 		// its tolerance when some OTHER parameter on the line is malformed. Both
 		// halves are accepted alone (both are separate rows in this table). This row
-		// is what would catch a guard
-		// narrowed to "a comma after the last parsed parameter" — the known-limit
-		// test would not, since that case's unparsed remainder also has a comma.
+		// is what would catch a guard narrowed to "a comma after the last parsed
+		// parameter" — the `joined and repeated answer differently` test would not,
+		// since that case's unparsed remainder also has a comma.
 		// Tracked in #563.
 		{ct: `application/json; profile="a,b"; charset`, wantErr: true},
 		{ct: "APPLICATION/JSON", want: FormatJSON},
@@ -1244,7 +1244,8 @@ func TestIngestFormat(t *testing.T) {
 		// anyone reintroduces one. The escaping corpus that went with the splitter
 		// is gone — testing it now would only be testing the stdlib.
 		{ct: `application/json; profile="a,b"`, want: FormatJSON},
-		// A COMMA-JOINED value is refused, whatever it joins. Content-Type is a
+		// A comma-bearing value that does not parse as one media type is refused,
+		// whatever it joins. Content-Type is a
 		// singleton field (§8.3) and §5.3 forbids the repetition that produces the
 		// joined form, so there is no list here to resolve — §8.3 warns that
 		// picking a member of the pseudo-list is itself the interoperability and
@@ -1477,13 +1478,14 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		assert.Len(t, pub.Messages, 2, "same format, different spelling — not ambiguous")
 	})
 
-	// A comma-joined value is refused, so it can never resolve to one member and
-	// read an NDJSON body as a single object. Note WHY: for most of these the
-	// media type reads fine — `application/json; charset=utf-8, application/x-ndjson`
+	// None of these parses as one media type, so none can resolve to a member and
+	// read an NDJSON body as a single object. Note WHY: for most of them the media
+	// type reads fine — `application/json; charset=utf-8, application/x-ndjson`
 	// yields "application/json". They are refused because a comma on a line that
 	// did not parse cleanly may be a second declaration joined on, and the error
-	// cannot tell that from a comma inside data.
-	t.Run("a comma-joined value is refused, whatever it joins", func(t *testing.T) {
+	// cannot tell that from a comma inside data. A comma-bearing value that DOES
+	// parse cleanly is accepted — see `joined and repeated answer differently`.
+	t.Run("a comma-bearing value that does not parse is refused", func(t *testing.T) {
 		t.Parallel()
 		for name, ct := range map[string]string{
 			"disagreeing":            `application/json, application/x-ndjson`,

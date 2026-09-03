@@ -255,7 +255,8 @@ func (l *lineReader) Next() (map[string]any, error) {
 // forbids repeating it, so a duplicate is malformed however it is spelled. §8.3
 // warns that resolving the resulting pseudo-list by "using the last syntactically
 // valid member" causes "interoperability and security issues", so we take no
-// member: a comma-joined value is refused in ingestFormatOne, and repeated LINES
+// member: a value carrying a comma is refused in ingestFormatOne unless the
+// value as a whole parses as one media type, and repeated LINES
 // must agree on (format, acceptedness) — `application/x-ndjson` and
 // `application/ndjson; charset=utf-8` do. Disagreement is errConflictingContentType.
 func resolveContentType(values []string) (IngestFormat, error) {
@@ -386,8 +387,8 @@ func emptyBodyMessage(format IngestFormat) string {
 // application/json, application/x-ndjson, …" — listing as acceptable the two
 // types they just declared, and explaining nothing.
 //
-// When a comma-joined value is the request's ONLY header line it does not reach
-// that wording: it fails to parse, so the agreement loop never runs and it gets
+// A comma-bearing value that does NOT parse, and is the request's only header
+// line, does not reach that wording: the agreement loop never runs and it gets
 // the unsupported text quoting the line whole. That is the honest report there —
 // nothing resolved, so nothing disagreed. Alongside another line it can still
 // come out as a disagreement, which is equally honest. api.md buckets the

@@ -189,7 +189,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// stops a request declaring both application/json and application/x-ndjson
 	// from silently taking the JSON path — an NDJSON body read as one object
 	// ingests record one and drops the rest behind a 200. See resolveContentType
-	// for why a comma-joined value is refused rather than split.
+	// for when a comma-bearing value is refused rather than split.
 	values := r.Header.Values("Content-Type")
 	format, err := resolveContentType(values)
 	if err != nil {
