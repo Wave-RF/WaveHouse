@@ -1509,9 +1509,11 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		assert.Len(t, pub.Messages, 2, "same format, different spelling — not ambiguous")
 	})
 
-	// Spelling-independence when ONE value's quotes are unbalanced. This is the
-	// invariant the run-to-end reading broke: the joined form must not absorb a
-	// declaration the repeated form would conflict with.
+	// The value-local invariant, which is the one that actually holds: a value
+	// whose own quotes do not balance protects no comma, so it absorbs nothing
+	// that follows it. The run-to-end reading broke exactly this. It is NOT
+	// spelling-independence — the two known-limit subtests below show both
+	// directions in which that still fails (#563).
 	t.Run("an unbalanced value must not absorb the next declaration", func(t *testing.T) {
 		t.Parallel()
 		for name, build := range map[string]func(*testing.T) *http.Request{
@@ -1542,8 +1544,8 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	// quoted comma, joined with one that ends mid-quote. The fallback splits the
 	// whole value, so the well-formed sibling's comma loses its protection too —
 	// repeated accepts, joined refuses. Unlike the case below this one IS
-	// narrowable (split only the trailing segment); tracked separately, pinned
-	// here so the current behavior is visible rather than surprising.
+	// narrowable (split only the trailing segment); tracked in #563, pinned here
+	// so the current behavior is visible rather than surprising.
 	t.Run("a mixed pair diverges the other way — known limit", func(t *testing.T) {
 		t.Parallel()
 		pubR := &testutil.MockPublisher{}

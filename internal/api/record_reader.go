@@ -315,7 +315,7 @@ func declaredContentTypes(values []string) []string {
 //
 // Only the second is unfixable here (joining is lossy and the joined string is a
 // valid single media type, so the line boundary is gone). The first could be
-// narrowed by naive-splitting only the trailing segment; tracked separately.
+// narrowed by naive-splitting only the trailing segment; tracked in #563.
 // Both are pinned in TestIngest_DuplicateContentTypeHeaders.
 func splitDeclarations(v string) []string {
 	var out []string
