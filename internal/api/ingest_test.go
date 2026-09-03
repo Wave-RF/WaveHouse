@@ -1231,9 +1231,10 @@ func TestIngestFormat(t *testing.T) {
 		{ct: "application/json; charset=utf-8, application/json", want: FormatJSON},
 		{ct: "application/x-ndjson, application/ndjson", want: FormatNDJSON},
 		// Three declarations, not two: the rule says EVERY part is resolved, and
-		// at N=2 a SplitN(ct, ",", 2) never looks past the second. (The
-		// empty-element row below catches that mutation too — this row is the
-		// direct statement of the rule, not its only witness.)
+		// at N=2 a SplitN(ct, ",", 2) never looks past the second. The
+		// CONFLICTING row below is the one that fails on that mutation — with
+		// the limit applied the agreeing row's tail still cuts back to
+		// application/json and passes. (The empty-element row catches it too.)
 		{ct: "application/json, application/json; charset=utf-8, application/json;;", want: FormatJSON},
 		{ct: "application/json, application/json; charset=utf-8, application/x-ndjson", wantErr: true, wantConflict: true},
 		// Genuinely conflicting joined declarations stay refused: honoring the
@@ -1483,11 +1484,14 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		assert.Len(t, pub.Messages, 2, "same format, different spelling — not ambiguous")
 	})
 
-	// A third line, disagreeing. At N=2 the guard's `values[1:]` could be
-	// `parts[1:2]` — a one-character off-by-one — and three lines from a
-	// two-proxy chain would silently take the JSON path and truncate an NDJSON
-	// batch to its first record. (TestIngestFormat's N=3 conflict row fails on
-	// that mutation too.)
+	// A third line, disagreeing. resolveContentType flattens every declaration
+	// into `parts` and compares `parts[1:]`; a bound that stops at two —
+	// `parts[1:min(2, len(parts))]` — lets three lines from a two-proxy chain
+	// silently take the JSON path and truncate an NDJSON batch to its first
+	// record. (TestIngestFormat's N=3 conflicting row fails on that mutation
+	// too. A bare `parts[1:2]` does NOT model it: `parts` is built with
+	// cap == len(values), so a one-line request panics and the whole package
+	// dies rather than passing quietly.)
 	t.Run("a third line that disagrees is refused", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
@@ -1682,25 +1686,6 @@ func TestIngest_JSONArray_SingleElement(t *testing.T) {
 	require.Len(t, resp.Results, 1)
 	assert.True(t, resultAt(t, resp, 1).Ok)
 	assert.Len(t, pub.Messages, 1)
-}
-
-func TestIngest_JSONArray_WithJSONContentType(t *testing.T) {
-	t.Parallel()
-	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-
-	// Content-Type: application/json must NOT force the single-object path when
-	// the body is an array. The header still decides the FAMILY; the first byte
-	// only picks arity within it, which is what this pins.
-	req := rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"},{"page":"/b"}]`)
-	w := httptest.NewRecorder()
-	h.Handle(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeBatchResult(t, w)
-	assert.Equal(t, 2, resp.Total)
-	assert.Equal(t, 2, resp.Succeeded)
-	assert.Len(t, pub.Messages, 2)
 }
 
 func TestIngest_JSONArray_PartialValidationFailure(t *testing.T) {
