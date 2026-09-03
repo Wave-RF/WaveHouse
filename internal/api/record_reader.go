@@ -78,7 +78,10 @@ const (
 	// re-read the body as something else.
 	FormatNDJSON
 	// FormatCSV plugs in here once ingest reads CSV: add the media types to
-	// ingestFormatOne's switch and the reader to newRecordReader's.
+	// acceptedContentTypes, which advertises them in the 415 automatically, and
+	// the reader to newRecordReader. Do NOT add them in ingestFormatOne — it
+	// resolves by scanning that one table, and a second list is the drift this
+	// arrangement exists to prevent.
 )
 
 // String renders a format for error messages and logs.
@@ -93,12 +96,11 @@ func (f IngestFormat) String() string {
 	}
 }
 
-// supportedContentTypes lists, in the order the 415 message names them, every
-// media type ingest reads. The first of each family is the canonical spelling.
 // acceptedContentTypes maps every media type ingest reads to the format it
-// selects, in the order the 415 body advertises them. It is the SINGLE source:
-// supportedContentTypes is derived from it, so the advertised list and the
-// accepted set cannot drift apart in either direction.
+// selects, in the order the 415 body advertises them. The first entry of each
+// family is the canonical spelling — the TS SDK sends those two. It is the
+// SINGLE source: supportedContentTypes is derived from it, so the advertised
+// list and the accepted set cannot drift apart in either direction.
 //
 // They could before. Adding a case to the resolver without adding it here left
 // the whole suite green while ingest accepted a type the 415 message, api.md and
