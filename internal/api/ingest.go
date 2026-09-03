@@ -273,6 +273,9 @@ func (h *IngestHandler) handleSingle(
 ) {
 	data, err := rr.Next()
 	if err != nil {
+		// Unreachable while the body is buffered — a bytes.Reader cannot produce
+		// a *http.MaxBytesError, and the cap is enforced at body.ReadFrom. Kept
+		// because it is the correct mapping if a reader ever streams again.
 		if writeMaxBytesError(w, err, reqCap) {
 			return
 		}
@@ -333,12 +336,16 @@ func (h *IngestHandler) handleBatch(
 				appendResult(&result, recordResult{Index: result.Total, Error: rse.Error()})
 				continue
 			}
+			// Unreachable while the body is buffered — a bytes.Reader cannot produce
+			// a *http.MaxBytesError, and the cap is enforced at body.ReadFrom. Kept
+			// because it is the correct mapping if a reader ever streams again.
 			if writeMaxBytesError(w, err, reqCap) {
 				return
 			}
-			// A fatal stream error (JSON array syntax error, oversized NDJSON
-			// line, or body read error) — the reader can't resume, so fail the
-			// request rather than report a misleading partial summary.
+			// A fatal stream error (JSON array syntax error, or an oversized
+			// NDJSON line) — the reader can't resume, so fail the request rather
+			// than report a misleading partial summary. Not a body read error:
+			// the readers run over an in-memory slice now.
 			h.logger.WarnContext(ctx, "ingest read error", "error", err, "table", table)
 			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return

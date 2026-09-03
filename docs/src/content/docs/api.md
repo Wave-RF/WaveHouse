@@ -198,7 +198,7 @@ Accepts a single flat JSON object, a JSON array of objects, or a newline-delimit
 
 Parameters are ignored, so `application/json; charset=utf-8` is `application/json`.
 
-The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse)). The cap applies to **every** body shape, NDJSON included — the whole body is read before it is parsed, so a line-framed batch is bounded exactly like a JSON array. Split an upload larger than the cap across several requests, and set your own outer limit at the [reverse proxy](/reverse-proxy#request-body-size-limits).
+The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse)). The cap applies to **every** body shape, NDJSON included — the whole body is read before it is parsed, so a line-framed batch is bounded by the same 16 MiB cap as a JSON array (NDJSON carries one additional, tighter bound: a single line over 10 MiB fails the request). The `413` is decided before any record is processed, so nothing is published — including for a single-object body whose trailing bytes push it over the cap, which is now rejected rather than accepted on its first object. Split an upload larger than the cap across several requests, and set your own outer limit at the [reverse proxy](/reverse-proxy#request-body-size-limits).
 
 The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
@@ -247,6 +247,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
+| 400 | `{"error":"invalid request body"}` | The body could not be read at all — a malformed transfer encoding, or a truncated upload |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure (unknown fields, type mismatches, missing required columns, null in a non-nullable column with no default). The body is the validator's message verbatim — there is no `validation failed:` prefix. |
 | 400 | `{"error":"missing dedupe id field \"event_id\""}` | Only when dedupe is enabled with `dedupe.require_id: true` and the row lacks the configured `id_field`. With `require_id: false` (the default) the row is instead published un-deduped. Either way — reject or publish — the row is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`. In a batch this is a per-record failure, not a whole-request error. |
@@ -362,7 +363,8 @@ A `200` is returned whenever the body was read and the records were processed �
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 400 | `{"error":"empty body"}` / `{"error":"empty ndjson body"}` | The body has no records |
-| 400 | `{"error":"invalid json: ..."}` | A structural JSON syntax error, or a truncated/unterminated JSON array (e.g. a cut-off upload — the whole request fails rather than reporting a partial success), or an oversized NDJSON line |
+| 400 | `{"error":"invalid request body"}` | The body could not be read at all — a malformed transfer encoding, or a truncated upload |
+| 400 | `{"error":"invalid json: ..."}` | A structural JSON syntax error, a single NDJSON line over 10 MiB, or a truncated/unterminated JSON array (e.g. a cut-off upload — the whole request fails rather than reporting a partial success), or an oversized NDJSON line |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (same auth gate as the single-object path; surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table (checked once, before any record) |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
@@ -371,7 +373,7 @@ A `200` is returned whenever the body was read and the records were processed �
 | 503 | `{"error":"service unavailable"}` | NATS JetStream full (backpressure) mid-batch; includes `Retry-After: 30` |
 
 :::caution[At-least-once on retry]
-A batch aborted partway (a `503`/`500`, or a JSON-array syntax error, after some leading records were already published) re-publishes those leading records when the whole batch is retried. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
+A batch aborted partway (a `503`/`500`, or a JSON-array syntax error, after some leading records were already published) re-publishes those leading records when the whole batch is retried. A `413` is **not** one of these: the body is read in full before any record is processed, so an over-cap request publishes nothing and is safe to retry once split. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
 :::
 
 **curl example (JSON array):**

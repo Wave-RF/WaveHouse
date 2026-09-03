@@ -19,7 +19,8 @@ import (
 // input_format_null_as_default: this relies on the ClickHouse server default
 // being 1, unlike date_time_input_format, which worker.go pins explicitly
 // because a server-default change there would silently alter parsing. Pinning
-// this one belongs with the wire change that starts emitting positional rows. The result has no trailing newline — the caller joins lines.
+// this one belongs with the wire change that starts emitting positional rows.
+// The result has no trailing newline — the caller joins lines.
 //
 // This is serialization ONLY. It performs no validation and makes no decision
 // about a value: schema validation upstream has already rejected unknown keys
