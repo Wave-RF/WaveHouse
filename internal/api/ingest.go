@@ -186,39 +186,33 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// unreadable Content-Type is a 415, and there is no reason to read (let
 	// alone buffer) bytes for a request already known to be unreadable.
 	//
-	// A caller may declare the type more than once. Go keeps repeated header
-	// LINES separately and Header.Get returns only the first, so without this a
-	// request declaring both application/json and application/x-ndjson would
-	// silently take the JSON path — and an NDJSON body read as a single object
-	// ingests record one and discards the rest, answering 200. ingestFormat
-	// applies the identical rule WITHIN one value, where an intermediary may have
-	// joined declarations with a comma; this applies it ACROSS lines. Agreement
-	// is on (format, acceptedness), so repeating a declaration, or spelling it
-	// differently, is harmless — only disagreement is refused, and this cannot
-	// reject a request that was unambiguous.
+	// A caller may declare the type more than once — Go keeps repeated header
+	// LINES separately and Header.Get returns only the first, and an intermediary
+	// may join duplicates into one line with a comma. Without resolving all of
+	// them, a request declaring both application/json and application/x-ndjson
+	// would silently take the JSON path: an NDJSON body read as a single object
+	// ingests record one, discards the rest, and answers 200. resolveContentType
+	// flattens both spellings and applies one agreement rule, so the outcome
+	// cannot depend on which spelling an intermediary the caller does not control
+	// happened to emit.
+	values := r.Header.Values("Content-Type")
 	contentType := r.Header.Get("Content-Type")
-	if values := r.Header.Values("Content-Type"); len(values) > 1 {
-		first, firstErr := ingestFormat(contentType)
-		for _, v := range values[1:] {
-			f, err := ingestFormat(v)
-			if f != first || (err == nil) != (firstErr == nil) {
-				// Logged like the neighbouring 415: this is the one refusal whose
-				// cause is usually NOT the caller's own doing — a proxy that starts
-				// duplicating the header would otherwise produce a wall of
-				// client-side 415s and no server-side signal at all.
-				h.logger.WarnContext(ctx, "conflicting ingest content-type headers",
-					"content_types", values, "table", table)
-				writeJSONError(w, http.StatusUnsupportedMediaType,
-					"conflicting Content-Type headers: "+strings.Join(values, ", "))
-				return
-			}
-		}
-	}
-	format, err := ingestFormat(contentType)
+	format, err := resolveContentType(values)
 	if err != nil {
-		h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
-			"content_type", contentType, "table", table)
-		writeJSONError(w, http.StatusUnsupportedMediaType, unsupportedContentTypeMessage(contentType))
+		conflicting := errors.Is(err, errConflictingContentType)
+		if conflicting {
+			// Logged with the whole declaration set, not just the first line:
+			// this is the one refusal whose cause is usually NOT the caller's own
+			// doing, and a proxy that starts duplicating the header would
+			// otherwise produce a wall of client-side 415s whose server-side
+			// record named only one of the two declarations involved.
+			h.logger.WarnContext(ctx, "conflicting ingest content-type declarations",
+				"content_types", values, "table", table)
+		} else {
+			h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
+				"content_type", contentType, "table", table)
+		}
+		writeJSONError(w, http.StatusUnsupportedMediaType, contentTypeMessage(values, conflicting))
 		return
 	}
 
@@ -245,6 +239,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Built from the RESOLVED format, not from the first header line: handing
+	// this `Header.Get` would resolve a second time over one declaration, and a
+	// leading EMPTY line would fail that second resolution while the set as a
+	// whole succeeded. The only error left is an empty body.
 	rr, batch, err := newRecordReader(format, body.Bytes())
 	if err != nil {
 		h.logger.ErrorContext(ctx, "empty ingest body", "table", table, "format", format.String())

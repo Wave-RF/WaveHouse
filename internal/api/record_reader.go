@@ -50,8 +50,16 @@ var errEmptyBody = errors.New("empty body")
 
 // errUnsupportedContentType is returned when the request declares no
 // Content-Type, one whose media type is not in the accepted list, or several
-// that disagree. The handler maps it to a 415.
+// that AGREE on being unreadable. Declarations that disagree are
+// errConflictingContentType. The handler maps both to a 415.
 var errUnsupportedContentType = errors.New("unsupported content type")
+
+// errConflictingContentType is returned when the request declares the type more
+// than once and the declarations do not agree. Distinct from
+// errUnsupportedContentType so the 415 can say which failure it was: the
+// unsupported wording lists the accepted types, which reads as nonsense when the
+// caller has just declared two of them.
+var errConflictingContentType = errors.New("conflicting content type")
 
 // IngestFormat is the wire format of an ingest request body. It comes from the
 // request's declared Content-Type and nothing else: the body never overrides
@@ -70,7 +78,10 @@ const (
 	// re-read the body as something else.
 	FormatNDJSON
 	// FormatCSV plugs in here once ingest reads CSV: add the media types to
-	// ingestFormat's switch and the reader to newRecordReader's.
+	// acceptedContentTypes, which advertises them in the 415 automatically, and
+	// the reader to newRecordReader. Do NOT add them in ingestFormatOne — it
+	// resolves by scanning that one table, and a second list is the drift this
+	// arrangement exists to prevent.
 )
 
 // String renders a format for error messages and logs.
@@ -85,15 +96,37 @@ func (f IngestFormat) String() string {
 	}
 }
 
-// supportedContentTypes lists, in the order the 415 message names them, every
-// media type ingest reads. The first of each family is the canonical spelling.
-var supportedContentTypes = []string{
-	"application/json",
-	"application/x-ndjson",
-	"application/ndjson",
-	"application/jsonl",
-	"application/jsonlines",
+// acceptedContentTypes maps every media type ingest reads to the format it
+// selects, in the order the 415 body advertises them. The first entry of each
+// family is the canonical spelling — the TS SDK sends those two. It is the
+// SINGLE source: supportedContentTypes is derived from it, so the advertised
+// list and the accepted set cannot drift apart in either direction.
+//
+// They could before. Adding a case to the resolver without adding it here left
+// the whole suite green while ingest accepted a type the 415 message, api.md and
+// architecture.md all failed to name — and no test can close that direction by
+// enumeration, because the complement is unbounded. One table closes it by
+// construction.
+var acceptedContentTypes = []struct {
+	mediaType string
+	format    IngestFormat
+}{
+	{"application/json", FormatJSON},
+	{"application/x-ndjson", FormatNDJSON},
+	{"application/ndjson", FormatNDJSON},
+	{"application/jsonl", FormatNDJSON},
+	{"application/jsonlines", FormatNDJSON},
 }
+
+// supportedContentTypes is what the 415 body lists and the docs quote, derived
+// from acceptedContentTypes so it is never a second place to edit.
+var supportedContentTypes = func() []string {
+	out := make([]string, len(acceptedContentTypes))
+	for i, a := range acceptedContentTypes {
+		out[i] = a.mediaType
+	}
+	return out
+}()
 
 // errUnterminatedArray marks a JSON array body that ended before its closing
 // ']' (a truncated / cut-off upload). It is deliberately NOT io.EOF so the
@@ -216,37 +249,54 @@ func (l *lineReader) Next() (map[string]any, error) {
 	return nil, io.EOF
 }
 
-// ingestFormat resolves a declared Content-Type to the format ingest will read
-// the body as. A missing, empty, or unrecognized type is errUnsupportedContentType
-// (a 415): the format is the client's declaration, so there is nothing to fall
-// back to.
+// declaredContentTypes flattens the Content-Type header set into one entry per
+// declaration. A caller may declare the type more than once: as repeated header
+// LINES, and an intermediary that merges duplicates joins them into one line
+// with a comma. Both spellings mean the same thing, so both are flattened here
+// and judged by ONE predicate — keeping the rule in two places is exactly how
+// the joined and repeated paths came to disagree before.
 //
-// One header value may carry SEVERAL declarations: an intermediary that merges
-// duplicate Content-Type header lines joins them with a comma. That is the same
-// situation as two separate header lines, which the handler resolves and
-// compares, so it is judged by the same rule here — resolve every part and
-// require them to agree. Judging it any other way would make the outcome depend
-// on which spelling an intermediary the caller does not control happened to
-// emit: `application/json, application/json` says exactly what two identical
-// header lines say.
+// Empty declarations are dropped. A bare `Content-Type:` line, or the trailing
+// element of `application/json,`, declares nothing rather than contradicting
+// anything, and RFC 9110 §5.6.1.2 says to ignore empty members of a list. If
+// nothing survives, the request declared no type at all.
+func declaredContentTypes(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
+// resolveContentType resolves the whole declared header set to the format ingest
+// will read the body as. Declarations must agree on (format, acceptedness):
+// `application/x-ndjson` and `application/ndjson; charset=utf-8` agree, a
+// supported and an unsupported declaration do not. Disagreement is
+// errConflictingContentType; nothing readable at all is errUnsupportedContentType.
 //
-// Agreement is on (format, acceptedness), not on text, so `application/x-ndjson`
-// and `application/ndjson; charset=utf-8` agree, while a supported and an
-// unsupported declaration do not. A comma inside a quoted parameter value is
-// split like any other, so such a header is refused whenever the parts it
-// produces disagree — `application/json; foo="x,y"` does. That is usual but not
-// universal: `application/json; foo="a,application/json;q=1"` splits into parts
-// that agree and is accepted. Not parsing quoted strings is the deliberate
-// price, and it is bounded — acceptance requires every part to match the
-// LEADING declaration, so the worst case is an over-reject, never a body framed
-// as something the caller did not declare.
-func ingestFormat(ct string) (IngestFormat, error) {
-	parts := strings.Split(ct, ",")
+// Agreement is what makes accepting safe — the choice of which declaration to
+// honor stops mattering. That is also why a comma inside a quoted parameter
+// value is split like any other: such a header is refused whenever the parts it
+// produces disagree — `application/json; foo="x,y"` does, while
+// `application/json; foo="a,application/json;q=1"` splits into parts that agree
+// and is accepted. Not parsing quoted strings is the deliberate price, and it is
+// bounded: acceptance requires every part to match the LEADING declaration, so
+// the worst case is an over-reject, never a body framed as something the caller
+// did not declare.
+func resolveContentType(values []string) (IngestFormat, error) {
+	parts := declaredContentTypes(values)
+	if len(parts) == 0 {
+		return FormatJSON, errUnsupportedContentType
+	}
 	first, firstErr := ingestFormatOne(parts[0])
 	for _, p := range parts[1:] {
 		f, err := ingestFormatOne(p)
 		if f != first || (err == nil) != (firstErr == nil) {
-			return FormatJSON, errUnsupportedContentType
+			return FormatJSON, errConflictingContentType
 		}
 	}
 	return first, firstErr
@@ -263,14 +313,13 @@ func ingestFormat(ct string) (IngestFormat, error) {
 // what the body is.
 func ingestFormatOne(ct string) (IngestFormat, error) {
 	base, _, _ := strings.Cut(ct, ";")
-	switch strings.ToLower(strings.TrimSpace(base)) {
-	case "application/json":
-		return FormatJSON, nil
-	case "application/x-ndjson", "application/ndjson", "application/jsonl", "application/jsonlines":
-		return FormatNDJSON, nil
-	default:
-		return FormatJSON, errUnsupportedContentType
+	mediaType := strings.ToLower(strings.TrimSpace(base))
+	for _, a := range acceptedContentTypes {
+		if a.mediaType == mediaType {
+			return a.format, nil
+		}
 	}
+	return FormatJSON, errUnsupportedContentType
 }
 
 // newRecordReader picks a reader for an already-resolved format over an
@@ -279,9 +328,15 @@ func ingestFormatOne(ct string) (IngestFormat, error) {
 // authoritative: an NDJSON body is read as NDJSON whatever its first byte, so a
 // line that isn't a JSON object fails as a per-record error rather than silently
 // re-framing the whole request. batch is false only for the single-object path;
-// true for array/NDJSON. The caller resolves the format with ingestFormat (which
-// owns the 415) and is expected to have bounded the body via
-// http.MaxBytesReader before buffering it.
+// true for array/NDJSON.
+//
+// It takes the format rather than a Content-Type on purpose. Resolving here as
+// well as in the handler meant the two could disagree — a leading empty
+// declaration resolved fine for the header SET and failed for the first line
+// alone, turning a good request into an empty-body 400. The only error this can
+// return is errEmptyBody. The caller resolves the format with
+// resolveContentType (which owns the 415) and is expected to have bounded the
+// body via http.MaxBytesReader before buffering it.
 func newRecordReader(format IngestFormat, body []byte) (rr recordReader, batch bool, err error) {
 	first, ok := firstNonSpace(body)
 	if !ok {
@@ -327,13 +382,33 @@ func emptyBodyMessage(format IngestFormat) string {
 	return "empty body"
 }
 
-// unsupportedContentTypeMessage is the 415 body: it says what was declared (or
-// that nothing was) and lists every media type ingest reads, so a caller can fix
-// the request from the response alone.
-func unsupportedContentTypeMessage(ct string) string {
-	declared := "no Content-Type"
-	if strings.TrimSpace(ct) != "" {
-		declared = fmt.Sprintf("Content-Type %q", ct)
+// contentTypeMessage is the 415 body. It says what was declared — all of it,
+// across header lines and joined values — and lists every media type ingest
+// reads, so a caller can fix the request from the response alone.
+//
+// The disagreement case gets its own wording. Routed through the unsupported
+// text, a joined `application/json, application/x-ndjson` told the caller
+// "ingest requires one of application/json, application/x-ndjson, …" — listing
+// as acceptable the two types they had just declared, and explaining nothing.
+// The spelling of the request no longer selects the message either: repeated
+// lines and a joined value describing the same disagreement now read alike.
+func contentTypeMessage(values []string, conflicting bool) string {
+	decls := declaredContentTypes(values)
+	list := strings.Join(supportedContentTypes, ", ")
+	accepted := "ingest requires one of " + list
+
+	quoted := make([]string, len(decls))
+	for i, d := range decls {
+		quoted[i] = fmt.Sprintf("%q", d)
 	}
-	return fmt.Sprintf("%s: ingest requires one of %s", declared, strings.Join(supportedContentTypes, ", "))
+	joined := strings.Join(quoted, ", ")
+
+	switch {
+	case conflicting:
+		return fmt.Sprintf("conflicting Content-Type declarations %s: ingest reads one format per request, and requires one of %s", joined, list)
+	case len(decls) == 0:
+		return "no Content-Type: " + accepted
+	default:
+		return fmt.Sprintf("Content-Type %s: %s", joined, accepted)
+	}
 }
