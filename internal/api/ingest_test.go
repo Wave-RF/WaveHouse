@@ -1183,12 +1183,10 @@ func TestIngestFormat(t *testing.T) {
 	tests := []struct {
 		ct   string
 		want IngestFormat
-		// wantErr is any 415; wantConflict narrows it to the disagreement
-		// sentinel. Pinned separately because they produce different bodies —
-		// routing a disagreement through the unsupported wording tells the caller
-		// "ingest requires one of …" and lists the types they just declared.
-		wantErr      bool
-		wantConflict bool
+		// wantErr is any 415. There is no conflict variant: this table drives
+		// resolveContentType with ONE value, and disagreement needs two header
+		// lines — TestIngest_DuplicateContentTypeHeaders covers that.
+		wantErr bool
 	}{
 		{ct: "application/json", want: FormatJSON},
 		{ct: "application/json; charset=utf-8", want: FormatJSON},
@@ -1211,11 +1209,20 @@ func TestIngestFormat(t *testing.T) {
 		// it the media type keeps the trailing space and 415s.
 		{ct: "application/json ; charset=utf-8", want: FormatJSON},
 		{ct: "application/x-ndjson ; charset=utf-8", want: FormatNDJSON},
-		// A duplicate parameter name is the one malformed-parameter shape
-		// ParseMediaType treats as fatal rather than as ErrInvalidMediaParameter:
-		// it yields NO media type, so it is refused. This is the single
-		// tightening the switch to the stdlib parser costs.
+		// A repeated parameter name is fatal to ParseMediaType — no media type at
+		// all, rather than ErrInvalidMediaParameter — but ONLY when the values
+		// differ; an exact repeat parses cleanly. The comparison is not
+		// case-normalized, so `UTF-8` and `utf-8` count as differing.
 		{ct: "application/json; charset=utf-8; charset=utf-16", wantErr: true},
+		{ct: "application/json; charset=utf-8; charset=utf-8", want: FormatJSON},
+		// The fourth tightening, and the one with no joined content anywhere in
+		// it: the comma guard is line-wide, so a well-formed quoted comma loses
+		// its tolerance when some OTHER parameter on the line is malformed. Both
+		// halves are accepted alone (rows above). This row is what would catch a guard
+		// narrowed to "a comma after the last parsed parameter" — the known-limit
+		// test would not, since that case's unparsed remainder also has a comma.
+		// Tracked in #563.
+		{ct: `application/json; profile="a,b"; charset`, wantErr: true},
 		{ct: "APPLICATION/JSON", want: FormatJSON},
 		{ct: "text/plain", wantErr: true},
 		{ct: "text/csv", wantErr: true},
@@ -1252,12 +1259,8 @@ func TestIngestFormat(t *testing.T) {
 			t.Parallel()
 			got, err := resolveContentType([]string{tt.ct})
 			if tt.wantErr {
-				if tt.wantConflict {
-					require.ErrorIs(t, err, errConflictingContentType,
-						"declarations that disagree must be distinguishable from an unsupported one")
-				} else {
-					require.ErrorIs(t, err, errUnsupportedContentType)
-				}
+				require.ErrorIs(t, err, errUnsupportedContentType,
+					"a single value can only fail as unsupported — a conflict needs two header lines")
 				return
 			}
 			require.NoError(t, err)

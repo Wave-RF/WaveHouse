@@ -17,7 +17,7 @@ const (
 	// flat ingest record; a line larger than this aborts the whole request.
 	maxNDJSONLineBytes = 10 << 20 // 10 MiB
 
-	// maxSniffBytes bounds how far the format sniffer peeks for the first
+	// maxSniffBytes bounds how far the arity peek looks for the first
 	// non-whitespace byte. Far beyond any reasonable amount of leading
 	// whitespace; a body that is only whitespace within this window is treated
 	// as empty.
@@ -358,12 +358,17 @@ func emptyBodyMessage(format IngestFormat) string {
 // across header lines and joined values — and lists every media type ingest
 // reads, so a caller can fix the request from the response alone.
 //
-// The disagreement case gets its own wording. Routed through the unsupported
-// text, a joined `application/json, application/x-ndjson` told the caller
-// "ingest requires one of application/json, application/x-ndjson, …" — listing
-// as acceptable the two types they had just declared, and explaining nothing.
-// The spelling of the request no longer selects the message either: repeated
-// lines and a joined value describing the same disagreement now read alike.
+// Disagreement between repeated LINES gets its own wording, because routing it
+// through the unsupported text would tell a caller who declared both
+// application/json and application/x-ndjson that ingest "requires one of
+// application/json, application/x-ndjson, …" — listing as acceptable the two
+// types they just declared, and explaining nothing.
+//
+// A comma-joined value does NOT reach that wording: it is a single header line
+// that fails to parse, so it never reaches the agreement loop and gets the
+// unsupported text, quoting the line whole. That is the same confusing shape
+// described above, and it is the honest report — nothing was resolved, so
+// nothing disagreed. api.md buckets it under "does not parse".
 func contentTypeMessage(values []string, conflicting bool) string {
 	decls := values
 	list := strings.Join(supportedContentTypes, ", ")

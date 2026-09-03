@@ -204,10 +204,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 				"content_types", values, "table", table)
 		} else {
 			// Logs the whole set, like the conflicting branch: the response body
-			// names every declaration, so logging only Header.Get would make the
+			// names every header line, so logging only Header.Get would make the
 			// server-side record disagree with what the caller was told — for
-			// ["", "text/csv"] the client sees `Content-Type "text/csv"` while
-			// the log said content_type="".
+			// ["", "text/csv"] the client sees `Content-Type "", "text/csv"`
+			// while Header.Get would have logged only content_type="".
 			h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
 				"content_types", values, "table", table)
 		}
@@ -215,11 +215,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The declaration is already resolved, and the resolved format — not the
-	// first header line — is what the reader is built from. Handing it
-	// `Header.Get` here would resolve a second time over one line, and a leading
-	// EMPTY line would then fail that second resolution while the set as a whole
-	// succeeded. The only error left is an empty body.
+	// The reader is built from the RESOLVED format, not from a second look at
+	// the header. Re-resolving here would duplicate the rule in two places,
+	// which is how the joined and repeated paths came to disagree before. The
+	// only error left is an empty body.
 	rr, batch, err := newRecordReader(format, r.Body)
 	if err != nil {
 		h.logger.ErrorContext(ctx, "empty ingest body", "table", table, "format", format.String())
