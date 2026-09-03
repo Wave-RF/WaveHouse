@@ -312,14 +312,13 @@ func splitDeclarations(v string) []string {
 // errConflictingContentType; nothing readable at all is errUnsupportedContentType.
 //
 // Agreement is what makes accepting safe — the choice of which declaration to
-// honor stops mattering. That is also why a comma inside a quoted parameter
-// value is split like any other: such a header is refused whenever the parts it
-// produces disagree — `application/json; foo="x,y"` does, while
-// `application/json; foo="a,application/json;q=1"` splits into parts that agree
-// and is accepted. Not parsing quoted strings is the deliberate price, and it is
-// bounded: acceptance requires every part to match the LEADING declaration, so
-// the worst case is an over-reject, never a body framed as something the caller
-// did not declare.
+// honor stops mattering. Only commas OUTSIDE a quoted parameter value separate
+// declarations (see splitDeclarations); a comma inside one is data (RFC 9110
+// §5.6.6), so `application/json; foo="x,y"` is a single declaration and
+// parameters still cannot cost a caller the request. A genuinely joined
+// disagreement is refused rather than resolved to the first, and acceptance
+// requires every declaration to match the leading one, so a request that IS
+// accepted can only be framed as its own leading declaration.
 func resolveContentType(values []string) (IngestFormat, error) {
 	parts := declaredContentTypes(values)
 	if len(parts) == 0 {
