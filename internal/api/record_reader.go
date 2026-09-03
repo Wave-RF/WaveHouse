@@ -95,13 +95,36 @@ func (f IngestFormat) String() string {
 
 // supportedContentTypes lists, in the order the 415 message names them, every
 // media type ingest reads. The first of each family is the canonical spelling.
-var supportedContentTypes = []string{
-	"application/json",
-	"application/x-ndjson",
-	"application/ndjson",
-	"application/jsonl",
-	"application/jsonlines",
+// acceptedContentTypes maps every media type ingest reads to the format it
+// selects, in the order the 415 body advertises them. It is the SINGLE source:
+// supportedContentTypes is derived from it, so the advertised list and the
+// accepted set cannot drift apart in either direction.
+//
+// They could before. Adding a case to the resolver without adding it here left
+// the whole suite green while ingest accepted a type the 415 message, api.md and
+// architecture.md all failed to name — and no test can close that direction by
+// enumeration, because the complement is unbounded. One table closes it by
+// construction.
+var acceptedContentTypes = []struct {
+	mediaType string
+	format    IngestFormat
+}{
+	{"application/json", FormatJSON},
+	{"application/x-ndjson", FormatNDJSON},
+	{"application/ndjson", FormatNDJSON},
+	{"application/jsonl", FormatNDJSON},
+	{"application/jsonlines", FormatNDJSON},
 }
+
+// supportedContentTypes is what the 415 body lists and the docs quote, derived
+// from acceptedContentTypes so it is never a second place to edit.
+var supportedContentTypes = func() []string {
+	out := make([]string, len(acceptedContentTypes))
+	for i, a := range acceptedContentTypes {
+		out[i] = a.mediaType
+	}
+	return out
+}()
 
 // errUnterminatedArray marks a JSON array body that ended before its closing
 // ']' (a truncated / cut-off upload). It is deliberately NOT io.EOF so the
@@ -288,14 +311,13 @@ func resolveContentType(values []string) (IngestFormat, error) {
 // what the body is.
 func ingestFormatOne(ct string) (IngestFormat, error) {
 	base, _, _ := strings.Cut(ct, ";")
-	switch strings.ToLower(strings.TrimSpace(base)) {
-	case "application/json":
-		return FormatJSON, nil
-	case "application/x-ndjson", "application/ndjson", "application/jsonl", "application/jsonlines":
-		return FormatNDJSON, nil
-	default:
-		return FormatJSON, errUnsupportedContentType
+	mediaType := strings.ToLower(strings.TrimSpace(base))
+	for _, a := range acceptedContentTypes {
+		if a.mediaType == mediaType {
+			return a.format, nil
+		}
 	}
+	return FormatJSON, errUnsupportedContentType
 }
 
 // newRecordReader picks a reader from the ALREADY-RESOLVED format, using a peek

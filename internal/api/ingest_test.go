@@ -1148,16 +1148,22 @@ func TestIngest_NDJSON_ErrorsTruncated(t *testing.T) {
 // point is to pin the advertised list against the docs, and an expectation
 // derived from the slice under test cannot do that.
 //
-// api.md's two 415 rows quote a truncated prefix of this ("… application/json,
-// application/x-ndjson, …"), so they do NOT need editing when the set changes.
-// The prose sites that spell the list out, and would: api.md's body/Content-Type
-// table, and architecture.md's "the four NDJSON spellings" count.
+// api.md's two 415 rows quote only a two-element prefix of this, so a change
+// past the second entry leaves them correct — but removing or reordering
+// `application/json` or `application/x-ndjson` does not. The prose sites that
+// spell the whole list out, and always need editing: api.md's body/Content-Type
+// table, architecture.md's "the four NDJSON spellings" count, and the ingest
+// entry in CHANGELOG.md.
 const wantAcceptedTypes = "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines"
 
-// TestAcceptedTypesAreAllResolvable is the inverse of the 415 assertions: those
-// pin that the advertised list does not shrink below what is accepted, this pins
-// that it does not grow beyond it. Without it the message could advertise a type
-// ingestFormatOne refuses, and every other test would stay green.
+// TestAcceptedTypesAreAllResolvable pins that the advertised list never grows
+// beyond what the resolver accepts — an entry added to acceptedContentTypes but
+// unreachable in ingestFormatOne would otherwise leave every test green.
+//
+// The opposite direction, accepting a type nothing advertises, is NOT pinned by
+// a test and cannot be: the complement is unbounded. It is closed structurally
+// instead — supportedContentTypes is derived from acceptedContentTypes, so
+// adding a type to the resolver necessarily advertises it.
 func TestAcceptedTypesAreAllResolvable(t *testing.T) {
 	t.Parallel()
 	for _, ct := range supportedContentTypes {
@@ -1165,7 +1171,7 @@ func TestAcceptedTypesAreAllResolvable(t *testing.T) {
 		require.NoError(t, err, "advertised type %q must resolve", ct)
 	}
 	assert.Equal(t, wantAcceptedTypes, strings.Join(supportedContentTypes, ", "),
-		"the advertised list and the accepted set must stay in step, and match api.md")
+		"the advertised list must match the literal api.md quotes")
 }
 
 // TestIngestFormat: the declared Content-Type — and only it — decides the
@@ -1225,8 +1231,9 @@ func TestIngestFormat(t *testing.T) {
 		{ct: "application/json; charset=utf-8, application/json", want: FormatJSON},
 		{ct: "application/x-ndjson, application/ndjson", want: FormatNDJSON},
 		// Three declarations, not two: the rule says EVERY part is resolved, and
-		// at N=2 a SplitN(ct, ",", 2) would satisfy the suite while never looking
-		// past the second.
+		// at N=2 a SplitN(ct, ",", 2) never looks past the second. (The
+		// empty-element row below catches that mutation too — this row is the
+		// direct statement of the rule, not its only witness.)
 		{ct: "application/json, application/json; charset=utf-8, application/json;;", want: FormatJSON},
 		{ct: "application/json, application/json; charset=utf-8, application/x-ndjson", wantErr: true, wantConflict: true},
 		// Genuinely conflicting joined declarations stay refused: honoring the
@@ -1290,7 +1297,8 @@ func TestIngest_UndeclaredOrUnsupportedContentType_415(t *testing.T) {
 		// wantPrefix is the message's declared-vs-undeclared half, which api.md's
 		// 415 rows quote verbatim ("no Content-Type: …" and the declared variant
 		// `Content-Type "text/plain": …`). Unasserted, the whole branch could
-		// collapse to the undeclared spelling with the suite still green — and a
+		// collapse to the undeclared spelling — the two-unsupported-lines subtest
+		// catches that mutation as well — and a
 		// caller would lose the echo telling them what the server actually read.
 		// The %q also matters: it renders a header with embedded quotes
 		// unambiguously.
@@ -1440,7 +1448,8 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	// FormatJSON (the unsupported branch returns FormatJSON with an error), so a
 	// format-only guard would let it through — and an NDJSON body then takes the
 	// single-object path and publishes 1 of 2 records with a 200. Pins the half of
-	// the comparison a "simplification" could delete with the suite still green.
+	// the comparison a "simplification" could delete. (Two TestIngestFormat rows
+	// also fail on that mutation; this is the handler-level statement of it.)
 	t.Run("a supported and an unsupported declaration are refused", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
@@ -1475,9 +1484,10 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	})
 
 	// A third line, disagreeing. At N=2 the guard's `values[1:]` could be
-	// `values[1:2]` — a one-character off-by-one — and the suite would stay green
-	// while three lines from a two-proxy chain silently took the JSON path and
-	// truncated an NDJSON batch to its first record.
+	// `parts[1:2]` — a one-character off-by-one — and three lines from a
+	// two-proxy chain would silently take the JSON path and truncate an NDJSON
+	// batch to its first record. (TestIngestFormat's N=3 conflict row fails on
+	// that mutation too.)
 	t.Run("a third line that disagrees is refused", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
@@ -1497,7 +1507,9 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	// sitting alongside another header line. Both orders, because the first value
 	// and the rest travel through different call sites — resolving either with
 	// the single-declaration helper instead of the full rule would mis-frame a
-	// joined value, and nothing else in the suite would notice.
+	// joined value. Only the joined-SECOND order is unique to these subtests —
+	// eleven TestIngestFormat rows already cover joined-first — but both are kept
+	// because the pair is what shows the two guards composing.
 	t.Run("a joined value alongside a plain line, joined first", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
@@ -1678,7 +1690,8 @@ func TestIngest_JSONArray_WithJSONContentType(t *testing.T) {
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 
 	// Content-Type: application/json must NOT force the single-object path when
-	// the body is an array — the sniffer wins.
+	// the body is an array. The header still decides the FAMILY; the first byte
+	// only picks arity within it, which is what this pins.
 	req := rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"},{"page":"/b"}]`)
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
