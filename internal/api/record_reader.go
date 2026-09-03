@@ -255,10 +255,10 @@ func (l *lineReader) Next() (map[string]any, error) {
 // forbids repeating it, so a duplicate is malformed however it is spelled. §8.3
 // warns that resolving the resulting pseudo-list by "using the last syntactically
 // valid member" causes "interoperability and security issues", so we take no
-// member: a value carrying a comma is refused in ingestFormatOne unless the
-// value as a whole parses as one media type, and repeated LINES
-// must agree on (format, acceptedness) — `application/x-ndjson` and
-// `application/ndjson; charset=utf-8` do. Disagreement is errConflictingContentType.
+// member: a value carrying a comma is refused in ingestFormatOne unless the value
+// as a whole parses as one media type, and repeated LINES must agree on (format,
+// acceptedness) — `application/x-ndjson` and `application/ndjson; charset=utf-8`
+// do. Disagreement is errConflictingContentType.
 func resolveContentType(values []string) (IngestFormat, error) {
 	if len(values) == 0 {
 		return FormatJSON, errUnsupportedContentType

@@ -1245,9 +1245,9 @@ func TestIngestFormat(t *testing.T) {
 		// is gone — testing it now would only be testing the stdlib.
 		{ct: `application/json; profile="a,b"`, want: FormatJSON},
 		// A comma-bearing value that does not parse as one media type is refused,
-		// whatever it joins. Content-Type is a
-		// singleton field (§8.3) and §5.3 forbids the repetition that produces the
-		// joined form, so there is no list here to resolve — §8.3 warns that
+		// whatever it joins. Content-Type is a singleton field (§8.3) and §5.3
+		// forbids the repetition that produces the joined form, so there is no list
+		// here to resolve — §8.3 warns that
 		// picking a member of the pseudo-list is itself the interoperability and
 		// security hazard. These leave no media type at all — "unexpected content
 		// after media subtype", or "no media type" for a leading comma — so 415
