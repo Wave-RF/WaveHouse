@@ -247,7 +247,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
-| 400 | `{"error":"invalid request body"}` | The body could not be read at all — a malformed transfer encoding, or a truncated upload |
+| 400 | `{"error":"invalid request body"}` | The body could not be read at all — a malformed transfer encoding, or a truncated upload (a body cut off *in transit*). A body that arrived complete but ends mid-value is `invalid json` |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure (unknown fields, type mismatches, missing required columns, null in a non-nullable column with no default). The body is the validator's message verbatim — there is no `validation failed:` prefix. |
 | 400 | `{"error":"missing dedupe id field \"event_id\""}` | Only when dedupe is enabled with `dedupe.require_id: true` and the row lacks the configured `id_field`. With `require_id: false` (the default) the row is instead published un-deduped. Either way — reject or publish — the row is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`. In a batch this is a per-record failure, not a whole-request error. |
@@ -363,8 +363,8 @@ A `200` is returned whenever the body was read and the records were processed �
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 400 | `{"error":"empty body"}` / `{"error":"empty ndjson body"}` | The body has no records |
-| 400 | `{"error":"invalid request body"}` | The body could not be read at all — a malformed transfer encoding, or a truncated upload |
-| 400 | `{"error":"invalid json: ..."}` | A structural JSON syntax error, a single NDJSON line over 10 MiB, or a JSON array that ends before its closing `]` — a body that transferred completely but was generated truncated. The whole request fails rather than reporting a partial success. A body cut off in transit is the row above, not this one |
+| 400 | `{"error":"invalid request body"}` | The body could not be read at all — a malformed transfer encoding, or a truncated upload (a body cut off *in transit*). A body that arrived complete but ends mid-value is `invalid json` |
+| 400 | `{"error":"invalid json: ..."}` | A structural JSON syntax error, a single NDJSON line over 10 MiB, or a JSON array that ends before its closing `]` — a body that transferred completely but was generated truncated. The whole request fails rather than reporting a partial success |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (same auth gate as the single-object path; surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table (checked once, before any record) |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
