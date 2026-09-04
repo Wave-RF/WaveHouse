@@ -333,13 +333,15 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 
 The NATS envelope changed shape in this release: the row now travels positionally, with `format`, `columns` and `row` replacing `data`. **The new worker cannot read a message published by an older version** — it carries no `format`, so there is no way to say which value belongs to which column.
 
-Such a message is not lost. It is parked on the DLQ with `X-DLQ-*` headers, or, where the DLQ is switched off for that table, acked and dropped with an `ERROR` log and a `wavehouse_ingest_poison_dropped_total` increment — a message that can never insert must not redeliver forever. But recovering it means replaying from the DLQ by hand, so it is far cheaper to drain first.
+This affects the streaming surface too, and more quietly. SSE gap-fill (`?since=` / `Last-Event-ID`) reads the same stream, and a pre-v2 envelope cannot be paired into a positional row there either — it is withheld from every role with **no error, no frame and no DLQ entry**. Because the stream keeps ACKed messages until the sweeper purges past `stream.gap_window_minutes` (15 by default), this outlives a *correct* drain: for that window, any replay spanning the upgrade silently omits the pre-upgrade events. Clients that need them should backfill over REST.
+
+On the worker side the message is not lost. It is parked on the DLQ with `X-DLQ-*` headers, or, where the DLQ is switched off for that table, acked and dropped with an `ERROR` log and a `wavehouse_ingest_poison_dropped_total` increment — a message that can never insert must not redeliver forever. But recovering it means replaying from the DLQ by hand, so it is far cheaper to drain first.
 
 To drain before upgrading:
 
 1. **Stop the producers**, or cut `/v1/ingest` at the reverse proxy. Nothing new should enter the stream.
 2. **Wait for the in-flight batches to flush.** A table's batch closes on size or after `maxWait` (5s by default), so a few seconds after the last write is enough; give it longer if ClickHouse is slow or retrying.
-3. **Confirm the queue is empty** before swapping binaries — the surest check is that the rows you expect have landed in ClickHouse, since there is no queue-depth gauge today ([#544](https://github.com/Wave-RF/WaveHouse/issues/544) tracks the related in-flight accounting). `wavehouse_nats_in_msgs_total` going flat is a supporting signal, not a guarantee.
+3. **Confirm nothing is left unconsumed** before swapping binaries. Not that the stream is empty: it is dual-use, and deliberately retains ACKed messages for the SSE replay window, so a non-zero depth right after a clean drain is expected. The surest check is that the rows you expect have landed in ClickHouse, since there is no queue-depth gauge today ([#544](https://github.com/Wave-RF/WaveHouse/issues/544) tracks the related in-flight accounting). `wavehouse_nats_in_msgs_total` going flat is a supporting signal, not a guarantee.
 4. **Upgrade**, then re-enable ingest.
 
 If you skipped the drain, check `dlq.{table}` for parked envelopes (and `wavehouse_ingest_poison_dropped_total` for any dropped where the DLQ was off) — see [Dead Letter Queue](#dead-letter-queue-dlq) below.

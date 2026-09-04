@@ -84,7 +84,7 @@ func (ts *TableSchema) ColumnNames() []string { return columnNames(ts.Columns) }
 // whether naming it in an INSERT's column list is legal.
 //
 // ClickHouse refuses exactly two kinds, verified against a live server
-// (26.7.3): a MATERIALIZED column is `Cannot insert column …, because it is
+// (26.6.3): a MATERIALIZED column is `Cannot insert column …, because it is
 // MATERIALIZED column` (code 44, and insert_allow_materialized_columns
 // defaults to 0), and an ALIAS column is `No such column …` (code 16) — it has
 // no storage to write. Everything else takes a value: a plain column, a

@@ -56,7 +56,7 @@ flowchart LR
 Note the stream is **dual-use**: it is both the durable buffer feeding the worker and the replay buffer that SSE clients gap-fill from. That is why a custom sweeper exists instead of plain work-queue auto-deletion (see [Scaling out](#scaling-to-multiple-instances)).
 
 :::note[Omitted columns on `Nullable` columns with a default]
-Inserts also pin `input_format_null_as_default=1`. A positional row has one value per insertable column and no way to say "absent", so a field the record omitted rides as an explicit `null` in its slot. That setting turns the `null` back into the column's default for a **non-nullable** column, matching what omitting the key did under `JSONEachRow` — but on a `Nullable(T) DEFAULT …` column ClickHouse stores `NULL` whatever the setting says, because only an *absent* key ever took the default. So such a column now stores `NULL` where it previously took its default. Verified on ClickHouse 26.7.3.
+Inserts also pin `input_format_null_as_default=1`. A positional row has one value per insertable column and no way to say "absent", so a field the record omitted rides as an explicit `null` in its slot. That setting turns the `null` back into the column's default for a **non-nullable** column, matching what omitting the key did under `JSONEachRow` — but on a `Nullable(T) DEFAULT …` column ClickHouse stores `NULL` whatever the setting says, because only an *absent* key ever took the default. So such a column now stores `NULL` where it previously took its default. Verified on ClickHouse 26.6.3.
 :::
 
 :::note[ClickHouse timestamp parsing]

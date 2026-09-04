@@ -702,7 +702,7 @@ func TestRefresh_DatabaseSnapshottedForWholeRefresh(t *testing.T) {
 }
 
 // TestColumn_IsInsertable pins the rule against what ClickHouse actually
-// refuses (verified on 26.7.3): a MATERIALIZED column is code 44
+// refuses (verified on 26.6.3): a MATERIALIZED column is code 44
 // ILLEGAL_COLUMN and an ALIAS column is code 16 NO_SUCH_COLUMN_IN_TABLE, while
 // a plain, DEFAULT or EPHEMERAL column takes a value. EPHEMERAL is the one
 // that reads backwards at a glance — it is insert-ONLY, never stored.
