@@ -140,8 +140,6 @@ func columnNames(cols []Column) []string {
 	return names
 }
 
-// InsertableColumnNames is InsertableColumns reduced to names, for the wire
-// envelope's column list. Returns an empty (non-nil) slice when none qualify.
 // Lookup returns the named column and whether the table declares it. Matching
 // is exact, as ClickHouse's own column resolution is. Linear over Columns, which
 // is the right shape for the per-record call sites: schemas are small and the
@@ -159,6 +157,8 @@ func (ts *TableSchema) Lookup(name string) (Column, bool) {
 	return Column{}, false
 }
 
+// InsertableColumnNames is InsertableColumns reduced to names, for the wire
+// envelope's column list. Returns an empty (non-nil) slice when none qualify.
 func (ts *TableSchema) InsertableColumnNames() []string {
 	if ts.insertableNames != nil {
 		return ts.insertableNames

@@ -221,7 +221,9 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons jetstream.Consumer
 	// shutdown drains in order: close every table channel so each tableLoop flushes
 	// its remainder and exits (tableWg), then wait for the backgrounded acks (ackWg).
 	// This order is what keeps the ack drain race-free: every ackWg.Add happens
-	// before its tableLoop returns, so all Adds precede tableWg.Wait here.
+	// either inside a tableLoop's lifetime OR on this goroutine (rejectPoison,
+	// via parseMsg below), and this goroutine is the one that Waits — so no Add
+	// can race the Wait on either path.
 	shutdown := func() {
 		for _, ch := range tableChans {
 			close(ch)

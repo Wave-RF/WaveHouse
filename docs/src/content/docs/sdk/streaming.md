@@ -122,7 +122,7 @@ Replay is also bounded by the server's [`stream.gap_window_minutes`](/settings-d
 :::
 
 :::danger[Upgrade the SDK and the server together]
-The SSE reader and writer changed in the same release. A **new SDK against an older server** never receives an `event: schema` frame, so it drops every row it is sent — the connection opens, stays open, and delivers nothing, with a `console.warn` per event and no `error` callback. A `liveQuery()` is harder still to spot: its backfill goes over REST and is unaffected, so it renders its initial snapshot, reports status `live`, and then simply never updates. An **older SDK against a new server** yields `data: undefined` for every event. Neither surfaces as an error you can catch.
+The SSE reader and writer changed in the same release. A **new SDK against an older server** never receives an `event: schema` frame, so it drops every row it is sent — the connection opens, stays open, and delivers nothing, with only a handful of `console.warn`s — bounded to three per cause per connection, then a suppression notice, so a quiet console is **not** evidence the stream is healthy — and no `error` callback. A `liveQuery()` is harder still to spot: its backfill goes over REST and is unaffected, so it renders its initial snapshot, reports status `live`, and then simply never updates. An **older SDK against a new server** yields `data: undefined` for every event. Neither surfaces as an error you can catch.
 
 `@wavehouse/sdk` publishes to npm independently of the server, so pinning the SDK in a frontend while the backend upgrades on its own schedule (or the reverse) is the normal deployment shape.
 :::

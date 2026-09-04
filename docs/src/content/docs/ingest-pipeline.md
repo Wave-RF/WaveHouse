@@ -106,7 +106,7 @@ Three `WaitGroup`s form a strict containment hierarchy, which is what makes shut
 
 - **`wg`** tracks the `dispatchLoop` goroutine.
 - **`tableWg`** (owned by `dispatchLoop`) tracks the per-table `tableLoop`s.
-- **`ackWg`** tracks the background `DoubleAck` goroutines.
+- **`ackWg`** tracks the background `DoubleAck` goroutines, and the poison disposal (a DLQ publish *plus* a `DoubleAck`) that `rejectPoison` backgrounds from the dispatch loop.
 
 ## Why per table? The bug this design fixes
 
@@ -192,7 +192,7 @@ sequenceDiagram
     SF-->>M: waitOrDeadline returns nil (or deadline error)
 ```
 
-Why this ordering is correct: every `ackWg.Add` happens inside a `tableLoop`'s lifetime, so all of them complete before `tableWg.Wait()` returns — which means `dispatchLoop` can safely `ackWg.Wait()` afterward with no `Add` racing `Wait`. The old code relied on "flush runs synchronously" for this; the hierarchy makes it structural instead.
+Why this ordering is correct: every `ackWg.Add` happens either inside a `tableLoop`'s lifetime **or on the `dispatchLoop` goroutine itself** (`rejectPoison`, reached from `parseMsg`), and `dispatchLoop` is the goroutine that `Wait`s — so no `Add` can race the `Wait` on either path. The `tableLoop` ones all complete before `tableWg.Wait()` returns — which means `dispatchLoop` can safely `ackWg.Wait()` afterward with no `Add` racing `Wait`. The old code relied on "flush runs synchronously" for this; the hierarchy makes it structural instead.
 
 If the deadline fires first, `waitOrDeadline` returns the deadline error and the in-flight goroutines are abandoned — the process is exiting anyway, and anything un-acked is redelivered on the next boot (at-least-once).
 
