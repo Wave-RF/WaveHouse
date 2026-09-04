@@ -2208,26 +2208,71 @@ func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
 }
 
 // TestIngest_ContentTypeEchoIsBounded: the 415 body and the WARN log echo what
-// the caller declared, and the 415 is decided BEFORE the body is read — so
-// without a bound a request needs no body, and no credentials under the shipped
-// compose policy, to make the server emit a large response. Go's default
-// MaxHeaderBytes is 1 MiB and %q expands a non-UTF-8 byte to \xNN, so the
-// unbounded echo was roughly a 4x amplification.
+// the caller declared, and the 415 is decided BEFORE the body is read — so a
+// request needs no body, and no credentials under the shipped compose policy,
+// to provoke one. Each non-UTF-8 byte costs 5 output bytes (%q renders \xNN,
+// then JSON escapes the backslash).
+//
+// BOTH dimensions are caller-controlled. The first version of this test covered
+// only one long line, and the fix it pinned bounded only per-declaration
+// length — which left the amplification factor untouched, since a caller can
+// send many declarations instead of one long one. 7200 lines of 128 bytes fits
+// under Go's default 1 MiB header cap and bought a 4.65 MB response.
 func TestIngest_ContentTypeEchoIsBounded(t *testing.T) {
 	t.Parallel()
-	// Non-UTF-8 bytes, which %q expands 4x — the worst case for the response.
-	huge := "application/" + strings.Repeat("\xff", 8000)
+	for name, build := range map[string]func(*testing.T) *http.Request{
+		"one very long declaration": func(t *testing.T) *http.Request {
+			return rawIngestRequest(t, "clicks", "application/"+strings.Repeat("\xff", 8000), `{"page":"/a"}`)
+		},
+		"many declarations": func(t *testing.T) *http.Request {
+			// rawIngestRequest uses Header.Set, so the repeated-line spelling has
+			// to be built with Add — which is exactly why the first version of
+			// this test could not express the case that mattered.
+			req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
+			for range 7200 {
+				req.Header.Add("Content-Type", "application/"+strings.Repeat("\xff", 116))
+			}
+			return req
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			w := httptest.NewRecorder()
+			h.Handle(w, build(t))
 
-	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	w := httptest.NewRecorder()
-	h.Handle(w, rawIngestRequest(t, "clicks", huge, `{"page":"/a"}`))
+			require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+			testutil.AssertJSONErrorResponse(t, w)
+			// The ceiling: 4 declarations x 128 bytes, each byte costing 5 in the
+			// worst case, plus the fixed message. What matters is that it does not
+			// move with the request — see the O(1) assertion below.
+			assert.Less(t, w.Body.Len(), 4096,
+				"the 415 body must be bounded in both the length and the count of declarations")
+			assert.Empty(t, pub.Messages)
+		})
+	}
 
-	require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
-	testutil.AssertJSONErrorResponse(t, w)
-	assert.Less(t, w.Body.Len(), 1024,
-		"the 415 body must not scale with the declared Content-Type")
-	assert.Contains(t, jsonErrorMessage(t, w), "truncated",
-		"and it should say so rather than silently cutting")
-	assert.Empty(t, pub.Messages)
+	// The property the size ceiling above only approximates: the body does not
+	// grow with the request at all. A 72x larger header set must produce a
+	// byte-identical response, or some dimension is still unbounded.
+	t.Run("the body does not grow with the request", func(t *testing.T) {
+		t.Parallel()
+		sizeFor := func(lines int) int {
+			req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
+			for range lines {
+				req.Header.Add("Content-Type", "application/"+strings.Repeat("\xff", 116))
+			}
+			w := httptest.NewRecorder()
+			NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, testutil.NopLogger()).Handle(w, req)
+			require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+			return w.Body.Len()
+		}
+		small, large := sizeFor(100), sizeFor(7200)
+		// Not byte-identical: the message ends "…and N more", so the response
+		// grows by the DIGITS of N — logarithmic, and the only permitted growth.
+		// A 72x larger header set may cost a handful of bytes, never a multiple.
+		assert.Less(t, large-small, 8,
+			"response size must grow at most with the digits of the count, not with the request")
+	})
 }

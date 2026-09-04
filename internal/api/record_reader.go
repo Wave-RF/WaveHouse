@@ -377,6 +377,39 @@ func emptyBodyMessage(format IngestFormat) string {
 	return "empty body"
 }
 
+// Bounds on what a caller-supplied Content-Type may cost us when echoed back.
+// The 415 is decided BEFORE the body is read, so a request needs no body — and,
+// under the shipped compose policy (default_role: public with insert), no
+// credentials — to provoke one.
+//
+// BOTH dimensions are caller-controlled and both must be bounded. values is
+// r.Header.Values("Content-Type"), so a caller picks the length of each
+// declaration AND how many there are. Bounding only the length leaves the
+// amplification factor intact: 7200 lines of 128 bytes fits under Go's default
+// 1 MiB MaxHeaderBytes and still bought a 4.65 MB response. Each non-UTF-8 byte
+// costs 5 output bytes — %q renders \xNN, then JSON escapes the backslash.
+const (
+	maxEchoedContentType  = 128 // per declaration
+	maxEchoedDeclarations = 4   // how many declarations are named at all
+)
+
+// echoSafe bounds a declaration set for echoing to the caller or the log, in
+// both dimensions. The result is O(1) in size regardless of the request.
+func echoSafe(values []string) []string {
+	shown := min(len(values), maxEchoedDeclarations)
+	out := make([]string, 0, shown+1)
+	for _, v := range values[:shown] {
+		if len(v) > maxEchoedContentType {
+			v = v[:maxEchoedContentType] + "…(truncated)"
+		}
+		out = append(out, v)
+	}
+	if rest := len(values) - shown; rest > 0 {
+		out = append(out, fmt.Sprintf("…and %d more", rest))
+	}
+	return out
+}
+
 // contentTypeMessage is the 415 body. It says what was declared — all of it,
 // across header lines and joined values — and lists every media type ingest
 // reads, so a caller can fix the request from the response alone.
@@ -393,27 +426,6 @@ func emptyBodyMessage(format IngestFormat) string {
 // nothing resolved, so nothing disagreed. Alongside another line it can still
 // come out as a disagreement, which is equally honest. api.md buckets the
 // single-line case under "does not parse".
-// maxEchoedContentType bounds how much of a caller-supplied declaration is
-// echoed back. The 415 is decided BEFORE the body is read, so without a bound a
-// request needs no body at all to make us emit a large response: Go's default
-// MaxHeaderBytes is 1 MiB and %q expands each non-UTF-8 byte to \xNN, roughly a
-// 4x amplification, with the same value repeated into the WARN log. 128 bytes
-// is far longer than any real media type plus parameters, so a caller fixing a
-// genuine mistake still sees what they sent.
-const maxEchoedContentType = 128
-
-// echoSafe bounds each declaration for echoing back to the caller or the log.
-func echoSafe(values []string) []string {
-	out := make([]string, len(values))
-	for i, v := range values {
-		if len(v) > maxEchoedContentType {
-			v = v[:maxEchoedContentType] + "…(truncated)"
-		}
-		out[i] = v
-	}
-	return out
-}
-
 func contentTypeMessage(values []string, conflicting bool) string {
 	decls := echoSafe(values)
 	list := strings.Join(supportedContentTypes, ", ")
