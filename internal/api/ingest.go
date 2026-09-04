@@ -203,8 +203,11 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	format, pin, err := resolveContentType(values)
 	if err != nil {
 		conflicting := errors.Is(err, errConflictingContentType)
-		// pin comes from resolveContentType, so the log below and the response at
-		// the bottom name the same declaration by construction.
+		// ONE bounded set, read by both the log and the response — pin comes from
+		// resolveContentType, so neither the declaration named nor the set it sits
+		// in can differ between them. Two call sites passing matching arguments is
+		// what let them diverge before.
+		decls := echoSafe(values, pin)
 		if conflicting {
 			// Logged with the same bounded set the response shows, not just the
 			// first line: this is the one refusal whose cause is usually NOT the
@@ -212,7 +215,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			// would otherwise produce a wall of client-side 415s whose
 			// server-side record named only one of the declarations involved.
 			h.logger.WarnContext(ctx, "conflicting ingest content-type declarations",
-				"content_types", echoSafe(values, pin), "table", table)
+				"content_types", decls, "table", table)
 		} else {
 			// Logs the same bounded set the response shows, like the conflicting
 			// branch: logging only Header.Get would make the server-side record
@@ -220,9 +223,9 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			// ["", "text/csv"] the client sees `Content-Type "", "text/csv"`
 			// while Header.Get would have logged only content_type="".
 			h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
-				"content_types", echoSafe(values, pin), "table", table)
+				"content_types", decls, "table", table)
 		}
-		writeJSONError(w, http.StatusUnsupportedMediaType, contentTypeMessage(values, pin, conflicting))
+		writeJSONError(w, http.StatusUnsupportedMediaType, contentTypeMessage(decls, conflicting))
 		return
 	}
 

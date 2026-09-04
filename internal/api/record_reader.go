@@ -51,8 +51,12 @@ func (e *recordSyntaxError) Error() string { return e.msg }
 var errEmptyBody = errors.New("empty body")
 
 // errUnsupportedContentType is returned when the request declares no
-// Content-Type, one whose media type is not in the accepted list, or several
-// that AGREE on being unreadable. Declarations that disagree are
+// Content-Type, one whose media type is not in the accepted list, several that
+// AGREE on being unreadable, or a line carrying a comma that did not parse
+// cleanly. That last case is easy to miss because its media type may well BE in
+// the accepted list — `application/json; charset=utf-8, application/x-ndjson`
+// resolves to application/json and is still refused, since the comma may be a
+// second declaration joined on. Declarations that disagree are
 // errConflictingContentType. The handler maps both to a 415.
 var errUnsupportedContentType = errors.New("unsupported content type")
 
@@ -448,9 +452,9 @@ func echoSafe(values []string, pin int) []string {
 }
 
 // disagreeingIndex returns the index of the first declaration that resolves
-// differently from the first, or -1 when they all agree. Same predicate as
-// resolveContentType's, so the declaration this names is the one that caused
-// the refusal.
+// differently from the first, or -1 when they all agree. It IS the predicate
+// resolveContentType refuses on — that function calls this one — so the
+// declaration this names is the one that caused the refusal.
 func disagreeingIndex(values []string) int {
 	if len(values) == 0 {
 		return -1
@@ -484,8 +488,10 @@ func disagreeingIndex(values []string) int {
 // nothing resolved, so nothing disagreed. Alongside another line it can still
 // come out as a disagreement, which is equally honest. api.md buckets the
 // single-line case under "does not parse".
-func contentTypeMessage(values []string, pin int, conflicting bool) string {
-	decls := echoSafe(values, pin)
+// It takes the ALREADY-BOUNDED declarations rather than bounding them itself,
+// so the 415 body and the WARN log cannot name different sets: there is one
+// echoSafe call per request and both consumers read its result.
+func contentTypeMessage(decls []string, conflicting bool) string {
 	list := strings.Join(supportedContentTypes, ", ")
 	accepted := "ingest requires one of " + list
 
