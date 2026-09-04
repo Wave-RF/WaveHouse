@@ -264,14 +264,13 @@ func resolveContentType(values []string) (IngestFormat, error) {
 	if len(values) == 0 {
 		return FormatJSON, errUnsupportedContentType
 	}
-	first, firstErr := ingestFormatOne(values[0])
-	for _, v := range values[1:] {
-		f, err := ingestFormatOne(v)
-		if f != first || (err == nil) != (firstErr == nil) {
-			return FormatJSON, errConflictingContentType
-		}
+	// One source for the disagreement rule. Writing the predicate here AND in
+	// disagreeingIndex left their equivalence resting on a comment, which is the
+	// drift this file has repeatedly paid for.
+	if disagreeingIndex(values) >= 0 {
+		return FormatJSON, errConflictingContentType
 	}
-	return first, firstErr
+	return ingestFormatOne(values[0])
 }
 
 // ingestFormatOne resolves ONE header line, parsed per RFC 9110 §8.3. Only the

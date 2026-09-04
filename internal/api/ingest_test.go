@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -2343,4 +2344,36 @@ func TestIngest_ConflictMessageNamesADifferentSpelling(t *testing.T) {
 	assert.Contains(t, jsonErrorMessage(t, w), `"application/x-ndjson"`,
 		"four agreeing spellings must not crowd out the declaration that caused the refusal")
 	assert.Empty(t, pub.Messages)
+}
+
+// TestIngest_ConflictLogNamesTheDisagreement: the WARN log must name the same
+// bounded set as the 415 body, pin included.
+//
+// This drifted invisibly once already: the response passed the pinned echo while
+// the log passed -1, so the operator debugging a header-duplicating proxy — who
+// never sees the client's 415 body — got the version with the disagreeing
+// declaration buried. Nothing covered log CONTENT, because NopLogger discards.
+func TestIngest_ConflictLogNamesTheDisagreement(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	h := NewIngestHandler(testRegistry(t), &testutil.MockPublisher{},
+		slog.New(slog.NewJSONHandler(&buf, nil)))
+
+	req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
+	for _, ct := range []string{
+		"application/json",
+		"application/json; charset=utf-8",
+		"application/json; charset=us-ascii",
+		"application/json; v=1",
+		"application/x-ndjson", // the one that disagrees
+	} {
+		req.Header.Add("Content-Type", ct)
+	}
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+	assert.Contains(t, buf.String(), "application/x-ndjson",
+		"the log must name the declaration that caused the refusal, like the response does")
+	assert.Contains(t, jsonErrorMessage(t, w), `"application/x-ndjson"`)
 }
