@@ -492,12 +492,10 @@ func (h *Hub) SubscribeSchemaFrame(table, role string, sub *Subscriber) (Frame, 
 			return Frame{}, false
 		}
 	}
-	// Every declared column, matching what an event's envelope carries.
-	names := make([]string, 0, len(schema.Columns))
-	for _, c := range schema.Columns {
-		names = append(names, c.Name)
-	}
-	_, projected := projectIndices(names, perms)
+	// The insertable subset, matching what an event's envelope carries — a
+	// computed column never appears in a published row, so announcing it here
+	// would guarantee a drift re-announcement on the very first event.
+	_, projected := projectIndices(schema.InsertableColumnNames(), perms)
 	sig := schemaSignature(table, projected)
 	if !sub.needsSchema(sig) {
 		return Frame{}, false // already announced (a live event beat us here)

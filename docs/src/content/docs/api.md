@@ -676,7 +676,7 @@ Returns the schema for a specific table.
 }
 ```
 
-Per-column fields: `name`, `type` and `is_nullable` describe the column; `position` is its 1-based ordinal in the table's declaration order (always present, and the order `columns` itself is in); `has_default` says whether it declares any default at all, while `default_expression` says what that default is, omitted when the column declares none. The table's `CREATE TABLE` statement is captured on the same refresh but is deliberately **not** exposed here — for a table backed by an external engine it renders that engine's wiring — endpoint, bucket/host, database, username, access key id. (ClickHouse masks the password as `[HIDDEN]` from ~23.9; the topology is what is withheld here.)
+Per-column fields: `name`, `type` and `is_nullable` describe the column; `position` is its 1-based ordinal in the table's declaration order (always present, and the order `columns` itself is in); `has_default` says whether it declares any default at all, while `default_kind` (`DEFAULT`, `MATERIALIZED`, `ALIAS`, `EPHEMERAL`) and `default_expression` say which and what — both omitted when the column declares none. A `MATERIALIZED` or `ALIAS` column is computed and **not** insertable, so it never appears in an ingest envelope or an SSE `schema` frame, though it is still reported here and is still queryable. The table's `CREATE TABLE` statement is captured on the same refresh but is deliberately **not** exposed here — for a table backed by an external engine it renders that engine's wiring — endpoint, bucket/host, database, username, access key id. (ClickHouse masks the password as `[HIDDEN]` from ~23.9; the topology is what is withheld here.)
 
 **Error responses:**
 
@@ -811,7 +811,7 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 | `scope` | string | Reserved; currently always empty. |
 | `received_timestamp` | string | RFC 3339 nano timestamp when WaveHouse received the event. |
 | `format` | string | Row format. Always `JSONCompactEachRow` today; stated on the wire so a reader can tell an envelope it understands from one it doesn't. |
-| `columns` | string[] | Column names in the table's declaration order — what each position in `row` means. |
+| `columns` | string[] | The table's **insertable** column names, in declaration order — what each position in `row` means. A `MATERIALIZED` or `ALIAS` column is computed by ClickHouse and cannot be named in an `INSERT`, so it never appears here. |
 | `row` | array | One `JSONCompactEachRow` line: one value per entry in `columns`, in that order. A column the request body omitted is `null` here, and the insert turns it back into the column's default. Parseable `DateTime`/`DateTime64` values are rewritten to canonical RFC 3339 UTC (see [timestamp canonicalization](#timestamp-canonicalization)); other values as originally sent. |
 
 `columns` and `row` are only meaningful together: a reader that cannot pair them — a length mismatch, an undecodable row — has no way to map a value to a column, and both the batch consumer and the SSE fan-out drop such an envelope rather than guess.

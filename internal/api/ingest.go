@@ -582,7 +582,8 @@ func (h *IngestHandler) processRecord(
 	// column names ride alongside in the envelope rather than in the row, so a
 	// batch of rows for one table carries the names once — and the reader can
 	// tell a schema change mid-stream from a reordering.
-	row, err := ingest.EncodeCompactRow(schema.Columns, data)
+	cols := schema.InsertableColumns()
+	row, err := ingest.EncodeCompactRow(cols, data)
 	if err != nil {
 		h.logger.ErrorContext(ctx, "failed to encode compact row", "error", err, "table", table)
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
@@ -593,7 +594,7 @@ func (h *IngestHandler) processRecord(
 		Scope:             scope,
 		ReceivedTimestamp: now.Format(time.RFC3339Nano),
 		Format:            ingest.FormatJSONCompactEachRow,
-		Columns:           schema.ColumnNames(),
+		Columns:           schema.InsertableColumnNames(),
 		Row:               row,
 	}
 

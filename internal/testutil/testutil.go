@@ -31,8 +31,8 @@ func NopLogger() *slog.Logger {
 // timestamp column specs are precomputed exactly as in production.
 //
 // The registry holds schemas rebuilt from those rows (Name, Type, HasDefault,
-// DefaultExpression, Position, DDL; IsNullable derived from the type string),
-// not the caller's structs.
+// DefaultKind, DefaultExpression, Position, DDL; IsNullable derived from the
+// type string), not the caller's structs.
 func NewTestSchemaRegistry(t testing.TB, tables []*discovery.TableSchema) *discovery.SchemaRegistry {
 	t.Helper()
 	reg := discovery.NewSchemaRegistry(&schemaConn{tables: tables}, func() string { return "test" }, func() time.Duration { return time.Hour }, NopLogger())
@@ -77,8 +77,11 @@ func (c *schemaConn) Query(_ context.Context, q string, _ ...any) (driver.Rows, 
 	r := &columnRows{}
 	for _, t := range c.tables {
 		for i, col := range t.Columns {
-			kind := ""
-			if col.HasDefault {
+			// An explicit DefaultKind wins, so a fixture can declare a
+			// MATERIALIZED/ALIAS/EPHEMERAL column; HasDefault alone still means
+			// a plain DEFAULT, as it always has.
+			kind := col.DefaultKind
+			if kind == "" && col.HasDefault {
 				kind = "DEFAULT"
 			}
 			r.rows = append(r.rows, columnRow{
