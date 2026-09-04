@@ -319,7 +319,7 @@ Examples for a `DateTime64(3, 'America/New_York')` column: `"2026-06-21 00:00:00
 A **JSON array** of objects (`[{…}, {…}]`) or an **NDJSON** body (`Content-Type: application/x-ndjson`, one JSON object per line) ingests a batch in a single request. Each record is validated, authorized, deduplicated, and published independently, so **one malformed or rejected record never blocks the rest of the batch**. (The SDK's `insert([...])` array helper uses the NDJSON form automatically; both forms return the same response.)
 
 - **JSON array** — the most convenient form from most HTTP clients. A structural JSON syntax error fails the whole request (`400`), but a wrong-typed element (a non-object) is reported per-record like any other rejection. An explicit empty array (`[]`) is a valid, record-less batch (`200`, `total: 0`).
-- **NDJSON** — one record per line. Its advantages are per-record error reporting and cheap client-side generation, not a larger ceiling: the body cap applies to it exactly as to a JSON array. Blank lines are skipped, and a single malformed *line* is reported and skipped (the newline reframes the next record).
+- **NDJSON** — one record per line. Its advantages are tolerance of a malformed record and cheap client-side generation, not a larger ceiling: the body cap applies to it exactly as to a JSON array. Blank lines are skipped, and a single malformed *line* is reported and skipped (the newline reframes the next record) — where a structural syntax error anywhere in a JSON array fails the whole request. Both forms report a wrong-typed record per-record.
 
 **Request (JSON array):**
 
@@ -380,7 +380,7 @@ A `200` is returned whenever the body was read and the records were processed �
 | 503 | `{"error":"service unavailable"}` | NATS JetStream full (backpressure) mid-batch; includes `Retry-After: 30` |
 
 :::caution[At-least-once on retry]
-A batch aborted partway (a `503`/`500`, or a JSON-array syntax error, after some leading records were already published) re-publishes those leading records when the whole batch is retried. A `413` is **not** one of these: the body is read in full before any record is processed, so an over-cap request publishes nothing and is safe to retry once split. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
+A batch aborted partway (a `503`/`500`, a JSON-array syntax error, or an NDJSON line over the 10 MiB line bound, after some leading records were already published) re-publishes those leading records when the whole batch is retried. A whole-body read failure is **not** one of these: a `413`, or the `400 invalid request body` of an upload cut off in transit, is decided before any record is processed, so nothing is published — safe to retry, once split for a `413`. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
 :::
 
 **curl example (JSON array):**

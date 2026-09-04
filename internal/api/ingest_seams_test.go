@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -138,6 +139,46 @@ func TestIngest_InsertCheckerSeam_IsUsed(t *testing.T) {
 			}
 			w := httptest.NewRecorder()
 			h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a", "org_id": value}))
+			assert.Equal(t, tt.want, w.Code, "body=%s", w.Body.String())
+			if tt.want == http.StatusForbidden {
+				testutil.AssertJSONErrorResponse(t, w)
+			}
+		})
+	}
+}
+
+// TestIngest_InsertCheckerSeam_InSet_IsUsed covers the _in arm, which reaches a
+// DIFFERENT seam method (InSet, not Matches). Without this, replacing
+// h.checker().InSet with the canonical valueInSet leaves the whole suite green —
+// the existing _in tests exercise that arm only through the default checker. A
+// swapped-in type-aware checker would then take effect for _eq and silently not
+// for _in, inside insert-check authorization.
+func TestIngest_InsertCheckerSeam_InSet_IsUsed(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name  string
+		inSet bool
+		value string
+		want  int
+	}{
+		{"seam admits a value the canonical comparison would reject", true, "org-z", http.StatusOK},
+		{"seam rejects a value the canonical comparison would admit", false, "org-b", http.StatusForbidden},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h.PolicySource = checkInStore()
+			h.Checker = alwaysChecker{inSet: tt.inSet}
+
+			req := ingestRequest(t, "clicks", map[string]any{"page": "/a", "org_id": tt.value})
+			ctx := auth.WithRole(req.Context(), "user")
+			ctx = auth.WithClaims(ctx, jwt.MapClaims{"orgs": []any{"org-a", "org-b"}})
+			req = req.WithContext(ctx)
+
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
 			assert.Equal(t, tt.want, w.Code, "body=%s", w.Body.String())
 			if tt.want == http.StatusForbidden {
 				testutil.AssertJSONErrorResponse(t, w)

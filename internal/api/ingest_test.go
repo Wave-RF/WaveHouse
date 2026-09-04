@@ -1985,6 +1985,14 @@ func TestIngest_BodyCap_413(t *testing.T) {
 		// them.
 		{name: "json array between elements", ct: "application/json", body: "[" + elem + "," + elem + "]", cap: int64(1 + len(elem))},
 		{name: "ndjson", ct: "application/x-ndjson", body: big, cap: 50},
+		// The other half of the cap change, and the only case here that
+		// distinguishes this tree from main: a COMPLETE first object followed by
+		// an oversized tail. Reading the body live, the decoder finished that
+		// object, published it and answered 200, silently discarding the rest;
+		// buffering first makes it a 413 with nothing published. Every case above
+		// puts the over-cap bytes INSIDE the first value, so all of them answer
+		// 413 on main too. api.md states this contract explicitly.
+		{name: "single object with oversized tail", ct: "application/json", body: elem + strings.Repeat("x", 500), cap: int64(len(elem) + 5)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -101,8 +101,10 @@ export class TableRef<Row = Record<string, unknown>> {
    * rest of the batch — per-record outcomes come back in the result
    * (`failed` / `results`), and `ok` is true only when every record succeeded.
    *
-   * The array path sends one request regardless of size; bounded-concurrency
-   * chunking of very large arrays is tracked separately (#196). For NDJSON you
+   * The array path sends one request regardless of size, so it is bound by the
+   * server's 16 MiB request-body cap (an over-cap array is a `413` with nothing
+   * ingested); bounded-concurrency chunking of very large arrays is tracked
+   * separately (#196). For NDJSON you
    * already have (a file or stream), use {@link insertNDJSON}.
    */
   async insert(
