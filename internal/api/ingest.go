@@ -210,7 +210,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			// otherwise produce a wall of client-side 415s whose server-side
 			// record named only one of the two declarations involved.
 			h.logger.WarnContext(ctx, "conflicting ingest content-type declarations",
-				"content_types", values, "table", table)
+				"content_types", echoSafe(values), "table", table)
 		} else {
 			// Logs the whole set, like the conflicting branch: the response body
 			// names every header line, so logging only Header.Get would make the
@@ -218,7 +218,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			// ["", "text/csv"] the client sees `Content-Type "", "text/csv"`
 			// while Header.Get would have logged only content_type="".
 			h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
-				"content_types", values, "table", table)
+				"content_types", echoSafe(values), "table", table)
 		}
 		writeJSONError(w, http.StatusUnsupportedMediaType, contentTypeMessage(values, conflicting))
 		return

@@ -393,8 +393,29 @@ func emptyBodyMessage(format IngestFormat) string {
 // nothing resolved, so nothing disagreed. Alongside another line it can still
 // come out as a disagreement, which is equally honest. api.md buckets the
 // single-line case under "does not parse".
+// maxEchoedContentType bounds how much of a caller-supplied declaration is
+// echoed back. The 415 is decided BEFORE the body is read, so without a bound a
+// request needs no body at all to make us emit a large response: Go's default
+// MaxHeaderBytes is 1 MiB and %q expands each non-UTF-8 byte to \xNN, roughly a
+// 4x amplification, with the same value repeated into the WARN log. 128 bytes
+// is far longer than any real media type plus parameters, so a caller fixing a
+// genuine mistake still sees what they sent.
+const maxEchoedContentType = 128
+
+// echoSafe bounds each declaration for echoing back to the caller or the log.
+func echoSafe(values []string) []string {
+	out := make([]string, len(values))
+	for i, v := range values {
+		if len(v) > maxEchoedContentType {
+			v = v[:maxEchoedContentType] + "…(truncated)"
+		}
+		out[i] = v
+	}
+	return out
+}
+
 func contentTypeMessage(values []string, conflicting bool) string {
-	decls := values
+	decls := echoSafe(values)
 	list := strings.Join(supportedContentTypes, ", ")
 	accepted := "ingest requires one of " + list
 

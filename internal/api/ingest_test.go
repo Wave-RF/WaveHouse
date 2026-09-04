@@ -2206,3 +2206,28 @@ func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, abort.Status)
 	assert.Empty(t, abort.RetryAfter, "not a transient condition — retrying cannot help")
 }
+
+// TestIngest_ContentTypeEchoIsBounded: the 415 body and the WARN log echo what
+// the caller declared, and the 415 is decided BEFORE the body is read — so
+// without a bound a request needs no body, and no credentials under the shipped
+// compose policy, to make the server emit a large response. Go's default
+// MaxHeaderBytes is 1 MiB and %q expands a non-UTF-8 byte to \xNN, so the
+// unbounded echo was roughly a 4x amplification.
+func TestIngest_ContentTypeEchoIsBounded(t *testing.T) {
+	t.Parallel()
+	// Non-UTF-8 bytes, which %q expands 4x — the worst case for the response.
+	huge := "application/" + strings.Repeat("\xff", 8000)
+
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	w := httptest.NewRecorder()
+	h.Handle(w, rawIngestRequest(t, "clicks", huge, `{"page":"/a"}`))
+
+	require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+	testutil.AssertJSONErrorResponse(t, w)
+	assert.Less(t, w.Body.Len(), 1024,
+		"the 415 body must not scale with the declared Content-Type")
+	assert.Contains(t, jsonErrorMessage(t, w), "truncated",
+		"and it should say so rather than silently cutting")
+	assert.Empty(t, pub.Messages)
+}
