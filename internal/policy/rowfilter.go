@@ -23,7 +23,7 @@ func (p *ResolvedPermissions) HasRowFilter() bool {
 	if p == nil {
 		return false
 	}
-	if !p.Allowed || p.Select.unresolved {
+	if !p.Allowed || p.Select == nil {
 		return true
 	}
 	return len(p.Select.rowFilter) > 0
@@ -131,7 +131,7 @@ func (p *ResolvedPermissions) RowVisible(row map[string]any, cols map[string]Col
 	// IsColumnAllowed, so a denied receiver never reads as "no filter ⇒ all visible".
 	// A grant resolved for INSERT is refused here for the same reason: its empty
 	// read side would otherwise read as "no filter", admitting every row.
-	if !p.Allowed || p.Select.unresolved {
+	if !p.Allowed || p.Select == nil {
 		return false
 	}
 	for _, pred := range p.Select.rowFilter {

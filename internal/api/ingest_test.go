@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
@@ -2157,4 +2158,51 @@ func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
 	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"event_id": "e1", "page": "/home"}))
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Len(t, pub.Messages, 1, "published without idempotency, not 500")
+}
+
+// TestProcessRecord_UnresolvedInsertSideAborts pins two things that are prose
+// everywhere else in this file.
+//
+// First, that an insert grant resolved for the OTHER operation aborts the whole
+// request rather than rejecting per record. perms is resolved once per request,
+// so the condition is true for every record or none; as a reject, a 10k batch
+// would report 10k independent permission failures for one mis-wired grant.
+//
+// Second, the reachability claim at the CheckClauses call site. The column loop
+// above it iterates the RECORD's columns, so it runs zero times for `{}` — and
+// discovery.Validate accepts `{}` here because every column is nullable or
+// defaulted. I previously asserted this path was unreachable, having tested only
+// against a schema with a required column; it is not.
+func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
+	t.Parallel()
+	schema := &discovery.TableSchema{
+		Name: "loose",
+		Columns: []discovery.Column{
+			{Name: "a", Type: "Nullable(String)", IsNullable: true},
+			{Name: "b", Type: "String", HasDefault: true},
+		},
+	}
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{schema})
+	h := NewIngestHandler(reg, &testutil.MockPublisher{}, testutil.NopLogger())
+
+	// A grant resolved for SELECT, reaching the insert path.
+	selectResolved := policy.Evaluate(&policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"loose": {"viewer": {Select: &policy.SelectPermissions{}}},
+		},
+	}, "viewer", "loose", "select", nil)
+	require.True(t, selectResolved.Allowed)
+
+	// An empty record really does clear validation and the column loop.
+	require.NoError(t, discovery.Validate(schema, map[string]any{}),
+		"all-nullable/defaulted columns accept an empty record — this is what makes the read reachable")
+
+	dup, reject, abort := h.processRecord(
+		context.Background(), "loose", "", schema, selectResolved, "viewer", map[string]any{}, time.Now())
+
+	assert.False(t, dup)
+	assert.Nil(t, reject, "a request-scoped condition must not be reported per record")
+	require.NotNil(t, abort, "an unresolved insert side must abort the request")
+	assert.Equal(t, http.StatusForbidden, abort.Status)
+	assert.Empty(t, abort.RetryAfter, "not a transient condition — retrying cannot help")
 }
