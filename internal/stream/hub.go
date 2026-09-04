@@ -53,6 +53,8 @@ type RowEvaluator interface {
 // package's in-memory row-filter evaluation.
 type policyRowEvaluator struct{}
 
+// Visible delegates to the policy package's in-memory row-filter evaluation,
+// the same resolution the query path renders to SQL (#319).
 func (policyRowEvaluator) Visible(perms *policy.ResolvedPermissions, row map[string]any, specs map[string]policy.ColumnSpec) bool {
 	return perms.RowVisible(row, specs)
 }

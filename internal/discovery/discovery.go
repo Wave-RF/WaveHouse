@@ -118,6 +118,8 @@ func (ts *TableSchema) cacheInsertable() {
 	ts.insertableNames = columnNames(ts.insertable)
 }
 
+// computeInsertable filters to the columns a record may carry, preserving
+// declaration order — the positional contract the wire envelope depends on.
 func computeInsertable(cols []Column) []Column {
 	out := make([]Column, 0, len(cols))
 	for _, c := range cols {
@@ -132,6 +134,8 @@ func computeInsertable(cols []Column) []Column {
 	return out[:len(out):len(out)]
 }
 
+// columnNames projects a column slice to its names, shared by ColumnNames and
+// InsertableColumnNames so the two cannot drift.
 func columnNames(cols []Column) []string {
 	names := make([]string, 0, len(cols))
 	for _, c := range cols {

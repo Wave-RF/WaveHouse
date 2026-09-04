@@ -426,19 +426,6 @@ func writeMaxBytesError(w http.ResponseWriter, err error, limit int64) bool {
 	return false
 }
 
-// processRecord runs the per-record pipeline shared by the single-object and
-// batch ingest paths: schema validation → column/check permission enforcement
-// (with claim-derived auto-injection) → optional dedup → publish. The
-// table-level insert grant is checked once by the caller before any record is
-// processed, so perms here drives only the per-column and per-row checks (it is
-// nil when no policy store is configured). data may be mutated to auto-inject
-// check-clause values.
-//
-// Exactly one of the outcomes is meaningful per call:
-//   - duplicate true: the record was skipped by dedup (reject/abort nil).
-//   - reject non-nil: the record is bad; the rest of a batch may still proceed.
-//   - abort non-nil: a whole-request failure; the caller stops and returns it.
-//
 // policyCheckGuard evaluates, ONCE per request, whether the role's insert
 // `check` clauses name only columns a published row can actually carry, and
 // returns the rejection every record should get when they do not.
@@ -503,6 +490,18 @@ func (h *IngestHandler) policyCheckGuard(
 	return nil
 }
 
+// processRecord runs the per-record pipeline shared by the single-object and
+// batch ingest paths: schema validation → column/check permission enforcement
+// (with claim-derived auto-injection) → optional dedup → publish. The
+// table-level insert grant is checked once by the caller before any record is
+// processed, so perms here drives only the per-column and per-row checks (it is
+// nil when no policy store is configured). data may be mutated to auto-inject
+// check-clause values.
+//
+// Exactly one of the outcomes is meaningful per call:
+//   - duplicate true: the record was skipped by dedup (reject/abort nil).
+//   - reject non-nil: the record is bad; the rest of a batch may still proceed.
+//   - abort non-nil: a whole-request failure; the caller stops and returns it.
 func (h *IngestHandler) processRecord(
 	ctx context.Context,
 	table, scope string,

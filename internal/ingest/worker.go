@@ -520,6 +520,9 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 	}
 }
 
+// insertToClickHouse writes one group as a single INSERT naming columns
+// explicitly, so the positional rows land in the right slots. Callers group by
+// column list first: a batch spanning two lists cannot share one statement.
 func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg) error {
 	var buf bytes.Buffer
 	for _, m := range msgs {
@@ -660,6 +663,8 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m jetstream.Msg, tableN
 	w.ackWg.Go(func() { _ = m.DoubleAck(ctx) })
 }
 
+// sendToDLQ parks a row that failed its own isolated INSERT. Distinct from
+// rejectPoison, which parks an envelope the worker could not read at all.
 func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parsedMsg, errMsg string) {
 	w.parkOnDLQ(ctx, pm.natsMsg, pm.natsSafeSubject, tableName, errMsg)
 }
