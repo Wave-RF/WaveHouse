@@ -205,7 +205,9 @@ Client POST /v1/ingest?table={table}
 
 Ingest worker pipeline (StartIngestWorker):
   ← JetStream pull consumer (buffer-consumer) on ingest.>
-  → Parse the event envelope (a malformed envelope is the only poison pill: it's acked-and-dropped)
+  → Parse the event envelope (an envelope the worker cannot read — malformed JSON,
+    an unknown or absent format, columns and row that don't pair — is parked on the
+    DLQ, or acked-and-dropped + counted where the DLQ is off for the table)
   → Batch events per table, bulk INSERT to ClickHouse
     (INSERTs pin date_time_input_format=best_effort — the server default since
     ClickHouse 26.5; see /ingest-pipeline for the basic-vs-best_effort divergence)
