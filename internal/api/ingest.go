@@ -265,10 +265,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if batch {
-		h.handleBatch(ctx, w, rr, reqCap, table, scope, schema, perms, role, now)
+		h.handleBatch(ctx, w, rr, reqCap, table, scope, schema, perms, role, now, h.policyCheckGuard(ctx, table, role, schema, perms))
 		return
 	}
-	h.handleSingle(ctx, w, rr, reqCap, table, scope, schema, perms, role, now)
+	h.handleSingle(ctx, w, rr, reqCap, table, scope, schema, perms, role, now, h.policyCheckGuard(ctx, table, role, schema, perms))
 }
 
 // handleSingle ingests a lone flat JSON object and preserves the GA response
@@ -284,6 +284,7 @@ func (h *IngestHandler) handleSingle(
 	perms *policy.ResolvedPermissions,
 	role string,
 	now time.Time,
+	checkGuard *recordReject,
 ) {
 	data, err := rr.Next()
 	if err != nil {
@@ -298,7 +299,7 @@ func (h *IngestHandler) handleSingle(
 		return
 	}
 
-	dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now)
+	dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now, checkGuard)
 	if abort != nil {
 		writeAbort(w, abort)
 		return
@@ -335,6 +336,7 @@ func (h *IngestHandler) handleBatch(
 	perms *policy.ResolvedPermissions,
 	role string,
 	now time.Time,
+	checkGuard *recordReject,
 ) {
 	result := batchResult{Results: []recordResult{}}
 
@@ -367,7 +369,7 @@ func (h *IngestHandler) handleBatch(
 
 		result.Total++
 		idx := result.Total
-		dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now)
+		dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now, checkGuard)
 		if abort != nil {
 			// Whole-request failure: surface the status rather than recording a
 			// request-scoped condition as per-record loss (see requestAbort).
@@ -436,6 +438,71 @@ func writeMaxBytesError(w http.ResponseWriter, err error, limit int64) bool {
 //   - duplicate true: the record was skipped by dedup (reject/abort nil).
 //   - reject non-nil: the record is bad; the rest of a batch may still proceed.
 //   - abort non-nil: a whole-request failure; the caller stops and returns it.
+//
+// policyCheckGuard evaluates, ONCE per request, whether the role's insert
+// `check` clauses name only columns a published row can actually carry, and
+// returns the rejection every record should get when they do not.
+//
+// A check the row cannot carry can never be enforced: the row holds one slot
+// per INSERTABLE column, by position, so an auto-injected value for anything
+// outside that set is dropped on the way out and the record inserts WITHOUT the
+// value the policy requires — answering 200. Policy validation cannot catch
+// this; it never sees the ClickHouse schema. Three ways in, all refused.
+//
+// Evaluated here rather than per record because the condition is a property of
+// (table, role, policy) and is identical for every record in the request — the
+// same reasoning as the !resolved abort in processRecord. Doing it per record
+// would emit one ERROR line per record for a single mis-wired policy, which on
+// a 16 MiB body of small records is ~1.2M lines. The reject is still returned
+// per record, so a batch reports each record's own cause: one that SUPPLIES the
+// column fails schema validation first, with a different message.
+func (h *IngestHandler) policyCheckGuard(
+	ctx context.Context,
+	table, role string,
+	schema *discovery.TableSchema,
+	perms *policy.ResolvedPermissions,
+) *recordReject {
+	checks, resolved := perms.CheckClauses()
+	if !resolved {
+		return nil // the !resolved abort in processRecord owns this case
+	}
+	for col := range checks {
+		schemaCol, known := schema.Lookup(col)
+		switch {
+		case !known:
+			h.logger.ErrorContext(ctx, "policy check references a column the table does not have",
+				"column", col, "table", table, "role", role)
+			return &recordReject{
+				Status:  http.StatusForbidden,
+				Message: fmt.Sprintf("policy check references column %q, which table %q does not have", col, table),
+			}
+		case !schemaCol.IsInsertable():
+			h.logger.ErrorContext(ctx, "policy check references a column no record may write",
+				"column", col, "table", table, "role", role, "default_kind", schemaCol.DefaultKind)
+			return &recordReject{
+				Status: http.StatusForbidden,
+				Message: fmt.Sprintf("policy check references column %q of table %q, which is %s and cannot be inserted",
+					col, table, strings.ToLower(schemaCol.DefaultKind)),
+			}
+		case schemaCol.DefaultKind == "EPHEMERAL":
+			// Insertable, so the row DOES carry a slot for it — but ClickHouse
+			// never stores an ephemeral column and no query can read one back, so
+			// the constraint is unverifiable the moment the insert returns.
+			// Accepting a check that provably does nothing is worse than refusing
+			// it. An operator wanting this should check the DEFAULT column derived
+			// from the ephemeral one, which is stored and therefore enforceable.
+			h.logger.ErrorContext(ctx, "policy check references an ephemeral column, which is never stored",
+				"column", col, "table", table, "role", role)
+			return &recordReject{
+				Status: http.StatusForbidden,
+				Message: fmt.Sprintf("policy check references column %q of table %q, which is ephemeral and is never stored",
+					col, table),
+			}
+		}
+	}
+	return nil
+}
+
 func (h *IngestHandler) processRecord(
 	ctx context.Context,
 	table, scope string,
@@ -444,6 +511,7 @@ func (h *IngestHandler) processRecord(
 	role string,
 	data map[string]any,
 	now time.Time,
+	checkGuard *recordReject,
 ) (duplicate bool, reject *recordReject, abort *requestAbort) {
 	if err := h.validator().Validate(schema, data); err != nil {
 		h.logger.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
@@ -485,48 +553,16 @@ func (h *IngestHandler) processRecord(
 			}
 		}
 		for col, requiredVal := range checks {
-			// A check the published row cannot carry can never be enforced: the row
-			// holds one slot per INSERTABLE column, by position, so an auto-injected
-			// value for anything outside that set is dropped on the way out and the
-			// record inserts WITHOUT the value the policy requires — answering 200.
-			// Policy validation cannot catch this: it never sees the ClickHouse
-			// schema. Three ways in, all refused here.
-			//
-			// The supplied-value case never reaches this loop — schema validation
-			// above rejects both an unknown column and a computed one — so in
-			// practice this fires on the omitted-and-auto-injected path. The check
-			// sits at the top of the loop anyway, so it does not depend on that
-			// ordering holding.
-			schemaCol, known := schema.Lookup(col)
-			switch {
-			case !known:
-				h.logger.ErrorContext(ctx, "policy check references a column the table does not have",
-					"column", col, "table", table, "role", role)
-				return false, &recordReject{
-					Status:  http.StatusForbidden,
-					Message: fmt.Sprintf("policy check references column %q, which table %q does not have", col, table),
-				}, nil
-			case !schemaCol.IsInsertable():
-				h.logger.ErrorContext(ctx, "policy check references a column no record may write",
-					"column", col, "table", table, "role", role, "default_kind", schemaCol.DefaultKind)
-				return false, &recordReject{
-					Status: http.StatusForbidden,
-					Message: fmt.Sprintf("policy check references column %q of table %q, which is %s and cannot be inserted",
-						col, table, strings.ToLower(schemaCol.DefaultKind)),
-				}, nil
-			case schemaCol.DefaultKind == "EPHEMERAL":
-				// Insertable, so the row DOES carry a slot for it — but ClickHouse
-				// never stores an ephemeral column and no query can read it back, so
-				// the constraint is unverifiable the moment the insert returns.
-				// Accepting a check that provably does nothing is worse than
-				// refusing it.
-				h.logger.ErrorContext(ctx, "policy check references an ephemeral column, which is never stored",
-					"column", col, "table", table, "role", role)
-				return false, &recordReject{
-					Status: http.StatusForbidden,
-					Message: fmt.Sprintf("policy check references column %q of table %q, which is ephemeral and is never stored",
-						col, table),
-				}, nil
+			// The guard for this is evaluated ONCE per request in
+			// policyCheckGuard (see Handle) and only consulted here: the condition
+			// is a property of (table, role, policy), identical for every record,
+			// so evaluating it per record would emit one ERROR line per record for
+			// a single mis-wired policy — the same amplification the !resolved
+			// abort above exists to avoid. The REJECT is still per record, because
+			// a record that supplies the column fails schema validation first with
+			// a different message, and a batch should report each its own cause.
+			if checkGuard != nil {
+				return false, checkGuard, nil
 			}
 			// A []any value is an _in check: the inserted value must be present and
 			// one of the allowed set. Unlike the scalar _eq case there is no single

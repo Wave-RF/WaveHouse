@@ -22,7 +22,7 @@ import (
 // not a wrong number in a JSON response.
 func TestDiscovery_MetadataAgainstRealClickHouse(t *testing.T) {
 	table := createTable(t,
-		"id UInt64, page String, note String DEFAULT 'unset', day Date MATERIALIZED toDate(now())",
+		"id UInt64, page String, note String DEFAULT 'unset', day Date MATERIALIZED toDate(now()), raw String EPHEMERAL ''",
 		"ORDER BY id",
 	)
 
@@ -56,6 +56,22 @@ func TestDiscovery_MetadataAgainstRealClickHouse(t *testing.T) {
 	// HasDefault is load-bearing — validation.go uses it to decide "not required".
 	assert.True(t, byName["day"].HasDefault, "MATERIALIZED is a non-empty default_kind")
 	assert.NotEmpty(t, byName["day"].DefaultExpression, "and carries its expression")
+
+	// The default_kind STRINGS themselves, verbatim from the server. IsInsertable
+	// and the policy-check guard both compare against these literals, and only
+	// two of the three fail loudly when wrong: a wrong "MATERIALIZED" or "ALIAS"
+	// puts the column in the INSERT list and ClickHouse rejects the batch, which
+	// TestIngest_ComputedColumns_FlowToClickHouse catches. A wrong "EPHEMERAL"
+	// fails SILENTLY — IsInsertable still returns true through its default arm,
+	// ingest keeps working, and the only symptom is that the guard's ephemeral
+	// branch never fires, quietly restoring the unenforceable-check 200 that
+	// branch exists to refuse. So pin all three here, against the real server.
+	assert.Equal(t, "MATERIALIZED", byName["day"].DefaultKind)
+	assert.Equal(t, "EPHEMERAL", byName["raw"].DefaultKind)
+	assert.Equal(t, "DEFAULT", byName["note"].DefaultKind)
+	assert.Empty(t, byName["id"].DefaultKind, "a plain column declares no default_kind")
+	assert.False(t, byName["day"].IsInsertable(), "MATERIALIZED cannot be named in an INSERT")
+	assert.True(t, byName["raw"].IsInsertable(), "EPHEMERAL is insert-only, so it CAN be named")
 
 	// DDL is captured, and never serialized.
 	assert.Contains(t, ts.DDL, "CREATE TABLE", "create_table_query is attached")

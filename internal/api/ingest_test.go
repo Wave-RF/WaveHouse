@@ -2310,7 +2310,7 @@ func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
 		"all-nullable/defaulted columns accept an empty record — this is what makes the read reachable")
 
 	dup, reject, abort := h.processRecord(
-		context.Background(), "loose", "", schema, selectResolved, "viewer", map[string]any{}, time.Now())
+		context.Background(), "loose", "", schema, selectResolved, "viewer", map[string]any{}, time.Now(), nil)
 
 	assert.False(t, dup)
 	assert.Nil(t, reject, "a request-scoped condition must not be reported per record")
