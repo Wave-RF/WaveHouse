@@ -406,10 +406,16 @@ const (
 )
 
 // echoSafe bounds a declaration set for echoing to the caller or the log, in
-// both dimensions, keeping the first maxEchoedDeclarations distinct values so a
-// disagreeing declaration is never hidden behind its agreeing neighbours. The
+// both dimensions. It keeps the first maxEchoedDeclarations DISTINCT values,
+// and always keeps values[pin] if pin is in range — pass -1 for none. The
 // result is O(1) in size regardless of the request.
-func echoSafe(values []string) []string {
+//
+// The pin exists because distinctness is not enough. Deduping by raw header
+// line lets four distinct but AGREEING spellings — `application/json` beside
+// `application/json; charset=utf-8` — fill every slot and bury the declaration
+// that actually disagreed, which is the exact failure the conflicting wording
+// exists to prevent, and the shape a header-duplicating proxy produces.
+func echoSafe(values []string, pin int) []string {
 	kept := make([]string, 0, maxEchoedDeclarations)
 	for _, v := range values {
 		if len(kept) == maxEchoedDeclarations {
@@ -418,6 +424,13 @@ func echoSafe(values []string) []string {
 		if !slices.Contains(kept, v) {
 			kept = append(kept, v)
 		}
+	}
+	// Guarantee the pinned declaration is named, giving up the last slot for it.
+	if pin >= 0 && pin < len(values) && !slices.Contains(kept, values[pin]) {
+		if len(kept) == maxEchoedDeclarations {
+			kept = kept[:maxEchoedDeclarations-1]
+		}
+		kept = append(kept, values[pin])
 	}
 	out := make([]string, 0, len(kept)+1)
 	for _, v := range kept {
@@ -430,6 +443,24 @@ func echoSafe(values []string) []string {
 		out = append(out, fmt.Sprintf("…and %d more", rest))
 	}
 	return out
+}
+
+// disagreeingIndex returns the index of the first declaration that resolves
+// differently from the first, or -1 when they all agree. Same predicate as
+// resolveContentType's, so the declaration this names is the one that caused
+// the refusal.
+func disagreeingIndex(values []string) int {
+	if len(values) == 0 {
+		return -1
+	}
+	first, firstErr := ingestFormatOne(values[0])
+	for i, v := range values[1:] {
+		f, err := ingestFormatOne(v)
+		if f != first || (err == nil) != (firstErr == nil) {
+			return i + 1
+		}
+	}
+	return -1
 }
 
 // contentTypeMessage is the 415 body. It says what was declared and lists every
@@ -452,7 +483,11 @@ func echoSafe(values []string) []string {
 // come out as a disagreement, which is equally honest. api.md buckets the
 // single-line case under "does not parse".
 func contentTypeMessage(values []string, conflicting bool) string {
-	decls := echoSafe(values)
+	pin := -1
+	if conflicting {
+		pin = disagreeingIndex(values)
+	}
+	decls := echoSafe(values, pin)
 	list := strings.Join(supportedContentTypes, ", ")
 	accepted := "ingest requires one of " + list
 

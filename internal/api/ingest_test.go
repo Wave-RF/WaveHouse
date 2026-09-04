@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -2229,8 +2230,11 @@ func TestIngest_ContentTypeEchoIsBounded(t *testing.T) {
 			// to be built with Add — which is exactly why the first version of
 			// this test could not express the case that mattered.
 			req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
-			for range 7200 {
-				req.Header.Add("Content-Type", "application/"+strings.Repeat("\xff", 116))
+			// DISTINCT lines. Identical ones collapse to a single kept value, so
+			// they never reach maxEchoedDeclarations — with a repeated literal
+			// this subtest passed even with the count cap removed entirely.
+			for i := range 7200 {
+				req.Header.Add("Content-Type", fmt.Sprintf("application/%04d", i)+strings.Repeat("\xff", 112))
 			}
 			return req
 		},
@@ -2262,8 +2266,8 @@ func TestIngest_ContentTypeEchoIsBounded(t *testing.T) {
 		t.Parallel()
 		sizeFor := func(lines int) int {
 			req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
-			for range lines {
-				req.Header.Add("Content-Type", "application/"+strings.Repeat("\xff", 116))
+			for i := range lines {
+				req.Header.Add("Content-Type", fmt.Sprintf("application/%04d", i)+strings.Repeat("\xff", 112))
 			}
 			w := httptest.NewRecorder()
 			NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, testutil.NopLogger()).Handle(w, req)
@@ -2306,5 +2310,37 @@ func TestIngest_ConflictMessageNamesTheDisagreement(t *testing.T) {
 	assert.Contains(t, msg, `"application/x-ndjson"`,
 		"the declaration that caused the conflict must not be hidden behind its agreeing neighbours")
 	assert.Contains(t, msg, `"application/json"`)
+	assert.Empty(t, pub.Messages)
+}
+
+// TestIngest_ConflictMessageNamesADifferentSpelling: distinctness alone is not
+// enough to keep the disagreeing declaration visible.
+//
+// echoSafe dedupes by raw header line, so four DISTINCT but AGREEING spellings
+// — the shape a header-duplicating proxy actually produces, e.g. a charset
+// variant — fill every slot and bury the one that disagreed. The earlier
+// version of this guard only handled identical neighbours, and passed for that
+// reason. contentTypeMessage now pins the disagreeing declaration.
+func TestIngest_ConflictMessageNamesADifferentSpelling(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
+	for _, ct := range []string{
+		"application/json",
+		"application/json; charset=utf-8",
+		"application/json; charset=us-ascii",
+		"application/json; v=1",
+		"application/x-ndjson", // the one that actually disagrees
+	} {
+		req.Header.Add("Content-Type", ct)
+	}
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+	assert.Contains(t, jsonErrorMessage(t, w), `"application/x-ndjson"`,
+		"four agreeing spellings must not crowd out the declaration that caused the refusal")
 	assert.Empty(t, pub.Messages)
 }

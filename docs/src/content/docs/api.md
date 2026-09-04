@@ -196,6 +196,7 @@ The header is parsed with Go's `mime.ParseMediaType`, which implements RFC 9110 
 
 `Content-Type` is also a **singleton** field, and §5.3 forbids repeating it. So anything that isn't exactly one readable media type is a `415`: no header, an unsupported type, one that doesn't parse, or more than one declaration. The single accommodation is for intermediaries that duplicate the header — **repeated header lines** are all resolved and accepted when they agree on the format. A **comma-joined** value is not — §8.3 warns that picking a member of the resulting pseudo-list is itself an interoperability and security hazard. Precisely: a value carrying a comma is refused whenever the value as a whole does not parse as one media type — whatever made it unparseable. A comma *inside a quoted parameter value* is legal data, so `application/json; a=", application/x-ndjson; b="` is one media type and is accepted, even though an intermediary may have built it by illegally joining two lines — the server cannot tell.
 
+The 415 body quotes what you declared, bounded: at most **four distinct** header lines, each capped at 128 bytes and marked `…(truncated)` when cut, followed by `"…and N more"`. N counts every header line not quoted — *including duplicates of one that is* — so five copies of the same header show it once, then `"…and 4 more"`. When declarations conflict, the one that actually disagreed is always quoted, even when four agreeing spellings would otherwise fill the list.
 :::
 
 | Body | `Content-Type` | Response |
