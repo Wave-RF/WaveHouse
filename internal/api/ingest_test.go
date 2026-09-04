@@ -2573,6 +2573,38 @@ func TestIngest_CheckColumnInSchema_StillInjects(t *testing.T) {
 // SUPPLYING the missing column is rejected too, one step earlier, by schema
 // validation — with its own message, which this pins so the two stay
 // distinguishable.
+// TestIngest_CheckGuardLogsOncePerRequest pins the half of the guard that the
+// per-record test cannot see. The condition is a property of (table, role,
+// policy) — identical for every record — so evaluating it per record emitted
+// one ERROR line per record: on a 16 MiB body of small records, ~1.2M lines
+// from a single mis-wired policy, while maxReportedResults caps only the
+// response. That is the amplification the !resolved abort above exists to
+// avoid, and nothing else in the suite distinguishes the hoisted form from the
+// inline one: TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord passes
+// either way, because the per-record REJECT is deliberately kept.
+func TestIngest_CheckGuardLogsOncePerRequest(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, slog.New(slog.NewJSONHandler(&buf, nil)))
+	h.PolicySource = policy.Static(checkColumnPolicy(t, "tenant_id", "acme"))
+
+	const n = 25
+	body := "[" + strings.Repeat(`{"page":"/a"},`, n-1) + `{"page":"/z"}]`
+	req := rawIngestRequest(t, "clicks", "application/json", body)
+	req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	resp := decodeBatchResult(t, w)
+	require.Equal(t, n, resp.Total)
+	assert.Equal(t, n, resp.Failed, "every record still fails — the reject stays per record")
+	assert.Equal(t, 1, strings.Count(buf.String(), "policy check references a column the table does not have"),
+		"but the request-constant cause is logged once, not once per record")
+	assert.Empty(t, pub.Messages)
+}
+
 func TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
