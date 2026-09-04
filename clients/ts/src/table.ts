@@ -14,6 +14,9 @@ import type {
 
 type CreateStreamFn<Row> = (table: string, opts?: StreamOptions) => StreamController<Row>;
 
+/** Content-Type for the JSON single-object ingest path. */
+const JSON_CONTENT_TYPE = "application/json";
+
 /** Content-Type for the NDJSON batch ingest path. */
 const NDJSON_CONTENT_TYPE = "application/x-ndjson";
 
@@ -119,6 +122,9 @@ export class TableRef<Row = Record<string, unknown>> {
       method: "POST",
       path: `/v1/ingest?table=${encodeURIComponent(this._table)}`,
       body: data,
+      // Ingest requires a declared format — an undeclared Content-Type is a
+      // 415 — so state it here rather than leaning on the request default.
+      contentType: JSON_CONTENT_TYPE,
       signal: opts?.signal,
     });
 

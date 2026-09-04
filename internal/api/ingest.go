@@ -193,11 +193,50 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
 
-	// Pick a reader from the body shape (Content-Type is only a hint).
-	rr, batch, err := newRecordReader(r.Header.Get("Content-Type"), r.Body)
+	// Pick a reader from the DECLARED format; the body only chooses arity within
+	// the JSON family. Resolving every header line and requiring agreement is what
+	// stops a request declaring both application/json and application/x-ndjson
+	// from silently taking the JSON path — an NDJSON body read as one object
+	// ingests record one and drops the rest behind a 200. See resolveContentType
+	// for when a comma-bearing value is refused rather than split.
+	values := r.Header.Values("Content-Type")
+	format, pin, err := resolveContentType(values)
 	if err != nil {
-		h.logger.ErrorContext(ctx, "empty ingest body", "table", table)
-		writeJSONError(w, http.StatusBadRequest, emptyBodyMessage(r.Header.Get("Content-Type")))
+		conflicting := errors.Is(err, errConflictingContentType)
+		// ONE bounded set, read by both the log and the response — pin comes from
+		// resolveContentType, so neither the declaration named nor the set it sits
+		// in can differ between them. Two call sites passing matching arguments is
+		// what let them diverge before.
+		decls := echoSafe(values, pin)
+		if conflicting {
+			// Logged with the same bounded set the response shows, not just the
+			// first line: this is the one refusal whose cause is usually NOT the
+			// caller's own doing, and a proxy that starts duplicating the header
+			// would otherwise produce a wall of client-side 415s whose
+			// server-side record named only one of the declarations involved.
+			h.logger.WarnContext(ctx, "conflicting ingest content-type declarations",
+				"content_types", decls, "table", table)
+		} else {
+			// Logs the same bounded set the response shows, like the conflicting
+			// branch: logging only Header.Get would make the server-side record
+			// disagree with what the caller was told — for
+			// ["", "text/csv"] the client sees `Content-Type "", "text/csv"`
+			// while Header.Get would have logged only content_type="".
+			h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
+				"content_types", decls, "table", table)
+		}
+		writeJSONError(w, http.StatusUnsupportedMediaType, contentTypeMessage(decls, conflicting))
+		return
+	}
+
+	// The reader is built from the RESOLVED format, not from a second look at
+	// the header. Re-resolving here would duplicate the rule in two places,
+	// which is how the joined and repeated paths came to disagree before. The
+	// only error left is an empty body.
+	rr, batch, err := newRecordReader(format, r.Body)
+	if err != nil {
+		h.logger.ErrorContext(ctx, "empty ingest body", "table", table, "format", format.String())
+		writeJSONError(w, http.StatusBadRequest, emptyBodyMessage(format))
 		return
 	}
 

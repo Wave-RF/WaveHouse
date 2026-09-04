@@ -278,10 +278,43 @@ describe("Ingest", () => {
   it("rejects invalid JSON payloads", async () => {
     const res = await fetch(`${WH_URL}/v1/ingest?table=${T.clicks}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}` },
+      headers: {
+        Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}`,
+        // Required since the format became the caller's declaration: without
+        // it the request is refused as a 415 before the body is even read
+        // (covered by the next case).
+        "Content-Type": "application/json",
+      },
       body: "{ bad json",
     });
     expect(res.status).toBe(400);
+  });
+
+  it("rejects an ingest that declares no readable Content-Type", async () => {
+    for (const headers of [
+      // `fetch` supplies text/plain for a string body when none is set.
+      { Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}` },
+      {
+        Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}`,
+        "Content-Type": "text/csv",
+      },
+    ]) {
+      const res = await fetch(`${WH_URL}/v1/ingest?table=${T.clicks}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ event_id: testId(), page: "/undeclared" }),
+      });
+      expect(res.status).toBe(415);
+      // The message names every type ingest reads, in order, so a caller can fix
+      // the request from the response alone. Asserted as one literal: checking
+      // the entries individually is vacuous for two of them, since
+      // `application/json` and `application/jsonl` are substrings of
+      // `application/jsonlines`.
+      const body = (await res.json()) as { error?: string };
+      expect(body.error).toContain(
+        "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines",
+      );
+    }
   });
 
   it("enforces policy check clauses (reject and auto-inject)", async () => {
