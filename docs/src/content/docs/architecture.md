@@ -188,6 +188,8 @@ Client POST /v1/ingest?table={table}
   → Policy check: role allowed to insert into this table (before the body is parsed)
   → Resolve the declared Content-Type into the body's format (415 if absent,
     unsupported, or if declarations disagree; before the body is read)
+  → Read the whole body into a pooled buffer, bounded by the 16 MiB cap
+    (413 before any record is processed, so nothing is published)
   → Validate JSON body against schema (type checks, required columns)
   → Policy column rules + check clauses (disallowed columns rejected;
     claim-derived values enforced or injected)

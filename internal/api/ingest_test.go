@@ -2011,6 +2011,52 @@ func TestIngest_BodyCap_413(t *testing.T) {
 	}
 }
 
+// TestIngest_ContentTypeResolvesBeforeTheBodyIsRead pins the ordering this
+// handler is built around: an unsupported declaration is a 415 decided before a
+// byte of body is buffered. Every other 415 case passes a small, perfectly
+// readable body, so moving resolveContentType back below body.ReadFrom would
+// leave all of them green while silently making an unsupported request pay for a
+// full buffer. Each subtest hands over a body that fails a DIFFERENT way, so a
+// reordered handler answers with that failure's status instead of 415.
+func TestIngest_ContentTypeResolvesBeforeTheBodyIsRead(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a body that cannot be read at all", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+			"/v1/ingest?table=clicks", iotest.ErrReader(errors.New("connection reset by peer")))
+		req.Header.Set("Content-Type", "text/csv")
+
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code,
+			"reading the body first would answer 400 invalid request body")
+		testutil.AssertJSONErrorResponse(t, w)
+		assert.Empty(t, pub.Messages)
+	})
+
+	t.Run("a body over the cap", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		h.maxRequestBytes = 50 // below the body
+
+		req := rawIngestRequest(t, "clicks", "text/csv",
+			`{"page":"/`+strings.Repeat("a", 200)+`"}`)
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code,
+			"reading the body first would answer 413 request body exceeded")
+		testutil.AssertJSONErrorResponse(t, w)
+		assert.Empty(t, pub.Messages)
+	})
+}
+
 // tsRegistry returns a registry whose events table carries the timestamp column
 // shapes the #372 canonicalization path rewrites.
 func tsRegistry(t testing.TB) *discovery.SchemaRegistry {
