@@ -485,6 +485,49 @@ func (h *IngestHandler) processRecord(
 			}
 		}
 		for col, requiredVal := range checks {
+			// A check the published row cannot carry can never be enforced: the row
+			// holds one slot per INSERTABLE column, by position, so an auto-injected
+			// value for anything outside that set is dropped on the way out and the
+			// record inserts WITHOUT the value the policy requires — answering 200.
+			// Policy validation cannot catch this: it never sees the ClickHouse
+			// schema. Three ways in, all refused here.
+			//
+			// The supplied-value case never reaches this loop — schema validation
+			// above rejects both an unknown column and a computed one — so in
+			// practice this fires on the omitted-and-auto-injected path. The check
+			// sits at the top of the loop anyway, so it does not depend on that
+			// ordering holding.
+			schemaCol, known := schema.Lookup(col)
+			switch {
+			case !known:
+				h.logger.ErrorContext(ctx, "policy check references a column the table does not have",
+					"column", col, "table", table, "role", role)
+				return false, &recordReject{
+					Status:  http.StatusForbidden,
+					Message: fmt.Sprintf("policy check references column %q, which table %q does not have", col, table),
+				}, nil
+			case !schemaCol.IsInsertable():
+				h.logger.ErrorContext(ctx, "policy check references a column no record may write",
+					"column", col, "table", table, "role", role, "default_kind", schemaCol.DefaultKind)
+				return false, &recordReject{
+					Status: http.StatusForbidden,
+					Message: fmt.Sprintf("policy check references column %q of table %q, which is %s and cannot be inserted",
+						col, table, strings.ToLower(schemaCol.DefaultKind)),
+				}, nil
+			case schemaCol.DefaultKind == "EPHEMERAL":
+				// Insertable, so the row DOES carry a slot for it — but ClickHouse
+				// never stores an ephemeral column and no query can read it back, so
+				// the constraint is unverifiable the moment the insert returns.
+				// Accepting a check that provably does nothing is worse than
+				// refusing it.
+				h.logger.ErrorContext(ctx, "policy check references an ephemeral column, which is never stored",
+					"column", col, "table", table, "role", role)
+				return false, &recordReject{
+					Status: http.StatusForbidden,
+					Message: fmt.Sprintf("policy check references column %q of table %q, which is ephemeral and is never stored",
+						col, table),
+				}, nil
+			}
 			// A []any value is an _in check: the inserted value must be present and
 			// one of the allowed set. Unlike the scalar _eq case there is no single
 			// value to auto-inject, so an absent column fails closed.

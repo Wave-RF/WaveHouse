@@ -142,6 +142,23 @@ func columnNames(cols []Column) []string {
 
 // InsertableColumnNames is InsertableColumns reduced to names, for the wire
 // envelope's column list. Returns an empty (non-nil) slice when none qualify.
+// Lookup returns the named column and whether the table declares it. Matching
+// is exact, as ClickHouse's own column resolution is. Linear over Columns, which
+// is the right shape for the per-record call sites: schemas are small and the
+// caller asks about one or two columns.
+//
+// It returns the Column rather than a bool because "does the table have it" is
+// rarely the whole question — a caller on the ingest path also has to know
+// whether a record may carry a value for it (IsInsertable).
+func (ts *TableSchema) Lookup(name string) (Column, bool) {
+	for _, c := range ts.Columns {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return Column{}, false
+}
+
 func (ts *TableSchema) InsertableColumnNames() []string {
 	if ts.insertableNames != nil {
 		return ts.insertableNames

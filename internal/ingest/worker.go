@@ -638,7 +638,15 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 // does: that is a transient DLQ outage, and retrying beats destroying the row.
 func (w *IngestWorker) rejectPoison(ctx context.Context, m jetstream.Msg, tableName, reason, detail string) {
 	if w.dlqEnabled == nil || w.dlqEnabled(tableName) {
-		w.parkOnDLQ(ctx, m, strings.TrimPrefix(m.Subject(), "ingest."), tableName, detail)
+		// Backgrounded on ackWg for the same reason handleSuccess backgrounds its
+		// acks: parkOnDLQ does a JetStream publish AND an fsync-bound DoubleAck,
+		// and parseMsg runs on the dispatchLoop goroutine. The scenario this whole
+		// change targets is an operator who skipped the drain, where EVERY backlog
+		// message is poison — done inline that is one publish plus one fsync per
+		// message in series, with intake stalled behind it. dispatchLoop adds and
+		// waits on the same goroutine, so each Add still happens-before the Wait.
+		subject := strings.TrimPrefix(m.Subject(), "ingest.")
+		w.ackWg.Go(func() { w.parkOnDLQ(ctx, m, subject, tableName, detail) })
 		return
 	}
 	poisonDroppedCounter.Add(ctx, 1, metric.WithAttributes(
@@ -647,7 +655,7 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m jetstream.Msg, tableN
 	))
 	w.logger.ErrorContext(ctx, "unreadable envelope dropped — the DLQ is disabled for this table, and a message that can never insert must not redeliver forever",
 		"table", tableName, "reason", reason, "detail", detail)
-	_ = m.DoubleAck(ctx)
+	w.ackWg.Go(func() { _ = m.DoubleAck(ctx) })
 }
 
 func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parsedMsg, errMsg string) {

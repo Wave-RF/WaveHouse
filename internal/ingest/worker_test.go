@@ -672,6 +672,7 @@ func parseAll(t *testing.T, w *IngestWorker, msgs ...*testutil.MockJetStreamMsg)
 	out := make([]parsedMsg, 0, len(msgs))
 	for _, m := range msgs {
 		pm, ok := w.parseMsg(context.Background(), m)
+		w.ackWg.Wait() // poison disposal is backgrounded now
 		require.True(t, ok, "parseMsg unexpectedly dropped a message")
 		out = append(out, pm)
 	}
@@ -688,6 +689,7 @@ func TestParseMsg(t *testing.T) {
 
 		pm, ok := w.parseMsg(context.Background(), m)
 		require.True(t, ok)
+		w.ackWg.Wait() // poison disposal is backgrounded now
 		assert.Equal(t, "events", pm.tableName, "raw table name drives per-table routing")
 		assert.Equal(t, "org_42", pm.scope)
 		// natsSafeSubject is the subject sans the "ingest." prefix (cache version key).
@@ -706,6 +708,7 @@ func TestParseMsg(t *testing.T) {
 		}
 
 		_, ok := w.parseMsg(context.Background(), bad)
+		w.ackWg.Wait() // poison disposal is backgrounded now
 		assert.False(t, ok, "malformed envelope must be dropped")
 		assert.True(t, bad.DoubleAcked.Load(), "poison pill must be acked so NATS won't redeliver it")
 	})
@@ -1281,6 +1284,7 @@ func TestParseMsg_PoisonEnvelope_ParkedOnDLQ(t *testing.T) {
 			m := &testutil.MockJetStreamMsg{MsgSubject: "ingest.events", MsgData: tt.data}
 
 			_, ok := w.parseMsg(context.Background(), m)
+			w.ackWg.Wait() // poison disposal is backgrounded now
 			require.False(t, ok, "poison must not be routed to a table loop")
 
 			published := js.Published()
@@ -1308,6 +1312,7 @@ func TestParseMsg_PoisonEnvelope_DLQDisabled_AckedAndDropped(t *testing.T) {
 	}
 	_, ok := w.parseMsg(context.Background(), m)
 	require.False(t, ok)
+	w.ackWg.Wait() // poison disposal is backgrounded now
 
 	assert.Empty(t, js.Published(), "nothing reaches the DLQ while it is disabled")
 	assert.True(t, m.DoubleAcked.Load(), "dropped rather than redelivered forever")
@@ -1327,6 +1332,7 @@ func TestParseMsg_PoisonEnvelope_DLQPublishFails_LeftUnacked(t *testing.T) {
 	}
 	_, ok := w.parseMsg(context.Background(), m)
 	require.False(t, ok)
+	w.ackWg.Wait() // poison disposal is backgrounded now
 	assert.False(t, m.DoubleAcked.Load(), "left unacked so it retries once the DLQ recovers")
 }
 
