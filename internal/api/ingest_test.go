@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
@@ -1168,7 +1171,7 @@ const wantAcceptedTypes = "application/json, application/x-ndjson, application/n
 func TestAcceptedTypesAreAllResolvable(t *testing.T) {
 	t.Parallel()
 	for _, ct := range supportedContentTypes {
-		_, err := resolveContentType([]string{ct})
+		_, _, err := resolveContentType([]string{ct})
 		require.NoError(t, err, "advertised type %q must resolve", ct)
 	}
 	assert.Equal(t, wantAcceptedTypes, strings.Join(supportedContentTypes, ", "),
@@ -1184,12 +1187,10 @@ func TestIngestFormat(t *testing.T) {
 	tests := []struct {
 		ct   string
 		want IngestFormat
-		// wantErr is any 415; wantConflict narrows it to the disagreement
-		// sentinel. Pinned separately because they produce different bodies —
-		// routing a disagreement through the unsupported wording tells the caller
-		// "ingest requires one of …" and lists the types they just declared.
-		wantErr      bool
-		wantConflict bool
+		// wantErr is any 415. There is no conflict variant: this table drives
+		// resolveContentType with ONE value, and disagreement needs two header
+		// lines — TestIngest_DuplicateContentTypeHeaders covers that.
+		wantErr bool
 	}{
 		{ct: "application/json", want: FormatJSON},
 		{ct: "application/json; charset=utf-8", want: FormatJSON},
@@ -1207,62 +1208,61 @@ func TestIngestFormat(t *testing.T) {
 		{ct: `application/json; charset="unterminated`, want: FormatJSON},
 		{ct: "application/x-ndjson;charset", want: FormatNDJSON},
 		// Optional whitespace before the ";" is legal (RFC 9110 §8.3
-		// `parameters = *( OWS ";" OWS [ parameter ] )`) and mime.ParseMediaType
-		// accepted it, so the TrimSpace that preserves parity must stay. Without
-		// it the media type keeps the trailing space and 415s.
+		// `parameters = *( OWS ";" OWS [ parameter ] )`). ParseMediaType trims it
+		// for us — the hand-rolled resolver needed its own TrimSpace here, and a
+		// future editor should not restore one.
 		{ct: "application/json ; charset=utf-8", want: FormatJSON},
 		{ct: "application/x-ndjson ; charset=utf-8", want: FormatNDJSON},
-		// A duplicate parameter is the case mime.ParseMediaType refuses outright;
-		// ignoring parameters entirely is what makes it a non-event.
+		// A repeated parameter name is the one malformed shape ParseMediaType
+		// reports WITHOUT a media type, so tolerating ErrInvalidMediaParameter
+		// alone would refuse it while accepting `; charset` and `;;` — a line
+		// drawn by Go's error taxonomy rather than by "parameters never decide
+		// the format". ingestFormatOne re-parses the media type alone, so all of
+		// these agree. Both value spellings, since Go compares them
+		// case-sensitively and would otherwise split this row's fate.
 		{ct: "application/json; charset=utf-8; charset=utf-16", want: FormatJSON},
+		{ct: "application/json; charset=UTF-8; charset=utf-8", want: FormatJSON},
+		{ct: "application/json; charset=utf-8; charset=utf-8", want: FormatJSON},
+		// ...but the re-parse must not resurrect a joined declaration: a comma
+		// on an unparsed line is refused before it is reached.
+		{ct: "application/json; charset=a; charset=b, application/x-ndjson", wantErr: true},
+		// The tightening with no joined content anywhere in
+		// it: the comma guard is line-wide, so a well-formed quoted comma loses
+		// its tolerance when some OTHER parameter on the line is malformed. Both
+		// halves are accepted alone (both are separate rows in this table). This row
+		// is what would catch a guard narrowed to "a comma after the last parsed
+		// parameter" — the `joined and repeated answer differently` test would not,
+		// since that case's unparsed remainder also has a comma.
+		// Tracked in #563.
+		{ct: `application/json; profile="a,b"; charset`, wantErr: true},
 		{ct: "APPLICATION/JSON", want: FormatJSON},
 		{ct: "text/plain", wantErr: true},
 		{ct: "text/csv", wantErr: true},
 		{ct: "", wantErr: true},
 		{ct: "   ", wantErr: true},
 		{ct: "???not-a-media-type", wantErr: true},
-		// A comma means an intermediary joined duplicate Content-Type header
-		// LINES into one value. That is the same situation as two separate lines,
-		// so it takes the same rule: resolve every declaration and require
-		// agreement. Agreeing forms are accepted — refusing them would make the
-		// outcome depend on which spelling an intermediary the caller does not
-		// control happened to emit, and the two-line spelling of each of these is
-		// accepted by TestIngest_DuplicateContentTypeHeaders.
-		{ct: "application/json, application/json", want: FormatJSON},
-		{ct: "application/json; charset=utf-8, application/json", want: FormatJSON},
-		{ct: "application/x-ndjson, application/ndjson", want: FormatNDJSON},
-		// Three declarations, not two: the rule says EVERY part is resolved, and
-		// at N=2 a SplitN(ct, ",", 2) never looks past the second. The
-		// CONFLICTING row below is the one that fails on that mutation — with
-		// the limit applied the agreeing row's tail still cuts back to
-		// application/json and passes. (The empty-element row catches it too.)
-		{ct: "application/json, application/json; charset=utf-8, application/json;;", want: FormatJSON},
-		{ct: "application/json, application/json; charset=utf-8, application/x-ndjson", wantErr: true, wantConflict: true},
-		// Genuinely conflicting joined declarations stay refused: honoring the
-		// first would read an NDJSON body as a single JSON object and drop every
-		// record past the first.
-		{ct: "application/json; charset=utf-8, application/x-ndjson", wantErr: true, wantConflict: true},
-		{ct: "application/x-ndjson; charset=utf-8, application/json", wantErr: true, wantConflict: true},
-		{ct: "application/json, text/csv", wantErr: true, wantConflict: true},
-		// This one's quoted comma splits into parts that disagree, so it is
-		// refused — the deliberate price of not parsing quoted strings, pinned so
-		// a future quoted-string-aware splitter cannot flip it with the suite
-		// green.
-		{ct: `application/json; foo="x,y"`, wantErr: true, wantConflict: true},
-		// ...but "any quoted comma is refused" would be the wrong rule to state:
-		// this one splits into parts that AGREE, so it is accepted. Pinned so the
-		// comment and api.md keep saying "whenever the parts disagree".
-		{ct: `application/json; foo="a,application/json;q=1"`, want: FormatJSON},
-		// Near misses. The switch is exact-match; rewriting it as a prefix or
-		// substring test would leave the suite green while these start ingesting.
-		// An empty declaration says nothing rather than contradicting something —
-		// RFC 9110 §5.6.1.2 ignores empty list members — so these are the declared
-		// type, not a conflict. All-empty is the absent case.
-		{ct: "application/json,", want: FormatJSON},
-		{ct: ",application/json", want: FormatJSON},
-		{ct: "application/json, ,application/json", want: FormatJSON},
+		// A quoted-string is opaque (RFC 9110 §5.6.6), so a comma inside a
+		// parameter value is data. mime.ParseMediaType handles that; the row is
+		// kept because hand-rolling the split is what produced three
+		// over-rejections of well-formed headers, and this fails immediately if
+		// anyone reintroduces one. The escaping corpus that went with the splitter
+		// is gone — testing it now would only be testing the stdlib.
+		{ct: `application/json; profile="a,b"`, want: FormatJSON},
+		// A comma-bearing value that does not parse as one media type is refused,
+		// whatever it joins. Content-Type is a singleton field (§8.3) and §5.3
+		// forbids the repetition that produces the joined form, so there is no list
+		// here to resolve — §8.3 warns that
+		// picking a member of the pseudo-list is itself the interoperability and
+		// security hazard. These leave no media type at all — "unexpected content
+		// after media subtype", or "no media type" for a leading comma — so 415
+		// rather than a conflict.
+		{ct: "application/json, application/x-ndjson", wantErr: true},
+		{ct: "application/json, application/json", wantErr: true},
+		{ct: "application/json,", wantErr: true},
+		{ct: ",application/json", wantErr: true},
 		{ct: ",", wantErr: true},
-		{ct: " , ", wantErr: true},
+		// Near misses, exact-match: rewriting the lookup as a prefix or substring
+		// test would leave the suite green while these start ingesting.
 		{ct: "application/json5", wantErr: true},
 		{ct: "application/jsonlines2", wantErr: true},
 		{ct: "application/ndjson-seq", wantErr: true},
@@ -1271,14 +1271,10 @@ func TestIngestFormat(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.ct, func(t *testing.T) {
 			t.Parallel()
-			got, err := resolveContentType([]string{tt.ct})
+			got, _, err := resolveContentType([]string{tt.ct})
 			if tt.wantErr {
-				if tt.wantConflict {
-					require.ErrorIs(t, err, errConflictingContentType,
-						"declarations that disagree must be distinguishable from an unsupported one")
-				} else {
-					require.ErrorIs(t, err, errUnsupportedContentType)
-				}
+				require.ErrorIs(t, err, errUnsupportedContentType,
+					"a single value can only fail as unsupported — a conflict needs two header lines")
 				return
 			}
 			require.NoError(t, err)
@@ -1371,6 +1367,7 @@ func TestIngest_ContentTypeRefusalBeatsEmptyBody(t *testing.T) {
 
 			assert.Equal(t, http.StatusUnsupportedMediaType, w.Code,
 				"the header is resolved before the body is read, so this is a 415 and not an empty-body 400")
+			testutil.AssertJSONErrorResponse(t, w)
 			assert.Contains(t, jsonErrorMessage(t, w), "ingest requires one of")
 			assert.Empty(t, pub.Messages)
 		})
@@ -1450,8 +1447,8 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	// FormatJSON (the unsupported branch returns FormatJSON with an error), so a
 	// format-only guard would let it through — and an NDJSON body then takes the
 	// single-object path and publishes 1 of 2 records with a 200. Pins the half of
-	// the comparison a "simplification" could delete. (Two TestIngestFormat rows
-	// also fail on that mutation; this is the handler-level statement of it.)
+	// the comparison a "simplification" could delete. (TestIngestFormat rows fail on
+	// that mutation too; this is the handler-level statement of it.)
 	t.Run("a supported and an unsupported declaration are refused", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
@@ -1485,14 +1482,97 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		assert.Len(t, pub.Messages, 2, "same format, different spelling — not ambiguous")
 	})
 
-	// A third line, disagreeing. resolveContentType flattens every declaration
-	// into `parts` and compares `parts[1:]`; a bound that stops at two —
-	// `parts[1:min(2, len(parts))]` — lets three lines from a two-proxy chain
-	// silently take the JSON path and truncate an NDJSON batch to its first
-	// record. (TestIngestFormat's N=3 conflicting row fails on that mutation
-	// too. A bare `parts[1:2]` does NOT model it: `parts` is built with
-	// cap == len(values), so a one-line request panics and the whole package
-	// dies rather than passing quietly.)
+	// None of these parses as one media type, so none can resolve to a member and
+	// read an NDJSON body as a single object. Note WHY: for most of them the media
+	// type reads fine — `application/json; charset=utf-8, application/x-ndjson`
+	// yields "application/json". They are refused because a comma on a line that
+	// did not parse cleanly may be a second declaration joined on, and the error
+	// cannot tell that from a comma inside data. A comma-bearing value that DOES
+	// parse cleanly is accepted — see `joined and repeated answer differently`.
+	t.Run("a comma-bearing value that does not parse is refused", func(t *testing.T) {
+		t.Parallel()
+		for name, ct := range map[string]string{
+			"disagreeing":            `application/json, application/x-ndjson`,
+			"agreeing":               `application/json, application/json`,
+			"a well-formed sibling":  `application/json; p="x,y", application/json; x="`,
+			"mid-quote then a comma": `application/json; foo=a"b, application/x-ndjson`,
+			"joined after a param":   `application/json; charset=utf-8, application/x-ndjson`,
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				pub := &testutil.MockPublisher{}
+				h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+				w := httptest.NewRecorder()
+				h.Handle(w, rawIngestRequest(t, "clicks", ct, ndjson))
+
+				assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+				testutil.AssertJSONErrorResponse(t, w)
+				assert.Empty(t, pub.Messages, "must not ingest record one and drop the rest behind a 200")
+			})
+		}
+	})
+
+	// Joining is lossy, so the two spellings answer differently in both
+	// directions. Only one of them is a shortcoming:
+	//
+	//   - accepts joined / refuses repeated. CORRECT, not a limit. When the joined
+	//     line's quotes balance it really is one media type with an odd parameter
+	//     (a comma inside a quoted value is legal qdtext), and the server cannot
+	//     know an intermediary built it by illegally joining two singleton lines.
+	//   - refuses joined / accepts repeated. Our deliberate fail-closed: the media
+	//     type still reads fine, but a comma sits on a line that did not parse
+	//     cleanly and may be a joined declaration. Narrowing it is #563.
+	//
+	// Pinned in both directions so neither can move unnoticed.
+	t.Run("joined and repeated answer differently, by construction", func(t *testing.T) {
+		t.Parallel()
+		for name, tc := range map[string]struct {
+			joined   string
+			repeated []string
+			wJoined  int
+			wRepeat  int
+		}{
+			"joined under-rejects": {
+				joined:   `application/json; a=", application/x-ndjson; b="`,
+				repeated: []string{`application/json; a="`, `application/x-ndjson; b="`},
+				wJoined:  http.StatusOK, wRepeat: http.StatusUnsupportedMediaType,
+			},
+			"joined over-rejects": {
+				joined:   `application/json; p="x,y", application/json; x="`,
+				repeated: []string{`application/json; p="x,y"`, `application/json; x="`},
+				wJoined:  http.StatusUnsupportedMediaType, wRepeat: http.StatusOK,
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				wJ := httptest.NewRecorder()
+				NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, testutil.NopLogger()).
+					Handle(wJ, rawIngestRequest(t, "clicks", tc.joined, `{"page":"/a"}`))
+				assert.Equal(t, tc.wJoined, wJ.Code, "joined")
+
+				req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
+				for _, v := range tc.repeated {
+					req.Header.Add("Content-Type", v)
+				}
+				wR := httptest.NewRecorder()
+				NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, testutil.NopLogger()).
+					Handle(wR, req)
+				assert.Equal(t, tc.wRepeat, wR.Code, "repeated")
+			})
+		}
+	})
+
+	t.Run("a quoted comma does not split a declaration", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		w := httptest.NewRecorder()
+		h.Handle(w, rawIngestRequest(t, "clicks", `application/json; profile="a,b"`, `{"page":"/a"}`))
+
+		assert.Equal(t, http.StatusOK, w.Code, "the comma is inside a quoted value, so this parses cleanly")
+		assert.Len(t, pub.Messages, 1)
+	})
+
 	t.Run("a third line that disagrees is refused", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
@@ -1505,86 +1585,36 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		h.Handle(w, req)
 
 		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+		testutil.AssertJSONErrorResponse(t, w)
 		assert.Empty(t, pub.Messages, "the third declaration must be resolved like the rest")
 	})
 
-	// The two guards compose: a value may itself carry joined declarations while
-	// sitting alongside another header line. Both orders, because the first value
-	// and the rest travel through different call sites — resolving either with
-	// the single-declaration helper instead of the full rule would mis-frame a
-	// joined value. Only the joined-SECOND order is unique to these subtests —
-	// eleven TestIngestFormat rows already cover joined-first — but both are kept
-	// because the pair is what shows the two guards composing.
-	t.Run("a joined value alongside a plain line, joined first", func(t *testing.T) {
-		t.Parallel()
-		pub := &testutil.MockPublisher{}
-		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-		req := rawIngestRequest(t, "clicks", "application/x-ndjson, application/ndjson", ndjson)
-		req.Header.Add("Content-Type", "application/jsonl")
-
-		w := httptest.NewRecorder()
-		h.Handle(w, req)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.Len(t, pub.Messages, 2, "all three declarations name NDJSON")
-	})
-
-	t.Run("a joined value alongside a plain line, joined second", func(t *testing.T) {
-		t.Parallel()
-		pub := &testutil.MockPublisher{}
-		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-		req := rawIngestRequest(t, "clicks", "application/x-ndjson", ndjson)
-		req.Header.Add("Content-Type", "application/ndjson, application/jsonl")
-
-		w := httptest.NewRecorder()
-		h.Handle(w, req)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.Len(t, pub.Messages, 2, "all three declarations name NDJSON")
-	})
-
-	// An empty second line is not a disagreement: the caller declared one type
-	// and nothing else. Refusing it would be an over-reject, and this spelling
-	// arrives on the wire from intermediaries that append a bare header.
-	// Both orderings, and both empty spellings. Order matters here in a way it
-	// must not: with the empty line FIRST, `Header.Get` returns it, so anything
-	// that re-resolves the first line alone rather than the resolved format
-	// disagrees with the set-level answer — a request the whole set accepts would
-	// fail that second resolution and be reported as an empty body.
+	// An empty declaration no longer buys leniency. Content-Type is a singleton
+	// field (§8.3), so a second line is malformed however it is spelled; an empty
+	// one yields no media type and therefore disagrees. Both orderings, because a
+	// re-resolution of Header.Get alone would answer differently from the set.
 	for name, empty := range map[string]string{"blank": "", "comma": ",", "spaces": "   "} {
-		t.Run("an empty second line is ignored ("+name+")", func(t *testing.T) {
+		t.Run("an empty line disagrees ("+name+")", func(t *testing.T) {
 			t.Parallel()
-			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-			req := rawIngestRequest(t, "clicks", "application/x-ndjson", ndjson)
-			req.Header.Add("Content-Type", empty)
+			for _, first := range []bool{false, true} {
+				pub := &testutil.MockPublisher{}
+				h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+				req := rawIngestRequest(t, "clicks", "", ndjson)
+				if first {
+					req.Header.Add("Content-Type", empty)
+					req.Header.Add("Content-Type", "application/x-ndjson")
+				} else {
+					req.Header.Add("Content-Type", "application/x-ndjson")
+					req.Header.Add("Content-Type", empty)
+				}
 
-			w := httptest.NewRecorder()
-			h.Handle(w, req)
+				w := httptest.NewRecorder()
+				h.Handle(w, req)
 
-			assert.Equal(t, http.StatusOK, w.Code)
-			assert.Len(t, pub.Messages, 2, "one real declaration plus nothing is not ambiguous")
-		})
-
-		t.Run("an empty FIRST line is ignored ("+name+")", func(t *testing.T) {
-			t.Parallel()
-			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-			// Built with no header and two Adds, not rawIngestRequest's ct
-			// argument: that argument SKIPS Header.Set when it is "", so the
-			// blank spelling would build a one-line set and pin nothing — and
-			// blank ("a bare `Content-Type:` line") is the very spelling the
-			// docs and CHANGELOG name as the motivating wire case.
-			req := rawIngestRequest(t, "clicks", "", ndjson)
-			req.Header.Add("Content-Type", empty)
-			req.Header.Add("Content-Type", "application/x-ndjson")
-
-			w := httptest.NewRecorder()
-			h.Handle(w, req)
-
-			assert.Equal(t, http.StatusOK, w.Code,
-				"the set declares NDJSON; which line arrived first must not change that")
-			assert.Len(t, pub.Messages, 2, "and it must be read as NDJSON, not as one JSON object")
+				assert.Equal(t, http.StatusUnsupportedMediaType, w.Code, "empty first=%v", first)
+				testutil.AssertJSONErrorResponse(t, w)
+				assert.Empty(t, pub.Messages)
+			}
 		})
 	}
 
@@ -1602,30 +1632,11 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		h.Handle(w, req)
 
 		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+		testutil.AssertJSONErrorResponse(t, w)
 		msg := jsonErrorMessage(t, w)
 		assert.Contains(t, msg, `"text/csv"`)
 		assert.Contains(t, msg, `"text/plain"`, "a declaration the caller sent must not vanish from the message")
 		assert.NotContains(t, msg, "conflicting", "agreeing-but-unsupported is not a conflict")
-		assert.Empty(t, pub.Messages)
-	})
-
-	// The two spellings of one disagreement now read alike. Previously a joined
-	// value fell through to the unsupported wording and listed the very types the
-	// caller had declared as the ones ingest requires.
-	t.Run("a joined disagreement reads like the repeated-line one", func(t *testing.T) {
-		t.Parallel()
-		pub := &testutil.MockPublisher{}
-		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-		req := rawIngestRequest(t, "clicks", "application/json, application/x-ndjson", ndjson)
-
-		w := httptest.NewRecorder()
-		h.Handle(w, req)
-
-		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
-		msg := jsonErrorMessage(t, w)
-		assert.Contains(t, msg, `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of `,
-			"the whole sentence is quoted in api.md's 415 tables, so all of it is contract")
-		assert.Contains(t, msg, "application/jsonlines", "the conflict message must still list what is accepted")
 		assert.Empty(t, pub.Messages)
 	})
 
@@ -1830,7 +1841,7 @@ func TestIngest_SingleObject_PrettyPrinted(t *testing.T) {
 	assert.Len(t, pub.Messages, 1)
 }
 
-func TestIngest_Unlabeled_ConcatenatedObjects_FirstOnly(t *testing.T) {
+func TestIngest_DeclaredJSON_ConcatenatedObjects_FirstOnly(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
@@ -2193,4 +2204,220 @@ func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
 	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"event_id": "e1", "page": "/home"}))
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Len(t, pub.Messages, 1, "published without idempotency, not 500")
+}
+
+// TestProcessRecord_UnresolvedInsertSideAborts pins two things that are prose
+// everywhere else in this file.
+//
+// First, that an insert grant resolved for the OTHER operation aborts the whole
+// request rather than rejecting per record. perms is resolved once per request,
+// so the condition is true for every record or none; as a reject, a 10k batch
+// would report 10k independent permission failures for one mis-wired grant.
+//
+// Second, the reachability claim at the CheckClauses call site. The column loop
+// above it iterates the RECORD's columns, so it runs zero times for `{}` — and
+// discovery.Validate accepts `{}` here because every column is nullable or
+// defaulted. I previously asserted this path was unreachable, having tested only
+// against a schema with a required column; it is not.
+func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
+	t.Parallel()
+	schema := &discovery.TableSchema{
+		Name: "loose",
+		Columns: []discovery.Column{
+			{Name: "a", Type: "Nullable(String)", IsNullable: true},
+			{Name: "b", Type: "String", HasDefault: true},
+		},
+	}
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{schema})
+	h := NewIngestHandler(reg, &testutil.MockPublisher{}, testutil.NopLogger())
+
+	// A grant resolved for SELECT, reaching the insert path.
+	selectResolved := policy.Evaluate(&policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"loose": {"viewer": {Select: &policy.SelectPermissions{}}},
+		},
+	}, "viewer", "loose", "select", nil)
+	require.True(t, selectResolved.Allowed)
+
+	// An empty record really does clear validation and the column loop.
+	require.NoError(t, discovery.Validate(schema, map[string]any{}),
+		"all-nullable/defaulted columns accept an empty record — this is what makes the read reachable")
+
+	dup, reject, abort := h.processRecord(
+		context.Background(), "loose", "", schema, selectResolved, "viewer", map[string]any{}, time.Now())
+
+	assert.False(t, dup)
+	assert.Nil(t, reject, "a request-scoped condition must not be reported per record")
+	require.NotNil(t, abort, "an unresolved insert side must abort the request")
+	assert.Equal(t, http.StatusForbidden, abort.Status)
+	assert.Empty(t, abort.RetryAfter, "not a transient condition — retrying cannot help")
+}
+
+// TestIngest_ContentTypeEchoIsBounded: the 415 body and the WARN log echo what
+// the caller declared, and the 415 is decided BEFORE the body is read — so a
+// request needs no body, and no credentials under the shipped compose policy,
+// to provoke one. Each non-UTF-8 byte costs 5 output bytes (%q renders \xNN,
+// then JSON escapes the backslash).
+//
+// BOTH dimensions are caller-controlled. The first version of this test covered
+// only one long line, and the fix it pinned bounded only per-declaration
+// length — which left the amplification factor untouched, since a caller can
+// send many declarations instead of one long one. 7200 lines of 128 bytes fits
+// under Go's default 1 MiB header cap and bought a 4.65 MB response.
+func TestIngest_ContentTypeEchoIsBounded(t *testing.T) {
+	t.Parallel()
+	for name, build := range map[string]func(*testing.T) *http.Request{
+		"one very long declaration": func(t *testing.T) *http.Request {
+			return rawIngestRequest(t, "clicks", "application/"+strings.Repeat("\xff", 8000), `{"page":"/a"}`)
+		},
+		"many declarations": func(t *testing.T) *http.Request {
+			// rawIngestRequest uses Header.Set, so the repeated-line spelling has
+			// to be built with Add — which is exactly why the first version of
+			// this test could not express the case that mattered.
+			req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
+			// DISTINCT lines. Identical ones collapse to a single kept value, so
+			// they never reach maxEchoedDeclarations — with a repeated literal
+			// this subtest passed even with the count cap removed entirely.
+			for i := range 7200 {
+				req.Header.Add("Content-Type", fmt.Sprintf("application/%04d", i)+strings.Repeat("\xff", 112))
+			}
+			return req
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			w := httptest.NewRecorder()
+			h.Handle(w, build(t))
+
+			require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+			testutil.AssertJSONErrorResponse(t, w)
+			// The ceiling: 4 declarations x 128 bytes, each byte costing 5 in the
+			// worst case, plus the fixed message. What matters is that it does not
+			// move with the request — see the O(1) assertion below.
+			assert.Less(t, w.Body.Len(), 4096,
+				"the 415 body must be bounded in both the length and the count of declarations")
+			assert.Contains(t, jsonErrorMessage(t, w), "…",
+				"a truncated echo must say so — …(truncated) or …and N more — not cut silently")
+			assert.Empty(t, pub.Messages)
+		})
+	}
+
+	// The property the size ceiling above only approximates: the body does not
+	// grow with the request. A 72x larger header set may cost a few bytes — the
+	// digits of N in "…and N more" — and never a multiple.
+	t.Run("the body does not grow with the request", func(t *testing.T) {
+		t.Parallel()
+		sizeFor := func(lines int) int {
+			req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
+			for i := range lines {
+				req.Header.Add("Content-Type", fmt.Sprintf("application/%04d", i)+strings.Repeat("\xff", 112))
+			}
+			w := httptest.NewRecorder()
+			NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, testutil.NopLogger()).Handle(w, req)
+			require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+			return w.Body.Len()
+		}
+		small, large := sizeFor(100), sizeFor(7200)
+		// Not byte-identical: the message ends "…and N more", so the response
+		// grows by the DIGITS of N — logarithmic, and the only permitted growth.
+		// A 72x larger header set may cost a handful of bytes, never a multiple.
+		assert.Less(t, large-small, 8,
+			"response size must grow at most with the digits of the count, not with the request")
+	})
+}
+
+// TestIngest_ConflictMessageNamesTheDisagreement: the echo bound keeps the first
+// four DISTINCT declarations, not the first four verbatim.
+//
+// Keeping them verbatim was a real regression in the message the bound was added
+// to protect: four copies of application/json followed by one
+// application/x-ndjson named only the agreeing type and hid the declaration that
+// caused the refusal behind "…and 1 more". The conflicting wording exists
+// precisely so a caller can see what disagreed.
+func TestIngest_ConflictMessageNamesTheDisagreement(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	req := rawIngestRequest(t, "clicks", "", "{\"page\":\"/a\"}\n{\"page\":\"/b\"}")
+	for range 4 {
+		req.Header.Add("Content-Type", "application/json")
+	}
+	req.Header.Add("Content-Type", "application/x-ndjson")
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+	msg := jsonErrorMessage(t, w)
+	assert.Contains(t, msg, "conflicting Content-Type declarations")
+	assert.Contains(t, msg, `"application/x-ndjson"`,
+		"the declaration that caused the conflict must not be hidden behind its agreeing neighbours")
+	assert.Contains(t, msg, `"application/json"`)
+	assert.Empty(t, pub.Messages)
+}
+
+// TestIngest_ConflictMessageNamesADifferentSpelling: distinctness alone is not
+// enough to keep the disagreeing declaration visible.
+//
+// echoSafe dedupes by raw header line, so four DISTINCT but AGREEING spellings
+// — the shape a header-duplicating proxy actually produces, e.g. a charset
+// variant — fill every slot and bury the one that disagreed. The earlier
+// version of this guard only handled identical neighbours, and passed for that
+// reason. contentTypeMessage now pins the disagreeing declaration.
+func TestIngest_ConflictMessageNamesADifferentSpelling(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
+	for _, ct := range []string{
+		"application/json",
+		"application/json; charset=utf-8",
+		"application/json; charset=us-ascii",
+		"application/json; v=1",
+		"application/x-ndjson", // the one that actually disagrees
+	} {
+		req.Header.Add("Content-Type", ct)
+	}
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+	assert.Contains(t, jsonErrorMessage(t, w), `"application/x-ndjson"`,
+		"four agreeing spellings must not crowd out the declaration that caused the refusal")
+	assert.Empty(t, pub.Messages)
+}
+
+// TestIngest_ConflictLogNamesTheDisagreement: the WARN log must name the same
+// bounded set as the 415 body, pin included.
+//
+// This drifted invisibly once already: the response passed the pinned echo while
+// the log passed -1, so the operator debugging a header-duplicating proxy — who
+// never sees the client's 415 body — got the version with the disagreeing
+// declaration buried. Nothing covered log CONTENT, because NopLogger discards.
+func TestIngest_ConflictLogNamesTheDisagreement(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	h := NewIngestHandler(testRegistry(t), &testutil.MockPublisher{},
+		slog.New(slog.NewJSONHandler(&buf, nil)))
+
+	req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
+	for _, ct := range []string{
+		"application/json",
+		"application/json; charset=utf-8",
+		"application/json; charset=us-ascii",
+		"application/json; v=1",
+		"application/x-ndjson", // the one that disagrees
+	} {
+		req.Header.Add("Content-Type", ct)
+	}
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+	assert.Contains(t, buf.String(), "application/x-ndjson",
+		"the log must name the declaration that caused the refusal, like the response does")
+	assert.Contains(t, jsonErrorMessage(t, w), `"application/x-ndjson"`)
 }
