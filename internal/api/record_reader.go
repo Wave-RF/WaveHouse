@@ -260,17 +260,20 @@ func (l *lineReader) Next() (map[string]any, error) {
 // as a whole parses as one media type, and repeated LINES must agree on (format,
 // acceptedness) — `application/x-ndjson` and `application/ndjson; charset=utf-8`
 // do. Disagreement is errConflictingContentType.
-func resolveContentType(values []string) (IngestFormat, error) {
+// It also returns the index of the declaration that disagreed, or -1 when none
+// did. Callers hand that straight to echoSafe as the pin, so the 415 body and
+// the WARN log cannot name different declarations — the invariant is structural
+// rather than three call sites independently computing the same answer and
+// being trusted to agree. They did not agree once already.
+func resolveContentType(values []string) (IngestFormat, int, error) {
 	if len(values) == 0 {
-		return FormatJSON, errUnsupportedContentType
+		return FormatJSON, -1, errUnsupportedContentType
 	}
-	// One source for the disagreement rule. Writing the predicate here AND in
-	// disagreeingIndex left their equivalence resting on a comment, which is the
-	// drift this file has repeatedly paid for.
-	if disagreeingIndex(values) >= 0 {
-		return FormatJSON, errConflictingContentType
+	if pin := disagreeingIndex(values); pin >= 0 {
+		return FormatJSON, pin, errConflictingContentType
 	}
-	return ingestFormatOne(values[0])
+	f, err := ingestFormatOne(values[0])
+	return f, -1, err
 }
 
 // ingestFormatOne resolves ONE header line, parsed per RFC 9110 §8.3. Only the
@@ -481,11 +484,7 @@ func disagreeingIndex(values []string) int {
 // nothing resolved, so nothing disagreed. Alongside another line it can still
 // come out as a disagreement, which is equally honest. api.md buckets the
 // single-line case under "does not parse".
-func contentTypeMessage(values []string, conflicting bool) string {
-	pin := -1
-	if conflicting {
-		pin = disagreeingIndex(values)
-	}
+func contentTypeMessage(values []string, pin int, conflicting bool) string {
 	decls := echoSafe(values, pin)
 	list := strings.Join(supportedContentTypes, ", ")
 	accepted := "ingest requires one of " + list

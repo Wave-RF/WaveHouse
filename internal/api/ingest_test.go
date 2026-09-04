@@ -1170,7 +1170,7 @@ const wantAcceptedTypes = "application/json, application/x-ndjson, application/n
 func TestAcceptedTypesAreAllResolvable(t *testing.T) {
 	t.Parallel()
 	for _, ct := range supportedContentTypes {
-		_, err := resolveContentType([]string{ct})
+		_, _, err := resolveContentType([]string{ct})
 		require.NoError(t, err, "advertised type %q must resolve", ct)
 	}
 	assert.Equal(t, wantAcceptedTypes, strings.Join(supportedContentTypes, ", "),
@@ -1270,7 +1270,7 @@ func TestIngestFormat(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.ct, func(t *testing.T) {
 			t.Parallel()
-			got, err := resolveContentType([]string{tt.ct})
+			got, _, err := resolveContentType([]string{tt.ct})
 			if tt.wantErr {
 				require.ErrorIs(t, err, errUnsupportedContentType,
 					"a single value can only fail as unsupported — a conflict needs two header lines")

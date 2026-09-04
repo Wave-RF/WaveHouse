@@ -200,17 +200,11 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// ingests record one and drops the rest behind a 200. See resolveContentType
 	// for when a comma-bearing value is refused rather than split.
 	values := r.Header.Values("Content-Type")
-	format, err := resolveContentType(values)
+	format, pin, err := resolveContentType(values)
 	if err != nil {
 		conflicting := errors.Is(err, errConflictingContentType)
-		// The pin must match what contentTypeMessage computes, or the log and the
-		// response name different declarations — and the LOG is the surface that
-		// matters here, since the operator debugging a header-duplicating proxy
-		// never sees the client's 415 body.
-		pin := -1
-		if conflicting {
-			pin = disagreeingIndex(values)
-		}
+		// pin comes from resolveContentType, so the log below and the response at
+		// the bottom name the same declaration by construction.
 		if conflicting {
 			// Logged with the same bounded set the response shows, not just the
 			// first line: this is the one refusal whose cause is usually NOT the
@@ -228,7 +222,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
 				"content_types", echoSafe(values, pin), "table", table)
 		}
-		writeJSONError(w, http.StatusUnsupportedMediaType, contentTypeMessage(values, conflicting))
+		writeJSONError(w, http.StatusUnsupportedMediaType, contentTypeMessage(values, pin, conflicting))
 		return
 	}
 
