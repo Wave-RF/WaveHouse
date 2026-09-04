@@ -51,7 +51,7 @@ The invariant index — what must stay true. Full narrative and rationale live i
 
 1. **Interface-first** — core behaviors are Go interfaces (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`); standalone vs. future-clustered swap implementations.
 2. **Bring Your Own Schema** — users create ClickHouse tables; WaveHouse discovers them via `system.columns` and never auto-migrates.
-3. **Schema-driven ingest** — `POST /v1/ingest?table={table}` takes flat JSON, validated against the discovered schema (unknown fields rejected, types/nullability enforced). No envelope.
+3. **Schema-driven ingest** — `POST /v1/ingest?table={table}` takes flat JSON, validated against the discovered schema (unknown fields rejected, types/nullability enforced). No envelope. The **declared `Content-Type` chooses the format and the bytes never do**: an absent, unreadable or duplicated declaration is a `415` decided *before* the body is read, so a mis-declared body fails per-record rather than being silently re-framed. Fail-closed — preserve it when touching `internal/api`.
 4. **Async ingestion** — ingest returns 200 after optional dedup + MQ publish; ClickHouse writes happen later via `StartIngestWorker`. NATS full → 503 + Retry-After.
 5. **Per-table batching** — the worker groups events by table and bulk-INSERTs in schema column order; each table's batch is independent.
 6. **Dead Letter Queue** — failed batch inserts publish to `WAVEHOUSE_DLQ` (`dlq.<table>`), gated per table by `dlq.enabled` in the settings directory's `config.json` (hot-reloadable; off = leave the row unacked for redelivery). No silent data loss.
