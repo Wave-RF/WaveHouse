@@ -212,9 +212,9 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			h.logger.WarnContext(ctx, "conflicting ingest content-type declarations",
 				"content_types", echoSafe(values), "table", table)
 		} else {
-			// Logs the whole set, like the conflicting branch: the response body
-			// names every header line, so logging only Header.Get would make the
-			// server-side record disagree with what the caller was told — for
+			// Logs the same bounded set the response shows, like the conflicting
+			// branch: logging only Header.Get would make the server-side record
+			// disagree with what the caller was told — for
 			// ["", "text/csv"] the client sees `Content-Type "", "text/csv"`
 			// while Header.Get would have logged only content_type="".
 			h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",

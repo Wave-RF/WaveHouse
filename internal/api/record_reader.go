@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"slices"
 	"strings"
 )
 
@@ -384,35 +385,59 @@ func emptyBodyMessage(format IngestFormat) string {
 //
 // BOTH dimensions are caller-controlled and both must be bounded. values is
 // r.Header.Values("Content-Type"), so a caller picks the length of each
-// declaration AND how many there are. Bounding only the length leaves the
-// amplification factor intact: 7200 lines of 128 bytes fits under Go's default
-// 1 MiB MaxHeaderBytes and still bought a 4.65 MB response. Each non-UTF-8 byte
-// costs 5 output bytes — %q renders \xNN, then JSON escapes the backslash.
+// declaration AND how many there are. Bounding only the length left the
+// amplification intact: 7200 lines of 128 bytes fits under Go's default 1 MiB
+// MaxHeaderBytes and still bought a 4.65 MB response. Each non-UTF-8 byte costs
+// 5 output bytes — %q renders \xNN, then JSON escapes the backslash. Over
+// HTTP/2 it is worse than that ratio suggests, since HPACK indexes a repeated
+// header line down to about one byte on the wire.
+//
+// 128 bytes is far longer than any real media type plus parameters, so a caller
+// fixing a genuine mistake still sees what they sent. FOUR is the number that
+// makes the message lossy, so it is the one that needs care: the declarations
+// retained are the first four DISTINCT ones, because keeping the first four
+// verbatim let a conflict hide behind them: four copies of application/json
+// followed by one application/x-ndjson named only the agreeing type and buried
+// the declaration that caused the refusal, which
+// is precisely what the conflicting wording exists to avoid.
 const (
 	maxEchoedContentType  = 128 // per declaration
-	maxEchoedDeclarations = 4   // how many declarations are named at all
+	maxEchoedDeclarations = 4   // how many DISTINCT declarations are named
 )
 
 // echoSafe bounds a declaration set for echoing to the caller or the log, in
-// both dimensions. The result is O(1) in size regardless of the request.
+// both dimensions, keeping the first maxEchoedDeclarations distinct values so a
+// disagreeing declaration is never hidden behind its agreeing neighbours. The
+// result is O(1) in size regardless of the request.
 func echoSafe(values []string) []string {
-	shown := min(len(values), maxEchoedDeclarations)
-	out := make([]string, 0, shown+1)
-	for _, v := range values[:shown] {
+	kept := make([]string, 0, maxEchoedDeclarations)
+	for _, v := range values {
+		if len(kept) == maxEchoedDeclarations {
+			break
+		}
+		if !slices.Contains(kept, v) {
+			kept = append(kept, v)
+		}
+	}
+	out := make([]string, 0, len(kept)+1)
+	for _, v := range kept {
 		if len(v) > maxEchoedContentType {
 			v = v[:maxEchoedContentType] + "…(truncated)"
 		}
 		out = append(out, v)
 	}
-	if rest := len(values) - shown; rest > 0 {
+	if rest := len(values) - len(kept); rest > 0 {
 		out = append(out, fmt.Sprintf("…and %d more", rest))
 	}
 	return out
 }
 
-// contentTypeMessage is the 415 body. It says what was declared — all of it,
-// across header lines and joined values — and lists every media type ingest
-// reads, so a caller can fix the request from the response alone.
+// contentTypeMessage is the 415 body. It says what was declared and lists every
+// media type ingest reads, so a caller can fix the request from the response
+// alone. The declarations are bounded by echoSafe — the first four DISTINCT
+// ones, each capped, then "…and N more" — so a caller sending thousands cannot
+// size the response, while a caller with a genuine conflict still sees the
+// declaration that caused it.
 //
 // Disagreement between repeated LINES gets its own wording, because routing it
 // through the unsupported text would tell a caller who declared both

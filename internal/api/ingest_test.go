@@ -2249,13 +2249,15 @@ func TestIngest_ContentTypeEchoIsBounded(t *testing.T) {
 			// move with the request — see the O(1) assertion below.
 			assert.Less(t, w.Body.Len(), 4096,
 				"the 415 body must be bounded in both the length and the count of declarations")
+			assert.Contains(t, jsonErrorMessage(t, w), "…",
+				"a truncated echo must say so — …(truncated) or …and N more — not cut silently")
 			assert.Empty(t, pub.Messages)
 		})
 	}
 
 	// The property the size ceiling above only approximates: the body does not
-	// grow with the request at all. A 72x larger header set must produce a
-	// byte-identical response, or some dimension is still unbounded.
+	// grow with the request. A 72x larger header set may cost a few bytes — the
+	// digits of N in "…and N more" — and never a multiple.
 	t.Run("the body does not grow with the request", func(t *testing.T) {
 		t.Parallel()
 		sizeFor := func(lines int) int {
@@ -2275,4 +2277,34 @@ func TestIngest_ContentTypeEchoIsBounded(t *testing.T) {
 		assert.Less(t, large-small, 8,
 			"response size must grow at most with the digits of the count, not with the request")
 	})
+}
+
+// TestIngest_ConflictMessageNamesTheDisagreement: the echo bound keeps the first
+// four DISTINCT declarations, not the first four verbatim.
+//
+// Keeping them verbatim was a real regression in the message the bound was added
+// to protect: four copies of application/json followed by one
+// application/x-ndjson named only the agreeing type and hid the declaration that
+// caused the refusal behind "…and 1 more". The conflicting wording exists
+// precisely so a caller can see what disagreed.
+func TestIngest_ConflictMessageNamesTheDisagreement(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	req := rawIngestRequest(t, "clicks", "", "{\"page\":\"/a\"}\n{\"page\":\"/b\"}")
+	for range 4 {
+		req.Header.Add("Content-Type", "application/json")
+	}
+	req.Header.Add("Content-Type", "application/x-ndjson")
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+	msg := jsonErrorMessage(t, w)
+	assert.Contains(t, msg, "conflicting Content-Type declarations")
+	assert.Contains(t, msg, `"application/x-ndjson"`,
+		"the declaration that caused the conflict must not be hidden behind its agreeing neighbours")
+	assert.Contains(t, msg, `"application/json"`)
+	assert.Empty(t, pub.Messages)
 }
