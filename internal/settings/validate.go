@@ -261,8 +261,21 @@ var (
 //
 // The evidence required is deliberately strong: a non-empty object under
 // "select"/"insert" whose every value is itself an object and none of whose keys
-// is a v2 permission field. The one shape that still reads as legacy is a table
-// granting a role literally named "select" or "insert" — rename such a role.
+// is a v2 permission field.
+//
+// A role literally NAMED after an operation is the hard case, because its v2
+// grant nests {"select": …}/{"insert": …} — which looks like an operation map.
+// Two sub-cases, and they are not alike:
+//
+//   - inner keys are exactly the SAME operation (select.select): the v1 and v2
+//     readings mean the same thing — role "select" reads this table either way —
+//     so accepting the v2 reading is free.
+//   - inner keys include the OTHER operation (select.insert): the readings
+//     DIVERGE — they differ on which role, which operation, or both. Guessing
+//     either way silently grants access the file never contained (for
+//     select.insert: v1 means a read-only role `insert`, v2 a write-only role
+//     `select`), so this refuses to guess and errors.
+//
 // A malformed document is left alone; the JSON parse error is the better message.
 func (v *validator) reportLegacyPolicyLayout(data []byte) bool {
 	var doc struct {
@@ -288,6 +301,15 @@ func (v *validator) reportLegacyPolicyLayout(data []byte) bool {
 			if !looksLikeRoleMap(raw, fields) {
 				continue
 			}
+			if same, divergent := operationNamedRoles(raw, op); same {
+				// Both readings agree; the v2 decode is safe.
+				continue
+			} else if divergent {
+				v.errorf(FilePolicies, fmt.Sprintf("tables.%s.%s", table, op),
+					"ambiguous between the role-first and operation-first layouts: every key under tables.%s.%s is an operation name, so pre-v2 those keys are role names under the %[2]q operation, and v2 they are operations under a role named %[2]q — different access either way. Rename the role",
+					table, op)
+				return true
+			}
 			v.errorf(FilePolicies, fmt.Sprintf("tables.%s.%s", table, op),
 				"pre-v2 operation-first layout (tables.%s.%s.<role>); v2 is role-first (tables.%s.<role>.%s) — see wavehouse.dev/access-control#migrating-from-the-operation-first-layout",
 				table, op, table, op)
@@ -295,6 +317,41 @@ func (v *validator) reportLegacyPolicyLayout(data []byte) bool {
 		}
 	}
 	return false
+}
+
+// operationNamedRoles classifies an operation block whose keys are all operation
+// names — the shape a role literally named "select"/"insert" produces under v2.
+//
+//   - same: the only key is op itself (select.select). Both readings assign the
+//     identical (role=op, operation=op, perms) triple. They cannot diverge on
+//     the perms either: v2's field sets are strict subsets of v1's, so a grant
+//     that would decode differently fails the strict decode anyway.
+//   - divergent: a key names the OTHER operation (select.insert), with or
+//     without op itself. The readings then differ on which role, which
+//     operation, or both — so the caller must refuse rather than pick one.
+//
+// Both false means the block is an ordinary role map and the legacy heuristic
+// stands.
+func operationNamedRoles(raw json.RawMessage, op string) (same, divergent bool) {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil || len(obj) == 0 {
+		return false, false
+	}
+	other := "insert"
+	if op == "insert" {
+		other = "select"
+	}
+	sawOther := false
+	for k := range obj {
+		switch k {
+		case op:
+		case other:
+			sawOther = true
+		default:
+			return false, false // a real role name: an ordinary role map
+		}
+	}
+	return !sawOther, sawOther
 }
 
 // looksLikeRoleMap reports whether raw is a non-empty JSON object that reads as
@@ -305,6 +362,13 @@ func looksLikeRoleMap(raw json.RawMessage, fields map[string]bool) bool {
 	if json.Unmarshal(raw, &obj) != nil || len(obj) == 0 {
 		return false
 	}
+	// A key that names a permission field (columns, filter, limit, …) means this
+	// is the operation's own permission object, not a map of roles; and every
+	// value must itself be an object, as a grant is. Blocks whose keys are all
+	// operation names — what a role literally NAMED "select"/"insert" nests
+	// under v2 — do read as role maps here, by design: the caller hands those to
+	// operationNamedRoles, which accepts the ones whose two readings agree and
+	// refuses the ones that diverge rather than picking a winner.
 	for k, val := range obj {
 		if fields[k] {
 			return false

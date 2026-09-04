@@ -42,12 +42,17 @@ func filteredPolicy() *policy.Policy {
 // seam answered.
 func TestHub_RowEvaluatorSeam_LiveBroadcast(t *testing.T) {
 	t.Parallel()
+	// The tenant is chosen per case so each subtest builds the scenario its name
+	// describes. With both cases sending a row the predicate withholds, the
+	// withhold case proved nothing — `seam.Visible(…) || perms.RowVisible(…)`
+	// would have passed it, since the policy withheld the row anyway.
 	for _, tt := range []struct {
-		name    string
-		visible bool
+		name     string
+		visible  bool
+		tenantID string
 	}{
-		{"seam admits a row the predicate would withhold", true},
-		{"seam withholds a row the predicate would admit", false},
+		{"seam admits a row the predicate would withhold", true, "t2"},
+		{"seam withholds a row the predicate would admit", false, "t1"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -58,9 +63,11 @@ func TestHub_RowEvaluatorSeam_LiveBroadcast(t *testing.T) {
 			sub := NewSubscriber(map[string]any{"tenant": "t1"}, nil)
 			hub.Add("ingest.clicks", "viewer", sub)
 
-			// tenant_id "t2" against a claim of "t1": the real predicate withholds.
+			// The claim is "t1", so tenant_id "t2" is a row the real predicate
+			// withholds and "t1" is one it admits — the seam's verdict must win
+			// either way.
 			hub.Broadcast("ingest.clicks", rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
-				map[string]any{"tenant_id": "t2", "page": "/a"}))
+				map[string]any{"tenant_id": tt.tenantID, "page": "/a"}))
 
 			assert.Equal(t, 1, eval.calls, "the live path must consult the seam")
 			if tt.visible {

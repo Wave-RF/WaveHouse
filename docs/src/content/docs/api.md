@@ -188,7 +188,16 @@ Where those values come from depends on how the binary was built:
 
 Accepts a single flat JSON object, a JSON array of objects, or a newline-delimited JSON (NDJSON) batch, validates each record against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.
 
-**`Content-Type` is required and authoritative.** The format is what the caller declares, not what the bytes look like: a body declared as NDJSON is read as NDJSON whatever its first byte, so a line that isn't a JSON object fails as a per-record error rather than silently re-framing the whole request. A request with **no** `Content-Type`, or one ingest doesn't read, is rejected with `415` and a message listing the accepted types — nothing is guessed. The one thing the body still decides is *arity within the JSON family*: the first non-whitespace byte picks a top-level array (`[`) or a single object.
+**`Content-Type` is required and authoritative.** The format is what the caller declares, not what the bytes look like: a body declared as NDJSON is read as NDJSON whatever its first byte, so a line that isn't a JSON object fails as a per-record error rather than silently re-framing the whole request. A request with **no** `Content-Type`, or one whose media type is not in the accepted list, is rejected with `415` and a message listing the accepted types — nothing is guessed. The one thing the body still decides is *arity within the JSON family*: the first non-whitespace byte picks a top-level array (`[`) or a single object. The reverse mis-declaration is **not** caught: NDJSON sent as `application/json` is read as the single object it starts with and the remaining lines are ignored — a `200` for one record. Declare `application/x-ndjson` for anything line-framed ([#561](https://github.com/Wave-RF/WaveHouse/issues/561)).
+
+:::note[What counts as a valid declaration]
+
+The header is parsed with Go's `mime.ParseMediaType`, which implements RFC 9110 §8.3 `media-type`, and only the media type decides the format. Parameters are ignored, so no malformed parameter costs you the request — `application/json; charset`, `application/json;;`, a value left mid-quote, even a name repeated with different values all read as `application/json`. One exception: a malformed parameter on a line that **also contains a comma** is refused, because the comma may be a second declaration joined on and the error cannot distinguish that from a comma inside data ([#563](https://github.com/Wave-RF/WaveHouse/issues/563)). So `application/json; profile="a,b"` is one media type and is accepted, while `application/json; profile="a,b"; charset` is a `415` — each half alone is fine.
+
+`Content-Type` is also a **singleton** field, and §5.3 forbids repeating it. So anything that isn't exactly one readable media type is a `415`: no header, an unsupported type, one whose **media type** doesn't parse, or more than one declaration. The single accommodation is for intermediaries that duplicate the header — **repeated header lines** are all resolved and accepted when they agree on the format. A **comma-joined** value is not — §8.3 warns that picking a member of the resulting pseudo-list is itself an interoperability and security hazard. Precisely: a value carrying a comma is refused whenever the value as a whole does not parse as one media type — whatever made it unparseable. A comma *inside a quoted parameter value* is legal data, so `application/json; a=", application/x-ndjson; b="` is one media type and is accepted, even though an intermediary may have built it by illegally joining two lines — the server cannot tell.
+
+The 415 body quotes what you declared, bounded: at most **four distinct** header lines, each capped at 128 bytes and marked `…(truncated)` when cut, followed by `"…and N more"`. N counts every header line not quoted — *including duplicates of one that is* — so five copies of the same header show it once, then `"…and 4 more"`. When declarations conflict, the one that actually disagreed is always quoted, even when four agreeing spellings would otherwise fill the list.
+:::
 
 | Body | `Content-Type` | Response |
 | ---- | -------------- | -------- |
@@ -196,9 +205,7 @@ Accepts a single flat JSON object, a JSON array of objects, or a newline-delimit
 | a JSON array of objects (any length, even 1) | `application/json` | per-record summary — see [Batch Ingest](#batch-ingest) |
 | one JSON object per line (NDJSON) | `application/x-ndjson` (also `application/ndjson`, `application/jsonl`, `application/jsonlines`) | per-record summary — see [Batch Ingest](#batch-ingest) |
 
-Parameters are ignored, so `application/json; charset=utf-8` is `application/json`.
-
-The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse)). For uploads larger than that, use the streaming NDJSON form below rather than one big body, and set your own outer limit at the [reverse proxy](/reverse-proxy#request-body-size-limits).
+The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse)). The cap applies to **every** body shape, NDJSON included — the whole body is read before it is parsed, so a line-framed batch is bounded by the same 16 MiB cap as a JSON array (NDJSON carries one additional, tighter bound: a single line over 10 MiB fails the request). The `413` is decided before any record is processed, so nothing is published — including for a single-object body whose trailing bytes push it over the cap, which is now rejected rather than accepted on its first object. Split an upload larger than the cap across several requests, and set your own outer limit at the [reverse proxy](/reverse-proxy#request-body-size-limits).
 
 The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
@@ -247,6 +254,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
+| 400 | `{"error":"invalid request body"}` | The body could not be read at all — a malformed transfer encoding, or a truncated upload (a body cut off *in transit*). A body that arrived complete but ends mid-value is `invalid json` |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure (unknown fields, type mismatches, missing required columns, null in a non-nullable column with no default). The body is the validator's message verbatim — there is no `validation failed:` prefix. |
 | 400 | `{"error":"missing dedupe id field \"event_id\""}` | Only when dedupe is enabled with `dedupe.require_id: true` and the row lacks the configured `id_field`. With `require_id: false` (the default) the row is instead published un-deduped. Either way — reject or publish — the row is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`. In a batch this is a per-record failure, not a whole-request error. |
@@ -256,7 +264,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 403 | `{"error":"check failed for column \"x\""}` | The record's value for a checked column doesn't satisfy the policy `check` (`_eq`/`_in`), or an `_in`-checked column is omitted ([Access control → Insert checks](/access-control#insert-checks)). On the batch path both this and the column error above are per-record failures reported in `results`, not whole-request rejections |
 | 404 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
-| 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …`) | The request declared no `Content-Type`, or one ingest doesn't read. Checked before the body is parsed |
+| 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …` — see the note above on how declarations are echoed; conflicting variant: `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of …`) | The request declared no `Content-Type`, one whose media type is unsupported or does not parse, a comma-bearing value that does not parse as a single media type, or repeated header lines that disagree — different formats, or one supported and one not. Checked before the body is parsed |
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
 | 500 | `{"error":"publish failed"}` | Message queue error |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Response includes `Retry-After: 30` header. |
@@ -311,7 +319,7 @@ Examples for a `DateTime64(3, 'America/New_York')` column: `"2026-06-21 00:00:00
 A **JSON array** of objects (`[{…}, {…}]`) or an **NDJSON** body (`Content-Type: application/x-ndjson`, one JSON object per line) ingests a batch in a single request. Each record is validated, authorized, deduplicated, and published independently, so **one malformed or rejected record never blocks the rest of the batch**. (The SDK's `insert([...])` array helper uses the NDJSON form automatically; both forms return the same response.)
 
 - **JSON array** — the most convenient form from most HTTP clients. A structural JSON syntax error fails the whole request (`400`), but a wrong-typed element (a non-object) is reported per-record like any other rejection. An explicit empty array (`[]`) is a valid, record-less batch (`200`, `total: 0`).
-- **NDJSON** — the streaming-friendly form for very large uploads. Blank lines are skipped, and a single malformed *line* is reported and skipped (the newline reframes the next record).
+- **NDJSON** — one record per line. Its advantages are tolerance of a malformed record and cheap client-side generation, not a larger ceiling: the body cap applies to it exactly as to a JSON array. Blank lines are skipped, and a single malformed *line* is reported and skipped (the newline reframes the next record) — where a structural syntax error anywhere in a JSON array fails the whole request. Both forms report a wrong-typed record per-record.
 
 **Request (JSON array):**
 
@@ -362,16 +370,17 @@ A `200` is returned whenever the body was read and the records were processed �
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 400 | `{"error":"empty body"}` / `{"error":"empty ndjson body"}` | The body has no records |
-| 400 | `{"error":"invalid json: ..."}` | A structural JSON syntax error, or a truncated/unterminated JSON array (e.g. a cut-off upload — the whole request fails rather than reporting a partial success), or an oversized NDJSON line |
+| 400 | `{"error":"invalid request body"}` | The body could not be read at all — a malformed transfer encoding, or a truncated upload (a body cut off *in transit*). A body that arrived complete but ends mid-value is `invalid json` |
+| 400 | `{"error":"invalid json: ..."}` | A structural JSON syntax error, a single NDJSON line over 10 MiB, or a JSON array that ends before its closing `]` — a body that transferred completely but was generated truncated. The whole request fails rather than reporting a partial success |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (same auth gate as the single-object path; surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table (checked once, before any record) |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
-| 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …`) | The request declared no `Content-Type`, or one ingest doesn't read. Checked before the body is parsed |
+| 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …` — see the note above on how declarations are echoed; conflicting variant: `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of …`) | The request declared no `Content-Type`, one whose media type is unsupported or does not parse, a comma-bearing value that does not parse as a single media type, or repeated header lines that disagree — different formats, or one supported and one not. Checked before the body is parsed |
 | 500 | `{"error":"publish failed"}` / `{"error":"dedupe failed"}` | Message-queue or dedup-backend failure mid-batch |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream full (backpressure) mid-batch; includes `Retry-After: 30` |
 
 :::caution[At-least-once on retry]
-A batch aborted partway (a `503`/`500`, or a JSON-array syntax error, after some leading records were already published) re-publishes those leading records when the whole batch is retried. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
+A batch aborted partway (a `503`/`500`, a JSON-array syntax error, or an NDJSON line over the 10 MiB line bound, after some leading records were already published) re-publishes those leading records when the whole batch is retried. A whole-body read failure is **not** one of these: a `413`, or the `400 invalid request body` of an upload cut off in transit, is decided before any record is processed, so nothing is published — safe to retry, once split for a `413`. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
 :::
 
 **curl example (JSON array):**
@@ -667,7 +676,7 @@ Returns the schema for a specific table.
 }
 ```
 
-Per-column fields: `name`, `type` and `is_nullable` describe the column; `position` is its 1-based ordinal in the table's declaration order (always present, and the order `columns` itself is in); `has_default` says whether it declares any default at all, while `default_expression` says what that default is, omitted when the column declares none. The table's `CREATE TABLE` statement is captured on the same refresh but is deliberately **not** exposed here — for a table backed by an external engine it carries that engine's credentials.
+Per-column fields: `name`, `type` and `is_nullable` describe the column; `position` is its 1-based ordinal in the table's declaration order (always present, and the order `columns` itself is in); `has_default` says whether it declares any default at all, while `default_expression` says what that default is, omitted when the column declares none. The table's `CREATE TABLE` statement is captured on the same refresh but is deliberately **not** exposed here — for a table backed by an external engine it renders that engine's wiring — endpoint, bucket/host, database, username, access key id. (ClickHouse masks the password as `[HIDDEN]` from ~23.9; the topology is what is withheld here.)
 
 **Error responses:**
 

@@ -41,8 +41,10 @@ func (discoveryValidator) CanonicalizeTimestamps(schema *discovery.TableSchema, 
 }
 
 // validator returns the handler's RecordValidator, or the default when none is
-// wired. Nil-safe rather than constructor-enforced because IngestHandler is
-// built by struct literal in places.
+// wired. Validator is an optional field set after construction, so nil is the
+// ordinary case rather than a mistake — and nil must resolve to the enforcing
+// default, never to skipping validation. That fail-closed direction is the
+// point; see hub.go's rowEvaluator for the same shape on row visibility.
 func (h *IngestHandler) validator() RecordValidator {
 	if h.Validator != nil {
 		return h.Validator
