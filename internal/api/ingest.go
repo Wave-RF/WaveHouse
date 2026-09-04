@@ -47,6 +47,12 @@ type IngestHandler struct {
 	PolicySource   policy.Source
 	logger         *slog.Logger
 
+	// Validator and Checker are the per-record seams a native type layer will
+	// take over (see ingest_seams.go). Both are optional: nil means the default
+	// implementation, which is today's behavior unchanged.
+	Validator RecordValidator
+	Checker   InsertChecker
+
 	// maxRequestBytes optionally overrides the default inbound request body cap
 	// (maxRequestBodyBytes). When 0, the default applies. Exists so same-package
 	// tests can pin the cap-overflow path without allocating 16 MiB per run; not
@@ -185,20 +191,15 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// TODO: set a scope (e.g., "org_id:123") – but scope requires us to know if a table is globally shared or scoped fully by roles/org/tenant. Currently we have no real way to set this, so scopes will be empty.
 	scope := ""
 
-	// Bound the inbound body (parity with /v1/ops/query; also caps the
-	// array/stream decode vectors). See query.go for maxRequestBodyBytes.
-	reqCap := int64(maxRequestBodyBytes)
-	if h.maxRequestBytes > 0 {
-		reqCap = h.maxRequestBytes
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
-
-	// Pick a reader from the DECLARED format; the body only chooses arity within
-	// the JSON family. Resolving every header line and requiring agreement is what
-	// stops a request declaring both application/json and application/x-ndjson
-	// from silently taking the JSON path — an NDJSON body read as one object
-	// ingests record one and drops the rest behind a 200. See resolveContentType
-	// for when a comma-bearing value is refused rather than split.
+	// Resolve the DECLARED format before touching the body: an undeclared or
+	// unreadable Content-Type is a 415, and there is no reason to read (let
+	// alone buffer) bytes for a request already known to be unreadable.
+	//
+	// Resolving every header line and requiring agreement is what stops a request
+	// declaring both application/json and application/x-ndjson from silently
+	// taking the JSON path — an NDJSON body read as one object ingests record one
+	// and drops the rest behind a 200. See resolveContentType for when a
+	// comma-bearing value is refused rather than split.
 	values := r.Header.Values("Content-Type")
 	format, pin, err := resolveContentType(values)
 	if err != nil {
@@ -229,11 +230,34 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bound the inbound body (parity with /v1/ops/query; also caps the
+	// array/stream decode vectors). See query.go for maxRequestBodyBytes.
+	reqCap := int64(maxRequestBodyBytes)
+	if h.maxRequestBytes > 0 {
+		reqCap = h.maxRequestBytes
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
+
+	// Read the whole (already-capped) body up front and run the readers over
+	// those bytes rather than the live connection. The buffer comes from a pool
+	// and goes back on the way out — every record the readers hand back is
+	// freshly allocated, so nothing downstream points into it.
+	body := getBodyBuffer()
+	defer putBodyBuffer(body)
+	if _, err := body.ReadFrom(r.Body); err != nil {
+		if writeMaxBytesError(w, err, reqCap) {
+			return
+		}
+		h.logger.WarnContext(ctx, "ingest body read failed", "error", err, "table", table)
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
 	// The reader is built from the RESOLVED format, not from a second look at
 	// the header. Re-resolving here would duplicate the rule in two places,
 	// which is how the joined and repeated paths came to disagree before. The
 	// only error left is an empty body.
-	rr, batch, err := newRecordReader(format, r.Body)
+	rr, batch, err := newRecordReader(format, body.Bytes())
 	if err != nil {
 		h.logger.ErrorContext(ctx, "empty ingest body", "table", table, "format", format.String())
 		writeJSONError(w, http.StatusBadRequest, emptyBodyMessage(format))
@@ -263,6 +287,9 @@ func (h *IngestHandler) handleSingle(
 ) {
 	data, err := rr.Next()
 	if err != nil {
+		// Unreachable while the body is buffered — a bytes.Reader cannot produce
+		// a *http.MaxBytesError, and the cap is enforced at body.ReadFrom. Kept
+		// because it is the correct mapping if a reader ever streams again.
 		if writeMaxBytesError(w, err, reqCap) {
 			return
 		}
@@ -323,12 +350,16 @@ func (h *IngestHandler) handleBatch(
 				appendResult(&result, recordResult{Index: result.Total, Error: rse.Error()})
 				continue
 			}
+			// Unreachable while the body is buffered — a bytes.Reader cannot produce
+			// a *http.MaxBytesError, and the cap is enforced at body.ReadFrom. Kept
+			// because it is the correct mapping if a reader ever streams again.
 			if writeMaxBytesError(w, err, reqCap) {
 				return
 			}
-			// A fatal stream error (JSON array syntax error, oversized NDJSON
-			// line, or body read error) — the reader can't resume, so fail the
-			// request rather than report a misleading partial summary.
+			// A fatal stream error (JSON array syntax error, or an oversized
+			// NDJSON line) — the reader can't resume, so fail the request rather
+			// than report a misleading partial summary. Not a body read error:
+			// the readers run over an in-memory slice now.
 			h.logger.WarnContext(ctx, "ingest read error", "error", err, "table", table)
 			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
@@ -414,7 +445,7 @@ func (h *IngestHandler) processRecord(
 	data map[string]any,
 	now time.Time,
 ) (duplicate bool, reject *recordReject, abort *requestAbort) {
-	if err := discovery.Validate(schema, data); err != nil {
+	if err := h.validator().Validate(schema, data); err != nil {
 		h.logger.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
 		return false, &recordReject{Status: http.StatusBadRequest, Message: err.Error()}, nil
 	}
@@ -459,7 +490,7 @@ func (h *IngestHandler) processRecord(
 			// value to auto-inject, so an absent column fails closed.
 			if set, isSet := requiredVal.([]any); isSet {
 				actual, ok := data[col]
-				if !ok || !valueInSet(actual, set) {
+				if !ok || !h.checker().InSet(actual, set) {
 					h.logger.WarnContext(ctx, "check clause failed", "column", col, "allowed", set, "actual", actual, "present", ok)
 					return false, &recordReject{
 						Status:  http.StatusForbidden,
@@ -479,7 +510,7 @@ func (h *IngestHandler) processRecord(
 				// what scopes that second reading to author-written literals: a
 				// claim-derived value arrives as a plain string and never gains a
 				// reading the token's own JSON type didn't give it.
-				if !checkValueMatches(actual, requiredVal) {
+				if !h.checker().Matches(actual, requiredVal) {
 					h.logger.WarnContext(ctx, "check clause failed", "column", col, "expected", requiredVal, "actual", actual)
 					return false, &recordReject{
 						Status:  http.StatusForbidden,
@@ -502,7 +533,7 @@ func (h *IngestHandler) processRecord(
 
 	// Canonicalize timestamps to RFC 3339 UTC (#372; fail-open — #381's row-filter
 	// enforces) after the permission checks: check clauses keep pre-#372 semantics.
-	discovery.CanonicalizeTimestamps(schema, data)
+	h.validator().CanonicalizeTimestamps(schema, data)
 
 	// Optional deduplication. enabled/id_field/require_id resolve per record
 	// from one snapshot (table override → global; the settings directory
