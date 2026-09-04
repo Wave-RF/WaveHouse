@@ -123,3 +123,25 @@ func TestIngest_ComputedColumns_FlowToClickHouse(t *testing.T) {
 // TestIngest_SuppliedComputedColumn_Rejected: the other half — a record that
 // names a computed column is refused at the API with a 400 naming it, rather
 // than having the value silently dropped by the positional encoder.
+func TestIngest_SuppliedComputedColumn_Rejected(t *testing.T) {
+	e := env(t)
+
+	table := createTable(t,
+		"user_id String, digest String MATERIALIZED concat('d:', user_id)",
+		"ORDER BY user_id",
+	)
+
+	resp, err := http.Post(
+		e.server.URL+"/v1/ingest?table="+url.QueryEscape(table),
+		"application/json",
+		strings.NewReader(`{"user_id":"dave","digest":"forged"}`),
+	)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Contains(t, body["error"], "digest")
+	assert.Contains(t, body["error"], "cannot be inserted")
+}

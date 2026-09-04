@@ -47,9 +47,9 @@ func TestDiscovery_MetadataAgainstRealClickHouse(t *testing.T) {
 	assert.NotEmpty(t, byName["note"].DefaultExpression, "a DEFAULT column carries its expression")
 	assert.Empty(t, byName["id"].DefaultExpression, "a plain column carries none")
 
-	// default_kind and IsInsertable arrive with the computed-column change further
-	// up the stack; this layer only reads default_expression and position, so the
-	// MATERIALIZED column is here to prove position stays contiguous across one.
+	// default_kind and IsInsertable land in this branch; this test covers the
+	// default_expression/position half, so the MATERIALIZED column is here to
+	// prove position stays contiguous across one.
 	assert.EqualValues(t, 4, byName["day"].Position, "a MATERIALIZED column still occupies a position")
 	// Two claims this layer makes that no unit fake can reach: testutil hardcodes
 	// kind="DEFAULT" whenever HasDefault, and no unit case sets MATERIALIZED.

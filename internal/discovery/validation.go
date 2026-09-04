@@ -19,8 +19,19 @@ func Validate(schema *TableSchema, data map[string]any) error {
 
 	// Reject unknown fields.
 	for key := range data {
-		if _, ok := colMap[key]; !ok {
+		col, ok := colMap[key]
+		if !ok {
 			return fmt.Errorf("unknown column %q for table %q", key, schema.Name)
+		}
+		// A computed column has no writable storage: ClickHouse refuses to
+		// insert a MATERIALIZED column and does not resolve an ALIAS one at
+		// all. The published row carries only insertable columns, so a value
+		// supplied for one of these would otherwise be dropped on the way out
+		// and the record would insert as though it had never been sent.
+		// Refuse it here instead, where the caller still hears about it.
+		if !col.IsInsertable() {
+			return fmt.Errorf("column %q of table %q is %s and cannot be inserted",
+				key, schema.Name, strings.ToLower(col.DefaultKind))
 		}
 	}
 

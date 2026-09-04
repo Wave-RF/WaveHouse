@@ -69,7 +69,7 @@ func TestProjectIndices(t *testing.T) {
 		{
 			name:      "no columns projects nothing",
 			cols:      nil,
-			perms:     &policy.ResolvedPermissions{Allowed: true},
+			perms:     &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{}},
 			wantIdx:   []int{},
 			wantNames: []string{},
 		},
