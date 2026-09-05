@@ -134,10 +134,12 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
    * the positional wire sends every row without a schema event, so an unbounded
    * `console.warn` per row floods the console for the whole connection — and so
    * does any other per-frame warn against a server sending something the reader
-   * cannot use. Every warn site is bounded, but keyed by CAUSE so a short row, a
-   * long row, a non-array row, a malformed schema frame and unparseable JSON
-   * stay individually visible: collapsing them behind one flag would hide the
-   * distinct failures the warning exists to surface. Reset per attempt.
+   * cannot use. Every PER-FRAME warn site is bounded, but keyed by CAUSE so a row
+   * with no announcement, a short row, a long row, a non-array row, a malformed
+   * schema frame and unparseable JSON stay individually visible: collapsing them
+   * behind one flag would hide the distinct failures the warning exists to
+   * surface. Reset per attempt. (The per-connect() notices are not per-frame and
+   * are not bounded here.)
    */
   private _warnBudget = new Map<string, number>();
 

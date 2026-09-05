@@ -280,10 +280,12 @@ Client GET /v1/stream
     (no `id:`, so it never moves Last-Event-ID) BEFORE registering, so a client
     on a quiet table learns its columns before any row arrives and a live event
     during setup finds the announcement already recorded rather than repeating
-    it. This announcement is best-effort — it is skipped when the registry has
-    no schema yet, or the role may read no column — and what actually
-    guarantees a row is never sent without its names is the LIVE path's
-    per-connection drift check on every event
+    it. This announcement is best-effort — skipped when the registry has no
+    schema for the table yet, or the role cannot read the table at all (a role
+    that CAN read it but whose column rules leave nothing readable is still
+    announced, with an empty list) — and what actually guarantees a row is
+    never sent without its names is the LIVE path's per-connection drift check
+    on every event
   → Register a Subscriber with the Stream Hub, keyed by (topic, role)
   → If ?since= / Last-Event-ID provided:
     → Create ephemeral NATS consumer with DeliverByStartTime

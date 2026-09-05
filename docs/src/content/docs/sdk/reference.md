@@ -139,7 +139,7 @@ Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev serve
 | `--out`, `-o` | Output .d.ts file path | `./wavehouse.d.ts` |
 | `--auth`, `-a` | Bearer token (if auth required) | — |
 
-The generated row type is the **read** shape. A `MATERIALIZED` or `ALIAS` column declares a default, so it is emitted as optional — but supplying one on `insert` is a `400` (`column "x" of table "t" is materialized and cannot be inserted`), and the type will not catch it. Omit computed columns; the server fills them in.
+The generated row type is the **read** shape — with one exception running the other way: an `EPHEMERAL` column declares a default, so codegen emits it too, yet no query can ever return it. There the type says readable where only the write is real. A `MATERIALIZED` or `ALIAS` column declares a default, so it is emitted as optional — but supplying one on `insert` is a `400` (`column "x" of table "t" is materialized and cannot be inserted`), and the type will not catch it. Omit computed columns; the server fills them in.
 
 **Example output:**
 

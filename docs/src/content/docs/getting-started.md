@@ -93,6 +93,8 @@ curl -N "http://localhost:8080/v1/stream?table=clicks"
 curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z"
 ```
 
+Rows arrive **positionally**: the stream announces the column names once in an `event: schema` frame, and every event's `row` array matches that order — so raw `curl` output looks like `"row":["/home","signup"]` rather than named fields. See [the wire format](/api#get-v1stream--server-sent-events-stream) for the frame sequence; the [TypeScript SDK](/sdk/streaming) zips them back into objects for you.
+
 ## Troubleshooting first runs
 
 The handful of things that most often trip up a first session — each is expected behavior with a quick fix:
