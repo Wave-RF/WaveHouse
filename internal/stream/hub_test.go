@@ -58,6 +58,47 @@ func rawEvent(tb testing.TB, table, ts string, data map[string]any) []byte {
 	return rawEventCols(tb, table, ts, slices.Sorted(maps.Keys(data)), data)
 }
 
+// TestBroadcast_DuplicateColumnWithheld: an envelope whose columns name one
+// column twice cannot be paired — the name-keyed map would keep the last value
+// and silently drop the first, and that map is what a row-level filter is
+// evaluated against, so a duplicate could decide visibility on a value the row
+// never carried. Withheld from every role rather than delivered under a guessed
+// reading, the same as a length mismatch.
+//
+// A nil policy store (passthrough, no filtering) and a positive control are
+// both load-bearing: with a restrictive policy the row would be withheld for
+// the wrong reason, and the control proves this hub delivers a well-formed
+// envelope on the same connection.
+//
+// Unreachable from our own producer — the envelope's columns come from
+// system.columns, where ClickHouse forbids two columns of one name — so this
+// pins the defence for an envelope we did not write.
+func TestBroadcast_DuplicateColumnWithheld(t *testing.T) {
+	t.Parallel()
+	const topic = "ingest.clicks"
+	hub := NewHub(nil, nil, nil) // nil store ⇒ passthrough, so nothing else withholds
+	sub := NewSubscriber(nil, nil)
+	hub.Add(topic, "viewer", sub)
+
+	dup, err := json.Marshal(ingest.EventMessage{
+		TableName:         "clicks",
+		ReceivedTimestamp: "2026-06-26T00:00:00Z",
+		Format:            ingest.FormatJSONCompactEachRow,
+		Columns:           []string{"tenant", "tenant"},
+		Row:               json.RawMessage(`["a","b"]`),
+	})
+	require.NoError(t, err)
+
+	hub.Broadcast(topic, dup)
+	assertNoFrame(t, sub)
+
+	// Positive control: the same hub, same subscriber, a well-formed envelope.
+	hub.Broadcast(topic, rawEvent(t, "clicks", "2026-06-26T00:00:01Z",
+		map[string]any{"page": "/a"}))
+	_, _, row := recvEvent(t, sub)
+	assert.Equal(t, "/a", row["page"], "the hub delivers a pairable envelope on this connection")
+}
+
 // rawEventCols is rawEvent with an explicit column order, for tests that pin a
 // declaration order or publish a column the record omits.
 func rawEventCols(tb testing.TB, table, ts string, cols []string, data map[string]any) []byte {

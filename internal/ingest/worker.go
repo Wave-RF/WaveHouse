@@ -389,6 +389,23 @@ func (w *IngestWorker) tableLoop(ctx context.Context, table string, in <-chan pa
 	}
 }
 
+// firstDuplicate returns the first column name that appears twice, if any.
+// ClickHouse rejects a duplicate in an INSERT column list outright (code 15,
+// DUPLICATE_COLUMN), so the batch would fail loudly here — but the same
+// envelope also reaches the SSE fan-out, where a repeated name silently
+// resolves to one value. Refusing it once, at the parse boundary, keeps both
+// consumers honest.
+func firstDuplicate(cols []string) (string, bool) {
+	seen := make(map[string]struct{}, len(cols))
+	for _, c := range cols {
+		if _, ok := seen[c]; ok {
+			return c, true
+		}
+		seen[c] = struct{}{}
+	}
+	return "", false
+}
+
 // parseMsg unmarshals one envelope into a parsedMsg. An envelope the worker can
 // never insert is poison — malformed JSON, a row format it doesn't know (which
 // is what a pre-v2 envelope looks like: it carries no `format` at all), or
@@ -426,6 +443,13 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m jetstream.Msg) (parsedMsg
 	// instead of one naming the real problem. The stream's pairRow makes the
 	// same check; this is the ingest half of the contract AGENTS.md states.
 	var cells []json.RawMessage
+	if dup, ok := firstDuplicate(envelope.Columns); ok {
+		w.logger.ErrorContext(ctx, "unreadable envelope: a column name repeats",
+			"table", envelope.TableName, "column", dup)
+		w.rejectPoison(ctx, m, envelope.TableName, "unpairable",
+			fmt.Sprintf("column %q appears more than once, so its values cannot be mapped to columns", dup))
+		return parsedMsg{}, false
+	}
 	if err := json.Unmarshal(envelope.Row, &cells); err != nil || len(cells) != len(envelope.Columns) {
 		w.logger.ErrorContext(ctx, "event envelope row does not pair with its columns",
 			"table", envelope.TableName, "columns", len(envelope.Columns), "error", err)

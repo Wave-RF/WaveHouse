@@ -361,6 +361,16 @@ func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, byNam
 	}
 	byName = make(map[string]any, len(cols))
 	for i, c := range cols {
+		// A repeated name has no single meaning: the map would keep the last
+		// value and silently drop the first, and this map is what a row-level
+		// filter is evaluated against — so a duplicate could decide visibility
+		// on a value the row never really carried. Unpairable, like a length
+		// mismatch. Cannot arise from our own producer (the envelope's columns
+		// come from system.columns, where ClickHouse forbids two columns of one
+		// name), so this is defence for an envelope we did not write.
+		if _, dup := byName[c]; dup {
+			return nil, nil, false
+		}
 		dec := json.NewDecoder(bytes.NewReader(cells[i]))
 		dec.UseNumber()
 		var v any

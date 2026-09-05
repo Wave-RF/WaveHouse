@@ -1301,6 +1301,40 @@ func TestParseMsg_PoisonEnvelope_ParkedOnDLQ(t *testing.T) {
 // the table there is nowhere to park it, and redelivering a message that can
 // never insert would wedge the consumer behind it — so it is acked and dropped,
 // loudly.
+// TestParseMsg_DuplicateColumn_Unpairable: `columns` naming one column twice
+// has no single reading. ClickHouse would reject the INSERT loudly (code 15,
+// DUPLICATE_COLUMN), but the same envelope also reaches the SSE fan-out, where
+// pairRow's name-keyed map would keep the last value and silently drop the
+// first — and that map is what a row-level filter is evaluated against. Refused
+// once, at the parse boundary, so neither consumer has to.
+//
+// Not reachable from our own producer: the envelope's columns come from
+// system.columns, where ClickHouse forbids two columns of one name, and the
+// embedded NATS server runs DontListen so only in-process code publishes here.
+// This is defence for an envelope we did not write — a hand-replayed DLQ
+// message, or a future out-of-process publisher.
+func TestParseMsg_DuplicateColumn_Unpairable(t *testing.T) {
+	t.Parallel()
+	w, js, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+
+	payload, err := json.Marshal(EventMessage{
+		TableName:         "events",
+		ReceivedTimestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		Format:            FormatJSONCompactEachRow,
+		Columns:           []string{"tenant", "tenant"},
+		Row:               json.RawMessage(`["a","b"]`),
+	})
+	require.NoError(t, err)
+
+	m := &testutil.MockJetStreamMsg{MsgSubject: "ingest.events", MsgData: payload}
+	_, ok := w.parseMsg(context.Background(), m)
+	require.False(t, ok, "a repeated column name is unpairable")
+	w.ackWg.Wait()
+
+	require.Len(t, js.Published(), 1, "parked on the DLQ, not dropped")
+	assert.Contains(t, js.Published()[0].Header.Get("X-DLQ-Error"), "appears more than once")
+}
+
 func TestParseMsg_PoisonEnvelope_DLQDisabled_AckedAndDropped(t *testing.T) {
 	t.Parallel()
 	w, js, _, _ := newTestWorker(&testutil.MockRoundTripper{})

@@ -562,6 +562,13 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       if (!Array.isArray(msg.columns) || msg.columns.some((c) => typeof c !== "string")) {
         throw new Error("columns must be an array of strings");
       }
+      // A repeated name has no single meaning when the row is zipped into an
+      // object: the later value wins and the earlier one vanishes, with no
+      // signal. Refuse the announcement instead — dropping rows until the next
+      // one is the same failure mode as a malformed frame, and it is loud.
+      if (new Set(msg.columns as string[]).size !== msg.columns.length) {
+        throw new Error("columns contains a duplicate name");
+      }
       this._columns = msg.columns as string[];
     } catch {
       this._columns = null;

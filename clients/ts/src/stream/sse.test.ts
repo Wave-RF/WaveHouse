@@ -499,6 +499,38 @@ describe("SSETransport positional rows", () => {
     warn.mockRestore();
   });
 
+  it("refuses a schema frame that names a column twice", async () => {
+    // Zipping a positional row against a duplicate name keeps the later value
+    // and drops the earlier one, with no signal. Refusing the announcement is
+    // the loud failure: rows drop until the next valid one.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = makeFetch();
+    const conn = streamingResponse();
+    f.queue.push(() => conn.res);
+
+    const t2 = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t2);
+    t2.connect();
+    await vi.waitFor(() => expect(seen.statuses).toContain("live"));
+
+    conn.push(schemaFrame(["tenant", "tenant"]));
+    conn.push(frame("t1", { table_name: "clicks", received_timestamp: "t1", row: ["a", "b"] }));
+    await flush();
+
+    expect(seen.events).toHaveLength(0);
+    expect(warn).toHaveBeenCalled();
+
+    // A valid announcement afterwards recovers the stream.
+    conn.push(schemaFrame(["page", "button"]));
+    conn.push(frame("t2", { table_name: "clicks", received_timestamp: "t2", row: ["/a", "go"] }));
+    await flush();
+    expect(seen.events).toHaveLength(1);
+    expect(seen.events[0].data).toEqual({ page: "/a", button: "go" });
+
+    t2.disconnect();
+    warn.mockRestore();
+  });
+
   it("drops a malformed schema event rather than keeping a stale column list", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const f = makeFetch();
