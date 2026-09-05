@@ -32,11 +32,17 @@ type errsThenSuccessConn struct {
 	calls atomic.Int32
 }
 
-// Query serves both of Refresh's result sets. Only the system.columns call
-// advances the error sequence and the counter, so `calls` still counts refresh
-// ATTEMPTS rather than statements.
+// Query serves every result set Refresh asks for, but only the system.columns
+// scan advances the error sequence and the counter — so `calls` counts refresh
+// ATTEMPTS, not statements.
+//
+// The match is an allow-list on purpose. Keyed the other way (skip
+// system.tables, count everything else) a query added to Refresh later would
+// silently become "an attempt": it would consume a scripted error meant for the
+// columns scan and shift the whole retry sequence, so the test would go wrong
+// quietly rather than fail. Anything this fake does not recognize is inert.
 func (c *errsThenSuccessConn) Query(_ context.Context, q string, _ ...any) (driver.Rows, error) {
-	if strings.Contains(q, "system.tables") {
+	if !strings.Contains(q, "system.columns") {
 		return &chainEmptyRows{}, nil
 	}
 	n := c.calls.Add(1)
@@ -128,8 +134,13 @@ func TestBoot_Chain_DegradedThenRecovers(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"status":"ok"`)
 
-	// Sanity: exactly four Query calls — the initial sync Refresh (1) plus
-	// the retry loop's three attempts (2,3 fail; 4 succeeds). An off-by-one
-	// in the loop's success short-circuit would show up here.
-	assert.Equal(t, int32(4), conn.calls.Load(), "expected 4 Query calls total")
+	// Sanity: exactly four refresh attempts — the initial sync Refresh (1) plus
+	// the retry loop's three attempts (2,3 fail; 4 succeeds). An off-by-one in
+	// the loop's success short-circuit would show up here.
+	//
+	// This counts system.columns scans, not Query calls: there are five of
+	// those, because Refresh returns as soon as the columns scan fails, so the
+	// three failed attempts never reach system.tables and only the successful
+	// one issues both.
+	assert.Equal(t, int32(4), conn.calls.Load(), "expected 4 refresh attempts (system.columns scans)")
 }

@@ -442,6 +442,95 @@ describe("SSETransport positional rows", () => {
     warn.mockRestore();
   });
 
+  it("bounds skew warnings per cause instead of one per row", async () => {
+    // A server that predates the positional wire sends every row with no schema
+    // event, so the unbounded warn was one console line per row for the whole
+    // connection. The volume is bounded, but per CAUSE — a flat boolean would
+    // have hidden the short/long/non-array cases behind whichever fired first.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = makeFetch();
+    const conn = streamingResponse();
+    f.queue.push(() => conn.res);
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(seen.statuses).toContain("live"));
+
+    // No schema frame at all — 10 rows, one cause.
+    for (let i = 0; i < 10; i++) {
+      conn.push(frame(`t${i}`, { table_name: "clicks", received_timestamp: `t${i}`, row: ["/a"] }));
+    }
+    await flush();
+
+    expect(seen.events).toHaveLength(0);
+    // 3 warnings + 1 "further occurrences suppressed", not 10.
+    expect(warn).toHaveBeenCalledTimes(4);
+    expect(String(warn.mock.calls[3][0])).toContain("suppressed");
+
+    // A DIFFERENT cause still gets its own budget — the point of keying by cause.
+    warn.mockClear();
+    conn.push(schemaFrame(["page", "country"]));
+    conn.push(frame("s1", { table_name: "clicks", received_timestamp: "s1", row: ["/a"] }));
+    await flush();
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    // The two non-skew causes are bounded on the same budget. Both flood
+    // identically against a bad server, and sdk/reference.md states the bound as
+    // a contract for every cause — so each needs its own case, or reverting the
+    // bound breaks nothing.
+    warn.mockClear();
+    for (let i = 0; i < 10; i++) {
+      conn.push(`event: schema\ndata: {"table_name":"clicks","columns":"not-an-array"}\n\n`);
+    }
+    await flush();
+    expect(warn).toHaveBeenCalledTimes(4);
+    expect(String(warn.mock.calls[3][0])).toContain("suppressed");
+
+    warn.mockClear();
+    for (let i = 0; i < 10; i++) {
+      conn.push(`data: {not json\n\n`);
+    }
+    await flush();
+    expect(warn).toHaveBeenCalledTimes(4);
+    expect(String(warn.mock.calls[3][0])).toContain("suppressed");
+
+    t.disconnect();
+    warn.mockRestore();
+  });
+
+  it("refuses a schema frame that names a column twice", async () => {
+    // Zipping a positional row against a duplicate name keeps the later value
+    // and drops the earlier one, with no signal. Refusing the announcement is
+    // the loud failure: rows drop until the next valid one.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = makeFetch();
+    const conn = streamingResponse();
+    f.queue.push(() => conn.res);
+
+    const t2 = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t2);
+    t2.connect();
+    await vi.waitFor(() => expect(seen.statuses).toContain("live"));
+
+    conn.push(schemaFrame(["tenant", "tenant"]));
+    conn.push(frame("t1", { table_name: "clicks", received_timestamp: "t1", row: ["a", "b"] }));
+    await flush();
+
+    expect(seen.events).toHaveLength(0);
+    expect(warn).toHaveBeenCalled();
+
+    // A valid announcement afterwards recovers the stream.
+    conn.push(schemaFrame(["page", "button"]));
+    conn.push(frame("t2", { table_name: "clicks", received_timestamp: "t2", row: ["/a", "go"] }));
+    await flush();
+    expect(seen.events).toHaveLength(1);
+    expect(seen.events[0].data).toEqual({ page: "/a", button: "go" });
+
+    t2.disconnect();
+    warn.mockRestore();
+  });
+
   it("drops a malformed schema event rather than keeping a stale column list", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const f = makeFetch();

@@ -34,7 +34,9 @@ type Hub struct {
 	// RowEvaluator is the seam a native type layer will take over: the one
 	// place a row's visibility under a role's row-filter is decided. nil means
 	// the default implementation, which delegates to ResolvedPermissions.RowVisible
-	// — today's behavior unchanged. Exported so it can be swapped; every
+	// — today's behavior unchanged. Wired once before the Hub serves traffic and
+	// not safe to mutate afterwards: rowAdmitted reads it from the consumer
+	// goroutine and from SSE handler goroutines without holding h.mu. Every
 	// delivery path reaches it through rowAdmitted, never directly.
 	RowEvaluator RowEvaluator
 }
@@ -51,6 +53,8 @@ type RowEvaluator interface {
 // package's in-memory row-filter evaluation.
 type policyRowEvaluator struct{}
 
+// Visible delegates to the policy package's in-memory row-filter evaluation,
+// the same resolution the query path renders to SQL (#319).
 func (policyRowEvaluator) Visible(perms *policy.ResolvedPermissions, row map[string]any, specs map[string]policy.ColumnSpec) bool {
 	return perms.RowVisible(row, specs)
 }
@@ -357,6 +361,16 @@ func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, byNam
 	}
 	byName = make(map[string]any, len(cols))
 	for i, c := range cols {
+		// A repeated name has no single meaning: the map would keep the last
+		// value and silently drop the first, and this map is what a row-level
+		// filter is evaluated against — so a duplicate could decide visibility
+		// on a value the row never really carried. Unpairable, like a length
+		// mismatch. Cannot arise from our own producer (the envelope's columns
+		// come from system.columns, where ClickHouse forbids two columns of one
+		// name), so this is defence for an envelope we did not write.
+		if _, dup := byName[c]; dup {
+			return nil, nil, false
+		}
 		dec := json.NewDecoder(bytes.NewReader(cells[i]))
 		dec.UseNumber()
 		var v any

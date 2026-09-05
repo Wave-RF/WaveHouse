@@ -105,6 +105,20 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 	if err != nil {
 		return nil, fmt.Errorf("building WHERE clause: %w", err)
 	}
+	// Build's one caller resolves for "select", so Select is non-nil here. A
+	// mis-resolved grant never reaches this line, but by THREE different deniers
+	// depending on the query's shape — naming only one would leave the other two
+	// looking unguarded:
+	//
+	//   - names columns    → validateAndAuthorizeColumns → IsColumnAllowed
+	//   - select_all only  → resolveProjection → RestrictsColumns/AllowedProjection
+	//   - aggregations only → validateAndAuthorizeColumns → IsAggregationAllowed
+	//
+	// All three fail closed on a nil Select; all three are pinned by
+	// TestBuild_InsertResolvedGrantIsRejected. The bare read is the backstop if
+	// that ordering changes — it would panic rather than skip the filter. Do NOT
+	// add a `perms.Select != nil` guard: it would emit an unfiltered query, the
+	// silent widening the pointer shape exists to prevent.
 	if perms != nil && perms.Select.WhereClause != "" {
 		whereParts = append([]string{"(" + perms.Select.WhereClause + ")"}, whereParts...)
 		params = append(params, perms.Select.WhereParams...)

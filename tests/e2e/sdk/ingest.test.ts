@@ -305,11 +305,15 @@ describe("Ingest", () => {
         body: JSON.stringify({ event_id: testId(), page: "/undeclared" }),
       });
       expect(res.status).toBe(415);
-      // The message names every type ingest reads, so a caller can fix the
-      // request from the response alone.
+      // The message names every type ingest reads, in order, so a caller can fix
+      // the request from the response alone. Asserted as one literal: checking
+      // the entries individually is vacuous for two of them, since
+      // `application/json` and `application/jsonl` are substrings of
+      // `application/jsonlines`.
       const body = (await res.json()) as { error?: string };
-      expect(body.error).toContain("application/json");
-      expect(body.error).toContain("application/x-ndjson");
+      expect(body.error).toContain(
+        "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines",
+      );
     }
   });
 

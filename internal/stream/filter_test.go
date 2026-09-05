@@ -26,23 +26,36 @@ func TestProjectIndices(t *testing.T) {
 			wantNames: []string{"a", "b"},
 		},
 		{
+			// An explicitly RESOLVED but empty select side: unrestricted. Distinct
+			// from a nil Select, which means the grant was never resolved for
+			// reads and is denied — the case below.
 			name:      "no lists keeps every column",
 			cols:      []string{"a", "b"},
-			perms:     &policy.ResolvedPermissions{Allowed: true},
+			perms:     &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{}},
 			wantIdx:   []int{0, 1},
 			wantNames: []string{"a", "b"},
 		},
 		{
+			// An insert-resolved grant reaching the stream path is a caller bug.
+			// projectIndices goes through IsColumnAllowed, which denies on the
+			// unresolved side, so nothing is projected rather than passed through.
+			name:      "unresolved select side projects nothing",
+			cols:      []string{"page", "secret"},
+			perms:     &policy.ResolvedPermissions{Allowed: true, Insert: &policy.ResolvedInsert{}},
+			wantIdx:   []int{},
+			wantNames: []string{},
+		},
+		{
 			name:      "allow list keeps only allowed columns, in schema order",
 			cols:      []string{"page", "secret", "button"},
-			perms:     &policy.ResolvedPermissions{Allowed: true, Select: policy.ResolvedSelect{AllowColumns: []string{"button", "page"}}},
+			perms:     &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{AllowColumns: []string{"button", "page"}}},
 			wantIdx:   []int{0, 2},
 			wantNames: []string{"page", "button"},
 		},
 		{
 			name:      "deny list drops denied columns and their slots",
 			cols:      []string{"page", "secret_col", "button"},
-			perms:     &policy.ResolvedPermissions{Allowed: true, Select: policy.ResolvedSelect{DenyColumns: []string{"secret_col"}}},
+			perms:     &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{DenyColumns: []string{"secret_col"}}},
 			wantIdx:   []int{0, 2},
 			wantNames: []string{"page", "button"},
 		},
@@ -56,7 +69,7 @@ func TestProjectIndices(t *testing.T) {
 		{
 			name:      "no columns projects nothing",
 			cols:      nil,
-			perms:     &policy.ResolvedPermissions{Allowed: true},
+			perms:     &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{}},
 			wantIdx:   []int{},
 			wantNames: []string{},
 		},

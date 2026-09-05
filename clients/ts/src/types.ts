@@ -266,6 +266,15 @@ export interface Column {
   is_nullable: boolean;
   /** Whether the column declares any default at all — see `default_kind`. */
   has_default: boolean;
+  /**
+   * How the default is declared, when there is one: `DEFAULT`, `MATERIALIZED`,
+   * `ALIAS` or `EPHEMERAL`. Omitted when the column declares none.
+   *
+   * `MATERIALIZED` and `ALIAS` columns are computed by ClickHouse and cannot be
+   * inserted, so they never appear in an ingest envelope or an SSE `schema`
+   * frame — though they are still reported here and are still queryable.
+   */
+  default_kind?: string;
   /** 1-based ordinal in the table's declaration order — the order `columns` itself is in. Always present. */
   position: number;
   /**

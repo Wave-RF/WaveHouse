@@ -14,11 +14,11 @@ It is deliberately detailed: this is a hot, concurrency-heavy path, and the goro
 | File | Contents |
 | --- | --- |
 | `worker.go` | `StartIngestWorker`, the `dispatchLoop`, `parseMsg` (+ `rejectPoison` for an envelope it cannot read), the per-table `tableBatcher`/`tableLoop`, `flushTable` (splits a batch per column list via `groupByColumns`) and `flushGroup` (bulk insert with a row-by-row poison-isolation fallback), `insertToClickHouse`, `handleSuccess` (cache invalidation + acks), `sendToDLQ`/`parkOnDLQ` |
-| `compact.go` | `EncodeCompactRow` — renders one record as a `JSONCompactEachRow` line over the table's insertable columns, in declaration order. Serialization only: it validates nothing and judges no value |
+| `compact.go` | `EncodeCompactRow` — renders one record as a `JSONCompactEachRow` line over the table's **insertable** columns, in declaration order. Serialization only: it validates nothing and judges no value |
 | `sweeper.go` | The **Active Sweeper** — purges stream messages that are both written to ClickHouse and past the SSE gap window |
 | `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |
 
-The pipeline is **insert-only**. The wire format carries `{table_name, scope, received_timestamp, format, columns, row}`: `row` is one `JSONCompactEachRow` line — a positional JSON array — and `columns` names its positions in the table's declaration order — over the table's **insertable** columns, since a `MATERIALIZED` or `ALIAS` column cannot be named in an INSERT. (`scope` is reserved and always `""` today.) Each NATS message is its own envelope, so the names ride along per record; where they are carried once is the `INSERT` the worker emits per group. The worker parses the envelope, groups a batch by column list, and bulk-`INSERT`s each group as `INSERT INTO … (cols) FORMAT JSONCompactEachRow` — schema validation already happened at the HTTP ingest handler, before publish. Non-insert mutations go through `POST /v1/ops/query` (admin-only).
+The pipeline is **insert-only**. (Upgrading across the v2 envelope? [Drain the queue first](/deployment#upgrading-across-the-v2-ingest-envelope).) The wire format carries `{table_name, scope, received_timestamp, format, columns, row}`: `row` is one `JSONCompactEachRow` line — a positional JSON array — and `columns` names its positions — the table's insertable columns, in declaration order (a `MATERIALIZED` or `ALIAS` column cannot be named in an `INSERT`, so it is not part of the row's contract). (`scope` is reserved and always `""` today.) Each NATS message is its own envelope, so the names ride along per record; where they are carried once is the `INSERT` the worker emits per group. The worker parses the envelope, groups a batch by column list, and bulk-`INSERT`s each group as `INSERT INTO … (cols) FORMAT JSONCompactEachRow` — schema validation already happened at the HTTP ingest handler, before publish. Non-insert mutations go through `POST /v1/ops/query` (admin-only).
 
 ## High-level shape
 
@@ -55,8 +55,12 @@ flowchart LR
 
 Note the stream is **dual-use**: it is both the durable buffer feeding the worker and the replay buffer that SSE clients gap-fill from. That is why a custom sweeper exists instead of plain work-queue auto-deletion (see [Scaling out](#scaling-to-multiple-instances)).
 
+:::note[Omitted columns on `Nullable` columns with a default]
+Inserts also pin `input_format_null_as_default=1`. A positional row has one value per insertable column and no way to say "absent", so a field the record omitted rides as an explicit `null` in its slot. That setting turns the `null` back into the column's default for a **non-nullable** column, matching what omitting the key did under `JSONEachRow` — but on a `Nullable(T) DEFAULT …` column ClickHouse stores `NULL` whatever the setting says, because only an *absent* key ever took the default. So such a column now stores `NULL` where it previously took its default. Verified on ClickHouse 26.6.3.
+:::
+
 :::note[ClickHouse timestamp parsing]
-Inserts pin `date_time_input_format=best_effort` — the server default since ClickHouse 26.5, but on older servers the `basic` default rejects the canonical RFC 3339 form's `Z` suffix ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). The ordinary spellings (zone-less date-times, 9–10-digit Unix-seconds strings) parse identically under both settings, so pre-canonical messages still in the stream replay unchanged. Bare digit-strings of other lengths are the exception: `best_effort` reads them as ClickHouse's calendar/epoch shapes, where `basic` read a plain `DateTime` column's digit string of five or more digits as Unix seconds (shorter runs it rejected outright, where `best_effort` reads `"2026"` as a year): under `best_effort` `"20260711"` stores 2026-07-11, where `basic` stored 1970-08-23. `DateTime64` columns diverge the same way on calendar-shaped runs, and additionally whenever an epoch run's unit doesn't match the column scale (under `basic`, runs longer than 10 digits are ticks at the column's own scale; `best_effort` unit-detects 13/16/19-digit runs as ms/µs/ns). A producer relying on the old `basic` reading changes meaning as soon as this WaveHouse version is deployed — the pin, not a ClickHouse upgrade, is what flips the parse.
+Inserts pin `date_time_input_format=best_effort` — the server default since ClickHouse 26.5, but on older servers the `basic` default rejects the canonical RFC 3339 form's `Z` suffix ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). The ordinary spellings (zone-less date-times, 9–10-digit Unix-seconds strings) parse identically under both settings. (This is moot for anything still buffered from an older build: a message published before the v2 envelope cannot be read at all — see [Upgrading across the v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope).) Bare digit-strings of other lengths are the exception: `best_effort` reads them as ClickHouse's calendar/epoch shapes, where `basic` read a plain `DateTime` column's digit string of five or more digits as Unix seconds (shorter runs it rejected outright, where `best_effort` reads `"2026"` as a year): under `best_effort` `"20260711"` stores 2026-07-11, where `basic` stored 1970-08-23. `DateTime64` columns diverge the same way on calendar-shaped runs, and additionally whenever an epoch run's unit doesn't match the column scale (under `basic`, runs longer than 10 digits are ticks at the column's own scale; `best_effort` unit-detects 13/16/19-digit runs as ms/µs/ns). A producer relying on the old `basic` reading changes meaning as soon as this WaveHouse version is deployed — the pin, not a ClickHouse upgrade, is what flips the parse.
 :::
 
 ## The journey of one event
@@ -102,7 +106,7 @@ Three `WaitGroup`s form a strict containment hierarchy, which is what makes shut
 
 - **`wg`** tracks the `dispatchLoop` goroutine.
 - **`tableWg`** (owned by `dispatchLoop`) tracks the per-table `tableLoop`s.
-- **`ackWg`** tracks the background `DoubleAck` goroutines.
+- **`ackWg`** tracks the background `DoubleAck` goroutines, and the poison disposal (a DLQ publish *plus* a `DoubleAck`) that `rejectPoison` backgrounds from the dispatch loop.
 
 ## Why per table? The bug this design fixes
 
@@ -188,7 +192,7 @@ sequenceDiagram
     SF-->>M: waitOrDeadline returns nil (or deadline error)
 ```
 
-Why this ordering is correct: every `ackWg.Add` happens inside a `tableLoop`'s lifetime, so all of them complete before `tableWg.Wait()` returns — which means `dispatchLoop` can safely `ackWg.Wait()` afterward with no `Add` racing `Wait`. The old code relied on "flush runs synchronously" for this; the hierarchy makes it structural instead.
+Why this ordering is correct: every `ackWg.Add` happens either inside a `tableLoop`'s lifetime **or on the `dispatchLoop` goroutine itself** (`rejectPoison`, reached from `parseMsg`), and `dispatchLoop` is the goroutine that `Wait`s — so no `Add` can race the `Wait` on either path. The `tableLoop` ones all complete before `tableWg.Wait()` returns — which means `dispatchLoop` can safely `ackWg.Wait()` afterward with no `Add` racing `Wait`. The old code relied on "flush runs synchronously" for this; the hierarchy makes it structural instead.
 
 If the deadline fires first, `waitOrDeadline` returns the deadline error and the in-flight goroutines are abandoned — the process is exiting anyway, and anything un-acked is redelivered on the next boot (at-least-once).
 

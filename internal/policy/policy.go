@@ -92,40 +92,36 @@ func (f Filter) hasOperator() bool {
 // Allowed is the whole-operation verdict; the resolved per-operation state hangs
 // off Select or Insert, whichever operation Evaluate was called for.
 //
-// The side Evaluate did NOT resolve is marked unresolved and denies everything.
-// That marking is load-bearing, not tidiness: an unresolved side is zero, and a
-// zero side is an empty allow list plus an empty deny list, which every accessor
-// here reads as "all columns" — so without it, asking a select-resolved grant an
-// insert question (or the reverse) would answer yes to every column of a table
-// the role may not write at all. Reading the wrong side is a caller bug, and the
-// ACCESSORS on this type now fail closed on it rather than widening.
+// The side Evaluate did NOT resolve is nil. That is the whole point of the
+// pointers: an EMPTY side and an UNRESOLVED side mean opposite things — empty is
+// "no restrictions" (what an admin gets), unresolved is "you asked the wrong
+// question" — and a value type cannot tell them apart, because both are the zero
+// value. Asking a select-resolved grant an insert question would then answer yes
+// to every column of a table the role may not write at all.
 //
-// That guarantee covers the methods only, and cannot cover a bare field read: an
-// unresolved Select.WhereClause is "" (no WHERE), its MaxRows is 0 (no cap), an
-// unresolved Insert.CheckClauses is nil (no checks). Nothing can defend those but
-// asking for the operation you actually resolved.
+// Accessors fail closed on a nil side. A BARE FIELD READ panics, which is the
+// intended failure: it is a caller bug, it is loud, and net/http contains it to
+// the one request. Do NOT "fix" such a panic by adding a nil guard that skips the
+// read — an absent WHERE clause is an unfiltered query, so a guard would restore
+// exactly the silent widening this shape exists to prevent. Ask for the operation
+// you actually resolved instead.
 type ResolvedPermissions struct {
 	Allowed bool
-	Select  ResolvedSelect
-	Insert  ResolvedInsert
+	Select  *ResolvedSelect
+	Insert  *ResolvedInsert
 }
 
 // ResolvedSelect is the read-side state of a resolved grant.
 type ResolvedSelect struct {
-	// unresolved marks the side Evaluate did not resolve — see
-	// ResolvedPermissions. Only this package sets it, because only Evaluate
-	// knows which question it was asked; a hand-built value is a deliberate
-	// assertion by its author and keeps the plain allow/deny reading.
-	unresolved   bool
 	AllowColumns []string
 	DenyColumns  []string
 	WhereClause  string
 	WhereParams  []any
 	// rowFilter is the same row-level-security predicate as WhereClause/WhereParams,
 	// kept in resolved form so the stream path can evaluate it in memory (RowVisible)
-	// while the query path renders it to SQL. Both derive from one ResolvePredicates
+	// while the query path renders it to SQL. Both derive from one resolvePredicates
 	// call in Evaluate, so the two read surfaces can't drift. See rowfilter.go.
-	rowFilter           []ResolvedPredicate
+	rowFilter           []resolvedPredicate
 	AllowedAggregations []string
 	DeniedAggregations  []string
 	MaxRows             int
@@ -136,20 +132,11 @@ type ResolvedSelect struct {
 
 // ResolvedInsert is the write-side state of a resolved grant.
 type ResolvedInsert struct {
-	// unresolved marks the side Evaluate did not resolve — see ResolvedSelect.
-	unresolved   bool
 	AllowColumns []string
 	DenyColumns  []string
 	// CheckClauses is column → required value, the form the ingest path
 	// enforces and auto-injects from. A []any value marks an _in set.
 	CheckClauses map[string]any
-	// CheckPredicates is the same check rules in render-agnostic predicate form
-	// — the insert-side twin of ResolvedSelect.rowFilter. It follows
-	// ResolvePredicates' fail-closed rule (an unresolvable claim yields no
-	// values), which is deliberately NOT CheckClauses' rule: a check value that
-	// cannot be resolved still auto-injects as "" there (#463). Populated for a
-	// consumer that does not exist yet; CheckClauses remains what ingest reads.
-	CheckPredicates []ResolvedPredicate
 }
 
 // claimTemplateRe matches {{ jwt.claim.path }} templates.
@@ -196,7 +183,11 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	// HTTP), so a nil policy falls through to the deny just below. Mirrors
 	// RoleAllowed's admin short-circuit on the pipe path.
 	if IsAdmin(p, role) {
-		return &ResolvedPermissions{Allowed: true}
+		// Both sides present and empty: an admin is unrestricted on either
+		// operation. This is the case that makes the pointers necessary — empty
+		// and unresolved were the same zero value before, so "unrestricted" and
+		// "never asked" could not be told apart.
+		return &ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{}, Insert: &ResolvedInsert{}}
 	}
 
 	// Beyond here the role is non-admin (non-empty only if it carried a concrete
@@ -249,10 +240,9 @@ func evaluateSelect(perms *SelectPermissions, claims map[string]any) *ResolvedPe
 
 	resolved := &ResolvedPermissions{
 		Allowed: true,
-		// This call answered a select question; the insert side was never
-		// resolved and must not read as an empty (permissive) grant.
-		Insert: ResolvedInsert{unresolved: true},
-		Select: ResolvedSelect{
+		// This call answered a select question, so Insert stays nil: an empty
+		// Insert would read as a permissive grant.
+		Select: &ResolvedSelect{
 			AllowColumns:        perms.AllowColumns,
 			DenyColumns:         perms.DenyColumns,
 			AllowedAggregations: perms.AllowedAggregations,
@@ -281,7 +271,7 @@ func evaluateSelect(perms *SelectPermissions, claims map[string]any) *ResolvedPe
 		// from that single source so they can't drift: the query path binds them into
 		// a SQL WHERE here; the stream path evaluates the same predicates in memory
 		// (ResolvedPermissions.RowVisible).
-		preds := ResolvePredicates(perms.Filter, claims)
+		preds := resolvePredicates(perms.Filter, claims)
 		resolved.Select.rowFilter = preds
 		clauses, params := predicatesToSQL(preds)
 		if len(clauses) > 0 {
@@ -302,9 +292,8 @@ func evaluateInsert(perms *InsertPermissions, claims map[string]any) *ResolvedPe
 
 	resolved := &ResolvedPermissions{
 		Allowed: true,
-		// Mirror of evaluateSelect: the read side was never resolved here.
-		Select: ResolvedSelect{unresolved: true},
-		Insert: ResolvedInsert{
+		// Mirror of evaluateSelect: Select stays nil here.
+		Insert: &ResolvedInsert{
 			AllowColumns: perms.AllowColumns,
 			DenyColumns:  perms.DenyColumns,
 		},
@@ -346,16 +335,12 @@ func evaluateInsert(perms *InsertPermissions, claims map[string]any) *ResolvedPe
 				resolved.Insert.CheckClauses[col] = resolveInValues(*f.In, claims)
 			}
 		}
-		// The same rules in predicate form, for a consumer that does not exist
-		// yet. Nothing reads it today, so it cannot widen a grant; see the field
-		// comment for why its unresolvable-claim rule differs from CheckClauses'.
-		resolved.Insert.CheckPredicates = ResolvePredicates(perms.Check, claims)
 	}
 
 	return resolved
 }
 
-// ResolvedPredicate is one row-filter or check comparison with its claim templates
+// resolvedPredicate is one row-filter or check comparison with its claim templates
 // already resolved to concrete string values — the shared, render-agnostic form the query
 // path turns into SQL (predicatesToSQL) and the stream path evaluates in memory
 // (RowVisible). Op is one of "=", "!=", ">", "<", "in". Values holds one element
@@ -363,26 +348,26 @@ func evaluateInsert(perms *InsertPermissions, claims map[string]any) *ResolvedPe
 // rows on either surface — an empty/unresolvable "in" set, or a scalar whose
 // constant was unresolvable (an absent/null claim, a structured value, or one with
 // no canonical form — see resolveTemplate/CanonicalScalar).
-type ResolvedPredicate struct {
+type resolvedPredicate struct {
 	Column string
 	Op     string
 	Values []string
 }
 
-// ResolvePredicates resolves each filter's claim templates once into predicates.
+// resolvePredicates resolves each filter's claim templates once into predicates.
 // Both read surfaces derive from this single result so they can't drift; the
 // operator order within a column (=, !=, >, <, in) mirrors the former inline SQL.
-func ResolvePredicates(filters map[string]Filter, claims map[string]any) []ResolvedPredicate {
-	var preds []ResolvedPredicate
+func resolvePredicates(filters map[string]Filter, claims map[string]any) []resolvedPredicate {
+	var preds []resolvedPredicate
 	// An unresolvable constant (ok=false from resolveTemplate) yields a predicate
 	// with NO values, which matches no rows on either surface (#385) — never a
 	// synthesized stand-in that could match some other principal's rows.
-	scalar := func(col, op, tmpl string) ResolvedPredicate {
+	scalar := func(col, op, tmpl string) resolvedPredicate {
 		v, ok := resolveTemplate(tmpl, claims)
 		if !ok {
-			return ResolvedPredicate{Column: col, Op: op}
+			return resolvedPredicate{Column: col, Op: op}
 		}
-		return ResolvedPredicate{Column: col, Op: op, Values: []string{v}}
+		return resolvedPredicate{Column: col, Op: op, Values: []string{v}}
 	}
 	for col, f := range filters {
 		if f.Eq != nil {
@@ -398,14 +383,14 @@ func ResolvePredicates(filters map[string]Filter, claims map[string]any) []Resol
 			preds = append(preds, scalar(col, "<", *f.Lt))
 		}
 		if f.In != nil {
-			preds = append(preds, ResolvedPredicate{col, "in", toStrings(resolveInValues(*f.In, claims))})
+			preds = append(preds, resolvedPredicate{col, "in", toStrings(resolveInValues(*f.In, claims))})
 		}
 	}
 	return preds
 }
 
 // predicatesToSQL renders resolved predicates into WHERE clauses and bound params.
-func predicatesToSQL(preds []ResolvedPredicate) ([]string, []any) {
+func predicatesToSQL(preds []resolvedPredicate) ([]string, []any) {
 	var clauses []string
 	var params []any
 	for _, p := range preds {
@@ -447,11 +432,11 @@ func predicatesToSQL(preds []ResolvedPredicate) ([]string, []any) {
 // resolveFilters converts filter definitions with claim templates into SQL WHERE
 // clauses. Retained as the predicates→SQL composition the query-path tests target.
 func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string, []any) {
-	return predicatesToSQL(ResolvePredicates(filters, claims))
+	return predicatesToSQL(resolvePredicates(filters, claims))
 }
 
 // toStrings normalizes resolveInValues' []any (already canonical strings) to the
-// []string a ResolvedPredicate carries.
+// []string a resolvedPredicate carries.
 func toStrings(vals []any) []string {
 	if len(vals) == 0 {
 		return nil
@@ -574,14 +559,18 @@ func (rp *ResolvedPermissions) IsColumnAllowed(col string, insert bool) bool {
 	if !rp.Allowed {
 		return false
 	}
-	allowColumns, denyColumns, unresolved := rp.Select.AllowColumns, rp.Select.DenyColumns, rp.Select.unresolved
+	side := rp.Select
+	var allowColumns, denyColumns []string
 	if insert {
-		allowColumns, denyColumns, unresolved = rp.Insert.AllowColumns, rp.Insert.DenyColumns, rp.Insert.unresolved
-	}
-	// Asking about the operation this grant was not resolved for: the lists are
-	// empty because nothing was evaluated, not because everything is permitted.
-	if unresolved {
-		return false
+		if rp.Insert == nil {
+			return false
+		}
+		allowColumns, denyColumns = rp.Insert.AllowColumns, rp.Insert.DenyColumns
+	} else {
+		if side == nil {
+			return false
+		}
+		allowColumns, denyColumns = side.AllowColumns, side.DenyColumns
 	}
 	// Precedence is most-restrictive-wins: the deny list is consulted before the
 	// allow list, so a column in BOTH is denied. The order of the two loops is
@@ -612,6 +601,31 @@ func (rp *ResolvedPermissions) IsColumnAllowed(col string, insert bool) bool {
 		}
 	}
 	return false
+}
+
+// CheckClauses returns the insert side's check clauses, and false when the
+// insert side was never resolved.
+//
+// It exists because the check-clause loop is the one consumer that iterates a
+// side's map rather than asking a question about a column, so it cannot go
+// through IsColumnAllowed. A bare `perms.Insert.CheckClauses` read presents an
+// empty map on an unresolved side and every check then passes VACUOUSLY — the
+// silent direction. Callers must treat ok=false as "refuse the write", not as
+// "no checks to run".
+//
+// A nil receiver means no policy applies, so there are no checks to run and ok
+// is TRUE — the same convention as IsColumnAllowed and the other accessors. The
+// fail-closed answer is for the case that actually matters: a grant that WAS
+// resolved, for the other operation. Returning false for a nil receiver would
+// make a deployment with no policy store refuse every ingest.
+func (rp *ResolvedPermissions) CheckClauses() (map[string]any, bool) {
+	if rp == nil {
+		return nil, true
+	}
+	if !rp.Allowed || rp.Insert == nil {
+		return nil, false
+	}
+	return rp.Insert.CheckClauses, true
 }
 
 // AllowedProjection returns the subset of cols this role may read, preserving
@@ -652,7 +666,7 @@ func (rp *ResolvedPermissions) RestrictsColumns() bool {
 	// `Allowed:false` receiver while IsColumnAllowed denies all — and
 	// resolveProjection's SelectAll branch trusts RestrictsColumns, so the
 	// disagreement would emit a bare `SELECT *` over every column. Fail closed.
-	if !rp.Allowed || rp.Select.unresolved {
+	if !rp.Allowed || rp.Select == nil {
 		return true
 	}
 	if len(rp.Select.DenyColumns) > 0 {
@@ -677,7 +691,7 @@ func (rp *ResolvedPermissions) IsAggregationAllowed(fn string) bool {
 	}
 	// An unresolved read side denies, for the same reason IsColumnAllowed does:
 	// its empty allow list means "not evaluated", not "everything".
-	if !rp.Allowed || rp.Select.unresolved {
+	if !rp.Allowed || rp.Select == nil {
 		return false
 	}
 	// Normalize case once so both deny and allow checks are case-insensitive;

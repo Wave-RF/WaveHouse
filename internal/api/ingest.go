@@ -83,8 +83,9 @@ var dedupeDisabledCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 // readable and the records were processed; per-record rejections (malformed
 // JSON, schema or permission failures) are reported in Results without failing
 // the whole request, so one bad record never obscures the rest of the batch
-// (issue #195). Whole-request conditions (backpressure, publish/dedup backend
-// failure) abort with the usual non-200 status instead.
+// (issue #195). Whole-request conditions abort with a non-200 status instead —
+// see requestAbort for the list, which lives there and only there, because
+// stating it in three places is how two of them went stale.
 type batchResult struct {
 	Total      int            `json:"total"`      // records read from the body
 	Succeeded  int            `json:"succeeded"`  // records validated + published
@@ -113,11 +114,19 @@ type recordReject struct {
 	Message string
 }
 
-// requestAbort is a whole-request failure: the system can't accept this record
-// (or any that follow) right now — publish backpressure (503), a publish/marshal
-// failure (500), or a dedup backend error (500). Both paths stop and return the
-// status; the batch path abandons the remaining records so the caller can retry
-// the batch rather than silently lose the tail.
+// requestAbort is a whole-request failure: this record and every one that
+// follows is refused. Both paths stop and return the status; the batch path
+// abandons the remaining records rather than silently losing the tail.
+//
+// Most causes are TRANSIENT system conditions, where abandoning the tail is what
+// makes the batch safe to retry: publish backpressure (503), a publish/marshal
+// failure (500), a dedup backend error (500).
+//
+// One is not. An insert grant that resolved for the other operation is a 403 and
+// a caller/config bug — retrying cannot help. It aborts rather than rejecting
+// per record because the grant is resolved ONCE per request, so it is true for
+// every record or none; as a per-record reject a 10k batch would report 10k
+// independent permission failures for a single mis-wired grant.
 type requestAbort struct {
 	Status     int
 	Message    string
@@ -185,12 +194,39 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Resolve the DECLARED format before touching the body: an undeclared or
 	// unreadable Content-Type is a 415, and there is no reason to read (let
 	// alone buffer) bytes for a request already known to be unreadable.
-	contentType := r.Header.Get("Content-Type")
-	format, err := ingestFormat(contentType)
+	//
+	// Resolving every header line and requiring agreement is what stops a request
+	// declaring both application/json and application/x-ndjson from silently
+	// taking the JSON path — an NDJSON body read as one object ingests record one
+	// and drops the rest behind a 200. See resolveContentType for when a
+	// comma-bearing value is refused rather than split.
+	values := r.Header.Values("Content-Type")
+	format, pin, err := resolveContentType(values)
 	if err != nil {
-		h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
-			"content_type", contentType, "table", table)
-		writeJSONError(w, http.StatusUnsupportedMediaType, unsupportedContentTypeMessage(contentType))
+		conflicting := errors.Is(err, errConflictingContentType)
+		// ONE bounded set, read by both the log and the response — pin comes from
+		// resolveContentType, so neither the declaration named nor the set it sits
+		// in can differ between them. Two call sites passing matching arguments is
+		// what let them diverge before.
+		decls := echoSafe(values, pin)
+		if conflicting {
+			// Logged with the same bounded set the response shows, not just the
+			// first line: this is the one refusal whose cause is usually NOT the
+			// caller's own doing, and a proxy that starts duplicating the header
+			// would otherwise produce a wall of client-side 415s whose
+			// server-side record named only one of the declarations involved.
+			h.logger.WarnContext(ctx, "conflicting ingest content-type declarations",
+				"content_types", decls, "table", table)
+		} else {
+			// Logs the same bounded set the response shows, like the conflicting
+			// branch: logging only Header.Get would make the server-side record
+			// disagree with what the caller was told — for
+			// ["", "text/csv"] the client sees `Content-Type "", "text/csv"`
+			// while Header.Get would have logged only content_type="".
+			h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
+				"content_types", decls, "table", table)
+		}
+		writeJSONError(w, http.StatusUnsupportedMediaType, contentTypeMessage(decls, conflicting))
 		return
 	}
 
@@ -217,6 +253,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The reader is built from the RESOLVED format, not from a second look at
+	// the header. Re-resolving here would duplicate the rule in two places,
+	// which is how the joined and repeated paths came to disagree before. The
+	// only error left is an empty body.
 	rr, batch, err := newRecordReader(format, body.Bytes())
 	if err != nil {
 		h.logger.ErrorContext(ctx, "empty ingest body", "table", table, "format", format.String())
@@ -225,10 +265,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if batch {
-		h.handleBatch(ctx, w, rr, reqCap, table, scope, schema, perms, role, now)
+		h.handleBatch(ctx, w, rr, reqCap, table, scope, schema, perms, role, now, h.policyCheckGuard(ctx, table, role, schema, perms))
 		return
 	}
-	h.handleSingle(ctx, w, rr, reqCap, table, scope, schema, perms, role, now)
+	h.handleSingle(ctx, w, rr, reqCap, table, scope, schema, perms, role, now, h.policyCheckGuard(ctx, table, role, schema, perms))
 }
 
 // handleSingle ingests a lone flat JSON object and preserves the GA response
@@ -244,9 +284,13 @@ func (h *IngestHandler) handleSingle(
 	perms *policy.ResolvedPermissions,
 	role string,
 	now time.Time,
+	checkGuard *recordReject,
 ) {
 	data, err := rr.Next()
 	if err != nil {
+		// Unreachable while the body is buffered — a bytes.Reader cannot produce
+		// a *http.MaxBytesError, and the cap is enforced at body.ReadFrom. Kept
+		// because it is the correct mapping if a reader ever streams again.
 		if writeMaxBytesError(w, err, reqCap) {
 			return
 		}
@@ -255,7 +299,7 @@ func (h *IngestHandler) handleSingle(
 		return
 	}
 
-	dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now)
+	dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now, checkGuard)
 	if abort != nil {
 		writeAbort(w, abort)
 		return
@@ -277,11 +321,11 @@ func (h *IngestHandler) handleSingle(
 
 // handleBatch ingests a multi-record body (JSON array or NDJSON), running each
 // record through the same validate → authorize → dedup → publish pipeline as a
-// single insert. A record that fails validation or a permission rule — or that
-// the reader couldn't decode — is recorded against its index and the batch
-// continues; a whole-request condition (backpressure, publish/dedup backend
-// failure) aborts the batch. Returns 200 with a per-record summary once the body
-// is consumed.
+// single insert. A record that fails validation or a PER-RECORD permission rule
+// (a denied column, a failed check clause) — or that the reader couldn't decode
+// — is recorded against its index and the batch continues; a whole-request
+// condition aborts it (see requestAbort). Returns 200 with a per-record summary
+// once the body is consumed.
 func (h *IngestHandler) handleBatch(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -292,6 +336,7 @@ func (h *IngestHandler) handleBatch(
 	perms *policy.ResolvedPermissions,
 	role string,
 	now time.Time,
+	checkGuard *recordReject,
 ) {
 	result := batchResult{Results: []recordResult{}}
 
@@ -307,12 +352,16 @@ func (h *IngestHandler) handleBatch(
 				appendResult(&result, recordResult{Index: result.Total, Error: rse.Error()})
 				continue
 			}
+			// Unreachable while the body is buffered — a bytes.Reader cannot produce
+			// a *http.MaxBytesError, and the cap is enforced at body.ReadFrom. Kept
+			// because it is the correct mapping if a reader ever streams again.
 			if writeMaxBytesError(w, err, reqCap) {
 				return
 			}
-			// A fatal stream error (JSON array syntax error, oversized NDJSON
-			// line, or body read error) — the reader can't resume, so fail the
-			// request rather than report a misleading partial summary.
+			// A fatal stream error (JSON array syntax error, or an oversized
+			// NDJSON line) — the reader can't resume, so fail the request rather
+			// than report a misleading partial summary. Not a body read error:
+			// the readers run over an in-memory slice now.
 			h.logger.WarnContext(ctx, "ingest read error", "error", err, "table", table)
 			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
@@ -320,11 +369,10 @@ func (h *IngestHandler) handleBatch(
 
 		result.Total++
 		idx := result.Total
-		dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now)
+		dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now, checkGuard)
 		if abort != nil {
-			// Whole-request failure (backpressure / publish / dedup backend):
-			// stop and surface the status so the caller retries the batch
-			// instead of treating a system outage as per-record loss.
+			// Whole-request failure: surface the status rather than recording a
+			// request-scoped condition as per-record loss (see requestAbort).
 			writeAbort(w, abort)
 			return
 		}
@@ -378,6 +426,70 @@ func writeMaxBytesError(w http.ResponseWriter, err error, limit int64) bool {
 	return false
 }
 
+// policyCheckGuard evaluates, ONCE per request, whether the role's insert
+// `check` clauses name only columns a published row can actually carry, and
+// returns the rejection every record should get when they do not.
+//
+// A check the row cannot carry can never be enforced: the row holds one slot
+// per INSERTABLE column, by position, so an auto-injected value for anything
+// outside that set is dropped on the way out and the record inserts WITHOUT the
+// value the policy requires — answering 200. Policy validation cannot catch
+// this; it never sees the ClickHouse schema. Three ways in, all refused.
+//
+// Evaluated here rather than per record because the condition is a property of
+// (table, role, policy) and is identical for every record in the request — the
+// same reasoning as the !resolved abort in processRecord. Doing it per record
+// would emit one ERROR line per record for a single mis-wired policy, which on
+// a 16 MiB body of small records is ~1.2M lines. The reject is still returned
+// per record, so a batch reports each record's own cause: one that SUPPLIES the
+// column fails schema validation first, with a different message.
+func (h *IngestHandler) policyCheckGuard(
+	ctx context.Context,
+	table, role string,
+	schema *discovery.TableSchema,
+	perms *policy.ResolvedPermissions,
+) *recordReject {
+	checks, resolved := perms.CheckClauses()
+	if !resolved {
+		return nil // the !resolved abort in processRecord owns this case
+	}
+	for col := range checks {
+		schemaCol, known := schema.Lookup(col)
+		switch {
+		case !known:
+			h.logger.ErrorContext(ctx, "policy check references a column the table does not have",
+				"column", col, "table", table, "role", role)
+			return &recordReject{
+				Status:  http.StatusForbidden,
+				Message: fmt.Sprintf("policy check references column %q, which table %q does not have", col, table),
+			}
+		case !schemaCol.IsInsertable():
+			h.logger.ErrorContext(ctx, "policy check references a column no record may write",
+				"column", col, "table", table, "role", role, "default_kind", schemaCol.DefaultKind)
+			return &recordReject{
+				Status: http.StatusForbidden,
+				Message: fmt.Sprintf("policy check references column %q of table %q, which is %s and cannot be inserted",
+					col, table, strings.ToLower(schemaCol.DefaultKind)),
+			}
+		case schemaCol.DefaultKind == "EPHEMERAL":
+			// Insertable, so the row DOES carry a slot for it — but ClickHouse
+			// never stores an ephemeral column and no query can read one back, so
+			// the constraint is unverifiable the moment the insert returns.
+			// Accepting a check that provably does nothing is worse than refusing
+			// it. An operator wanting this should check the DEFAULT column derived
+			// from the ephemeral one, which is stored and therefore enforceable.
+			h.logger.ErrorContext(ctx, "policy check references an ephemeral column, which is never stored",
+				"column", col, "table", table, "role", role)
+			return &recordReject{
+				Status: http.StatusForbidden,
+				Message: fmt.Sprintf("policy check references column %q of table %q, which is ephemeral and is never stored",
+					col, table),
+			}
+		}
+	}
+	return nil
+}
+
 // processRecord runs the per-record pipeline shared by the single-object and
 // batch ingest paths: schema validation → column/check permission enforcement
 // (with claim-derived auto-injection) → optional dedup → publish. The
@@ -398,6 +510,7 @@ func (h *IngestHandler) processRecord(
 	role string,
 	data map[string]any,
 	now time.Time,
+	checkGuard *recordReject,
 ) (duplicate bool, reject *recordReject, abort *requestAbort) {
 	if err := h.validator().Validate(schema, data); err != nil {
 		h.logger.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
@@ -415,37 +528,40 @@ func (h *IngestHandler) processRecord(
 				}, nil
 			}
 		}
-		for col, requiredVal := range perms.Insert.CheckClauses {
-			// A check the published row cannot carry can never be enforced: the
-			// row holds one slot per INSERTABLE column, by position, so an
-			// auto-injected value for anything outside that set is dropped on the
-			// way out and the record inserts WITHOUT the value the policy
-			// requires — silently. Two ways in, both refused here: a column the
-			// table does not have at all, and one it has but computes
-			// (MATERIALIZED/ALIAS), which no record may write.
-			//
-			// The supplied-value case never reaches here — schema validation
-			// above rejects both an unknown column and a computed one — so in
-			// practice this fires on the omitted-and-auto-injected path. The
-			// check sits at the top of the loop anyway, so it does not depend on
-			// that ordering holding.
-			schemaCol, known := schema.Lookup(col)
-			switch {
-			case !known:
-				h.logger.ErrorContext(ctx, "policy check references a column the table does not have",
-					"column", col, "table", table, "role", role)
-				return false, &recordReject{
-					Status:  http.StatusForbidden,
-					Message: fmt.Sprintf("policy check references column %q, which table %q does not have", col, table),
-				}, nil
-			case !schemaCol.IsInsertable():
-				h.logger.ErrorContext(ctx, "policy check references a column no record may write",
-					"column", col, "table", table, "role", role, "default_kind", schemaCol.DefaultKind)
-				return false, &recordReject{
-					Status: http.StatusForbidden,
-					Message: fmt.Sprintf("policy check references column %q of table %q, which is %s and cannot be inserted",
-						col, table, strings.ToLower(schemaCol.DefaultKind)),
-				}, nil
+		// Through the accessor, not a bare read. The check loop iterates a side's
+		// map rather than asking about a column, so IsColumnAllowed cannot cover it,
+		// and a bare read presents an empty map on an unresolved side — every check
+		// then passes vacuously. ok=false ABORTS the request; it must never be read
+		// as "no checks to run".
+		//
+		// Reachable, unlike the query path's bare reads: discovery.Validate only
+		// requires a column that is neither nullable nor defaulted, so a table whose
+		// columns are all nullable or all defaulted accepts `{}`, and the column loop
+		// above then runs zero times.
+		checks, resolved := perms.CheckClauses()
+		if !resolved {
+			// ABORT, not a per-record reject: perms is resolved once per request,
+			// so this is true for every record or none. As a reject, a 10k-record
+			// batch would emit 10k ERROR lines and report 10k independent
+			// permission failures for one mis-wired grant.
+			h.logger.ErrorContext(ctx, "insert checks consulted on a grant resolved for another operation",
+				"table", table, "role", role)
+			return false, nil, &requestAbort{
+				Status:  http.StatusForbidden,
+				Message: "insert permissions were not resolved for this request",
+			}
+		}
+		for col, requiredVal := range checks {
+			// The guard for this is evaluated ONCE per request in
+			// policyCheckGuard (see Handle) and only consulted here: the condition
+			// is a property of (table, role, policy), identical for every record,
+			// so evaluating it per record would emit one ERROR line per record for
+			// a single mis-wired policy — the same amplification the !resolved
+			// abort above exists to avoid. The REJECT is still per record, because
+			// a record that supplies the column fails schema validation first with
+			// a different message, and a batch should report each its own cause.
+			if checkGuard != nil {
+				return false, checkGuard, nil
 			}
 			// A []any value is an _in check: the inserted value must be present and
 			// one of the allowed set. Unlike the scalar _eq case there is no single
@@ -540,12 +656,10 @@ func (h *IngestHandler) processRecord(
 		}
 	}
 
-	// Render the record positionally against the table's declaration order,
-	// over the columns a record may actually carry: naming a MATERIALIZED or
-	// ALIAS column in the INSERT the worker builds from this is an error, so
-	// they are not part of the row's contract. The column names ride alongside
-	// in the envelope rather than in the row, so the reader can tell a schema
-	// change mid-stream from a reordering.
+	// Render the record positionally against the table's declaration order. The
+	// column names ride alongside in the envelope rather than in the row, so a
+	// batch of rows for one table carries the names once — and the reader can
+	// tell a schema change mid-stream from a reordering.
 	cols := schema.InsertableColumns()
 	row, err := ingest.EncodeCompactRow(cols, data)
 	if err != nil {

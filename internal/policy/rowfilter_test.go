@@ -18,7 +18,7 @@ func intNumeric() ColumnSpec {
 
 // evalRowFilter builds a one-role/one-table policy carrying filter and returns the
 // permissions resolved against claims, so tests exercise the full
-// ResolvePredicates → RowVisible path the stream fan-out uses.
+// resolvePredicates → RowVisible path the stream fan-out uses.
 func evalRowFilter(t *testing.T, filter map[string]Filter, claims map[string]any) *ResolvedPermissions {
 	t.Helper()
 	p := &Policy{Tables: map[string]TablePolicy{

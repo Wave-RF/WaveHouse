@@ -40,13 +40,13 @@ const { data } = await clicks.insert([
 // data: { ok, total, succeeded, failed, duplicates, results? }
 ```
 
-For an array insert, `data.ok` is `true` only when every record succeeded (`failed === 0`). Inspect `data.failed` and `data.results` (each `{ index, ok|duplicate|error }`, 1-based `index`) for partial failures — the call's top-level `error` is reserved for whole-request failures (network, `404` unknown table, `403` forbidden, `503` backpressure). An empty array is a no-op and sends no request. The array path sends one request regardless of size; bounded-concurrency chunking of very large arrays is tracked in [#196](https://github.com/Wave-RF/WaveHouse/issues/196).
+For an array insert, `data.ok` is `true` only when every record succeeded (`failed === 0`). Inspect `data.failed` and `data.results` (each `{ index, ok|duplicate|error }`, 1-based `index`) for partial failures — the call's top-level `error` is reserved for whole-request failures (network, `404` unknown table, `403` forbidden, `503` backpressure). An empty array is a no-op and sends no request. The array path sends one request regardless of size, so it is bound by the same 16 MiB [request-body cap](/reverse-proxy#request-body-size-limits); bounded-concurrency chunking of very large arrays is tracked in [#196](https://github.com/Wave-RF/WaveHouse/issues/196).
 
 > `POST /v1/ingest` also accepts a raw JSON array or a single object directly, so non-SDK clients can send whichever shape is convenient — but the `Content-Type` is **required** and decides the format (`application/json` or `application/x-ndjson`); a request without one is rejected with `415`. The SDK always sets it. See the [API reference](/api#post-v1ingesttabletable--ingest-data).
 
 ### `.insertNDJSON(source, opts?)`
 
-Insert pre-formatted NDJSON you already have — a `.ndjson` file, a byte stream, or a string — without first parsing it into objects. Accepts a `string`, `Uint8Array`, `Blob`/`File`, or `ReadableStream<Uint8Array>`; non-string sources are read fully into memory before sending. Returns the same per-record summary as an array `insert`.
+Insert pre-formatted NDJSON you already have — a `.ndjson` file, a byte stream, or a string — without first parsing it into objects. Accepts a `string`, `Uint8Array`, `Blob`/`File`, or `ReadableStream<Uint8Array>`; non-string sources are read fully into memory before sending. The server buffers the whole body too, so the 16 MiB [request-body cap](/reverse-proxy#request-body-size-limits) applies to NDJSON exactly as to any other shape — an upload over it is a `413` with nothing ingested; split it across several calls. Returns the same per-record summary as an array `insert`.
 
 The server caps the request body at **16 MiB** whatever the form — NDJSON is read in full before parsing, exactly like a JSON array — and answers `413` above it. Split a larger export across several calls; see [Batch Ingest](/api#batch-ingest).
 

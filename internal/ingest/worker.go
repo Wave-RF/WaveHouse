@@ -221,7 +221,9 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons jetstream.Consumer
 	// shutdown drains in order: close every table channel so each tableLoop flushes
 	// its remainder and exits (tableWg), then wait for the backgrounded acks (ackWg).
 	// This order is what keeps the ack drain race-free: every ackWg.Add happens
-	// before its tableLoop returns, so all Adds precede tableWg.Wait here.
+	// either inside a tableLoop's lifetime OR on this goroutine (rejectPoison,
+	// via parseMsg below), and this goroutine is the one that Waits — so no Add
+	// can race the Wait on either path.
 	shutdown := func() {
 		for _, ch := range tableChans {
 			close(ch)
@@ -387,6 +389,23 @@ func (w *IngestWorker) tableLoop(ctx context.Context, table string, in <-chan pa
 	}
 }
 
+// firstDuplicate returns the first column name that appears twice, if any.
+// ClickHouse rejects a duplicate in an INSERT column list outright (code 15,
+// DUPLICATE_COLUMN), so the batch would fail loudly here — but the same
+// envelope also reaches the SSE fan-out, where a repeated name silently
+// resolves to one value. Refusing it once, at the parse boundary, keeps both
+// consumers honest.
+func firstDuplicate(cols []string) (string, bool) {
+	seen := make(map[string]struct{}, len(cols))
+	for _, c := range cols {
+		if _, ok := seen[c]; ok {
+			return c, true
+		}
+		seen[c] = struct{}{}
+	}
+	return "", false
+}
+
 // parseMsg unmarshals one envelope into a parsedMsg. An envelope the worker can
 // never insert is poison — malformed JSON, a row format it doesn't know (which
 // is what a pre-v2 envelope looks like: it carries no `format` at all), or
@@ -424,6 +443,13 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m jetstream.Msg) (parsedMsg
 	// instead of one naming the real problem. The stream's pairRow makes the
 	// same check; this is the ingest half of the contract AGENTS.md states.
 	var cells []json.RawMessage
+	if dup, ok := firstDuplicate(envelope.Columns); ok {
+		w.logger.ErrorContext(ctx, "unreadable envelope: a column name repeats",
+			"table", envelope.TableName, "column", dup)
+		w.rejectPoison(ctx, m, envelope.TableName, "unpairable",
+			fmt.Sprintf("column %q appears more than once, so its values cannot be mapped to columns", dup))
+		return parsedMsg{}, false
+	}
 	if err := json.Unmarshal(envelope.Row, &cells); err != nil || len(cells) != len(envelope.Columns) {
 		w.logger.ErrorContext(ctx, "event envelope row does not pair with its columns",
 			"table", envelope.TableName, "columns", len(envelope.Columns), "error", err)
@@ -518,6 +544,9 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 	}
 }
 
+// insertToClickHouse writes one group as a single INSERT naming columns
+// explicitly, so the positional rows land in the right slots. Callers group by
+// column list first: a batch spanning two lists cannot share one statement.
 func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg) error {
 	var buf bytes.Buffer
 	for _, m := range msgs {
@@ -544,14 +573,14 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	// because a positional row has one value per column and no way to say
 	// "absent". For a NON-nullable column with a default this setting turns that
 	// null back into the default, matching what omitting the key did under
-	// JSONEachRow. It is already the server default (verified on 26.7.3), so
+	// JSONEachRow. It is already the server default (verified on 26.6.3), so
 	// this is belt-and-braces for a server configured otherwise.
 	//
 	// TRANSITIONAL DIVERGENCE, and it is NOT what this setting controls: on a
 	// NULLABLE column an explicit null is stored as NULL whatever the setting
 	// says — only an ABSENT key ever took the default. So a `Nullable(T) DEFAULT
 	// …` column now stores NULL where it previously took its default. Verified
-	// on 26.7.3: omitted key → default; explicit null → NULL at both settings.
+	// on 26.6.3: omitted key → default; explicit null → NULL at both settings.
 	q.Set("input_format_null_as_default", "1")
 
 	req, err := http.NewRequestWithContext(ctx, "POST", t.URL+"?"+q.Encode(), &buf)
@@ -638,7 +667,15 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 // does: that is a transient DLQ outage, and retrying beats destroying the row.
 func (w *IngestWorker) rejectPoison(ctx context.Context, m jetstream.Msg, tableName, reason, detail string) {
 	if w.dlqEnabled == nil || w.dlqEnabled(tableName) {
-		w.parkOnDLQ(ctx, m, strings.TrimPrefix(m.Subject(), "ingest."), tableName, detail)
+		// Backgrounded on ackWg for the same reason handleSuccess backgrounds its
+		// acks: parkOnDLQ does a JetStream publish AND an fsync-bound DoubleAck,
+		// and parseMsg runs on the dispatchLoop goroutine. The scenario this whole
+		// change targets is an operator who skipped the drain, where EVERY backlog
+		// message is poison — done inline that is one publish plus one fsync per
+		// message in series, with intake stalled behind it. dispatchLoop adds and
+		// waits on the same goroutine, so each Add still happens-before the Wait.
+		subject := strings.TrimPrefix(m.Subject(), "ingest.")
+		w.ackWg.Go(func() { w.parkOnDLQ(ctx, m, subject, tableName, detail) })
 		return
 	}
 	poisonDroppedCounter.Add(ctx, 1, metric.WithAttributes(
@@ -647,9 +684,11 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m jetstream.Msg, tableN
 	))
 	w.logger.ErrorContext(ctx, "unreadable envelope dropped — the DLQ is disabled for this table, and a message that can never insert must not redeliver forever",
 		"table", tableName, "reason", reason, "detail", detail)
-	_ = m.DoubleAck(ctx)
+	w.ackWg.Go(func() { _ = m.DoubleAck(ctx) })
 }
 
+// sendToDLQ parks a row that failed its own isolated INSERT. Distinct from
+// rejectPoison, which parks an envelope the worker could not read at all.
 func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parsedMsg, errMsg string) {
 	w.parkOnDLQ(ctx, pm.natsMsg, pm.natsSafeSubject, tableName, errMsg)
 }

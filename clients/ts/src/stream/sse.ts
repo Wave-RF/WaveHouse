@@ -129,6 +129,19 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
    * silently mislabel every value.
    */
   private _columns: string[] | null = null;
+  /**
+   * Per-cause warning budget for the current connection. A server that predates
+   * the positional wire sends every row without a schema event, so an unbounded
+   * `console.warn` per row floods the console for the whole connection — and so
+   * does any other per-frame warn against a server sending something the reader
+   * cannot use. Every PER-FRAME warn site is bounded, but keyed by CAUSE so a row
+   * with no announcement, a short row, a long row, a non-array row, a malformed
+   * schema frame and unparseable JSON stay individually visible: collapsing them
+   * behind one flag would hide the distinct failures the warning exists to
+   * surface. Reset per attempt. (The per-connect() notices are not per-frame and
+   * are not bounded here.)
+   */
+  private _warnBudget = new Map<string, number>();
 
   onEvent: ((event: StreamEvent<T>) => void) | null = null;
   onStatus: ((status: StreamStatus) => void) | null = null;
@@ -228,11 +241,27 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
     }
   }
 
+  /**
+   * Warn at most `LIMIT` times per cause per connection, then once more to say
+   * how many were suppressed. Returns nothing — callers warn and bail as before.
+   */
+  private _warnBounded(cause: string, message: string, data: unknown): void {
+    const LIMIT = 3;
+    const seen = (this._warnBudget.get(cause) ?? 0) + 1;
+    this._warnBudget.set(cause, seen);
+    if (seen <= LIMIT) {
+      console.warn(message, data);
+    } else if (seen === LIMIT + 1) {
+      console.warn(`${message} — further occurrences suppressed for this connection`);
+    }
+  }
+
   /** One connection attempt: request, validate, then pump frames until it ends. */
   private async _attempt(): Promise<AttemptResult> {
     const ac = new AbortController();
     this._abort = ac;
     this._columns = null;
+    this._warnBudget.clear();
 
     // A URL that won't build is deterministic — every retry produces the same
     // failure — so it ends the stream rather than looping.
@@ -533,10 +562,21 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       if (!Array.isArray(msg.columns) || msg.columns.some((c) => typeof c !== "string")) {
         throw new Error("columns must be an array of strings");
       }
+      // A repeated name has no single meaning when the row is zipped into an
+      // object: the later value wins and the earlier one vanishes, with no
+      // signal. Refuse the announcement instead — dropping rows until the next
+      // one is the same failure mode as a malformed frame, and it is loud.
+      if (new Set(msg.columns as string[]).size !== msg.columns.length) {
+        throw new Error("columns contains a duplicate name");
+      }
       this._columns = msg.columns as string[];
     } catch {
       this._columns = null;
-      console.warn("[wavehouse] SSE received a malformed schema event:", data);
+      this._warnBounded(
+        "bad-schema-frame",
+        "[wavehouse] SSE received a malformed schema event:",
+        data,
+      );
     }
   }
 
@@ -571,12 +611,21 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       };
       const columns = this._columns;
       if (!columns) {
-        console.warn("[wavehouse] SSE received a row before any schema event:", data);
+        this._warnBounded(
+          "no-schema",
+          "[wavehouse] SSE received a row before any schema event:",
+          data,
+        );
         return;
       }
-      if (!Array.isArray(msg.row) || msg.row.length !== columns.length) {
-        console.warn(
-          `[wavehouse] SSE row does not match the announced ${columns.length} column(s):`,
+      if (!Array.isArray(msg.row)) {
+        this._warnBounded("row-not-array", "[wavehouse] SSE row is not an array:", data);
+        return;
+      }
+      if (msg.row.length !== columns.length) {
+        this._warnBounded(
+          msg.row.length < columns.length ? "row-short" : "row-long",
+          `[wavehouse] SSE row has ${msg.row.length} value(s) but ${columns.length} column(s) were announced:`,
           data,
         );
         return;
@@ -593,7 +642,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       }
       event = { table: msg.table_name, timestamp: msg.received_timestamp, data: row as T };
     } catch {
-      console.warn("[wavehouse] SSE received malformed message:", data);
+      this._warnBounded("bad-json", "[wavehouse] SSE received malformed message:", data);
       return; // ignore malformed messages
     }
 
