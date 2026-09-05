@@ -271,21 +271,13 @@ export interface Column {
    * `ALIAS` or `EPHEMERAL`. Omitted when the column declares none.
    *
    * `MATERIALIZED` and `ALIAS` columns are computed by ClickHouse and cannot be
-   * inserted, so they never appear in an ingest envelope or an SSE `schema`
-   * frame — though they are still reported here and are still queryable.
+   * inserted — a record naming one is rejected — so they never appear in an
+   * ingest envelope or an SSE `schema` frame, though they are still reported
+   * here and are still queryable.
    */
   default_kind?: string;
   /** 1-based ordinal in the table's declaration order — the order `columns` itself is in. Always present. */
   position: number;
-  /**
-   * How the default is declared, when there is one: `DEFAULT`, `MATERIALIZED`,
-   * `ALIAS` or `EPHEMERAL`. Omitted when the column declares none.
-   *
-   * `MATERIALIZED` and `ALIAS` columns are computed by ClickHouse and cannot be
-   * inserted — a record naming one is rejected, and they never appear in an
-   * ingest envelope or an SSE `schema` frame.
-   */
-  default_kind?: string;
   /** The column's DEFAULT expression, absent when it declares none. */
   default_expression?: string;
 }

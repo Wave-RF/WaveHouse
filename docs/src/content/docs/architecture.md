@@ -310,9 +310,6 @@ Client GET /v1/stream
     Column projection runs once per role (Hub.Broadcast) — per-subscriber
     work only where a row filter makes visibility per-connection; replay
     shares the same column policy + row check but projects per-connection
-  → A drifted column list re-announces before the row that uses it, tracked
-    per connection (replay tracks its own — see the known limitation in the
-    API reference's stream section)
 ```
 
 ## Technology Stack
