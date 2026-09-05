@@ -132,9 +132,11 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
   /**
    * Per-cause warning budget for the current connection. A server that predates
    * the positional wire sends every row without a schema event, so an unbounded
-   * `console.warn` per row floods the console for the whole connection. Bound
-   * the volume, but key by CAUSE so a short row, a long row and a non-array row
-   * stay individually visible — collapsing them behind one flag would hide the
+   * `console.warn` per row floods the console for the whole connection — and so
+   * does any other per-frame warn against a server sending something the reader
+   * cannot use. Every warn site is bounded, but keyed by CAUSE so a short row, a
+   * long row, a non-array row, a malformed schema frame and unparseable JSON
+   * stay individually visible: collapsing them behind one flag would hide the
    * distinct failures the warning exists to surface. Reset per attempt.
    */
   private _warnBudget = new Map<string, number>();
@@ -561,7 +563,11 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       this._columns = msg.columns as string[];
     } catch {
       this._columns = null;
-      console.warn("[wavehouse] SSE received a malformed schema event:", data);
+      this._warnBounded(
+        "bad-schema-frame",
+        "[wavehouse] SSE received a malformed schema event:",
+        data,
+      );
     }
   }
 
@@ -627,7 +633,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       }
       event = { table: msg.table_name, timestamp: msg.received_timestamp, data: row as T };
     } catch {
-      console.warn("[wavehouse] SSE received malformed message:", data);
+      this._warnBounded("bad-json", "[wavehouse] SSE received malformed message:", data);
       return; // ignore malformed messages
     }
 
