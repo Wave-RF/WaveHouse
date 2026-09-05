@@ -235,7 +235,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 - Missing required columns (non-nullable without a default) are rejected.
 - Null values for non-nullable columns without a default are rejected.
 - A value for a `MATERIALIZED` or `ALIAS` column is rejected — ClickHouse computes those, and the published row has no slot for one.
-- **An omitted `Nullable(T) DEFAULT …` column now stores `NULL`, not the default.** The published row is positional, with one slot per insertable column and no way to express "absent", so an omitted key rides as an explicit `null`; `input_format_null_as_default` rescues that only for a **non-nullable** column. Only an absent key ever took the default. Verified on ClickHouse 26.6.3.
+- **An omitted `Nullable(T) DEFAULT …` column now stores `NULL`, not the default.** The published row is positional, with one slot per insertable column and no way to express "absent", so an omitted key rides as an explicit `null`; `input_format_null_as_default` rescues that only for a **non-nullable** column. On a nullable column only an absent key ever took the default, and a positional row cannot express absence. Verified on ClickHouse 26.6.3. (One case changes only on a server explicitly running `input_format_null_as_default=0`: an explicit `null` for a non-nullable column with a default now takes the default there rather than failing the row into the DLQ, because WaveHouse pins the setting instead of inheriting it. On a default-configured server this was already the behavior.)
 - Type compatibility: `String` accepts JSON strings, numbers, and booleans (ClickHouse coerces the non-strings); `FixedString`/`UUID` accept the same at validation, but ClickHouse rejects a non-string value there, so it surfaces in the DLQ; `DateTime`/`Date`/`Enum` accept JSON strings or numbers; `IPv*` accepts JSON strings (a number passes validation but ClickHouse rejects it → DLQ); `Int*`/`Float*`/`Decimal` accept JSON numbers or strings — a string lets JavaScript callers avoid 64-bit precision loss, and its contents are ClickHouse's to judge (a non-numeric string is accepted here and surfaces in the DLQ, not as a `400`); `Bool` accepts JSON booleans and the numbers `0`/`1` (any other number, and *any* string — including `"true"` — passes validation but is rejected by ClickHouse → DLQ); `Array` accepts JSON arrays; `Map` accepts JSON objects; `Tuple` accepts JSON arrays or objects at validation, but ClickHouse takes an array only for an *unnamed* tuple and an object only for a *named* one — the other shape surfaces in the DLQ; any other ClickHouse type (`JSON`, `Variant`, `Dynamic`, geo, …) accepts any JSON value — WaveHouse defers to ClickHouse, so a bad value surfaces in the DLQ rather than as a `400`.
 - `Nullable()` and `LowCardinality()` wrappers are handled transparently.
 - Top-level `DateTime`/`DateTime64` values are rewritten to a canonical wire form on ingest — see [Timestamp canonicalization](#timestamp-canonicalization).
@@ -331,7 +331,7 @@ A **JSON array** of objects (`[{…}, {…}]`) or an **NDJSON** body (`Content-T
 POST /v1/ingest?table=clicks
 Content-Type: application/json
 
-[{"page": "/home", "score": 42.5}, {"page": "/about"}, {"page": "/pricing", "score": 7}]
+[{"page": "/home", "button": "signup", "score": 42.5}, {"page": "/about", "button": "nav", "score": 3}, {"page": "/pricing", "button": "cta", "score": 7, "referrer": "/home"}]
 ```
 
 **Request (NDJSON):**
@@ -340,9 +340,9 @@ Content-Type: application/json
 POST /v1/ingest?table=clicks
 Content-Type: application/x-ndjson
 
-{"page": "/home", "score": 42.5}
-{"page": "/about"}
-{"page": "/pricing", "score": 7}
+{"page": "/home", "button": "signup", "score": 42.5}
+{"page": "/about", "button": "nav", "score": 3}
+{"page": "/pricing", "button": "cta", "score": 7, "referrer": "/home"}
 ```
 
 **Response (`200`):** a per-record summary. Each `results` entry mirrors the single-object response (`ok` / `duplicate` / `error`) plus its 1-based `index`.
@@ -392,7 +392,7 @@ A batch aborted partway (a `503`/`500`, a JSON-array syntax error, or an NDJSON 
 ```bash
 curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
-  -d '[{"page":"/home"},{"page":"/about"}]'
+  -d '[{"page":"/home","button":"signup","score":42.5},{"page":"/about","button":"nav","score":3}]'
 ```
 
 **curl example (NDJSON):**
@@ -400,7 +400,7 @@ curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 ```bash
 curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/x-ndjson" \
-  --data-binary $'{"page":"/home"}\n{"page":"/about"}\n'
+  --data-binary $'{"page":"/home","button":"signup","score":42.5}\n{"page":"/about","button":"nav","score":3}\n'
 ```
 
 ---
@@ -597,17 +597,17 @@ Opens a persistent SSE connection for real-time event streaming. Supports histor
 
 **Response:** SSE stream (`text/event-stream`). Data events include an `id:` field set to the event's `received_timestamp`. The stream opens with a `: connected` comment and emits a minimal `:` keepalive comment periodically (every 30 seconds by default), which keeps a quiet connection from being closed by a proxy; both are standard SSE comments that `EventSource` ignores (raw consumers should skip `:`-prefixed lines).
 
-**Row values arrive positionally, and the column names are announced separately.** Before the first row, and again whenever the column list changes, the stream sends an `event: schema` frame naming the columns of the rows that follow — in order, already reduced to what the caller's role may read. Every data frame's `row` array then has exactly one value per announced column, in that order. `schema` is a **named** SSE event, so a browser `EventSource` must `addEventListener('schema', …)` — it never reaches `onmessage`. A schema frame carries **no** `id:` line, so it never moves the client's `Last-Event-ID`.
+**Row values arrive positionally, and the column names are announced separately.** Before the first row, and again whenever the column list changes, the stream sends an `event: schema` frame naming the columns of the rows that follow — in order, already reduced to what the caller's role may read. That re-announcement is **not** guaranteed after a gap-fill across a column change; see the arity note below. Every data frame's `row` array then has exactly one value per announced column, in that order. `schema` is a **named** SSE event, so a browser `EventSource` must `addEventListener('schema', …)` — it never reaches `onmessage`. A schema frame carries **no** `id:` line, so it never moves the client's `Last-Event-ID`. In the example below the table has its own `received_timestamp` **column**, which collides by name with the frame's top-level `received_timestamp` **field** — they are different values: the field is when WaveHouse received the event, the row slot is that column as published (`null` where the record omitted it, which ClickHouse replaces with the column's default on insert).
 
 ```text
 event: schema
-data: {"table_name":"clicks","columns":["page","button"]}
+data: {"table_name":"clicks","columns":["page","button","received_timestamp"]}
 
 id: 2026-03-24T12:00:00.123Z
-data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","row":["/home","signup"]}
+data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","row":["/home","signup","2026-03-24T11:59:58.512Z"]}
 
 id: 2026-03-24T12:00:01.456Z
-data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","row":["/pricing",null]}
+data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","row":["/pricing","cta",null]}
 ```
 
 A raw consumer must keep the most recent announced column list and zip each `row` against it; a value the record did not carry arrives as `null` in its slot rather than being omitted, so positions never shift. **Check arity before zipping:** drop a `row` whose length disagrees with the last announced list rather than zipping it, because the announcement is not guaranteed in one case — a connection that gap-fills across a column change may receive live rows with no fresh announcement until the columns next change or it reconnects ([#543](https://github.com/Wave-RF/WaveHouse/issues/543)). An arity check covers an added or removed column; a *same-length* change (a `RENAME COLUMN`, or a drop paired with an add) it cannot see, and reconnecting is what resynchronizes. Separately, a replay spanning a server upgrade across the v2 ingest envelope silently omits the pre-upgrade events — see [Upgrading across the v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope). The TypeScript SDK does this for you and still yields row objects — `.stream()` and `.liveQuery()` are unchanged. The announcement is **per connection**, so a client that joins mid-stream is told the columns before it is sent a row, and a reconnect is told again.
@@ -804,8 +804,8 @@ The message format used on NATS JetStream between ingest and the batch consumer:
   "scope": "",
   "received_timestamp": "2026-03-24T12:00:00.123456789Z",
   "format": "JSONCompactEachRow",
-  "columns": ["page", "button", "score"],
-  "row": ["/home", "signup", 42.5]
+  "columns": ["page", "button", "score", "received_timestamp"],
+  "row": ["/home", "signup", 42.5, null]
 }
 ```
 
@@ -818,11 +818,21 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 | `columns` | string[] | The table's **insertable** column names, in declaration order — what each position in `row` means. A `MATERIALIZED` or `ALIAS` column is computed by ClickHouse and cannot be named in an `INSERT`, so it never appears here. |
 | `row` | array | One `JSONCompactEachRow` line: one value per entry in `columns`, in that order. A column the request body omitted is `null` here; for a **non-nullable** column the insert turns that back into the column's default (`input_format_null_as_default`), but a `Nullable(T) DEFAULT …` column stores `NULL` — only an *absent* key ever took the default, and a positional row has one slot per column and no way to express absence. Parseable `DateTime`/`DateTime64` values are rewritten to canonical RFC 3339 UTC (see [timestamp canonicalization](#timestamp-canonicalization)); other values as originally sent. |
 
-`columns` and `row` are only meaningful together: a reader that cannot pair them — a length mismatch, an undecodable row — has no way to map a value to a column, and the SSE fan-out drops such an envelope rather than guess, and the batch consumer parks it on the DLQ with `X-DLQ-*` headers — acking and dropping it (counted by `wavehouse_ingest_poison_dropped_total`) only where the DLQ is switched off for that table, since it can never insert on retry.
+`columns` and `row` are only meaningful together: a reader that cannot pair them — a length mismatch, an undecodable row — has no way to map a value to a column, and the SSE fan-out drops such an envelope rather than guess, and the batch consumer parks it on the DLQ with `X-DLQ-*` headers — acking and dropping it (counted by `wavehouse_ingest_poison_dropped_total` (labeled by `table` and `reason` — `malformed`, `unknown_format` or `unpairable`)) only where the DLQ is switched off for that table, since it can never insert on retry.
 
 ### Client-Facing Format (SSE)
 
-The same positional row, with the column list delivered once per connection as its own `event: schema` frame rather than repeated on every event — see [`GET /v1/stream`](#get-v1stream--server-sent-events-stream) for the frame sequence. The announced list is the caller's **projected** columns (the role's allow/deny rules applied), so it can be narrower than the envelope's.
+The same positional row, in a **narrower** body: a data frame carries `table_name`, `received_timestamp` and `row`, and neither `scope` nor `format` — those are envelope fields and do not cross to the client. The column list travels separately, in its own `event: schema` frame sent before the first row and again whenever the list drifts — though not guaranteed to re-announce after a gap-fill across a change ([#543](https://github.com/Wave-RF/WaveHouse/issues/543)) — rather than repeated on every event — see [`GET /v1/stream`](#get-v1stream--server-sent-events-stream) for the frame sequence. The announced list is the caller's **projected** columns (the role's allow/deny rules applied), so both it and the `row` it describes can be narrower than the envelope's — the row carries exactly one value per announced column, not per envelope column.
+
+```json
+{
+  "table_name": "clicks",
+  "received_timestamp": "2026-03-24T12:00:00.123456789Z",
+  "row": ["/home", "signup", 42.5]
+}
+```
+
+Three values, where the envelope above has four: this is the frame a role restricted to `page`, `button` and `score` receives, and its `event: schema` frame announces exactly those three.
 
 ## Dead Letter Queue (DLQ)
 
@@ -845,5 +855,5 @@ export TOKEN=$(jwt encode --secret "change-me-in-production" '{"role": "admin", 
 curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"page": "/home"}'
+  -d '{"page": "/home", "button": "signup", "score": 42.5}'
 ```
