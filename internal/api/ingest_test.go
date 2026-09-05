@@ -2563,16 +2563,6 @@ func TestIngest_CheckColumnInSchema_StillInjects(t *testing.T) {
 	assert.Equal(t, "org-42", row["org_id"], "the injected value rides in its column's slot")
 }
 
-// TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord: the guard is a
-// per-record rejection, not a whole-request abort — the batch is still read to
-// the end and reports every record, rather than failing the request outright.
-//
-// Every record fails here, and that is not an artifact of the fixture: the
-// condition is a property of (table, role, policy), identical for every record
-// in the request, so there is no sibling this guard could spare. A record
-// SUPPLYING the missing column is rejected too, one step earlier, by schema
-// validation — with its own message, which this pins so the two stay
-// distinguishable.
 // TestIngest_CheckGuardLogsOncePerRequest pins the half of the guard that the
 // per-record test cannot see. The condition is a property of (table, role,
 // policy) — identical for every record — so evaluating it per record emitted
@@ -2605,6 +2595,16 @@ func TestIngest_CheckGuardLogsOncePerRequest(t *testing.T) {
 	assert.Empty(t, pub.Messages)
 }
 
+// TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord: the guard is a
+// per-record rejection, not a whole-request abort — the batch is still read to
+// the end and reports every record, rather than failing the request outright.
+//
+// Every record fails here, and that is not an artifact of the fixture: the
+// condition is a property of (table, role, policy), identical for every record
+// in the request, so there is no sibling this guard could spare. A record
+// SUPPLYING the missing column is rejected too, one step earlier, by schema
+// validation — with its own message, which this pins so the two stay
+// distinguishable.
 func TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}

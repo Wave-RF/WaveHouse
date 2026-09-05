@@ -475,6 +475,26 @@ describe("SSETransport positional rows", () => {
     await flush();
     expect(warn).toHaveBeenCalledTimes(1);
 
+    // The two non-skew causes are bounded on the same budget. Both flood
+    // identically against a bad server, and sdk/reference.md states the bound as
+    // a contract for every cause — so each needs its own case, or reverting the
+    // bound breaks nothing.
+    warn.mockClear();
+    for (let i = 0; i < 10; i++) {
+      conn.push(`event: schema\ndata: {"table_name":"clicks","columns":"not-an-array"}\n\n`);
+    }
+    await flush();
+    expect(warn).toHaveBeenCalledTimes(4);
+    expect(String(warn.mock.calls[3][0])).toContain("suppressed");
+
+    warn.mockClear();
+    for (let i = 0; i < 10; i++) {
+      conn.push(`data: {not json\n\n`);
+    }
+    await flush();
+    expect(warn).toHaveBeenCalledTimes(4);
+    expect(String(warn.mock.calls[3][0])).toContain("suppressed");
+
     t.disconnect();
     warn.mockRestore();
   });
