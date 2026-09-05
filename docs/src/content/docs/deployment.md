@@ -329,6 +329,28 @@ ORDER BY (page);
 
 WaveHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (settings directory; seed default 60). You can also trigger an immediate refresh via `POST /v1/ops/schema/refresh` (admin-only).
 
+## Upgrading across the v2 ingest envelope
+
+The NATS envelope changed shape in this release: the row now travels positionally, with `format`, `columns` and `row` replacing `data`. **The new worker cannot read a message published by an older version** — it carries no `format`, so there is no way to say which value belongs to which column.
+
+This affects the streaming surface too, and more quietly. SSE gap-fill (`?since=` / `Last-Event-ID`) reads the same stream, and a pre-v2 envelope cannot be paired into a positional row there either — it is withheld from every role with **no error, no frame and no DLQ entry**. Because the stream keeps ACKed messages until the sweeper purges past `stream.gap_window_minutes` (15 by default), this outlives a *correct* drain: for that window, any replay spanning the upgrade silently omits the pre-upgrade events. Clients that need them should backfill over REST.
+
+On the worker side the outcome depends on the DLQ. **With the DLQ enabled for the table**, the message is parked on `dlq.{table}` with `X-DLQ-*` headers and is recoverable by hand — but re-ingest each parked envelope's inner `data` object as a fresh `POST /v1/ingest`; republishing the envelope as-is onto `ingest.{table}` fails the same `format` check and simply re-parks it. **With the DLQ switched off for the table, it is permanently lost**: acked and dropped with an `ERROR` log and a `wavehouse_ingest_poison_dropped_total` increment, unrecoverable from either the ingest stream or the DLQ, because a message that can never insert must not redeliver forever. Draining first is cheaper than a manual replay, and it is the only option at all where the DLQ is off.
+
+Two audits belong **before** the drain, because neither announces itself afterwards:
+
+- **`Nullable(T) DEFAULT …` columns now store `NULL` where they took their default.** A positional row has one slot per insertable column and no way to say *absent*, so a key the record omits rides as an explicit `null`. `input_format_null_as_default=1` turns that back into the default for a **non-nullable** column, but ClickHouse stores `NULL` on a nullable one whatever the setting says — only an absent key ever took the default. Following this runbook exactly still changes what lands in those columns, silently. See [the ingest note](/ingest-pipeline#the-journey-of-one-event).
+- **Policy `check` blocks are now validated against the table.** A `check` naming a column the table lacks, one it computes (`MATERIALIZED`/`ALIAS`), or an `EPHEMERAL` one is a per-record `403` on *every* insert by that role. `wavehouse validate` cannot catch it — it never sees the ClickHouse schema — so audit them against their tables first. See [Access control → Insert checks](/access-control#insert-checks).
+
+To drain before upgrading:
+
+1. **Stop the producers**, or cut `/v1/ingest` at the reverse proxy. Nothing new should enter the stream.
+2. **Wait for the in-flight batches to flush.** A table's batch closes on size or after `maxWait` (5s by default), so a few seconds after the last write is enough; give it longer if ClickHouse is slow or retrying.
+3. **Confirm nothing is left unconsumed** before swapping binaries. Not that the stream is empty: it is dual-use, and deliberately retains ACKed messages for the SSE replay window, so a non-zero depth right after a clean drain is expected. Rows landing in ClickHouse is a success signal, **not proof the queue is drained** — when the DLQ is off for a table, a row that fails its retry is skipped without being acked, so NATS keeps redelivering it while its neighbors land. Check that nothing is still failing or redelivering, and note which signal covers which case: [`GET /v1/ops/dlq/stats`](/api#get-v1opsdlqstats--dlq-statistics) is non-zero only where the DLQ is **on**; `wavehouse_ingest_poison_dropped_total` counts unreadable envelopes dropped where it is **off**; and for a twice-failed row with the DLQ off — the case just described — the **only** signal is the `ERROR` log (`isolated bad row, DLQ disabled for table`). A clean `dlq/stats` with the DLQ off proves nothing. There is no queue-depth gauge today ([#544](https://github.com/Wave-RF/WaveHouse/issues/544) tracks the related in-flight accounting), and `wavehouse_nats_in_msgs_total` going flat is a supporting signal rather than a guarantee. Enabling the DLQ is not itself a drain — replay from `dlq.{table}` is manual.
+4. **Upgrade**, then re-enable ingest.
+
+If you skipped the drain, check `dlq.{table}` for parked envelopes (and `wavehouse_ingest_poison_dropped_total` for any dropped where the DLQ was off) — see [Dead Letter Queue](#dead-letter-queue-dlq) below.
+
 ## Dead Letter Queue (DLQ)
 
 A failed batch insert is retried row by row; while `dlq.enabled` is `true` for the table (the seed default — a hot-reloadable [settings directory](/settings-directory#dead-letter-queue) key, overridable per table), the rows that fail again are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}` instead of retrying forever. Monitor DLQ depth via `GET /v1/ops/dlq/stats`.

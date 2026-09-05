@@ -379,9 +379,17 @@ function compareOrdered(
   return false;
 }
 
-/** @internal Project a row to only the specified columns. */
+/**
+ * @internal Project a row to only the specified columns.
+ *
+ * Null-prototype, matching the rows the SSE transport hands us: a ClickHouse
+ * column may legitimately be named `__proto__`, and on a plain object literal
+ * that assignment hits the inherited setter instead of creating an own
+ * property, so the column would vanish from a `.select(…)` projection while
+ * surviving an unprojected stream.
+ */
 function projectColumns(row: Record<string, unknown>, columns: string[]): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
+  const result: Record<string, unknown> = Object.create(null);
   for (const col of columns) {
     if (col in row) result[col] = row[col];
   }

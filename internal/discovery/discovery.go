@@ -18,10 +18,16 @@ type Column struct {
 	Type       string `json:"type"`
 	IsNullable bool   `json:"is_nullable"`
 	HasDefault bool   `json:"has_default"`
+	// DefaultKind is how the column's default is declared, verbatim from
+	// system.columns.default_kind: "" (none), "DEFAULT", "MATERIALIZED",
+	// "ALIAS", or "EPHEMERAL". It is what decides whether a record may carry a
+	// value for the column — see IsInsertable. HasDefault is the boolean
+	// reading of the same field, so the two never disagree about whether a
+	// default exists.
+	DefaultKind string `json:"default_kind,omitempty"`
 	// DefaultExpression is the column's DEFAULT/MATERIALIZED/ALIAS expression
 	// as ClickHouse stores it (system.columns.default_expression), empty when
-	// the column declares none. HasDefault stays the boolean form (a non-empty
-	// default_kind) so the two never disagree about whether one exists.
+	// the column declares none.
 	DefaultExpression string `json:"default_expression,omitempty"`
 	// Position is the column's 1-based ordinal in the table's declaration order
 	// (system.columns.position). Columns is already ordered by it; the field
@@ -56,6 +62,15 @@ type TableSchema struct {
 	// system.tables by the time the second query ran — the two scans are not one
 	// snapshot, so a consumer must not treat an empty DDL as "no such table".
 	DDL string `json:"-"`
+
+	// insertable/insertableNames memoize InsertableColumns/InsertableColumnNames,
+	// which are per-table constants that the ingest path would otherwise rebuild
+	// once per record — on a 20-column table that is ~2 KB of garbage per record.
+	// Filled once by cacheInsertable when the registry builds the schema, and
+	// never written again, so concurrent readers need no lock. A TableSchema
+	// built as a literal (tests) leaves them nil and takes the uncached path.
+	insertable      []Column
+	insertableNames []string
 }
 
 // ColumnNames returns the table's column names in their discovered order
@@ -63,12 +78,96 @@ type TableSchema struct {
 // a SELECT * into a role's allowed projection, so the order is stable and
 // matches the physical column order. Returns an empty (non-nil) slice for a
 // schema with no columns.
-func (ts *TableSchema) ColumnNames() []string {
-	names := make([]string, 0, len(ts.Columns))
-	for _, c := range ts.Columns {
+func (ts *TableSchema) ColumnNames() []string { return columnNames(ts.Columns) }
+
+// IsInsertable reports whether a record may carry a value for this column —
+// whether naming it in an INSERT's column list is legal.
+//
+// ClickHouse refuses exactly two kinds, verified against a live server
+// (26.6.3): a MATERIALIZED column is `Cannot insert column …, because it is
+// MATERIALIZED column` (code 44, and insert_allow_materialized_columns
+// defaults to 0), and an ALIAS column is `No such column …` (code 16) — it has
+// no storage to write. Everything else takes a value: a plain column, a
+// DEFAULT column, and an EPHEMERAL one, which exists precisely to be inserted
+// into (it is insert-only — never stored, never selected).
+func (c Column) IsInsertable() bool {
+	switch c.DefaultKind {
+	case "MATERIALIZED", "ALIAS":
+		return false
+	default:
+		return true
+	}
+}
+
+// InsertableColumns returns the columns a record may carry, in declaration
+// order — the positional contract for a row on the ingest path. Computed
+// columns are left out because naming one in an INSERT is an error, not
+// because they are uninteresting: they stay in Columns, so the schema endpoint
+// and the query path still see the whole table.
+func (ts *TableSchema) InsertableColumns() []Column {
+	if ts.insertable != nil {
+		return ts.insertable
+	}
+	return computeInsertable(ts.Columns)
+}
+
+// cacheInsertable fills the memoized subsets. Called once per table per refresh,
+// before the schema is published to readers.
+func (ts *TableSchema) cacheInsertable() {
+	ts.insertable = computeInsertable(ts.Columns)
+	ts.insertableNames = columnNames(ts.insertable)
+}
+
+// computeInsertable filters to the columns a record may carry, preserving
+// declaration order — the positional contract the wire envelope depends on.
+func computeInsertable(cols []Column) []Column {
+	out := make([]Column, 0, len(cols))
+	for _, c := range cols {
+		if c.IsInsertable() {
+			out = append(out, c)
+		}
+	}
+	// Cap the slice to its length. The memo is handed to every caller by
+	// reference, and on a table with a computed column cap > len — so an append
+	// by some future caller would write into the shared, concurrently-read
+	// backing array instead of copying. Capping forces that append to allocate.
+	return out[:len(out):len(out)]
+}
+
+// columnNames projects a column slice to its names, shared by ColumnNames and
+// InsertableColumnNames so the two cannot drift.
+func columnNames(cols []Column) []string {
+	names := make([]string, 0, len(cols))
+	for _, c := range cols {
 		names = append(names, c.Name)
 	}
 	return names
+}
+
+// Lookup returns the named column and whether the table declares it. Matching
+// is exact, as ClickHouse's own column resolution is. Linear over Columns, which
+// is the right shape for the per-record call sites: schemas are small and the
+// caller asks about one or two columns.
+//
+// It returns the Column rather than a bool because "does the table have it" is
+// rarely the whole question — a caller on the ingest path also has to know
+// whether a record may carry a value for it (IsInsertable).
+func (ts *TableSchema) Lookup(name string) (Column, bool) {
+	for _, c := range ts.Columns {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return Column{}, false
+}
+
+// InsertableColumnNames is InsertableColumns reduced to names, for the wire
+// envelope's column list. Returns an empty (non-nil) slice when none qualify.
+func (ts *TableSchema) InsertableColumnNames() []string {
+	if ts.insertableNames != nil {
+		return ts.insertableNames
+	}
+	return columnNames(ts.InsertableColumns())
 }
 
 // SchemaRegistry discovers and caches ClickHouse table schemas.
@@ -179,6 +278,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 			Type:              colType,
 			IsNullable:        isNullable(colType),
 			HasDefault:        defaultKind != "",
+			DefaultKind:       defaultKind,
 			DefaultExpression: defaultExpr,
 			Position:          position,
 		}
@@ -197,6 +297,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 
 	for _, ts := range tables {
 		resolveTimestampSpecs(ts, serverTZ, sr.logger)
+		ts.cacheInsertable()
 	}
 
 	sr.mu.Lock()

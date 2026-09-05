@@ -234,6 +234,8 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 - Type mismatches are rejected (e.g., sending a boolean for a `Float64` column).
 - Missing required columns (non-nullable without a default) are rejected.
 - Null values for non-nullable columns without a default are rejected.
+- A value for a `MATERIALIZED` or `ALIAS` column is rejected — ClickHouse computes those, and the published row has no slot for one.
+- **An omitted `Nullable(T) DEFAULT …` column now stores `NULL`, not the default.** The published row is positional, with one slot per insertable column and no way to express "absent", so an omitted key rides as an explicit `null`; `input_format_null_as_default` rescues that only for a **non-nullable** column. Only an absent key ever took the default. Verified on ClickHouse 26.6.3.
 - Type compatibility: `String` accepts JSON strings, numbers, and booleans (ClickHouse coerces the non-strings); `FixedString`/`UUID` accept the same at validation, but ClickHouse rejects a non-string value there, so it surfaces in the DLQ; `DateTime`/`Date`/`Enum` accept JSON strings or numbers; `IPv*` accepts JSON strings (a number passes validation but ClickHouse rejects it → DLQ); `Int*`/`Float*`/`Decimal` accept JSON numbers or strings — a string lets JavaScript callers avoid 64-bit precision loss, and its contents are ClickHouse's to judge (a non-numeric string is accepted here and surfaces in the DLQ, not as a `400`); `Bool` accepts JSON booleans and the numbers `0`/`1` (any other number, and *any* string — including `"true"` — passes validation but is rejected by ClickHouse → DLQ); `Array` accepts JSON arrays; `Map` accepts JSON objects; `Tuple` accepts JSON arrays or objects at validation, but ClickHouse takes an array only for an *unnamed* tuple and an object only for a *named* one — the other shape surfaces in the DLQ; any other ClickHouse type (`JSON`, `Variant`, `Dynamic`, geo, …) accepts any JSON value — WaveHouse defers to ClickHouse, so a bad value surfaces in the DLQ rather than as a `400`.
 - `Nullable()` and `LowCardinality()` wrappers are handled transparently.
 - Top-level `DateTime`/`DateTime64` values are rewritten to a canonical wire form on ingest — see [Timestamp canonicalization](#timestamp-canonicalization).
@@ -257,11 +259,13 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 400 | `{"error":"invalid request body"}` | The body could not be read at all — a malformed transfer encoding, or a truncated upload (a body cut off *in transit*). A body that arrived complete but ends mid-value is `invalid json` |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure (unknown fields, type mismatches, missing required columns, null in a non-nullable column with no default). The body is the validator's message verbatim — there is no `validation failed:` prefix. |
+| 400 | `{"error":"column \"x\" of table \"t\" is materialized and cannot be inserted"}` (also `… is alias …`) | The record supplies a value for a column ClickHouse computes. Omit it — the server fills it in. Refused rather than dropped: the published row has one slot per insertable column, so the value would otherwise vanish behind a `200` |
 | 400 | `{"error":"missing dedupe id field \"event_id\""}` | Only when dedupe is enabled with `dedupe.require_id: true` and the row lacks the configured `id_field`. With `require_id: false` (the default) the row is instead published un-deduped. Either way — reject or publish — the row is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`. In a batch this is a per-record failure, not a whole-request error. |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason rather than silently falling back to `default_role`) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table |
 | 403 | `{"error":"column \"x\" not allowed for insert"}` | The record names a column the role's `allow_columns`/`deny_columns` forbids ([Access control → Column permissions](/access-control#column-permissions)) |
 | 403 | `{"error":"check failed for column \"x\""}` | The record's value for a checked column doesn't satisfy the policy `check` (`_eq`/`_in`), or an `_in`-checked column is omitted ([Access control → Insert checks](/access-control#insert-checks)). On the batch path both this and the column error above are per-record failures reported in `results`, not whole-request rejections |
+| 403 | `{"error":"policy check references column \"x\", which table \"t\" does not have"}` (also `… which is materialized and cannot be inserted`, the same for `alias`, and `… which is ephemeral and is never stored`) | A **policy misconfiguration**, not a bad request: the role's `check` names a column the table lacks, one ClickHouse computes, or an `EPHEMERAL` one. None can be enforced — the published row carries one slot per insertable column, and an ephemeral column is never stored — so the check would have passed silently while enforcing nothing. Per-record like the rejections above, and it fires on **every** insert by that role until the policy or the table is corrected. `wavehouse validate` cannot catch it: it never sees the ClickHouse schema |
 | 404 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
 | 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …` — see the note above on how declarations are echoed; conflicting variant: `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of …`) | The request declared no `Content-Type`, one whose media type is unsupported or does not parse, a comma-bearing value that does not parse as a single media type, or repeated header lines that disagree — different formats, or one supported and one not. Checked before the body is parsed |
@@ -591,19 +595,26 @@ Opens a persistent SSE connection for real-time event streaming. Supports histor
 | ------ | ----------- |
 | `Last-Event-ID` | RFC 3339 timestamp of the last received event. If present, overrides the `since` query parameter for automatic reconnection (standard `EventSource` behavior). |
 
-**Response:** SSE stream (`text/event-stream`). Each event includes an `id:` field set to the event's `received_timestamp`. The stream opens with a `: connected` comment and emits a minimal `:` keepalive comment periodically (every 30 seconds by default), which keeps a quiet connection from being closed by a proxy; both are standard SSE comments that `EventSource` ignores (raw consumers should skip `:`-prefixed lines).
+**Response:** SSE stream (`text/event-stream`). Data events include an `id:` field set to the event's `received_timestamp`. The stream opens with a `: connected` comment and emits a minimal `:` keepalive comment periodically (every 30 seconds by default), which keeps a quiet connection from being closed by a proxy; both are standard SSE comments that `EventSource` ignores (raw consumers should skip `:`-prefixed lines).
+
+**Row values arrive positionally, and the column names are announced separately.** Before the first row, and again whenever the column list changes, the stream sends an `event: schema` frame naming the columns of the rows that follow — in order, already reduced to what the caller's role may read. Every data frame's `row` array then has exactly one value per announced column, in that order. `schema` is a **named** SSE event, so a browser `EventSource` must `addEventListener('schema', …)` — it never reaches `onmessage`. A schema frame carries **no** `id:` line, so it never moves the client's `Last-Event-ID`.
 
 ```text
+event: schema
+data: {"table_name":"clicks","columns":["page","button"]}
+
 id: 2026-03-24T12:00:00.123Z
-data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","data":{"page":"/home","button":"signup"}}
+data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","row":["/home","signup"]}
 
 id: 2026-03-24T12:00:01.456Z
-data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","data":{"page":"/pricing"}}
+data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","row":["/pricing",null]}
 ```
+
+A raw consumer must keep the most recent announced column list and zip each `row` against it; a value the record did not carry arrives as `null` in its slot rather than being omitted, so positions never shift. **Check arity before zipping:** drop a `row` whose length disagrees with the last announced list rather than zipping it, because the announcement is not guaranteed in one case — a connection that gap-fills across a column change may receive live rows with no fresh announcement until the columns next change or it reconnects ([#543](https://github.com/Wave-RF/WaveHouse/issues/543)). An arity check covers an added or removed column; a *same-length* change (a `RENAME COLUMN`, or a drop paired with an add) it cannot see, and reconnecting is what resynchronizes. Separately, a replay spanning a server upgrade across the v2 ingest envelope silently omits the pre-upgrade events — see [Upgrading across the v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope). The TypeScript SDK does this for you and still yields row objects — `.stream()` and `.liveQuery()` are unchanged. The announcement is **per connection**, so a client that joins mid-stream is told the columns before it is sent a row, and a reconnect is told again.
 
 Each SSE connection is bound to a single `?table=`; to consume multiple tables, open one connection per table.
 
-Row values of top-level `DateTime`/`DateTime64` columns inside `data` arrive in the canonical RFC 3339 UTC form (ingest rewrites them before publishing — see [timestamp canonicalization](#timestamp-canonicalization)), so a live event and a `/v1/query` read of the same row agree on the instant in zone-explicit form — a zone-less spelling no longer parses as local time in a browser ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). The two renderings are byte-identical regardless of the declared time zone or a `Nullable` wrapper — a column declared with a non-UTC zone also streams as `Z`, and `/v1/query` normalizes it (nullable or not) to UTC before rendering. Canonicalization is fail-open at ingest, so a value outside the accepted input forms streams in whatever spelling the producer sent — and for exactly those events the byte-identity above does not hold: a spelling ClickHouse accepts anyway is stored and still queries back canonical, while one it too rejects lands in the DLQ and never becomes queryable at all. Events ingested before this behavior shipped likewise replay in their original spelling.
+Values of top-level `DateTime`/`DateTime64` columns inside `row` arrive in the canonical RFC 3339 UTC form (ingest rewrites them before publishing — see [timestamp canonicalization](#timestamp-canonicalization)), so a live event and a `/v1/query` read of the same row agree on the instant in zone-explicit form — a zone-less spelling no longer parses as local time in a browser ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). The two renderings are byte-identical regardless of the declared time zone or a `Nullable` wrapper — a column declared with a non-UTC zone also streams as `Z`, and `/v1/query` normalizes it (nullable or not) to UTC before rendering. Canonicalization is fail-open at ingest, so a value outside the accepted input forms streams in whatever spelling the producer sent — and for exactly those events the byte-identity above does not hold: a spelling ClickHouse accepts anyway is stored and still queries back canonical, while one it too rejects lands in the DLQ and never becomes queryable at all.
 
 **Note:** When access control policies are active, streamed events are filtered per the caller's role: tables without `select` permission are skipped, denied columns are removed from each event, and the role's [row-level `filter`](/access-control#row-level-security) is evaluated per subscriber against the caller's JWT claims — supplied by the connection's token (the `Authorization` header, or the `?token=` fallback above), with replayed gap-fill events filtered the same way. For a filter constant the query path's SQL also accepts ([the enforcement caution](/access-control#where-each-rule-is-enforced) gives per-type guidance), a connection is never delivered a row the query path would hide for that role — every comparison the stream can't prove fails closed and withholds the row instead. Numeric comparisons run in the column's storage domain — both operands narrowed the way ClickHouse narrows the stored value and the bound constant — so columns that narrow on insert (`Float32`/`Float64` width, a `Decimal`'s scale) agree with the query path too; the residual payload-vs-stored case is an event whose insert later fails into the DLQ, which the caution documents. The connection's claims are captured once, when the stream is established — a policy change applies from the next live event (an in-flight gap-fill finishes under the policy snapshot taken when the stream opened), but an expired token or changed claims take effect only when the client reconnects.
 
@@ -645,7 +656,7 @@ Returns all discovered ClickHouse table schemas.
       {"name": "page", "type": "String", "is_nullable": false, "has_default": false, "position": 1},
       {"name": "button", "type": "String", "is_nullable": false, "has_default": false, "position": 2},
       {"name": "score", "type": "Float64", "is_nullable": false, "has_default": false, "position": 3},
-      {"name": "received_timestamp", "type": "DateTime64(3, 'UTC')", "is_nullable": false, "has_default": true, "default_expression": "now64(3, 'UTC')", "position": 4}
+      {"name": "received_timestamp", "type": "DateTime64(3, 'UTC')", "is_nullable": false, "has_default": true, "default_kind": "DEFAULT", "default_expression": "now64(3, 'UTC')", "position": 4}
     ]
   }
 ]
@@ -669,7 +680,7 @@ Returns the schema for a specific table.
 }
 ```
 
-Per-column fields: `name`, `type` and `is_nullable` describe the column; `position` is its 1-based ordinal in the table's declaration order (always present, and the order `columns` itself is in); `has_default` says whether it declares any default at all, while `default_expression` says what that default is, omitted when the column declares none. The table's `CREATE TABLE` statement is captured on the same refresh but is deliberately **not** exposed here — for a table backed by an external engine it renders that engine's wiring — endpoint, bucket/host, database, username, access key id. (ClickHouse masks the password as `[HIDDEN]` from ~23.9; the topology is what is withheld here.)
+Per-column fields: `name`, `type` and `is_nullable` describe the column; `position` is its 1-based ordinal in the table's declaration order (always present, and the order `columns` itself is in); `has_default` says whether it declares any default at all, while `default_kind` (`DEFAULT`, `MATERIALIZED`, `ALIAS`, `EPHEMERAL`) and `default_expression` say which and what — both omitted when the column declares none. A `MATERIALIZED` or `ALIAS` column is computed and **not** insertable, so it never appears in an ingest envelope or an SSE `schema` frame, though it is still reported here and can still be selected by name. An `EPHEMERAL` column is the reverse: insertable — it exists to be written — but never stored and never selectable at all, so it can appear in a stream's column list while no query can return it. The table's `CREATE TABLE` statement is captured on the same refresh but is deliberately **not** exposed here — for a table backed by an external engine it renders that engine's wiring — endpoint, bucket/host, database, username, access key id. (ClickHouse masks the password as `[HIDDEN]` from ~23.9; the topology is what is withheld here.)
 
 **Error responses:**
 
@@ -790,40 +801,32 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 ```json
 {
   "table_name": "clicks",
+  "scope": "",
   "received_timestamp": "2026-03-24T12:00:00.123456789Z",
-  "data": {
-    "page": "/home",
-    "button": "signup",
-    "score": 42.5
-  }
+  "format": "JSONCompactEachRow",
+  "columns": ["page", "button", "score"],
+  "row": ["/home", "signup", 42.5]
 }
 ```
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `table_name` | string | Target ClickHouse table (from URL). |
+| `scope` | string | Reserved; currently always empty. |
 | `received_timestamp` | string | RFC 3339 nano timestamp when WaveHouse received the event. |
-| `data` | object | The flat JSON body, with parseable `DateTime`/`DateTime64` column values rewritten to canonical RFC 3339 UTC (see [timestamp canonicalization](#timestamp-canonicalization)); other values as originally sent. |
+| `format` | string | Row format. Always `JSONCompactEachRow` today; stated on the wire so a reader can tell an envelope it understands from one it doesn't. |
+| `columns` | string[] | The table's **insertable** column names, in declaration order — what each position in `row` means. A `MATERIALIZED` or `ALIAS` column is computed by ClickHouse and cannot be named in an `INSERT`, so it never appears here. |
+| `row` | array | One `JSONCompactEachRow` line: one value per entry in `columns`, in that order. A column the request body omitted is `null` here; for a **non-nullable** column the insert turns that back into the column's default (`input_format_null_as_default`), but a `Nullable(T) DEFAULT …` column stores `NULL` — only an *absent* key ever took the default, and a positional row has one slot per column and no way to express absence. Parseable `DateTime`/`DateTime64` values are rewritten to canonical RFC 3339 UTC (see [timestamp canonicalization](#timestamp-canonicalization)); other values as originally sent. |
+
+`columns` and `row` are only meaningful together: a reader that cannot pair them — a length mismatch, an undecodable row — has no way to map a value to a column, and the SSE fan-out drops such an envelope rather than guess, and the batch consumer parks it on the DLQ with `X-DLQ-*` headers — acking and dropping it (counted by `wavehouse_ingest_poison_dropped_total`) only where the DLQ is switched off for that table, since it can never insert on retry.
 
 ### Client-Facing Format (SSE)
 
-Same as the wire format — events are passed through directly:
-
-```json
-{
-  "table_name": "clicks",
-  "received_timestamp": "2026-03-24T12:00:00.123456789Z",
-  "data": {
-    "page": "/home",
-    "button": "signup",
-    "score": 42.5
-  }
-}
-```
+The same positional row, with the column list delivered once per connection as its own `event: schema` frame rather than repeated on every event — see [`GET /v1/stream`](#get-v1stream--server-sent-events-stream) for the frame sequence. The announced list is the caller's **projected** columns (the role's allow/deny rules applied), so it can be narrower than the envelope's.
 
 ## Dead Letter Queue (DLQ)
 
-When a batch insert to ClickHouse fails (e.g., type errors, connection issues), the worker re-inserts the batch row by row: rows that succeed are acked, and only the rows that fail again are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — those messages are ACKed from the main stream and moved to the DLQ for inspection. The DLQ message body is the published `EventMessage` envelope (`{"table_name":…,"received_timestamp":…,"data":{…}}` — the failed row is under its `data` key, its `DateTime`/`DateTime64` values as published: canonicalized where WaveHouse could parse them, otherwise the producer's original spelling — see [timestamp canonicalization](#timestamp-canonicalization)); the failure reason, table, and time travel in the `X-DLQ-Table` / `X-DLQ-Error` / `X-DLQ-Timestamp` message headers.
+When a batch insert to ClickHouse fails (e.g., type errors, connection issues), the worker re-inserts the batch row by row: rows that succeed are acked, and only the rows that fail again are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — those messages are ACKed from the main stream and moved to the DLQ for inspection. A second class lands here too: an envelope the worker cannot *read* at all — malformed JSON, an unknown `format` (what a pre-v2 message looks like), or `columns` and `row` that do not pair — is parked without ever reaching a table batch, which is what an operator sees after upgrading across the wire change without draining first. **Two different body shapes land here, and a consumer must not assume one decoder.** A row that failed its INSERT is parked as the `EventMessage` envelope above. An envelope the worker could not *read* is parked as **its original bytes, verbatim** — `parkOnDLQ` republishes what arrived — so it is whatever the producer sent: a pre-v2 `data` object, malformed JSON, or a v2 envelope whose `columns` and `row` do not pair. Being undecodable as an `EventMessage` is precisely why it was parked, so decode defensively and fall back on the `X-DLQ-Error` header, which names the reason. For the first shape the body is the published `EventMessage` envelope (`{"table_name":…,"scope":"","received_timestamp":…,"format":…,"columns":[…],"row":[…]}` — the failed row is the `row` array, read against `columns`, its `DateTime`/`DateTime64` values as published: canonicalized where WaveHouse could parse them, otherwise the producer's original spelling — see [timestamp canonicalization](#timestamp-canonicalization)); the failure reason, table, and time travel in the `X-DLQ-Table` / `X-DLQ-Error` / `X-DLQ-Timestamp` message headers.
 
 Use `GET /v1/ops/dlq/stats` to monitor DLQ depth.
 

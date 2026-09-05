@@ -16,10 +16,14 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -28,7 +32,16 @@ type parsedMsg struct {
 	natsSafeSubject string
 	tableName       string // routing key for per-table batching; raw (unencoded) name
 	scope           string
-	rawJSON         []byte
+	columns         []string        // envelope column names, in declaration order
+	colSig          string          // columns joined; the within-table batch key
+	row             json.RawMessage // one JSONCompactEachRow line, no trailing newline
+}
+
+// columnSignature renders a column list as a map key. The separator is a byte
+// that cannot appear in a ClickHouse identifier's UTF-8 encoding, so no pair of
+// distinct column lists can collide on it.
+func columnSignature(cols []string) string {
+	return strings.Join(cols, "\x00")
 }
 
 type IngestWorker struct {
@@ -54,6 +67,15 @@ type IngestWorker struct {
 	wg    sync.WaitGroup
 	ackWg sync.WaitGroup
 }
+
+// poisonDroppedCounter counts envelopes the worker could not read and could not
+// park on the DLQ because it is switched off for the table. Every increment is
+// a row that no longer exists anywhere; a non-zero rate right after an upgrade
+// means the ingest queue was not drained first.
+var poisonDroppedCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
+	"wavehouse_ingest_poison_dropped_total",
+	metric.WithDescription("Unreadable ingest envelopes acked and dropped because the DLQ is disabled for the table"),
+)
 
 // Batching defaults; overridable on the struct for tests.
 // TODO: eventually make this configurable not just in tests
@@ -199,7 +221,9 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons jetstream.Consumer
 	// shutdown drains in order: close every table channel so each tableLoop flushes
 	// its remainder and exits (tableWg), then wait for the backgrounded acks (ackWg).
 	// This order is what keeps the ack drain race-free: every ackWg.Add happens
-	// before its tableLoop returns, so all Adds precede tableWg.Wait here.
+	// either inside a tableLoop's lifetime OR on this goroutine (rejectPoison,
+	// via parseMsg below), and this goroutine is the one that Waits — so no Add
+	// can race the Wait on either path.
 	shutdown := func() {
 		for _, ch := range tableChans {
 			close(ch)
@@ -216,7 +240,7 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons jetstream.Consumer
 		case m := <-msgChan:
 			pm, ok := w.parseMsg(flushCtx, m)
 			if !ok {
-				continue // malformed envelope: already acked-and-dropped in parseMsg
+				continue // unreadable envelope: parked on the DLQ (or acked-and-dropped) in parseMsg
 			}
 			ch, exists := tableChans[pm.tableName]
 			if !exists {
@@ -365,29 +389,83 @@ func (w *IngestWorker) tableLoop(ctx context.Context, table string, in <-chan pa
 	}
 }
 
-// parseMsg unmarshals one envelope into a parsedMsg. A malformed envelope is a
-// poison pill: it is acked-and-dropped here (so NATS won't redeliver it) and ok
-// is false so the caller skips it.
-func (w *IngestWorker) parseMsg(ctx context.Context, m jetstream.Msg) (parsedMsg, bool) {
-	var envelope struct {
-		UnsafeTableName   string          `json:"table_name"`
-		UnsafeScope       string          `json:"scope"`
-		ReceivedTimestamp string          `json:"received_timestamp"`
-		Data              json.RawMessage `json:"data"`
+// firstDuplicate returns the first column name that appears twice, if any.
+// ClickHouse rejects a duplicate in an INSERT column list outright (code 15,
+// DUPLICATE_COLUMN), so the batch would fail loudly here — but the same
+// envelope also reaches the SSE fan-out, where a repeated name silently
+// resolves to one value. Refusing it once, at the parse boundary, keeps both
+// consumers honest.
+func firstDuplicate(cols []string) (string, bool) {
+	seen := make(map[string]struct{}, len(cols))
+	for _, c := range cols {
+		if _, ok := seen[c]; ok {
+			return c, true
+		}
+		seen[c] = struct{}{}
 	}
+	return "", false
+}
+
+// parseMsg unmarshals one envelope into a parsedMsg. An envelope the worker can
+// never insert is poison — malformed JSON, a row format it doesn't know (which
+// is what a pre-v2 envelope looks like: it carries no `format` at all), or
+// columns and a row it can't pair. Poison is parked on the DLQ rather than
+// dropped, so an operator who skipped the documented pre-deploy drain finds
+// those rows waiting instead of gone; when the DLQ is off for the table it is
+// acked-and-dropped with a counted error, because a message that can never
+// insert must not redeliver forever. ok is false either way so the caller skips it.
+func (w *IngestWorker) parseMsg(ctx context.Context, m jetstream.Msg) (parsedMsg, bool) {
+	var envelope EventMessage
 
 	if err := json.Unmarshal(m.Data(), &envelope); err != nil {
 		w.logger.ErrorContext(ctx, "failed to parse event envelope", "error", err)
-		_ = m.DoubleAck(ctx)
+		w.rejectPoison(ctx, m, "", "malformed", err.Error())
+		return parsedMsg{}, false
+	}
+	if envelope.Format != FormatJSONCompactEachRow {
+		w.logger.ErrorContext(ctx, "event envelope declares an unknown row format",
+			"format", envelope.Format, "table", envelope.TableName)
+		w.rejectPoison(ctx, m, envelope.TableName, "unknown_format",
+			fmt.Sprintf("unknown row format %q (a pre-v2 envelope carries none); drain the ingest queue before upgrading", envelope.Format))
+		return parsedMsg{}, false
+	}
+	if len(envelope.Columns) == 0 || len(envelope.Row) == 0 {
+		w.logger.ErrorContext(ctx, "event envelope carries no columns or no row",
+			"table", envelope.TableName, "columns", len(envelope.Columns))
+		w.rejectPoison(ctx, m, envelope.TableName, "unpairable",
+			"envelope carries no columns or no row, so its values cannot be mapped to columns")
+		return parsedMsg{}, false
+	}
+	// Columns and row are only meaningful together, so check that they pair
+	// rather than trusting the producer. Without this the mismatch reaches
+	// ClickHouse and fails the INSERT — the row lands in the DLQ either way, but
+	// via a batch failure and a row-by-row retry, and with a ClickHouse error
+	// instead of one naming the real problem. The stream's pairRow makes the
+	// same check; this is the ingest half of the contract AGENTS.md states.
+	var cells []json.RawMessage
+	if dup, ok := firstDuplicate(envelope.Columns); ok {
+		w.logger.ErrorContext(ctx, "unreadable envelope: a column name repeats",
+			"table", envelope.TableName, "column", dup)
+		w.rejectPoison(ctx, m, envelope.TableName, "unpairable",
+			fmt.Sprintf("column %q appears more than once, so its values cannot be mapped to columns", dup))
+		return parsedMsg{}, false
+	}
+	if err := json.Unmarshal(envelope.Row, &cells); err != nil || len(cells) != len(envelope.Columns) {
+		w.logger.ErrorContext(ctx, "event envelope row does not pair with its columns",
+			"table", envelope.TableName, "columns", len(envelope.Columns), "error", err)
+		w.rejectPoison(ctx, m, envelope.TableName, "unpairable",
+			fmt.Sprintf("row does not pair with its %d column(s), so its values cannot be mapped to columns", len(envelope.Columns)))
 		return parsedMsg{}, false
 	}
 
 	return parsedMsg{
 		natsMsg:         m,
 		natsSafeSubject: strings.TrimPrefix(m.Subject(), "ingest."),
-		tableName:       envelope.UnsafeTableName,
-		scope:           envelope.UnsafeScope,
-		rawJSON:         envelope.Data, // only the inner payload goes to ClickHouse
+		tableName:       envelope.TableName,
+		scope:           envelope.Scope,
+		columns:         envelope.Columns,
+		colSig:          columnSignature(envelope.Columns),
+		row:             envelope.Row,
 	}, true
 }
 
@@ -404,9 +482,45 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 		return
 	}
 
-	err := w.insertToClickHouse(ctx, tableName, msgs)
+	// One INSERT per distinct column list. The row is positional, so rows
+	// written under different column lists — a schema change mid-stream —
+	// cannot share a statement. In steady state a table has exactly one
+	// signature and this is a single group.
+	for _, group := range groupByColumns(msgs) {
+		w.flushGroup(ctx, tableName, group)
+	}
+}
+
+// groupByColumns splits a table's batch by column list. Arrival order is
+// preserved WITHIN each group; the groups themselves are ordered by where their
+// column list first appeared, so a row can be inserted before an earlier row
+// that used a different list. Returns the input as a single group in the common
+// case where every row agrees, which is the only case where the batch's arrival
+// order survives end to end.
+func groupByColumns(msgs []parsedMsg) [][]parsedMsg {
+	groups := make([][]parsedMsg, 0, 1)
+	index := make(map[string]int, 1)
+	for _, pm := range msgs {
+		i, ok := index[pm.colSig]
+		if !ok {
+			index[pm.colSig] = len(groups)
+			groups = append(groups, []parsedMsg{pm})
+			continue
+		}
+		groups[i] = append(groups[i], pm)
+	}
+	return groups
+}
+
+// flushGroup inserts one (table, column list) batch, falling back to row-by-row
+// isolation on failure. Every message in group shares a column signature, so the
+// first one's columns describe them all.
+func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group []parsedMsg) {
+	cols := group[0].columns
+
+	err := w.insertToClickHouse(ctx, tableName, cols, group)
 	if err == nil {
-		w.handleSuccess(ctx, tableName, msgs)
+		w.handleSuccess(ctx, tableName, group)
 		return
 	}
 
@@ -415,8 +529,8 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 	// ISOLATE & DLQ: re-insert one row at a time so a single poison row can't
 	// sink the whole batch.
 	// TODO: potentially could try a binary search or something eventually maybe? unclear if faster...
-	for _, pm := range msgs {
-		singleErr := w.insertToClickHouse(ctx, tableName, []parsedMsg{pm})
+	for _, pm := range group {
+		singleErr := w.insertToClickHouse(ctx, tableName, cols, []parsedMsg{pm})
 		if singleErr != nil {
 			if w.dlqEnabled != nil && !w.dlqEnabled(tableName) {
 				w.logger.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "table", tableName, "error", singleErr)
@@ -430,19 +544,44 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 	}
 }
 
-func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, msgs []parsedMsg) error {
+// insertToClickHouse writes one group as a single INSERT naming columns
+// explicitly, so the positional rows land in the right slots. Callers group by
+// column list first: a batch spanning two lists cannot share one statement.
+func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg) error {
 	var buf bytes.Buffer
 	for _, m := range msgs {
-		buf.Write(m.rawJSON)
+		buf.Write(m.row)
 		buf.WriteString("\n")
+	}
+
+	// The row is positional, so the statement must name the columns in the same
+	// order the envelope did. The table still binds as a server-side Identifier
+	// parameter; a column LIST has no such parameter, so each name is quoted
+	// client-side by the one helper that renders an identifier as SQL.
+	quoted := make([]string, len(columns))
+	for i, c := range columns {
+		quoted[i] = chsql.QuoteIdent(c)
 	}
 
 	t := w.target()
 	q := url.Values{}
 	q.Set("database", t.Database)
 	q.Set("param_target_table", tableName)
-	q.Set("query", "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow")
+	q.Set("query", fmt.Sprintf("INSERT INTO {target_table:Identifier} (%s) FORMAT JSONCompactEachRow", strings.Join(quoted, ", ")))
 	q.Set("date_time_input_format", "best_effort")
+	// A field the record omitted rides as an explicit null in its column's slot,
+	// because a positional row has one value per column and no way to say
+	// "absent". For a NON-nullable column with a default this setting turns that
+	// null back into the default, matching what omitting the key did under
+	// JSONEachRow. It is already the server default (verified on 26.6.3), so
+	// this is belt-and-braces for a server configured otherwise.
+	//
+	// TRANSITIONAL DIVERGENCE, and it is NOT what this setting controls: on a
+	// NULLABLE column an explicit null is stored as NULL whatever the setting
+	// says — only an ABSENT key ever took the default. So a `Nullable(T) DEFAULT
+	// …` column now stores NULL where it previously took its default. Verified
+	// on 26.6.3: omitted key → default; explicit null → NULL at both settings.
+	q.Set("input_format_null_as_default", "1")
 
 	req, err := http.NewRequestWithContext(ctx, "POST", t.URL+"?"+q.Encode(), &buf)
 	if err != nil {
@@ -520,11 +659,48 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 	})
 }
 
+// rejectPoison disposes of a message the worker can never insert. The DLQ is
+// preferred — the row is preserved for inspection and replay — and dropping is
+// the fallback when the DLQ is off for the table, since redelivering a message
+// that can never succeed would wedge the consumer behind it forever. A DLQ
+// publish that FAILS leaves the message unacked, exactly as the isolation path
+// does: that is a transient DLQ outage, and retrying beats destroying the row.
+func (w *IngestWorker) rejectPoison(ctx context.Context, m jetstream.Msg, tableName, reason, detail string) {
+	if w.dlqEnabled == nil || w.dlqEnabled(tableName) {
+		// Backgrounded on ackWg for the same reason handleSuccess backgrounds its
+		// acks: parkOnDLQ does a JetStream publish AND an fsync-bound DoubleAck,
+		// and parseMsg runs on the dispatchLoop goroutine. The scenario this whole
+		// change targets is an operator who skipped the drain, where EVERY backlog
+		// message is poison — done inline that is one publish plus one fsync per
+		// message in series, with intake stalled behind it. dispatchLoop adds and
+		// waits on the same goroutine, so each Add still happens-before the Wait.
+		subject := strings.TrimPrefix(m.Subject(), "ingest.")
+		w.ackWg.Go(func() { w.parkOnDLQ(ctx, m, subject, tableName, detail) })
+		return
+	}
+	poisonDroppedCounter.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("table", tableName),
+		attribute.String("reason", reason),
+	))
+	w.logger.ErrorContext(ctx, "unreadable envelope dropped — the DLQ is disabled for this table, and a message that can never insert must not redeliver forever",
+		"table", tableName, "reason", reason, "detail", detail)
+	w.ackWg.Go(func() { _ = m.DoubleAck(ctx) })
+}
+
+// sendToDLQ parks a row that failed its own isolated INSERT. Distinct from
+// rejectPoison, which parks an envelope the worker could not read at all.
 func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parsedMsg, errMsg string) {
-	subject := "dlq." + pm.natsSafeSubject
+	w.parkOnDLQ(ctx, pm.natsMsg, pm.natsSafeSubject, tableName, errMsg)
+}
+
+// parkOnDLQ republishes one message on its dlq.* subject with the failure
+// context in headers, then acks the original so NATS stops redelivering it. A
+// failed publish deliberately leaves the original unacked.
+func (w *IngestWorker) parkOnDLQ(ctx context.Context, natsMsg jetstream.Msg, safeSubject, tableName, errMsg string) {
+	subject := "dlq." + safeSubject
 
 	msg := nats.NewMsg(subject)
-	msg.Data = pm.natsMsg.Data()
+	msg.Data = natsMsg.Data()
 	if msg.Header == nil {
 		msg.Header = make(nats.Header)
 	}
@@ -539,5 +715,5 @@ func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parse
 	}
 
 	// DoubleAck original message so NATS doesn't redeliver the corrupt data
-	_ = pm.natsMsg.DoubleAck(ctx)
+	_ = natsMsg.DoubleAck(ctx)
 }

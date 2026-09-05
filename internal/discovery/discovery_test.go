@@ -700,3 +700,112 @@ func TestRefresh_DatabaseSnapshottedForWholeRefresh(t *testing.T) {
 		"both queries in one refresh must use the same database; a reconfigure applies to the next refresh")
 	assert.Equal(t, "old", seen[0], "the snapshot is taken once, at the start of the refresh")
 }
+
+// TestColumn_IsInsertable pins the rule against what ClickHouse actually
+// refuses (verified on 26.6.3): a MATERIALIZED column is code 44
+// ILLEGAL_COLUMN and an ALIAS column is code 16 NO_SUCH_COLUMN_IN_TABLE, while
+// a plain, DEFAULT or EPHEMERAL column takes a value. EPHEMERAL is the one
+// that reads backwards at a glance — it is insert-ONLY, never stored.
+func TestColumn_IsInsertable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		kind string
+		want bool
+	}{
+		{"", true},
+		{"DEFAULT", true},
+		{"EPHEMERAL", true},
+		{"MATERIALIZED", false},
+		{"ALIAS", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.kind, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, Column{Name: "c", DefaultKind: tt.kind}.IsInsertable())
+		})
+	}
+}
+
+// TestTableSchema_InsertableColumns: computed columns are dropped from the
+// ingest contract but stay in Columns — the schema endpoint and the query path
+// still see the whole table.
+func TestTableSchema_InsertableColumns(t *testing.T) {
+	t.Parallel()
+	ts := &TableSchema{Name: "t", Columns: []Column{
+		{Name: "id", Position: 1},
+		{Name: "mat", DefaultKind: "MATERIALIZED", Position: 2},
+		{Name: "page", DefaultKind: "DEFAULT", Position: 3},
+		{Name: "ali", DefaultKind: "ALIAS", Position: 4},
+	}}
+	assert.Equal(t, []string{"id", "page"}, ts.InsertableColumnNames())
+	assert.Equal(t, []string{"id", "mat", "page", "ali"}, ts.ColumnNames(),
+		"the full column list is untouched")
+
+	got := ts.InsertableColumns()
+	require.Len(t, got, 2)
+	assert.Equal(t, uint64(3), got[1].Position, "declaration order and ordinals survive the filter")
+}
+
+// TestTableSchema_InsertableColumnNames_NoneQualify: a table of nothing but
+// computed columns yields an empty, non-nil list rather than nil.
+func TestTableSchema_InsertableColumnNames_NoneQualify(t *testing.T) {
+	t.Parallel()
+	ts := &TableSchema{Name: "t", Columns: []Column{{Name: "ali", DefaultKind: "ALIAS"}}}
+	got := ts.InsertableColumnNames()
+	assert.Empty(t, got)
+	assert.NotNil(t, got)
+}
+
+// TestRefresh_CapturesDefaultKind: the kind is what decides insertability, so
+// it must survive the scan verbatim rather than being flattened to HasDefault.
+func TestRefresh_CapturesDefaultKind(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{columns: []fakeColumn{
+		{table: "t", name: "id", chType: "UInt64", position: 1},
+		{table: "t", name: "mat", chType: "String", defaultKind: "MATERIALIZED", defaultExpr: "concat('m', id)", position: 2},
+		{table: "t", name: "page", chType: "String", defaultKind: "DEFAULT", defaultExpr: "'/'", position: 3},
+	}}
+	sr := NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, discardLogger())
+	require.NoError(t, sr.Refresh(context.Background()))
+
+	ts := sr.Get("t")
+	require.NotNil(t, ts)
+	assert.Equal(t, "", ts.Columns[0].DefaultKind)
+	assert.Equal(t, "MATERIALIZED", ts.Columns[1].DefaultKind)
+	assert.True(t, ts.Columns[1].HasDefault, "a computed column still reads as having a default")
+	assert.Equal(t, "DEFAULT", ts.Columns[2].DefaultKind)
+	assert.Equal(t, []string{"id", "page"}, ts.InsertableColumnNames())
+}
+
+func TestInsertableColumns_CachedAndUncachedAgree(t *testing.T) {
+	t.Parallel()
+	// A literal-built TableSchema (what tests construct) leaves the memo nil and
+	// takes the compute path; cacheInsertable is what the registry calls after a
+	// refresh. Both must answer identically, or a discovered table and a
+	// hand-built one disagree about what may be inserted.
+	ts := &TableSchema{Name: "clicks", Columns: []Column{
+		{Name: "id", Type: "UInt64"},
+		{Name: "day", Type: "Date", DefaultKind: "MATERIALIZED"},
+		{Name: "page", Type: "String"},
+		{Name: "alias", Type: "String", DefaultKind: "ALIAS"},
+		{Name: "note", Type: "String", DefaultKind: "DEFAULT"},
+	}}
+
+	uncached := ts.InsertableColumns()
+	uncachedNames := ts.InsertableColumnNames()
+	require.Nil(t, ts.insertable, "reading must not populate the memo")
+
+	ts.cacheInsertable()
+	assert.Equal(t, uncached, ts.InsertableColumns())
+	assert.Equal(t, uncachedNames, ts.InsertableColumnNames())
+	assert.Equal(t, []string{"id", "page", "note"}, ts.InsertableColumnNames(),
+		"MATERIALIZED and ALIAS are excluded; DEFAULT and plain are not")
+
+	// The memo is returned by reference, so every caller shares one slice. That
+	// is safe only while no caller writes to it — pin the contract here, since a
+	// caller that appended would corrupt every later request for this table.
+	first := ts.InsertableColumns()
+	second := ts.InsertableColumns()
+	require.NotEmpty(t, first)
+	assert.Same(t, &first[0], &second[0], "callers share the memoized backing array")
+}

@@ -18,6 +18,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
@@ -2080,17 +2081,32 @@ func tsRegistry(t testing.TB) *discovery.SchemaRegistry {
 	})
 }
 
-// publishedData decodes the inner data object of the last published envelope —
-// what the stream fans out and the worker inserts.
+// publishedData decodes the last published envelope and zips its positional row
+// back into a name→value map — what the stream fans out and the worker inserts,
+// read the way both of them read it.
 func publishedData(t *testing.T, pub *testutil.MockPublisher) map[string]any {
 	t.Helper()
 	msg := pub.LastMessage()
 	require.NotNil(t, msg)
-	var evt struct {
-		Data map[string]any `json:"data"`
+	return publishedRow(t, msg.Data)
+}
+
+// publishedRow decodes one published envelope and zips its row by column name.
+// A column the record omitted rides as an explicit null, exactly as it does on
+// the wire, so a caller can tell "absent" from "present and null" only by value.
+func publishedRow(t *testing.T, payload []byte) map[string]any {
+	t.Helper()
+	var evt ingest.EventMessage
+	require.NoError(t, json.Unmarshal(payload, &evt))
+	require.Equal(t, ingest.FormatJSONCompactEachRow, evt.Format)
+	var cells []any
+	require.NoError(t, json.Unmarshal(evt.Row, &cells))
+	require.Len(t, cells, len(evt.Columns), "the row must have one value per announced column")
+	out := make(map[string]any, len(cells))
+	for i, c := range evt.Columns {
+		out[c] = cells[i]
 	}
-	require.NoError(t, json.Unmarshal(msg.Data, &evt))
-	return evt.Data
+	return out
 }
 
 // TestIngest_TimestampsCanonicalized is the #372 contract: whatever spelling a
@@ -2198,11 +2214,7 @@ func TestIngest_Batch_MixedTimestampSpellings(t *testing.T) {
 
 	var spellings []string
 	for _, msg := range pub.Messages {
-		var evt struct {
-			Data map[string]any `json:"data"`
-		}
-		require.NoError(t, json.Unmarshal(msg.Data, &evt))
-		spellings = append(spellings, evt.Data["ts"].(string))
+		spellings = append(spellings, publishedRow(t, msg.Data)["ts"].(string))
 	}
 	assert.Equal(t, []string{
 		"2026-06-21T04:00:00Z", // already canonical
@@ -2298,7 +2310,7 @@ func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
 		"all-nullable/defaulted columns accept an empty record — this is what makes the read reachable")
 
 	dup, reject, abort := h.processRecord(
-		context.Background(), "loose", "", schema, selectResolved, "viewer", map[string]any{}, time.Now())
+		context.Background(), "loose", "", schema, selectResolved, "viewer", map[string]any{}, time.Now(), nil)
 
 	assert.False(t, dup)
 	assert.Nil(t, reject, "a request-scoped condition must not be reported per record")
@@ -2474,4 +2486,195 @@ func TestIngest_ConflictLogNamesTheDisagreement(t *testing.T) {
 	assert.Contains(t, buf.String(), "application/x-ndjson",
 		"the log must name the declaration that caused the refusal, like the response does")
 	assert.Contains(t, jsonErrorMessage(t, w), `"application/x-ndjson"`)
+}
+
+// TestIngest_CheckColumnNotInSchema_Rejected: a check clause naming a column the
+// table does not have can never be satisfied, and the auto-injected value would
+// be dropped by the positional encoder — the record would insert without the
+// value the policy requires, silently. It must be rejected, naming the column.
+func TestIngest_CheckColumnNotInSchema_Rejected(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h.PolicySource = policy.Static(checkColumnPolicy(t, "tenant_id", "acme"))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a"}))
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "tenant_id", "the message names the offending column")
+	assert.Contains(t, w.Body.String(), "which table")
+	assert.Empty(t, pub.Messages, "a record that cannot carry the required value must not publish")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+// TestIngest_CheckOnComputedColumn_Rejected is the second way into the same
+// failure the guard above exists to stop. The column IS in the table, so a
+// presence check passes it — but no record may write it, so the row has no slot
+// for it and the auto-injected value would be dropped on the way out, leaving
+// the record inserted WITHOUT the value the policy requires.
+func TestIngest_CheckOnComputedColumn_Rejected(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ col, kind string }{
+		{"digest", "materialized"},
+		{"doubled", "alias"},
+	} {
+		t.Run(tt.col, func(t *testing.T) {
+			t.Parallel()
+			required := "must-be-this"
+			p := &policy.Policy{Tables: map[string]policy.TablePolicy{
+				"clicks": {"viewer": {Insert: &policy.InsertPermissions{
+					Check: map[string]policy.Filter{tt.col: {Eq: &required}},
+				}}},
+			}}
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(computedRegistry(t), pub, testutil.NopLogger())
+			h.PolicySource = policy.Static(p)
+
+			w := httptest.NewRecorder()
+			h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a"}))
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), tt.col)
+			assert.Contains(t, w.Body.String(), tt.kind+" and cannot be inserted",
+				"the message says WHY, distinctly from the absent-column case")
+			assert.Empty(t, pub.Messages, "never publish a record the check could not be enforced on")
+		})
+	}
+}
+
+// TestIngest_CheckColumnInSchema_StillInjects is the other half: the guard must
+// not disturb the case it sits next to. A record omitting a checked column that
+// DOES exist still gets the value injected, canonicalized, and carried in the
+// encoded row at that column's position.
+func TestIngest_CheckColumnInSchema_StillInjects(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h.PolicySource = policy.Static(checkColumnPolicy(t, "org_id", "org-42"))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a"}))
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	require.Len(t, pub.Messages, 1)
+	row := publishedRow(t, pub.Messages[0].Data)
+	assert.Equal(t, "/a", row["page"])
+	assert.Equal(t, "org-42", row["org_id"], "the injected value rides in its column's slot")
+}
+
+// TestIngest_CheckGuardLogsOncePerRequest pins the half of the guard that the
+// per-record test cannot see. The condition is a property of (table, role,
+// policy) — identical for every record — so evaluating it per record emitted
+// one ERROR line per record: on a 16 MiB body of small records, ~1.2M lines
+// from a single mis-wired policy, while maxReportedResults caps only the
+// response. That is the amplification the !resolved abort above exists to
+// avoid, and nothing else in the suite distinguishes the hoisted form from the
+// inline one: TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord passes
+// either way, because the per-record REJECT is deliberately kept.
+func TestIngest_CheckGuardLogsOncePerRequest(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, slog.New(slog.NewJSONHandler(&buf, nil)))
+	h.PolicySource = policy.Static(checkColumnPolicy(t, "tenant_id", "acme"))
+
+	const n = 25
+	body := "[" + strings.Repeat(`{"page":"/a"},`, n-1) + `{"page":"/z"}]`
+	req := rawIngestRequest(t, "clicks", "application/json", body)
+	req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	resp := decodeBatchResult(t, w)
+	require.Equal(t, n, resp.Total)
+	assert.Equal(t, n, resp.Failed, "every record still fails — the reject stays per record")
+	assert.Equal(t, 1, strings.Count(buf.String(), "policy check references a column the table does not have"),
+		"but the request-constant cause is logged once, not once per record")
+	assert.Empty(t, pub.Messages)
+}
+
+// TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord: the guard is a
+// per-record rejection, not a whole-request abort — the batch is still read to
+// the end and reports every record, rather than failing the request outright.
+//
+// Every record fails here, and that is not an artifact of the fixture: the
+// condition is a property of (table, role, policy), identical for every record
+// in the request, so there is no sibling this guard could spare. A record
+// SUPPLYING the missing column is rejected too, one step earlier, by schema
+// validation — with its own message, which this pins so the two stay
+// distinguishable.
+func TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h.PolicySource = policy.Static(checkColumnPolicy(t, "tenant_id", "acme"))
+
+	req := rawIngestRequest(t, "clicks", "application/json",
+		`[{"page":"/a"},{"page":"/b","tenant_id":"acme"},{"page":"/c"}]`)
+	req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "a misconfigured policy must not abort the request")
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 3, resp.Total)
+	assert.Equal(t, 3, resp.Failed)
+	assert.Zero(t, resp.Succeeded)
+	require.Len(t, resp.Results, 3)
+	assert.Contains(t, resp.Results[0].Error, "which table", "omitted ⇒ the new guard")
+	assert.Contains(t, resp.Results[1].Error, "unknown column", "supplied ⇒ schema validation, one step earlier")
+	assert.Contains(t, resp.Results[2].Error, "which table")
+	assert.Empty(t, pub.Messages)
+}
+
+// checkColumnPolicy grants "viewer" insert on clicks with an _eq check on col.
+func checkColumnPolicy(t *testing.T, col, required string) *policy.Policy {
+	t.Helper()
+	return &policy.Policy{Tables: map[string]policy.TablePolicy{
+		"clicks": {"viewer": {Insert: &policy.InsertPermissions{
+			Check: map[string]policy.Filter{col: {Eq: &required}},
+		}}},
+	}}
+}
+
+// computedRegistry is a clicks table carrying both kinds of computed column,
+// the shape ClickHouse refuses to have named in an INSERT column list.
+func computedRegistry(t testing.TB) *discovery.SchemaRegistry {
+	return testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
+		{
+			Name: "clicks",
+			Columns: []discovery.Column{
+				{Name: "page", Type: "String"},
+				{Name: "digest", Type: "String", DefaultKind: "MATERIALIZED", HasDefault: true},
+				{Name: "country", Type: "String", HasDefault: true},
+				{Name: "doubled", Type: "UInt64", DefaultKind: "ALIAS", HasDefault: true},
+				{Name: "raw", Type: "String", DefaultKind: "EPHEMERAL", HasDefault: true},
+			},
+		},
+	})
+}
+
+// TestIngest_CheckOnEphemeralColumn_Rejected: an EPHEMERAL column is the case
+// IsInsertable alone does not catch. It IS insertable — the row carries a slot
+// for it and the INSERT accepts it — so the check appears enforceable. But
+// ClickHouse never stores an ephemeral column and no query can read one back
+// (SELECT is code 16, NO_SUCH_COLUMN_IN_TABLE), so the constraint is
+// unverifiable the moment the insert returns. A check that provably does
+// nothing is worse than a refused one: it reads as tenant isolation and is not.
+func TestIngest_CheckOnEphemeralColumn_Rejected(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(computedRegistry(t), pub, testutil.NopLogger())
+	h.PolicySource = policy.Static(checkColumnPolicy(t, "raw", "anything"))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a"}))
+
+	assert.Equal(t, http.StatusForbidden, w.Code, "body=%s", w.Body.String())
+	testutil.AssertJSONErrorResponse(t, w)
+	assert.Contains(t, jsonErrorMessage(t, w), "is ephemeral and is never stored")
+	assert.Empty(t, pub.Messages, "an unenforceable check must publish nothing")
 }

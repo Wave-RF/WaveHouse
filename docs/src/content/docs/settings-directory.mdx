@@ -113,7 +113,7 @@ The tenant tunables. Every key is required (a missing one is a validation error)
 | `dedupe.id_field` | `event_id` | Dedup key field — see [Deduplication](#deduplication). |
 | `dedupe.require_id` | `false` | Reject rows missing the id field — see [Deduplication](#deduplication). |
 | `dedupe.tables.<table>.{id_field, require_id}` | `{}` | Optional per-table overrides; each entry overrides only the fields it names and inherits the rest. |
-| `dlq.enabled` | `true` | Park rows that still fail after row-by-row isolation on the `WAVEHOUSE_DLQ` stream (`false`: leave them unacked for redelivery) — see [Dead Letter Queue](#dead-letter-queue). |
+| `dlq.enabled` | `true` | Park rows that still fail after row-by-row isolation on the `WAVEHOUSE_DLQ` stream (`false`: leave them unacked for redelivery — except an envelope the worker cannot read, which is dropped and counted) — see [Dead Letter Queue](#dead-letter-queue). |
 | `dlq.tables.<table>.enabled` | `{}` | Optional per-table override of the switch. |
 | `query.timestamp_bucket_seconds` | `60` | Bucket (seconds, `>= 0`) that a structured query's relative time range is truncated to, so near-identical queries share a cache entry; `0` disables bucketing. Read per query. |
 | `query.default_max_rows` | `10000` | Fallback result `LIMIT` (`>= 1`) applied to a structured query when the caller and policy specify none. A result-**shaping** default, not a resource limit — server-wide limits (memory, rows scanned, execution time) belong in ClickHouse, see [Server-side resource limits](/configuration#server-side-resource-limits). |
@@ -183,7 +183,7 @@ The `auth` block is the verifier wiring, minus the secrets. `jwks_url` (absolute
 A failed batch insert is retried row by row; a row that fails again on its own is a poison row. `dlq.enabled` (seed default `true`) decides what happens to it, resolved per table (`dlq.tables.<table>.enabled` → global) at the moment of the failure, so a reload applies to the next poison row:
 
 - `true` — the row is published to the `WAVEHOUSE_DLQ` NATS stream under `dlq.<table>` with the ClickHouse error in its headers, and its original is acked. Inspect it with `GET /v1/ops/dlq/stats` (admin-only).
-- `false` — the row is left unacked, so NATS redelivers it and it retries until it inserts or the switch is flipped back. Nothing is ever dropped either way; the choice is *park it* versus *keep retrying*.
+- `false` — the row is left unacked, so NATS redelivers it and it retries until it inserts or the switch is flipped back. For every row the worker **can read**, nothing is ever dropped either way — the choice is *park it* versus *keep retrying*. **One exception, new in this release:** an envelope the worker cannot read *at all* — malformed JSON, an unknown `format` (what a pre-v2 in-flight message looks like), or `columns` and `row` that do not pair — can never insert, so redelivering it forever would wedge the consumer. With the DLQ off for the table it is acked and **dropped**, logged at `ERROR` and counted by `wavehouse_ingest_poison_dropped_total` (labeled by `table` and `reason`). See [Ingest Pipeline](/ingest-pipeline) — and drain the ingest queue before upgrading.
 
 The `WAVEHOUSE_DLQ` stream always exists (an empty stream costs nothing) and the stats endpoint is always registered — the switch is purely behavioral, which is what makes it safe to reload.
 
