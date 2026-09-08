@@ -70,11 +70,18 @@ func collectEnvTags(t reflect.Type, into map[string]bool) {
 // exists must be writable, and one that doesn't (boot creates it — a first
 // run, or a missing mount that WarnIfFreshDataDir calls out) must have a
 // writable nearest existing ancestor so that creation can succeed. Run before
-// anything dials out, so a root-owned bind mount refuses boot in the first
-// second instead of after ClickHouse discovery, with the UID-65532 hint
-// attached. Writability is probed by creating and removing one temp file:
-// the only portable test that exercises the mount's ownership and mode.
+// anything dials out, so a data_dir the process cannot write to refuses boot
+// before ClickHouse discovery rather than after it; a permission denial
+// carries the UID-65532 hint, since a bind mount owned by root is the
+// typical cause. Writability is probed by creating and removing one temp
+// file: the only portable test that exercises the mount's ownership and
+// mode. A blank dir — reachable through `WH_DATA_DIR=` — is refused
+// outright: the ancestor walk would otherwise probe the working directory
+// and pass, and NATS and Pebble state would land under it.
 func CheckDataDir(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return errors.New("data_dir (WH_DATA_DIR) is required: an empty value would scatter NATS and Pebble state under the working directory")
+	}
 	info, err := os.Stat(dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):

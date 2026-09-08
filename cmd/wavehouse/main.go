@@ -160,13 +160,13 @@ func run() int {
 		return 1
 	}
 
-	// data_dir must be usable before anything dials out: a root-owned bind
-	// mount is the classic container misconfiguration, and refusing here
-	// puts the UID-65532 hint in the first second of the log rather than
+	// data_dir must be writable before anything dials out, so the refusal
+	// (and, for the typical cause — a bind mount owned by root rather than
+	// UID 65532 — the remediation) lands at the top of the log rather than
 	// after ClickHouse discovery. NATS and Pebble still fail loud on their
 	// own if the directory changes underneath us.
 	if err := config.CheckDataDir(cfg.DataDir); err != nil {
-		logger.Error("load config", "error", err)
+		logger.Error("check data_dir", "error", err)
 		return 1
 	}
 

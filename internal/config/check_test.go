@@ -112,3 +112,15 @@ func TestCheckDataDir(t *testing.T) {
 		assert.Contains(t, err.Error(), parent)
 	})
 }
+
+// A blank data_dir must not pass by probing the working directory — an empty
+// WH_DATA_DIR reaches Load as "" and would otherwise scatter NATS and Pebble
+// state under the cwd.
+func TestCheckDataDir_BlankIsRefused(t *testing.T) {
+	t.Parallel()
+	for _, dir := range []string{"", "  "} {
+		err := CheckDataDir(dir)
+		require.Error(t, err, "%q", dir)
+		assert.Contains(t, err.Error(), "data_dir (WH_DATA_DIR) is required")
+	}
+}
