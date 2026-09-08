@@ -717,9 +717,14 @@ func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parse
 }
 
 // parkOnDLQ republishes one message on its dlq.* subject with the failure
-// context in headers, then acks the original so NATS stops redelivering it. A
-// failed publish deliberately leaves the original unacked, and reports false so
-// a caller does not count a parking that did not happen.
+// context in headers, then acks the original so NATS stops redelivering it.
+//
+// Reports false in two distinct cases, both meaning "do not count this as a
+// parking", and false does NOT imply nothing was published. A failed publish
+// leaves the original unacked and parks nothing. A failed ack AFTER a
+// successful publish leaves a DLQ copy behind but also leaves the original in
+// the stream, so the next redelivery parks a second copy — counting the first
+// would overstate the total by one per retry.
 func (w *IngestWorker) parkOnDLQ(ctx context.Context, natsMsg jetstream.Msg, safeSubject, tableName, errMsg string) bool {
 	subject := "dlq." + safeSubject
 

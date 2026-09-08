@@ -168,7 +168,7 @@ func TestEventView_UnknownFormatWithheld(t *testing.T) {
 // TestPairRow_Verdict enumerates the shapes that cannot be paired. Each one has
 // to fail closed: a row-filter is evaluated against the name-keyed map, so a
 // value read under the wrong name decides visibility on data the row never
-// carried. The pairable case is the control that keeps the other four honest —
+// carried. The pairable case is the control that keeps the other seven honest —
 // a pairRow that rejected everything would satisfy them alone.
 func TestPairRow_Verdict(t *testing.T) {
 	t.Parallel()

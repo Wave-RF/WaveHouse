@@ -355,9 +355,11 @@ func newEventView(raw []byte) *eventView {
 
 // pairRow splits a compact row into its cells and zips them with the column
 // names. ok is false when the two cannot be paired — an undecodable row, a
-// length that disagrees with the column list, or a repeated column name —
-// because there is then no way to say which value belongs to which column, and
-// a row-filter that cannot read its column must withhold rather than guess.
+// length that disagrees with the column list, a repeated column name, or an
+// empty column list (which no length check catches, since a zero-length row
+// agrees with it) — because there is then no way to say which value belongs to
+// which column, and a row-filter that cannot read its column must withhold
+// rather than guess.
 func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, byName map[string]any, ok bool) {
 	if len(row) == 0 {
 		return nil, nil, false
