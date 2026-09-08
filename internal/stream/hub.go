@@ -354,8 +354,9 @@ func newEventView(raw []byte) *eventView {
 }
 
 // pairRow splits a compact row into its cells and zips them with the column
-// names. ok is false when the two cannot be paired — an undecodable row, or a
-// length that disagrees with the column list — because there is then no way to
+// names. ok is false when the two cannot be paired — an undecodable row, a
+// length that disagrees with the column list, or a repeated column name —
+// because there is then no way to
 // say which value belongs to which column, and a row-filter that cannot read its
 // column must withhold rather than guess.
 func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, byName map[string]any, ok bool) {
@@ -576,9 +577,10 @@ func planForRole(p *policy.Policy, filter bool, role string, ev *eventView, kind
 		return rolePlan{data: Frame{Kind: kind, Data: wireFrame("", ev.raw)}}, true
 	}
 	if !ev.usable {
-		// The envelope decoded but its columns and row don't pair. Nothing can be
-		// projected positionally and no row-filter can be evaluated, so withhold
-		// from every role rather than deliver values under guessed names.
+		// The envelope decoded but declares a format we don't know, or its columns
+		// and row don't pair. Either way nothing can be projected positionally and
+		// no row-filter can be evaluated, so withhold from every role rather than
+		// deliver values under guessed names.
 		return rolePlan{}, false
 	}
 

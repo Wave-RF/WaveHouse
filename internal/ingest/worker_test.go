@@ -18,6 +18,11 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
@@ -1452,4 +1457,73 @@ func TestFlushTable_MixedColumnLists_TwoInserts(t *testing.T) {
 	assert.ElementsMatch(t, []string{"[1]\n", "[2,\"x\"]\n"}, bodies)
 	assert.True(t, narrow.DoubleAcked.Load())
 	assert.True(t, wide.DoubleAcked.Load())
+}
+
+// TestRejectPoison_CountedByDisposition: every unreadable envelope is counted,
+// whichever way it was disposed of. Before the read-side SSE counter was
+// removed, an operator running with the DLQ *on* — the recommended setting —
+// still had a metric for this class; without counting the parked path they
+// would have had none, and the drain-was-missed signal the upgrade runbook
+// points at would be invisible in exactly that configuration.
+//
+// The publish-failure case is the reason the count hangs off parkOnDLQ's
+// verdict rather than the rejection: that message stays unacked and redelivers,
+// so counting on rejection would re-count it on every retry of a DLQ outage.
+func TestRejectPoison_CountedByDisposition(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	saved := otel.GetMeterProvider()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	defer otel.SetMeterProvider(saved)
+
+	dispositions := func() map[string]int64 {
+		var rm metricdata.ResourceMetrics
+		require.NoError(t, reader.Collect(context.Background(), &rm))
+		out := map[string]int64{}
+		for _, sm := range rm.ScopeMetrics {
+			for _, md := range sm.Metrics {
+				if md.Name != "wavehouse_ingest_poison_total" {
+					continue
+				}
+				sum, ok := md.Data.(metricdata.Sum[int64])
+				require.True(t, ok)
+				for _, dp := range sum.DataPoints {
+					d, _ := dp.Attributes.Value(attribute.Key("disposition"))
+					out[d.AsString()] += dp.Value
+				}
+			}
+		}
+		return out
+	}
+
+	poison := func() *testutil.MockJetStreamMsg {
+		return &testutil.MockJetStreamMsg{
+			MsgSubject: "ingest.events",
+			MsgData:    v1Envelope(t, "events", map[string]any{"id": 1}),
+		}
+	}
+
+	// Parked on the DLQ — the path that had no metric at all.
+	w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+	_, ok := w.parseMsg(context.Background(), poison())
+	require.False(t, ok)
+	w.ackWg.Wait()
+	assert.Equal(t, map[string]int64{"parked": 1}, dispositions())
+
+	// DLQ off for the table: acked and dropped, counted separately.
+	w2, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+	w2.dlqEnabled = func(string) bool { return false }
+	_, ok = w2.parseMsg(context.Background(), poison())
+	require.False(t, ok)
+	w2.ackWg.Wait()
+	assert.Equal(t, map[string]int64{"parked": 1, "dropped": 1}, dispositions())
+
+	// A DLQ outage parks nothing, so it counts nothing — the message is still
+	// unacked and will be counted once, when a retry actually parks it.
+	w3, js3, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+	js3.PubErr = errors.New("jetstream unavailable")
+	_, ok = w3.parseMsg(context.Background(), poison())
+	require.False(t, ok)
+	w3.ackWg.Wait()
+	assert.Equal(t, map[string]int64{"parked": 1, "dropped": 1}, dispositions(),
+		"a failed park must not be counted as one")
 }

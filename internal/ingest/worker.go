@@ -68,13 +68,20 @@ type IngestWorker struct {
 	ackWg sync.WaitGroup
 }
 
-// poisonDroppedCounter counts envelopes the worker could not read and could not
-// park on the DLQ because it is switched off for the table. Every increment is
-// a row that no longer exists anywhere; a non-zero rate right after an upgrade
-// means the ingest queue was not drained first.
-var poisonDroppedCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
-	"wavehouse_ingest_poison_dropped_total",
-	metric.WithDescription("Unreadable ingest envelopes acked and dropped because the DLQ is disabled for the table"),
+// poisonCounter counts envelopes the worker could not read, by what became of
+// each: disposition="parked" was republished to the DLQ and is recoverable,
+// disposition="dropped" was acked and discarded because the DLQ is switched off
+// for the table and is a row that no longer exists anywhere.
+//
+// Both dispositions are counted because a non-zero rate right after an upgrade
+// means the ingest queue was not drained first, and that is true whichever way
+// the switch was set — an operator watching for a missed drain should not have
+// to know the table's DLQ setting to see it. Counted once actually parked, not
+// once rejected, so a DLQ outage (which leaves the message unacked and
+// redelivering) does not inflate the count on every retry.
+var poisonCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
+	"wavehouse_ingest_poison_total",
+	metric.WithDescription("Ingest envelopes the worker could not read, by disposition: parked on the DLQ, or acked and dropped where the DLQ is disabled for the table"),
 )
 
 // Batching defaults; overridable on the struct for tests.
@@ -675,13 +682,14 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m jetstream.Msg, tableN
 		// message in series, with intake stalled behind it. dispatchLoop adds and
 		// waits on the same goroutine, so each Add still happens-before the Wait.
 		subject := strings.TrimPrefix(m.Subject(), "ingest.")
-		w.ackWg.Go(func() { w.parkOnDLQ(ctx, m, subject, tableName, detail) })
+		w.ackWg.Go(func() {
+			if w.parkOnDLQ(ctx, m, subject, tableName, detail) {
+				countPoison(ctx, tableName, reason, "parked")
+			}
+		})
 		return
 	}
-	poisonDroppedCounter.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("table", tableName),
-		attribute.String("reason", reason),
-	))
+	countPoison(ctx, tableName, reason, "dropped")
 	w.logger.ErrorContext(ctx, "unreadable envelope dropped — the DLQ is disabled for this table, and a message that can never insert must not redeliver forever",
 		"table", tableName, "reason", reason, "detail", detail)
 	w.ackWg.Go(func() { _ = m.DoubleAck(ctx) })
@@ -690,13 +698,14 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m jetstream.Msg, tableN
 // sendToDLQ parks a row that failed its own isolated INSERT. Distinct from
 // rejectPoison, which parks an envelope the worker could not read at all.
 func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parsedMsg, errMsg string) {
-	w.parkOnDLQ(ctx, pm.natsMsg, pm.natsSafeSubject, tableName, errMsg)
+	_ = w.parkOnDLQ(ctx, pm.natsMsg, pm.natsSafeSubject, tableName, errMsg)
 }
 
 // parkOnDLQ republishes one message on its dlq.* subject with the failure
 // context in headers, then acks the original so NATS stops redelivering it. A
-// failed publish deliberately leaves the original unacked.
-func (w *IngestWorker) parkOnDLQ(ctx context.Context, natsMsg jetstream.Msg, safeSubject, tableName, errMsg string) {
+// failed publish deliberately leaves the original unacked, and reports false so
+// a caller does not count a parking that did not happen.
+func (w *IngestWorker) parkOnDLQ(ctx context.Context, natsMsg jetstream.Msg, safeSubject, tableName, errMsg string) bool {
 	subject := "dlq." + safeSubject
 
 	msg := nats.NewMsg(subject)
@@ -711,9 +720,19 @@ func (w *IngestWorker) parkOnDLQ(ctx context.Context, natsMsg jetstream.Msg, saf
 	_, pubErr := w.js.PublishMsg(ctx, msg)
 	if pubErr != nil {
 		w.logger.ErrorContext(ctx, "NATS DLQ publish failed, this data will continue retrying insertion indefinitely until the DLQ recovers", "table", tableName, "subject", subject, "error", pubErr)
-		return
+		return false
 	}
 
 	// DoubleAck original message so NATS doesn't redeliver the corrupt data
 	_ = natsMsg.DoubleAck(ctx)
+	return true
+}
+
+// countPoison records one unreadable envelope under its disposition.
+func countPoison(ctx context.Context, tableName, reason, disposition string) {
+	poisonCounter.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("table", tableName),
+		attribute.String("reason", reason),
+		attribute.String("disposition", disposition),
+	))
 }
