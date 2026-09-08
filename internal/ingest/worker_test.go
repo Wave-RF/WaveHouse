@@ -1540,4 +1540,17 @@ func TestRejectPoison_CountedByDisposition(t *testing.T) {
 	w4.ackWg.Wait()
 	assert.Equal(t, map[string]int64{"parked": 1, "dropped": 1}, dispositions(),
 		"a failed ack must not be counted as a drop")
+
+	// The park side has the identical hazard, and it is worse there: the publish
+	// already succeeded, so a failed ack means the next redelivery parks a SECOND
+	// copy on the DLQ. Counting the first would overstate the parked total the
+	// upgrade runbook tells an operator to read, by one per redelivery.
+	w5, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+	parkedUnackable := poison()
+	parkedUnackable.DoubleAckErr = errors.New("ack timed out")
+	_, ok = w5.parseMsg(context.Background(), parkedUnackable)
+	require.False(t, ok)
+	w5.ackWg.Wait()
+	assert.Equal(t, map[string]int64{"parked": 1, "dropped": 1}, dispositions(),
+		"a park whose ack failed must not be counted as a parking")
 }

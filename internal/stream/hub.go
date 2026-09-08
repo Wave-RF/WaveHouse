@@ -365,6 +365,15 @@ func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, byNam
 	if err := json.Unmarshal(row, &cells); err != nil {
 		return nil, nil, false
 	}
+	// A zero-column envelope pairs with anything of length zero — both `null`,
+	// which unmarshals to a nil slice, and `[]` — and would then be announced as
+	// a usable event carrying `row:[]`. There is no such thing as a positional
+	// row over no columns, and the worker already refuses the same shape
+	// (parseMsg's len(envelope.Columns) == 0), so refuse it here too rather than
+	// let the two consumers disagree about an envelope neither can read.
+	if len(cols) == 0 {
+		return nil, nil, false
+	}
 	if len(cells) != len(cols) {
 		return nil, nil, false
 	}

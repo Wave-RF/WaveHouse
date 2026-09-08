@@ -182,6 +182,13 @@ func TestPairRow_Verdict(t *testing.T) {
 		{"length mismatch", []string{"page", "button"}, `["/a"]`, false},
 		{"undecodable row", []string{"page"}, `"not-an-array"`, false},
 		{"empty row", []string{"page"}, ``, false},
+		// A zero-column envelope pairs with anything of length zero, so BOTH
+		// spellings have to be refused: `null` unmarshals to a nil slice and `[]`
+		// to an empty one, and a length check alone accepts each. There is no
+		// positional row over no columns, and the worker refuses the same shape.
+		{"zero columns, null row", nil, `null`, false},
+		{"zero columns, empty row", []string{}, `[]`, false},
+		{"null row against real columns", []string{"page"}, `null`, false},
 		{"pairable", []string{"page"}, `["/a"]`, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

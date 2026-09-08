@@ -738,8 +738,16 @@ func (w *IngestWorker) parkOnDLQ(ctx context.Context, natsMsg jetstream.Msg, saf
 		return false
 	}
 
-	// DoubleAck original message so NATS doesn't redeliver the corrupt data
-	_ = natsMsg.DoubleAck(ctx)
+	// DoubleAck original message so NATS doesn't redeliver the corrupt data. A
+	// failed ack leaves it in the stream, so the next redelivery publishes a
+	// SECOND copy to the DLQ — report false so the caller does not count this
+	// parking again on every retry. The duplicate copy is the residual cost:
+	// PublishMsg is not idempotent, so it cannot be taken back here.
+	if err := natsMsg.DoubleAck(ctx); err != nil {
+		w.logger.ErrorContext(ctx, "parked on the DLQ but the ack failed, so the envelope stays in the stream and will be parked again on redelivery",
+			"table", tableName, "subject", subject, "error", err)
+		return false
+	}
 	return true
 }
 
