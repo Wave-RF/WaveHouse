@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -453,24 +454,30 @@ func (h *IngestHandler) policyCheckGuard(
 	if !resolved {
 		return nil // the !resolved abort in processRecord owns this case
 	}
+
+	// Sorted, and every offender — not the first one a map range happens to
+	// yield. This message is the diagnostic an operator fixes their policy from:
+	// reporting one of two broken columns, and a different one between
+	// otherwise-identical requests, hides the second until the first is fixed.
+	cols := make([]string, 0, len(checks))
 	for col := range checks {
+		cols = append(cols, col)
+	}
+	sort.Strings(cols)
+
+	var reasons []string
+	for _, col := range cols {
 		schemaCol, known := schema.Lookup(col)
 		switch {
 		case !known:
 			h.logger.ErrorContext(ctx, "policy check references a column the table does not have",
 				"column", col, "table", table, "role", role)
-			return &recordReject{
-				Status:  http.StatusForbidden,
-				Message: fmt.Sprintf("policy check references column %q, which table %q does not have", col, table),
-			}
+			reasons = append(reasons, fmt.Sprintf("%q, which table %q does not have", col, table))
 		case !schemaCol.IsInsertable():
 			h.logger.ErrorContext(ctx, "policy check references a column no record may write",
 				"column", col, "table", table, "role", role, "default_kind", schemaCol.DefaultKind)
-			return &recordReject{
-				Status: http.StatusForbidden,
-				Message: fmt.Sprintf("policy check references column %q of table %q, which is %s and cannot be inserted",
-					col, table, strings.ToLower(schemaCol.DefaultKind)),
-			}
+			reasons = append(reasons, fmt.Sprintf("%q of table %q, which is %s and cannot be inserted",
+				col, table, strings.ToLower(schemaCol.DefaultKind)))
 		case schemaCol.DefaultKind == "EPHEMERAL":
 			// Insertable, so the row DOES carry a slot for it — but ClickHouse
 			// never stores an ephemeral column and no query can read one back, so
@@ -480,14 +487,17 @@ func (h *IngestHandler) policyCheckGuard(
 			// from the ephemeral one, which is stored and therefore enforceable.
 			h.logger.ErrorContext(ctx, "policy check references an ephemeral column, which is never stored",
 				"column", col, "table", table, "role", role)
-			return &recordReject{
-				Status: http.StatusForbidden,
-				Message: fmt.Sprintf("policy check references column %q of table %q, which is ephemeral and is never stored",
-					col, table),
-			}
+			reasons = append(reasons, fmt.Sprintf("%q of table %q, which is ephemeral and is never stored",
+				col, table))
 		}
 	}
-	return nil
+	if len(reasons) == 0 {
+		return nil
+	}
+	return &recordReject{
+		Status:  http.StatusForbidden,
+		Message: "policy check references column " + strings.Join(reasons, "; and column "),
+	}
 }
 
 // processRecord runs the per-record pipeline shared by the single-object and
