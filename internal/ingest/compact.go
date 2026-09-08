@@ -9,17 +9,15 @@ import (
 )
 
 // EncodeCompactRow renders one record as a single JSONCompactEachRow line: a
-// JSON array carrying exactly one value per schema column, in declaration order
+// JSON array carrying exactly one value per INSERTABLE column, in declaration order
 // (discovery orders TableSchema.Columns by system.columns.position). A column
 // the record does not carry encodes as null. For a NON-nullable column with a
 // default the insert turns that back into the default
 // (input_format_null_as_default); on a NULLABLE column ClickHouse stores the
 // NULL, because only an ABSENT key ever took the default and a positional row
-// cannot express absence. Note that WaveHouse does NOT set
-// input_format_null_as_default: this relies on the ClickHouse server default
-// being 1, unlike date_time_input_format, which worker.go pins explicitly
-// because a server-default change there would silently alter parsing. Pinning
-// this one belongs with the wire change that starts emitting positional rows.
+// cannot express absence. worker.go pins
+// input_format_null_as_default=1 explicitly, alongside date_time_input_format,
+// so a server-default change cannot silently alter either.
 // The result has no trailing newline — the caller joins lines.
 //
 // This is serialization ONLY. It performs no validation and makes no decision

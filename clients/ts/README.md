@@ -10,7 +10,7 @@ npm install @wavehouse/sdk
 
 Requires Node 22 or newer — the only line this SDK is tested against; Node 18 and 20 are past upstream end-of-life. Neither browsers nor Node need a polyfill: streaming runs on `fetch`, like the rest of the SDK — see [Runtime support](https://wavehouse.dev/sdk/#runtime-support).
 
-This works in any framework that uses a bundler — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — with `import { createClient } from '@wavehouse/sdk'`.
+This works in any framework that uses a bundler — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — with `import { createClient } from '@wavehouse/sdk'`. The SDK and the server share the SSE wire protocol, so move them as a **pair** — a skewed pair delivers no usable rows and raises no error ([details](https://wavehouse.dev/sdk/streaming)).
 
 The package is published with [npm provenance](https://docs.npmjs.com/generating-provenance-statements) — npm shows a verified provenance badge on the [package page](https://www.npmjs.com/package/@wavehouse/sdk), and `npm audit signatures` checks the attestation against this repository's signed build.
 
@@ -30,7 +30,7 @@ No bundler, no `npm`, no framework required — drop the SDK straight into an HT
 </script>
 ```
 
-Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`). jsDelivr (`https://cdn.jsdelivr.net/npm/@wavehouse/sdk/+esm`) and unpkg (`https://unpkg.com/@wavehouse/sdk?module`) serve the same ES module.
+Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`). jsDelivr (`https://cdn.jsdelivr.net/npm/@wavehouse/sdk/+esm`) and unpkg (`https://unpkg.com/@wavehouse/sdk?module`) serve the same ES module. The SDK and the server share the SSE wire protocol, so pin them as a **pair** — a skewed pair delivers no usable rows and raises no error.
 
 **Classic global (`<script src>`).** For pages that can't use ES modules, the bundled IIFE build attaches everything to a `WaveHouse` global:
 
@@ -42,7 +42,7 @@ Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`). jsDelivr (
 </script>
 ```
 
-**Versioning.** A bare CDN URL serves the latest published **release**; pin for production (`@wavehouse/sdk@0.1.0`) or float on a range (`@0` for the newest 0.x, `@0.1` for 0.1.x). Builds from `main` are published under the `dev` tag — `@wavehouse/sdk@dev` — for trying unreleased changes.
+**Versioning.** A bare CDN URL serves the latest published **release**; pin for production (`@wavehouse/sdk@0.1.0`) or float on a range (`@0` for the newest 0.x, `@0.1` for 0.1.x). Builds from `main` are published under the `dev` tag — `@wavehouse/sdk@dev` — for trying unreleased changes. Whichever you choose, move the SDK and the server together: they share the SSE wire protocol, and a skewed pair delivers no usable rows and raises no error — a newer SDK drops every row, an older one hands you an event per frame with `data: undefined`.
 
 Streaming (`.stream()`) runs on `fetch`, so it works in both forms with no polyfill.
 

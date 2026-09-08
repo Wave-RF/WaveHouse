@@ -325,3 +325,34 @@ func TestNumericStorageOf(t *testing.T) {
 		})
 	}
 }
+
+// TestValidate_RejectsSuppliedComputedColumn: a record naming a MATERIALIZED or
+// ALIAS column must be refused where the caller still hears about it. The
+// published row carries only insertable columns, so without this the value
+// would be silently dropped and the record would insert as though it had never
+// been sent — the failure mode that made this class invisible.
+func TestValidate_RejectsSuppliedComputedColumn(t *testing.T) {
+	t.Parallel()
+	schema := &TableSchema{Name: "clicks", Columns: []Column{
+		{Name: "id", Type: "UInt64"},
+		{Name: "mat", Type: "String", DefaultKind: "MATERIALIZED", HasDefault: true},
+		{Name: "ali", Type: "UInt64", DefaultKind: "ALIAS", HasDefault: true},
+	}}
+
+	for _, tt := range []struct{ name, col, want string }{
+		{"materialized", "mat", "materialized and cannot be inserted"},
+		{"alias", "ali", "alias and cannot be inserted"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := Validate(schema, map[string]any{"id": float64(1), tt.col: "x"})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.col)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+
+	// Omitting them is the normal case and must still pass: they are not
+	// "missing required columns", they are computed by the server.
+	require.NoError(t, Validate(schema, map[string]any{"id": float64(1)}))
+}

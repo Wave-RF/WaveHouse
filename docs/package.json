@@ -21,7 +21,7 @@
     "@wave-rf/astro-themed-mermaid": "^0.3.1",
     "@wave-rf/cloudflare-md-router": "^0.2.1",
     "@wave-rf/starlight-llm-tools": "^0.3.1",
-    "@wavehouse/sdk": "workspace:*",
+    "@wavehouse/sdk": "^0.1.1",
     "astro": "^7.1.1",
     "astro-vtbot": "^3.1.0",
     "katex": "^0.18.4",

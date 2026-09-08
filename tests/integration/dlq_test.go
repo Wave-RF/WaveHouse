@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,7 +56,9 @@ func TestDLQ_PopulatedOnIngestWorkerFailure(t *testing.T) {
 	evt := map[string]any{
 		"table_name":         rawTableName,
 		"received_timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-		"data":               map[string]any{"key": "value"},
+		"format":             ingest.FormatJSONCompactEachRow,
+		"columns":            []string{"key"},
+		"row":                []any{"value"},
 	}
 	payload, err := json.Marshal(evt)
 	require.NoError(t, err)
@@ -99,7 +102,9 @@ func TestDLQ_PopulatedOnIngestWorkerFailureWithBadName(t *testing.T) {
 	evt := map[string]any{
 		"table_name":         rawTableName,
 		"received_timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-		"data":               map[string]any{"key": "value"},
+		"format":             ingest.FormatJSONCompactEachRow,
+		"columns":            []string{"key"},
+		"row":                []any{"value"},
 	}
 	payload, err := json.Marshal(evt)
 	require.NoError(t, err)

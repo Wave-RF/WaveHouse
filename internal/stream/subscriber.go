@@ -1,5 +1,7 @@
 package stream
 
+import "sync"
+
 // defaultSubscriberQueue is the per-connection outbound buffer. A cap >1 (the
 // keepalive-only queue was cap 1) lets live event frames queue while the handler
 // is mid-write instead of being dropped on the spot; 64 matches the per-subscriber
@@ -13,7 +15,7 @@ const defaultSubscriberQueue = 64
 // frame dropped by a full queue is never counted as sent. Producers (the keepalive
 // wheel, the event Hub) fan frames in with Send; the handler writes Data verbatim.
 type Frame struct {
-	Kind string // a Kind* constant: keepalive, event, or replay
+	Kind string // a Kind* constant: keepalive, schema, event, or replay
 	Data []byte // the exact bytes written to the client
 }
 
@@ -47,6 +49,43 @@ type Subscriber struct {
 	// producer — the event fan-out, replay, the keepalive wheel — is covered without
 	// each call site remembering to count. Nil-safe (nil in tests).
 	metric *Metrics
+
+	// schemaMu guards lastSchema against the connection's own handler goroutine,
+	// which reads nothing here but may run alongside the fan-out.
+	//
+	// It does NOT make Hub.deliver's check→send→record sequence atomic, and
+	// deliver does not need it to be: Broadcast runs on ONE goroutine — the
+	// single jetstream Consume callback the hub bridge registers in
+	// cmd/wavehouse/main.go, invoked inline per message — so no two events race
+	// to announce the same connection's columns. A future change that fans
+	// Broadcast out across goroutines must hold a lock across that whole
+	// sequence, or two events will both send an announcement (harmless) while a
+	// third slips a row between a check and its record (not harmless: the client
+	// zips it against the previous list). Replay does not touch this field at
+	// all — it tracks drift in its own closure; see Hub.ReplayProjector.
+	schemaMu sync.Mutex
+	// lastSchema is the signature of the column list most recently announced to
+	// this connection ("" ⇒ none yet). Rows travel positionally, so a client that
+	// has not been told the column list cannot read one.
+	lastSchema string
+}
+
+// needsSchema reports whether sig differs from the column list last announced to
+// this connection. It deliberately does NOT record: the caller records only once
+// the frame is actually queued (see recordSchema), so an announcement dropped by
+// a full queue leaves the connection still due one rather than silently
+// unsynchronized for every row until the list next changes.
+func (s *Subscriber) needsSchema(sig string) bool {
+	s.schemaMu.Lock()
+	defer s.schemaMu.Unlock()
+	return s.lastSchema != sig
+}
+
+// recordSchema notes that sig has been announced to this connection.
+func (s *Subscriber) recordSchema(sig string) {
+	s.schemaMu.Lock()
+	defer s.schemaMu.Unlock()
+	s.lastSchema = sig
 }
 
 // NewSubscriber returns a Subscriber ready to register with a Heartbeater and the
