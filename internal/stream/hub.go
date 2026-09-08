@@ -458,6 +458,14 @@ func (h *Hub) ReplayProjector(role string, sub *Subscriber) func(raw []byte) []F
 	lastSig := ""
 	return func(raw []byte) []Frame {
 		ev := newEventView(raw)
+		if ev.decoded && !ev.usable {
+			// Same accounting as the live path in Broadcast. Without it a gap-fill
+			// silently returns no frames for a bad envelope, which is precisely the
+			// blind spot this counter exists to remove — and replay is the harder
+			// one to notice, since the client asked for a range and gets a short
+			// answer rather than nothing.
+			h.metric.RowUnpairable(ev.evt.TableName, ev.unpairReason)
+		}
 		plan, ok := planForRole(p, filter, role, ev, KindReplay)
 		if !ok {
 			return nil

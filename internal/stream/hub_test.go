@@ -102,10 +102,56 @@ func TestBroadcast_DuplicateColumnWithheld(t *testing.T) {
 // TestBroadcast_UnpairableCounted: an envelope withheld from every role is the
 // read-side twin of one the worker parks on the DLQ with an ERROR log and a
 // poison counter. Before this it was dropped in silence — no log, no metric —
-// so a subscriber simply stopped seeing rows. The counter is per EVENT, not per
-// role, and carries the reason so an operator can tell a length mismatch from a
-// repeated column name.
+// so a subscriber simply stopped seeing rows.
+//
+// This asserts the COUNTER and its labels, on BOTH delivery paths. An earlier
+// version of this test only checked pairRow's return value, which says nothing
+// about whether anything is ever recorded: it passed while the replay path was
+// still silent.
 func TestBroadcast_UnpairableCounted(t *testing.T) {
+	savedMP := otel.GetMeterProvider()
+	reader := sdkmetric.NewManualReader()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	defer otel.SetMeterProvider(savedMP)
+
+	const topic = "ingest.clicks"
+	hub := NewHub(nil, nil, NewMetrics())
+	sub := NewSubscriber(nil, nil)
+	hub.Add(topic, "viewer", sub)
+
+	bad, err := json.Marshal(ingest.EventMessage{
+		TableName:         "clicks",
+		ReceivedTimestamp: "2026-06-26T00:00:00Z",
+		Format:            ingest.FormatJSONCompactEachRow,
+		Columns:           []string{"tenant", "tenant"},
+		Row:               json.RawMessage(`["a","b"]`),
+	})
+	require.NoError(t, err)
+
+	hub.Broadcast(topic, bad)               // live path
+	hub.ReplayProjector("viewer", sub)(bad) // gap-fill path
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	md, ok := collectByName(rm)["wavehouse_sse_rows_unpairable_total"]
+	require.True(t, ok, "the counter must exist once an unpairable envelope is seen")
+
+	sum, ok := md.Data.(metricdata.Sum[int64])
+	require.True(t, ok)
+	require.Len(t, sum.DataPoints, 1, "one series: same table, same reason")
+	dp := sum.DataPoints[0]
+	assert.EqualValues(t, 2, dp.Value, "counted on BOTH the live and the replay path")
+
+	table, _ := dp.Attributes.Value(attribute.Key("table"))
+	reason, _ := dp.Attributes.Value(attribute.Key("reason"))
+	assert.Equal(t, "clicks", table.AsString())
+	assert.Equal(t, "duplicate_column", reason.AsString(), "the label an operator slices by")
+}
+
+// TestPairRow_Reasons pins the reason strings the counter's label carries, so a
+// renamed classification shows up here rather than as a silently changed label
+// on somebody's dashboard.
+func TestPairRow_Reasons(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name, reason string
@@ -115,11 +161,13 @@ func TestBroadcast_UnpairableCounted(t *testing.T) {
 		{"duplicate column", "duplicate_column", []string{"tenant", "tenant"}, `["a","b"]`},
 		{"length mismatch", "length_mismatch", []string{"page", "button"}, `["/a"]`},
 		{"undecodable row", "undecodable_row", []string{"page"}, `"not-an-array"`},
+		{"empty row", "empty_row", []string{"page"}, ``},
+		{"pairable", "", []string{"page"}, `["/a"]`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			_, _, reason := pairRow(tt.cols, json.RawMessage(tt.row))
-			assert.Equal(t, tt.reason, reason, "the reason label an operator sees")
+			assert.Equal(t, tt.reason, reason)
 		})
 	}
 }
