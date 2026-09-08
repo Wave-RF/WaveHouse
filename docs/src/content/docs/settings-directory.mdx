@@ -19,7 +19,7 @@ Where the directory lives is the one boot-config key involved: `settings.dir` / 
 
 ## Loading and hot reload
 
-The server validates and adopts the directory at boot — a missing or invalid directory refuses to start, so a typo, a missing mount, or an invalid policy surfaces immediately instead of silently denying every request (run `wavehouse validate` to reproduce the findings, `wavehouse bootstrap` to create a starter directory).
+The server validates and adopts the directory at boot — a missing or invalid directory refuses to start, so a typo, a missing mount, or an invalid policy surfaces immediately instead of silently denying every request (run `wavehouse validate` to reproduce the findings, `wavehouse bootstrap` to create a starter directory). Boot config has no equivalent command and needs none: it only takes effect through a restart, and the restart refuses on an undeclared YAML key, an unbound `WH_*` variable, or an unusable `data_dir` — see [Configuration — Loading Order](/configuration#loading-order).
 
 A running instance re-validates and re-adopts on any of three triggers, all funneling through one serialized reload path:
 

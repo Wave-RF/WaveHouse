@@ -150,12 +150,22 @@ func run() int {
 	logger.Info("starting WaveHouse", "version", Version, "build_time", BuildTime, "git_commit", GitCommit)
 
 	cfgPath := "config.yaml"
-	if p := os.Getenv("WH_CONFIG"); p != "" {
+	if p := os.Getenv(config.EnvConfig); p != "" {
 		cfgPath = p
 	}
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
+		logger.Error("load config", "error", err)
+		return 1
+	}
+
+	// data_dir must be usable before anything dials out: a root-owned bind
+	// mount is the classic container misconfiguration, and refusing here
+	// puts the UID-65532 hint in the first second of the log rather than
+	// after ClickHouse discovery. NATS and Pebble still fail loud on their
+	// own if the directory changes underneath us.
+	if err := config.CheckDataDir(cfg.DataDir); err != nil {
 		logger.Error("load config", "error", err)
 		return 1
 	}
@@ -195,7 +205,7 @@ func run() int {
 	serviceName := "wavehouse"
 
 	var level slog.Level
-	switch strings.ToUpper(strings.TrimSpace(os.Getenv("WH_LOG_LEVEL"))) {
+	switch strings.ToUpper(strings.TrimSpace(os.Getenv(config.EnvLogLevel))) {
 	case "DEBUG":
 		level = slog.LevelDebug
 	case "WARN":

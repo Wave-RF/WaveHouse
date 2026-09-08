@@ -1,0 +1,113 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+)
+
+// envPrefix is what every WaveHouse environment variable starts with, and the
+// only filter that makes an unbound-name check meaningful: the environment
+// always carries names that aren't ours.
+const envPrefix = "WH_"
+
+// processEnv lists the WH_* names the binary reads outside the Config struct
+// (cmd/wavehouse), so UnboundEnv doesn't flag them.
+var processEnv = []string{EnvConfig, EnvLogLevel}
+
+// rejectUnboundEnv is the environment half of rejectUnknownKeys: an error
+// naming every WH_* variable in environ that nothing reads.
+func rejectUnboundEnv(environ []string) error {
+	unbound := UnboundEnv(environ)
+	if len(unbound) == 0 {
+		return nil
+	}
+	return fmt.Errorf("unbound environment variable(s): %s — a typo, or a key that moved to the settings directory (%s); unset it, or rename it to a key the Config struct declares", strings.Join(unbound, ", "), EnvSettingsDir)
+}
+
+// UnboundEnv returns, sorted, every WH_* name in environ (os.Environ() form,
+// "KEY=value") that no Config field's env tag binds and the binary doesn't
+// read otherwise. Such a name is almost always a typo or a key that moved to
+// the settings directory — `WH_DEDUPE_ENABLED=true` left in a compose file
+// would otherwise be set, ignored, and believed. Only the WH_ prefix is
+// checked, since the environment is shared with whatever launched the process.
+func UnboundEnv(environ []string) []string {
+	bound := map[string]bool{}
+	for _, name := range processEnv {
+		bound[name] = true
+	}
+	collectEnvTags(reflect.TypeFor[Config](), bound)
+	var out []string
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, envPrefix) && !bound[name] {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// collectEnvTags records every env tag in t, recursing into nested structs.
+func collectEnvTags(t reflect.Type, into map[string]bool) {
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if tag := f.Tag.Get("env"); tag != "" {
+			into[tag] = true
+		}
+		if f.Type.Kind() == reflect.Struct {
+			collectEnvTags(f.Type, into)
+		}
+	}
+}
+
+// CheckDataDir reports whether boot can use dir as data_dir: a directory that
+// exists must be writable, and one that doesn't (boot creates it — a first
+// run, or a missing mount that WarnIfFreshDataDir calls out) must have a
+// writable nearest existing ancestor so that creation can succeed. Run before
+// anything dials out, so a root-owned bind mount refuses boot in the first
+// second instead of after ClickHouse discovery, with the UID-65532 hint
+// attached. Writability is probed by creating and removing one temp file:
+// the only portable test that exercises the mount's ownership and mode.
+func CheckDataDir(dir string) error {
+	info, err := os.Stat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// Boot creates it; check the ancestor below.
+	case err != nil:
+		return fmt.Errorf("data_dir %s: %w", dir, err)
+	case !info.IsDir():
+		return fmt.Errorf("data_dir %s is not a directory", dir)
+	}
+
+	target := dir
+	for {
+		if _, err := os.Stat(target); err == nil {
+			break
+		}
+		parent := filepath.Dir(target)
+		if parent == target {
+			break
+		}
+		target = parent
+	}
+	f, err := os.CreateTemp(target, ".wavehouse-datadir-probe-*")
+	if err != nil {
+		msg := fmt.Sprintf("data_dir %s is not writable", dir)
+		if target != dir {
+			msg = fmt.Sprintf("data_dir %s does not exist and %s is not writable, so it cannot be created", dir, target)
+		}
+		if errors.Is(err, fs.ErrPermission) {
+			msg += "; " + permissionHint
+		}
+		return fmt.Errorf("%s: %w", msg, err)
+	}
+	name := f.Name()
+	_ = f.Close()
+	return os.Remove(name)
+}
