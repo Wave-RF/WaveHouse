@@ -185,7 +185,7 @@ They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear
 There's no bundled playground — point an `@wavehouse/sdk` client at your local server (`baseURL: "http://localhost:8080"`); the trial policy `make dev` seeds into `./settings` authorizes the demo-table requests:
 
 :::caution[For **streaming**, don't use the published stable SDK against a local server]
-A `make dev` server speaks the v2 SSE wire — an `event: schema` frame plus positional rows — and the published stable line still speaks the pre-v2 one. Point it at `/v1/stream` and every event arrives with `data: undefined`, with no `error` callback and nothing to catch, while REST and structured queries keep working — which makes it easy to misread as a server bug. Use the in-tree SDK (`make build-ts`) or `@wavehouse/sdk@dev` for streaming work until the next `clients/ts/v*` release. See [Upgrade the SDK and the server together](/sdk/streaming#upgrade-the-sdk-and-the-server-together).
+A `make dev` server speaks the v2 SSE wire — an `event: schema` frame plus positional rows — and the published stable line still speaks the pre-v2 one. Point it at `/v1/stream` and every event arrives with `data: undefined`, with no `error` callback and nothing to catch, while REST and structured queries keep working — which makes it easy to misread as a server bug. Use the in-tree SDK (`make build-ts`) or `@wavehouse/sdk@dev` for streaming work until the next `clients/ts/v*` release. See [Transport Behavior](/sdk/streaming#transport-behavior), which carries the full danger note on upgrading the SDK and the server together.
 :::
 
 ```bash
