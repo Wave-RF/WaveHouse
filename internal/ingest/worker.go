@@ -76,9 +76,13 @@ type IngestWorker struct {
 // Both dispositions are counted because a non-zero rate right after an upgrade
 // means the ingest queue was not drained first, and that is true whichever way
 // the switch was set — an operator watching for a missed drain should not have
-// to know the table's DLQ setting to see it. Counted once actually parked, not
-// once rejected, so a DLQ outage (which leaves the message unacked and
-// redelivering) does not inflate the count on every retry.
+// to know the table's DLQ setting to see it.
+//
+// Counted once the envelope is actually parked or actually acked, never once it
+// is merely rejected: a DLQ outage and a failed ack both leave the message in
+// the stream, unacked and due for redelivery. Counting at rejection would score
+// the same envelope again on every retry, and would report it as parked or as
+// gone for good while it was still sitting in the queue.
 var poisonCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 	"wavehouse_ingest_poison_total",
 	metric.WithDescription("Ingest envelopes the worker could not read, by disposition: parked on the DLQ, or acked and dropped where the DLQ is disabled for the table"),

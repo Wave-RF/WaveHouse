@@ -84,5 +84,15 @@ updates:
       # floor to >=22.12 or stop shipping CJS. Tracked in #492.
       - dependency-name: "eventsource-parser"
         update-types: ["version-update:semver-major"]
+      # The docs site pins the PUBLISHED @wavehouse/sdk (docs/package.json) so an
+      # in-tree wire change cannot reach the deployed landing page before the
+      # demo backend speaks it (#568). Raising that range is a release decision
+      # that belongs with the backend upgrade and the `latest` tag — not a Monday
+      # dependency sweep, whose reviewer is not thinking about which wire the
+      # demo backend serves. Patch updates inside the pinned 0.x line already
+      # satisfy the caret, so nothing routine is lost; for a 0.x package it is
+      # the MINOR bump that crosses the wire boundary.
+      - dependency-name: "@wavehouse/sdk"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
     commit-message:
       prefix: "deps"

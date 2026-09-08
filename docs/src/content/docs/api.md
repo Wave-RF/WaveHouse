@@ -822,7 +822,7 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 
 ### Client-Facing Format (SSE)
 
-The same positional row, with the column list delivered once per connection as its own `event: schema` frame rather than repeated on every event — see [`GET /v1/stream`](#get-v1stream--server-sent-events-stream) for the frame sequence. The announced list is the caller's **projected** columns (the role's allow/deny rules applied), so it can be narrower than the envelope's.
+The same positional row, with the column list delivered as its own `event: schema` frame — once when the connection opens and again whenever the list changes — rather than repeated on every event — see [`GET /v1/stream`](#get-v1stream--server-sent-events-stream) for the frame sequence. The announced list is the caller's **projected** columns (the role's allow/deny rules applied), so it can be narrower than the envelope's.
 
 ## Dead Letter Queue (DLQ)
 

@@ -599,9 +599,9 @@ make release-sdk-ts VERSION=0.1.0   # tag clients/ts/v0.1.0 → @wavehouse/sdk o
 
 `make release-sdk-go` exists too, wired ahead of the Go SDK landing ([#434](https://github.com/Wave-RF/WaveHouse/pull/434)); it refuses to run until `clients/go/` is in the repo.
 
-**After** tagging an SDK release, raise `docs/package.json`'s `@wavehouse/sdk` range to the new line. The pin floats within `0.1.x` and stops at `0.2.0`, so a new **minor** does not reach the docs site — including its live hero demo — until someone bumps it, which is the point: the bump is where you decide the deployed backend and the site's SDK move together. `minimumReleaseAgeExclude` already exempts `@wavehouse/*` from the 7-day cooldown, so the freshly published version installs immediately.
-
 The one thing to do *before* tagging is promote the changelog: `AGENTS.md` requires every PR to add its entry under `## Unreleased`, so open a PR renaming that heading to `## [X.Y.Z] - YYYY-MM-DD` and adding the matching link reference at the foot of the file. Nothing in the release pipeline reads `CHANGELOG.md` — this is for the file's own readers.
+
+**After** tagging an SDK release, raise `docs/package.json`'s `@wavehouse/sdk` range to the new line. The pin floats within `0.1.x` and stops at `0.2.0`, so a new **minor** does not reach the docs site — including its live hero demo — until someone bumps it, which is the point: the bump is where you decide that the deployed demo backend and the site's SDK move together. `minimumReleaseAgeExclude` already exempts `@wavehouse/*` from the 7-day cooldown, so the freshly published version installs immediately. Dependabot will **not** propose this one for you — `@wavehouse/sdk` is in the npm `ignore` list in `.github/dependabot.yml` for exactly this reason, since a grouped Monday `deps:` PR is reviewed by someone thinking about dependency hygiene, not about which wire the demo backend speaks.
 
 Each runs [`scripts/release.sh`](https://github.com/Wave-RF/WaveHouse/blob/main/scripts/release.sh), which preflights (on `main`, clean tree, in sync with `origin/main`, the tag free both locally and on the remote, the required `CI` check green on *this exact commit*), prints exactly what will be published, and asks before pushing. `DRY_RUN=1 make release-…` stops after the plan. Tag creation is admin-only via the `release tag protection` ruleset.
 
