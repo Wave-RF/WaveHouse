@@ -1297,10 +1297,6 @@ func TestParseMsg_PoisonEnvelope_ParkedOnDLQ(t *testing.T) {
 	}
 }
 
-// TestParseMsg_PoisonEnvelope_DLQDisabled_AckedAndDropped: with the DLQ off for
-// the table there is nowhere to park it, and redelivering a message that can
-// never insert would wedge the consumer behind it — so it is acked and dropped,
-// loudly.
 // TestParseMsg_DuplicateColumn_Unpairable: `columns` naming one column twice
 // has no single reading. ClickHouse would reject the INSERT loudly (code 15,
 // DUPLICATE_COLUMN), but the same envelope also reaches the SSE fan-out, where
@@ -1335,6 +1331,10 @@ func TestParseMsg_DuplicateColumn_Unpairable(t *testing.T) {
 	assert.Contains(t, js.Published()[0].Header.Get("X-DLQ-Error"), "appears more than once")
 }
 
+// TestParseMsg_PoisonEnvelope_DLQDisabled_AckedAndDropped: with the DLQ off for
+// the table there is nowhere to park it, and redelivering a message that can
+// never insert would wedge the consumer behind it — so it is acked and dropped,
+// loudly.
 func TestParseMsg_PoisonEnvelope_DLQDisabled_AckedAndDropped(t *testing.T) {
 	t.Parallel()
 	w, js, _, _ := newTestWorker(&testutil.MockRoundTripper{})

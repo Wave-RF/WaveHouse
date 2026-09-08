@@ -170,6 +170,12 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 	}
 
 	ev := newEventView(raw)
+	if ev.decoded && !ev.usable {
+		// Withheld from EVERY role below. The worker parks this same envelope on
+		// the DLQ with an ERROR; without this counter the read side drops it in
+		// silence, which is the failure class this project budgets at zero.
+		h.metric.RowUnpairable(ev.evt.TableName, ev.unpairReason)
+	}
 	p, filter := h.snapshotPolicy()
 
 	// Column specs for type-aware row-filter comparison — resolved lazily at most
@@ -319,12 +325,13 @@ func NumericSpecOf(st discovery.NumericStorage) policy.NumericSpec {
 // an EventMessage at all is forwarded verbatim when no policy store is wired,
 // and refused when one is.
 type eventView struct {
-	raw     []byte
-	evt     ingest.EventMessage
-	decoded bool // raw parsed as an EventMessage
-	usable  bool // ...and its columns and row could be paired
-	cells   []json.RawMessage
-	row     map[string]any
+	raw          []byte
+	evt          ingest.EventMessage
+	decoded      bool   // raw parsed as an EventMessage
+	usable       bool   // ...and its columns and row could be paired
+	unpairReason string // why not, when usable is false — the metric's reason label
+	cells        []json.RawMessage
+	row          map[string]any
 }
 
 // newEventView decodes raw once for the whole fan-out. Numbers decode as
@@ -340,7 +347,8 @@ func newEventView(raw []byte) *eventView {
 		return ev
 	}
 	ev.decoded = true
-	ev.cells, ev.row, ev.usable = pairRow(ev.evt.Columns, ev.evt.Row)
+	ev.cells, ev.row, ev.unpairReason = pairRow(ev.evt.Columns, ev.evt.Row)
+	ev.usable = ev.unpairReason == ""
 	return ev
 }
 
@@ -349,15 +357,15 @@ func newEventView(raw []byte) *eventView {
 // length that disagrees with the column list — because there is then no way to
 // say which value belongs to which column, and a row-filter that cannot read its
 // column must withhold rather than guess.
-func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, byName map[string]any, ok bool) {
+func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, byName map[string]any, reason string) {
 	if len(row) == 0 {
-		return nil, nil, false
+		return nil, nil, "empty_row"
 	}
 	if err := json.Unmarshal(row, &cells); err != nil {
-		return nil, nil, false
+		return nil, nil, "undecodable_row"
 	}
 	if len(cells) != len(cols) {
-		return nil, nil, false
+		return nil, nil, "length_mismatch"
 	}
 	byName = make(map[string]any, len(cols))
 	for i, c := range cols {
@@ -369,17 +377,17 @@ func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, byNam
 		// come from system.columns, where ClickHouse forbids two columns of one
 		// name), so this is defence for an envelope we did not write.
 		if _, dup := byName[c]; dup {
-			return nil, nil, false
+			return nil, nil, "duplicate_column"
 		}
 		dec := json.NewDecoder(bytes.NewReader(cells[i]))
 		dec.UseNumber()
 		var v any
 		if err := dec.Decode(&v); err != nil {
-			return nil, nil, false
+			return nil, nil, "undecodable_cell"
 		}
 		byName[c] = v
 	}
-	return cells, byName, true
+	return cells, byName, ""
 }
 
 // decodeEvent parses raw as a published EventMessage, reporting whether it is one

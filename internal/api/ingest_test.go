@@ -2535,6 +2535,7 @@ func TestIngest_CheckOnComputedColumn_Rejected(t *testing.T) {
 			h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a"}))
 
 			assert.Equal(t, http.StatusForbidden, w.Code)
+			testutil.AssertJSONErrorResponse(t, w)
 			assert.Contains(t, w.Body.String(), tt.col)
 			assert.Contains(t, w.Body.String(), tt.kind+" and cannot be inserted",
 				"the message says WHY, distinctly from the absent-column case")

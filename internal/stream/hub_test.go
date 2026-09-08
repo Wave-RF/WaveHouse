@@ -99,6 +99,31 @@ func TestBroadcast_DuplicateColumnWithheld(t *testing.T) {
 	assert.Equal(t, "/a", row["page"], "the hub delivers a pairable envelope on this connection")
 }
 
+// TestBroadcast_UnpairableCounted: an envelope withheld from every role is the
+// read-side twin of one the worker parks on the DLQ with an ERROR log and a
+// poison counter. Before this it was dropped in silence — no log, no metric —
+// so a subscriber simply stopped seeing rows. The counter is per EVENT, not per
+// role, and carries the reason so an operator can tell a length mismatch from a
+// repeated column name.
+func TestBroadcast_UnpairableCounted(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, reason string
+		cols         []string
+		row          string
+	}{
+		{"duplicate column", "duplicate_column", []string{"tenant", "tenant"}, `["a","b"]`},
+		{"length mismatch", "length_mismatch", []string{"page", "button"}, `["/a"]`},
+		{"undecodable row", "undecodable_row", []string{"page"}, `"not-an-array"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, reason := pairRow(tt.cols, json.RawMessage(tt.row))
+			assert.Equal(t, tt.reason, reason, "the reason label an operator sees")
+		})
+	}
+}
+
 // rawEventCols is rawEvent with an explicit column order, for tests that pin a
 // declaration order or publish a column the record omits.
 func rawEventCols(tb testing.TB, table, ts string, cols []string, data map[string]any) []byte {
