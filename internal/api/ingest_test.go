@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
@@ -1928,6 +1929,41 @@ func TestIngest_EmptyBody(t *testing.T) {
 	}
 }
 
+// TestIngest_BodyReadFailure_400: the one new user-visible response shape this
+// PR adds. It is documented in both ingest error tables in api.md and in the
+// CHANGELOG, and nothing exercised it — no test in the tree hands ingest a body
+// reader that fails, so the status, the string, and the nothing-published
+// property were all unpinned and a refactor could have turned it into a 500 or
+// a non-JSON body with the suite green.
+//
+// Distinct from the 413: MaxBytesReader's overflow is caught one branch above.
+// This is the transport failing outright — a reset, a short Content-Length, a
+// malformed chunked encoding.
+func TestIngest_BodyReadFailure_400(t *testing.T) {
+	t.Parallel()
+
+	for _, ct := range []string{"application/json", "application/x-ndjson"} {
+		t.Run(ct, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+				"/v1/ingest?table=clicks", iotest.ErrReader(errors.New("connection reset by peer")))
+			req.Header.Set("Content-Type", ct)
+
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			testutil.AssertJSONErrorResponse(t, w)
+			assert.Equal(t, "invalid request body", jsonErrorMessage(t, w),
+				"documented verbatim in both api.md ingest error tables")
+			assert.Empty(t, pub.Messages, "a body that could not be read must publish nothing")
+		})
+	}
+}
+
 func TestIngest_BodyCap_413(t *testing.T) {
 	t.Parallel()
 
@@ -1942,12 +1978,21 @@ func TestIngest_BodyCap_413(t *testing.T) {
 		{name: "single object", ct: "application/json", body: big, cap: 50},
 		{name: "json array mid-element", ct: "application/json", body: "[" + big + "]", cap: 50},
 		// Cap lands exactly between elements (just past '[' + the first element,
-		// before the comma) so the overflow surfaces at arrayReader's
-		// More()/Token boundary — the path that used to swallow the read error
-		// and silently truncate to a partial 200 instead of 413.
+		// before the comma). Kept as a distinct case because it is the shape that
+		// used to truncate to a partial 200 — but note all four now trip in the
+		// same place: `body.ReadFrom` in the handler, before a reader is built.
+		// The readers run over an in-memory slice, so no cap error can reach
+		// them.
 		{name: "json array between elements", ct: "application/json", body: "[" + elem + "," + elem + "]", cap: int64(1 + len(elem))},
-		// NDJSON over cap surfaces via the scanner's Err() (MaxBytesError).
 		{name: "ndjson", ct: "application/x-ndjson", body: big, cap: 50},
+		// The other half of the cap change, and the only case here that
+		// distinguishes this tree from main: a COMPLETE first object followed by
+		// an oversized tail. Reading the body live, the decoder finished that
+		// object, published it and answered 200, silently discarding the rest;
+		// buffering first makes it a 413 with nothing published. Every case above
+		// puts the over-cap bytes INSIDE the first value, so all of them answer
+		// 413 on main too. api.md states this contract explicitly.
+		{name: "single object with oversized tail", ct: "application/json", body: elem + strings.Repeat("x", 500), cap: int64(len(elem) + 5)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1963,8 +2008,61 @@ func TestIngest_BodyCap_413(t *testing.T) {
 			assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
 			assert.Contains(t, w.Body.String(), "request body exceeded")
 			testutil.AssertJSONErrorResponse(t, w)
+			// The 413 is atomic now, which is the user-visible half of buffering
+			// the body. Previously the readers ran over the live connection, so
+			// handleBatch published each record as it decoded it and the cap
+			// surfaced mid-iteration — a 413 left the already-published prefix in
+			// NATS, and a client retrying it double-inserted that prefix. Nothing
+			// pinned that, so the change could have regressed silently.
+			assert.Empty(t, pub.Messages, "an over-cap request must publish nothing at all")
 		})
 	}
+}
+
+// TestIngest_ContentTypeResolvesBeforeTheBodyIsRead pins the ordering this
+// handler is built around: an unsupported declaration is a 415 decided before a
+// byte of body is buffered. Every other 415 case passes a small, perfectly
+// readable body, so moving resolveContentType back below body.ReadFrom would
+// leave all of them green while silently making an unsupported request pay for a
+// full buffer. Each subtest hands over a body that fails a DIFFERENT way, so a
+// reordered handler answers with that failure's status instead of 415.
+func TestIngest_ContentTypeResolvesBeforeTheBodyIsRead(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a body that cannot be read at all", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+			"/v1/ingest?table=clicks", iotest.ErrReader(errors.New("connection reset by peer")))
+		req.Header.Set("Content-Type", "text/csv")
+
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code,
+			"reading the body first would answer 400 invalid request body")
+		testutil.AssertJSONErrorResponse(t, w)
+		assert.Empty(t, pub.Messages)
+	})
+
+	t.Run("a body over the cap", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		h.maxRequestBytes = 50 // below the body
+
+		req := rawIngestRequest(t, "clicks", "text/csv",
+			`{"page":"/`+strings.Repeat("a", 200)+`"}`)
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+
+		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code,
+			"reading the body first would answer 413 request body exceeded")
+		testutil.AssertJSONErrorResponse(t, w)
+		assert.Empty(t, pub.Messages)
+	})
 }
 
 // tsRegistry returns a registry whose events table carries the timestamp column

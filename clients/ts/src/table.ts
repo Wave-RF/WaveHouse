@@ -101,8 +101,10 @@ export class TableRef<Row = Record<string, unknown>> {
    * rest of the batch — per-record outcomes come back in the result
    * (`failed` / `results`), and `ok` is true only when every record succeeded.
    *
-   * The array path sends one request regardless of size; bounded-concurrency
-   * chunking of very large arrays is tracked separately (#196). For NDJSON you
+   * The array path sends one request regardless of size, so it is bound by the
+   * server's 16 MiB request-body cap (an over-cap array is a `413` with nothing
+   * ingested); bounded-concurrency chunking of very large arrays is tracked
+   * separately (#196). For NDJSON you
    * already have (a file or stream), use {@link insertNDJSON}.
    */
   async insert(
@@ -140,9 +142,11 @@ export class TableRef<Row = Record<string, unknown>> {
    * file or a stream produced by another system. For in-memory rows, prefer
    * {@link insert}.
    *
-   * Non-string sources are read fully into memory before sending (the server
-   * streams the parse). Returns the same per-record batch summary as an array
-   * `insert`.
+   * Non-string sources are read fully into memory before sending. The server
+   * buffers the whole body too, so the request-body cap applies to NDJSON
+   * exactly as to any other shape — an upload over it is a `413` with nothing
+   * ingested, and must be split across several calls. Returns the same
+   * per-record batch summary as an array `insert`.
    */
   async insertNDJSON(
     source: NDJSONSource,

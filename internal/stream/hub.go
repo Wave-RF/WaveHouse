@@ -29,6 +29,41 @@ type Hub struct {
 	policy   policy.Source             // nil ⇒ policy filtering not configured (legacy passthrough)
 	registry *discovery.SchemaRegistry // nil ⇒ no column types; row-filter comparison degrades fail-closed (see columnSpecs)
 	metric   *Metrics                  // nil-safe
+
+	// RowEvaluator is the seam a native type layer will take over: the one
+	// place a row's visibility under a role's row-filter is decided. nil means
+	// the default implementation, which delegates to ResolvedPermissions.RowVisible
+	// — today's behavior unchanged. Wired once before the Hub serves traffic and
+	// not safe to mutate afterwards: rowAdmitted reads it from the consumer
+	// goroutine and from SSE handler goroutines without holding h.mu. Every
+	// delivery path reaches it through rowAdmitted, never directly.
+	RowEvaluator RowEvaluator
+}
+
+// RowEvaluator decides whether one decoded event row is visible to a subscriber
+// under their resolved permissions. specs classifies each column for the
+// comparison (see Hub.columnSpecs); a nil map means no type knowledge, which the
+// default implementation treats as the fail-closed floor.
+type RowEvaluator interface {
+	Visible(perms *policy.ResolvedPermissions, row map[string]any, specs map[string]policy.ColumnSpec) bool
+}
+
+// policyRowEvaluator is the default RowEvaluator, delegating to the policy
+// package's in-memory row-filter evaluation.
+type policyRowEvaluator struct{}
+
+func (policyRowEvaluator) Visible(perms *policy.ResolvedPermissions, row map[string]any, specs map[string]policy.ColumnSpec) bool {
+	return perms.RowVisible(row, specs)
+}
+
+// rowEvaluator returns the Hub's RowEvaluator, or the default when none is
+// wired. Nil-safe rather than constructor-enforced, so a zero Hub still
+// evaluates row-level security instead of panicking past it.
+func (h *Hub) rowEvaluator() RowEvaluator {
+	if h.RowEvaluator != nil {
+		return h.RowEvaluator
+	}
+	return policyRowEvaluator{}
 }
 
 // topicRoutes holds the per-role buckets subscribed to one topic.
@@ -178,7 +213,7 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 // so the two delivery paths can't drift on how row-level security is evaluated.
 func (h *Hub) rowAdmitted(p *policy.Policy, role string, evt *ingest.EventMessage, claims map[string]any, colSpecs map[string]policy.ColumnSpec) bool {
 	perms := policy.Evaluate(p, role, evt.TableName, "select", claims)
-	if !perms.RowVisible(evt.Data, colSpecs) {
+	if !h.rowEvaluator().Visible(perms, evt.Data, colSpecs) {
 		h.metric.RowWithheld(evt.TableName, role)
 		return false
 	}
