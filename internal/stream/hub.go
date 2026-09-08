@@ -170,12 +170,6 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 	}
 
 	ev := newEventView(raw)
-	if ev.decoded && !ev.usable {
-		// Withheld from EVERY role below. The worker parks this same envelope on
-		// the DLQ with an ERROR; without this counter the read side drops it in
-		// silence, which is the failure class this project budgets at zero.
-		h.metric.RowUnpairable(ev.evt.TableName, ev.unpairReason)
-	}
 	p, filter := h.snapshotPolicy()
 
 	// Column specs for type-aware row-filter comparison — resolved lazily at most
@@ -325,13 +319,12 @@ func NumericSpecOf(st discovery.NumericStorage) policy.NumericSpec {
 // an EventMessage at all is forwarded verbatim when no policy store is wired,
 // and refused when one is.
 type eventView struct {
-	raw          []byte
-	evt          ingest.EventMessage
-	decoded      bool   // raw parsed as an EventMessage
-	usable       bool   // ...and its columns and row could be paired
-	unpairReason string // why not, when usable is false — the metric's reason label
-	cells        []json.RawMessage
-	row          map[string]any
+	raw     []byte
+	evt     ingest.EventMessage
+	decoded bool // raw parsed as an EventMessage
+	usable  bool // ...and it declares a known format whose columns and row pair
+	cells   []json.RawMessage
+	row     map[string]any
 }
 
 // newEventView decodes raw once for the whole fan-out. Numbers decode as
@@ -347,8 +340,16 @@ func newEventView(raw []byte) *eventView {
 		return ev
 	}
 	ev.decoded = true
-	ev.cells, ev.row, ev.unpairReason = pairRow(ev.evt.Columns, ev.evt.Row)
-	ev.usable = ev.unpairReason == ""
+	// The hub is a second consumer of the same subject as the ingest worker, and
+	// acks independently of it, so a format only the worker refuses would stream
+	// to clients while the worker parks it on the DLQ. Refusing it here keeps the
+	// two readers agreeing on what the bytes mean. Today only a pre-v2 envelope
+	// declares anything else, and it would fail pairing anyway on its empty
+	// column list — this is what holds once a second format exists.
+	if ev.evt.Format != ingest.FormatJSONCompactEachRow {
+		return ev
+	}
+	ev.cells, ev.row, ev.usable = pairRow(ev.evt.Columns, ev.evt.Row)
 	return ev
 }
 
@@ -357,15 +358,15 @@ func newEventView(raw []byte) *eventView {
 // length that disagrees with the column list — because there is then no way to
 // say which value belongs to which column, and a row-filter that cannot read its
 // column must withhold rather than guess.
-func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, byName map[string]any, reason string) {
+func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, byName map[string]any, ok bool) {
 	if len(row) == 0 {
-		return nil, nil, "empty_row"
+		return nil, nil, false
 	}
 	if err := json.Unmarshal(row, &cells); err != nil {
-		return nil, nil, "undecodable_row"
+		return nil, nil, false
 	}
 	if len(cells) != len(cols) {
-		return nil, nil, "length_mismatch"
+		return nil, nil, false
 	}
 	byName = make(map[string]any, len(cols))
 	for i, c := range cols {
@@ -377,17 +378,17 @@ func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, byNam
 		// come from system.columns, where ClickHouse forbids two columns of one
 		// name), so this is defence for an envelope we did not write.
 		if _, dup := byName[c]; dup {
-			return nil, nil, "duplicate_column"
+			return nil, nil, false
 		}
 		dec := json.NewDecoder(bytes.NewReader(cells[i]))
 		dec.UseNumber()
 		var v any
 		if err := dec.Decode(&v); err != nil {
-			return nil, nil, "undecodable_cell"
+			return nil, nil, false
 		}
 		byName[c] = v
 	}
-	return cells, byName, ""
+	return cells, byName, true
 }
 
 // decodeEvent parses raw as a published EventMessage, reporting whether it is one
@@ -458,14 +459,6 @@ func (h *Hub) ReplayProjector(role string, sub *Subscriber) func(raw []byte) []F
 	lastSig := ""
 	return func(raw []byte) []Frame {
 		ev := newEventView(raw)
-		if ev.decoded && !ev.usable {
-			// Same accounting as the live path in Broadcast. Without it a gap-fill
-			// silently returns no frames for a bad envelope, which is precisely the
-			// blind spot this counter exists to remove — and replay is the harder
-			// one to notice, since the client asked for a range and gets a short
-			// answer rather than nothing.
-			h.metric.RowUnpairable(ev.evt.TableName, ev.unpairReason)
-		}
 		plan, ok := planForRole(p, filter, role, ev, KindReplay)
 		if !ok {
 			return nil
