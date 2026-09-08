@@ -9,7 +9,10 @@
 #                     PR templates, editor + agent config) — then the
 #                     Go/SDK suites can skip.
 #   docs=true|false   true when any path feeds the docs-site build: docs/,
-#                     clients/ts/ (the landing page bundles @wavehouse/sdk),
+#                     clients/ts/ (kept deliberately over-inclusive: the docs
+#                     site now pins the PUBLISHED @wavehouse/sdk, so a clients/ts
+#                     change no longer feeds the docs build — failing safe here
+#                     is cheaper than missing a coupling that comes back),
 #                     the workspace lockfile, or the CI build plumbing
 #                     itself (ci.yml / setup-env).
 #

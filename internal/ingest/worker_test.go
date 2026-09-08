@@ -1526,4 +1526,18 @@ func TestRejectPoison_CountedByDisposition(t *testing.T) {
 	w3.ackWg.Wait()
 	assert.Equal(t, map[string]int64{"parked": 1, "dropped": 1}, dispositions(),
 		"a failed park must not be counted as one")
+
+	// The drop side has the same hazard from the other direction: a failed ack
+	// leaves the message in the stream to be redelivered and refused again, so
+	// counting before the ack would report a row as gone forever — the meaning
+	// deployment.md gives "dropped" — once per redelivery, while it is still there.
+	w4, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+	w4.dlqEnabled = func(string) bool { return false }
+	unackable := poison()
+	unackable.DoubleAckErr = errors.New("ack timed out")
+	_, ok = w4.parseMsg(context.Background(), unackable)
+	require.False(t, ok)
+	w4.ackWg.Wait()
+	assert.Equal(t, map[string]int64{"parked": 1, "dropped": 1}, dispositions(),
+		"a failed ack must not be counted as a drop")
 }

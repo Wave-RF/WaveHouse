@@ -207,7 +207,8 @@ Ingest worker pipeline (StartIngestWorker):
   ← JetStream pull consumer (buffer-consumer) on ingest.>
   → Parse the event envelope (an envelope the worker cannot read — malformed JSON,
     an unknown or absent format, columns and row that don't pair — is parked on the
-    DLQ, or acked-and-dropped + counted where the DLQ is off for the table)
+    DLQ, or acked-and-dropped where the DLQ is off for the table; either way
+    counted by wavehouse_ingest_poison_total under its disposition)
   → Batch events per table, bulk INSERT to ClickHouse
     (INSERTs pin date_time_input_format=best_effort — the server default since
     ClickHouse 26.5; see /ingest-pipeline for the basic-vs-best_effort divergence)

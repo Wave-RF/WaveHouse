@@ -689,10 +689,21 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m jetstream.Msg, tableN
 		})
 		return
 	}
-	countPoison(ctx, tableName, reason, "dropped")
 	w.logger.ErrorContext(ctx, "unreadable envelope dropped — the DLQ is disabled for this table, and a message that can never insert must not redeliver forever",
 		"table", tableName, "reason", reason, "detail", detail)
-	w.ackWg.Go(func() { _ = m.DoubleAck(ctx) })
+	// Counted only once the ack lands, for the same reason the parked path waits
+	// on parkOnDLQ's verdict: a failed ack leaves the message in the stream to be
+	// redelivered and refused again, and "dropped" is documented to an operator as
+	// a row that no longer exists anywhere. Counting before the ack would report
+	// that about a row still sitting in the queue, once per redelivery.
+	w.ackWg.Go(func() {
+		if err := m.DoubleAck(ctx); err != nil {
+			w.logger.ErrorContext(ctx, "ack of a dropped unreadable envelope failed, so it stays in the stream and will be refused again",
+				"table", tableName, "reason", reason, "error", err)
+			return
+		}
+		countPoison(ctx, tableName, reason, "dropped")
+	})
 }
 
 // sendToDLQ parks a row that failed its own isolated INSERT. Distinct from
