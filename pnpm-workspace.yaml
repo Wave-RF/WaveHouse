@@ -19,10 +19,15 @@ minimumReleaseAge: 10080
 
 # Exempt our own first-party packages from the release-age cooldown above. The
 # cooldown is a supply-chain defense against compromised third-party releases;
-# packages we publish ourselves (the @wave-rf/* scope) are trusted immediately,
-# and gating them would block consuming a freshly tagged release for 7 days.
+# packages we publish ourselves are trusted immediately, and gating them would
+# block consuming a freshly tagged release for 7 days. Both our scopes belong
+# here: @wave-rf/* are the plugins, and @wavehouse/* is the product — the docs
+# site consumes @wavehouse/sdk from the registry rather than the workspace
+# (see docs/package.json), precisely so it tracks a published release, and the
+# cooldown would otherwise hold that release back a week after every tag.
 minimumReleaseAgeExclude:
   - "@wave-rf/*"
+  - "@wavehouse/*"
 
 # Fail an install when the active Node doesn't satisfy a package's engines.node.
 # Every workspace package — including the published SDK (clients/ts) — declares
