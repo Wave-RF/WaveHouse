@@ -30,12 +30,12 @@ Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table
 
 ```ts
 // Single row → { ok: true } (or { ok: true, duplicate: true } when dedup skips it)
-const { data, error } = await clicks.insert({ page: '/home', button: 'cta' });
+const { data, error } = await clicks.insert({ page: '/home', button: 'cta', score: 42.5 });
 
 // Many rows → one NDJSON request, per-record summary
 const { data } = await clicks.insert([
-  { page: '/home', button: 'cta' },
-  { page: '/about', button: 'nav' },
+  { page: '/home', button: 'cta', score: 42.5 },
+  { page: '/about', button: 'nav', score: 3 },
 ]);
 // data: { ok, total, succeeded, failed, duplicates, results? }
 ```
@@ -50,7 +50,7 @@ Insert pre-formatted NDJSON you already have — a `.ndjson` file, a byte stream
 
 ```ts
 // From a string
-await clicks.insertNDJSON('{"page":"/a"}\n{"page":"/b"}\n');
+await clicks.insertNDJSON('{"page":"/a","button":"cta","score":1}\n{"page":"/b","button":"nav","score":2}\n');
 
 // From a browser <input type="file"> (a File is a Blob)
 await clicks.insertNDJSON(fileInput.files[0]);
