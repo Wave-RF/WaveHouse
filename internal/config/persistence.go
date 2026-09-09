@@ -11,7 +11,7 @@ import (
 // signature: a Docker bind mount whose host directory is owned by root
 // rather than the distroless `nonroot` user. Shared by the boot-time storage
 // error and the data_dir probe (CheckDataDir) that runs right after Load.
-const permissionHint = "if running in a container with a host bind mount, the host directory must be owned by UID 65532 (the `nonroot` user in the distroless image). Try `sudo chown -R 65532:65532 /your/host/path`. Named volumes inherit ownership automatically and don't need this."
+const permissionHint = "if running in a container with a host bind mount, the host directory must be writable by UID 65532 (the `nonroot` user in the distroless image); the usual fix is `sudo chown -R 65532:65532 /your/host/path`. Named volumes inherit ownership automatically and don't need this."
 
 // LogStorageInitError emits an error log for a storage-init failure, with a
 // UID-65532 hint when the failure looks like a permission denial — the

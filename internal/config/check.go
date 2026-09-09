@@ -98,9 +98,13 @@ func CheckDataDir(dir string) error {
 		return fmt.Errorf("data_dir %s is not a directory", dir)
 	}
 
+	// Walk up to the nearest existing entry with Lstat, so a dangling
+	// symlink — dir itself, or a component above it — stops the walk rather
+	// than being skipped over as "does not exist": the probe would otherwise
+	// pass in an unrelated ancestor and NATS would fail on the symlink later.
 	target := dir
 	for {
-		if _, err := os.Stat(target); err == nil {
+		if _, err := os.Lstat(target); err == nil {
 			break
 		}
 		parent := filepath.Dir(target)
@@ -108,6 +112,9 @@ func CheckDataDir(dir string) error {
 			break
 		}
 		target = parent
+	}
+	if _, err := os.Stat(target); err != nil {
+		return fmt.Errorf("data_dir %s: %s is a dangling symlink: %w", dir, target, err)
 	}
 	f, err := os.CreateTemp(target, ".wavehouse-datadir-probe-*")
 	if err != nil {

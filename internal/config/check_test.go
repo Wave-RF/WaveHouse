@@ -92,6 +92,39 @@ func TestCheckDataDir(t *testing.T) {
 		assert.True(t, os.IsNotExist(err), "the check must not create the directory")
 	})
 
+	t.Run("dangling symlink as data_dir", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		link := filepath.Join(root, "data")
+		require.NoError(t, os.Symlink(filepath.Join(root, "gone"), link))
+		err := CheckDataDir(link)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "dangling symlink")
+		assert.Contains(t, err.Error(), link)
+	})
+
+	t.Run("dangling symlink above data_dir", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		link := filepath.Join(root, "mnt")
+		require.NoError(t, os.Symlink(filepath.Join(root, "gone"), link))
+		err := CheckDataDir(filepath.Join(link, "data"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "dangling symlink")
+		assert.Contains(t, err.Error(), link)
+	})
+
+	t.Run("symlink to a real directory passes", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		target := filepath.Join(root, "real")
+		require.NoError(t, os.Mkdir(target, 0o700))
+		link := filepath.Join(root, "data")
+		require.NoError(t, os.Symlink(target, link))
+		require.NoError(t, CheckDataDir(link))
+		require.NoError(t, CheckDataDir(filepath.Join(link, "nested")))
+	})
+
 	t.Run("a file is not a directory", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "data")

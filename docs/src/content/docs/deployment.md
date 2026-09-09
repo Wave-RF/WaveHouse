@@ -206,12 +206,12 @@ volumes:
   - /srv/wavehouse:/app/data
 ```
 
-Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. If `/srv/wavehouse` is owned by `root:root` on the host (the default for a freshly `mkdir`'d directory), the binary refuses to start before it touches the settings directory or ClickHouse — `data_dir` is probed for writability right after the config loads:
+Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. The condition boot enforces is that UID 65532 can **write** to the directory — a freshly `mkdir`'d `root:root` directory at the default mode cannot be, which is the common case, though a root-owned directory with permissive mode bits or an ACL passes. If `/srv/wavehouse` is not writable, the binary refuses to start before it touches the settings directory or ClickHouse — `data_dir` is probed for writability right after the config loads:
 
 ```text wrap=false
 ERROR  check data_dir  error="data_dir /app/data is not writable; if running in a
-       container with a host bind mount, the host directory must be owned by
-       UID 65532 (the `nonroot` user in the distroless image). Try
+       container with a host bind mount, the host directory must be writable by
+       UID 65532 (the `nonroot` user in the distroless image); the usual fix is
        `sudo chown -R 65532:65532 /your/host/path`. ...: permission denied"
 ```
 
