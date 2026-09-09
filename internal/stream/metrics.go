@@ -21,13 +21,12 @@ const (
 // last, and how much is written out. The zero value (a nil *Metrics) is a no-op,
 // so the handler can hold one unconditionally and tests can skip wiring it.
 type Metrics struct {
-	active     metric.Int64UpDownCounter
-	duration   metric.Float64Histogram
-	frames     metric.Int64Counter
-	bytes      metric.Int64Counter
-	dropped    metric.Int64Counter
-	withheld   metric.Int64Counter
-	unpairable metric.Int64Counter
+	active   metric.Int64UpDownCounter
+	duration metric.Float64Histogram
+	frames   metric.Int64Counter
+	bytes    metric.Int64Counter
+	dropped  metric.Int64Counter
+	withheld metric.Int64Counter
 }
 
 // NewMetrics builds the SSE instruments on the global meter provider. Call it
@@ -47,9 +46,7 @@ func NewMetrics() *Metrics {
 		metric.WithDescription("SSE frames dropped to a full subscriber queue (slow consumer)"))
 	withheld, _ := meter.Int64Counter("wavehouse_sse_rows_withheld_total",
 		metric.WithDescription("Event rows withheld from a subscriber by the role's row-level-security filter (including fail-closed evaluations)"))
-	unpairable, _ := meter.Int64Counter("wavehouse_sse_rows_unpairable_total",
-		metric.WithDescription("Event rows withheld from EVERY role because the envelope's columns and row could not be paired (length mismatch, undecodable row, or a repeated column name)"))
-	return &Metrics{active: active, duration: duration, frames: frames, bytes: bytes, dropped: dropped, withheld: withheld, unpairable: unpairable}
+	return &Metrics{active: active, duration: duration, frames: frames, bytes: bytes, dropped: dropped, withheld: withheld}
 }
 
 // ConnOpened records a newly established stream.
@@ -99,19 +96,4 @@ func (m *Metrics) RowWithheld(table, role string) {
 	}
 	m.withheld.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("table", table), attribute.String("role", role)))
-}
-
-// RowUnpairable records an event withheld from every subscriber because its
-// envelope could not be paired into a positional row.
-//
-// Distinct from RowWithheld, which is a policy decision about one subscriber:
-// this is the read-side of the same envelope the worker parks on the DLQ, and
-// without it the stream drops the row silently while the ingest path is loud
-// about the identical message.
-func (m *Metrics) RowUnpairable(table, reason string) {
-	if m == nil {
-		return
-	}
-	m.unpairable.Add(context.Background(), 1,
-		metric.WithAttributes(attribute.String("table", table), attribute.String("reason", reason)))
 }

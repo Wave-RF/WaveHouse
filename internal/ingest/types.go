@@ -17,8 +17,9 @@ const FormatJSONCompactEachRow = "JSONCompactEachRow"
 // Row data travels POSITIONALLY: Row is one JSONCompactEachRow line (a JSON
 // array, no trailing newline) and Columns names its positions in the table's
 // declaration order. The two are only meaningful together — a reader that
-// cannot pair them (a length mismatch, an undecodable row) has no way to map a
-// value to a column and must fail closed rather than guess.
+// cannot pair them (a length mismatch, an undecodable row, a repeated column
+// name) has no way to map a value to a column and must fail closed rather than
+// guess.
 type EventMessage struct {
 	TableName         string          `json:"table_name"`
 	Scope             string          `json:"scope"`

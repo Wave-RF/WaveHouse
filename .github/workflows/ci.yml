@@ -141,7 +141,7 @@ jobs:
 
   # ── Docs site build ────────────────────────────────────────────────
   # Astro site → docs-dist artifact, feeding the two deploy jobs. Pure
-  # pnpm (build-docs → check-docs → build-ts needs no Go toolchain), and
+  # pnpm (build-docs → check-docs, pure pnpm, needs no Go toolchain), and
   # only runs when a docs-affecting file changed — Go binaries are no
   # longer built here: compile breakage is already caught by lint
   # (golangci type-checks every package), the test suites, and the e2e
