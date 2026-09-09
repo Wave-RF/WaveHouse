@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"testing"
 
+	"github.com/ilyakaznacheev/cleanenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,24 +31,37 @@ func TestUnboundEnv(t *testing.T) {
 	assert.Empty(t, UnboundEnv(nil))
 }
 
-// Every env tag on the struct must count as bound — a field added without
-// this walk picking it up would refuse every boot that sets it.
-func TestUnboundEnv_EveryStructTagIsBound(t *testing.T) {
+// Every variable cleanenv itself reads must count as bound — a name the
+// loader honors but this walk misses would refuse every boot that sets it.
+// The oracle is cleanenv's own metadata (GetDescription lists each bound
+// name), not collectEnvTags, so a divergence in tag grammar (comma lists,
+// env-prefix) shows up here rather than in production.
+func TestUnboundEnv_MatchesCleanenv(t *testing.T) {
 	t.Parallel()
+	desc, err := cleanenv.GetDescription(&Config{}, nil)
+	require.NoError(t, err)
+	names := regexp.MustCompile(`(?m)^  (WH_[A-Z0-9_]+) `).FindAllStringSubmatch(desc, -1)
+	require.NotEmpty(t, names)
 	var environ []string
-	for name := range collectAllEnvTags(t) {
-		environ = append(environ, name+"=1")
+	seen := map[string]bool{}
+	for _, m := range names {
+		environ = append(environ, m[1]+"=1")
+		seen[m[1]] = true
 	}
+	require.True(t, seen[EnvSettingsDir])
+	require.True(t, seen["WH_OTEL_TRACES_SAMPLE_RATE"])
 	assert.Empty(t, UnboundEnv(environ))
 }
 
-func collectAllEnvTags(t *testing.T) map[string]bool {
-	t.Helper()
-	tags := map[string]bool{}
-	collectEnvTags(reflect.TypeFor[Config](), tags)
-	require.Contains(t, tags, EnvSettingsDir)
-	require.Contains(t, tags, "WH_OTEL_TRACES_SAMPLE_RATE")
-	return tags
+func TestCollectEnvTags_CommaList(t *testing.T) {
+	t.Parallel()
+	type multi struct {
+		A string `env:"WH_ONE,WH_TWO"`
+		B string `env:""`
+	}
+	got := map[string]bool{}
+	collectEnvTags(reflect.TypeFor[multi](), got)
+	assert.Equal(t, map[string]bool{"WH_ONE": true, "WH_TWO": true}, got)
 }
 
 func TestLoad_RejectsUnboundEnv(t *testing.T) {

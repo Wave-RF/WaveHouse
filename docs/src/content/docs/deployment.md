@@ -186,7 +186,7 @@ On a first-ever run this is expected. On every subsequent run it should be silen
 
 ### Distroless Permission Traps (named volume vs bind mount)
 
-WaveHouse images run as the distroless `nonroot` user (UID 65532). Bind mounts and named volumes interact with this differently, and the distroless image has no shell to `chown` things at runtime — so getting the host side wrong produces a hard-to-read permission error from NATS or Pebble at startup.
+WaveHouse images run as the distroless `nonroot` user (UID 65532). Bind mounts and named volumes interact with this differently, and the distroless image has no shell to `chown` things at runtime — so getting the host side wrong refuses boot in the first lines of the log with a named `data_dir` error and the `chown` remediation attached.
 
 **Named volumes** (the recommended pattern):
 
@@ -206,12 +206,13 @@ volumes:
   - /srv/wavehouse:/app/data
 ```
 
-Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. If `/srv/wavehouse` is owned by `root:root` on the host (the default for a freshly `mkdir`'d directory), the binary fails at startup with a permission error from NATS:
+Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. If `/srv/wavehouse` is owned by `root:root` on the host (the default for a freshly `mkdir`'d directory), the binary refuses to start before it touches the settings directory or ClickHouse — `data_dir` is probed for writability right after the config loads:
 
 ```text wrap=false
-ERROR  mq init failed  error="..."  path=/app/data/nats
-       hint="if running in a container with a host bind mount, the host
-       directory must be owned by UID 65532..."
+ERROR  check data_dir  error="data_dir /app/data is not writable; if running in a
+       container with a host bind mount, the host directory must be owned by
+       UID 65532 (the `nonroot` user in the distroless image). Try
+       `sudo chown -R 65532:65532 /your/host/path`. ...: permission denied"
 ```
 
 The fix is one host-side command before first start:

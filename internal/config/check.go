@@ -27,7 +27,7 @@ func rejectUnboundEnv(environ []string) error {
 	if len(unbound) == 0 {
 		return nil
 	}
-	return fmt.Errorf("unbound environment variable(s): %s — a typo, or a key that moved to the settings directory (%s); unset it, or rename it to a key the Config struct declares", strings.Join(unbound, ", "), EnvSettingsDir)
+	return fmt.Errorf("unbound environment variable(s): %s — a typo, or a key that moved to the settings directory (%s); unset it, or rename it to a key the Config struct declares. On Kubernetes, a Service named wh or wh-* injects WH_SERVICE_HOST, WH_PORT, … into every pod started after it: set enableServiceLinks: false on the pod spec, or rename the Service", strings.Join(unbound, ", "), EnvSettingsDir)
 }
 
 // UnboundEnv returns, sorted, every WH_* name in environ (os.Environ() form,
@@ -53,12 +53,18 @@ func UnboundEnv(environ []string) []string {
 	return out
 }
 
-// collectEnvTags records every env tag in t, recursing into nested structs.
+// collectEnvTags records every name in every env tag in t, recursing into
+// nested structs. It mirrors cleanenv's tag grammar: an env tag is a
+// comma-separated list of names. cleanenv's `env-prefix` tag is NOT
+// mirrored — Config must not use it, or a prefixed variable that cleanenv
+// reads would be refused here; TestUnboundEnv_MatchesCleanenv pins that.
 func collectEnvTags(t reflect.Type, into map[string]bool) {
 	for i := range t.NumField() {
 		f := t.Field(i)
-		if tag := f.Tag.Get("env"); tag != "" {
-			into[tag] = true
+		for _, name := range strings.Split(f.Tag.Get("env"), ",") {
+			if name != "" {
+				into[name] = true
+			}
 		}
 		if f.Type.Kind() == reflect.Struct {
 			collectEnvTags(f.Type, into)
