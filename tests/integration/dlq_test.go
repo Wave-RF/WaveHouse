@@ -53,14 +53,13 @@ func TestDLQ_PopulatedOnIngestWorkerFailure(t *testing.T) {
 	rawTableName := fmt.Sprintf("nonexistent_table_%d", time.Now().UnixNano())
 	safeTableName := query.SafeEncodeNATS(rawTableName)
 
-	evt := map[string]any{
-		"table_name":         rawTableName,
-		"received_timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-		"format":             ingest.FormatJSONCompactEachRow,
-		"columns":            []string{"key"},
-		"row":                []any{"value"},
-	}
-	payload, err := json.Marshal(evt)
+	payload, err := json.Marshal(ingest.EventMessage{
+		TableName:         rawTableName,
+		ReceivedTimestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		Format:            ingest.FormatJSONCompactEachRow,
+		Columns:           []string{"key"},
+		Row:               json.RawMessage(`["value"]`),
+	})
 	require.NoError(t, err)
 
 	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+safeTableName, payload)
@@ -99,14 +98,13 @@ func TestDLQ_PopulatedOnIngestWorkerFailureWithBadName(t *testing.T) {
 	rawTableName := fmt.Sprintf("no table.!@#&*()_=/_`%d", time.Now().UnixNano())
 	safeTableName := query.SafeEncodeNATS(rawTableName)
 
-	evt := map[string]any{
-		"table_name":         rawTableName,
-		"received_timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-		"format":             ingest.FormatJSONCompactEachRow,
-		"columns":            []string{"key"},
-		"row":                []any{"value"},
-	}
-	payload, err := json.Marshal(evt)
+	payload, err := json.Marshal(ingest.EventMessage{
+		TableName:         rawTableName,
+		ReceivedTimestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		Format:            ingest.FormatJSONCompactEachRow,
+		Columns:           []string{"key"},
+		Row:               json.RawMessage(`["value"]`),
+	})
 	require.NoError(t, err)
 
 	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+safeTableName, payload)
