@@ -27,7 +27,7 @@ func rejectUnboundEnv(environ []string) error {
 	if len(unbound) == 0 {
 		return nil
 	}
-	return fmt.Errorf("unbound environment variable(s): %s — a typo, or a key that moved to the settings directory (%s); unset it, or rename it to a key the Config struct declares. On Kubernetes, a Service named wh or wh-* injects WH_SERVICE_HOST, WH_PORT, … into every pod started after it: set enableServiceLinks: false on the pod spec, or rename the Service", strings.Join(unbound, ", "), EnvSettingsDir)
+	return fmt.Errorf("unbound environment variable(s): %s — a typo, or a key that moved to the settings directory (%s); unset it, or rename it to a key the Config struct declares. On Kubernetes, a Service in the pod's namespace named wh or wh-* injects link variables under the WH_ prefix (WH_SERVICE_HOST and WH_PORT for wh, WH_FOO_SERVICE_HOST and WH_FOO_PORT for wh-foo, …) into every pod started after it: set enableServiceLinks: false on the pod spec, or rename the Service", strings.Join(unbound, ", "), EnvSettingsDir)
 }
 
 // unboundEnv returns, sorted, every WH_* name in environ (os.Environ() form,
