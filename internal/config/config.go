@@ -32,6 +32,16 @@ type Config struct {
 // so a config test pins the tag to this constant to prevent drift.
 const EnvSettingsDir = "WH_SETTINGS_DIR"
 
+// EnvConfig names the boot-config file (default: ./config.yaml) and
+// EnvLogLevel the minimum log level. Neither is a Config field — the first
+// locates the file the struct is read from, the second is read by main
+// directly — so they are declared here as the process-level names unboundEnv
+// must not flag.
+const (
+	EnvConfig   = "WH_CONFIG"
+	EnvLogLevel = "WH_LOG_LEVEL"
+)
+
 // Settings locates the hot-reloadable settings directory — the four JSON
 // documents (roles.json, policies.json, pipes.json, config.json) validated by
 // internal/settings. Boot-tier by necessity: it's the pointer the reload
@@ -207,11 +217,17 @@ func (c *Config) Validate() error {
 }
 
 // Load reads config from a YAML file (if it exists) with env var overrides.
-// The YAML is strict: a key the Config struct doesn't declare is an error
-// naming every such key, so a tunable that moved to the settings directory
-// (or a typo) can't be silently ignored. Environment variables can't be
-// checked the same way — the environment always carries unrelated names.
+// Both sources are strict: a YAML key the Config struct doesn't declare, or
+// a WH_* environment variable no field binds, is an error naming every
+// offender, so a tunable that moved to the settings directory (or a typo)
+// can't be silently ignored. The environment always carries unrelated
+// names, so only the WH_ prefix is checked there. Boot is the validator for
+// this half of configuration — there is no dry run; a refused boot is the
+// loud signal.
 func Load(path string) (*Config, error) {
+	if err := rejectUnboundEnv(os.Environ()); err != nil {
+		return nil, err
+	}
 	var cfg Config
 	if _, err := os.Stat(path); err == nil {
 		if err := cleanenv.ReadConfig(path, &cfg); err != nil {

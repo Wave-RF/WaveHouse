@@ -1,5 +1,7 @@
-# This file is strict: a key the server doesn't declare (a typo, or a tunable
-# that moved to the settings directory) refuses to boot and is named.
+# This file is strict, and so is the environment: a key the server doesn't
+# declare (a typo, or a tunable that moved to the settings directory) refuses
+# to boot and is named — whether it arrives as a YAML key here or as a WH_*
+# variable no key binds.
 # Root for embedded state. NATS lives at <data_dir>/nats; Pebble (when dedupe
 # is enabled) lives at <data_dir>/pebble. In a container, this MUST be on a
 # host-backed volume — the relative default is for local binary use only.

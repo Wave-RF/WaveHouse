@@ -186,7 +186,7 @@ On a first-ever run this is expected. On every subsequent run it should be silen
 
 ### Distroless Permission Traps (named volume vs bind mount)
 
-WaveHouse images run as the distroless `nonroot` user (UID 65532). Bind mounts and named volumes interact with this differently, and the distroless image has no shell to `chown` things at runtime — so getting the host side wrong produces a hard-to-read permission error from NATS or Pebble at startup.
+WaveHouse images run as the distroless `nonroot` user (UID 65532). Bind mounts and named volumes interact with this differently, and the distroless image has no shell to `chown` things at runtime — so getting the host side of `/app/data` wrong refuses boot in the first lines of the log with a named `data_dir` error and the `chown` remediation attached. `/app/settings` fails differently: the server only reads it, so a mount it cannot read, or that does not validate, is a settings-validation error rather than a `data_dir` one.
 
 **Named volumes** (the recommended pattern):
 
@@ -206,12 +206,13 @@ volumes:
   - /srv/wavehouse:/app/data
 ```
 
-Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. If `/srv/wavehouse` is owned by `root:root` on the host (the default for a freshly `mkdir`'d directory), the binary fails at startup with a permission error from NATS:
+Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. The condition boot enforces is that UID 65532 can **write** to the directory — a freshly `mkdir`'d `root:root` directory at the default mode cannot be, which is the common case, though a root-owned directory with permissive mode bits or an ACL passes. If `/srv/wavehouse` is not writable, the binary refuses to start before it touches the settings directory or ClickHouse — `data_dir` is probed for writability right after the config loads:
 
 ```text wrap=false
-ERROR  mq init failed  error="..."  path=/app/data/nats
-       hint="if running in a container with a host bind mount, the host
-       directory must be owned by UID 65532..."
+ERROR  check data_dir  error="data_dir /app/data is not writable; if running in a
+       container with a host bind mount, the host directory must be writable by
+       UID 65532 (the `nonroot` user in the distroless image); the usual fix is
+       `sudo chown -R 65532:65532 /your/host/path`. ...: permission denied"
 ```
 
 The fix is one host-side command before first start:
@@ -305,6 +306,8 @@ readinessProbe:
   httpGet: { path: /readyz, port: 8080 }
 ```
 
+Don't name WaveHouse's own Service `wh` or `wh-*`. kubelet injects `WH_SERVICE_HOST` and friends into every pod in the namespace started after such a Service exists, WaveHouse's own pods included, and the strict environment check refuses them — not at deploy time, but on the next restart. Any Service in the namespace named that way has the same effect; `enableServiceLinks: false` on the pod spec turns the injection off. See [Configuration → Loading Order](/configuration#loading-order).
+
 Until `startupProbe` succeeds, kubelet doesn't run `livenessProbe` or `readinessProbe` against the pod — so a slow or temporarily-unreachable ClickHouse can't restart-loop the pod via the liveness path. Size `failureThreshold` to your expected worst-case CH boot time; the default 30 × 10s = 5min is generous and works for compose-on-NAS-style deployments where CH and WaveHouse can race during a host reboot.
 
 ## Behind a reverse proxy
@@ -339,10 +342,11 @@ This affects the streaming surface too, and more quietly. SSE gap-fill (`?since=
 
 On the worker side the outcome depends on the DLQ. **With the DLQ enabled for the table**, the message is parked on `dlq.{table}` with `X-DLQ-*` headers and is recoverable by hand — but re-ingest each parked envelope's inner `data` object as a fresh `POST /v1/ingest`; republishing the envelope as-is onto `ingest.{table}` fails the same `format` check and simply re-parks it. **With the DLQ switched off for the table, it is permanently lost**: acked and dropped with an `ERROR` log and a `wavehouse_ingest_poison_total` increment carrying `disposition="dropped"`, unrecoverable from either the ingest stream or the DLQ, because a message that can never insert must not redeliver forever. Draining first is cheaper than a manual replay, and it is the only option at all where the DLQ is off.
 
-Two audits belong **before** the drain, because neither announces itself afterwards:
+Three audits belong **before** the drain, because none of them announces itself afterwards:
 
 - **`Nullable(T) DEFAULT …` columns now store `NULL` where they took their default.** A positional row has one slot per insertable column and no way to say *absent*, so a key the record omits rides as an explicit `null`. `input_format_null_as_default=1` turns that back into the default for a **non-nullable** column, but ClickHouse stores `NULL` on a nullable one whatever the setting says — only an absent key ever took the default. Following this runbook exactly still changes what lands in those columns, silently. See [the ingest note](/ingest-pipeline#the-journey-of-one-event).
 - **Policy `check` blocks are now validated against the table.** A `check` naming a column the table lacks, one it computes (`MATERIALIZED`/`ALIAS`), or an `EPHEMERAL` one is a per-record `403` on *every* insert by that role. `wavehouse validate` cannot catch it — it never sees the ClickHouse schema — so audit them against their tables first. See [Access control → Insert checks](/access-control#insert-checks).
+- **Every `WH_*` variable the binary does not bind refuses boot.** The old binary ignored a variable it did not read; the new one names every unbound one and exits before it opens the queue, so a pod spec or compose file that still carries one comes back from the upgrade as a container that will not start. Diff the environment against the [Configuration Reference](/configuration) first: a `WH_*` variable that is not in its tables is unbound, and whatever it used to configure now lives in the [settings directory](/settings-directory) or is gone. A Kubernetes Service in the pod's namespace named `wh` or `wh-*` counts too: it injects link variables under the `WH_` prefix (`WH_SERVICE_HOST` and `WH_PORT` for `wh`, `WH_FOO_SERVICE_HOST` and `WH_FOO_PORT` for `wh-foo`), so set `enableServiceLinks: false` on the pod spec.
 
 To drain before upgrading:
 

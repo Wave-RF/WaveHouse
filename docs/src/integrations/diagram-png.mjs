@@ -109,8 +109,8 @@ export function diagramPng(options = {}) {
     name: "wh-diagram-png",
     hooks: {
       "astro:build:done": async ({ dir, pages, logger }) => {
-        if (process.env.WH_SKIP_DIAGRAM_PNG === "1") {
-          logger.info("skipped (WH_SKIP_DIAGRAM_PNG=1)");
+        if (process.env.DOCS_SKIP_DIAGRAM_PNG === "1") {
+          logger.info("skipped (DOCS_SKIP_DIAGRAM_PNG=1)");
           return;
         }
         try {
