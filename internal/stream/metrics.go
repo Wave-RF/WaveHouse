@@ -14,6 +14,7 @@ const (
 	KindKeepalive = "keepalive" // wheel keepalive comment
 	KindEvent     = "event"     // live event off the hub
 	KindReplay    = "replay"    // historical event from gap-fill on (re)connect
+	KindSchema    = "schema"    // column list for the rows that follow
 )
 
 // Metrics records SSE stream activity: how many streams are open, how long they

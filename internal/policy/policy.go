@@ -549,7 +549,7 @@ func navigateClaims(claims map[string]any, parts []string) any {
 // This is the single source of truth for the per-column decision on BOTH sides.
 // Every path defers to it: the query builder checks every column a structured
 // query references against it (internal/query.Build), the stream path's
-// filterColumns drops any event column it rejects, and ingest rejects any
+// projectIndices drops any event column it rejects, and ingest rejects any
 // record field it rejects. Keep it the one decision function so the surfaces can never
 // drift apart.
 func (rp *ResolvedPermissions) IsColumnAllowed(col string, insert bool) bool {
@@ -633,7 +633,7 @@ func (rp *ResolvedPermissions) CheckClauses() (map[string]any, bool) {
 // source of truth for expanding an unqualified "all columns" read (the SQL the
 // builder would otherwise emit as SELECT *) into the concrete set a role is
 // permitted to see — the projection counterpart to the stream path's
-// filterColumns. A nil receiver (no policy) returns cols unchanged.
+// projectIndices. A nil receiver (no policy) returns cols unchanged.
 func (rp *ResolvedPermissions) AllowedProjection(cols []string) []string {
 	if rp == nil {
 		return cols

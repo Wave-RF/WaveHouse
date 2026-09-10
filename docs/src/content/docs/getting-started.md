@@ -93,6 +93,10 @@ curl -N "http://localhost:8080/v1/stream?table=clicks"
 curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z"
 ```
 
+Rows arrive **positionally**, so raw `curl` output looks like `"row":["/home","signup"]` rather than named fields. The stream sends an `event: schema` frame before the first row and again when the column list changes, and a raw client must pair each row against the **most recent** frame rather than the first.
+
+That re-announcement is not guaranteed in one case: after a gap-fill across a column change, live rows can arrive without a fresh frame ([#543](https://github.com/Wave-RF/WaveHouse/issues/543)). Drop a row whose length disagrees with the last announced list rather than zipping it, and reconnect to resynchronize — an arity check cannot see a same-length change such as a `RENAME COLUMN`. See [the wire format](/api#get-v1stream--server-sent-events-stream) for the frame sequence and the full rule; the [TypeScript SDK](/sdk/streaming) does all of this for you.
+
 ## Troubleshooting first runs
 
 The handful of things that most often trip up a first session — each is expected behavior with a quick fix:

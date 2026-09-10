@@ -58,12 +58,12 @@ deno add npm:@wavehouse/sdk
 </script>
 ```
 
-Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`); jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For pages that can't use ES modules, the bundled IIFE build at `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag. Streaming runs on `fetch`, so it needs no polyfill either way. A bare CDN URL tracks the latest published release; use a range (`@0`, `@0.1`) to float within a major or minor, or the `@dev` tag for unreleased builds from `main` (see [Cutting a release](/development#cutting-a-release)).
+Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`); jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For pages that can't use ES modules, the bundled IIFE build at `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag. Streaming runs on `fetch`, so it needs no polyfill either way. A bare CDN URL tracks the latest published release; use a range (`@0`, `@0.1`) to float within a major or minor, or the `@dev` tag for unreleased builds from `main` (see [Cutting a release](/development#cutting-a-release)). The SDK and the server share the SSE wire protocol, so pin them as a **pair** — see [Upgrade the SDK and the server together](/sdk/streaming).
 
   </TabItem>
 </Tabs>
 
-The package works in any bundler-based framework — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — via `import { createClient } from '@wavehouse/sdk'`, and with no build step at all via the CDN tab above.
+The package works in any bundler-based framework — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — via `import { createClient } from '@wavehouse/sdk'`, and with no build step at all via the CDN tab above. The SDK and the server share the SSE wire protocol, so move them as a **pair** — a skewed pair delivers no usable rows and raises no error ([details](/sdk/streaming)).
 
 ## Imports & Runtimes
 
@@ -114,7 +114,7 @@ import { createClient } from '@wavehouse/sdk';
 import { createClient } from 'https://esm.sh/@wavehouse/sdk';
 ```
 
-Pin a version for production: `https://esm.sh/@wavehouse/sdk@0.1.0`. jsDelivr (`https://cdn.jsdelivr.net/npm/@wavehouse/sdk/+esm`) and unpkg (`https://unpkg.com/@wavehouse/sdk?module`) serve the same ES module.
+Pin a version for production: `https://esm.sh/@wavehouse/sdk@0.1.0`. jsDelivr (`https://cdn.jsdelivr.net/npm/@wavehouse/sdk/+esm`) and unpkg (`https://unpkg.com/@wavehouse/sdk?module`) serve the same ES module. The SDK and the server share the SSE wire protocol, so pin them as a **pair** — see [Upgrade the SDK and the server together](/sdk/streaming).
 
   </TabItem>
 </Tabs>
