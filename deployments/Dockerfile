@@ -29,7 +29,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # subdirectories itself when NATS/Pebble open their stores — pre-creating
 # them here would buy nothing and obscures intent. Named-volume copy-up runs
 # against `/app/data` regardless; bind mounts mask the image dir entirely
-# and rely on host-side ownership matching UID 65532.
+# and rely on the host directory being writable by UID 65532.
 #
 # /app/settings is the settings-directory mount point, pre-created but
 # deliberately EMPTY: the image ships no settings, same as it ships no

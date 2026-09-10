@@ -7,7 +7,7 @@
 # Only the parents are pre-created — the binary mkdirs `nats/` and `pebble/`
 # subdirs itself when NATS/Pebble open their stores. Named-volume copy-up
 # runs against `/app/data`; bind mounts mask the image dir entirely and
-# require host-side ownership matching UID 65532.
+# require the host directory to be writable by UID 65532.
 
 # Pin to the builder's native arch via $BUILDPLATFORM. Without this, a
 # cross-arch build (e.g. linux/arm64 from an amd64 builder) would default

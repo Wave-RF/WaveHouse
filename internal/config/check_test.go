@@ -27,8 +27,8 @@ func TestUnboundEnv(t *testing.T) {
 		"WHATEVER=1",                   // prefix is WH_, not WH
 		"NOT_WH_FOO=1",
 	}
-	assert.Equal(t, []string{"WH_", "WH_DEDUPE_ENABLED", "WH_SERVER_PROT"}, UnboundEnv(environ))
-	assert.Empty(t, UnboundEnv(nil))
+	assert.Equal(t, []string{"WH_", "WH_DEDUPE_ENABLED", "WH_SERVER_PROT"}, unboundEnv(environ))
+	assert.Empty(t, unboundEnv(nil))
 }
 
 // Every variable cleanenv itself reads must count as bound — a name the
@@ -50,7 +50,7 @@ func TestUnboundEnv_MatchesCleanenv(t *testing.T) {
 	}
 	require.True(t, seen[EnvSettingsDir])
 	require.True(t, seen["WH_OTEL_TRACES_SAMPLE_RATE"])
-	assert.Empty(t, UnboundEnv(environ))
+	assert.Empty(t, unboundEnv(environ))
 }
 
 func TestCollectEnvTags_CommaList(t *testing.T) {
@@ -144,6 +144,21 @@ func TestCheckDataDir(t *testing.T) {
 		err := CheckDataDir(dir)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "is not writable")
+		assert.Contains(t, err.Error(), "65532")
+	})
+
+	t.Run("unsearchable parent carries the UID hint", func(t *testing.T) {
+		// os.Stat fails with EACCES, not ErrNotExist, so this never reaches
+		// the write probe: the hint must ride on the Stat arm.
+		if os.Getuid() == 0 {
+			t.Skip("root searches anywhere")
+		}
+		parent := t.TempDir()
+		require.NoError(t, os.Chmod(parent, 0o600))
+		t.Cleanup(func() { _ = os.Chmod(parent, 0o700) }) //nolint:gosec // G302: restore so TempDir cleanup works
+		err := CheckDataDir(filepath.Join(parent, "data"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "is not accessible")
 		assert.Contains(t, err.Error(), "65532")
 	})
 

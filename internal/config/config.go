@@ -35,7 +35,7 @@ const EnvSettingsDir = "WH_SETTINGS_DIR"
 // EnvConfig names the boot-config file (default: ./config.yaml) and
 // EnvLogLevel the minimum log level. Neither is a Config field — the first
 // locates the file the struct is read from, the second is read by main
-// directly — so they are declared here as the process-level names UnboundEnv
+// directly — so they are declared here as the process-level names unboundEnv
 // must not flag.
 const (
 	EnvConfig   = "WH_CONFIG"

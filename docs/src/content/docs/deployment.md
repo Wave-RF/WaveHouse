@@ -186,7 +186,7 @@ On a first-ever run this is expected. On every subsequent run it should be silen
 
 ### Distroless Permission Traps (named volume vs bind mount)
 
-WaveHouse images run as the distroless `nonroot` user (UID 65532). Bind mounts and named volumes interact with this differently, and the distroless image has no shell to `chown` things at runtime — so getting the host side wrong refuses boot in the first lines of the log with a named `data_dir` error and the `chown` remediation attached.
+WaveHouse images run as the distroless `nonroot` user (UID 65532). Bind mounts and named volumes interact with this differently, and the distroless image has no shell to `chown` things at runtime — so getting the host side of `/app/data` wrong refuses boot in the first lines of the log with a named `data_dir` error and the `chown` remediation attached. `/app/settings` fails differently: the server only reads it, so a mount it cannot read, or that does not validate, is a settings-validation error rather than a `data_dir` one.
 
 **Named volumes** (the recommended pattern):
 
@@ -340,10 +340,11 @@ This affects the streaming surface too, and more quietly. SSE gap-fill (`?since=
 
 On the worker side the outcome depends on the DLQ. **With the DLQ enabled for the table**, the message is parked on `dlq.{table}` with `X-DLQ-*` headers and is recoverable by hand — but re-ingest each parked envelope's inner `data` object as a fresh `POST /v1/ingest`; republishing the envelope as-is onto `ingest.{table}` fails the same `format` check and simply re-parks it. **With the DLQ switched off for the table, it is permanently lost**: acked and dropped with an `ERROR` log and a `wavehouse_ingest_poison_total` increment carrying `disposition="dropped"`, unrecoverable from either the ingest stream or the DLQ, because a message that can never insert must not redeliver forever. Draining first is cheaper than a manual replay, and it is the only option at all where the DLQ is off.
 
-Two audits belong **before** the drain, because neither announces itself afterwards:
+Three audits belong **before** the drain, because none of them announces itself afterwards:
 
 - **`Nullable(T) DEFAULT …` columns now store `NULL` where they took their default.** A positional row has one slot per insertable column and no way to say *absent*, so a key the record omits rides as an explicit `null`. `input_format_null_as_default=1` turns that back into the default for a **non-nullable** column, but ClickHouse stores `NULL` on a nullable one whatever the setting says — only an absent key ever took the default. Following this runbook exactly still changes what lands in those columns, silently. See [the ingest note](/ingest-pipeline#the-journey-of-one-event).
 - **Policy `check` blocks are now validated against the table.** A `check` naming a column the table lacks, one it computes (`MATERIALIZED`/`ALIAS`), or an `EPHEMERAL` one is a per-record `403` on *every* insert by that role. `wavehouse validate` cannot catch it — it never sees the ClickHouse schema — so audit them against their tables first. See [Access control → Insert checks](/access-control#insert-checks).
+- **Every `WH_*` variable the binary no longer reads refuses boot.** The tunables that moved to the settings directory this release — the ClickHouse wiring other than the password, `dedupe.*`, `dlq.*`, `stream.*`, `mq.*`, `query.*`, `schema.*`, `cors.*`, `auth.role_claim`, and the old policy-file and pipes-directory paths — used to be `WH_*` variables. The old binary ignored a leftover; the new one names every variable it does not bind and exits before it opens the queue, so a pod spec or compose file that still carries one comes back from the upgrade as a container that will not start. Diff the environment against the [Configuration Reference](/configuration) first, and move each leftover to its [`config.json` key](/settings-directory#configjson-keys) or drop it. A Kubernetes Service named `wh` or `wh-*` counts too: its injected `WH_SERVICE_HOST` and `WH_PORT` link variables need `enableServiceLinks: false` on the pod spec.
 
 To drain before upgrading:
 
