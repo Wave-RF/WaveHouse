@@ -1,21 +1,25 @@
 //go:build integration
 
 // Package tests contains integration tests for WaveHouse. The package brings
-// up a single ClickHouse testcontainer + in-process embedded NATS + wired
-// API server in TestMain, then exposes that environment to every test in the
-// package via env(). Each test creates its own ClickHouse table for data
+// up a single ClickHouse testcontainer and, against it, the production wiring
+// (app.New: embedded NATS, ingest worker, sweeper, hub, the API server) in
+// TestMain, then exposes that environment to every test in the package via
+// env(). Each test creates its own ClickHouse table for data
 // isolation; the shared infra avoids the per-test container churn that drove
 // flakes and slow runs in the previous monolithic file.
 package tests
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
+	"io"
+	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -26,16 +30,11 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/Wave-RF/WaveHouse/internal/api"
-	"github.com/Wave-RF/WaveHouse/internal/auth"
-	"github.com/Wave-RF/WaveHouse/internal/cache"
-	"github.com/Wave-RF/WaveHouse/internal/chconn"
+	"github.com/Wave-RF/WaveHouse/internal/app"
+	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
-	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"github.com/Wave-RF/WaveHouse/internal/stream"
-	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 )
 
 const (
@@ -49,7 +48,7 @@ type testEnv struct {
 	chConn     driver.Conn
 	chHTTPURL  string
 	embeddedMQ *mq.EmbeddedNATS
-	server     *httptest.Server
+	baseURL    string // the wired API server, e.g. http://127.0.0.1:41234
 	registry   *discovery.SchemaRegistry
 }
 
@@ -116,12 +115,11 @@ func TestMain(m *testing.M) {
 	os.Exit(exit)
 }
 
-// setup brings up the shared testcontainer + embedded NATS + wired server.
-// Returns a non-zero code on any failure plus a cleanup func that is always
-// safe to call (it tracks which resources actually started).
+// setup brings up the shared testcontainer and runs the wired app against
+// it. Returns a non-zero code on any failure plus a cleanup func that is
+// always safe to call (it tracks which resources actually started).
 func setup() (int, func()) {
 	ctx := context.Background()
-	logger := slog.Default()
 
 	cleanups := newCleanupStack()
 	cleanup := func() { cleanups.run() }
@@ -138,64 +136,140 @@ func setup() (int, func()) {
 		_ = ch.container.Terminate(context.Background())
 	})
 
-	// Embedded NATS lives in-process — no testcontainer needed. Production
-	// uses the same in-process server, so the integration tests exercise
-	// the real wiring rather than a NATS Docker image we never ship with.
-	embeddedMQ, err := mq.NewEmbedded(mustTempDir(), 10*1024*1024, testutil.NopLogger())
+	settingsDir, err := writeTestSettings(ch)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "integration setup: embedded nats: %v\n", err)
-		return 1, cleanup
-	}
-	cleanups.push(func() { _ = embeddedMQ.Close() })
-
-	js := embeddedMQ.JetStream()
-	if err := api.EnsureDLQStream(ctx, js, 1024*1024); err != nil {
-		fmt.Fprintf(os.Stderr, "integration setup: ensure dlq: %v\n", err)
+		fmt.Fprintf(os.Stderr, "integration setup: settings: %v\n", err)
 		return 1, cleanup
 	}
 
-	registry := discovery.NewSchemaRegistry(ch.conn, func() string { return testCHDatabase }, func() time.Duration { return time.Minute }, logger)
-	if err := registry.Refresh(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "integration setup: schema refresh: %v\n", err)
-		return 1, cleanup
-	}
-
-	localCache, err := cache.NewLocal(1 << 30) // 1 GB
+	// The wired app on a harness listener: the same construction the binary
+	// uses (embedded NATS in-process, the ingest worker, sweeper, hub bridge,
+	// every handler), so the suite exercises the real wiring rather than a
+	// hand-built subset that drifts from it.
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "integration setup: cache initialization: %v\n", err)
+		fmt.Fprintf(os.Stderr, "integration setup: listen: %v\n", err)
 		return 1, cleanup
 	}
-	cleanups.push(func() { _ = localCache.Close() })
-
-	if _, err := ingest.StartIngestWorker(
-		ctx,
-		embeddedMQ.NatsConn(),
-		localCache,
-		func() chconn.Target {
-			return chconn.Target{URL: ch.httpURL(), Username: testCHUser, Password: testCHPassword, Database: testCHDatabase}
-		},
-		nil,
-	); err != nil {
-		fmt.Fprintf(os.Stderr, "integration setup: ingest worker: %v\n", err)
-
-		return 1, cleanup
+	cfg := &config.Config{
+		DataDir:    mustTempDir(),
+		Server:     config.Server{ShutdownTimeout: 10},
+		ClickHouse: config.ClickHouse{Password: testCHPassword},
+		Cache:      config.Cache{L1MaxCost: 1 << 30}, // 1 GB
+		Settings:   config.Settings{Dir: settingsDir},
 	}
-
-	server, err := buildServer(ch, embeddedMQ, registry, logger)
+	a, err := app.New(ctx, app.Options{Config: cfg, Listener: ln})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "integration setup: build server: %v\n", err)
+		_ = ln.Close()
+		fmt.Fprintf(os.Stderr, "integration setup: app: %v\n", err)
 		return 1, cleanup
 	}
-	cleanups.push(func() { server.Close() })
+	runCtx, stop := context.WithCancel(ctx)
+	runDone := make(chan error, 1)
+	go func() { runDone <- a.Run(runCtx) }()
+	cleanups.push(func() {
+		stop()
+		if err := <-runDone; err != nil {
+			fmt.Fprintf(os.Stderr, "integration teardown: run: %v\n", err)
+		}
+		_ = a.Close()
+	})
+
+	baseURL := "http://" + ln.Addr().String()
+	// Boot tolerates an unreachable ClickHouse (degraded, retrying), but the
+	// suite must not: wait for the sticky /livez, which turns 200 only once
+	// schema discovery has succeeded.
+	if err := waitForLive(ctx, baseURL, 30*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "integration setup: %v\n", err)
+		return 1, cleanup
+	}
 
 	sharedEnv = &testEnv{
 		chConn:     ch.conn,
 		chHTTPURL:  ch.httpURL(),
-		embeddedMQ: embeddedMQ,
-		server:     server,
-		registry:   registry,
+		embeddedMQ: a.MQ(),
+		baseURL:    baseURL,
+		registry:   a.Registry(),
 	}
 	return 0, cleanup
+}
+
+// writeTestSettings materializes the embedded seed with the ClickHouse block
+// pointed at the testcontainer and a dev-style policy: default_role is the
+// admin role, so the suite's plain unauthenticated requests exercise
+// functionality as a privileged caller and can hit admin-gated endpoints
+// without minting JWTs. Auth enforcement is covered by the internal/auth
+// unit tests and the e2e SDK suite. The stream budget is shrunk to 1 GiB
+// like the e2e fixture so the scratch directory stays small.
+func writeTestSettings(ch *chInstance) (string, error) {
+	files, err := settings.Seed()
+	if err != nil {
+		return "", err
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(files[settings.FileConfig], &doc); err != nil {
+		return "", fmt.Errorf("seed config.json: %w", err)
+	}
+	patch := map[string]any{
+		"clickhouse": map[string]any{
+			"addr": ch.nativeAddr(), "http_port": mustAtoi(ch.httpPort), "http_scheme": "http",
+			"database": testCHDatabase, "username": testCHUser, "query_timeout": 30,
+		},
+		"mq": map[string]any{"max_bytes_gb": 1},
+	}
+	for key, val := range patch {
+		if doc[key], err = json.Marshal(val); err != nil {
+			return "", err
+		}
+	}
+	if files[settings.FileConfig], err = json.MarshalIndent(doc, "", "  "); err != nil {
+		return "", err
+	}
+	files[settings.FileRoles] = []byte(`{"roles": ["admin"]}`)
+	files[settings.FilePolicies] = []byte(`{"default_role": "admin"}`)
+
+	dir := mustTempDir()
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			return "", err
+		}
+	}
+	return dir, nil
+}
+
+// waitForLive polls /livez until it returns 200 or the timeout elapses,
+// reporting the last response so a degraded boot's diagnostic surfaces.
+func waitForLive(ctx context.Context, baseURL string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	last := "no response"
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/livez", nil)
+		if err != nil {
+			return err
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+			last = fmt.Sprintf("%d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		} else {
+			last = err.Error()
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("server not live after %s: %s", timeout, last)
+}
+
+func mustAtoi(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		panic(fmt.Sprintf("integration setup: port %q is not numeric: %v", s, err))
+	}
+	return n
 }
 
 // chInstance bundles a ClickHouse testcontainer with the connection + ports
@@ -302,50 +376,8 @@ func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Dura
 	}
 }
 
-// buildServer wires the same handler set as cmd/wavehouse/main.go but
-// against the test ClickHouse + embedded NATS. There is no auth on/off switch
-// anymore, so the test AuthMW stamps every request with the admin role — the
-// integration suite exercises functionality as a privileged caller and can hit
-// admin-gated endpoints without minting JWTs. Auth-enforcement coverage lives
-// in the internal/auth unit tests and the e2e SDK suite.
-//
-// The RequireAdmin gate resolves that stamped role against PolicySource, so the
-// server is wired with an in-memory policy whose admin_role is "admin". A nil
-// store would deny every admin-gated route (IsAdmin(nil) is false by design).
-func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, logger *slog.Logger) (*httptest.Server, error) {
-	js := embeddedMQ.JetStream()
-
-	policyStore := policy.Static(&policy.Policy{AdminRole: "admin"})
-	streamHub := stream.NewHub(policyStore, registry, nil)
-
-	deps := api.Dependencies{
-		Ingest: api.NewIngestHandler(registry, embeddedMQ, logger),
-		// /v1/ops/query proxies straight to ClickHouse's HTTP interface,
-		// so the handler needs the HTTP URL + creds rather than the
-		// native-protocol driver.Conn other handlers use.
-		Query: api.NewQueryHandler(func() chconn.Target {
-			return chconn.Target{URL: ch.httpURL(), Username: testCHUser, Password: testCHPassword, Database: testCHDatabase}
-		}, func() time.Duration { return 30 * time.Second }),
-		SSE:          api.NewStreamHandler(streamHub, js),
-		Health:       api.NewHealthHandler(ch.conn),
-		Schema:       api.NewSchemaHandler(registry),
-		DLQ:          api.NewDLQHandler(js, logger),
-		PolicySource: policyStore,
-		AuthMW: func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				next.ServeHTTP(w, r.WithContext(auth.WithRole(r.Context(), "admin")))
-			})
-		},
-		JS:     js,
-		Logger: logger,
-	}
-
-	server := httptest.NewServer(api.NewRouter(deps))
-	return server, nil
-}
-
 func mustTempDir() string {
-	dir, err := os.MkdirTemp("", "wavehouse-it-nats-")
+	dir, err := os.MkdirTemp("", "wavehouse-it-")
 	if err != nil {
 		panic(fmt.Sprintf("integration setup: temp dir: %v", err))
 	}

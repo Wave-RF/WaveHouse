@@ -43,7 +43,7 @@ type Dependencies struct {
 	CORSOrigins func() []string
 	Logger      *slog.Logger
 	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
-	// endpoint (Prometheus convention). Wired by main.go from the OTel Prometheus
+	// endpoint (Prometheus convention). Wired by internal/app from the OTel Prometheus
 	// exporter when observability.metrics.prometheus.enabled is true AND port is 0.
 	MetricsHandler http.Handler
 	MetricsPath    string
@@ -117,7 +117,7 @@ func NewRouter(deps Dependencies) http.Handler {
 
 	// Prometheus scrape endpoint — wired only when prometheus.enabled is true
 	// AND prometheus.port is 0 (mount on this router). When prometheus.port
-	// is non-zero, main.go runs a dedicated listener instead and this is nil.
+	// is non-zero, internal/app runs a dedicated listener instead and this is nil.
 	if deps.MetricsHandler != nil && deps.MetricsPath != "" {
 		r.Method(http.MethodGet, deps.MetricsPath, deps.MetricsHandler)
 	}

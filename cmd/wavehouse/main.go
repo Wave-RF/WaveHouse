@@ -2,32 +2,17 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
-	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/api"
-	"github.com/Wave-RF/WaveHouse/internal/auth"
-	"github.com/Wave-RF/WaveHouse/internal/cache"
-	"github.com/Wave-RF/WaveHouse/internal/chconn"
+	"github.com/Wave-RF/WaveHouse/internal/app"
 	"github.com/Wave-RF/WaveHouse/internal/config"
-	"github.com/Wave-RF/WaveHouse/internal/dedupe"
-	"github.com/Wave-RF/WaveHouse/internal/discovery"
-	"github.com/Wave-RF/WaveHouse/internal/ingest"
-	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/observability"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"github.com/Wave-RF/WaveHouse/internal/settings"
-	"github.com/Wave-RF/WaveHouse/internal/stream"
 )
 
 // Pre-populated build info variables, set via ldflags by the Makefile and by
@@ -124,7 +109,10 @@ func main() {
 			os.Exit(2)
 		}
 	}
-	os.Exit(run())
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	code := run(ctx)
+	stop()
+	os.Exit(code)
 }
 
 func printUsage(w io.Writer) {
@@ -140,11 +128,14 @@ Run 'wavehouse <command> -h' for command-specific help.
 `, config.EnvSettingsDir)
 }
 
-// run executes the binary and returns a process exit code. Using a
-// separate function (rather than os.Exit directly in main) ensures deferred
-// cleanups — especially OTEL flush — still run before the process exits.
-func run() int {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+// run boots the server and blocks until ctx is cancelled (SIGINT/SIGTERM)
+// or a component fails, returning the process exit code. A separate function
+// (rather than os.Exit directly in main) so the deferred cleanup — especially
+// the OTel flush — still runs before the process exits.
+func run(ctx context.Context) int {
+	logLevel := &slog.LevelVar{}
+	logLevel.Set(logLevelFromEnv())
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
 
 	logger.Info("starting WaveHouse", "version", Version, "build_time", BuildTime, "git_commit", GitCommit)
@@ -153,7 +144,6 @@ func run() int {
 	if p := os.Getenv(config.EnvConfig); p != "" {
 		cfgPath = p
 	}
-
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		logger.Error("load config", "error", err)
@@ -170,493 +160,40 @@ func run() int {
 		return 1
 	}
 
-	// Settings directory — the hot-reloadable half of configuration (dedupe,
-	// dlq, query, schema, stream, cors — see settings.TenantConfig). Required:
-	// config.Validate already
-	// rejected an empty settings.dir, and an invalid directory refuses boot. The binary carries no
-	// compiled defaults; `wavehouse bootstrap` writes the seed. A *reload*
-	// of an invalid directory merely keeps the previous snapshot.
-	settingsStore, _ := settings.Open(cfg.Settings.Dir, logger)
-	if settingsStore == nil {
-		logger.Error("settings directory invalid, refusing to start — findings above; `wavehouse validate` reproduces them, `wavehouse bootstrap` writes a starter directory", "dir", cfg.Settings.Dir)
-		return 1
-	}
-
-	// Validate auth posture. There is no on/off switch — the JWT middleware
-	// always runs. With neither a secret (boot config) nor a JWKS URL
-	// (settings) no token can validate, so every request falls back to the
-	// policy default_role (a pure public deployment). That's a valid posture,
-	// so warn rather than fail.
-	switch {
-	case cfg.Auth.JWTSecret == "" && settingsStore.Auth().JWKSURL == "":
-		logger.Warn("no auth.jwt_secret (boot config) or auth.jwks_url (settings) set: no token can be validated, so every request resolves to the policy default_role (public access)")
-	case cfg.Auth.JWTSecret == "change-me-in-production":
-		logger.Warn("WH_AUTH_JWT_SECRET is using the default insecure value")
-	}
-
-	cfg.Auth.OperatorKey = strings.TrimSpace(cfg.Auth.OperatorKey)
-	if cfg.Auth.OperatorKey == "" {
-		logger.Warn("no auth.operator_key set: if you lose the JWT secret, lose control of the JWKS endpoint, or lose your HMAC secret — or policies.json is emptied — every token-based request is denied and the only recovery is editing the settings directory on the host")
-	} else {
-		logger.Info("operator key is set: requests presenting it via 'Authorization: Operator <key>' (or the X-Operator-Key alias) are authorized as a full-access platform operator, and can trigger a settings reload over HTTP while the server is locked out")
-	}
-
-	ctx := context.Background()
-	serviceName := "wavehouse"
-
-	var level slog.Level
-	switch strings.ToUpper(strings.TrimSpace(os.Getenv(config.EnvLogLevel))) {
-	case "DEBUG":
-		level = slog.LevelDebug
-	case "WARN":
-		level = slog.LevelWarn
-	case "ERROR":
-		level = slog.LevelError
-	default:
-		level = slog.LevelInfo
-	}
-
-	logLevel := &slog.LevelVar{}
-	logLevel.Set(level)
-
-	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
-	slog.SetDefault(logger)
-
-	var promHandler http.Handler
-	// Provider init runs whenever either OTLP push or Prometheus exposition is
-	// wanted — Prometheus-only operation (Alloy/scrape, no collector) is a
-	// first-class mode. The OTel SDK MeterProvider is the shared substrate.
-	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
-		// Endpoint, TLS, and auth headers come from the standard
-		// OTEL_EXPORTER_OTLP_* env vars, read by the SDK. A malformed header is
-		// logged and skipped by the SDK (fail-soft); InitProvider's own error is
-		// likewise non-fatal — we log it and fall back to stdout below.
-		otelShutdown, ph, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
-			TracesEnabled:     cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
-			TracesSampleRate:  cfg.OTel.Traces.SampleRate,
-			MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
-			PrometheusEnabled: cfg.Prometheus.Enabled,
-			LogsEnabled:       cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
-		})
-		if err != nil {
-			logger.Error("failed to initialize observability, falling back to stdout", "error", err)
-		} else {
-			promHandler = ph
-			defer func() {
-				// Bound shutdown so an unreachable collector can't hang exit:
-				// otelShutdown honors this deadline internally (see
-				// observability.InitProvider), returning even when a provider's
-				// flush is stuck in gRPC backoff.
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer cancel()
-				_ = otelShutdown(ctx)
-			}()
-
-			// Only swap to the OTLP-aware logger when OTLP logs are wired up;
-			// Prometheus-only mode keeps the stdout-only handler set earlier.
-			if cfg.OTel.Enabled && cfg.OTel.Logs.Enabled {
-				otelLogger := observability.NewLogger(serviceName, logLevel, true, cfg.OTel.Logs.SampleRate)
-				logger = otelLogger.With(
-					"version", Version,
-					"build_time", BuildTime,
-					"git_commit", GitCommit,
-				)
-				slog.SetDefault(logger)
-			}
-			otlpEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-			if otlpEndpoint == "" {
-				otlpEndpoint = "localhost:4317 (SDK default)"
-			}
-			switch {
-			case cfg.OTel.Enabled && cfg.Prometheus.Enabled:
-				logger.Info("observability pipeline established", "otlp_endpoint", otlpEndpoint, "prometheus", true)
-			case cfg.OTel.Enabled:
-				logger.Info("observability pipeline established", "otlp_endpoint", otlpEndpoint)
-			case cfg.Prometheus.Enabled:
-				logger.Info("observability pipeline established", "prometheus", true)
-			}
-		}
-	}
-
-	// ClickHouse connection. The wiring is the settings directory's
-	// clickhouse block plus the boot-config password; chconn.Manager is the
-	// one driver.Conn every consumer holds, and a reload that changes the
-	// wiring swaps the connection behind it unconditionally — the adopted
-	// settings are the authority, and reachability surfaces where it already
-	// does (schema discovery retries, /readyz, query errors). The HTTP-side
-	// consumers read Target/QueryTimeout per request.
-	chParams := func() chconn.Params {
-		c := settingsStore.ClickHouse()
-		return chconn.Params{
-			Addr: c.Addr, HTTPPort: c.HTTPPort, HTTPScheme: c.HTTPScheme,
-			Database: c.Database, Username: c.Username, Password: cfg.ClickHouse.Password,
-			QueryTimeout: c.QueryTimeout,
-		}
-	}
-	chConn, err := chconn.Open(chParams(), logger)
-	if err != nil {
-		logger.Error("clickhouse open", "error", err)
-		return 1
-	}
-	defer func() { _ = chConn.Close() }()
-	settingsStore.AfterAdopt(func() {
-		if err := chConn.Reconfigure(chParams()); err != nil {
-			logger.Error("clickhouse reconfigure", "error", err)
-		}
+	a, err := app.New(ctx, app.Options{
+		Config:   cfg,
+		Build:    app.BuildInfo{Version: Version, GitCommit: GitCommit, BuildTime: BuildTime},
+		LogLevel: logLevel,
 	})
-
-	// Process-lifetime context — cancelled by the SIGINT/SIGTERM handler
-	// below. Created here (instead of further down) so the boot-time schema
-	// discovery retry goroutine ties cleanly to shutdown.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Schema discovery — non-fatal on boot. If the first Refresh fails
-	// (ClickHouse unreachable, database missing, etc.) we mark the binary
-	// degraded via bootState (which /livez surfaces as 503 + diagnostic)
-	// and retry in the background with exponential backoff. The process
-	// still binds :8080 so operators can `curl /livez` instead of grepping
-	// a restart-loop log. Once a Refresh succeeds, bootState flips to nil
-	// and /livez returns 200. The periodic auto-refresh ticker is started
-	// only after the first successful Refresh (sync or retry) so it never
-	// races RetryRefresh on Refresh calls or on bootState writes.
-	bootState := api.NewBootState(nil)
-	// Both sources are read per refresh, so a settings reload retunes the
-	// cadence and a ClickHouse reconfigure moves the database without a restart.
-	registry := discovery.NewSchemaRegistry(chConn, chConn.Database, settingsStore.SchemaRefreshInterval, logger)
-	if err := registry.Refresh(ctx); err != nil {
-		logger.Warn("schema discovery failed on boot, retrying in background", "error", err)
-		bootState.Set(fmt.Errorf("schema discovery: %w", err))
-		go func() {
-			retryErr := registry.RetryRefresh(ctx, 2*time.Second, 60*time.Second, func(attemptErr error) {
-				logger.Warn("schema discovery retry failed", "error", attemptErr)
-				bootState.Set(fmt.Errorf("schema discovery: %w", attemptErr))
-			})
-			if retryErr != nil {
-				// ctx cancelled before success — process is shutting down.
-				return
-			}
-			logger.Info("schema discovery succeeded after retry, /livez now 200")
-			bootState.Set(nil)
-			go registry.StartAutoRefresh(ctx)
-		}()
-	} else {
-		go registry.StartAutoRefresh(ctx)
-	}
-
-	// State directories — one configurable root, fixed subdir convention.
-	natsDir := filepath.Join(cfg.DataDir, "nats")
-	pebbleDir := filepath.Join(cfg.DataDir, "pebble")
-
-	// Embedded dedupe (Pebble). The store follows the hot-reloadable
-	// dedupe.enabled setting: one reconcile closure opens or closes it to
-	// match the current snapshot. It is registered as the after-adopt hook
-	// BEFORE the boot apply below (Apply is idempotent), so a reload landing
-	// between the two can't leave the settings saying "on" with the store
-	// still closed — either the hook sees it or the boot apply reads it. A
-	// failed open is fatal at boot, like every other store; on reload it is
-	// logged and leaves the store closed — ingest then fails closed (500
-	// "dedupe failed") rather than silently publishing un-deduped, since the
-	// files asked for dedupe.
-	dedup := dedupe.NewManaged(pebbleDir)
-	defer func() { _ = dedup.Close() }()
-	reconcileDedupe := func() (bool, error) {
-		enabled := settingsStore.DedupeEnabled()
-		if enabled && !dedup.Open() {
-			config.WarnIfFreshDataDir(logger, "pebble", pebbleDir)
-		}
-		if err := dedup.Apply(enabled); err != nil {
-			config.LogStorageInitError(logger, "dedupe", pebbleDir, err)
-			return enabled, err
-		}
-		return enabled, nil
-	}
-	settingsStore.AfterAdopt(func() {
-		if enabled, err := reconcileDedupe(); err == nil {
-			logger.Info("dedupe store reconciled with settings", "enabled", enabled)
-		}
-	})
-	if _, err := reconcileDedupe(); err != nil {
-		return 1
-	}
-
-	// Embedded MQ (NATS).
-	config.WarnIfFreshDataDir(logger, "nats", natsDir)
-
-	maxBytes := settingsStore.MQMaxBytes()
-	embeddedMQ, err := mq.NewEmbedded(natsDir, maxBytes)
 	if err != nil {
-		config.LogStorageInitError(logger, "mq", natsDir, err)
+		logger.Error("boot", "error", err)
 		return 1
 	}
-	defer func() { _ = embeddedMQ.Close() }()
-
-	// Only register system metric gauges when a real MeterProvider is in
-	// place — otherwise `otel.GetMeterProvider()` returns the no-op SDK
-	// provider and RegisterCallback silently no-ops, making this look
-	// authoritative when it's actually doing nothing.
-	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
-		if err := observability.RegisterSystemMetrics(embeddedMQ.GetServer(), dedup); err != nil {
-			logger.Error("failed to register system metrics", "error", err)
-		}
-	}
-
-	// DLQ stream. Always present: an empty limits-policy stream costs nothing,
-	// and whether a poison row lands on it is the hot-reloadable dlq.enabled
-	// switch (global, overridable per table), resolved by the ingest worker at
-	// the moment of the failure.
-	if err := api.EnsureDLQStream(ctx, embeddedMQ.JetStream(), maxBytes/10); err != nil {
-		logger.Error("dlq stream init", "error", err)
-		return 1
-	}
-
-	// mq.max_bytes_gb is hot-reloadable: after each adoption both streams'
-	// limits are updated in place (the DLQ keeps a tenth of the budget).
-	appliedMaxBytes := maxBytes
-	settingsStore.AfterAdopt(func() {
-		mb := settingsStore.MQMaxBytes()
-		if mb == appliedMaxBytes {
-			return
-		}
-		if err := embeddedMQ.Resize(ctx, mb); err != nil {
-			logger.Error("mq stream resize failed; previous limit stays in effect", "error", err)
-			return
-		}
-		if err := api.EnsureDLQStream(ctx, embeddedMQ.JetStream(), mb/10); err != nil {
-			logger.Error("dlq stream resize failed; previous limit stays in effect", "error", err)
-			return
-		}
-		logger.Info("mq stream limits reconciled with settings", "max_bytes_gb", mb>>30)
-		appliedMaxBytes = mb
-	})
-
-	// L1 cache only in standalone mode.
-	l1, err := cache.NewLocal(cfg.Cache.L1MaxCost)
-	if err != nil {
-		logger.Error("cache init", "error", err)
-		return 1
-	}
-	// TODO: eventually this is where we can switch between ristretto, redis, tiered (both), etc
-	cache := l1
-	defer func() { _ = cache.Close() }()
-
-	// Access-control policy and named pipes come from the settings directory
-	// (policies.json / pipes.json) and are read per request off the adopted
-	// snapshot, so a reload applies to the next request with no hook.
-	policySource := policy.Source(settingsStore.Policy)
-	if settingsStore.Policy() == nil {
-		logger.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
-	}
-
-	// Active sweeper — purges messages that are both written to CH and
-	// older than the SSE gap window (stream.gap_window_minutes, re-read every
-	// sweep). Runs every minute.
-	sweeper := ingest.NewSweeper(embeddedMQ.JetStream(), settingsStore.GapWindow, logger)
-
-	// Streaming fan-out: one SSE metric set shared by the Hub (drop counts) and the
-	// handler (write counts), and the Hub that projects/serializes each event once
-	// per (topic, role) and pushes it to that role's subscribers.
-	sseMetrics := stream.NewMetrics()
-	streamHub := stream.NewHub(policySource, registry, sseMetrics)
-
-	// Start batch consumer → ClickHouse.
-	ingestCleanup, err := ingest.StartIngestWorker(
-		ctx,
-		embeddedMQ.NatsConn(),
-		cache,
-		chConn.Target,
-		settingsStore.DLQFor,
-	)
-	if err != nil {
-		logger.Error("ingest worker init", "error", err)
-		return 1
-	}
-	// Start active sweeper.
-	go sweeper.Start(ctx)
-
-	// Hub bridge: MQ → broadcast to connected SSE clients. The Hub decodes and
-	// projects each event itself (skipping malformed payloads), so the bridge just
-	// forwards the raw bytes and acks.
-	if err := embeddedMQ.Subscribe(ctx, "ingest.>", "hub-bridge", func(msg *mq.Message) error {
-		streamHub.Broadcast(msg.Subject, msg.Data)
-		if err := msg.Ack(); err != nil {
-			slog.Warn("failed to ack message from embedded hub bridge", "error", err)
-		}
-		return nil
-	}); err != nil {
-		logger.Error("hub bridge start", "error", err)
-		return 1
-	}
-
-	// Build handlers.
-	js := embeddedMQ.JetStream()
-	ingestHandler := api.NewIngestHandler(registry, embeddedMQ, logger)
-	ingestHandler.PolicySource = policySource
-	ingestHandler.Dedup = dedup
-	ingestHandler.DedupeSettings = settingsStore.DedupeFor
-
-	dlqHandler := api.NewDLQHandler(js, logger)
-
-	// /v1/ops/query proxies straight to ClickHouse over HTTP — no native
-	// driver involvement. Same HTTP target as the ingest worker, resolved
-	// per request.
-	queryHandler := api.NewQueryHandler(chConn.Target, chConn.QueryTimeout)
-
-	healthHandler := api.NewHealthHandler(chConn)
-	healthHandler.Boot = bootState
-
-	streamHandler := api.NewStreamHandler(streamHub, js)
-	streamHandler.Metrics = sseMetrics
-
-	// Shared keepalive wheel: one goroutine nudges idle streams so proxies don't
-	// idle-close them. Runs for the process lifetime; a reload that changes
-	// stream.keepalive_* rebuilds the ring in place under the live connections.
-	// Registered as an after-adopt hook before the reload triggers start (the
-	// same ordering as the dedupe hook), so no reload can be missed.
-	heartbeater := stream.NewHeartbeater(settingsStore.Keepalive())
-	settingsStore.AfterAdopt(func() { heartbeater.Reconfigure(settingsStore.Keepalive()) })
-	streamHandler.Heartbeater = heartbeater
-	go heartbeater.Run(ctx)
-
-	// Build the auth verifier up front so a misconfigured/unreachable JWKS
-	// endpoint fails startup loudly rather than booting into a degraded
-	// state. jwks_url and role_claim are settings; the secrets are boot
-	// config. A reload rebuilds the verifier from the adopted settings
-	// unconditionally — an unreachable JWKS then fails closed (no token
-	// validates, requests fall to default_role) until it is reachable or the
-	// next reload.
-	authConfig := func() auth.Config {
-		a := settingsStore.Auth()
-		return auth.Config{
-			JWTSecret:   cfg.Auth.JWTSecret,
-			JWKSURL:     a.JWKSURL,
-			RoleClaim:   a.RoleClaim,
-			OperatorKey: cfg.Auth.OperatorKey,
-		}
-	}
-	authn, err := auth.NewAuthenticator(authConfig(), policySource, logger)
-	if err != nil {
-		logger.Error("auth middleware init", "error", err)
-		return 1
-	}
-	settingsStore.AfterAdopt(func() { authn.Reconfigure(authConfig()) })
-	authMW := authn.Middleware()
-
-	// Settings reload triggers. All three (SIGHUP here, the directory watcher
-	// below, POST /v1/ops/settings/reload) funnel into the same serialized
-	// Store.Reload, and a rejected reload keeps the previous good snapshot.
-	// Started only now, after every AfterAdopt hook is registered (ClickHouse
-	// reconnect, dedupe store, keepalive wheel, auth verifier): the watcher
-	// reloads once as soon as its watch exists, and that reload must already
-	// drive every hook — a hook registered after the first reload could miss it.
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-hup:
-				settingsStore.Reload("sighup")
-			}
-		}
-	}()
-	go func() {
-		// Watcher setup failure degrades, not fatal: SIGHUP and the ops
-		// endpoint still reload.
-		if err := settingsStore.Watch(ctx); err != nil {
-			logger.Error("settings directory watcher failed; reload via SIGHUP or POST /v1/ops/settings/reload", "error", err)
+	// slog.Default from here on: app.New swaps in the OTLP-aware logger when
+	// OTLP logs are enabled, and that is the one every later line should hit.
+	defer func() {
+		if err := a.Close(); err != nil {
+			slog.Warn("cleanup", "error", err)
 		}
 	}()
 
-	deps := api.Dependencies{
-		Ingest:          ingestHandler,
-		Query:           queryHandler,
-		SSE:             streamHandler,
-		Health:          healthHandler,
-		Version:         api.NewVersionHandler(Version, GitCommit, BuildTime),
-		Schema:          api.NewSchemaHandler(registry),
-		DLQ:             dlqHandler,
-		Pipes:           api.NewPipesHandler(settingsStore, policySource, chConn, cache, chConn.QueryTimeout, logger),
-		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policySource, settingsStore.TimestampBucketSeconds, chConn.QueryTimeout, settingsStore.DefaultMaxRows, logger),
-
-		AuthMW:       authMW,
-		PolicySource: policySource,
-		Logger:       logger,
-		JS:           js,
-		CORSOrigins:  settingsStore.CORSOrigins,
-		Settings:     api.NewSettingsHandler(settingsStore, logger),
-	}
-
-	// Prometheus /metrics routing: same-port → mount on API router,
-	// dedicated port → spin a sidecar HTTP server below.
-	promPath := cfg.Prometheus.Path
-	promPort := cfg.Prometheus.Port
-	var promSrv *http.Server
-	if promHandler != nil {
-		if promPort == 0 {
-			deps.MetricsHandler = promHandler
-			deps.MetricsPath = promPath
-		} else {
-			mux := http.NewServeMux()
-			mux.Handle(promPath, promHandler)
-			promSrv = &http.Server{
-				Addr:              fmt.Sprintf(":%d", promPort),
-				Handler:           mux,
-				ReadHeaderTimeout: 10 * time.Second,
-				// Full Read/Write timeouts are safe here — unlike the main API
-				// server (SSE), the Prometheus sidecar serves only
-				// single-shot scrape requests, so an unbounded slow client has
-				// no legitimate reason to hold a connection.
-				ReadTimeout:  30 * time.Second,
-				WriteTimeout: 30 * time.Second,
-			}
-		}
-	}
-
-	router := api.NewRouter(deps)
-
-	srv := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:           router,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	// Graceful shutdown.
-	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
-		logger.Info("shutting down")
-		shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownTimeout)*time.Second)
-		defer shutCancel()
-		cancel()
-		if err := srv.Shutdown(shutCtx); err != nil {
-			logger.Error("server shutdown error", "error", err)
-		}
-		if promSrv != nil {
-			if err := promSrv.Shutdown(shutCtx); err != nil {
-				logger.Error("prometheus server shutdown error", "error", err)
-			}
-		}
-		if err := ingestCleanup(shutCtx); err != nil {
-			logger.Error("ingest worker cleanup error", "error", err)
-		}
-	}()
-
-	if promSrv != nil {
-		go func() {
-			logger.Info("starting prometheus metrics server", "addr", promSrv.Addr, "path", promPath)
-			if err := promSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				logger.Error("prometheus server error", "error", err)
-			}
-		}()
-	}
-
-	logger.Info("starting server", "port", cfg.Server.Port)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Error("server error", "error", err)
+	if err := a.Run(ctx); err != nil {
+		slog.Error("run", "error", err)
 		return 1
 	}
 	return 0
+}
+
+// logLevelFromEnv reads WH_LOG_LEVEL; anything unrecognized is Info.
+func logLevelFromEnv() slog.Level {
+	switch strings.ToUpper(strings.TrimSpace(os.Getenv(config.EnvLogLevel))) {
+	case "DEBUG":
+		return slog.LevelDebug
+	case "WARN":
+		return slog.LevelWarn
+	case "ERROR":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }

@@ -24,7 +24,7 @@ import (
 func TestDLQ_StatsEmptyOnFreshStart(t *testing.T) {
 	e := env(t)
 
-	resp, err := http.Get(e.server.URL + "/v1/ops/dlq/stats")
+	resp, err := http.Get(e.baseURL + "/v1/ops/dlq/stats")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -69,7 +69,7 @@ func TestDLQ_PopulatedOnIngestWorkerFailure(t *testing.T) {
 	// loaded CI runner. The condition polls the API rather than the
 	// stream so this also exercises the read path.
 	assert.Eventually(t, func() bool {
-		resp, err := http.Get(e.server.URL + "/v1/ops/dlq/stats")
+		resp, err := http.Get(e.baseURL + "/v1/ops/dlq/stats")
 		if err != nil {
 			return false
 		}
@@ -114,7 +114,7 @@ func TestDLQ_PopulatedOnIngestWorkerFailureWithBadName(t *testing.T) {
 	// loaded CI runner. The condition polls the API rather than the
 	// stream so this also exercises the read path.
 	assert.Eventually(t, func() bool {
-		resp, err := http.Get(e.server.URL + "/v1/ops/dlq/stats")
+		resp, err := http.Get(e.baseURL + "/v1/ops/dlq/stats")
 		if err != nil {
 			return false
 		}

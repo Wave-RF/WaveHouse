@@ -60,17 +60,6 @@ exclude:
   # via whichever suite(s) actually do cover it. See scripts/cov/main.go
   # config.excludesFor for the wiring.
   per-suite:
-    unit:
-      # cmd/wavehouse/main.go is the binary entry point — 400+ lines of
-      # service wiring that's only meaningfully exercised by the e2e suite
-      # (which runs bin/wavehouse-cov against a real ClickHouse + NATS).
-      # Excluding from `unit` keeps that gate from being dragged down by
-      # 0% coverage on an untestable wiring file. The merged total still
-      # counts e2e's coverage of this file. health.go in the same package
-      # IS unit-testable (httptest server + WH_SERVER_PORT) and stays in
-      # coverage everywhere — see issue #140 for the deferred refactor
-      # that would shrink main.go enough to drop this exclude entirely.
-      - ^cmd/wavehouse/main\.go$
     e2e:
       # internal/settings is mostly validation: the e2e suite (server-
       # focused) only walks the happy path — boot adopts a valid fixture

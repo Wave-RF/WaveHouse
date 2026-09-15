@@ -73,10 +73,9 @@ type config struct {
 		// PerSuite applies on top of Paths but only when rendering the
 		// named suite's profile — not when computing the merged total.
 		// Use for files that legitimately can't be covered by one suite
-		// (e.g., cmd/wavehouse/main.go is untestable by unit but exercised
-		// by e2e); excluding from `unit` keeps that suite's gate clean
-		// without hiding the file's e2e-derived coverage from the merged
-		// total.
+		// (e.g., the settings CLI entry points that e2e never runs);
+		// excluding them from that suite keeps its gate clean without
+		// hiding the file's other-suite coverage from the merged total.
 		PerSuite map[string][]string `yaml:"per-suite"`
 	} `yaml:"exclude"`
 }
@@ -301,8 +300,8 @@ func merge(c *config) error {
 	threshold := c.Threshold.Total
 	// Merged total uses only global excludes — per-suite excludes are
 	// intentionally NOT applied here, so a file that's untestable by one
-	// suite (e.g., cmd/wavehouse/main.go vs unit) still counts toward the
-	// project-wide gate via the suite(s) that DO cover it (e2e).
+	// suite (e.g., cmd/wavehouse/validate.go vs e2e) still counts toward the
+	// project-wide gate via the suite(s) that DO cover it (unit).
 	rows, total, covered, err := parseCoverage(profile, c, c.excludesFor(""))
 	if err != nil {
 		return err
@@ -706,9 +705,9 @@ func parseCoverage(profile string, c *config, excludePatterns []string) (rows []
 		}
 		// Match exclusions against either pkg+"/" (directory-level) or
 		// shortPath (file-level). Directory patterns like ^internal/testutil/
-		// match the former; single-file patterns like ^cmd/wavehouse/main\.go$
-		// match the latter, useful for excluding binary entry points that
-		// can't be unit-tested without dragging the suite gate.
+		// match the former; single-file patterns like ^cmd/wavehouse/validate\.go$
+		// match the latter, useful for excluding a file one suite never
+		// reaches without dragging that suite's gate.
 		if matchesAny(excludes, pkg+"/") || matchesAny(excludes, shortPath) {
 			continue
 		}

@@ -67,7 +67,7 @@ type ProviderConfig struct {
 func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (func(context.Context) error, http.Handler, error) {
 	// Snapshot the OTel globals on entry. On a partial init failure we want to
 	// roll them back to whatever was installed before — otherwise the caller
-	// (which continues on init error per main.go) keeps using shut-down
+	// (which continues on init error per internal/app) keeps using shut-down
 	// providers as the global state, strictly worse than the no-op defaults.
 	prevProp := otel.GetTextMapPropagator()
 	prevTP := otel.GetTracerProvider()

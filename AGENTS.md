@@ -24,11 +24,12 @@ WaveHouse is a **schema-aware real-time API gateway for ClickHouse**, written in
 
 One binary:
 
-- **`cmd/wavehouse/`** — Standalone mode (all-in-one with embedded NATS, optional Pebble dedup)
+- **`cmd/wavehouse/`** — Standalone mode (all-in-one with embedded NATS, optional Pebble dedup): argv dispatch, the logger, `config.Load`, and the signal context; everything else is `internal/app`
 
-Sixteen internal packages under `internal/` (plus `internal/testutil/` for shared test helpers):
+Seventeen internal packages under `internal/` (plus `internal/testutil/` for shared test helpers):
 
 - **`api/`** — Chi HTTP router, JWT/JWKS middleware (from `auth/`), ingest/query/structured-query/SSE/schema/DLQ/pipes handlers
+- **`app/`** — the process wiring: `New` builds every component from the boot config and the settings directory (each one wired in one place — what it opens, what it loops, what it releases — with the settings store handed to its wiring function whole, the injection point the per-tenant registry of #583 lands on), `Run` drives the long-lived ones under one `errgroup` until the context is cancelled or one fails, `Close` releases them in reverse order. `cmd/wavehouse` and `tests/integration` both boot through it
 - **`auth/`** — JWT auth middleware: HMAC **or** JWKS verification with `alg` pinned to the active verifier, role extraction from a configurable claim path; always runs, never rejects (bad token → empty role + stashed reason)
 - **`cache/`** — `Cache` interface → `LocalCache` (Ristretto) + `SharedCache` (TBD) + `TieredCache` (singleflight)
 - **`chconn/`** — `Manager`, the one ClickHouse `driver.Conn` every consumer holds; `Reconfigure` swaps the connection behind it after a settings reload changes the wiring (never dials; the old connection closes after a `query_timeout` grace)
@@ -65,7 +66,7 @@ The invariant index — what must stay true. Full narrative and rationale live i
 14. **TypeScript SDK** — `@wavehouse/sdk`: typed query builder, real-time SSE over `fetch`, live queries (incrementable/decomposable/poll aggregation), codegen CLI. Exactly one runtime dependency — `eventsource-parser` (SSE framing, itself dependency-free); adding a second needs the same scrutiny the first got. The canonical client (see §SDK Sync).
 15. **Observability invariants** — stdout always 100% (sampling is OTLP-push-only); WARN+ERROR always export at 100% (a non-configurable floor — don't expose it); gRPC OTel exporters dial lazily so an unreachable collector never blocks startup; the OTel Prometheus exporter uses a **private** `prometheus.Registry`. The OTLP endpoint/TLS/custom-CA/mTLS/headers are delegated to the OpenTelemetry SDK's standard `OTEL_EXPORTER_OTLP_*` env vars — `InitProvider` passes **no** endpoint/header options. Known gap, intentionally not patched in WaveHouse app code: the pinned gRPC logs exporter (`otlploggrpc` v0.19/v0.20) ignores the env TLS-cert vars, so a custom/private CA and mutual TLS apply to traces/metrics but **not** the logs signal (public-CA/system-roots TLS and plaintext still work for logs) — upstream bug open-telemetry/opentelemetry-go#6661. A malformed `OTEL_EXPORTER_OTLP_HEADERS` is logged and skipped by the SDK (fail-soft), not fatal. Preserve when touching the logger/sampler/provider. Detail: architecture.md § `observability/`.
 16. **Bearer-token-only CORS posture (security)** — Bearer JWT on every request, no cookies/sessions; `corsMiddleware` deliberately **never** emits `Access-Control-Allow-Credentials` (not needed, and `*` + credentials is a spec violation browsers reject). `cors.allowed_origins` (settings directory) controls who can *read* responses, not cookie scope; CSRF protection is structural. Don't reintroduce cookie auth or `Allow-Credentials` without a design discussion — answers GitHub #29/#30. Code: `internal/api/router.go`.
-17. **Non-fatal boot** — schema-discovery failure on boot is non-fatal: `cmd/wavehouse` records an `api.BootState`, binds `:8080`, serves 503 on `/livez`/`/readyz` with the diagnostic, and retries via `SchemaRegistry.RetryRefresh` (backoff 2s → 60s). Bounds supervisor restart loops.
+17. **Non-fatal boot** — schema-discovery failure on boot is non-fatal: `internal/app` records an `api.BootState`, binds `:8080`, serves 503 on `/livez`/`/readyz` with the diagnostic, and retries via `SchemaRegistry.RetryRefresh` (backoff 2s → 60s). Bounds supervisor restart loops.
 18. **Health endpoints** — liveness `/livez`, readiness `/readyz` (k8s convention); `/healthz` is a permanent alias of `/livez`; `/health` + `/ready` are deprecated (removal v0.2.0, CHANGELOG #144). `/v1/health` is the SDK's content-free public ping (no ClickHouse check), a `/v1` route so it survives reverse-proxy probe-path filtering. Point k8s at `/livez`/`/readyz`, SDK/online-checks at `/v1/health`, never the deprecated aliases.
 19. **Canonical timestamp wire form (fail-open at ingest)** — the HTTP ingest handler rewrites every top-level `DateTime`/`DateTime64` column value it can parse to RFC 3339 UTC (`discovery.CanonicalizeTimestamps`; per-column precision + zone precomputed at schema refresh) after validation + policy checks and **before** the NATS publish, so the one payload every consumer shares — SSE subscribers, the ClickHouse insert, the DLQ — carries the same spelling `/v1/query` renders: live and query reads can't drift on the instant (#372). Zone-less inputs are read in the column's declared zone, else the discovered server default — ClickHouse's own rule, so the spelling changes but never the instant. Deliberately **fail-open**: an unparseable value or unresolvable zone (no tzdata embedded — never a failed refresh, never a silent UTC reinterpretation, which would move instants) publishes verbatim; ingest must not reject a record over its timestamp spelling — fail-closed enforcement belongs to the stream row-filter (#381). Don't re-spell timestamps downstream. Preserve when touching `internal/discovery`, the ingest handler, or the SSE fan-out. Detail: architecture.md § `discovery/` + §Ingest Path; the exact spelling spec (truncation, zero-trimming, `Z`-only) lives in api.md §Timestamp canonicalization — keep it in sync with `canonicalTimestamp`.
 
@@ -389,21 +390,21 @@ Internal-only backend changes (middleware refactors, observability internals, de
 1. Create or modify a handler in `internal/api/` (follow existing patterns like `ingest.go`).
 2. Register the route in `internal/api/router.go`.
 3. If it needs new dependencies, add to the `Dependencies` struct in `router.go`.
-4. Wire dependencies in `cmd/wavehouse/main.go`.
+4. Wire dependencies in `internal/app/wire.go`.
 5. Add tests.
 6. Document in `docs/src/content/docs/api.md`.
 
 ### Adding a new config option
 
 1. Add the field to the appropriate struct in `internal/config/config.go` with `yaml`, `env`, and `env-default` tags.
-2. Use the new config value in `cmd/wavehouse/main.go` or the relevant internal package.
+2. Use the new config value in `internal/app/wire.go` or the relevant internal package.
 3. Document in `docs/src/content/docs/configuration.mdx`.
 
 ### Adding a new internal package
 
 1. Create the package under `internal/`.
 2. Define an interface if there will be multiple implementations.
-3. Wire it into `cmd/wavehouse/main.go`.
+3. Wire it into `internal/app/wire.go` as a component (what it opens, what it loops, what it releases).
 4. Document in `docs/src/content/docs/architecture.md`.
 5. **Add a matching `area/<pkg>` repo label** (e.g. `area/foo` for `internal/foo/`) so issues can be routed to it during triage, and add the path → label mapping to `.github/labeler.yml` so PRs touching the package get auto-labeled. Issue triage is manual (see §Repository Automation); only the PR-side labeling is automated.
 
@@ -420,8 +421,9 @@ Internal-only backend changes (middleware refactors, observability internals, de
 ## File Structure
 
 ```text
-cmd/                    → Binary entry points (thin — just wiring)
+cmd/                    → Binary entry points (thin — argv, logger, config, signals)
 internal/api/           → HTTP layer (handlers, router, middleware, schema/DLQ/pipes endpoints)
+internal/app/           → Process wiring (build every component, run them under one errgroup, release in reverse)
 internal/auth/          → JWT/JWKS authentication middleware (HMAC or JWKS, role extraction from claims)
 internal/cache/         → Caching (interface + L1/L2/tiered implementations)
 internal/chconn/        → ClickHouse connection manager (driver.Conn swapped on settings reload)
