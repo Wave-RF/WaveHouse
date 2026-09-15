@@ -267,11 +267,17 @@ func (a *App) wireMQ(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(context.Background(), mqResizeTimeout)
 		defer cancel()
 		if err := embedded.Resize(ctx, mb); err != nil {
-			slog.Error("mq stream resize failed; previous limit stays in effect", "error", err)
+			slog.Error("mq stream resize failed; previous limits stay in effect", "error", err)
 			return
 		}
 		if err := api.EnsureDLQStream(ctx, embedded.JetStream(), mb/10); err != nil {
-			slog.Error("dlq stream resize failed; previous limit stays in effect", "error", err)
+			// Keep both streams on one adopted document: undo the ingest
+			// resize so the 10:1 pair stays at the previous limit, and the
+			// next adoption retries both.
+			slog.Error("dlq stream resize failed; restoring the previous ingest limit", "error", err)
+			if err := embedded.Resize(ctx, applied); err != nil {
+				slog.Error("ingest stream rollback failed; ingest stream at the new limit, dlq at the previous", "error", err)
+			}
 			return
 		}
 		slog.Info("mq stream limits reconciled with settings", "max_bytes_gb", mb>>30)
@@ -486,6 +492,11 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	}
 	a.handler = api.NewRouter(deps)
 
+	// ReadHeaderTimeout only, deliberately: net/http leaves ReadTimeout's
+	// deadline on the connection while the handler runs, so its background
+	// read would time out and cancel the request context — ending every
+	// /v1/stream connection at that timeout. WriteTimeout would cut the
+	// same long-lived responses.
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", a.cfg.Server.Port),
 		Handler:           a.handler,

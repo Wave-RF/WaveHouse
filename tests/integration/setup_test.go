@@ -152,8 +152,12 @@ func setup() (int, func()) {
 		fmt.Fprintf(os.Stderr, "integration setup: listen: %v\n", err)
 		return 1, cleanup
 	}
+	// Both scratch directories are removed after the app closes (LIFO).
+	dataDir := mustTempDir()
+	cleanups.push(func() { _ = os.RemoveAll(dataDir) })
+	cleanups.push(func() { _ = os.RemoveAll(settingsDir) })
 	cfg := &config.Config{
-		DataDir:    mustTempDir(),
+		DataDir:    dataDir,
 		Server:     config.Server{ShutdownTimeout: 10},
 		ClickHouse: config.ClickHouse{Password: testCHPassword},
 		Cache:      config.Cache{L1MaxCost: 1 << 30}, // 1 GB
