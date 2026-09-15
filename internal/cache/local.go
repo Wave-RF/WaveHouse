@@ -24,7 +24,7 @@ func NewLocal(maxCost int64) (*LocalCache, error) {
 	if err != nil {
 		return nil, err
 	}
-	vm := NewVersionManager(nil)
+	vm := NewVersionManager()
 	return &LocalCache{cache: cache, versionManager: vm}, nil
 }
 

@@ -4,14 +4,23 @@ import (
 	"context"
 
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
-	"github.com/nats-io/nats-server/v2/server"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 )
 
+// MQStats is the point-in-time snapshot of the embedded message queue the
+// system gauges observe. Reported by the mq package (mq.EmbeddedNATS.Stats);
+// defined here because mq imports observability, not the other way round.
+type MQStats struct {
+	Connections int64 // active client connections
+	InMsgs      int64 // messages received, cumulative
+}
+
 // RegisterSystemMetrics creates asynchronous gauges that periodically pull
-// stats from embedded systems (NATS, Pebble) and push them to OpenTelemetry.
-func RegisterSystemMetrics(natsServer *server.Server, dedup dedupe.Deduplicator) error {
+// stats from embedded systems (the MQ, Pebble) and push them to OpenTelemetry.
+// mqStats is read on every scrape; nil skips the MQ gauges, as a nil dedup
+// skips the Pebble ones.
+func RegisterSystemMetrics(mqStats func() (MQStats, error), dedup dedupe.Deduplicator) error {
 	meter := otel.Meter("wavehouse-system")
 
 	// NATS Instruments
@@ -24,11 +33,11 @@ func RegisterSystemMetrics(natsServer *server.Server, dedup dedupe.Deduplicator)
 
 	// Register the scraper callback (runs every 15 seconds)
 	_, err := meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
-		// Scrape NATS
-		if natsServer != nil {
-			if varz, err := natsServer.Varz(nil); err == nil {
-				o.ObserveInt64(natsConnections, int64(varz.Connections))
-				o.ObserveInt64(natsInMsgs, varz.InMsgs)
+		// Scrape the MQ
+		if mqStats != nil {
+			if stats, err := mqStats(); err == nil {
+				o.ObserveInt64(natsConnections, stats.Connections)
+				o.ObserveInt64(natsInMsgs, stats.InMsgs)
 			}
 		}
 

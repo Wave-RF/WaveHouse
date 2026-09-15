@@ -10,19 +10,18 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // StreamHandler handles GET /v1/stream
 type StreamHandler struct {
 	Hub         *stream.Hub
-	JS          jetstream.JetStream
+	Replayer    mq.Replayer // gap-fill source; nil disables replay
 	Heartbeater *stream.Heartbeater
 	Metrics     *stream.Metrics
 }
 
-func NewStreamHandler(hub *stream.Hub, js jetstream.JetStream) *StreamHandler {
-	return &StreamHandler{Hub: hub, JS: js}
+func NewStreamHandler(hub *stream.Hub, replayer mq.Replayer) *StreamHandler {
+	return &StreamHandler{Hub: hub, Replayer: replayer}
 }
 
 func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +105,8 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	h.Hub.Add(topic, role, sub)
 	defer h.Hub.Remove(topic, role, sub)
 
-	// Gap fill from NATS using DeliverByStartTime.
+	// Gap fill from the MQ's retained messages (DeliverByStartTime, see
+	// mq.Replayer).
 	// Prefer Last-Event-ID header (set automatically by EventSource on reconnect)
 	// over the "since" query parameter.
 	// TODO: this breaks I think if we multiplex SSE? Need to test further...
@@ -133,12 +133,12 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 			return true
 		}
-		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.JS != nil {
-			h.replayFromNATS(r.Context(), ts, topic, sendReplay)
+		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.Replayer != nil {
+			h.replay(r.Context(), ts, topic, sendReplay)
 		} else if err != nil {
 			// Fall back to RFC3339 without nanos.
-			if ts, err := time.Parse(time.RFC3339, sinceStr); err == nil && h.JS != nil {
-				h.replayFromNATS(r.Context(), ts, topic, sendReplay)
+			if ts, err := time.Parse(time.RFC3339, sinceStr); err == nil && h.Replayer != nil {
+				h.replay(r.Context(), ts, topic, sendReplay)
 			}
 		}
 	}
@@ -172,27 +172,10 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// replayFromNATS creates an ephemeral NATS consumer starting at the given time
-// and sends all available messages to the callback until caught up.
-func (h *StreamHandler) replayFromNATS(ctx context.Context, since time.Time, subject string, send func([]byte) bool) {
-	cons, err := h.JS.CreateOrUpdateConsumer(ctx, mq.StreamName(), jetstream.ConsumerConfig{
-		FilterSubject:     subject,
-		DeliverPolicy:     jetstream.DeliverByStartTimePolicy,
-		OptStartTime:      &since,
-		AckPolicy:         jetstream.AckNonePolicy,
-		InactiveThreshold: 5 * time.Second,
-	})
-	if err != nil {
-		return
-	}
-
-	for {
-		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
-		if err != nil {
-			return // No more messages or timeout — done with gap-fill.
-		}
-		if !send(msg.Data()) {
-			return
-		}
-	}
+// replay sends every message retained on subject since the given time to the
+// callback until caught up. A replay that cannot start is not fatal to the
+// stream — the client still gets live events from here on — so the error is
+// dropped rather than ending the connection.
+func (h *StreamHandler) replay(ctx context.Context, since time.Time, subject string, send func([]byte) bool) {
+	_ = h.Replayer.ReplaySince(ctx, subject, since, send)
 }

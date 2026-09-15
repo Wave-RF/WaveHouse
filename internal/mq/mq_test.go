@@ -53,3 +53,31 @@ func TestMessage_NilCallbacks(t *testing.T) {
 	assert.NotPanics(t, func() { _ = msg.Ack() })
 	assert.NotPanics(t, func() { _ = msg.Nak() })
 }
+
+func TestHeaders(t *testing.T) {
+	t.Parallel()
+
+	h := Headers{}
+	assert.Empty(t, h.Get("missing"))
+
+	h.Add("k", "1")
+	h.Add("k", "2")
+	assert.Equal(t, "1", h.Get("k"), "Get returns the first value")
+	assert.Equal(t, []string{"1", "2"}, h["k"], "Add appends")
+
+	h.Set("k", "3")
+	assert.Equal(t, []string{"3"}, h["k"], "Set replaces")
+
+	// Exact-key, like nats.Header.
+	assert.Empty(t, h.Get("K"))
+}
+
+func TestWithHeader(t *testing.T) {
+	t.Parallel()
+
+	h := Headers{}
+	WithHeader("X-A", "1")(h)
+	WithHeader("X-A", "2")(h)
+	WithHeader("X-B", "b")(h)
+	assert.Equal(t, Headers{"X-A": {"1", "2"}, "X-B": {"b"}}, h)
+}

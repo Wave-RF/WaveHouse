@@ -12,14 +12,15 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
-// Compile-time interface assertions. Catch breakage early if the underlying
-// upstream interface gains methods our mocks don't override.
+// Compile-time interface assertions. Catch breakage early when an interface
+// these mocks implement gains a method.
 var (
-	_ jetstream.Msg     = (*MockJetStreamMsg)(nil)
+	_ mq.Publisher      = (*MockPublisher)(nil)
+	_ mq.Subscriber     = (*MockSubscriber)(nil)
+	_ mq.StreamManager  = (*MockStreamManager)(nil)
+	_ mq.Stream         = (*MockStream)(nil)
 	_ http.RoundTripper = (*MockRoundTripper)(nil)
 )
 
@@ -32,23 +33,36 @@ type MockPublisher struct {
 	Err      error // if set, Publish returns this error
 }
 
-// PublishedMessage records a single publish call.
+// PublishedMessage records a single publish call, with the headers the
+// options set.
 type PublishedMessage struct {
 	Subject string
 	Data    []byte
+	Headers mq.Headers
 }
 
 func (m *MockPublisher) Publish(_ context.Context, subject string, data []byte, opts ...mq.PublishOpt) error {
 	if m.Err != nil {
 		return m.Err
 	}
+	headers := mq.Headers{}
+	for _, opt := range opts {
+		opt(headers)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Messages = append(m.Messages, PublishedMessage{Subject: subject, Data: data})
+	m.Messages = append(m.Messages, PublishedMessage{Subject: subject, Data: data, Headers: headers})
 	return nil
 }
 
 func (m *MockPublisher) Close() error { return nil }
+
+// Published returns a snapshot of the publish calls recorded so far.
+func (m *MockPublisher) Published() []PublishedMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]PublishedMessage(nil), m.Messages...)
+}
 
 // LastMessage returns the most recently published message, or nil.
 func (m *MockPublisher) LastMessage() *PublishedMessage {
@@ -135,16 +149,13 @@ func (m *MockCache) GetNamespaces() []cache.Namespace {
 	return append([]cache.Namespace(nil), m.InvNamespaces...) // Return copy
 }
 
-// ── Mock jetstream.Msg ───────────────────────────────────────────
+// ── Mock mq.Message ──────────────────────────────────────────────
 
-// MockJetStreamMsg implements jetstream.Msg for unit tests. Only the methods
-// production code actually exercises (Data/Subject/Headers/Ack/Nak/DoubleAck)
-// are overridden — calls to anything else panic, which is the loud-fail
-// signal we want from a unit test mock.
-type MockJetStreamMsg struct {
+// MockMessage builds mq.Messages whose ack-family callbacks flip the flags
+// below, so a test can assert what the worker did with a message.
+type MockMessage struct {
 	MsgData    []byte
 	MsgSubject string
-	MsgHeaders nats.Header
 
 	// Configurable errors returned from the matching ack-family methods.
 	AckErr       error
@@ -157,146 +168,81 @@ type MockJetStreamMsg struct {
 	DoubleAcked atomic.Bool
 }
 
-func (m *MockJetStreamMsg) Data() []byte         { return m.MsgData }
-func (m *MockJetStreamMsg) Subject() string      { return m.MsgSubject }
-func (m *MockJetStreamMsg) Headers() nats.Header { return m.MsgHeaders }
-func (m *MockJetStreamMsg) Reply() string        { return "" }
-
-func (m *MockJetStreamMsg) Ack() error {
-	m.Acked.Store(true)
-	return m.AckErr
+// Message returns an mq.Message wired to this mock's flags. Every call returns
+// a new Message sharing the same flags.
+func (m *MockMessage) Message() *mq.Message {
+	return mq.NewMessage(context.Background(), m.MsgSubject, m.MsgData, time.Time{},
+		func(context.Context) error {
+			m.DoubleAcked.Store(true)
+			return m.DoubleAckErr
+		},
+		func() error {
+			m.Acked.Store(true)
+			return m.AckErr
+		},
+		func() error {
+			m.Naked.Store(true)
+			return m.NakErr
+		},
+	)
 }
 
-func (m *MockJetStreamMsg) Nak() error {
-	m.Naked.Store(true)
-	return m.NakErr
+// ── Mock mq.StreamManager / mq.Stream ────────────────────────────
+
+// MockStreamManager implements mq.StreamManager. StreamFn resolves every
+// lookup; unset, every lookup fails.
+type MockStreamManager struct {
+	StreamFn func(ctx context.Context, name string) (mq.Stream, error)
 }
 
-func (m *MockJetStreamMsg) DoubleAck(_ context.Context) error {
-	m.DoubleAcked.Store(true)
-	return m.DoubleAckErr
-}
-
-// The remaining jetstream.Msg methods are intentionally unimplemented —
-// they panic to signal "the production code touched a path this test
-// wasn't expecting." Implement on demand.
-func (m *MockJetStreamMsg) NakWithDelay(_ time.Duration) error {
-	panic("MockJetStreamMsg.NakWithDelay not implemented")
-}
-func (m *MockJetStreamMsg) InProgress() error { panic("MockJetStreamMsg.InProgress not implemented") }
-func (m *MockJetStreamMsg) Term() error       { panic("MockJetStreamMsg.Term not implemented") }
-func (m *MockJetStreamMsg) TermWithReason(string) error {
-	panic("MockJetStreamMsg.TermWithReason not implemented")
-}
-
-func (m *MockJetStreamMsg) Metadata() (*jetstream.MsgMetadata, error) {
-	panic("MockJetStreamMsg.Metadata not implemented")
-}
-
-// ── Mock JetStream (Stream / Consumer / PublishMsg) ──────────────
-
-// MockJetStream embeds jetstream.JetStream so unused methods panic. Override
-// only what your test touches: StreamFn / ConsumerFn for sweeper-style code,
-// PublishMsg recorder (Published + PubErr) for DLQ-style code.
-type MockJetStream struct {
-	jetstream.JetStream
-
-	StreamFn     func(ctx context.Context, name string) (jetstream.Stream, error)
-	ConsumerFn   func(ctx context.Context, stream, consumer string) (jetstream.Consumer, error)
-	PublishMsgFn func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error)
-
-	mu        sync.Mutex
-	published []*nats.Msg
-	PubErr    error // if set, PublishMsg returns this error (and skips recording)
-}
-
-func (m *MockJetStream) Stream(ctx context.Context, name string) (jetstream.Stream, error) {
+func (m *MockStreamManager) Stream(ctx context.Context, name string) (mq.Stream, error) {
 	if m.StreamFn == nil {
-		return nil, errors.New("MockJetStream.Stream: StreamFn not set")
+		return nil, errors.New("MockStreamManager.Stream: StreamFn not set")
 	}
 	return m.StreamFn(ctx, name)
 }
 
-func (m *MockJetStream) Consumer(ctx context.Context, stream, consumer string) (jetstream.Consumer, error) {
-	if m.ConsumerFn == nil {
-		return nil, errors.New("MockJetStream.Consumer: ConsumerFn not set")
-	}
-	return m.ConsumerFn(ctx, stream, consumer)
-}
-
-func (m *MockJetStream) PublishMsg(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
-	if m.PublishMsgFn != nil {
-		return m.PublishMsgFn(ctx, msg, opts...)
-	}
-	if m.PubErr != nil {
-		return nil, m.PubErr
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.published = append(m.published, msg)
-	return &jetstream.PubAck{}, nil
-}
-
-// Published returns a snapshot of PublishMsg calls recorded so far.
-func (m *MockJetStream) Published() []*nats.Msg {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]*nats.Msg(nil), m.published...)
-}
-
-// ── Mock jetstream.Stream ────────────────────────────────────────
-
-// MockStream embeds jetstream.Stream so unused methods panic. Provide Msgs
-// for static GetMsg lookup, or GetMsgFn for richer behaviour. Purge calls
-// are recorded into Purged.
+// MockStream implements mq.Stream. Provide MessageTimes for static lookup, or
+// MessageTimeFn for richer behaviour. PurgeBelow calls are recorded in Purged.
 type MockStream struct {
-	jetstream.Stream
+	StateVal mq.StreamState
+	StateErr error
 
-	InfoVal *jetstream.StreamInfo
-	InfoErr error
+	MessageTimes  map[uint64]time.Time
+	MessageTimeFn func(ctx context.Context, seq uint64) (time.Time, error)
 
-	Msgs     map[uint64]*jetstream.RawStreamMsg
-	GetMsgFn func(ctx context.Context, seq uint64, opts ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error)
+	AckFloorVal uint64
+	AckFloorErr error
 
 	mu       sync.Mutex
-	Purged   []jetstream.StreamPurgeOpt
+	Purged   []uint64
 	PurgeErr error
 }
 
-func (m *MockStream) Info(_ context.Context, _ ...jetstream.StreamInfoOpt) (*jetstream.StreamInfo, error) {
-	return m.InfoVal, m.InfoErr
+func (m *MockStream) State(_ context.Context, _ string) (mq.StreamState, error) {
+	return m.StateVal, m.StateErr
 }
 
-func (m *MockStream) GetMsg(ctx context.Context, seq uint64, opts ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
-	if m.GetMsgFn != nil {
-		return m.GetMsgFn(ctx, seq, opts...)
+func (m *MockStream) MessageTime(ctx context.Context, seq uint64) (time.Time, error) {
+	if m.MessageTimeFn != nil {
+		return m.MessageTimeFn(ctx, seq)
 	}
-	msg, ok := m.Msgs[seq]
+	ts, ok := m.MessageTimes[seq]
 	if !ok {
-		return nil, errors.New("MockStream.GetMsg: message not found")
+		return time.Time{}, errors.New("MockStream.MessageTime: message not found")
 	}
-	return msg, nil
+	return ts, nil
 }
 
-func (m *MockStream) Purge(_ context.Context, opts ...jetstream.StreamPurgeOpt) error {
+func (m *MockStream) PurgeBelow(_ context.Context, seq uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Purged = append(m.Purged, opts...)
+	m.Purged = append(m.Purged, seq)
 	return m.PurgeErr
 }
 
-// ── Mock jetstream.Consumer ──────────────────────────────────────
-
-// MockConsumer embeds jetstream.Consumer so unused methods panic.
-type MockConsumer struct {
-	jetstream.Consumer
-
-	InfoVal *jetstream.ConsumerInfo
-	InfoErr error
-}
-
-func (m *MockConsumer) Info(_ context.Context) (*jetstream.ConsumerInfo, error) {
-	return m.InfoVal, m.InfoErr
+func (m *MockStream) ConsumerAckFloor(_ context.Context, _ string) (uint64, error) {
+	return m.AckFloorVal, m.AckFloorErr
 }
 
 // ── Mock http.RoundTripper ───────────────────────────────────────

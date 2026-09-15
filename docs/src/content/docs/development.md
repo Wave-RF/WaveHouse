@@ -427,6 +427,7 @@ The configuration is in `.golangci.yml` (v2 format with `default: none` for expl
 - **noctx** — HTTP requests without context
 - **errorlint** — Proper error wrapping checks (`%w`, `errors.Is/As`)
 - **tparallel** — Missing `t.Parallel()` in test subtests
+- **depguard** — Import boundaries: only `internal/mq` may import NATS/JetStream (`github.com/nats-io/…`); everything else goes through an mq-owned type
 
 Formatting (**gofumpt** — strict superset of gofmt — and **goimports** import grouping) is enforced through the v2 `formatters:` section rather than as linters.
 
@@ -459,7 +460,7 @@ WaveHouse/
 │   ├── dedupe/             # Optional deduplication (Pebble)
 │   ├── discovery/          # ClickHouse schema introspection + validation
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
-│   ├── mq/                 # NATS message queue abstraction
+│   ├── mq/                 # MQ boundary: the only NATS/JetStream importer
 │   ├── observability/      # OpenTelemetry pipeline (traces/metrics/logs + Prometheus)
 │   ├── pipes/              # Named query pipes (types + parameter binding)
 │   ├── policy/             # Access control policies (types + evaluation)

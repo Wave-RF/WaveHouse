@@ -62,8 +62,7 @@ func TestDLQ_PopulatedOnIngestWorkerFailure(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+safeTableName, payload)
-	require.NoError(t, err)
+	require.NoError(t, e.embeddedMQ.Publish(ctx, "ingest."+safeTableName, payload))
 
 	// Ingest worker batches every 5s; 30s upper bound gives generous slack on a
 	// loaded CI runner. The condition polls the API rather than the
@@ -107,8 +106,7 @@ func TestDLQ_PopulatedOnIngestWorkerFailureWithBadName(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+safeTableName, payload)
-	require.NoError(t, err)
+	require.NoError(t, e.embeddedMQ.Publish(ctx, "ingest."+safeTableName, payload))
 
 	// Ingest worker batches every 5s; 30s upper bound gives generous slack on a
 	// loaded CI runner. The condition polls the API rather than the

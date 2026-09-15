@@ -396,7 +396,7 @@ func run() int {
 	// provider and RegisterCallback silently no-ops, making this look
 	// authoritative when it's actually doing nothing.
 	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
-		if err := observability.RegisterSystemMetrics(embeddedMQ.GetServer(), dedup); err != nil {
+		if err := observability.RegisterSystemMetrics(embeddedMQ.Stats, dedup); err != nil {
 			logger.Error("failed to register system metrics", "error", err)
 		}
 	}
@@ -405,7 +405,7 @@ func run() int {
 	// and whether a poison row lands on it is the hot-reloadable dlq.enabled
 	// switch (global, overridable per table), resolved by the ingest worker at
 	// the moment of the failure.
-	if err := api.EnsureDLQStream(ctx, embeddedMQ.JetStream(), maxBytes/10); err != nil {
+	if err := embeddedMQ.EnsureDLQStream(ctx, maxBytes/10); err != nil {
 		logger.Error("dlq stream init", "error", err)
 		return 1
 	}
@@ -422,7 +422,7 @@ func run() int {
 			logger.Error("mq stream resize failed; previous limit stays in effect", "error", err)
 			return
 		}
-		if err := api.EnsureDLQStream(ctx, embeddedMQ.JetStream(), mb/10); err != nil {
+		if err := embeddedMQ.EnsureDLQStream(ctx, mb/10); err != nil {
 			logger.Error("dlq stream resize failed; previous limit stays in effect", "error", err)
 			return
 		}
@@ -451,7 +451,7 @@ func run() int {
 	// Active sweeper — purges messages that are both written to CH and
 	// older than the SSE gap window (stream.gap_window_minutes, re-read every
 	// sweep). Runs every minute.
-	sweeper := ingest.NewSweeper(embeddedMQ.JetStream(), settingsStore.GapWindow, logger)
+	sweeper := ingest.NewSweeper(embeddedMQ, settingsStore.GapWindow, logger)
 
 	// Streaming fan-out: one SSE metric set shared by the Hub (drop counts) and the
 	// handler (write counts), and the Hub that projects/serializes each event once
@@ -462,7 +462,7 @@ func run() int {
 	// Start batch consumer → ClickHouse.
 	ingestCleanup, err := ingest.StartIngestWorker(
 		ctx,
-		embeddedMQ.NatsConn(),
+		embeddedMQ,
 		cache,
 		chConn.Target,
 		settingsStore.DLQFor,
@@ -489,13 +489,12 @@ func run() int {
 	}
 
 	// Build handlers.
-	js := embeddedMQ.JetStream()
 	ingestHandler := api.NewIngestHandler(registry, embeddedMQ, logger)
 	ingestHandler.PolicySource = policySource
 	ingestHandler.Dedup = dedup
 	ingestHandler.DedupeSettings = settingsStore.DedupeFor
 
-	dlqHandler := api.NewDLQHandler(js, logger)
+	dlqHandler := api.NewDLQHandler(embeddedMQ, logger)
 
 	// /v1/ops/query proxies straight to ClickHouse over HTTP — no native
 	// driver involvement. Same HTTP target as the ingest worker, resolved
@@ -505,7 +504,7 @@ func run() int {
 	healthHandler := api.NewHealthHandler(chConn)
 	healthHandler.Boot = bootState
 
-	streamHandler := api.NewStreamHandler(streamHub, js)
+	streamHandler := api.NewStreamHandler(streamHub, embeddedMQ)
 	streamHandler.Metrics = sseMetrics
 
 	// Shared keepalive wheel: one goroutine nudges idle streams so proxies don't
@@ -583,7 +582,6 @@ func run() int {
 		AuthMW:       authMW,
 		PolicySource: policySource,
 		Logger:       logger,
-		JS:           js,
 		CORSOrigins:  settingsStore.CORSOrigins,
 		Settings:     api.NewSettingsHandler(settingsStore, logger),
 	}

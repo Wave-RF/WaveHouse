@@ -16,6 +16,7 @@ linters:
     - noctx
     - errorlint
     - tparallel
+    - depguard # the MQ boundary — see settings.depguard below
     # new additions below, commented out to fix for now, double commented as not working or big fixes
     # - canonicalheader
     # # - clickhouselint  # installed when `golangci-lint help linters` but not make version
@@ -62,6 +63,16 @@ linters:
     - usetesting
     - wastedassign
   settings:
+    depguard:
+      rules:
+        # The MQ boundary: only internal/mq imports NATS/JetStream, so a
+        # broker change lands in one package. Key Design Decision #20.
+        mq-boundary:
+          files:
+            - "!**/internal/mq/**"
+          deny:
+            - pkg: github.com/nats-io
+              desc: only internal/mq may import NATS/JetStream; go through an mq-owned type
     revive:
       # Opt in to specific rules only; skip the default set's noisy
       # doc-comment and unused-parameter rules for internal packages.

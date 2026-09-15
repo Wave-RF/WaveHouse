@@ -11,7 +11,6 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/nats-io/nats.go/jetstream"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -35,7 +34,6 @@ type Dependencies struct {
 	// PolicySource backs the RequireAdmin gate: the admin role (policy.AdminRole)
 	// is read live from the adopted policy, so admin_role changes apply on reload.
 	PolicySource policy.Source
-	JS           jetstream.JetStream // for SSE gap-fill
 	// CORSOrigins returns the allowed CORS origins, read per request so a
 	// settings reload applies immediately (settings.Store.CORSOrigins in
 	// production). An empty or nil list — including a nil func — denies every

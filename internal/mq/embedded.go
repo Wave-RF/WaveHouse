@@ -2,6 +2,7 @@ package mq
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -45,6 +46,15 @@ type EmbeddedNATS struct {
 	conn   *nats.Conn
 	js     jetstream.JetStream
 }
+
+// EmbeddedNATS is the one implementation of every mq interface.
+var (
+	_ Publisher       = (*EmbeddedNATS)(nil)
+	_ Subscriber      = (*EmbeddedNATS)(nil)
+	_ ConsumerManager = (*EmbeddedNATS)(nil)
+	_ StreamManager   = (*EmbeddedNATS)(nil)
+	_ Replayer        = (*EmbeddedNATS)(nil)
+)
 
 // NewEmbedded starts an embedded NATS server with JetStream enabled.
 // An optional *slog.Logger can be passed to control server log output;
@@ -116,6 +126,19 @@ func ingestStreamConfig(maxBytes int64) jetstream.StreamConfig {
 	}
 }
 
+// dlqStreamConfig is the WAVEHOUSE_DLQ stream. DiscardOld: a full DLQ drops
+// its oldest parked rows rather than refusing new ones — backpressure belongs
+// to the ingest stream, not the dead-letter one.
+func dlqStreamConfig(maxBytes int64) jetstream.StreamConfig {
+	return jetstream.StreamConfig{
+		Name:      DLQStreamName(),
+		Subjects:  []string{"dlq.>"},
+		Retention: jetstream.LimitsPolicy,
+		MaxBytes:  maxBytes,
+		Discard:   jetstream.DiscardOld,
+	}
+}
+
 // Resize updates the ingest stream's MaxBytes in place (the hot-reloadable
 // mq.max_bytes_gb). JetStream applies a limit change to a live stream
 // without touching its messages: growing takes effect immediately; shrinking
@@ -128,18 +151,43 @@ func (e *EmbeddedNATS) Resize(ctx context.Context, maxBytes int64) error {
 	return nil
 }
 
+// EnsureDLQStream creates the DLQ stream if it doesn't exist, or updates its
+// MaxBytes in place if it does (the same reload path as Resize).
+func (e *EmbeddedNATS) EnsureDLQStream(ctx context.Context, maxBytes int64) error {
+	_, err := e.js.CreateOrUpdateStream(ctx, dlqStreamConfig(maxBytes))
+	return err
+}
+
 func (e *EmbeddedNATS) Publish(ctx context.Context, subject string, data []byte, opts ...PublishOpt) error {
 	msg := nats.NewMsg(subject)
 	msg.Data = data
 
 	// Apply any optional configurations (like headers) to the message
+	headers := Headers{}
 	for _, opt := range opts {
-		opt(msg)
+		opt(headers)
 	}
 
-	observability.InjectNATS(ctx, msg)
+	observability.InjectHeaders(ctx, headers)
+	msg.Header = nats.Header(headers)
 	_, err := e.js.PublishMsg(ctx, msg)
 	return err
+}
+
+// wrapMsg adapts a received JetStream message to the mq-owned Message. ctx
+// becomes Message.Ctx as given; Subscribe extracts the trace context first.
+func wrapMsg(ctx context.Context, m jetstream.Msg) *Message {
+	return NewMessage(ctx, m.Subject(), m.Data(), time.Now(),
+		func(ctx context.Context) error {
+			return m.DoubleAck(ctx)
+		},
+		func() error {
+			return m.Ack()
+		},
+		func() error {
+			return m.Nak()
+		},
+	)
 }
 
 func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName string, handler func(msg *Message) error) error {
@@ -153,20 +201,7 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName stri
 	}
 
 	cctx, err := cons.Consume(func(m jetstream.Msg) {
-		msgCtx := observability.ExtractNATS(ctx, m)
-
-		msg := NewMessage(msgCtx, m.Subject(), m.Data(), time.Now(),
-			func(ctx context.Context) error {
-				return m.DoubleAck(ctx)
-			},
-			func() error {
-				return m.Ack()
-			},
-			func() error {
-				return m.Nak()
-			},
-		)
-
+		msg := wrapMsg(observability.ExtractHeaders(ctx, m.Headers()), m)
 		if err := handler(msg); err != nil {
 			_ = msg.Nak()
 		}
@@ -183,13 +218,135 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName stri
 	return nil
 }
 
-// JetStream returns the underlying JetStream handle for direct access (e.g. gap-fill).
-func (e *EmbeddedNATS) JetStream() jetstream.JetStream {
-	return e.js
+// CreateConsumer creates or updates a durable explicit-ack pull consumer on
+// the ingest stream. ctx becomes every delivered Message.Ctx (see
+// ConsumerManager); it does not stop delivery — Consumer.Consume's stop does.
+func (e *EmbeddedNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (Consumer, error) {
+	cons, err := e.js.CreateOrUpdateConsumer(ctx, StreamName(), jetstream.ConsumerConfig{
+		Durable:       cfg.Durable,
+		FilterSubject: cfg.FilterSubject,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		AckWait:       cfg.AckWait,
+		MaxAckPending: cfg.MaxAckPending,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create consumer: %w", err)
+	}
+	return &jsConsumer{cons: cons, ctx: ctx}, nil
 }
 
-func (e *EmbeddedNATS) NatsConn() *nats.Conn {
-	return e.conn
+// jsConsumer is the Consumer over a JetStream pull consumer.
+type jsConsumer struct {
+	cons jetstream.Consumer
+	ctx  context.Context // each delivered Message.Ctx (see ConsumerManager)
+}
+
+func (c *jsConsumer) Consume(handler func(msg *Message), prefetch int) (func(), error) {
+	var opts []jetstream.PullConsumeOpt
+	if prefetch > 0 {
+		opts = append(opts, jetstream.PullMaxMessages(prefetch))
+	}
+	cctx, err := c.cons.Consume(func(m jetstream.Msg) {
+		handler(wrapMsg(c.ctx, m))
+	}, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("consume: %w", err)
+	}
+	return cctx.Stop, nil
+}
+
+// Stream resolves a stream handle by name.
+func (e *EmbeddedNATS) Stream(ctx context.Context, name string) (Stream, error) {
+	s, err := e.js.Stream(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return &jsStream{s: s}, nil
+}
+
+// jsStream is the Stream handle over a resolved JetStream stream.
+type jsStream struct {
+	s jetstream.Stream
+}
+
+func (s *jsStream) State(ctx context.Context, subjectFilter string) (StreamState, error) {
+	var opts []jetstream.StreamInfoOpt
+	if subjectFilter != "" {
+		opts = append(opts, jetstream.WithSubjectFilter(subjectFilter))
+	}
+	info, err := s.s.Info(ctx, opts...)
+	if err != nil {
+		return StreamState{}, err
+	}
+	return StreamState{
+		FirstSeq: info.State.FirstSeq,
+		LastSeq:  info.State.LastSeq,
+		Msgs:     info.State.Msgs,
+		Subjects: info.State.Subjects,
+	}, nil
+}
+
+func (s *jsStream) MessageTime(ctx context.Context, seq uint64) (time.Time, error) {
+	msg, err := s.s.GetMsg(ctx, seq)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return msg.Time, nil
+}
+
+func (s *jsStream) PurgeBelow(ctx context.Context, seq uint64) error {
+	return s.s.Purge(ctx, jetstream.WithPurgeSequence(seq))
+}
+
+func (s *jsStream) ConsumerAckFloor(ctx context.Context, consumer string) (uint64, error) {
+	cons, err := s.s.Consumer(ctx, consumer)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrConsumerNotFound) {
+			return 0, fmt.Errorf("consumer %q: %w", consumer, ErrConsumerNotFound)
+		}
+		return 0, err
+	}
+	info, err := cons.Info(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("consumer info: %w", err)
+	}
+	return info.AckFloor.Stream, nil
+}
+
+// ReplaySince creates an ephemeral consumer on the ingest stream starting at
+// since (DeliverByStartTime) and drains it to send until caught up. The
+// consumer is ack-less and expires on its own once idle.
+func (e *EmbeddedNATS) ReplaySince(ctx context.Context, subject string, since time.Time, send func(data []byte) bool) error {
+	cons, err := e.js.CreateOrUpdateConsumer(ctx, StreamName(), jetstream.ConsumerConfig{
+		FilterSubject:     subject,
+		DeliverPolicy:     jetstream.DeliverByStartTimePolicy,
+		OptStartTime:      &since,
+		AckPolicy:         jetstream.AckNonePolicy,
+		InactiveThreshold: 5 * time.Second,
+	})
+	if err != nil {
+		return fmt.Errorf("replay consumer: %w", err)
+	}
+
+	for {
+		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
+		if err != nil {
+			return nil // No more messages or timeout — done with gap-fill.
+		}
+		if !send(msg.Data()) {
+			return nil
+		}
+	}
+}
+
+// Stats reports the embedded server's connection and inbound-message counters
+// for observability.RegisterSystemMetrics.
+func (e *EmbeddedNATS) Stats() (observability.MQStats, error) {
+	varz, err := e.server.Varz(nil)
+	if err != nil {
+		return observability.MQStats{}, err
+	}
+	return observability.MQStats{Connections: int64(varz.Connections), InMsgs: varz.InMsgs}, nil
 }
 
 func (e *EmbeddedNATS) Close() error {
@@ -201,8 +358,4 @@ func (e *EmbeddedNATS) Close() error {
 	// Milliseconds for an in-process server.
 	e.server.WaitForShutdown()
 	return nil
-}
-
-func (e *EmbeddedNATS) GetServer() *natsserver.Server {
-	return e.server
 }

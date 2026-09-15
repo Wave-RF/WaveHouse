@@ -3,24 +3,28 @@ package observability
 import (
 	"context"
 
-	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 )
 
-// natsCarrier adapts nats.Header to satisfy the TextMapCarrier interface
-type natsCarrier nats.Header
+// headerCarrier adapts a message header map to OpenTelemetry's TextMapCarrier.
+// NATS and HTTP headers are both map[string][]string, so either converts to it
+// without a copy. Lookups are exact-key (no canonicalization), matching
+// nats.Header, so the propagator reads back the keys it wrote.
+type headerCarrier map[string][]string
 
-// These are methods for retrieving and storing values from and to NATS header.
-func (c natsCarrier) Get(key string) string {
-	return nats.Header(c).Get(key)
+func (c headerCarrier) Get(key string) string {
+	if v := c[key]; len(v) > 0 {
+		return v[0]
+	}
+	return ""
 }
 
-func (c natsCarrier) Set(key string, value string) {
-	nats.Header(c).Set(key, value)
+func (c headerCarrier) Set(key string, value string) {
+	c[key] = []string{value}
 }
 
-// Gives us back header (for OTEL debugging).
-func (c natsCarrier) Keys() []string {
+// Keys lists the header names (for OTel debugging).
+func (c headerCarrier) Keys() []string {
 	keys := make([]string, 0, len(c))
 	for k := range c {
 		keys = append(keys, k)
@@ -28,26 +32,19 @@ func (c natsCarrier) Keys() []string {
 	return keys
 }
 
-type HeaderHolder interface {
-	Headers() nats.Header
+// InjectHeaders writes the propagation context (trace + baggage) from ctx into
+// the message headers h, which must be non-nil. The publisher calls this before
+// handing a message to the broker so the consumer can pick the trace back up.
+func InjectHeaders(ctx context.Context, h map[string][]string) {
+	otel.GetTextMapPropagator().Inject(ctx, headerCarrier(h))
 }
 
-// InjectNATS injects the propagation context into the NATS message header.
-// Use this in the API/Producer before publishing.
-func InjectNATS(ctx context.Context, msg *nats.Msg) {
-	if msg.Header == nil {
-		msg.Header = make(nats.Header)
-	}
-	// Take the Trace ID from the contets and pack it into the NATS Headers so the worker can find it later.
-	otel.GetTextMapPropagator().Inject(ctx, natsCarrier(msg.Header))
-}
-
-// ExtractNATS extracts the propagation context from the NATS message header.
-// Use this in the Worker/Subscriber when a message is received.
-func ExtractNATS(ctx context.Context, msg HeaderHolder) context.Context {
-	headers := msg.Headers()
-	if headers == nil {
+// ExtractHeaders returns ctx carrying the propagation context found in the
+// message headers h. A nil h returns ctx unchanged. The subscriber calls this
+// when a message is received.
+func ExtractHeaders(ctx context.Context, h map[string][]string) context.Context {
+	if h == nil {
 		return ctx
 	}
-	return otel.GetTextMapPropagator().Extract(ctx, natsCarrier(headers))
+	return otel.GetTextMapPropagator().Extract(ctx, headerCarrier(h))
 }

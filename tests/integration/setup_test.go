@@ -148,8 +148,7 @@ func setup() (int, func()) {
 	}
 	cleanups.push(func() { _ = embeddedMQ.Close() })
 
-	js := embeddedMQ.JetStream()
-	if err := api.EnsureDLQStream(ctx, js, 1024*1024); err != nil {
+	if err := embeddedMQ.EnsureDLQStream(ctx, 1024*1024); err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: ensure dlq: %v\n", err)
 		return 1, cleanup
 	}
@@ -169,7 +168,7 @@ func setup() (int, func()) {
 
 	if _, err := ingest.StartIngestWorker(
 		ctx,
-		embeddedMQ.NatsConn(),
+		embeddedMQ,
 		localCache,
 		func() chconn.Target {
 			return chconn.Target{URL: ch.httpURL(), Username: testCHUser, Password: testCHPassword, Database: testCHDatabase}
@@ -313,8 +312,6 @@ func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Dura
 // server is wired with an in-memory policy whose admin_role is "admin". A nil
 // store would deny every admin-gated route (IsAdmin(nil) is false by design).
 func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, logger *slog.Logger) (*httptest.Server, error) {
-	js := embeddedMQ.JetStream()
-
 	policyStore := policy.Static(&policy.Policy{AdminRole: "admin"})
 	streamHub := stream.NewHub(policyStore, registry, nil)
 
@@ -326,17 +323,16 @@ func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discover
 		Query: api.NewQueryHandler(func() chconn.Target {
 			return chconn.Target{URL: ch.httpURL(), Username: testCHUser, Password: testCHPassword, Database: testCHDatabase}
 		}, func() time.Duration { return 30 * time.Second }),
-		SSE:          api.NewStreamHandler(streamHub, js),
+		SSE:          api.NewStreamHandler(streamHub, embeddedMQ),
 		Health:       api.NewHealthHandler(ch.conn),
 		Schema:       api.NewSchemaHandler(registry),
-		DLQ:          api.NewDLQHandler(js, logger),
+		DLQ:          api.NewDLQHandler(embeddedMQ, logger),
 		PolicySource: policyStore,
 		AuthMW: func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				next.ServeHTTP(w, r.WithContext(auth.WithRole(r.Context(), "admin")))
 			})
 		},
-		JS:     js,
 		Logger: logger,
 	}
 
