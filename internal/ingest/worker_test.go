@@ -1540,3 +1540,52 @@ func TestRejectPoison_CountedByDisposition(t *testing.T) {
 	assert.Equal(t, map[string]int64{"parked": 1, "dropped": 1}, dispositions(),
 		"a park whose ack failed must not be counted as a parking")
 }
+
+// blockingFakeConsumer delivers n messages to the handler from its own
+// goroutines, the way the JetStream client does, and closes done once every
+// delivery has returned — so a handler that never returns is observable.
+type blockingFakeConsumer struct {
+	n    int
+	done chan struct{}
+}
+
+func (f *blockingFakeConsumer) Consume(handler func(*mq.Message), _ int) (func(), error) {
+	var wg sync.WaitGroup
+	for range f.n {
+		wg.Go(func() {
+			handler((&testutil.MockMessage{MsgSubject: "ingest.t", MsgData: []byte("not json")}).Message())
+		})
+	}
+	go func() {
+		wg.Wait()
+		close(f.done)
+	}()
+	return func() {}, nil
+}
+
+// TestDispatchLoop_HandoffReturnsOnCancel pins the delivery handoff's
+// cancellation: Consumer.Consume's stop does not wait for a handler already
+// in flight, so once dispatchLoop has stopped draining msgChan, a delivery
+// blocked on a full channel must return on ctx rather than pin the client's
+// delivery goroutine for the life of the process.
+func TestDispatchLoop_HandoffReturnsOnCancel(t *testing.T) {
+	t.Parallel()
+
+	w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+	w.maxBatch = 1                                    // msgChan holds 2
+	w.dlqEnabled = func(string) bool { return false } // any message parsed is acked-and-dropped, no publish
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already stopping: the loop exits at its first ctx.Done pick, leaving msgChan full
+
+	cons := &blockingFakeConsumer{n: 64, done: make(chan struct{})}
+	w.wg.Add(1)
+	go w.dispatchLoop(ctx, cons)
+	w.wg.Wait()
+
+	select {
+	case <-cons.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deliveries blocked on a full msgChan never returned after the loop stopped")
+	}
+}

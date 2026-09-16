@@ -315,7 +315,10 @@ func (s *jsStream) ConsumerAckFloor(ctx context.Context, consumer string) (uint6
 
 // ReplaySince creates an ephemeral consumer on the ingest stream starting at
 // since (DeliverByStartTime) and drains it to send until caught up. The
-// consumer is ack-less and expires on its own once idle.
+// consumer is ack-less and expires on its own once idle. Caught up is the
+// client's no-messages or request-timeout answer to a pull; any other pull
+// failure (a closed connection, a deleted consumer) is returned so the caller
+// knows the replay ended short rather than empty.
 func (e *EmbeddedNATS) ReplaySince(ctx context.Context, subject string, since time.Time, send func(data []byte) bool) error {
 	cons, err := e.js.CreateOrUpdateConsumer(ctx, StreamName(), jetstream.ConsumerConfig{
 		FilterSubject:     subject,
@@ -331,7 +334,10 @@ func (e *EmbeddedNATS) ReplaySince(ctx context.Context, subject string, since ti
 	for {
 		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
 		if err != nil {
-			return nil // No more messages or timeout — done with gap-fill.
+			if errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout) {
+				return nil // caught up
+			}
+			return fmt.Errorf("replay next: %w", err)
 		}
 		if !send(msg.Data()) {
 			return nil

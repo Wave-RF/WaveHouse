@@ -211,8 +211,15 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 
 	// Pull consumer with a push-like callback (the client prefetches pullMaxMessages).
 	// Hand off to msgChan only, so the consume goroutine never blocks on flush work.
+	// The handoff also watches ctx: stop (deferred below) does not wait for a
+	// delivery already in the handler, so once this loop has stopped draining
+	// msgChan a full channel would otherwise pin the client's delivery goroutine
+	// forever. A message dropped here is unacked and simply redelivered.
 	stop, err := cons.Consume(func(msg *mq.Message) {
-		msgChan <- msg
+		select {
+		case msgChan <- msg:
+		case <-ctx.Done():
+		}
 	}, pullMaxMessages)
 	if err != nil {
 		w.logger.Error("failed to start consumer", "error", err)

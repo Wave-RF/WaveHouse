@@ -189,8 +189,8 @@ type StreamManager interface {
 type Replayer interface {
 	// ReplaySince sends the data of every message on subject stored at or
 	// after since, in stream order, until send returns false or the stream is
-	// caught up. Only failing to start the replay is an error; running out of
-	// messages is the normal end.
+	// caught up. Running out of messages is the normal end; failing to start
+	// the replay, or a delivery failure before it catches up, is an error.
 	ReplaySince(ctx context.Context, subject string, since time.Time, send func(data []byte) bool) error
 }
 

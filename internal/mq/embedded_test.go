@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -311,4 +312,25 @@ func TestEmbeddedNATS_Resize(t *testing.T) {
 	// Everything but the limit is preserved.
 	assert.Equal(t, []string{"ingest.>"}, info.CachedInfo().Config.Subjects)
 	assert.Equal(t, jetstream.DiscardNew, info.CachedInfo().Config.Discard)
+}
+
+func TestEmbeddedNATS_ReplaySince_PullFailureIsAnError(t *testing.T) {
+	e := newTestEmbedded(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	require.NoError(t, e.Publish(ctx, "ingest.r", []byte("one")))
+	require.NoError(t, e.Publish(ctx, "ingest.r", []byte("two")))
+
+	// Closing the client connection under a running replay makes the next pull
+	// fail outright — that is not "caught up" and must reach the caller.
+	var got []string
+	err := e.ReplaySince(ctx, "ingest.r", time.Time{}, func(data []byte) bool {
+		got = append(got, string(data))
+		e.conn.Close()
+		return true
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, nats.ErrConnectionClosed)
+	assert.Equal(t, []string{"one"}, got, "the message delivered before the failure was still sent")
 }

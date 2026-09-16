@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -173,9 +174,12 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // replay sends every message retained on subject since the given time to the
-// callback until caught up. A replay that cannot start is not fatal to the
-// stream — the client still gets live events from here on — so the error is
-// dropped rather than ending the connection.
+// callback until caught up. A replay that cannot start, or that fails before
+// catching up, is not fatal to the stream — the client still gets live events
+// from here on — so the error is logged rather than ending the connection.
 func (h *StreamHandler) replay(ctx context.Context, since time.Time, subject string, send func([]byte) bool) {
-	_ = h.Replayer.ReplaySince(ctx, subject, since, send)
+	if err := h.Replayer.ReplaySince(ctx, subject, since, send); err != nil {
+		slog.Default().WarnContext(ctx, "gap-fill replay ended early; the client continues with live events only",
+			"component", "stream", "subject", subject, "since", since, "error", err)
+	}
 }
