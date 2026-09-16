@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -113,7 +114,7 @@ func newApp(t *testing.T, cfg *config.Config, opts Options) *App {
 	opts.Config = cfg
 	a, err := New(t.Context(), opts)
 	require.NoError(t, err)
-	t.Cleanup(func() { assert.NoError(t, a.Close()) })
+	t.Cleanup(func() { assert.NoError(t, a.Close(context.Background())) })
 	return a
 }
 
@@ -138,8 +139,8 @@ func TestNew_DegradedBootServesDiagnostics(t *testing.T) {
 
 	assert.NotNil(t, a.Registry())
 	assert.NotNil(t, a.MQ())
-	assert.NoError(t, a.Close())
-	assert.NoError(t, a.Close(), "Close is idempotent")
+	assert.NoError(t, a.Close(context.Background()))
+	assert.NoError(t, a.Close(context.Background()), "Close is idempotent")
 }
 
 func TestNew_DedupeFollowsSettings(t *testing.T) {
@@ -210,6 +211,29 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	assert.False(t, a.dedup.Open(), "dedupe hook closed the store")
 }
 
+func TestReload_DLQResizeFailureRollsBackIngest(t *testing.T) {
+	dir := writeSettings(t, map[string]any{"mq": map[string]any{"max_bytes_gb": 1}})
+	cfg := testConfig(t, dir)
+	a := newApp(t, cfg, Options{})
+	js := a.mq.JetStream()
+
+	// Put the DLQ stream where the hook's update can't follow: JetStream
+	// refuses to change a live stream's retention policy, so recreating it
+	// as a work queue makes the next EnsureDLQStream fail after the ingest
+	// resize has already succeeded.
+	require.NoError(t, js.DeleteStream(t.Context(), mq.DLQStreamName()))
+	_, err := js.CreateStream(t.Context(), jetstream.StreamConfig{
+		Name: mq.DLQStreamName(), Subjects: []string{"dlq.>"}, Retention: jetstream.WorkQueuePolicy, MaxBytes: (1 << 30) / 10,
+	})
+	require.NoError(t, err)
+
+	rewriteSettings(t, dir, map[string]any{"mq": map[string]any{"max_bytes_gb": 2}})
+	_, adopted := a.store.Reload("test")
+	require.True(t, adopted)
+	assert.Equal(t, int64(1<<30), streamMaxBytes(t, a, mq.StreamName()), "the ingest resize is undone so the pair stays at the previous limit")
+	assert.Equal(t, int64(1<<30)/10, streamMaxBytes(t, a, mq.DLQStreamName()))
+}
+
 func TestNew_RefusesInvalidSettingsDirectory(t *testing.T) {
 	guardGlobals(t)
 	cfg := testConfig(t, t.TempDir()) // empty: every required file is missing
@@ -235,7 +259,7 @@ func TestNew_AuthBootFailureReleasesEverything(t *testing.T) {
 	cfg.Settings.Dir = writeSettings(t, nil)
 	a, err = New(t.Context(), Options{Config: cfg})
 	require.NoError(t, err)
-	assert.NoError(t, a.Close())
+	assert.NoError(t, a.Close(context.Background()))
 }
 
 func TestNew_PrometheusInlineMountsOnRouter(t *testing.T) {
@@ -334,15 +358,53 @@ func TestRun_PrometheusSidecar(t *testing.T) {
 }
 
 func TestRun_ListenFailureStopsEverything(t *testing.T) {
+	// Hold the wildcard address the server binds (":port"), not loopback: a
+	// process already on the port holds the same address, and macOS allows a
+	// wildcard bind while only 127.0.0.1:port is held (Linux refuses both),
+	// which turned this test into a hang there.
 	var lc net.ListenConfig
-	taken, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	taken, err := lc.Listen(t.Context(), "tcp", ":0")
 	require.NoError(t, err)
 	defer func() { _ = taken.Close() }()
 	cfg := testConfig(t, writeSettings(t, nil))
 	cfg.Server.Port = taken.Addr().(*net.TCPAddr).Port
 	a := newApp(t, cfg, Options{})
 
-	err = a.Run(t.Context())
-	require.Error(t, err)
+	// Bounded so a bind that unexpectedly succeeds fails the assertion below
+	// (a cancelled Run returns nil) instead of blocking until the package
+	// timeout kills the binary with no output.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	err = a.Run(ctx)
+	require.Error(t, err, "boot must fail immediately when the port is taken")
 	assert.True(t, strings.HasPrefix(err.Error(), "http server: "), "the failing component names itself: %v", err)
+}
+
+func TestRun_StopEndsOpenStreams(t *testing.T) {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	cfg := testConfig(t, writeSettings(t, nil))
+	a := newApp(t, cfg, Options{Listener: ln})
+	baseURL, stop := runApp(t, a, ln)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/v1/stream?table=events", nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	buf := make([]byte, 64)
+	n, err := resp.Body.Read(buf)
+	require.NoError(t, err)
+	require.Contains(t, string(buf[:n]), ": connected", "the stream is open")
+
+	// A stream is a connection to close, not work to drain: the stop ends it
+	// at once rather than waiting out server.shutdown_timeout and then
+	// force-closing it anyway.
+	started := time.Now()
+	assert.NoError(t, stop())
+	assert.Less(t, time.Since(started), time.Second, "the open stream held the stop for the drain budget")
+	_, err = io.ReadAll(resp.Body)
+	assert.NoError(t, err, "the server ended the stream cleanly")
 }

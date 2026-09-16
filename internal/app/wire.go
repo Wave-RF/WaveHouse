@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -31,17 +32,25 @@ import (
 
 const (
 	serviceName = "wavehouse"
-	// otelShutdownTimeout bounds the telemetry flush at exit so an unreachable
-	// collector can't hang the process: InitProvider's shutdown honors it
-	// internally, returning even when a flush is stuck in gRPC backoff.
-	otelShutdownTimeout = 3 * time.Second
 	// mqResizeTimeout bounds the JetStream calls a settings reload makes to
-	// apply a new mq.max_bytes_gb. The reload holds the store's lock while its
-	// hooks run, so an in-process JetStream call that never returns would
-	// otherwise block every later reload.
-	mqResizeTimeout   = 10 * time.Second
+	// apply a new mq.max_bytes_gb — both streams share it. The reload holds
+	// the store's lock while its hooks run, so an in-process JetStream call
+	// that never returns would otherwise block every later reload.
+	mqResizeTimeout = 10 * time.Second
+	// mqRollbackTimeout is the undo's own budget when the DLQ resize fails:
+	// in-process JetStream fails by stalling rather than erroring, so the
+	// likely cause is that mqResizeTimeout has just run out, and an undo on
+	// that context would fail without touching the stream. The hook holds the
+	// store's lock for at most the sum of the two.
+	mqRollbackTimeout = 5 * time.Second
 	readHeaderTimeout = 10 * time.Second
 )
+
+// withoutContext adapts a local store's Close, which has no deadline to
+// honor, to the component close signature.
+func withoutContext(release func() error) func(context.Context) error {
+	return func(context.Context) error { return release() }
+}
 
 // wireSettings adopts the settings directory — the hot-reloadable half of
 // configuration (dedupe, dlq, query, schema, stream, cors — see
@@ -91,11 +100,10 @@ func (a *App) wireObservability(ctx context.Context) {
 		return
 	}
 	a.promHandler = promHandler
-	a.add(component{name: "observability", close: func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), otelShutdownTimeout)
-		defer cancel()
-		return shutdown(ctx)
-	}})
+	// The flush honors the release budget Close passes: InitProvider's
+	// shutdown returns at the deadline even when a flush is stuck in gRPC
+	// backoff against an unreachable collector.
+	a.add(component{name: "observability", close: shutdown})
 
 	// Only swap to the OTLP-aware logger when OTLP logs are wired up;
 	// Prometheus-only mode keeps the stdout-only handler main installed.
@@ -142,7 +150,7 @@ func (a *App) wireClickHouse() error {
 		return fmt.Errorf("clickhouse open: %w", err)
 	}
 	a.ch = ch
-	a.add(component{name: "clickhouse", close: ch.Close})
+	a.add(component{name: "clickhouse", close: withoutContext(ch.Close)})
 	a.store.AfterAdopt(func() {
 		if err := ch.Reconfigure(params()); err != nil {
 			slog.Error("clickhouse reconfigure", "error", err)
@@ -203,7 +211,7 @@ func (a *App) wireDedupe() error {
 	dir := filepath.Join(a.cfg.DataDir, "pebble")
 	dedup := dedupe.NewManaged(dir)
 	a.dedup = dedup
-	a.add(component{name: "dedupe", close: dedup.Close})
+	a.add(component{name: "dedupe", close: withoutContext(dedup.Close)})
 	reconcile := func() (bool, error) {
 		enabled := a.store.DedupeEnabled()
 		if enabled && !dedup.Open() {
@@ -243,7 +251,7 @@ func (a *App) wireMQ(ctx context.Context) error {
 		return fmt.Errorf("mq open: %w", err)
 	}
 	a.mq = embedded
-	a.add(component{name: "mq", close: embedded.Close})
+	a.add(component{name: "mq", close: withoutContext(embedded.Close)})
 
 	// Only register system metric gauges when a real MeterProvider is in
 	// place — otherwise `otel.GetMeterProvider()` returns the no-op SDK
@@ -273,9 +281,14 @@ func (a *App) wireMQ(ctx context.Context) error {
 		if err := api.EnsureDLQStream(ctx, embedded.JetStream(), mb/10); err != nil {
 			// Keep both streams on one adopted document: undo the ingest
 			// resize so the 10:1 pair stays at the previous limit, and the
-			// next adoption retries both.
+			// next adoption retries both. Safe in this direction — the ingest
+			// stream is DiscardNew, so shrinking it back drops nothing
+			// stored. The undo runs on its own budget, not the one the DLQ
+			// call has likely just exhausted.
 			slog.Error("dlq stream resize failed; restoring the previous ingest limit", "error", err)
-			if err := embedded.Resize(ctx, applied); err != nil {
+			rollbackCtx, cancelRollback := context.WithTimeout(context.Background(), mqRollbackTimeout)
+			defer cancelRollback()
+			if err := embedded.Resize(rollbackCtx, applied); err != nil {
 				slog.Error("ingest stream rollback failed; ingest stream at the new limit, dlq at the previous", "error", err)
 			}
 			return
@@ -294,7 +307,7 @@ func (a *App) wireCache() error {
 	}
 	// TODO: eventually this is where we can switch between ristretto, redis, tiered (both), etc
 	a.cache = l1
-	a.add(component{name: "cache", close: l1.Close})
+	a.add(component{name: "cache", close: withoutContext(l1.Close)})
 	return nil
 }
 
@@ -422,9 +435,15 @@ func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
 // reload could miss it.
 func (a *App) wireReloadTriggers() {
 	a.add(component{name: "sighup", run: func(ctx context.Context) error {
+		// Registered for the rest of the process, deliberately: Notify takes
+		// SIGHUP off its default disposition (terminate), and a Stop when
+		// this loop returns — the start of shutdown — would put it back for
+		// the whole drain and release, where a hangup is easy to hit (closing
+		// the terminal after Ctrl-C signals the process group). Once ctx is
+		// done nothing reads the channel, so a late SIGHUP is discarded:
+		// ignored, as a reload of a process on its way out should be.
 		hup := make(chan os.Signal, 1)
 		signal.Notify(hup, syscall.SIGHUP)
-		defer signal.Stop(hup)
 		for {
 			select {
 			case <-ctx.Done():
@@ -462,6 +481,10 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	streamHandler := api.NewStreamHandler(a.hub, js)
 	streamHandler.Metrics = a.sseMetrics
 	streamHandler.Heartbeater = a.heartbeater
+	// Closed when the API server begins shutting down, ending every open
+	// stream at once (see serve).
+	closing := make(chan struct{})
+	streamHandler.Closing = closing
 
 	deps := api.Dependencies{
 		Ingest: ingestHandler,
@@ -502,6 +525,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Handler:           a.handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
+	srv.RegisterOnShutdown(sync.OnceFunc(func() { close(closing) }))
 	a.add(component{name: "http server", run: func(ctx context.Context) error {
 		return a.serve(ctx, "server", srv, a.listener)
 	}})
@@ -532,11 +556,13 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 
 // serve runs srv on ln — bound to srv.Addr when nil — until ctx is done,
 // then drains it within the shutdown timeout and force-closes whatever is
-// still open at the deadline: an SSE stream only ends on client disconnect,
-// so without the Close one connected client would hold the stop for the
-// whole timeout and then keep the process alive past it. A bind or serve
-// failure is returned; a drain failure is logged, since the process is
-// exiting anyway.
+// still open at the deadline. Shutdown stops accepting, waits for in-flight
+// requests, and cancels nothing, so an SSE stream — a request that never
+// finishes on its own — would ride the drain to the deadline; its
+// OnShutdown hook ends every stream as the drain begins instead (the client
+// reconnects and gap-fills via Last-Event-ID), leaving the budget to the
+// request/response work it is for. A bind or serve failure is returned; a
+// drain failure is logged, since the process is exiting anyway.
 func (a *App) serve(ctx context.Context, name string, srv *http.Server, ln net.Listener) error {
 	if ln == nil {
 		var lc net.ListenConfig

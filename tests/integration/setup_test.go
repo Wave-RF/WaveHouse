@@ -177,7 +177,9 @@ func setup() (int, func()) {
 		if err := <-runDone; err != nil {
 			fmt.Fprintf(os.Stderr, "integration teardown: run: %v\n", err)
 		}
-		_ = a.Close()
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = a.Close(closeCtx)
 	})
 
 	baseURL := "http://" + ln.Addr().String()

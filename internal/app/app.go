@@ -1,9 +1,14 @@
 // Package app wires the WaveHouse process. New builds every component from
 // the boot config and the settings directory, Run drives the long-lived ones
 // under one errgroup until the context is cancelled or one of them fails, and
-// Close releases what New opened, in reverse order. cmd/wavehouse is the
-// argv/signal/exit-code shell around it; tests/integration builds the same
-// wiring against a ClickHouse testcontainer.
+// Close releases what New opened, in reverse order. A stop is two bounded
+// phases, each within server.shutdown_timeout: Run drains the in-flight
+// request/response work and ingest batches (open SSE streams end at once —
+// they are connections to close, not work to finish), then Close releases
+// the stores and flushes telemetry under the context its caller passes.
+// cmd/wavehouse is the argv/signal/exit-code shell around it;
+// tests/integration builds the same wiring against a ClickHouse
+// testcontainer.
 //
 // Each component is wired in one place, as one component value: what New
 // opens, what Run loops, and what Close releases. The settings store is
@@ -60,11 +65,12 @@ type Options struct {
 
 // component is one wired subsystem: an optional long-lived loop and an
 // optional release step. run blocks until ctx is done and returns nil on a
-// clean stop; close releases what New opened. Either may be nil.
+// clean stop; close releases what New opened within ctx, the caller's stop
+// budget. Either may be nil.
 type component struct {
 	name  string
 	run   func(ctx context.Context) error
-	close func() error
+	close func(ctx context.Context) error
 }
 
 // App is the wired process. Construct with New; the zero value is unusable.
@@ -103,7 +109,9 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	}
 	defer func() {
 		if err != nil {
-			_ = a.Close()
+			closeCtx, cancel := a.shutdownContext()
+			defer cancel()
+			_ = a.Close(closeCtx)
 		}
 	}()
 
@@ -163,15 +171,20 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 // Close releases every resource New opened, newest first, and reports every
-// failure joined. Safe to call more than once.
-func (a *App) Close() error {
+// failure joined. ctx is the release budget: the local stores (Pebble,
+// ristretto, embedded NATS) close in milliseconds and ignore it, while a
+// remote implementation's close is a network round trip that gives up at
+// the deadline rather than hanging the exit on a dead peer, and the
+// telemetry flush — last, so the lines the other closes log still reach the
+// collector — takes whatever is left of it. Safe to call more than once.
+func (a *App) Close(ctx context.Context) error {
 	var errs []error
 	for i := len(a.components) - 1; i >= 0; i-- {
 		c := a.components[i]
 		if c.close == nil {
 			continue
 		}
-		if err := c.close(); err != nil {
+		if err := c.close(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", c.name, err))
 		}
 	}

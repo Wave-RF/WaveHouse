@@ -308,16 +308,18 @@ func run() error {
 		if err != nil && !isExpectedExit(err) {
 			log.Printf("  wavehouse exit: %v", err)
 		}
-	case <-time.After(20 * time.Second):
-		// A graceful exit is bounded: the API-server and ingest-worker drains
-		// run concurrently under server.shutdown_timeout (10s default, forced
-		// closed at the deadline), then the telemetry flush is capped at ~3s
-		// with no collector running (see internal/app + observability
-		// .InitProvider) — ~13s worst case, and near-instant when nothing is
-		// open. Fast exits are unaffected (whDone fires). Killing here would
-		// SIGKILL the cover binary before it flushes GOCOVERDIR, zeroing e2e
-		// coverage — the budget must stay above the bounded shutdown time.
-		log.Println("  wavehouse did not exit within 20s — killing")
+	case <-time.After(25 * time.Second):
+		// A graceful exit is bounded in two phases, each under
+		// server.shutdown_timeout (10s default): the API-server and
+		// ingest-worker drains run concurrently and are forced closed at the
+		// deadline, then app.Close releases the stores and flushes telemetry
+		// under its own deadline (see internal/app) — ~20s worst case, and
+		// near-instant when nothing is open (SSE streams end as the drain
+		// begins). Fast exits are unaffected (whDone fires). Killing here
+		// would SIGKILL the cover binary before it flushes GOCOVERDIR,
+		// zeroing e2e coverage — the budget must stay above the bounded
+		// shutdown time.
+		log.Println("  wavehouse did not exit within 25s — killing")
 		_ = whCmd.Process.Kill()
 		<-whDone
 	}

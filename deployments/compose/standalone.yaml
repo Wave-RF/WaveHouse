@@ -50,6 +50,10 @@ services:
     volumes:
       - wavehouse-data:/app/data
       - ./settings:/app/settings    # checked-in seed + trial policy, clickhouse.addr=clickhouse:9000; hot-reloads on edit
+    # A stop is two phases, each bounded by server.shutdown_timeout (10s):
+    # the drain, then the release of NATS/Pebble and the telemetry flush.
+    # Docker's default 10s grace would SIGKILL the release; cover both.
+    stop_grace_period: 25s
     depends_on:
       - clickhouse
 

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -146,5 +147,36 @@ func TestRun_RefusesToBoot(t *testing.T) {
 			tt.env(t)
 			assert.Equal(t, 1, run(t.Context()))
 		})
+	}
+}
+
+func TestStopOnSignals_SecondSignalExits(t *testing.T) {
+	saved := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(saved) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	sigs := make(chan os.Signal, 2)
+	cancelled := make(chan struct{})
+	exited := make(chan int, 1)
+	go stopOnSignals(sigs, func() { close(cancelled) }, func(code int) { exited <- code })
+
+	sigs <- syscall.SIGTERM
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first signal did not cancel the run context")
+	}
+	select {
+	case code := <-exited:
+		t.Fatalf("exited %d on the first signal; it should begin the graceful stop", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	sigs <- syscall.SIGINT
+	select {
+	case code := <-exited:
+		assert.Equal(t, 1, code, "a second signal abandons the stop with a non-zero exit")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second signal did not exit")
 	}
 }

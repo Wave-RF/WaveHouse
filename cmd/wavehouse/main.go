@@ -10,6 +10,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/app"
 	"github.com/Wave-RF/WaveHouse/internal/config"
@@ -109,10 +110,26 @@ func main() {
 			os.Exit(2)
 		}
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	code := run(ctx)
-	stop()
-	os.Exit(code)
+	ctx, cancel := context.WithCancel(context.Background())
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go stopOnSignals(sigs, cancel, os.Exit)
+	os.Exit(run(ctx))
+}
+
+// stopOnSignals cancels the run context on the first SIGINT/SIGTERM, which
+// begins the graceful stop, and exits on the second: a repeat while the
+// drain runs means "stop waiting" — the conventional escape hatch — and
+// abandons it with a non-zero exit. The registration is held for the whole
+// process so the second signal reaches here rather than a channel nobody
+// reads (or, unregistered, the default disposition).
+func stopOnSignals(sigs <-chan os.Signal, cancel context.CancelFunc, exit func(int)) {
+	s := <-sigs
+	slog.Info("shutdown signal received; a second one exits immediately", "signal", s.String())
+	cancel()
+	s = <-sigs
+	slog.Error("second shutdown signal received; exiting without finishing the stop", "signal", s.String())
+	exit(1)
 }
 
 func printUsage(w io.Writer) {
@@ -131,7 +148,9 @@ Run 'wavehouse <command> -h' for command-specific help.
 // run boots the server and blocks until ctx is cancelled (SIGINT/SIGTERM)
 // or a component fails, returning the process exit code. A separate function
 // (rather than os.Exit directly in main) so the deferred cleanup — especially
-// the OTel flush — still runs before the process exits.
+// the OTel flush — still runs before the process exits. A stop is two
+// phases, each bounded by server.shutdown_timeout: Run drains the in-flight
+// work, then Close releases the stores and flushes telemetry.
 func run(ctx context.Context) int {
 	logLevel := &slog.LevelVar{}
 	logLevel.Set(logLevelFromEnv())
@@ -172,7 +191,9 @@ func run(ctx context.Context) int {
 	// slog.Default from here on: app.New swaps in the OTLP-aware logger when
 	// OTLP logs are enabled, and that is the one every later line should hit.
 	defer func() {
-		if err := a.Close(); err != nil {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownTimeout)*time.Second)
+		defer cancel()
+		if err := a.Close(closeCtx); err != nil {
 			slog.Warn("cleanup", "error", err)
 		}
 	}()

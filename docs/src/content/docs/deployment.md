@@ -310,6 +310,17 @@ Don't name WaveHouse's own Service `wh` or `wh-*`. kubelet injects `WH_SERVICE_H
 
 Until `startupProbe` succeeds, kubelet doesn't run `livenessProbe` or `readinessProbe` against the pod — so a slow or temporarily-unreachable ClickHouse can't restart-loop the pod via the liveness path. Size `failureThreshold` to your expected worst-case CH boot time; the default 30 × 10s = 5min is generous and works for compose-on-NAS-style deployments where CH and WaveHouse can race during a host reboot.
 
+## Stopping
+
+`SIGTERM` or `SIGINT` begins a graceful stop in two phases, each bounded by [`server.shutdown_timeout`](/configuration#server) (default 10s):
+
+1. **Drain.** The listener stops accepting, every open [SSE stream](/api#get-v1stream--server-sent-events-stream) is ended at once (clients reconnect and resume from `Last-Event-ID`), and in-flight requests and the ingest worker's in-hand batches finish. Whatever is still open at the deadline is force-closed.
+2. **Release.** The stores (embedded NATS, Pebble, the cache, ClickHouse) close and telemetry is flushed, last, so the release's own log lines reach the collector. A remote store's close gives up at the deadline rather than hanging on a dead peer.
+
+A second `SIGTERM`/`SIGINT` while the stop is running abandons it and exits non-zero immediately. `SIGHUP` reloads the [settings directory](/settings-directory) during normal operation and is ignored once a stop has begun.
+
+Size the orchestrator's kill grace against both phases: at the default timeout a stop needs up to 20s before it should be `SIGKILL`ed. Docker's default `stop_grace_period` is 10s, so the [compose file](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/compose/standalone.yaml) sets it explicitly; on Kubernetes the equivalent is `terminationGracePeriodSeconds`. A stop with nothing in flight takes well under a second either way.
+
 ## Behind a reverse proxy
 
 WaveHouse serves plain HTTP on `:8080` and does **not** terminate TLS, manage certificates, or rate-limit — put a reverse proxy, CDN, or tunnel (nginx, Caddy, Cloudflare Tunnel) in front for any internet-facing deployment. A few behaviors only matter behind a proxy: TLS termination, the request-body size limits, Server-Sent Events buffering (WaveHouse now sends keepalive comments so quiet streams survive proxy idle timeouts, [#226](https://github.com/Wave-RF/WaveHouse/issues/226)), header/auth forwarding, and which health paths to expose. See **[Behind a reverse proxy](/reverse-proxy)** for the full guide and example nginx/Caddy/Cloudflare configs.

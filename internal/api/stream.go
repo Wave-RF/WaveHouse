@@ -19,6 +19,12 @@ type StreamHandler struct {
 	JS          jetstream.JetStream
 	Heartbeater *stream.Heartbeater
 	Metrics     *stream.Metrics
+	// Closing, when set, is closed as the server begins shutting down, and
+	// every open stream ends at once: a stream is a connection to close, not
+	// in-flight work for the drain to wait on, and the client reconnects and
+	// gap-fills via Last-Event-ID. A nil channel never fires (a harness that
+	// serves the handler itself).
+	Closing <-chan struct{}
 }
 
 func NewStreamHandler(hub *stream.Hub, js jetstream.JetStream) *StreamHandler {
@@ -153,6 +159,8 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-h.Closing:
 			return
 		case <-sub.Evicted():
 			// Marked for disconnection (slow consumer). The client reconnects and
