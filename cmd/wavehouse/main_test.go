@@ -99,13 +99,15 @@ func TestRun_BootsAndStopsOnCancel(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		return resp.StatusCode == http.StatusOK && strings.Contains(string(body), Version)
-	}, 10*time.Second, 20*time.Millisecond, "server never answered /version")
+	}, 5*time.Second, 20*time.Millisecond, "server never answered /version")
 
 	cancel()
 	select {
 	case code := <-done:
 		assert.Equal(t, 0, code, "a signal-cancelled run exits 0")
-	case <-time.After(15 * time.Second):
+	// Inside the package's 15s test budget, so this guard fires with its
+	// message rather than the timeout panic replacing it.
+	case <-time.After(5 * time.Second):
 		t.Fatal("run did not return after cancel")
 	}
 }

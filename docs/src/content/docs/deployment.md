@@ -315,11 +315,11 @@ Until `startupProbe` succeeds, kubelet doesn't run `livenessProbe` or `readiness
 `SIGTERM` or `SIGINT` begins a graceful stop in two phases, each bounded by [`server.shutdown_timeout`](/configuration#server) (default 10s):
 
 1. **Drain.** The listener stops accepting, every open [SSE stream](/api#get-v1stream--server-sent-events-stream) is ended at once (clients reconnect and resume from `Last-Event-ID`), and in-flight requests and the ingest worker's in-hand batches finish. Whatever is still open at the deadline is force-closed.
-2. **Release.** The stores (embedded NATS, Pebble, the cache, ClickHouse) close and telemetry is flushed, last, so the release's own log lines reach the collector. A remote store's close gives up at the deadline rather than hanging on a dead peer.
+2. **Release.** The stores (embedded NATS, Pebble, the cache, ClickHouse) close and telemetry is flushed, last, so the release's own log lines reach the collector.
 
 A second `SIGTERM`/`SIGINT` while the stop is running abandons it and exits non-zero immediately. `SIGHUP` reloads the [settings directory](/settings-directory) during normal operation and is ignored once a stop has begun.
 
-Size the orchestrator's kill grace against both phases: at the default timeout a stop needs up to 20s before it should be `SIGKILL`ed. Docker's default `stop_grace_period` is 10s, so the [compose file](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/compose/standalone.yaml) sets it explicitly; on Kubernetes the equivalent is `terminationGracePeriodSeconds`. A stop with nothing in flight takes well under a second either way.
+Size the orchestrator's kill grace against both phases: at the default timeout a stop needs up to 20s before it should be `SIGKILL`ed. Docker's default `stop_grace_period` is 10s, so the [compose file](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/compose/standalone.yaml) sets `stop_grace_period: 25s`, that bound plus headroom; on Kubernetes the equivalent is `terminationGracePeriodSeconds`, whose 30s default already covers it — raise it if you raise `server.shutdown_timeout`. A stop with nothing in flight takes well under a second either way, unless OTLP export is on and the collector is unreachable: the flush then runs to the release deadline.
 
 ## Behind a reverse proxy
 

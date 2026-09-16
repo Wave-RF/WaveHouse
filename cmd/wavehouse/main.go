@@ -111,7 +111,9 @@ func main() {
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	sigs := make(chan os.Signal, 1)
+	// Room for both signals: Notify never blocks, so a second one landing
+	// before the first is read must buffer, not drop.
+	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go stopOnSignals(sigs, cancel, os.Exit)
 	os.Exit(run(ctx))

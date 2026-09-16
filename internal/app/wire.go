@@ -434,21 +434,26 @@ func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
 // reload must already drive every hook — a hook registered after the first
 // reload could miss it.
 func (a *App) wireReloadTriggers() {
+	// Registered here and released only at the end of Close, deliberately:
+	// Notify takes SIGHUP off its default disposition (terminate), and a
+	// Stop when the loop returns — the start of shutdown — would put it back
+	// for the whole drain and release, where a hangup is easy to hit
+	// (closing the terminal after Ctrl-C signals the process group). Once
+	// ctx is done nothing reads the channel, so a late SIGHUP is discarded:
+	// ignored, as a reload of a process on its way out should be.
+	a.hup = make(chan os.Signal, 1)
+	signal.Notify(a.hup, syscall.SIGHUP)
 	a.add(component{name: "sighup", run: func(ctx context.Context) error {
-		// Registered for the rest of the process, deliberately: Notify takes
-		// SIGHUP off its default disposition (terminate), and a Stop when
-		// this loop returns — the start of shutdown — would put it back for
-		// the whole drain and release, where a hangup is easy to hit (closing
-		// the terminal after Ctrl-C signals the process group). Once ctx is
-		// done nothing reads the channel, so a late SIGHUP is discarded:
-		// ignored, as a reload of a process on its way out should be.
-		hup := make(chan os.Signal, 1)
-		signal.Notify(hup, syscall.SIGHUP)
 		for {
 			select {
 			case <-ctx.Done():
 				return nil
-			case <-hup:
+			case <-a.hup:
+				// Both cases ready at once is a coin flip; a reload must
+				// not start once the stop has.
+				if ctx.Err() != nil {
+					return nil
+				}
 				a.store.Reload("sighup")
 			}
 		}

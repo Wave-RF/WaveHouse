@@ -20,10 +20,10 @@ type StreamHandler struct {
 	Heartbeater *stream.Heartbeater
 	Metrics     *stream.Metrics
 	// Closing, when set, is closed as the server begins shutting down, and
-	// every open stream ends at once: a stream is a connection to close, not
-	// in-flight work for the drain to wait on, and the client reconnects and
-	// gap-fills via Last-Event-ID. A nil channel never fires (a harness that
-	// serves the handler itself).
+	// every open stream ends at once — mid-replay too: a stream is a
+	// connection to close, not in-flight work for the drain to wait on, and
+	// the client reconnects and gap-fills via Last-Event-ID. A nil channel
+	// never fires (a harness that serves the handler itself).
 	Closing <-chan struct{}
 }
 
@@ -140,11 +140,11 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			return true
 		}
 		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.JS != nil {
-			h.replayFromNATS(r.Context(), ts, topic, sendReplay)
+			h.replayFromNATS(r.Context(), h.Closing, ts, topic, sendReplay)
 		} else if err != nil {
 			// Fall back to RFC3339 without nanos.
 			if ts, err := time.Parse(time.RFC3339, sinceStr); err == nil && h.JS != nil {
-				h.replayFromNATS(r.Context(), ts, topic, sendReplay)
+				h.replayFromNATS(r.Context(), h.Closing, ts, topic, sendReplay)
 			}
 		}
 	}
@@ -181,8 +181,10 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // replayFromNATS creates an ephemeral NATS consumer starting at the given time
-// and sends all available messages to the callback until caught up.
-func (h *StreamHandler) replayFromNATS(ctx context.Context, since time.Time, subject string, send func([]byte) bool) {
+// and sends all available messages to the callback until caught up, the
+// client goes away, or closing fires — a long gap-fill must not hold the
+// server's drain any more than a live stream would.
+func (h *StreamHandler) replayFromNATS(ctx context.Context, closing <-chan struct{}, since time.Time, subject string, send func([]byte) bool) {
 	cons, err := h.JS.CreateOrUpdateConsumer(ctx, mq.StreamName(), jetstream.ConsumerConfig{
 		FilterSubject:     subject,
 		DeliverPolicy:     jetstream.DeliverByStartTimePolicy,
@@ -195,6 +197,13 @@ func (h *StreamHandler) replayFromNATS(ctx context.Context, since time.Time, sub
 	}
 
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-closing:
+			return
+		default:
+		}
 		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
 		if err != nil {
 			return // No more messages or timeout — done with gap-fill.

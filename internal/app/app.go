@@ -25,6 +25,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"os/signal"
 
 	"golang.org/x/sync/errgroup"
 
@@ -96,6 +98,9 @@ type App struct {
 
 	// components in wiring order; Close walks them backwards.
 	components []component
+	// hup is the SIGHUP registration, held until Close has released every
+	// component so a hangup during the stop is ignored rather than fatal.
+	hup chan os.Signal
 }
 
 // New wires every component. ctx bounds construction only — the boot-time
@@ -189,6 +194,10 @@ func (a *App) Close(ctx context.Context) error {
 		}
 	}
 	a.components = nil
+	if a.hup != nil {
+		signal.Stop(a.hup)
+		a.hup = nil
+	}
 	return errors.Join(errs...)
 }
 

@@ -151,11 +151,11 @@ The flush goroutine only ever touches `rows` and the worker's concurrency-safe c
 
 ## Contexts
 
-There are three contexts, each with one job.
+The signal context cancels `app.Run`'s errgroup context, which cancels `workerCtx` — the worker's stop signal. Two more are immune to it by construction: `flushCtx` is `context.WithoutCancel(workerCtx)`, and the drain deadline each component builds is rooted in `context.Background()`. Each has one job.
 
 ```mermaid
-flowchart LR
-    PC["signal ctx<br/>(main, NotifyContext)"] -->|"SIGINT/SIGTERM cancels"| RC["run ctx<br/>(app.Run's errgroup)"]
+flowchart TB
+    PC["signal ctx<br/>(main, WithCancel + signal.Notify)"] -->|"SIGINT/SIGTERM cancels"| RC["run ctx<br/>(app.Run's errgroup)"]
     RC --> WC["workerCtx<br/>(child — the STOP signal)"]
     WC -->|"context.WithoutCancel"| FC["flushCtx<br/>(values only; never canceled)"]
     WC -.->|"only dispatchLoop watches Done()"| D[dispatchLoop]
@@ -164,7 +164,7 @@ flowchart LR
 
 - **`workerCtx`** is the stop signal. **Only `dispatchLoop` watches it.** Every downstream goroutine stops via channel-close instead, which gives a deterministic drain with no select race that could abandon buffered rows.
 - **`flushCtx` = `context.WithoutCancel(workerCtx)`** carries trace values but is never canceled. A flush that has started must finish, so data already written to ClickHouse gets acked rather than redelivered. It is bounded by the HTTP client timeout (30s); shutdown bounds the *wait* for it with a deadline.
-- A separate **shutdown-deadline context** lives only in the app's ingest-worker component (`internal/app`) and is rooted in `context.Background()` (so it survives `workerCtx` being canceled) — it caps how long shutdown waits (`server.shutdown_timeout`).
+- Each component that drains builds its own **shutdown-deadline context** (`App.shutdownContext` in `internal/app`, `server.shutdown_timeout`), rooted in `context.Background()` so it survives `workerCtx` being canceled. The ingest worker's and the API server's run concurrently, so the drain phase is bounded by one timeout, not their sum.
 
 The principle: **`ctx` cancellation is the stop mechanism for long-running loops; `Close()`/stop-funcs are the mechanism for resources.**
 
@@ -172,7 +172,7 @@ The principle: **`ctx` cancellation is the stop mechanism for long-running loops
 
 Startup: `StartIngestWorker` creates the consumer, builds the worker, and launches `dispatchLoop`. It returns a `stopFunc` closure that the app's ingest-worker component holds and calls once the run context is canceled; `app.Run` does not return until that drain has finished.
 
-Shutdown drains **bottom-up through the containment hierarchy**, under one deadline (`server.shutdown_timeout`, taken by the ingest-worker component alongside the API server's own drain):
+Shutdown drains **bottom-up through the containment hierarchy**, under the ingest-worker component's own `server.shutdown_timeout` deadline (the API server's drain takes another, concurrently):
 
 ```mermaid
 sequenceDiagram
