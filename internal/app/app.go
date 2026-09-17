@@ -215,8 +215,10 @@ func (a *App) Run(ctx context.Context) error {
 // it is a real bound: a remote implementation's close gives up at the
 // deadline itself, and a close that ignores the context — the local stores
 // (Pebble, ristretto, embedded NATS), which normally finish in milliseconds
-// — is abandoned at it, since the process is exiting either way and the
-// flush that follows reports the abandonment. The telemetry flush then runs
+// — is abandoned at it, and the components below it are not released at
+// all (a close started then would overlap the abandoned one and break the
+// reverse order), since the process is exiting either way and the flush
+// that follows reports both. The telemetry flush then runs
 // on its own flushTimeout, so it is never handed a budget a slow close has
 // already spent. Safe to call more than once.
 func (a *App) Close(ctx context.Context) error {
@@ -227,6 +229,13 @@ func (a *App) Close(ctx context.Context) error {
 	for i := len(a.components) - 1; i >= 0; i-- {
 		c := a.components[i]
 		if c.close == nil {
+			continue
+		}
+		if ctx.Err() != nil {
+			// The budget is spent: a close started now would overlap the
+			// one abandoned above and break the reverse order, so the rest
+			// are left to the exit and named.
+			errs = append(errs, fmt.Errorf("%s: not released, budget spent: %w", c.name, ctx.Err()))
 			continue
 		}
 		if err := closeWithin(ctx, c.name, c.close); err != nil {

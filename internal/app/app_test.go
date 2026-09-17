@@ -396,6 +396,12 @@ func TestClose_AbandonsAStuckCloseAtTheDeadline(t *testing.T) {
 	t.Cleanup(func() { close(release) })
 	a := &App{}
 	a.stopCtx, a.stopCancel = context.WithCancel(context.Background())
+	// Wired first, so it is released last — after the stuck one.
+	earlierReleased := false
+	a.add(component{name: "earlier", close: func(context.Context) error {
+		earlierReleased = true
+		return nil
+	}})
 	a.add(component{name: "stuck", close: func(context.Context) error {
 		<-release // ignores its context, like a local store's Close
 		return nil
@@ -409,6 +415,8 @@ func TestClose_AbandonsAStuckCloseAtTheDeadline(t *testing.T) {
 	assert.Less(t, time.Since(started), time.Second, "the release budget bounds a close that ignores it")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "stuck: abandoned at the release deadline")
+	assert.Contains(t, err.Error(), "earlier: not released, budget spent")
+	assert.False(t, earlierReleased, "a close after the abandoned one would overlap it and break the reverse order")
 	assert.NotContains(t, err.Error(), "fine")
 }
 
