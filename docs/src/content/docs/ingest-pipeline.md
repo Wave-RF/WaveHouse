@@ -263,7 +263,7 @@ What will need to change, and the trade-offs (discussed at length on the batchin
 
 - **Work distribution.** Either a *shared* durable pull consumer (competing consumers — coordination-free, but a hot table's rows spread across instances, shrinking per-instance batches), or **partitioned consumer groups** that hash by table-name subject token so a table always lands on one owner (pinned consumer → per-table affinity + automatic failover, at the cost of an assignment layer).
 - **Idempotent inserts become mandatory.** At-least-once + redelivery-on-crash means another instance can re-insert a batch the dead one had written but not acked. Use `ReplacingMergeTree` (or a dedup key). The single-instance design hides this today.
-- **NATS resilience.** Remote NATS needs explicit reconnect/backoff and a `Consume` error handler — none of which the embedded path needs.
+- **NATS resilience.** Remote NATS needs explicit reconnect/backoff for the connection itself — the embedded path never dials out, so there is nothing to reconnect. The `Consume` error handler that detects a dead consumer already lives in `embedded.go` and needs no change for a remote broker.
 - **The sweeper.** Its single-`AckFloor` model assumes one consumer. With per-table/partition consumers you either rework it to purge below the *minimum* AckFloor across consumers, or — cleaner — **split the dual-use stream**: a `WorkQueuePolicy` work stream (auto-deletes on ack, no sweeper) plus a `MaxAge` replay stream (server-expired by time, no sweeper), joined by stream sourcing. That deletes the sweeper and its leader-election problem entirely, at the cost of duplicating the in-flight overlap on disk.
 
 ## Deferred / not yet implemented
