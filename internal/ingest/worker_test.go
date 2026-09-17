@@ -1553,8 +1553,17 @@ func (f *blockingFakeConsumer) Consume(handler func(*mq.Message), _ int) (func()
 
 // failingFakeConsumer delivers msgs, then reports that delivery ended — or,
 // with startErr set, refuses to start at all.
+//
+// The handler only enqueues, so "delivered" is not "routed": reporting the end
+// straight after the last handler call would let dispatchLoop's select pick
+// the failure while msgs still sit unrouted in its channel. sentinel closes
+// that gap without reaching into the loop: it is delivered last, the loop
+// handles its channel in order on one goroutine, and an unreadable envelope
+// with the DLQ off is acked-and-dropped — so once sentinel is acked, every
+// message before it has been routed.
 type failingFakeConsumer struct {
 	msgs     []*testutil.MockMessage
+	sentinel *testutil.MockMessage
 	endWith  error
 	startErr error
 	stopped  atomic.Bool
@@ -1568,6 +1577,12 @@ func (f *failingFakeConsumer) Consume(handler func(*mq.Message), _ int) (func(),
 	go func() {
 		for _, m := range f.msgs {
 			handler(m.Message())
+		}
+		if f.sentinel != nil {
+			handler(f.sentinel.Message())
+			for deadline := time.Now().Add(5 * time.Second); !f.sentinel.DoubleAcked.Load() && time.Now().Before(deadline); {
+				time.Sleep(time.Millisecond)
+			}
 		}
 		failed <- f.endWith
 	}()
@@ -1584,11 +1599,13 @@ func TestDispatchLoop_DeliveryEndedFailsLoud(t *testing.T) {
 	rt := &testutil.MockRoundTripper{}
 	w, _, _, _ := newTestWorker(rt)
 	w.maxBatch = 100
-	w.maxWait = time.Hour // only the shutdown flush can write the row
+	w.maxWait = time.Hour                             // only the shutdown flush can write the row
+	w.dlqEnabled = func(string) bool { return false } // the sentinel is acked-and-dropped, no publish
 
 	held := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	sentinel := &testutil.MockMessage{MsgTopic: mq.Topic{Table: "events"}, MsgData: []byte("not json")}
 	ended := fmt.Errorf("%w: consumer deleted", mq.ErrDeliveryEnded)
-	cons := &failingFakeConsumer{msgs: []*testutil.MockMessage{held}, endWith: ended}
+	cons := &failingFakeConsumer{msgs: []*testutil.MockMessage{held}, sentinel: sentinel, endWith: ended}
 
 	w.wg.Add(1)
 	go w.dispatchLoop(context.Background(), cons)
@@ -1602,6 +1619,7 @@ func TestDispatchLoop_DeliveryEndedFailsLoud(t *testing.T) {
 	w.wg.Wait()
 
 	assert.True(t, cons.stopped.Load(), "the consumer is stopped on the way out")
+	require.True(t, sentinel.DoubleAcked.Load(), "the handshake held: the row was routed before delivery ended")
 	assert.Equal(t, int32(1), rt.Hits(), "the row already in hand was flushed, not abandoned")
 	assert.True(t, held.DoubleAcked.Load(), "and acked, so it is not redelivered as a duplicate")
 }
