@@ -388,6 +388,28 @@ func TestRun_ListenFailureStopsEverything(t *testing.T) {
 	err = a.Run(ctx)
 	require.Error(t, err, "boot must fail immediately when the port is taken")
 	assert.True(t, strings.HasPrefix(err.Error(), "http server: "), "the failing component names itself: %v", err)
+	assert.Error(t, a.stopCtx.Err(), "a component failure begins the stop, so a reload mid-hook gives up too")
+}
+
+func TestClose_AbandonsAStuckCloseAtTheDeadline(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	a := &App{}
+	a.stopCtx, a.stopCancel = context.WithCancel(context.Background())
+	a.add(component{name: "stuck", close: func(context.Context) error {
+		<-release // ignores its context, like a local store's Close
+		return nil
+	}})
+	a.add(component{name: "fine", close: func(context.Context) error { return nil }})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := a.Close(ctx)
+	assert.Less(t, time.Since(started), time.Second, "the release budget bounds a close that ignores it")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stuck: abandoned at the release deadline")
+	assert.NotContains(t, err.Error(), "fine")
 }
 
 func TestRun_StopEndsOpenStreams(t *testing.T) {

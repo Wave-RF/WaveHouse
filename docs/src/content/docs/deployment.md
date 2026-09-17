@@ -315,7 +315,7 @@ Until `startupProbe` succeeds, kubelet doesn't run `livenessProbe` or `readiness
 `SIGTERM` or `SIGINT` begins a graceful stop in three bounded phases whose budgets add up:
 
 1. **Drain**, within [`server.shutdown_timeout`](/configuration#server) (default 10s). The listener stops accepting, every open [SSE stream](/api#get-v1stream--server-sent-events-stream) is ended at once, gap-fill in progress included (clients reconnect and resume from `Last-Event-ID`), and in-flight requests and the ingest worker's in-hand batches finish. A settings reload caught mid-hook gives up too. Whatever is still open at the deadline is force-closed.
-2. **Release**, within a fixed 5s. The stores (embedded NATS, Pebble, the cache, ClickHouse) close.
+2. **Release**, within a fixed 5s. The stores (embedded NATS, Pebble, the cache, ClickHouse) close; one still closing at the deadline is abandoned and named in the log.
 3. **Flush**, within a fixed 3s. Telemetry is flushed last, on its own budget, so the lines the release logged reach the collector even when a close was slow.
 
 Only the drain scales with the deployment's workload, so it is the one operators tune; the other two are constants.

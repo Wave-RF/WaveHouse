@@ -188,9 +188,11 @@ func (a *App) add(c component) { a.components = append(a.components, c) }
 // or a component fails, which stops the rest and returns that error. Call
 // Close afterwards to release what New opened.
 func (a *App) Run(ctx context.Context) error {
-	unhook := context.AfterFunc(ctx, a.stopCancel)
-	defer unhook()
 	g, gctx := errgroup.WithContext(ctx)
+	// On gctx, not ctx: a component failure cancels only gctx, and the stop
+	// it begins must reach a reload mid-hook too, or the hook holds Wait.
+	unhook := context.AfterFunc(gctx, a.stopCancel)
+	defer unhook()
 	for _, c := range a.components {
 		if c.run == nil {
 			continue
@@ -209,13 +211,14 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 // Close releases every resource New opened, newest first, and reports every
-// failure joined. ctx is the release budget (ReleaseTimeout from main): the
-// local stores (Pebble, ristretto, embedded NATS) close in milliseconds and
-// ignore it, while a remote implementation's close is a network round trip
-// that gives up at the deadline rather than hanging the exit on a dead
-// peer. The telemetry flush then runs on its own flushTimeout, so it is
-// never handed a budget a slow close has already spent. Safe to call more
-// than once.
+// failure joined. ctx is the release budget (ReleaseTimeout from main), and
+// it is a real bound: a remote implementation's close gives up at the
+// deadline itself, and a close that ignores the context — the local stores
+// (Pebble, ristretto, embedded NATS), which normally finish in milliseconds
+// — is abandoned at it, since the process is exiting either way and the
+// flush that follows reports the abandonment. The telemetry flush then runs
+// on its own flushTimeout, so it is never handed a budget a slow close has
+// already spent. Safe to call more than once.
 func (a *App) Close(ctx context.Context) error {
 	// A stop is under way from here even if Run never saw a cancel (a
 	// component failed): anything still waiting on stopCtx gives up.
@@ -226,8 +229,8 @@ func (a *App) Close(ctx context.Context) error {
 		if c.close == nil {
 			continue
 		}
-		if err := c.close(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", c.name, err))
+		if err := closeWithin(ctx, c.name, c.close); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	a.components = nil
@@ -251,6 +254,24 @@ func (a *App) Close(ctx context.Context) error {
 		a.hup = nil
 	}
 	return errors.Join(errs...)
+}
+
+// closeWithin runs release and gives up on it at ctx's deadline, so the
+// release budget holds even for a close that never looks at its context.
+// An abandoned close keeps running in the background until the process
+// exits; the error names it so the flush can report which store was stuck.
+func closeWithin(ctx context.Context, name string, release func(context.Context) error) error {
+	done := make(chan error, 1)
+	go func() { done <- release(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("%s: abandoned at the release deadline: %w", name, ctx.Err())
+	}
 }
 
 // Handler is the API router, for a harness that serves it itself.
