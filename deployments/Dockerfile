@@ -1,15 +1,20 @@
 # syntax=docker/dockerfile:1
 # Stage 1: Build
-FROM golang:1.26-alpine AS builder
+#
+# bookworm (glibc), not alpine (musl): the chtypes SDK's dlopen path needs
+# cgo (dlfcn), and the image the SDK builds its own artifacts against — plus
+# the artifact's own glibc floor (2.17, 2.29 for the 24.8/25.3 lines) — is
+# glibc, not musl. The non-alpine golang image bundles gcc out of the box,
+# unlike alpine (which needs an explicit apk add build-base for cgo).
+FROM golang:1.27-bookworm AS builder
 WORKDIR /src
 
 # Pass build tags as an argument (defaults to empty)
 ARG BUILD_TAGS=""
 
-# Download dependencies first into the module cache. The `golang:*-alpine`
-# image sets GOPATH=/go, so `go mod download` writes to /go/pkg/mod — that's
-# the cache mount target. Splitting this into its own layer means dependency
-# changes (go.mod / go.sum) don't bust the source-code COPY layer's cache.
+# Download dependencies first into the module cache. Splitting this into its
+# own layer means dependency changes (go.mod / go.sum) don't bust the
+# source-code COPY layer's cache.
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
@@ -20,9 +25,25 @@ COPY . .
 # tree (read by `go build` for imports) and /root/.cache/go-build for the
 # compiled-package cache (Go's content-addressed build cache). Without both,
 # every `docker build` is a cold compile.
+#
+# CGO_ENABLED=1 is unconditional (see the bookworm comment above).
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -tags="${BUILD_TAGS}" -ldflags="-s -w" -o /bin/wavehouse ./cmd/wavehouse
+    CGO_ENABLED=1 go build -tags="${BUILD_TAGS}" -ldflags="-s -w" -o /bin/wavehouse ./cmd/wavehouse
+
+# Bake the pinned chtypes artifact(s) into the image so the container has no
+# runtime network dependency and no first-request download stall. chtypes.lock
+# is this repo's pin (schema-1, exact file + sha256 per platform/line);
+# scripts/fetch-chtypes.sh wraps the SDK's own CLI with --frozen, which
+# refuses anything the lock doesn't name. `go run <module>@<version>`
+# resolves and builds the SDK's CLI straight from its module proxy — it
+# needs no entry in THIS repo's go.mod/go.sum, so this works even before
+# `go mod tidy` has picked up the chtypes/go dependency.
+COPY chtypes.lock ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    mkdir -p /opt/chtypes/artifacts && \
+    scripts/fetch-chtypes.sh --dest /opt/chtypes/artifacts
 
 # Create the parent state and settings directories owned by the nonroot
 # user (UID 65532 in distroless). The binary creates `nats/` and `pebble/`
@@ -42,13 +63,24 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 RUN mkdir -p /app/data /app/settings && chown -R 65532:65532 /app
 
 # Stage 2: Final minimal image
-FROM gcr.io/distroless/static-debian12
+#
+# distroless/cc, not distroless/static: chtypes' dlopen path needs glibc's
+# dynamic loader plus libstdc++ (the artifact is a C++-built .so) — the
+# "cc" variant bundles exactly that (glibc, libgcc1, libstdc++6) and nothing
+# else, still with no shell or package manager.
+FROM gcr.io/distroless/cc-debian12
 
 WORKDIR /app
 USER nonroot:nonroot
 ENV WH_SETTINGS_DIR=/app/settings
+# The SDK's own registry search path (R3 §7) reads this directly — no
+# WaveHouse config change is needed to find what the image already baked
+# in. WH_CHTYPES_REGISTRY (internal/config) is for an operator who wants to
+# point at a different, bind-mounted registry directory instead.
+ENV CHTYPES_REGISTRY=/opt/chtypes/artifacts
 
 COPY --from=builder --chown=nonroot:nonroot /app /app
+COPY --from=builder --chown=nonroot:nonroot /opt/chtypes /opt/chtypes
 COPY --from=builder --chown=nonroot:nonroot /bin/wavehouse /app/wavehouse
 
 # OCI image metadata. Static labels live here; per-build dynamic ones

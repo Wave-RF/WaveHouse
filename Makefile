@@ -160,7 +160,19 @@ GSA         := GOEXPERIMENT=jsonv2 go tool gsa
 
 # Externally-installed tools — version is encoded in the path so bumping the
 # version invalidates the file rule and triggers a reinstall.
-GOLANGCI_LINT_VERSION := v2.11.4
+#
+# v2.11.4 panics in its type-checker on every package once go.mod says
+# `go 1.27` (measured, this migration). v2.13.0 is the OLDEST release whose
+# changelog claims go1.27 support ("go1.27 support (#6642)"), but it panics
+# too — a DIFFERENT bug: `nilness`/`honnef.co/go/tools@v0.8.0-rc.1` crashes
+# analyzing a third-party dependency's source (measured: `internal error:
+# unhandled builtin recover`, package "sentry", i.e. getsentry/sentry-go).
+# v2.13.1 bumps that dependency past its release candidate to the real
+# 0.8.0 and the panic is gone; v2.13.2 (bumping it again, to 0.8.1) is the
+# newest confirmed-clean release at time of writing — pinned here rather
+# than v2.13.1 since nothing points at 2.13.1 specifically being the fix,
+# only that 2.13.0 is broken and 2.13.2 is verified clean in this tree.
+GOLANGCI_LINT_VERSION := v2.13.2
 GOLANGCI_LINT         := $(LOCAL_BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
 # air is the hot-reload runner used by `make dev`. We install it to .bin/
@@ -171,7 +183,7 @@ AIR_VERSION := v1.65.1
 AIR         := $(LOCAL_BIN)/air-$(AIR_VERSION)
 
 # misspell: curated common-typo corrector + US/UK locale enforcer. Installed
-# standalone to .bin/ (pure Go, `go install` — same pattern as air) so it can
+# standalone to .bin/ via `go install`, same pattern as air, so it can
 # lint Markdown/MDX prose. DISTINCT from the misspell analyzer bundled inside
 # golangci-lint, which only inspects Go source; same maintained fork
 # (github.com/golangci/misspell), two entry points. Drives `make lint-prose`.
@@ -903,20 +915,6 @@ release-sdk-go: ## Tag a Go SDK release — go get (VERSION=X.Y.Z)
 # `verify` or `ci` — `deadcode` has false positives on reflection / HTTP
 # routers, and the size/dep tools are too slow for a pre-push gate.
 
-# audit-cgo: WaveHouse builds with CGO_ENABLED=0. Listed packages have pure-Go
-# fallbacks today, but a new dep could quietly break that constraint — this
-# audit surfaces every transitively-reachable package with C files so the drift
-# is visible before a release-time cross-compile breaks.
-.PHONY: audit-cgo
-audit-cgo: ## Audit dependency tree for CGO files (informational)
-	@echo "$(CYAN)==> Scanning dependency tree for packages with C files...$(RESET)"
-	@printf "  WaveHouse builds with %sCGO_ENABLED=0%s — listed packages have pure-Go fallbacks\n" "$(YELLOW)" "$(RESET)"
-	@echo  "  and their C code is never compiled. This audit catches new CGO deps."
-	@echo
-	@CGO_ENABLED=1 go list -deps -f '{{if .CgoFiles}}  ⚠ {{.ImportPath}}  ({{len .CgoFiles}} C files){{end}}' ./cmd/...
-	@echo
-	@echo "$(GREEN)==> CGO audit complete$(RESET)"
-
 # deadcode: whole-program reachability analysis, complementary to
 # golangci-lint's `unused` (which is locally scoped). False positives are
 # common for HTTP routers, reflection-based dispatch, and init() registration
@@ -943,9 +941,9 @@ dep-cut: ## Top cuttable dependencies by transitive weight (LIMIT=N to override)
 	@LIMIT='$(LIMIT)' scripts/dep-cut.sh
 
 # binary-analysis: one command for "what's in my binary, and what's wrong with
-# it." Runs in dep-order: build → size → audit-cgo → deadcode.
+# it." Runs in dep-order: build → size → deadcode.
 .PHONY: binary-analysis
-binary-analysis: size audit-cgo deadcode ## Combined: size + audit-cgo + deadcode
+binary-analysis: size deadcode ## Combined: size + deadcode
 	@echo
 	@echo "$(GREEN)==> Binary analysis complete$(RESET)"
 	@printf "  Cuttable dependencies: %smake dep-cut%s\n" "$(CYAN)" "$(RESET)"
@@ -1037,7 +1035,7 @@ $(GOLANGCI_LINT):
 	@mv $(LOCAL_BIN)/golangci-lint $@
 	@echo "$(GREEN)==> Installed: $@$(RESET)"
 
-# air installs cleanly via `go install` (pure Go, no shell-piping). GOBIN
+# air installs cleanly via `go install` (no shell-piping). GOBIN
 # pins the install location to our .bin/ rather than the user's $GOPATH/bin.
 $(AIR):
 	@echo "$(YELLOW)==> Installing air $(AIR_VERSION) for $(OS)_$(ARCH)...$(RESET)"
@@ -1046,7 +1044,7 @@ $(AIR):
 	@mv $(LOCAL_BIN)/air $@
 	@echo "$(GREEN)==> Installed: $@$(RESET)"
 
-# misspell installs cleanly via `go install` (pure Go), GOBIN-pinned to .bin/
+# misspell installs cleanly via `go install`, GOBIN-pinned to .bin/
 # like air. cmd/misspell is the CLI entry point of the golangci fork — the same
 # codebase golangci-lint vendors as a library for its Go-only misspell linter.
 $(MISSPELL):

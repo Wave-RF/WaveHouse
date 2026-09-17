@@ -1,15 +1,30 @@
 name: Release
 
+# Shape: three NATIVE build jobs, one publish job.
+#
+# cgo made cross-compiling impossible for darwin (measured — see the header of
+# .goreleaser.yaml: a dependency's own darwin C file needs Mach headers no
+# Linux runner can supply), and the GoReleaser features that solve it —
+# split/merge, `builder: prebuilt` — are Pro-only, with no `--skip=build` in
+# OSS. So GoReleaser compiles, once per runner, and this workflow does the
+# assembling: archives, checksums, GitHub Release, and the multi-arch GHCR
+# image built straight from `deployments/Dockerfile.goreleaser` (the same
+# `<os>/<arch>/wavehouse` context layout GoReleaser's dockers_v2 used to hand
+# it, so that file is unchanged).
+#
+# Every runner label here is free for public repos: ubuntu-latest,
+# ubuntu-24.04-arm, macos-latest.
+
 on:
   push:
     tags:
       - "v*"
 
+# Least privilege by default. Only `publish` is elevated — the three build
+# jobs compile a tag's code on three runners and must not be able to write a
+# release, push a package, or mint an attestation.
 permissions:
-  contents: write # create the GitHub Release (goreleaser)
-  packages: write # push the image to GHCR
-  id-token: write # OIDC for build-provenance attestations (Sigstore)
-  attestations: write # write the build-provenance attestations
+  contents: read
 
 concurrency:
   # Per-tag, never cancelling: two runs of the SAME tag (a re-run after a
@@ -19,54 +34,195 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Release
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      # A release is all-or-nothing: there is no such thing as publishing two
+      # of the three platforms, so stop the others as soon as one fails.
+      fail-fast: true
+      matrix:
+        # Must mirror .goreleaser.yaml's `builds[0].goos/goarch/ignore`.
+        # `--single-target` compiles the RUNNER's platform and ignores that
+        # list, so this matrix is what actually decides what gets built — the
+        # guard step below is what keeps the two from drifting apart.
+        include:
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-latest
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+          - goos: darwin
+            goarch: arm64
+            runner: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # goreleaser derives .Version from the tag and .ShortCommit from the
+          # commit; `git describe` needs the tag history.
           fetch-depth: 0
-          # The most privileged job here: contents+packages+attestations write,
-          # running a third-party action, a downloaded goreleaser binary, a full
-          # `go mod download` + cross-compile, and a Docker build — any one of
-          # which could read a persisted token out of .git/config and push. No
-          # authenticated git is needed: GoReleaser talks to the API via
-          # GITHUB_TOKEN, `git describe` is local, and the fetch is already done.
+          # Nothing here needs authenticated git: `git describe` is local and
+          # this job pushes nothing. A downloaded goreleaser binary and a full
+          # `go mod download` run before anything else, and a persisted token
+          # in .git/config would be readable by both.
           persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
-          # Opting out keeps a ~1 GB archive — the module tree plus this
-          # job's cross-compile objects — out of the 10 GB repo budget.
-          # (That entry is keyed on the root go.mod, not go.sum: setup-go
-          # hashed go.sum through v6.2.0 and go.mod from v6.3.0 —
-          # actions/setup-go#705.)
-          #
-          # Turning it back on here would be strictly negative. Nothing
-          # mints that key any more — publish-dev.yml and
-          # goreleaser-validate.yml opt out too, and ci.yml runs no
-          # setup-go — so the restore is a guaranteed miss. Worse, cache
-          # writes are scoped to the ref that made them: a save from
-          # refs/tags/v1.0.0 can never be read by refs/tags/v1.0.1, by main,
-          # or by a PR — only by a re-run of that same tag. It would be a
-          # ~1 GB entry per release that nothing but a retry can ever read.
-          #
-          # What IS warm is publish-dev's gobuild-v3-<os>-go-release- entry,
-          # restorable from the default branch's scope. A tagged release is
-          # rare and not latency-sensitive, so it isn't worth a hand-rolled
-          # restore step here — but that's the lever if it ever is.
-          #
-          # Same cache: false as publish-dev.yml and goreleaser-validate.yml;
-          # different follow-up (publish-dev re-caches the useful half). #443.
+          # No cache. Cache writes are scoped to the ref that made them, so a
+          # save from refs/tags/v1.0.0 can never be read by refs/tags/v1.0.1,
+          # by main, or by a PR — only by a re-run of that same tag. It would
+          # be a ~1 GB entry per release that nothing but a retry can read.
+          # A tagged release is rare and not latency-sensitive. (publish-dev
+          # caches instead, on main's scope, where it is read back. #443.)
           cache: false
 
-      # dockers_v2 builds the linux/amd64+arm64 manifest via `docker buildx`;
-      # the GitHub-hosted runner's default docker driver can't build
+      # Before the build, not after: if a runner label ever changes
+      # architecture under us (ubuntu-latest moving to arm64 would do it),
+      # `--single-target` would silently produce the wrong binary and this
+      # workflow would publish it under the matrix's name.
+      - name: Assert the runner is ${{ matrix.goos }}/${{ matrix.goarch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          host_os=$(go env GOOS)
+          host_arch=$(go env GOARCH)
+          echo "runner=${{ matrix.runner }} host=${host_os}/${host_arch}"
+          if [ "$host_os" != "${{ matrix.goos }}" ] || [ "$host_arch" != "${{ matrix.goarch }}" ]; then
+            echo "::error::${{ matrix.runner }} is ${host_os}/${host_arch} but the matrix says ${{ matrix.goos }}/${{ matrix.goarch }} — cgo cannot cross-compile these targets, so this run would ship the wrong binary"
+            exit 1
+          fi
+
+      - name: Build
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          # Pin to the v2 line so a v3 release breaks loudly instead of
+          # silently changing release behavior.
+          version: "~> v2"
+          # `build`, not `release`: this job only compiles. `--output` copies
+          # the binary to a fixed path so nothing downstream has to know
+          # GoReleaser's per-target dist directory name (`wavehouse_darwin_
+          # arm64_v8.0` and friends — the GOARM64 suffix is not obvious).
+          args: build --clean --single-target --output dist/wavehouse
+
+      - name: Describe the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          file dist/wavehouse
+          ls -l dist/wavehouse
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wavehouse-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/wavehouse
+          if-no-files-found: error
+          # An intra-run hand-off to `publish`, not a deliverable — the
+          # deliverables are the release assets and the image.
+          retention-days: 1
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the GitHub Release
+      packages: write # push the image to GHCR
+      id-token: write # OIDC for build-provenance attestations (Sigstore)
+      attestations: write # write the build-provenance attestations
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `git describe` picks the previous v* tag for the release notes.
+          fetch-depth: 0
+          # The most privileged job here: contents+packages+attestations write,
+          # running a Docker build that fetches from the network — which could
+          # read a persisted token out of .git/config and push. No
+          # authenticated git is needed: `gh` reaches the API via GH_TOKEN,
+          # `git describe` is local, and the fetch is already done.
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: wavehouse-*
+          path: staging
+
+      # Resolve the moving GHCR tag BEFORE anything is published, so a
+      # malformed tag fails here rather than after a multi-arch image push.
+      # The script rejects anything that isn't semver-shaped, so a typo can't
+      # fall through to `latest`. It is also the single source of truth for
+      # "is this a prerelease" below — `latest` means stable, by definition —
+      # rather than a second semver parser that could disagree with it.
+      - name: Resolve release channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          channel="$(scripts/ci/release-channel.sh "$GITHUB_REF_NAME")"
+          echo "WAVEHOUSE_CHANNEL=${channel}" >> "$GITHUB_ENV"
+          echo "::notice::${GITHUB_REF_NAME} publishes ghcr.io/wave-rf/wavehouse:${GITHUB_REF_NAME} + :${channel}"
+
+      - name: Assemble archives, checksums, and the image build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist ctx/scripts
+
+          # Dockerfile.goreleaser's chtypes-fetch stage needs these three at
+          # their normal repo-relative paths — the same files GoReleaser's
+          # dockers_v2.extra_files used to copy into its temp context.
+          cp chtypes.lock ctx/
+          cp scripts/fetch-chtypes.sh scripts/_colors.sh ctx/scripts/
+
+          for target in linux/amd64 linux/arm64 darwin/arm64; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            bin="staging/wavehouse-${goos}-${goarch}/wavehouse"
+            if [ ! -f "$bin" ]; then
+              echo "::error::missing build artifact for ${target} (${bin})"
+              exit 1
+            fi
+            # actions/upload-artifact zips its input and that zip carries no
+            # unix mode bits, so the executable bit does NOT survive the round
+            # trip. Restore it before anything tars or COPYs the file.
+            chmod +x "$bin"
+
+            stage="$(mktemp -d)"
+            cp "$bin" "$stage/wavehouse"
+            # NOTICE is not optional: the repo is Apache-2.0 and §4(d) makes
+            # every redistributor of these archives inherit an attribution
+            # obligation they cannot satisfy from a tarball carrying only
+            # LICENSE. CHANGELOG.md is deliberately absent — 300+ KB of
+            # development history, one click away on GitHub, and the release
+            # page already renders the notes.
+            cp LICENSE NOTICE README.md "$stage/"
+            tar -czf "dist/wavehouse_${goos}_${goarch}.tar.gz" \
+              -C "$stage" wavehouse LICENSE NOTICE README.md
+            rm -rf "$stage"
+
+            # Dockerfile.goreleaser COPYs `$TARGETPLATFORM/wavehouse`.
+            if [ "$goos" = linux ]; then
+              mkdir -p "ctx/linux/${goarch}"
+              cp "$bin" "ctx/linux/${goarch}/wavehouse"
+            fi
+          done
+
+          # Base names only, two-space separator — the format GoReleaser wrote,
+          # and what `actions/attest-build-provenance` and `sha256sum -c` both
+          # expect.
+          (cd dist && sha256sum wavehouse_*.tar.gz > checksums.txt)
+          echo "--- dist/"
+          ls -l dist
+          echo "--- checksums.txt"
+          cat dist/checksums.txt
+
+      # The GitHub-hosted runner's default docker driver can't build
       # multi-platform images, so create a docker-container builder. No QEMU
-      # needed — Dockerfile.goreleaser stages are $BUILDPLATFORM-pinned /
-      # COPY-only by design. Mirrors publish-dev.yml.
+      # needed — Dockerfile.goreleaser's stages are $BUILDPLATFORM-pinned or
+      # COPY-only by design, so nothing foreign-arch ever executes.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
@@ -77,36 +233,90 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Resolve the moving GHCR tag BEFORE the build, so a malformed tag
-      # fails here rather than after an 8-target cross-compile and a
-      # multi-arch image push. The script rejects anything that isn't
-      # semver-shaped, so a typo can't fall through to `latest`.
-      - name: Resolve release channel
+      # Before the GitHub Release, deliberately: a failed image build then
+      # leaves nothing public to reconcile, and the job is re-runnable. The
+      # reverse order would publish a release announcing an image that does
+      # not exist.
+      #
+      # Every build gets an immutable reference plus one moving pointer:
+      # :{tag} plus the channel release-channel.sh derived — :latest for a
+      # stable tag, :alpha/:beta/:rc/:next for a prerelease. That indirection
+      # is why `v1.3.0-rc.1` can't take :latest away from a shipped `v1.2.0`.
+      #
+      # The labels mirror what GoReleaser's dockers_v2.labels injected; the
+      # static floor for all of them lives in the Dockerfile itself.
+      - name: Build and push the multi-arch image
         shell: bash
+        env:
+          IMAGE: ghcr.io/wave-rf/wavehouse
         run: |
           set -euo pipefail
-          channel="$(scripts/ci/release-channel.sh "$GITHUB_REF_NAME")"
-          echo "WAVEHOUSE_CHANNEL=${channel}" >> "$GITHUB_ENV"
-          echo "::notice::${GITHUB_REF_NAME} publishes ghcr.io/wave-rf/wavehouse:${GITHUB_REF_NAME} + :${channel}"
+          version="${GITHUB_REF_NAME#v}"
+          created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --file deployments/Dockerfile.goreleaser \
+            --tag "${IMAGE}:${GITHUB_REF_NAME}" \
+            --tag "${IMAGE}:${WAVEHOUSE_CHANNEL}" \
+            --label "org.opencontainers.image.title=WaveHouse" \
+            --label "org.opencontainers.image.description=Schema-aware real-time API gateway for ClickHouse" \
+            --label "org.opencontainers.image.url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.version=${version}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.created=${created}" \
+            --push \
+            ctx
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
-        with:
-          # Pin to the v2 line so a v3 release breaks loudly instead
-          # of silently changing release behavior.
-          version: "~> v2"
-          args: release --clean
+      # GoReleaser's `release.mode` defaulted to `keep-existing`, which is what
+      # made "publish from the Releases UI, let the tag fire this workflow"
+      # work without clobbering a hand-written body. Reproduce that: if the
+      # release already exists (UI-created, or this is a re-run), upload the
+      # assets and leave the notes alone.
+      #
+      # `--notes-start-tag` is not optional. GitHub's own generator picks the
+      # previous release itself, and this repo publishes `clients/ts/v*`
+      # releases too — so without it a server release's notes can be diffed
+      # against an SDK release. `git describe --match 'v*'` is the same rule
+      # .goreleaser.yaml's `git.ignore_tags` applied.
+      - name: Create or update the GitHub Release
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Second dockers_v2 tag in .goreleaser.yaml. Stable → latest;
-          # prerelease → alpha/beta/rc/next, so an rc can't displace the
-          # :latest a shipped stable release owns.
-          WAVEHOUSE_CHANNEL: ${{ env.WAVEHOUSE_CHANNEL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::notice::release ${tag} already exists — uploading assets, leaving its notes untouched"
+            gh release upload "$tag" dist/wavehouse_*.tar.gz dist/checksums.txt --clobber
+            exit 0
+          fi
+
+          args=(--verify-tag --title "$tag" --generate-notes)
+
+          # `latest` is release-channel.sh's answer for a stable tag and only
+          # for a stable tag, so this is the same judgement GoReleaser's
+          # `prerelease: auto` made — and GitHub's "Latest release" badge keys
+          # off exactly this flag.
+          if [ "$WAVEHOUSE_CHANNEL" != latest ]; then
+            args+=(--prerelease)
+          fi
+
+          if previous="$(git describe --tags --abbrev=0 --match 'v*' "${tag}^" 2>/dev/null)"; then
+            echo "::notice::release notes for ${tag} generated since ${previous}"
+            args+=(--notes-start-tag "$previous")
+          else
+            echo "::notice::no earlier v* tag is reachable from ${tag} — notes will cover the full history"
+          fi
+
+          gh release create "$tag" "${args[@]}" \
+            dist/wavehouse_*.tar.gz dist/checksums.txt
 
       # Build-provenance attestations — free for public repos via Sigstore's
       # public-good infra. Binaries: one attestation over every artifact listed
-      # in goreleaser's checksums.txt. Image: attest the multi-arch
-      # manifest-list digest and store the attestation alongside it in GHCR.
+      # in checksums.txt. Image: attest the multi-arch manifest-list digest and
+      # store the attestation alongside it in GHCR.
       - name: Attest binary provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -132,10 +342,10 @@ jobs:
 
       # Prove the attestations we just wrote actually verify against the
       # artifacts people will download — the same `gh attestation verify`
-      # command, flags included, that the install docs tell users to run. Attesting and verifying
-      # are different code paths (subject digests, the checksums-file
-      # expansion, the registry round-trip), so a release that publishes
-      # unverifiable provenance should go red rather than look green.
+      # command, flags included, that the install docs tell users to run.
+      # Attesting and verifying are different code paths (subject digests, the
+      # checksums-file expansion, the registry round-trip), so a release that
+      # publishes unverifiable provenance should go red rather than look green.
       # Runs last: the release is already public by this point, so this is a
       # loud alarm, not a gate.
       - name: Verify published provenance
@@ -152,7 +362,7 @@ jobs:
           # attestation. Verify them all rather than a representative one —
           # a per-GOOS/GOARCH gap is exactly what this would miss.
           shopt -s nullglob
-          archives=(dist/*.tar.gz dist/*.zip)
+          archives=(dist/*.tar.gz)
           if [ ${#archives[@]} -eq 0 ]; then
             echo "::error::no release archives in dist/ to verify"
             exit 1

@@ -13,13 +13,23 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 
 | Tool | Required version | Why | Install |
 | ---- | ---------------- | --- | ------- |
-| **Go** | 1.26+ (matches `go.mod`) | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
+| **Go** | 1.27+ (matches `go.mod`) | Compiles `cmd/wavehouse` with cgo enabled (needed by chtypes' dlopen shim — a C toolchain and glibc must be present); also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
 | **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse via testcontainers (no compose file) | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
 | **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
+
+### The chtypes artifact — fetch it once per machine
+
+`internal/typelayer` loads a per-ClickHouse-version shared library at start to run ingest validation and row-level security through ClickHouse's own parser (see [Deployment → chtypes artifacts](/deployment#chtypes-artifacts)). It is not source code and `make tools` does not fetch it for you — pull it once with:
+
+```bash
+scripts/fetch-chtypes.sh   # wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.2.1 fetch --frozen --lock chtypes.lock 26.6
+```
+
+It lands in the default local cache (`~/.cache/chtypes/artifacts/<os>-<arch>`) and is 160–290 MB — expect the first run to take a minute or two. Without it, `make dev` / `make test` / `make test-e2e` fail closed (a `503` on ingest, every stream row withheld) until a matching artifact exists for the ClickHouse line the tests or your local server run against.
 
 ### Auto-installed by `make tools`
 
@@ -34,7 +44,7 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 ### Verify your setup
 
 ```bash
-go version          # go1.26+
+go version          # go1.27+
 make --version      # GNU Make 4.x
 docker compose version
 node --version      # v22.x (matches .nvmrc and CI)
@@ -541,10 +551,9 @@ Run `make help` to see all targets. Key ones:
 | `make release-sdk-go VERSION=X.Y.Z` | Tag a Go SDK release — `go get` (pending [#434](https://github.com/Wave-RF/WaveHouse/pull/434)) |
 | **Analysis** (informational, not in CI) | |
 | `make size` | Binary size analysis → `tmp/analysis/` (text + SVG + interactive HTML) |
-| `make audit-cgo` | Audit dependency tree for C files (builds use `CGO_ENABLED=0`) |
 | `make deadcode` | Find unreachable functions |
 | `make dep-cut` | Top cuttable deps by transitive weight (`LIMIT=N` to override) |
-| `make binary-analysis` | Combined: `size` + `audit-cgo` + `deadcode` |
+| `make binary-analysis` | Combined: `size` + `deadcode` |
 | **Cleanup** (tiered — compose explicitly for partial resets) | |
 | `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`, `docs/.dev-dist/`) |
 | `make clean-test` | Test outputs only (`tmp/` — coverage data, logs, NATS state) |
@@ -613,7 +622,7 @@ The **tag is the version**, everywhere:
 
 | Component | Where the version comes from |
 | --- | --- |
-| Server | GoReleaser's `-ldflags` at build time, from the tag |
+| Server | GoReleaser's `-ldflags` at build time, from the tag (`goreleaser build --single-target`, once per platform) |
 | Go SDK | The tag itself — a Go module has no version file |
 | TypeScript SDK | `publish-npm.yml` stamps `clients/ts/package.json` from the tag before publishing |
 
@@ -633,7 +642,7 @@ Tag globs are anchored at the start of the ref name, so `v*` never matches a `cl
 
 ### What a release publishes
 
-- **Server —** a **GitHub Release** with the cross-compiled archives (linux/darwin/windows/freebsd × amd64/arm64; `.zip` on Windows, `.tar.gz` elsewhere) and `checksums.txt`. A tag carrying a prerelease suffix (`v0.1.0-alpha.1`) is marked as a GitHub pre-release, so it never takes the "Latest release" badge from a shipped stable version.
+- **Server —** a **GitHub Release** with archives for the three supported platforms (linux/amd64, linux/arm64, darwin/arm64 — cgo's dlopen requirement and the lack of a chtypes artifact elsewhere dropped Windows, FreeBSD, and darwin/amd64; see [Deployment → Supported Platforms](/deployment#supported-platforms)), each `.tar.gz`, and `checksums.txt`. A tag carrying a prerelease suffix (`v0.1.0-alpha.1`) is marked as a GitHub pre-release, so it never takes the "Latest release" badge from a shipped stable version.
 - **Both —** **release notes generated by GitHub** from the PRs merged since the previous tag *in the same family* — one line per PR, since `main` is squash-merged, grouped into the categories defined in [`.github/release.yml`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/release.yml). Grouping is by **PR label**: `github_actions` / `documentation` are applied automatically by `actions/labeler`, but `breaking-change`, `security`, `bug`, and `enhancement` are applied by hand — an unlabelled PR lands in "Other changes". Dependabot is split out by **author** rather than by label, because the labels `actions/labeler` applies by path — `github_actions`, `documentation` — mark our own PRs too; our CI work gets its own "CI & build" section — ordered above Documentation, since a CI PR here nearly always updates docs too — and Dependencies is pure Dependabot residue. **Any category keyed on a label a Dependabot PR can carry needs that author exclude** — labeler's path labels *and* the ecosystem labels Dependabot applies itself (`dependencies`, `javascript`, `go`, `github_actions`; `javascript` is in neither `labeler.yml` nor our categories) — or that category intercepts bumps before they reach the `📦 Dependencies` catch-all. `CHANGELOG.md` is *not* the source of the release body; it is the longer-form record of why each change was made.
 - **Server —** a **GHCR image** at `ghcr.io/wave-rf/wavehouse`, with two tags: the immutable `:vX.Y.Z`, and one moving *channel* pointer. A stable release moves `:latest`; a prerelease moves `:alpha` / `:beta` / `:rc` / `:next` instead, matching the npm dist-tag it would get. The channel comes from the **first** prerelease identifier, matched **exactly**: `v0.2.0-rc.1` → `:rc`, while `-alpha1`, `-preview.1`, or any other form → `:next`. `scripts/ci/release-channel.sh` is the single rule every publisher uses, so `ghcr.io/wave-rf/wavehouse:rc` and `@wavehouse/sdk@rc` can't drift apart. **A prerelease-only project therefore has no `:latest` tag** — that is deliberate; `:latest` starts existing when the first stable release ships.
 - **TypeScript SDK —** an **npm publish** of `@wavehouse/sdk` under `latest` (stable) or `alpha`/`beta`/`rc`/`next` (prerelease), plus its own GitHub Release.
@@ -657,14 +666,32 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:v0.1.0 \
 `--signer-workflow` is not optional garnish: `--repo` alone accepts an attestation produced by *any* workflow in the repo. Same point, and the `:dev` equivalent, in [Deployment → Registry](/deployment#registry) and `SECURITY.md`.
 
 :::note[Releasing from the GitHub UI instead]
-Publishing a release from **Releases → Draft a new release** creates the tag, which fires the same workflow — so it works, and GoReleaser's default `mode: keep-existing` (the key is not set in `.goreleaser.yaml`) means it will not overwrite notes you wrote. Two things the `make` targets do for you and the UI does not: none of the preflight checks run, and you must click **Generate release notes** yourself, because a body you publish empty stays empty.
+Publishing a release from **Releases → Draft a new release** creates the tag, which fires the same workflow — so it works, and it will not overwrite notes you wrote: `release.yml` checks `gh release view` first and, when the release already exists, only uploads the assets. (That check also makes the job re-runnable, which is why it is not conditional on how the release was created.) Two things the `make` targets do for you and the UI does not: none of the preflight checks run, and you must click **Generate release notes** yourself, because a body you publish empty stays empty.
 :::
+
+### How the server release is built
+
+Since the switch to cgo the three binaries are built on **three native runners**, not cross-compiled from one:
+
+| Target | Runner |
+| --- | --- |
+| `linux/amd64` | `ubuntu-latest` |
+| `linux/arm64` | `ubuntu-24.04-arm` |
+| `darwin/arm64` | `macos-latest` |
+
+All three are free for public repositories. Each runs `goreleaser build --single-target --output dist/wavehouse` — so `.goreleaser.yaml` is still the one place the build's `-ldflags`, binary name and supported platform set are declared — and uploads the binary as a run artifact. A final `ubuntu-latest` job assembles everything: the three `.tar.gz` archives, `checksums.txt`, the multi-arch GHCR image via `docker buildx build` over [`deployments/Dockerfile.goreleaser`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/Dockerfile.goreleaser), the GitHub Release, and the provenance attestations.
+
+**Why not one runner and cross-compilers?** cgo needs a C toolchain per target, and for darwin that means real Apple SDK headers. `zig cc -target aarch64-macos` cross-compiles most Go programs happily, but not this one: `prometheus/client_golang`'s darwin process collector is a C file that `#include`s `<mach/mach_vm.h>`, which zig does not ship and which cannot legally be fetched onto a GitHub-hosted Linux runner. Measured, with and without `-tags netgo,osusergo`; the two GoReleaser features that would solve it — split/merge and `builder: prebuilt` — are Pro-only, and OSS `goreleaser release` has no `--skip=build`, so there is no way to have GoReleaser assemble a release from binaries built elsewhere. The two Linux targets *can* be cross-compiled (`gcc-aarch64-linux-gnu` works), but building them natively alongside darwin costs nothing extra and keeps one rule instead of two.
+
+A consequence worth knowing when you file a bug: the released Linux binaries are **dynamically linked against glibc**, minimum `GLIBC_2.34` (measured on `ubuntu-24.04`, both architectures) — Debian 12, Ubuntu 22.04 and RHEL 9 or newer. The pre-cgo builds were static and ran anywhere. The container images are unaffected; their `distroless/cc-debian12` base is glibc 2.36.
+
+`goreleaser-validate.yml` is the PR-time proof of all of this. On a change to `.goreleaser.yaml`, `go.mod`/`go.sum`, `chtypes.lock`, `scripts/fetch-chtypes.sh`, `deployments/Dockerfile.goreleaser` or the release workflows it runs `goreleaser check`, the same three-runner matrix in `--snapshot` mode, and a real multi-arch image build (to `--output type=cacheonly`, so nothing is pushed). It is advisory, not a required check.
 
 ## The `dev` channel
 
 Between releases, every push to `main` republishes both artifacts so `@dev` always means "current `main`":
 
-- **`ghcr.io/wave-rf/wavehouse:dev`** — a rolling pointer, plus an immutable `:dev-<sha>` (pruned after 30 days by `cleanup-ghcr.yml`, newest 5 always kept). Built by the same GoReleaser pipeline with `WAVEHOUSE_DEV=1`, which suppresses the GitHub Release. Note a Docker tag is only a pointer: `docker run …:dev` reuses a stale local image unless you `docker pull` first or pass `--pull=always`.
+- **`ghcr.io/wave-rf/wavehouse:dev`** — a rolling pointer, plus an immutable `:dev-<sha>` (pruned after 30 days by `cleanup-ghcr.yml`, newest 5 always kept). Built by `publish-dev.yml`, the same shape as a real release minus everything that isn't the image: two native Linux build jobs and one push job, no archives and no GitHub Release. Note a Docker tag is only a pointer: `docker run …:dev` reuses a stale local image unless you `docker pull` first or pass `--pull=always`.
 - **`@wavehouse/sdk@dev`** — `0.0.1-dev.<utc-stamp>.h<build-hash>`, published only when the published package actually changes. The trailing hash covers every file `npm pack` would ship — the built `dist/`, `package.json` minus its `version`, and the bundled `README`/`LICENSE` — so a push whose package would be byte-identical to the current `dev` publish is skipped, while a change to `exports`, `files`, `bin`, or `engines` republishes even though `dist/` is untouched.
 
   The `<utc-stamp>` is load-bearing, not decoration. `npm install …@dev` records a *range* in your `package.json`, not the dist-tag, so what you get on the next install is the highest version matching that range. Under the old `0.0.0-dev.h<hash>` scheme, semver's lexical ordering of alphanumeric prerelease identifiers meant the newest publish routinely wasn't the highest one, and a range could resolve *backwards* — an `@dev` install landed on a two-month-old build ([#475](https://github.com/Wave-RF/WaveHouse/issues/475)). A numeric identifier compares numerically, so the channel now orders by publish time. The `0.0.1` base keeps the channel below every real release (so a dev build can never satisfy `^0.1.0`) and above the legacy `0.0.0-dev.*` publishes, which npm's 72-hour unpublish window makes permanent.

@@ -7,6 +7,14 @@
 # scope". Suppress only that exact message — a genuine scope typo (e.g.
 # `contents` → `conten`) still produces a different message and fails. Drop
 # this once actionlint ships the scope.
+#
+# nektos/act has the same gap and no equivalent escape hatch: `act` (0.2.89)
+# refuses ci.yml outright with `Unknown Property code-quality` from its own
+# schema validator, before running anything. That is the tool, not the
+# workflow — GitHub accepts the scope. To dry-run or run ci.yml under act,
+# copy the workflows to a scratch dir and strip the one `code-quality: write`
+# line there. (act's default image also ships no Go, so `setup-env`'s
+# `go version` step exits 127 under act regardless.)
 paths:
   "**/*.yml":
     ignore:

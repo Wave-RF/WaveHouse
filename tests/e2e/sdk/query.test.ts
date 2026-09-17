@@ -236,6 +236,44 @@ describe("Query", () => {
     }
   });
 
+  // The value SPELLING is part of the SDK contract, and none of the suite
+  // tables can show it: they are all String/UInt32/DateTime64. A Decimal
+  // arrives as a JSON number (`wavehouse codegen` types it as one), and a
+  // DateTime64 keeps ClickHouse's own `YYYY-MM-DD HH:MM:SS.fff` spelling
+  // rather than ISO-8601 — the same bytes the stream carries (#372). The
+  // byte-exact pin for every type family lives in the Go integration suite
+  // (tests/integration/query_types_test.go); this is the consumer-side half.
+  it("renders a Decimal as a number and a DateTime64 in ClickHouse's spelling", async () => {
+    const admin = adminClient();
+    const t = `types_${testId().replace(/-/g, "_")}`;
+
+    await chQuery(
+      `CREATE TABLE IF NOT EXISTS default.\`${t}\` (id String, amount Decimal(10, 2), at DateTime64(3)) ENGINE = Memory`,
+    );
+    await chQuery(`INSERT INTO default.\`${t}\` VALUES ('r1', 12.50, '2026-01-15 10:30:00.123')`);
+    await admin.schema.refresh();
+
+    const currentPolicy = readPolicyFile();
+    await setPolicy({
+      tables: {
+        ...currentPolicy.tables,
+        [t]: { viewer: { select: { allow_columns: ["*"] } } },
+      },
+    });
+
+    try {
+      const result = await wh.from(t).selectAll().fetch();
+      expect(result.error).toBeNull();
+      expect(result.data).toHaveLength(1);
+      const row = result.data![0] as Record<string, unknown>;
+      expect(typeof row.amount).toBe("number");
+      expect(row.amount).toBe(12.5);
+      expect(row.at).toBe("2026-01-15 10:30:00.123");
+    } finally {
+      await chQuery(`DROP TABLE IF EXISTS default.\`${t}\``);
+    }
+  });
+
   it("rejects queries to unauthorized tables (403)", async () => {
     const admin = adminClient();
 

@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { chQuery, dataClient, testId, waitForCondition } from "./helpers.js";
 import { suiteTables } from "./tables.js";
 
+// These trigger the INGEST WORKER's flush (500 rows or a 5s linger), which is
+// the only batching left on this path: the API handler's own 500-record
+// chunking is gone. A body is now one type-layer call whatever its size, so the
+// 500 here is the worker's number and nothing in the handler shares it — a
+// batch of any size comes back as one contiguous, 1-based result set
+// (TestIngest_LargeBatch_IndicesStayContiguous pins the indexing cheaply).
 describe("Ingest Batching Triggers", () => {
   const wh = dataClient();
   const T = suiteTables("batching");

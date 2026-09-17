@@ -16,9 +16,9 @@ func TestQueryCacheKey(t *testing.T) {
 	tests := []struct {
 		name        string
 		sqlA        string
-		paramsA     []any
+		paramsA     []string
 		sqlB        string
-		paramsB     []any
+		paramsB     []string
 		expectEqual bool
 	}{
 		{
@@ -42,23 +42,26 @@ func TestQueryCacheKey(t *testing.T) {
 			sqlA:        "SELECT 1",
 			paramsA:     nil,
 			sqlB:        "SELECT 1",
-			paramsB:     []any{"a"},
+			paramsB:     []string{"a"},
 			expectEqual: false,
 		},
 		{
 			name:        "embedded NUL byte does not collide with split params",
 			sqlA:        "SELECT 1",
-			paramsA:     []any{"foo\x00bar"},
+			paramsA:     []string{"foo\x00bar"},
 			sqlB:        "SELECT 1",
-			paramsB:     []any{"foo", "bar"},
+			paramsB:     []string{"foo", "bar"},
 			expectEqual: false,
 		},
 		{
-			name:        "string and int with same textual value are distinct",
+			// Every parameter is a String on the wire now, so "42" and 42
+			// ARE the same read. What must still stay apart is two values
+			// whose CONCATENATION matches — the framing's job.
+			name:        "adjacent params are not confusable with one joined param",
 			sqlA:        "SELECT 1",
-			paramsA:     []any{"42"},
+			paramsA:     []string{"4", "2"},
 			sqlB:        "SELECT 1",
-			paramsB:     []any{42},
+			paramsB:     []string{"42"},
 			expectEqual: false,
 		},
 		{
@@ -66,25 +69,21 @@ func TestQueryCacheKey(t *testing.T) {
 			sqlA:        "SELECT 1",
 			paramsA:     nil,
 			sqlB:        "SELECT 1",
-			paramsB:     []any{},
+			paramsB:     []string{},
 			expectEqual: true,
 		},
 		{
-			// Constructed as an actual collision pair under the old
-			// "raw sql + framed params" format. The param frame for
-			// `"y"` is 0x00 + 8-byte BE length (0x1D = 29) +
-			// `{"type":"string","value":"y"}` (29 bytes), so the byte
-			// stream `("X", ["y"])` produces under the old framing is
-			// `"X" + 0x00 + 0x00…0x1D + {"type":"string","value":"y"}`.
-			// Setting sqlA to exactly those bytes and paramsA to nil
-			// reproduces that stream — under the old framing the two
-			// inputs hashed identically. The new 0x01-marker + 8-byte
-			// length prefix on sql forces them apart.
+			// Constructed as an actual collision pair under the pre-#315
+			// "raw sql + framed params" format: sqlA is byte-for-byte the
+			// stream `("X", ["y"])` used to produce (the param frame is
+			// 0x00 + an 8-byte BE length + the payload), so the two inputs
+			// hashed identically. The 0x01 marker + 8-byte length prefix on
+			// the sql section forces them apart.
 			name:        "sql crafted to mimic a param-frame stream does not collide with shorter sql + real param",
-			sqlA:        "X\x00\x00\x00\x00\x00\x00\x00\x00\x1d{\"type\":\"string\",\"value\":\"y\"}",
+			sqlA:        "X\x00\x00\x00\x00\x00\x00\x00\x00\x01y",
 			paramsA:     nil,
 			sqlB:        "X",
-			paramsB:     []any{"y"},
+			paramsB:     []string{"y"},
 			expectEqual: false,
 		},
 	}

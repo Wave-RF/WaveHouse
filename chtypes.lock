@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "artifacts": {
+    "darwin-arm64/26.6": {
+      "file": "chtypes-26.6.8.7-stable-darwin-arm64-b1789588846.tar.gz",
+      "sha256": "f623a63442cbe3f424514e639f02b6543e7fd5c690b4b73431f2142d252b6439"
+    },
+    "linux-amd64/26.6": {
+      "file": "chtypes-26.6.8.7-stable-linux-amd64-b1789588846.tar.gz",
+      "sha256": "fdc0dba7d283a2c9b1ffacfeebd2b310bd4a1804373f6ce9baabddbd9540e614"
+    },
+    "linux-arm64/26.6": {
+      "file": "chtypes-26.6.8.7-stable-linux-arm64-b1789588846.tar.gz",
+      "sha256": "1ea0ec4ec9efdcb99092bd9c4ee15e3c4b8e09a0f00594e43d48fa56d13e45dd"
+    }
+  }
+}

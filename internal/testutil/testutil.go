@@ -27,8 +27,8 @@ func NopLogger() *slog.Logger {
 // NewTestSchemaRegistry creates a SchemaRegistry pre-loaded with the given
 // table schemas, without a real ClickHouse: a mock connection serves the
 // schemas as system.columns rows (UTC as the server zone) and the registry is
-// built by the real discovery path — NewSchemaRegistry + Refresh — so
-// timestamp column specs are precomputed exactly as in production.
+// built by the real discovery path — NewSchemaRegistry + Refresh — so the
+// derived fields and the refresh hooks behave exactly as in production.
 //
 // The registry holds schemas rebuilt from those rows (Name, Type, HasDefault,
 // DefaultKind, DefaultExpression, Position, DDL; IsNullable derived from the

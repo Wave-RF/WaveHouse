@@ -118,10 +118,11 @@ type ResolvedSelect struct {
 	WhereClause  string
 	WhereParams  []any
 	// rowFilter is the same row-level-security predicate as WhereClause/WhereParams,
-	// kept in resolved form so the stream path can evaluate it in memory (RowVisible)
-	// while the query path renders it to SQL. Both derive from one resolvePredicates
-	// call in Evaluate, so the two read surfaces can't drift. See rowfilter.go.
-	rowFilter           []resolvedPredicate
+	// kept in resolved form so the stream path can evaluate it against the stored
+	// row (Predicates, handed to the type layer) while the query path renders it to
+	// SQL. Both derive from one resolvePredicates call in Evaluate, so the two read
+	// surfaces can't drift (#457).
+	rowFilter           []Predicate
 	AllowedAggregations []string
 	DeniedAggregations  []string
 	MaxRows             int
@@ -255,8 +256,8 @@ func evaluateSelect(perms *SelectPermissions, claims map[string]any) *ResolvedPe
 	}
 
 	// Resolve filters into WHERE clause. A bind-unsafe filter column can't be
-	// emitted safely — a '?' in it would shift clickhouse-go's positional value
-	// binding, including this RLS filter's own bound value — so deny the role
+	// emitted safely — a '?' in it would shift the positional-to-named parameter
+	// rewrite, including this RLS filter's own bound value — so deny the role
 	// fail-closed rather than drop the predicate (which would widen row access)
 	// or emit a mis-bound query. validateSelectPerms rejects such a policy at
 	// write time; this guards the query path as defense-in-depth (Evaluate does
@@ -269,8 +270,8 @@ func evaluateSelect(perms *SelectPermissions, claims map[string]any) *ResolvedPe
 		}
 		// Resolve the row-filter once into predicates, then render both read surfaces
 		// from that single source so they can't drift: the query path binds them into
-		// a SQL WHERE here; the stream path evaluates the same predicates in memory
-		// (ResolvedPermissions.RowVisible).
+		// a SQL WHERE here; the stream path compiles the same predicates through the
+		// type layer (ResolvedPermissions.Predicates).
 		preds := resolvePredicates(perms.Filter, claims)
 		resolved.Select.rowFilter = preds
 		clauses, params := predicatesToSQL(preds)
@@ -320,15 +321,8 @@ func evaluateInsert(perms *InsertPermissions, claims map[string]any) *ResolvedPe
 			case f.Eq != nil:
 				// Deliberate asymmetry with the read path: an unresolvable check claim
 				// still resolves to "" and is auto-injected as the required value (#463).
-				// A placeholder-free value is marked LiteralValue so the check
-				// comparison can accept its numeric reading; a claim-derived value
-				// stays a plain string and keeps strict canonical equality.
 				v, _ := resolveTemplate(*f.Eq, claims)
-				if !claimTemplateRe.MatchString(*f.Eq) {
-					resolved.Insert.CheckClauses[col] = LiteralValue(v)
-				} else {
-					resolved.Insert.CheckClauses[col] = v
-				}
+				resolved.Insert.CheckClauses[col] = v
 			case f.In != nil:
 				// A []any value marks a set-membership check (vs a scalar required
 				// value); ingest enforces "inserted value must be one of these".
@@ -340,15 +334,20 @@ func evaluateInsert(perms *InsertPermissions, claims map[string]any) *ResolvedPe
 	return resolved
 }
 
-// resolvedPredicate is one row-filter or check comparison with its claim templates
-// already resolved to concrete string values — the shared, render-agnostic form the query
-// path turns into SQL (predicatesToSQL) and the stream path evaluates in memory
-// (RowVisible). Op is one of "=", "!=", ">", "<", "in". Values holds one element
-// for the scalar operators and zero-or-more for "in"; an EMPTY Values matches no
-// rows on either surface — an empty/unresolvable "in" set, or a scalar whose
-// constant was unresolvable (an absent/null claim, a structured value, or one with
-// no canonical form — see resolveTemplate/CanonicalScalar).
-type resolvedPredicate struct {
+// Predicate is one row-filter comparison with its claim templates already
+// resolved to concrete string values — the shared, render-agnostic form the query
+// path turns into SQL (predicatesToSQL) and the stream path hands to the type
+// layer to evaluate against the stored row. Op is one of "=", "!=", ">", "<",
+// "in". Values holds one element for the scalar operators and zero-or-more for
+// "in"; an EMPTY Values matches no rows on either surface — an empty/unresolvable
+// "in" set, or a scalar whose constant was unresolvable (an absent/null claim, a
+// structured value, or one with no canonical form — see
+// resolveTemplate/CanonicalScalar).
+//
+// It is exported because the stream path evaluates it outside this package. The
+// values are bound as typed parameters there, exactly as they are bound as query
+// parameters here — neither surface ever splices one into expression text.
+type Predicate struct {
 	Column string
 	Op     string
 	Values []string
@@ -357,17 +356,17 @@ type resolvedPredicate struct {
 // resolvePredicates resolves each filter's claim templates once into predicates.
 // Both read surfaces derive from this single result so they can't drift; the
 // operator order within a column (=, !=, >, <, in) mirrors the former inline SQL.
-func resolvePredicates(filters map[string]Filter, claims map[string]any) []resolvedPredicate {
-	var preds []resolvedPredicate
+func resolvePredicates(filters map[string]Filter, claims map[string]any) []Predicate {
+	var preds []Predicate
 	// An unresolvable constant (ok=false from resolveTemplate) yields a predicate
 	// with NO values, which matches no rows on either surface (#385) — never a
 	// synthesized stand-in that could match some other principal's rows.
-	scalar := func(col, op, tmpl string) resolvedPredicate {
+	scalar := func(col, op, tmpl string) Predicate {
 		v, ok := resolveTemplate(tmpl, claims)
 		if !ok {
-			return resolvedPredicate{Column: col, Op: op}
+			return Predicate{Column: col, Op: op}
 		}
-		return resolvedPredicate{Column: col, Op: op, Values: []string{v}}
+		return Predicate{Column: col, Op: op, Values: []string{v}}
 	}
 	for col, f := range filters {
 		if f.Eq != nil {
@@ -383,14 +382,14 @@ func resolvePredicates(filters map[string]Filter, claims map[string]any) []resol
 			preds = append(preds, scalar(col, "<", *f.Lt))
 		}
 		if f.In != nil {
-			preds = append(preds, resolvedPredicate{col, "in", toStrings(resolveInValues(*f.In, claims))})
+			preds = append(preds, Predicate{col, "in", toStrings(resolveInValues(*f.In, claims))})
 		}
 	}
 	return preds
 }
 
 // predicatesToSQL renders resolved predicates into WHERE clauses and bound params.
-func predicatesToSQL(preds []resolvedPredicate) ([]string, []any) {
+func predicatesToSQL(preds []Predicate) ([]string, []any) {
 	var clauses []string
 	var params []any
 	for _, p := range preds {
@@ -429,14 +428,8 @@ func predicatesToSQL(preds []resolvedPredicate) ([]string, []any) {
 	return clauses, params
 }
 
-// resolveFilters converts filter definitions with claim templates into SQL WHERE
-// clauses. Retained as the predicates→SQL composition the query-path tests target.
-func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string, []any) {
-	return predicatesToSQL(resolvePredicates(filters, claims))
-}
-
 // toStrings normalizes resolveInValues' []any (already canonical strings) to the
-// []string a resolvedPredicate carries.
+// []string a Predicate carries.
 func toStrings(vals []any) []string {
 	if len(vals) == 0 {
 		return nil
@@ -457,9 +450,9 @@ func toStrings(vals []any) []string {
 // with no placeholders — including a literal "" — is always ok, and binds
 // exactly as written: canonicalizing a numeric-spelled literal here would
 // silently move read filters on String columns (`_neq: "1.0"` on a version
-// column is a different predicate than `_neq: "1"`); the insert-check
-// comparison instead accepts a literal's numeric reading at compare time
-// (CanonicalNumericLiteral).
+// column is a different predicate than `_neq: "1"`). A literal a numeric
+// column cannot read is ClickHouse's own code 53 at evaluation time, on both
+// surfaces, not a second Go reading of the literal.
 func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
 	ok := true
 	resolved := claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
@@ -601,6 +594,50 @@ func (rp *ResolvedPermissions) IsColumnAllowed(col string, insert bool) bool {
 		}
 	}
 	return false
+}
+
+// HasRowFilter reports whether this role/table entry carries a row-level-security
+// predicate. The stream fan-out uses it to decide whether an event can be projected
+// once for a whole role bucket (no filter) or must be checked per subscriber against
+// that subscriber's claims (filter present). A nil receiver (no policy applies) has
+// no filter.
+//
+// It answers YES for a denied grant and for one whose read side was never
+// resolved, neither of which has a predicate to speak of. That is deliberate:
+// this is the GATE in front of the per-row evaluation, and a "no filter" answer
+// sends the caller down the deliver-to-the-whole-bucket fast path where no row is
+// ever checked. Saying yes forces the per-subscriber path, where Predicates
+// denies. Same shape and same reason as RestrictsColumns, which guards the
+// builder's SELECT * expansion.
+func (rp *ResolvedPermissions) HasRowFilter() bool {
+	if rp == nil {
+		return false
+	}
+	if !rp.Allowed || rp.Select == nil {
+		return true
+	}
+	return len(rp.Select.rowFilter) > 0
+}
+
+// Predicates returns the resolved row-filter predicates for the read side — the
+// SAME slice predicatesToSQL rendered into this grant's WHERE clause, so the
+// stream and the query answer off one resolution and cannot drift (#457). The
+// caller evaluates them against the stored row; every value is bound, never
+// spliced.
+//
+// ok is false when no row may be admitted at all: a denied grant, or one
+// resolved for INSERT whose empty read side would otherwise read as "no
+// predicates, everything visible" — the same fail-closed shape as CheckClauses.
+// A nil receiver means no policy applies, so there is nothing to filter by and
+// ok is TRUE with no predicates.
+func (rp *ResolvedPermissions) Predicates() ([]Predicate, bool) {
+	if rp == nil {
+		return nil, true
+	}
+	if !rp.Allowed || rp.Select == nil {
+		return nil, false
+	}
+	return rp.Select.rowFilter, true
 }
 
 // CheckClauses returns the insert side's check clauses, and false when the
@@ -806,8 +843,8 @@ func validateSelectPerms(table, role string, perms *SelectPermissions) error {
 		return fmt.Errorf("table %q, op %q, role %q: max_memory_usage must be non-negative", table, op, role)
 	}
 	// Filter column names are interpolated into SQL (backtick-quoted) at query
-	// time, so a '?' in one would shift clickhouse-go's positional value
-	// binding. Refuse such a policy at write time, mirroring the query builder's
+	// time, so a '?' in one would shift the positional-to-named parameter
+	// rewrite. Refuse such a policy at write time, mirroring the query builder's
 	// chsql.BindUnsafe guard on caller-supplied columns.
 	for col, f := range perms.Filter {
 		if chsql.BindUnsafe(col) {
@@ -815,7 +852,7 @@ func validateSelectPerms(table, role string, perms *SelectPermissions) error {
 		}
 		// An entry naming no operator resolves to no predicate, so the row-level
 		// restriction the author declared would silently not apply — Evaluate would
-		// answer HasRowFilter() false and RowVisible true for every row. Refuse it
+		// answer HasRowFilter() false and admit every row on the stream. Refuse it
 		// here; the resolver's matching deny is defense-in-depth.
 		if !f.hasOperator() {
 			return fmt.Errorf("table %q, op %q, role %q: filter column %q sets no operator — use _eq, _neq, _gt, _lt, or _in", table, op, role, col)

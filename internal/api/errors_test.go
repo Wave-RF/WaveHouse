@@ -161,7 +161,7 @@ func TestPipesHandler_Execute_DenialLogsAllowedRoles(t *testing.T) {
 func TestIngest_DenialLogsPolicyGate(t *testing.T) {
 	t.Parallel()
 	logger, buf := warnBufLogger()
-	h := NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, logger)
+	h := newTestIngestHandler(t, testRegistry(t), &testutil.MockPublisher{}, logger)
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{}}}, // no insert for viewer
@@ -192,7 +192,7 @@ func TestAuthzDenied_LogsChiRoutePattern(t *testing.T) {
 	logger, buf := warnBufLogger()
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	router := NewRouter(Dependencies{
-		Ingest:       NewIngestHandler(reg, &testutil.MockPublisher{}, logger),
+		Ingest:       newTestIngestHandler(t, reg, &testutil.MockPublisher{}, logger),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:       &HealthHandler{},

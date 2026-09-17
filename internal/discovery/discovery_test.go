@@ -360,13 +360,68 @@ func newFakeRegistry(t *testing.T, errs []error) (*SchemaRegistry, *fakeConn) {
 	return NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, logger), conn
 }
 
-// TestRefresh_UnresolvableServerTimezone_NotFatal: an unresolvable server zone
-// degrades to pass-through canonicalization (#372), never a failed refresh.
+// TestRefresh_UnresolvableServerTimezone_NotFatal: the registry reports the
+// zone name verbatim and never interprets it, so a name Go cannot resolve is
+// still published rather than failing the refresh. Whoever consumes it decides
+// what an unusable zone means (#372).
 func TestRefresh_UnresolvableServerTimezone_NotFatal(t *testing.T) {
 	t.Parallel()
 	conn := &fakeConn{tz: "Not/AZone"}
 	sr := NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, discardLogger())
 	require.NoError(t, sr.Refresh(context.Background()))
+	assert.Equal(t, "Not/AZone", sr.ServerTimezone())
+}
+
+// TestServerTimezone_EmptyBeforeRefresh: nothing is published until a refresh
+// succeeds, so a consumer cannot mistake "not probed yet" for UTC.
+func TestServerTimezone_EmptyBeforeRefresh(t *testing.T) {
+	t.Parallel()
+	sr, _ := newFakeRegistry(t, nil)
+	assert.Empty(t, sr.ServerTimezone())
+	require.NoError(t, sr.Refresh(context.Background()))
+	assert.Equal(t, "UTC", sr.ServerTimezone())
+}
+
+// TestOnRefresh_FiresAfterSwapWithPublishedSchemas: the hook is what binds the
+// type layer, so it must see the version, the zone and the same schemas Get()
+// now returns — not the ones from before the swap.
+func TestOnRefresh_FiresAfterSwapWithPublishedSchemas(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{
+		tz:      "Europe/Berlin",
+		version: "26.6.3.62",
+		columns: []fakeColumn{{table: "events", name: "id", chType: "UInt64", position: 1}},
+	}
+	sr := NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, discardLogger())
+
+	var gotVersion, gotTZ string
+	var gotTables []*TableSchema
+	calls := 0
+	sr.OnRefresh(func(version, tz string, tables []*TableSchema) {
+		calls++
+		gotVersion, gotTZ, gotTables = version, tz, tables
+		assert.NotNil(t, sr.Get("events"), "hook must run after the swap")
+	})
+
+	require.NoError(t, sr.Refresh(context.Background()))
+	assert.Equal(t, 1, calls)
+	assert.Equal(t, "26.6.3.62", gotVersion)
+	assert.Equal(t, "Europe/Berlin", gotTZ)
+	require.Len(t, gotTables, 1)
+	assert.Equal(t, "events", gotTables[0].Name)
+	assert.Equal(t, []string{"id"}, gotTables[0].InsertableColumnNames(), "hook sees the memoized schema")
+}
+
+// TestOnRefresh_NotFiredOnFailure: a failed refresh keeps the previous cache,
+// so rebinding off a half-read registry would compile the wrong thing.
+func TestOnRefresh_NotFiredOnFailure(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{versionErr: errors.New("server gone")}
+	sr := NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, discardLogger())
+	fired := false
+	sr.OnRefresh(func(string, string, []*TableSchema) { fired = true })
+	require.Error(t, sr.Refresh(context.Background()))
+	assert.False(t, fired)
 }
 
 // TestRefresh_RowsIterationError_Fails: rows.Next() returns false on a
@@ -808,4 +863,10 @@ func TestInsertableColumns_CachedAndUncachedAgree(t *testing.T) {
 	second := ts.InsertableColumns()
 	require.NotEmpty(t, first)
 	assert.Same(t, &first[0], &second[0], "callers share the memoized backing array")
+}
+
+// discardLogger is the registries' test logger: refresh warnings are asserted
+// via behavior, not log output.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

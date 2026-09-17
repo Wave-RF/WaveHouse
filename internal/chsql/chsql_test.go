@@ -43,3 +43,37 @@ func TestBindUnsafe(t *testing.T) {
 		}
 	}
 }
+
+// TestEscapeStringParam pins the encoding both {p:String} surfaces depend on.
+// The single quote and '%'/'_' are deliberately NOT escaped: the value is read
+// as an escaped FIELD, not as a quoted literal and not as a LIKE pattern, so
+// encoding them would bind characters the caller never wrote.
+func TestEscapeStringParam(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "acme", "acme"},
+		{"empty", "", ""},
+		{"backslash", `a\b`, `a\\b`},
+		{"trailing backslash", `trail\`, `trail\\`},
+		{"tab", "a\tb", `a\tb`},
+		{"newline", "a\nb", `a\nb`},
+		{"carriage return", "a\rb", `a\rb`},
+		{"single quote is untouched", "O'Brien", "O'Brien"},
+		{"like metacharacters are untouched", "50%_off", "50%_off"},
+		{"nul is untouched", "a\x00b", "a\x00b"},
+		{"backslash then t is not re-read as a tab", `a\tb`, `a\\tb`},
+		{"every byte at once", "a\\\tb\nc\rd", `a\\\tb\nc\rd`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := EscapeStringParam(tt.in); got != tt.want {
+				t.Errorf("EscapeStringParam(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

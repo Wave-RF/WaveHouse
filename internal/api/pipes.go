@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/go-chi/chi/v5"
@@ -22,7 +22,7 @@ import (
 type PipesHandler struct {
 	Source       pipes.Source
 	PolicySource policy.Source // resolves empty role to default_role; may be nil
-	CHConn       driver.Conn
+	CH           *chReader
 	Cache        cache.Cache
 	sf           singleflight.Group
 	// queryTimeout bounds each pipe execution, read per request
@@ -39,8 +39,8 @@ type PipesHandler struct {
 	maxRequestBytes int64
 }
 
-func NewPipesHandler(source pipes.Source, policySource policy.Source, conn driver.Conn, c cache.Cache, queryTimeout func() time.Duration, logger *slog.Logger) *PipesHandler {
-	return &PipesHandler{Source: source, PolicySource: policySource, CHConn: conn, Cache: c, queryTimeout: queryTimeout, logger: logger}
+func NewPipesHandler(source pipes.Source, policySource policy.Source, target func() chconn.Target, c cache.Cache, queryTimeout func() time.Duration, logger *slog.Logger) *PipesHandler {
+	return &PipesHandler{Source: source, PolicySource: policySource, CH: newCHReader(target), Cache: c, queryTimeout: queryTimeout, logger: logger}
 }
 
 // List returns all named queries (admin endpoint).
@@ -127,7 +127,11 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sql, params, err := pipes.BindParams(q, supplied)
+	// BindParams inlines every value as an escaped SQL literal — a pipe's
+	// placeholders can sit anywhere in the statement, including positions
+	// (LIMIT, an identifier) where a bound parameter is not legal — so the
+	// rendered SQL carries no placeholders and nothing is bound here.
+	sql, err := pipes.BindParams(q, supplied)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -138,7 +142,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	// by sha alone (TTL-only) and the ingest worker cannot version-invalidate it.
 	// TODO: once pipes expose their tables/scopes, pass them as deps here so writes
 	// invalidate cached pipe results.
-	cacheKey := queryCacheKey(sql, params)
+	cacheKey := queryCacheKey(sql, nil)
 	if h.Cache != nil {
 		if data, _, err := h.Cache.Get(r.Context(), cacheKey, nil); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -155,16 +159,13 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 		start := time.Now()
 
-		rows, err := executeCHQuery(queryCtx, h.CHConn, sql, params)
+		// ClickHouse's own JSON rendering of the rows, stored and served
+		// verbatim. A pipe carries no per-role resource caps (allowed_roles is
+		// its whole policy), so no settings are sent.
+		data, err := h.CH.query(queryCtx, sql, nil, nil)
 		queryDuration := time.Since(start)
 		if err != nil {
 			// TODO: depending on the error, we may actually want to cache it
-			return nil, err
-		}
-
-		data, err := json.Marshal(rows)
-		if err != nil {
-			// TODO: eventually we want CSV support etc
 			return nil, err
 		}
 

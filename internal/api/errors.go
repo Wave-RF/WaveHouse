@@ -18,10 +18,23 @@ import (
 // match the success-path handlers and RFC 8259 (which does not define a
 // charset for application/json — JSON is required to be UTF-8 already).
 func writeJSONError(w http.ResponseWriter, status int, message string) {
+	writeJSONErrorCode(w, status, message, 0)
+}
+
+// writeJSONErrorCode is writeJSONError plus ClickHouse's own error code, which
+// the ingest path carries when the server's parser is the one that refused the
+// record (117 unknown field, 27 unparseable value, 6 out of range). A zero code
+// is omitted rather than sent as 0, so a body carrying "code" always means
+// ClickHouse answered — a gateway rejection never invents one.
+func writeJSONErrorCode(w http.ResponseWriter, status int, message string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+	body := map[string]any{"error": message}
+	if code != 0 {
+		body["code"] = code
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // writeAuthzDenied writes the response for an authorization denial and emits a

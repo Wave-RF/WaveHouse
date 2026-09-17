@@ -21,6 +21,12 @@ services:
       # are convention, not config. The Dockerfile pre-creates /app/data
       # owned by the nonroot user; bind-mount any persistent volume here.
       WH_DATA_DIR: /app/data
+      # deployments/Dockerfile already bakes the pinned chtypes artifact
+      # (chtypes.lock) into the image at /opt/chtypes/artifacts and sets
+      # CHTYPES_REGISTRY there — no override needed for the quickstart.
+      # Point it elsewhere only if you bind-mount a different/updated
+      # registry directory instead of rebuilding the image:
+      # CHTYPES_REGISTRY: /opt/chtypes/artifacts
       # ClickHouse wiring (addr, ports, database, user) is in ./settings/config.json
       # — the settings directory below — where it hot-reloads. Only the
       # password is env (a secret); the bundled ClickHouse has none.

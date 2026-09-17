@@ -10,6 +10,7 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -36,6 +37,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
 const (
@@ -51,7 +53,31 @@ type testEnv struct {
 	embeddedMQ *mq.EmbeddedNATS
 	server     *httptest.Server
 	registry   *discovery.SchemaRegistry
+	// ingest is the live handler, so a test can install its own policy for the
+	// ingest path (see withIngestPolicy). Nothing in this package runs in
+	// parallel, so swapping it for the length of one test is safe.
+	ingest *api.IngestHandler
 }
+
+// withIngestPolicy installs an ingest-side policy for the calling test and
+// restores the default (none — an unrestricted path) afterwards. Paired with
+// testRoleHeader / testClaimsHeader, it is how the column-policy and
+// insert-check cases reach the real HTTP path.
+func withIngestPolicy(t *testing.T, p *policy.Policy) {
+	t.Helper()
+	prev := sharedEnv.ingest.PolicySource
+	sharedEnv.ingest.PolicySource = policy.Static(p)
+	t.Cleanup(func() { sharedEnv.ingest.PolicySource = prev })
+}
+
+// Test-only request headers honoured by the suite's AuthMW. Production derives
+// the role and claims from a JWT; the integration suite needs to drive a
+// NON-admin role and real claims through the actual handler without standing up
+// a signer, and these two headers are the whole of that seam.
+const (
+	testRoleHeader   = "X-Test-Role"
+	testClaimsHeader = "X-Test-Claims" // a JSON object
+)
 
 var sharedEnv *testEnv
 
@@ -155,6 +181,20 @@ func setup() (int, func()) {
 	}
 
 	registry := discovery.NewSchemaRegistry(ch.conn, func() string { return testCHDatabase }, func() time.Duration { return time.Minute }, logger)
+
+	// The type layer is bound from the refresh hook, exactly as main.go wires
+	// it, so a table created mid-suite is compiled by the createTable refresh
+	// rather than needing its own step. Failing here is fatal on purpose: the
+	// artifact missing would otherwise turn every ingest assertion into a 503
+	// that reads like a product bug.
+	types, err := typelayer.NewEngine(typelayer.Config{}, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration setup: chtypes engine: %v\n", err)
+		return 1, cleanup
+	}
+	cleanups.push(types.Close)
+	registry.OnRefresh(types.Bind)
+
 	if err := registry.Refresh(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: schema refresh: %v\n", err)
 		return 1, cleanup
@@ -181,7 +221,7 @@ func setup() (int, func()) {
 		return 1, cleanup
 	}
 
-	server, err := buildServer(ch, embeddedMQ, registry, logger)
+	server, ingestHandler, err := buildServer(ch, embeddedMQ, registry, types, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: build server: %v\n", err)
 		return 1, cleanup
@@ -194,6 +234,7 @@ func setup() (int, func()) {
 		embeddedMQ: embeddedMQ,
 		server:     server,
 		registry:   registry,
+		ingest:     ingestHandler,
 	}
 	return 0, cleanup
 }
@@ -224,10 +265,9 @@ func (c *chInstance) httpURL() string    { return fmt.Sprintf("http://%s:%s", c.
 // race; the dominant flake mode tracked in #70.
 func startClickHouse(ctx context.Context) (*chInstance, error) {
 	chReq := testcontainers.ContainerRequest{
-		// Pinned: 26.8 reads bare numbers in DateTime64 columns as epoch seconds,
-		// not ticks at column precision — CanonicalizeTimestamps still models the
-		// pre-26.8 rule (TestTimestampCanonicalization_DifferentialAgainstClickHouse
-		// catches the divergence). Bump the pin together with the canonicalizer (#536).
+		// Pinned to a line the chtypes artifact set covers; the type layer answers
+		// with the artifact matching the server's own version, so bumping this pin
+		// means fetching that line into chtypes.lock too (#536).
 		Image:        "clickhouse/clickhouse-server:26.6.3.62",
 		ExposedPorts: []string{"9000/tcp", "8123/tcp"},
 		Env:          map[string]string{"CLICKHOUSE_PASSWORD": testCHPassword},
@@ -312,14 +352,17 @@ func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Dura
 // The RequireAdmin gate resolves that stamped role against PolicySource, so the
 // server is wired with an in-memory policy whose admin_role is "admin". A nil
 // store would deny every admin-gated route (IsAdmin(nil) is false by design).
-func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, logger *slog.Logger) (*httptest.Server, error) {
+func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, types *typelayer.Engine, logger *slog.Logger) (*httptest.Server, *api.IngestHandler, error) {
 	js := embeddedMQ.JetStream()
 
 	policyStore := policy.Static(&policy.Policy{AdminRole: "admin"})
 	streamHub := stream.NewHub(policyStore, registry, nil)
 
+	ingestHandler := api.NewIngestHandler(registry, embeddedMQ, logger)
+	ingestHandler.Types = types
+
 	deps := api.Dependencies{
-		Ingest: api.NewIngestHandler(registry, embeddedMQ, logger),
+		Ingest: ingestHandler,
 		// /v1/ops/query proxies straight to ClickHouse's HTTP interface,
 		// so the handler needs the HTTP URL + creds rather than the
 		// native-protocol driver.Conn other handlers use.
@@ -333,7 +376,20 @@ func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discover
 		PolicySource: policyStore,
 		AuthMW: func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				next.ServeHTTP(w, r.WithContext(auth.WithRole(r.Context(), "admin")))
+				role := r.Header.Get(testRoleHeader)
+				if role == "" {
+					role = "admin"
+				}
+				ctx := auth.WithRole(r.Context(), role)
+				if raw := r.Header.Get(testClaimsHeader); raw != "" {
+					var claims map[string]any
+					if err := json.Unmarshal([]byte(raw), &claims); err != nil {
+						http.Error(w, "bad "+testClaimsHeader, http.StatusBadRequest)
+						return
+					}
+					ctx = auth.WithClaims(ctx, claims)
+				}
+				next.ServeHTTP(w, r.WithContext(ctx))
 			})
 		},
 		JS:     js,
@@ -341,7 +397,7 @@ func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discover
 	}
 
 	server := httptest.NewServer(api.NewRouter(deps))
-	return server, nil
+	return server, ingestHandler, nil
 }
 
 func mustTempDir() string {

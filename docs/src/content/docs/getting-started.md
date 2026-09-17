@@ -5,13 +5,13 @@ sidebar:
   order: 2
 ---
 
-Run WaveHouse locally in under five minutes. WaveHouse ships as a single binary with ClickHouse as the only external dependency; this walkthrough covers ingest, query, and real-time streaming.
+Run WaveHouse locally in under five minutes. WaveHouse ships as one binary plus the per-ClickHouse-version [chtypes artifact](/deployment#chtypes-artifacts) it loads at start, with ClickHouse as the only external network dependency; this walkthrough covers ingest, query, and real-time streaming.
 
 ## Prerequisites
 
 - **Docker** — for running ClickHouse (and optionally WaveHouse itself).
 - **curl** and **jq** (optional) — for poking the API.
-- **Go 1.26+** — only required if you want to build from source; skip it for the Docker path below.
+- **Go 1.27+** — only required if you want to build from source; skip it for the Docker path below. Building from source also requires cgo (a C toolchain) and glibc — see [Deployment → Supported Platforms](/deployment#supported-platforms).
 
 ## 1. Start WaveHouse
 
@@ -62,7 +62,7 @@ curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 # → {"ok":true}
 ```
 
-WaveHouse validates the body against the ClickHouse schema before acknowledging. Unknown fields, type mismatches, and missing required columns are rejected with a `400`.
+WaveHouse validates the body against the ClickHouse schema before acknowledging — using ClickHouse's own parser, running in-process (`internal/typelayer`, via [chtypes](/deployment#chtypes-artifacts)), so a rejection carries ClickHouse's own error code and message, the same as a native `INSERT` would produce. Unknown fields and type mismatches are rejected with a `400`.
 
 ## 4. Query
 

@@ -34,12 +34,6 @@ type Column struct {
 	// carries the ordinal itself so a caller holding a lone Column still knows
 	// where it sits.
 	Position uint64 `json:"position"`
-
-	// tsSpec is a DateTime/DateTime64 column's canonicalization spec, resolved
-	// once at schema build (Refresh). nil for non-timestamp columns, hand-built
-	// Column literals, and unresolvable zones — CanonicalizeTimestamps passes
-	// those through untouched (fail-open, #372).
-	tsSpec *timestampSpec
 }
 
 // TableSchema holds the discovered schema for one ClickHouse table. Columns is
@@ -187,6 +181,13 @@ type SchemaRegistry struct {
 	// serverVersion is the ClickHouse version string from the last successful
 	// Refresh, guarded by mu alongside tables.
 	serverVersion string
+	// serverTZ is the server's default time zone name from the same Refresh.
+	// ClickHouse reads zone-less timestamps in it, so the type layer has to
+	// parse in the same zone or it answers about a different instant.
+	serverTZ string
+	// onRefresh is notified after every successful Refresh, with the same
+	// version/zone/tables the swap published.
+	onRefresh []func(serverVersion, serverTZ string, tables []*TableSchema)
 }
 
 // NewSchemaRegistry creates a registry that discovers schemas from system.columns.
@@ -200,16 +201,28 @@ func NewSchemaRegistry(conn driver.Conn, database func() string, refreshInterval
 	}
 }
 
+// OnRefresh registers a hook invoked after every successful Refresh, once the
+// new schemas are published. Hooks run synchronously on the refresh goroutine —
+// they are expected to be cheap (the type layer's rebind compiles only the
+// tables whose columns changed) — and must be registered before the first
+// Refresh.
+func (sr *SchemaRegistry) OnRefresh(hook func(serverVersion, serverTZ string, tables []*TableSchema)) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	sr.onRefresh = append(sr.onRefresh, hook)
+}
+
 // Refresh rebuilds the in-memory schema cache: it discovers the server's default
-// time zone and version, queries system.columns, attaches each table's DDL from
-// system.tables, and precomputes timestamp column specs.
+// time zone and version, queries system.columns, and attaches each table's DDL
+// from system.tables.
 func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
 	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
 	defer span.End()
 
 	// ClickHouse interprets zone-less timestamp strings in the server's default
-	// zone; canonicalization applies the same rule so the instant never changes (#372).
+	// zone; the type layer parses in the same zone so the instant never
+	// changes (#372).
 	var tzName string
 	if err := sr.conn.QueryRow(ctx, "SELECT timezone()").Scan(&tzName); err != nil {
 		return fmt.Errorf("query server timezone: %w", err)
@@ -229,16 +242,6 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	var serverVersion string
 	if err := sr.conn.QueryRow(ctx, "SELECT version()").Scan(&serverVersion); err != nil {
 		return fmt.Errorf("query server version: %w", err)
-	}
-
-	var serverTZ *time.Location
-	if loc, err := loadLocation(tzName); err == nil {
-		serverTZ = loc
-	} else {
-		// Unresolvable — warn, not fatal, and no UTC fallback (that could move
-		// instants). A nil server zone means zone-less values pass through.
-		sr.logger.Warn("cannot resolve server timezone; zone-less timestamps will pass through un-canonicalized",
-			"timezone", tzName, "error", err)
 	}
 
 	// One database per refresh. `database` is a live getter so a ClickHouse
@@ -295,16 +298,33 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		return err
 	}
 
+	var noDDL []string
+	published := make([]*TableSchema, 0, len(tables))
 	for _, ts := range tables {
-		resolveTimestampSpecs(ts, serverTZ, sr.logger)
 		ts.cacheInsertable()
+		published = append(published, ts)
+		if ts.DDL == "" {
+			noDDL = append(noDDL, ts.Name)
+		}
 	}
 
 	sr.mu.Lock()
 	sr.tables = tables
 	sr.serverVersion = serverVersion
+	sr.serverTZ = tzName
+	hooks := sr.onRefresh
 	sr.mu.Unlock()
 	sr.logger.Info("schema registry refreshed", "tables", len(tables), "server_tz", tzName, "server_version", serverVersion)
+	if len(noDDL) > 0 {
+		// The two scans are not one snapshot, so a table can be missing its
+		// CREATE statement without being missing (#558). One line per refresh,
+		// not per table.
+		sr.logger.Warn("tables discovered without DDL", "tables", noDDL)
+	}
+
+	for _, hook := range hooks {
+		hook(serverVersion, tzName, published)
+	}
 
 	return nil
 }
@@ -351,6 +371,16 @@ func (sr *SchemaRegistry) ServerVersion() string {
 	sr.mu.RLock()
 	defer sr.mu.RUnlock()
 	return sr.serverVersion
+}
+
+// ServerTimezone returns the server's default time zone name captured by the
+// last successful Refresh, or "" before the first one. It is the name
+// ClickHouse reported, not a resolved location: nothing here interprets it, the
+// type layer hands it straight to the parser that will read the rows.
+func (sr *SchemaRegistry) ServerTimezone() string {
+	sr.mu.RLock()
+	defer sr.mu.RUnlock()
+	return sr.serverTZ
 }
 
 // Get returns the schema for a table, or nil if not found.

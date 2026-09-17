@@ -11,16 +11,18 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
-	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,13 +34,34 @@ func testRegistry(t testing.TB) *discovery.SchemaRegistry {
 			Name: "clicks",
 			Columns: []discovery.Column{
 				{Name: "page", Type: "String"},
-				{Name: "button", Type: "String", HasDefault: true},
-				{Name: "count", Type: "UInt64", HasDefault: true},
-				{Name: "event_id", Type: "String", HasDefault: true},
-				{Name: "org_id", Type: "String", HasDefault: true},
+				{Name: "button", Type: "String", HasDefault: true, DefaultExpression: "''"},
+				{Name: "count", Type: "UInt64", HasDefault: true, DefaultExpression: "0"},
+				{Name: "event_id", Type: "String", HasDefault: true, DefaultExpression: "''"},
+				{Name: "org_id", Type: "String", HasDefault: true, DefaultExpression: "''"},
 			},
 		},
 	})
+}
+
+// engineMu serialises engine construction. typelayer.Engine.Bind sets
+// chtypes.Timezone — a PACKAGE global in the SDK — under the engine's own lock,
+// which does not order two engines against each other, so parallel tests each
+// building one race on that write. Production has exactly one engine and never
+// hits it; this is a test-only workaround for a typelayer defect, and the fix
+// belongs there (guard the global with a package-level mutex).
+var engineMu sync.Mutex
+
+// newTestIngestHandler wires a handler the way production does: over a real
+// chtypes engine compiled from the registry's own schemas. There is no
+// validation-free mode to test against — a nil Types is a 503 by design — so
+// every handler test that reaches a record needs one.
+func newTestIngestHandler(t testing.TB, reg *discovery.SchemaRegistry, pub mq.Publisher, logger *slog.Logger) *IngestHandler {
+	t.Helper()
+	engineMu.Lock()
+	defer engineMu.Unlock()
+	h := NewIngestHandler(reg, pub, logger)
+	h.Types = typelayer.TestEngine(t, reg.List()...)
+	return h
 }
 
 func ingestRequest(t *testing.T, table string, body any) *http.Request {
@@ -55,7 +78,7 @@ func ingestRequest(t *testing.T, table string, body any) *http.Request {
 func TestIngest_ValidPayload(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "count": 1})
 	w := httptest.NewRecorder()
@@ -105,7 +128,7 @@ func TestIngest_MissingTable(t *testing.T) {
 			t.Parallel()
 
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 			req := httptest.NewRequestWithContext(
 				context.Background(),
@@ -128,7 +151,7 @@ func TestIngest_MissingTable(t *testing.T) {
 func TestIngest_UnknownTable(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	req := ingestRequest(t, "nonexistent", map[string]any{"x": 1})
 	w := httptest.NewRecorder()
@@ -142,35 +165,118 @@ func TestIngest_UnknownTable(t *testing.T) {
 func TestIngest_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	r := rawIngestRequest(t, "clicks", "application/json", "not json")
 
 	w := httptest.NewRecorder()
 	h.Handle(w, r)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "invalid json")
+	// CONTRACT CHANGE: the message is ClickHouse's own, with its code, because
+	// nothing in Go reads the body any more. It used to be the flat
+	// "invalid json" the Go decoder produced.
+	msg, code := errorAndCode(t, w)
+	assert.Contains(t, msg, "expected '{'")
+	assert.Equal(t, 27, code)
 	testutil.AssertJSONErrorResponse(t, w)
+	assert.Empty(t, pub.Messages)
 }
 
+// TestIngest_SchemaValidation_UnknownField: a field the table does not have is
+// a real ClickHouse rejection (code 117), not a gateway guess. The compile
+// profile pins input_format_skip_unknown_fields=0 precisely so this is a
+// verdict the caller hears about rather than silent data loss.
 func TestIngest_SchemaValidation_UnknownField(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "nonexistent_field": 42})
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "error")
+	msg, code := errorAndCode(t, w)
+	assert.Contains(t, msg, "nonexistent_field")
+	assert.Equal(t, 117, code)
+	assert.Empty(t, pub.Messages)
+}
+
+// TestIngest_MissingRequiredColumn_TakesTheDefault records a DELIBERATE
+// behaviour change: WaveHouse used to answer 400 "missing required column" for
+// a column that is neither nullable nor defaulted. ClickHouse does not — it
+// reads an omitted field as the type's default — and the gateway now gives the
+// server's answer rather than its own. Measured on 26.6.3.62: `{}` into
+// `page String` stores the empty string.
+func TestIngest_MissingRequiredColumn_TakesTheDefault(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
+
+	w := httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"count": 1}))
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, "", publishedData(t, pub)["page"], "the omitted required column takes its type default")
+}
+
+// TestIngest_ComputedColumns_AreNotOnTheWire: the envelope's Columns are the
+// columns the exported row actually carries — declaration order minus
+// MATERIALIZED, ALIAS and EPHEMERAL. The old envelope used InsertableColumns,
+// which counts EPHEMERAL in, so a table with one announced a column the row did
+// not have. Supplying one is the server's own 117.
+func TestIngest_ComputedColumns_AreNotOnTheWire(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := newTestIngestHandler(t, computedRegistry(t), pub, testutil.NopLogger())
+
+	w := httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/a"}))
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+
+	var evt ingest.EventMessage
+	require.NoError(t, json.Unmarshal(pub.LastMessage().Data, &evt))
+	assert.Equal(t, []string{"page", "country"}, evt.Columns)
+	assert.JSONEq(t, `["/a", "US"]`, string(evt.Row), "the MATERIALIZED value is the server's to compute")
+
+	w = httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/a", "raw": "x"}))
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	_, code := errorAndCode(t, w)
+	assert.Equal(t, 117, code, "a record naming an EPHEMERAL column is refused per record, with ClickHouse's code")
+}
+
+// TestIngest_Batch_PerRecordCodes: a batch reports each refused record's own
+// ClickHouse code alongside its message, and one bad record does not cost its
+// siblings.
+func TestIngest_Batch_PerRecordCodes(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
+
+	req := rawIngestRequest(t, "clicks", "application/json",
+		`[{"page":"/a"},{"page":"/b","nope":1},{"page":"/c","count":"x"},{"page":"/d"}]`)
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 4, resp.Total)
+	assert.Equal(t, 2, resp.Succeeded)
+	assert.Equal(t, 2, resp.Failed)
+	require.Len(t, resp.Results, 4)
+	assert.True(t, resp.Results[0].Ok)
+	assert.Equal(t, 117, resp.Results[1].Code)
+	assert.Equal(t, 27, resp.Results[2].Code)
+	assert.True(t, resp.Results[3].Ok)
+	assert.Len(t, pub.Messages, 2, "the siblings of a refused record still publish")
 }
 
 func TestIngest_Dedup_FirstTime(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	dedup := testutil.NewMockDeduplicator()
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
 	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", false }
 
@@ -186,7 +292,7 @@ func TestIngest_Dedup_Duplicate(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	dedup := testutil.NewMockDeduplicator()
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
 	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", false }
 
@@ -212,7 +318,7 @@ func TestIngest_Dedup_Duplicate(t *testing.T) {
 func TestIngest_PublishError_503(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{Err: errors.New("maximum bytes exceeded")}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
 	w := httptest.NewRecorder()
@@ -226,7 +332,7 @@ func TestIngest_PublishError_503(t *testing.T) {
 func TestIngest_PublishError_500(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{Err: errors.New("some other error")}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
 	w := httptest.NewRecorder()
@@ -240,7 +346,7 @@ func TestIngest_PublishError_500(t *testing.T) {
 func TestIngest_Policy_Forbidden(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
@@ -265,7 +371,7 @@ func TestIngest_Policy_Forbidden(t *testing.T) {
 func TestIngest_Policy_ColumnDenied(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
@@ -282,14 +388,21 @@ func TestIngest_Policy_ColumnDenied(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
 
-	assert.Equal(t, http.StatusForbidden, w.Code)
-	assert.Contains(t, w.Body.String(), "not allowed for insert")
+	// CONTRACT CHANGE (AUDIT D1): column policy is answered by compiling the
+	// role's own schema WITHOUT the denied columns, so the refusal is
+	// ClickHouse's per-record code 117 — a 400, not the gateway's 403. It no
+	// longer confirms whether the column exists at all.
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	msg, code := errorAndCode(t, w)
+	assert.Contains(t, msg, "button")
+	assert.Equal(t, 117, code)
+	assert.Empty(t, pub.Messages)
 }
 
 func TestIngest_Policy_CheckClause_Mismatch(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
@@ -317,7 +430,7 @@ func TestIngest_Policy_CheckClause_Mismatch(t *testing.T) {
 func TestIngest_Policy_CheckClause_Match(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
@@ -343,15 +456,15 @@ func TestIngest_Policy_CheckClause_Match(t *testing.T) {
 	assert.NotNil(t, pub.LastMessage(), "should have published")
 }
 
-// TestIngest_Policy_CheckClause_NumericSpellingMatch: the check comparison is
-// canonical on both sides (policy.CanonicalScalar), so a numeric claim and a
-// numeric insert value match by value even when their JSON spellings differ —
-// a claim spelled 1.0 accepts an inserted 1. The former string-form comparison
-// ("1.0" != "1") rejected exactly this insert.
+// TestIngest_Policy_CheckClause_NumericSpellingMatch: a numeric CLAIM still
+// matches a numeric insert value whose JSON spelling differs — a claim spelled
+// 1.0 accepts an inserted 1. Policy canonicalizes the claim to "1" on the way
+// in, and the check then binds it as a String parameter that ClickHouse
+// compares against the stored UInt64. Nothing in Go compares the two values.
 func TestIngest_Policy_CheckClause_NumericSpellingMatch(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	countTemplate := "{{ jwt.max_count }}"
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
@@ -376,26 +489,39 @@ func TestIngest_Policy_CheckClause_NumericSpellingMatch(t *testing.T) {
 	assert.NotNil(t, pub.LastMessage(), "should have published")
 }
 
-// TestIngest_Policy_CheckClause_StaticNumericSpelling: a check value with no
-// placeholder carries no JSON type, so the comparison accepts either reading
-// of it — a static `_eq: "1.0"` accepts an inserted number 1 (its canonical
-// numeric reading) and an inserted string "1.0" (its spelling, the pre-PR
-// behavior) alike. Without the numeric reading, the payload side is canonical
-// ("1") while the static side keeps its raw spelling ("1.0") and the check
-// rejects every numeric insert it was written to allow.
+// TestIngest_Policy_CheckClause_StaticNumericSpelling is a DOCUMENTED CONTRACT
+// CHANGE. A placeholder-free check value used to carry a second, numeric
+// reading in Go — a typed marker on the resolved clause plus a canonical
+// numeric re-render of the literal, both since deleted — so a static
+// `_eq: "1.0"` admitted an inserted number 1. The check is now ClickHouse's own
+// comparison against a {p:String} parameter, and `UInt64 = '1.0'` is the
+// server's code 53 TYPE_MISMATCH — a per-row VerdictError, which is a 422
+// because it means "we could not judge this", never "your payload was wrong".
+//
+// The value is also what would have been injected into a record that omitted
+// the column, and `count UInt64 DEFAULT '1.0'` does not compile (code 6,
+// measured). The handler retries the shape without its defaults rather than
+// answering 503, so the request still gets a per-record verdict.
+//
+// The operator fix is to write the literal the column can read (`_eq: "1"`);
+// the covering case below pins that it still works.
 func TestIngest_Policy_CheckClause_StaticNumericSpelling(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name string
 		body any
+		want int
 	}{
-		{"numeric reading", 1},
-		{"literal spelling", "1.0"},
+		{"numeric reading", 1, http.StatusUnprocessableEntity},
+		// ClickHouse refuses the record before the check is ever consulted: the
+		// column is a UInt64 and the string "1.0" is not one. Parse errors
+		// precede check errors now (AUDIT §A.2).
+		{"literal spelling", "1.0", http.StatusBadRequest},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 			staticCount := "1.0"
 			h.PolicySource = policy.Static(&policy.Policy{
 				Tables: map[string]policy.TablePolicy{
@@ -415,18 +541,42 @@ func TestIngest_Policy_CheckClause_StaticNumericSpelling(t *testing.T) {
 			w := httptest.NewRecorder()
 			h.Handle(w, req)
 
-			assert.Equal(t, http.StatusOK, w.Code)
-			assert.NotNil(t, pub.LastMessage(), "should have published")
+			assert.Equal(t, tt.want, w.Code, "body=%s", w.Body.String())
+			assert.NotContains(t, w.Body.String(), "check failed",
+				"neither answer is the check saying no — one is a type mismatch, the other a parse refusal")
+			assert.Empty(t, pub.Messages)
 		})
 	}
+
+	// The covering case: a literal the column CAN read still admits the record,
+	// so the change above is about the spelling, not about static checks.
+	t.Run("a readable literal still admits the record", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
+		staticCount := "1"
+		h.PolicySource = policy.Static(&policy.Policy{
+			Tables: map[string]policy.TablePolicy{
+				"clicks": {"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+					"count": {Eq: &staticCount},
+				}}}},
+			},
+		})
+		req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "count": 1})
+		req = req.WithContext(auth.WithRole(req.Context(), "user"))
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		assert.Len(t, pub.Messages, 1)
+	})
 }
 
-// TestIngest_Policy_CheckClause_StringClaimStrictEquality: the numeric
-// reading is reserved for placeholder-free literals (policy.LiteralValue). A
-// claim-derived required value keeps strict canonical equality, so a writer
-// whose claim is the STRING "1e3" cannot insert the number 1000 — its id is
-// the three-character text, and accepting the numeric reading would let it
-// store a row under the tenant whose String id is "1000".
+// TestIngest_Policy_CheckClause_StringClaimStrictEquality: a writer whose claim
+// is the STRING "1e3" cannot insert the number 1000 — its id is the
+// three-character text, and a numeric reading would let it store a row under
+// the tenant whose String id is "1000". ClickHouse enforces it now: the column
+// is a String, so the comparison is between strings and no numeric reading
+// exists to slip through.
 func TestIngest_Policy_CheckClause_StringClaimStrictEquality(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -440,7 +590,7 @@ func TestIngest_Policy_CheckClause_StringClaimStrictEquality(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 			orgTemplate := "{{ jwt.org_id }}"
 			h.PolicySource = policy.Static(&policy.Policy{
 				Tables: map[string]policy.TablePolicy{
@@ -465,15 +615,25 @@ func TestIngest_Policy_CheckClause_StringClaimStrictEquality(t *testing.T) {
 	}
 }
 
-// TestIngest_Policy_CheckClause_NullValue_FailsClosed: the _eq twin of the
-// _in null test. With the claim absent the required value is "", and
-// CanonicalScalar(nil) also renders "" — only the hasForm guard separates
-// them, so without it an explicit null in the payload would satisfy the check
-// (pre-canonicalization, fmt.Sprint(nil) gave "<nil>" and this was impossible).
-func TestIngest_Policy_CheckClause_NullValue_FailsClosed(t *testing.T) {
+// TestIngest_Policy_CheckClause_NullValue_StoredValueIsWhatIsChecked is a
+// DOCUMENTED CONTRACT CHANGE, and the reason is worth stating precisely because
+// it reads as a loosening.
+//
+// The check is now evaluated against the row ClickHouse WOULD STORE, not against
+// the caller's spelling. `input_format_null_as_default=1` — the setting the real
+// INSERT already pins — turns an explicit JSON null on a non-nullable column
+// into that column's default, so `org_id: null` stores "". The required value
+// here is also "": policy deliberately resolves an unresolvable check claim to
+// the empty string and auto-injects it (#463), so a record OMITTING org_id has
+// always been accepted and stored "". The two cases now agree, where the Go-side
+// rule ("null has no canonical form, so it matches nothing") made them differ.
+//
+// Nothing is admitted that the stored row does not satisfy — which is the
+// property the check clause is for.
+func TestIngest_Policy_CheckClause_NullValue_StoredValueIsWhatIsChecked(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
@@ -493,16 +653,47 @@ func TestIngest_Policy_CheckClause_NullValue_FailsClosed(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
 
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, "", publishedData(t, pub)["org_id"], "the stored value is what satisfied the check")
+
+	// With a claim that DOES resolve, an explicit null takes the INJECTED value
+	// rather than the table's own default: null_as_default resolves it against
+	// the ROLE's compiled schema, whose DEFAULT is the claim. A null on a checked
+	// column therefore behaves exactly like omitting it, and can never carry
+	// another tenant's value — the property that matters.
+	pub2 := &testutil.MockPublisher{}
+	h2 := newTestIngestHandler(t, testRegistry(t), pub2, testutil.NopLogger())
+	h2.PolicySource = h.PolicySource
+	req = ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": nil})
+	ctx = auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{"org_id": "real-org"})
+	w = httptest.NewRecorder()
+	h2.Handle(w, req.WithContext(ctx))
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, "real-org", publishedData(t, pub2)["org_id"])
+
+	// A null is not a way past the check: a value that is present and wrong is
+	// still refused.
+	pub3 := &testutil.MockPublisher{}
+	h3 := newTestIngestHandler(t, testRegistry(t), pub3, testutil.NopLogger())
+	h3.PolicySource = h.PolicySource
+	req = ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": "someone-else"})
+	ctx = auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{"org_id": "real-org"})
+	w = httptest.NewRecorder()
+	h3.Handle(w, req.WithContext(ctx))
+
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "check failed")
-	assert.Nil(t, pub.LastMessage(), "a null payload value must not satisfy an unresolvable check")
+	assert.Empty(t, pub3.Messages)
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
@@ -548,7 +739,7 @@ func checkInStore() policy.Source {
 func TestIngest_Policy_CheckIn_InSet(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = checkInStore()
 
 	// org_id is one of the token's allowed orgs — should pass.
@@ -567,7 +758,7 @@ func TestIngest_Policy_CheckIn_InSet(t *testing.T) {
 func TestIngest_Policy_CheckIn_NotInSet(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = checkInStore()
 
 	// org_id is NOT one of the token's allowed orgs — forging another tenant's row.
@@ -584,15 +775,22 @@ func TestIngest_Policy_CheckIn_NotInSet(t *testing.T) {
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
-// TestIngest_Policy_CheckIn_NullValue_FailsClosed: an explicit null passes
-// schema validation for a defaulted column, but it has no canonical scalar
-// form — so it is a member of NO set, even one carrying the empty string ""
-// (the regression shape: an unguarded canonicalization would render null as
-// "" and match an empty-string member).
-func TestIngest_Policy_CheckIn_NullValue_FailsClosed(t *testing.T) {
+// TestIngest_Policy_CheckIn_NullValue_ChecksTheStoredValue is a DOCUMENTED
+// CONTRACT CHANGE, the _in twin of the _eq one above. An explicit null on a
+// non-nullable column stores that column's default (input_format_null_as_default
+// =1, the setting the real INSERT pins), and an _in check has no value to
+// inject, so the stored "" is what the filter tests. A token whose allowed set
+// LISTS "" therefore admits it — the row it stores really is one the token
+// authorises. The old Go-side rule said null has no canonical form and matched
+// nothing.
+//
+// The second half is the part that must not move: an allowed set WITHOUT "" is
+// still a refusal, so this is not a way to write a row under a tenant the token
+// does not carry.
+func TestIngest_Policy_CheckIn_NullValue_ChecksTheStoredValue(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = checkInStore()
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": nil})
@@ -603,15 +801,28 @@ func TestIngest_Policy_CheckIn_NullValue_FailsClosed(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
 
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, "", publishedData(t, pub)["org_id"], `the stored "" is a member of the token's own set`)
+
+	pub2 := &testutil.MockPublisher{}
+	h2 := newTestIngestHandler(t, testRegistry(t), pub2, testutil.NopLogger())
+	h2.PolicySource = checkInStore()
+	req = ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": nil})
+	ctx = auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{"orgs": []any{"org-a", "org-b"}})
+	w = httptest.NewRecorder()
+	h2.Handle(w, req.WithContext(ctx))
+
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "check failed")
+	assert.Empty(t, pub2.Messages, `a set without "" still refuses the null`)
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestIngest_Policy_CheckIn_Absent_FailsClosed(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = checkInStore()
 
 	// org_id omitted — unlike _eq there's no single value to auto-inject, so the
@@ -638,7 +849,7 @@ func TestIngest_Policy_CheckIn_Absent_FailsClosed(t *testing.T) {
 func TestIngest_Policy_CheckIn_AbsentClaim_FailsClosed(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = checkInStore()
 
 	// The `orgs` claim is absent entirely, so the _in set resolves to a typed-nil
@@ -662,7 +873,7 @@ func TestIngest_Dedup_MissingIDField(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	dedup := testutil.NewMockDeduplicator()
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
 	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", false }
 
@@ -681,7 +892,7 @@ func TestIngest_Dedup_MissingIDField(t *testing.T) {
 func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = testutil.NewMockDeduplicator()
 	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", true }
 
@@ -703,7 +914,7 @@ func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
 func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = testutil.NewMockDeduplicator()
 	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", true }
 
@@ -730,7 +941,7 @@ func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {
 func TestIngest_Policy_DenyColumns(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
@@ -746,14 +957,28 @@ func TestIngest_Policy_DenyColumns(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
 
-	assert.Equal(t, http.StatusForbidden, w.Code)
-	assert.Contains(t, w.Body.String(), "not allowed for insert")
+	// CONTRACT CHANGE (AUDIT D1), as for AllowColumns: a denied column is absent
+	// from the role's compiled schema, so naming it is ClickHouse's code 117.
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	msg, code := errorAndCode(t, w)
+	assert.Contains(t, msg, "count")
+	assert.Equal(t, 117, code)
+	assert.Empty(t, pub.Messages)
+
+	// And the deny is real, not an artifact of the message: the same record
+	// without the denied column is accepted.
+	req = ingestRequest(t, "clicks", map[string]any{"page": "/home"})
+	req = req.WithContext(auth.WithRole(req.Context(), "writer"))
+	w = httptest.NewRecorder()
+	h.Handle(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Len(t, pub.Messages, 1)
 }
 
 func TestIngest_AdminRole_NoPolicy(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {},
@@ -817,7 +1042,7 @@ func resultAt(t *testing.T, resp batchResult, index int) recordResult {
 func TestIngest_NDJSON_AllValid(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "count": 1}),
@@ -845,7 +1070,7 @@ func TestIngest_NDJSON_AllValid(t *testing.T) {
 func TestIngest_NDJSON_PartialFailure_Validation(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a"}),
@@ -871,7 +1096,7 @@ func TestIngest_NDJSON_PartialFailure_Validation(t *testing.T) {
 func TestIngest_NDJSON_MalformedLine(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a"}),
@@ -888,7 +1113,12 @@ func TestIngest_NDJSON_MalformedLine(t *testing.T) {
 	assert.Equal(t, 1, resp.Failed)
 	require.Len(t, resp.Results, 3)
 	assert.True(t, resultAt(t, resp, 1).Ok)
-	assert.Contains(t, resultAt(t, resp, 2).Error, "invalid json")
+	// The message is ClickHouse's own parse refusal now, not Go's "invalid json",
+	// and the code is whichever one its reader raised (26 for a quoted string it
+	// cannot finish, 27 for a value it cannot read) — the point is that a code is
+	// attributed at all.
+	assert.NotZero(t, resultAt(t, resp, 2).Code)
+	assert.NotEmpty(t, resultAt(t, resp, 2).Error)
 	assert.True(t, resultAt(t, resp, 3).Ok)
 	assert.Len(t, pub.Messages, 2)
 }
@@ -896,7 +1126,7 @@ func TestIngest_NDJSON_MalformedLine(t *testing.T) {
 func TestIngest_NDJSON_BlankLinesSkipped(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	// Leading, interior, and whitespace-only lines are all skipped; only real
 	// records are counted.
@@ -933,7 +1163,7 @@ func TestIngest_NDJSON_EmptyBody(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 			req := ndjsonRequest(t, "clicks", tt.lines...)
 			w := httptest.NewRecorder()
@@ -951,7 +1181,7 @@ func TestIngest_NDJSON_Dedup(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	dedup := testutil.NewMockDeduplicator()
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
 	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", false }
 
@@ -980,7 +1210,7 @@ func TestIngest_NDJSON_Backpressure_503(t *testing.T) {
 	// Publisher rejects every publish with the backpressure sentinel; the first
 	// valid record aborts the whole batch with 503 + Retry-After.
 	pub := &testutil.MockPublisher{Err: errors.New("maximum bytes exceeded")}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a"}),
@@ -997,7 +1227,7 @@ func TestIngest_NDJSON_Backpressure_503(t *testing.T) {
 func TestIngest_NDJSON_PublishError_500(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{Err: errors.New("some other error")}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	req := ndjsonRequest(t, "clicks", jsonLine(t, map[string]any{"page": "/a"}))
 	w := httptest.NewRecorder()
@@ -1011,7 +1241,7 @@ func TestIngest_NDJSON_PublishError_500(t *testing.T) {
 func TestIngest_NDJSON_Policy_ColumnDenied_PerLine(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
@@ -1037,14 +1267,16 @@ func TestIngest_NDJSON_Policy_ColumnDenied_PerLine(t *testing.T) {
 	assert.Equal(t, 1, resp.Failed)
 	require.Len(t, resp.Results, 2)
 	assert.True(t, resultAt(t, resp, 1).Ok)
-	assert.Contains(t, resultAt(t, resp, 2).Error, "not allowed for insert")
+	// CONTRACT CHANGE (AUDIT D1): the denied column is ClickHouse's code 117.
+	assert.Contains(t, resultAt(t, resp, 2).Error, "button")
+	assert.Equal(t, 117, resultAt(t, resp, 2).Code)
 	assert.Len(t, pub.Messages, 1)
 }
 
 func TestIngest_NDJSON_Policy_TableForbidden(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
@@ -1071,7 +1303,7 @@ func TestIngest_NDJSON_Policy_TableForbidden(t *testing.T) {
 func TestIngest_NDJSON_Policy_CheckClause_PerLineAndAutoInject(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	orgTemplate := "{{ jwt.org_id }}"
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
@@ -1111,7 +1343,7 @@ func TestIngest_NDJSON_Policy_CheckClause_PerLineAndAutoInject(t *testing.T) {
 func TestIngest_NDJSON_ContentTypeWithCharset(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	req := ndjsonRequest(t, "clicks", jsonLine(t, map[string]any{"page": "/a"}))
 	req.Header.Set("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -1128,7 +1360,7 @@ func TestIngest_NDJSON_ContentTypeWithCharset(t *testing.T) {
 func TestIngest_NDJSON_ErrorsTruncated(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	const total = maxReportedResults + 50
 	lines := make([]string, total)
@@ -1159,7 +1391,7 @@ func TestIngest_NDJSON_ErrorsTruncated(t *testing.T) {
 // spell the whole list out, and always need editing: api.md's body/Content-Type
 // table, architecture.md's "the four NDJSON spellings" count, and the ingest
 // entry in CHANGELOG.md.
-const wantAcceptedTypes = "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines"
+const wantAcceptedTypes = "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/tab-separated-values"
 
 // TestAcceptedTypesAreAllResolvable pins that the advertised list never grows
 // beyond what the resolver accepts — an entry added to acceptedContentTypes but
@@ -1237,8 +1469,16 @@ func TestIngestFormat(t *testing.T) {
 		// Tracked in #563.
 		{ct: `application/json; profile="a,b"; charset`, wantErr: true},
 		{ct: "APPLICATION/JSON", want: FormatJSON},
+		{ct: "text/csv", want: FormatCSV},
+		{ct: "text/csv; charset=utf-8", want: FormatCSV},
+		{ct: "text/tab-separated-values", want: FormatTSV},
 		{ct: "text/plain", wantErr: true},
-		{ct: "text/csv", wantErr: true},
+		// Near misses for the positional pair, for the same reason as the JSON
+		// ones below: an exact-match lookup rewritten as a prefix test would
+		// start ingesting these with the suite green.
+		{ct: "text/csv2", wantErr: true},
+		{ct: "text/tab-separated-value", wantErr: true},
+		{ct: "text/tsv", wantErr: true},
 		{ct: "", wantErr: true},
 		{ct: "   ", wantErr: true},
 		{ct: "???not-a-media-type", wantErr: true},
@@ -1305,14 +1545,14 @@ func TestIngest_UndeclaredOrUnsupportedContentType_415(t *testing.T) {
 	}{
 		{"no content-type", "", "no Content-Type: "},
 		{"text/plain", "text/plain", `Content-Type "text/plain": `},
-		{"text/csv", "text/csv", `Content-Type "text/csv": `},
+		{"application/xml", "application/xml", `Content-Type "application/xml": `},
 		{"malformed media type", "???not-a-media-type", `Content-Type "???not-a-media-type": `},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 			w := httptest.NewRecorder()
 			h.Handle(w, rawIngestRequest(t, "clicks", tt.ct, `{"page":"/a"}`))
 
@@ -1347,6 +1587,18 @@ func jsonErrorMessage(t *testing.T, w *httptest.ResponseRecorder) string {
 	return body.Error
 }
 
+// errorAndCode returns the decoded "error" message and ClickHouse's "code",
+// which is absent (0) unless the server's own parser is what refused.
+func errorAndCode(t *testing.T, w *httptest.ResponseRecorder) (string, int) {
+	t.Helper()
+	var body struct {
+		Error string `json:"error"`
+		Code  int    `json:"code"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	return body.Error, body.Code
+}
+
 // TestIngest_ContentTypeRefusalBeatsEmptyBody: the PR's headline ordering claim
 // — "checked before the body is parsed" — is what lets a caller trust that a 415
 // describes their header and not their payload. Nothing pinned it: every 415 case
@@ -1362,7 +1614,7 @@ func TestIngest_ContentTypeRefusalBeatsEmptyBody(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 			w := httptest.NewRecorder()
 			h.Handle(w, rawIngestRequest(t, "clicks", ct, ""))
 
@@ -1378,18 +1630,41 @@ func TestIngest_ContentTypeRefusalBeatsEmptyBody(t *testing.T) {
 // TestIngest_DeclaredNDJSON_ArrayBodyIsNotReframed: the header is authoritative.
 // A JSON array sent as NDJSON is read as NDJSON — one line, not a JSON object —
 // so it fails as a per-record error instead of silently being re-read as a batch.
+// TestIngest_DeclaredNDJSON_ArrayBodyIsNotReframed: the declared format is still
+// authoritative — a declared-NDJSON body is never re-read as the JSON family, so
+// the depth-1 comma rewrite (which is what makes a compact array salvageable per
+// record) does not run on it.
+//
+// CONTRACT CHANGE: it used to be one unparseable NDJSON line, reported as a
+// single per-record failure. ClickHouse's own JSONEachRow reader takes the
+// surrounding brackets in its stride, so both objects now ingest and the batch
+// reports two records. Nothing is silently dropped either way; what changed is
+// that the mis-declaration now costs nothing instead of the whole body.
 func TestIngest_DeclaredNDJSON_ArrayBodyIsNotReframed(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	w := httptest.NewRecorder()
 	h.Handle(w, rawIngestRequest(t, "clicks", "application/x-ndjson", `[{"page":"/a"},{"page":"/b"}]`))
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	resp := decodeBatchResult(t, w)
-	assert.Equal(t, 1, resp.Total, "the array is one NDJSON line, not two records")
-	assert.Equal(t, 1, resp.Failed)
-	assert.Empty(t, pub.Messages)
+	assert.Equal(t, 2, resp.Total, "ClickHouse's reader frames the array's elements")
+	assert.Equal(t, 2, resp.Succeeded)
+	assert.Len(t, pub.Messages, 2)
+
+	// The rewrite really is off for this declaration: a compact array with one
+	// bad record loses the whole batch here, which is exactly the cliff the
+	// rewrite exists to remove for a declared-JSON body (see
+	// TestIngest_JSONArray_CompactWithOneBadRecord).
+	pub2 := &testutil.MockPublisher{}
+	h2 := newTestIngestHandler(t, testRegistry(t), pub2, testutil.NopLogger())
+	w = httptest.NewRecorder()
+	h2.Handle(w, rawIngestRequest(t, "clicks", "application/x-ndjson",
+		`[{"page":"/a"},{"page":"/b","nope":1},{"page":"/c"}]`))
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Zero(t, decodeBatchResult(t, w).Succeeded, "the compact array is all-or-nothing without the rewrite")
+	assert.Empty(t, pub2.Messages)
 }
 
 // ── Multi-format ingest (JSON array, arity sniffing, body cap) ─────────────
@@ -1428,7 +1703,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	t.Run("disagreeing declarations are refused", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
-		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 		req := rawIngestRequest(t, "clicks", "application/json", ndjson)
 		req.Header.Add("Content-Type", "application/x-ndjson")
 
@@ -1453,7 +1728,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	t.Run("a supported and an unsupported declaration are refused", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
-		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 		req := rawIngestRequest(t, "clicks", "application/json", ndjson)
 		req.Header.Add("Content-Type", "text/csv")
 
@@ -1472,7 +1747,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	t.Run("different spellings of the same format are accepted", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
-		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 		req := rawIngestRequest(t, "clicks", "application/x-ndjson", ndjson)
 		req.Header.Add("Content-Type", "application/ndjson; charset=utf-8")
 
@@ -1502,7 +1777,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
 				pub := &testutil.MockPublisher{}
-				h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+				h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 				w := httptest.NewRecorder()
 				h.Handle(w, rawIngestRequest(t, "clicks", ct, ndjson))
 
@@ -1547,7 +1822,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
 				wJ := httptest.NewRecorder()
-				NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, testutil.NopLogger()).
+				newTestIngestHandler(t, testRegistry(t), &testutil.MockPublisher{}, testutil.NopLogger()).
 					Handle(wJ, rawIngestRequest(t, "clicks", tc.joined, `{"page":"/a"}`))
 				assert.Equal(t, tc.wJoined, wJ.Code, "joined")
 
@@ -1556,7 +1831,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 					req.Header.Add("Content-Type", v)
 				}
 				wR := httptest.NewRecorder()
-				NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, testutil.NopLogger()).
+				newTestIngestHandler(t, testRegistry(t), &testutil.MockPublisher{}, testutil.NopLogger()).
 					Handle(wR, req)
 				assert.Equal(t, tc.wRepeat, wR.Code, "repeated")
 			})
@@ -1566,7 +1841,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	t.Run("a quoted comma does not split a declaration", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
-		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 		w := httptest.NewRecorder()
 		h.Handle(w, rawIngestRequest(t, "clicks", `application/json; profile="a,b"`, `{"page":"/a"}`))
 
@@ -1577,7 +1852,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	t.Run("a third line that disagrees is refused", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
-		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 		req := rawIngestRequest(t, "clicks", "application/json", ndjson)
 		req.Header.Add("Content-Type", "application/json")
 		req.Header.Add("Content-Type", "application/x-ndjson")
@@ -1599,7 +1874,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 			t.Parallel()
 			for _, first := range []bool{false, true} {
 				pub := &testutil.MockPublisher{}
-				h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+				h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 				req := rawIngestRequest(t, "clicks", "", ndjson)
 				if first {
 					req.Header.Add("Content-Type", empty)
@@ -1625,8 +1900,8 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	t.Run("two unsupported lines name both", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
-		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-		req := rawIngestRequest(t, "clicks", "text/csv", ndjson)
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
+		req := rawIngestRequest(t, "clicks", "application/xml", ndjson)
 		req.Header.Add("Content-Type", "text/plain")
 
 		w := httptest.NewRecorder()
@@ -1635,7 +1910,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 		assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
 		testutil.AssertJSONErrorResponse(t, w)
 		msg := jsonErrorMessage(t, w)
-		assert.Contains(t, msg, `"text/csv"`)
+		assert.Contains(t, msg, `"application/xml"`)
 		assert.Contains(t, msg, `"text/plain"`, "a declaration the caller sent must not vanish from the message")
 		assert.NotContains(t, msg, "conflicting", "agreeing-but-unsupported is not a conflict")
 		assert.Empty(t, pub.Messages)
@@ -1644,7 +1919,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 	t.Run("an identical declaration repeated is not ambiguous", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
-		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 		req := rawIngestRequest(t, "clicks", "application/x-ndjson", ndjson)
 		req.Header.Add("Content-Type", "application/x-ndjson")
 
@@ -1659,7 +1934,7 @@ func TestIngest_DuplicateContentTypeHeaders(t *testing.T) {
 func TestIngest_JSONArray_AllValid(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	// A JSON array declared as application/json is read as a batch — the body's
 	// first byte picks arity within the family ingestRequest declares.
@@ -1684,7 +1959,7 @@ func TestIngest_JSONArray_AllValid(t *testing.T) {
 func TestIngest_JSONArray_SingleElement(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	// A one-element array is still a batch (returns the results envelope, not
 	// the single-object {"ok":true}).
@@ -1704,7 +1979,7 @@ func TestIngest_JSONArray_SingleElement(t *testing.T) {
 func TestIngest_JSONArray_PartialValidationFailure(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	req := ingestRequest(t, "clicks", []map[string]any{
 		{"page": "/a"},
@@ -1729,7 +2004,7 @@ func TestIngest_JSONArray_PartialValidationFailure(t *testing.T) {
 func TestIngest_JSONArray_ScalarElements(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	// Non-object elements (number, string, nested array) are wrong-typed: the
 	// decoder stays in sync, so each is a per-record error and the objects
@@ -1760,11 +2035,12 @@ func TestIngest_JSONArray_ScalarElements(t *testing.T) {
 func TestIngest_JSONArray_SyntaxError_Fatal(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	// A structural syntax error desyncs the decoder — the whole request fails
-	// (400), unlike a per-element type error. The leading good element may have
-	// already published (at-least-once on retry).
+	// (400), unlike a per-element type error. Records before it are published
+	// only if a chunk filled first (see chunkRecords); one leading record has
+	// not been validated yet when the abort comes, so nothing ships.
 	req := rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"}, {bad]`)
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
@@ -1772,7 +2048,7 @@ func TestIngest_JSONArray_SyntaxError_Fatal(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
 	testutil.AssertJSONErrorResponse(t, w)
-	assert.Len(t, pub.Messages, 1) // the leading record published before the abort
+	assert.Empty(t, pub.Messages, "the leading record was still staged when the body failed")
 }
 
 func TestIngest_JSONArray_Truncated_Fatal(t *testing.T) {
@@ -1794,7 +2070,7 @@ func TestIngest_JSONArray_Truncated_Fatal(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 			req := rawIngestRequest(t, "clicks", "application/json", tt.body)
 			w := httptest.NewRecorder()
@@ -1810,7 +2086,7 @@ func TestIngest_JSONArray_Truncated_Fatal(t *testing.T) {
 func TestIngest_JSONArray_Empty(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	// An explicit empty array is a valid, record-less batch → 200 with no rows.
 	req := rawIngestRequest(t, "clicks", "application/json", `[]`)
@@ -1827,7 +2103,7 @@ func TestIngest_JSONArray_Empty(t *testing.T) {
 func TestIngest_SingleObject_PrettyPrinted(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	// A multi-line (pretty-printed) single object must not be mistaken for
 	// NDJSON — it's one record on the single-object path.
@@ -1845,7 +2121,7 @@ func TestIngest_SingleObject_PrettyPrinted(t *testing.T) {
 func TestIngest_DeclaredJSON_ConcatenatedObjects_FirstOnly(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 	// Two concatenated objects declared as application/json take the
 	// single-object path and ingest only the first (matching the historical
@@ -1878,7 +2154,7 @@ func TestIngest_LeadingWhitespace_Sniff(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 			req := rawIngestRequest(t, "clicks", "application/json", tt.body)
 			w := httptest.NewRecorder()
@@ -1916,7 +2192,7 @@ func TestIngest_EmptyBody(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 			req := rawIngestRequest(t, "clicks", tt.contentType, tt.body)
 			w := httptest.NewRecorder()
@@ -1947,7 +2223,7 @@ func TestIngest_BodyReadFailure_400(t *testing.T) {
 		t.Run(ct, func(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
 				"/v1/ingest?table=clicks", iotest.ErrReader(errors.New("connection reset by peer")))
@@ -1999,7 +2275,7 @@ func TestIngest_BodyCap_413(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 			h.maxRequestBytes = tt.cap // below the body
 
 			req := rawIngestRequest(t, "clicks", tt.ct, tt.body)
@@ -2033,11 +2309,11 @@ func TestIngest_ContentTypeResolvesBeforeTheBodyIsRead(t *testing.T) {
 	t.Run("a body that cannot be read at all", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
-		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
 			"/v1/ingest?table=clicks", iotest.ErrReader(errors.New("connection reset by peer")))
-		req.Header.Set("Content-Type", "text/csv")
+		req.Header.Set("Content-Type", "application/xml")
 
 		w := httptest.NewRecorder()
 		h.Handle(w, req)
@@ -2051,10 +2327,10 @@ func TestIngest_ContentTypeResolvesBeforeTheBodyIsRead(t *testing.T) {
 	t.Run("a body over the cap", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
-		h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 		h.maxRequestBytes = 50 // below the body
 
-		req := rawIngestRequest(t, "clicks", "text/csv",
+		req := rawIngestRequest(t, "clicks", "application/xml",
 			`{"page":"/`+strings.Repeat("a", 200)+`"}`)
 		w := httptest.NewRecorder()
 		h.Handle(w, req)
@@ -2074,8 +2350,8 @@ func tsRegistry(t testing.TB) *discovery.SchemaRegistry {
 			Name: "events",
 			Columns: []discovery.Column{
 				{Name: "name", Type: "String"},
-				{Name: "ts", Type: "DateTime('UTC')", HasDefault: true},
-				{Name: "ts_ms", Type: "DateTime64(3, 'UTC')", HasDefault: true},
+				{Name: "ts", Type: "DateTime('UTC')", HasDefault: true, DefaultExpression: "now()"},
+				{Name: "ts_ms", Type: "DateTime64(3, 'UTC')", HasDefault: true, DefaultExpression: "now64(3)"},
 			},
 		},
 	})
@@ -2109,13 +2385,17 @@ func publishedRow(t *testing.T, payload []byte) map[string]any {
 	return out
 }
 
-// TestIngest_TimestampsCanonicalized is the #372 contract: whatever spelling a
-// producer uses, the published payload — the one copy SSE subscribers, the
-// ClickHouse insert, and the DLQ all consume — carries RFC 3339 UTC.
+// TestIngest_TimestampsCanonicalized is the #372 contract, now satisfied by
+// construction: whatever spelling a producer uses, the published payload — the
+// one copy SSE subscribers, the ClickHouse insert and the DLQ all consume —
+// carries the instant as ClickHouse's OWN writer renders it. That is
+// "2026-06-21 04:00:00" in the column's zone, not RFC 3339 with a Z: the row is
+// the server's rendering of the stored value, so the SSE frame and a
+// /v1/query row cannot disagree.
 func TestIngest_TimestampsCanonicalized(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(tsRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, tsRegistry(t), pub, testutil.NopLogger())
 
 	req := ingestRequest(t, "events", map[string]any{
 		"name":  "e",
@@ -2127,24 +2407,24 @@ func TestIngest_TimestampsCanonicalized(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	data := publishedData(t, pub)
-	assert.Equal(t, "2026-06-21T04:00:00Z", data["ts"])
-	assert.Equal(t, "2026-06-21T04:00:00.5Z", data["ts_ms"])
+	assert.Equal(t, "2026-06-21 04:00:00", data["ts"])
+	// Sub-second digits are the column's precision, zeros and all — the server
+	// does not trim them the way the old canonicalizer did.
+	assert.Equal(t, "2026-06-21 04:00:00.500", data["ts_ms"])
 	assert.Equal(t, "e", data["name"], "non-timestamp columns untouched")
 }
 
-// TestIngest_AutoInjectedLiteralTimestampCanonicalized pins the LiteralValue
-// unwrap on the auto-inject path: a placeholder-free _eq check value is typed
-// policy.LiteralValue for the comparison, but must enter the published data as
-// a plain string — timestamp canonicalization switches on `case string`, so a
-// leaked named type would silently skip the rewrite and publish the
-// non-canonical spelling (the #372 fail-open that #381's row filter relies
-// on). json.Marshal renders both identically, so only this assertion on the
-// canonical form catches the leak.
+// TestIngest_AutoInjectedLiteralTimestampCanonicalized: a value the policy
+// auto-injects is not a shortcut past the parser. The check literal is written
+// in a spelling ClickHouse does not store it in, so the published row proves
+// the injected value went through the same parse every producer-supplied value
+// does — an injected value published in its policy spelling would mean the
+// server and the stream disagree about what the row holds.
 func TestIngest_AutoInjectedLiteralTimestampCanonicalized(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(tsRegistry(t), pub, testutil.NopLogger())
-	staticTS := "2026-06-21 04:00:00"
+	h := newTestIngestHandler(t, tsRegistry(t), pub, testutil.NopLogger())
+	staticTS := "2026-06-21T04:00:00Z"
 	h.PolicySource = policy.Static(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"events": {
@@ -2166,31 +2446,38 @@ func TestIngest_AutoInjectedLiteralTimestampCanonicalized(t *testing.T) {
 	h.Handle(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "2026-06-21T04:00:00Z", publishedData(t, pub)["ts"],
-		"auto-injected literal must be canonicalized, not published in its policy spelling")
+	assert.Equal(t, "2026-06-21 04:00:00", publishedData(t, pub)["ts"],
+		"auto-injected literal must be parsed, not published in its policy spelling")
 }
 
-// TestIngest_TimestampGarbage_PassesThrough: fail-open — an unparseable value
-// publishes verbatim; ClickHouse's own parser decides insertability (#372/#381).
-func TestIngest_TimestampGarbage_PassesThrough(t *testing.T) {
+// TestIngest_TimestampGarbage_Rejected: the old fail-open is gone. An
+// unparseable timestamp used to publish verbatim and fail later at the worker's
+// INSERT, where the caller could not see it; ClickHouse's own parser now
+// answers at the edge, with its own code, and nothing is published.
+func TestIngest_TimestampGarbage_Rejected(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(tsRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, tsRegistry(t), pub, testutil.NopLogger())
 
 	req := ingestRequest(t, "events", map[string]any{"name": "e", "ts": "banana"})
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
 
-	require.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "banana", publishedData(t, pub)["ts"], "unparseable value published verbatim")
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	msg, code := errorAndCode(t, w)
+	assert.Contains(t, msg, "Cannot read DateTime")
+	assert.Equal(t, 41, code, "ClickHouse's own code rides with the message")
+	assert.Empty(t, pub.Messages)
 }
 
-// TestIngest_Batch_MixedTimestampSpellings: parseable spellings canonicalize,
-// the unparseable one passes through — no record fails on its timestamp.
+// TestIngest_Batch_MixedTimestampSpellings: every parseable spelling lands on
+// the same instant in the server's own rendering, and the unparseable one fails
+// ALONE — one bad timestamp in a batch must not cost its siblings, which is
+// what the compile profile's allow_errors_ratio buys.
 func TestIngest_Batch_MixedTimestampSpellings(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(tsRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, tsRegistry(t), pub, testutil.NopLogger())
 
 	req := ingestRequest(t, "events", []map[string]any{
 		{"name": "a", "ts": "2026-06-21T04:00:00Z"},
@@ -2201,25 +2488,21 @@ func TestIngest_Batch_MixedTimestampSpellings(t *testing.T) {
 	h.Handle(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	var result struct {
-		Total     int `json:"total"`
-		Succeeded int `json:"succeeded"`
-		Failed    int `json:"failed"`
-	}
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
+	result := decodeBatchResult(t, w)
+	require.Len(t, result.Results, 3)
+	assert.Equal(t, 41, result.Results[1].Code, "the failing record carries ClickHouse's code")
 	assert.Equal(t, 3, result.Total)
-	assert.Equal(t, 3, result.Succeeded)
-	assert.Equal(t, 0, result.Failed)
-	require.Len(t, pub.Messages, 3, "every record published")
+	assert.Equal(t, 2, result.Succeeded)
+	assert.Equal(t, 1, result.Failed)
+	require.Len(t, pub.Messages, 2, "only the records ClickHouse accepted")
 
 	var spellings []string
 	for _, msg := range pub.Messages {
 		spellings = append(spellings, publishedRow(t, msg.Data)["ts"].(string))
 	}
 	assert.Equal(t, []string{
-		"2026-06-21T04:00:00Z", // already canonical
-		"banana",               // unparseable — passed through verbatim
-		"2026-06-21T04:00:00Z", // Unix seconds — canonicalized
+		"2026-06-21 04:00:00", // RFC 3339 in
+		"2026-06-21 04:00:00", // Unix seconds in — same instant, same rendering
 	}, spellings)
 }
 
@@ -2242,7 +2525,7 @@ func TestIngest_Dedup_DisabledBySettings(t *testing.T) {
 			pub := &testutil.MockPublisher{}
 			dedup := testutil.NewMockDeduplicator()
 			dedup.Err = errors.New("must not be called while disabled")
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 			h.Dedup = dedup
 			h.DedupeSettings = func(string) (bool, string, bool) { return false, "event_id", true }
 
@@ -2262,7 +2545,7 @@ func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	dedup := testutil.NewMockDeduplicator()
 	dedup.Err = dedupe.ErrDisabled
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.Dedup = dedup
 	h.DedupeSettings = func(string) (bool, string, bool) { return true, "event_id", true }
 
@@ -2282,20 +2565,21 @@ func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
 //
 // Second, the reachability claim at the CheckClauses call site. The column loop
 // above it iterates the RECORD's columns, so it runs zero times for `{}` — and
-// discovery.Validate accepts `{}` here because every column is nullable or
-// defaulted. I previously asserted this path was unreachable, having tested only
-// against a schema with a required column; it is not.
-func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
+// nothing now rejects an empty record before that point, because ClickHouse
+// reads `{}` as every column taking its default. I previously asserted this
+// path was unreachable, having tested only against a schema with a required
+// column; it is not, and under the type layer it is reachable for EVERY table.
+func TestCheckRecord_UnresolvedInsertSideAborts(t *testing.T) {
 	t.Parallel()
 	schema := &discovery.TableSchema{
 		Name: "loose",
 		Columns: []discovery.Column{
 			{Name: "a", Type: "Nullable(String)", IsNullable: true},
-			{Name: "b", Type: "String", HasDefault: true},
+			{Name: "b", Type: "String", HasDefault: true, DefaultExpression: "''"},
 		},
 	}
 	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{schema})
-	h := NewIngestHandler(reg, &testutil.MockPublisher{}, testutil.NopLogger())
+	h := newTestIngestHandler(t, reg, &testutil.MockPublisher{}, testutil.NopLogger())
 
 	// A grant resolved for SELECT, reaching the insert path.
 	selectResolved := policy.Evaluate(&policy.Policy{
@@ -2305,15 +2589,11 @@ func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
 	}, "viewer", "loose", "select", nil)
 	require.True(t, selectResolved.Allowed)
 
-	// An empty record really does clear validation and the column loop.
-	require.NoError(t, discovery.Validate(schema, map[string]any{}),
-		"all-nullable/defaulted columns accept an empty record — this is what makes the read reachable")
+	_, preds, cols, abort := h.insertShape(
+		context.Background(), "loose", "viewer", schema, selectResolved, nil)
 
-	dup, reject, abort := h.processRecord(
-		context.Background(), "loose", "", schema, selectResolved, "viewer", map[string]any{}, time.Now(), nil)
-
-	assert.False(t, dup)
-	assert.Nil(t, reject, "a request-scoped condition must not be reported per record")
+	assert.Nil(t, preds, "an unresolved insert side must produce no check predicates")
+	assert.Nil(t, cols)
 	require.NotNil(t, abort, "an unresolved insert side must abort the request")
 	assert.Equal(t, http.StatusForbidden, abort.Status)
 	assert.Empty(t, abort.RetryAfter, "not a transient condition — retrying cannot help")
@@ -2353,7 +2633,7 @@ func TestIngest_ContentTypeEchoIsBounded(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 			w := httptest.NewRecorder()
 			h.Handle(w, build(t))
 
@@ -2381,7 +2661,7 @@ func TestIngest_ContentTypeEchoIsBounded(t *testing.T) {
 				req.Header.Add("Content-Type", fmt.Sprintf("application/%04d", i)+strings.Repeat("\xff", 112))
 			}
 			w := httptest.NewRecorder()
-			NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, testutil.NopLogger()).Handle(w, req)
+			newTestIngestHandler(t, testRegistry(t), &testutil.MockPublisher{}, testutil.NopLogger()).Handle(w, req)
 			require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
 			return w.Body.Len()
 		}
@@ -2405,7 +2685,7 @@ func TestIngest_ContentTypeEchoIsBounded(t *testing.T) {
 func TestIngest_ConflictMessageNamesTheDisagreement(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	req := rawIngestRequest(t, "clicks", "", "{\"page\":\"/a\"}\n{\"page\":\"/b\"}")
 	for range 4 {
 		req.Header.Add("Content-Type", "application/json")
@@ -2435,7 +2715,7 @@ func TestIngest_ConflictMessageNamesTheDisagreement(t *testing.T) {
 func TestIngest_ConflictMessageNamesADifferentSpelling(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
 	for _, ct := range []string{
 		"application/json",
@@ -2466,7 +2746,7 @@ func TestIngest_ConflictMessageNamesADifferentSpelling(t *testing.T) {
 func TestIngest_ConflictLogNamesTheDisagreement(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	h := NewIngestHandler(testRegistry(t), &testutil.MockPublisher{},
+	h := newTestIngestHandler(t, testRegistry(t), &testutil.MockPublisher{},
 		slog.New(slog.NewJSONHandler(&buf, nil)))
 
 	req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
@@ -2495,7 +2775,7 @@ func TestIngest_ConflictLogNamesTheDisagreement(t *testing.T) {
 func TestIngest_CheckColumnNotInSchema_Rejected(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = policy.Static(checkColumnPolicy(t, "tenant_id", "acme"))
 
 	w := httptest.NewRecorder()
@@ -2528,7 +2808,7 @@ func TestIngest_CheckOnComputedColumn_Rejected(t *testing.T) {
 				}}},
 			}}
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(computedRegistry(t), pub, testutil.NopLogger())
+			h := newTestIngestHandler(t, computedRegistry(t), pub, testutil.NopLogger())
 			h.PolicySource = policy.Static(p)
 
 			w := httptest.NewRecorder()
@@ -2551,7 +2831,7 @@ func TestIngest_CheckOnComputedColumn_Rejected(t *testing.T) {
 func TestIngest_CheckColumnInSchema_StillInjects(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = policy.Static(checkColumnPolicy(t, "org_id", "org-42"))
 
 	w := httptest.NewRecorder()
@@ -2577,7 +2857,7 @@ func TestIngest_CheckGuardLogsOncePerRequest(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, slog.New(slog.NewJSONHandler(&buf, nil)))
+	h := newTestIngestHandler(t, testRegistry(t), pub, slog.New(slog.NewJSONHandler(&buf, nil)))
 	h.PolicySource = policy.Static(checkColumnPolicy(t, "tenant_id", "acme"))
 
 	const n = 25
@@ -2602,14 +2882,17 @@ func TestIngest_CheckGuardLogsOncePerRequest(t *testing.T) {
 //
 // Every record fails here, and that is not an artifact of the fixture: the
 // condition is a property of (table, role, policy), identical for every record
-// in the request, so there is no sibling this guard could spare. A record
-// SUPPLYING the missing column is rejected too, one step earlier, by schema
-// validation — with its own message, which this pins so the two stay
-// distinguishable.
+// in the request, so there is no sibling this guard could spare.
+//
+// CONTRACT CHANGE: a record SUPPLYING the missing column used to get the
+// guard's message too, because the gateway's key walk ran first. ClickHouse's
+// parser now answers first, so that record reports its own code 117 — the same
+// ordering change as everywhere else on this path (AUDIT §A.2). Both are still
+// failures and nothing publishes.
 func TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = policy.Static(checkColumnPolicy(t, "tenant_id", "acme"))
 
 	req := rawIngestRequest(t, "clicks", "application/json",
@@ -2625,9 +2908,13 @@ func TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord(t *testing.T) {
 	assert.Equal(t, 3, resp.Failed)
 	assert.Zero(t, resp.Succeeded)
 	require.Len(t, resp.Results, 3)
-	assert.Contains(t, resp.Results[0].Error, "which table", "omitted ⇒ the new guard")
-	assert.Contains(t, resp.Results[1].Error, "unknown column", "supplied ⇒ schema validation, one step earlier")
-	assert.Contains(t, resp.Results[2].Error, "which table")
+	for _, i := range []int{0, 2} {
+		assert.Contains(t, resp.Results[i].Error, "which table", "record %d", i+1)
+		assert.Zero(t, resp.Results[i].Code, "a gateway rejection never carries a ClickHouse code")
+	}
+	assert.Contains(t, resp.Results[1].Error, "tenant_id")
+	assert.Equal(t, 117, resp.Results[1].Code,
+		"the record that SUPPLIES the column is refused by ClickHouse first")
 	assert.Empty(t, pub.Messages)
 }
 
@@ -2649,10 +2936,10 @@ func computedRegistry(t testing.TB) *discovery.SchemaRegistry {
 			Name: "clicks",
 			Columns: []discovery.Column{
 				{Name: "page", Type: "String"},
-				{Name: "digest", Type: "String", DefaultKind: "MATERIALIZED", HasDefault: true},
-				{Name: "country", Type: "String", HasDefault: true},
-				{Name: "doubled", Type: "UInt64", DefaultKind: "ALIAS", HasDefault: true},
-				{Name: "raw", Type: "String", DefaultKind: "EPHEMERAL", HasDefault: true},
+				{Name: "digest", Type: "String", DefaultKind: "MATERIALIZED", HasDefault: true, DefaultExpression: "upper(page)"},
+				{Name: "country", Type: "String", HasDefault: true, DefaultExpression: "'US'"},
+				{Name: "doubled", Type: "UInt64", DefaultKind: "ALIAS", HasDefault: true, DefaultExpression: "length(page) * 2"},
+				{Name: "raw", Type: "String", DefaultKind: "EPHEMERAL", HasDefault: true, DefaultExpression: "''"},
 			},
 		},
 	})
@@ -2668,7 +2955,7 @@ func computedRegistry(t testing.TB) *discovery.SchemaRegistry {
 func TestIngest_CheckOnEphemeralColumn_Rejected(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(computedRegistry(t), pub, testutil.NopLogger())
+	h := newTestIngestHandler(t, computedRegistry(t), pub, testutil.NopLogger())
 	h.PolicySource = policy.Static(checkColumnPolicy(t, "raw", "anything"))
 
 	w := httptest.NewRecorder()

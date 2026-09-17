@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
+	"maps"
 	"net/http"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
@@ -19,6 +22,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -38,7 +42,11 @@ const maxReportedResults = 10000
 // IngestHandler handles POST /v1/ingest?table={table}
 type IngestHandler struct {
 	Registry *discovery.SchemaRegistry
-	Dedup    dedupe.Deduplicator // nil when no dedupe store is wired (tests)
+	// Types answers "would this record insert?" with ClickHouse's own parser.
+	// Nil is never "skip validation": the handler refuses the request, because
+	// nothing else on this path looks at a value.
+	Types *typelayer.Engine
+	Dedup dedupe.Deduplicator // nil when no dedupe store is wired (tests)
 	// DedupeSettings resolves the effective dedupe id_field/require_id for a
 	// table (settings.Store.DedupeFor in production). Called once per record so
 	// a settings reload lands at a record boundary — one record never mixes two
@@ -48,17 +56,18 @@ type IngestHandler struct {
 	PolicySource   policy.Source
 	logger         *slog.Logger
 
-	// Validator and Checker are the per-record seams a native type layer will
-	// take over (see ingest_seams.go). Both are optional: nil means the default
-	// implementation, which is today's behavior unchanged.
-	Validator RecordValidator
-	Checker   InsertChecker
-
 	// maxRequestBytes optionally overrides the default inbound request body cap
 	// (maxRequestBodyBytes). When 0, the default applies. Exists so same-package
 	// tests can pin the cap-overflow path without allocating 16 MiB per run; not
 	// a production tuning knob, hence unexported. Mirrors QueryHandler.
 	maxRequestBytes int64
+
+	// noticeMu guards noticeLast, the last time each rate-limited notice was
+	// logged. A missing artifact or a policy whose injected literal will not
+	// compile is a standing condition: one line per request would bury the rest
+	// of the log under it.
+	noticeMu   sync.Mutex
+	noticeLast map[string]time.Time
 }
 
 func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher, logger *slog.Logger) *IngestHandler {
@@ -79,14 +88,14 @@ var dedupeDisabledCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 	metric.WithDescription("Ingested records published without dedupe because the store was switched off while settings said enabled (reload window)"),
 )
 
-// batchResult is the response body for any multi-record ingest (a JSON array,
-// an NDJSON batch, and — later — CSV). The status is 200 whenever the body was
-// readable and the records were processed; per-record rejections (malformed
-// JSON, schema or permission failures) are reported in Results without failing
-// the whole request, so one bad record never obscures the rest of the batch
-// (issue #195). Whole-request conditions abort with a non-200 status instead —
-// see requestAbort for the list, which lives there and only there, because
-// stating it in three places is how two of them went stale.
+// batchResult is the response body for any multi-record ingest: a JSON array,
+// an NDJSON batch, a CSV or a TSV body. The status is 200 whenever the body was
+// readable and the records were processed; per-record rejections (unparseable
+// values, unknown columns, failed check clauses) are reported in Results without
+// failing the whole request, so one bad record never obscures the rest of the
+// batch (issue #195). Whole-request conditions abort with a non-200 status
+// instead — see requestAbort for the list, which lives there and only there,
+// because stating it in three places is how two of them went stale.
 type batchResult struct {
 	Total      int            `json:"total"`      // records read from the body
 	Succeeded  int            `json:"succeeded"`  // records validated + published
@@ -104,15 +113,22 @@ type recordResult struct {
 	Ok        bool   `json:"ok,omitempty"`
 	Duplicate bool   `json:"duplicate,omitempty"`
 	Error     string `json:"error,omitempty"`
+	// Code is ClickHouse's own error code when the record was refused by the
+	// server's parser (117 unknown field — which now includes a column the role
+	// may not write, 27 unparseable value, 6 out of range). Absent for a gateway
+	// rejection — a failed check clause is our verdict, not ClickHouse's, and
+	// must not be dressed as one.
+	Code int `json:"code,omitempty"`
 }
 
-// recordReject is a per-record rejection: this record is bad (failed schema
-// validation or a column/check permission rule), but the rest of the batch can
-// still proceed. The single-object path maps Status to the HTTP code; the batch
-// path records Message against the index and keeps going.
+// recordReject is a per-record rejection: this record is bad (ClickHouse's
+// parser refused it, or a policy check clause did), but the rest of the batch
+// can still proceed. The single-object path maps Status to the HTTP code; the
+// batch path records Message against the index and keeps going.
 type recordReject struct {
 	Status  int
 	Message string
+	Code    int // ClickHouse's code; 0 for a gateway rejection (see recordResult.Code)
 }
 
 // requestAbort is a whole-request failure: this record and every one that
@@ -121,7 +137,8 @@ type recordReject struct {
 //
 // Most causes are TRANSIENT system conditions, where abandoning the tail is what
 // makes the batch safe to retry: publish backpressure (503), a publish/marshal
-// failure (500), a dedup backend error (500).
+// failure (500), a dedup backend error (500), a type layer that cannot answer
+// (503).
 //
 // One is not. An insert grant that resolved for the other operation is a 403 and
 // a caller/config bug — retrying cannot help. It aborts rather than rejecting
@@ -132,6 +149,33 @@ type requestAbort struct {
 	Status     int
 	Message    string
 	RetryAfter string // non-empty → emit a Retry-After header (503 backpressure)
+}
+
+// ingestRun is one request's state after the body has been framed and ruled on: the
+// handle that produced the bytes, chtypes' verdict per record, and the check
+// verdicts over the accepted ones. Both response shapes read their records out
+// of it, so the single-object and batch paths cannot disagree about what a
+// record's outcome is — only about how it is rendered.
+type ingestRun struct {
+	table, scope string
+	tbl          *typelayer.Table
+	batch        typelayer.Batch
+	// records is how many records the request contains: the body's own framing
+	// before chtypes has read it (an empty array is zero, anything else is at
+	// least one), then len(batch.Rows) once it has answered.
+	records int
+	// verdicts/reasons are index-aligned with the ACCEPTED records, not with
+	// batch.Rows, so they are read through the accepted cursor.
+	verdicts []bool
+	reasons  []string
+	// checkColumns names the check clauses the verdicts came from, for the
+	// rejection message. The filter is AND-joined over all of them, so a false
+	// verdict does not say which one failed — with one clause it does.
+	checkColumns []string
+	// checkGuard is the rejection every otherwise-acceptable record gets when
+	// the role's check clauses name columns no record can carry.
+	checkGuard *recordReject
+	accepted   int // cursor into verdicts/reasons
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -151,15 +195,12 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	r = r.WithContext(ctx)
 
-	// TODO: what should the order of these be to maximize speed + limit risk of data leakage or DoS/resource exhaustion?
-
 	if table == "" {
 		h.logger.ErrorContext(ctx, "missing table parameter in request")
 		writeJSONError(w, http.StatusBadRequest, "missing table")
 		return
 	}
 
-	// TODO: prevent table-enumeration...
 	schema := h.Registry.Get(table)
 	if schema == nil {
 		h.logger.WarnContext(ctx, "unknown table requested", "table", table)
@@ -231,18 +272,18 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bound the inbound body (parity with /v1/ops/query; also caps the
-	// array/stream decode vectors). See query.go for maxRequestBodyBytes.
+	// Bound the inbound body (parity with /v1/ops/query). See query.go for
+	// maxRequestBodyBytes.
 	reqCap := int64(maxRequestBodyBytes)
 	if h.maxRequestBytes > 0 {
 		reqCap = h.maxRequestBytes
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
 
-	// Read the whole (already-capped) body up front and run the readers over
-	// those bytes rather than the live connection. The buffer comes from a pool
-	// and goes back on the way out — every record the readers hand back is
-	// freshly allocated, so nothing downstream points into it.
+	// Read the whole (already-capped) body up front and hand those bytes to
+	// ClickHouse's own parser. The buffer comes from a pool and goes back on the
+	// way out; the exported rows point INTO the type layer's payload, not into
+	// this buffer, and are copied into the envelope before it is released.
 	body := getBodyBuffer()
 	defer putBodyBuffer(body)
 	if _, err := body.ReadFrom(r.Body); err != nil {
@@ -254,157 +295,421 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The reader is built from the RESOLVED format, not from a second look at
-	// the header. Re-resolving here would duplicate the rule in two places,
-	// which is how the joined and repeated paths came to disagree before. The
-	// only error left is an empty body.
-	rr, batch, err := newRecordReader(format, body.Bytes())
-	if err != nil {
+	// Framing: the declared format says how the body frames its records, and the
+	// first non-whitespace byte answers the one question left inside the JSON
+	// family — array or single object. That byte is the ONLY thing the body gets
+	// to decide, and it decides the response shape (AUDIT §A.6), never the
+	// format.
+	first, ok := firstNonSpace(body.Bytes())
+	if !ok {
 		h.logger.ErrorContext(ctx, "empty ingest body", "table", table, "format", format.String())
 		writeJSONError(w, http.StatusBadRequest, emptyBodyMessage(format))
 		return
 	}
-
-	if batch {
-		h.handleBatch(ctx, w, rr, reqCap, table, scope, schema, perms, role, now, h.policyCheckGuard(ctx, table, role, schema, perms))
-		return
-	}
-	h.handleSingle(ctx, w, rr, reqCap, table, scope, schema, perms, role, now, h.policyCheckGuard(ctx, table, role, schema, perms))
-}
-
-// handleSingle ingests a lone flat JSON object and preserves the GA response
-// contract: 200 {"ok":true} (or {"duplicate":true} when dedup skips it), or the
-// matching non-200 on validation / permission / whole-request failure.
-func (h *IngestHandler) handleSingle(
-	ctx context.Context,
-	w http.ResponseWriter,
-	rr recordReader,
-	reqCap int64,
-	table, scope string,
-	schema *discovery.TableSchema,
-	perms *policy.ResolvedPermissions,
-	role string,
-	now time.Time,
-	checkGuard *recordReject,
-) {
-	data, err := rr.Next()
-	if err != nil {
-		// Unreachable while the body is buffered — a bytes.Reader cannot produce
-		// a *http.MaxBytesError, and the cap is enforced at body.ReadFrom. Kept
-		// because it is the correct mapping if a reader ever streams again.
-		if writeMaxBytesError(w, err, reqCap) {
+	batchShape := format.alwaysBatch() || first == '['
+	var records int
+	switch {
+	case format == FormatJSON && first == '[':
+		n, framed := reframeArray(body.Bytes())
+		if !framed {
+			// Brackets that do not balance: a truncated upload or a structural
+			// syntax error. Neither can be salvaged per record, and reporting the
+			// records that did arrive as a complete batch is the failure this
+			// refusal exists to prevent.
+			h.logger.WarnContext(ctx, "ingest read error", "error", "unterminated json array", "table", table)
+			writeJSONError(w, http.StatusBadRequest, "invalid json: unterminated json array")
 			return
 		}
-		h.logger.ErrorContext(ctx, "invalid json payload", "error", err, "table", table)
-		writeJSONError(w, http.StatusBadRequest, "invalid json")
-		return
+		records = n
+	default:
+		// A single-object body is one record (concatenated objects after it are
+		// ignored, as they always have been — declare NDJSON to batch them, #561);
+		// a line-framed body has at least the record its first byte starts. The
+		// real count is chtypes' own, taken from the batch once it has answered.
+		records = 1
 	}
 
-	dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now, checkGuard)
+	// The role's projection of the table answers column policy and the auto
+	// -injected check values inside ClickHouse's own parser, so no Go code walks
+	// the record's keys. It is taken once and held for the whole request, so
+	// every record is judged by one generation and one shape: a refresh that
+	// recompiles the table waits for this request rather than changing the
+	// answer halfway through a batch. Resolved after the framing checks so a
+	// 415/413/empty-body/unterminated request is still refused for its own
+	// reason when the type layer happens to be down.
+	guard := h.policyCheckGuard(ctx, table, role, schema, perms)
+	shape, preds, checkColumns, abort := h.insertShape(ctx, table, role, schema, perms, guard)
 	if abort != nil {
 		writeAbort(w, abort)
 		return
 	}
-	if reject != nil {
-		writeJSONError(w, reject.Status, reject.Message)
+	tbl, abort := h.roleTable(ctx, table, shape)
+	if abort != nil {
+		writeAbort(w, abort)
 		return
 	}
-	if dup {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]bool{"duplicate": true})
-		return
-	}
+	defer tbl.Release()
 
-	h.logger.InfoContext(ctx, "event successfully ingested", "table", table)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-}
-
-// handleBatch ingests a multi-record body (JSON array or NDJSON), running each
-// record through the same validate → authorize → dedup → publish pipeline as a
-// single insert. A record that fails validation or a PER-RECORD permission rule
-// (a denied column, a failed check clause) — or that the reader couldn't decode
-// — is recorded against its index and the batch continues; a whole-request
-// condition aborts it (see requestAbort). Returns 200 with a per-record summary
-// once the body is consumed.
-func (h *IngestHandler) handleBatch(
-	ctx context.Context,
-	w http.ResponseWriter,
-	rr recordReader,
-	reqCap int64,
-	table, scope string,
-	schema *discovery.TableSchema,
-	perms *policy.ResolvedPermissions,
-	role string,
-	now time.Time,
-	checkGuard *recordReject,
-) {
-	result := batchResult{Results: []recordResult{}}
-
-	for {
-		data, err := rr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			if rse, ok := errors.AsType[*recordSyntaxError](err); ok {
-				result.Total++
-				result.Failed++
-				appendResult(&result, recordResult{Index: result.Total, Error: rse.Error()})
-				continue
-			}
-			// Unreachable while the body is buffered — a bytes.Reader cannot produce
-			// a *http.MaxBytesError, and the cap is enforced at body.ReadFrom. Kept
-			// because it is the correct mapping if a reader ever streams again.
-			if writeMaxBytesError(w, err, reqCap) {
-				return
-			}
-			// A fatal stream error (JSON array syntax error, or an oversized
-			// NDJSON line) — the reader can't resume, so fail the request rather
-			// than report a misleading partial summary. Not a body read error:
-			// the readers run over an in-memory slice now.
-			h.logger.WarnContext(ctx, "ingest read error", "error", err, "table", table)
-			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+	st := &ingestRun{table: table, scope: scope, tbl: tbl, records: records, checkColumns: checkColumns, checkGuard: guard}
+	if records > 0 {
+		if abort := h.judge(ctx, st, format.wire(), body.Bytes(), preds); abort != nil {
+			writeAbort(w, abort)
 			return
 		}
+	}
 
-		result.Total++
-		idx := result.Total
-		dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now, checkGuard)
+	if batchShape {
+		h.writeBatch(ctx, w, st, now)
+		return
+	}
+	h.writeSingle(ctx, w, st, now)
+}
+
+// judge asks ClickHouse's own parser for a verdict per record — ONE call for the
+// whole body, no chunking (AUDIT §A.9) — and then, when the role carries insert
+// check clauses, evaluates them as ONE compiled filter over the exported rows.
+//
+// Both are Go-level failures or data verdicts, never both: an unavailable handle
+// is the type layer's outage and anything else is ours, and neither is the
+// caller's record to fix.
+func (h *IngestHandler) judge(ctx context.Context, st *ingestRun, wire typelayer.Format, body []byte, preds []policy.Predicate) *requestAbort {
+	batch, err := st.tbl.Ingest(wire, body)
+	if err != nil {
+		var un *typelayer.Unavailable
+		if errors.As(err, &un) {
+			h.logUnavailable(ctx, st.table, un.Cause)
+			return unavailableAbort(un.Cause)
+		}
+		h.logger.ErrorContext(ctx, "record validation failed", "error", err, "table", st.table)
+		return &requestAbort{Status: http.StatusInternalServerError, Message: "validation failed"}
+	}
+	st.batch = batch
+	// chtypes' per-record answer is the record count: a JSON array sent as
+	// NDJSON is however many elements its reader took, a blank line is nothing.
+	// When it gave no per-record detail the padded batch is still index-shaped,
+	// so the same rule keeps every later index in range.
+	st.records = len(batch.Rows)
+
+	if len(preds) == 0 || len(batch.Payload) == 0 {
+		return nil
+	}
+	verdicts, reasons, err := st.tbl.CheckVerdicts(batch.Payload, preds)
+	if err != nil {
+		var un *typelayer.Unavailable
+		if errors.As(err, &un) {
+			h.logUnavailable(ctx, st.table, un.Cause)
+			return unavailableAbort(un.Cause)
+		}
+		h.logger.ErrorContext(ctx, "insert check evaluation failed", "error", err, "table", st.table)
+		return &requestAbort{Status: http.StatusInternalServerError, Message: "check evaluation failed"}
+	}
+	st.verdicts, st.reasons = verdicts, reasons
+	return nil
+}
+
+// resolveRecord decides the i-th record's outcome and, when it survives every
+// rule, publishes it. Exactly one of the returns is set, or none (published).
+//
+// The order is the one the type layer imposes and is a documented change: a
+// record that both fails to parse and violates a check clause now reports the
+// PARSE error, because the check runs over rows ClickHouse has already accepted.
+// Nothing is published either way, so no enforcement is lost (AUDIT §A.2).
+func (h *IngestHandler) resolveRecord(ctx context.Context, st *ingestRun, i int, now time.Time) (duplicate bool, reject *recordReject, abort *requestAbort) {
+	verdict := verdictAt(st.batch, i)
+	if !verdict.Accepted {
+		h.logVerdict(ctx, st.table, verdict)
+		return false, verdictReject(verdict), nil
+	}
+
+	// The payload cursor advances for every accepted record, whatever happens
+	// next: the check verdicts are index-aligned with the exported rows, so a
+	// record skipped here would shift every later record onto another's answer.
+	cursor := st.accepted
+	st.accepted++
+
+	if st.checkGuard != nil {
+		return false, st.checkGuard, nil
+	}
+	if st.verdicts != nil {
+		if cursor >= len(st.verdicts) {
+			// Fewer verdicts than exported rows: the type layer already logged
+			// the mismatch. Withhold rather than publish an unchecked row.
+			return false, checkReject(typelayer.ReasonDecline, st.checkColumns), nil
+		}
+		if !st.verdicts[cursor] {
+			h.logger.WarnContext(ctx, "check clause failed",
+				"columns", st.checkColumns, "reason", st.reasons[cursor], "table", st.table)
+			return false, checkReject(st.reasons[cursor], st.checkColumns), nil
+		}
+	}
+	return h.publishAccepted(ctx, st, verdict.Line, now)
+}
+
+// writeSingle answers a lone flat JSON object and preserves the GA response
+// contract: 200 {"ok":true} (or {"duplicate":true} when dedup skips it), or the
+// matching non-200 on refusal / permission / whole-request failure.
+func (h *IngestHandler) writeSingle(ctx context.Context, w http.ResponseWriter, st *ingestRun, now time.Time) {
+	dup, reject, abort := h.resolveRecord(ctx, st, 0, now)
+	switch {
+	case abort != nil:
+		writeAbort(w, abort)
+	case reject != nil:
+		writeJSONErrorCode(w, reject.Status, reject.Message, reject.Code)
+	case dup:
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"duplicate": true})
+	default:
+		h.logger.InfoContext(ctx, "event successfully ingested", "table", st.table)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}
+}
+
+// writeBatch answers a multi-record body (JSON array, NDJSON, CSV or TSV). A
+// record ClickHouse's parser refused, or one a check clause denied, is recorded
+// against its index and the batch continues; a whole-request condition aborts it
+// (see requestAbort). Returns 200 with a per-record summary.
+func (h *IngestHandler) writeBatch(ctx context.Context, w http.ResponseWriter, st *ingestRun, now time.Time) {
+	result := batchResult{Total: st.records, Results: []recordResult{}}
+	for i := range st.records {
+		dup, reject, abort := h.resolveRecord(ctx, st, i, now)
 		if abort != nil {
 			// Whole-request failure: surface the status rather than recording a
 			// request-scoped condition as per-record loss (see requestAbort).
 			writeAbort(w, abort)
 			return
 		}
-		if reject != nil {
+		entry := recordResult{Index: i + 1}
+		switch {
+		case reject != nil:
+			entry.Error, entry.Code = reject.Message, reject.Code
 			result.Failed++
-			appendResult(&result, recordResult{Index: idx, Error: reject.Message})
-			continue
-		}
-		if dup {
+		case dup:
+			entry.Duplicate = true
 			result.Duplicates++
-			appendResult(&result, recordResult{Index: idx, Duplicate: true})
-			continue
+		default:
+			entry.Ok = true
+			result.Succeeded++
 		}
-		result.Succeeded++
-		appendResult(&result, recordResult{Index: idx, Ok: true})
+		// Up to maxReportedResults entries are echoed; the counts above stay
+		// authoritative even when the slice is truncated.
+		if len(result.Results) < maxReportedResults {
+			result.Results = append(result.Results, entry)
+		}
 	}
 
-	h.logger.InfoContext(ctx, "batch ingested", "table", table,
+	h.logger.InfoContext(ctx, "batch ingested", "table", st.table,
 		"total", result.Total, "succeeded", result.Succeeded,
 		"failed", result.Failed, "duplicates", result.Duplicates)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(result)
 }
 
-// appendResult records a per-record outcome up to maxReportedResults. The
-// batchResult counts are incremented by the caller and stay authoritative even
-// when the Results slice is truncated.
-func appendResult(result *batchResult, entry recordResult) {
-	if len(result.Results) < maxReportedResults {
-		result.Results = append(result.Results, entry)
+// insertShape turns the role's resolved insert grant into the projection of the
+// table ClickHouse itself will enforce, plus the predicates the check clauses
+// become.
+//
+// Columns is the allow/deny decision, answered by omitting the denied columns
+// from the compiled schema: a record naming one is then refused per row with
+// ClickHouse's own code 117 rather than by a Go walk over the record's keys
+// (AUDIT §A.1, decision D1). nil means the role may write every column, which
+// compiles to no second handle at all.
+//
+// Defaults is the `_eq` auto-inject: the required value becomes the column's
+// DEFAULT, so a record that omits it is filled and a record that supplies one
+// still wins (measured, AUDIT §A.3). An `_in` check has no single value to
+// inject, so the column keeps the TABLE's own default and the filter tests that
+// — a documented behaviour change (D3).
+func (h *IngestHandler) insertShape(
+	ctx context.Context,
+	table, role string,
+	schema *discovery.TableSchema,
+	perms *policy.ResolvedPermissions,
+	guard *recordReject,
+) (typelayer.RoleShape, []policy.Predicate, []string, *requestAbort) {
+	if perms == nil {
+		return typelayer.RoleShape{}, nil, nil, nil
 	}
+
+	// Through the accessor, not a bare read: a bare read presents an empty map
+	// on an unresolved side and every check then passes vacuously. ok=false
+	// ABORTS the request; it must never be read as "no checks to run".
+	checks, resolved := perms.CheckClauses()
+	if !resolved {
+		// ABORT, not a per-record reject: perms is resolved once per request, so
+		// this is true for every record or none. As a reject, a 10k-record batch
+		// would emit 10k ERROR lines and report 10k independent permission
+		// failures for one mis-wired grant.
+		h.logger.ErrorContext(ctx, "insert checks consulted on a grant resolved for another operation",
+			"table", table, "role", role)
+		return typelayer.RoleShape{}, nil, nil, &requestAbort{
+			Status:  http.StatusForbidden,
+			Message: "insert permissions were not resolved for this request",
+		}
+	}
+
+	shape := typelayer.RoleShape{Columns: allowedInsertColumns(schema, perms)}
+	if guard != nil {
+		// The guard's own columns cannot be injected into or filtered on — that
+		// is what it refuses — so the shape stays bare and every record that
+		// parses gets the guard's rejection instead.
+		return shape, nil, nil, nil
+	}
+
+	cols := slices.Sorted(maps.Keys(checks))
+	preds := make([]policy.Predicate, 0, len(cols))
+	for _, col := range cols {
+		switch v := checks[col].(type) {
+		case []any:
+			// An _in set. A nil/empty set is an unresolvable claim and matches
+			// nothing — CheckVerdicts short-circuits it to all-false without
+			// compiling anything (#224).
+			vals := make([]string, 0, len(v))
+			for _, e := range v {
+				s, ok := scalarString(e)
+				if !ok {
+					vals = nil
+					break
+				}
+				vals = append(vals, s)
+			}
+			preds = append(preds, policy.Predicate{Column: col, Op: "in", Values: vals})
+		default:
+			s, ok := scalarString(checks[col])
+			if !ok {
+				// A required value with no string form cannot be expressed as a
+				// filter constant, and admitting the record would drop the check
+				// entirely. An empty Values list matches nothing.
+				preds = append(preds, policy.Predicate{Column: col, Op: "="})
+				continue
+			}
+			if shape.Defaults == nil {
+				shape.Defaults = make(map[string]string, len(cols))
+			}
+			shape.Defaults[col] = s
+			preds = append(preds, policy.Predicate{Column: col, Op: "=", Values: []string{s}})
+		}
+	}
+	return shape, preds, cols, nil
+}
+
+// allowedInsertColumns is the role's writable column set, or nil when it may
+// write every column the table has. nil is the identity shape, which reuses the
+// table's own compiled handle instead of a second one.
+//
+// Every column is asked through IsColumnAllowed so the allow/deny precedence
+// stays in the one place that owns it; the computed kinds are included for the
+// same reason, and typelayer keeps them whatever this list says (they are the
+// server's to compute, and a MATERIALIZED expression over a dropped column would
+// not compile at all).
+func allowedInsertColumns(schema *discovery.TableSchema, perms *policy.ResolvedPermissions) []string {
+	allowed := make([]string, 0, len(schema.Columns))
+	for _, c := range schema.Columns {
+		if perms.IsColumnAllowed(c.Name, true) {
+			allowed = append(allowed, c.Name)
+		}
+	}
+	if len(allowed) == len(schema.Columns) {
+		return nil
+	}
+	return allowed
+}
+
+// scalarString renders a check clause's required value as the string the filter
+// binds. Every filter parameter binds as {pN:String} whatever the column's
+// declared type (AUDIT §C.1), so this is the only conversion the check path
+// needs.
+//
+// The reflect.Kind test rather than a type switch is deliberate: policy marks a
+// placeholder-free check value with its own string-kinded named type, a
+// distinction that existed only for the Go-side numeric re-reading ClickHouse
+// now answers and that policy drops with it. Naming the type here would keep it
+// alive; asking for its kind works across the change.
+func scalarString(v any) (string, bool) {
+	if s, ok := v.(string); ok {
+		return s, true
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.String {
+		return rv.String(), true
+	}
+	return "", false
+}
+
+// roleTable resolves the compiled handle for this role's projection, or the 503
+// every record of this request gets instead. The type layer being down is an
+// outage, never a verdict about the data: a caller must be able to retry the
+// same body unchanged.
+//
+// An injected literal the column cannot read (`count UInt64 DEFAULT 'abc'`) is a
+// compile refusal, ClickHouse code 6 — measured. That must not become a 503 for
+// a policy that is simply unsatisfiable, so the shape is retried without its
+// defaults: the check filter then judges the record as sent, which fails closed
+// (an absent column takes the table default and the filter refuses it). The
+// type layer logs the refusal once per generation and shape; this adds one
+// rate-limited line saying what was done about it.
+func (h *IngestHandler) roleTable(ctx context.Context, table string, shape typelayer.RoleShape) (*typelayer.Table, *requestAbort) {
+	if h.Types == nil {
+		// Nothing else on this path inspects a value, so an unwired type layer
+		// cannot mean "accept anything" — the same fail-closed direction the
+		// stream's row evaluator takes.
+		h.logUnavailable(ctx, table, "no type layer is wired")
+		return nil, unavailableAbort("ingest validation is unavailable")
+	}
+	tbl, err := h.Types.RoleTable(table, shape)
+	if err == nil {
+		return tbl, nil
+	}
+	if len(shape.Defaults) > 0 {
+		bare := typelayer.RoleShape{Columns: shape.Columns}
+		if t, bareErr := h.Types.RoleTable(table, bare); bareErr == nil {
+			if h.noticeDue("inject:" + table) {
+				h.logger.WarnContext(ctx, "insert check value cannot be injected as a column default; records omitting it will fail the check",
+					"table", table, "columns", slices.Sorted(maps.Keys(shape.Defaults)), "cause", err.Error())
+			}
+			return t, nil
+		}
+	}
+	var un *typelayer.Unavailable
+	if errors.As(err, &un) {
+		h.logUnavailable(ctx, table, un.Cause)
+		return nil, unavailableAbort(un.Cause)
+	}
+	h.logger.ErrorContext(ctx, "could not resolve the compiled schema", "error", err, "table", table)
+	return nil, unavailableAbort(err.Error())
+}
+
+// unavailableAbort is the 503 for a type layer that cannot answer. Retry-After
+// matches the publish-backpressure 503: both are "come back, nothing is wrong
+// with your request".
+func unavailableAbort(cause string) *requestAbort {
+	return &requestAbort{Status: http.StatusServiceUnavailable, Message: cause, RetryAfter: "30"}
+}
+
+// logUnavailable emits at most one line per table per minute. A missing
+// artifact or a timezone mismatch persists until an operator acts, so the
+// per-request line says nothing the first one didn't.
+func (h *IngestHandler) logUnavailable(ctx context.Context, table, cause string) {
+	if h.noticeDue("unavailable:" + table) {
+		h.logger.ErrorContext(ctx, "ingest type layer unavailable", "table", table, "cause", cause)
+	}
+}
+
+// noticeDue rate-limits a standing-condition notice to one line per key per
+// minute, so a condition that persists until an operator acts does not bury the
+// rest of the log under one line per request.
+func (h *IngestHandler) noticeDue(key string) bool {
+	now := time.Now()
+	h.noticeMu.Lock()
+	defer h.noticeMu.Unlock()
+	if last, seen := h.noticeLast[key]; seen && now.Sub(last) < time.Minute {
+		return false
+	}
+	if h.noticeLast == nil {
+		h.noticeLast = make(map[string]time.Time)
+	}
+	h.noticeLast[key] = now
+	return true
 }
 
 // writeAbort emits a whole-request failure response: the status and message,
@@ -432,27 +737,34 @@ func writeMaxBytesError(w http.ResponseWriter, err error, limit int64) bool {
 // returns the rejection every record should get when they do not.
 //
 // A check the row cannot carry can never be enforced: the row holds one slot
-// per INSERTABLE column, by position, so an auto-injected value for anything
-// outside that set is dropped on the way out and the record inserts WITHOUT the
-// value the policy requires — answering 200. Policy validation cannot catch
-// this; it never sees the ClickHouse schema. Three ways in, all refused.
+// per WIRE column, by position, so an injected value for anything outside that
+// set is dropped on the way out and the record inserts WITHOUT the value the
+// policy requires — answering 200. Policy validation cannot catch this; it never
+// sees the ClickHouse schema. Three ways in, all refused.
+//
+// It is not redundant now that the compiled schema answers column policy: a
+// Defaults entry for a column the shape cannot carry is a COMPILE refusal, so
+// without this guard a mis-wired policy would be a 503 naming a ClickHouse
+// internal rather than a 403 naming the column the operator has to fix.
 //
 // Evaluated here rather than per record because the condition is a property of
-// (table, role, policy) and is identical for every record in the request — the
-// same reasoning as the !resolved abort in processRecord. Doing it per record
-// would emit one ERROR line per record for a single mis-wired policy, which on
-// a 16 MiB body of small records is ~1.2M lines. The reject is still returned
-// per record, so a batch reports each record's own cause: one that SUPPLIES the
-// column fails schema validation first, with a different message.
+// (table, role, policy) and is identical for every record in the request. Doing
+// it per record would emit one ERROR line per record for a single mis-wired
+// policy, which on a 16 MiB body of small records is ~1.2M lines. The reject is
+// still returned per record, so a batch reports each record's own cause: one
+// that SUPPLIES the column is refused by ClickHouse first, with its own message.
 func (h *IngestHandler) policyCheckGuard(
 	ctx context.Context,
 	table, role string,
 	schema *discovery.TableSchema,
 	perms *policy.ResolvedPermissions,
 ) *recordReject {
+	if perms == nil {
+		return nil
+	}
 	checks, resolved := perms.CheckClauses()
 	if !resolved {
-		return nil // the !resolved abort in processRecord owns this case
+		return nil // the !resolved abort in insertShape owns this case
 	}
 
 	// Sorted, and every offender — not the first one a map range happens to
@@ -500,149 +812,107 @@ func (h *IngestHandler) policyCheckGuard(
 	}
 }
 
-// processRecord runs the per-record pipeline shared by the single-object and
-// batch ingest paths: schema validation → column/check permission enforcement
-// (with claim-derived auto-injection) → optional dedup → publish. The
-// table-level insert grant is checked once by the caller before any record is
-// processed, so perms here drives only the per-column and per-row checks (it is
-// nil when no policy store is configured). data may be mutated to auto-inject
-// check-clause values.
+// verdictAt reads the verdict for the i-th record of a batch. A verdict the
+// type layer did not return is a decline, never an acceptance: a missing answer
+// must not publish a row nobody ruled on.
+func verdictAt(batch typelayer.Batch, i int) typelayer.RowVerdict {
+	if i < len(batch.Rows) {
+		return batch.Rows[i]
+	}
+	return typelayer.RowVerdict{Declined: true, Message: "no verdict was returned for this record"}
+}
+
+// verdictReject maps a verdict that is not an acceptance to the record's
+// rejection. A refusal is ClickHouse's own answer about the data — 400, with
+// its code. A decline is the validation engine failing to answer at all, which
+// is never the caller's fault and must never be dressed as a 400: 422 says "we
+// could not judge this", so a retry is meaningful and a client cannot learn
+// from it that its payload was wrong.
+func verdictReject(v typelayer.RowVerdict) *recordReject {
+	if v.Declined {
+		return &recordReject{
+			Status:  http.StatusUnprocessableEntity,
+			Message: "validation engine declined: " + v.Message,
+		}
+	}
+	return &recordReject{Status: http.StatusBadRequest, Message: v.Message, Code: v.Code}
+}
+
+// checkReject maps one check verdict that is not a definite true. "The data says
+// no" is a 403; "we could not tell" is a 422, fail closed either way.
 //
-// Exactly one of the outcomes is meaningful per call:
-//   - duplicate true: the record was skipped by dedup (reject/abort nil).
-//   - reject non-nil: the record is bad; the rest of a batch may still proceed.
-//   - abort non-nil: a whole-request failure; the caller stops and returns it.
-func (h *IngestHandler) processRecord(
+// The filter is AND-joined over every check clause, so a false verdict does not
+// name which clause failed — with a single clause the column is unambiguous, and
+// with several the message names the set that was tested rather than inventing
+// an attribution.
+func checkReject(reason string, cols []string) *recordReject {
+	if reason == typelayer.ReasonFilter {
+		return &recordReject{Status: http.StatusForbidden, Message: "check failed for " + columnList(cols)}
+	}
+	return &recordReject{
+		Status:  http.StatusUnprocessableEntity,
+		Message: "validation engine declined: the insert check for " + columnList(cols) + " could not be evaluated",
+	}
+}
+
+// columnList renders a check's column set for a rejection message.
+func columnList(cols []string) string {
+	quoted := make([]string, len(cols))
+	for i, c := range cols {
+		quoted[i] = fmt.Sprintf("%q", c)
+	}
+	if len(cols) == 1 {
+		return "column " + quoted[0]
+	}
+	return "columns " + strings.Join(quoted, ", ")
+}
+
+// logVerdict records a record ClickHouse would not take. A refusal carries its
+// code so an operator can look it up without parsing the message; a decline is
+// an ERROR because it is the engine, not the data, that failed.
+func (h *IngestHandler) logVerdict(ctx context.Context, table string, v typelayer.RowVerdict) {
+	if v.Declined {
+		h.logger.ErrorContext(ctx, "validation engine declined a record", "reason", v.Message, "table", table)
+		return
+	}
+	h.logger.WarnContext(ctx, "schema validation failed", "error", v.Message, "code", v.Code, "table", table)
+}
+
+// publishAccepted runs the two steps reserved for a record the server itself
+// accepted: dedupe, then the publish of the row ClickHouse's own writer
+// produced.
+//
+// Dedupe runs AFTER validation deliberately — the idempotency key must mark
+// only what is actually published, or a record ClickHouse refuses would burn
+// its id and a corrected retry would be swallowed as a duplicate.
+//
+// line is the exported JSONCompactEachRow row, a sub-slice of the type layer's
+// payload, so it is copied into the envelope before the handle is released.
+func (h *IngestHandler) publishAccepted(
 	ctx context.Context,
-	table, scope string,
-	schema *discovery.TableSchema,
-	perms *policy.ResolvedPermissions,
-	role string,
-	data map[string]any,
+	st *ingestRun,
+	line []byte,
 	now time.Time,
-	checkGuard *recordReject,
 ) (duplicate bool, reject *recordReject, abort *requestAbort) {
-	if err := h.validator().Validate(schema, data); err != nil {
-		h.logger.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
-		return false, &recordReject{Status: http.StatusBadRequest, Message: err.Error()}, nil
-	}
-
-	// DEEP AUTH: column-level allow/deny + check clauses.
-	if perms != nil {
-		for col := range data {
-			if !perms.IsColumnAllowed(col, true) {
-				h.logger.WarnContext(ctx, "column insertion forbidden", "column", col, "role", role)
-				return false, &recordReject{
-					Status:  http.StatusForbidden,
-					Message: fmt.Sprintf("column %q not allowed for insert", col),
-				}, nil
-			}
-		}
-		// Through the accessor, not a bare read. The check loop iterates a side's
-		// map rather than asking about a column, so IsColumnAllowed cannot cover it,
-		// and a bare read presents an empty map on an unresolved side — every check
-		// then passes vacuously. ok=false ABORTS the request; it must never be read
-		// as "no checks to run".
-		//
-		// Reachable, unlike the query path's bare reads: discovery.Validate only
-		// requires a column that is neither nullable nor defaulted, so a table whose
-		// columns are all nullable or all defaulted accepts `{}`, and the column loop
-		// above then runs zero times.
-		checks, resolved := perms.CheckClauses()
-		if !resolved {
-			// ABORT, not a per-record reject: perms is resolved once per request,
-			// so this is true for every record or none. As a reject, a 10k-record
-			// batch would emit 10k ERROR lines and report 10k independent
-			// permission failures for one mis-wired grant.
-			h.logger.ErrorContext(ctx, "insert checks consulted on a grant resolved for another operation",
-				"table", table, "role", role)
-			return false, nil, &requestAbort{
-				Status:  http.StatusForbidden,
-				Message: "insert permissions were not resolved for this request",
-			}
-		}
-		for col, requiredVal := range checks {
-			// The guard for this is evaluated ONCE per request in
-			// policyCheckGuard (see Handle) and only consulted here: the condition
-			// is a property of (table, role, policy), identical for every record,
-			// so evaluating it per record would emit one ERROR line per record for
-			// a single mis-wired policy — the same amplification the !resolved
-			// abort above exists to avoid. The REJECT is still per record, because
-			// a record that supplies the column fails schema validation first with
-			// a different message, and a batch should report each its own cause.
-			if checkGuard != nil {
-				return false, checkGuard, nil
-			}
-			// A []any value is an _in check: the inserted value must be present and
-			// one of the allowed set. Unlike the scalar _eq case there is no single
-			// value to auto-inject, so an absent column fails closed.
-			if set, isSet := requiredVal.([]any); isSet {
-				actual, ok := data[col]
-				if !ok || !h.checker().InSet(actual, set) {
-					h.logger.WarnContext(ctx, "check clause failed", "column", col, "allowed", set, "actual", actual, "present", ok)
-					return false, &recordReject{
-						Status:  http.StatusForbidden,
-						Message: fmt.Sprintf("check failed for column %q", col),
-					}, nil
-				}
-				continue
-			}
-			if actual, ok := data[col]; ok {
-				// Both sides canonicalize through policy.CanonicalScalar, so a
-				// numeric insert value matches a numeric claim by value, not by
-				// spelling (payload 1.0 vs claim 1), and a value with no canonical
-				// form (object/array/null) matches nothing. A policy.LiteralValue —
-				// a placeholder-free check value, which carries no JSON type —
-				// additionally matches by its numeric reading, so `_eq: "1.0"`
-				// accepts an inserted 1.0 as well as an inserted "1.0". The type is
-				// what scopes that second reading to author-written literals: a
-				// claim-derived value arrives as a plain string and never gains a
-				// reading the token's own JSON type didn't give it.
-				if !h.checker().Matches(actual, requiredVal) {
-					h.logger.WarnContext(ctx, "check clause failed", "column", col, "expected", requiredVal, "actual", actual)
-					return false, &recordReject{
-						Status:  http.StatusForbidden,
-						Message: fmt.Sprintf("check failed for column %q", col),
-					}, nil
-				}
-			} else {
-				// Auto-inject the required value if not provided — as a plain
-				// string: a LiteralValue must not leak its named type into the
-				// published payload, where downstream type switches (timestamp
-				// canonicalization's `case string`) would silently miss it.
-				if lit, isLit := requiredVal.(policy.LiteralValue); isLit {
-					data[col] = string(lit)
-				} else {
-					data[col] = requiredVal
-				}
-			}
-		}
-	}
-
-	// Canonicalize timestamps to RFC 3339 UTC (#372; fail-open — #381's row-filter
-	// enforces) after the permission checks: check clauses keep pre-#372 semantics.
-	h.validator().CanonicalizeTimestamps(schema, data)
-
 	// Optional deduplication. enabled/id_field/require_id resolve per record
 	// from one snapshot (table override → global; the settings directory
 	// always states them, so no compiled fallback is needed), so a reload
 	// lands at a record boundary. A Deduplicator without a settings source is
 	// a wiring bug, not a mode — main wires both or neither.
 	if h.Dedup != nil && h.DedupeSettings != nil {
-		if enabled, idField, requireID := h.DedupeSettings(table); enabled {
-			idVal, ok := data[idField]
+		if enabled, idField, requireID := h.DedupeSettings(st.table); enabled {
+			eventID, ok := eventIDAt(line, slices.Index(st.tbl.WireColumns, idField))
 			if !ok {
-				dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
+				dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", st.table)))
 				if requireID {
-					h.logger.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", idField, "table", table)
+					h.logger.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", idField, "table", st.table)
 					return false, &recordReject{
 						Status:  http.StatusBadRequest,
 						Message: fmt.Sprintf("missing dedupe id field %q", idField),
 					}, nil
 				}
-				h.logger.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", idField, "table", table)
+				h.logger.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", idField, "table", st.table)
 			} else {
-				eventID := fmt.Sprint(idVal)
 				dup, err := h.Dedup.CheckAndMark(ctx, eventID)
 				switch {
 				case errors.Is(err, dedupe.ErrDisabled):
@@ -653,8 +923,8 @@ func (h *IngestHandler) processRecord(
 					// carries the signal (a burst is a reload; a steady rate
 					// is the store and settings out of step), so the line is
 					// Debug rather than a WARN per record.
-					dedupeDisabledCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
-					h.logger.DebugContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "event_id", eventID, "table", table)
+					dedupeDisabledCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", st.table)))
+					h.logger.DebugContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "event_id", eventID, "table", st.table)
 				case err != nil:
 					h.logger.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
 					return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
@@ -666,24 +936,20 @@ func (h *IngestHandler) processRecord(
 		}
 	}
 
-	// Render the record positionally against the table's declaration order. The
-	// column names ride alongside in the envelope rather than in the row, so a
-	// batch of rows for one table carries the names once — and the reader can
-	// tell a schema change mid-stream from a reordering.
-	cols := schema.InsertableColumns()
-	row, err := ingest.EncodeCompactRow(cols, data)
-	if err != nil {
-		h.logger.ErrorContext(ctx, "failed to encode compact row", "error", err, "table", table)
-		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
-	}
-
+	// The row travels POSITIONALLY as the bytes ClickHouse's own writer
+	// produced, with the column names alongside rather than in the row: a batch
+	// of rows for one table carries the names once, and the reader can tell a
+	// schema change mid-stream from a reordering. WireColumns are the ROLE's
+	// columns, so a role that may not write every column publishes a shorter row
+	// with a matching name list — the worker already groups a flush by column
+	// signature, so that is one more group, not a new code path.
 	evt := ingest.EventMessage{
-		TableName:         table,
-		Scope:             scope,
+		TableName:         st.table,
+		Scope:             st.scope,
 		ReceivedTimestamp: now.Format(time.RFC3339Nano),
 		Format:            ingest.FormatJSONCompactEachRow,
-		Columns:           schema.InsertableColumnNames(),
-		Row:               row,
+		Columns:           st.tbl.WireColumns,
+		Row:               json.RawMessage(line),
 	}
 
 	payload, err := json.Marshal(evt)
@@ -692,12 +958,12 @@ func (h *IngestHandler) processRecord(
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
 	}
 
-	subject := "ingest." + query.SafeEncodeNATS(table)
-	if scope != "" {
-		subject += "." + query.SafeEncodeNATS(scope)
+	subject := "ingest." + query.SafeEncodeNATS(st.table)
+	if st.scope != "" {
+		subject += "." + query.SafeEncodeNATS(st.scope)
 	}
 
-	h.logger.DebugContext(ctx, "publishing event to NATS", "subject", subject, "table", table, "scope", scope)
+	h.logger.DebugContext(ctx, "publishing event to NATS", "subject", subject, "table", st.table, "scope", st.scope)
 	if err := h.Publisher.Publish(ctx, subject, payload); err != nil {
 		if strings.Contains(err.Error(), "maximum bytes exceeded") {
 			h.logger.WarnContext(ctx, "nats maximum bytes exceeded", "subject", subject)
@@ -710,45 +976,36 @@ func (h *IngestHandler) processRecord(
 	return false, nil, nil
 }
 
-// checkValueMatches decides insert-check equality: the payload value must
-// have a canonical scalar form (object/array/null match nothing) equal to the
-// required value's canonical form. A policy.LiteralValue — and only that type,
-// which Evaluate reserves for placeholder-free check values — also matches by
-// its canonical numeric reading (policy.CanonicalNumericLiteral), so a static
-// `_eq: "1.0"` accepts an inserted 1.0 and an inserted "1.0" alike.
-func checkValueMatches(actual, required any) bool {
-	actualStr, hasForm := policy.CanonicalScalar(actual)
-	if !hasForm {
-		return false
+// eventIDAt reads the dedupe id out of the exported row by POSITION — the id
+// column's index in the table's wire columns — so no record is decoded for it
+// (AUDIT §A.4). idx is -1 when the column is not on the wire at all.
+//
+// Two consequences worth knowing, both documented:
+//   - the key is the STORED value, not the caller's spelling: `256` into a
+//     UInt8 keys on `0`, and a DateTime keys on ClickHouse's rendering. For the
+//     documented case — a string id — the two are identical.
+//   - "missing" now means "the row carries no value", which for an omitted
+//     column is its default. An empty id is therefore treated as absent, which
+//     is what an omitted `event_id String` produces and what the WARN, the
+//     counter and require_id have always been about. A numeric id column cannot
+//     distinguish an omitted 0 from a supplied one.
+func eventIDAt(line []byte, idx int) (string, bool) {
+	if idx < 0 {
+		return "", false
 	}
-	if lit, isLit := required.(policy.LiteralValue); isLit {
-		if actualStr == string(lit) {
-			return true
+	cell, ok := cellAt(line, idx)
+	if !ok || len(cell) == 0 {
+		return "", false
+	}
+	if cell[0] == '"' {
+		// One scalar string, not the record: the cell is JSON-encoded by
+		// ClickHouse's own writer (it escapes "/" as "\/"), so Go's own
+		// string-literal unquoting would refuse it.
+		var s string
+		if err := json.Unmarshal(cell, &s); err != nil || s == "" {
+			return "", false
 		}
-		n, ok := policy.CanonicalNumericLiteral(string(lit))
-		return ok && actualStr == n
+		return s, true
 	}
-	requiredStr, ok := policy.CanonicalScalar(required)
-	return ok && actualStr == requiredStr
-}
-
-// valueInSet reports whether v matches any member of set, comparing by
-// canonical string form (policy.CanonicalScalar) to mirror the scalar check's
-// claim-derived equality — a JSON number in the insert body matches a
-// claim-derived value by value, not spelling, and a v with no canonical form
-// (object/array/null) is a member of no set. _in members never take the
-// LiteralValue numeric reading: an _in set is claim-derived by design, and a
-// placeholder-free _in template is a degenerate one-element set that keeps
-// spelling equality.
-func valueInSet(v any, set []any) bool {
-	vs, ok := policy.CanonicalScalar(v)
-	if !ok {
-		return false
-	}
-	for _, s := range set {
-		if ss, ok := policy.CanonicalScalar(s); ok && ss == vs {
-			return true
-		}
-	}
-	return false
+	return string(cell), true
 }

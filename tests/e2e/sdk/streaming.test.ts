@@ -20,7 +20,7 @@ describe("Streaming", () => {
     // Explicitly allow the 'anon' role to SELECT (stream) from this suite's tables.
     // 'scoped' additionally carries a per-subscriber row filter — streamed rows are
     // limited to the caller's own country claim — so the SSE fan-out exercises the
-    // row-level-security path (ResolvedPermissions.RowVisible) end to end, not just
+    // row-level-security path (the type layer's compiled filters) end to end, not just
     // column projection.
     Object.assign(publicPolicy.tables[T.clicks], {
       anon: { select: { allow_columns: ["*"] } },
@@ -105,9 +105,11 @@ describe("Streaming", () => {
 
     it("row DateTime columns arrive canonicalized, matching /v1/query (#372)", async () => {
       // Ingest spells the row timestamp with an offset; the wire form everywhere
-      // downstream must be canonical RFC 3339 UTC, so the SSE frame and the
-      // /v1/query rendering of the same stored instant are byte-identical — the
-      // query/stream clock drift #372 reported.
+      // downstream is ClickHouse's OWN rendering of the stored instant, so the
+      // SSE frame and the /v1/query rendering are byte-identical — the
+      // query/stream clock drift #372 reported. Since the row is produced by the
+      // server's writer at validation time, that identity now holds by
+      // construction rather than by a canonicalizer agreeing with the server.
       const whPublic = publicClient();
       const whAuth = dataClient();
       const receivedEvents: any[] = [];
@@ -133,7 +135,9 @@ describe("Streaming", () => {
 
         await waitForCondition(() => receivedEvents.some((e) => e.data?.event_id === id), 10_000);
         const frame = receivedEvents.find((e) => e.data?.event_id === id);
-        expect(frame?.data.received_timestamp).toBe("2026-06-21T04:00:00.123Z");
+        // The column's own rendering: "YYYY-MM-DD hh:mm:ss.SSS" in its zone
+        // (DateTime64(3) here), not RFC 3339 with a Z.
+        expect(frame?.data.received_timestamp).toBe("2026-06-21 04:00:00.123");
 
         // The ClickHouse insert is async behind the stream event — poll the query
         // path until the row lands, then compare the two renderings.

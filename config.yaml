@@ -32,10 +32,15 @@ prometheus:
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
 
-# Only the password is boot config; addr, http_port, http_scheme, database,
-# username, query_timeout are the settings directory's clickhouse block.
+# Only the password and chtypes_registry are boot config; addr, http_port,
+# http_scheme, database, username, query_timeout are the settings
+# directory's clickhouse block.
 clickhouse:
   password: ""
+  # Explicit chtypes artifact registry directory. Empty (default) defers to
+  # the SDK's own search path ($CHTYPES_REGISTRY, ~/.cache/chtypes/artifacts,
+  # system dirs) — set this only to point at a non-default location.
+  chtypes_registry: ""
 
 # In-process L1 cache size. The query time-bucket
 # (query.timestamp_bucket_seconds) is a settings key.

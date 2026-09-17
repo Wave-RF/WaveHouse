@@ -82,9 +82,11 @@ func isNumericLiteral(s string) bool {
 // parameter definitions.
 //
 // Values are inlined directly into the SQL string (scalars are escaped, arrays
-// render as a parenthesized list — see formatParamValue). This avoids
-// driver-level positional parameter limitations (e.g. LIMIT position).
-func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
+// render as a parenthesized list — see formatParamValue). This avoids the
+// positional-parameter limitations a pipe would otherwise hit: a placeholder
+// may sit in a LIMIT, a FORMAT clause or an identifier, where a bound value is
+// not legal SQL. Nothing is left for the caller to bind.
+func BindParams(q *NamedQuery, supplied map[string]any) (string, error) {
 	// Build lookup from formal parameter definitions.
 	formal := make(map[string]*ParamDef, len(q.Parameters))
 	for i := range q.Parameters {
@@ -95,7 +97,7 @@ func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
 	for _, p := range q.Parameters {
 		if p.Required {
 			if _, ok := supplied[p.Name]; !ok {
-				return "", nil, fmt.Errorf("missing required parameter: %s", p.Name)
+				return "", fmt.Errorf("missing required parameter: %s", p.Name)
 			}
 		}
 	}
@@ -132,9 +134,9 @@ func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
 	})
 
 	if bindErr != nil {
-		return "", nil, bindErr
+		return "", bindErr
 	}
-	return sql, nil, nil
+	return sql, nil
 }
 
 // formatParamValue converts a Go value to a safe SQL literal for inline

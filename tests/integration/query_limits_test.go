@@ -16,6 +16,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
@@ -67,12 +68,11 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 		{
 			// max_rows_to_read bounds rows SCANNED — the lever that stops a
 			// full-table scan. A 25-row scan blows past a cap of 1. ClickHouse
-			// error code 158 == TOO_MANY_ROWS (the native driver surfaces the
-			// numeric code, not the HTTP interface's symbolic suffix).
+			// error code 158 == TOO_MANY_ROWS.
 			name:        "per-role max_rows_to_read is enforced (code 158 TOO_MANY_ROWS)",
 			perms:       policy.SelectPermissions{AllowColumns: []string{"*"}, MaxRowsToRead: 1},
 			wantStatus:  http.StatusInternalServerError,
-			wantBodyHas: "code: 158",
+			wantBodyHas: "Code: 158",
 		},
 		{
 			// max_memory_usage bounds peak query memory — the lever that stops
@@ -82,7 +82,7 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 			name:        "per-role max_memory_usage is enforced (code 241 MEMORY_LIMIT_EXCEEDED)",
 			perms:       policy.SelectPermissions{AllowColumns: []string{"*"}, MaxMemoryUsage: 1},
 			wantStatus:  http.StatusInternalServerError,
-			wantBodyHas: "code: 241",
+			wantBodyHas: "Code: 241",
 		},
 	}
 
@@ -99,7 +99,10 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 				},
 			})
 			h := api.NewStructuredQueryHandler(
-				e.chConn, nil, e.registry, store, func() int { return 60 }, func() time.Duration { return 30 * time.Second }, nil, testutil.NopLogger(),
+				func() chconn.Target {
+					return chconn.Target{URL: e.chHTTPURL, Username: testCHUser, Password: testCHPassword, Database: testCHDatabase}
+				},
+				nil, e.registry, store, func() int { return 60 }, func() time.Duration { return 30 * time.Second }, nil, testutil.NopLogger(),
 			)
 
 			req := httptest.NewRequest(http.MethodPost,

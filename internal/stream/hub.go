@@ -21,52 +21,43 @@ import (
 // resolved against each subscriber's claims, so two subscribers of the same role can
 // be entitled to different rows. For a role that carries a row-filter, Broadcast
 // therefore keeps the shared column projection but evaluates row visibility PER
-// subscriber (ResolvedPermissions.RowVisible) before delivering — closing the
-// query/stream RLS drift in #319. Roles without a row-filter keep the pure
-// once-per-role fast path unchanged. See projectColumns.
+// subscriber (RowView.Visible over the event parsed once) before delivering —
+// closing the query/stream RLS drift in #319. Roles without a row-filter keep the
+// pure once-per-role fast path unchanged, and never reach the type layer at all.
+// See projectColumns.
 type Hub struct {
 	mu       sync.RWMutex
 	topics   map[string]*topicRoutes
 	policy   policy.Source             // nil ⇒ policy filtering not configured (legacy passthrough)
-	registry *discovery.SchemaRegistry // nil ⇒ no column types; row-filter comparison degrades fail-closed (see columnSpecs)
+	registry *discovery.SchemaRegistry // nil ⇒ no schema frame on subscribe; row filtering is unaffected (the type layer owns it)
 	metric   *Metrics                  // nil-safe
 
-	// RowEvaluator is the seam a native type layer will take over: the one
-	// place a row's visibility under a role's row-filter is decided. nil means
-	// the default implementation, which delegates to ResolvedPermissions.RowVisible
-	// — today's behavior unchanged. Wired once before the Hub serves traffic and
-	// not safe to mutate afterwards: rowAdmitted reads it from the consumer
-	// goroutine and from SSE handler goroutines without holding h.mu. Every
-	// delivery path reaches it through rowAdmitted, never directly.
+	// RowEvaluator decides a row's visibility under a role's row-filter — the
+	// one place that decision is taken, for live fan-out and replay alike.
+	// Production wires NewRowEvaluator (the type layer); nil means the
+	// fail-closed default below, which withholds every row of a row-filtered
+	// role, because an unwired evaluator must never read as "everything
+	// visible". Wired once before the Hub serves traffic and not safe to mutate
+	// afterwards: rowAdmitted reads it from the consumer goroutine and from SSE
+	// handler goroutines without holding h.mu. Every delivery path reaches it
+	// through Prepare + rowAdmitted, never directly.
 	RowEvaluator RowEvaluator
+
+	// unwired is that fail-closed default: an engineEvaluator with no Engine,
+	// which withholds and logs once. It is a field rather than a fresh value per
+	// call so the "no engine" report really is once per Hub.
+	unwired engineEvaluator
 }
 
-// RowEvaluator decides whether one decoded event row is visible to a subscriber
-// under their resolved permissions. specs classifies each column for the
-// comparison (see Hub.columnSpecs); a nil map means no type knowledge, which the
-// default implementation treats as the fail-closed floor.
-type RowEvaluator interface {
-	Visible(perms *policy.ResolvedPermissions, row map[string]any, specs map[string]policy.ColumnSpec) bool
-}
-
-// policyRowEvaluator is the default RowEvaluator, delegating to the policy
-// package's in-memory row-filter evaluation.
-type policyRowEvaluator struct{}
-
-// Visible delegates to the policy package's in-memory row-filter evaluation,
-// the same resolution the query path renders to SQL (#319).
-func (policyRowEvaluator) Visible(perms *policy.ResolvedPermissions, row map[string]any, specs map[string]policy.ColumnSpec) bool {
-	return perms.RowVisible(row, specs)
-}
-
-// rowEvaluator returns the Hub's RowEvaluator, or the default when none is
-// wired. Nil-safe rather than constructor-enforced, so a zero Hub still
-// evaluates row-level security instead of panicking past it.
+// rowEvaluator returns the Hub's RowEvaluator, or the fail-closed default when
+// none is wired. Nil-safe rather than constructor-enforced, so a zero Hub still
+// enforces row-level security instead of panicking past it — or, worse, reading
+// an absent evaluator as an absent restriction.
 func (h *Hub) rowEvaluator() RowEvaluator {
 	if h.RowEvaluator != nil {
 		return h.RowEvaluator
 	}
-	return policyRowEvaluator{}
+	return &h.unwired
 }
 
 // topicRoutes holds the per-role buckets subscribed to one topic.
@@ -76,10 +67,10 @@ type topicRoutes struct {
 
 // NewHub builds an event hub. A nil policy store passes every event through
 // unfiltered (the unwired-tests case); a non-nil store whose Get returns nil is a
-// total lockout (a deleted/absent policy denies everyone). A nil registry leaves
-// every column's type unknown, so row-filter comparison degrades FAIL-CLOSED:
-// equality/set predicates admit only a byte-identical value and ordering/!= admit
-// nothing (see policy.ColumnKind); metric may be nil.
+// total lockout (a deleted/absent policy denies everyone). A nil registry only
+// costs the on-subscribe schema frame — row filtering reads its types from the
+// type layer behind RowEvaluator, which the caller wires separately; metric may
+// be nil.
 func NewHub(policyStore policy.Source, registry *discovery.SchemaRegistry, metric *Metrics) *Hub {
 	return &Hub{topics: make(map[string]*topicRoutes), policy: policyStore, registry: registry, metric: metric}
 }
@@ -172,11 +163,18 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 	ev := newEventView(raw)
 	p, filter := h.snapshotPolicy()
 
-	// Column specs for type-aware row-filter comparison — resolved lazily at most
-	// once per event, only when some role actually carries a row-filter, and reused
-	// across every filtered role and subscriber.
-	var colSpecs map[string]policy.ColumnSpec
-	specsResolved := false
+	// The row is parsed at most ONCE per event — only when some role actually
+	// carries a row-filter — and the parsed view is reused by every filtered role
+	// and subscriber. Parsing is the expensive half; evaluating a compiled
+	// predicate over an already-parsed row is not.
+	var view RowView
+	var prepErr error
+	prepared := false
+	defer func() {
+		if view != nil {
+			view.Close()
+		}
+	}()
 
 	for _, rb := range roleBuckets {
 		plan, ok := planForRole(p, filter, rb.role, ev, KindEvent)
@@ -201,12 +199,12 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 		// shared, but whether each subscriber may see THIS row depends on its claims, so
 		// evaluate visibility per subscriber. Predicates read the full event row (a
 		// filter may key on a column the role can't SELECT), not the projected columns.
-		if !specsResolved {
-			colSpecs = h.columnSpecs(ev.evt.TableName)
-			specsResolved = true
+		if !prepared {
+			view, prepErr = h.rowEvaluator().Prepare(ev.evt.TableName, ev.evt.Columns, ev.evt.Row)
+			prepared = true
 		}
 		for _, sub := range rb.bucket.Snapshot() {
-			if h.rowAdmitted(p, rb.role, ev, sub.claims, colSpecs) {
+			if h.rowAdmitted(p, rb.role, ev, sub.claims, view, prepErr) {
 				deliver(sub, plan)
 			}
 		}
@@ -239,81 +237,36 @@ func deliver(sub *Subscriber, plan rolePlan) {
 }
 
 // rowAdmitted reports whether claims admit this event's row under the role's
-// row-filter, counting a withheld row when they don't. It is the one admission
-// step shared by the live fan-out (per subscriber) and replay (per connection),
-// so the two delivery paths can't drift on how row-level security is evaluated.
-func (h *Hub) rowAdmitted(p *policy.Policy, role string, ev *eventView, claims map[string]any, colSpecs map[string]policy.ColumnSpec) bool {
+// row-filter, counting a withheld row (with the reason) when they don't. It is
+// the one admission step shared by the live fan-out (per subscriber) and replay
+// (per connection), so the two delivery paths can't drift on how row-level
+// security is evaluated.
+//
+// view is the event parsed once for the whole fan-out; prepErr is why there is
+// none. An event that could not be prepared — no compiled schema for the table,
+// a column list that is not the compiled generation's, an unparseable row —
+// withholds from every row-filtered subscriber, never from the unfiltered roles
+// that never asked the type layer anything.
+func (h *Hub) rowAdmitted(p *policy.Policy, role string, ev *eventView, claims map[string]any, view RowView, prepErr error) bool {
+	if prepErr != nil || view == nil {
+		// view == nil with no error is a broken evaluator, not a verdict: withhold.
+		h.metric.RowWithheld(ev.evt.TableName, role, WithheldReason(prepErr))
+		return false
+	}
 	perms := policy.Evaluate(p, role, ev.evt.TableName, "select", claims)
-	if !h.rowEvaluator().Visible(perms, ev.row, colSpecs) {
-		h.metric.RowWithheld(ev.evt.TableName, role)
+	visible, reason := view.Visible(perms)
+	if !visible {
+		h.metric.RowWithheld(ev.evt.TableName, role, reason)
 		return false
 	}
 	return true
 }
 
-// columnSpecs classifies each of the table's columns for the row-filter evaluator:
-// DateTime/DateTime64 columns compare as instants (through discovery's
-// Column.TimeParser — the same grammar ingest canonicalization applies, so a
-// zone-less filter constant matches the canonical RFC 3339 payload), numeric types
-// compare numerically (9 < 100, matching ClickHouse), String compares bytewise
-// (exactly ClickHouse's String collation), and any other type is omitted —
-// policy.ColumnOpaque, the map's zero value — admitting byte-equality only. nil when
-// no schema is available (unknown table, or a Hub built without a registry), which
-// reads as every column Opaque: the fail-closed floor, never a lexicographic
-// fallback that could admit rows the query path excludes ("9" > "100" as text).
-func (h *Hub) columnSpecs(table string) map[string]policy.ColumnSpec {
-	if h.registry == nil {
-		return nil
-	}
-	schema := h.registry.Get(table)
-	if schema == nil {
-		return nil
-	}
-	m := make(map[string]policy.ColumnSpec, len(schema.Columns))
-	for _, c := range schema.Columns {
-		if pt := c.TimeParser(); pt != nil {
-			m[c.Name] = policy.ColumnSpec{Kind: policy.ColumnTime, ParseTime: pt}
-			continue
-		}
-		switch {
-		case discovery.IsNumericType(c.Type):
-			// The storage model narrows both comparison operands the way
-			// ClickHouse narrows the stored value and the bound constant. A
-			// numeric type whose model can't be classified keeps the zero
-			// NumericSpec, which refuses every comparison — fail closed,
-			// never a comparison under guessed semantics.
-			spec := policy.ColumnSpec{Kind: policy.ColumnNumeric}
-			if st, ok := discovery.NumericStorageOf(c.Type); ok {
-				spec.Numeric = NumericSpecOf(st)
-			}
-			m[c.Name] = spec
-		case discovery.IsStringType(c.Type):
-			m[c.Name] = policy.ColumnSpec{Kind: policy.ColumnText}
-		}
-	}
-	return m
-}
-
-// NumericSpecOf renders discovery's storage classification as the policy
-// evaluator's storage model. Exported so the tests/integration differential
-// oracle builds specs through the very mapping production uses — one source,
-// so the oracle can't keep validating a mapping the Hub no longer applies.
-func NumericSpecOf(st discovery.NumericStorage) policy.NumericSpec {
-	switch {
-	case st.Integer:
-		return policy.NumericSpec{Family: policy.NumericInteger, Bits: st.IntBits, Unsigned: st.Unsigned}
-	case st.FloatBits != 0:
-		return policy.NumericSpec{Family: policy.NumericFloat, Bits: st.FloatBits}
-	default:
-		return policy.NumericSpec{Family: policy.NumericDecimal, Precision: st.Precision, Scale: st.Scale}
-	}
-}
-
-// eventView is one published event decoded once per Broadcast, in the two forms
-// the delivery paths need: cells, the raw JSON value at each envelope column
-// position (sliced positionally into the outgoing frame, so a value's bytes are
-// never re-encoded), and row, the same values keyed by column name for the
-// row-filter evaluator.
+// eventView is one published event decoded once per Broadcast: cells, the raw
+// JSON value at each envelope column position, sliced positionally into the
+// outgoing frame so a value's bytes are never re-encoded. The row-filter reads
+// the ORIGINAL positional bytes (ev.evt.Row) through the type layer rather than
+// any decoding done here — the parse that decides visibility is ClickHouse's own.
 //
 // raw and decoded carry the legacy no-policy passthrough: a payload that is not
 // an EventMessage at all is forwarded verbatim when no policy store is wired,
@@ -324,16 +277,13 @@ type eventView struct {
 	decoded bool // raw parsed as an EventMessage
 	usable  bool // ...and it declares a known format whose columns and row pair
 	cells   []json.RawMessage
-	row     map[string]any
 }
 
-// newEventView decodes raw once for the whole fan-out. Numbers decode as
-// json.Number — exact digit strings, not float64 — because the row-filter
-// comparison must see the same value ClickHouse stores: ingest decodes with
-// UseNumber and forwards the row verbatim, so a bare 64-bit ID past 2^53 keeps
-// its exact digits on the query path, and a lossy float64 decode here would
-// collapse neighboring IDs into one value and deliver another tenant's row. The
-// outgoing frame reuses the raw cell bytes, so it stays byte-faithful regardless.
+// newEventView decodes raw once for the whole fan-out. The envelope's own fields
+// decode with UseNumber so nothing in it is rounded, and the row's cells are kept
+// as raw bytes: the outgoing frame reuses them verbatim, so a 64-bit id past 2^53
+// keeps every digit on the wire, and the visibility decision never sees a Go
+// float at all.
 func newEventView(raw []byte) *eventView {
 	ev := &eventView{raw: raw}
 	if !decodeEvent(raw, &ev.evt) {
@@ -349,23 +299,28 @@ func newEventView(raw []byte) *eventView {
 	if ev.evt.Format != ingest.FormatJSONCompactEachRow {
 		return ev
 	}
-	ev.cells, ev.row, ev.usable = pairRow(ev.evt.Columns, ev.evt.Row)
+	ev.cells, ev.usable = pairRow(ev.evt.Columns, ev.evt.Row)
 	return ev
 }
 
-// pairRow splits a compact row into its cells and zips them with the column
-// names. ok is false when the two cannot be paired — an undecodable row, a
+// pairRow splits a compact row into its cells and checks that they pair with the
+// column names. ok is false when the two cannot be paired — an undecodable row, a
 // length that disagrees with the column list, a repeated column name, or an
 // empty column list (which no length check catches, since a zero-length row
 // agrees with it) — because there is then no way to say which value belongs to
-// which column, and a row-filter that cannot read its column must withhold
-// rather than guess.
-func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, byName map[string]any, ok bool) {
+// which column, and neither the announced schema frame nor a row-filter may
+// guess.
+//
+// This is ALL that survives of the old name-keyed decode: the arity and drift
+// check the schema frame needs. The values themselves are never decoded here —
+// they go to the type layer as the bytes they arrived as, and out to the client
+// as the same bytes.
+func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, ok bool) {
 	if len(row) == 0 {
-		return nil, nil, false
+		return nil, false
 	}
 	if err := json.Unmarshal(row, &cells); err != nil {
-		return nil, nil, false
+		return nil, false
 	}
 	// A zero-column envelope pairs with anything of length zero — both `null`,
 	// which unmarshals to a nil slice, and `[]` — and would then be announced as
@@ -374,32 +329,26 @@ func pairRow(cols []string, row json.RawMessage) (cells []json.RawMessage, byNam
 	// (parseMsg's len(envelope.Columns) == 0), so refuse it here too rather than
 	// let the two consumers disagree about an envelope neither can read.
 	if len(cols) == 0 {
-		return nil, nil, false
+		return nil, false
 	}
 	if len(cells) != len(cols) {
-		return nil, nil, false
+		return nil, false
 	}
-	byName = make(map[string]any, len(cols))
-	for i, c := range cols {
-		// A repeated name has no single meaning: the map would keep the last
-		// value and silently drop the first, and this map is what a row-level
-		// filter is evaluated against — so a duplicate could decide visibility
-		// on a value the row never really carried. Unpairable, like a length
-		// mismatch. Cannot arise from our own producer (the envelope's columns
-		// come from system.columns, where ClickHouse forbids two columns of one
-		// name), so this is defence for an envelope we did not write.
-		if _, dup := byName[c]; dup {
-			return nil, nil, false
+	// A repeated name has no single meaning: the client zips the announced list
+	// against the positional row, so a duplicate makes two positions
+	// indistinguishable to it, and the type layer would read the row against a
+	// column list the table cannot have. Unpairable, like a length mismatch.
+	// Cannot arise from our own producer (the envelope's columns come from
+	// system.columns, where ClickHouse forbids two columns of one name), so this
+	// is defence for an envelope we did not write.
+	seen := make(map[string]struct{}, len(cols))
+	for _, c := range cols {
+		if _, dup := seen[c]; dup {
+			return nil, false
 		}
-		dec := json.NewDecoder(bytes.NewReader(cells[i]))
-		dec.UseNumber()
-		var v any
-		if err := dec.Decode(&v); err != nil {
-			return nil, nil, false
-		}
-		byName[c] = v
+		seen[c] = struct{}{}
 	}
-	return cells, byName, true
+	return cells, true
 }
 
 // decodeEvent parses raw as a published EventMessage, reporting whether it is one
@@ -438,15 +387,12 @@ func (h *Hub) snapshotPolicy() (p *policy.Policy, filter bool) {
 // policy. Replay is already per-connection, so row-level security evaluates against
 // this connection's claims directly; the returned closure holds one policy snapshot
 // for the whole gap-fill (matching Broadcast's one-snapshot-per-event — a reload
-// landing mid-replay applies from the first live event) and caches the per-table
-// column-kind lookup across the replay loop, so a large Last-Event-ID gap-fill
-// doesn't pay a store read-lock plus a registry lookup and map build per event.
+// landing mid-replay applies from the first live event), so a large Last-Event-ID
+// gap-fill doesn't pay a store read-lock per event.
 // The closure is for a single goroutine — each connection makes its own. The live
 // path uses Broadcast.
 func (h *Hub) ReplayProjector(role string, sub *Subscriber) func(raw []byte) []Frame {
 	p, filter := h.snapshotPolicy()
-	var colSpecs map[string]policy.ColumnSpec
-	specsFor := "" // table name colSpecs was resolved for ("" ⇒ not yet resolved)
 	// Schema-drift state is LOCAL to this gap-fill, not the connection's shared
 	// lastSchema. Replay writes straight to the socket while live events queue
 	// behind it, so sharing the state would let a live event's announcement
@@ -475,13 +421,15 @@ func (h *Hub) ReplayProjector(role string, sub *Subscriber) func(raw []byte) []F
 			return nil
 		}
 		if plan.perms.HasRowFilter() {
-			// One topic ⇒ one table, so this resolves once per replay in practice; the
-			// guard re-resolves if a stream ever mixes tables rather than going stale.
-			if specsFor != ev.evt.TableName {
-				colSpecs = h.columnSpecs(ev.evt.TableName)
-				specsFor = ev.evt.TableName
+			// Replay is per connection, so one prepared row serves exactly one
+			// visibility question — but it is still closed immediately, because the
+			// gap-fill loop can run for thousands of events.
+			view, err := h.rowEvaluator().Prepare(ev.evt.TableName, ev.evt.Columns, ev.evt.Row)
+			admitted := h.rowAdmitted(p, role, ev, sub.claims, view, err)
+			if view != nil {
+				view.Close()
 			}
-			if !h.rowAdmitted(p, role, ev, sub.claims, colSpecs) {
+			if !admitted {
 				return nil // this row is filtered out for these claims
 			}
 		}

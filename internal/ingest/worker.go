@@ -19,6 +19,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/query"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel"
@@ -579,20 +580,33 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	q.Set("database", t.Database)
 	q.Set("param_target_table", tableName)
 	q.Set("query", fmt.Sprintf("INSERT INTO {target_table:Identifier} (%s) FORMAT JSONCompactEachRow", strings.Join(quoted, ", ")))
-	q.Set("date_time_input_format", "best_effort")
-	// A field the record omitted rides as an explicit null in its column's slot,
-	// because a positional row has one value per column and no way to say
-	// "absent". For a NON-nullable column with a default this setting turns that
-	// null back into the default, matching what omitting the key did under
-	// JSONEachRow. It is already the server default (verified on 26.6.3), so
-	// this is belt-and-braces for a server configured otherwise.
+
+	// The PARSING settings come from typelayer, not from literals here: chtypes
+	// ruled on these rows under exactly this map at ingest time, and a setting
+	// the two do not share is a setting whose verdict was answered for a
+	// question the server is not being asked. One definition, both sides.
 	//
-	// TRANSITIONAL DIVERGENCE, and it is NOT what this setting controls: on a
-	// NULLABLE column an explicit null is stored as NULL whatever the setting
-	// says — only an ABSENT key ever took the default. So a `Nullable(T) DEFAULT
-	// …` column now stores NULL where it previously took its default. Verified
-	// on 26.6.3: omitted key → default; explicit null → NULL at both settings.
-	q.Set("input_format_null_as_default", "1")
+	// date_time_input_format=best_effort: the row already carries ClickHouse's
+	// own rendering, but a DateTime column still parses it under this setting.
+	// input_format_null_as_default=1: a field the record omitted rides as an
+	// explicit null in its column's slot, because a positional row has one value
+	// per column and no way to say "absent"; for a NON-nullable column with a
+	// default this turns that null back into the default. It is already the
+	// server default (verified on 26.6.3), so this is belt-and-braces for a
+	// server configured otherwise. NOT what it controls: on a NULLABLE column an
+	// explicit null is stored as NULL whatever the setting says.
+	for k, v := range typelayer.InsertSettings() {
+		q.Set(k, v)
+	}
+	// Synchronous insert: the worker owns batching and acks a message only once
+	// the rows are in, so an async buffer would ack data that is still in
+	// flight. Not a parsing setting, so chtypes never sees it.
+	q.Set("async_insert", "0")
+	// insert_deduplicate is deliberately left at the SERVER default (it flipped
+	// in 26.2). WaveHouse's idempotency is app-level (internal/dedupe, keyed on
+	// the caller's id field) and a Replicated engine's block-hash dedupe answers
+	// a different question; pinning either value here would override an
+	// operator's own choice for their engine.
 
 	req, err := http.NewRequestWithContext(ctx, "POST", t.URL+"?"+q.Encode(), &buf)
 	if err != nil {

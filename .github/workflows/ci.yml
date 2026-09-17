@@ -198,6 +198,11 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # WAVEHOUSE_TEST_REQUIRE_CHTYPES=1: typelayer.TestEngine t.Fatal()s instead of
+    # t.Skip()ing when the pinned artifact isn't installed — CI must never
+    # silently skip the chtypes-backed tests it has the artifact for.
+    env:
+      WAVEHOUSE_TEST_REQUIRE_CHTYPES: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -206,6 +211,7 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           go-cache-suffix: "-unit"
+          chtypes: "true"
       - name: Run Go unit tests + SDK vitest tests
         run: make test-unit test-ts COV_DEFER=1
       - name: Upload coverage fragment
@@ -223,6 +229,9 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # See the unit job's comment on WAVEHOUSE_TEST_REQUIRE_CHTYPES.
+    env:
+      WAVEHOUSE_TEST_REQUIRE_CHTYPES: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -237,7 +246,8 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           go-cache-suffix: "-integration"
-          node: "false" # pure Go + testcontainers ClickHouse
+          node: "false" # Go + testcontainers ClickHouse only
+          chtypes: "true"
       - name: Run Go integration tests
         run: make test-integration COV_DEFER=1
       - name: Upload coverage fragment
@@ -259,7 +269,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 35, not 25: a cold first push pays the cover-instrumented cgo build plus
+    # the chtypes artifact fetch on top of the suite (W7 estimated 14-19 min).
+    timeout-minutes: 35
+    # See the unit job's comment on WAVEHOUSE_TEST_REQUIRE_CHTYPES.
+    env:
+      WAVEHOUSE_TEST_REQUIRE_CHTYPES: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -279,6 +294,7 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           go-cache-suffix: "-e2e-cov"
+          chtypes: "true"
       # `-j` builds the prereqs (build-ts ∥ build-cover) concurrently,
       # then runs the orchestrator: ClickHouse testcontainer + the cover
       # binary + the SDK vitest suite.

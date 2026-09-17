@@ -14,7 +14,7 @@
 <p align="center">
   The open-source real-time API gateway for ClickHouse: schema-aware ingest, async batching, real-time SSE streaming, and tiered query caching.
   <strong>
-  All in a single binary.
+  All in one binary, plus the per-ClickHouse-version artifact it loads at start.
   </strong>
 </p>
 
@@ -67,7 +67,7 @@ Full walkthrough at **[wavehouse.dev/getting-started](https://wavehouse.dev/gett
 
 ## Why WaveHouse?
 
-ClickHouse is a phenomenal OLAP database, but pointing a frontend right at it leaves a lot to be desired: one-row inserts trigger `Too many parts`, there's no backpressure or edge validation, no real-time push, and no row/column security. You end up building custom APIs, a Kafka queue, a batch consumer, a cache tier, and an auth service. **WaveHouse is that whole stack as one binary** — the only external dependency is ClickHouse.
+ClickHouse is a phenomenal OLAP database, but pointing a frontend right at it leaves a lot to be desired: one-row inserts trigger `Too many parts`, there's no backpressure or edge validation, no real-time push, and no row/column security. You end up building custom APIs, a Kafka queue, a batch consumer, a cache tier, and an auth service. **WaveHouse is that whole stack as one binary** (plus a per-ClickHouse-version artifact it loads at start, for ClickHouse-native ingest validation and row-level security) — the only external network dependency is ClickHouse.
 
 If you're building user-facing analytics, WaveHouse is like **Supabase for ClickHouse**. Or an **open-source Tinybird** that pushes data to the frontend in real time over SSE, not just pull-based REST.
 
@@ -81,7 +81,7 @@ If you're building user-facing analytics, WaveHouse is like **Supabase for Click
 
 |                               | Direct ClickHouse | Kafka + CH (DIY) |   Tinybird    | **WaveHouse**  |
 | ----------------------------- | :---------------: | :--------------: | :-----------: | :------------: |
-| Self-hosted, single binary    |         —         |        —         |   ✗ (SaaS)    |       ✓        |
+| Self-hosted, one binary       |         —         |        —         |   ✗ (SaaS)    |       ✓        |
 | Safe high-rate inserts        |         ✗         |  ✓ (via Kafka)   |       ✓       |       ✓        |
 | Schema validation at the edge |         ✗         |      custom      |       ✓       |       ✓        |
 | Real-time push (SSE)          |         ✗         |  custom service  |       ✗       |    ✓ native    |
@@ -127,6 +127,14 @@ Swap in `:vX.Y.Z` and `release.yml` for a release image. Pin the signer either w
 go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 ```
 
+`go install` compiles from source with cgo enabled (requires a C toolchain and glibc — Linux amd64/arm64 or macOS arm64) but does not fetch the [chtypes artifact](https://wavehouse.dev/deployment#chtypes-artifacts) WaveHouse loads at start. Fetch it once before the first run:
+
+```bash
+go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.2.1 fetch <your-clickhouse-minor-version>
+```
+
+This downloads 160–290 MB into the default local cache (`~/.cache/chtypes/artifacts/<os>-<arch>`); point `WH_CHTYPES_REGISTRY` elsewhere if you keep it somewhere else.
+
 ```bash
 wavehouse bootstrap ./settings   # starter settings directory, every key at its default
 WH_SETTINGS_DIR=./settings wavehouse
@@ -144,7 +152,7 @@ Track what's shipped, in progress, and planned on the [**project board**](https:
 
 ## Local Development
 
-You'll need **Go 1.26+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pnpm 11.21+**. See [development docs](https://wavehouse.dev/development) for the authoritative source of truth with the full list, version requirements, and gotchas.
+You'll need **Go 1.27+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pnpm 11.21+**. See [development docs](https://wavehouse.dev/development) for the authoritative source of truth with the full list, version requirements, and gotchas.
 
 ```bash
 make tools    # one-time bootstrap

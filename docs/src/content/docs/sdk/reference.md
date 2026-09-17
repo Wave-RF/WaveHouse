@@ -139,7 +139,7 @@ Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev serve
 | `--out`, `-o` | Output .d.ts file path | `./wavehouse.d.ts` |
 | `--auth`, `-a` | Bearer token (if auth required) | — |
 
-The generated row type is the **read** shape — with one exception running the other way: an `EPHEMERAL` column declares a default, so codegen emits it too, yet no query can ever return it. There the type says readable where only the write is real. A `MATERIALIZED` or `ALIAS` column declares a default, so it is emitted as optional — but supplying one on `insert` is a `400` (`column "x" of table "t" is materialized and cannot be inserted`), and the type will not catch it. Omit computed columns; the server fills them in.
+The generated row type is the **read** shape, and computed columns are where it and the server disagree. An `EPHEMERAL` column declares a default, so codegen emits it, yet no query can ever return it — the type says readable where only the write is real. `MATERIALIZED` and `ALIAS` columns declare defaults too, so they are emitted as optional, but supplying any of the three on `insert` is a `400` carrying ClickHouse's own code 117 (`Unknown field found while parsing JSONEachRow format: x`), and the type will not catch it. Omit computed columns; the server fills them in.
 
 **Example output:**
 
@@ -164,7 +164,7 @@ export interface ClicksRow {
 | ClickHouse Type | TypeScript Type |
 |----------------|-----------------|
 | `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Enum*`, `IPv4/6` | `string` |
-| `UInt*`, `Int*`, `Float*`, `Decimal*` | `number` |
+| `UInt*`, `Int*`, `Float*`, `Decimal*` | `number` — `Decimal*` comes back as a JSON number, not a string |
 | `Bool` | `boolean` |
 | `Nullable(T)` | `T \| null` |
 | `Array(T)` | `T[]` |

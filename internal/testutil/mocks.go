@@ -183,6 +183,7 @@ func (m *MockJetStreamMsg) DoubleAck(_ context.Context) error {
 func (m *MockJetStreamMsg) NakWithDelay(_ time.Duration) error {
 	panic("MockJetStreamMsg.NakWithDelay not implemented")
 }
+
 func (m *MockJetStreamMsg) InProgress() error { panic("MockJetStreamMsg.InProgress not implemented") }
 func (m *MockJetStreamMsg) Term() error       { panic("MockJetStreamMsg.Term not implemented") }
 func (m *MockJetStreamMsg) TermWithReason(string) error {

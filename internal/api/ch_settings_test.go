@@ -17,7 +17,7 @@ func TestChReadSettings(t *testing.T) {
 		limits chQueryLimits
 		// want is the exact settings map expected; nil means chReadSettings
 		// must return nil (no caps → no context wrapping).
-		want map[string]any
+		want map[string]string
 	}{
 		{
 			name:   "no caps set",
@@ -27,35 +27,36 @@ func TestChReadSettings(t *testing.T) {
 		{
 			name:   "sub-second execution time is a fractional max_execution_time",
 			limits: chQueryLimits{ExecutionTime: 500 * time.Millisecond},
-			// The driver only auto-derives max_execution_time for deadlines > 1s,
-			// so a 500ms cap MUST be emitted explicitly or it reaches CH unbounded.
-			want: map[string]any{"max_execution_time": 0.5},
+			// A request deadline is not a server-side bound, so a sub-second cap
+			// MUST be emitted explicitly — and as fractional seconds, which a
+			// whole-second spelling would round away to "no cap at all".
+			want: map[string]string{"max_execution_time": "0.5"},
 		},
 		{
 			name:   "multi-second execution time",
 			limits: chQueryLimits{ExecutionTime: 3 * time.Second},
-			want:   map[string]any{"max_execution_time": 3.0},
+			want:   map[string]string{"max_execution_time": "3"},
 		},
 		{
 			name:   "max_result_rows caps result rows with throw mode",
 			limits: chQueryLimits{MaxResultRows: 1000},
-			want: map[string]any{
-				"max_result_rows":      1000,
+			want: map[string]string{
+				"max_result_rows":      "1000",
 				"result_overflow_mode": "throw",
 			},
 		},
 		{
 			name:   "max_rows_to_read caps rows scanned with throw mode",
 			limits: chQueryLimits{MaxRowsToRead: 1_000_000},
-			want: map[string]any{
-				"max_rows_to_read":   int64(1_000_000),
+			want: map[string]string{
+				"max_rows_to_read":   "1000000",
 				"read_overflow_mode": "throw",
 			},
 		},
 		{
 			name:   "max_memory_usage caps peak query memory",
 			limits: chQueryLimits{MaxMemoryBytes: 4 << 30}, // 4 GiB > int32
-			want:   map[string]any{"max_memory_usage": int64(4 << 30)},
+			want:   map[string]string{"max_memory_usage": "4294967296"},
 		},
 		{
 			name: "all caps together",
@@ -65,20 +66,20 @@ func TestChReadSettings(t *testing.T) {
 				MaxRowsToRead:  2_000_000,
 				MaxMemoryBytes: 8 << 30,
 			},
-			want: map[string]any{
-				"max_execution_time":   2.0,
-				"max_result_rows":      500,
+			want: map[string]string{
+				"max_execution_time":   "2",
+				"max_result_rows":      "500",
 				"result_overflow_mode": "throw",
-				"max_rows_to_read":     int64(2_000_000),
+				"max_rows_to_read":     "2000000",
 				"read_overflow_mode":   "throw",
-				"max_memory_usage":     int64(8 << 30),
+				"max_memory_usage":     "8589934592",
 			},
 		},
 		{
 			name:   "zero caps are omitted even when others are set",
 			limits: chQueryLimits{MaxRowsToRead: 42},
-			want: map[string]any{
-				"max_rows_to_read":   int64(42),
+			want: map[string]string{
+				"max_rows_to_read":   "42",
 				"read_overflow_mode": "throw",
 			},
 		},
@@ -99,12 +100,12 @@ func TestChReadSettings(t *testing.T) {
 				t.Fatalf("expected settings %#v, got nil", tt.want)
 			}
 			if len(got) != len(tt.want) {
-				t.Fatalf("settings key count mismatch: got %#v, want %#v", map[string]any(got), tt.want)
+				t.Fatalf("settings key count mismatch: got %#v, want %#v", got, tt.want)
 			}
 			for k, wantV := range tt.want {
 				gotV, ok := got[k]
 				if !ok {
-					t.Errorf("missing setting %q (got %#v)", k, map[string]any(got))
+					t.Errorf("missing setting %q (got %#v)", k, got)
 					continue
 				}
 				if gotV != wantV {

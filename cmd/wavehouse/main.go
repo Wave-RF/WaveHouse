@@ -28,6 +28,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
 // Pre-populated build info variables, set via ldflags by the Makefile and by
@@ -321,9 +322,24 @@ func run() int {
 	// only after the first successful Refresh (sync or retry) so it never
 	// races RetryRefresh on Refresh calls or on bootState writes.
 	bootState := api.NewBootState(nil)
+
+	// chtypes engine — opened once at boot, like data_dir. Failure here is
+	// fatal (explicit registry dir missing/unreadable, or no artifact
+	// anywhere when unset): unlike schema discovery, there is no useful
+	// degraded mode without a validation engine.
+	types, err := typelayer.NewEngine(typelayer.Config{RegistryDir: cfg.ClickHouse.ChtypesRegistry}, logger)
+	if err != nil {
+		logger.Error("chtypes engine init", "error", err)
+		return 1
+	}
+
 	// Both sources are read per refresh, so a settings reload retunes the
 	// cadence and a ClickHouse reconfigure moves the database without a restart.
 	registry := discovery.NewSchemaRegistry(chConn, chConn.Database, settingsStore.SchemaRefreshInterval, logger)
+	// Bind (re)compiles per-table handles after every successful Refresh —
+	// registered before the first Refresh call below so boot itself binds,
+	// not just later reloads.
+	registry.OnRefresh(types.Bind)
 	if err := registry.Refresh(ctx); err != nil {
 		logger.Warn("schema discovery failed on boot, retrying in background", "error", err)
 		bootState.Set(fmt.Errorf("schema discovery: %w", err))
@@ -458,6 +474,7 @@ func run() int {
 	// per (topic, role) and pushes it to that role's subscribers.
 	sseMetrics := stream.NewMetrics()
 	streamHub := stream.NewHub(policySource, registry, sseMetrics)
+	streamHub.RowEvaluator = stream.NewRowEvaluator(types, logger)
 
 	// Start batch consumer → ClickHouse.
 	ingestCleanup, err := ingest.StartIngestWorker(
@@ -494,6 +511,7 @@ func run() int {
 	ingestHandler.PolicySource = policySource
 	ingestHandler.Dedup = dedup
 	ingestHandler.DedupeSettings = settingsStore.DedupeFor
+	ingestHandler.Types = types
 
 	dlqHandler := api.NewDLQHandler(js, logger)
 
@@ -569,6 +587,8 @@ func run() int {
 		}
 	}()
 
+	// Pipes and StructuredQuery take the HTTP target rather than the native
+	// driver: they ask ClickHouse for JSON (internal/api/clickhouse_http.go).
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
 		Query:           queryHandler,
@@ -577,8 +597,8 @@ func run() int {
 		Version:         api.NewVersionHandler(Version, GitCommit, BuildTime),
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
-		Pipes:           api.NewPipesHandler(settingsStore, policySource, chConn, cache, chConn.QueryTimeout, logger),
-		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policySource, settingsStore.TimestampBucketSeconds, chConn.QueryTimeout, settingsStore.DefaultMaxRows, logger),
+		Pipes:           api.NewPipesHandler(settingsStore, policySource, chConn.Target, cache, chConn.QueryTimeout, logger),
+		StructuredQuery: api.NewStructuredQueryHandler(chConn.Target, cache, registry, policySource, settingsStore.TimestampBucketSeconds, chConn.QueryTimeout, settingsStore.DefaultMaxRows, logger),
 
 		AuthMW:       authMW,
 		PolicySource: policySource,

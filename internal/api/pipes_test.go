@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -38,8 +40,12 @@ func pipesRequest(t *testing.T, method, path, name string, body any) *http.Reque
 }
 
 // noTimeout is the pipe-execution deadline source for handler tests that
-// never reach ClickHouse.
+// never reach ClickHouse. It is an ALREADY-EXPIRED deadline, so a test whose
+// pipe does reach ClickHouse must use shortTimeout instead.
 func noTimeout() time.Duration { return 0 }
+
+// shortTimeout bounds the tests that execute against a stub ClickHouse.
+func shortTimeout() time.Duration { return 5 * time.Second }
 
 func TestPipesHandler_List(t *testing.T) {
 	t.Parallel()
@@ -409,4 +415,71 @@ func TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed(t *testing.T) {
 	assert.NotEqual(t, http.StatusForbidden, w.Code,
 		"admin bypasses the allowlist on a pipe with no allowed_roles")
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
+}
+
+// TestPipesHandler_Execute_ServesClickHouseBytes pins the pipe execution path
+// now that it runs over ClickHouse's HTTP interface: the bound SQL is the POST
+// body, the rows come back as ClickHouse rendered them, and the response is
+// the JSON array with X-Cache: MISS. A pipe inlines its parameters (they can
+// sit in a LIMIT, where a bound value is not legal SQL), so nothing is bound.
+func TestPipesHandler_Execute_ServesClickHouseBytes(t *testing.T) {
+	t.Parallel()
+	var gotSQL string
+	var gotParams int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotSQL = string(body)
+		for k := range r.URL.Query() {
+			if strings.HasPrefix(k, "param_") {
+				gotParams++
+			}
+		}
+		_, _ = io.WriteString(w, "{\"page\":\"/home\",\"n\":3}\n")
+	}))
+	t.Cleanup(srv.Close)
+
+	store := pipes.Static(&pipes.NamedQuery{
+		Name:       "by_page",
+		SQL:        "SELECT page, count() AS n FROM clicks WHERE page = {{page}} GROUP BY page LIMIT {{lim}}",
+		Parameters: []pipes.ParamDef{{Name: "page", Required: true}, {Name: "lim", Default: 5}},
+	})
+	h := NewPipesHandler(store, policy.Static(&policy.Policy{}),
+		func() chconn.Target { return chconn.Target{URL: srv.URL} },
+		nil, shortTimeout, testutil.NopLogger())
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/by_page/execute", "by_page", map[string]any{"page": "/home"})
+	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
+	h.Execute(w, r)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, "SELECT page, count() AS n FROM clicks WHERE page = '/home' GROUP BY page LIMIT 5", gotSQL)
+	assert.Zero(t, gotParams, "a pipe inlines its values; nothing should be bound")
+	assert.JSONEq(t, `[{"page":"/home","n":3}]`, w.Body.String())
+	assert.Equal(t, "MISS", w.Header().Get("X-Cache"))
+}
+
+// TestPipesHandler_Execute_ClickHouseErrorIs500 pins the error contract: a pipe
+// whose SQL ClickHouse refuses is a 500 carrying ClickHouse's own message.
+func TestPipesHandler_Execute_ClickHouseErrorIs500(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, "Code: 60. DB::Exception: Table default.nope does not exist. (UNKNOWN_TABLE)")
+	}))
+	t.Cleanup(srv.Close)
+
+	store := pipes.Static(&pipes.NamedQuery{Name: "broken", SQL: "SELECT * FROM nope"})
+	h := NewPipesHandler(store, policy.Static(&policy.Policy{}),
+		func() chconn.Target { return chconn.Target{URL: srv.URL} },
+		nil, shortTimeout, testutil.NopLogger())
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/broken/execute", "broken", nil)
+	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
+	h.Execute(w, r)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "Code: 60")
+	testutil.AssertJSONErrorResponse(t, w)
 }

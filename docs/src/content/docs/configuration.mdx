@@ -53,6 +53,7 @@ Only the secret is boot config. The wiring — native address, HTTP port and sch
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password, combined with the settings directory's `clickhouse.username` on every (re)connect. A secret, so it never lives in a tracked JSON file; rotating it is a restart. |
+| `clickhouse.chtypes_registry` | `WH_CHTYPES_REGISTRY` | *(empty)* | Directory holding the chtypes artifacts (one `<minor>/` per ClickHouse line). Empty defers to the chtypes search path — `$CHTYPES_REGISTRY`, `~/.cache/chtypes/artifacts/<os>-<arch>`, then the system directories — and loads the server's line lazily; an explicit directory is opened eagerly, every artifact in it. Boot-tier: changing it is a restart. See [chtypes artifacts](/deployment#chtypes-artifacts). |
 
 ### Server-side resource limits
 

@@ -149,28 +149,6 @@ func TestEvaluate_CheckClauses(t *testing.T) {
 	assert.Equal(t, "org-456", perms.Insert.CheckClauses["org_id"])
 }
 
-// TestEvaluate_CheckClauses_StaticLiteralTyped: a placeholder-free check
-// value is wrapped as LiteralValue — the marker that lets the ingest
-// comparison accept its numeric reading — while a claim-derived value (above)
-// stays a plain string, so a string-typed claim can never gain that reading.
-func TestEvaluate_CheckClauses_StaticLiteralTyped(t *testing.T) {
-	t.Parallel()
-	eqVal := "1.0"
-	p := &Policy{
-		Tables: map[string]TablePolicy{
-			"clicks": {
-				"user": {Insert: &InsertPermissions{Check: map[string]Filter{
-					"count": {Eq: &eqVal},
-				}}},
-			},
-		},
-	}
-	perms := Evaluate(p, "user", "clicks", "insert", map[string]any{})
-	assert.True(t, perms.Allowed)
-	require.Contains(t, perms.Insert.CheckClauses, "count")
-	assert.Equal(t, LiteralValue("1.0"), perms.Insert.CheckClauses["count"])
-}
-
 func TestEvaluate_AggregationLimits(t *testing.T) {
 	t.Parallel()
 	p := &Policy{
@@ -469,8 +447,8 @@ func TestResolveTemplate(t *testing.T) {
 		// A static literal binds exactly as written even when it spells a JSON
 		// number: canonicalizing it here would move read filters on String
 		// columns (`_neq: "1.0"` on a version column would stop excluding rows
-		// storing "1.0"). The insert-check comparison accepts the numeric
-		// reading at compare time instead (CanonicalNumericLiteral).
+		// storing "1.0"). A literal a numeric column cannot read is
+		// ClickHouse's own code 53 at evaluation time, on both surfaces.
 		{"numeric-spelled literal binds as written", "1.0", "1.0", true},
 		{"exponent-spelled literal binds as written", "1e400", "1e400", true},
 	}
@@ -570,41 +548,6 @@ func TestCanonicalScalar(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got, ok := CanonicalScalar(tt.v)
-			assert.Equal(t, tt.want, got)
-			assert.Equal(t, tt.ok, ok)
-		})
-	}
-}
-
-// TestCanonicalNumericLiteral pins the numeric reading of a policy-authored
-// check literal: only spellings JSON itself can produce canonicalize — the
-// json.Valid gate rejects big.Int-acceptable forms like "+5" and "007" that
-// no decoded claim or payload value ever carries, so the check comparison's
-// second reading can't accept a spelling the first side can't produce.
-func TestCanonicalNumericLiteral(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		lit  string
-		want string
-		ok   bool
-	}{
-		{"float spelling of an integer", "1.0", "1", true},
-		{"exponent spelling", "25e-4", "0.0025", true},
-		{"negative fraction", "-2.50", "-2.5", true},
-		{"integer passes through", "7", "7", true},
-		{"leading plus is not JSON", "+5", "", false},
-		{"leading zero is not JSON", "007", "", false},
-		{"whitespace-padded number is not a bare literal", " 5", "", false},
-		{"non-numeric literal", "org-123", "", false},
-		{"boolean literal is valid JSON but not a number", "true", "", false},
-		{"empty literal", "", "", false},
-		{"no canonical form past the bound", "1e400", "", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, ok := CanonicalNumericLiteral(tt.lit)
 			assert.Equal(t, tt.want, got)
 			assert.Equal(t, tt.ok, ok)
 		})
@@ -845,7 +788,12 @@ func TestEvaluate_WildcardRoleKeyDoesNotGrant(t *testing.T) {
 		"a \"*\" role key must not grant a roleless request")
 }
 
-func TestResolveFilters_MultipleOperators(t *testing.T) {
+// The TestFiltersToSQL_* tests below target the query path's rendering as
+// evaluateSelect performs it: resolvePredicates, then predicatesToSQL over the
+// result. They spell the pair out rather than going through a helper, so the
+// composition under test is the one production runs.
+
+func TestFiltersToSQL_MultipleOperators(t *testing.T) {
 	t.Parallel()
 	neqVal := "deleted"
 	gtVal := "0"
@@ -853,29 +801,29 @@ func TestResolveFilters_MultipleOperators(t *testing.T) {
 		"status": {Neq: &neqVal},
 		"count":  {Gt: &gtVal},
 	}
-	clauses, params := resolveFilters(filters, nil)
+	clauses, params := predicatesToSQL(resolvePredicates(filters, nil))
 	assert.Len(t, clauses, 2)
 	assert.Len(t, params, 2)
 }
 
-func TestResolveFilters_LtOperator(t *testing.T) {
+func TestFiltersToSQL_LtOperator(t *testing.T) {
 	t.Parallel()
 	ltVal := "100"
 	filters := map[string]Filter{
 		"price": {Lt: &ltVal},
 	}
-	clauses, params := resolveFilters(filters, nil)
+	clauses, params := predicatesToSQL(resolvePredicates(filters, nil))
 	require.Len(t, clauses, 1)
 	assert.Contains(t, clauses[0], "`price` < ?")
 	assert.Equal(t, "100", params[0])
 }
 
-// TestResolveFilters_UnresolvableClaim_FailsClosed: the #385 fix — a row-filter
+// TestFiltersToSQL_UnresolvableClaim_FailsClosed: the #385 fix — a row-filter
 // template referencing a claim the token doesn't carry emits a constant-false
 // predicate for EVERY operator, never a real comparison against the empty
 // string it renders to (where not-equals / greater-than on a string column
 // would match essentially all rows).
-func TestResolveFilters_UnresolvableClaim_FailsClosed(t *testing.T) {
+func TestFiltersToSQL_UnresolvableClaim_FailsClosed(t *testing.T) {
 	t.Parallel()
 	tmpl := "{{ jwt.tenant_id }}"
 	partial := "t-{{ jwt.tenant_id }}"
@@ -894,7 +842,7 @@ func TestResolveFilters_UnresolvableClaim_FailsClosed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			clauses, params := resolveFilters(map[string]Filter{"tenant_id": tt.filter}, claims)
+			clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": tt.filter}, claims))
 			require.Len(t, clauses, 1)
 			assert.Equal(t, "1 = 0", clauses[0])
 			assert.Empty(t, params)
@@ -902,14 +850,14 @@ func TestResolveFilters_UnresolvableClaim_FailsClosed(t *testing.T) {
 	}
 }
 
-// TestResolveFilters_StructuredClaim_FailsClosed: a claim that resolves to a
+// TestFiltersToSQL_StructuredClaim_FailsClosed: a claim that resolves to a
 // JSON object or array — usually a policy typo that dropped the final path
 // segment ({{ jwt.meta }} for {{ jwt.meta.tenant_id }}) — fails closed on every
 // operator instead of binding its "map[…]"/"[…]" stringification, which _neq
 // would match against essentially every row. The one legitimate structured
 // shape is unaffected: a bare-claim _in against an ARRAY binds its elements
-// (TestResolveFilters_InArrayClaim).
-func TestResolveFilters_StructuredClaim_FailsClosed(t *testing.T) {
+// (TestFiltersToSQL_InArrayClaim).
+func TestFiltersToSQL_StructuredClaim_FailsClosed(t *testing.T) {
 	t.Parallel()
 	obj := "{{ jwt.meta }}"
 	arr := "{{ jwt.tids }}"
@@ -931,7 +879,7 @@ func TestResolveFilters_StructuredClaim_FailsClosed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			clauses, params := resolveFilters(map[string]Filter{"tenant_id": tt.filter}, claims)
+			clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": tt.filter}, claims))
 			require.Len(t, clauses, 1)
 			assert.Equal(t, "1 = 0", clauses[0])
 			assert.Empty(t, params)
@@ -939,59 +887,59 @@ func TestResolveFilters_StructuredClaim_FailsClosed(t *testing.T) {
 	}
 }
 
-// TestResolveFilters_LiteralEmptyValue_Binds: a template-free literal "" is the
+// TestFiltersToSQL_LiteralEmptyValue_Binds: a template-free literal "" is the
 // policy author's chosen value, not a resolution failure — it must keep binding
 // an equality against the empty string rather than be mistaken for the #385
 // fail-closed case.
-func TestResolveFilters_LiteralEmptyValue_Binds(t *testing.T) {
+func TestFiltersToSQL_LiteralEmptyValue_Binds(t *testing.T) {
 	t.Parallel()
 	empty := ""
-	clauses, params := resolveFilters(map[string]Filter{"status": {Eq: &empty}}, nil)
+	clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"status": {Eq: &empty}}, nil))
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`status` = ?", clauses[0])
 	assert.Equal(t, []any{""}, params)
 }
 
-// TestResolveFilters_EmptyStringClaim_Binds: the boundary of the #385
+// TestFiltersToSQL_EmptyStringClaim_Binds: the boundary of the #385
 // fail-closed rule — only an ABSENT or null claim fails closed. A claim present
 // as an empty string resolves and binds normally, so `_neq` against an
 // empty-string claim still emits a real `col != ?` predicate bound to the
 // empty string, never a constant-false predicate.
-func TestResolveFilters_EmptyStringClaim_Binds(t *testing.T) {
+func TestFiltersToSQL_EmptyStringClaim_Binds(t *testing.T) {
 	t.Parallel()
 	neq := "{{ jwt.tenant_id }}"
 	claims := map[string]any{"tenant_id": ""}
-	clauses, params := resolveFilters(map[string]Filter{"tenant_id": {Neq: &neq}}, claims)
+	clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": {Neq: &neq}}, claims))
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`tenant_id` != ?", clauses[0])
 	assert.Equal(t, []any{""}, params)
 }
 
-// TestResolveFilters_InEmptyStringClaim_Binds: an _in whose claim is present as
+// TestFiltersToSQL_InEmptyStringClaim_Binds: an _in whose claim is present as
 // an empty STRING is a scalar, not an empty set — it binds as the one-element
 // set `IN (?)` bound to the empty string. Failing closed is reserved for
-// absent/null claims and empty arrays (TestResolveFilters_InEmptyClaim_FailsClosed).
-func TestResolveFilters_InEmptyStringClaim_Binds(t *testing.T) {
+// absent/null claims and empty arrays (TestFiltersToSQL_InEmptyClaim_FailsClosed).
+func TestFiltersToSQL_InEmptyStringClaim_Binds(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.tenant_id }}"
 	claims := map[string]any{"tenant_id": ""}
-	clauses, params := resolveFilters(map[string]Filter{"tenant_id": {In: &in}}, claims)
+	clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": {In: &in}}, claims))
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`tenant_id` IN (?)", clauses[0])
 	assert.Equal(t, []any{""}, params)
 }
 
-// TestResolveFilters_InTemplateWithText_Binds: the resolvable half of the _in
+// TestFiltersToSQL_InTemplateWithText_Binds: the resolvable half of the _in
 // surrounding-text branch — a template with literal text AND a claim the token
 // carries binds the rendered one-element set `IN (?)`. Its fail-closed twin
-// (unresolvable claim → 1 = 0) is TestResolveFilters_UnresolvableClaim_FailsClosed;
+// (unresolvable claim → 1 = 0) is TestFiltersToSQL_UnresolvableClaim_FailsClosed;
 // this guards against a regression to an unconditional nil, which would deny every
 // row for a policy of this shape while the whole suite still passed.
-func TestResolveFilters_InTemplateWithText_Binds(t *testing.T) {
+func TestFiltersToSQL_InTemplateWithText_Binds(t *testing.T) {
 	t.Parallel()
 	in := "t-{{ jwt.tenant_id }}"
 	claims := map[string]any{"tenant_id": "x"}
-	clauses, params := resolveFilters(map[string]Filter{"tenant_id": {In: &in}}, claims)
+	clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": {In: &in}}, claims))
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`tenant_id` IN (?)", clauses[0])
 	assert.Equal(t, []any{"t-x"}, params)
@@ -1032,8 +980,8 @@ func TestEvaluate_FilterUnresolvableClaim_FailsClosed(t *testing.T) {
 }
 
 // TestValidate_RejectsBindUnsafeFilterColumn: a policy whose row-filter column
-// contains '?' is refused at write time — it would shift clickhouse-go's
-// positional value binding when interpolated into the WHERE clause.
+// contains '?' is refused at write time — it would shift the
+// positional-to-named parameter rewrite when interpolated into the WHERE clause.
 func TestValidate_RejectsBindUnsafeFilterColumn(t *testing.T) {
 	t.Parallel()
 	eq := "{{ jwt.org }}"
@@ -1100,42 +1048,42 @@ func TestValidate_AcceptsWellFormedTemplates(t *testing.T) {
 	}
 }
 
-// TestResolveFilters_InArrayClaim: the headline #224 fix — an _in filter whose
+// TestFiltersToSQL_InArrayClaim: the headline #224 fix — an _in filter whose
 // value is a single array-valued claim expands to `col IN (?, …)` with one bound
 // param per element, scoping the role to that set instead of producing no
 // predicate (the former fail-open).
-func TestResolveFilters_InArrayClaim(t *testing.T) {
+func TestFiltersToSQL_InArrayClaim(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.tenants }}"
 	filters := map[string]Filter{"tenant_id": {In: &in}}
 	claims := map[string]any{"tenants": []any{"a", "b", "c"}}
-	clauses, params := resolveFilters(filters, claims)
+	clauses, params := predicatesToSQL(resolvePredicates(filters, claims))
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`tenant_id` IN (?,?,?)", clauses[0])
 	assert.Equal(t, []any{"a", "b", "c"}, params)
 }
 
-// TestResolveFilters_InScalarClaim: a non-array claim yields a single-element IN,
+// TestFiltersToSQL_InScalarClaim: a non-array claim yields a single-element IN,
 // so _in degrades gracefully to the _eq case rather than erroring.
-func TestResolveFilters_InScalarClaim(t *testing.T) {
+func TestFiltersToSQL_InScalarClaim(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.tenant }}"
 	filters := map[string]Filter{"tenant_id": {In: &in}}
 	claims := map[string]any{"tenant": "solo"}
-	clauses, params := resolveFilters(filters, claims)
+	clauses, params := predicatesToSQL(resolvePredicates(filters, claims))
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`tenant_id` IN (?)", clauses[0])
 	assert.Equal(t, []any{"solo"}, params)
 }
 
-// TestResolveFilters_InNonScalarElement_FailsClosed: the structured-claim rule
-// (TestResolveFilters_StructuredClaim_FailsClosed) extends INSIDE a bare-claim
+// TestFiltersToSQL_InNonScalarElement_FailsClosed: the structured-claim rule
+// (TestFiltersToSQL_StructuredClaim_FailsClosed) extends INSIDE a bare-claim
 // _in array — one object, null, nested-array, or canonical-form-less numeric
 // element fails the WHOLE set closed. Binding such an element's
 // "map[…]"/"<nil>" rendering would bind a value no row legitimately carries,
 // and binding only the clean remainder would silently shrink the set the
 // policy author declared.
-func TestResolveFilters_InNonScalarElement_FailsClosed(t *testing.T) {
+func TestFiltersToSQL_InNonScalarElement_FailsClosed(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.tenants }}"
 	filters := map[string]Filter{"tenant_id": {In: &in}}
@@ -1151,7 +1099,7 @@ func TestResolveFilters_InNonScalarElement_FailsClosed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			clauses, params := resolveFilters(filters, map[string]any{"tenants": tt.tenants})
+			clauses, params := predicatesToSQL(resolvePredicates(filters, map[string]any{"tenants": tt.tenants}))
 			require.Len(t, clauses, 1)
 			assert.Equal(t, "1 = 0", clauses[0])
 			assert.Empty(t, params)
@@ -1159,89 +1107,129 @@ func TestResolveFilters_InNonScalarElement_FailsClosed(t *testing.T) {
 	}
 }
 
-// TestResolveFilters_InNumericElements_BindCanonically: scalar elements of a
+// TestFiltersToSQL_InNumericElements_BindCanonically: scalar elements of a
 // bare-claim _in array bind through the same CanonicalScalar rule as every
 // other operator — numeric spellings canonicalize, large integers keep exact
 // digits, strings pass through.
-func TestResolveFilters_InNumericElements_BindCanonically(t *testing.T) {
+func TestFiltersToSQL_InNumericElements_BindCanonically(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.tenants }}"
 	filters := map[string]Filter{"tenant_id": {In: &in}}
 	claims := map[string]any{"tenants": []any{json.Number("1.0"), json.Number("12345678901234567890"), "b"}}
-	clauses, params := resolveFilters(filters, claims)
+	clauses, params := predicatesToSQL(resolvePredicates(filters, claims))
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`tenant_id` IN (?,?,?)", clauses[0])
 	assert.Equal(t, []any{"1", "12345678901234567890", "b"}, params)
 }
 
-// TestResolveFilters_NumericClaimBinding pins the SQL surface of numeric claim
+// TestFiltersToSQL_NumericClaimBinding pins the SQL surface of numeric claim
 // rendering for a hand-built claims map: a json.Number claim binds its canonical
 // exact digits; a float64 below 2^53 binds positionally (never the "1e+06"
 // spelling ClickHouse integer columns reject); a float64 at or past 2^53 lost
 // its digits at decode, so the predicate renders `1 = 0` — matching no rows, the
-// same verdict RowVisible reaches in memory — alone or as one _in element.
-func TestResolveFilters_NumericClaimBinding(t *testing.T) {
+// same verdict the stream reaches on its own surface — alone or as one _in element.
+func TestFiltersToSQL_NumericClaimBinding(t *testing.T) {
 	t.Parallel()
 	tmpl := "{{ jwt.tenant }}"
 	eq := map[string]Filter{"tenant_id": {Eq: &tmpl}}
 
-	clauses, params := resolveFilters(eq, map[string]any{"tenant": json.Number("10000000000000001")})
+	clauses, params := predicatesToSQL(resolvePredicates(eq, map[string]any{"tenant": json.Number("10000000000000001")}))
 	require.Equal(t, []string{"`tenant_id` = ?"}, clauses)
 	assert.Equal(t, []any{"10000000000000001"}, params, "json.Number binds exact digits")
 
-	clauses, params = resolveFilters(eq, map[string]any{"tenant": float64(1_000_000)})
+	clauses, params = predicatesToSQL(resolvePredicates(eq, map[string]any{"tenant": float64(1_000_000)}))
 	require.Equal(t, []string{"`tenant_id` = ?"}, clauses)
 	assert.Equal(t, []any{"1000000"}, params, "small float binds positionally, not 1e+06")
 
-	clauses, params = resolveFilters(eq, map[string]any{"tenant": float64(10000000000000001)})
+	clauses, params = predicatesToSQL(resolvePredicates(eq, map[string]any{"tenant": float64(10000000000000001)}))
 	assert.Equal(t, []string{"1 = 0"}, clauses, "lossy float64 claim matches no rows")
 	assert.Empty(t, params)
 
 	in := "{{ jwt.tenants }}"
-	clauses, params = resolveFilters(map[string]Filter{"tenant_id": {In: &in}},
-		map[string]any{"tenants": []any{"a", float64(1 << 60)}})
+	clauses, params = predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": {In: &in}},
+		map[string]any{"tenants": []any{"a", float64(1 << 60)}}))
 	assert.Equal(t, []string{"1 = 0"}, clauses, "one poisoned element resolves the whole set empty")
 	assert.Empty(t, params)
 }
 
-// TestCompareCanonicalDecimals pins the digit-string ordering over canonical
-// forms — the comparison twin of canonicalDecimal, exact at any width, never a
-// float round-trip. Each pair is asserted in both directions.
-func TestCompareCanonicalDecimals(t *testing.T) {
+// TestRowFilter_UnresolvableClaim_NoRowsOnBothPaths pins the #457 fail-closed
+// rule on BOTH read surfaces at once: a filter template whose claim the token
+// doesn't carry renders the constant-false predicate on the query path AND
+// yields a predicate with NO values on the stream path, which the type layer
+// refuses without compiling anything. One Evaluate resolution drives both, so a
+// claim-less token can never see zero rows on /v1/query yet every row on
+// /v1/stream. HasRowFilter must stay true for the failed predicate — dropping it
+// would put the role back on the unfiltered once-per-role fast path, the exact
+// fail-open this test exists to prevent.
+func TestRowFilter_UnresolvableClaim_NoRowsOnBothPaths(t *testing.T) {
 	t.Parallel()
+	noTenant := map[string]any{"role": "user"} // validly signed token, no tenant claim
 	tests := []struct {
-		a, b string
-		want int
+		name   string
+		filter map[string]Filter
+		claims map[string]any
 	}{
-		{"0", "0", 0},
-		{"1", "2", -1},
-		{"9", "100", -1},
-		{"-1", "1", -1},
-		{"-2", "-1", -1},
-		{"-100", "-9", -1},
-		{"1.5", "1.5", 0},
-		{"1.05", "1.5", -1},
-		{"0.5", "0.55", -1},
-		{"2", "2.5", -1},
-		{"-1.5", "-1", -1},
-		{"0.0025", "0.003", -1},
-		{"12345678901234567890", "12345678901234567891", -1},
-		{"9007199254740992", "9007199254740993", -1},
+		{"_eq", map[string]Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}}, noTenant},
+		{"_neq, the leak direction", map[string]Filter{"tenant_id": {Neq: new("{{ jwt.tenant }}")}}, noTenant},
+		{"_gt", map[string]Filter{"tenant_id": {Gt: new("{{ jwt.tenant }}")}}, noTenant},
+		{"_in with surrounding text", map[string]Filter{"tenant_id": {In: new("t-{{ jwt.tenant }}")}}, noTenant},
+		{
+			"object claim in a scalar slot",
+			map[string]Filter{"tenant_id": {Eq: new("{{ jwt.meta }}")}},
+			map[string]any{"meta": map[string]any{"tenant": "acme"}},
+		},
 	}
 	for _, tt := range tests {
-		assert.Equal(t, tt.want, compareCanonicalDecimals(tt.a, tt.b), "%s vs %s", tt.a, tt.b)
-		assert.Equal(t, -tt.want, compareCanonicalDecimals(tt.b, tt.a), "%s vs %s reversed", tt.b, tt.a)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := &Policy{Tables: map[string]TablePolicy{
+				"t": {"r": {Select: &SelectPermissions{Filter: tt.filter}}},
+			}}
+			perms := Evaluate(p, "r", "t", "select", tt.claims)
+
+			assert.Equal(t, "1 = 0", perms.Select.WhereClause, "query path: constant-false predicate")
+			assert.Empty(t, perms.Select.WhereParams)
+			assert.True(t, perms.HasRowFilter(), "failed predicate must keep the stream on the per-subscriber path")
+
+			preds, ok := perms.Predicates()
+			require.True(t, ok, "a resolved read side answers with its predicates")
+			require.Len(t, preds, 1, "the failed predicate is present, not dropped")
+			assert.Equal(t, "tenant_id", preds[0].Column)
+			assert.Empty(t, preds[0].Values,
+				"stream path: no values to bind, which matches no row without compiling anything")
+		})
 	}
 }
 
-// TestResolveFilters_InEmptyClaim_FailsClosed: an empty set makes the predicate
+// TestPredicates_IsTheSameResolutionAsTheWhereClause: the two read surfaces are
+// rendered from ONE resolvePredicates call, so the predicates handed to the
+// stream carry exactly the values bound into the query's WHERE — in the same
+// order. A second resolution, even of the same policy, is what #457 was about.
+func TestPredicates_IsTheSameResolutionAsTheWhereClause(t *testing.T) {
+	t.Parallel()
+	p := &Policy{Tables: map[string]TablePolicy{
+		"t": {"r": {Select: &SelectPermissions{Filter: map[string]Filter{
+			"tenant_id": {Eq: new("{{ jwt.tenant }}")},
+		}}}},
+	}}
+	perms := Evaluate(p, "r", "t", "select", map[string]any{"tenant": "acme"})
+
+	assert.Equal(t, "`tenant_id` = ?", perms.Select.WhereClause)
+	assert.Equal(t, []any{"acme"}, perms.Select.WhereParams)
+
+	preds, ok := perms.Predicates()
+	require.True(t, ok)
+	assert.Equal(t, []Predicate{{Column: "tenant_id", Op: "=", Values: []string{"acme"}}}, preds)
+}
+
+// TestFiltersToSQL_InEmptyClaim_FailsClosed: an empty set makes the predicate
 // match no rows (a constant-false predicate) rather than widen to all rows — the
 // fail-closed direction. `IN ()` is invalid SQL. Two distinct branches of
 // resolveInValues reach this: an absent claim (navigateClaims returns nil, which
 // CanonicalScalar rejects in its nil/object/array case, so resolveInValues'
 // `default` branch fails the set closed) and a present-but-empty array (the
 // `case []any` branch with zero elements). Both must fail closed.
-func TestResolveFilters_InEmptyClaim_FailsClosed(t *testing.T) {
+func TestFiltersToSQL_InEmptyClaim_FailsClosed(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.tenants }}"
 	filters := map[string]Filter{"tenant_id": {In: &in}}
@@ -1252,7 +1240,7 @@ func TestResolveFilters_InEmptyClaim_FailsClosed(t *testing.T) {
 	for name, claims := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			clauses, params := resolveFilters(filters, claims)
+			clauses, params := predicatesToSQL(resolvePredicates(filters, claims))
 			require.Len(t, clauses, 1)
 			assert.Equal(t, "1 = 0", clauses[0])
 			assert.Empty(t, params)
@@ -1262,7 +1250,7 @@ func TestResolveFilters_InEmptyClaim_FailsClosed(t *testing.T) {
 
 // TestEvaluate_FilterInClause: end-to-end through Evaluate, an _in filter lands
 // in the role's WhereClause/WhereParams (exercising the bind-safe guard + IN
-// assembly), not just the resolveFilters unit.
+// assembly), not just the resolvePredicates+predicatesToSQL pair below it.
 func TestEvaluate_FilterInClause(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.app_metadata.tenant_ids }}"
@@ -1548,14 +1536,16 @@ func TestEvaluate_UnresolvedSideFailsClosed(t *testing.T) {
 	assert.False(t, ins.IsAggregationAllowed("count"))
 	assert.True(t, ins.HasRowFilter(),
 		"the GATE must not report 'no filter' — that sends the caller down the "+
-			"whole-bucket fast path where RowVisible is never consulted")
-	assert.False(t, ins.RowVisible(map[string]any{"tenant_id": "acme"}, nil),
-		"an unresolved read side must not admit every row")
+			"whole-bucket fast path where no row is ever checked")
+	_, insRows := ins.Predicates()
+	assert.False(t, insRows,
+		"an unresolved read side must refuse the row question, not answer 'no predicates'")
 
-	// The select-resolved grant still evaluates its row filter normally.
+	// The select-resolved grant still hands out its row filter normally.
 	assert.True(t, sel.HasRowFilter())
-	assert.True(t, sel.RowVisible(map[string]any{"tenant_id": "acme"}, nil))
-	assert.False(t, sel.RowVisible(map[string]any{"tenant_id": "globex"}, nil))
+	selPreds, selRows := sel.Predicates()
+	require.True(t, selRows)
+	assert.Equal(t, []Predicate{{Column: "tenant_id", Op: "=", Values: []string{"acme"}}}, selPreds)
 }
 
 // TestHandBuiltPermissions_PresentSidesKeepPlainReading: a value assembled by
@@ -1569,7 +1559,9 @@ func TestHandBuiltPermissions_PresentSidesKeepPlainReading(t *testing.T) {
 	assert.True(t, rp.IsColumnAllowed("anything", true))
 	assert.True(t, rp.IsAggregationAllowed("count"))
 	assert.False(t, rp.RestrictsColumns())
-	assert.True(t, rp.RowVisible(map[string]any{"a": 1}, nil))
+	preds, rows := rp.Predicates()
+	assert.True(t, rows)
+	assert.Empty(t, preds, "a resolved but unfiltered read side admits every row")
 	// An EMPTY insert side has no checks and is resolved — not the same answer as
 	// a nil one below. A slip to `rp.Insert != nil && len(...) > 0` would break
 	// exactly here.
@@ -1591,10 +1583,11 @@ func TestHandBuiltPermissions_NilSideDenies(t *testing.T) {
 	assert.False(t, insertOnly.IsAggregationAllowed("count"))
 	assert.True(t, insertOnly.RestrictsColumns(), "an unresolved read side restricts everything")
 	// HasRowFilter says YES on an unresolved read side on purpose: it routes the
-	// hub onto the per-subscriber path where RowVisible denies, instead of the
-	// no-filter fast path that never consults RowVisible at all.
+	// hub onto the per-subscriber path where Predicates denies, instead of the
+	// no-filter fast path that never asks about a row at all.
 	assert.True(t, insertOnly.HasRowFilter(), "must not take the no-filter fast path")
-	assert.False(t, insertOnly.RowVisible(map[string]any{"a": 1}, nil), "and the per-row check denies")
+	_, insertOnlyRows := insertOnly.Predicates()
+	assert.False(t, insertOnlyRows, "and the per-row question is refused")
 	assert.Empty(t, insertOnly.AllowedProjection([]string{"a", "b"}))
 
 	_, insertChecksOK := insertOnly.CheckClauses()
@@ -1672,7 +1665,7 @@ func TestEvaluate_OperatorLessFilterAndCheckDenyFailClosed(t *testing.T) {
 	// `"tenant_id": {}` survives a strict decode — every Filter operator is
 	// omitempty — and then matches no case in either resolver, so the declared
 	// restriction resolves to nothing. Before this was refused, the policy below
-	// validated clean and RowVisible answered true for every tenant.
+	// validated clean and the row filter admitted every tenant.
 	sel := &Policy{Tables: map[string]TablePolicy{
 		"clicks": {"viewer": {Select: &SelectPermissions{
 			AllowColumns: []string{"*"},
@@ -1698,7 +1691,8 @@ func TestEvaluate_OperatorLessFilterAndCheckDenyFailClosed(t *testing.T) {
 	selPerms := Evaluate(sel, "viewer", "clicks", "select", nil)
 	assert.False(t, selPerms.Allowed, "an operator-less filter must deny, not read as unrestricted")
 	assert.True(t, selPerms.HasRowFilter(), "a denied grant gates every row")
-	assert.False(t, selPerms.RowVisible(map[string]any{"tenant_id": "someone-else"}, nil))
+	_, selRows := selPerms.Predicates()
+	assert.False(t, selRows, "and refuses the row question rather than reading as unfiltered")
 
 	insPerms := Evaluate(ins, "writer", "clicks", "insert", nil)
 	assert.False(t, insPerms.Allowed, "an operator-less check must deny, not drop the rule")

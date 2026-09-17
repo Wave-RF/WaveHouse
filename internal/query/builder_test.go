@@ -1,6 +1,7 @@
 package query
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -136,8 +137,16 @@ func TestBuild_InFilter(t *testing.T) {
 	}
 	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
-	assert.Contains(t, result.SQL, "`page` IN (?,?)")
-	assert.Len(t, result.Params, 2)
+	// One placeholder for the whole list — it binds as an Array(String), which
+	// is what keeps a long list under ClickHouse's 999-query-string-field cap.
+	assert.Contains(t, result.SQL, "`page` IN ?")
+	require.Len(t, result.Params, 1)
+	assert.Equal(t, []any{"/home", "/about"}, result.Params[0])
+
+	sql, params, err := result.NamedParams()
+	require.NoError(t, err)
+	assert.Contains(t, sql, "`page` IN {p0:Array(String)}")
+	assert.Equal(t, []string{`['/home','/about']`}, params)
 }
 
 func TestBuild_OrderBy(t *testing.T) {
@@ -490,34 +499,6 @@ func TestBucketTime_ZeroBucket(t *testing.T) {
 	assert.Equal(t, ts, got, "zero bucket should not truncate")
 }
 
-func TestCoerceFilterValue(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		input   any
-		wantTyp string
-		wantVal any
-	}{
-		{"RFC3339", "2026-04-02T16:02:07Z", "string", "2026-04-02 16:02:07"},
-		{"RFC3339Nano", "2026-04-02T16:02:07.666Z", "string", "2026-04-02 16:02:07.666"},
-		{"RFC3339Nano_short", "2026-04-02T16:02:07.15Z", "string", "2026-04-02 16:02:07.15"},
-		{"plain_string", "hello", "string", "hello"},
-		{"number", 42, "int", 42},
-		{"nil", nil, "<nil>", nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := coerceFilterValue(tt.input)
-			assert.Equal(t, tt.wantTyp, fmt.Sprintf("%T", got))
-			if tt.wantVal != nil {
-				assert.Equal(t, tt.wantVal, got)
-			}
-		})
-	}
-}
-
 func TestBuild_FilterWithTimestampValue(t *testing.T) {
 	t.Parallel()
 	schema := &discovery.TableSchema{
@@ -539,9 +520,17 @@ func TestBuild_FilterWithTimestampValue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, "`received_timestamp` < ?")
 	require.Len(t, result.Params, 1)
-	strVal, isString := result.Params[0].(string)
-	assert.True(t, isString, "timestamp filter value should be coerced to formatted string, got %T", result.Params[0])
-	assert.Equal(t, "2026-04-02 16:02:07.666", strVal)
+	// The value is bound, not rendered, so it reaches ClickHouse exactly as
+	// the caller wrote it. WaveHouse used to rewrite an RFC3339 value into
+	// ClickHouse's own spelling; ClickHouse has parsed the RFC3339 spelling
+	// itself since 26.5, and the surfaces that hand a caller a timestamp to
+	// filter on already emit ClickHouse's spelling.
+	assert.Equal(t, "2026-04-02T16:02:07.666Z", result.Params[0])
+
+	sql, params, err := result.NamedParams()
+	require.NoError(t, err)
+	assert.Contains(t, sql, "`received_timestamp` < {p0:String}")
+	assert.Equal(t, []string{"2026-04-02T16:02:07.666Z"}, params)
 }
 
 func TestBuild_TableNameWithBacktick(t *testing.T) {
@@ -573,8 +562,8 @@ func TestBuild_InvalidColumns(t *testing.T) {
 			sq: &StructuredQuery{
 				Columns: []string{"page"},
 				// A non-schema order column is allowed as an alias reference and
-				// backtick-quoted; only a '?' (which clickhouse-go's binder would
-				// miscount) is rejected.
+				// backtick-quoted; only a '?' (which the positional-to-named rewrite
+				// would miscount) is rejected.
 				OrderBy: []OrderClause{{Column: "we?ird", Dir: "asc"}},
 			},
 			wantErr: "unsupported order column",
@@ -855,7 +844,7 @@ func TestBuild_AggregationAliasQuotedAndContained(t *testing.T) {
 }
 
 // TestBuild_RejectsBindUnsafeAlias keeps the one alias rejection that remains: a
-// '?' would be miscounted by clickhouse-go's positional value binder.
+// '?' would be miscounted by the positional-to-named parameter rewrite.
 func TestBuild_RejectsBindUnsafeAlias(t *testing.T) {
 	t.Parallel()
 	sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "we?ird"}}}
@@ -1001,4 +990,129 @@ func TestBuild_InsertResolvedGrantIsRejected(t *testing.T) {
 	res, err := Build("clicks", &StructuredQuery{Columns: []string{"page"}}, testSchema(), selectResolved, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.NotNil(t, res)
+}
+
+// TestNamedParams pins the ClickHouse binding rule: every positional `?`
+// becomes a named parameter, every scalar binds as String and every list as
+// Array(String), in the order the WHERE assembly emitted them.
+func TestNamedParams(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		sql        string
+		params     []any
+		wantSQL    string
+		wantParams []string
+	}{
+		{
+			name:       "no parameters",
+			sql:        "SELECT `page` FROM `clicks` LIMIT 10",
+			wantSQL:    "SELECT `page` FROM `clicks` LIMIT 10",
+			wantParams: nil,
+		},
+		{
+			name:       "policy predicate keeps its leading position",
+			sql:        "SELECT `page` FROM `clicks` WHERE (`org_id` = ?) AND `page` = ? LIMIT 100",
+			params:     []any{"org-1", "/home"},
+			wantSQL:    "SELECT `page` FROM `clicks` WHERE (`org_id` = {p0:String}) AND `page` = {p1:String} LIMIT 100",
+			wantParams: []string{"org-1", "/home"},
+		},
+		{
+			name:       "list binds as one Array(String)",
+			sql:        "SELECT * FROM `t` WHERE `page` IN ? LIMIT 10",
+			params:     []any{[]any{"/a", "/b"}},
+			wantSQL:    "SELECT * FROM `t` WHERE `page` IN {p0:Array(String)} LIMIT 10",
+			wantParams: []string{`['/a','/b']`},
+		},
+		{
+			name:   "numbers keep the caller's own digits",
+			sql:    "SELECT * FROM `t` WHERE `a` = ? AND `b` = ? AND `c` = ? LIMIT 10",
+			params: []any{json.Number("12.50"), json.Number("9007199254740993"), true},
+			wantSQL: "SELECT * FROM `t` WHERE `a` = {p0:String} AND `b` = {p1:String} " +
+				"AND `c` = {p2:String} LIMIT 10",
+			wantParams: []string{"12.50", "9007199254740993", "true"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sql, params, err := (&BuildResult{SQL: tt.sql, Params: tt.params}).NamedParams()
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantSQL, sql)
+			assert.Equal(t, tt.wantParams, params)
+		})
+	}
+}
+
+// TestNamedParams_Encoding pins the two escapings a ClickHouse query parameter
+// needs, which are NOT the same and must not be applied to each other's
+// values. Measured on 26.6.3.62 (the version the integration suite pins):
+//
+//   - a scalar `{p:String}` is read by the escaped-text reader, so a raw
+//     backslash is taken as the start of an escape sequence ("a\b" came back
+//     holding a backspace) and a raw tab or newline ends the field outright
+//     (code 457, a 500 for the caller);
+//   - an `Array(String)` value is an array literal whose elements are quoted,
+//     so a raw tab or newline rides through untouched and only the quote and
+//     the backslash need encoding.
+//
+// Both encodings round-trip every case below byte for byte against a live
+// server; getting either wrong is silent data loss, not an error.
+func TestNamedParams_Encoding(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		value     any
+		wantParam string
+	}{
+		{"plain", "hello", "hello"},
+		{"single quote needs nothing", "it's", "it's"},
+		{"backslash", `a\b`, `a\\b`},
+		{"windows path", `C:\Users\x`, `C:\\Users\\x`},
+		{"tab", "a\tb", `a\tb`},
+		{"newline", "a\nb", `a\nb`},
+		{"carriage return", "a\rb", `a\rb`},
+		{"a literal backslash-n", `a\nb`, `a\\nb`},
+		{"like pattern", "%foo%", "%foo%"},
+		{"list quotes and backslashes", []any{`it's`, `a\b`, "a\tb"}, "['it\\'s','a\\\\b','a\tb']"},
+		{"list containment attempt", []any{`']) OR 1=1 --`}, `['\']) OR 1=1 --']`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, params, err := (&BuildResult{SQL: "SELECT ?", Params: []any{tt.value}}).NamedParams()
+			require.NoError(t, err)
+			require.Len(t, params, 1)
+			assert.Equal(t, tt.wantParam, params[0])
+		})
+	}
+}
+
+// TestNamedParams_Rejects covers the values and shapes that have no honest
+// binding. A JSON null is the notable one: the driver quietly turned it into
+// `col = NULL` (never true), where an empty String parameter would compare
+// against the empty string — a different question, so it is refused (→ 400).
+func TestNamedParams_Rejects(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		sql     string
+		params  []any
+		wantErr string
+	}{
+		{"null value", "SELECT ?", []any{nil}, "must not be null"},
+		{"object value", "SELECT ?", []any{map[string]any{"k": "v"}}, "unsupported filter value type"},
+		{"nested list", "SELECT ?", []any{[]any{[]any{"a"}}}, "nested list"},
+		{"more values than placeholders", "SELECT 1", []any{"a"}, "only 0 placeholders"},
+		{"more placeholders than values", "SELECT ?, ?", []any{"a"}, "more placeholders"},
+		{"placeholder with no values", "SELECT ?", nil, "no bound values"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := (&BuildResult{SQL: tt.sql, Params: tt.params}).NamedParams()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }

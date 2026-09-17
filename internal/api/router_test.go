@@ -328,7 +328,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	t.Cleanup(func() { _ = emb.Close() })
 
 	deps := Dependencies{
-		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Ingest:       newTestIngestHandler(t, reg, pub, testutil.NopLogger()),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(hub, nil),
 		Health:       &HealthHandler{},
@@ -486,7 +486,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
-		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Ingest:       newTestIngestHandler(t, reg, pub, testutil.NopLogger()),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(hub, nil),
 		Health:       &HealthHandler{},
@@ -547,7 +547,7 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	hub := stream.NewHub(nil, nil, nil)
 
 	deps := Dependencies{
-		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Ingest:       newTestIngestHandler(t, reg, pub, testutil.NopLogger()),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(hub, nil),
 		Health:       &HealthHandler{},
@@ -625,7 +625,7 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	hub := stream.NewHub(nil, nil, nil)
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Ingest: newTestIngestHandler(t, reg, pub, testutil.NopLogger()),
 		Query:  &QueryHandler{},
 		SSE:    NewStreamHandler(hub, nil),
 		Health: &HealthHandler{},
@@ -650,7 +650,7 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	hub := stream.NewHub(nil, nil, nil)
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Ingest: newTestIngestHandler(t, reg, pub, testutil.NopLogger()),
 		Query:  &QueryHandler{},
 		SSE:    NewStreamHandler(hub, nil),
 		Health: &HealthHandler{},
@@ -750,7 +750,7 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
-		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Ingest:       newTestIngestHandler(t, reg, pub, testutil.NopLogger()),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(hub, nil),
 		Health:       &HealthHandler{},

@@ -116,13 +116,25 @@ type Server struct {
 	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT" env-default:"10"`
 }
 
-// ClickHouse holds only the password. The wiring — address, HTTP port and
-// scheme, database, username, query timeout — is the settings directory's
-// `clickhouse` block (hot-reloadable: a change swaps the connection). The password stays here because secrets
+// ClickHouse holds the password plus the chtypes registry directory. The
+// wiring — address, HTTP port and scheme, database, username, query
+// timeout — is the settings directory's `clickhouse` block (hot-reloadable:
+// a change swaps the connection). The password stays here because secrets
 // don't belong in a tracked JSON file; it is combined with the adopted
-// wiring on every (re)connect.
+// wiring on every (re)connect. ChtypesRegistry is boot-tier like the
+// password (typelayer.NewEngine opens the registry once at boot, not
+// hot-reloadable) but isn't a secret — it's grouped here because it is the
+// other ClickHouse-adjacent boot input, not because it needs the same
+// protection.
 type ClickHouse struct {
 	Password string `yaml:"password" env:"WH_CH_PASSWORD"`
+	// ChtypesRegistry names the chtypes artifact registry directory (see
+	// typelayer.Config.RegistryDir). Empty (the default) defers to the SDK's
+	// own search path — $CHTYPES_REGISTRY, the per-user cache, then the
+	// system dirs — and loads a line lazily; an explicit directory is opened
+	// eagerly, every artifact in it. deployments/Dockerfile therefore sets
+	// CHTYPES_REGISTRY rather than this field.
+	ChtypesRegistry string `yaml:"chtypes_registry" env:"WH_CHTYPES_REGISTRY"`
 }
 
 // Cache sizes the in-process L1 cache. The time-range bucket structured

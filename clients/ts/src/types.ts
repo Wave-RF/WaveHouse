@@ -4,7 +4,19 @@
 
 // --- Database type helper ---
 
-/** User-provided database schema mapping table names to row types. */
+/**
+ * User-provided database schema mapping table names to row types.
+ *
+ * A queried value is rendered by ClickHouse itself, so the JSON spelling is
+ * the server's, not the client's: `Decimal*` and every integer/float arrive
+ * as numbers, `FixedString`/`UUID`/`Enum*`/`IPv4`/`IPv6` and the date-time
+ * family as strings, `Array`/`Map` as their JSON equivalents, and `Nullable`
+ * as the value or `null` — which is what `wavehouse codegen` generates. Two
+ * consequences worth knowing: `DateTime`/`DateTime64` use ClickHouse's own
+ * `YYYY-MM-DD HH:MM:SS[.fff]` spelling (the same bytes the stream carries),
+ * not ISO-8601, and a 64-bit integer past 2^53 arrives as an unquoted JSON
+ * number, so it loses precision in JavaScript.
+ */
 export type Database = Record<string, Record<string, unknown>>;
 
 // --- Result types ---
@@ -292,9 +304,9 @@ export type Schemas = Record<string, TableSchema>;
 // --- Insert result ---
 
 /**
- * A per-record outcome from a batch (array / NDJSON) insert. Mirrors the
- * single-object response shape plus the record's position. Exactly one of
- * `ok` / `duplicate` / `error` is set.
+ * A per-record outcome from a batch (array / NDJSON / CSV / TSV) insert.
+ * Mirrors the single-object response shape plus the record's position. Exactly
+ * one of `ok` / `duplicate` / `error` is set.
  */
 export interface InsertRecordResult {
   /** 1-based index of the record within the submitted batch. */
@@ -305,6 +317,20 @@ export interface InsertRecordResult {
   duplicate?: boolean;
   /** Set (with `ok`/`duplicate` absent) when the record was rejected. */
   error?: string;
+  /**
+   * ClickHouse's own error code, present only when the server's parser is what
+   * refused the record — 117 unknown field, 27 unparseable value, 6 out of
+   * range. Absent for a gateway rejection (a failed policy check, a missing
+   * dedupe id), so `code !== undefined` means "ClickHouse answered".
+   *
+   * 117 now also covers **a column the caller's role may not write**. Column
+   * policy is enforced by compiling the role's own schema without the denied
+   * columns, so naming one is an unknown field to the parser rather than a
+   * separate gateway refusal: it is a `400` with this code, where it used to be
+   * a `403 column "x" not allowed for insert`. The message is ClickHouse's own
+   * and does not reveal whether the column exists.
+   */
+  code?: number;
 }
 
 export interface InsertResult {

@@ -1,18 +1,47 @@
-name: GoReleaser snapshot validation
+name: Release build validation
 
-# Catches goreleaser config + Go-compile breakage at PR time, before
-# it could block a real tag-time release. Snapshot mode implies
-# --skip=publish, so nothing is pushed.
+# PR-time proof that a real release would build. Nothing is published:
+# `--snapshot` implies `--skip=publish`, and the image is built to
+# `type=cacheonly`, so no registry is touched and no GitHub Release is made.
 #
-# Path-filtered to goreleaser config / dockerfile changes only;
-# go.mod / go.sum bumps are validated post-merge by publish-dev.yml
-# running the full multi-target pipeline. `goreleaser build
-# --single-target` exercises config parseability + Go compile for
-# the host platform (release does not accept --single-target).
+# It covers the three things a tag-time failure would otherwise block on:
+#
+#   1. `goreleaser check`   — .goreleaser.yaml's schema.
+#   2. a build per target   — all THREE, each on its own native runner, which
+#                             is the only way to compile them now that cgo
+#                             rules out cross-compiling (darwin in particular:
+#                             see the header of .goreleaser.yaml). The old
+#                             `--single-target` job ran on linux/amd64 only and
+#                             was blind to the other two by construction.
+#   3. the image            — the real multi-arch `docker buildx build` over
+#                             deployments/Dockerfile.goreleaser with the
+#                             snapshot binaries in the exact context layout
+#                             release.yml assembles, including the chtypes
+#                             artifact fetch from chtypes.lock. A stale lock,
+#                             an unfetchable artifact or a Dockerfile mistake
+#                             fails here rather than mid-release.
+#
+# Path filter: go.mod / go.sum are in it because a dependency bump is the
+# realistic way a platform breaks (the darwin cgo C file that killed
+# cross-compiling arrived with a prometheus/client_golang bump), and
+# publish-dev.yml no longer builds darwin at all, so nothing else on main
+# would catch it. chtypes.lock / fetch-chtypes.sh / _colors.sh are in it
+# because the image build consumes all three — the assemble step copies
+# _colors.sh into the context and the Dockerfile's fetch stage sources it, so
+# an edit there can break the image with nothing else on a PR to catch it.
+#
+# NOT a required check: the `main branch protection` ruleset requires only
+# `CI`, the aggregator in ci.yml. Making this gating means adding it to that
+# aggregator's `needs`, which is a ci.yml change.
 on:
   pull_request:
     paths:
       - .goreleaser.yaml
+      - go.mod
+      - go.sum
+      - chtypes.lock
+      - scripts/fetch-chtypes.sh
+      - scripts/_colors.sh
       - deployments/Dockerfile.goreleaser
       - .github/workflows/release.yml
       - .github/workflows/publish-dev.yml
@@ -27,34 +56,143 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  validate:
-    name: Validate snapshot build
+  config:
+    name: Validate .goreleaser.yaml
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Runs on PR-authored code; nothing here needs authenticated git.
+          persist-credentials: false
+
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          # Same v2 line as release.yml so this validates against the same
+          # goreleaser version a real release uses.
+          version: "~> v2"
+          args: check
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      # Keep going: knowing that two of three targets are broken is more useful
+      # on a PR than the first failure alone. (release.yml is fail-fast for the
+      # opposite reason — there, a partial result is worthless.)
+      fail-fast: false
+      matrix:
+        # Must mirror release.yml's matrix and .goreleaser.yaml's declared
+        # goos/goarch.
+        include:
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-latest
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+          - goos: darwin
+            goarch: arm64
+            runner: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # goreleaser uses `git describe` to derive the snapshot
           # version; needs full tag history.
           fetch-depth: 0
-          # Runs on PR-authored code; nothing here needs authenticated git.
           persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
-          # Single-target build is fast enough that the bundled
-          # cache's post-step save costs more than a cold
-          # `go mod download`.
+          # A single-target build is fast enough that the bundled cache's
+          # post-step save costs more than a cold `go mod download` — and a
+          # cache saved from a PR's ref can only ever be read by that same PR.
           cache: false
 
-      - name: Run GoReleaser snapshot build
+      - name: Assert the runner is ${{ matrix.goos }}/${{ matrix.goarch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          host_os=$(go env GOOS)
+          host_arch=$(go env GOARCH)
+          echo "runner=${{ matrix.runner }} host=${host_os}/${host_arch}"
+          if [ "$host_os" != "${{ matrix.goos }}" ] || [ "$host_arch" != "${{ matrix.goarch }}" ]; then
+            echo "::error::${{ matrix.runner }} is ${host_os}/${host_arch} but the matrix says ${{ matrix.goos }}/${{ matrix.goarch }} — this leg is not validating what it claims to"
+            exit 1
+          fi
+
+      - name: Snapshot build
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          # Same v2 line as release.yml so the snapshot validates
-          # against the same goreleaser version a real release uses.
           version: "~> v2"
-          # `build` (not `release`) so --single-target is accepted;
-          # release-only steps (archive / docker / checksums) are
-          # validated post-merge by publish-dev.yml.
-          args: build --snapshot --clean --single-target
+          # `--snapshot` because a PR head carries no release tag.
+          args: build --snapshot --clean --single-target --output dist/wavehouse
+
+      - name: Describe the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          file dist/wavehouse
+          ls -l dist/wavehouse
+
+      # Only the Linux binaries feed the image job; uploading the darwin one
+      # too would cost a transfer nothing reads.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: matrix.goos == 'linux'
+        with:
+          name: snapshot-linux-${{ matrix.goarch }}
+          path: dist/wavehouse
+          if-no-files-found: error
+          retention-days: 1
+
+  image:
+    name: Build the multi-arch image
+    # A plain `needs` on a fail-fast: false matrix means ANY failing leg skips
+    # this job — including the darwin one, which contributes nothing here. That
+    # is the intended trade: if a target cannot even compile, the image result
+    # is noise, and the build job's own red is the finding.
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: snapshot-linux-*
+          path: staging
+
+      - name: Assemble the image build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ctx/scripts
+          cp chtypes.lock ctx/
+          cp scripts/fetch-chtypes.sh scripts/_colors.sh ctx/scripts/
+          for goarch in amd64 arm64; do
+            mkdir -p "ctx/linux/${goarch}"
+            install -m 0755 "staging/snapshot-linux-${goarch}/wavehouse" \
+              "ctx/linux/${goarch}/wavehouse"
+          done
+          find ctx -type f -printf '%M %s %p\n'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # `type=cacheonly`: run the full build for both platforms — including the
+      # chtypes artifact fetch and sha256 verification against chtypes.lock —
+      # and throw the result away. No registry credentials, so this works on
+      # fork PRs too.
+      - name: Build (no push)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --file deployments/Dockerfile.goreleaser \
+            --output type=cacheonly \
+            ctx

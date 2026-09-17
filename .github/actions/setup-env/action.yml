@@ -44,6 +44,15 @@
 #      lockfile + astro.config.mjs. Speeds up warm `astro check` /
 #      `astro build` — unchanged content skips the parse + transform
 #      pipeline. See #132.
+#   7. chtypes artifact cache (~/.cache/chtypes/artifacts) keyed on
+#      chtypes.lock — the pinned ClickHouse-version .so/.dylib the SDK
+#      dlopens. Measured for today's one pinned line (26.6, linux-amd64):
+#      316 MiB of libchtypes.so on disk, ~65 MiB as a stored archive, and
+#      85 MiB over the wire on a MISS (the upstream .tar.gz). Fetched via
+#      scripts/fetch-chtypes.sh (--frozen: refuses anything the lock
+#      doesn't name), which the CLI makes idempotent even on a cache hit
+#      (a lightweight manifest check, not a re-download). Go test jobs
+#      that dial chtypes need this; see .github/workflows/README.md.
 name: Setup CI environment
 description: Caches (restore + automatic post-job save) and toolchains for WaveHouse CI
 
@@ -65,6 +74,9 @@ inputs:
     default: "false"
   astro:
     description: "Cache the Astro content collections (docs check/build)"
+    default: "false"
+  chtypes:
+    description: "Fetch + cache the chtypes artifact(s) pinned in chtypes.lock (Go test jobs that dial chtypes only)"
     default: "false"
 
 # Exact-key cache-hit flags, for consumers that want to skip work on a
@@ -178,6 +190,29 @@ runs:
         restore-keys: |
           golangci-${{ runner.os }}-
 
+    # chtypes artifact cache — keyed on chtypes.lock (not go.mod/go.sum):
+    # the pinned file+sha256 per platform/line is the only thing that
+    # changes its contents. runner.arch is in the key on principle (all CI
+    # runners are ubuntu-latest amd64 today; a future arm64 runner must not
+    # restore amd64 .so files into its search path).
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.chtypes == 'true' }}
+      id: chtypes-cache
+      with:
+        path: ~/.cache/chtypes/artifacts
+        key: chtypes-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('chtypes.lock') }}
+        restore-keys: |
+          chtypes-v1-${{ runner.os }}-${{ runner.arch }}-
+
+    # Runs on both cache hit and miss: scripts/fetch-chtypes.sh --frozen is
+    # cheap on a hit (a manifest check against chtypes.lock, not a
+    # re-download — see the script) and it is what turns a restored-but-
+    # unverified cache entry back into a hash-checked one every run.
+    - name: Fetch pinned chtypes artifact
+      if: ${{ inputs.chtypes == 'true' }}
+      shell: bash
+      run: scripts/fetch-chtypes.sh
+
     # No actions/setup-go: it spends ~9s/job downloading + extracting a
     # toolchain the runner can already provide. The image's preinstalled
     # `go` + GOTOOLCHAIN=auto (the Go ≥1.21 default) resolve go.mod's
@@ -189,6 +224,16 @@ runs:
     # this step makes that cost visible and the post-job save captures it.
     # Trade-off: setup-go's inline problem matchers (PR-file annotations
     # on compile errors) are gone; the log output is unchanged.
+    #
+    # On a chtypes job the cold cost is paid TWICE, and the second fetch is
+    # invisible because it happens inside the step above: `go run <pkg>@ver`
+    # resolves its toolchain from the pinned CLI module, not from this
+    # repo's go.mod, so it can land on a different patch than the one this
+    # step materialises (measured on an ambient go1.24.13: go1.27.1 for the
+    # CLI, go1.27.0 for `go 1.27` here). Both are ~80 MB and both live in
+    # ~/go/pkg/mod/golang.org/toolchain, so gomod-v1 absorbs both after the
+    # first save. A `toolchain` line in go.mod naming the same patch the CLI
+    # resolves would collapse it to one — not worth pinning for ~7s.
     - name: Verify Go resolves go.mod's toolchain
       if: ${{ inputs.go == 'true' }}
       shell: bash

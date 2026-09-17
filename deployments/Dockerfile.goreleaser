@@ -1,8 +1,19 @@
+# The prebuilt-binary image. Despite the name, GoReleaser no longer drives
+# this file: cgo made cross-compiling impossible for darwin, so the release
+# pipeline builds each binary on its own native runner and
+# .github/workflows/release.yml (and publish-dev.yml, and the no-push
+# validation in goreleaser-validate.yml) invokes `docker buildx build` on it
+# directly. The build CONTRACT is unchanged and those workflows reproduce it
+# exactly — a context holding `<os>/<arch>/wavehouse` per target plus
+# chtypes.lock and scripts/{fetch-chtypes,_colors}.sh — which is why this file
+# needed no edit beyond these comments. The name is kept so published image
+# history, `docker history` output and every doc reference stay valid.
+#
 # Tiny stage just to mkdir + chown the state directories. Distroless has no
 # shell, so the runtime image can't run RUN commands itself; we materialise
-# the layout here and COPY it into the final image. Keeps the goreleaser
-# variant in lockstep with deployments/Dockerfile (source-build) so the two
-# images expose the same /app filesystem layout to operators.
+# the layout here and COPY it into the final image. Keeps this variant in
+# lockstep with deployments/Dockerfile (source-build) so the two images expose
+# the same /app filesystem layout to operators.
 #
 # Only the parents are pre-created — the binary mkdirs `nats/` and `pebble/`
 # subdirs itself when NATS/Pebble open their stores. Named-volume copy-up
@@ -21,28 +32,62 @@ FROM --platform=$BUILDPLATFORM alpine:3 AS layout
 # RUN in deployments/Dockerfile; keep the two in lockstep.
 RUN mkdir -p /app/data /app/settings && chown -R 65532:65532 /app
 
-FROM gcr.io/distroless/static-debian12
+# Fetches the pinned chtypes artifact for THIS image's target platform (not
+# necessarily the builder's — buildx may emulate or cross-fetch). Built
+# natively on $BUILDPLATFORM like `layout` above: no compiled Go code
+# crosses an arch boundary here, just an HTTPS download + sha256 check via
+# the SDK CLI's own --platform flag, so QEMU emulation would buy nothing.
+# Needs chtypes.lock + scripts/fetch-chtypes.sh + scripts/_colors.sh at their
+# normal repo-relative paths. The build context is assembled by the workflow
+# rather than being the repo root, so those three are copied into it
+# explicitly — see the "Assemble the image build context" step in
+# .github/workflows/release.yml, publish-dev.yml and goreleaser-validate.yml.
+#
+# This stage is also the pipeline's chtypes.lock check: `--frozen` refuses any
+# artifact the lock does not name, so an upstream republish of a pinned line
+# fails the build here rather than silently baking a different library.
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS chtypes-fetch
+ARG TARGETPLATFORM
+WORKDIR /src
+COPY chtypes.lock ./
+COPY scripts/fetch-chtypes.sh scripts/_colors.sh ./scripts/
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    plat="$(echo "$TARGETPLATFORM" | tr / -)"; \
+    mkdir -p /opt/chtypes/artifacts && \
+    scripts/fetch-chtypes.sh --platform "$plat" --dest /opt/chtypes/artifacts
 
-# GoReleaser automatically injects this based on the platform it's building for
+FROM gcr.io/distroless/cc-debian12
+
+# buildx injects this per target platform of a `--platform a,b` build
 ARG TARGETPLATFORM
 
 WORKDIR /app
 USER nonroot:nonroot
 ENV WH_SETTINGS_DIR=/app/settings
+# The SDK's own registry search path (R3 §7) reads this directly — no
+# WaveHouse config change is needed to find what the image already baked
+# in. WH_CHTYPES_REGISTRY (internal/config) is for an operator who wants to
+# point at a different, bind-mounted registry directory instead.
+ENV CHTYPES_REGISTRY=/opt/chtypes/artifacts
 
 # Pre-created state directories owned by the nonroot user (UID 65532) so
 # the binary can mkdir under /app/data without a volume mount, and so
 # bind-mounting empty volumes at /app/data inherits correct ownership.
 COPY --from=layout --chown=nonroot:nonroot /app /app
+COPY --from=chtypes-fetch --chown=nonroot:nonroot /opt/chtypes /opt/chtypes
 
-# Copy the binaries from the platform-specific subdirectories GoReleaser creates
+# Copy the binary from its platform-specific subdirectory of the context —
+# `linux/amd64/wavehouse`, `linux/arm64/wavehouse`. The workflow stages each
+# native runner's binary there with mode 0755 (actions/upload-artifact's zip
+# carries no unix mode bits, so the executable bit has to be restored).
 COPY --chown=nonroot:nonroot $TARGETPLATFORM/wavehouse /app/wavehouse
 
-# OCI image metadata. Static labels here; goreleaser injects per-build
-# ones (revision, version, created, image.title with the version) via
-# `dockers_v2.labels` in `.goreleaser.yaml`, which take precedence on
-# release builds. The static set below is the floor — guaranteed even
-# if a label is missing from the goreleaser config.
+# OCI image metadata. Static labels here; the publishing workflows pass the
+# per-build ones (revision, version, created, and a dev-suffixed title and
+# description on the :dev channel) as `docker buildx build --label`, which
+# take precedence. The static set below is the floor — guaranteed even when a
+# label is missing from the command line, e.g. on a local `docker build`.
 LABEL org.opencontainers.image.title="WaveHouse"
 LABEL org.opencontainers.image.description="Schema-aware real-time API gateway for ClickHouse"
 LABEL org.opencontainers.image.url="https://github.com/Wave-RF/WaveHouse"

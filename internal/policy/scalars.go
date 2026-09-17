@@ -22,6 +22,18 @@ import (
 // the humanization. The canonical units are milliseconds (time) and bytes
 // (memory); ClickHouse receives those numbers directly, so its own size/duration
 // syntax never leaks to policy authors.
+//
+// They stay WaveHouse's own vocabulary rather than becoming a passthrough of
+// ClickHouse's setting syntax, because there is no such syntax to pass through.
+// Measured on a live 26.3.28.5 server: `max_memory_usage='4GiB'` and
+// `max_execution_time='10s'` are both refused with code 27 ("Cannot parse
+// input: expected 'eof' before: 'B'" / "before: 's'"), as is `'1m30s'`; only
+// `'4G'` and `'10'` parse. Forwarding the documented spellings would break every
+// policy value already written AND turn a config typo into a per-query 500
+// instead of a load-time refusal. Millis is also not only a setting: it is read
+// as a Go number (api/structured_query.go bounds the client context with
+// Duration(), and ch_settings.go emits fractional seconds so a sub-second cap
+// survives), which an opaque duration string could not supply.
 
 // Millis is a duration stored as whole milliseconds. Input accepts a Go duration
 // string ("10s", "500ms", "1m30s") or a bare integer count of milliseconds.

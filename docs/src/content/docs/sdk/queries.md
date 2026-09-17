@@ -40,9 +40,9 @@ const { data } = await clicks.insert([
 // data: { ok, total, succeeded, failed, duplicates, results? }
 ```
 
-For an array insert, `data.ok` is `true` only when every record succeeded (`failed === 0`). Inspect `data.failed` and `data.results` (each `{ index, ok|duplicate|error }`, 1-based `index`) for partial failures — the call's top-level `error` is reserved for whole-request failures (network, `404` unknown table, `403` forbidden, `503` backpressure). An empty array is a no-op and sends no request. The array path sends one request regardless of size, so it is bound by the same 16 MiB [request-body cap](/reverse-proxy#request-body-size-limits); bounded-concurrency chunking of very large arrays is tracked in [#196](https://github.com/Wave-RF/WaveHouse/issues/196).
+For an array insert, `data.ok` is `true` only when every record succeeded (`failed === 0`). Inspect `data.failed` and `data.results` (each `{ index, ok|duplicate|error, code? }`, 1-based `index`, `code` being ClickHouse's own error code on a parser rejection) for partial failures — the call's top-level `error` is reserved for whole-request failures (network, `404` unknown table, `403` forbidden, `503` backpressure). An empty array is a no-op and sends no request. The array path sends one request regardless of size, so it is bound by the same 16 MiB [request-body cap](/reverse-proxy#request-body-size-limits); bounded-concurrency chunking of very large arrays is tracked in [#196](https://github.com/Wave-RF/WaveHouse/issues/196).
 
-> `POST /v1/ingest` also accepts a raw JSON array or a single object directly, so non-SDK clients can send whichever shape is convenient — but the `Content-Type` is **required** and decides the format (`application/json` or `application/x-ndjson`); a request without one is rejected with `415`. The SDK always sets it. See the [API reference](/api#post-v1ingesttabletable--ingest-data).
+> `POST /v1/ingest` also accepts a raw JSON array or a single object directly, and header-less positional `text/csv` / `text/tab-separated-values` bodies, so non-SDK clients can send whichever shape is convenient — but the `Content-Type` is **required** and decides the format; a request without one is rejected with `415`. The SDK always sets it. See the [API reference](/api#post-v1ingesttabletable--ingest-data).
 
 ### `.insertNDJSON(source, opts?)`
 

@@ -25,10 +25,10 @@ func getBodyBuffer() *bytes.Buffer {
 }
 
 // putBodyBuffer returns buf to the pool unless it outgrew
-// maxPooledBufferBytes. The caller must be done reading records out of it: the
-// record readers decode into freshly allocated values (encoding/json copies
-// every string, json.Number included), so "done" means the last Next has
-// returned — nothing a handed-back record holds points into these bytes.
+// maxPooledBufferBytes. The caller must be done with the request: the body
+// goes to the type layer as-is and the exported rows point into the type
+// layer's own payload, which is copied into the envelope before the table
+// handle is released — nothing published points into these bytes.
 func putBodyBuffer(buf *bytes.Buffer) {
 	if buf == nil || buf.Cap() > maxPooledBufferBytes {
 		return

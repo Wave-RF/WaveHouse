@@ -7,25 +7,31 @@ describe("Dead Letter Queue (DLQ) & Failures", () => {
   const admin = adminClient();
   const T = suiteTables("dlq");
 
-  it("routes only the failed row to DLQ while valid rows are inserted", async () => {
+  // This case used to assert the opposite: a row that "bypasses API validation
+  // but fails database insertion" landing in the DLQ. That gap is what the type
+  // layer closed — ingest now asks ClickHouse's own parser before publishing,
+  // so an unparseable value is refused at the gateway with the server's real
+  // code and never enters the queue. The DLQ still exists for failures that
+  // only surface at INSERT time (covered by tests/integration/dlq_test.go and
+  // internal/ingest/worker_test.go); what this pins is that bad data no longer
+  // gets that far.
+  it("refuses the unparseable row at ingest, so the DLQ never sees it", async () => {
     const runId = testId();
 
-    // Get baseline DLQ stats before we pollute them. DLQ stats are keyed by
-    // table name, and this suite owns T.clicks exclusively, so the count is
-    // isolated from every other test file.
+    // Baseline before we touch it. DLQ stats are keyed by table name and this
+    // suite owns T.clicks exclusively, so the count is isolated from every
+    // other test file.
     const initialDlq = await admin.dlq.list();
     const initialClicksDlq = (initialDlq.data?.tables as any)?.[T.clicks] || 0;
 
-    // We are going to send 9 perfectly valid rows, and 1 critically malformed row.
+    // Nine valid rows and one whose duration_ms no ClickHouse parser can read.
     const rows = Array.from({ length: 10 }).map((_, i) => {
       if (i === 9) {
         return {
           event_id: `${runId}-bad`,
-          page: "/bag-page",
+          page: "/bad-page",
           session_id: `session-${runId}`,
           user_id: `user-${runId}`,
-          // Go accepts strings for numerics, but ClickHouse cannot parse this into an Int/Float.
-          // This successfully bypasses API validation but fails database insertion.
           duration_ms: "definitely-not-a-number",
         };
       }
@@ -38,15 +44,17 @@ describe("Dead Letter Queue (DLQ) & Failures", () => {
     });
 
     const res = await wh.from(T.clicks).insert(rows as any);
-    expect(res.error).toBeNull(); // API accepts it (schema validation is loose by design)
+    // A per-record rejection is not a request failure: the batch is a 200 whose
+    // body carries one verdict per record.
+    expect(res.error).toBeNull();
+    expect(res.data?.succeeded).toBe(9);
+    expect(res.data?.failed).toBe(1);
+    const refused = res.data?.results?.find((r) => r.error);
+    expect(refused?.index).toBe(10);
+    // A `code` means ClickHouse answered — a gateway rejection carries none.
+    expect(refused?.code).toBeGreaterThan(0);
 
-    // 9 good rows must land. Budget is 10s (the suite norm), not the 6s a plain
-    // timer-flush uses: the bad row forces the worker into 1-by-1 isolation —
-    // ~11 sequential CH round-trips after the 5s maxWait timer — which is far
-    // more post-timer work than a single-insert flush, so 6s sat right at the
-    // edge under CI load. The structural fix is a lower e2e maxWait (deferred
-    // config PR), which drops the 5s-timer dependency; this budget can shrink
-    // back once that lands.
+    // The nine good rows still land: one bad record never blocks the batch.
     await waitForCondition(async (signal) => {
       const chRows = await chQuery(
         `SELECT count() as cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
@@ -55,17 +63,10 @@ describe("Dead Letter Queue (DLQ) & Failures", () => {
       return Number((chRows[0] as any).cnt) === 9;
     }, 10_000);
 
-    // Verify exactly 1 message was added to the DLQ for this suite's clicks table
-    await waitForCondition(async () => {
-      const dlqRes = await admin.dlq.list();
-      const currentClicksDlq = (dlqRes.data?.tables as any)?.[T.clicks] || 0;
-      return currentClicksDlq === initialClicksDlq + 1;
-    }, 5_000);
-
+    // The refused row was never published, so nothing can have reached the DLQ.
+    // The wait above already proves the worker drained this batch.
     const finalDlq = await admin.dlq.list();
     const finalClicksDlq = (finalDlq.data?.tables as any)?.[T.clicks] || 0;
-
-    // Only 1 was rejected and routed to the DLQ
-    expect(finalClicksDlq).toBe(initialClicksDlq + 1);
+    expect(finalClicksDlq).toBe(initialClicksDlq);
   }, 20_000);
 });

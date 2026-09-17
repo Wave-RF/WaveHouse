@@ -171,7 +171,7 @@ Where it differs from WaveHouse:
 
 | Dimension | Tinybird | WaveHouse |
 | --------- | -------- | --------- |
-| Hosting | SaaS only (managed tiers: Developer $49/mo → Enterprise custom) | Self-host, single binary |
+| Hosting | SaaS only (managed tiers: Developer $49/mo → Enterprise custom) | Self-host, one binary + local artifact |
 | Pricing model | Pay for allocated vCPU/QPS/storage; egress fees for cross-region | Your infra; no per-query or per-GB fee |
 | Data residency | Their infrastructure | Your infrastructure |
 | Source of truth for schema | Tinybird datasource definitions | Your ClickHouse tables (`system.columns`) |
