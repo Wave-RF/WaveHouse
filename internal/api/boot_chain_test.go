@@ -91,7 +91,7 @@ func TestBoot_Chain_DegradedThenRecovers(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	registry := discovery.NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, logger)
 
-	// Phase 0 — synchronous boot Refresh fails. main.go records the
+	// Phase 0 — synchronous boot Refresh fails. internal/app records the
 	// diagnostic in BootState and proceeds with the retry loop in a
 	// goroutine; we drive both inline here for determinism.
 	bootState := NewBootState(nil)

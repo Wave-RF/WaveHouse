@@ -19,6 +19,12 @@ type StreamHandler struct {
 	Replayer    mq.Replayer // gap-fill source; nil disables replay
 	Heartbeater *stream.Heartbeater
 	Metrics     *stream.Metrics
+	// Closing, when set, is closed as the server begins shutting down, and
+	// every open stream ends at once — mid-replay too: a stream is a
+	// connection to close, not in-flight work for the drain to wait on, and
+	// the client reconnects and gap-fills via Last-Event-ID. A nil channel
+	// never fires (a harness that serves the handler itself).
+	Closing <-chan struct{}
 }
 
 func NewStreamHandler(hub *stream.Hub, replayer mq.Replayer) *StreamHandler {
@@ -134,14 +140,16 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 			return true
 		}
+		replayCtx, cancelReplay := h.replayContext(r)
 		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.Replayer != nil {
-			h.replay(r.Context(), ts, topic, sendReplay)
+			h.replay(replayCtx, ts, topic, sendReplay)
 		} else if err != nil {
 			// Fall back to RFC3339 without nanos.
 			if ts, err := time.Parse(time.RFC3339, sinceStr); err == nil && h.Replayer != nil {
-				h.replay(r.Context(), ts, topic, sendReplay)
+				h.replay(replayCtx, ts, topic, sendReplay)
 			}
 		}
+		cancelReplay()
 	}
 
 	// Register with the shared keepalive wheel so a quiet stream isn't idle-closed
@@ -154,6 +162,8 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-h.Closing:
 			return
 		case <-sub.Evicted():
 			// Marked for disconnection (slow consumer). The client reconnects and
@@ -173,12 +183,33 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// replayContext is the gap-fill's context: the request's, cancelled early
+// when the server begins shutting down. Shutdown never cancels a request
+// context itself, so without this the consumer creation — an MQ round trip
+// made before the replay loop's first check — could hold the drain.
+func (h *StreamHandler) replayContext(r *http.Request) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(r.Context())
+	if h.Closing != nil {
+		go func() {
+			select {
+			case <-h.Closing:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	return ctx, cancel
+}
+
 // replay sends every message retained on subject since the given time to the
-// callback until caught up. A replay that cannot start, or that fails before
+// callback until caught up or ctx is done (the client went away, or the
+// server is shutting down — a long gap-fill must not hold the drain any more
+// than a live stream would). A replay that cannot start, or that fails before
 // catching up, is not fatal to the stream — the client still gets live events
-// from here on — so the error is logged rather than ending the connection.
+// from here on — so the error is logged rather than ending the connection. A
+// done ctx is the connection ending, not a failure, and is not logged.
 func (h *StreamHandler) replay(ctx context.Context, since time.Time, subject string, send func([]byte) bool) {
-	if err := h.Replayer.ReplaySince(ctx, subject, since, send); err != nil {
+	if err := h.Replayer.ReplaySince(ctx, subject, since, send); err != nil && ctx.Err() == nil {
 		slog.Default().WarnContext(ctx, "gap-fill replay ended early; the client continues with live events only",
 			"component", "stream", "subject", subject, "since", since, "error", err)
 	}

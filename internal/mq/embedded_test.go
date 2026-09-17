@@ -124,7 +124,7 @@ func TestEmbeddedNATS_StreamHandle(t *testing.T) {
 
 	empty, err := s.State(ctx, "")
 	require.NoError(t, err)
-	assert.Equal(t, StreamState{}, empty, "a fresh stream has no sequences, no messages, no subject breakdown")
+	assert.Equal(t, StreamState{MaxBytes: 64 << 20}, empty, "a fresh stream has no sequences, no messages, no subject breakdown — only its configured cap")
 
 	before := time.Now()
 	for i := range 3 {
@@ -333,4 +333,24 @@ func TestEmbeddedNATS_ReplaySince_PullFailureIsAnError(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, nats.ErrConnectionClosed)
 	assert.Equal(t, []string{"one"}, got, "the message delivered before the failure was still sent")
+}
+
+func TestEmbeddedNATS_ReplaySince_StopsWhenContextIsDone(t *testing.T) {
+	e := newTestEmbedded(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	require.NoError(t, e.Publish(ctx, "ingest.r", []byte("one")))
+	require.NoError(t, e.Publish(ctx, "ingest.r", []byte("two")))
+
+	// Cancelling mid-replay (the client went away, or the server is shutting
+	// down) ends the drain before the next pull rather than running to caught up.
+	var got []string
+	err := e.ReplaySince(ctx, "ingest.r", time.Time{}, func(data []byte) bool {
+		got = append(got, string(data))
+		cancel()
+		return true
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, []string{"one"}, got)
 }

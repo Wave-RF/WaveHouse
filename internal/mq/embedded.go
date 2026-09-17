@@ -73,8 +73,8 @@ func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*Embe
 		StoreDir:   storeDir,
 		SyncAlways: true, // fsync every JetStream write — publish ACKs only after data is on disk
 		// Without NoSigs, Start() installs a process-wide SIGINT handler that
-		// races main's graceful shutdown (double Shutdown → "close of nil
-		// channel" panic) and os.Exit(0)s past main's defers. WaveHouse owns
+		// races the app's graceful shutdown (double Shutdown → "close of nil
+		// channel" panic) and os.Exit(0)s past its cleanup. WaveHouse owns
 		// the lifecycle; Close() shuts the server down. See #287.
 		NoSigs: true,
 	}
@@ -283,6 +283,7 @@ func (s *jsStream) State(ctx context.Context, subjectFilter string) (StreamState
 		LastSeq:  info.State.LastSeq,
 		Msgs:     info.State.Msgs,
 		Subjects: info.State.Subjects,
+		MaxBytes: info.Config.MaxBytes,
 	}, nil
 }
 
@@ -318,7 +319,8 @@ func (s *jsStream) ConsumerAckFloor(ctx context.Context, consumer string) (uint6
 // consumer is ack-less and expires on its own once idle. Caught up is the
 // client's no-messages or request-timeout answer to a pull; any other pull
 // failure (a closed connection, a deleted consumer) is returned so the caller
-// knows the replay ended short rather than empty.
+// knows the replay ended short rather than empty. A done ctx ends the drain
+// between pulls and returns ctx's error.
 func (e *EmbeddedNATS) ReplaySince(ctx context.Context, subject string, since time.Time, send func(data []byte) bool) error {
 	cons, err := e.js.CreateOrUpdateConsumer(ctx, StreamName(), jetstream.ConsumerConfig{
 		FilterSubject:     subject,
@@ -332,6 +334,9 @@ func (e *EmbeddedNATS) ReplaySince(ctx context.Context, subject string, since ti
 	}
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
 		if err != nil {
 			if errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout) {

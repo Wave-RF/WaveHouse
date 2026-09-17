@@ -156,6 +156,7 @@ type StreamState struct {
 	// Subjects maps subject → message count for the subjects matching the
 	// filter passed to Stream.State; nil when no filter was given.
 	Subjects map[string]uint64
+	MaxBytes int64 // the stream's configured byte cap (mq.max_bytes_gb, a tenth of it for the DLQ)
 }
 
 // ErrConsumerNotFound is returned by Stream.ConsumerAckFloor when the named
@@ -190,7 +191,8 @@ type Replayer interface {
 	// ReplaySince sends the data of every message on subject stored at or
 	// after since, in stream order, until send returns false or the stream is
 	// caught up. Running out of messages is the normal end; failing to start
-	// the replay, or a delivery failure before it catches up, is an error.
+	// the replay, or a delivery failure before it catches up, is an error. A
+	// done ctx stops the replay and returns ctx's error.
 	ReplaySince(ctx context.Context, subject string, since time.Time, send func(data []byte) bool) error
 }
 

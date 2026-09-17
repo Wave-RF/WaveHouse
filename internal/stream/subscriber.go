@@ -56,7 +56,7 @@ type Subscriber struct {
 	// It does NOT make Hub.deliver's check→send→record sequence atomic, and
 	// deliver does not need it to be: Broadcast runs on ONE goroutine — the
 	// single jetstream Consume callback the hub bridge registers in
-	// cmd/wavehouse/main.go, invoked inline per message — so no two events race
+	// internal/app, invoked inline per message — so no two events race
 	// to announce the same connection's columns. A future change that fans
 	// Broadcast out across goroutines must hold a lock across that whole
 	// sequence, or two events will both send an announcement (harmless) while a

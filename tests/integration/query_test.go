@@ -107,7 +107,7 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 			for _, id := range tt.rowIDs {
 				body := fmt.Sprintf(`{"id":%q,"page":"/about"}`, id)
 				resp, err := http.Post(
-					e.server.URL+"/v1/ingest?table="+url.QueryEscape(table),
+					e.baseURL+"/v1/ingest?table="+url.QueryEscape(table),
 					"application/json",
 					strings.NewReader(body),
 				)
@@ -134,7 +134,7 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 
 			mutationBody, _ := json.Marshal(map[string]string{"sql": tt.mutationSQL(table)})
 			qResp, err := http.Post(
-				e.server.URL+"/v1/ops/query",
+				e.baseURL+"/v1/ops/query",
 				"application/json",
 				bytes.NewReader(mutationBody),
 			)

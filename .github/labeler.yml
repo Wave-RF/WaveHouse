@@ -3,6 +3,11 @@
 # Rule of thumb: match the `internal/<pkg>/` → `area/<pkg>` convention
 # established in AGENTS.md.
 
+"area/app":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "internal/app/**"
+
 "area/api":
   - changed-files:
     - any-glob-to-any-file:
