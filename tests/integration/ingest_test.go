@@ -30,7 +30,7 @@ func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 
 	body := `{"user_id":"alice","event_type":"click","value":42.5}`
 	resp, err := http.Post(
-		e.server.URL+"/v1/ingest?table="+url.QueryEscape(table),
+		e.baseURL+"/v1/ingest?table="+url.QueryEscape(table),
 		"application/json",
 		strings.NewReader(body),
 	)
@@ -54,7 +54,7 @@ func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 	// Confirm the success path didn't tee anything into the DLQ for this
 	// table — that's the actual contract we're asserting (no silent
 	// duplicate writes to dlq.<table> alongside the real INSERT).
-	dlqResp, err := http.Get(e.server.URL + "/v1/ops/dlq/stats")
+	dlqResp, err := http.Get(e.baseURL + "/v1/ops/dlq/stats")
 	require.NoError(t, err)
 	defer dlqResp.Body.Close()
 
@@ -91,7 +91,7 @@ func TestIngest_ComputedColumns_FlowToClickHouse(t *testing.T) {
 
 	body := `{"user_id":"carol","value":21}`
 	resp, err := http.Post(
-		e.server.URL+"/v1/ingest?table="+url.QueryEscape(table),
+		e.baseURL+"/v1/ingest?table="+url.QueryEscape(table),
 		"application/json",
 		strings.NewReader(body),
 	)
@@ -132,7 +132,7 @@ func TestIngest_SuppliedComputedColumn_Rejected(t *testing.T) {
 	)
 
 	resp, err := http.Post(
-		e.server.URL+"/v1/ingest?table="+url.QueryEscape(table),
+		e.baseURL+"/v1/ingest?table="+url.QueryEscape(table),
 		"application/json",
 		strings.NewReader(`{"user_id":"dave","digest":"forged"}`),
 	)

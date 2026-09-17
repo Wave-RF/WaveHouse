@@ -19,6 +19,12 @@ type StreamHandler struct {
 	JS          jetstream.JetStream
 	Heartbeater *stream.Heartbeater
 	Metrics     *stream.Metrics
+	// Closing, when set, is closed as the server begins shutting down, and
+	// every open stream ends at once — mid-replay too: a stream is a
+	// connection to close, not in-flight work for the drain to wait on, and
+	// the client reconnects and gap-fills via Last-Event-ID. A nil channel
+	// never fires (a harness that serves the handler itself).
+	Closing <-chan struct{}
 }
 
 func NewStreamHandler(hub *stream.Hub, js jetstream.JetStream) *StreamHandler {
@@ -133,14 +139,16 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 			return true
 		}
+		replayCtx, cancelReplay := h.replayContext(r)
 		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.JS != nil {
-			h.replayFromNATS(r.Context(), ts, topic, sendReplay)
+			h.replayFromNATS(replayCtx, ts, topic, sendReplay)
 		} else if err != nil {
 			// Fall back to RFC3339 without nanos.
 			if ts, err := time.Parse(time.RFC3339, sinceStr); err == nil && h.JS != nil {
-				h.replayFromNATS(r.Context(), ts, topic, sendReplay)
+				h.replayFromNATS(replayCtx, ts, topic, sendReplay)
 			}
 		}
+		cancelReplay()
 	}
 
 	// Register with the shared keepalive wheel so a quiet stream isn't idle-closed
@@ -153,6 +161,8 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-h.Closing:
 			return
 		case <-sub.Evicted():
 			// Marked for disconnection (slow consumer). The client reconnects and
@@ -172,8 +182,28 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// replayContext is the gap-fill's context: the request's, cancelled early
+// when the server begins shutting down. Shutdown never cancels a request
+// context itself, so without this the consumer creation — a NATS round trip
+// made before the fetch loop's first check — could hold the drain.
+func (h *StreamHandler) replayContext(r *http.Request) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(r.Context())
+	if h.Closing != nil {
+		go func() {
+			select {
+			case <-h.Closing:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	return ctx, cancel
+}
+
 // replayFromNATS creates an ephemeral NATS consumer starting at the given time
-// and sends all available messages to the callback until caught up.
+// and sends all available messages to the callback until caught up or ctx is
+// done (the client went away, or the server is shutting down — a long
+// gap-fill must not hold the drain any more than a live stream would).
 func (h *StreamHandler) replayFromNATS(ctx context.Context, since time.Time, subject string, send func([]byte) bool) {
 	cons, err := h.JS.CreateOrUpdateConsumer(ctx, mq.StreamName(), jetstream.ConsumerConfig{
 		FilterSubject:     subject,
@@ -187,6 +217,9 @@ func (h *StreamHandler) replayFromNATS(ctx context.Context, since time.Time, sub
 	}
 
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
 		if err != nil {
 			return // No more messages or timeout — done with gap-fill.

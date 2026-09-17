@@ -151,11 +151,12 @@ The flush goroutine only ever touches `rows` and the worker's concurrency-safe c
 
 ## Contexts
 
-There are three contexts, each with one job.
+The signal context cancels `app.Run`'s errgroup context, which cancels `workerCtx` — the worker's stop signal. Two more are immune to it by construction: `flushCtx` is `context.WithoutCancel(workerCtx)`, and the drain deadline each component builds is rooted in `context.Background()`. Each has one job.
 
 ```mermaid
-flowchart LR
-    PC["process ctx<br/>(main, WithCancel)"] -->|"SIGINT/SIGTERM cancels"| WC["workerCtx<br/>(child — the STOP signal)"]
+flowchart TB
+    PC["signal ctx<br/>(main, WithCancel + signal.Notify)"] -->|"SIGINT/SIGTERM cancels"| RC["run ctx<br/>(app.Run's errgroup)"]
+    RC --> WC["workerCtx<br/>(child — the STOP signal)"]
     WC -->|"context.WithoutCancel"| FC["flushCtx<br/>(values only; never canceled)"]
     WC -.->|"only dispatchLoop watches Done()"| D[dispatchLoop]
     FC -.->|"passed down; never watched"| TL["tableLoops + flushes"]
@@ -163,25 +164,25 @@ flowchart LR
 
 - **`workerCtx`** is the stop signal. **Only `dispatchLoop` watches it.** Every downstream goroutine stops via channel-close instead, which gives a deterministic drain with no select race that could abandon buffered rows.
 - **`flushCtx` = `context.WithoutCancel(workerCtx)`** carries trace values but is never canceled. A flush that has started must finish, so data already written to ClickHouse gets acked rather than redelivered. It is bounded by the HTTP client timeout (30s); shutdown bounds the *wait* for it with a deadline.
-- A separate **shutdown-deadline context** lives only in `main`'s signal handler and is rooted in `context.Background()` (so it survives `workerCtx` being canceled) — it caps how long shutdown waits.
+- Each component that drains builds its own **shutdown-deadline context** (`App.shutdownContext` in `internal/app`, `server.shutdown_timeout`), rooted in `context.Background()` so it survives `workerCtx` being canceled. The ingest worker's and the API server's run concurrently, so the drain phase is bounded by one timeout, not their sum.
 
 The principle: **`ctx` cancellation is the stop mechanism for long-running loops; `Close()`/stop-funcs are the mechanism for resources.**
 
 ## Lifecycle and shutdown
 
-Startup: `StartIngestWorker` creates the consumer, builds the worker, and launches `dispatchLoop`. It returns a `stopFunc` closure that `main` holds and calls during graceful shutdown.
+Startup: `StartIngestWorker` creates the consumer, builds the worker, and launches `dispatchLoop`. It returns a `stopFunc` closure that the app's ingest-worker component holds and calls once the run context is canceled; `app.Run` does not return until that drain has finished.
 
-Shutdown drains **bottom-up through the containment hierarchy**, under a single deadline:
+Shutdown drains **bottom-up through the containment hierarchy**, under the ingest-worker component's own `server.shutdown_timeout` deadline (the API server's drain takes another, concurrently):
 
 ```mermaid
 sequenceDiagram
-    participant M as main
+    participant M as app: ingest-worker component
     participant SF as stopFunc
     participant D as dispatchLoop
     participant TL as tableLoops
     participant A as ack goroutines
-    M->>M: SIGTERM → cancel() + shutCtx (deadline)
-    M->>SF: ingestCleanup(shutCtx)
+    M->>M: run ctx canceled (SIGTERM via app.Run) → shutCtx (deadline)
+    M->>SF: stop(shutCtx)
     SF->>D: workerCancel() → ctx.Done fires
     D->>TL: close every per-table channel
     TL->>TL: drain buffered rows, await in-flight insert, final flush
@@ -231,7 +232,7 @@ flowchart TD
     Purge -->|"deletes msgs that are BOTH<br/>written to ClickHouse AND past the gap window"| Stream[("WAVEHOUSE stream")]
 ```
 
-`MIN(ackFloor+1, gapSeq)` is the safety argument: never purge past what is in ClickHouse, and never past the SSE replay window. If ClickHouse is down the `AckFloor` stops advancing, purging freezes, and the stream fills toward `MaxBytes` — backpressure by construction. The sweeper is launched fire-and-forget (`go sweeper.Start(ctx)`); an interrupted sweep is harmless and idempotent, so it needs no drain on shutdown — the opposite posture from the worker.
+`MIN(ackFloor+1, gapSeq)` is the safety argument: never purge past what is in ClickHouse, and never past the SSE replay window. If ClickHouse is down the `AckFloor` stops advancing, purging freezes, and the stream fills toward `MaxBytes` — backpressure by construction. The sweeper is one of `app.Run`'s components (`Sweeper.Start` blocks until the run context is canceled), but an interrupted sweep is harmless and idempotent, so it returns on `ctx.Done()` with no drain of its own — unlike the worker's bounded `stopFunc`.
 
 ## Scaling to multiple instances
 

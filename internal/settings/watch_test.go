@@ -78,7 +78,7 @@ func TestStore_Watch_CatchesUpOnStart(t *testing.T) {
 }
 
 // TestStore_Watch_MissingDir pins the setup contract: a nonexistent directory
-// is a returned error (main.go logs it and degrades to SIGHUP + the ops
+// is a returned error (internal/app logs it and degrades to SIGHUP + the ops
 // endpoint), not a silent no-op loop.
 func TestStore_Watch_MissingDir(t *testing.T) {
 	t.Parallel()

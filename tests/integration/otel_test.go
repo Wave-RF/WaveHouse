@@ -215,7 +215,7 @@ func TestOTel_PrometheusScrape_ExposesMetrics(t *testing.T) {
 	counter.Add(context.Background(), 7)
 
 	// Scrape via httptest. We don't go over the wire; the handler is the
-	// same one main.go would mount on the API router or sidecar listener.
+	// same one internal/app would mount on the API router or sidecar listener.
 	server := httptest.NewServer(promHandler)
 	t.Cleanup(server.Close)
 
@@ -310,8 +310,9 @@ func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 	// Best-effort shutdown in a goroutine so the test doesn't leak the
 	// runtime-metrics goroutine. We don't assert anything about it — the
 	// OTel SDK doesn't fully honor the shutdown deadline against an
-	// unreachable gRPC endpoint, and main.go bounds the timeout for the
-	// same reason. See the defer wrapping otelShutdown in cmd/wavehouse/main.go.
+	// unreachable gRPC endpoint, and internal/app bounds the timeout for the
+	// same reason. See App.Close's flush, which runs on its own flushTimeout
+	// budget in internal/app/app.go.
 	go func() {
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer drainCancel()
