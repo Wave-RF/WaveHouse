@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel"
 
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 )
 
@@ -357,6 +358,41 @@ func TestRun_ListenFailureStopsEverything(t *testing.T) {
 	// does not join, so the cancel may land a beat after Run returns.
 	assert.Eventually(t, func() bool { return a.stopCtx.Err() != nil }, time.Second, time.Millisecond,
 		"a component failure begins the stop, so a reload mid-hook gives up too")
+}
+
+// dyingConsumerBroker is the real broker, except that the ingest worker's
+// consumer reports that delivery ended shortly after it starts — what a
+// deleted durable or a closed MQ connection looks like from the worker.
+type dyingConsumerBroker struct {
+	mq.Broker
+	reason error
+}
+
+func (b dyingConsumerBroker) CreateConsumer(context.Context, mq.ConsumerConfig) (mq.Consumer, error) {
+	return dyingConsumer{reason: b.reason}, nil
+}
+
+type dyingConsumer struct{ reason error }
+
+func (c dyingConsumer) Consume(func(*mq.Message), int) (func(), <-chan error, error) {
+	failed := make(chan error, 1)
+	failed <- c.reason
+	return func() {}, failed, nil
+}
+
+func TestRun_DeadIngestWorkerStopsEverything(t *testing.T) {
+	a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{})
+	// The worker takes its consumer from a.mq when Run starts it.
+	a.mq = dyingConsumerBroker{Broker: a.mq, reason: fmt.Errorf("%w: consumer deleted", mq.ErrDeliveryEnded)}
+
+	// Bounded so a worker failure that goes unnoticed fails the assertion
+	// below (a cancelled Run returns nil) instead of serving forever — which
+	// is exactly the silent stall this guards against.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	err := a.Run(ctx)
+	require.ErrorIs(t, err, mq.ErrDeliveryEnded, "an API that accepts events nothing writes must not keep running")
+	assert.True(t, strings.HasPrefix(err.Error(), "ingest worker: "), "the failing component names itself: %v", err)
 }
 
 func TestClose_AbandonsAStuckCloseAtTheDeadline(t *testing.T) {

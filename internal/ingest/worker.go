@@ -50,7 +50,11 @@ func columnSignature(cols []string) string {
 }
 
 type IngestWorker struct {
-	dlq        mq.DeadLetterer
+	dlq mq.DeadLetterer
+	// failed carries the one error that ends the worker on its own — the
+	// consumer could not start, or delivery ended underneath it. Buffered so
+	// the dispatch loop never blocks on a caller that has already gone.
+	failed     chan error
 	httpClient *http.Client
 	cache      cache.Cache
 	logger     *slog.Logger
@@ -114,19 +118,26 @@ const (
 	ackWait = 60 * time.Second
 )
 
+// StartIngestWorker starts the batch consumer. stop drains it under the given
+// deadline. failed receives at most one error, if the worker ends on its own:
+// ingestion has stopped and nothing inside the worker can bring it back, so
+// the caller must treat it as fatal (internal/app returns it from Run, which
+// stops the process — the next boot recreates the consumer). The worker has
+// already flushed and acked what it held by the time failed fires; stop is
+// still the caller's to call.
 func StartIngestWorker(
 	ctx context.Context, queue Queue, cache cache.Cache,
 	target func() chconn.Target,
 	dlqEnabled func(table string) bool,
-) (func(context.Context) error, error) {
+) (stop func(context.Context) error, failed <-chan error, err error) {
 	if queue == nil {
-		return nil, fmt.Errorf("message queue is nil")
+		return nil, nil, fmt.Errorf("message queue is nil")
 	}
 	if cache == nil {
-		return nil, fmt.Errorf("cache is nil")
+		return nil, nil, fmt.Errorf("cache is nil")
 	}
 	if target == nil {
-		return nil, fmt.Errorf("clickhouse target is nil")
+		return nil, nil, fmt.Errorf("clickhouse target is nil")
 	}
 
 	cons, err := queue.CreateConsumer(ctx, mq.ConsumerConfig{
@@ -135,7 +146,7 @@ func StartIngestWorker(
 		MaxAckPending: maxAckPending,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Tune the HTTP Transport for high-throughput ClickHouse ingestion
@@ -155,7 +166,8 @@ func StartIngestWorker(
 	}
 
 	worker := &IngestWorker{
-		dlq: queue,
+		dlq:    queue,
+		failed: make(chan error, 1),
 		httpClient: &http.Client{
 			Transport: customTransport,
 			Timeout:   30 * time.Second,
@@ -178,7 +190,7 @@ func StartIngestWorker(
 		workerCancel()
 		return waitOrDeadline(shutdownCtx, &worker.wg)
 	}
-	return stopFunc, nil
+	return stopFunc, worker.failed, nil
 }
 
 // waitOrDeadline returns nil once wg drains, or ctx.Err() if ctx fires first
@@ -214,7 +226,7 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 	// delivery already in the handler, so once this loop has stopped draining
 	// msgChan a full channel would otherwise pin the client's delivery goroutine
 	// forever. A message dropped here is unacked and simply redelivered.
-	stop, err := cons.Consume(func(msg *mq.Message) {
+	stop, deliveryEnded, err := cons.Consume(func(msg *mq.Message) {
 		select {
 		case msgChan <- msg:
 		case <-ctx.Done():
@@ -222,6 +234,7 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 	}, pullMaxMessages)
 	if err != nil {
 		w.logger.Error("failed to start consumer", "error", err)
+		w.failed <- fmt.Errorf("ingest worker: start consumer: %w", err)
 		return
 	}
 	defer stop()
@@ -252,6 +265,16 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 		select {
 		case <-ctx.Done():
 			shutdown()
+			return
+		case err := <-deliveryEnded:
+			// The MQ gave up on the consumer: no message will arrive again, so
+			// waiting on msgChan would stall ingestion silently. Flush and ack
+			// what is already in hand — those rows are delivered and the
+			// publish path is not what broke — then fail loud. Messages still
+			// in msgChan are unacked and redelivered to the next consumer.
+			w.logger.Error("ingest consumer delivery ended; ingestion has stopped", "error", err)
+			shutdown()
+			w.failed <- fmt.Errorf("ingest worker: %w", err)
 			return
 		case m := <-msgChan:
 			pm, ok := w.parseMsg(flushCtx, m)

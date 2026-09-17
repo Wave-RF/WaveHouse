@@ -170,7 +170,7 @@ The principle: **`ctx` cancellation is the stop mechanism for long-running loops
 
 ## Lifecycle and shutdown
 
-Startup: `StartIngestWorker` creates the consumer, builds the worker, and launches `dispatchLoop`. It returns a `stopFunc` closure that the app's ingest-worker component holds and calls once the run context is canceled; `app.Run` does not return until that drain has finished.
+Startup: `StartIngestWorker` creates the consumer, builds the worker, and launches `dispatchLoop`. It returns a `stopFunc` closure that the app's ingest-worker component holds and calls once the run context is canceled; `app.Run` does not return until that drain has finished. It also returns a `failed` channel, which carries at most one error if the worker ends on its own — see [When the consumer dies](#when-the-consumer-dies).
 
 Shutdown drains **bottom-up through the containment hierarchy**, under the ingest-worker component's own `server.shutdown_timeout` deadline (the API server's drain takes another, concurrently):
 
@@ -198,6 +198,12 @@ Why this ordering is correct: every `ackWg.Add` happens either inside a `tableLo
 If the deadline fires first, `waitOrDeadline` returns the deadline error and the in-flight goroutines are abandoned — the process is exiting anyway, and anything un-acked is redelivered on the next boot (at-least-once).
 
 Messages still sitting in `msgChan` or the consumer's prefetch buffer at shutdown are **not** flushed; they are simply redelivered next boot. Graceful shutdown flushes the in-hand per-table batches, not the entire in-flight pipeline.
+
+### When the consumer dies
+
+Delivery can end underneath a running worker: the durable consumer is deleted, or the MQ connection closes. The broker client reports that only through an asynchronous error callback and then stops delivering — no message ever arrives to say so, so a loop that only watches `msgChan` would wait forever while the API kept accepting events nothing writes. `mq.Consumer.Consume` therefore returns a `failed` channel next to `stop` (`mq.ErrDeliveryEnded`, wrapping the broker's reason), and `dispatchLoop` selects on it beside `ctx.Done()` and `msgChan`. On a failure it runs the same bottom-up drain as a shutdown — the rows already in hand are flushed and acked, not abandoned — and then reports the error on the worker's own `failed` channel. A consumer that cannot start at all takes the same path.
+
+The worker does not try to revive the consumer. The app's ingest-worker component returns the error from `app.Run`, which stops every other component and exits non-zero, the same way any failed component does; the supervisor's restart recreates the durable consumer at boot, and everything unacked is redelivered (at-least-once). Passing conditions the client also reports through that callback (a missed heartbeat, a leadership change) are logged at `WARN` and do not end the worker. With the embedded broker (`DontListen`, no external client that could delete the durable) this path is hard to reach today; it matters once a remote broker or per-tenant consumers exist.
 
 ## Backpressure and durability knobs
 

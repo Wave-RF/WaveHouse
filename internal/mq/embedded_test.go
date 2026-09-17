@@ -167,7 +167,7 @@ func TestEmbeddedNATS_StreamHandle(t *testing.T) {
 	// Acks are asserted on the test goroutine: the handler runs on the
 	// client's delivery goroutine, where a require would Goexit the wrong one.
 	acked := make(chan error, 4)
-	stop, err := cons.Consume(func(msg *Message) {
+	stop, _, err := cons.Consume(func(msg *Message) {
 		if msg.TopicKey() == "a" && msg.Data[0] < 2 {
 			acked <- msg.DoubleAck(ctx)
 		}
@@ -546,7 +546,7 @@ func TestEmbeddedNATS_PurgeAcked(t *testing.T) {
 	cons, err := e.CreateConsumer(ctx, ConsumerConfig{Durable: "buffer", MaxAckPending: 10})
 	require.NoError(t, err)
 	acked := make(chan error, 4)
-	stop, err := cons.Consume(func(msg *Message) {
+	stop, _, err := cons.Consume(func(msg *Message) {
 		if msg.Data[0] < 2 {
 			acked <- msg.DoubleAck(ctx)
 		}
@@ -581,4 +581,53 @@ func TestEmbeddedNATS_PurgeAcked(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(3), st.FirstSeq, "unacked events survive however old they are")
 	assert.Equal(t, uint64(2), st.Msgs)
+}
+
+func TestEmbeddedNATS_Consume_ReportsDeliveryEndingOnItsOwn(t *testing.T) {
+	e := newTestEmbedded(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	cons, err := e.CreateConsumer(ctx, ConsumerConfig{Durable: "doomed", MaxAckPending: 10})
+	require.NoError(t, err)
+	stop, failed, err := cons.Consume(func(*Message) {}, 4)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+
+	select {
+	case err := <-failed:
+		t.Fatalf("a healthy consumer reported a failure: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Deleting the durable underneath a running Consume is terminal: the
+	// client stops the subscription on its own, and no message will ever say
+	// so. It must reach the caller.
+	require.NoError(t, e.js.DeleteConsumer(ctx, ingestStream, "doomed"))
+
+	select {
+	case err := <-failed:
+		require.ErrorIs(t, err, ErrDeliveryEnded)
+		require.ErrorIs(t, err, jetstream.ErrConsumerDeleted, "the broker's reason is kept")
+	case <-ctx.Done():
+		t.Fatal("delivery ended underneath the consumer and nothing was reported")
+	}
+}
+
+func TestEmbeddedNATS_Consume_StopIsNotAFailure(t *testing.T) {
+	e := newTestEmbedded(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	cons, err := e.CreateConsumer(ctx, ConsumerConfig{Durable: "stopped", MaxAckPending: 10})
+	require.NoError(t, err)
+	stop, failed, err := cons.Consume(func(*Message) {}, 4)
+	require.NoError(t, err)
+
+	stop()
+	select {
+	case err := <-failed:
+		t.Fatalf("our own stop was reported as a failure: %v", err)
+	case <-time.After(time.Second):
+	}
 }

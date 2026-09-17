@@ -183,8 +183,18 @@ type Consumer interface {
 	// flight, or one for a message already queued client-side, may still run
 	// after stop returns, so a handler must not write to anything the caller
 	// tears down right after stopping.
-	Consume(handler func(msg *Message), prefetch int) (stop func(), err error)
+	//
+	// Delivery can also end on its own after Consume has returned: the broker
+	// or the client gives up on the consumer (it was deleted, the connection
+	// closed). That is reported on failed — exactly one error, and nothing
+	// once stop has been called — because no message will ever arrive to say
+	// so. A caller that ignores failed waits forever on a dead consumer.
+	Consume(handler func(msg *Message), prefetch int) (stop func(), failed <-chan error, err error)
 }
+
+// ErrDeliveryEnded is the error a Consumer reports on failed, wrapping the
+// broker's reason when it gave one.
+var ErrDeliveryEnded = errors.New("consumer delivery ended")
 
 // ConsumerManager creates durable consumers on the ingest queue. A delivered
 // Message.Ctx is the ctx given to CreateConsumer: unlike Subscriber, the

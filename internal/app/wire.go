@@ -335,17 +335,26 @@ func (a *App) wireStreaming() {
 // drain within the shutdown timeout.
 func (a *App) wireIngestWorker() {
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
-		stop, err := ingest.StartIngestWorker(ctx, a.mq, a.cache, a.ch.Target, a.store.DLQFor)
+		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, a.cache, a.ch.Target, a.store.DLQFor)
 		if err != nil {
 			return err
 		}
-		<-ctx.Done()
+		// A worker that ends on its own (its consumer was deleted, the MQ
+		// connection closed) cannot be revived from here and would otherwise
+		// leave the API accepting events nothing writes. Returning the error
+		// fails Run, which stops every other component; the supervisor's
+		// restart recreates the consumer at boot.
+		var workerErr error
+		select {
+		case <-ctx.Done():
+		case workerErr = <-failed:
+		}
 		shutCtx, cancel := a.shutdownContext()
 		defer cancel()
 		if err := stop(shutCtx); err != nil {
 			slog.Error("ingest worker cleanup error", "error", err)
 		}
-		return nil
+		return workerErr
 	}})
 }
 

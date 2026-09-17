@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
@@ -325,8 +326,22 @@ type jsConsumer struct {
 	ctx  context.Context // each delivered Message.Ctx (see ConsumerManager)
 }
 
-func (c *jsConsumer) Consume(handler func(msg *Message), prefetch int) (func(), error) {
-	var opts []jetstream.PullConsumeOpt
+func (c *jsConsumer) Consume(handler func(msg *Message), prefetch int) (func(), <-chan error, error) {
+	// The client reports what goes wrong after Consume returns only through
+	// this handler, never through Consume's own error. It calls it for
+	// passing conditions too (a missed heartbeat, a leadership change) and
+	// keeps delivering; on a terminal one (the consumer was deleted, a bad
+	// request, a closed connection) it calls it and then stops the
+	// subscription itself. So the handler only records and logs, and "the
+	// subscription closed without our stop" below is what terminal means —
+	// the client's own verdict, not a list of error names kept in step here.
+	var lastErr atomic.Pointer[error]
+	opts := []jetstream.PullConsumeOpt{
+		jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
+			lastErr.Store(&err)
+			slog.Default().Warn("mq: consumer reported an error", "component", "nats", "error", err)
+		}),
+	}
 	if prefetch > 0 {
 		opts = append(opts, jetstream.PullMaxMessages(prefetch))
 	}
@@ -334,9 +349,27 @@ func (c *jsConsumer) Consume(handler func(msg *Message), prefetch int) (func(), 
 		handler(wrapMsg(c.ctx, m))
 	}, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("consume: %w", err)
+		return nil, nil, fmt.Errorf("consume: %w", err)
 	}
-	return cctx.Stop, nil
+
+	var stopped atomic.Bool
+	failed := make(chan error, 1)
+	go func() {
+		<-cctx.Closed()
+		if stopped.Load() {
+			return
+		}
+		if reason := lastErr.Load(); reason != nil {
+			failed <- fmt.Errorf("%w: %w", ErrDeliveryEnded, *reason)
+			return
+		}
+		failed <- ErrDeliveryEnded
+	}()
+	stop := func() {
+		stopped.Store(true)
+		cctx.Stop()
+	}
+	return stop, failed, nil
 }
 
 // stream resolves a stream handle by name.

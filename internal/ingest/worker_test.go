@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,6 +43,7 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockPublisher
 	cache := &testutil.MockCache{}
 	w := &IngestWorker{
 		dlq:        pub,
+		failed:     make(chan error, 1),
 		httpClient: &http.Client{Transport: rt},
 		cache:      cache,
 		logger:     testutil.NopLogger(),
@@ -131,7 +133,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			q, c := tt.setup(t)
-			_, err := StartIngestWorker(context.Background(), q, c,
+			_, _, err := StartIngestWorker(context.Background(), q, c,
 				func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrSub)
@@ -265,7 +267,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	stopFn, err := StartIngestWorker(ctx, emb, &testutil.MockCache{},
+	stopFn, _, err := StartIngestWorker(ctx, emb, &testutil.MockCache{},
 		func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		}, nil)
@@ -301,7 +303,7 @@ func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 
 	// chURL is never dialed: with no messages there is no flush, so a dummy
 	// host/port is fine.
-	stopFn, err := StartIngestWorker(context.Background(), emb, &testutil.MockCache{},
+	stopFn, _, err := StartIngestWorker(context.Background(), emb, &testutil.MockCache{},
 		func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
 	require.NoError(t, err)
 
@@ -1535,7 +1537,7 @@ type blockingFakeConsumer struct {
 	done chan struct{}
 }
 
-func (f *blockingFakeConsumer) Consume(handler func(*mq.Message), _ int) (func(), error) {
+func (f *blockingFakeConsumer) Consume(handler func(*mq.Message), _ int) (func(), <-chan error, error) {
 	var wg sync.WaitGroup
 	for range f.n {
 		wg.Go(func() {
@@ -1546,7 +1548,80 @@ func (f *blockingFakeConsumer) Consume(handler func(*mq.Message), _ int) (func()
 		wg.Wait()
 		close(f.done)
 	}()
-	return func() {}, nil
+	return func() {}, nil, nil
+}
+
+// failingFakeConsumer delivers msgs, then reports that delivery ended — or,
+// with startErr set, refuses to start at all.
+type failingFakeConsumer struct {
+	msgs     []*testutil.MockMessage
+	endWith  error
+	startErr error
+	stopped  atomic.Bool
+}
+
+func (f *failingFakeConsumer) Consume(handler func(*mq.Message), _ int) (func(), <-chan error, error) {
+	if f.startErr != nil {
+		return nil, nil, f.startErr
+	}
+	failed := make(chan error, 1)
+	go func() {
+		for _, m := range f.msgs {
+			handler(m.Message())
+		}
+		failed <- f.endWith
+	}()
+	return func() { f.stopped.Store(true) }, failed, nil
+}
+
+// TestDispatchLoop_DeliveryEndedFailsLoud pins the worker's answer to a
+// consumer that dies underneath it (deleted, connection closed): no message
+// will ever arrive to say so, so the loop must not sit on msgChan. It flushes
+// and acks what it already holds, then reports the failure and exits.
+func TestDispatchLoop_DeliveryEndedFailsLoud(t *testing.T) {
+	t.Parallel()
+
+	rt := &testutil.MockRoundTripper{}
+	w, _, _, _ := newTestWorker(rt)
+	w.maxBatch = 100
+	w.maxWait = time.Hour // only the shutdown flush can write the row
+
+	held := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	ended := fmt.Errorf("%w: consumer deleted", mq.ErrDeliveryEnded)
+	cons := &failingFakeConsumer{msgs: []*testutil.MockMessage{held}, endWith: ended}
+
+	w.wg.Add(1)
+	go w.dispatchLoop(context.Background(), cons)
+
+	select {
+	case err := <-w.failed:
+		require.ErrorIs(t, err, mq.ErrDeliveryEnded)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the worker kept waiting on a consumer that will never deliver again")
+	}
+	w.wg.Wait()
+
+	assert.True(t, cons.stopped.Load(), "the consumer is stopped on the way out")
+	assert.Equal(t, int32(1), rt.Hits(), "the row already in hand was flushed, not abandoned")
+	assert.True(t, held.DoubleAcked.Load(), "and acked, so it is not redelivered as a duplicate")
+}
+
+// TestDispatchLoop_ConsumerStartFailureFailsLoud: a consumer that cannot start
+// leaves a worker that will never ingest, which must not look like a running one.
+func TestDispatchLoop_ConsumerStartFailureFailsLoud(t *testing.T) {
+	t.Parallel()
+
+	w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+	w.wg.Add(1)
+	go w.dispatchLoop(context.Background(), &failingFakeConsumer{startErr: errors.New("consume refused")})
+
+	select {
+	case err := <-w.failed:
+		require.ErrorContains(t, err, "consume refused")
+	case <-time.After(5 * time.Second):
+		t.Fatal("a worker whose consumer never started reported nothing")
+	}
+	w.wg.Wait()
 }
 
 // TestDispatchLoop_HandoffReturnsOnCancel pins the delivery handoff's
