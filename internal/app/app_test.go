@@ -388,7 +388,10 @@ func TestRun_ListenFailureStopsEverything(t *testing.T) {
 	err = a.Run(ctx)
 	require.Error(t, err, "boot must fail immediately when the port is taken")
 	assert.True(t, strings.HasPrefix(err.Error(), "http server: "), "the failing component names itself: %v", err)
-	assert.Error(t, a.stopCtx.Err(), "a component failure begins the stop, so a reload mid-hook gives up too")
+	// Eventually: AfterFunc runs stopCancel on its own goroutine, which Run
+	// does not join, so the cancel may land a beat after Run returns.
+	assert.Eventually(t, func() bool { return a.stopCtx.Err() != nil }, time.Second, time.Millisecond,
+		"a component failure begins the stop, so a reload mid-hook gives up too")
 }
 
 func TestClose_AbandonsAStuckCloseAtTheDeadline(t *testing.T) {

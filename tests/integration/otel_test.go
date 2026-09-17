@@ -311,7 +311,8 @@ func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 	// runtime-metrics goroutine. We don't assert anything about it — the
 	// OTel SDK doesn't fully honor the shutdown deadline against an
 	// unreachable gRPC endpoint, and internal/app bounds the timeout for the
-	// same reason. See the observability component's close in internal/app/wire.go.
+	// same reason. See App.Close's flush, which runs on its own flushTimeout
+	// budget in internal/app/app.go.
 	go func() {
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer drainCancel()
