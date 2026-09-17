@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
@@ -45,6 +46,9 @@ type EmbeddedNATS struct {
 	server *natsserver.Server
 	conn   *nats.Conn
 	js     jetstream.JetStream
+
+	limitMu  sync.Mutex
+	maxBytes int64 // the ingest stream cap both streams were last reconciled to
 }
 
 // EmbeddedNATS is the one implementation of every mq interface.
@@ -56,7 +60,28 @@ var (
 	_ Replayer        = (*EmbeddedNATS)(nil)
 )
 
-// NewEmbedded starts an embedded NATS server with JetStream enabled.
+const (
+	// dlqShare is the DLQ stream's slice of the byte budget: a tenth of the
+	// ingest stream's cap.
+	dlqShare = 10
+	// resizeTimeout bounds the JetStream calls SetMaxBytes makes to apply a
+	// new cap — both streams share it. A settings reload holds the store's
+	// lock while its hooks run, so an in-process JetStream call that never
+	// returns would otherwise block every later reload.
+	resizeTimeout = 10 * time.Second
+	// rollbackTimeout is the undo's own budget when the DLQ resize fails:
+	// in-process JetStream fails by stalling rather than erroring, so the
+	// likely cause is that resizeTimeout has just run out, and an undo on
+	// that context would fail without touching the stream. SetMaxBytes runs
+	// for at most the sum of the two.
+	rollbackTimeout = 5 * time.Second
+)
+
+// NewEmbedded starts an embedded NATS server with JetStream enabled and
+// both streams in place: the ingest stream capped at maxBytes and the DLQ
+// stream at a tenth of it. The DLQ stream is always present — an empty
+// limits-policy stream costs nothing, and whether a poison row lands on it is
+// the ingest worker's decision at the moment of the failure.
 // An optional *slog.Logger can be passed to control server log output;
 // if omitted, slog.Default() is used. The stream name is fixed (see
 // StreamName / DLQStreamName) — the embedded server is private to this
@@ -108,8 +133,13 @@ func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*Embe
 		ns.Shutdown()
 		return nil, fmt.Errorf("create stream: %w", err)
 	}
+	if _, err := js.CreateOrUpdateStream(context.Background(), dlqStreamConfig(maxBytes/dlqShare)); err != nil {
+		nc.Close()
+		ns.Shutdown()
+		return nil, fmt.Errorf("create dlq stream: %w", err)
+	}
 
-	return &EmbeddedNATS{server: ns, conn: nc, js: js}, nil
+	return &EmbeddedNATS{server: ns, conn: nc, js: js, maxBytes: maxBytes}, nil
 }
 
 // ingestStreamConfig is the WAVEHOUSE stream. LimitsPolicy: standard
@@ -139,23 +169,55 @@ func dlqStreamConfig(maxBytes int64) jetstream.StreamConfig {
 	}
 }
 
-// Resize updates the ingest stream's MaxBytes in place (the hot-reloadable
-// mq.max_bytes_gb). JetStream applies a limit change to a live stream
-// without touching its messages: growing takes effect immediately; shrinking
-// below the current size makes DiscardNew refuse new publishes until the
-// worker drains it — nothing buffered is dropped.
-func (e *EmbeddedNATS) Resize(ctx context.Context, maxBytes int64) error {
-	if _, err := e.js.UpdateStream(ctx, ingestStreamConfig(maxBytes)); err != nil {
-		return fmt.Errorf("resize stream: %w", err)
-	}
-	return nil
+// MaxBytes reports the ingest stream cap both streams were last reconciled to
+// (by NewEmbedded, then by each successful SetMaxBytes).
+func (e *EmbeddedNATS) MaxBytes() int64 {
+	e.limitMu.Lock()
+	defer e.limitMu.Unlock()
+	return e.maxBytes
 }
 
-// EnsureDLQStream creates the DLQ stream if it doesn't exist, or updates its
-// MaxBytes in place if it does (the same reload path as Resize).
-func (e *EmbeddedNATS) EnsureDLQStream(ctx context.Context, maxBytes int64) error {
-	_, err := e.js.CreateOrUpdateStream(ctx, dlqStreamConfig(maxBytes))
-	return err
+// SetMaxBytes applies a new byte budget to both streams in place (the
+// hot-reloadable mq.max_bytes_gb): the ingest stream takes maxBytes and the
+// DLQ stream a tenth of it. JetStream applies a limit change to a live stream
+// without touching its messages: growing takes effect immediately; shrinking
+// the ingest stream below its current size makes DiscardNew refuse new
+// publishes until the worker drains it — nothing buffered is dropped.
+//
+// The pair moves together or not at all. If the DLQ update fails after the
+// ingest one succeeded, the ingest resize is undone so the 10:1 pair stays at
+// the previous budget, and the next call retries both. Safe in that direction
+// — the ingest stream is DiscardNew, so shrinking it back drops nothing
+// stored. On any error MaxBytes keeps reporting the previous budget.
+//
+// The JetStream calls are bounded by resizeTimeout, plus rollbackTimeout for
+// the undo, both rooted in ctx — so a caller's cancellation (a process stop
+// caught mid-reload) gives up rather than waiting either out; the next boot
+// reconciles both streams from the adopted settings anyway.
+func (e *EmbeddedNATS) SetMaxBytes(ctx context.Context, maxBytes int64) error {
+	e.limitMu.Lock()
+	defer e.limitMu.Unlock()
+	if maxBytes == e.maxBytes {
+		return nil
+	}
+
+	resizeCtx, cancel := context.WithTimeout(ctx, resizeTimeout)
+	defer cancel()
+	if _, err := e.js.UpdateStream(resizeCtx, ingestStreamConfig(maxBytes)); err != nil {
+		return fmt.Errorf("resize ingest stream: %w", err)
+	}
+	if _, err := e.js.CreateOrUpdateStream(resizeCtx, dlqStreamConfig(maxBytes/dlqShare)); err != nil {
+		// The undo runs on its own budget, not the one the DLQ call has
+		// likely just exhausted.
+		rollbackCtx, cancelRollback := context.WithTimeout(ctx, rollbackTimeout)
+		defer cancelRollback()
+		if _, rollbackErr := e.js.UpdateStream(rollbackCtx, ingestStreamConfig(e.maxBytes)); rollbackErr != nil {
+			return fmt.Errorf("resize dlq stream: %w (ingest stream rollback failed, so it stays at the new limit and the dlq at the previous: %w)", err, rollbackErr)
+		}
+		return fmt.Errorf("resize dlq stream: %w (ingest stream restored to the previous limit)", err)
+	}
+	e.maxBytes = maxBytes
+	return nil
 }
 
 func (e *EmbeddedNATS) Publish(ctx context.Context, subject string, data []byte, opts ...PublishOpt) error {

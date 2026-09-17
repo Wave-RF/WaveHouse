@@ -92,22 +92,23 @@ func TestEmbeddedNATS_PublishHeaders(t *testing.T) {
 	assert.Equal(t, []byte("x"), raw.Data)
 }
 
-func TestEmbeddedNATS_EnsureDLQStream_Idempotent(t *testing.T) {
+func TestNewEmbedded_CreatesBothStreams(t *testing.T) {
 	e := newTestEmbedded(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	// Create, then re-run with a new cap: the second call is an update in
-	// place, not an error.
-	require.NoError(t, e.EnsureDLQStream(ctx, 1<<20))
-	require.NoError(t, e.EnsureDLQStream(ctx, 2<<20))
+	assert.Equal(t, int64(64<<20), e.MaxBytes())
 
-	info, err := e.js.Stream(ctx, DLQStreamName())
+	ingest, err := e.js.Stream(ctx, StreamName())
 	require.NoError(t, err)
-	cfg := info.CachedInfo().Config
-	assert.Equal(t, DLQStreamName(), cfg.Name)
+	assert.Equal(t, int64(64<<20), ingest.CachedInfo().Config.MaxBytes)
+
+	// The DLQ stream is always present, at a tenth of the budget.
+	dlq, err := e.js.Stream(ctx, DLQStreamName())
+	require.NoError(t, err)
+	cfg := dlq.CachedInfo().Config
 	assert.Equal(t, []string{"dlq.>"}, cfg.Subjects)
-	assert.Equal(t, int64(2<<20), cfg.MaxBytes)
+	assert.Equal(t, int64(64<<20)/10, cfg.MaxBytes)
 	assert.Equal(t, jetstream.DiscardOld, cfg.Discard)
 }
 
@@ -300,18 +301,72 @@ func TestSlogNATSLogger_Levels(t *testing.T) {
 	l.Fatalf("fatal %d", 42) // slog.Error; no os.Exit here
 }
 
-func TestEmbeddedNATS_Resize(t *testing.T) {
+func TestEmbeddedNATS_SetMaxBytes(t *testing.T) {
 	e := newTestEmbedded(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	require.NoError(t, e.Resize(ctx, 128<<20))
-	info, err := e.js.Stream(ctx, StreamName())
+	require.NoError(t, e.SetMaxBytes(ctx, 128<<20))
+	assert.Equal(t, int64(128<<20), e.MaxBytes())
+
+	ingest, err := e.js.Stream(ctx, StreamName())
 	require.NoError(t, err)
-	assert.Equal(t, int64(128<<20), info.CachedInfo().Config.MaxBytes)
+	assert.Equal(t, int64(128<<20), ingest.CachedInfo().Config.MaxBytes)
 	// Everything but the limit is preserved.
-	assert.Equal(t, []string{"ingest.>"}, info.CachedInfo().Config.Subjects)
-	assert.Equal(t, jetstream.DiscardNew, info.CachedInfo().Config.Discard)
+	assert.Equal(t, []string{"ingest.>"}, ingest.CachedInfo().Config.Subjects)
+	assert.Equal(t, jetstream.DiscardNew, ingest.CachedInfo().Config.Discard)
+
+	// The DLQ stream follows at a tenth of the budget.
+	dlq, err := e.js.Stream(ctx, DLQStreamName())
+	require.NoError(t, err)
+	assert.Equal(t, int64(128<<20)/10, dlq.CachedInfo().Config.MaxBytes)
+	assert.Equal(t, jetstream.DiscardOld, dlq.CachedInfo().Config.Discard)
+
+	// The budget already in effect is a no-op, not an error.
+	require.NoError(t, e.SetMaxBytes(ctx, 128<<20))
+	assert.Equal(t, int64(128<<20), e.MaxBytes())
+}
+
+func TestEmbeddedNATS_SetMaxBytes_DLQFailureRollsBackIngest(t *testing.T) {
+	e := newTestEmbedded(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	// Put the DLQ stream where the update can't follow: JetStream refuses to
+	// change a live stream's retention policy, so recreating it as a work
+	// queue makes the DLQ resize fail after the ingest resize has already
+	// succeeded.
+	require.NoError(t, e.js.DeleteStream(ctx, DLQStreamName()))
+	_, err := e.js.CreateStream(ctx, jetstream.StreamConfig{
+		Name: DLQStreamName(), Subjects: []string{"dlq.>"}, Retention: jetstream.WorkQueuePolicy, MaxBytes: (64 << 20) / 10,
+	})
+	require.NoError(t, err)
+
+	err = e.SetMaxBytes(ctx, 128<<20)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ingest stream restored to the previous limit")
+	assert.Equal(t, int64(64<<20), e.MaxBytes(), "the budget in effect is unchanged, so the next call retries both")
+
+	ingest, err := e.js.Stream(ctx, StreamName())
+	require.NoError(t, err)
+	assert.Equal(t, int64(64<<20), ingest.CachedInfo().Config.MaxBytes, "the ingest resize is undone so the pair stays at the previous limit")
+	dlq, err := e.js.Stream(ctx, DLQStreamName())
+	require.NoError(t, err)
+	assert.Equal(t, int64(64<<20)/10, dlq.CachedInfo().Config.MaxBytes)
+}
+
+func TestEmbeddedNATS_SetMaxBytes_IngestFailureChangesNothing(t *testing.T) {
+	e := newTestEmbedded(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // a stop caught mid-reload: the first JetStream call gives up
+
+	err := e.SetMaxBytes(ctx, 128<<20)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, int64(64<<20), e.MaxBytes())
+
+	dlq, err := e.js.Stream(t.Context(), DLQStreamName())
+	require.NoError(t, err)
+	assert.Equal(t, int64(64<<20)/10, dlq.CachedInfo().Config.MaxBytes, "the dlq is not touched when the ingest resize fails")
 }
 
 func TestEmbeddedNATS_ReplaySince_PullFailureIsAnError(t *testing.T) {

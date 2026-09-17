@@ -162,7 +162,7 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	if err := a.wireDedupe(); err != nil {
 		return nil, err
 	}
-	if err := a.wireMQ(ctx); err != nil {
+	if err := a.wireMQ(); err != nil {
 		return nil, err
 	}
 	if err := a.wireCache(); err != nil {

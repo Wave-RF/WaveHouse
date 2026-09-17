@@ -31,22 +31,7 @@ import (
 )
 
 const (
-	serviceName = "wavehouse"
-	// mqResizeTimeout bounds the JetStream calls a settings reload makes to
-	// apply a new mq.max_bytes_gb — both streams share it. The reload holds
-	// the store's lock while its hooks run, so an in-process JetStream call
-	// that never returns would otherwise block every later reload. Both
-	// this and the rollback are rooted in the App's stop context, so a
-	// reload caught mid-hook by SIGTERM gives up rather than holding the
-	// drain past server.shutdown_timeout; the next boot reconciles both
-	// streams from the adopted settings anyway.
-	mqResizeTimeout = 10 * time.Second
-	// mqRollbackTimeout is the undo's own budget when the DLQ resize fails:
-	// in-process JetStream fails by stalling rather than erroring, so the
-	// likely cause is that mqResizeTimeout has just run out, and an undo on
-	// that context would fail without touching the stream. The hook holds the
-	// store's lock for at most the sum of the two.
-	mqRollbackTimeout = 5 * time.Second
+	serviceName       = "wavehouse"
 	readHeaderTimeout = 10 * time.Second
 )
 
@@ -240,17 +225,13 @@ func (a *App) wireDedupe() error {
 }
 
 // wireMQ starts the embedded NATS under data_dir/nats with the ingest stream
-// and the DLQ stream. The DLQ stream is always present: an empty
-// limits-policy stream costs nothing, and whether a poison row lands on it
-// is the hot-reloadable dlq.enabled switch (global, overridable per table),
-// resolved by the ingest worker at the moment of the failure.
-// mq.max_bytes_gb is hot-reloadable too: after each adoption both streams'
-// limits are updated in place (the DLQ keeps a tenth of the budget).
-func (a *App) wireMQ(ctx context.Context) error {
+// and the DLQ stream. mq.max_bytes_gb is hot-reloadable: after each adoption
+// the new budget is handed to the MQ, which owns how it is split across the
+// streams and keeps them consistent (see mq.EmbeddedNATS.SetMaxBytes).
+func (a *App) wireMQ() error {
 	dir := filepath.Join(a.cfg.DataDir, "nats")
 	config.WarnIfFreshDataDir(slog.Default(), "nats", dir)
-	maxBytes := a.store.MQMaxBytes()
-	embedded, err := mq.NewEmbedded(dir, maxBytes)
+	embedded, err := mq.NewEmbedded(dir, a.store.MQMaxBytes())
 	if err != nil {
 		config.LogStorageInitError(slog.Default(), "mq", dir, err)
 		return fmt.Errorf("mq open: %w", err)
@@ -268,38 +249,19 @@ func (a *App) wireMQ(ctx context.Context) error {
 		}
 	}
 
-	if err := embedded.EnsureDLQStream(ctx, maxBytes/10); err != nil {
-		return fmt.Errorf("dlq stream init: %w", err)
-	}
-	applied := maxBytes
+	// Rooted in the App's stop context, so a reload caught mid-hook by
+	// SIGTERM gives up rather than holding the drain past
+	// server.shutdown_timeout.
 	a.store.AfterAdopt(func() {
 		mb := a.store.MQMaxBytes()
-		if mb == applied {
+		if mb == embedded.MaxBytes() {
 			return
 		}
-		ctx, cancel := context.WithTimeout(a.stopCtx, mqResizeTimeout)
-		defer cancel()
-		if err := embedded.Resize(ctx, mb); err != nil {
-			slog.Error("mq stream resize failed; previous limits stay in effect", "error", err)
-			return
-		}
-		if err := embedded.EnsureDLQStream(ctx, mb/10); err != nil {
-			// Keep both streams on one adopted document: undo the ingest
-			// resize so the 10:1 pair stays at the previous limit, and the
-			// next adoption retries both. Safe in this direction — the ingest
-			// stream is DiscardNew, so shrinking it back drops nothing
-			// stored. The undo runs on its own budget, not the one the DLQ
-			// call has likely just exhausted.
-			slog.Error("dlq stream resize failed; restoring the previous ingest limit", "error", err)
-			rollbackCtx, cancelRollback := context.WithTimeout(a.stopCtx, mqRollbackTimeout)
-			defer cancelRollback()
-			if err := embedded.Resize(rollbackCtx, applied); err != nil {
-				slog.Error("ingest stream rollback failed; ingest stream at the new limit, dlq at the previous", "error", err)
-			}
+		if err := embedded.SetMaxBytes(a.stopCtx, mb); err != nil {
+			slog.Error("mq stream resize failed; the next reload retries", "error", err)
 			return
 		}
 		slog.Info("mq stream limits reconciled with settings", "max_bytes_gb", mb>>30)
-		applied = mb
 	})
 	return nil
 }

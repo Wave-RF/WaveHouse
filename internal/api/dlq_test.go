@@ -15,12 +15,9 @@ import (
 )
 
 func TestDLQStats_EmptyWhenNoStream(t *testing.T) {
-	dir := t.TempDir()
-	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
-	require.NoError(t, err)
-	defer func() { _ = emb.Close() }()
-
-	handler := NewDLQHandler(emb, slog.Default())
+	// The embedded MQ always has a DLQ stream, so the lookup failure comes
+	// from a manager that resolves nothing.
+	handler := NewDLQHandler(&testutil.MockStreamManager{}, slog.Default())
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/dlq/stats", nil)
 	rec := httptest.NewRecorder()
@@ -45,9 +42,6 @@ func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 	defer func() { _ = emb.Close() }()
 
 	ctx := context.Background()
-
-	// Create the DLQ stream.
-	require.NoError(t, emb.EnsureDLQStream(ctx, 1024*1024))
 
 	// Publish messages to DLQ subjects.
 	for i := 0; i < 3; i++ {
@@ -82,8 +76,6 @@ func TestDLQStats_SingleTable(t *testing.T) {
 	defer func() { _ = emb.Close() }()
 
 	ctx := context.Background()
-
-	require.NoError(t, emb.EnsureDLQStream(ctx, 1024*1024))
 
 	require.NoError(t, emb.Publish(ctx, "dlq.orders", []byte(`{"table_name":"orders"}`)))
 
