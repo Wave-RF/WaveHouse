@@ -5,8 +5,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-
-	"github.com/nats-io/nats.go"
 )
 
 // VersionManager handles the safe tracking of table + scope versioning.
@@ -17,17 +15,13 @@ type VersionManager struct {
 
 	tableVersions     map[string]uint64 // <table>                         -> table_version
 	namespaceVersions map[string]uint64 // <table>.<table_version>.<scope> -> namespace_version
-
-	conn *nats.Conn
 }
 
 // NewVersionManager initializes the thread-safe version store.
-// Optionally initialized with a NATS connection, so that each version manager on every distributed server can keep in sync – NOT IMPLEMENTED, just wired in
-func NewVersionManager(conn *nats.Conn) *VersionManager {
+func NewVersionManager() *VersionManager {
 	return &VersionManager{
 		tableVersions:     make(map[string]uint64),
 		namespaceVersions: make(map[string]uint64),
-		conn:              conn,
 	}
 }
 

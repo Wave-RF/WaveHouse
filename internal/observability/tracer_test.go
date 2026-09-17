@@ -5,7 +5,6 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -14,7 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// InjectNATS / ExtractNATS rely on the global text map propagator. The
+// InjectHeaders / ExtractHeaders rely on the global text map propagator. The
 // production pipeline installs one via InitProvider; tests don't go through
 // that path, so install a standard composite propagator here.
 //
@@ -38,11 +37,10 @@ func localTracerProvider() *sdktrace.TracerProvider {
 	return sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
 }
 
-func TestNATSCarrier_SetGetKeys(t *testing.T) {
+func TestHeaderCarrier_SetGetKeys(t *testing.T) {
 	t.Parallel()
 
-	h := nats.Header{}
-	c := natsCarrier(h)
+	c := headerCarrier{}
 
 	c.Set("foo", "bar")
 	c.Set("baz", "qux")
@@ -50,18 +48,15 @@ func TestNATSCarrier_SetGetKeys(t *testing.T) {
 	assert.Equal(t, "bar", c.Get("foo"))
 	assert.Equal(t, "qux", c.Get("baz"))
 	assert.Empty(t, c.Get("missing"))
+	// Exact-key, like nats.Header: no canonicalization on either side.
+	assert.Empty(t, c.Get("Foo"))
 
 	keys := c.Keys()
 	sort.Strings(keys)
 	assert.Equal(t, []string{"baz", "foo"}, keys)
 }
 
-// fakeHeaderHolder implements HeaderHolder for testing ExtractNATS.
-type fakeHeaderHolder struct{ h nats.Header }
-
-func (f *fakeHeaderHolder) Headers() nats.Header { return f.h }
-
-func TestInjectExtractNATS_Roundtrip(t *testing.T) {
+func TestInjectExtractHeaders_Roundtrip(t *testing.T) {
 	t.Parallel()
 
 	// Build a context carrying a valid, sampled span so the W3C TraceContext
@@ -72,35 +67,32 @@ func TestInjectExtractNATS_Roundtrip(t *testing.T) {
 	ctx, span := tp.Tracer("observability-test").Start(context.Background(), "publish")
 	t.Cleanup(func() { span.End() })
 
-	msg := nats.NewMsg("ingest.test")
-	InjectNATS(ctx, msg)
+	headers := map[string][]string{}
+	InjectHeaders(ctx, headers)
 
-	require.NotNil(t, msg.Header)
-	require.NotEmpty(t, msg.Header, "inject should populate headers")
+	require.NotEmpty(t, headers, "inject should populate headers")
 
-	extracted := ExtractNATS(context.Background(), &fakeHeaderHolder{h: msg.Header})
+	extracted := ExtractHeaders(context.Background(), headers)
 	sc := trace.SpanContextFromContext(extracted)
 	require.True(t, sc.IsValid(), "extracted context must carry a valid span context")
 	assert.Equal(t, span.SpanContext().TraceID(), sc.TraceID())
 }
 
-func TestInjectNATS_CreatesHeaderWhenNil(t *testing.T) {
+func TestInjectHeaders_NoSpanWritesNothing(t *testing.T) {
 	t.Parallel()
 
-	msg := &nats.Msg{Subject: "ingest.nil"}
-	require.Nil(t, msg.Header)
-
-	InjectNATS(context.Background(), msg)
-	// Even without a valid span, Inject should initialize the header map so
-	// subsequent Set calls don't panic.
-	assert.NotNil(t, msg.Header)
+	// Without a valid span or baggage the propagators have nothing to write,
+	// so a message published outside a trace carries no propagation headers.
+	headers := map[string][]string{}
+	InjectHeaders(context.Background(), headers)
+	assert.Empty(t, headers)
 }
 
-func TestExtractNATS_NilHeadersPassthrough(t *testing.T) {
+func TestExtractHeaders_NilHeadersPassthrough(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	got := ExtractNATS(ctx, &fakeHeaderHolder{h: nil})
+	got := ExtractHeaders(ctx, nil)
 	// No headers → should return the context unchanged, not panic.
 	assert.Equal(t, ctx, got)
 }

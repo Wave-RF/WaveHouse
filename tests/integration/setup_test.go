@@ -47,7 +47,7 @@ const (
 type testEnv struct {
 	chConn     driver.Conn
 	chHTTPURL  string
-	embeddedMQ *mq.EmbeddedNATS
+	embeddedMQ mq.Broker
 	baseURL    string // the wired API server, e.g. http://127.0.0.1:41234
 	registry   *discovery.SchemaRegistry
 }

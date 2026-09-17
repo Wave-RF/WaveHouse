@@ -15,7 +15,7 @@ It is deliberately detailed: this is a hot, concurrency-heavy path, and the goro
 | --- | --- |
 | `worker.go` | `StartIngestWorker`, the `dispatchLoop`, `parseMsg` (+ `rejectPoison` for an envelope it cannot read), the per-table `tableBatcher`/`tableLoop`, `flushTable` (splits a batch per column list via `groupByColumns`) and `flushGroup` (bulk insert with a row-by-row poison-isolation fallback), `insertToClickHouse`, `handleSuccess` (cache invalidation + acks), `sendToDLQ`/`parkOnDLQ` |
 | `compact.go` | `EncodeCompactRow` — renders one record as a `JSONCompactEachRow` line over the table's **insertable** columns, in declaration order. Serialization only: it validates nothing and judges no value |
-| `sweeper.go` | The **Active Sweeper** — purges stream messages that are both written to ClickHouse and past the SSE gap window |
+| `sweeper.go` | The **Active Sweeper** — every minute, asks the MQ to purge the events that are both written to ClickHouse and past the SSE gap window (the purge arithmetic below lives in `internal/mq/purge.go`) |
 | `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |
 
 The pipeline is **insert-only**. (Upgrading across the v2 envelope? [Drain the queue first](/deployment#upgrading-across-the-v2-ingest-envelope).) The wire format carries `{table_name, scope, received_timestamp, format, columns, row}`: `row` is one `JSONCompactEachRow` line — a positional JSON array — and `columns` names its positions — the table's insertable columns, in declaration order (a `MATERIALIZED` or `ALIAS` column cannot be named in an `INSERT`, so it is not part of the row's contract). (`scope` is reserved and always `""` today.) Each NATS message is its own envelope, so the names ride along per record; where they are carried once is the `INSERT` the worker emits per group. The worker parses the envelope, groups a batch by column list, and bulk-`INSERT`s each group as `INSERT INTO … (cols) FORMAT JSONCompactEachRow` — schema validation already happened at the HTTP ingest handler, before publish. Non-insert mutations go through `POST /v1/ops/query` (admin-only).
@@ -170,7 +170,7 @@ The principle: **`ctx` cancellation is the stop mechanism for long-running loops
 
 ## Lifecycle and shutdown
 
-Startup: `StartIngestWorker` creates the consumer, builds the worker, and launches `dispatchLoop`. It returns a `stopFunc` closure that the app's ingest-worker component holds and calls once the run context is canceled; `app.Run` does not return until that drain has finished.
+Startup: `StartIngestWorker` creates the consumer, builds the worker, and launches `dispatchLoop`. It returns a `stopFunc` closure that the app's ingest-worker component holds and calls once the run context is canceled; `app.Run` does not return until that drain has finished. It also returns a `failed` channel, which carries at most one error if the worker ends on its own — see [When the consumer dies](#when-the-consumer-dies).
 
 Shutdown drains **bottom-up through the containment hierarchy**, under the ingest-worker component's own `server.shutdown_timeout` deadline (the API server's drain takes another, concurrently):
 
@@ -199,6 +199,12 @@ If the deadline fires first, `waitOrDeadline` returns the deadline error and the
 
 Messages still sitting in `msgChan` or the consumer's prefetch buffer at shutdown are **not** flushed; they are simply redelivered next boot. Graceful shutdown flushes the in-hand per-table batches, not the entire in-flight pipeline.
 
+### When the consumer dies
+
+Delivery can end underneath a running worker: the durable consumer is deleted, or the MQ connection closes. The broker client reports that only through an asynchronous error callback and then stops delivering — no message ever arrives to say so, so a loop that only watches `msgChan` would wait forever while the API kept accepting events nothing writes. `mq.Consumer.Consume` therefore returns a `failed` channel next to `stop` (`mq.ErrDeliveryEnded`, wrapping the broker's reason), and `dispatchLoop` selects on it beside `ctx.Done()` and `msgChan`. On a failure it runs the same bottom-up drain as a shutdown — the rows already in hand are flushed and acked, not abandoned — and then reports the error on the worker's own `failed` channel. A consumer that cannot start at all takes the same path.
+
+The worker does not try to revive the consumer. The app's ingest-worker component returns the error from `app.Run`, which stops every other component and exits non-zero, the same way any failed component does; the supervisor's restart recreates the durable consumer at boot, and everything unacked is redelivered (at-least-once). Passing conditions the client also reports through that callback (a missed heartbeat, a leadership change) are logged at `WARN` and do not end the worker. With the embedded broker (`DontListen`, no external client that could delete the durable) this path is hard to reach today; it matters once a remote broker or per-tenant consumers exist.
+
 ## Backpressure and durability knobs
 
 Several layers throttle the pipeline, inner to outer:
@@ -221,7 +227,7 @@ Several layers throttle the pipeline, inner to outer:
 
 ## The Active Sweeper
 
-The worker advances the consumer's `AckFloor` by acking; the sweeper observes it to decide what is safe to purge. They never call each other — the consumer's `AckFloor` is their only contract.
+The worker advances the consumer's `AckFloor` by acking; the sweep observes it to decide what is safe to purge. They never call each other — the consumer's `AckFloor` is their only contract. The sweeper (`internal/ingest`) owns the schedule and the window: each tick it calls `mq.Purger.PurgeAcked(buffer-consumer, now − gap window)`. The steps after the tick below are the embedded broker's implementation of that call.
 
 ```mermaid
 flowchart TD
@@ -257,7 +263,7 @@ What will need to change, and the trade-offs (discussed at length on the batchin
 
 - **Work distribution.** Either a *shared* durable pull consumer (competing consumers — coordination-free, but a hot table's rows spread across instances, shrinking per-instance batches), or **partitioned consumer groups** that hash by table-name subject token so a table always lands on one owner (pinned consumer → per-table affinity + automatic failover, at the cost of an assignment layer).
 - **Idempotent inserts become mandatory.** At-least-once + redelivery-on-crash means another instance can re-insert a batch the dead one had written but not acked. Use `ReplacingMergeTree` (or a dedup key). The single-instance design hides this today.
-- **NATS resilience.** Remote NATS needs explicit reconnect/backoff and a `Consume` error handler — none of which the embedded path needs.
+- **NATS resilience.** Remote NATS needs explicit reconnect/backoff for the connection itself — the embedded path never dials out, so there is nothing to reconnect. The `Consume` error handler that detects a dead consumer already lives in `embedded.go` and needs no change for a remote broker.
 - **The sweeper.** Its single-`AckFloor` model assumes one consumer. With per-table/partition consumers you either rework it to purge below the *minimum* AckFloor across consumers, or — cleaner — **split the dual-use stream**: a `WorkQueuePolicy` work stream (auto-deletes on ack, no sweeper) plus a `MaxAge` replay stream (server-expired by time, no sweeper), joined by stream sourcing. That deletes the sweeper and its leader-election problem entirely, at the cost of duplicating the in-flight overlap on disk.
 
 ## Deferred / not yet implemented

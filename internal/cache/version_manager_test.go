@@ -8,7 +8,7 @@ import (
 
 func TestVersionManager_NamespaceKey(t *testing.T) {
 	t.Parallel()
-	vm := NewVersionManager(nil)
+	vm := NewVersionManager()
 
 	// Default table version (0); a scopeless namespace renders a trailing dot.
 	assert.Equal(t, "users.0.", vm.NamespaceKey("users", ""))
@@ -23,7 +23,7 @@ func TestVersionManager_NamespaceKey(t *testing.T) {
 
 func TestVersionManager_QueryKey(t *testing.T) {
 	t.Parallel()
-	vm := NewVersionManager(nil)
+	vm := NewVersionManager()
 
 	// One dependency at default versions: sha | <table>.<tableVer>.<scope>.<nsVer>.
 	key := vm.QueryKey("hash123", []Namespace{{Table: "users", Scope: "org_1"}})
@@ -37,7 +37,7 @@ func TestVersionManager_QueryKey(t *testing.T) {
 
 func TestVersionManager_BumpTable(t *testing.T) {
 	t.Parallel()
-	vm := NewVersionManager(nil)
+	vm := NewVersionManager()
 
 	users := []Namespace{{Table: "users", Scope: "org_1"}}
 	orders := []Namespace{{Table: "orders", Scope: "org_1"}}
@@ -53,7 +53,7 @@ func TestVersionManager_BumpTable(t *testing.T) {
 
 func TestVersionManager_BumpNamespace(t *testing.T) {
 	t.Parallel()
-	vm := NewVersionManager(nil)
+	vm := NewVersionManager()
 
 	scoped := []Namespace{{Table: "users", Scope: "org_1"}}
 	wholeTable := []Namespace{{Table: "users"}}

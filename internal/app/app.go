@@ -93,7 +93,7 @@ type App struct {
 	bootState   *api.BootState
 	registry    *discovery.SchemaRegistry
 	dedup       *dedupe.Managed
-	mq          *mq.EmbeddedNATS
+	mq          mq.Broker
 	cache       cache.Cache
 	sseMetrics  *stream.Metrics
 	hub         *stream.Hub
@@ -162,7 +162,7 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	if err := a.wireDedupe(); err != nil {
 		return nil, err
 	}
-	if err := a.wireMQ(ctx); err != nil {
+	if err := a.wireMQ(); err != nil {
 		return nil, err
 	}
 	if err := a.wireCache(); err != nil {
@@ -290,6 +290,6 @@ func (a *App) Handler() http.Handler { return a.handler }
 // creating tables.
 func (a *App) Registry() *discovery.SchemaRegistry { return a.registry }
 
-// MQ is the embedded NATS, for a harness that publishes straight onto the
-// ingest stream.
-func (a *App) MQ() *mq.EmbeddedNATS { return a.mq }
+// MQ is the broker, for a harness that publishes straight onto the ingest
+// queue.
+func (a *App) MQ() mq.Broker { return a.mq }

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,13 +15,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDLQStats_EmptyWhenNoStream(t *testing.T) {
-	dir := t.TempDir()
-	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
-	require.NoError(t, err)
-	defer func() { _ = emb.Close() }()
+// parkedMsg is a message as the ingest worker would hand it to the DLQ.
+func parkedMsg(table string) *mq.Message {
+	return (&testutil.MockMessage{
+		MsgTopic: mq.Topic{Table: table},
+		MsgData:  []byte(`{"table_name":"` + table + `"}`),
+	}).Message()
+}
 
-	handler := NewDLQHandler(emb.JetStream(), slog.Default())
+func TestDLQStats_EmptyWhenNoStream(t *testing.T) {
+	// The embedded MQ always has a dead-letter queue, so its absence comes
+	// from a mock.
+	handler := NewDLQHandler(&testutil.MockDeadLetterStats{Err: mq.ErrNoDeadLetterQueue}, slog.Default())
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/dlq/stats", nil)
 	rec := httptest.NewRecorder()
@@ -44,23 +50,17 @@ func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = emb.Close() }()
 
-	js := emb.JetStream()
 	ctx := context.Background()
 
-	// Create the DLQ stream.
-	require.NoError(t, EnsureDLQStream(ctx, js, 1024*1024))
-
-	// Publish messages to DLQ subjects.
+	// Park messages on the dead-letter queue.
 	for i := 0; i < 3; i++ {
-		_, err := js.Publish(ctx, "dlq.events", []byte(`{"table_name":"events"}`))
-		require.NoError(t, err)
+		require.NoError(t, emb.DeadLetter(ctx, parkedMsg("events")))
 	}
 	for i := 0; i < 2; i++ {
-		_, err := js.Publish(ctx, "dlq.users", []byte(`{"table_name":"users"}`))
-		require.NoError(t, err)
+		require.NoError(t, emb.DeadLetter(ctx, parkedMsg("users")))
 	}
 
-	handler := NewDLQHandler(js, slog.Default())
+	handler := NewDLQHandler(emb, slog.Default())
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 
@@ -84,15 +84,11 @@ func TestDLQStats_SingleTable(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = emb.Close() }()
 
-	js := emb.JetStream()
 	ctx := context.Background()
 
-	require.NoError(t, EnsureDLQStream(ctx, js, 1024*1024))
+	require.NoError(t, emb.DeadLetter(ctx, parkedMsg("orders")))
 
-	_, err = js.Publish(ctx, "dlq.orders", []byte(`{"table_name":"orders"}`))
-	require.NoError(t, err)
-
-	handler := NewDLQHandler(js, slog.Default())
+	handler := NewDLQHandler(emb, slog.Default())
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 
@@ -108,25 +104,34 @@ func TestDLQStats_SingleTable(t *testing.T) {
 	assert.Equal(t, float64(1), resp["total"])
 }
 
-func TestEnsureDLQStream_Idempotent(t *testing.T) {
-	dir := t.TempDir()
-	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
+func TestDLQStats_BrokerFailureIsAnError(t *testing.T) {
+	handler := NewDLQHandler(&testutil.MockDeadLetterStats{Err: errors.New("broker unavailable")}, testutil.NopLogger())
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/dlq/stats", nil)
+	rec := httptest.NewRecorder()
+
+	handler.Stats(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "a failed read is not an empty queue")
+}
+
+func TestDLQStats_PassesTheTableFilter(t *testing.T) {
+	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
 	defer func() { _ = emb.Close() }()
 
-	js := emb.JetStream()
 	ctx := context.Background()
+	require.NoError(t, emb.DeadLetter(ctx, parkedMsg("default.orders")))
+	require.NoError(t, emb.DeadLetter(ctx, parkedMsg("users")))
 
-	// Calling twice should not error.
-	require.NoError(t, EnsureDLQStream(ctx, js, 1024*1024))
-	require.NoError(t, EnsureDLQStream(ctx, js, 1024*1024))
+	handler := NewDLQHandler(emb, slog.Default())
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/ops/dlq/stats?table=default.orders", nil)
+	rec := httptest.NewRecorder()
 
-	// Stream should be accessible under the canonical DLQ name.
-	stream, err := js.Stream(ctx, mq.DLQStreamName())
-	require.NoError(t, err)
+	handler.Stats(rec, req)
 
-	info, err := stream.Info(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, mq.DLQStreamName(), info.Config.Name)
-	assert.Equal(t, []string{"dlq.>"}, info.Config.Subjects)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, map[string]any{"default.orders": float64(1)}, resp["tables"])
+	assert.Equal(t, float64(2), resp["total"])
 }

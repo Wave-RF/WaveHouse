@@ -19,22 +19,27 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/query"
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
+// Queue is what the worker needs from the MQ: a durable consumer on the
+// ingest queue and somewhere to park what it cannot write. mq.Broker
+// satisfies it.
+type Queue interface {
+	mq.ConsumerManager
+	mq.DeadLetterer
+}
+
 type parsedMsg struct {
-	natsMsg         jetstream.Msg
-	natsSafeSubject string
-	tableName       string // routing key for per-table batching; raw (unencoded) name
-	scope           string
-	columns         []string        // envelope column names, in declaration order
-	colSig          string          // columns joined; the within-table batch key
-	row             json.RawMessage // one JSONCompactEachRow line, no trailing newline
+	msg       *mq.Message
+	tableName string // routing key for per-table batching; raw (unencoded) name
+	scope     string
+	columns   []string        // envelope column names, in declaration order
+	colSig    string          // columns joined; the within-table batch key
+	row       json.RawMessage // one JSONCompactEachRow line, no trailing newline
 }
 
 // columnSignature renders a column list as a map key. The separator is a byte
@@ -45,7 +50,11 @@ func columnSignature(cols []string) string {
 }
 
 type IngestWorker struct {
-	js         jetstream.JetStream
+	dlq mq.DeadLetterer
+	// failed carries the one error that ends the worker on its own — the
+	// consumer could not start, or delivery ended underneath it. Buffered so
+	// the dispatch loop never blocks on a caller that has already gone.
+	failed     chan error
 	httpClient *http.Client
 	cache      cache.Cache
 	logger     *slog.Logger
@@ -109,35 +118,35 @@ const (
 	ackWait = 60 * time.Second
 )
 
+// StartIngestWorker starts the batch consumer. stop drains it under the given
+// deadline. failed receives at most one error, if the worker ends on its own:
+// ingestion has stopped and nothing inside the worker can bring it back, so
+// the caller must treat it as fatal (internal/app returns it from Run, which
+// stops the process — the next boot recreates the consumer). The worker has
+// already flushed and acked what it held by the time failed fires; stop is
+// still the caller's to call.
 func StartIngestWorker(
-	ctx context.Context, nc *nats.Conn, cache cache.Cache,
+	ctx context.Context, queue Queue, cache cache.Cache,
 	target func() chconn.Target,
 	dlqEnabled func(table string) bool,
-) (func(context.Context) error, error) {
-	if nc == nil {
-		return nil, fmt.Errorf("nats connection is nil")
+) (stop func(context.Context) error, failed <-chan error, err error) {
+	if queue == nil {
+		return nil, nil, fmt.Errorf("message queue is nil")
 	}
 	if cache == nil {
-		return nil, fmt.Errorf("cache is nil")
+		return nil, nil, fmt.Errorf("cache is nil")
 	}
 	if target == nil {
-		return nil, fmt.Errorf("clickhouse target is nil")
+		return nil, nil, fmt.Errorf("clickhouse target is nil")
 	}
 
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return nil, fmt.Errorf("initialize JetStream: %w", err)
-	}
-
-	cons, err := js.CreateOrUpdateConsumer(ctx, mq.StreamName(), jetstream.ConsumerConfig{
+	cons, err := queue.CreateConsumer(ctx, mq.ConsumerConfig{
 		Durable:       BufferConsumerName,
-		FilterSubject: "ingest.>",
-		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       ackWait,
 		MaxAckPending: maxAckPending,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Tune the HTTP Transport for high-throughput ClickHouse ingestion
@@ -157,7 +166,8 @@ func StartIngestWorker(
 	}
 
 	worker := &IngestWorker{
-		js: js,
+		dlq:    queue,
+		failed: make(chan error, 1),
 		httpClient: &http.Client{
 			Transport: customTransport,
 			Timeout:   30 * time.Second,
@@ -180,7 +190,7 @@ func StartIngestWorker(
 		workerCancel()
 		return waitOrDeadline(shutdownCtx, &worker.wg)
 	}
-	return stopFunc, nil
+	return stopFunc, worker.failed, nil
 }
 
 // waitOrDeadline returns nil once wg drains, or ctx.Err() if ctx fires first
@@ -205,21 +215,29 @@ func waitOrDeadline(ctx context.Context, wg *sync.WaitGroup) error {
 // never strand another table's rows behind a shared timer. It is the ONLY
 // goroutine that watches ctx; tableLoops stop via channel-close, which gives a
 // deterministic drain with no abandoned messages.
-func (w *IngestWorker) dispatchLoop(ctx context.Context, cons jetstream.Consumer) {
+func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 	defer w.wg.Done()
 
-	msgChan := make(chan jetstream.Msg, w.maxBatch*2)
+	msgChan := make(chan *mq.Message, w.maxBatch*2)
 
-	// Pull consumer with a push-like callback (nats.go prefetches pullMaxMessages).
+	// Pull consumer with a push-like callback (the client prefetches pullMaxMessages).
 	// Hand off to msgChan only, so the consume goroutine never blocks on flush work.
-	consumeCtx, err := cons.Consume(func(msg jetstream.Msg) {
-		msgChan <- msg
-	}, jetstream.PullMaxMessages(pullMaxMessages))
+	// The handoff also watches ctx: stop (deferred below) does not wait for a
+	// delivery already in the handler, so once this loop has stopped draining
+	// msgChan a full channel would otherwise pin the client's delivery goroutine
+	// forever. A message dropped here is unacked and simply redelivered.
+	stop, deliveryEnded, err := cons.Consume(func(msg *mq.Message) {
+		select {
+		case msgChan <- msg:
+		case <-ctx.Done():
+		}
+	}, pullMaxMessages)
 	if err != nil {
 		w.logger.Error("failed to start consumer", "error", err)
+		w.failed <- fmt.Errorf("ingest worker: start consumer: %w", err)
 		return
 	}
-	defer consumeCtx.Stop()
+	defer stop()
 
 	// flushCtx carries values (trace) but is never cancelled: a started flush must
 	// finish so data already in ClickHouse gets acked rather than redelivered. It
@@ -247,6 +265,16 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons jetstream.Consumer
 		select {
 		case <-ctx.Done():
 			shutdown()
+			return
+		case err := <-deliveryEnded:
+			// The MQ gave up on the consumer: no message will arrive again, so
+			// waiting on msgChan would stall ingestion silently. Flush and ack
+			// what is already in hand — those rows are delivered and the
+			// publish path is not what broke — then fail loud. Messages still
+			// in msgChan are unacked and redelivered to the next consumer.
+			w.logger.Error("ingest consumer delivery ended; ingestion has stopped", "error", err)
+			shutdown()
+			w.failed <- fmt.Errorf("ingest worker: %w", err)
 			return
 		case m := <-msgChan:
 			pm, ok := w.parseMsg(flushCtx, m)
@@ -425,10 +453,10 @@ func firstDuplicate(cols []string) (string, bool) {
 // those rows waiting instead of gone; when the DLQ is off for the table it is
 // acked-and-dropped with a counted error, because a message that can never
 // insert must not redeliver forever. ok is false either way so the caller skips it.
-func (w *IngestWorker) parseMsg(ctx context.Context, m jetstream.Msg) (parsedMsg, bool) {
+func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, bool) {
 	var envelope EventMessage
 
-	if err := json.Unmarshal(m.Data(), &envelope); err != nil {
+	if err := json.Unmarshal(m.Data, &envelope); err != nil {
 		w.logger.ErrorContext(ctx, "failed to parse event envelope", "error", err)
 		w.rejectPoison(ctx, m, "", "malformed", err.Error())
 		return parsedMsg{}, false
@@ -470,13 +498,12 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m jetstream.Msg) (parsedMsg
 	}
 
 	return parsedMsg{
-		natsMsg:         m,
-		natsSafeSubject: strings.TrimPrefix(m.Subject(), "ingest."),
-		tableName:       envelope.TableName,
-		scope:           envelope.Scope,
-		columns:         envelope.Columns,
-		colSig:          columnSignature(envelope.Columns),
-		row:             envelope.Row,
+		msg:       m,
+		tableName: envelope.TableName,
+		scope:     envelope.Scope,
+		columns:   envelope.Columns,
+		colSig:    columnSignature(envelope.Columns),
+		row:       envelope.Row,
 	}, true
 }
 
@@ -626,7 +653,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 	// every scope — and there's nothing more to add. Otherwise invalidate each
 	// distinct scope. Doing this here (we already loop the batch once, and know it's
 	// one table) keeps Cache.Invalidate a simple one-pass bump.
-	encodedTable := query.SafeEncodeNATS(tableName)
+	encodedTable := query.SafeEncodeToken(tableName)
 	seenScopes := make(map[string]struct{}, len(msgs))
 	namespaces := make([]cache.Namespace, 0, len(msgs))
 
@@ -641,7 +668,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 		seenScopes[pm.scope] = struct{}{}
 		namespaces = append(namespaces, cache.Namespace{
 			Table: encodedTable,
-			Scope: query.SafeEncodeNATS(pm.scope),
+			Scope: query.SafeEncodeToken(pm.scope),
 		})
 	}
 
@@ -661,7 +688,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 		var acks sync.WaitGroup
 		for _, pm := range msgs {
 			acks.Go(func() {
-				if err := pm.natsMsg.DoubleAck(context.WithoutCancel(ctx)); err != nil {
+				if err := pm.msg.DoubleAck(context.WithoutCancel(ctx)); err != nil {
 					w.logger.ErrorContext(context.WithoutCancel(ctx), "double ack failed for processed message", "error", err, "table", tableName)
 				}
 			})
@@ -676,18 +703,17 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 // that can never succeed would wedge the consumer behind it forever. A DLQ
 // publish that FAILS leaves the message unacked, exactly as the isolation path
 // does: that is a transient DLQ outage, and retrying beats destroying the row.
-func (w *IngestWorker) rejectPoison(ctx context.Context, m jetstream.Msg, tableName, reason, detail string) {
+func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, tableName, reason, detail string) {
 	if w.dlqEnabled == nil || w.dlqEnabled(tableName) {
 		// Backgrounded on ackWg for the same reason handleSuccess backgrounds its
-		// acks: parkOnDLQ does a JetStream publish AND an fsync-bound DoubleAck,
+		// acks: parkOnDLQ does a DLQ publish AND an fsync-bound DoubleAck,
 		// and parseMsg runs on the dispatchLoop goroutine. The scenario this whole
 		// change targets is an operator who skipped the drain, where EVERY backlog
 		// message is poison — done inline that is one publish plus one fsync per
 		// message in series, with intake stalled behind it. dispatchLoop adds and
 		// waits on the same goroutine, so each Add still happens-before the Wait.
-		subject := strings.TrimPrefix(m.Subject(), "ingest.")
 		w.ackWg.Go(func() {
-			if w.parkOnDLQ(ctx, m, subject, tableName, detail) {
+			if w.parkOnDLQ(ctx, m, tableName, detail) {
 				countPoison(ctx, tableName, reason, "parked")
 			}
 		})
@@ -713,11 +739,12 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m jetstream.Msg, tableN
 // sendToDLQ parks a row that failed its own isolated INSERT. Distinct from
 // rejectPoison, which parks an envelope the worker could not read at all.
 func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parsedMsg, errMsg string) {
-	_ = w.parkOnDLQ(ctx, pm.natsMsg, pm.natsSafeSubject, tableName, errMsg)
+	_ = w.parkOnDLQ(ctx, pm.msg, tableName, errMsg)
 }
 
-// parkOnDLQ republishes one message on its dlq.* subject with the failure
-// context in headers, then acks the original so NATS stops redelivering it.
+// parkOnDLQ parks one message on the dead-letter queue (under the topic it
+// arrived on — the envelope may be unreadable) with the failure context in
+// headers, then acks the original so the MQ stops redelivering it.
 //
 // Reports false in two distinct cases, both meaning "do not count this as a
 // parking", and false does NOT imply nothing was published. A failed publish
@@ -725,32 +752,25 @@ func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parse
 // successful publish leaves a DLQ copy behind but also leaves the original in
 // the stream, so the next redelivery parks a second copy — counting the first
 // would overstate the total by one per retry.
-func (w *IngestWorker) parkOnDLQ(ctx context.Context, natsMsg jetstream.Msg, safeSubject, tableName, errMsg string) bool {
-	subject := "dlq." + safeSubject
-
-	msg := nats.NewMsg(subject)
-	msg.Data = natsMsg.Data()
-	if msg.Header == nil {
-		msg.Header = make(nats.Header)
-	}
-	msg.Header.Set("X-DLQ-Table", tableName)
-	msg.Header.Set("X-DLQ-Error", errMsg)
-	msg.Header.Set("X-DLQ-Timestamp", time.Now().UTC().Format(time.RFC3339))
-
-	_, pubErr := w.js.PublishMsg(ctx, msg)
+func (w *IngestWorker) parkOnDLQ(ctx context.Context, msg *mq.Message, tableName, errMsg string) bool {
+	pubErr := w.dlq.DeadLetter(ctx, msg,
+		mq.WithHeader("X-DLQ-Table", tableName),
+		mq.WithHeader("X-DLQ-Error", errMsg),
+		mq.WithHeader("X-DLQ-Timestamp", time.Now().UTC().Format(time.RFC3339)),
+	)
 	if pubErr != nil {
-		w.logger.ErrorContext(ctx, "NATS DLQ publish failed, this data will continue retrying insertion indefinitely until the DLQ recovers", "table", tableName, "subject", subject, "error", pubErr)
+		w.logger.ErrorContext(ctx, "DLQ publish failed, this data will continue retrying insertion indefinitely until the DLQ recovers", "table", tableName, "topic", msg.TopicKey(), "error", pubErr)
 		return false
 	}
 
-	// DoubleAck original message so NATS doesn't redeliver the corrupt data. A
+	// DoubleAck original message so the MQ doesn't redeliver the corrupt data. A
 	// failed ack leaves it in the stream, so the next redelivery publishes a
 	// SECOND copy to the DLQ — report false so the caller does not count this
 	// parking again on every retry. The duplicate copy is the residual cost:
-	// PublishMsg is not idempotent, so it cannot be taken back here.
-	if err := natsMsg.DoubleAck(ctx); err != nil {
+	// a publish is not idempotent, so it cannot be taken back here.
+	if err := msg.DoubleAck(ctx); err != nil {
 		w.logger.ErrorContext(ctx, "parked on the DLQ but the ack failed, so the envelope stays in the stream and will be parked again on redelivery",
-			"table", tableName, "subject", subject, "error", err)
+			"table", tableName, "topic", msg.TopicKey(), "error", err)
 		return false
 	}
 	return true

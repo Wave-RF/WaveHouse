@@ -2,8 +2,12 @@ package mq
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
@@ -44,13 +48,41 @@ type EmbeddedNATS struct {
 	server *natsserver.Server
 	conn   *nats.Conn
 	js     jetstream.JetStream
+	logger *slog.Logger
+
+	limitMu  sync.Mutex
+	maxBytes int64 // the ingest stream cap both streams were last reconciled to
 }
 
-// NewEmbedded starts an embedded NATS server with JetStream enabled.
+// EmbeddedNATS is the one implementation of every mq interface.
+var _ Broker = (*EmbeddedNATS)(nil)
+
+const (
+	// dlqShare is the DLQ stream's slice of the byte budget: a tenth of the
+	// ingest stream's cap.
+	dlqShare = 10
+	// resizeTimeout bounds the JetStream calls SetMaxBytes makes to apply a
+	// new cap — both streams share it. A settings reload holds the store's
+	// lock while its hooks run, so an in-process JetStream call that never
+	// returns would otherwise block every later reload.
+	resizeTimeout = 10 * time.Second
+	// rollbackTimeout is the undo's own budget when the DLQ resize fails:
+	// in-process JetStream fails by stalling rather than erroring, so the
+	// likely cause is that resizeTimeout has just run out, and an undo on
+	// that context would fail without touching the stream. SetMaxBytes runs
+	// for at most the sum of the two.
+	rollbackTimeout = 5 * time.Second
+)
+
+// NewEmbedded starts an embedded NATS server with JetStream enabled and
+// both streams in place: the ingest stream capped at maxBytes and the DLQ
+// stream at a tenth of it. The DLQ stream is always present — an empty
+// limits-policy stream costs nothing, and whether a poison row lands on it is
+// the ingest worker's decision at the moment of the failure.
 // An optional *slog.Logger can be passed to control server log output;
-// if omitted, slog.Default() is used. The stream name is fixed (see
-// StreamName / DLQStreamName) — the embedded server is private to this
-// process, so there's no namespacing to do.
+// if omitted, slog.Default() is used. The stream names are fixed (see
+// subject.go) — the embedded server is private to this process, so there's
+// no namespacing to do.
 func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*EmbeddedNATS, error) {
 	l := slog.Default()
 	if len(logger) > 0 && logger[0] != nil {
@@ -98,8 +130,13 @@ func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*Embe
 		ns.Shutdown()
 		return nil, fmt.Errorf("create stream: %w", err)
 	}
+	if _, err := js.CreateOrUpdateStream(context.Background(), dlqStreamConfig(maxBytes/dlqShare)); err != nil {
+		nc.Close()
+		ns.Shutdown()
+		return nil, fmt.Errorf("create dlq stream: %w", err)
+	}
 
-	return &EmbeddedNATS{server: ns, conn: nc, js: js}, nil
+	return &EmbeddedNATS{server: ns, conn: nc, js: js, logger: l, maxBytes: maxBytes}, nil
 }
 
 // ingestStreamConfig is the WAVEHOUSE stream. LimitsPolicy: standard
@@ -108,44 +145,140 @@ func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*Embe
 // new messages when full, propagating backpressure to the upstream API.
 func ingestStreamConfig(maxBytes int64) jetstream.StreamConfig {
 	return jetstream.StreamConfig{
-		Name:      StreamName(),
-		Subjects:  []string{"ingest.>"},
+		Name:      ingestStream,
+		Subjects:  []string{ingestAll},
 		Retention: jetstream.LimitsPolicy,
 		MaxBytes:  maxBytes,
 		Discard:   jetstream.DiscardNew,
 	}
 }
 
-// Resize updates the ingest stream's MaxBytes in place (the hot-reloadable
-// mq.max_bytes_gb). JetStream applies a limit change to a live stream
-// without touching its messages: growing takes effect immediately; shrinking
-// below the current size makes DiscardNew refuse new publishes until the
-// worker drains it — nothing buffered is dropped.
-func (e *EmbeddedNATS) Resize(ctx context.Context, maxBytes int64) error {
-	if _, err := e.js.UpdateStream(ctx, ingestStreamConfig(maxBytes)); err != nil {
-		return fmt.Errorf("resize stream: %w", err)
+// dlqStreamConfig is the WAVEHOUSE_DLQ stream. DiscardOld: a full DLQ drops
+// its oldest parked rows rather than refusing new ones — backpressure belongs
+// to the ingest stream, not the dead-letter one.
+func dlqStreamConfig(maxBytes int64) jetstream.StreamConfig {
+	return jetstream.StreamConfig{
+		Name:      dlqStream,
+		Subjects:  []string{dlqAll},
+		Retention: jetstream.LimitsPolicy,
+		MaxBytes:  maxBytes,
+		Discard:   jetstream.DiscardOld,
 	}
+}
+
+// MaxBytes reports the ingest stream cap both streams were last reconciled to
+// (by NewEmbedded, then by each successful SetMaxBytes).
+func (e *EmbeddedNATS) MaxBytes() int64 {
+	e.limitMu.Lock()
+	defer e.limitMu.Unlock()
+	return e.maxBytes
+}
+
+// SetMaxBytes applies a new byte budget to both streams in place (the
+// hot-reloadable mq.max_bytes_gb): the ingest stream takes maxBytes and the
+// DLQ stream a tenth of it. JetStream applies a limit change to a live stream
+// without touching its messages: growing takes effect immediately; shrinking
+// the ingest stream below its current size makes DiscardNew refuse new
+// publishes until the worker drains it — nothing buffered is dropped.
+//
+// The pair moves together where it can. If the DLQ update fails after the
+// ingest one succeeded, the ingest resize is undone so the 10:1 pair stays at
+// the previous budget, and the next call retries both. Safe in that direction
+// — the ingest stream is DiscardNew, so shrinking it back drops nothing
+// stored. The undo is best effort: if it fails too, the ingest stream stays at
+// the new limit and the DLQ at the previous, and the error says so. On any
+// error MaxBytes keeps reporting the previous budget, so a later call with the
+// new budget reapplies both.
+//
+// The JetStream calls are bounded by resizeTimeout, plus rollbackTimeout for
+// the undo, both rooted in ctx. That is deliberate: ctx is the process's stop
+// context, so a reload caught mid-hook by a stop gives up — undo included —
+// rather than holding the drain past server.shutdown_timeout. A cancellation
+// between the two updates is therefore the one way to leave the pair split,
+// and only for the rest of a process that is exiting: the next boot
+// reconciles both streams from the adopted settings.
+func (e *EmbeddedNATS) SetMaxBytes(ctx context.Context, maxBytes int64) error {
+	e.limitMu.Lock()
+	defer e.limitMu.Unlock()
+	if maxBytes == e.maxBytes {
+		return nil
+	}
+
+	resizeCtx, cancel := context.WithTimeout(ctx, resizeTimeout)
+	defer cancel()
+	if _, err := e.js.UpdateStream(resizeCtx, ingestStreamConfig(maxBytes)); err != nil {
+		return fmt.Errorf("resize ingest stream: %w", err)
+	}
+	if _, err := e.js.CreateOrUpdateStream(resizeCtx, dlqStreamConfig(maxBytes/dlqShare)); err != nil {
+		// The undo runs on its own budget, not the one the DLQ call has
+		// likely just exhausted.
+		rollbackCtx, cancelRollback := context.WithTimeout(ctx, rollbackTimeout)
+		defer cancelRollback()
+		if _, rollbackErr := e.js.UpdateStream(rollbackCtx, ingestStreamConfig(e.maxBytes)); rollbackErr != nil {
+			return fmt.Errorf("resize dlq stream: %w (ingest stream rollback failed, so it stays at the new limit and the dlq at the previous: %w)", err, rollbackErr)
+		}
+		return fmt.Errorf("resize dlq stream: %w (ingest stream restored to the previous limit)", err)
+	}
+	e.maxBytes = maxBytes
 	return nil
 }
 
-func (e *EmbeddedNATS) Publish(ctx context.Context, subject string, data []byte, opts ...PublishOpt) error {
-	msg := nats.NewMsg(subject)
+// Publish stores data on topic's ingest subject. A stream at its byte budget
+// (DiscardNew) refuses the publish; that is reported as ErrQueueFull.
+func (e *EmbeddedNATS) Publish(ctx context.Context, topic Topic, data []byte, opts ...PublishOpt) error {
+	err := e.publish(ctx, subject(ingestPrefix, topic), data, opts)
+	if err != nil && strings.Contains(err.Error(), "maximum bytes exceeded") {
+		// The server reports a full store as a generic store failure whose
+		// text is the only thing that names the cause.
+		return fmt.Errorf("%w: %w", ErrQueueFull, err)
+	}
+	return err
+}
+
+// DeadLetter stores msg's data on its topic's DLQ subject — the subject it
+// arrived on with the ingest prefix swapped for the DLQ one, nothing decoded
+// or re-encoded. The DLQ stream is DiscardOld, so a full DLQ drops its oldest
+// parked rows rather than refusing.
+func (e *EmbeddedNATS) DeadLetter(ctx context.Context, msg *Message, opts ...PublishOpt) error {
+	return e.publish(ctx, dlqPrefix+msg.topicKey, msg.Data, opts)
+}
+
+func (e *EmbeddedNATS) publish(ctx context.Context, subj string, data []byte, opts []PublishOpt) error {
+	msg := nats.NewMsg(subj)
 	msg.Data = data
 
 	// Apply any optional configurations (like headers) to the message
+	headers := Headers{}
 	for _, opt := range opts {
-		opt(msg)
+		opt(headers)
 	}
 
-	observability.InjectNATS(ctx, msg)
+	observability.InjectHeaders(ctx, headers)
+	msg.Header = nats.Header(headers)
 	_, err := e.js.PublishMsg(ctx, msg)
 	return err
 }
 
-func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName string, handler func(msg *Message) error) error {
-	cons, err := e.js.CreateOrUpdateConsumer(ctx, StreamName(), jetstream.ConsumerConfig{
+// wrapMsg adapts a received JetStream message to the mq-owned Message. ctx
+// becomes Message.Ctx as given; Subscribe extracts the trace context first.
+func wrapMsg(ctx context.Context, m jetstream.Msg) *Message {
+	return newMessage(ctx, topicKey(ingestPrefix, m.Subject()), m.Data(), time.Now(),
+		func(ctx context.Context) error {
+			return m.DoubleAck(ctx)
+		},
+		func() error {
+			return m.Ack()
+		},
+		func() error {
+			return m.Nak()
+		},
+	)
+}
+
+func (e *EmbeddedNATS) Subscribe(ctx context.Context, consumerName string, handler func(msg *Message) error) error {
+	cons, err := e.js.CreateOrUpdateConsumer(ctx, ingestStream, jetstream.ConsumerConfig{
 		Durable:       consumerName,
-		FilterSubject: subject,
+		FilterSubject: ingestAll,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	})
 	if err != nil {
@@ -153,20 +286,7 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName stri
 	}
 
 	cctx, err := cons.Consume(func(m jetstream.Msg) {
-		msgCtx := observability.ExtractNATS(ctx, m)
-
-		msg := NewMessage(msgCtx, m.Subject(), m.Data(), time.Now(),
-			func(ctx context.Context) error {
-				return m.DoubleAck(ctx)
-			},
-			func() error {
-				return m.Ack()
-			},
-			func() error {
-				return m.Nak()
-			},
-		)
-
+		msg := wrapMsg(observability.ExtractHeaders(ctx, m.Headers()), m)
 		if err := handler(msg); err != nil {
 			_ = msg.Nak()
 		}
@@ -183,13 +303,238 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName stri
 	return nil
 }
 
-// JetStream returns the underlying JetStream handle for direct access (e.g. gap-fill).
-func (e *EmbeddedNATS) JetStream() jetstream.JetStream {
-	return e.js
+// CreateConsumer creates or updates a durable explicit-ack pull consumer on
+// the ingest stream. ctx becomes every delivered Message.Ctx (see
+// ConsumerManager); it does not stop delivery — Consumer.Consume's stop does.
+func (e *EmbeddedNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (Consumer, error) {
+	cons, err := e.js.CreateOrUpdateConsumer(ctx, ingestStream, jetstream.ConsumerConfig{
+		Durable:       cfg.Durable,
+		FilterSubject: ingestAll,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		AckWait:       cfg.AckWait,
+		MaxAckPending: cfg.MaxAckPending,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create consumer: %w", err)
+	}
+	return &jsConsumer{cons: cons, ctx: ctx}, nil
 }
 
-func (e *EmbeddedNATS) NatsConn() *nats.Conn {
-	return e.conn
+// jsConsumer is the Consumer over a JetStream pull consumer.
+type jsConsumer struct {
+	cons jetstream.Consumer
+	ctx  context.Context // each delivered Message.Ctx (see ConsumerManager)
+}
+
+func (c *jsConsumer) Consume(handler func(msg *Message), prefetch int) (func(), <-chan error, error) {
+	// The client reports what goes wrong after Consume returns only through
+	// this handler, never through Consume's own error. It calls it for
+	// passing conditions too (a missed heartbeat, a leadership change) and
+	// keeps delivering; on a terminal one (the consumer was deleted, a bad
+	// request, a closed connection) it calls it and then stops the
+	// subscription itself. So the handler only records and logs, and "the
+	// subscription closed without our stop" below is what terminal means —
+	// the client's own verdict, not a list of error names kept in step here.
+	var lastErr atomic.Pointer[error]
+	opts := []jetstream.PullConsumeOpt{
+		jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
+			lastErr.Store(&err)
+			slog.Default().Warn("mq: consumer reported an error", "component", "nats", "error", err)
+		}),
+	}
+	if prefetch > 0 {
+		opts = append(opts, jetstream.PullMaxMessages(prefetch))
+	}
+	cctx, err := c.cons.Consume(func(m jetstream.Msg) {
+		handler(wrapMsg(c.ctx, m))
+	}, opts...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("consume: %w", err)
+	}
+
+	var stopped atomic.Bool
+	failed := make(chan error, 1)
+	go func() {
+		<-cctx.Closed()
+		if stopped.Load() {
+			return
+		}
+		if reason := lastErr.Load(); reason != nil {
+			failed <- fmt.Errorf("%w: %w", ErrDeliveryEnded, *reason)
+			return
+		}
+		failed <- ErrDeliveryEnded
+	}()
+	stop := func() {
+		stopped.Store(true)
+		cctx.Stop()
+	}
+	return stop, failed, nil
+}
+
+// stream resolves a stream handle by name.
+func (e *EmbeddedNATS) stream(ctx context.Context, name string) (*jsStream, error) {
+	s, err := e.js.Stream(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return &jsStream{s: s}, nil
+}
+
+// jsStream is the sequencedStream over a resolved JetStream stream.
+type jsStream struct {
+	s jetstream.Stream
+}
+
+func (s *jsStream) state(ctx context.Context, subjectFilter string) (streamState, error) {
+	var opts []jetstream.StreamInfoOpt
+	if subjectFilter != "" {
+		opts = append(opts, jetstream.WithSubjectFilter(subjectFilter))
+	}
+	info, err := s.s.Info(ctx, opts...)
+	if err != nil {
+		return streamState{}, err
+	}
+	return streamState{
+		FirstSeq: info.State.FirstSeq,
+		LastSeq:  info.State.LastSeq,
+		Msgs:     info.State.Msgs,
+		Subjects: info.State.Subjects,
+	}, nil
+}
+
+func (s *jsStream) messageTime(ctx context.Context, seq uint64) (time.Time, error) {
+	msg, err := s.s.GetMsg(ctx, seq)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrMsgNotFound) {
+			return time.Time{}, fmt.Errorf("sequence %d: %w", seq, errSequenceNotFound)
+		}
+		return time.Time{}, err
+	}
+	return msg.Time, nil
+}
+
+func (s *jsStream) purgeBelow(ctx context.Context, seq uint64) error {
+	return s.s.Purge(ctx, jetstream.WithPurgeSequence(seq))
+}
+
+func (s *jsStream) consumerAckFloor(ctx context.Context, consumer string) (uint64, error) {
+	cons, err := s.s.Consumer(ctx, consumer)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrConsumerNotFound) {
+			return 0, fmt.Errorf("consumer %q: %w", consumer, ErrConsumerNotFound)
+		}
+		return 0, err
+	}
+	info, err := cons.Info(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("consumer info: %w", err)
+	}
+	return info.AckFloor.Stream, nil
+}
+
+// PurgeAcked purges the ingest stream below MIN(consumer's ack floor + 1,
+// first sequence stored at or after olderThan) — see purgeAcked.
+func (e *EmbeddedNATS) PurgeAcked(ctx context.Context, consumer string, olderThan time.Time) (bool, error) {
+	s, err := e.stream(ctx, ingestStream)
+	if err != nil {
+		return false, fmt.Errorf("get stream: %w", err)
+	}
+	report, err := purgeAcked(ctx, s, consumer, olderThan)
+	if err != nil {
+		return false, err
+	}
+	// The sweep's own log lines: their detail is in sequences, which only
+	// this package speaks.
+	switch {
+	case report.purged:
+		e.logger.Info("sweeper: purged",
+			"purged_below_seq", report.target,
+			"ack_floor", report.ackFloor,
+			"gap_seq", report.gapSeq,
+		)
+	case report.gapSeq == 0:
+		e.logger.Debug("sweeper: all messages within gap window, skipping purge")
+	}
+	return report.purged, nil
+}
+
+// DeadLetterCounts reads the DLQ stream's per-subject counts. A scoped topic
+// counts under "table.scope"; the table filter matches the unscoped subject.
+func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, table string) (DeadLetterCounts, error) {
+	s, err := e.stream(ctx, dlqStream)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrStreamNotFound) {
+			return DeadLetterCounts{}, fmt.Errorf("%w: %w", ErrNoDeadLetterQueue, err)
+		}
+		return DeadLetterCounts{}, fmt.Errorf("get dlq stream: %w", err)
+	}
+
+	filter := dlqAll
+	if table != "" {
+		filter = subject(dlqPrefix, Topic{Table: table})
+	}
+	state, err := s.state(ctx, filter)
+	if err != nil {
+		return DeadLetterCounts{}, fmt.Errorf("dlq stream info: %w", err)
+	}
+
+	counts := DeadLetterCounts{Tables: make(map[string]uint64, len(state.Subjects)), Total: state.Msgs}
+	for subj, n := range state.Subjects {
+		// TODO: do we need to break out scopes here?
+		name, err := decodeToken(strings.TrimPrefix(subj, dlqPrefix))
+		if err != nil {
+			continue
+		}
+		counts.Tables[name] = n
+	}
+	return counts, nil
+}
+
+// ReplaySince creates an ephemeral consumer on topic's ingest subject starting at
+// since (DeliverByStartTime) and drains it to send until caught up. The
+// consumer is ack-less and expires on its own once idle. Caught up is the
+// client's no-messages or request-timeout answer to a pull; any other pull
+// failure (a closed connection, a deleted consumer) is returned so the caller
+// knows the replay ended short rather than empty. A done ctx ends the drain
+// between pulls and returns ctx's error.
+func (e *EmbeddedNATS) ReplaySince(ctx context.Context, topic Topic, since time.Time, send func(data []byte) bool) error {
+	cons, err := e.js.CreateOrUpdateConsumer(ctx, ingestStream, jetstream.ConsumerConfig{
+		FilterSubject:     subject(ingestPrefix, topic),
+		DeliverPolicy:     jetstream.DeliverByStartTimePolicy,
+		OptStartTime:      &since,
+		AckPolicy:         jetstream.AckNonePolicy,
+		InactiveThreshold: 5 * time.Second,
+	})
+	if err != nil {
+		return fmt.Errorf("replay consumer: %w", err)
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
+		if err != nil {
+			if errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout) {
+				return nil // caught up
+			}
+			return fmt.Errorf("replay next: %w", err)
+		}
+		if !send(msg.Data()) {
+			return nil
+		}
+	}
+}
+
+// Stats reports the embedded server's connection and inbound-message counters
+// for observability.RegisterSystemMetrics.
+func (e *EmbeddedNATS) Stats() (observability.MQStats, error) {
+	varz, err := e.server.Varz(nil)
+	if err != nil {
+		return observability.MQStats{}, err
+	}
+	return observability.MQStats{Connections: int64(varz.Connections), InMsgs: varz.InMsgs}, nil
 }
 
 func (e *EmbeddedNATS) Close() error {
@@ -201,8 +546,4 @@ func (e *EmbeddedNATS) Close() error {
 	// Milliseconds for an in-process server.
 	e.server.WaitForShutdown()
 	return nil
-}
-
-func (e *EmbeddedNATS) GetServer() *natsserver.Server {
-	return e.server
 }

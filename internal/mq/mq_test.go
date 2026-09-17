@@ -8,23 +8,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestStreamName(t *testing.T) {
-	t.Parallel()
-	assert.Equal(t, "WAVEHOUSE", StreamName())
-}
-
-func TestDLQStreamName(t *testing.T) {
-	t.Parallel()
-	assert.Equal(t, "WAVEHOUSE_DLQ", DLQStreamName())
-}
-
 func TestMessage_AckNak(t *testing.T) {
 	t.Parallel()
 
 	var doubleAcked, acked, naked int
 	msg := NewMessage(
 		t.Context(),
-		"ingest.x",
+		Topic{Table: "x"},
 		[]byte("hi"),
 		time.Unix(1000, 0),
 		func(ctx context.Context) error { doubleAcked++; return nil },
@@ -32,7 +22,8 @@ func TestMessage_AckNak(t *testing.T) {
 		func() error { naked++; return nil },
 	)
 
-	assert.Equal(t, "ingest.x", msg.Subject)
+	assert.Equal(t, Topic{Table: "x"}, msg.Topic())
+	assert.Equal(t, "x", msg.TopicKey())
 	assert.Equal(t, []byte("hi"), msg.Data)
 	assert.Equal(t, int64(1000), msg.Timestamp.Unix())
 
@@ -48,8 +39,36 @@ func TestMessage_NilCallbacks(t *testing.T) {
 	t.Parallel()
 
 	// Ack/Nak on a message with nil callbacks must be a no-op, not panic.
-	msg := NewMessage(t.Context(), "s", nil, time.Now(), nil, nil, nil)
+	msg := NewMessage(t.Context(), Topic{Table: "s"}, nil, time.Now(), nil, nil, nil)
 	assert.NotPanics(t, func() { _ = msg.DoubleAck(t.Context()) })
 	assert.NotPanics(t, func() { _ = msg.Ack() })
 	assert.NotPanics(t, func() { _ = msg.Nak() })
+}
+
+func TestHeaders(t *testing.T) {
+	t.Parallel()
+
+	h := Headers{}
+	assert.Empty(t, h.Get("missing"))
+
+	h.Add("k", "1")
+	h.Add("k", "2")
+	assert.Equal(t, "1", h.Get("k"), "Get returns the first value")
+	assert.Equal(t, []string{"1", "2"}, h["k"], "Add appends")
+
+	h.Set("k", "3")
+	assert.Equal(t, []string{"3"}, h["k"], "Set replaces")
+
+	// Exact-key, like nats.Header.
+	assert.Empty(t, h.Get("K"))
+}
+
+func TestWithHeader(t *testing.T) {
+	t.Parallel()
+
+	h := Headers{}
+	WithHeader("X-A", "1")(h)
+	WithHeader("X-A", "2")(h)
+	WithHeader("X-B", "b")(h)
+	assert.Equal(t, Headers{"X-A": {"1", "2"}, "X-B": {"b"}}, h)
 }

@@ -75,7 +75,7 @@ func rawEvent(tb testing.TB, table, ts string, data map[string]any) []byte {
 // pins the defence for an envelope we did not write.
 func TestBroadcast_DuplicateColumnWithheld(t *testing.T) {
 	t.Parallel()
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	hub := NewHub(nil, nil, nil) // nil store ⇒ passthrough, so nothing else withholds
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
@@ -138,7 +138,7 @@ func TestReplayProjector_UnpairableWithheld(t *testing.T) {
 // The columns and row here pair perfectly, so ONLY the format can withhold it,
 // and the positive control proves the withholding is the format's doing.
 func TestEventView_UnknownFormatWithheld(t *testing.T) {
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	hub := NewHub(nil, nil, NewMetrics())
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
@@ -315,7 +315,7 @@ func recvEventCols(t *testing.T, sub *Subscriber, cols []string) (Frame, map[str
 func TestHub_ProjectsOncePerRole_FanOutToAllSubscribers(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil) // nil store ⇒ passthrough, no filtering
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 
 	a, b := NewSubscriber(nil, nil), NewSubscriber(nil, nil)
 	hub.Add(topic, "public", a)
@@ -348,7 +348,7 @@ func TestHub_ProjectsPerRole_ColumnFilterAndDenial(t *testing.T) {
 		},
 	}
 	hub := NewHub(policy.Static(p), nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 
 	viewer := NewSubscriber(nil, nil)
 	blocked := NewSubscriber(nil, nil)
@@ -428,7 +428,7 @@ func TestHub_ProjectsPerRole_DistinctRolesGetDistinctFrames(t *testing.T) {
 		},
 	}
 	hub := NewHub(policy.Static(p), nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 
 	viewer, editor := NewSubscriber(nil, nil), NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", viewer)
@@ -481,7 +481,7 @@ func rowFilterPolicy() *policy.Policy {
 func TestHub_RowFilter_PerSubscriberIsolation(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(policy.Static(rowFilterPolicy()), nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 
 	acme := NewSubscriber(jwtClaims(t, map[string]any{"tenant": "acme"}), nil)
 	globex := NewSubscriber(jwtClaims(t, map[string]any{"tenant": "globex"}), nil)
@@ -525,7 +525,7 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 		},
 	}
 	hub := NewHub(policy.Static(p), nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 
 	org := map[string]any{"tenant": "globex"}
 	claims := map[string]any{"org": org}
@@ -571,7 +571,7 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 func TestHub_RowFilter_MissingColumn_FailsClosed(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(policy.Static(rowFilterPolicy()), nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 
 	acme := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
 	hub.Add(topic, "viewer", acme)
@@ -588,7 +588,7 @@ func TestHub_RowFilter_MissingColumn_FailsClosed(t *testing.T) {
 func TestHub_RowFilter_SharedProjectionAcrossSameClaims(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(policy.Static(rowFilterPolicy()), nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 
 	a := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
 	b := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
@@ -626,7 +626,7 @@ func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 		},
 	}
 	hub := NewHub(policy.Static(p), reg, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 
 	sub := NewSubscriber(nil, nil) // constant filter value ⇒ no claims needed
 	hub.Add(topic, "viewer", sub)
@@ -666,7 +666,7 @@ func TestHub_RowFilter_FloatNarrowing_SchemaInformed(t *testing.T) {
 		},
 	}
 	hub := NewHub(policy.Static(p), reg, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
 
@@ -682,10 +682,10 @@ func TestHub_TopicIsolation(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)
 	clicks, views := NewSubscriber(nil, nil), NewSubscriber(nil, nil)
-	hub.Add("ingest.clicks", "public", clicks)
-	hub.Add("ingest.views", "public", views)
+	hub.Add("clicks", "public", clicks)
+	hub.Add("views", "public", views)
 
-	hub.Broadcast("ingest.clicks", rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)}))
+	hub.Broadcast("clicks", rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)}))
 
 	f, _, _ := recvEvent(t, clicks)
 	assert.NotEmpty(t, f.Data)
@@ -731,7 +731,7 @@ func TestHub_PassthroughAndFailClosed(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			hub := NewHub(tt.store, nil, nil)
-			const topic = "ingest.custom"
+			const topic = "custom"
 			sub := NewSubscriber(nil, nil)
 			hub.Add(topic, "public", sub)
 			hub.Broadcast(topic, []byte(tt.payload))
@@ -752,7 +752,7 @@ func TestHub_PassthroughAndFailClosed(t *testing.T) {
 func TestHub_AddRemoveGCsBucketsAndTopics(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	sub := NewSubscriber(nil, nil)
 
 	hub.Add(topic, "public", sub)
@@ -774,7 +774,7 @@ func TestHub_BroadcastNoSubscribers_NoOp(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)
 	assert.NotPanics(t, func() {
-		hub.Broadcast("ingest.nobody", rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)}))
+		hub.Broadcast("nobody", rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)}))
 	})
 }
 
@@ -791,7 +791,7 @@ func TestHub_SlowConsumerDropIncrementsMetric(t *testing.T) {
 
 	m := NewMetrics()
 	hub := NewHub(nil, nil, m)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	// cap-2: the first broadcast fills it with the schema frame plus the row, so
 	// the second undrained broadcast's row drops (its column list is unchanged, so
 	// no second schema frame is due). The shared seam NewSubscriber wires metrics through.
@@ -899,7 +899,7 @@ func TestHub_ReplayProjector_RowFilter(t *testing.T) {
 func TestHub_ConcurrentAddRemoveBroadcast_Race(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	raw := rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)})
 
 	var wg sync.WaitGroup
@@ -930,7 +930,7 @@ func TestHub_ConcurrentAddRemoveBroadcast_Race(t *testing.T) {
 func TestHub_ConcurrentRowFilteredBroadcast_Race(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(policy.Static(rowFilterPolicy()), nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	raw := rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "acme", "page": "/a"})
 
 	var wg sync.WaitGroup
@@ -979,7 +979,7 @@ func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
 		},
 	}
 	hub := NewHub(policy.Static(p), reg, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 
 	// Claims come from real signed tokens through the production middleware, so a
 	// bare JSON-number tenant claim reaches the filter exactly as production
@@ -1024,7 +1024,7 @@ func TestHub_RowFilter_TimestampInstantMatch(t *testing.T) {
 		},
 	}
 	hub := NewHub(policy.Static(p), reg, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
@@ -1058,7 +1058,7 @@ func TestHub_RowFilterWithheldIncrementsMetric(t *testing.T) {
 	})
 
 	hub := NewHub(policy.Static(rowFilterPolicy()), nil, NewMetrics())
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	acme := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
 	globex := NewSubscriber(map[string]any{"tenant": "globex"}, nil)
 	hub.Add(topic, "viewer", acme)
@@ -1086,7 +1086,7 @@ func TestHub_RowFilterWithheldIncrementsMetric(t *testing.T) {
 // per-subscriber evaluation, which is the cost under measurement. See #435 for the
 // memoization follow-up this benchmark exists to arbitrate.
 func BenchmarkBroadcast_RowFilteredFanout(b *testing.B) {
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	raw := rawEvent(b, "clicks", "2026-06-26T00:00:00Z",
 		map[string]any{"tenant_id": "acme", "page": "/a", "secret": "x"})
 
@@ -1224,7 +1224,7 @@ func sumByName(rm metricdata.ResourceMetrics, name string) int64 {
 func TestHub_SchemaFrame_AnnouncedOncePerConnection(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "public", sub)
 
@@ -1250,7 +1250,7 @@ func TestHub_SchemaFrame_AnnouncedOncePerConnection(t *testing.T) {
 func TestHub_SchemaFrame_ReannouncedOnDrift(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "public", sub)
 
@@ -1281,7 +1281,7 @@ func TestHub_SchemaFrame_ReannouncedOnDrift(t *testing.T) {
 func TestHub_SchemaFrame_PerConnectionNotPerRole(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	early := NewSubscriber(nil, nil)
 	hub.Add(topic, "public", early)
 
@@ -1324,8 +1324,8 @@ func TestHub_SubscribeSchemaFrame(t *testing.T) {
 	assert.Equal(t, []string{"page"}, frameColumns(t, f), "announced list is the role's projection")
 
 	// The first live event does not re-announce what the connection was told.
-	hub.Add("ingest.clicks", "viewer", sub)
-	hub.Broadcast("ingest.clicks", rawEventCols(t, "clicks", "t1", []string{"page", "secret"},
+	hub.Add("clicks", "viewer", sub)
+	hub.Broadcast("clicks", rawEventCols(t, "clicks", "t1", []string{"page", "secret"},
 		map[string]any{"page": "/a", "secret": "x"}))
 	data, row := recvEventCols(t, sub, []string{"page"})
 	assert.Equal(t, "/a", row["page"])
@@ -1371,7 +1371,7 @@ func TestHub_SubscribeSchemaFrame_NothingToAnnounce(t *testing.T) {
 func TestHub_DataFrame_PreservesRawCellBytes(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "public", sub)
 
@@ -1395,8 +1395,8 @@ func TestHub_ReplayProjector_SchemaTrackingIsIndependentOfLive(t *testing.T) {
 	raw := rawEventCols(t, "clicks", "t1", []string{"page"}, map[string]any{"page": "/a"})
 
 	// A live event records the connection's column list first...
-	hub.Add("ingest.clicks", "public", sub)
-	hub.Broadcast("ingest.clicks", raw)
+	hub.Add("clicks", "public", sub)
+	hub.Broadcast("clicks", raw)
 	_, _, _ = recvEvent(t, sub)
 
 	// ...and the gap-fill still announces before its first row.
@@ -1415,7 +1415,7 @@ func TestHub_ReplayProjector_SchemaTrackingIsIndependentOfLive(t *testing.T) {
 func TestHub_SchemaFrame_DroppedAnnouncementDropsItsRow(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)
-	const topic = "ingest.clicks"
+	const topic = "clicks"
 	sub := newSubscriber(1, nil) // cap-1: room for the announcement, not the row
 	hub.Add(topic, "public", sub)
 
@@ -1456,8 +1456,8 @@ func TestHub_SubscribeSchemaFrame_ExcludesComputedColumns(t *testing.T) {
 	assert.Equal(t, []string{"page", "country"}, cols)
 
 	// The first event announces nothing new, because the lists agree.
-	hub.Add("ingest.clicks", "public", sub)
-	hub.Broadcast("ingest.clicks", rawEventCols(t, "clicks", "t1", cols,
+	hub.Add("clicks", "public", sub)
+	hub.Broadcast("clicks", rawEventCols(t, "clicks", "t1", cols,
 		map[string]any{"page": "/a", "country": "US"}))
 	_, row := recvEventCols(t, sub, cols)
 	assert.Equal(t, "/a", row["page"])

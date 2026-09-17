@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -176,15 +175,6 @@ func rewriteSettings(t *testing.T, dir string, patch map[string]any) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileConfig), data, 0o600)) //nolint:gosec // G703: dir is a t.TempDir() from writeSettings
 }
 
-func streamMaxBytes(t *testing.T, a *App, name string) int64 {
-	t.Helper()
-	st, err := a.mq.JetStream().Stream(t.Context(), name)
-	require.NoError(t, err)
-	info, err := st.Info(t.Context())
-	require.NoError(t, err)
-	return info.Config.MaxBytes
-}
-
 func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	// Hooks are registered in New and fired by the reload triggers Run
 	// starts; a direct Reload stands in for any of the three triggers and
@@ -193,8 +183,7 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	cfg := testConfig(t, dir)
 	a := newApp(t, cfg, Options{})
 	require.False(t, a.dedup.Open())
-	require.Equal(t, int64(1<<30), streamMaxBytes(t, a, mq.StreamName()))
-	require.Equal(t, int64(1<<30)/10, streamMaxBytes(t, a, mq.DLQStreamName()))
+	require.Equal(t, int64(1<<30), a.mq.MaxBytes())
 
 	rewriteSettings(t, dir, map[string]any{
 		"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}},
@@ -203,36 +192,13 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	_, adopted := a.store.Reload("test")
 	require.True(t, adopted)
 	assert.True(t, a.dedup.Open(), "dedupe hook opened the store")
-	assert.Equal(t, int64(2<<30), streamMaxBytes(t, a, mq.StreamName()), "mq hook resized the ingest stream")
-	assert.Equal(t, int64(2<<30)/10, streamMaxBytes(t, a, mq.DLQStreamName()), "mq hook resized the DLQ stream")
+	// How the budget is split across the MQ's queues is internal/mq's to test.
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(), "mq hook applied the new byte budget")
 
 	rewriteSettings(t, dir, map[string]any{"mq": map[string]any{"max_bytes_gb": 2}})
 	_, adopted = a.store.Reload("test")
 	require.True(t, adopted)
 	assert.False(t, a.dedup.Open(), "dedupe hook closed the store")
-}
-
-func TestReload_DLQResizeFailureRollsBackIngest(t *testing.T) {
-	dir := writeSettings(t, map[string]any{"mq": map[string]any{"max_bytes_gb": 1}})
-	cfg := testConfig(t, dir)
-	a := newApp(t, cfg, Options{})
-	js := a.mq.JetStream()
-
-	// Put the DLQ stream where the hook's update can't follow: JetStream
-	// refuses to change a live stream's retention policy, so recreating it
-	// as a work queue makes the next EnsureDLQStream fail after the ingest
-	// resize has already succeeded.
-	require.NoError(t, js.DeleteStream(t.Context(), mq.DLQStreamName()))
-	_, err := js.CreateStream(t.Context(), jetstream.StreamConfig{
-		Name: mq.DLQStreamName(), Subjects: []string{"dlq.>"}, Retention: jetstream.WorkQueuePolicy, MaxBytes: (1 << 30) / 10,
-	})
-	require.NoError(t, err)
-
-	rewriteSettings(t, dir, map[string]any{"mq": map[string]any{"max_bytes_gb": 2}})
-	_, adopted := a.store.Reload("test")
-	require.True(t, adopted)
-	assert.Equal(t, int64(1<<30), streamMaxBytes(t, a, mq.StreamName()), "the ingest resize is undone so the pair stays at the previous limit")
-	assert.Equal(t, int64(1<<30)/10, streamMaxBytes(t, a, mq.DLQStreamName()))
 }
 
 func TestNew_RefusesInvalidSettingsDirectory(t *testing.T) {
@@ -392,6 +358,41 @@ func TestRun_ListenFailureStopsEverything(t *testing.T) {
 	// does not join, so the cancel may land a beat after Run returns.
 	assert.Eventually(t, func() bool { return a.stopCtx.Err() != nil }, time.Second, time.Millisecond,
 		"a component failure begins the stop, so a reload mid-hook gives up too")
+}
+
+// dyingConsumerBroker is the real broker, except that the ingest worker's
+// consumer reports that delivery ended shortly after it starts — what a
+// deleted durable or a closed MQ connection looks like from the worker.
+type dyingConsumerBroker struct {
+	mq.Broker
+	reason error
+}
+
+func (b dyingConsumerBroker) CreateConsumer(context.Context, mq.ConsumerConfig) (mq.Consumer, error) {
+	return dyingConsumer{reason: b.reason}, nil
+}
+
+type dyingConsumer struct{ reason error }
+
+func (c dyingConsumer) Consume(func(*mq.Message), int) (func(), <-chan error, error) {
+	failed := make(chan error, 1)
+	failed <- c.reason
+	return func() {}, failed, nil
+}
+
+func TestRun_DeadIngestWorkerStopsEverything(t *testing.T) {
+	a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{})
+	// The worker takes its consumer from a.mq when Run starts it.
+	a.mq = dyingConsumerBroker{Broker: a.mq, reason: fmt.Errorf("%w: consumer deleted", mq.ErrDeliveryEnded)}
+
+	// Bounded so a worker failure that goes unnoticed fails the assertion
+	// below (a cancelled Run returns nil) instead of serving forever — which
+	// is exactly the silent stall this guards against.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	err := a.Run(ctx)
+	require.ErrorIs(t, err, mq.ErrDeliveryEnded, "an API that accepts events nothing writes must not keep running")
+	assert.True(t, strings.HasPrefix(err.Error(), "ingest worker: "), "the failing component names itself: %v", err)
 }
 
 func TestClose_AbandonsAStuckCloseAtTheDeadline(t *testing.T) {

@@ -3,20 +3,19 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // StreamHandler handles GET /v1/stream
 type StreamHandler struct {
 	Hub         *stream.Hub
-	JS          jetstream.JetStream
+	Replayer    mq.Replayer // gap-fill source; nil disables replay
 	Heartbeater *stream.Heartbeater
 	Metrics     *stream.Metrics
 	// Closing, when set, is closed as the server begins shutting down, and
@@ -27,8 +26,8 @@ type StreamHandler struct {
 	Closing <-chan struct{}
 }
 
-func NewStreamHandler(hub *stream.Hub, js jetstream.JetStream) *StreamHandler {
-	return &StreamHandler{Hub: hub, JS: js}
+func NewStreamHandler(hub *stream.Hub, replayer mq.Replayer) *StreamHandler {
+	return &StreamHandler{Hub: hub, Replayer: replayer}
 }
 
 func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -58,10 +57,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// TODO: impl scope
 	scope := ""
-	topic := "ingest." + query.SafeEncodeNATS(table)
-	if scope != "" {
-		topic += "." + query.SafeEncodeNATS(scope)
-	}
+	topic := mq.Topic{Table: table, Scope: scope}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -109,10 +105,12 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		h.Metrics.FrameSent(f.Kind, n)
 	}
 
-	h.Hub.Add(topic, role, sub)
-	defer h.Hub.Remove(topic, role, sub)
+	topicKey := topic.Key()
+	h.Hub.Add(topicKey, role, sub)
+	defer h.Hub.Remove(topicKey, role, sub)
 
-	// Gap fill from NATS using DeliverByStartTime.
+	// Gap fill from the MQ's retained messages (DeliverByStartTime, see
+	// mq.Replayer).
 	// Prefer Last-Event-ID header (set automatically by EventSource on reconnect)
 	// over the "since" query parameter.
 	// TODO: this breaks I think if we multiplex SSE? Need to test further...
@@ -140,12 +138,12 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			return true
 		}
 		replayCtx, cancelReplay := h.replayContext(r)
-		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.JS != nil {
-			h.replayFromNATS(replayCtx, ts, topic, sendReplay)
+		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.Replayer != nil {
+			h.replay(replayCtx, ts, topic, sendReplay)
 		} else if err != nil {
 			// Fall back to RFC3339 without nanos.
-			if ts, err := time.Parse(time.RFC3339, sinceStr); err == nil && h.JS != nil {
-				h.replayFromNATS(replayCtx, ts, topic, sendReplay)
+			if ts, err := time.Parse(time.RFC3339, sinceStr); err == nil && h.Replayer != nil {
+				h.replay(replayCtx, ts, topic, sendReplay)
 			}
 		}
 		cancelReplay()
@@ -184,8 +182,8 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 // replayContext is the gap-fill's context: the request's, cancelled early
 // when the server begins shutting down. Shutdown never cancels a request
-// context itself, so without this the consumer creation — a NATS round trip
-// made before the fetch loop's first check — could hold the drain.
+// context itself, so without this the consumer creation — an MQ round trip
+// made before the replay loop's first check — could hold the drain.
 func (h *StreamHandler) replayContext(r *http.Request) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(r.Context())
 	if h.Closing != nil {
@@ -200,32 +198,16 @@ func (h *StreamHandler) replayContext(r *http.Request) (context.Context, context
 	return ctx, cancel
 }
 
-// replayFromNATS creates an ephemeral NATS consumer starting at the given time
-// and sends all available messages to the callback until caught up or ctx is
-// done (the client went away, or the server is shutting down — a long
-// gap-fill must not hold the drain any more than a live stream would).
-func (h *StreamHandler) replayFromNATS(ctx context.Context, since time.Time, subject string, send func([]byte) bool) {
-	cons, err := h.JS.CreateOrUpdateConsumer(ctx, mq.StreamName(), jetstream.ConsumerConfig{
-		FilterSubject:     subject,
-		DeliverPolicy:     jetstream.DeliverByStartTimePolicy,
-		OptStartTime:      &since,
-		AckPolicy:         jetstream.AckNonePolicy,
-		InactiveThreshold: 5 * time.Second,
-	})
-	if err != nil {
-		return
-	}
-
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
-		if err != nil {
-			return // No more messages or timeout — done with gap-fill.
-		}
-		if !send(msg.Data()) {
-			return
-		}
+// replay sends every message retained on topic since the given time to the
+// callback until caught up or ctx is done (the client went away, or the
+// server is shutting down — a long gap-fill must not hold the drain any more
+// than a live stream would). A replay that cannot start, or that fails before
+// catching up, is not fatal to the stream — the client still gets live events
+// from here on — so the error is logged rather than ending the connection. A
+// done ctx is the connection ending, not a failure, and is not logged.
+func (h *StreamHandler) replay(ctx context.Context, since time.Time, topic mq.Topic, send func([]byte) bool) {
+	if err := h.Replayer.ReplaySince(ctx, topic, since, send); err != nil && ctx.Err() == nil {
+		slog.Default().WarnContext(ctx, "gap-fill replay ended early; the client continues with live events only",
+			"component", "stream", "table", topic.Table, "scope", topic.Scope, "since", since, "error", err)
 	}
 }

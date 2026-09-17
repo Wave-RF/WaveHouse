@@ -61,12 +61,12 @@ func TestHub_RowEvaluatorSeam_LiveBroadcast(t *testing.T) {
 			hub.RowEvaluator = eval
 
 			sub := NewSubscriber(map[string]any{"tenant": "t1"}, nil)
-			hub.Add("ingest.clicks", "viewer", sub)
+			hub.Add("clicks", "viewer", sub)
 
 			// The claim is "t1", so tenant_id "t2" is a row the real predicate
 			// withholds and "t1" is one it admits — the seam's verdict must win
 			// either way.
-			hub.Broadcast("ingest.clicks", rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
+			hub.Broadcast("clicks", rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
 				map[string]any{"tenant_id": tt.tenantID, "page": "/a"}))
 
 			assert.Equal(t, 1, eval.calls, "the live path must consult the seam")
@@ -106,12 +106,12 @@ func TestHub_DefaultRowEvaluator_WhenUnwired(t *testing.T) {
 	assert.IsType(t, policyRowEvaluator{}, hub.rowEvaluator())
 
 	sub := NewSubscriber(map[string]any{"tenant": "t1"}, nil)
-	hub.Add("ingest.clicks", "viewer", sub)
-	hub.Broadcast("ingest.clicks", rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
+	hub.Add("clicks", "viewer", sub)
+	hub.Broadcast("clicks", rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
 		map[string]any{"tenant_id": "t2", "page": "/a"}))
 	assertNoFrame(t, sub)
 
-	hub.Broadcast("ingest.clicks", rawEvent(t, "clicks", "2026-06-26T00:00:01Z",
+	hub.Broadcast("clicks", rawEvent(t, "clicks", "2026-06-26T00:00:01Z",
 		map[string]any{"tenant_id": "t1", "page": "/a"}))
 	f, _, _ := recvEvent(t, sub)
 	assert.NotEmpty(t, f.Data)

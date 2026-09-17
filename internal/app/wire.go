@@ -31,22 +31,7 @@ import (
 )
 
 const (
-	serviceName = "wavehouse"
-	// mqResizeTimeout bounds the JetStream calls a settings reload makes to
-	// apply a new mq.max_bytes_gb — both streams share it. The reload holds
-	// the store's lock while its hooks run, so an in-process JetStream call
-	// that never returns would otherwise block every later reload. Both
-	// this and the rollback are rooted in the App's stop context, so a
-	// reload caught mid-hook by SIGTERM gives up rather than holding the
-	// drain past server.shutdown_timeout; the next boot reconciles both
-	// streams from the adopted settings anyway.
-	mqResizeTimeout = 10 * time.Second
-	// mqRollbackTimeout is the undo's own budget when the DLQ resize fails:
-	// in-process JetStream fails by stalling rather than erroring, so the
-	// likely cause is that mqResizeTimeout has just run out, and an undo on
-	// that context would fail without touching the stream. The hook holds the
-	// store's lock for at most the sum of the two.
-	mqRollbackTimeout = 5 * time.Second
+	serviceName       = "wavehouse"
 	readHeaderTimeout = 10 * time.Second
 )
 
@@ -239,67 +224,46 @@ func (a *App) wireDedupe() error {
 	return nil
 }
 
-// wireMQ starts the embedded NATS under data_dir/nats with the ingest stream
-// and the DLQ stream. The DLQ stream is always present: an empty
-// limits-policy stream costs nothing, and whether a poison row lands on it
-// is the hot-reloadable dlq.enabled switch (global, overridable per table),
-// resolved by the ingest worker at the moment of the failure.
-// mq.max_bytes_gb is hot-reloadable too: after each adoption both streams'
-// limits are updated in place (the DLQ keeps a tenth of the budget).
-func (a *App) wireMQ(ctx context.Context) error {
+// wireMQ starts the MQ — the embedded NATS under data_dir/nats, the one
+// place the implementation is chosen; everything after it sees mq.Broker.
+// mq.max_bytes_gb is hot-reloadable: after each adoption the new budget is
+// handed to the MQ, which owns how it is split across its queues and keeps
+// them consistent (see mq.Broker.SetMaxBytes).
+func (a *App) wireMQ() error {
 	dir := filepath.Join(a.cfg.DataDir, "nats")
 	config.WarnIfFreshDataDir(slog.Default(), "nats", dir)
-	maxBytes := a.store.MQMaxBytes()
-	embedded, err := mq.NewEmbedded(dir, maxBytes)
+	var broker mq.Broker
+	broker, err := mq.NewEmbedded(dir, a.store.MQMaxBytes())
 	if err != nil {
 		config.LogStorageInitError(slog.Default(), "mq", dir, err)
 		return fmt.Errorf("mq open: %w", err)
 	}
-	a.mq = embedded
-	a.add(component{name: "mq", close: withoutContext(embedded.Close)})
+	a.mq = broker
+	a.add(component{name: "mq", close: withoutContext(broker.Close)})
 
 	// Only register system metric gauges when a real MeterProvider is in
 	// place — otherwise `otel.GetMeterProvider()` returns the no-op SDK
 	// provider and RegisterCallback silently no-ops, making this look
 	// authoritative when it's actually doing nothing.
 	if a.cfg.OTel.Enabled || a.cfg.Prometheus.Enabled {
-		if err := observability.RegisterSystemMetrics(embedded.GetServer(), a.dedup); err != nil {
+		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedup); err != nil {
 			slog.Error("failed to register system metrics", "error", err)
 		}
 	}
 
-	if err := api.EnsureDLQStream(ctx, embedded.JetStream(), maxBytes/10); err != nil {
-		return fmt.Errorf("dlq stream init: %w", err)
-	}
-	applied := maxBytes
+	// Rooted in the App's stop context, so a reload caught mid-hook by
+	// SIGTERM gives up rather than holding the drain past
+	// server.shutdown_timeout.
 	a.store.AfterAdopt(func() {
 		mb := a.store.MQMaxBytes()
-		if mb == applied {
+		if mb == broker.MaxBytes() {
 			return
 		}
-		ctx, cancel := context.WithTimeout(a.stopCtx, mqResizeTimeout)
-		defer cancel()
-		if err := embedded.Resize(ctx, mb); err != nil {
-			slog.Error("mq stream resize failed; previous limits stay in effect", "error", err)
-			return
-		}
-		if err := api.EnsureDLQStream(ctx, embedded.JetStream(), mb/10); err != nil {
-			// Keep both streams on one adopted document: undo the ingest
-			// resize so the 10:1 pair stays at the previous limit, and the
-			// next adoption retries both. Safe in this direction — the ingest
-			// stream is DiscardNew, so shrinking it back drops nothing
-			// stored. The undo runs on its own budget, not the one the DLQ
-			// call has likely just exhausted.
-			slog.Error("dlq stream resize failed; restoring the previous ingest limit", "error", err)
-			rollbackCtx, cancelRollback := context.WithTimeout(a.stopCtx, mqRollbackTimeout)
-			defer cancelRollback()
-			if err := embedded.Resize(rollbackCtx, applied); err != nil {
-				slog.Error("ingest stream rollback failed; ingest stream at the new limit, dlq at the previous", "error", err)
-			}
+		if err := broker.SetMaxBytes(a.stopCtx, mb); err != nil {
+			slog.Error("mq stream resize failed; the next reload retries", "error", err)
 			return
 		}
 		slog.Info("mq stream limits reconciled with settings", "max_bytes_gb", mb>>30)
-		applied = mb
 	})
 	return nil
 }
@@ -320,7 +284,7 @@ func (a *App) wireCache() error {
 // written to ClickHouse and older than the SSE gap window
 // (stream.gap_window_minutes, re-read every sweep). Runs every minute.
 func (a *App) wireSweeper() {
-	sweeper := ingest.NewSweeper(a.mq.JetStream(), a.store.GapWindow, slog.Default())
+	sweeper := ingest.NewSweeper(a.mq, a.store.GapWindow, slog.Default())
 	a.add(component{name: "sweeper", run: func(ctx context.Context) error {
 		sweeper.Start(ctx)
 		return nil
@@ -339,8 +303,8 @@ func (a *App) wireStreaming() {
 	// projects each event itself (skipping malformed payloads), so the bridge
 	// just forwards the raw bytes and acks.
 	a.add(component{name: "hub bridge", run: func(ctx context.Context) error {
-		err := a.mq.Subscribe(ctx, "ingest.>", "hub-bridge", func(msg *mq.Message) error {
-			a.hub.Broadcast(msg.Subject, msg.Data)
+		err := a.mq.Subscribe(ctx, "hub-bridge", func(msg *mq.Message) error {
+			a.hub.Broadcast(msg.TopicKey(), msg.Data)
 			if err := msg.Ack(); err != nil {
 				slog.Warn("failed to ack message from embedded hub bridge", "error", err)
 			}
@@ -371,17 +335,26 @@ func (a *App) wireStreaming() {
 // drain within the shutdown timeout.
 func (a *App) wireIngestWorker() {
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
-		stop, err := ingest.StartIngestWorker(ctx, a.mq.NatsConn(), a.cache, a.ch.Target, a.store.DLQFor)
+		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, a.cache, a.ch.Target, a.store.DLQFor)
 		if err != nil {
 			return err
 		}
-		<-ctx.Done()
+		// A worker that ends on its own (its consumer was deleted, the MQ
+		// connection closed) cannot be revived from here and would otherwise
+		// leave the API accepting events nothing writes. Returning the error
+		// fails Run, which stops every other component; the supervisor's
+		// restart recreates the consumer at boot.
+		var workerErr error
+		select {
+		case <-ctx.Done():
+		case workerErr = <-failed:
+		}
 		shutCtx, cancel := a.shutdownContext()
 		defer cancel()
 		if err := stop(shutCtx); err != nil {
 			slog.Error("ingest worker cleanup error", "error", err)
 		}
-		return nil
+		return workerErr
 	}})
 }
 
@@ -482,7 +455,6 @@ func (a *App) wireReloadTriggers() {
 // the API router instead.
 func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	logger := slog.Default()
-	js := a.mq.JetStream()
 
 	ingestHandler := api.NewIngestHandler(a.registry, a.mq, logger)
 	ingestHandler.PolicySource = a.policies
@@ -492,7 +464,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	healthHandler := api.NewHealthHandler(a.ch)
 	healthHandler.Boot = a.bootState
 
-	streamHandler := api.NewStreamHandler(a.hub, js)
+	streamHandler := api.NewStreamHandler(a.hub, a.mq)
 	streamHandler.Metrics = a.sseMetrics
 	streamHandler.Heartbeater = a.heartbeater
 	// Closed when the API server begins shutting down, ending every open
@@ -510,14 +482,13 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Health:          healthHandler,
 		Version:         api.NewVersionHandler(a.build.Version, a.build.GitCommit, a.build.BuildTime),
 		Schema:          api.NewSchemaHandler(a.registry),
-		DLQ:             api.NewDLQHandler(js, logger),
+		DLQ:             api.NewDLQHandler(a.mq, logger),
 		Pipes:           api.NewPipesHandler(a.store, a.policies, a.ch, a.cache, a.ch.QueryTimeout, logger),
 		StructuredQuery: api.NewStructuredQueryHandler(a.ch, a.cache, a.registry, a.policies, a.store.TimestampBucketSeconds, a.ch.QueryTimeout, a.store.DefaultMaxRows, logger),
 
 		AuthMW:       authMW,
 		PolicySource: a.policies,
 		Logger:       logger,
-		JS:           js,
 		CORSOrigins:  a.store.CORSOrigins,
 		Settings:     api.NewSettingsHandler(a.store, logger),
 	}
