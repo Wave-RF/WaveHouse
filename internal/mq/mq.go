@@ -207,19 +207,23 @@ type DeadLetterer interface {
 // DeadLetterCounts is what is parked on the dead-letter queue.
 type DeadLetterCounts struct {
 	// Tables maps table name → parked messages, for the tables asked about.
+	// Scope is not broken out yet (it is inert until #235): a message parked
+	// under a scoped topic counts under "table.scope", not under its table.
 	Tables map[string]uint64
 	// Total is every parked message, whatever the filter.
 	Total uint64
 }
 
 // ErrNoDeadLetterQueue is returned by DeadLetterStats.DeadLetterCounts when
-// the dead-letter queue cannot be resolved (it may not exist yet).
+// the dead-letter queue does not exist (nothing can have been parked). Any
+// other failure to read it is a plain error.
 var ErrNoDeadLetterQueue = errors.New("dead-letter queue not found")
 
 // DeadLetterStats reports on the dead-letter queue.
 type DeadLetterStats interface {
 	// DeadLetterCounts counts parked messages per table; a non-empty table
-	// narrows Tables to that one.
+	// narrows Tables to that one (its unscoped messages — see
+	// DeadLetterCounts.Tables).
 	DeadLetterCounts(ctx context.Context, table string) (DeadLetterCounts, error)
 }
 
@@ -261,8 +265,11 @@ type Broker interface {
 	Replayer
 	// SetMaxBytes applies a new byte budget (the hot-reloadable
 	// mq.max_bytes_gb) to the queues as a whole — how it is split between
-	// them is the implementation's. On an error the previous budget stays in
-	// effect. MaxBytes reports the budget in effect.
+	// them is the implementation's. On an error the implementation restores
+	// the previous budget where it can (best effort: the error says when it
+	// could not, and a canceled ctx abandons the restore too), and MaxBytes
+	// keeps reporting the previous budget so the next call retries.
+	// MaxBytes reports the budget last applied in full.
 	SetMaxBytes(ctx context.Context, maxBytes int64) error
 	MaxBytes() int64
 	// Stats reports the broker counters the system gauges observe.

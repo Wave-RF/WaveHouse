@@ -180,16 +180,22 @@ func (e *EmbeddedNATS) MaxBytes() int64 {
 // the ingest stream below its current size makes DiscardNew refuse new
 // publishes until the worker drains it — nothing buffered is dropped.
 //
-// The pair moves together or not at all. If the DLQ update fails after the
+// The pair moves together where it can. If the DLQ update fails after the
 // ingest one succeeded, the ingest resize is undone so the 10:1 pair stays at
 // the previous budget, and the next call retries both. Safe in that direction
 // — the ingest stream is DiscardNew, so shrinking it back drops nothing
-// stored. On any error MaxBytes keeps reporting the previous budget.
+// stored. The undo is best effort: if it fails too, the ingest stream stays at
+// the new limit and the DLQ at the previous, and the error says so. On any
+// error MaxBytes keeps reporting the previous budget, so a later call with the
+// new budget reapplies both.
 //
 // The JetStream calls are bounded by resizeTimeout, plus rollbackTimeout for
-// the undo, both rooted in ctx — so a caller's cancellation (a process stop
-// caught mid-reload) gives up rather than waiting either out; the next boot
-// reconciles both streams from the adopted settings anyway.
+// the undo, both rooted in ctx. That is deliberate: ctx is the process's stop
+// context, so a reload caught mid-hook by a stop gives up — undo included —
+// rather than holding the drain past server.shutdown_timeout. A cancellation
+// between the two updates is therefore the one way to leave the pair split,
+// and only for the rest of a process that is exiting: the next boot
+// reconciles both streams from the adopted settings.
 func (e *EmbeddedNATS) SetMaxBytes(ctx context.Context, maxBytes int64) error {
 	e.limitMu.Lock()
 	defer e.limitMu.Unlock()
@@ -367,6 +373,9 @@ func (s *jsStream) state(ctx context.Context, subjectFilter string) (streamState
 func (s *jsStream) messageTime(ctx context.Context, seq uint64) (time.Time, error) {
 	msg, err := s.s.GetMsg(ctx, seq)
 	if err != nil {
+		if errors.Is(err, jetstream.ErrMsgNotFound) {
+			return time.Time{}, fmt.Errorf("sequence %d: %w", seq, errSequenceNotFound)
+		}
 		return time.Time{}, err
 	}
 	return msg.Time, nil
@@ -421,8 +430,11 @@ func (e *EmbeddedNATS) PurgeAcked(ctx context.Context, consumer string, olderTha
 // counts under "table.scope"; the table filter matches the unscoped subject.
 func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, table string) (DeadLetterCounts, error) {
 	s, err := e.stream(ctx, dlqStream)
-	if err != nil { // TODO: catch by error type
-		return DeadLetterCounts{}, fmt.Errorf("%w: %w", ErrNoDeadLetterQueue, err)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrStreamNotFound) {
+			return DeadLetterCounts{}, fmt.Errorf("%w: %w", ErrNoDeadLetterQueue, err)
+		}
+		return DeadLetterCounts{}, fmt.Errorf("get dlq stream: %w", err)
 	}
 
 	filter := dlqAll

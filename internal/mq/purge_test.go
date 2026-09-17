@@ -33,7 +33,7 @@ func (f *fakeStream) state(context.Context, string) (streamState, error) {
 
 func (f *fakeStream) messageTime(ctx context.Context, seq uint64) (time.Time, error) {
 	if f.messageTimeFn == nil {
-		return time.Time{}, errors.New("fakeStream.messageTime: message not found")
+		return time.Time{}, errSequenceNotFound
 	}
 	return f.messageTimeFn(ctx, seq)
 }
@@ -214,15 +214,26 @@ func TestFindGapSequence(t *testing.T) {
 		}
 		return cutoff.Add(time.Duration(seq-60) * time.Minute), nil //nolint:gosec // test-only, values are small
 	}
-	// seqs 40..60 missing (already purged), <40 are old, >60 are within window.
-	sparseSequences := func(_ context.Context, seq uint64) (time.Time, error) {
-		if seq >= 40 && seq <= 60 {
-			return time.Time{}, errors.New("not found")
+	// missingBetween returns a lookup where seqs lo..hi hold no message, seqs
+	// below boundary are old, and seqs from boundary on are within the window.
+	missingBetween := func(lo, hi, boundary uint64) func(context.Context, uint64) (time.Time, error) {
+		return func(_ context.Context, seq uint64) (time.Time, error) {
+			if seq >= lo && seq <= hi {
+				return time.Time{}, errSequenceNotFound
+			}
+			if seq < boundary {
+				return cutoff.Add(-time.Minute), nil
+			}
+			return cutoff.Add(time.Minute), nil
 		}
-		if seq < 40 {
+	}
+	lookupFailsAt := func(bad uint64) func(context.Context, uint64) (time.Time, error) {
+		return func(_ context.Context, seq uint64) (time.Time, error) {
+			if seq == bad {
+				return time.Time{}, errors.New("request timeout")
+			}
 			return cutoff.Add(-time.Minute), nil
 		}
-		return cutoff.Add(time.Minute), nil
 	}
 
 	tests := []struct {
@@ -269,12 +280,50 @@ func TestFindGapSequence(t *testing.T) {
 			wantSeq:       61,
 		},
 		{
-			// Binary search skips missing seqs; first available within window is 61.
-			name:          "sparse sequences",
+			// seqs 40..60 hold nothing, <40 are old, >60 are within window. The
+			// bound stops at the hole: purging below 40 removes every old
+			// message, the same ones a bound of 61 would.
+			name:          "missing range straddles the boundary",
 			gapWindow:     gapWindow,
 			state:         streamState{FirstSeq: 1, LastSeq: 100},
-			messageTimeFn: sparseSequences,
-			wantSeq:       61,
+			messageTimeFn: missingBetween(40, 60, 61),
+			wantSeq:       40,
+		},
+		{
+			// The boundary is 40 and the hole (45..55) is inside the window. A
+			// missing midpoint must not discard the lower half: answering 56
+			// here would purge 40..44, which are inside the replay window.
+			name:          "missing range after the boundary keeps the window intact",
+			gapWindow:     gapWindow,
+			state:         streamState{FirstSeq: 1, LastSeq: 100},
+			messageTimeFn: missingBetween(45, 55, 40),
+			wantSeq:       40,
+		},
+		{
+			// The boundary is 70 and the hole (45..55) is below it. The bound
+			// stops where the hole starts — purging less than it could, never
+			// more; the next sweep starts past the hole and finds 70.
+			name:          "missing range before the boundary under-purges, never over",
+			gapWindow:     gapWindow,
+			state:         streamState{FirstSeq: 1, LastSeq: 100},
+			messageTimeFn: missingBetween(45, 55, 70),
+			wantSeq:       45,
+		},
+		{
+			// A lookup that fails says nothing about the sequence, so there is
+			// no safe bound to return.
+			name:          "failed lookup aborts the search",
+			gapWindow:     gapWindow,
+			state:         streamState{FirstSeq: 1, LastSeq: 100},
+			messageTimeFn: lookupFailsAt(50),
+			wantErrSub:    "message time at 50",
+		},
+		{
+			name:          "failed lookup of the oldest message aborts the search",
+			gapWindow:     gapWindow,
+			state:         streamState{FirstSeq: 1, LastSeq: 100},
+			messageTimeFn: lookupFailsAt(1),
+			wantErrSub:    "message time at 1",
 		},
 		{
 			name:       "stream info error",

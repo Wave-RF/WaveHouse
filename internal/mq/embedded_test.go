@@ -155,7 +155,7 @@ func TestEmbeddedNATS_StreamHandle(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ts.Before(before.Add(-time.Second)), "stored time is the publish time")
 	_, err = s.messageTime(ctx, 99)
-	require.Error(t, err, "a sequence that was never stored is an error")
+	require.ErrorIs(t, err, errSequenceNotFound, "a sequence that was never stored holds no message")
 
 	// No consumer yet: the sentinel the sweeper keys its "not yet" warning on.
 	_, err = s.consumerAckFloor(ctx, "nobody")
@@ -194,7 +194,7 @@ func TestEmbeddedNATS_StreamHandle(t *testing.T) {
 	assert.Equal(t, uint64(3), st.FirstSeq)
 	assert.Equal(t, uint64(2), st.Msgs)
 	_, err = s.messageTime(ctx, 1)
-	require.Error(t, err, "a purged sequence is gone")
+	require.ErrorIs(t, err, errSequenceNotFound, "a purged sequence is gone")
 }
 
 // TestEmbeddedNATS_CreateConsumer_Config pins the ConsumerConfig → broker
@@ -464,6 +464,19 @@ func TestEmbeddedNATS_DeadLetterCounts_NoQueue(t *testing.T) {
 	require.NoError(t, e.js.DeleteStream(ctx, dlqStream))
 	_, err := e.DeadLetterCounts(ctx, "")
 	require.ErrorIs(t, err, ErrNoDeadLetterQueue)
+}
+
+func TestEmbeddedNATS_DeadLetterCounts_BrokerFailureIsNotAnEmptyQueue(t *testing.T) {
+	e := newTestEmbedded(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	// A lookup that fails for any reason other than "no such stream" must not
+	// read as an empty queue.
+	e.conn.Close()
+	_, err := e.DeadLetterCounts(ctx, "")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrNoDeadLetterQueue)
 }
 
 func TestEmbeddedNATS_DeadLetter_IsAPrefixSwap(t *testing.T) {

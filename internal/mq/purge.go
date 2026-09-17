@@ -2,9 +2,14 @@ package mq
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
+
+// errSequenceNotFound is returned by sequencedStream.messageTime for a
+// sequence that holds no message (purged, deleted, or never stored).
+var errSequenceNotFound = errors.New("sequence not found")
 
 // streamState is the slice of a JetStream stream's state this package reads.
 type streamState struct {
@@ -23,8 +28,9 @@ type sequencedStream interface {
 	// state reports the stream's sequence bounds and message count. A
 	// non-empty subjectFilter also fills streamState.Subjects.
 	state(ctx context.Context, subjectFilter string) (streamState, error)
-	// messageTime returns the stored timestamp of the message at seq. A purged
-	// or never-stored sequence is an error.
+	// messageTime returns the stored timestamp of the message at seq.
+	// errSequenceNotFound when the sequence holds no message; any other error
+	// is a failed lookup that says nothing about the sequence.
 	messageTime(ctx context.Context, seq uint64) (time.Time, error)
 	// purgeBelow removes every message with a sequence lower than seq.
 	purgeBelow(ctx context.Context, seq uint64) error
@@ -88,6 +94,13 @@ func purgeAcked(ctx context.Context, s sequencedStream, consumer string, cutoff 
 // whose timestamp is >= cutoff. Returns 0 if the stream is empty or nothing is
 // older than cutoff. This takes ~15 lightweight messageTime lookups instead of
 // creating an ephemeral consumer.
+//
+// The result is a purge bound, so every uncertainty resolves toward purging
+// less. A sequence that holds no message gives no timestamp to compare, and
+// the boundary may lie on either side of it: it is treated as inside the
+// window, which can only lower the result (the next sweep moves past it once
+// the messages below it are gone). A lookup that fails for any other reason
+// aborts the search — a guess there could purge inside the replay window.
 func findGapSequence(ctx context.Context, s sequencedStream, cutoff time.Time) (uint64, error) {
 	state, err := s.state(ctx, "")
 	if err != nil {
@@ -105,6 +118,9 @@ func findGapSequence(ctx context.Context, s sequencedStream, cutoff time.Time) (
 	if err == nil && !oldest.Before(cutoff) {
 		return 0, nil
 	}
+	if err != nil && !errors.Is(err, errSequenceNotFound) {
+		return 0, fmt.Errorf("message time at %d: %w", first, err)
+	}
 
 	lo, hi := first, last
 	result := last + 1 // Default: everything is older than the cutoff.
@@ -112,9 +128,14 @@ func findGapSequence(ctx context.Context, s sequencedStream, cutoff time.Time) (
 	for lo <= hi {
 		mid := lo + (hi-lo)/2
 		ts, err := s.messageTime(ctx, mid)
+		if err != nil && !errors.Is(err, errSequenceNotFound) {
+			return 0, fmt.Errorf("message time at %d: %w", mid, err)
+		}
 		if err != nil {
-			// Sequence may have been purged; scan forward.
-			lo = mid + 1
+			// No message here, so no comparison: keep mid as a candidate and
+			// search below it rather than discarding the lower half.
+			result = mid
+			hi = mid - 1
 			continue
 		}
 		if ts.Before(cutoff) {
