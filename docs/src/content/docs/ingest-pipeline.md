@@ -15,7 +15,7 @@ It is deliberately detailed: this is a hot, concurrency-heavy path, and the goro
 | --- | --- |
 | `worker.go` | `StartIngestWorker`, the `dispatchLoop`, `parseMsg` (+ `rejectPoison` for an envelope it cannot read), the per-table `tableBatcher`/`tableLoop`, `flushTable` (splits a batch per column list via `groupByColumns`) and `flushGroup` (bulk insert with a row-by-row poison-isolation fallback), `insertToClickHouse`, `handleSuccess` (cache invalidation + acks), `sendToDLQ`/`parkOnDLQ` |
 | `compact.go` | `EncodeCompactRow` — renders one record as a `JSONCompactEachRow` line over the table's **insertable** columns, in declaration order. Serialization only: it validates nothing and judges no value |
-| `sweeper.go` | The **Active Sweeper** — purges stream messages that are both written to ClickHouse and past the SSE gap window |
+| `sweeper.go` | The **Active Sweeper** — every minute, asks the MQ to purge the events that are both written to ClickHouse and past the SSE gap window (the purge arithmetic below lives in `internal/mq/purge.go`) |
 | `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |
 
 The pipeline is **insert-only**. (Upgrading across the v2 envelope? [Drain the queue first](/deployment#upgrading-across-the-v2-ingest-envelope).) The wire format carries `{table_name, scope, received_timestamp, format, columns, row}`: `row` is one `JSONCompactEachRow` line — a positional JSON array — and `columns` names its positions — the table's insertable columns, in declaration order (a `MATERIALIZED` or `ALIAS` column cannot be named in an `INSERT`, so it is not part of the row's contract). (`scope` is reserved and always `""` today.) Each NATS message is its own envelope, so the names ride along per record; where they are carried once is the `INSERT` the worker emits per group. The worker parses the envelope, groups a batch by column list, and bulk-`INSERT`s each group as `INSERT INTO … (cols) FORMAT JSONCompactEachRow` — schema validation already happened at the HTTP ingest handler, before publish. Non-insert mutations go through `POST /v1/ops/query` (admin-only).
@@ -221,7 +221,7 @@ Several layers throttle the pipeline, inner to outer:
 
 ## The Active Sweeper
 
-The worker advances the consumer's `AckFloor` by acking; the sweeper observes it to decide what is safe to purge. They never call each other — the consumer's `AckFloor` is their only contract.
+The worker advances the consumer's `AckFloor` by acking; the sweep observes it to decide what is safe to purge. They never call each other — the consumer's `AckFloor` is their only contract. The sweeper (`internal/ingest`) owns the schedule and the window: each tick it calls `mq.Purger.PurgeAcked(buffer-consumer, now − gap window)`. The steps after the tick below are the embedded broker's implementation of that call.
 
 ```mermaid
 flowchart TD

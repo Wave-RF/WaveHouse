@@ -93,7 +93,7 @@ type App struct {
 	bootState   *api.BootState
 	registry    *discovery.SchemaRegistry
 	dedup       *dedupe.Managed
-	mq          *mq.EmbeddedNATS
+	mq          mq.Broker
 	cache       cache.Cache
 	sseMetrics  *stream.Metrics
 	hub         *stream.Hub
@@ -290,6 +290,6 @@ func (a *App) Handler() http.Handler { return a.handler }
 // creating tables.
 func (a *App) Registry() *discovery.SchemaRegistry { return a.registry }
 
-// MQ is the embedded NATS, for a harness that publishes straight onto the
-// ingest stream.
-func (a *App) MQ() *mq.EmbeddedNATS { return a.mq }
+// MQ is the broker, for a harness that publishes straight onto the ingest
+// queue.
+func (a *App) MQ() mq.Broker { return a.mq }

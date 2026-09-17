@@ -3,7 +3,6 @@ package testutil
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -17,31 +16,42 @@ import (
 // Compile-time interface assertions. Catch breakage early when an interface
 // these mocks implement gains a method.
 var (
-	_ mq.Publisher      = (*MockPublisher)(nil)
-	_ mq.Subscriber     = (*MockSubscriber)(nil)
-	_ mq.StreamManager  = (*MockStreamManager)(nil)
-	_ mq.Stream         = (*MockStream)(nil)
-	_ http.RoundTripper = (*MockRoundTripper)(nil)
+	_ mq.Publisher       = (*MockPublisher)(nil)
+	_ mq.Subscriber      = (*MockSubscriber)(nil)
+	_ mq.DeadLetterer    = (*MockPublisher)(nil)
+	_ mq.Purger          = (*MockPurger)(nil)
+	_ mq.DeadLetterStats = (*MockDeadLetterStats)(nil)
+	_ http.RoundTripper  = (*MockRoundTripper)(nil)
 )
 
 // ── Mock Publisher ───────────────────────────────────────────────
 
-// MockPublisher records all published messages for test assertions.
+// MockPublisher records all published messages — ingest publishes and
+// dead-letter parkings alike — for test assertions.
 type MockPublisher struct {
 	mu       sync.Mutex
 	Messages []PublishedMessage
-	Err      error // if set, Publish returns this error
+	Err      error // if set, Publish and DeadLetter return this error
 }
 
-// PublishedMessage records a single publish call, with the headers the
-// options set.
+// PublishedMessage records a single Publish or DeadLetter call, with the
+// headers the options set.
 type PublishedMessage struct {
-	Subject string
-	Data    []byte
-	Headers mq.Headers
+	Topic      mq.Topic
+	DeadLetter bool // parked via DeadLetter rather than published via Publish
+	Data       []byte
+	Headers    mq.Headers
 }
 
-func (m *MockPublisher) Publish(_ context.Context, subject string, data []byte, opts ...mq.PublishOpt) error {
+func (m *MockPublisher) Publish(_ context.Context, topic mq.Topic, data []byte, opts ...mq.PublishOpt) error {
+	return m.record(PublishedMessage{Topic: topic, Data: data}, opts)
+}
+
+func (m *MockPublisher) DeadLetter(_ context.Context, msg *mq.Message, opts ...mq.PublishOpt) error {
+	return m.record(PublishedMessage{Topic: msg.Topic(), DeadLetter: true, Data: msg.Data}, opts)
+}
+
+func (m *MockPublisher) record(pm PublishedMessage, opts []mq.PublishOpt) error {
 	if m.Err != nil {
 		return m.Err
 	}
@@ -51,7 +61,8 @@ func (m *MockPublisher) Publish(_ context.Context, subject string, data []byte, 
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Messages = append(m.Messages, PublishedMessage{Subject: subject, Data: data, Headers: headers})
+	pm.Headers = headers
+	m.Messages = append(m.Messages, pm)
 	return nil
 }
 
@@ -83,7 +94,7 @@ type MockSubscriber struct {
 	Handler func(msg *mq.Message) error
 }
 
-func (m *MockSubscriber) Subscribe(_ context.Context, _, _ string, handler func(msg *mq.Message) error) error {
+func (m *MockSubscriber) Subscribe(_ context.Context, _ string, handler func(msg *mq.Message) error) error {
 	m.Handler = handler
 	return m.Err
 }
@@ -154,8 +165,8 @@ func (m *MockCache) GetNamespaces() []cache.Namespace {
 // MockMessage builds mq.Messages whose ack-family callbacks flip the flags
 // below, so a test can assert what the worker did with a message.
 type MockMessage struct {
-	MsgData    []byte
-	MsgSubject string
+	MsgData  []byte
+	MsgTopic mq.Topic
 
 	// Configurable errors returned from the matching ack-family methods.
 	AckErr       error
@@ -171,7 +182,7 @@ type MockMessage struct {
 // Message returns an mq.Message wired to this mock's flags. Every call returns
 // a new Message sharing the same flags.
 func (m *MockMessage) Message() *mq.Message {
-	return mq.NewMessage(context.Background(), m.MsgSubject, m.MsgData, time.Time{},
+	return mq.NewMessage(context.Background(), m.MsgTopic, m.MsgData, time.Time{},
 		func(context.Context) error {
 			m.DoubleAcked.Store(true)
 			return m.DoubleAckErr
@@ -187,62 +198,40 @@ func (m *MockMessage) Message() *mq.Message {
 	)
 }
 
-// ── Mock mq.StreamManager / mq.Stream ────────────────────────────
+// ── Mock mq.Purger ───────────────────────────────────────────────
 
-// MockStreamManager implements mq.StreamManager. StreamFn resolves every
-// lookup; unset, every lookup fails.
-type MockStreamManager struct {
-	StreamFn func(ctx context.Context, name string) (mq.Stream, error)
+// MockPurger implements mq.Purger and records every call.
+type MockPurger struct {
+	Purged bool  // what PurgeAcked reports
+	Err    error // if set, PurgeAcked returns this error
+
+	mu    sync.Mutex
+	Calls []PurgeCall
 }
 
-func (m *MockStreamManager) Stream(ctx context.Context, name string) (mq.Stream, error) {
-	if m.StreamFn == nil {
-		return nil, errors.New("MockStreamManager.Stream: StreamFn not set")
-	}
-	return m.StreamFn(ctx, name)
+// PurgeCall records one PurgeAcked call.
+type PurgeCall struct {
+	Consumer  string
+	OlderThan time.Time
 }
 
-// MockStream implements mq.Stream. Provide MessageTimes for static lookup, or
-// MessageTimeFn for richer behaviour. PurgeBelow calls are recorded in Purged.
-type MockStream struct {
-	StateVal mq.StreamState
-	StateErr error
-
-	MessageTimes  map[uint64]time.Time
-	MessageTimeFn func(ctx context.Context, seq uint64) (time.Time, error)
-
-	AckFloorVal uint64
-	AckFloorErr error
-
-	mu       sync.Mutex
-	Purged   []uint64
-	PurgeErr error
-}
-
-func (m *MockStream) State(_ context.Context, _ string) (mq.StreamState, error) {
-	return m.StateVal, m.StateErr
-}
-
-func (m *MockStream) MessageTime(ctx context.Context, seq uint64) (time.Time, error) {
-	if m.MessageTimeFn != nil {
-		return m.MessageTimeFn(ctx, seq)
-	}
-	ts, ok := m.MessageTimes[seq]
-	if !ok {
-		return time.Time{}, errors.New("MockStream.MessageTime: message not found")
-	}
-	return ts, nil
-}
-
-func (m *MockStream) PurgeBelow(_ context.Context, seq uint64) error {
+func (m *MockPurger) PurgeAcked(_ context.Context, consumer string, olderThan time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Purged = append(m.Purged, seq)
-	return m.PurgeErr
+	m.Calls = append(m.Calls, PurgeCall{Consumer: consumer, OlderThan: olderThan})
+	return m.Purged, m.Err
 }
 
-func (m *MockStream) ConsumerAckFloor(_ context.Context, _ string) (uint64, error) {
-	return m.AckFloorVal, m.AckFloorErr
+// ── Mock mq.DeadLetterStats ──────────────────────────────────────
+
+// MockDeadLetterStats implements mq.DeadLetterStats with a canned answer.
+type MockDeadLetterStats struct {
+	Counts mq.DeadLetterCounts
+	Err    error
+}
+
+func (m *MockDeadLetterStats) DeadLetterCounts(context.Context, string) (mq.DeadLetterCounts, error) {
+	return m.Counts, m.Err
 }
 
 // ── Mock http.RoundTripper ───────────────────────────────────────

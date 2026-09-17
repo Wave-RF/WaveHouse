@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,19 +47,14 @@ type EmbeddedNATS struct {
 	server *natsserver.Server
 	conn   *nats.Conn
 	js     jetstream.JetStream
+	logger *slog.Logger
 
 	limitMu  sync.Mutex
 	maxBytes int64 // the ingest stream cap both streams were last reconciled to
 }
 
 // EmbeddedNATS is the one implementation of every mq interface.
-var (
-	_ Publisher       = (*EmbeddedNATS)(nil)
-	_ Subscriber      = (*EmbeddedNATS)(nil)
-	_ ConsumerManager = (*EmbeddedNATS)(nil)
-	_ StreamManager   = (*EmbeddedNATS)(nil)
-	_ Replayer        = (*EmbeddedNATS)(nil)
-)
+var _ Broker = (*EmbeddedNATS)(nil)
 
 const (
 	// dlqShare is the DLQ stream's slice of the byte budget: a tenth of the
@@ -83,9 +79,9 @@ const (
 // limits-policy stream costs nothing, and whether a poison row lands on it is
 // the ingest worker's decision at the moment of the failure.
 // An optional *slog.Logger can be passed to control server log output;
-// if omitted, slog.Default() is used. The stream name is fixed (see
-// StreamName / DLQStreamName) — the embedded server is private to this
-// process, so there's no namespacing to do.
+// if omitted, slog.Default() is used. The stream names are fixed (see
+// subject.go) — the embedded server is private to this process, so there's
+// no namespacing to do.
 func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*EmbeddedNATS, error) {
 	l := slog.Default()
 	if len(logger) > 0 && logger[0] != nil {
@@ -139,7 +135,7 @@ func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*Embe
 		return nil, fmt.Errorf("create dlq stream: %w", err)
 	}
 
-	return &EmbeddedNATS{server: ns, conn: nc, js: js, maxBytes: maxBytes}, nil
+	return &EmbeddedNATS{server: ns, conn: nc, js: js, logger: l, maxBytes: maxBytes}, nil
 }
 
 // ingestStreamConfig is the WAVEHOUSE stream. LimitsPolicy: standard
@@ -148,8 +144,8 @@ func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*Embe
 // new messages when full, propagating backpressure to the upstream API.
 func ingestStreamConfig(maxBytes int64) jetstream.StreamConfig {
 	return jetstream.StreamConfig{
-		Name:      StreamName(),
-		Subjects:  []string{"ingest.>"},
+		Name:      ingestStream,
+		Subjects:  []string{ingestAll},
 		Retention: jetstream.LimitsPolicy,
 		MaxBytes:  maxBytes,
 		Discard:   jetstream.DiscardNew,
@@ -161,8 +157,8 @@ func ingestStreamConfig(maxBytes int64) jetstream.StreamConfig {
 // to the ingest stream, not the dead-letter one.
 func dlqStreamConfig(maxBytes int64) jetstream.StreamConfig {
 	return jetstream.StreamConfig{
-		Name:      DLQStreamName(),
-		Subjects:  []string{"dlq.>"},
+		Name:      dlqStream,
+		Subjects:  []string{dlqAll},
 		Retention: jetstream.LimitsPolicy,
 		MaxBytes:  maxBytes,
 		Discard:   jetstream.DiscardOld,
@@ -220,8 +216,28 @@ func (e *EmbeddedNATS) SetMaxBytes(ctx context.Context, maxBytes int64) error {
 	return nil
 }
 
-func (e *EmbeddedNATS) Publish(ctx context.Context, subject string, data []byte, opts ...PublishOpt) error {
-	msg := nats.NewMsg(subject)
+// Publish stores data on topic's ingest subject. A stream at its byte budget
+// (DiscardNew) refuses the publish; that is reported as ErrQueueFull.
+func (e *EmbeddedNATS) Publish(ctx context.Context, topic Topic, data []byte, opts ...PublishOpt) error {
+	err := e.publish(ctx, subject(ingestPrefix, topic), data, opts)
+	if err != nil && strings.Contains(err.Error(), "maximum bytes exceeded") {
+		// The server reports a full store as a generic store failure whose
+		// text is the only thing that names the cause.
+		return fmt.Errorf("%w: %w", ErrQueueFull, err)
+	}
+	return err
+}
+
+// DeadLetter stores msg's data on its topic's DLQ subject — the subject it
+// arrived on with the ingest prefix swapped for the DLQ one, nothing decoded
+// or re-encoded. The DLQ stream is DiscardOld, so a full DLQ drops its oldest
+// parked rows rather than refusing.
+func (e *EmbeddedNATS) DeadLetter(ctx context.Context, msg *Message, opts ...PublishOpt) error {
+	return e.publish(ctx, dlqPrefix+msg.topicKey, msg.Data, opts)
+}
+
+func (e *EmbeddedNATS) publish(ctx context.Context, subj string, data []byte, opts []PublishOpt) error {
+	msg := nats.NewMsg(subj)
 	msg.Data = data
 
 	// Apply any optional configurations (like headers) to the message
@@ -239,7 +255,7 @@ func (e *EmbeddedNATS) Publish(ctx context.Context, subject string, data []byte,
 // wrapMsg adapts a received JetStream message to the mq-owned Message. ctx
 // becomes Message.Ctx as given; Subscribe extracts the trace context first.
 func wrapMsg(ctx context.Context, m jetstream.Msg) *Message {
-	return NewMessage(ctx, m.Subject(), m.Data(), time.Now(),
+	return newMessage(ctx, topicKey(ingestPrefix, m.Subject()), m.Data(), time.Now(),
 		func(ctx context.Context) error {
 			return m.DoubleAck(ctx)
 		},
@@ -252,10 +268,10 @@ func wrapMsg(ctx context.Context, m jetstream.Msg) *Message {
 	)
 }
 
-func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName string, handler func(msg *Message) error) error {
-	cons, err := e.js.CreateOrUpdateConsumer(ctx, StreamName(), jetstream.ConsumerConfig{
+func (e *EmbeddedNATS) Subscribe(ctx context.Context, consumerName string, handler func(msg *Message) error) error {
+	cons, err := e.js.CreateOrUpdateConsumer(ctx, ingestStream, jetstream.ConsumerConfig{
 		Durable:       consumerName,
-		FilterSubject: subject,
+		FilterSubject: ingestAll,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	})
 	if err != nil {
@@ -284,9 +300,9 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName stri
 // the ingest stream. ctx becomes every delivered Message.Ctx (see
 // ConsumerManager); it does not stop delivery — Consumer.Consume's stop does.
 func (e *EmbeddedNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (Consumer, error) {
-	cons, err := e.js.CreateOrUpdateConsumer(ctx, StreamName(), jetstream.ConsumerConfig{
+	cons, err := e.js.CreateOrUpdateConsumer(ctx, ingestStream, jetstream.ConsumerConfig{
 		Durable:       cfg.Durable,
-		FilterSubject: cfg.FilterSubject,
+		FilterSubject: ingestAll,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       cfg.AckWait,
 		MaxAckPending: cfg.MaxAckPending,
@@ -317,8 +333,8 @@ func (c *jsConsumer) Consume(handler func(msg *Message), prefetch int) (func(), 
 	return cctx.Stop, nil
 }
 
-// Stream resolves a stream handle by name.
-func (e *EmbeddedNATS) Stream(ctx context.Context, name string) (Stream, error) {
+// stream resolves a stream handle by name.
+func (e *EmbeddedNATS) stream(ctx context.Context, name string) (*jsStream, error) {
 	s, err := e.js.Stream(ctx, name)
 	if err != nil {
 		return nil, err
@@ -326,30 +342,29 @@ func (e *EmbeddedNATS) Stream(ctx context.Context, name string) (Stream, error) 
 	return &jsStream{s: s}, nil
 }
 
-// jsStream is the Stream handle over a resolved JetStream stream.
+// jsStream is the sequencedStream over a resolved JetStream stream.
 type jsStream struct {
 	s jetstream.Stream
 }
 
-func (s *jsStream) State(ctx context.Context, subjectFilter string) (StreamState, error) {
+func (s *jsStream) state(ctx context.Context, subjectFilter string) (streamState, error) {
 	var opts []jetstream.StreamInfoOpt
 	if subjectFilter != "" {
 		opts = append(opts, jetstream.WithSubjectFilter(subjectFilter))
 	}
 	info, err := s.s.Info(ctx, opts...)
 	if err != nil {
-		return StreamState{}, err
+		return streamState{}, err
 	}
-	return StreamState{
+	return streamState{
 		FirstSeq: info.State.FirstSeq,
 		LastSeq:  info.State.LastSeq,
 		Msgs:     info.State.Msgs,
 		Subjects: info.State.Subjects,
-		MaxBytes: info.Config.MaxBytes,
 	}, nil
 }
 
-func (s *jsStream) MessageTime(ctx context.Context, seq uint64) (time.Time, error) {
+func (s *jsStream) messageTime(ctx context.Context, seq uint64) (time.Time, error) {
 	msg, err := s.s.GetMsg(ctx, seq)
 	if err != nil {
 		return time.Time{}, err
@@ -357,11 +372,11 @@ func (s *jsStream) MessageTime(ctx context.Context, seq uint64) (time.Time, erro
 	return msg.Time, nil
 }
 
-func (s *jsStream) PurgeBelow(ctx context.Context, seq uint64) error {
+func (s *jsStream) purgeBelow(ctx context.Context, seq uint64) error {
 	return s.s.Purge(ctx, jetstream.WithPurgeSequence(seq))
 }
 
-func (s *jsStream) ConsumerAckFloor(ctx context.Context, consumer string) (uint64, error) {
+func (s *jsStream) consumerAckFloor(ctx context.Context, consumer string) (uint64, error) {
 	cons, err := s.s.Consumer(ctx, consumer)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrConsumerNotFound) {
@@ -376,16 +391,71 @@ func (s *jsStream) ConsumerAckFloor(ctx context.Context, consumer string) (uint6
 	return info.AckFloor.Stream, nil
 }
 
-// ReplaySince creates an ephemeral consumer on the ingest stream starting at
+// PurgeAcked purges the ingest stream below MIN(consumer's ack floor + 1,
+// first sequence stored at or after olderThan) — see purgeAcked.
+func (e *EmbeddedNATS) PurgeAcked(ctx context.Context, consumer string, olderThan time.Time) (bool, error) {
+	s, err := e.stream(ctx, ingestStream)
+	if err != nil {
+		return false, fmt.Errorf("get stream: %w", err)
+	}
+	report, err := purgeAcked(ctx, s, consumer, olderThan)
+	if err != nil {
+		return false, err
+	}
+	// The sweep's own log lines: their detail is in sequences, which only
+	// this package speaks.
+	switch {
+	case report.purged:
+		e.logger.Info("sweeper: purged",
+			"purged_below_seq", report.target,
+			"ack_floor", report.ackFloor,
+			"gap_seq", report.gapSeq,
+		)
+	case report.gapSeq == 0:
+		e.logger.Debug("sweeper: all messages within gap window, skipping purge")
+	}
+	return report.purged, nil
+}
+
+// DeadLetterCounts reads the DLQ stream's per-subject counts. A scoped topic
+// counts under "table.scope"; the table filter matches the unscoped subject.
+func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, table string) (DeadLetterCounts, error) {
+	s, err := e.stream(ctx, dlqStream)
+	if err != nil { // TODO: catch by error type
+		return DeadLetterCounts{}, fmt.Errorf("%w: %w", ErrNoDeadLetterQueue, err)
+	}
+
+	filter := dlqAll
+	if table != "" {
+		filter = subject(dlqPrefix, Topic{Table: table})
+	}
+	state, err := s.state(ctx, filter)
+	if err != nil {
+		return DeadLetterCounts{}, fmt.Errorf("dlq stream info: %w", err)
+	}
+
+	counts := DeadLetterCounts{Tables: make(map[string]uint64, len(state.Subjects)), Total: state.Msgs}
+	for subj, n := range state.Subjects {
+		// TODO: do we need to break out scopes here?
+		name, err := decodeToken(strings.TrimPrefix(subj, dlqPrefix))
+		if err != nil {
+			continue
+		}
+		counts.Tables[name] = n
+	}
+	return counts, nil
+}
+
+// ReplaySince creates an ephemeral consumer on topic's ingest subject starting at
 // since (DeliverByStartTime) and drains it to send until caught up. The
 // consumer is ack-less and expires on its own once idle. Caught up is the
 // client's no-messages or request-timeout answer to a pull; any other pull
 // failure (a closed connection, a deleted consumer) is returned so the caller
 // knows the replay ended short rather than empty. A done ctx ends the drain
 // between pulls and returns ctx's error.
-func (e *EmbeddedNATS) ReplaySince(ctx context.Context, subject string, since time.Time, send func(data []byte) bool) error {
-	cons, err := e.js.CreateOrUpdateConsumer(ctx, StreamName(), jetstream.ConsumerConfig{
-		FilterSubject:     subject,
+func (e *EmbeddedNATS) ReplaySince(ctx context.Context, topic Topic, since time.Time, send func(data []byte) bool) error {
+	cons, err := e.js.CreateOrUpdateConsumer(ctx, ingestStream, jetstream.ConsumerConfig{
+		FilterSubject:     subject(ingestPrefix, topic),
 		DeliverPolicy:     jetstream.DeliverByStartTimePolicy,
 		OptStartTime:      &since,
 		AckPolicy:         jetstream.AckNonePolicy,

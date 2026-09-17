@@ -22,7 +22,6 @@ import (
 	"go.opentelemetry.io/otel"
 
 	"github.com/Wave-RF/WaveHouse/internal/config"
-	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 )
 
@@ -175,15 +174,6 @@ func rewriteSettings(t *testing.T, dir string, patch map[string]any) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileConfig), data, 0o600)) //nolint:gosec // G703: dir is a t.TempDir() from writeSettings
 }
 
-func streamMaxBytes(t *testing.T, a *App, name string) int64 {
-	t.Helper()
-	st, err := a.mq.Stream(t.Context(), name)
-	require.NoError(t, err)
-	state, err := st.State(t.Context(), "")
-	require.NoError(t, err)
-	return state.MaxBytes
-}
-
 func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	// Hooks are registered in New and fired by the reload triggers Run
 	// starts; a direct Reload stands in for any of the three triggers and
@@ -192,8 +182,7 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	cfg := testConfig(t, dir)
 	a := newApp(t, cfg, Options{})
 	require.False(t, a.dedup.Open())
-	require.Equal(t, int64(1<<30), streamMaxBytes(t, a, mq.StreamName()))
-	require.Equal(t, int64(1<<30)/10, streamMaxBytes(t, a, mq.DLQStreamName()))
+	require.Equal(t, int64(1<<30), a.mq.MaxBytes())
 
 	rewriteSettings(t, dir, map[string]any{
 		"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}},
@@ -202,8 +191,8 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	_, adopted := a.store.Reload("test")
 	require.True(t, adopted)
 	assert.True(t, a.dedup.Open(), "dedupe hook opened the store")
-	assert.Equal(t, int64(2<<30), streamMaxBytes(t, a, mq.StreamName()), "mq hook resized the ingest stream")
-	assert.Equal(t, int64(2<<30)/10, streamMaxBytes(t, a, mq.DLQStreamName()), "mq hook resized the DLQ stream")
+	// How the budget is split across the MQ's queues is internal/mq's to test.
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(), "mq hook applied the new byte budget")
 
 	rewriteSettings(t, dir, map[string]any{"mq": map[string]any{"max_bytes_gb": 2}})
 	_, adopted = a.store.Reload("test")

@@ -19,6 +19,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
@@ -68,7 +69,7 @@ func TestIngest_ValidPayload(t *testing.T) {
 
 	msg := pub.LastMessage()
 	require.NotNil(t, msg)
-	assert.Equal(t, "ingest.clicks", msg.Subject)
+	assert.Equal(t, mq.Topic{Table: "clicks"}, msg.Topic)
 }
 
 func TestIngest_MissingTable(t *testing.T) {
@@ -211,7 +212,7 @@ func TestIngest_Dedup_Duplicate(t *testing.T) {
 
 func TestIngest_PublishError_503(t *testing.T) {
 	t.Parallel()
-	pub := &testutil.MockPublisher{Err: errors.New("maximum bytes exceeded")}
+	pub := &testutil.MockPublisher{Err: fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull)}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
@@ -979,7 +980,7 @@ func TestIngest_NDJSON_Backpressure_503(t *testing.T) {
 	t.Parallel()
 	// Publisher rejects every publish with the backpressure sentinel; the first
 	// valid record aborts the whole batch with 503 + Retry-After.
-	pub := &testutil.MockPublisher{Err: errors.New("maximum bytes exceeded")}
+	pub := &testutil.MockPublisher{Err: fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull)}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
 
 	req := ndjsonRequest(t, "clicks",

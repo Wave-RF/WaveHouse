@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
-	"github.com/Wave-RF/WaveHouse/internal/query"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,9 +41,9 @@ func TestDLQ_StatsEmptyOnFreshStart(t *testing.T) {
 
 // TestDLQ_PopulatedOnIngestWorkerFailure verifies that publishing an event for a
 // non-existent table routes the failure into the DLQ. Bypasses the API's
-// schema validation by publishing directly to JetStream — ingest worker's batch
-// INSERT then fails, fallback fires, and the DLQ output records the entry
-// under `dlq.<table>`.
+// schema validation by publishing directly to the MQ — ingest worker's batch
+// INSERT then fails, fallback fires, and the DLQ records the entry under the
+// table.
 func TestDLQ_PopulatedOnIngestWorkerFailure(t *testing.T) {
 	e := env(t)
 	ctx := context.Background()
@@ -51,7 +51,6 @@ func TestDLQ_PopulatedOnIngestWorkerFailure(t *testing.T) {
 	// A table name that intentionally doesn't exist in ClickHouse. Per-test
 	// suffix keeps tests independent if more DLQ tests get added later.
 	rawTableName := fmt.Sprintf("nonexistent_table_%d", time.Now().UnixNano())
-	safeTableName := query.SafeEncodeNATS(rawTableName)
 
 	payload, err := json.Marshal(ingest.EventMessage{
 		TableName:         rawTableName,
@@ -62,7 +61,7 @@ func TestDLQ_PopulatedOnIngestWorkerFailure(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, e.embeddedMQ.Publish(ctx, "ingest."+safeTableName, payload))
+	require.NoError(t, e.embeddedMQ.Publish(ctx, mq.Topic{Table: rawTableName}, payload))
 
 	// Ingest worker batches every 5s; 30s upper bound gives generous slack on a
 	// loaded CI runner. The condition polls the API rather than the
@@ -91,11 +90,10 @@ func TestDLQ_PopulatedOnIngestWorkerFailureWithBadName(t *testing.T) {
 	e := env(t)
 	ctx := context.Background()
 
-	// A table name that intentionally doesn't exist in ClickHouse AND is invalid as a NATS subject. This tests that ingest worker's DLQ can handle subjects that are not valid NATS subjects.
+	// A table name that intentionally doesn't exist in ClickHouse AND is invalid as a broker subject token. This tests that the MQ can carry, and park on the DLQ, names it has to encode.
 	// Per-test suffix keeps tests independent if more DLQ tests get added later.
 
 	rawTableName := fmt.Sprintf("no table.!@#&*()_=/_`%d", time.Now().UnixNano())
-	safeTableName := query.SafeEncodeNATS(rawTableName)
 
 	payload, err := json.Marshal(ingest.EventMessage{
 		TableName:         rawTableName,
@@ -106,7 +104,7 @@ func TestDLQ_PopulatedOnIngestWorkerFailureWithBadName(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, e.embeddedMQ.Publish(ctx, "ingest."+safeTableName, payload))
+	require.NoError(t, e.embeddedMQ.Publish(ctx, mq.Topic{Table: rawTableName}, payload))
 
 	// Ingest worker batches every 5s; 30s upper bound gives generous slack on a
 	// loaded CI runner. The condition polls the API rather than the

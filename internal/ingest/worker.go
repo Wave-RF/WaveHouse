@@ -26,20 +26,20 @@ import (
 )
 
 // Queue is what the worker needs from the MQ: a durable consumer on the
-// ingest stream and a publisher for the DLQ. mq.EmbeddedNATS satisfies it.
+// ingest queue and somewhere to park what it cannot write. mq.Broker
+// satisfies it.
 type Queue interface {
 	mq.ConsumerManager
-	mq.Publisher
+	mq.DeadLetterer
 }
 
 type parsedMsg struct {
-	msg             *mq.Message
-	natsSafeSubject string
-	tableName       string // routing key for per-table batching; raw (unencoded) name
-	scope           string
-	columns         []string        // envelope column names, in declaration order
-	colSig          string          // columns joined; the within-table batch key
-	row             json.RawMessage // one JSONCompactEachRow line, no trailing newline
+	msg       *mq.Message
+	tableName string // routing key for per-table batching; raw (unencoded) name
+	scope     string
+	columns   []string        // envelope column names, in declaration order
+	colSig    string          // columns joined; the within-table batch key
+	row       json.RawMessage // one JSONCompactEachRow line, no trailing newline
 }
 
 // columnSignature renders a column list as a map key. The separator is a byte
@@ -50,7 +50,7 @@ func columnSignature(cols []string) string {
 }
 
 type IngestWorker struct {
-	publisher  mq.Publisher // DLQ output
+	dlq        mq.DeadLetterer
 	httpClient *http.Client
 	cache      cache.Cache
 	logger     *slog.Logger
@@ -131,7 +131,6 @@ func StartIngestWorker(
 
 	cons, err := queue.CreateConsumer(ctx, mq.ConsumerConfig{
 		Durable:       BufferConsumerName,
-		FilterSubject: "ingest.>",
 		AckWait:       ackWait,
 		MaxAckPending: maxAckPending,
 	})
@@ -156,7 +155,7 @@ func StartIngestWorker(
 	}
 
 	worker := &IngestWorker{
-		publisher: queue,
+		dlq: queue,
 		httpClient: &http.Client{
 			Transport: customTransport,
 			Timeout:   30 * time.Second,
@@ -476,13 +475,12 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 	}
 
 	return parsedMsg{
-		msg:             m,
-		natsSafeSubject: strings.TrimPrefix(m.Subject, "ingest."),
-		tableName:       envelope.TableName,
-		scope:           envelope.Scope,
-		columns:         envelope.Columns,
-		colSig:          columnSignature(envelope.Columns),
-		row:             envelope.Row,
+		msg:       m,
+		tableName: envelope.TableName,
+		scope:     envelope.Scope,
+		columns:   envelope.Columns,
+		colSig:    columnSignature(envelope.Columns),
+		row:       envelope.Row,
 	}, true
 }
 
@@ -632,7 +630,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 	// every scope — and there's nothing more to add. Otherwise invalidate each
 	// distinct scope. Doing this here (we already loop the batch once, and know it's
 	// one table) keeps Cache.Invalidate a simple one-pass bump.
-	encodedTable := query.SafeEncodeNATS(tableName)
+	encodedTable := query.SafeEncodeToken(tableName)
 	seenScopes := make(map[string]struct{}, len(msgs))
 	namespaces := make([]cache.Namespace, 0, len(msgs))
 
@@ -647,7 +645,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 		seenScopes[pm.scope] = struct{}{}
 		namespaces = append(namespaces, cache.Namespace{
 			Table: encodedTable,
-			Scope: query.SafeEncodeNATS(pm.scope),
+			Scope: query.SafeEncodeToken(pm.scope),
 		})
 	}
 
@@ -685,15 +683,14 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, tableName, reason, detail string) {
 	if w.dlqEnabled == nil || w.dlqEnabled(tableName) {
 		// Backgrounded on ackWg for the same reason handleSuccess backgrounds its
-		// acks: parkOnDLQ does a JetStream publish AND an fsync-bound DoubleAck,
+		// acks: parkOnDLQ does a DLQ publish AND an fsync-bound DoubleAck,
 		// and parseMsg runs on the dispatchLoop goroutine. The scenario this whole
 		// change targets is an operator who skipped the drain, where EVERY backlog
 		// message is poison — done inline that is one publish plus one fsync per
 		// message in series, with intake stalled behind it. dispatchLoop adds and
 		// waits on the same goroutine, so each Add still happens-before the Wait.
-		subject := strings.TrimPrefix(m.Subject, "ingest.")
 		w.ackWg.Go(func() {
-			if w.parkOnDLQ(ctx, m, subject, tableName, detail) {
+			if w.parkOnDLQ(ctx, m, tableName, detail) {
 				countPoison(ctx, tableName, reason, "parked")
 			}
 		})
@@ -719,11 +716,12 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, tableNam
 // sendToDLQ parks a row that failed its own isolated INSERT. Distinct from
 // rejectPoison, which parks an envelope the worker could not read at all.
 func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parsedMsg, errMsg string) {
-	_ = w.parkOnDLQ(ctx, pm.msg, pm.natsSafeSubject, tableName, errMsg)
+	_ = w.parkOnDLQ(ctx, pm.msg, tableName, errMsg)
 }
 
-// parkOnDLQ republishes one message on its dlq.* subject with the failure
-// context in headers, then acks the original so NATS stops redelivering it.
+// parkOnDLQ parks one message on the dead-letter queue (under the topic it
+// arrived on — the envelope may be unreadable) with the failure context in
+// headers, then acks the original so the MQ stops redelivering it.
 //
 // Reports false in two distinct cases, both meaning "do not count this as a
 // parking", and false does NOT imply nothing was published. A failed publish
@@ -731,27 +729,25 @@ func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parse
 // successful publish leaves a DLQ copy behind but also leaves the original in
 // the stream, so the next redelivery parks a second copy — counting the first
 // would overstate the total by one per retry.
-func (w *IngestWorker) parkOnDLQ(ctx context.Context, msg *mq.Message, safeSubject, tableName, errMsg string) bool {
-	subject := "dlq." + safeSubject
-
-	pubErr := w.publisher.Publish(ctx, subject, msg.Data,
+func (w *IngestWorker) parkOnDLQ(ctx context.Context, msg *mq.Message, tableName, errMsg string) bool {
+	pubErr := w.dlq.DeadLetter(ctx, msg,
 		mq.WithHeader("X-DLQ-Table", tableName),
 		mq.WithHeader("X-DLQ-Error", errMsg),
 		mq.WithHeader("X-DLQ-Timestamp", time.Now().UTC().Format(time.RFC3339)),
 	)
 	if pubErr != nil {
-		w.logger.ErrorContext(ctx, "NATS DLQ publish failed, this data will continue retrying insertion indefinitely until the DLQ recovers", "table", tableName, "subject", subject, "error", pubErr)
+		w.logger.ErrorContext(ctx, "DLQ publish failed, this data will continue retrying insertion indefinitely until the DLQ recovers", "table", tableName, "topic", msg.TopicKey(), "error", pubErr)
 		return false
 	}
 
-	// DoubleAck original message so NATS doesn't redeliver the corrupt data. A
+	// DoubleAck original message so the MQ doesn't redeliver the corrupt data. A
 	// failed ack leaves it in the stream, so the next redelivery publishes a
 	// SECOND copy to the DLQ — report false so the caller does not count this
 	// parking again on every retry. The duplicate copy is the residual cost:
 	// a publish is not idempotent, so it cannot be taken back here.
 	if err := msg.DoubleAck(ctx); err != nil {
 		w.logger.ErrorContext(ctx, "parked on the DLQ but the ack failed, so the envelope stays in the stream and will be parked again on redelivery",
-			"table", tableName, "subject", subject, "error", err)
+			"table", tableName, "topic", msg.TopicKey(), "error", err)
 		return false
 	}
 	return true

@@ -27,7 +27,6 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,7 +41,7 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockPublisher
 	pub := &testutil.MockPublisher{}
 	cache := &testutil.MockCache{}
 	w := &IngestWorker{
-		publisher:  pub,
+		dlq:        pub,
 		httpClient: &http.Client{Transport: rt},
 		cache:      cache,
 		logger:     testutil.NopLogger(),
@@ -86,21 +85,16 @@ func makeEnvelopeCols(t *testing.T, tableName, scope string, cols []string, data
 // newIngestMsg builds a MockMessage shaped exactly the way the
 // /v1/ingest producer (internal/api/ingest.go) publishes events:
 //
-//	subject  = "ingest." + SafeEncodeNATS(table)                     // scopeless
-//	subject  = "ingest." + SafeEncodeNATS(table) + "." + SafeEncodeNATS(scope)
+//	topic    = mq.Topic{Table: table, Scope: scope}                  // raw, not encoded
 //	envelope = { table_name: table, scope: scope, ... }              // raw, not encoded
 //
-// Tests should use this helper instead of hand-rolling MsgSubject/MsgData pairs
-// so the subject and envelope can't silently drift from the producer's contract.
+// Tests should use this helper instead of hand-rolling MsgTopic/MsgData pairs
+// so the topic and envelope can't silently drift from the producer's contract.
 func newIngestMsg(t *testing.T, table, scope string, data map[string]any) *testutil.MockMessage {
 	t.Helper()
-	subj := "ingest." + query.SafeEncodeNATS(table)
-	if scope != "" {
-		subj += "." + query.SafeEncodeNATS(scope)
-	}
 	return &testutil.MockMessage{
-		MsgSubject: subj,
-		MsgData:    makeEnvelope(t, table, scope, data),
+		MsgTopic: mq.Topic{Table: table, Scope: scope},
+		MsgData:  makeEnvelope(t, table, scope, data),
 	}
 }
 
@@ -155,7 +149,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 func TestStartIngestWorker_EndToEnd(t *testing.T) {
 	t.Parallel()
 
-	// ── Embedded NATS (creates the WAVEHOUSE stream w/ "ingest.>") ──
+	// ── Embedded MQ ──
 	emb, err := mq.NewEmbedded(t.TempDir(), 4*1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
@@ -187,7 +181,6 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 
 	cons, err := emb.CreateConsumer(ctx, mq.ConsumerConfig{
 		Durable:       BufferConsumerName,
-		FilterSubject: "ingest.>",
 		MaxAckPending: 1000,
 	})
 	require.NoError(t, err)
@@ -197,7 +190,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 	// 5s default. StartIngestWorker's own setup is covered by
 	// TestStartIngestWorker_Validation + _StopFunc.
 	worker := &IngestWorker{
-		publisher:  emb,
+		dlq:        emb,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cache:      cache,
 		logger:     testutil.NopLogger(),
@@ -216,7 +209,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 
 	// ── Publish an envelope on ingest.events ──
 	envelope := makeEnvelope(t, "events", "org_42", map[string]any{"id": 1, "v": "x"})
-	err = emb.Publish(ctx, "ingest.events.org_42", envelope)
+	err = emb.Publish(ctx, mq.Topic{Table: "events", Scope: "org_42"}, envelope)
 	require.NoError(t, err)
 
 	// ── Wait for the worker to insert + ack ──
@@ -279,7 +272,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	require.NoError(t, err)
 
 	// Publish so there's an in-flight insert blocking on `release`.
-	err = emb.Publish(ctx, "ingest.events", makeEnvelope(t, "events", "", map[string]any{"id": 1}))
+	err = emb.Publish(ctx, mq.Topic{Table: "events"}, makeEnvelope(t, "events", "", map[string]any{"id": 1}))
 	require.NoError(t, err)
 
 	// Give the worker a moment to pick up the message and start the request.
@@ -571,13 +564,11 @@ func TestSendToDLQ(t *testing.T) {
 	tests := []struct {
 		name          string
 		table         string
-		safeSubject   string
 		msgData       []byte
-		msgSubject    string
+		msgTopic      mq.Topic
 		errMsg        string
 		pubErr        error // applied to MockPublisher.Err before the call
-		wantPublished int   // expected number of Publish calls recorded
-		wantSubject   string
+		wantPublished int   // expected number of DeadLetter calls recorded
 		wantData      []byte
 		wantAcked     bool
 		extraCheck    func(t *testing.T, m testutil.PublishedMessage)
@@ -585,12 +576,10 @@ func TestSendToDLQ(t *testing.T) {
 		{
 			name:          "publishes with headers and acks original",
 			table:         "events",
-			safeSubject:   "events",
 			msgData:       []byte(`{"bad":"row"}`),
-			msgSubject:    "events",
+			msgTopic:      mq.Topic{Table: "events"},
 			errMsg:        "Code: 60. DB::Exception: ...",
 			wantPublished: 1,
-			wantSubject:   "dlq.events",
 			wantData:      []byte(`{"bad":"row"}`),
 			wantAcked:     true,
 			extraCheck: func(t *testing.T, m testutil.PublishedMessage) {
@@ -606,24 +595,22 @@ func TestSendToDLQ(t *testing.T) {
 			// otherwise we'd lose the row.
 			name:          "publish failure means no ack",
 			table:         "events",
-			safeSubject:   "events",
 			msgData:       []byte(`{"bad":"row"}`),
-			msgSubject:    "events",
+			msgTopic:      mq.Topic{Table: "events"},
 			errMsg:        "boom",
 			pubErr:        errors.New("nats unavailable"),
 			wantPublished: 0,
 			wantAcked:     false,
 		},
 		{
-			// The DLQ subject uses the already-NATS-safe subject from the
-			// upstream envelope; we don't re-encode here.
-			name:          "uses already-encoded safe subject",
+			// Parked under the topic the message arrived on, scope included;
+			// how that is named on the DLQ is the MQ's.
+			name:          "parks under the message's own topic",
 			table:         "events.staging",
-			safeSubject:   "events%2Estaging",
 			msgData:       []byte("payload"),
+			msgTopic:      mq.Topic{Table: "events.staging", Scope: "org_42"},
 			errMsg:        "err",
 			wantPublished: 1,
-			wantSubject:   "dlq.events%2Estaging",
 			wantData:      []byte("payload"),
 			wantAcked:     true,
 		},
@@ -636,10 +623,10 @@ func TestSendToDLQ(t *testing.T) {
 			pub.Err = tt.pubErr
 
 			original := &testutil.MockMessage{
-				MsgData:    tt.msgData,
-				MsgSubject: tt.msgSubject,
+				MsgData:  tt.msgData,
+				MsgTopic: tt.msgTopic,
 			}
-			pm := parsedMsg{msg: original.Message(), natsSafeSubject: tt.safeSubject}
+			pm := parsedMsg{msg: original.Message()}
 
 			w.sendToDLQ(context.Background(), tt.table, pm, tt.errMsg)
 
@@ -647,7 +634,8 @@ func TestSendToDLQ(t *testing.T) {
 			require.Len(t, published, tt.wantPublished)
 			if tt.wantPublished > 0 {
 				got := published[0]
-				assert.Equal(t, tt.wantSubject, got.Subject)
+				assert.True(t, got.DeadLetter, "parked on the DLQ, not republished to ingest")
+				assert.Equal(t, tt.msgTopic, got.Topic)
 				if tt.wantData != nil {
 					assert.Equal(t, tt.wantData, got.Data)
 				}
@@ -691,8 +679,6 @@ func TestParseMsg(t *testing.T) {
 		w.ackWg.Wait() // poison disposal is backgrounded now
 		assert.Equal(t, "events", pm.tableName, "raw table name drives per-table routing")
 		assert.Equal(t, "org_42", pm.scope)
-		// natsSafeSubject is the subject sans the "ingest." prefix (cache version key).
-		assert.Equal(t, "events.org_42", pm.natsSafeSubject)
 		assert.JSONEq(t, `[1]`, string(pm.row))
 		assert.Equal(t, []string{"id"}, pm.columns)
 		assert.False(t, m.DoubleAcked.Load(), "valid message must not be acked by parseMsg")
@@ -702,8 +688,8 @@ func TestParseMsg(t *testing.T) {
 		t.Parallel()
 		w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
 		bad := &testutil.MockMessage{
-			MsgSubject: "ingest.events",
-			MsgData:    []byte("not valid json"),
+			MsgTopic: mq.Topic{Table: "events"},
+			MsgData:  []byte("not valid json"),
 		}
 
 		_, ok := w.parseMsg(context.Background(), bad.Message())
@@ -874,7 +860,8 @@ func TestFlushTable_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 
 	published := pub.Published()
 	require.Len(t, published, 1, "exactly one row should reach the DLQ")
-	assert.Equal(t, "dlq.events", published[0].Subject)
+	assert.True(t, published[0].DeadLetter)
+	assert.Equal(t, mq.Topic{Table: "events"}, published[0].Topic)
 	assert.Equal(t, "events", published[0].Headers.Get("X-DLQ-Table"))
 	assert.Contains(t, published[0].Headers.Get("X-DLQ-Error"), "Code: 60")
 }
@@ -1090,13 +1077,12 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 
 	cons, err := emb.CreateConsumer(ctx, mq.ConsumerConfig{
 		Durable:       BufferConsumerName,
-		FilterSubject: "ingest.>",
 		MaxAckPending: 1000,
 	})
 	require.NoError(t, err)
 
 	worker := &IngestWorker{
-		publisher:  emb,
+		dlq:        emb,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cache:      &testutil.MockCache{},
 		logger:     testutil.NopLogger(),
@@ -1115,7 +1101,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 
 	// 1. Prime table A — too few events to hit either trigger on its own.
 	for i := range batchA {
-		err = emb.Publish(ctx, "ingest.tableA",
+		err = emb.Publish(ctx, mq.Topic{Table: "tableA"},
 			makeEnvelope(t, "tableA", "", map[string]any{"id": i}))
 		require.NoError(t, err)
 	}
@@ -1123,7 +1109,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 	// 2. Then publish exactly maxBatch events to table B — should hit B's
 	//    own size trigger and flush immediately, regardless of what A did.
 	for i := range batchB {
-		err = emb.Publish(ctx, "ingest.tableB",
+		err = emb.Publish(ctx, mq.Topic{Table: "tableB"},
 			makeEnvelope(t, "tableB", "", map[string]any{"id": i}))
 		require.NoError(t, err)
 	}
@@ -1187,13 +1173,12 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 
 	cons, err := emb.CreateConsumer(ctx, mq.ConsumerConfig{
 		Durable:       BufferConsumerName,
-		FilterSubject: "ingest.>",
 		MaxAckPending: 1000,
 	})
 	require.NoError(t, err)
 
 	worker := &IngestWorker{
-		publisher:  emb,
+		dlq:        emb,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cache:      &testutil.MockCache{},
 		logger:     testutil.NopLogger(),
@@ -1211,7 +1196,7 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 	})
 
 	for i := range total {
-		err = emb.Publish(ctx, "ingest.tableX",
+		err = emb.Publish(ctx, mq.Topic{Table: "tableX"},
 			makeEnvelope(t, "tableX", "", map[string]any{"id": i}))
 		require.NoError(t, err)
 	}
@@ -1272,7 +1257,7 @@ func TestParseMsg_PoisonEnvelope_ParkedOnDLQ(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			w, pub, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-			m := &testutil.MockMessage{MsgSubject: "ingest.events", MsgData: tt.data}
+			m := &testutil.MockMessage{MsgTopic: mq.Topic{Table: "events"}, MsgData: tt.data}
 
 			_, ok := w.parseMsg(context.Background(), m.Message())
 			w.ackWg.Wait() // poison disposal is backgrounded now
@@ -1280,7 +1265,8 @@ func TestParseMsg_PoisonEnvelope_ParkedOnDLQ(t *testing.T) {
 
 			published := pub.Published()
 			require.Len(t, published, 1, "the row is parked, not dropped")
-			assert.Equal(t, "dlq.events", published[0].Subject)
+			assert.True(t, published[0].DeadLetter)
+			assert.Equal(t, mq.Topic{Table: "events"}, published[0].Topic)
 			assert.Equal(t, tt.data, published[0].Data, "the original bytes are preserved verbatim")
 			assert.NotEmpty(t, published[0].Headers.Get("X-DLQ-Error"))
 			assert.True(t, m.DoubleAcked.Load(), "acked once parked, so NATS stops redelivering it")
@@ -1313,7 +1299,7 @@ func TestParseMsg_DuplicateColumn_Unpairable(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	m := &testutil.MockMessage{MsgSubject: "ingest.events", MsgData: payload}
+	m := &testutil.MockMessage{MsgTopic: mq.Topic{Table: "events"}, MsgData: payload}
 	_, ok := w.parseMsg(context.Background(), m.Message())
 	require.False(t, ok, "a repeated column name is unpairable")
 	w.ackWg.Wait()
@@ -1332,8 +1318,8 @@ func TestParseMsg_PoisonEnvelope_DLQDisabled_AckedAndDropped(t *testing.T) {
 	w.dlqEnabled = func(string) bool { return false }
 
 	m := &testutil.MockMessage{
-		MsgSubject: "ingest.events",
-		MsgData:    v1Envelope(t, "events", map[string]any{"id": 1}),
+		MsgTopic: mq.Topic{Table: "events"},
+		MsgData:  v1Envelope(t, "events", map[string]any{"id": 1}),
 	}
 	_, ok := w.parseMsg(context.Background(), m.Message())
 	require.False(t, ok)
@@ -1352,8 +1338,8 @@ func TestParseMsg_PoisonEnvelope_DLQPublishFails_LeftUnacked(t *testing.T) {
 	pub.Err = errors.New("jetstream unavailable")
 
 	m := &testutil.MockMessage{
-		MsgSubject: "ingest.events",
-		MsgData:    v1Envelope(t, "events", map[string]any{"id": 1}),
+		MsgTopic: mq.Topic{Table: "events"},
+		MsgData:  v1Envelope(t, "events", map[string]any{"id": 1}),
 	}
 	_, ok := w.parseMsg(context.Background(), m.Message())
 	require.False(t, ok)
@@ -1425,12 +1411,12 @@ func TestFlushTable_MixedColumnLists_TwoInserts(t *testing.T) {
 	w, _, _, wait := newTestWorker(rt)
 
 	narrow := &testutil.MockMessage{
-		MsgSubject: "ingest.events",
-		MsgData:    makeEnvelopeCols(t, "events", "", []string{"id"}, map[string]any{"id": 1}),
+		MsgTopic: mq.Topic{Table: "events"},
+		MsgData:  makeEnvelopeCols(t, "events", "", []string{"id"}, map[string]any{"id": 1}),
 	}
 	wide := &testutil.MockMessage{
-		MsgSubject: "ingest.events",
-		MsgData:    makeEnvelopeCols(t, "events", "", []string{"id", "v"}, map[string]any{"id": 2, "v": "x"}),
+		MsgTopic: mq.Topic{Table: "events"},
+		MsgData:  makeEnvelopeCols(t, "events", "", []string{"id", "v"}, map[string]any{"id": 2, "v": "x"}),
 	}
 	w.flushTable(context.Background(), "events", parseAll(t, w, narrow, wide))
 	wait()
@@ -1483,8 +1469,8 @@ func TestRejectPoison_CountedByDisposition(t *testing.T) {
 
 	poison := func() *testutil.MockMessage {
 		return &testutil.MockMessage{
-			MsgSubject: "ingest.events",
-			MsgData:    v1Envelope(t, "events", map[string]any{"id": 1}),
+			MsgTopic: mq.Topic{Table: "events"},
+			MsgData:  v1Envelope(t, "events", map[string]any{"id": 1}),
 		}
 	}
 
@@ -1553,7 +1539,7 @@ func (f *blockingFakeConsumer) Consume(handler func(*mq.Message), _ int) (func()
 	var wg sync.WaitGroup
 	for range f.n {
 		wg.Go(func() {
-			handler((&testutil.MockMessage{MsgSubject: "ingest.t", MsgData: []byte("not json")}).Message())
+			handler((&testutil.MockMessage{MsgTopic: mq.Topic{Table: "t"}, MsgData: []byte("not json")}).Message())
 		})
 	}
 	go func() {

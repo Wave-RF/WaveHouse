@@ -224,27 +224,29 @@ func (a *App) wireDedupe() error {
 	return nil
 }
 
-// wireMQ starts the embedded NATS under data_dir/nats with the ingest stream
-// and the DLQ stream. mq.max_bytes_gb is hot-reloadable: after each adoption
-// the new budget is handed to the MQ, which owns how it is split across the
-// streams and keeps them consistent (see mq.EmbeddedNATS.SetMaxBytes).
+// wireMQ starts the MQ — the embedded NATS under data_dir/nats, the one
+// place the implementation is chosen; everything after it sees mq.Broker.
+// mq.max_bytes_gb is hot-reloadable: after each adoption the new budget is
+// handed to the MQ, which owns how it is split across its queues and keeps
+// them consistent (see mq.Broker.SetMaxBytes).
 func (a *App) wireMQ() error {
 	dir := filepath.Join(a.cfg.DataDir, "nats")
 	config.WarnIfFreshDataDir(slog.Default(), "nats", dir)
-	embedded, err := mq.NewEmbedded(dir, a.store.MQMaxBytes())
+	var broker mq.Broker
+	broker, err := mq.NewEmbedded(dir, a.store.MQMaxBytes())
 	if err != nil {
 		config.LogStorageInitError(slog.Default(), "mq", dir, err)
 		return fmt.Errorf("mq open: %w", err)
 	}
-	a.mq = embedded
-	a.add(component{name: "mq", close: withoutContext(embedded.Close)})
+	a.mq = broker
+	a.add(component{name: "mq", close: withoutContext(broker.Close)})
 
 	// Only register system metric gauges when a real MeterProvider is in
 	// place — otherwise `otel.GetMeterProvider()` returns the no-op SDK
 	// provider and RegisterCallback silently no-ops, making this look
 	// authoritative when it's actually doing nothing.
 	if a.cfg.OTel.Enabled || a.cfg.Prometheus.Enabled {
-		if err := observability.RegisterSystemMetrics(embedded.Stats, a.dedup); err != nil {
+		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedup); err != nil {
 			slog.Error("failed to register system metrics", "error", err)
 		}
 	}
@@ -254,10 +256,10 @@ func (a *App) wireMQ() error {
 	// server.shutdown_timeout.
 	a.store.AfterAdopt(func() {
 		mb := a.store.MQMaxBytes()
-		if mb == embedded.MaxBytes() {
+		if mb == broker.MaxBytes() {
 			return
 		}
-		if err := embedded.SetMaxBytes(a.stopCtx, mb); err != nil {
+		if err := broker.SetMaxBytes(a.stopCtx, mb); err != nil {
 			slog.Error("mq stream resize failed; the next reload retries", "error", err)
 			return
 		}
@@ -301,8 +303,8 @@ func (a *App) wireStreaming() {
 	// projects each event itself (skipping malformed payloads), so the bridge
 	// just forwards the raw bytes and acks.
 	a.add(component{name: "hub bridge", run: func(ctx context.Context) error {
-		err := a.mq.Subscribe(ctx, "ingest.>", "hub-bridge", func(msg *mq.Message) error {
-			a.hub.Broadcast(msg.Subject, msg.Data)
+		err := a.mq.Subscribe(ctx, "hub-bridge", func(msg *mq.Message) error {
+			a.hub.Broadcast(msg.TopicKey(), msg.Data)
 			if err := msg.Ack(); err != nil {
 				slog.Warn("failed to ack message from embedded hub bridge", "error", err)
 			}

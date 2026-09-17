@@ -18,7 +18,6 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"github.com/Wave-RF/WaveHouse/internal/query"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -692,18 +691,13 @@ func (h *IngestHandler) processRecord(
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
 	}
 
-	subject := "ingest." + query.SafeEncodeNATS(table)
-	if scope != "" {
-		subject += "." + query.SafeEncodeNATS(scope)
-	}
-
-	h.logger.DebugContext(ctx, "publishing event to NATS", "subject", subject, "table", table, "scope", scope)
-	if err := h.Publisher.Publish(ctx, subject, payload); err != nil {
-		if strings.Contains(err.Error(), "maximum bytes exceeded") {
-			h.logger.WarnContext(ctx, "nats maximum bytes exceeded", "subject", subject)
+	h.logger.DebugContext(ctx, "publishing event to the ingest queue", "table", table, "scope", scope)
+	if err := h.Publisher.Publish(ctx, mq.Topic{Table: table, Scope: scope}, payload); err != nil {
+		if errors.Is(err, mq.ErrQueueFull) {
+			h.logger.WarnContext(ctx, "ingest queue is full", "table", table, "scope", scope)
 			return false, nil, &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30"}
 		}
-		h.logger.ErrorContext(ctx, "failed to publish to NATS", "error", err, "subject", subject)
+		h.logger.ErrorContext(ctx, "failed to publish to the ingest queue", "error", err, "table", table, "scope", scope)
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed"}
 	}
 

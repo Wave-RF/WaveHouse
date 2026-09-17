@@ -9,7 +9,7 @@ import (
 )
 
 // MQStats is the point-in-time snapshot of the embedded message queue the
-// system gauges observe. Reported by the mq package (mq.EmbeddedNATS.Stats);
+// system gauges observe. Reported by the mq package (mq.Broker.Stats);
 // defined here because mq imports observability, not the other way round.
 type MQStats struct {
 	Connections int64 // active client connections

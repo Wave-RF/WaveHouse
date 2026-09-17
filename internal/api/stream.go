@@ -9,7 +9,6 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 )
 
@@ -58,10 +57,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// TODO: impl scope
 	scope := ""
-	topic := "ingest." + query.SafeEncodeNATS(table)
-	if scope != "" {
-		topic += "." + query.SafeEncodeNATS(scope)
-	}
+	topic := mq.Topic{Table: table, Scope: scope}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -109,8 +105,9 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		h.Metrics.FrameSent(f.Kind, n)
 	}
 
-	h.Hub.Add(topic, role, sub)
-	defer h.Hub.Remove(topic, role, sub)
+	topicKey := topic.Key()
+	h.Hub.Add(topicKey, role, sub)
+	defer h.Hub.Remove(topicKey, role, sub)
 
 	// Gap fill from the MQ's retained messages (DeliverByStartTime, see
 	// mq.Replayer).
@@ -201,16 +198,16 @@ func (h *StreamHandler) replayContext(r *http.Request) (context.Context, context
 	return ctx, cancel
 }
 
-// replay sends every message retained on subject since the given time to the
+// replay sends every message retained on topic since the given time to the
 // callback until caught up or ctx is done (the client went away, or the
 // server is shutting down — a long gap-fill must not hold the drain any more
 // than a live stream would). A replay that cannot start, or that fails before
 // catching up, is not fatal to the stream — the client still gets live events
 // from here on — so the error is logged rather than ending the connection. A
 // done ctx is the connection ending, not a failure, and is not logged.
-func (h *StreamHandler) replay(ctx context.Context, since time.Time, subject string, send func([]byte) bool) {
-	if err := h.Replayer.ReplaySince(ctx, subject, since, send); err != nil && ctx.Err() == nil {
+func (h *StreamHandler) replay(ctx context.Context, since time.Time, topic mq.Topic, send func([]byte) bool) {
+	if err := h.Replayer.ReplaySince(ctx, topic, since, send); err != nil && ctx.Err() == nil {
 		slog.Default().WarnContext(ctx, "gap-fill replay ended early; the client continues with live events only",
-			"component", "stream", "subject", subject, "since", since, "error", err)
+			"component", "stream", "table", topic.Table, "scope", topic.Scope, "since", since, "error", err)
 	}
 }

@@ -3,12 +3,12 @@ package query
 import (
 	"bytes"
 	"fmt"
-	"net/url"
 )
 
-// SafeEncodeNATS converts any ClickHouse table name into a safe, single NATS token.
-// It preserves alphanumerics and underscores, but percent-encodes everything else.
-func SafeEncodeNATS(raw string) string {
+// SafeEncodeToken converts any table or scope name into a single dot-free
+// token, for composing the cache's dotted namespace keys. It preserves
+// alphanumerics and underscores, but percent-encodes everything else.
+func SafeEncodeToken(raw string) string {
 	var buf bytes.Buffer
 	for i := 0; i < len(raw); i++ {
 		b := raw[i]
@@ -21,11 +21,4 @@ func SafeEncodeNATS(raw string) string {
 		}
 	}
 	return buf.String()
-}
-
-// SafeDecodeNATS reverses the NATS-safe encoding back to the raw ClickHouse table name.
-func SafeDecodeNATS(safe string) (string, error) {
-	// Re-use Go's standard library to unescape the percent-encoding
-	// url.PathUnescape perfectly handles the %XX format we generated above
-	return url.PathUnescape(safe)
 }

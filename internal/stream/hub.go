@@ -340,7 +340,7 @@ func newEventView(raw []byte) *eventView {
 		return ev
 	}
 	ev.decoded = true
-	// The hub is a second consumer of the same subject as the ingest worker, and
+	// The hub is a second consumer of the same events as the ingest worker, and
 	// acks independently of it, so a format only the worker refuses would stream
 	// to clients while the worker parks it on the DLQ. Refusing it here keeps the
 	// two readers agreeing on what the bytes mean. Today only a pre-v2 envelope
@@ -578,7 +578,7 @@ func planForRole(p *policy.Policy, filter bool, role string, ev *eventView, kind
 	if !ev.decoded {
 		// Without a decoded EventMessage there's no table to evaluate policy against,
 		// so fail closed whenever policy is configured: a malformed-but-valid-JSON
-		// payload on ingest.<table> must not bypass column filtering. Pass through
+		// payload on the table's topic must not bypass column filtering. Pass through
 		// only when no policy store is wired at all (the legacy/test passthrough),
 		// where there is no column list to announce either.
 		if filter || !json.Valid(ev.raw) {
