@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -316,6 +317,15 @@ func TestRun_ServesUntilCancelled(t *testing.T) {
 	assert.Contains(t, body, "schema discovery")
 
 	assert.NoError(t, stop(), "a cancelled Run is a clean stop")
+
+	// Between Run returning and Close, SIGHUP must still be captured: its
+	// default disposition is terminate, so if the registration had been
+	// released at the start of the stop this signal would kill the test
+	// binary. Sent to the process itself; the sighup loop has already
+	// returned, so the signal is simply discarded.
+	require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGHUP))
+	time.Sleep(50 * time.Millisecond)
+
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/livez", nil)
 	require.NoError(t, err)
 	resp, err := http.DefaultClient.Do(req)

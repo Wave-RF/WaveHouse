@@ -309,11 +309,11 @@ func run() error {
 			log.Printf("  wavehouse exit: %v", err)
 		}
 	case <-time.After(25 * time.Second):
-		// A graceful exit is bounded in two phases, each under
-		// server.shutdown_timeout (10s default): the API-server and
-		// ingest-worker drains run concurrently and are forced closed at the
-		// deadline, then app.Close releases the stores and flushes telemetry
-		// under its own deadline (see internal/app) — ~20s worst case, and
+		// A graceful exit is bounded in three phases whose budgets add:
+		// the API-server and ingest-worker drains run concurrently under
+		// server.shutdown_timeout (10s default) and are forced closed at the
+		// deadline, then app.Close releases the stores within 5s and flushes
+		// telemetry within 3s (see internal/app) — ~18s worst case, and
 		// near-instant when nothing is open (SSE streams end as the drain
 		// begins). Fast exits are unaffected (whDone fires). Killing here
 		// would SIGKILL the cover binary before it flushes GOCOVERDIR,

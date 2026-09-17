@@ -9,6 +9,9 @@ data_dir: ./data
 
 server:
   port: 8080
+  # Drain budget for a stop (in-flight requests and ingest batches). The
+  # release of the stores (5s) and the telemetry flush (3s) are fixed on
+  # top, so size the kill grace at this plus 8s.
   shutdown_timeout: 10
 
 otel:

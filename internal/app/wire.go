@@ -35,7 +35,11 @@ const (
 	// mqResizeTimeout bounds the JetStream calls a settings reload makes to
 	// apply a new mq.max_bytes_gb — both streams share it. The reload holds
 	// the store's lock while its hooks run, so an in-process JetStream call
-	// that never returns would otherwise block every later reload.
+	// that never returns would otherwise block every later reload. Both
+	// this and the rollback are rooted in the App's stop context, so a
+	// reload caught mid-hook by SIGTERM gives up rather than holding the
+	// drain past server.shutdown_timeout; the next boot reconciles both
+	// streams from the adopted settings anyway.
 	mqResizeTimeout = 10 * time.Second
 	// mqRollbackTimeout is the undo's own budget when the DLQ resize fails:
 	// in-process JetStream fails by stalling rather than erroring, so the
@@ -100,10 +104,11 @@ func (a *App) wireObservability(ctx context.Context) {
 		return
 	}
 	a.promHandler = promHandler
-	// The flush honors the release budget Close passes: InitProvider's
-	// shutdown returns at the deadline even when a flush is stuck in gRPC
-	// backoff against an unreachable collector.
-	a.add(component{name: "observability", close: shutdown})
+	// Not a component: Close runs the flush after every component has
+	// released, on its own budget (see App.Close). InitProvider's shutdown
+	// returns at that deadline even when a flush is stuck in gRPC backoff
+	// against an unreachable collector.
+	a.flush = shutdown
 
 	// Only swap to the OTLP-aware logger when OTLP logs are wired up;
 	// Prometheus-only mode keeps the stdout-only handler main installed.
@@ -272,7 +277,7 @@ func (a *App) wireMQ(ctx context.Context) error {
 		if mb == applied {
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), mqResizeTimeout)
+		ctx, cancel := context.WithTimeout(a.stopCtx, mqResizeTimeout)
 		defer cancel()
 		if err := embedded.Resize(ctx, mb); err != nil {
 			slog.Error("mq stream resize failed; previous limits stay in effect", "error", err)
@@ -286,7 +291,7 @@ func (a *App) wireMQ(ctx context.Context) error {
 			// stored. The undo runs on its own budget, not the one the DLQ
 			// call has likely just exhausted.
 			slog.Error("dlq stream resize failed; restoring the previous ingest limit", "error", err)
-			rollbackCtx, cancelRollback := context.WithTimeout(context.Background(), mqRollbackTimeout)
+			rollbackCtx, cancelRollback := context.WithTimeout(a.stopCtx, mqRollbackTimeout)
 			defer cancelRollback()
 			if err := embedded.Resize(rollbackCtx, applied); err != nil {
 				slog.Error("ingest stream rollback failed; ingest stream at the new limit, dlq at the previous", "error", err)
@@ -441,14 +446,18 @@ func (a *App) wireReloadTriggers() {
 	// (closing the terminal after Ctrl-C signals the process group). Once
 	// ctx is done nothing reads the channel, so a late SIGHUP is discarded:
 	// ignored, as a reload of a process on its way out should be.
-	a.hup = make(chan os.Signal, 1)
-	signal.Notify(a.hup, syscall.SIGHUP)
+	// The loop reads its own copy: Close nils the field after Run has
+	// joined this goroutine, and the copy keeps that from being a data race
+	// on any path that closes without joining.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	a.hup = hup
 	a.add(component{name: "sighup", run: func(ctx context.Context) error {
 		for {
 			select {
 			case <-ctx.Done():
 				return nil
-			case <-a.hup:
+			case <-hup:
 				// Both cases ready at once is a coin flip; a reload must
 				// not start once the stop has.
 				if ctx.Err() != nil {

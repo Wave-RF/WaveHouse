@@ -10,7 +10,6 @@ import (
 	"runtime/debug"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/app"
 	"github.com/Wave-RF/WaveHouse/internal/config"
@@ -150,9 +149,10 @@ Run 'wavehouse <command> -h' for command-specific help.
 // run boots the server and blocks until ctx is cancelled (SIGINT/SIGTERM)
 // or a component fails, returning the process exit code. A separate function
 // (rather than os.Exit directly in main) so the deferred cleanup — especially
-// the OTel flush — still runs before the process exits. A stop is two
-// phases, each bounded by server.shutdown_timeout: Run drains the in-flight
-// work, then Close releases the stores and flushes telemetry.
+// the OTel flush — still runs before the process exits. A stop is three
+// bounded phases whose budgets add: Run drains the in-flight work within
+// server.shutdown_timeout, then Close releases the stores within
+// app.ReleaseTimeout and flushes telemetry within its own short budget.
 func run(ctx context.Context) int {
 	logLevel := &slog.LevelVar{}
 	logLevel.Set(logLevelFromEnv())
@@ -193,7 +193,7 @@ func run(ctx context.Context) int {
 	// slog.Default from here on: app.New swaps in the OTLP-aware logger when
 	// OTLP logs are enabled, and that is the one every later line should hit.
 	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownTimeout)*time.Second)
+		closeCtx, cancel := context.WithTimeout(context.Background(), app.ReleaseTimeout)
 		defer cancel()
 		if err := a.Close(closeCtx); err != nil {
 			slog.Warn("cleanup", "error", err)

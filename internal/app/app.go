@@ -1,11 +1,14 @@
 // Package app wires the WaveHouse process. New builds every component from
 // the boot config and the settings directory, Run drives the long-lived ones
 // under one errgroup until the context is cancelled or one of them fails, and
-// Close releases what New opened, in reverse order. A stop is two bounded
-// phases, each within server.shutdown_timeout: Run drains the in-flight
-// request/response work and ingest batches (open SSE streams end at once —
-// they are connections to close, not work to finish), then Close releases
-// the stores and flushes telemetry under the context its caller passes.
+// Close releases what New opened, in reverse order. A stop is three bounded
+// phases, and their budgets add rather than multiply: Run drains the
+// in-flight request/response work and ingest batches within
+// server.shutdown_timeout (open SSE streams end at once — they are
+// connections to close, not work to finish), then Close releases the stores
+// under the context its caller passes (ReleaseTimeout), then flushes
+// telemetry under a short budget of its own so the flush that reports on
+// the stop is never starved by a slow close.
 // cmd/wavehouse is the argv/signal/exit-code shell around it;
 // tests/integration builds the same wiring against a ClickHouse
 // testcontainer.
@@ -27,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -98,10 +102,31 @@ type App struct {
 
 	// components in wiring order; Close walks them backwards.
 	components []component
+	// flush is the telemetry shutdown, run by Close after every component
+	// has released so the lines they log still reach the collector.
+	flush func(ctx context.Context) error
 	// hup is the SIGHUP registration, held until Close has released every
 	// component so a hangup during the stop is ignored rather than fatal.
 	hup chan os.Signal
+	// stopCtx is cancelled the moment a stop begins (Run's context is
+	// cancelled, or Close is called), so work that outlives its component's
+	// loop — a settings reload mid-hook — gives up with it instead of
+	// stretching the drain past its budget.
+	stopCtx    context.Context
+	stopCancel context.CancelFunc
 }
+
+const (
+	// ReleaseTimeout bounds Close's release of the stores. A fixed budget
+	// rather than server.shutdown_timeout: only the drain scales with the
+	// deployment's workload, so the stop's worst case is shutdown_timeout
+	// plus these constants, not a multiple of it.
+	ReleaseTimeout = 5 * time.Second
+	// flushTimeout bounds the telemetry flush that ends the stop. Short and
+	// its own: the flush reports on the stop, so it must neither be starved
+	// by a slow close nor hold the exit for an unreachable collector.
+	flushTimeout = 3 * time.Second
+)
 
 // New wires every component. ctx bounds construction only — the boot-time
 // schema refresh and the JetStream stream setup; the loops start in Run. A
@@ -112,11 +137,17 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	if a.logLevel == nil {
 		a.logLevel = &slog.LevelVar{}
 	}
+	a.stopCtx, a.stopCancel = context.WithCancel(context.Background())
 	defer func() {
 		if err != nil {
-			closeCtx, cancel := a.shutdownContext()
+			closeCtx, cancel := context.WithTimeout(context.Background(), ReleaseTimeout)
 			defer cancel()
-			_ = a.Close(closeCtx)
+			// The boot error is the one the caller acts on; a release
+			// failure on the way out is still the evidence for a leaked
+			// handle, so it is logged rather than dropped.
+			if cerr := a.Close(closeCtx); cerr != nil {
+				slog.Warn("cleanup after failed boot", "error", cerr)
+			}
 		}
 	}()
 
@@ -157,6 +188,8 @@ func (a *App) add(c component) { a.components = append(a.components, c) }
 // or a component fails, which stops the rest and returns that error. Call
 // Close afterwards to release what New opened.
 func (a *App) Run(ctx context.Context) error {
+	unhook := context.AfterFunc(ctx, a.stopCancel)
+	defer unhook()
 	g, gctx := errgroup.WithContext(ctx)
 	for _, c := range a.components {
 		if c.run == nil {
@@ -176,13 +209,17 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 // Close releases every resource New opened, newest first, and reports every
-// failure joined. ctx is the release budget: the local stores (Pebble,
-// ristretto, embedded NATS) close in milliseconds and ignore it, while a
-// remote implementation's close is a network round trip that gives up at
-// the deadline rather than hanging the exit on a dead peer, and the
-// telemetry flush — last, so the lines the other closes log still reach the
-// collector — takes whatever is left of it. Safe to call more than once.
+// failure joined. ctx is the release budget (ReleaseTimeout from main): the
+// local stores (Pebble, ristretto, embedded NATS) close in milliseconds and
+// ignore it, while a remote implementation's close is a network round trip
+// that gives up at the deadline rather than hanging the exit on a dead
+// peer. The telemetry flush then runs on its own flushTimeout, so it is
+// never handed a budget a slow close has already spent. Safe to call more
+// than once.
 func (a *App) Close(ctx context.Context) error {
+	// A stop is under way from here even if Run never saw a cancel (a
+	// component failed): anything still waiting on stopCtx gives up.
+	a.stopCancel()
 	var errs []error
 	for i := len(a.components) - 1; i >= 0; i-- {
 		c := a.components[i]
@@ -194,6 +231,21 @@ func (a *App) Close(ctx context.Context) error {
 		}
 	}
 	a.components = nil
+	if a.flush != nil {
+		flushCtx, cancel := context.WithTimeout(context.Background(), flushTimeout)
+		if err := a.flush(flushCtx); err != nil {
+			errs = append(errs, fmt.Errorf("observability: %w", err))
+		}
+		cancel()
+		a.flush = nil
+	}
+	// Last, deliberately, and not a close hook on the sighup component:
+	// hooks run in reverse wiring order, so that would restore SIGHUP's
+	// default disposition (terminate) while the stores and the flush were
+	// still closing, and a hangup — closing the terminal after Ctrl-C
+	// signals the process group — would kill the process mid-release.
+	// TestRun_ServesUntilCancelled sends the test binary a SIGHUP between
+	// Run and Close to pin this.
 	if a.hup != nil {
 		signal.Stop(a.hup)
 		a.hup = nil

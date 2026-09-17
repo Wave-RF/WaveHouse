@@ -312,14 +312,17 @@ Until `startupProbe` succeeds, kubelet doesn't run `livenessProbe` or `readiness
 
 ## Stopping
 
-`SIGTERM` or `SIGINT` begins a graceful stop in two phases, each bounded by [`server.shutdown_timeout`](/configuration#server) (default 10s):
+`SIGTERM` or `SIGINT` begins a graceful stop in three bounded phases whose budgets add up:
 
-1. **Drain.** The listener stops accepting, every open [SSE stream](/api#get-v1stream--server-sent-events-stream) is ended at once (clients reconnect and resume from `Last-Event-ID`), and in-flight requests and the ingest worker's in-hand batches finish. Whatever is still open at the deadline is force-closed.
-2. **Release.** The stores (embedded NATS, Pebble, the cache, ClickHouse) close and telemetry is flushed, last, so the release's own log lines reach the collector.
+1. **Drain**, within [`server.shutdown_timeout`](/configuration#server) (default 10s). The listener stops accepting, every open [SSE stream](/api#get-v1stream--server-sent-events-stream) is ended at once, gap-fill in progress included (clients reconnect and resume from `Last-Event-ID`), and in-flight requests and the ingest worker's in-hand batches finish. A settings reload caught mid-hook gives up too. Whatever is still open at the deadline is force-closed.
+2. **Release**, within a fixed 5s. The stores (embedded NATS, Pebble, the cache, ClickHouse) close.
+3. **Flush**, within a fixed 3s. Telemetry is flushed last, on its own budget, so the lines the release logged reach the collector even when a close was slow.
+
+Only the drain scales with the deployment's workload, so it is the one operators tune; the other two are constants.
 
 A second `SIGTERM`/`SIGINT` while the stop is running abandons it and exits non-zero immediately. `SIGHUP` reloads the [settings directory](/settings-directory) during normal operation and is ignored once a stop has begun.
 
-Size the orchestrator's kill grace against both phases: at the default timeout a stop needs up to 20s before it should be `SIGKILL`ed. Docker's default `stop_grace_period` is 10s, so the [compose file](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/compose/standalone.yaml) sets `stop_grace_period: 25s`, that bound plus headroom; on Kubernetes the equivalent is `terminationGracePeriodSeconds`, whose 30s default already covers it — raise it if you raise `server.shutdown_timeout`. A stop with nothing in flight takes well under a second either way, unless OTLP export is on and the collector is unreachable: the flush then runs to the release deadline.
+Size the orchestrator's kill grace at `server.shutdown_timeout` plus 8s: at the default a stop needs up to 18s before it should be `SIGKILL`ed, and raising the timeout raises that total by the same amount. Docker's default `stop_grace_period` is 10s, so the [compose file](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/compose/standalone.yaml) sets `stop_grace_period: 25s`, that bound plus headroom; on Kubernetes the equivalent is `terminationGracePeriodSeconds`, whose 30s default already covers it — raise it if you raise `server.shutdown_timeout`. A stop with nothing in flight takes well under a second either way, unless OTLP export is on and the collector is unreachable: the flush then waits out its 3s.
 
 ## Behind a reverse proxy
 

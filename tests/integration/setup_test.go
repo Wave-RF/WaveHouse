@@ -141,6 +141,7 @@ func setup() (int, func()) {
 		fmt.Fprintf(os.Stderr, "integration setup: settings: %v\n", err)
 		return 1, cleanup
 	}
+	cleanups.push(func() { _ = os.RemoveAll(settingsDir) })
 
 	// The wired app on a harness listener: the same construction the binary
 	// uses (embedded NATS in-process, the ingest worker, sweeper, hub bridge,
@@ -152,10 +153,9 @@ func setup() (int, func()) {
 		fmt.Fprintf(os.Stderr, "integration setup: listen: %v\n", err)
 		return 1, cleanup
 	}
-	// Both scratch directories are removed after the app closes (LIFO).
+	// Scratch directories are removed after the app closes (LIFO).
 	dataDir := mustTempDir()
 	cleanups.push(func() { _ = os.RemoveAll(dataDir) })
-	cleanups.push(func() { _ = os.RemoveAll(settingsDir) })
 	cfg := &config.Config{
 		DataDir:    dataDir,
 		Server:     config.Server{ShutdownTimeout: 10},
