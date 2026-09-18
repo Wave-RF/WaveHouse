@@ -70,12 +70,13 @@ func (a *App) wireSettings() error {
 // perTenant adapts a store accessor to the tenant-keyed getter the async
 // paths take: they hold a tenant id (tenant.Default today, the MQ subject's
 // from #583 story 5), not a request's resolved store. Only tenant.Default
-// exists, so a miss is a wiring bug and reads as T's zero value; what a
-// removed tenant means to each async path is story 3's to decide.
+// exists, so a miss is a wiring bug: logged, and read as T's zero value —
+// what a removed tenant means to each async path is story 3's to decide.
 func perTenant[T any](tenants *settings.Registry, get func(*settings.Store) T) func(tenant.ID) T {
 	return func(id tenant.ID) T {
 		store, ok := tenants.For(id)
 		if !ok {
+			slog.Error("no settings store for tenant; reading the zero value", "tenant", id)
 			var zero T
 			return zero
 		}
@@ -356,7 +357,11 @@ func (a *App) wireIngestWorker() {
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
 		dlqEnabled := func(id tenant.ID, table string) bool {
 			store, ok := a.tenants.For(id)
-			return ok && store.DLQFor(table)
+			if !ok {
+				slog.Error("no settings store for tenant; treating its DLQ as off", "tenant", id, "table", table)
+				return false
+			}
+			return store.DLQFor(table)
 		}
 		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, a.cache, a.ch.Target, tenant.Default, dlqEnabled)
 		if err != nil {

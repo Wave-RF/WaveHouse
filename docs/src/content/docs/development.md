@@ -495,7 +495,7 @@ WaveHouse/
 - **Strict Go formatting**: Use `gofumpt` (a stricter superset of `gofmt`, enforced by CI). Run `make fmt` to format.
 - **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces so implementations can be swapped behind a stable contract.
 - **Package boundaries**: The `internal/` directory ensures packages are private to this module.
-- **Error handling**: Return errors to callers. Use `slog` for structured logging.
+- **Error handling**: Return errors to callers. Use `slog` for structured logging, through the default logger (`slog.InfoContext(ctx, …)` and its siblings) — constructors don't take a `*slog.Logger`; tests silence or capture it with `internal/testutil/logtest`.
 - **Schema-driven**: ClickHouse is the schema source of truth. WaveHouse discovers and validates against real table schemas.
 
 ## Makefile Targets
