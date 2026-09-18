@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/stream"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 )
@@ -22,7 +23,7 @@ import (
 
 func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
 	t.Parallel()
-	h := &StreamHandler{Hub: stream.NewHub(nil, nil, nil)}
+	h := &StreamHandler{Hub: stream.NewHub(tenant.Default, nil, nil, nil)}
 
 	cases := []struct {
 		name    string
@@ -50,7 +51,7 @@ func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
 
 func TestSSE_AcceptsSafeTableName(t *testing.T) {
 	t.Parallel()
-	h := &StreamHandler{Hub: stream.NewHub(nil, nil, nil)}
+	h := &StreamHandler{Hub: stream.NewHub(tenant.Default, nil, nil, nil)}
 
 	// Use a request context that's already cancelled so the handler exits
 	// the live-stream select loop immediately instead of blocking the test.
@@ -75,7 +76,7 @@ func TestSSE_EmitsHeartbeatsWhenIdle(t *testing.T) {
 	hb := stream.NewHeartbeater(20*time.Millisecond, 1)
 	go hb.Run(t.Context())
 
-	h := &StreamHandler{Hub: stream.NewHub(nil, nil, nil), Heartbeater: hb}
+	h := &StreamHandler{Hub: stream.NewHub(tenant.Default, nil, nil, nil), Heartbeater: hb}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)
@@ -114,7 +115,7 @@ func TestSSE_WheelTickRacesHandlerTeardown(t *testing.T) {
 	defer cancel()
 	go hb.Run(ctx)
 
-	h := &StreamHandler{Hub: stream.NewHub(nil, nil, nil), Heartbeater: hb}
+	h := &StreamHandler{Hub: stream.NewHub(tenant.Default, nil, nil, nil), Heartbeater: hb}
 
 	const conns = 40
 	var wg sync.WaitGroup

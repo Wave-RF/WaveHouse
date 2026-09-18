@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 
 	"go.opentelemetry.io/otel"
 )
@@ -177,10 +178,12 @@ type SchemaRegistry struct {
 	// ClickHouse reconfigure that changes clickhouse.database is honored by
 	// the next refresh (chconn.Manager.Database in production).
 	database func() string
-	// refreshInterval supplies the auto-refresh interval on each tick, so a
-	// settings reload retunes the cadence without restarting the loop
-	// (settings.Store.SchemaRefreshInterval in production).
-	refreshInterval func() time.Duration
+	// tenant is whose tables the registry discovers.
+	tenant tenant.ID
+	// refreshInterval supplies the tenant's auto-refresh interval on each
+	// tick, so a settings reload retunes the cadence without restarting the
+	// loop (settings.Store.SchemaRefreshInterval in production).
+	refreshInterval func(tenant.ID) time.Duration
 	logger          *slog.Logger
 	mu              sync.RWMutex
 	tables          map[string]*TableSchema
@@ -189,11 +192,13 @@ type SchemaRegistry struct {
 	serverVersion string
 }
 
-// NewSchemaRegistry creates a registry that discovers schemas from system.columns.
-func NewSchemaRegistry(conn driver.Conn, database func() string, refreshInterval func() time.Duration, logger *slog.Logger) *SchemaRegistry {
+// NewSchemaRegistry creates the registry of tenant id, which discovers
+// schemas from system.columns.
+func NewSchemaRegistry(conn driver.Conn, database func() string, id tenant.ID, refreshInterval func(tenant.ID) time.Duration, logger *slog.Logger) *SchemaRegistry {
 	return &SchemaRegistry{
 		conn:            conn,
 		database:        database,
+		tenant:          id,
 		refreshInterval: refreshInterval,
 		logger:          logger,
 		tables:          make(map[string]*TableSchema),
@@ -429,7 +434,7 @@ func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxB
 // — an in-flight wait finishes at the old cadence rather than resetting,
 // which keeps a reload from ever deferring an imminent refresh.
 func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
-	interval := sr.refreshInterval()
+	interval := sr.refreshInterval(sr.tenant)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -440,7 +445,7 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 			if err := sr.Refresh(ctx); err != nil {
 				sr.logger.Error("schema auto-refresh failed", "error", err)
 			}
-			if next := sr.refreshInterval(); next != interval {
+			if next := sr.refreshInterval(sr.tenant); next != interval {
 				interval = next
 				ticker.Reset(interval)
 			}

@@ -14,6 +14,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -133,15 +134,15 @@ func TestRequireAdmin_InvalidTokenDenialLogsFailLoudReason(t *testing.T) {
 func TestPipesHandler_Execute_DenialLogsAllowedRoles(t *testing.T) {
 	t.Parallel()
 	logger, buf := warnBufLogger()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{Name: "report", SQL: "SELECT * FROM clicks", AllowedRoles: []string{"analyst", "viewer"}},
 	)
-	h := NewPipesHandler(store, policy.Static(&policy.Policy{}), nil, nil, noTimeout, logger)
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, logger)
 
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
 	r = r.WithContext(auth.WithRole(r.Context(), "guest"))
 	w := httptest.NewRecorder()
-	h.Execute(w, r)
+	h.Execute(w, withTenant(r))
 	require.Equal(t, http.StatusForbidden, w.Code)
 
 	out := buf.String()
@@ -162,7 +163,7 @@ func TestIngest_DenialLogsPolicyGate(t *testing.T) {
 	t.Parallel()
 	logger, buf := warnBufLogger()
 	h := NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, logger)
-	h.PolicySource = policy.Static(&policy.Policy{
+	h.PolicySource = staticPolicy(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{}}}, // no insert for viewer
 		},
@@ -171,7 +172,7 @@ func TestIngest_DenialLogsPolicyGate(t *testing.T) {
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
 	req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
 	w := httptest.NewRecorder()
-	h.Handle(w, req)
+	h.Handle(w, withTenant(req))
 	require.Equal(t, http.StatusForbidden, w.Code)
 
 	out := buf.String()
@@ -192,9 +193,10 @@ func TestAuthzDenied_LogsChiRoutePattern(t *testing.T) {
 	logger, buf := warnBufLogger()
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	router := NewRouter(Dependencies{
+		Tenants:      testTenants(),
 		Ingest:       NewIngestHandler(reg, &testutil.MockPublisher{}, logger),
 		Query:        &QueryHandler{},
-		SSE:          NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
+		SSE:          NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
 		Health:       &HealthHandler{},
 		Schema:       NewSchemaHandler(reg),
 		AuthMW:       func(next http.Handler) http.Handler { return next },

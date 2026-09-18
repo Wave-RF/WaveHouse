@@ -9,6 +9,8 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
@@ -31,6 +33,10 @@ type Dependencies struct {
 	// directory is configured (nothing to reload).
 	Settings *SettingsHandler
 	AuthMW   func(http.Handler) http.Handler
+	// Tenants resolves the tenant.Header of every tenant route to that
+	// tenant's settings store (TenantMW), ahead of AuthMW. The probes,
+	// /version, the metrics path, and /v1/ops/* are tenant-exempt.
+	Tenants *settings.Registry
 	// PolicySource backs the RequireAdmin gate: the admin role (policy.AdminRole)
 	// is read live from the adopted policy, so admin_role changes apply on reload.
 	PolicySource policy.Source
@@ -120,45 +126,49 @@ func NewRouter(deps Dependencies) http.Handler {
 		r.Method(http.MethodGet, deps.MetricsPath, deps.MetricsHandler)
 	}
 
-	// API v1 endpoints. The JWT auth middleware always runs (no enable/disable switch).
+	// API v1 endpoints. The JWT auth middleware always runs (no enable/disable
+	// switch) on both halves: the tenant routes, which resolve their tenant
+	// first, and the tenant-exempt ops tree.
 	r.Route("/v1", func(r chi.Router) {
-		r.Use(deps.AuthMW)
+		r.Group(func(r chi.Router) {
+			r.Use(TenantMW(deps.Tenants))
+			r.Use(deps.AuthMW)
 
-		// Public content-free liveness ping. Lives under /v1 deliberately:
-		// it's documented API surface the SDK relies on to check "is this
-		// server reachable" before sending data, so it must stay public even
-		// in deployments that filter the bare /livez|/readyz|/healthz probe
-		// paths at the reverse proxy. AuthMW runs but never rejects, so no
-		// token is required and there's no authz gate. Mirrors /livez under
-		// the hood (200 past boot, 503 while degraded), no body.
-		r.Get("/health", deps.Health.Online)
+			// Public content-free liveness ping. Lives under /v1 deliberately:
+			// it's documented API surface the SDK relies on to check "is this
+			// server reachable" before sending data, so it must stay public even
+			// in deployments that filter the bare /livez|/readyz|/healthz probe
+			// paths at the reverse proxy. AuthMW runs but never rejects, so no
+			// token is required and there's no authz gate. Mirrors /livez under
+			// the hood (200 past boot, 503 while degraded), no body.
+			r.Get("/health", deps.Health.Online)
 
-		// Single admin gate for every admin-equivalent surface. The admin role
-		// is policy.AdminRole (configurable via admin_role, "admin" by default),
-		// read live from the policy store so changes apply without a restart.
-		// Declaring it once keeps the gate consistent across the tree.
-		requireAdmin := RequireAdmin(deps.PolicySource, deps.Logger)
+			r.Post("/ingest", deps.Ingest.Handle)
+			r.Get("/stream", deps.SSE.Handle)
 
-		r.Post("/ingest", deps.Ingest.Handle)
-		r.Get("/stream", deps.SSE.Handle)
+			// Structured query endpoint.
+			if deps.StructuredQuery != nil {
+				r.Post("/query", deps.StructuredQuery.Handle)
+			}
 
-		// Structured query endpoint.
-		if deps.StructuredQuery != nil {
-			r.Post("/query", deps.StructuredQuery.Handle)
-		}
-
-		// Named query pipes.
-		if deps.Pipes != nil {
-			r.Get("/pipes/{name}", deps.Pipes.Execute)
-			r.Post("/pipes/{name}", deps.Pipes.Execute)
-		}
+			// Named query pipes.
+			if deps.Pipes != nil {
+				r.Get("/pipes/{name}", deps.Pipes.Execute)
+				r.Post("/pipes/{name}", deps.Pipes.Execute)
+			}
+		})
 
 		// Ops routes — every admin-gated surface lives under /v1/ops. The
 		// requireAdmin gate covers the whole tree; every surface below —
 		// including raw-SQL passthrough — shares the same admin principal
 		// set (policy.AdminRole).
 		r.Route("/ops", func(r chi.Router) {
-			r.Use(requireAdmin)
+			// Single admin gate for every admin-equivalent surface. The admin
+			// role is policy.AdminRole (configurable via admin_role, "admin" by
+			// default), read live from the policy store so changes apply
+			// without a restart.
+			r.Use(deps.AuthMW)
+			r.Use(RequireAdmin(deps.PolicySource, deps.Logger))
 
 			// Schema discovery.
 			r.Get("/schema", deps.Schema.Get)
@@ -342,7 +352,7 @@ func corsMiddleware(origins func() []string) func(http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 				// Last-Event-ID lets a cross-origin SSE client resume a stream
 				// (read by StreamHandler.Handle); without it the preflight fails.
-				w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, Last-Event-ID, X-Request-ID")
+				w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, Last-Event-ID, X-Request-ID, "+tenant.Header)
 				w.Header().Set("Access-Control-Expose-Headers", "X-Cache, X-Request-ID")
 				w.Header().Set("Access-Control-Max-Age", "3600")
 			}

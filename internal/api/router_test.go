@@ -11,9 +11,9 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -173,6 +173,7 @@ func TestCORSMiddleware_Preflight(t *testing.T) {
 	// Last-Event-ID is the SSE resumption header (issue #215): cross-origin
 	// fetch-based stream clients that resume via it must clear preflight.
 	assert.Contains(t, w.Header().Get("Access-Control-Allow-Headers"), "Last-Event-ID")
+	assert.Contains(t, w.Header().Get("Access-Control-Allow-Headers"), tenant.Header, "a browser client must be allowed to send the tenant header")
 }
 
 func TestCORSMiddleware_NormalRequest(t *testing.T) {
@@ -321,13 +322,14 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		{Name: "events", Columns: []discovery.Column{{Name: "id", Type: "String"}}},
 	})
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil, nil)
+	hub := stream.NewHub(tenant.Default, nil, nil, nil)
 
 	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 
 	deps := Dependencies{
+		Tenants:      testTenants(),
 		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(hub, nil),
@@ -335,7 +337,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		Version:      NewVersionHandler("test", "test", "test"),
 		Schema:       NewSchemaHandler(reg),
 		DLQ:          NewDLQHandler(emb, testutil.NopLogger()),
-		Pipes:        NewPipesHandler(pipes.Static(), policy.Static(&policy.Policy{}), nil, nil, nil, testutil.NopLogger()),
+		Pipes:        NewPipesHandler(staticPipes(), staticPolicy(&policy.Policy{}), nil, nil, nil, testutil.NopLogger()),
 		AuthMW:       func(next http.Handler) http.Handler { return next },
 		PolicySource: policy.Static(&policy.Policy{}),
 		Logger:       testutil.NopLogger(),
@@ -411,8 +413,9 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 func TestNewRouter_CORSOnStream(t *testing.T) {
 	t.Parallel()
 
-	hub := stream.NewHub(nil, nil, nil)
+	hub := stream.NewHub(tenant.Default, nil, nil, nil)
 	router := NewRouter(Dependencies{
+		Tenants:     testTenants(),
 		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
 		AuthMW:      func(next http.Handler) http.Handler { return next },
@@ -483,9 +486,10 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil, nil)
+	hub := stream.NewHub(tenant.Default, nil, nil, nil)
 
 	router := NewRouter(Dependencies{
+		Tenants:      testTenants(),
 		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(hub, nil),
@@ -544,9 +548,10 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil, nil)
+	hub := stream.NewHub(tenant.Default, nil, nil, nil)
 
 	deps := Dependencies{
+		Tenants:      testTenants(),
 		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(hub, nil),
@@ -623,15 +628,16 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil, nil)
+	hub := stream.NewHub(tenant.Default, nil, nil, nil)
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
-		Query:  &QueryHandler{},
-		SSE:    NewStreamHandler(hub, nil),
-		Health: &HealthHandler{},
-		Schema: NewSchemaHandler(reg),
-		AuthMW: func(next http.Handler) http.Handler { return next },
-		Logger: testutil.NopLogger(),
+		Tenants: testTenants(),
+		Ingest:  NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Query:   &QueryHandler{},
+		SSE:     NewStreamHandler(hub, nil),
+		Health:  &HealthHandler{},
+		Schema:  NewSchemaHandler(reg),
+		AuthMW:  func(next http.Handler) http.Handler { return next },
+		Logger:  testutil.NopLogger(),
 	}
 	router := NewRouter(deps)
 
@@ -648,15 +654,16 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil, nil)
+	hub := stream.NewHub(tenant.Default, nil, nil, nil)
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
-		Query:  &QueryHandler{},
-		SSE:    NewStreamHandler(hub, nil),
-		Health: &HealthHandler{},
-		Schema: NewSchemaHandler(reg),
-		AuthMW: func(next http.Handler) http.Handler { return next },
-		Logger: testutil.NopLogger(),
+		Tenants: testTenants(),
+		Ingest:  NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Query:   &QueryHandler{},
+		SSE:     NewStreamHandler(hub, nil),
+		Health:  &HealthHandler{},
+		Schema:  NewSchemaHandler(reg),
+		AuthMW:  func(next http.Handler) http.Handler { return next },
+		Logger:  testutil.NopLogger(),
 	}
 	router := NewRouter(deps)
 
@@ -747,9 +754,10 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 		{Name: "events", Columns: []discovery.Column{{Name: "id", Type: "String"}}},
 	})
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil, nil)
+	hub := stream.NewHub(tenant.Default, nil, nil, nil)
 
 	router := NewRouter(Dependencies{
+		Tenants:      testTenants(),
 		Ingest:       NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(hub, nil),

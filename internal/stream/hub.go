@@ -10,6 +10,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // Hub fans live events out to SSE subscribers. Column projection is serialized ONCE
@@ -27,7 +28,8 @@ import (
 type Hub struct {
 	mu       sync.RWMutex
 	topics   map[string]*topicRoutes
-	policy   policy.Source             // nil ⇒ policy filtering not configured (legacy passthrough)
+	tenant   tenant.ID                 // whose policy every event and subscriber is evaluated against
+	policy   PolicySource              // nil ⇒ policy filtering not configured (legacy passthrough)
 	registry *discovery.SchemaRegistry // nil ⇒ no column types; row-filter comparison degrades fail-closed (see columnSpecs)
 	metric   *Metrics                  // nil-safe
 
@@ -74,14 +76,19 @@ type topicRoutes struct {
 	roles map[string]Bucket // role -> Bucket of Subscribers
 }
 
-// NewHub builds an event hub. A nil policy store passes every event through
+// PolicySource yields a tenant's access-control policy, read per event so a
+// settings reload applies to the next one. A nil policy from a wired source
+// is a deliberate lockout.
+type PolicySource func(tenant.ID) *policy.Policy
+
+// NewHub builds the event hub of tenant id. A nil policy store passes every event through
 // unfiltered (the unwired-tests case); a non-nil store whose Get returns nil is a
 // total lockout (a deleted/absent policy denies everyone). A nil registry leaves
 // every column's type unknown, so row-filter comparison degrades FAIL-CLOSED:
 // equality/set predicates admit only a byte-identical value and ordering/!= admit
 // nothing (see policy.ColumnKind); metric may be nil.
-func NewHub(policyStore policy.Source, registry *discovery.SchemaRegistry, metric *Metrics) *Hub {
-	return &Hub{topics: make(map[string]*topicRoutes), policy: policyStore, registry: registry, metric: metric}
+func NewHub(id tenant.ID, policyStore PolicySource, registry *discovery.SchemaRegistry, metric *Metrics) *Hub {
+	return &Hub{topics: make(map[string]*topicRoutes), tenant: id, policy: policyStore, registry: registry, metric: metric}
 }
 
 // Add registers sub to receive events for (topic, role), creating the role bucket
@@ -426,7 +433,7 @@ func (h *Hub) snapshotPolicy() (p *policy.Policy, filter bool) {
 	if h.policy == nil {
 		return nil, false
 	}
-	return h.policy(), true
+	return h.policy(h.tenant), true
 }
 
 // ReplayProjector returns the projection function for one connection's gap-fill:

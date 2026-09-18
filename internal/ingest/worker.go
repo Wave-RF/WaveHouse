@@ -19,6 +19,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/query"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -64,11 +65,14 @@ type IngestWorker struct {
 	target   func() chconn.Target
 	maxBatch int
 	maxWait  time.Duration
-	// dlqEnabled reports, per table, whether a row that still fails after
-	// row-by-row isolation is parked on the DLQ (settings.Store.DLQFor in
-	// production; nil means always). Resolved at the moment of the failure, so
+	// tenant is whose events the worker writes; every event is its tenant's
+	// until the MQ subject carries one (#583 story 5).
+	tenant tenant.ID
+	// dlqEnabled reports, per tenant table, whether a row that still fails
+	// after row-by-row isolation is parked on the DLQ (settings.Store.DLQFor
+	// in production; nil means always). Resolved at the moment of the failure, so
 	// a settings reload applies to the next poison row without a restart.
-	dlqEnabled func(table string) bool
+	dlqEnabled func(id tenant.ID, table string) bool
 
 	// wg tracks the dispatch loop; ackWg tracks backgrounded DoubleAck goroutines.
 	// Separate so shutdown can drain inserts (wg → tableWg) before waiting on the
@@ -128,7 +132,8 @@ const (
 func StartIngestWorker(
 	ctx context.Context, queue Queue, cache cache.Cache,
 	target func() chconn.Target,
-	dlqEnabled func(table string) bool,
+	id tenant.ID,
+	dlqEnabled func(id tenant.ID, table string) bool,
 ) (stop func(context.Context) error, failed <-chan error, err error) {
 	if queue == nil {
 		return nil, nil, fmt.Errorf("message queue is nil")
@@ -177,6 +182,7 @@ func StartIngestWorker(
 		target:     target,
 		maxBatch:   defaultMaxBatch,
 		maxWait:    defaultMaxWait,
+		tenant:     id,
 		dlqEnabled: dlqEnabled,
 	}
 
@@ -570,7 +576,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 	for _, pm := range group {
 		singleErr := w.insertToClickHouse(ctx, tableName, cols, []parsedMsg{pm})
 		if singleErr != nil {
-			if w.dlqEnabled != nil && !w.dlqEnabled(tableName) {
+			if w.dlqEnabled != nil && !w.dlqEnabled(w.tenant, tableName) {
 				w.logger.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "table", tableName, "error", singleErr)
 				continue
 			}
@@ -704,7 +710,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 // publish that FAILS leaves the message unacked, exactly as the isolation path
 // does: that is a transient DLQ outage, and retrying beats destroying the row.
 func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, tableName, reason, detail string) {
-	if w.dlqEnabled == nil || w.dlqEnabled(tableName) {
+	if w.dlqEnabled == nil || w.dlqEnabled(w.tenant, tableName) {
 		// Backgrounded on ackWg for the same reason handleSuccess backgrounds its
 		// acks: parkOnDLQ does a DLQ publish AND an fsync-bound DoubleAck,
 		// and parseMsg runs on the dispatchLoop goroutine. The scenario this whole

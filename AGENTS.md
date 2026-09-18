@@ -26,7 +26,7 @@ One binary:
 
 - **`cmd/wavehouse/`** — Standalone mode (all-in-one with embedded NATS, optional Pebble dedup): argv dispatch, the logger, `config.Load`, and the signal context; everything else is `internal/app`
 
-Seventeen internal packages under `internal/` (plus `internal/testutil/` for shared test helpers):
+Eighteen internal packages under `internal/` (plus `internal/testutil/` for shared test helpers):
 
 - **`api/`** — Chi HTTP router, JWT/JWKS middleware (from `auth/`), ingest/query/structured-query/SSE/schema/DLQ/pipes handlers
 - **`app/`** — the process wiring: `New` builds every component from the boot config and the settings directory (each one wired in one place — what it opens, what it loops, what it releases — with the settings store handed to its wiring function whole, the injection point the per-tenant registry of #583 lands on), `Run` drives the long-lived ones under one `errgroup` until the context is cancelled or one fails, `Close` releases them in reverse order. `cmd/wavehouse` and `tests/integration` both boot through it
@@ -43,8 +43,9 @@ Seventeen internal packages under `internal/` (plus `internal/testutil/` for sha
 - **`pipes/`** — Named query pipes: `NamedQuery` type + `BindParams` + `Source` (read per request; `settings.Store` in production, `Static(q...)` in tests)
 - **`policy/`** — Hasura-style access control, **role-first**: `TablePolicy` is `map[string]RolePermissions`, and a role's grant splits by operation into `SelectPermissions` (columns, row `filter`, aggregations, the `max_*` limits) and `InsertPermissions` (columns, `check`) — so a field only one side honors does not exist on the other. `Evaluate()` resolves ONE operation and leaves the other side **nil** (`Select *ResolvedSelect` / `Insert *ResolvedInsert`), which every accessor fails closed on — nil is "not resolved", distinct from an empty side, which is "unrestricted" (what the admin return builds). Claim templating (`{{ jwt.claim.path }}`) resolves during that call. Policies come from `Source`, a `func() *Policy` read per call (`settings.Store.Policy` in production, `Static(p)` in tests)
 - **`query/`** — Structured query AST types + SQL builder with schema validation, structural policy predicate/limit emission, timestamp bucketing
-- **`settings/`** — the settings directory: `Validate` (strict JSON, per-file rules, cross-file role references), `Store` (the adopted snapshot + serialized `Reload`, typed accessors read per call, `AfterAdopt` hooks), the fsnotify `Watch`, and the `go:embed`ded seed `wavehouse bootstrap` writes
+- **`settings/`** — the settings directory: `Validate` (strict JSON, per-file rules, cross-file role references), `Store` (the adopted snapshot + serialized `Reload`, typed accessors read per call, `AfterAdopt` hooks), `Registry` (tenant id → `Store`; holds the one store under `tenant.Default`), the fsnotify `Watch`, and the `go:embed`ded seed `wavehouse bootstrap` writes
 - **`stream/`** — SSE fan-out: rows travel POSITIONALLY, so each connection is told its projected column list in an `event: schema` frame before its first row and again on drift — **not** guaranteed after a gap-fill across a column change, which can leave a connection reading live rows against a stale list until it reconnects ([#543](https://github.com/Wave-RF/WaveHouse/issues/543)) — (tracked per connection; replay tracks its own). The event `Hub` (registers subscribers by `(topic, role)`; `Broadcast` projects + serializes each event once per role, the #294 delivery hot path — a role carrying a row-level `filter` keeps the shared projection but delivers per subscriber, each subscriber's claims evaluated against the row, #319), `Subscriber` (per-connection outbound `Frame` queue, `Send`/`Frames`; claims fixed at construction, immutable), the `Bucket` fan-out set (`subscriberSet`, one per `(topic, role)`), the `Heartbeater` keepalive wheel, and `Metrics` (the `wavehouse_sse_*` stream instruments)
+- **`tenant/`** — the tenant identifier ([#583](https://github.com/Wave-RF/WaveHouse/issues/583)): `ID` (a validated string), `Parse` (letters, digits, `_`, `-`; ≤ 64 bytes — safe as a folder name and as an MQ subject token), `Default` (`"0"`), and `Header` (`X-Tenant-ID`). Imports nothing from the rest of the repo. `api.TenantMW` resolves the header against `settings.Registry` before auth on every `/v1` route outside `/v1/ops/*` (`400` malformed, `404` unknown) and puts the resolved `*settings.Store` in the request context; handlers read it once (`api.StoreFromContext`) and pass it down as an argument, and nothing below a handler reads context. The async paths (ingest worker, sweeper, stream hub, schema registry) are constructed with a `tenant.ID` and their getters take it
 
 ## Key Design Decisions
 
@@ -440,6 +441,7 @@ internal/policy/        → Access control policies (types, evaluation, Source)
 internal/query/         → Structured query AST + SQL builder
 internal/settings/      → Settings directory (validate, adopted snapshot + reload, watcher, embedded seed)
 internal/stream/        → SSE fan-out (event Hub: project once per role, Subscriber outbound queue, Bucket fan-out, keepalive Heartbeater wheel)
+internal/tenant/        → Tenant id (type, grammar, reserved default, request header name)
 internal/testutil/      → Shared test helpers (NopLogger, etc.)
 tests/                  → Integration & E2E tests
 tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer)

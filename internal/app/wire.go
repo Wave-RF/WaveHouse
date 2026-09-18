@@ -25,9 +25,11 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 const (
@@ -57,6 +59,7 @@ func (a *App) wireSettings() error {
 		return fmt.Errorf("settings directory %s invalid, refusing to start — findings above; `wavehouse validate` reproduces them, `wavehouse bootstrap` writes a starter directory", a.cfg.Settings.Dir)
 	}
 	a.store = store
+	a.tenants = settings.NewRegistry(store)
 	a.policies = policy.Source(store.Policy)
 	if store.Policy() == nil {
 		slog.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
@@ -72,6 +75,22 @@ func (a *App) wireSettings() error {
 // malformed header is logged and skipped by the SDK (fail-soft);
 // InitProvider's own error is likewise non-fatal — logged, stdout-only from
 // there on.
+// perTenant adapts a store accessor to the tenant-keyed getter the async
+// paths take: they hold a tenant id (tenant.Default today, the MQ subject's
+// from #583 story 5), not a request's resolved store. Only tenant.Default
+// exists, so a miss is a wiring bug and reads as T's zero value; what a
+// removed tenant means to each async path is story 3's to decide.
+func perTenant[T any](tenants *settings.Registry, get func(*settings.Store) T) func(tenant.ID) T {
+	return func(id tenant.ID) T {
+		store, ok := tenants.For(id)
+		if !ok {
+			var zero T
+			return zero
+		}
+		return get(store)
+	}
+}
+
 func (a *App) wireObservability(ctx context.Context) {
 	cfg := a.cfg
 	if !cfg.OTel.Enabled && !cfg.Prometheus.Enabled {
@@ -162,7 +181,7 @@ func (a *App) wireDiscovery(ctx context.Context) {
 	a.bootState = api.NewBootState(nil)
 	// Both sources are read per refresh, so a settings reload retunes the
 	// cadence and a ClickHouse reconfigure moves the database without a restart.
-	registry := discovery.NewSchemaRegistry(a.ch, a.ch.Database, a.store.SchemaRefreshInterval, slog.Default())
+	registry := discovery.NewSchemaRegistry(a.ch, a.ch.Database, tenant.Default, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval), slog.Default())
 	a.registry = registry
 	bootErr := registry.Refresh(ctx)
 	if bootErr != nil {
@@ -284,7 +303,7 @@ func (a *App) wireCache() error {
 // written to ClickHouse and older than the SSE gap window
 // (stream.gap_window_minutes, re-read every sweep). Runs every minute.
 func (a *App) wireSweeper() {
-	sweeper := ingest.NewSweeper(a.mq, a.store.GapWindow, slog.Default())
+	sweeper := ingest.NewSweeper(a.mq, tenant.Default, perTenant(a.tenants, (*settings.Store).GapWindow), slog.Default())
 	a.add(component{name: "sweeper", run: func(ctx context.Context) error {
 		sweeper.Start(ctx)
 		return nil
@@ -297,7 +316,7 @@ func (a *App) wireSweeper() {
 // that role's subscribers; the MQ → Hub bridge; and the keepalive wheel.
 func (a *App) wireStreaming() {
 	a.sseMetrics = stream.NewMetrics()
-	a.hub = stream.NewHub(a.policies, a.registry, a.sseMetrics)
+	a.hub = stream.NewHub(tenant.Default, perTenant(a.tenants, (*settings.Store).Policy), a.registry, a.sseMetrics)
 
 	// Hub bridge: MQ → broadcast to connected SSE clients. The Hub decodes and
 	// projects each event itself (skipping malformed payloads), so the bridge
@@ -335,7 +354,11 @@ func (a *App) wireStreaming() {
 // drain within the shutdown timeout.
 func (a *App) wireIngestWorker() {
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
-		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, a.cache, a.ch.Target, a.store.DLQFor)
+		dlqEnabled := func(id tenant.ID, table string) bool {
+			store, ok := a.tenants.For(id)
+			return ok && store.DLQFor(table)
+		}
+		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, a.cache, a.ch.Target, tenant.Default, dlqEnabled)
 		if err != nil {
 			return err
 		}
@@ -457,9 +480,9 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	logger := slog.Default()
 
 	ingestHandler := api.NewIngestHandler(a.registry, a.mq, logger)
-	ingestHandler.PolicySource = a.policies
+	ingestHandler.PolicySource = (*settings.Store).Policy
 	ingestHandler.Dedup = a.dedup
-	ingestHandler.DedupeSettings = a.store.DedupeFor
+	ingestHandler.DedupeSettings = (*settings.Store).DedupeFor
 
 	healthHandler := api.NewHealthHandler(a.ch)
 	healthHandler.Boot = a.bootState
@@ -472,6 +495,9 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	closing := make(chan struct{})
 	streamHandler.Closing = closing
 
+	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.ch, a.cache, a.ch.QueryTimeout, logger)
+	pipesHandler.OpsStore = a.store
+
 	deps := api.Dependencies{
 		Ingest: ingestHandler,
 		// /v1/ops/query proxies straight to ClickHouse over HTTP — no native
@@ -483,10 +509,11 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Version:         api.NewVersionHandler(a.build.Version, a.build.GitCommit, a.build.BuildTime),
 		Schema:          api.NewSchemaHandler(a.registry),
 		DLQ:             api.NewDLQHandler(a.mq, logger),
-		Pipes:           api.NewPipesHandler(a.store, a.policies, a.ch, a.cache, a.ch.QueryTimeout, logger),
-		StructuredQuery: api.NewStructuredQueryHandler(a.ch, a.cache, a.registry, a.policies, a.store.TimestampBucketSeconds, a.ch.QueryTimeout, a.store.DefaultMaxRows, logger),
+		Pipes:           pipesHandler,
+		StructuredQuery: api.NewStructuredQueryHandler(a.ch, a.cache, a.registry, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, a.ch.QueryTimeout, (*settings.Store).DefaultMaxRows, logger),
 
 		AuthMW:       authMW,
+		Tenants:      a.tenants,
 		PolicySource: a.policies,
 		Logger:       logger,
 		CORSOrigins:  a.store.CORSOrigins,

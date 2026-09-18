@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // NopLogger returns a *slog.Logger that discards all output.
@@ -35,7 +36,7 @@ func NopLogger() *slog.Logger {
 // type string), not the caller's structs.
 func NewTestSchemaRegistry(t testing.TB, tables []*discovery.TableSchema) *discovery.SchemaRegistry {
 	t.Helper()
-	reg := discovery.NewSchemaRegistry(&schemaConn{tables: tables}, func() string { return "test" }, func() time.Duration { return time.Hour }, NopLogger())
+	reg := discovery.NewSchemaRegistry(&schemaConn{tables: tables}, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour }, NopLogger())
 	require.NoError(t, reg.Refresh(context.Background()))
 	return reg
 }

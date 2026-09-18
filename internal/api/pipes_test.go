@@ -43,7 +43,7 @@ func noTimeout() time.Duration { return 0 }
 
 func TestPipesHandler_List(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT page, count(*) FROM clicks GROUP BY page"},
 		&pipes.NamedQuery{Name: "recent", SQL: "SELECT * FROM clicks ORDER BY ts DESC LIMIT 10"},
 	)
@@ -61,7 +61,7 @@ func TestPipesHandler_List(t *testing.T) {
 
 func TestPipesHandler_Get_Found(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT page FROM clicks"},
 	)
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
@@ -78,7 +78,7 @@ func TestPipesHandler_Get_Found(t *testing.T) {
 
 func TestPipesHandler_Get_NotFound(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static()
+	store := staticPipes()
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
@@ -92,7 +92,7 @@ func TestPipesHandler_Get_NotFound(t *testing.T) {
 
 func TestPipesHandler_List_Empty(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static()
+	store := staticPipes()
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
@@ -108,12 +108,12 @@ func TestPipesHandler_List_Empty(t *testing.T) {
 
 func TestPipesHandler_Execute_NotFound(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static()
+	store := staticPipes()
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/nope/execute", "nope", nil)
-	h.Execute(w, r)
+	h.Execute(w, withTenant(r))
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "pipe not found")
@@ -123,7 +123,7 @@ func TestPipesHandler_Execute_NotFound(t *testing.T) {
 func TestPipesHandler_Execute_RoleAuthorization(t *testing.T) {
 	t.Parallel()
 	testutil.RunRoleMatrix(t, testutil.StandardRoleMatrix(), func(t *testing.T, tc testutil.RoleCase) *httptest.ResponseRecorder {
-		store := pipes.Static(
+		store := staticPipes(
 			&pipes.NamedQuery{
 				Name:         "report",
 				SQL:          "SELECT * FROM clicks",
@@ -133,7 +133,7 @@ func TestPipesHandler_Execute_RoleAuthorization(t *testing.T) {
 		// A real (non-nil) policy so the default admin role ("admin") is defined
 		// and bypasses the allowlist, per the matrix. With a nil policy nobody is
 		// admin (total lockout) — covered separately in internal/policy tests.
-		h := NewPipesHandler(store, policy.Static(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+		h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
 
 		w := httptest.NewRecorder()
 		r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
@@ -146,14 +146,14 @@ func TestPipesHandler_Execute_RoleAuthorization(t *testing.T) {
 		// safeHandle recovers the nil-backend panic on the allowed path so a
 		// served request surfaces as a clean non-403 rather than crashing the
 		// parallel test binary; a forbidden request returns a real 403 first.
-		safeHandle(h.Execute, w, r)
+		safeHandle(h.Execute, w, withTenant(r))
 		return w
 	})
 }
 
 func TestPipesHandler_Execute_RestrictedPipe_EmptyRoleDenied(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{
 			Name:         "admin_report",
 			SQL:          "SELECT * FROM clicks",
@@ -166,7 +166,7 @@ func TestPipesHandler_Execute_RestrictedPipe_EmptyRoleDenied(t *testing.T) {
 	// No ContextKeyRole set, which simulates no token or a JWT without the role claim.
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/admin_report/execute", "admin_report", nil)
 
-	safeHandle(h.Execute, w, r)
+	safeHandle(h.Execute, w, withTenant(r))
 
 	assert.Equal(t, http.StatusForbidden, w.Code,
 		"pipe restricted to %v must reject a request with no role in context", []string{"admin"})
@@ -178,17 +178,17 @@ func TestPipesHandler_Execute_RestrictedPipe_EmptyRoleDenied(t *testing.T) {
 // in context) resolves to the policy default_role, which is in AllowedRoles.
 func TestPipesHandler_Execute_DefaultRoleGrantsAccess(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{Name: "report", SQL: "SELECT * FROM clicks", AllowedRoles: []string{"viewer"}},
 	)
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
-	h.PolicySource = policy.Static(&policy.Policy{DefaultRole: "viewer"})
+	h.PolicySource = staticPolicy(&policy.Policy{DefaultRole: "viewer"})
 
 	w := httptest.NewRecorder()
 	// No role in context (tokenless / JWT without role claim).
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
 
-	safeHandle(h.Execute, w, r)
+	safeHandle(h.Execute, w, withTenant(r))
 
 	assert.NotEqual(t, http.StatusForbidden, w.Code,
 		"empty role should resolve to default_role 'viewer', which is in AllowedRoles")
@@ -199,16 +199,16 @@ func TestPipesHandler_Execute_DefaultRoleGrantsAccess(t *testing.T) {
 // is still gated by AllowedRoles — a default that isn't listed is denied.
 func TestPipesHandler_Execute_DefaultRoleNotInAllowedRolesDenied(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{Name: "admin_report", SQL: "SELECT * FROM clicks", AllowedRoles: []string{"admin"}},
 	)
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
-	h.PolicySource = policy.Static(&policy.Policy{DefaultRole: "viewer"})
+	h.PolicySource = staticPolicy(&policy.Policy{DefaultRole: "viewer"})
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/admin_report/execute", "admin_report", nil)
 
-	safeHandle(h.Execute, w, r)
+	safeHandle(h.Execute, w, withTenant(r))
 
 	assert.Equal(t, http.StatusForbidden, w.Code,
 		"default_role 'viewer' is not in AllowedRoles [admin] → denied")
@@ -217,7 +217,7 @@ func TestPipesHandler_Execute_DefaultRoleNotInAllowedRolesDenied(t *testing.T) {
 
 func TestPipesHandler_Execute_MissingParam(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{
 			Name: "by_page",
 			SQL:  "SELECT * FROM clicks WHERE page = {{page}}",
@@ -226,14 +226,14 @@ func TestPipesHandler_Execute_MissingParam(t *testing.T) {
 			},
 		},
 	)
-	h := NewPipesHandler(store, policy.Static(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	// No query params or body — missing "page".
 	r := pipesRequest(t, http.MethodGet, "/v1/pipes/by_page/execute", "by_page", nil)
 	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
 
-	h.Execute(w, r)
+	h.Execute(w, withTenant(r))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "missing required parameter")
@@ -242,7 +242,7 @@ func TestPipesHandler_Execute_MissingParam(t *testing.T) {
 
 func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{
 			Name: "by_page",
 			SQL:  "SELECT * FROM clicks WHERE page = {{page}}",
@@ -251,7 +251,7 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 			},
 		},
 	)
-	h := NewPipesHandler(store, policy.Static(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/pipes/by_page/execute?page=/home", nil)
@@ -260,7 +260,7 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
 	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
 
-	safeHandle(h.Execute, w, r)
+	safeHandle(h.Execute, w, withTenant(r))
 
 	// Should pass param binding — will fail later at executeQuery (nil conn).
 	assert.NotEqual(t, http.StatusBadRequest, w.Code)
@@ -273,14 +273,14 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 // is tiny so we don't allocate 1 MiB per run.
 func TestPipesHandler_Execute_RequestBodyCap(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{
 			Name:       "by_page",
 			SQL:        "SELECT * FROM clicks WHERE page = {{page}}",
 			Parameters: []pipes.ParamDef{{Name: "page", Type: "string", Required: true}},
 		},
 	)
-	h := NewPipesHandler(store, policy.Static(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
 	h.maxRequestBytes = 64
 
 	w := httptest.NewRecorder()
@@ -289,7 +289,7 @@ func TestPipesHandler_Execute_RequestBodyCap(t *testing.T) {
 	})
 	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
 
-	h.Execute(w, r)
+	h.Execute(w, withTenant(r))
 
 	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "oversized body must 413")
 	assert.Contains(t, w.Body.String(), "request body exceeded")
@@ -298,7 +298,7 @@ func TestPipesHandler_Execute_RequestBodyCap(t *testing.T) {
 
 func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{
 			Name: "by_page",
 			SQL:  "SELECT * FROM clicks WHERE page = {{page}}",
@@ -307,14 +307,14 @@ func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
 			},
 		},
 	)
-	h := NewPipesHandler(store, policy.Static(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	body := map[string]any{"page": "/about"}
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/by_page/execute", "by_page", body)
 	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
 
-	safeHandle(h.Execute, w, r)
+	safeHandle(h.Execute, w, withTenant(r))
 
 	// Should pass param binding — will fail at executeQuery (nil conn).
 	assert.NotEqual(t, http.StatusBadRequest, w.Code)
@@ -327,7 +327,7 @@ func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
 // empty allowlist matches no role.
 func TestPipesHandler_Execute_NoAllowedRoles_NonAdminDenied(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{Name: "open", SQL: "SELECT * FROM clicks"}, // no AllowedRoles
 	)
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
@@ -338,7 +338,7 @@ func TestPipesHandler_Execute_NoAllowedRoles_NonAdminDenied(t *testing.T) {
 	ctx = auth.WithRole(ctx, "viewer")
 	r = r.WithContext(ctx)
 
-	safeHandle(h.Execute, w, r)
+	safeHandle(h.Execute, w, withTenant(r))
 
 	assert.Equal(t, http.StatusForbidden, w.Code,
 		"a pipe with no allowed_roles must reject a non-admin role")
@@ -349,21 +349,21 @@ func TestPipesHandler_Execute_NoAllowedRoles_NonAdminDenied(t *testing.T) {
 // IN list and passes binding (failing only later at the nil ClickHouse conn).
 func TestPipesHandler_Execute_ArrayParamBinds(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{
 			Name:       "by_ids",
 			SQL:        "SELECT * FROM clicks WHERE id IN {{ids}}",
 			Parameters: []pipes.ParamDef{{Name: "ids", Type: "array", Required: true}},
 		},
 	)
-	h := NewPipesHandler(store, policy.Static(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	body := map[string]any{"ids": []any{"a", "b"}}
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/by_ids/execute", "by_ids", body)
 	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
 
-	safeHandle(h.Execute, w, r)
+	safeHandle(h.Execute, w, withTenant(r))
 
 	// Binding succeeded — the only failure left is the nil conn, never a 400.
 	assert.NotEqual(t, http.StatusBadRequest, w.Code)
@@ -374,17 +374,17 @@ func TestPipesHandler_Execute_ArrayParamBinds(t *testing.T) {
 // form and is refused with a 400 before any query runs (#317).
 func TestPipesHandler_Execute_ObjectParamRejected(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{Name: "by_col", SQL: "SELECT * FROM clicks WHERE col = {{p}}"},
 	)
-	h := NewPipesHandler(store, policy.Static(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	body := map[string]any{"p": map[string]any{"k": "v"}}
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/by_col/execute", "by_col", body)
 	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
 
-	h.Execute(w, r)
+	h.Execute(w, withTenant(r))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "unsupported parameter type object")
@@ -395,16 +395,16 @@ func TestPipesHandler_Execute_ObjectParamRejected(t *testing.T) {
 // roles bypass the allowlist, so admin can run a pipe with no allowed_roles.
 func TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed(t *testing.T) {
 	t.Parallel()
-	store := pipes.Static(
+	store := staticPipes(
 		&pipes.NamedQuery{Name: "open", SQL: "SELECT * FROM clicks"},
 	)
-	h := NewPipesHandler(store, policy.Static(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)
 	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
 
-	safeHandle(h.Execute, w, r)
+	safeHandle(h.Execute, w, withTenant(r))
 
 	assert.NotEqual(t, http.StatusForbidden, w.Code,
 		"admin bypasses the allowlist on a pipe with no allowed_roles")

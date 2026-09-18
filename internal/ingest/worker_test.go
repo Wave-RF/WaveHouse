@@ -28,6 +28,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -134,7 +135,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 			t.Parallel()
 			q, c := tt.setup(t)
 			_, _, err := StartIngestWorker(context.Background(), q, c,
-				func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
+				func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, tenant.Default, nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrSub)
 		})
@@ -270,7 +271,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	stopFn, _, err := StartIngestWorker(ctx, emb, &testutil.MockCache{},
 		func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
-		}, nil)
+		}, tenant.Default, nil)
 	require.NoError(t, err)
 
 	// Publish so there's an in-flight insert blocking on `release`.
@@ -304,7 +305,7 @@ func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 	// chURL is never dialed: with no messages there is no flush, so a dummy
 	// host/port is fine.
 	stopFn, _, err := StartIngestWorker(context.Background(), emb, &testutil.MockCache{},
-		func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
+		func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, tenant.Default, nil)
 	require.NoError(t, err)
 
 	// Nothing to flush, so shutdown drains immediately and returns nil before the
@@ -887,7 +888,7 @@ func TestFlushTable_BadRow_DLQDisabledForTable_LeftUnacked(t *testing.T) {
 		},
 	}
 	w, pub, _, wait := newTestWorker(rt)
-	w.dlqEnabled = func(table string) bool { return table != "events" }
+	w.dlqEnabled = func(_ tenant.ID, table string) bool { return table != "events" }
 
 	good := newIngestMsg(t, "events", "", map[string]any{"id": 1, "poison": false})
 	poison := newIngestMsg(t, "events", "", map[string]any{"id": 2, "poison": true})
@@ -1317,7 +1318,7 @@ func TestParseMsg_DuplicateColumn_Unpairable(t *testing.T) {
 func TestParseMsg_PoisonEnvelope_DLQDisabled_AckedAndDropped(t *testing.T) {
 	t.Parallel()
 	w, pub, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-	w.dlqEnabled = func(string) bool { return false }
+	w.dlqEnabled = func(tenant.ID, string) bool { return false }
 
 	m := &testutil.MockMessage{
 		MsgTopic: mq.Topic{Table: "events"},
@@ -1485,7 +1486,7 @@ func TestRejectPoison_CountedByDisposition(t *testing.T) {
 
 	// DLQ off for the table: acked and dropped, counted separately.
 	w2, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-	w2.dlqEnabled = func(string) bool { return false }
+	w2.dlqEnabled = func(tenant.ID, string) bool { return false }
 	_, ok = w2.parseMsg(context.Background(), poison().Message())
 	require.False(t, ok)
 	w2.ackWg.Wait()
@@ -1506,7 +1507,7 @@ func TestRejectPoison_CountedByDisposition(t *testing.T) {
 	// counting before the ack would report a row as gone forever — the meaning
 	// deployment.md gives "dropped" — once per redelivery, while it is still there.
 	w4, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-	w4.dlqEnabled = func(string) bool { return false }
+	w4.dlqEnabled = func(tenant.ID, string) bool { return false }
 	unackable := poison()
 	unackable.DoubleAckErr = errors.New("ack timed out")
 	_, ok = w4.parseMsg(context.Background(), unackable.Message())
@@ -1599,8 +1600,8 @@ func TestDispatchLoop_DeliveryEndedFailsLoud(t *testing.T) {
 	rt := &testutil.MockRoundTripper{}
 	w, _, _, _ := newTestWorker(rt)
 	w.maxBatch = 100
-	w.maxWait = time.Hour                             // only the shutdown flush can write the row
-	w.dlqEnabled = func(string) bool { return false } // the sentinel is acked-and-dropped, no publish
+	w.maxWait = time.Hour                                        // only the shutdown flush can write the row
+	w.dlqEnabled = func(tenant.ID, string) bool { return false } // the sentinel is acked-and-dropped, no publish
 
 	held := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 	sentinel := &testutil.MockMessage{MsgTopic: mq.Topic{Table: "events"}, MsgData: []byte("not json")}
@@ -1651,8 +1652,8 @@ func TestDispatchLoop_HandoffReturnsOnCancel(t *testing.T) {
 	t.Parallel()
 
 	w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-	w.maxBatch = 1                                    // msgChan holds 2
-	w.dlqEnabled = func(string) bool { return false } // any message parsed is acked-and-dropped, no publish
+	w.maxBatch = 1                                               // msgChan holds 2
+	w.dlqEnabled = func(tenant.ID, string) bool { return false } // any message parsed is acked-and-dropped, no publish
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already stopping: the loop exits at its first ctx.Done pick, leaving msgChan full

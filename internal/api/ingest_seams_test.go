@@ -52,7 +52,7 @@ func TestIngest_RecordValidatorSeam_IsUsed(t *testing.T) {
 		h.Validator = v
 
 		w := httptest.NewRecorder()
-		h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
+		h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home"})))
 
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 		testutil.AssertJSONErrorResponse(t, w)
@@ -70,7 +70,7 @@ func TestIngest_RecordValidatorSeam_IsUsed(t *testing.T) {
 		h.Validator = v
 
 		w := httptest.NewRecorder()
-		h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
+		h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home"})))
 
 		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 		assert.Equal(t, 1, v.validated)
@@ -90,7 +90,7 @@ func TestIngest_DefaultValidator_WhenUnwired(t *testing.T) {
 	assert.IsType(t, discoveryValidator{}, h.validator())
 
 	w := httptest.NewRecorder()
-	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"nonexistent_field": 1}))
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"nonexistent_field": 1})))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	testutil.AssertJSONErrorResponse(t, w)
 	assert.Empty(t, pub.Messages)
@@ -130,7 +130,7 @@ func TestIngest_InsertCheckerSeam_IsUsed(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
 			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-			h.PolicySource = policy.Static(p)
+			h.PolicySource = staticPolicy(p)
 			h.Checker = alwaysChecker{matches: tt.matches}
 
 			value := "org-something-else"
@@ -138,7 +138,7 @@ func TestIngest_InsertCheckerSeam_IsUsed(t *testing.T) {
 				value = required // the default checker would accept this
 			}
 			w := httptest.NewRecorder()
-			h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a", "org_id": value}))
+			h.Handle(w, withTenant(viewerIngestRequest(t, "clicks", map[string]any{"page": "/a", "org_id": value})))
 			assert.Equal(t, tt.want, w.Code, "body=%s", w.Body.String())
 			if tt.want == http.StatusForbidden {
 				testutil.AssertJSONErrorResponse(t, w)
@@ -178,7 +178,7 @@ func TestIngest_InsertCheckerSeam_InSet_IsUsed(t *testing.T) {
 			req = req.WithContext(ctx)
 
 			w := httptest.NewRecorder()
-			h.Handle(w, req)
+			h.Handle(w, withTenant(req))
 			assert.Equal(t, tt.want, w.Code, "body=%s", w.Body.String())
 			if tt.want == http.StatusForbidden {
 				testutil.AssertJSONErrorResponse(t, w)
@@ -199,12 +199,12 @@ func TestIngest_DefaultChecker_WhenUnwired(t *testing.T) {
 	}}
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicySource = policy.Static(p)
+	h.PolicySource = staticPolicy(p)
 	require.Nil(t, h.Checker)
 	assert.IsType(t, canonicalChecker{}, h.checker())
 
 	w := httptest.NewRecorder()
-	h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a", "org_id": "wrong"}))
+	h.Handle(w, withTenant(viewerIngestRequest(t, "clicks", map[string]any{"page": "/a", "org_id": "wrong"})))
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	testutil.AssertJSONErrorResponse(t, w)
 	assert.Empty(t, pub.Messages)
@@ -225,12 +225,12 @@ func TestIngest_SeamOrdering_ChecksSitBetweenValidateAndCanonicalize(t *testing.
 	pub := &testutil.MockPublisher{}
 	v := &recordingValidator{}
 	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
-	h.PolicySource = policy.Static(p)
+	h.PolicySource = staticPolicy(p)
 	h.Validator = v
 
 	// A failing check must land AFTER Validate and BEFORE canonicalization.
 	w := httptest.NewRecorder()
-	h.Handle(w, viewerIngestRequest(t, "clicks", map[string]any{"page": "/a", "org_id": "wrong"}))
+	h.Handle(w, withTenant(viewerIngestRequest(t, "clicks", map[string]any{"page": "/a", "org_id": "wrong"})))
 	require.Equal(t, http.StatusForbidden, w.Code)
 	testutil.AssertJSONErrorResponse(t, w)
 	assert.Equal(t, 1, v.validated, "validation runs before the check clauses")

@@ -18,6 +18,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -39,12 +40,13 @@ type IngestHandler struct {
 	Registry *discovery.SchemaRegistry
 	Dedup    dedupe.Deduplicator // nil when no dedupe store is wired (tests)
 	// DedupeSettings resolves the effective dedupe id_field/require_id for a
-	// table (settings.Store.DedupeFor in production). Called once per record so
-	// a settings reload lands at a record boundary — one record never mixes two
-	// documents' values. Dedup is skipped when nil.
-	DedupeSettings func(table string) (enabled bool, idField string, requireID bool)
+	// table of the request's tenant ((*settings.Store).DedupeFor in
+	// production). Called once per record so a settings reload lands at a
+	// record boundary — one record never mixes two documents' values. Dedup is
+	// skipped when nil.
+	DedupeSettings func(store *settings.Store, table string) (enabled bool, idField string, requireID bool)
 	Publisher      mq.Publisher
-	PolicySource   policy.Source
+	PolicySource   PolicySource
 	logger         *slog.Logger
 
 	// Validator and Checker are the per-record seams a native type layer will
@@ -134,6 +136,10 @@ type requestAbort struct {
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	store, ok := requestStore(w, r)
+	if !ok {
+		return
+	}
 	now := time.Now().UTC()
 	table := r.URL.Query().Get("table")
 
@@ -174,7 +180,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	var role string
 
 	if h.PolicySource != nil {
-		p := h.PolicySource()
+		p := h.PolicySource(store)
 		role = policy.ResolveRole(p, auth.RoleFromContext(ctx))
 		claims, _ := auth.ClaimsFromContext(ctx)
 		perms = policy.Evaluate(p, role, table, "insert", claims)
@@ -265,10 +271,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if batch {
-		h.handleBatch(ctx, w, rr, reqCap, table, scope, schema, perms, role, now, h.policyCheckGuard(ctx, table, role, schema, perms))
+		h.handleBatch(ctx, w, rr, reqCap, store, table, scope, schema, perms, role, now, h.policyCheckGuard(ctx, table, role, schema, perms))
 		return
 	}
-	h.handleSingle(ctx, w, rr, reqCap, table, scope, schema, perms, role, now, h.policyCheckGuard(ctx, table, role, schema, perms))
+	h.handleSingle(ctx, w, rr, reqCap, store, table, scope, schema, perms, role, now, h.policyCheckGuard(ctx, table, role, schema, perms))
 }
 
 // handleSingle ingests a lone flat JSON object and preserves the GA response
@@ -279,6 +285,7 @@ func (h *IngestHandler) handleSingle(
 	w http.ResponseWriter,
 	rr recordReader,
 	reqCap int64,
+	store *settings.Store,
 	table, scope string,
 	schema *discovery.TableSchema,
 	perms *policy.ResolvedPermissions,
@@ -299,7 +306,7 @@ func (h *IngestHandler) handleSingle(
 		return
 	}
 
-	dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now, checkGuard)
+	dup, reject, abort := h.processRecord(ctx, store, table, scope, schema, perms, role, data, now, checkGuard)
 	if abort != nil {
 		writeAbort(w, abort)
 		return
@@ -331,6 +338,7 @@ func (h *IngestHandler) handleBatch(
 	w http.ResponseWriter,
 	rr recordReader,
 	reqCap int64,
+	store *settings.Store,
 	table, scope string,
 	schema *discovery.TableSchema,
 	perms *policy.ResolvedPermissions,
@@ -369,7 +377,7 @@ func (h *IngestHandler) handleBatch(
 
 		result.Total++
 		idx := result.Total
-		dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now, checkGuard)
+		dup, reject, abort := h.processRecord(ctx, store, table, scope, schema, perms, role, data, now, checkGuard)
 		if abort != nil {
 			// Whole-request failure: surface the status rather than recording a
 			// request-scoped condition as per-record loss (see requestAbort).
@@ -513,6 +521,7 @@ func (h *IngestHandler) policyCheckGuard(
 //   - abort non-nil: a whole-request failure; the caller stops and returns it.
 func (h *IngestHandler) processRecord(
 	ctx context.Context,
+	store *settings.Store,
 	table, scope string,
 	schema *discovery.TableSchema,
 	perms *policy.ResolvedPermissions,
@@ -628,7 +637,7 @@ func (h *IngestHandler) processRecord(
 	// lands at a record boundary. A Deduplicator without a settings source is
 	// a wiring bug, not a mode — main wires both or neither.
 	if h.Dedup != nil && h.DedupeSettings != nil {
-		if enabled, idField, requireID := h.DedupeSettings(table); enabled {
+		if enabled, idField, requireID := h.DedupeSettings(store, table); enabled {
 			idVal, ok := data[idField]
 			if !ok {
 				dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))

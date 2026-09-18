@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 func TestIsTimestampType(t *testing.T) {
@@ -301,7 +303,7 @@ func TestResolveTimestampSpecs(t *testing.T) {
 func TestRefresh_PrecomputesSpecs(t *testing.T) {
 	t.Parallel()
 	conn := &fakeConn{columns: []fakeColumn{{table: "t", name: "ts", chType: "DateTime", position: 1}}}
-	reg := NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, discardLogger())
+	reg := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour }, discardLogger())
 	require.NoError(t, reg.Refresh(context.Background()))
 	col := reg.Get("t").Columns[0]
 	require.NotNil(t, col.tsSpec)

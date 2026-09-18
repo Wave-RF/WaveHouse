@@ -50,6 +50,29 @@ WaveHouse extracts the role from a configurable JWT claim path (`auth.role_claim
 
 Policies support Hasura-style row-level and column-level permissions with JWT claim templating (e.g., `{{ jwt.app_metadata.tenant_id }}`).
 
+## Tenant Selection
+
+Every `/v1` route outside `/v1/ops/*` resolves a tenant before it authenticates the request. The tenant comes from the `X-Tenant-ID` request header:
+
+```text
+X-Tenant-ID: 0
+```
+
+A request without the header, or with an empty one, resolves to tenant `0`, the default tenant, whose settings are the [settings directory](/settings-directory). Setting the header on every request is the client's or the fronting proxy's job; WaveHouse never derives it from the token.
+
+A tenant id is 1–64 characters of ASCII letters, digits, `_`, and `-`. It is a string, not a number, so a long numeric id keeps every digit.
+
+| Status | Body | When |
+| ------ | ---- | ---- |
+| `400` | `{"error": "invalid X-Tenant-ID: …"}` | The id breaks the grammar above, or the header was sent more than once |
+| `404` | `{"error": "unknown tenant: <id>"}` | The id is well formed but no such tenant exists |
+
+Both are decided before authentication, so they are returned whatever token the request carries.
+
+The probes (`/livez`, `/readyz`, `/healthz`), `/version`, the Prometheus metrics path, and `/v1/ops/*` are tenant-exempt: they ignore the header entirely.
+
+`X-Tenant-ID` is in the CORS `Access-Control-Allow-Headers` list, so a browser client can send it cross-origin. The SDK sends it through [`options.headers`](/sdk#custom-headers).
+
 ## Response Format
 
 ### Error Responses
