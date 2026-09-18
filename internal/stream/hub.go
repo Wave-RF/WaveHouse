@@ -443,11 +443,11 @@ func (h *Hub) snapshotPolicy() (p *policy.Policy, filter bool) {
 // replay shares the Hub's policy store and schema registry with the live fan-out —
 // the handler can't accidentally project replay against a different (or nil)
 // policy. Replay is already per-connection, so row-level security evaluates against
-// this connection's claims directly; the returned closure holds one policy snapshot
-// for the whole gap-fill (matching Broadcast's one-snapshot-per-event — a reload
-// landing mid-replay applies from the first live event) and caches the per-table
-// column-kind lookup across the replay loop, so a large Last-Event-ID gap-fill
-// doesn't pay a store read-lock plus a registry lookup and map build per event.
+// this connection's claims directly; the returned closure reads the policy per
+// replayed event (matching Broadcast, so a reload landing mid-replay applies to
+// the next replayed row) and caches only the per-table column-kind lookup across
+// the replay loop, so a large Last-Event-ID gap-fill doesn't pay a registry
+// lookup and map build per event.
 // The closure is for a single goroutine — each connection makes its own. The live
 // path uses Broadcast.
 func (h *Hub) ReplayProjector(role string, sub *Subscriber) func(raw []byte) []Frame {
