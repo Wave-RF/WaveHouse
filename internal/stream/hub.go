@@ -451,7 +451,6 @@ func (h *Hub) snapshotPolicy() (p *policy.Policy, filter bool) {
 // The closure is for a single goroutine — each connection makes its own. The live
 // path uses Broadcast.
 func (h *Hub) ReplayProjector(role string, sub *Subscriber) func(raw []byte) []Frame {
-	p, filter := h.snapshotPolicy()
 	var colSpecs map[string]policy.ColumnSpec
 	specsFor := "" // table name colSpecs was resolved for ("" ⇒ not yet resolved)
 	// Schema-drift state is LOCAL to this gap-fill, not the connection's shared
@@ -476,6 +475,9 @@ func (h *Hub) ReplayProjector(role string, sub *Subscriber) func(raw []byte) []F
 	// availability; a reconnect resynchronizes.
 	lastSig := ""
 	return func(raw []byte) []Frame {
+		// Read per event, like Broadcast, so a policy adopted mid-gap-fill
+		// applies to the next replayed row rather than after the fill ends.
+		p, filter := h.snapshotPolicy()
 		ev := newEventView(raw)
 		plan, ok := planForRole(p, filter, role, ev, KindReplay)
 		if !ok {

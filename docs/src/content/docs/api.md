@@ -781,7 +781,7 @@ The policy has no endpoints: it is the settings directory's [`policies.json`](/s
 
 Returns every adopted named query pipe — the settings directory's [`pipes.json`](/settings-directory#pipesjson). Pipes have no write endpoints: edit the file and reload.
 
-The ops routes are [tenant-exempt](#tenant-selection), so this read and `GET /v1/ops/pipes/{name}` name their tenant with an optional `?tenant=` query parameter instead of the header. Absent or empty means tenant `0`; a malformed id or a repeated parameter is a `400` (`{"error": "invalid ?tenant: …"}`), and an unknown tenant a `404` with the same body as the header.
+The ops routes are [tenant-exempt](#tenant-selection), so this read and `GET /v1/ops/pipes/{name}` name their tenant with an optional `?tenant=` query parameter instead of the header. Absent or empty means tenant `0`; a malformed id, a repeated parameter, or a query string that does not parse is a `400` (`{"error": "invalid ?tenant: …"}`), and an unknown tenant a `404` with the same body as the header.
 
 #### `GET /v1/ops/pipes/{name}` — Get Named Pipe
 

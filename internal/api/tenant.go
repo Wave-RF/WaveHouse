@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/url"
 
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
@@ -94,7 +95,15 @@ func TenantMW(tenants *settings.Registry) func(http.Handler) http.Handler {
 const opsTenantParam = "tenant"
 
 // opsStore resolves the tenant an ops route addresses from its
-// opsTenantParam, with the same answers as TenantMW.
+// opsTenantParam, with the same answers as TenantMW. The query string is
+// parsed strictly: url.Values silently drops a malformed pair, which would
+// turn "?tenant=acme;x=1" into the default tenant rather than a 400.
 func opsStore(w http.ResponseWriter, r *http.Request, tenants *settings.Registry) (*settings.Store, bool) {
-	return resolveTenant(w, tenants, "?"+opsTenantParam, r.URL.Query()[opsTenantParam])
+	where := "?" + opsTenantParam
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid "+where+": malformed query string")
+		return nil, false
+	}
+	return resolveTenant(w, tenants, where, values[opsTenantParam])
 }

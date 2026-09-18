@@ -55,8 +55,8 @@ func TestTenantMW(t *testing.T) {
 				return
 			}
 			assert.Nil(t, resolved, "a refused request must not reach the handler")
+			testutil.AssertJSONErrorResponse(t, w)
 			assert.Contains(t, w.Body.String(), tt.wantBody)
-			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
 		})
 	}
 }
@@ -179,6 +179,8 @@ func TestPipesHandler_AdminReads_TenantParam(t *testing.T) {
 		{name: "unknown tenant", query: "?tenant=acme", wantStatus: http.StatusNotFound, wantBody: "unknown tenant: acme"},
 		{name: "malformed tenant", query: "?tenant=a.b", wantStatus: http.StatusBadRequest, wantBody: "invalid ?tenant"},
 		{name: "repeated parameter", query: "?tenant=0&tenant=0", wantStatus: http.StatusBadRequest, wantBody: "sent more than once"},
+		// url.Values would drop the malformed pair and default the tenant.
+		{name: "malformed query string", query: "?tenant=acme;x=1", wantStatus: http.StatusBadRequest, wantBody: "malformed query string"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -189,11 +191,15 @@ func TestPipesHandler_AdminReads_TenantParam(t *testing.T) {
 			w := httptest.NewRecorder()
 			h.List(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/ops/pipes"+tt.query, nil))
 			require.Equal(t, tt.wantStatus, w.Code, "List body: %s", w.Body.String())
+			if tt.wantBody != "" {
+				testutil.AssertJSONErrorResponse(t, w)
+			}
 
 			w = httptest.NewRecorder()
 			h.Get(w, pipesRequest(t, http.MethodGet, "/v1/ops/pipes/top_pages"+tt.query, "top_pages", nil))
 			require.Equal(t, tt.wantStatus, w.Code, "Get body: %s", w.Body.String())
 			if tt.wantBody != "" {
+				testutil.AssertJSONErrorResponse(t, w)
 				assert.Contains(t, w.Body.String(), tt.wantBody)
 			} else {
 				assert.Contains(t, w.Body.String(), `"top_pages"`)

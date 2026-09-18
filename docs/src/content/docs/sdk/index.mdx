@@ -335,7 +335,7 @@ The token is never placed in the URL. The server still accepts a `?token=` query
 :::caution[Streaming asks more of a custom `fetch`]
 `.stream()` and `.liveQuery()` read the response as it arrives, so an `options.fetch` used with them must return a response with a live streaming body. A response handed back with an absent or already-consumed body fails fast with `SSE_NO_STREAM_BODY`. What the SDK cannot rescue is a wrapper that *awaits* the body before returning — `await res.text()`, or the `res.clone().text()` a logging wrapper reaches for — because on a stream that never ends it never resolves and your function never returns. Both satisfy every REST call, which is what makes the trap easy to walk into.
 
-`options.headers` is also subject to CORS in a browser: a header outside the safelist joins the preflight, which the origin has to allow. WaveHouse advertises a fixed set, so custom headers reach it cross-origin only when a proxy in front terminates the preflight — the deployment they exist for. Server-side callers never preflight.
+`options.headers` is also subject to CORS in a browser: a header outside the safelist joins the preflight, which the origin has to allow. WaveHouse advertises a fixed set (see [below](#custom-headers)), so a header outside it reaches WaveHouse cross-origin only when a proxy in front terminates the preflight — the deployment such headers exist for. Server-side callers never preflight.
 :::
 
 #### Serving under a path prefix

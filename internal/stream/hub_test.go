@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -860,6 +861,27 @@ func TestHub_ReplayProjector(t *testing.T) {
 			assert.NotContains(t, row, "secret")
 		})
 	}
+}
+
+// A policy adopted while a gap-fill is in flight applies to the next replayed
+// row, as it does on the live path: the projector reads the policy per event
+// rather than once at construction.
+func TestHub_ReplayProjector_ReadsPolicyPerEvent(t *testing.T) {
+	t.Parallel()
+	granted := &policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}},
+		},
+	}
+	var current atomic.Pointer[policy.Policy]
+	current.Store(granted)
+	hub := NewHub(tenant.Default, func(tenant.ID) *policy.Policy { return current.Load() }, nil, nil)
+	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z", map[string]any{"page": "/home"})
+
+	project := hub.ReplayProjector("viewer", NewSubscriber(nil, nil))
+	require.Len(t, project(raw), 2, "granted before the reload")
+	current.Store(&policy.Policy{}) // the reload revokes the grant mid-fill
+	assert.Empty(t, project(raw), "the next replayed row sees the revocation")
 }
 
 // TestHub_ReplayProjector_RowFilter exercises the row-filter branch of replay: the
