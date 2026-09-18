@@ -184,7 +184,7 @@ The hot-reloadable half of configuration: a directory of four JSON files (`confi
 - **store.go** — `Store` owns the adopted snapshot. `Open` validates and adopts at boot; `Reload` re-validates and swaps the document atomically when there are no errors (a rejected reload keeps the previous snapshot). Consumers read typed accessors per call (`ClickHouse()`, `Auth()`, `DedupeFor(table)`, `DLQFor(table)`, `Keepalive()`, …) rather than holding values, and `AfterAdopt` registers hooks (dedupe store open/close, keepalive-wheel rebuild) that run after each successful reload.
 - **registry.go** — `Registry` maps a tenant id to its `Store` (`For(id)`). It holds the one store `Open` adopted, under `tenant.Default`; reload and the watcher stay on the `Store`.
 - **watch.go** — fsnotify on the *directory* (not the files, so atomic-writer replaces and Kubernetes ConfigMap symlink swaps aren't lost), debounced into one reload; reloads once as soon as the watch exists so an edit between the boot read and the watch is never missed. `SIGHUP` and the reload endpoint funnel through the same serialized `Reload`.
-- **seed.go** / **seed/** — The `go:embed`ded starter directory with every key at its default. The binary carries no compiled defaults: `wavehouse bootstrap [dir]` writes this seed, and the compose stack and e2e fixture ship copies of it.
+- **seed.go** / **seed/** — The embedded (`go:embed`) starter directory with every key at its default. The binary carries no compiled defaults: `wavehouse bootstrap [dir]` writes this seed, and the compose stack and e2e fixture ship copies of it.
 
 ### `tenant/` — Tenant Identifier
 
