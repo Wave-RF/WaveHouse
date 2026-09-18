@@ -40,7 +40,6 @@ type StructuredQueryHandler struct {
 	// constant.
 	bucketSecs     func(*settings.Store) int
 	defaultMaxRows func(*settings.Store) int
-	logger         *slog.Logger
 
 	// maxRequestBytes optionally overrides the default inbound request body
 	// cap (maxControlBodyBytes). When 0, the default applies. Exists so
@@ -58,7 +57,6 @@ func NewStructuredQueryHandler(
 	bucketSecs func(*settings.Store) int,
 	queryTimeout func() time.Duration,
 	defaultMaxRows func(*settings.Store) int,
-	logger *slog.Logger,
 ) *StructuredQueryHandler {
 	return &StructuredQueryHandler{
 		CHConn:         conn,
@@ -68,7 +66,6 @@ func NewStructuredQueryHandler(
 		bucketSecs:     bucketSecs,
 		queryTimeout:   queryTimeout,
 		defaultMaxRows: defaultMaxRows,
-		logger:         logger,
 	}
 }
 
@@ -115,7 +112,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	claims, _ := auth.ClaimsFromContext(r.Context())
 	perms := policy.Evaluate(p, role, table, "select", claims)
 	if !perms.Allowed {
-		writeAuthzDenied(w, r, h.logger, role, nil,
+		writeAuthzDenied(w, r, role, nil,
 			slog.String("gate", "policy"),
 			slog.String("table", table),
 			slog.String("action", "select"),

@@ -45,7 +45,6 @@ type Dependencies struct {
 	// production). An empty or nil list — including a nil func — denies every
 	// browser origin; ["*"] is the only allow-all spelling.
 	CORSOrigins func() []string
-	Logger      *slog.Logger
 	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
 	// endpoint (Prometheus convention). Wired by internal/app from the OTel Prometheus
 	// exporter when observability.metrics.prometheus.enabled is true AND port is 0.
@@ -168,7 +167,7 @@ func NewRouter(deps Dependencies) http.Handler {
 			// default), read live from the policy store so changes apply
 			// without a restart.
 			r.Use(deps.AuthMW)
-			r.Use(RequireAdmin(deps.PolicySource, deps.Logger))
+			r.Use(RequireAdmin(deps.PolicySource))
 
 			// Schema discovery.
 			r.Get("/schema", deps.Schema.Get)
@@ -257,7 +256,7 @@ func jsonRecoverer(next http.Handler) http.Handler {
 // resolves to an empty (non-admin) role and is denied here. Denials go through
 // writeAuthzDenied, so a present-but-invalid token fails loud (401 + token
 // reason) rather than as a bare 403.
-func RequireAdmin(store policy.Source, logger *slog.Logger) func(http.Handler) http.Handler {
+func RequireAdmin(store policy.Source) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var p *policy.Policy
@@ -273,7 +272,7 @@ func RequireAdmin(store policy.Source, logger *slog.Logger) func(http.Handler) h
 				next.ServeHTTP(w, r)
 				return
 			}
-			writeAuthzDenied(w, r, logger, role, nil, slog.String("gate", "admin"))
+			writeAuthzDenied(w, r, role, nil, slog.String("gate", "admin"))
 		})
 	}
 }

@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -11,18 +10,20 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func captureLog(t *testing.T) (*slog.Logger, *bytes.Buffer) {
+// captureLog routes the default logger to the returned buffer. The default
+// logger is process-wide, so the tests that call it run serially (see
+// logtest.Capture).
+func captureLog(t *testing.T) *logtest.Buffer {
 	t.Helper()
-	var buf bytes.Buffer
-	h := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
-	return slog.New(h), &buf
+	return logtest.Capture(t, slog.LevelDebug)
 }
 
-func records(t *testing.T, buf *bytes.Buffer) []map[string]any {
+func records(t *testing.T, buf *logtest.Buffer) []map[string]any {
 	t.Helper()
 	var out []map[string]any
 	for line := range strings.SplitSeq(strings.TrimRight(buf.String(), "\n"), "\n") {
@@ -37,11 +38,10 @@ func records(t *testing.T, buf *bytes.Buffer) []map[string]any {
 }
 
 func TestWarnIfFreshDataDir_Missing(t *testing.T) {
-	t.Parallel()
-	logger, buf := captureLog(t)
+	buf := captureLog(t)
 
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	WarnIfFreshDataDir(logger, "nats", missing)
+	WarnIfFreshDataDir("nats", missing)
 
 	recs := records(t, buf)
 	require.Len(t, recs, 1)
@@ -52,11 +52,10 @@ func TestWarnIfFreshDataDir_Missing(t *testing.T) {
 }
 
 func TestWarnIfFreshDataDir_Empty(t *testing.T) {
-	t.Parallel()
-	logger, buf := captureLog(t)
+	buf := captureLog(t)
 
 	// t.TempDir() returns a fresh empty dir.
-	WarnIfFreshDataDir(logger, "pebble", t.TempDir())
+	WarnIfFreshDataDir("pebble", t.TempDir())
 
 	recs := records(t, buf)
 	require.Len(t, recs, 1)
@@ -65,13 +64,12 @@ func TestWarnIfFreshDataDir_Empty(t *testing.T) {
 }
 
 func TestWarnIfFreshDataDir_Populated(t *testing.T) {
-	t.Parallel()
-	logger, buf := captureLog(t)
+	buf := captureLog(t)
 
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "marker"), []byte("x"), 0o600))
 
-	WarnIfFreshDataDir(logger, "nats", dir)
+	WarnIfFreshDataDir("nats", dir)
 
 	recs := records(t, buf)
 	require.Len(t, recs, 1)
@@ -80,23 +78,21 @@ func TestWarnIfFreshDataDir_Populated(t *testing.T) {
 }
 
 func TestWarnIfFreshDataDir_EmptyDirArgIsNoop(t *testing.T) {
-	t.Parallel()
-	logger, buf := captureLog(t)
+	buf := captureLog(t)
 
-	WarnIfFreshDataDir(logger, "nats", "")
+	WarnIfFreshDataDir("nats", "")
 
 	assert.Empty(t, buf.String())
 }
 
 func TestLogStorageInitError_AddsHintOnPermissionDenied(t *testing.T) {
-	t.Parallel()
-	logger, buf := captureLog(t)
+	buf := captureLog(t)
 
 	// fs.ErrPermission wraps to os.ErrPermission via errors.Is — this is
 	// the canonical "permission denied" signal across the stdlib filesystem
 	// surface, so any wrapped EACCES/EPERM bubbling up from NATS or Pebble
 	// will satisfy the same check.
-	LogStorageInitError(logger, "mq", "/app/data/nats", fs.ErrPermission)
+	LogStorageInitError("mq", "/app/data/nats", fs.ErrPermission)
 
 	recs := records(t, buf)
 	require.Len(t, recs, 1)
@@ -107,10 +103,9 @@ func TestLogStorageInitError_AddsHintOnPermissionDenied(t *testing.T) {
 }
 
 func TestLogStorageInitError_NoHintOnGenericError(t *testing.T) {
-	t.Parallel()
-	logger, buf := captureLog(t)
+	buf := captureLog(t)
 
-	LogStorageInitError(logger, "mq", "/app/data/nats", errors.New("disk full"))
+	LogStorageInitError("mq", "/app/data/nats", errors.New("disk full"))
 
 	recs := records(t, buf)
 	require.Len(t, recs, 1)

@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,19 +38,19 @@ type captured struct {
 // run drives cfg's middleware over a request decorated by setup, returning what
 // the downstream handler observed. The middleware never rejects — it always
 // reaches the handler — so the interesting output is the captured context, not
-// the status code. It uses no policy store or logger (the operator-key path is
+// the status code. It uses no policy store (the operator-key path is
 // exercised by runOp).
 func run(t *testing.T, cfg Config, setup func(*http.Request)) captured {
 	t.Helper()
-	return runOp(t, cfg, nil, nil, setup)
+	return runOp(t, cfg, nil, setup)
 }
 
-// runOp is run with an explicit policy store and logger, so the operator-key
+// runOp is run with an explicit policy store, so the operator-key
 // path (which reads the live admin role from the store) can be exercised.
-func runOp(t *testing.T, cfg Config, store policy.Source, logger *slog.Logger, setup func(*http.Request)) captured {
+func runOp(t *testing.T, cfg Config, store policy.Source, setup func(*http.Request)) captured {
 	t.Helper()
 	var c captured
-	a, err := NewAuthenticator(cfg, store, logger)
+	a, err := NewAuthenticator(cfg, store)
 	require.NoError(t, err)
 	h := a.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c.called = true
@@ -318,7 +318,7 @@ func TestMiddleware_JWKSUnreachableAtBoot_FailsLoud(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := NewAuthenticator(Config{JWKSURL: srv.URL}, nil, nil)
+	_, err := NewAuthenticator(Config{JWKSURL: srv.URL}, nil)
 	require.Error(t, err, "an unreachable/erroring JWKS at boot must fail loudly")
 }
 
@@ -330,7 +330,7 @@ func TestMiddleware_JWKSReachableAtBoot_OK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, err := NewAuthenticator(Config{JWKSURL: srv.URL}, nil, nil)
+	a, err := NewAuthenticator(Config{JWKSURL: srv.URL}, nil)
 	require.NoError(t, err, "a reachable JWKS endpoint must construct successfully")
 	require.NotNil(t, a.Middleware())
 }
@@ -374,7 +374,6 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 		name       string
 		cfg        Config
 		store      policy.Source
-		logger     *slog.Logger
 		setup      func(*http.Request)
 		wantOp     bool
 		wantRole   string
@@ -384,7 +383,6 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 			name:     "match sets operator bit and stamps the live admin role",
 			cfg:      Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role", OperatorKey: testOperatorKey},
 			store:    adminStore(),
-			logger:   testutil.NopLogger(), // exercise the audit-log (logger != nil) branch
 			setup:    operatorHeader(testOperatorKey),
 			wantOp:   true,
 			wantRole: "admin",
@@ -489,7 +487,7 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			c := runOp(t, tt.cfg, tt.store, tt.logger, tt.setup)
+			c := runOp(t, tt.cfg, tt.store, tt.setup)
 			assert.Equal(t, tt.wantOp, c.isOperator, "operator bit")
 			assert.Equal(t, tt.wantRole, c.role, "role")
 			assert.Equal(t, tt.wantClaims, c.hasClaims, "claims present")
@@ -507,7 +505,7 @@ func TestMiddleware_OperatorKey_StripsQueryToken(t *testing.T) {
 	t.Parallel()
 	store := policy.Static(&policy.Policy{AdminRole: "admin"})
 	query := testutil.MakeJWT(t, map[string]any{"role": "viewer"})
-	c := runOp(t, Config{OperatorKey: testOperatorKey}, store, nil, func(r *http.Request) {
+	c := runOp(t, Config{OperatorKey: testOperatorKey}, store, func(r *http.Request) {
 		r.URL.RawQuery = "table=clicks&token=" + query
 		r.Header.Set("X-Operator-Key", testOperatorKey)
 	})
@@ -517,12 +515,13 @@ func TestMiddleware_OperatorKey_StripsQueryToken(t *testing.T) {
 	assert.Equal(t, "clicks", c.otherQueryParam)
 }
 
-// infoBufLogger returns a logger writing JSON records at Info+ to buf, so a test
-// can assert both that the failed-operator-attempt WARN fires and that ordinary
-// traffic does not emit it. Mirrors warnBufLogger in internal/api/errors_test.go.
-func infoBufLogger() (*slog.Logger, *bytes.Buffer) {
-	var buf bytes.Buffer
-	return slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})), &buf
+// captureInfo routes the default logger's Info+ records to the returned
+// buffer, so a test can assert both that the failed-operator-attempt WARN
+// fires and that ordinary traffic does not emit it. The default logger is
+// process-wide, so the tests that call it run serially (see logtest.Capture).
+func captureInfo(t *testing.T) *logtest.Buffer {
+	t.Helper()
+	return logtest.Capture(t, slog.LevelInfo)
 }
 
 // A presented-but-wrong operator credential is recorded at WARN (so operators
@@ -535,14 +534,12 @@ func infoBufLogger() (*slog.Logger, *bytes.Buffer) {
 // the failed-attempt cases in TestMiddleware_OperatorKey already exercise the
 // Add call (proving it's safe under the default no-op meter).
 func TestMiddleware_OperatorKey_FailedAttemptLogged(t *testing.T) {
-	t.Parallel()
 	cfg := Config{OperatorKey: testOperatorKey}
 	store := policy.Static(&policy.Policy{AdminRole: "admin"})
 
 	t.Run("wrong key via X-Operator-Key logs WARN and falls through", func(t *testing.T) {
-		t.Parallel()
-		logger, buf := infoBufLogger()
-		c := runOp(t, cfg, store, logger, operatorHeader("wrong-key"))
+		buf := captureInfo(t)
+		c := runOp(t, cfg, store, operatorHeader("wrong-key"))
 		assert.False(t, c.isOperator, "a wrong key never sets the operator bit")
 		assert.Empty(t, c.role, "wrong key + no JWT → roleless fall-through")
 		assert.NoError(t, c.authErr)
@@ -554,9 +551,8 @@ func TestMiddleware_OperatorKey_FailedAttemptLogged(t *testing.T) {
 	})
 
 	t.Run("wrong key via Authorization Operator scheme logs WARN", func(t *testing.T) {
-		t.Parallel()
-		logger, buf := infoBufLogger()
-		c := runOp(t, cfg, store, logger, func(r *http.Request) {
+		buf := captureInfo(t)
+		c := runOp(t, cfg, store, func(r *http.Request) {
 			r.Header.Set("Authorization", "Operator wrong-key")
 		})
 		assert.False(t, c.isOperator)
@@ -564,18 +560,16 @@ func TestMiddleware_OperatorKey_FailedAttemptLogged(t *testing.T) {
 	})
 
 	t.Run("absent operator credential does not emit the failed-attempt WARN", func(t *testing.T) {
-		t.Parallel()
-		logger, buf := infoBufLogger()
-		c := runOp(t, cfg, store, logger, nil) // no operator header at all
+		buf := captureInfo(t)
+		c := runOp(t, cfg, store, nil) // no operator header at all
 		assert.False(t, c.isOperator)
 		assert.NotContains(t, buf.String(), "operator key authentication failed",
 			"an absent operator credential is an ordinary request, not a failed attempt")
 	})
 
 	t.Run("successful operator auth logs the INFO audit, not the failure WARN", func(t *testing.T) {
-		t.Parallel()
-		logger, buf := infoBufLogger()
-		c := runOp(t, cfg, store, logger, operatorHeader(testOperatorKey))
+		buf := captureInfo(t)
+		c := runOp(t, cfg, store, operatorHeader(testOperatorKey))
 		assert.True(t, c.isOperator)
 		out := buf.String()
 		assert.Contains(t, out, `"level":"INFO"`)
@@ -634,7 +628,7 @@ func TestExtractClaim(t *testing.T) {
 // changes role_claim is visible to the next request with no rebuild.
 func TestAuthenticator_ReconfigureSwapsRoleClaim(t *testing.T) {
 	t.Parallel()
-	a, err := NewAuthenticator(Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role"}, nil, nil)
+	a, err := NewAuthenticator(Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role"}, nil)
 	require.NoError(t, err)
 	var got string
 	h := a.Middleware()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = RoleFromContext(r.Context()) }))
@@ -665,7 +659,7 @@ func TestAuthenticator_ReconfigureAppliesUnreachableJWKS(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, err := NewAuthenticator(Config{JWTSecret: testutil.TestJWTSecret}, nil, nil)
+	a, err := NewAuthenticator(Config{JWTSecret: testutil.TestJWTSecret}, nil)
 	require.NoError(t, err)
 
 	var got string

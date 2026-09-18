@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -95,7 +96,7 @@ type timestampSpec struct {
 // type strings and loads no zones. An unresolvable zone (no embedded tzdata —
 // resolution needs the runtime's zone database) keeps a nil spec — warned, not
 // fatal: those values pass through un-canonicalized.
-func resolveTimestampSpecs(ts *TableSchema, serverTZ *time.Location, logger *slog.Logger) {
+func resolveTimestampSpecs(ctx context.Context, ts *TableSchema, serverTZ *time.Location) {
 	for i := range ts.Columns {
 		col := &ts.Columns[i]
 		if !isTimestampType(col.Type) {
@@ -103,7 +104,7 @@ func resolveTimestampSpecs(ts *TableSchema, serverTZ *time.Location, logger *slo
 		}
 		spec, err := resolveTimestampSpec(col.Type, serverTZ)
 		if err != nil {
-			logger.Warn("cannot resolve timestamp column spec; its ingest values will pass through un-canonicalized",
+			slog.WarnContext(ctx, "cannot resolve timestamp column spec; its ingest values will pass through un-canonicalized",
 				"table", ts.Name, "column", col.Name, "type", col.Type, "error", err)
 			continue
 		}

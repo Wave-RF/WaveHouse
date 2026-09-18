@@ -47,7 +47,8 @@ func TestPipesHandler_List(t *testing.T) {
 		&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT page, count(*) FROM clicks GROUP BY page"},
 		&pipes.NamedQuery{Name: "recent", SQL: "SELECT * FROM clicks ORDER BY ts DESC LIMIT 10"},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
+	h.Tenants = testTenants()
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/pipes", nil)
@@ -64,7 +65,8 @@ func TestPipesHandler_Get_Found(t *testing.T) {
 	store := staticPipes(
 		&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT page FROM clicks"},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
+	h.Tenants = testTenants()
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes/top_pages", "top_pages", nil)
@@ -79,7 +81,8 @@ func TestPipesHandler_Get_Found(t *testing.T) {
 func TestPipesHandler_Get_NotFound(t *testing.T) {
 	t.Parallel()
 	store := staticPipes()
-	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
+	h.Tenants = testTenants()
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes/nope", "nope", nil)
@@ -93,7 +96,8 @@ func TestPipesHandler_Get_NotFound(t *testing.T) {
 func TestPipesHandler_List_Empty(t *testing.T) {
 	t.Parallel()
 	store := staticPipes()
-	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
+	h.Tenants = testTenants()
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes", "", nil)
@@ -109,7 +113,7 @@ func TestPipesHandler_List_Empty(t *testing.T) {
 func TestPipesHandler_Execute_NotFound(t *testing.T) {
 	t.Parallel()
 	store := staticPipes()
-	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/nope/execute", "nope", nil)
@@ -133,7 +137,7 @@ func TestPipesHandler_Execute_RoleAuthorization(t *testing.T) {
 		// A real (non-nil) policy so the default admin role ("admin") is defined
 		// and bypasses the allowlist, per the matrix. With a nil policy nobody is
 		// admin (total lockout) — covered separately in internal/policy tests.
-		h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+		h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout)
 
 		w := httptest.NewRecorder()
 		r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
@@ -160,7 +164,7 @@ func TestPipesHandler_Execute_RestrictedPipe_EmptyRoleDenied(t *testing.T) {
 			AllowedRoles: []string{"admin"},
 		},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
 
 	w := httptest.NewRecorder()
 	// No ContextKeyRole set, which simulates no token or a JWT without the role claim.
@@ -181,7 +185,7 @@ func TestPipesHandler_Execute_DefaultRoleGrantsAccess(t *testing.T) {
 	store := staticPipes(
 		&pipes.NamedQuery{Name: "report", SQL: "SELECT * FROM clicks", AllowedRoles: []string{"viewer"}},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
 	h.PolicySource = staticPolicy(&policy.Policy{DefaultRole: "viewer"})
 
 	w := httptest.NewRecorder()
@@ -202,7 +206,7 @@ func TestPipesHandler_Execute_DefaultRoleNotInAllowedRolesDenied(t *testing.T) {
 	store := staticPipes(
 		&pipes.NamedQuery{Name: "admin_report", SQL: "SELECT * FROM clicks", AllowedRoles: []string{"admin"}},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
 	h.PolicySource = staticPolicy(&policy.Policy{DefaultRole: "viewer"})
 
 	w := httptest.NewRecorder()
@@ -226,7 +230,7 @@ func TestPipesHandler_Execute_MissingParam(t *testing.T) {
 			},
 		},
 	)
-	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout)
 
 	w := httptest.NewRecorder()
 	// No query params or body — missing "page".
@@ -251,7 +255,7 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 			},
 		},
 	)
-	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/pipes/by_page/execute?page=/home", nil)
@@ -280,7 +284,7 @@ func TestPipesHandler_Execute_RequestBodyCap(t *testing.T) {
 			Parameters: []pipes.ParamDef{{Name: "page", Type: "string", Required: true}},
 		},
 	)
-	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout)
 	h.maxRequestBytes = 64
 
 	w := httptest.NewRecorder()
@@ -307,7 +311,7 @@ func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
 			},
 		},
 	)
-	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout)
 
 	w := httptest.NewRecorder()
 	body := map[string]any{"page": "/about"}
@@ -330,7 +334,7 @@ func TestPipesHandler_Execute_NoAllowedRoles_NonAdminDenied(t *testing.T) {
 	store := staticPipes(
 		&pipes.NamedQuery{Name: "open", SQL: "SELECT * FROM clicks"}, // no AllowedRoles
 	)
-	h := NewPipesHandler(store, nil, nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)
@@ -356,7 +360,7 @@ func TestPipesHandler_Execute_ArrayParamBinds(t *testing.T) {
 			Parameters: []pipes.ParamDef{{Name: "ids", Type: "array", Required: true}},
 		},
 	)
-	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout)
 
 	w := httptest.NewRecorder()
 	body := map[string]any{"ids": []any{"a", "b"}}
@@ -377,7 +381,7 @@ func TestPipesHandler_Execute_ObjectParamRejected(t *testing.T) {
 	store := staticPipes(
 		&pipes.NamedQuery{Name: "by_col", SQL: "SELECT * FROM clicks WHERE col = {{p}}"},
 	)
-	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout)
 
 	w := httptest.NewRecorder()
 	body := map[string]any{"p": map[string]any{"k": "v"}}
@@ -398,7 +402,7 @@ func TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed(t *testing.T) {
 	store := staticPipes(
 		&pipes.NamedQuery{Name: "open", SQL: "SELECT * FROM clicks"},
 	)
-	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout, testutil.NopLogger())
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout)
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)

@@ -13,6 +13,11 @@
     - any-glob-to-any-file:
       - "internal/api/**"
 
+"area/tenant":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "internal/tenant/**"
+
 "area/ingest":
   - changed-files:
     - any-glob-to-any-file:

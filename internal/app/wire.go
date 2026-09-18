@@ -54,7 +54,7 @@ func withoutContext(release func() error) func(context.Context) error {
 // are read per request off the adopted snapshot, so a reload applies to the
 // next request with no hook.
 func (a *App) wireSettings() error {
-	store, _ := settings.Open(a.cfg.Settings.Dir, slog.Default())
+	store, _ := settings.Open(a.cfg.Settings.Dir)
 	if store == nil {
 		return fmt.Errorf("settings directory %s invalid, refusing to start — findings above; `wavehouse validate` reproduces them, `wavehouse bootstrap` writes a starter directory", a.cfg.Settings.Dir)
 	}
@@ -154,7 +154,7 @@ func (a *App) wireClickHouse() error {
 			QueryTimeout: c.QueryTimeout,
 		}
 	}
-	ch, err := chconn.Open(params(), slog.Default())
+	ch, err := chconn.Open(params())
 	if err != nil {
 		return fmt.Errorf("clickhouse open: %w", err)
 	}
@@ -181,7 +181,7 @@ func (a *App) wireDiscovery(ctx context.Context) {
 	a.bootState = api.NewBootState(nil)
 	// Both sources are read per refresh, so a settings reload retunes the
 	// cadence and a ClickHouse reconfigure moves the database without a restart.
-	registry := discovery.NewSchemaRegistry(a.ch, a.ch.Database, tenant.Default, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval), slog.Default())
+	registry := discovery.NewSchemaRegistry(a.ch, a.ch.Database, tenant.Default, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
 	a.registry = registry
 	bootErr := registry.Refresh(ctx)
 	if bootErr != nil {
@@ -224,10 +224,10 @@ func (a *App) wireDedupe() error {
 	reconcile := func() (bool, error) {
 		enabled := a.store.DedupeEnabled()
 		if enabled && !dedup.Open() {
-			config.WarnIfFreshDataDir(slog.Default(), "pebble", dir)
+			config.WarnIfFreshDataDir("pebble", dir)
 		}
 		if err := dedup.Apply(enabled); err != nil {
-			config.LogStorageInitError(slog.Default(), "dedupe", dir, err)
+			config.LogStorageInitError("dedupe", dir, err)
 			return enabled, err
 		}
 		return enabled, nil
@@ -250,11 +250,11 @@ func (a *App) wireDedupe() error {
 // them consistent (see mq.Broker.SetMaxBytes).
 func (a *App) wireMQ() error {
 	dir := filepath.Join(a.cfg.DataDir, "nats")
-	config.WarnIfFreshDataDir(slog.Default(), "nats", dir)
+	config.WarnIfFreshDataDir("nats", dir)
 	var broker mq.Broker
 	broker, err := mq.NewEmbedded(dir, a.store.MQMaxBytes())
 	if err != nil {
-		config.LogStorageInitError(slog.Default(), "mq", dir, err)
+		config.LogStorageInitError("mq", dir, err)
 		return fmt.Errorf("mq open: %w", err)
 	}
 	a.mq = broker
@@ -303,7 +303,7 @@ func (a *App) wireCache() error {
 // written to ClickHouse and older than the SSE gap window
 // (stream.gap_window_minutes, re-read every sweep). Runs every minute.
 func (a *App) wireSweeper() {
-	sweeper := ingest.NewSweeper(a.mq, tenant.Default, perTenant(a.tenants, (*settings.Store).GapWindow), slog.Default())
+	sweeper := ingest.NewSweeper(a.mq, tenant.Default, perTenant(a.tenants, (*settings.Store).GapWindow))
 	a.add(component{name: "sweeper", run: func(ctx context.Context) error {
 		sweeper.Start(ctx)
 		return nil
@@ -418,7 +418,7 @@ func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
 			OperatorKey: operatorKey,
 		}
 	}
-	authn, err := auth.NewAuthenticator(authConfig(), a.policies, slog.Default())
+	authn, err := auth.NewAuthenticator(authConfig(), a.policies)
 	if err != nil {
 		return nil, fmt.Errorf("auth middleware init: %w", err)
 	}
@@ -477,9 +477,7 @@ func (a *App) wireReloadTriggers() {
 // prometheus.port set — the metrics sidecar. Same-port Prometheus mounts on
 // the API router instead.
 func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
-	logger := slog.Default()
-
-	ingestHandler := api.NewIngestHandler(a.registry, a.mq, logger)
+	ingestHandler := api.NewIngestHandler(a.registry, a.mq)
 	ingestHandler.PolicySource = (*settings.Store).Policy
 	ingestHandler.Dedup = a.dedup
 	ingestHandler.DedupeSettings = (*settings.Store).DedupeFor
@@ -495,8 +493,8 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	closing := make(chan struct{})
 	streamHandler.Closing = closing
 
-	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.ch, a.cache, a.ch.QueryTimeout, logger)
-	pipesHandler.OpsStore = a.store
+	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.ch, a.cache, a.ch.QueryTimeout)
+	pipesHandler.Tenants = a.tenants
 
 	deps := api.Dependencies{
 		Ingest: ingestHandler,
@@ -508,16 +506,15 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Health:          healthHandler,
 		Version:         api.NewVersionHandler(a.build.Version, a.build.GitCommit, a.build.BuildTime),
 		Schema:          api.NewSchemaHandler(a.registry),
-		DLQ:             api.NewDLQHandler(a.mq, logger),
+		DLQ:             api.NewDLQHandler(a.mq),
 		Pipes:           pipesHandler,
-		StructuredQuery: api.NewStructuredQueryHandler(a.ch, a.cache, a.registry, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, a.ch.QueryTimeout, (*settings.Store).DefaultMaxRows, logger),
+		StructuredQuery: api.NewStructuredQueryHandler(a.ch, a.cache, a.registry, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, a.ch.QueryTimeout, (*settings.Store).DefaultMaxRows),
 
 		AuthMW:       authMW,
 		Tenants:      a.tenants,
 		PolicySource: a.policies,
-		Logger:       logger,
 		CORSOrigins:  a.store.CORSOrigins,
-		Settings:     api.NewSettingsHandler(a.store, logger),
+		Settings:     api.NewSettingsHandler(a.store),
 	}
 
 	prom := a.cfg.Prometheus

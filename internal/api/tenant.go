@@ -46,34 +46,55 @@ func requestStore(w http.ResponseWriter, r *http.Request) (*settings.Store, bool
 	return store, ok
 }
 
-// TenantMW resolves the request's tenant before authentication runs: the
-// tenant.Header value, tenant.Default when absent. A malformed id is a 400
-// and a well-formed id the registry does not hold is a 404. A repeated
-// header is refused rather than picked from, so a value a proxy sets can
-// never be shadowed by one the client sent.
+// resolveTenant turns the tenant values a request carries — one header line
+// or one query value, none meaning tenant.Default — into that tenant's store.
+// A malformed id is a 400 and a well-formed id the registry does not hold is
+// a 404. A repeated value is refused rather than picked from, so a value a
+// proxy sets can never be shadowed by one the client sent. where names the
+// source in the error body.
+func resolveTenant(w http.ResponseWriter, tenants *settings.Registry, where string, values []string) (*settings.Store, bool) {
+	id := tenant.Default
+	if len(values) > 1 {
+		writeJSONError(w, http.StatusBadRequest, "invalid "+where+": sent more than once")
+		return nil, false
+	}
+	if len(values) == 1 && values[0] != "" {
+		parsed, err := tenant.Parse(values[0])
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid "+where+": "+err.Error())
+			return nil, false
+		}
+		id = parsed
+	}
+	store, ok := tenants.For(id)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, "unknown tenant: "+id.String())
+		return nil, false
+	}
+	return store, true
+}
+
+// TenantMW resolves the request's tenant from the tenant.Header before
+// authentication runs and stores it in the request context.
 func TenantMW(tenants *settings.Registry) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id := tenant.Default
-			values := r.Header.Values(tenant.Header)
-			if len(values) > 1 {
-				writeJSONError(w, http.StatusBadRequest, "invalid "+tenant.Header+": sent more than once")
-				return
-			}
-			if len(values) == 1 && values[0] != "" {
-				parsed, err := tenant.Parse(values[0])
-				if err != nil {
-					writeJSONError(w, http.StatusBadRequest, "invalid "+tenant.Header+": "+err.Error())
-					return
-				}
-				id = parsed
-			}
-			store, ok := tenants.For(id)
+			store, ok := resolveTenant(w, tenants, tenant.Header, r.Header.Values(tenant.Header))
 			if !ok {
-				writeJSONError(w, http.StatusNotFound, "unknown tenant: "+id.String())
 				return
 			}
 			next.ServeHTTP(w, r.WithContext(WithStore(r.Context(), store)))
 		})
 	}
+}
+
+// opsTenantParam is the query parameter an ops route takes its tenant from.
+// The ops tree is tenant-exempt — it runs no TenantMW and ignores the header
+// — so an admin names the tenant explicitly, and none means tenant.Default.
+const opsTenantParam = "tenant"
+
+// opsStore resolves the tenant an ops route addresses from its
+// opsTenantParam, with the same answers as TenantMW.
+func opsStore(w http.ResponseWriter, r *http.Request, tenants *settings.Registry) (*settings.Store, bool) {
+	return resolveTenant(w, tenants, "?"+opsTenantParam, r.URL.Query()[opsTenantParam])
 }

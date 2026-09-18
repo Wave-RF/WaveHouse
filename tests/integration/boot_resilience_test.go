@@ -18,7 +18,6 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
-	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
 // TestBootResilience_StickyHealthVsConditionalReady exercises the full
@@ -41,7 +40,6 @@ import (
 // package, which is exactly the assumption this test needs to violate.
 func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
 	ctx := context.Background()
-	logger := testutil.NopLogger()
 
 	ch, err := startClickHouse(ctx)
 	require.NoError(t, err, "starting initial CH container")
@@ -68,7 +66,7 @@ func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
 	require.NoError(t, err, "reopen driver against stopped CH")
 
 	bootState := api.NewBootState(nil)
-	registry := discovery.NewSchemaRegistry(ch.conn, func() string { return testCHDatabase }, tenant.Default, func(tenant.ID) time.Duration { return time.Minute }, logger)
+	registry := discovery.NewSchemaRegistry(ch.conn, func() string { return testCHDatabase }, tenant.Default, func(tenant.ID) time.Duration { return time.Minute })
 
 	// === Row 1: Boot, CH down ===
 	err = registry.Refresh(ctx)
@@ -90,7 +88,7 @@ func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
 	_ = ch.conn.Close()
 	ch.conn, err = openDriver(ch.nativeAddr())
 	require.NoError(t, err, "reopen driver against restarted CH")
-	registry = discovery.NewSchemaRegistry(ch.conn, func() string { return testCHDatabase }, tenant.Default, func(tenant.ID) time.Duration { return time.Minute }, logger)
+	registry = discovery.NewSchemaRegistry(ch.conn, func() string { return testCHDatabase }, tenant.Default, func(tenant.ID) time.Duration { return time.Minute })
 	h.CHConn = ch.conn
 	require.NoError(t, waitForNativeReady(ctx, ch.conn, 30*time.Second), "CH native should be ready after restart")
 

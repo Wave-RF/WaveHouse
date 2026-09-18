@@ -35,7 +35,7 @@ import (
 )
 
 // Shared mocks come from internal/testutil: MockMessage, MockPublisher,
-// MockRoundTripper, MockCache, NopLogger.
+// MockRoundTripper, MockCache.
 
 // newTestWorker builds an IngestWorker wired to in-process mocks. wait() blocks
 // until all background ack goroutines kicked off by handleSuccess finish.
@@ -47,7 +47,6 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockPublisher
 		failed:     make(chan error, 1),
 		httpClient: &http.Client{Transport: rt},
 		cache:      cache,
-		logger:     testutil.NopLogger(),
 		target: func() chconn.Target {
 			return chconn.Target{URL: "http://test-clickhouse:8123", Username: "test_user", Password: "test_pass", Database: "test_db"}
 		},
@@ -121,7 +120,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 		{
 			name: "nil cache",
 			setup: func(t *testing.T) (Queue, cache.Cache) {
-				emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024, testutil.NopLogger())
+				emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024)
 				require.NoError(t, err)
 				t.Cleanup(func() { _ = emb.Close() })
 				return emb, nil
@@ -153,7 +152,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 	t.Parallel()
 
 	// ── Embedded MQ ──
-	emb, err := mq.NewEmbedded(t.TempDir(), 4*1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(t.TempDir(), 4*1024*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 
@@ -196,7 +195,6 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 		dlq:        emb,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cache:      cache,
-		logger:     testutil.NopLogger(),
 		target: func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
@@ -247,7 +245,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	t.Parallel()
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 
@@ -298,7 +296,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 	t.Parallel()
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 
@@ -1052,7 +1050,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		batchB = maxBatch
 	)
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 
@@ -1088,7 +1086,6 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		dlq:        emb,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cache:      &testutil.MockCache{},
-		logger:     testutil.NopLogger(),
 		target: func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
@@ -1146,7 +1143,7 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 		total    = 4                // 3 → one full batch on the size trigger; 1 leftover
 	)
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 
@@ -1184,7 +1181,6 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 		dlq:        emb,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cache:      &testutil.MockCache{},
-		logger:     testutil.NopLogger(),
 		target: func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},

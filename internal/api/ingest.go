@@ -47,7 +47,6 @@ type IngestHandler struct {
 	DedupeSettings func(store *settings.Store, table string) (enabled bool, idField string, requireID bool)
 	Publisher      mq.Publisher
 	PolicySource   PolicySource
-	logger         *slog.Logger
 
 	// Validator and Checker are the per-record seams a native type layer will
 	// take over (see ingest_seams.go). Both are optional: nil means the default
@@ -62,8 +61,8 @@ type IngestHandler struct {
 	maxRequestBytes int64
 }
 
-func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher, logger *slog.Logger) *IngestHandler {
-	return &IngestHandler{Registry: registry, Publisher: pub, logger: logger}
+func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher) *IngestHandler {
+	return &IngestHandler{Registry: registry, Publisher: pub}
 }
 
 var dedupeMissingIDCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
@@ -152,14 +151,14 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	// Add a standard log to prove we are inside the span logic
-	h.logger.DebugContext(ctx, "debug: span started for ingest", "table", table)
+	slog.DebugContext(ctx, "debug: span started for ingest", "table", table)
 
 	r = r.WithContext(ctx)
 
 	// TODO: what should the order of these be to maximize speed + limit risk of data leakage or DoS/resource exhaustion?
 
 	if table == "" {
-		h.logger.ErrorContext(ctx, "missing table parameter in request")
+		slog.ErrorContext(ctx, "missing table parameter in request")
 		writeJSONError(w, http.StatusBadRequest, "missing table")
 		return
 	}
@@ -167,7 +166,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// TODO: prevent table-enumeration...
 	schema := h.Registry.Get(table)
 	if schema == nil {
-		h.logger.WarnContext(ctx, "unknown table requested", "table", table)
+		slog.WarnContext(ctx, "unknown table requested", "table", table)
 		writeJSONError(w, http.StatusNotFound, "unknown table: "+table)
 		return
 	}
@@ -185,7 +184,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		claims, _ := auth.ClaimsFromContext(ctx)
 		perms = policy.Evaluate(p, role, table, "insert", claims)
 		if !perms.Allowed {
-			writeAuthzDenied(w, r, h.logger, role, nil,
+			writeAuthzDenied(w, r, role, nil,
 				slog.String("gate", "policy"),
 				slog.String("table", table),
 				slog.String("action", "insert"),
@@ -221,7 +220,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			// caller's own doing, and a proxy that starts duplicating the header
 			// would otherwise produce a wall of client-side 415s whose
 			// server-side record named only one of the declarations involved.
-			h.logger.WarnContext(ctx, "conflicting ingest content-type declarations",
+			slog.WarnContext(ctx, "conflicting ingest content-type declarations",
 				"content_types", decls, "table", table)
 		} else {
 			// Logs the same bounded set the response shows, like the conflicting
@@ -229,7 +228,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			// disagree with what the caller was told — for
 			// ["", "text/csv"] the client sees `Content-Type "", "text/csv"`
 			// while Header.Get would have logged only content_type="".
-			h.logger.WarnContext(ctx, "ingest content-type not declared or not supported",
+			slog.WarnContext(ctx, "ingest content-type not declared or not supported",
 				"content_types", decls, "table", table)
 		}
 		writeJSONError(w, http.StatusUnsupportedMediaType, contentTypeMessage(decls, conflicting))
@@ -254,7 +253,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		if writeMaxBytesError(w, err, reqCap) {
 			return
 		}
-		h.logger.WarnContext(ctx, "ingest body read failed", "error", err, "table", table)
+		slog.WarnContext(ctx, "ingest body read failed", "error", err, "table", table)
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -265,7 +264,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// only error left is an empty body.
 	rr, batch, err := newRecordReader(format, body.Bytes())
 	if err != nil {
-		h.logger.ErrorContext(ctx, "empty ingest body", "table", table, "format", format.String())
+		slog.ErrorContext(ctx, "empty ingest body", "table", table, "format", format.String())
 		writeJSONError(w, http.StatusBadRequest, emptyBodyMessage(format))
 		return
 	}
@@ -301,7 +300,7 @@ func (h *IngestHandler) handleSingle(
 		if writeMaxBytesError(w, err, reqCap) {
 			return
 		}
-		h.logger.ErrorContext(ctx, "invalid json payload", "error", err, "table", table)
+		slog.ErrorContext(ctx, "invalid json payload", "error", err, "table", table)
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -321,7 +320,7 @@ func (h *IngestHandler) handleSingle(
 		return
 	}
 
-	h.logger.InfoContext(ctx, "event successfully ingested", "table", table)
+	slog.InfoContext(ctx, "event successfully ingested", "table", table)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
@@ -370,7 +369,7 @@ func (h *IngestHandler) handleBatch(
 			// NDJSON line) — the reader can't resume, so fail the request rather
 			// than report a misleading partial summary. Not a body read error:
 			// the readers run over an in-memory slice now.
-			h.logger.WarnContext(ctx, "ingest read error", "error", err, "table", table)
+			slog.WarnContext(ctx, "ingest read error", "error", err, "table", table)
 			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}
@@ -398,7 +397,7 @@ func (h *IngestHandler) handleBatch(
 		appendResult(&result, recordResult{Index: idx, Ok: true})
 	}
 
-	h.logger.InfoContext(ctx, "batch ingested", "table", table,
+	slog.InfoContext(ctx, "batch ingested", "table", table,
 		"total", result.Total, "succeeded", result.Succeeded,
 		"failed", result.Failed, "duplicates", result.Duplicates)
 	w.Header().Set("Content-Type", "application/json")
@@ -477,11 +476,11 @@ func (h *IngestHandler) policyCheckGuard(
 		schemaCol, known := schema.Lookup(col)
 		switch {
 		case !known:
-			h.logger.ErrorContext(ctx, "policy check references a column the table does not have",
+			slog.ErrorContext(ctx, "policy check references a column the table does not have",
 				"column", col, "table", table, "role", role)
 			reasons = append(reasons, fmt.Sprintf("%q, which table %q does not have", col, table))
 		case !schemaCol.IsInsertable():
-			h.logger.ErrorContext(ctx, "policy check references a column no record may write",
+			slog.ErrorContext(ctx, "policy check references a column no record may write",
 				"column", col, "table", table, "role", role, "default_kind", schemaCol.DefaultKind)
 			reasons = append(reasons, fmt.Sprintf("%q of table %q, which is %s and cannot be inserted",
 				col, table, strings.ToLower(schemaCol.DefaultKind)))
@@ -492,7 +491,7 @@ func (h *IngestHandler) policyCheckGuard(
 			// Accepting a check that provably does nothing is worse than refusing
 			// it. An operator wanting this should check the DEFAULT column derived
 			// from the ephemeral one, which is stored and therefore enforceable.
-			h.logger.ErrorContext(ctx, "policy check references an ephemeral column, which is never stored",
+			slog.ErrorContext(ctx, "policy check references an ephemeral column, which is never stored",
 				"column", col, "table", table, "role", role)
 			reasons = append(reasons, fmt.Sprintf("%q of table %q, which is ephemeral and is never stored",
 				col, table))
@@ -531,7 +530,7 @@ func (h *IngestHandler) processRecord(
 	checkGuard *recordReject,
 ) (duplicate bool, reject *recordReject, abort *requestAbort) {
 	if err := h.validator().Validate(schema, data); err != nil {
-		h.logger.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
+		slog.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
 		return false, &recordReject{Status: http.StatusBadRequest, Message: err.Error()}, nil
 	}
 
@@ -539,7 +538,7 @@ func (h *IngestHandler) processRecord(
 	if perms != nil {
 		for col := range data {
 			if !perms.IsColumnAllowed(col, true) {
-				h.logger.WarnContext(ctx, "column insertion forbidden", "column", col, "role", role)
+				slog.WarnContext(ctx, "column insertion forbidden", "column", col, "role", role)
 				return false, &recordReject{
 					Status:  http.StatusForbidden,
 					Message: fmt.Sprintf("column %q not allowed for insert", col),
@@ -562,7 +561,7 @@ func (h *IngestHandler) processRecord(
 			// so this is true for every record or none. As a reject, a 10k-record
 			// batch would emit 10k ERROR lines and report 10k independent
 			// permission failures for one mis-wired grant.
-			h.logger.ErrorContext(ctx, "insert checks consulted on a grant resolved for another operation",
+			slog.ErrorContext(ctx, "insert checks consulted on a grant resolved for another operation",
 				"table", table, "role", role)
 			return false, nil, &requestAbort{
 				Status:  http.StatusForbidden,
@@ -587,7 +586,7 @@ func (h *IngestHandler) processRecord(
 			if set, isSet := requiredVal.([]any); isSet {
 				actual, ok := data[col]
 				if !ok || !h.checker().InSet(actual, set) {
-					h.logger.WarnContext(ctx, "check clause failed", "column", col, "allowed", set, "actual", actual, "present", ok)
+					slog.WarnContext(ctx, "check clause failed", "column", col, "allowed", set, "actual", actual, "present", ok)
 					return false, &recordReject{
 						Status:  http.StatusForbidden,
 						Message: fmt.Sprintf("check failed for column %q", col),
@@ -607,7 +606,7 @@ func (h *IngestHandler) processRecord(
 				// claim-derived value arrives as a plain string and never gains a
 				// reading the token's own JSON type didn't give it.
 				if !h.checker().Matches(actual, requiredVal) {
-					h.logger.WarnContext(ctx, "check clause failed", "column", col, "expected", requiredVal, "actual", actual)
+					slog.WarnContext(ctx, "check clause failed", "column", col, "expected", requiredVal, "actual", actual)
 					return false, &recordReject{
 						Status:  http.StatusForbidden,
 						Message: fmt.Sprintf("check failed for column %q", col),
@@ -642,13 +641,13 @@ func (h *IngestHandler) processRecord(
 			if !ok {
 				dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
 				if requireID {
-					h.logger.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", idField, "table", table)
+					slog.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", idField, "table", table)
 					return false, &recordReject{
 						Status:  http.StatusBadRequest,
 						Message: fmt.Sprintf("missing dedupe id field %q", idField),
 					}, nil
 				}
-				h.logger.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", idField, "table", table)
+				slog.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", idField, "table", table)
 			} else {
 				eventID := fmt.Sprint(idVal)
 				dup, err := h.Dedup.CheckAndMark(ctx, eventID)
@@ -662,12 +661,12 @@ func (h *IngestHandler) processRecord(
 					// is the store and settings out of step), so the line is
 					// Debug rather than a WARN per record.
 					dedupeDisabledCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
-					h.logger.DebugContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "event_id", eventID, "table", table)
+					slog.DebugContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "event_id", eventID, "table", table)
 				case err != nil:
-					h.logger.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
+					slog.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
 					return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
 				case dup:
-					h.logger.InfoContext(ctx, "duplicate event skipped", "event_id", eventID)
+					slog.InfoContext(ctx, "duplicate event skipped", "event_id", eventID)
 					return true, nil, nil
 				}
 			}
@@ -681,7 +680,7 @@ func (h *IngestHandler) processRecord(
 	cols := schema.InsertableColumns()
 	row, err := ingest.EncodeCompactRow(cols, data)
 	if err != nil {
-		h.logger.ErrorContext(ctx, "failed to encode compact row", "error", err, "table", table)
+		slog.ErrorContext(ctx, "failed to encode compact row", "error", err, "table", table)
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
 	}
 
@@ -696,17 +695,17 @@ func (h *IngestHandler) processRecord(
 
 	payload, err := json.Marshal(evt)
 	if err != nil {
-		h.logger.ErrorContext(ctx, "failed to marshal event message", "error", err)
+		slog.ErrorContext(ctx, "failed to marshal event message", "error", err)
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
 	}
 
-	h.logger.DebugContext(ctx, "publishing event to the ingest queue", "table", table, "scope", scope)
+	slog.DebugContext(ctx, "publishing event to the ingest queue", "table", table, "scope", scope)
 	if err := h.Publisher.Publish(ctx, mq.Topic{Table: table, Scope: scope}, payload); err != nil {
 		if errors.Is(err, mq.ErrQueueFull) {
-			h.logger.WarnContext(ctx, "ingest queue is full", "table", table, "scope", scope)
+			slog.WarnContext(ctx, "ingest queue is full", "table", table, "scope", scope)
 			return false, nil, &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30"}
 		}
-		h.logger.ErrorContext(ctx, "failed to publish to the ingest queue", "error", err, "table", table, "scope", scope)
+		slog.ErrorContext(ctx, "failed to publish to the ingest queue", "error", err, "table", table, "scope", scope)
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed"}
 	}
 

@@ -18,7 +18,6 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
-	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
 // TestStructuredQuery_ResourceCapsEnforcedServerSide is the executable proof
@@ -100,7 +99,7 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 				},
 			}
 			h := api.NewStructuredQueryHandler(
-				e.chConn, nil, e.registry, func(*settings.Store) *policy.Policy { return p }, func(*settings.Store) int { return 60 }, func() time.Duration { return 30 * time.Second }, nil, testutil.NopLogger(),
+				e.chConn, nil, e.registry, func(*settings.Store) *policy.Policy { return p }, func(*settings.Store) int { return 60 }, func() time.Duration { return 30 * time.Second }, nil,
 			)
 
 			req := httptest.NewRequest(http.MethodPost,

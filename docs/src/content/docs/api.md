@@ -69,7 +69,7 @@ A tenant id is 1–64 characters of ASCII letters, digits, `_`, and `-`. It is a
 
 Both are decided before authentication, so they are returned whatever token the request carries.
 
-The probes (`/livez`, `/readyz`, `/healthz`), `/version`, the Prometheus metrics path, and `/v1/ops/*` are tenant-exempt: they ignore the header entirely.
+The probes (`/livez`, `/readyz`, `/healthz`), `/version`, the Prometheus metrics path, and `/v1/ops/*` are tenant-exempt: they ignore the header entirely. An ops route that reads a tenant's settings names it with a `?tenant=` query parameter instead ([`GET /v1/ops/pipes`](#get-v1opspipes--list-named-pipes)), with the same grammar and the same `400`/`404` answers.
 
 `X-Tenant-ID` is in the CORS `Access-Control-Allow-Headers` list, so a browser client can send it cross-origin. The SDK sends it through [`options.headers`](/sdk#custom-headers).
 
@@ -781,9 +781,11 @@ The policy has no endpoints: it is the settings directory's [`policies.json`](/s
 
 Returns every adopted named query pipe — the settings directory's [`pipes.json`](/settings-directory#pipesjson). Pipes have no write endpoints: edit the file and reload.
 
+The ops routes are [tenant-exempt](#tenant-selection), so this read and `GET /v1/ops/pipes/{name}` name their tenant with an optional `?tenant=` query parameter instead of the header. Absent or empty means tenant `0`; a malformed id or a repeated parameter is a `400`, and an unknown tenant a `404`, with the same bodies as the header.
+
 #### `GET /v1/ops/pipes/{name}` — Get Named Pipe
 
-Returns a specific named pipe definition:
+Returns a specific named pipe definition (of the `?tenant=`, as above):
 
 ```json
 {

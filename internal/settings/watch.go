@@ -3,6 +3,7 @@ package settings
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"time"
 
@@ -50,8 +51,8 @@ func (s *Store) Watch(ctx context.Context) error {
 	// Best effort: a parent that can't be watched (e.g. "/" permissions)
 	// costs only the recreate case, not the watcher.
 	if parent := filepath.Dir(dir); parent != dir {
-		if err := w.Add(parent); err != nil && s.logger != nil {
-			s.logger.Warn("settings watcher: parent directory not watched; a deleted-and-recreated settings directory won't reload until SIGHUP or POST /v1/ops/settings/reload", "parent", parent, "error", err)
+		if err := w.Add(parent); err != nil {
+			slog.WarnContext(ctx, "settings watcher: parent directory not watched; a deleted-and-recreated settings directory won't reload until SIGHUP or POST /v1/ops/settings/reload", "parent", parent, "error", err)
 		}
 	}
 	// Catch up on the gap between Open's read at boot and the watch existing:
@@ -89,9 +90,7 @@ func (s *Store) Watch(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			if s.logger != nil {
-				s.logger.Error("settings watcher error", "dir", s.dir, "error", werr)
-			}
+			slog.ErrorContext(ctx, "settings watcher error", "dir", s.dir, "error", werr)
 		case <-timer.C:
 			// Re-arm the directory watch before reloading: after a remove or
 			// rename fsnotify has dropped it, and Add is a no-op while it

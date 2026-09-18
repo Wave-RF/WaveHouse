@@ -24,17 +24,16 @@ type PipesHandler struct {
 	// Source yields a tenant's pipes (the store itself in production).
 	Source       func(*settings.Store) pipes.Source
 	PolicySource PolicySource // resolves empty role to default_role; may be nil
-	// OpsStore is the store the admin reads (List, Get) serve: /v1/ops is
-	// tenant-exempt, so they carry no request tenant and read the default one.
-	OpsStore *settings.Store
-	CHConn   driver.Conn
-	Cache    cache.Cache
-	sf       singleflight.Group
+	// Tenants resolves the ?tenant= of the admin reads (List, Get): the ops
+	// tree is tenant-exempt, so they name their tenant rather than carry one.
+	Tenants *settings.Registry
+	CHConn  driver.Conn
+	Cache   cache.Cache
+	sf      singleflight.Group
 	// queryTimeout bounds each pipe execution, read per request
 	// (chconn.Manager.QueryTimeout in production) so a settings reload
 	// applies without a restart.
 	queryTimeout func() time.Duration
-	logger       *slog.Logger
 
 	// maxRequestBytes optionally overrides the default inbound request body
 	// cap (maxControlBodyBytes) for the body-decoding path (Execute).
@@ -44,24 +43,32 @@ type PipesHandler struct {
 	maxRequestBytes int64
 }
 
-func NewPipesHandler(source func(*settings.Store) pipes.Source, policySource PolicySource, conn driver.Conn, c cache.Cache, queryTimeout func() time.Duration, logger *slog.Logger) *PipesHandler {
-	return &PipesHandler{Source: source, PolicySource: policySource, CHConn: conn, Cache: c, queryTimeout: queryTimeout, logger: logger}
+func NewPipesHandler(source func(*settings.Store) pipes.Source, policySource PolicySource, conn driver.Conn, c cache.Cache, queryTimeout func() time.Duration) *PipesHandler {
+	return &PipesHandler{Source: source, PolicySource: policySource, CHConn: conn, Cache: c, queryTimeout: queryTimeout}
 }
 
-// List returns all named queries (admin endpoint).
-func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
+// List returns all named queries of the ?tenant= (admin endpoint).
+func (h *PipesHandler) List(w http.ResponseWriter, r *http.Request) {
+	store, ok := opsStore(w, r, h.Tenants)
+	if !ok {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	q := h.Source(h.OpsStore).Pipes()
+	q := h.Source(store).Pipes()
 	if q == nil {
 		q = []*pipes.NamedQuery{}
 	}
 	_ = json.NewEncoder(w).Encode(q)
 }
 
-// Get returns a specific named query (admin endpoint).
+// Get returns a specific named query of the ?tenant= (admin endpoint).
 func (h *PipesHandler) Get(w http.ResponseWriter, r *http.Request) {
+	store, ok := opsStore(w, r, h.Tenants)
+	if !ok {
+		return
+	}
 	name := chi.URLParam(r, "name")
-	q := h.Source(h.OpsStore).Pipe(name)
+	q := h.Source(store).Pipe(name)
 	if q == nil {
 		writeJSONError(w, http.StatusNotFound, "pipe not found")
 		return
@@ -98,7 +105,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 	role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
 	if !policy.RoleAllowed(p, role, q.AllowedRoles) {
-		writeAuthzDenied(w, r, h.logger, role, q.AllowedRoles,
+		writeAuthzDenied(w, r, role, q.AllowedRoles,
 			slog.String("gate", "pipe"),
 			slog.String("pipe", q.Name),
 		)

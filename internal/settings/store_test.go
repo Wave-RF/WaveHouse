@@ -18,7 +18,7 @@ func newLoadedStore(t *testing.T, overrides map[string]string) *Store {
 	for name, content := range overrides {
 		files[name] = content
 	}
-	s, findings := Open(writeDir(t, files), nil)
+	s, findings := Open(writeDir(t, files))
 	require.NotNil(t, s, "findings: %s", findingStrings(findings))
 	return s
 }
@@ -88,11 +88,11 @@ func TestStore_OpenRejectsInvalid(t *testing.T) {
 	t.Parallel()
 	files := validFiles()
 	files[FileConfig] = `{}` // every key missing
-	s, findings := Open(writeDir(t, files), nil)
+	s, findings := Open(writeDir(t, files))
 	assert.Nil(t, s)
 	assert.True(t, HasErrors(findings))
 
-	s, findings = Open(filepath.Join(t.TempDir(), "nope"), nil)
+	s, findings = Open(filepath.Join(t.TempDir(), "nope"))
 	assert.Nil(t, s)
 	assert.True(t, HasErrors(findings))
 }
@@ -122,7 +122,7 @@ func TestStore_SeedIsValid(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "settings")
 	require.NoError(t, WriteSeed(dir))
-	s, findings := Open(dir, nil)
+	s, findings := Open(dir)
 	require.NotNil(t, s, "findings: %s", findingStrings(findings))
 	assert.False(t, HasErrors(findings))
 	// The one expected finding: an empty policies.json is fail-closed and

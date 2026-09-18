@@ -184,7 +184,6 @@ type SchemaRegistry struct {
 	// tick, so a settings reload retunes the cadence without restarting the
 	// loop (settings.Store.SchemaRefreshInterval in production).
 	refreshInterval func(tenant.ID) time.Duration
-	logger          *slog.Logger
 	mu              sync.RWMutex
 	tables          map[string]*TableSchema
 	// serverVersion is the ClickHouse version string from the last successful
@@ -194,13 +193,12 @@ type SchemaRegistry struct {
 
 // NewSchemaRegistry creates the registry of tenant id, which discovers
 // schemas from system.columns.
-func NewSchemaRegistry(conn driver.Conn, database func() string, id tenant.ID, refreshInterval func(tenant.ID) time.Duration, logger *slog.Logger) *SchemaRegistry {
+func NewSchemaRegistry(conn driver.Conn, database func() string, id tenant.ID, refreshInterval func(tenant.ID) time.Duration) *SchemaRegistry {
 	return &SchemaRegistry{
 		conn:            conn,
 		database:        database,
 		tenant:          id,
 		refreshInterval: refreshInterval,
-		logger:          logger,
 		tables:          make(map[string]*TableSchema),
 	}
 }
@@ -242,7 +240,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	} else {
 		// Unresolvable — warn, not fatal, and no UTC fallback (that could move
 		// instants). A nil server zone means zone-less values pass through.
-		sr.logger.Warn("cannot resolve server timezone; zone-less timestamps will pass through un-canonicalized",
+		slog.WarnContext(ctx, "cannot resolve server timezone; zone-less timestamps will pass through un-canonicalized",
 			"timezone", tzName, "error", err)
 	}
 
@@ -301,7 +299,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	}
 
 	for _, ts := range tables {
-		resolveTimestampSpecs(ts, serverTZ, sr.logger)
+		resolveTimestampSpecs(ctx, ts, serverTZ)
 		ts.cacheInsertable()
 	}
 
@@ -309,7 +307,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	sr.tables = tables
 	sr.serverVersion = serverVersion
 	sr.mu.Unlock()
-	sr.logger.Info("schema registry refreshed", "tables", len(tables), "server_tz", tzName, "server_version", serverVersion)
+	slog.InfoContext(ctx, "schema registry refreshed", "tables", len(tables), "server_tz", tzName, "server_version", serverVersion)
 
 	return nil
 }
@@ -443,7 +441,7 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := sr.Refresh(ctx); err != nil {
-				sr.logger.Error("schema auto-refresh failed", "error", err)
+				slog.ErrorContext(ctx, "schema auto-refresh failed", "error", err)
 			}
 			if next := sr.refreshInterval(sr.tenant); next != interval {
 				interval = next

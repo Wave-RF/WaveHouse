@@ -41,10 +41,7 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 // "gate" (admin / policy / pipe) so a denial is attributable to the check that
 // raised it without parsing the route pattern, and the policy paths add the
 // table + action they evaluated.
-// logger is the calling gate's injected logger (each handler holds one; main
-// wires it, tests pass their own) — the denial WARN goes there, not to a
-// package global.
-func writeAuthzDenied(w http.ResponseWriter, r *http.Request, logger *slog.Logger, role string, allowedRoles []string, attrs ...slog.Attr) {
+func writeAuthzDenied(w http.ResponseWriter, r *http.Request, role string, allowedRoles []string, attrs ...slog.Attr) {
 	authErr := auth.AuthErrorFromContext(r.Context())
 
 	// reason tracks the response: a present-but-invalid token fails loud (401)
@@ -59,7 +56,7 @@ func writeAuthzDenied(w http.ResponseWriter, r *http.Request, logger *slog.Logge
 		reason = "no role and no default_role configured"
 	}
 
-	logAuthzDenied(logger, r, reason, role, allowedRoles, status, attrs...)
+	logAuthzDenied(r, reason, role, allowedRoles, status, attrs...)
 
 	if authErr != nil {
 		writeJSONError(w, http.StatusUnauthorized, authErr.Error())
@@ -82,7 +79,7 @@ func writeAuthzDenied(w http.ResponseWriter, r *http.Request, logger *slog.Logge
 // slog escapes control characters in string values, so the request-derived
 // fields (route, method, role) carry no log-injection risk despite originating
 // in an *http.Request scope.
-func logAuthzDenied(logger *slog.Logger, r *http.Request, reason, resolvedRole string, allowedRoles []string, status int, attrs ...slog.Attr) {
+func logAuthzDenied(r *http.Request, reason, resolvedRole string, allowedRoles []string, status int, attrs ...slog.Attr) {
 	// Prefer the matched route template (e.g. /v1/pipes/{name}) over the raw
 	// path: it keeps the field low-cardinality and avoids logging concrete path
 	// params. Falls back to the path when there's no chi route context (a gate
@@ -103,7 +100,7 @@ func logAuthzDenied(logger *slog.Logger, r *http.Request, reason, resolvedRole s
 		slog.Int("status", status),
 	}
 
-	logger.LogAttrs(r.Context(), slog.LevelWarn, "authorization denied", append(fields, attrs...)...)
+	slog.LogAttrs(r.Context(), slog.LevelWarn, "authorization denied", append(fields, attrs...)...)
 }
 
 // forbiddenForRole returns the 403 message body for a policy/allowlist denial.

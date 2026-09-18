@@ -20,7 +20,7 @@ func TestSweep_AsksForTheBufferConsumerAndTheGapWindow(t *testing.T) {
 	t.Parallel()
 	gapWindow := 5 * time.Minute
 	purger := &testutil.MockPurger{Purged: true}
-	s := NewSweeper(purger, tenant.Default, func(tenant.ID) time.Duration { return gapWindow }, testutil.NopLogger())
+	s := NewSweeper(purger, tenant.Default, func(tenant.ID) time.Duration { return gapWindow })
 
 	before := time.Now()
 	s.sweep(context.Background())
@@ -37,7 +37,7 @@ func TestSweep_RereadsTheGapWindowEverySweep(t *testing.T) {
 	t.Parallel()
 	gapWindow := time.Minute
 	purger := &testutil.MockPurger{}
-	s := NewSweeper(purger, tenant.Default, func(tenant.ID) time.Duration { return gapWindow }, testutil.NopLogger())
+	s := NewSweeper(purger, tenant.Default, func(tenant.ID) time.Duration { return gapWindow })
 
 	s.sweep(context.Background())
 	gapWindow = time.Hour // a settings reload
@@ -51,7 +51,7 @@ func TestSweep_ErrorsDoNotPanic(t *testing.T) {
 	t.Parallel()
 	for _, err := range []error{mq.ErrConsumerNotFound, errors.New("broker unavailable")} {
 		purger := &testutil.MockPurger{Err: err}
-		s := NewSweeper(purger, tenant.Default, func(tenant.ID) time.Duration { return time.Minute }, testutil.NopLogger())
+		s := NewSweeper(purger, tenant.Default, func(tenant.ID) time.Duration { return time.Minute })
 		s.sweep(context.Background())
 		assert.Len(t, purger.Calls, 1)
 	}
@@ -63,7 +63,7 @@ func TestSweep_ErrorsDoNotPanic(t *testing.T) {
 
 func TestStart_ContextCancellation(t *testing.T) {
 	t.Parallel()
-	s := NewSweeper(&testutil.MockPurger{}, tenant.Default, func(tenant.ID) time.Duration { return 5 * time.Minute }, testutil.NopLogger())
+	s := NewSweeper(&testutil.MockPurger{}, tenant.Default, func(tenant.ID) time.Duration { return 5 * time.Minute })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately.

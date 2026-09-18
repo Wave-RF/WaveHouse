@@ -3,8 +3,6 @@ package discovery
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"testing"
 	"time"
 
@@ -96,7 +94,7 @@ func TestCanonicalizeTimestamps(t *testing.T) {
 			t.Parallel()
 			// The production path: specs resolved once at schema-build time.
 			schema := tsSchema(tt.colType)
-			resolveTimestampSpecs(schema, tt.serverTZ, discardLogger())
+			resolveTimestampSpecs(t.Context(), schema, tt.serverTZ)
 			data := map[string]any{"ts": tt.value}
 			CanonicalizeTimestamps(schema, data)
 			assert.Equal(t, tt.want, data["ts"])
@@ -133,7 +131,7 @@ func TestColumnTimeParser(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			schema := tsSchema(tt.colType)
-			resolveTimestampSpecs(schema, nil, discardLogger())
+			resolveTimestampSpecs(t.Context(), schema, nil)
 			parse := schema.Columns[0].TimeParser()
 			require.NotNil(t, parse)
 			got, ok := parse(tt.value)
@@ -158,7 +156,7 @@ func TestColumnTimeParser_NilOrZoneLimited(t *testing.T) {
 		{Name: "d", Type: "Date"},
 		{Name: "ts", Type: "DateTime"},
 	}}
-	resolveTimestampSpecs(schema, nil, discardLogger())
+	resolveTimestampSpecs(t.Context(), schema, nil)
 	assert.Nil(t, schema.Columns[0].TimeParser(), "String column: no parser")
 	assert.Nil(t, schema.Columns[1].TimeParser(), "Date column: excluded from timestamp handling")
 	assert.Nil(t, tsSchema("DateTime").Columns[0].TimeParser(), "hand-built literal without spec resolution: no parser")
@@ -189,7 +187,7 @@ func TestCanonicalizeTimestamps_AbsentColumn(t *testing.T) {
 		{Name: "ts", Type: "DateTime", HasDefault: true},
 		{Name: "page", Type: "String"},
 	}}
-	resolveTimestampSpecs(schema, time.UTC, discardLogger())
+	resolveTimestampSpecs(t.Context(), schema, time.UTC)
 	data := map[string]any{"page": "/home"}
 	CanonicalizeTimestamps(schema, data)
 	assert.Equal(t, map[string]any{"page": "/home"}, data)
@@ -255,7 +253,7 @@ func TestCanonicalizeTimestamps_Unparseable_PassThrough(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			schema := tsSchema(tt.colType)
-			resolveTimestampSpecs(schema, time.UTC, discardLogger())
+			resolveTimestampSpecs(t.Context(), schema, time.UTC)
 			data := map[string]any{"ts": tt.value}
 			CanonicalizeTimestamps(schema, data)
 			assert.Equal(t, tt.value, data["ts"])
@@ -277,7 +275,7 @@ func TestResolveTimestampSpecs(t *testing.T) {
 		{Name: "broken", Type: "DateTime('Not/AZone')"},
 		{Name: "etc_utc", Type: "DateTime('Etc/UTC')"},
 	}}
-	resolveTimestampSpecs(schema, nyc, discardLogger())
+	resolveTimestampSpecs(t.Context(), schema, nyc)
 
 	require.NotNil(t, schema.Columns[0].tsSpec)
 	assert.Equal(t, nyc, schema.Columns[0].tsSpec.loc, "zone-less column takes the server zone")
@@ -303,15 +301,9 @@ func TestResolveTimestampSpecs(t *testing.T) {
 func TestRefresh_PrecomputesSpecs(t *testing.T) {
 	t.Parallel()
 	conn := &fakeConn{columns: []fakeColumn{{table: "t", name: "ts", chType: "DateTime", position: 1}}}
-	reg := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour }, discardLogger())
+	reg := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 	require.NoError(t, reg.Refresh(context.Background()))
 	col := reg.Get("t").Columns[0]
 	require.NotNil(t, col.tsSpec)
 	assert.Equal(t, time.UTC, col.tsSpec.loc)
-}
-
-// discardLogger mirrors the registries' test logger: spec-resolution warnings are
-// asserted via behavior (nil specs), not log output.
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

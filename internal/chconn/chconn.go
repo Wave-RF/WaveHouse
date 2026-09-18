@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"strconv"
 	"sync"
@@ -62,7 +61,6 @@ type state struct {
 
 // Manager is a driver.Conn whose backing connection is swapped by Reconfigure.
 type Manager struct {
-	logger *slog.Logger
 	// dial is the connection factory; tests substitute it.
 	dial func(Params) (driver.Conn, error)
 	// grace is how long a replaced connection stays open for in-flight
@@ -78,8 +76,8 @@ var _ driver.Conn = (*Manager)(nil)
 // Open builds the boot-time connection. Like clickhouse.Open it does not
 // dial — boot tolerates an unreachable ClickHouse (schema discovery degrades
 // and retries) — so only a malformed option errors here.
-func Open(p Params, logger *slog.Logger) (*Manager, error) {
-	m := &Manager{logger: logger, dial: dial, grace: p.QueryTimeout}
+func Open(p Params) (*Manager, error) {
+	m := &Manager{dial: dial, grace: p.QueryTimeout}
 	conn, err := m.dial(p)
 	if err != nil {
 		return nil, err

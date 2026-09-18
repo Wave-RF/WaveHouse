@@ -75,10 +75,10 @@ The invariant index — what must stay true. Full narrative and rationale live i
 ## Code Conventions
 
 - **Go 1.26**, strict formatting (`gofumpt`, enforced by CI)
-- **Structured logging** with `log/slog` (JSON handler)
+- **Structured logging** with `log/slog` (JSON handler), through the default logger: call `slog.InfoContext(ctx, …)` and its siblings (the context carries the trace ids the handler stamps) rather than taking a `*slog.Logger` parameter or field. `cmd/wavehouse` and `internal/app` install the default; tests silence or capture it with `internal/testutil/logtest` (a capturing test must not call `t.Parallel()`)
 - **Chi v5** for HTTP routing
 - **Error handling**: Return errors, don't panic. Wrap with `fmt.Errorf("context: %w", err)`.
-- **No global state**: Dependencies are passed explicitly (constructor injection).
+- **No global state**: Dependencies are passed explicitly (constructor injection). The `slog` default logger is the one sanctioned exception.
 - **Package naming**: Lowercase, single word (or abbreviated). `internal/` enforces module privacy.
 
 ## Craftsmanship
@@ -442,7 +442,7 @@ internal/query/         → Structured query AST + SQL builder
 internal/settings/      → Settings directory (validate, adopted snapshot + reload, watcher, embedded seed)
 internal/stream/        → SSE fan-out (event Hub: project once per role, Subscriber outbound queue, Bucket fan-out, keepalive Heartbeater wheel)
 internal/tenant/        → Tenant id (type, grammar, reserved default, request header name)
-internal/testutil/      → Shared test helpers (NopLogger, etc.)
+internal/testutil/      → Shared test helpers (mocks, JWT + schema helpers; logtest/ captures or silences the default logger)
 tests/                  → Integration & E2E tests
 tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer)
 tests/e2e/              → E2E test stack (scripts/orchestrator boots a ClickHouse testcontainer + the wavehouse-cov binary)
