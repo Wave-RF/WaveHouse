@@ -35,9 +35,9 @@ type StructuredQueryHandler struct {
 	// ((*settings.Store).TimestampBucketSeconds in production) and
 	// defaultMaxRows its current fallback result LIMIT
 	// ((*settings.Store).DefaultMaxRows) — funcs, not ints, so a settings
-	// reload takes effect on the next query without a restart. A nil bucketSecs means no bucketing; a nil
-	// defaultMaxRows or a non-positive return means the builder's compiled
-	// constant.
+	// reload takes effect on the next query without a restart. A nil
+	// bucketSecs means no bucketing; a nil defaultMaxRows or a non-positive
+	// return means the builder's compiled constant.
 	bucketSecs     func(*settings.Store) int
 	defaultMaxRows func(*settings.Store) int
 

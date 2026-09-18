@@ -468,6 +468,7 @@ WaveHouse/
 │   ├── query/              # Structured query AST + SQL builder
 │   ├── settings/           # Settings directory: validate, adopted snapshot, reload
 │   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
+│   ├── tenant/             # Tenant id: type, grammar, reserved default, request header name
 │   └── testutil/           # Shared test helpers and mocks
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)

@@ -67,14 +67,6 @@ func (a *App) wireSettings() error {
 	return nil
 }
 
-// wireObservability initializes the OTel pipeline whenever either OTLP push
-// or Prometheus exposition is wanted — Prometheus-only operation
-// (Alloy/scrape, no collector) is a first-class mode, and the OTel SDK
-// MeterProvider is the shared substrate. Endpoint, TLS, and auth headers
-// come from the standard OTEL_EXPORTER_OTLP_* env vars, read by the SDK. A
-// malformed header is logged and skipped by the SDK (fail-soft);
-// InitProvider's own error is likewise non-fatal — logged, stdout-only from
-// there on.
 // perTenant adapts a store accessor to the tenant-keyed getter the async
 // paths take: they hold a tenant id (tenant.Default today, the MQ subject's
 // from #583 story 5), not a request's resolved store. Only tenant.Default
@@ -91,6 +83,14 @@ func perTenant[T any](tenants *settings.Registry, get func(*settings.Store) T) f
 	}
 }
 
+// wireObservability initializes the OTel pipeline whenever either OTLP push
+// or Prometheus exposition is wanted — Prometheus-only operation
+// (Alloy/scrape, no collector) is a first-class mode, and the OTel SDK
+// MeterProvider is the shared substrate. Endpoint, TLS, and auth headers
+// come from the standard OTEL_EXPORTER_OTLP_* env vars, read by the SDK. A
+// malformed header is logged and skipped by the SDK (fail-soft);
+// InitProvider's own error is likewise non-fatal — logged, stdout-only from
+// there on.
 func (a *App) wireObservability(ctx context.Context) {
 	cfg := a.cfg
 	if !cfg.OTel.Enabled && !cfg.Prometheus.Enabled {
