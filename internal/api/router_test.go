@@ -469,6 +469,30 @@ func TestNewRouter_CORSOnStream(t *testing.T) {
 	})
 }
 
+// TestNewRouter_VaryOriginAndTenant pins the composed Vary header on a tenant
+// route: corsMiddleware sets Vary: Origin at the root and TenantMW adds
+// Vary: X-Tenant-ID inside /v1, so both survive only in that registration
+// order. A reorder would drop one silently — a shared cache could then replay
+// one tenant's response to another, or one origin's CORS answer to another.
+func TestNewRouter_VaryOriginAndTenant(t *testing.T) {
+	t.Parallel()
+
+	router := NewRouter(Dependencies{
+		Tenants:     testTenants(),
+		Health:      &HealthHandler{},
+		AuthMW:      func(next http.Handler) http.Handler { return next },
+		CORSOrigins: func() []string { return []string{"https://app.example.com"} },
+	})
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/health", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.ElementsMatch(t, []string{"Origin", tenant.Header}, rec.Header().Values("Vary"))
+}
+
 // TestNewRouter_RawSQLAdminGate pins the contract for POST /v1/ops/query:
 //
 //	admin role   → reaches handler
