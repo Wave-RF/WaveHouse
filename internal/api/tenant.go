@@ -76,10 +76,14 @@ func resolveTenant(w http.ResponseWriter, tenants *settings.Registry, where stri
 }
 
 // TenantMW resolves the request's tenant from the tenant.Header before
-// authentication runs and stores it in the request context.
+// authentication runs and stores it in the request context. Every answer,
+// the 400 and 404 included, carries Vary: X-Tenant-ID so a shared cache
+// cannot replay one tenant's response to another — added, not set, so the
+// CORS Vary: Origin survives.
 func TenantMW(tenants *settings.Registry) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Add("Vary", tenant.Header)
 			store, ok := resolveTenant(w, tenants, tenant.Header, r.Header.Values(tenant.Header))
 			if !ok {
 				return

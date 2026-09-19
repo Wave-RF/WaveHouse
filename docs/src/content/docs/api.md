@@ -67,9 +67,9 @@ A tenant id is 1–64 characters of ASCII letters, digits, `_`, and `-`. It is a
 | `400` | `{"error": "invalid X-Tenant-ID: …"}` | The id breaks the grammar above, or the header was sent more than once |
 | `404` | `{"error": "unknown tenant: <id>"}` | The id is well formed but no such tenant exists |
 
-Both are decided before authentication, so they are returned whatever token the request carries.
+Both are decided before authentication, so they are returned whatever token the request carries. Every response from a tenant route, these two included, carries `Vary: X-Tenant-ID`, so a shared cache keys on the header and never replays one tenant's response to another.
 
-The probes (`/livez`, `/readyz`, `/healthz`), `/version`, the Prometheus metrics path, and `/v1/ops/*` are tenant-exempt: they ignore the header entirely. An ops route that reads a tenant's settings names it with a `?tenant=` query parameter instead ([`GET /v1/ops/pipes`](#get-v1opspipes--list-named-pipes)), with the same grammar and the same `400`/`404` answers.
+The probes (`/livez`, `/readyz`, `/healthz`), `/version`, the Prometheus metrics path, and `/v1/ops/*` are tenant-exempt: they ignore the header entirely. The two admin pipe reads ([`GET /v1/ops/pipes`](#get-v1opspipes--list-named-pipes) and `GET /v1/ops/pipes/{name}`) name their tenant with an optional `?tenant=` query parameter instead, with the same grammar and the same `400`/`404` answers; no other ops route takes a tenant.
 
 `X-Tenant-ID` is in the CORS `Access-Control-Allow-Headers` list, so a browser client can send it cross-origin. The SDK sends it through [`options.headers`](/sdk#custom-headers).
 

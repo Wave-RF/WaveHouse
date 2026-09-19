@@ -50,6 +50,8 @@ func TestTenantMW(t *testing.T) {
 			h.ServeHTTP(w, req)
 
 			require.Equal(t, tt.wantStatus, w.Code, "body: %s", w.Body.String())
+			assert.Equal(t, []string{tenant.Header}, w.Header().Values("Vary"),
+				"every answer varies on the tenant header, a refusal included")
 			if tt.wantStatus == http.StatusOK {
 				assert.Same(t, testStore, resolved, "the resolved store rides the request context")
 				return
