@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/settings"
-	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,9 +40,9 @@ func writeSettingsFixture(t *testing.T, configJSON string) string {
 // case adopted survives), so neither the parent nor the subtests are parallel.
 func TestSettingsReload(t *testing.T) {
 	dir := writeSettingsFixture(t, fullConfig(100))
-	store, _ := settings.Open(dir, testutil.NopLogger())
+	store, _ := settings.Open(dir)
 	require.NotNil(t, store)
-	h := NewSettingsHandler(store, testutil.NopLogger())
+	h := NewSettingsHandler(store)
 
 	post := func() (*httptest.ResponseRecorder, reloadResponse) {
 		rec := httptest.NewRecorder()

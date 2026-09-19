@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,7 +13,9 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,14 +44,12 @@ func TestWriteJSONError_EscapesSpecialCharacters(t *testing.T) {
 	assert.Equal(t, `oops "quoted" \n`, body["error"])
 }
 
-// warnBufLogger returns a WARN-level JSON logger that writes to the returned
-// buffer. It's injected into the gate/handler under test (the way
-// internal/policy/store_test.go injects one into NewStore), so reading a
-// denial's structured WARN needs no process-global slog.SetDefault swap — which
-// is why, unlike the old default-logger capture, these tests can run in parallel.
-func warnBufLogger() (*slog.Logger, *bytes.Buffer) {
-	var buf bytes.Buffer
-	return slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})), &buf
+// captureWarns routes the default logger's WARN+ records to the returned
+// buffer. The default logger is process-wide, so the tests that call it run
+// serially (see logtest.Capture).
+func captureWarns(t *testing.T) *logtest.Buffer {
+	t.Helper()
+	return logtest.Capture(t, slog.LevelWarn)
 }
 
 // TestRequireAdmin_DenialLogsStructuredWarn pins the structured WARN emitted on
@@ -58,9 +57,8 @@ func warnBufLogger() (*slog.Logger, *bytes.Buffer) {
 // allowlist" reason, and gate=admin (so the denial is attributable to the admin
 // check, which the route pattern alone can't convey).
 func TestRequireAdmin_DenialLogsStructuredWarn(t *testing.T) {
-	t.Parallel()
-	logger, buf := warnBufLogger()
-	handler := RequireAdmin(policy.Static(&policy.Policy{}), logger)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	buf := captureWarns(t)
+	handler := RequireAdmin(policy.Static(&policy.Policy{}))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler must not run on a denied request")
 	}))
 
@@ -86,10 +84,9 @@ func TestRequireAdmin_DenialLogsStructuredWarn(t *testing.T) {
 // while role_resolved is the default — the signal that says "the public default
 // role can't reach admin", not "the client sent the wrong role".
 func TestRequireAdmin_EmptyRoleDenialLogsResolvedRole(t *testing.T) {
-	t.Parallel()
-	logger, buf := warnBufLogger()
+	buf := captureWarns(t)
 	store := policy.Static(&policy.Policy{DefaultRole: "viewer"})
-	handler := RequireAdmin(store, logger)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	handler := RequireAdmin(store)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler must not run on a denied request")
 	}))
 
@@ -108,9 +105,8 @@ func TestRequireAdmin_EmptyRoleDenialLogsResolvedRole(t *testing.T) {
 // 401, distinguishing it from an ordinary roleless 403. The admin gate logs no
 // explicit allowlist, so roles_allowed is null.
 func TestRequireAdmin_InvalidTokenDenialLogsFailLoudReason(t *testing.T) {
-	t.Parallel()
-	logger, buf := warnBufLogger()
-	handler := RequireAdmin(nil, logger)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	buf := captureWarns(t)
+	handler := RequireAdmin(nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler must not run on a denied request")
 	}))
 
@@ -131,17 +127,16 @@ func TestRequireAdmin_InvalidTokenDenialLogsFailLoudReason(t *testing.T) {
 // caller through — and which pipe (the route pattern is /v1/pipes/{name}, so the
 // concrete name isn't in the route field).
 func TestPipesHandler_Execute_DenialLogsAllowedRoles(t *testing.T) {
-	t.Parallel()
-	logger, buf := warnBufLogger()
-	store := pipes.Static(
+	buf := captureWarns(t)
+	store := staticPipes(
 		&pipes.NamedQuery{Name: "report", SQL: "SELECT * FROM clicks", AllowedRoles: []string{"analyst", "viewer"}},
 	)
-	h := NewPipesHandler(store, policy.Static(&policy.Policy{}), nil, nil, noTimeout, logger)
+	h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout)
 
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
 	r = r.WithContext(auth.WithRole(r.Context(), "guest"))
 	w := httptest.NewRecorder()
-	h.Execute(w, r)
+	h.Execute(w, withTenant(r))
 	require.Equal(t, http.StatusForbidden, w.Code)
 
 	out := buf.String()
@@ -159,10 +154,9 @@ func TestPipesHandler_Execute_DenialLogsAllowedRoles(t *testing.T) {
 // denial is distinguishable from an admin-gate or pipe-allowlist denial — the
 // /v1/ingest route pattern alone doesn't say which check failed, or on what.
 func TestIngest_DenialLogsPolicyGate(t *testing.T) {
-	t.Parallel()
-	logger, buf := warnBufLogger()
-	h := NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, logger)
-	h.PolicySource = policy.Static(&policy.Policy{
+	buf := captureWarns(t)
+	h := NewIngestHandler(testRegistry(t), &testutil.MockPublisher{})
+	h.PolicySource = staticPolicy(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{}}}, // no insert for viewer
 		},
@@ -171,7 +165,7 @@ func TestIngest_DenialLogsPolicyGate(t *testing.T) {
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
 	req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
 	w := httptest.NewRecorder()
-	h.Handle(w, req)
+	h.Handle(w, withTenant(req))
 	require.Equal(t, http.StatusForbidden, w.Code)
 
 	out := buf.String()
@@ -188,18 +182,17 @@ func TestIngest_DenialLogsPolicyGate(t *testing.T) {
 // it denies before sub-route matching and the template is /v1/ops/*; the
 // gate=admin attribute tells the operator which check denied it.
 func TestAuthzDenied_LogsChiRoutePattern(t *testing.T) {
-	t.Parallel()
-	logger, buf := warnBufLogger()
+	buf := captureWarns(t)
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	router := NewRouter(Dependencies{
-		Ingest:       NewIngestHandler(reg, &testutil.MockPublisher{}, logger),
+		Tenants:      testTenants(),
+		Ingest:       NewIngestHandler(reg, &testutil.MockPublisher{}),
 		Query:        &QueryHandler{},
-		SSE:          NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
+		SSE:          NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
 		Health:       &HealthHandler{},
 		Schema:       NewSchemaHandler(reg),
 		AuthMW:       func(next http.Handler) http.Handler { return next },
 		PolicySource: policy.Static(&policy.Policy{}),
-		Logger:       logger,
 	})
 
 	ctx := auth.WithRole(context.Background(), "viewer")

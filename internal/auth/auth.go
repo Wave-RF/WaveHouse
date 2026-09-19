@@ -66,8 +66,8 @@ func (v *verifier) keyFunc(t *jwt.Token) (any, error) {
 // refresh (or the refresh an unknown key id triggers) succeeds, no JWT
 // validates and requests fall to the policy default_role — the same
 // fail-closed posture as an unreachable ClickHouse, fixed by the next
-// reload. Refresh failures are logged through logger when non-nil.
-func newVerifier(cfg Config, requireFetch bool, logger *slog.Logger) (*verifier, error) {
+// reload. Refresh failures are logged.
+func newVerifier(cfg Config, requireFetch bool) (*verifier, error) {
 	v := &verifier{secret: cfg.JWTSecret, roleClaim: cfg.RoleClaim, url: cfg.JWKSURL}
 	if v.roleClaim == "" {
 		v.roleClaim = "role"
@@ -76,11 +76,9 @@ func newVerifier(cfg Config, requireFetch bool, logger *slog.Logger) (*verifier,
 		ctx, cancel := context.WithCancel(context.Background())
 		noErrorReturnFirstHTTPReq := !requireFetch
 		override := keyfunc.Override{NoErrorReturnFirstHTTPReq: &noErrorReturnFirstHTTPReq}
-		if logger != nil {
-			override.RefreshErrorHandlerFunc = func(u string) func(context.Context, error) {
-				return func(_ context.Context, err error) {
-					logger.Warn("jwks refresh failed; no token validates until it succeeds", "url", u, "error", err)
-				}
+		override.RefreshErrorHandlerFunc = func(u string) func(context.Context, error) {
+			return func(ctx context.Context, err error) {
+				slog.WarnContext(ctx, "jwks refresh failed; no token validates until it succeeds", "url", u, "error", err)
 			}
 		}
 		jwks, err := keyfunc.NewDefaultOverrideCtx(ctx, []string{cfg.JWKSURL}, override)
@@ -109,19 +107,18 @@ func newVerifier(cfg Config, requireFetch bool, logger *slog.Logger) (*verifier,
 type Authenticator struct {
 	operatorKey string
 	store       policy.Source
-	logger      *slog.Logger
 	mu          sync.Mutex // serializes Reconfigure
 	cur         atomic.Pointer[verifier]
 }
 
 // NewAuthenticator builds the boot-time verifier from cfg. An unreachable
 // JWKS endpoint is an error so boot fails loudly rather than degraded.
-func NewAuthenticator(cfg Config, store policy.Source, logger *slog.Logger) (*Authenticator, error) {
-	v, err := newVerifier(cfg, true, logger)
+func NewAuthenticator(cfg Config, store policy.Source) (*Authenticator, error) {
+	v, err := newVerifier(cfg, true)
 	if err != nil {
 		return nil, err
 	}
-	a := &Authenticator{operatorKey: cfg.OperatorKey, store: store, logger: logger}
+	a := &Authenticator{operatorKey: cfg.OperatorKey, store: store}
 	a.cur.Store(v)
 	return a, nil
 }
@@ -145,11 +142,9 @@ func (a *Authenticator) Reconfigure(cfg Config) {
 	// The URL was validated as absolute http(s) and the first fetch is not
 	// required, so construction cannot fail; a nil verifier would fail closed
 	// anyway (every token rejected), matching the fetch-pending state.
-	v, err := newVerifier(cfg, false, a.logger)
+	v, err := newVerifier(cfg, false)
 	if err != nil {
-		if a.logger != nil {
-			a.logger.Error("auth reconfigure: build verifier", "error", err)
-		}
+		slog.Error("auth reconfigure: build verifier", "error", err)
 		return
 	}
 	a.cur.Store(v)
@@ -161,7 +156,7 @@ func (a *Authenticator) Reconfigure(cfg Config) {
 // Middleware returns the http middleware bound to this Authenticator; it
 // reads the current verifier on every request.
 func (a *Authenticator) Middleware() func(http.Handler) http.Handler {
-	return middleware(a.cur.Load, a.operatorKey, a.store, a.logger)
+	return middleware(a.cur.Load, a.operatorKey, a.store)
 }
 
 var (
@@ -205,13 +200,13 @@ var operatorKeyFailures, _ = otel.Meter("wavehouse-auth").Int64Counter(
 // When cfg.OperatorKey is set, a non-JWT operator path is checked before the
 // Bearer token (see operatorKey below): a constant-time match on the presented
 // credential authorizes a full-access platform operator independent of the JWT verifier.
-// store and logger back that path — the live admin role is read from store per
-// request, and operator authentications are logged at info (audit). A presented
+// store backs that path — the live admin role is read from store per
+// request — and operator authentications are logged at info (audit). A presented
 // credential that does not match is logged at warn and counted by
 // wavehouse_auth_operator_key_failures_total (a probing signal), then falls
-// through like any unauthenticated request. Both store and logger may be nil
-// when no operator key is configured.
-func middleware(current func() *verifier, operatorKeyCfg string, store policy.Source, logger *slog.Logger) func(http.Handler) http.Handler {
+// through like any unauthenticated request. store may be nil when no operator
+// key is configured.
+func middleware(current func() *verifier, operatorKeyCfg string, store policy.Source) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// One verifier per request: the swap is atomic, so a reload lands
@@ -245,22 +240,20 @@ func middleware(current func() *verifier, operatorKeyCfg string, store policy.So
 				match := presented != "" &&
 					subtle.ConstantTimeCompare([]byte(presented), []byte(operatorKeyCfg)) == 1
 				if match {
-					if logger != nil {
-						// Audit at Info (not Debug): the operator key is the most
-						// privileged credential in the system — full data-plane +
-						// admin, honored even when the policy is wiped — so its use
-						// must be visible in production logs (Info+), mirroring the
-						// WARN emitted on an authz denial. Correlation fields
-						// (request_id, and eventually the trusted-proxy client IP) are
-						// deliberately NOT stamped per-call-site — they belong in the
-						// global TraceHandler (internal/observability) so every log line
-						// gets them uniformly; tracked in #333. When OTel is enabled this
-						// line already carries trace_id/span_id from that handler.
-						logger.LogAttrs(r.Context(), slog.LevelInfo, "operator key authenticated request",
-							slog.String("path", r.URL.Path),
-							slog.String("method", r.Method),
-						)
-					}
+					// Audit at Info (not Debug): the operator key is the most
+					// privileged credential in the system — full data-plane +
+					// admin, honored even when the policy is wiped — so its use
+					// must be visible in production logs (Info+), mirroring the
+					// WARN emitted on an authz denial. Correlation fields
+					// (request_id, and eventually the trusted-proxy client IP) are
+					// deliberately NOT stamped per-call-site — they belong in the
+					// global TraceHandler (internal/observability) so every log line
+					// gets them uniformly; tracked in #333. When OTel is enabled this
+					// line already carries trace_id/span_id from that handler.
+					slog.LogAttrs(r.Context(), slog.LevelInfo, "operator key authenticated request",
+						slog.String("path", r.URL.Path),
+						slog.String("method", r.Method),
+					)
 					var p *policy.Policy
 					if store != nil {
 						p = store()
@@ -280,12 +273,10 @@ func middleware(current func() *verifier, operatorKeyCfg string, store policy.So
 					// sends a wrong operator key by accident. Same correlation-field
 					// deferral (request_id / client IP → #333) as the audit line above.
 					operatorKeyFailures.Add(r.Context(), 1)
-					if logger != nil {
-						logger.LogAttrs(r.Context(), slog.LevelWarn, "operator key authentication failed",
-							slog.String("path", r.URL.Path),
-							slog.String("method", r.Method),
-						)
-					}
+					slog.LogAttrs(r.Context(), slog.LevelWarn, "operator key authentication failed",
+						slog.String("path", r.URL.Path),
+						slog.String("method", r.Method),
+					)
 				}
 			}
 

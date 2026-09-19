@@ -12,11 +12,10 @@ import (
 // DLQHandler exposes Dead Letter Queue statistics.
 type DLQHandler struct {
 	Counts mq.DeadLetterStats
-	Logger *slog.Logger
 }
 
-func NewDLQHandler(stats mq.DeadLetterStats, logger *slog.Logger) *DLQHandler {
-	return &DLQHandler{Counts: stats, Logger: logger}
+func NewDLQHandler(stats mq.DeadLetterStats) *DLQHandler {
+	return &DLQHandler{Counts: stats}
 }
 
 // Stats returns per-table message counts on the dead-letter queue.
@@ -25,7 +24,7 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	counts, err := h.Counts.DeadLetterCounts(r.Context(), r.URL.Query().Get("table"))
 	if err != nil {
 		if !errors.Is(err, mq.ErrNoDeadLetterQueue) {
-			h.Logger.ErrorContext(r.Context(), "dlq stats failed", "error", err)
+			slog.ErrorContext(r.Context(), "dlq stats failed", "error", err)
 			writeJSONError(w, http.StatusInternalServerError, "stream info failed")
 			return
 		}

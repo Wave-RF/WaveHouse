@@ -335,7 +335,7 @@ The token is never placed in the URL. The server still accepts a `?token=` query
 :::caution[Streaming asks more of a custom `fetch`]
 `.stream()` and `.liveQuery()` read the response as it arrives, so an `options.fetch` used with them must return a response with a live streaming body. A response handed back with an absent or already-consumed body fails fast with `SSE_NO_STREAM_BODY`. What the SDK cannot rescue is a wrapper that *awaits* the body before returning — `await res.text()`, or the `res.clone().text()` a logging wrapper reaches for — because on a stream that never ends it never resolves and your function never returns. Both satisfy every REST call, which is what makes the trap easy to walk into.
 
-`options.headers` is also subject to CORS in a browser: a header outside the safelist joins the preflight, which the origin has to allow. WaveHouse advertises a fixed set, so custom headers reach it cross-origin only when a proxy in front terminates the preflight — the deployment they exist for. Server-side callers never preflight.
+`options.headers` is also subject to CORS in a browser: a header outside the safelist joins the preflight, which the origin has to allow. WaveHouse advertises a fixed set (see [below](#custom-headers)), so a header outside it reaches WaveHouse cross-origin only when a proxy in front terminates the preflight — the deployment such headers exist for. Server-side callers never preflight.
 :::
 
 #### Serving under a path prefix
@@ -377,7 +377,7 @@ Your headers are applied *underneath* the SDK's own, and a collision means yours
 
 Nothing is ever comma-joined: on a collision the SDK's value stands alone, and two of your own entries differing only in case collapse to the last one — a header joined rather than replaced is how you end up sending `Content-Type: application/json, image/png`.
 
-From a **browser**, a cross-origin custom header must also survive CORS preflight, and WaveHouse allow-lists a fixed set (`Accept`, `Authorization`, `Content-Type`, `Last-Event-ID`, `X-Request-ID`) with no config knob. So custom headers work server-side, or from a browser when the proxy in front owns CORS — which is the same proxy the header is usually for.
+From a **browser**, a cross-origin custom header must also survive CORS preflight, and WaveHouse allow-lists a fixed set (`Accept`, `Authorization`, `Content-Type`, `Last-Event-ID`, `X-Request-ID`, `X-Tenant-ID`) with no config knob. So any other custom header works server-side, or from a browser when the proxy in front owns CORS — which is the same proxy the header is usually for. [`X-Tenant-ID`](/api#tenant-selection) is on the list, so a browser can select a tenant with `headers: { "X-Tenant-ID": "…" }` directly.
 
 Headers are static. For a credential that rotates per request, wrap the transport with [`options.fetch`](#supplying-your-own-fetch); a callback form is tracked in [#459](https://github.com/Wave-RF/WaveHouse/issues/459).
 

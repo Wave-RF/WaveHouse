@@ -15,6 +15,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
@@ -40,7 +41,7 @@ func newStructuredQueryHandler(t testing.TB) *StructuredQueryHandler {
 			},
 		},
 	})
-	return NewStructuredQueryHandler(nil, nil, reg, nil, func() int { return 60 }, func() time.Duration { return 5 * time.Second }, nil, testutil.NopLogger())
+	return NewStructuredQueryHandler(nil, nil, reg, nil, func(*settings.Store) int { return 60 }, func() time.Duration { return 5 * time.Second }, nil)
 }
 
 func TestStructuredQuery_MissingTable(t *testing.T) {
@@ -89,7 +90,7 @@ func TestStructuredQuery_MissingTable(t *testing.T) {
 			)
 
 			w := httptest.NewRecorder()
-			h.Handle(w, req)
+			h.Handle(w, withTenant(req))
 
 			assert.Equal(t, http.StatusBadRequest, w.Code)
 			assert.Contains(t, w.Body.String(), "missing table")
@@ -103,7 +104,7 @@ func TestStructuredQuery_UnknownTable(t *testing.T) {
 	h := newStructuredQueryHandler(t)
 	r := structuredQueryRequest(t, "nope", query.StructuredQuery{Columns: []string{"x"}})
 	w := httptest.NewRecorder()
-	h.Handle(w, r)
+	h.Handle(w, withTenant(r))
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "unknown table")
@@ -115,7 +116,7 @@ func TestStructuredQuery_InvalidJSON(t *testing.T) {
 	h := newStructuredQueryHandler(t)
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query?table=clicks", bytes.NewReader([]byte(`{bad}`)))
 	w := httptest.NewRecorder()
-	h.Handle(w, r)
+	h.Handle(w, withTenant(r))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
@@ -145,7 +146,7 @@ func TestStructuredQuery_RequestBodyCap(t *testing.T) {
 
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query?table=clicks", bytes.NewReader(body))
 	w := httptest.NewRecorder()
-	h.Handle(w, r)
+	h.Handle(w, withTenant(r))
 
 	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "oversized request must 413, not 400")
 	assert.Contains(t, w.Body.String(), "request body exceeded")
@@ -162,7 +163,7 @@ func TestStructuredQuery_PolicyForbidden(t *testing.T) {
 		},
 	}
 	h := newStructuredQueryHandler(t)
-	h.PolicySource = policy.Static(p)
+	h.PolicySource = staticPolicy(p)
 
 	sq := query.StructuredQuery{Columns: []string{"page"}}
 	r := structuredQueryRequest(t, "clicks", sq)
@@ -171,7 +172,7 @@ func TestStructuredQuery_PolicyForbidden(t *testing.T) {
 	r = r.WithContext(ctx)
 
 	w := httptest.NewRecorder()
-	h.Handle(w, r)
+	h.Handle(w, withTenant(r))
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "forbidden")
@@ -188,7 +189,7 @@ func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
 		},
 	}
 	h := newStructuredQueryHandler(t)
-	h.PolicySource = policy.Static(p)
+	h.PolicySource = staticPolicy(p)
 
 	// Request "count" column which is not in AllowColumns.
 	sq := query.StructuredQuery{Columns: []string{"count"}}
@@ -198,7 +199,7 @@ func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
 	r = r.WithContext(ctx)
 
 	w := httptest.NewRecorder()
-	h.Handle(w, r)
+	h.Handle(w, withTenant(r))
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "column")
@@ -219,7 +220,7 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 		},
 	}
 	h := newStructuredQueryHandler(t)
-	h.PolicySource = policy.Static(p)
+	h.PolicySource = staticPolicy(p)
 
 	sq := query.StructuredQuery{
 		Aggregations: []query.Aggregation{
@@ -232,7 +233,7 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 	r = r.WithContext(ctx)
 
 	w := httptest.NewRecorder()
-	h.Handle(w, r)
+	h.Handle(w, withTenant(r))
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "aggregation")
@@ -246,11 +247,11 @@ func TestStructuredQuery_NilPolicyFailsClosed(t *testing.T) {
 	// An adopted-but-empty policies.json yields a nil policy: total lockout,
 	// nobody passes (AGENTS.md invariant 11). A PolicySource is always wired
 	// in production; this pins the value it returns, not its absence.
-	h.PolicySource = policy.Static(nil)
+	h.PolicySource = staticPolicy(nil)
 	sq := query.StructuredQuery{Columns: []string{"page"}}
 	r := structuredQueryRequest(t, "clicks", sq)
 	w := httptest.NewRecorder()
-	h.Handle(w, r)
+	h.Handle(w, withTenant(r))
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
@@ -289,7 +290,7 @@ func newCapturingHandler(t *testing.T, conn driver.Conn, p *policy.Policy) *Stru
 			},
 		},
 	})
-	return NewStructuredQueryHandler(conn, nil, reg, policy.Static(p), func() int { return 60 }, func() time.Duration { return 5 * time.Second }, nil, testutil.NopLogger())
+	return NewStructuredQueryHandler(conn, nil, reg, staticPolicy(p), func(*settings.Store) int { return 60 }, func() time.Duration { return 5 * time.Second }, nil)
 }
 
 func viewerRequest(t *testing.T, sq query.StructuredQuery) *http.Request {
@@ -317,7 +318,7 @@ func TestStructuredQuery_SelectAll_RestrictedRoleGetsAllowedProjection(t *testin
 	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page", "ts"}}))
 
 	w := httptest.NewRecorder()
-	h.Handle(w, viewerRequest(t, query.StructuredQuery{SelectAll: true}))
+	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{SelectAll: true})))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	assert.Equal(t, "SELECT `page`, `ts` FROM `clicks` LIMIT 10000", conn.lastSQL)
@@ -349,7 +350,7 @@ func TestStructuredQuery_RowFilterAndMaxRows_ReachClickHouse(t *testing.T) {
 	ctx := auth.WithClaims(auth.WithRole(r.Context(), "viewer"), jwt.MapClaims{"org_id": "org-1"})
 
 	w := httptest.NewRecorder()
-	h.Handle(w, r.WithContext(ctx))
+	h.Handle(w, withTenant(r.WithContext(ctx)))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	assert.Equal(t, "SELECT `page` FROM `clicks` WHERE (`user_id` = ?) AND `page` = ? LIMIT 100", conn.lastSQL)
@@ -366,7 +367,7 @@ func TestStructuredQuery_OmittedColumns_ReturnsNothing(t *testing.T) {
 	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page", "ts"}}))
 
 	w := httptest.NewRecorder()
-	h.Handle(w, viewerRequest(t, query.StructuredQuery{}))
+	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{})))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	assert.JSONEq(t, "[]", w.Body.String())
@@ -381,7 +382,7 @@ func TestStructuredQuery_SelectAll_DenyListExpands(t *testing.T) {
 	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{DenyColumns: []string{"payload"}}))
 
 	w := httptest.NewRecorder()
-	h.Handle(w, viewerRequest(t, query.StructuredQuery{SelectAll: true}))
+	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{SelectAll: true})))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	assert.Equal(t, "SELECT `page`, `user_id`, `ts` FROM `clicks` LIMIT 10000", conn.lastSQL)
@@ -397,7 +398,7 @@ func TestStructuredQuery_LiteralStarColumn_Unknown(t *testing.T) {
 	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
 
 	w := httptest.NewRecorder()
-	h.Handle(w, viewerRequest(t, query.StructuredQuery{Columns: []string{"*"}}))
+	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{Columns: []string{"*"}})))
 
 	require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
 	assert.Empty(t, conn.lastSQL)
@@ -412,7 +413,7 @@ func TestStructuredQuery_UnrestrictedRoleKeepsSelectStar(t *testing.T) {
 	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
 
 	w := httptest.NewRecorder()
-	h.Handle(w, viewerRequest(t, query.StructuredQuery{SelectAll: true}))
+	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{SelectAll: true})))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	assert.Equal(t, "SELECT * FROM `clicks` LIMIT 10000", conn.lastSQL)
@@ -458,7 +459,7 @@ func TestStructuredQuery_DeniedColumnInAnyClause_Returns403(t *testing.T) {
 			h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page", "ts"}}))
 
 			w := httptest.NewRecorder()
-			h.Handle(w, viewerRequest(t, tt.sq))
+			h.Handle(w, withTenant(viewerRequest(t, tt.sq)))
 
 			assert.Equal(t, http.StatusForbidden, w.Code, "body=%s", w.Body.String())
 			assert.Contains(t, w.Body.String(), "not allowed")
@@ -477,7 +478,7 @@ func TestStructuredQuery_NoReadableColumns_Returns403(t *testing.T) {
 	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"nonexistent"}}))
 
 	w := httptest.NewRecorder()
-	h.Handle(w, viewerRequest(t, query.StructuredQuery{SelectAll: true}))
+	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{SelectAll: true})))
 
 	assert.Equal(t, http.StatusForbidden, w.Code, "body=%s", w.Body.String())
 	assert.Empty(t, conn.lastSQL)
@@ -497,7 +498,7 @@ func TestStructuredQuery_UnauthenticatedUsesDefaultRoleProjection(t *testing.T) 
 	// No role on the context — a tokenless request.
 	r := structuredQueryRequest(t, "clicks", query.StructuredQuery{SelectAll: true, Limit: 2})
 	w := httptest.NewRecorder()
-	h.Handle(w, r)
+	h.Handle(w, withTenant(r))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	assert.Equal(t, "SELECT `page` FROM `clicks` LIMIT 2", conn.lastSQL)
@@ -524,7 +525,7 @@ func TestStructuredQuery_CacheKeyIsolatesColumnVisibility(t *testing.T) {
 		r := structuredQueryRequest(t, "clicks", query.StructuredQuery{SelectAll: true})
 		r = r.WithContext(auth.WithClaims(auth.WithRole(r.Context(), role), jwt.MapClaims{}))
 		w := httptest.NewRecorder()
-		h.Handle(w, r)
+		h.Handle(w, withTenant(r))
 		require.Equal(t, http.StatusOK, w.Code, "role=%s body=%s", role, w.Body.String())
 		return conn.lastSQL
 	}

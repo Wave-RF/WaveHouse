@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,7 +25,7 @@ func parkedMsg(table string) *mq.Message {
 func TestDLQStats_EmptyWhenNoStream(t *testing.T) {
 	// The embedded MQ always has a dead-letter queue, so its absence comes
 	// from a mock.
-	handler := NewDLQHandler(&testutil.MockDeadLetterStats{Err: mq.ErrNoDeadLetterQueue}, slog.Default())
+	handler := NewDLQHandler(&testutil.MockDeadLetterStats{Err: mq.ErrNoDeadLetterQueue})
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/dlq/stats", nil)
 	rec := httptest.NewRecorder()
@@ -46,7 +45,7 @@ func TestDLQStats_EmptyWhenNoStream(t *testing.T) {
 
 func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 	dir := t.TempDir()
-	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(dir, 1024*1024)
 	require.NoError(t, err)
 	defer func() { _ = emb.Close() }()
 
@@ -60,7 +59,7 @@ func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 		require.NoError(t, emb.DeadLetter(ctx, parkedMsg("users")))
 	}
 
-	handler := NewDLQHandler(emb, slog.Default())
+	handler := NewDLQHandler(emb)
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 
@@ -80,7 +79,7 @@ func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 
 func TestDLQStats_SingleTable(t *testing.T) {
 	dir := t.TempDir()
-	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(dir, 1024*1024)
 	require.NoError(t, err)
 	defer func() { _ = emb.Close() }()
 
@@ -88,7 +87,7 @@ func TestDLQStats_SingleTable(t *testing.T) {
 
 	require.NoError(t, emb.DeadLetter(ctx, parkedMsg("orders")))
 
-	handler := NewDLQHandler(emb, slog.Default())
+	handler := NewDLQHandler(emb)
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 
@@ -105,7 +104,7 @@ func TestDLQStats_SingleTable(t *testing.T) {
 }
 
 func TestDLQStats_BrokerFailureIsAnError(t *testing.T) {
-	handler := NewDLQHandler(&testutil.MockDeadLetterStats{Err: errors.New("broker unavailable")}, testutil.NopLogger())
+	handler := NewDLQHandler(&testutil.MockDeadLetterStats{Err: errors.New("broker unavailable")})
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/dlq/stats", nil)
 	rec := httptest.NewRecorder()
@@ -116,7 +115,7 @@ func TestDLQStats_BrokerFailureIsAnError(t *testing.T) {
 }
 
 func TestDLQStats_PassesTheTableFilter(t *testing.T) {
-	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024)
 	require.NoError(t, err)
 	defer func() { _ = emb.Close() }()
 
@@ -124,7 +123,7 @@ func TestDLQStats_PassesTheTableFilter(t *testing.T) {
 	require.NoError(t, emb.DeadLetter(ctx, parkedMsg("default.orders")))
 	require.NoError(t, emb.DeadLetter(ctx, parkedMsg("users")))
 
-	handler := NewDLQHandler(emb, slog.Default())
+	handler := NewDLQHandler(emb)
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/ops/dlq/stats?table=default.orders", nil)
 	rec := httptest.NewRecorder()
 

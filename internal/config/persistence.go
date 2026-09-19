@@ -21,12 +21,12 @@ const permissionHint = "if running in a container with a host bind mount, the ho
 //
 // `kind` is a short label (e.g. "mq", "dedupe"). The caller still decides
 // whether to exit; this only logs.
-func LogStorageInitError(logger *slog.Logger, kind, path string, err error) {
+func LogStorageInitError(kind, path string, err error) {
 	fields := []any{"error", err, "path", path}
 	if errors.Is(err, os.ErrPermission) {
 		fields = append(fields, "hint", permissionHint)
 	}
-	logger.Error(kind+" init failed", fields...)
+	slog.Error(kind+" init failed", fields...)
 }
 
 // WarnIfFreshDataDir logs a startup `WARN` if dir doesn't already exist or is
@@ -39,7 +39,7 @@ func LogStorageInitError(logger *slog.Logger, kind, path string, err error) {
 // recreated.
 //
 // `kind` is a short label for the log message (e.g. "nats", "pebble").
-func WarnIfFreshDataDir(logger *slog.Logger, kind, dir string) {
+func WarnIfFreshDataDir(kind, dir string) {
 	if dir == "" {
 		return
 	}
@@ -47,20 +47,20 @@ func WarnIfFreshDataDir(logger *slog.Logger, kind, dir string) {
 	entries, err := os.ReadDir(dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		logger.Warn(
+		slog.Warn(
 			"data directory does not exist — starting with no prior state. If this is a redeploy, your persistent volume is not actually persisting; verify your mount.",
 			"kind", kind,
 			"path", dir,
 		)
 	case err != nil:
-		logger.Warn("could not read data directory", "kind", kind, "path", dir, "error", err)
+		slog.Warn("could not read data directory", "kind", kind, "path", dir, "error", err)
 	case len(entries) == 0:
-		logger.Warn(
+		slog.Warn(
 			"data directory is empty — starting with no prior state. If this is a redeploy, your persistent volume is not actually persisting; verify your mount.",
 			"kind", kind,
 			"path", dir,
 		)
 	default:
-		logger.Info("data directory found with prior state", "kind", kind, "path", dir)
+		slog.Info("data directory found with prior state", "kind", kind, "path", dir)
 	}
 }

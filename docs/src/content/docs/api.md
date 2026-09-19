@@ -50,6 +50,29 @@ WaveHouse extracts the role from a configurable JWT claim path (`auth.role_claim
 
 Policies support Hasura-style row-level and column-level permissions with JWT claim templating (e.g., `{{ jwt.app_metadata.tenant_id }}`).
 
+## Tenant Selection
+
+Every `/v1` route outside `/v1/ops/*` resolves a tenant before it authenticates the request. The tenant comes from the `X-Tenant-ID` request header:
+
+```text
+X-Tenant-ID: 0
+```
+
+A request without the header, or with an empty one, resolves to tenant `0`, the default tenant, whose settings are the [settings directory](/settings-directory). A settings directory defines that one tenant, so any other id is unknown. Setting the header on every request is the client's or the fronting proxy's job; WaveHouse never derives it from the token.
+
+A tenant id is 1–64 characters of ASCII letters, digits, `_`, and `-`. It is a string, not a number, so a long numeric id keeps every digit.
+
+| Status | Body | When |
+| ------ | ---- | ---- |
+| `400` | `{"error": "invalid X-Tenant-ID: …"}` | The id breaks the grammar above, or the header was sent more than once |
+| `404` | `{"error": "unknown tenant: <id>"}` | The id is well formed but no such tenant exists |
+
+Both are decided before authentication, so they are returned whatever token the request carries. Every response from a tenant route, these two included, carries `Vary: X-Tenant-ID`, so a shared cache keys on the header and never replays one tenant's response to another.
+
+The probes (`/livez`, `/readyz`, `/healthz`), `/version`, the Prometheus metrics path, and `/v1/ops/*` are tenant-exempt: they ignore the header entirely. The two admin pipe reads ([`GET /v1/ops/pipes`](#get-v1opspipes--list-named-pipes) and `GET /v1/ops/pipes/{name}`) name their tenant with an optional `?tenant=` query parameter instead, with the same grammar and the same `400`/`404` answers; no other ops route takes a tenant.
+
+`X-Tenant-ID` is in the CORS `Access-Control-Allow-Headers` list, so a browser client can send it cross-origin. The SDK sends it through [`options.headers`](/sdk#custom-headers).
+
 ## Response Format
 
 ### Error Responses
@@ -150,7 +173,7 @@ Status code: `503 Service Unavailable`
 
 ### `GET /v1/health` — Liveness ping (public, content-free)
 
-Returns **`200 OK` with an empty body** once the gateway is past boot, or **`503 Service Unavailable`** (also empty) while boot-time schema discovery is still failing. No authentication required and no response body — the caller only branches on the status code, so there's nothing to JSON-encode or cache per request.
+Returns **`200 OK` with an empty body** once the gateway is past boot, or **`503 Service Unavailable`** (also empty) while boot-time schema discovery is still failing. Like every other `/v1` route it [resolves a tenant](#tenant-selection) first, so a bad `X-Tenant-ID` answers `400`/`404` before the probe runs. No authentication required and no response body — the caller only branches on the status code, so there's nothing to JSON-encode or cache per request.
 
 This is what the SDK's `wh.sys.health()` calls, and the endpoint to use when choosing among multiple servers in a distributed setup. It mirrors `/livez` under the hood but is intentionally a `/v1` API route rather than a Kubernetes probe path: an operator may filter the bare probe paths (`/livez`, `/readyz`, `/healthz`) out at the reverse proxy since they're internal probes, so the SDK relies on `/v1/health`, which is documented public API surface meant to stay reachable. It does **not** ping ClickHouse — readiness-based load balancing is the proxy/LB's job (via `/readyz`), not the client's.
 
@@ -616,7 +639,7 @@ Each SSE connection is bound to a single `?table=`; to consume multiple tables, 
 
 Values of top-level `DateTime`/`DateTime64` columns inside `row` arrive in the canonical RFC 3339 UTC form (ingest rewrites them before publishing — see [timestamp canonicalization](#timestamp-canonicalization)), so a live event and a `/v1/query` read of the same row agree on the instant in zone-explicit form — a zone-less spelling no longer parses as local time in a browser ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). The two renderings are byte-identical regardless of the declared time zone or a `Nullable` wrapper — a column declared with a non-UTC zone also streams as `Z`, and `/v1/query` normalizes it (nullable or not) to UTC before rendering. Canonicalization is fail-open at ingest, so a value outside the accepted input forms streams in whatever spelling the producer sent — and for exactly those events the byte-identity above does not hold: a spelling ClickHouse accepts anyway is stored and still queries back canonical, while one it too rejects lands in the DLQ and never becomes queryable at all.
 
-**Note:** When access control policies are active, streamed events are filtered per the caller's role: tables without `select` permission are skipped, denied columns are removed from each event, and the role's [row-level `filter`](/access-control#row-level-security) is evaluated per subscriber against the caller's JWT claims — supplied by the connection's token (the `Authorization` header, or the `?token=` fallback above), with replayed gap-fill events filtered the same way. For a filter constant the query path's SQL also accepts ([the enforcement caution](/access-control#where-each-rule-is-enforced) gives per-type guidance), a connection is never delivered a row the query path would hide for that role — every comparison the stream can't prove fails closed and withholds the row instead. Numeric comparisons run in the column's storage domain — both operands narrowed the way ClickHouse narrows the stored value and the bound constant — so columns that narrow on insert (`Float32`/`Float64` width, a `Decimal`'s scale) agree with the query path too; the residual payload-vs-stored case is an event whose insert later fails into the DLQ, which the caution documents. The connection's claims are captured once, when the stream is established — a policy change applies from the next live event (an in-flight gap-fill finishes under the policy snapshot taken when the stream opened), but an expired token or changed claims take effect only when the client reconnects.
+**Note:** When access control policies are active, streamed events are filtered per the caller's role: tables without `select` permission are skipped, denied columns are removed from each event, and the role's [row-level `filter`](/access-control#row-level-security) is evaluated per subscriber against the caller's JWT claims — supplied by the connection's token (the `Authorization` header, or the `?token=` fallback above), with replayed gap-fill events filtered the same way. For a filter constant the query path's SQL also accepts ([the enforcement caution](/access-control#where-each-rule-is-enforced) gives per-type guidance), a connection is never delivered a row the query path would hide for that role — every comparison the stream can't prove fails closed and withholds the row instead. Numeric comparisons run in the column's storage domain — both operands narrowed the way ClickHouse narrows the stored value and the bound constant — so columns that narrow on insert (`Float32`/`Float64` width, a `Decimal`'s scale) agree with the query path too; the residual payload-vs-stored case is an event whose insert later fails into the DLQ, which the caution documents. The connection's claims are captured once, when the stream is established — a policy change applies from the next event, replayed or live (a gap-fill re-reads the policy per event too), but an expired token or changed claims take effect only when the client reconnects.
 
 **CORS:** `/v1/stream` honors the `cors.allowed_origins` allowlist (settings directory) like every endpoint. Note that a **header-authenticated stream preflights before it connects** — `Authorization` is not CORS-safelisted — where a bare `EventSource` never preflighted at all: its request is not a `fetch()`, so Fetch's unsafe-request flag is never set and `Last-Event-ID` rides on the plain `GET`. Both headers are allow-listed, so an allowed origin connects *and* resumes cross-origin.
 
@@ -758,9 +781,11 @@ The policy has no endpoints: it is the settings directory's [`policies.json`](/s
 
 Returns every adopted named query pipe — the settings directory's [`pipes.json`](/settings-directory#pipesjson). Pipes have no write endpoints: edit the file and reload.
 
+The ops routes are [tenant-exempt](#tenant-selection), so this read and `GET /v1/ops/pipes/{name}` name their tenant with an optional `?tenant=` query parameter instead of the header. Absent or empty means tenant `0`; a malformed id, a repeated parameter, or a query string that does not parse is a `400` (`{"error": "invalid ?tenant: …"}`), and an unknown tenant a `404` with the same body as the header.
+
 #### `GET /v1/ops/pipes/{name}` — Get Named Pipe
 
-Returns a specific named pipe definition:
+Returns a specific named pipe definition from the tenant named by `?tenant=`, as above:
 
 ```json
 {

@@ -19,6 +19,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/query"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -57,18 +58,20 @@ type IngestWorker struct {
 	failed     chan error
 	httpClient *http.Client
 	cache      cache.Cache
-	logger     *slog.Logger
 	// target resolves the ClickHouse HTTP wiring per insert
 	// (chconn.Manager.Target in production) so a settings reload that
 	// re-points ClickHouse applies to the next flush.
 	target   func() chconn.Target
 	maxBatch int
 	maxWait  time.Duration
-	// dlqEnabled reports, per table, whether a row that still fails after
-	// row-by-row isolation is parked on the DLQ (settings.Store.DLQFor in
-	// production; nil means always). Resolved at the moment of the failure, so
+	// tenant is whose events the worker writes; every event is its tenant's
+	// until the MQ subject carries one (#583 story 5).
+	tenant tenant.ID
+	// dlqEnabled reports, per tenant table, whether a row that still fails
+	// after row-by-row isolation is parked on the DLQ (settings.Store.DLQFor
+	// in production; nil means always). Resolved at the moment of the failure, so
 	// a settings reload applies to the next poison row without a restart.
-	dlqEnabled func(table string) bool
+	dlqEnabled func(id tenant.ID, table string) bool
 
 	// wg tracks the dispatch loop; ackWg tracks backgrounded DoubleAck goroutines.
 	// Separate so shutdown can drain inserts (wg → tableWg) before waiting on the
@@ -128,7 +131,8 @@ const (
 func StartIngestWorker(
 	ctx context.Context, queue Queue, cache cache.Cache,
 	target func() chconn.Target,
-	dlqEnabled func(table string) bool,
+	id tenant.ID,
+	dlqEnabled func(id tenant.ID, table string) bool,
 ) (stop func(context.Context) error, failed <-chan error, err error) {
 	if queue == nil {
 		return nil, nil, fmt.Errorf("message queue is nil")
@@ -173,10 +177,10 @@ func StartIngestWorker(
 			Timeout:   30 * time.Second,
 		},
 		cache:      cache,
-		logger:     slog.Default().With("component", "ingest_worker"),
 		target:     target,
 		maxBatch:   defaultMaxBatch,
 		maxWait:    defaultMaxWait,
+		tenant:     id,
 		dlqEnabled: dlqEnabled,
 	}
 
@@ -233,7 +237,7 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 		}
 	}, pullMaxMessages)
 	if err != nil {
-		w.logger.Error("failed to start consumer", "error", err)
+		slog.ErrorContext(ctx, "failed to start consumer", "error", err)
 		w.failed <- fmt.Errorf("ingest worker: start consumer: %w", err)
 		return
 	}
@@ -272,7 +276,7 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 			// what is already in hand — those rows are delivered and the
 			// publish path is not what broke — then fail loud. Messages still
 			// in msgChan are unacked and redelivered to the next consumer.
-			w.logger.Error("ingest consumer delivery ended; ingestion has stopped", "error", err)
+			slog.ErrorContext(ctx, "ingest consumer delivery ended; ingestion has stopped", "error", err)
 			shutdown()
 			w.failed <- fmt.Errorf("ingest worker: %w", err)
 			return
@@ -457,19 +461,19 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 	var envelope EventMessage
 
 	if err := json.Unmarshal(m.Data, &envelope); err != nil {
-		w.logger.ErrorContext(ctx, "failed to parse event envelope", "error", err)
+		slog.ErrorContext(ctx, "failed to parse event envelope", "error", err)
 		w.rejectPoison(ctx, m, "", "malformed", err.Error())
 		return parsedMsg{}, false
 	}
 	if envelope.Format != FormatJSONCompactEachRow {
-		w.logger.ErrorContext(ctx, "event envelope declares an unknown row format",
+		slog.ErrorContext(ctx, "event envelope declares an unknown row format",
 			"format", envelope.Format, "table", envelope.TableName)
 		w.rejectPoison(ctx, m, envelope.TableName, "unknown_format",
 			fmt.Sprintf("unknown row format %q (a pre-v2 envelope carries none); drain the ingest queue before upgrading", envelope.Format))
 		return parsedMsg{}, false
 	}
 	if len(envelope.Columns) == 0 || len(envelope.Row) == 0 {
-		w.logger.ErrorContext(ctx, "event envelope carries no columns or no row",
+		slog.ErrorContext(ctx, "event envelope carries no columns or no row",
 			"table", envelope.TableName, "columns", len(envelope.Columns))
 		w.rejectPoison(ctx, m, envelope.TableName, "unpairable",
 			"envelope carries no columns or no row, so its values cannot be mapped to columns")
@@ -483,14 +487,14 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 	// same check; this is the ingest half of the contract AGENTS.md states.
 	var cells []json.RawMessage
 	if dup, ok := firstDuplicate(envelope.Columns); ok {
-		w.logger.ErrorContext(ctx, "unreadable envelope: a column name repeats",
+		slog.ErrorContext(ctx, "unreadable envelope: a column name repeats",
 			"table", envelope.TableName, "column", dup)
 		w.rejectPoison(ctx, m, envelope.TableName, "unpairable",
 			fmt.Sprintf("column %q appears more than once, so its values cannot be mapped to columns", dup))
 		return parsedMsg{}, false
 	}
 	if err := json.Unmarshal(envelope.Row, &cells); err != nil || len(cells) != len(envelope.Columns) {
-		w.logger.ErrorContext(ctx, "event envelope row does not pair with its columns",
+		slog.ErrorContext(ctx, "event envelope row does not pair with its columns",
 			"table", envelope.TableName, "columns", len(envelope.Columns), "error", err)
 		w.rejectPoison(ctx, m, envelope.TableName, "unpairable",
 			fmt.Sprintf("row does not pair with its %d column(s), so its values cannot be mapped to columns", len(envelope.Columns)))
@@ -562,7 +566,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 		return
 	}
 
-	w.logger.WarnContext(ctx, "bulk insert failed, falling back to 1-by-1 isolation", "table", tableName, "error", err)
+	slog.WarnContext(ctx, "bulk insert failed, falling back to 1-by-1 isolation", "table", tableName, "error", err)
 
 	// ISOLATE & DLQ: re-insert one row at a time so a single poison row can't
 	// sink the whole batch.
@@ -570,11 +574,11 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 	for _, pm := range group {
 		singleErr := w.insertToClickHouse(ctx, tableName, cols, []parsedMsg{pm})
 		if singleErr != nil {
-			if w.dlqEnabled != nil && !w.dlqEnabled(tableName) {
-				w.logger.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "table", tableName, "error", singleErr)
+			if w.dlqEnabled != nil && !w.dlqEnabled(w.tenant, tableName) {
+				slog.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "table", tableName, "error", singleErr)
 				continue
 			}
-			w.logger.ErrorContext(ctx, "isolated bad row, sending to DLQ", "table", tableName, "error", singleErr)
+			slog.ErrorContext(ctx, "isolated bad row, sending to DLQ", "table", tableName, "error", singleErr)
 			w.sendToDLQ(ctx, tableName, pm, singleErr.Error())
 		} else {
 			w.handleSuccess(ctx, tableName, []parsedMsg{pm})
@@ -676,7 +680,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 		invCtx := trace.ContextWithSpanContext(context.WithoutCancel(ctx), trace.SpanContextFromContext(ctx))
 		_, err := w.cache.Invalidate(invCtx, namespaces)
 		if err != nil {
-			w.logger.ErrorContext(invCtx, "failed to invalidate cache after insert - your cache is holding stale data now!", "table", tableName, "error", err)
+			slog.ErrorContext(invCtx, "failed to invalidate cache after insert - your cache is holding stale data now!", "table", tableName, "error", err)
 		}
 	}
 
@@ -689,7 +693,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 		for _, pm := range msgs {
 			acks.Go(func() {
 				if err := pm.msg.DoubleAck(context.WithoutCancel(ctx)); err != nil {
-					w.logger.ErrorContext(context.WithoutCancel(ctx), "double ack failed for processed message", "error", err, "table", tableName)
+					slog.ErrorContext(context.WithoutCancel(ctx), "double ack failed for processed message", "error", err, "table", tableName)
 				}
 			})
 		}
@@ -704,7 +708,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 // publish that FAILS leaves the message unacked, exactly as the isolation path
 // does: that is a transient DLQ outage, and retrying beats destroying the row.
 func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, tableName, reason, detail string) {
-	if w.dlqEnabled == nil || w.dlqEnabled(tableName) {
+	if w.dlqEnabled == nil || w.dlqEnabled(w.tenant, tableName) {
 		// Backgrounded on ackWg for the same reason handleSuccess backgrounds its
 		// acks: parkOnDLQ does a DLQ publish AND an fsync-bound DoubleAck,
 		// and parseMsg runs on the dispatchLoop goroutine. The scenario this whole
@@ -719,7 +723,7 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, tableNam
 		})
 		return
 	}
-	w.logger.ErrorContext(ctx, "unreadable envelope dropped — the DLQ is disabled for this table, and a message that can never insert must not redeliver forever",
+	slog.ErrorContext(ctx, "unreadable envelope dropped — the DLQ is disabled for this table, and a message that can never insert must not redeliver forever",
 		"table", tableName, "reason", reason, "detail", detail)
 	// Counted only once the ack lands, for the same reason the parked path waits
 	// on parkOnDLQ's verdict: a failed ack leaves the message in the stream to be
@@ -728,7 +732,7 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, tableNam
 	// that about a row still sitting in the queue, once per redelivery.
 	w.ackWg.Go(func() {
 		if err := m.DoubleAck(ctx); err != nil {
-			w.logger.ErrorContext(ctx, "ack of a dropped unreadable envelope failed, so it stays in the stream and will be refused again",
+			slog.ErrorContext(ctx, "ack of a dropped unreadable envelope failed, so it stays in the stream and will be refused again",
 				"table", tableName, "reason", reason, "error", err)
 			return
 		}
@@ -759,7 +763,7 @@ func (w *IngestWorker) parkOnDLQ(ctx context.Context, msg *mq.Message, tableName
 		mq.WithHeader("X-DLQ-Timestamp", time.Now().UTC().Format(time.RFC3339)),
 	)
 	if pubErr != nil {
-		w.logger.ErrorContext(ctx, "DLQ publish failed, this data will continue retrying insertion indefinitely until the DLQ recovers", "table", tableName, "topic", msg.TopicKey(), "error", pubErr)
+		slog.ErrorContext(ctx, "DLQ publish failed, this data will continue retrying insertion indefinitely until the DLQ recovers", "table", tableName, "topic", msg.TopicKey(), "error", pubErr)
 		return false
 	}
 
@@ -769,7 +773,7 @@ func (w *IngestWorker) parkOnDLQ(ctx context.Context, msg *mq.Message, tableName
 	// parking again on every retry. The duplicate copy is the residual cost:
 	// a publish is not idempotent, so it cannot be taken back here.
 	if err := msg.DoubleAck(ctx); err != nil {
-		w.logger.ErrorContext(ctx, "parked on the DLQ but the ack failed, so the envelope stays in the stream and will be parked again on redelivery",
+		slog.ErrorContext(ctx, "parked on the DLQ but the ack failed, so the envelope stays in the stream and will be parked again on redelivery",
 			"table", tableName, "topic", msg.TopicKey(), "error", err)
 		return false
 	}

@@ -17,7 +17,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 )
 
 // TestStructuredQuery_ResourceCapsEnforcedServerSide is the executable proof
@@ -92,19 +92,22 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 			// actually executes against ClickHouse (no cross-case cache hit
 			// masking enforcement). defaultMaxRows 0 falls back to the builder's
 			// constant. singleflight's zero value is ready to use.
-			store := policy.Static(&policy.Policy{
+			p := &policy.Policy{
 				AdminRole: "admin",
 				Tables: map[string]policy.TablePolicy{
 					table: {"viewer": {Select: &tt.perms}},
 				},
-			})
+			}
 			h := api.NewStructuredQueryHandler(
-				e.chConn, nil, e.registry, store, func() int { return 60 }, func() time.Duration { return 30 * time.Second }, nil, testutil.NopLogger(),
+				e.chConn, nil, e.registry, func(*settings.Store) *policy.Policy { return p }, func(*settings.Store) int { return 60 }, func() time.Duration { return 30 * time.Second }, nil,
 			)
 
 			req := httptest.NewRequest(http.MethodPost,
 				"/v1/query?table="+table, strings.NewReader(`{"select_all":true}`))
 			req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
+			// The handler is served without the router, so the test stands in
+			// for TenantMW; the fixed getters above never read the store.
+			req = req.WithContext(api.WithStore(req.Context(), &settings.Store{}))
 			rec := httptest.NewRecorder()
 
 			h.Handle(rec, req)

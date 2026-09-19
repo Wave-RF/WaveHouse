@@ -16,31 +16,32 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// slogNATSLogger adapts slog to the natsserver.Logger interface.
-type slogNATSLogger struct{ l *slog.Logger }
+// slogNATSLogger adapts the default slog logger to the natsserver.Logger
+// interface.
+type slogNATSLogger struct{}
 
-func (s *slogNATSLogger) Noticef(format string, v ...any) {
-	s.l.Info(fmt.Sprintf(format, v...), "component", "nats")
+func (slogNATSLogger) Noticef(format string, v ...any) {
+	slog.Info(fmt.Sprintf(format, v...), "component", "nats")
 }
 
-func (s *slogNATSLogger) Warnf(format string, v ...any) {
-	s.l.Warn(fmt.Sprintf(format, v...), "component", "nats")
+func (slogNATSLogger) Warnf(format string, v ...any) {
+	slog.Warn(fmt.Sprintf(format, v...), "component", "nats")
 }
 
-func (s *slogNATSLogger) Fatalf(format string, v ...any) {
-	s.l.Error(fmt.Sprintf(format, v...), "component", "nats")
+func (slogNATSLogger) Fatalf(format string, v ...any) {
+	slog.Error(fmt.Sprintf(format, v...), "component", "nats")
 }
 
-func (s *slogNATSLogger) Errorf(format string, v ...any) {
-	s.l.Error(fmt.Sprintf(format, v...), "component", "nats")
+func (slogNATSLogger) Errorf(format string, v ...any) {
+	slog.Error(fmt.Sprintf(format, v...), "component", "nats")
 }
 
-func (s *slogNATSLogger) Debugf(format string, v ...any) {
-	s.l.Debug(fmt.Sprintf(format, v...), "component", "nats")
+func (slogNATSLogger) Debugf(format string, v ...any) {
+	slog.Debug(fmt.Sprintf(format, v...), "component", "nats")
 }
 
-func (s *slogNATSLogger) Tracef(format string, v ...any) {
-	s.l.Debug(fmt.Sprintf(format, v...), "component", "nats")
+func (slogNATSLogger) Tracef(format string, v ...any) {
+	slog.Debug(fmt.Sprintf(format, v...), "component", "nats")
 }
 
 // EmbeddedNATS runs an in-process NATS server with JetStream.
@@ -48,7 +49,6 @@ type EmbeddedNATS struct {
 	server *natsserver.Server
 	conn   *nats.Conn
 	js     jetstream.JetStream
-	logger *slog.Logger
 
 	limitMu  sync.Mutex
 	maxBytes int64 // the ingest stream cap both streams were last reconciled to
@@ -79,16 +79,10 @@ const (
 // stream at a tenth of it. The DLQ stream is always present — an empty
 // limits-policy stream costs nothing, and whether a poison row lands on it is
 // the ingest worker's decision at the moment of the failure.
-// An optional *slog.Logger can be passed to control server log output;
-// if omitted, slog.Default() is used. The stream names are fixed (see
-// subject.go) — the embedded server is private to this process, so there's
-// no namespacing to do.
-func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*EmbeddedNATS, error) {
-	l := slog.Default()
-	if len(logger) > 0 && logger[0] != nil {
-		l = logger[0]
-	}
-
+// The server logs through slog's default logger. The stream names are fixed
+// (see subject.go) — the embedded server is private to this process, so
+// there's no namespacing to do.
+func NewEmbedded(storeDir string, maxBytes int64) (*EmbeddedNATS, error) {
 	opts := &natsserver.Options{
 		DontListen: true,
 		JetStream:  true,
@@ -105,7 +99,7 @@ func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*Embe
 	if err != nil {
 		return nil, fmt.Errorf("new nats server: %w", err)
 	}
-	ns.SetLogger(&slogNATSLogger{l: l}, false, false)
+	ns.SetLogger(slogNATSLogger{}, false, false)
 	ns.Start()
 
 	if !ns.ReadyForConnections(5 * time.Second) {
@@ -136,7 +130,7 @@ func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*Embe
 		return nil, fmt.Errorf("create dlq stream: %w", err)
 	}
 
-	return &EmbeddedNATS{server: ns, conn: nc, js: js, logger: l, maxBytes: maxBytes}, nil
+	return &EmbeddedNATS{server: ns, conn: nc, js: js, maxBytes: maxBytes}, nil
 }
 
 // ingestStreamConfig is the WAVEHOUSE stream. LimitsPolicy: standard
@@ -339,7 +333,7 @@ func (c *jsConsumer) Consume(handler func(msg *Message), prefetch int) (func(), 
 	opts := []jetstream.PullConsumeOpt{
 		jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
 			lastErr.Store(&err)
-			slog.Default().Warn("mq: consumer reported an error", "component", "nats", "error", err)
+			slog.Warn("mq: consumer reported an error", "component", "nats", "error", err)
 		}),
 	}
 	if prefetch > 0 {
@@ -448,13 +442,13 @@ func (e *EmbeddedNATS) PurgeAcked(ctx context.Context, consumer string, olderTha
 	// this package speaks.
 	switch {
 	case report.purged:
-		e.logger.Info("sweeper: purged",
+		slog.InfoContext(ctx, "sweeper: purged",
 			"purged_below_seq", report.target,
 			"ack_floor", report.ackFloor,
 			"gap_seq", report.gapSeq,
 		)
 	case report.gapSeq == 0:
-		e.logger.Debug("sweeper: all messages within gap window, skipping purge")
+		slog.DebugContext(ctx, "sweeper: all messages within gap window, skipping purge")
 	}
 	return report.purged, nil
 }

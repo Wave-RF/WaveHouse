@@ -86,7 +86,11 @@ type App struct {
 	logLevel *slog.LevelVar
 	listener net.Listener
 
+	// store is the default tenant's settings, which the process-wide
+	// resources (ClickHouse, dedupe, MQ, auth, CORS, reload) still follow;
+	// tenants is the registry every tenant-aware path resolves through.
 	store       *settings.Store
+	tenants     *settings.Registry
 	policies    policy.Source
 	promHandler http.Handler
 	ch          *chconn.Manager

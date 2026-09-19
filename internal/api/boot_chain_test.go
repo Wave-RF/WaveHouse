@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
@@ -88,8 +87,7 @@ func TestBoot_Chain_DegradedThenRecovers(t *testing.T) {
 	// comes up partway through the retry backoff.
 	conn := &errsThenSuccessConn{errs: []error{connRefused, connRefused, dbMissing}}
 
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	registry := discovery.NewSchemaRegistry(conn, func() string { return "test" }, func() time.Duration { return time.Hour }, logger)
+	registry := discovery.NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 
 	// Phase 0 — synchronous boot Refresh fails. internal/app records the
 	// diagnostic in BootState and proceeds with the retry loop in a

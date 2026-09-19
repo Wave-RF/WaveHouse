@@ -12,6 +12,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
 )
@@ -20,16 +21,19 @@ import (
 // listing for admins. Pipes are defined in the settings directory's
 // pipes.json and read per request, so a reload applies immediately.
 type PipesHandler struct {
-	Source       pipes.Source
-	PolicySource policy.Source // resolves empty role to default_role; may be nil
-	CHConn       driver.Conn
-	Cache        cache.Cache
-	sf           singleflight.Group
+	// Source yields a tenant's pipes (the store itself in production).
+	Source       func(*settings.Store) pipes.Source
+	PolicySource PolicySource // resolves empty role to default_role; may be nil
+	// Tenants resolves the ?tenant= of the admin reads (List, Get): the ops
+	// tree is tenant-exempt, so they name their tenant rather than carry one.
+	Tenants *settings.Registry
+	CHConn  driver.Conn
+	Cache   cache.Cache
+	sf      singleflight.Group
 	// queryTimeout bounds each pipe execution, read per request
 	// (chconn.Manager.QueryTimeout in production) so a settings reload
 	// applies without a restart.
 	queryTimeout func() time.Duration
-	logger       *slog.Logger
 
 	// maxRequestBytes optionally overrides the default inbound request body
 	// cap (maxControlBodyBytes) for the body-decoding path (Execute).
@@ -39,24 +43,32 @@ type PipesHandler struct {
 	maxRequestBytes int64
 }
 
-func NewPipesHandler(source pipes.Source, policySource policy.Source, conn driver.Conn, c cache.Cache, queryTimeout func() time.Duration, logger *slog.Logger) *PipesHandler {
-	return &PipesHandler{Source: source, PolicySource: policySource, CHConn: conn, Cache: c, queryTimeout: queryTimeout, logger: logger}
+func NewPipesHandler(source func(*settings.Store) pipes.Source, policySource PolicySource, conn driver.Conn, c cache.Cache, queryTimeout func() time.Duration) *PipesHandler {
+	return &PipesHandler{Source: source, PolicySource: policySource, CHConn: conn, Cache: c, queryTimeout: queryTimeout}
 }
 
-// List returns all named queries (admin endpoint).
-func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
+// List returns all named queries of the ?tenant= (admin endpoint).
+func (h *PipesHandler) List(w http.ResponseWriter, r *http.Request) {
+	store, ok := opsStore(w, r, h.Tenants)
+	if !ok {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	q := h.Source.Pipes()
+	q := h.Source(store).Pipes()
 	if q == nil {
 		q = []*pipes.NamedQuery{}
 	}
 	_ = json.NewEncoder(w).Encode(q)
 }
 
-// Get returns a specific named query (admin endpoint).
+// Get returns a specific named query of the ?tenant= (admin endpoint).
 func (h *PipesHandler) Get(w http.ResponseWriter, r *http.Request) {
+	store, ok := opsStore(w, r, h.Tenants)
+	if !ok {
+		return
+	}
 	name := chi.URLParam(r, "name")
-	q := h.Source.Pipe(name)
+	q := h.Source(store).Pipe(name)
 	if q == nil {
 		writeJSONError(w, http.StatusNotFound, "pipe not found")
 		return
@@ -67,8 +79,12 @@ func (h *PipesHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 // Execute runs a named query with the provided parameters.
 func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
+	store, ok := requestStore(w, r)
+	if !ok {
+		return
+	}
 	name := chi.URLParam(r, "name")
-	q := h.Source.Pipe(name)
+	q := h.Source(store).Pipe(name)
 	if q == nil {
 		writeJSONError(w, http.StatusNotFound, "pipe not found")
 		return
@@ -85,11 +101,11 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	// allowed_roles therefore authorizes nobody but admin (fails closed).
 	var p *policy.Policy
 	if h.PolicySource != nil {
-		p = h.PolicySource()
+		p = h.PolicySource(store)
 	}
 	role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
 	if !policy.RoleAllowed(p, role, q.AllowedRoles) {
-		writeAuthzDenied(w, r, h.logger, role, q.AllowedRoles,
+		writeAuthzDenied(w, r, role, q.AllowedRoles,
 			slog.String("gate", "pipe"),
 			slog.String("pipe", q.Name),
 		)

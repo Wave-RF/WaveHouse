@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -16,13 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
-
-// NopLogger returns a *slog.Logger that discards all output.
-// Use in tests to suppress noisy log output from embedded NATS, etc.
-func NopLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 // NewTestSchemaRegistry creates a SchemaRegistry pre-loaded with the given
 // table schemas, without a real ClickHouse: a mock connection serves the
@@ -35,7 +28,7 @@ func NopLogger() *slog.Logger {
 // type string), not the caller's structs.
 func NewTestSchemaRegistry(t testing.TB, tables []*discovery.TableSchema) *discovery.SchemaRegistry {
 	t.Helper()
-	reg := discovery.NewSchemaRegistry(&schemaConn{tables: tables}, func() string { return "test" }, func() time.Duration { return time.Hour }, NopLogger())
+	reg := discovery.NewSchemaRegistry(&schemaConn{tables: tables}, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 	require.NoError(t, reg.Refresh(context.Background()))
 	return reg
 }

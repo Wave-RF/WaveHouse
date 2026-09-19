@@ -28,13 +28,14 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // Shared mocks come from internal/testutil: MockMessage, MockPublisher,
-// MockRoundTripper, MockCache, NopLogger.
+// MockRoundTripper, MockCache.
 
 // newTestWorker builds an IngestWorker wired to in-process mocks. wait() blocks
 // until all background ack goroutines kicked off by handleSuccess finish.
@@ -46,7 +47,6 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockPublisher
 		failed:     make(chan error, 1),
 		httpClient: &http.Client{Transport: rt},
 		cache:      cache,
-		logger:     testutil.NopLogger(),
 		target: func() chconn.Target {
 			return chconn.Target{URL: "http://test-clickhouse:8123", Username: "test_user", Password: "test_pass", Database: "test_db"}
 		},
@@ -120,7 +120,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 		{
 			name: "nil cache",
 			setup: func(t *testing.T) (Queue, cache.Cache) {
-				emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024, testutil.NopLogger())
+				emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024)
 				require.NoError(t, err)
 				t.Cleanup(func() { _ = emb.Close() })
 				return emb, nil
@@ -134,7 +134,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 			t.Parallel()
 			q, c := tt.setup(t)
 			_, _, err := StartIngestWorker(context.Background(), q, c,
-				func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
+				func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, tenant.Default, nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrSub)
 		})
@@ -152,7 +152,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 	t.Parallel()
 
 	// ── Embedded MQ ──
-	emb, err := mq.NewEmbedded(t.TempDir(), 4*1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(t.TempDir(), 4*1024*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 
@@ -195,7 +195,6 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 		dlq:        emb,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cache:      cache,
-		logger:     testutil.NopLogger(),
 		target: func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
@@ -246,7 +245,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	t.Parallel()
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 
@@ -270,7 +269,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	stopFn, _, err := StartIngestWorker(ctx, emb, &testutil.MockCache{},
 		func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
-		}, nil)
+		}, tenant.Default, nil)
 	require.NoError(t, err)
 
 	// Publish so there's an in-flight insert blocking on `release`.
@@ -297,14 +296,14 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 	t.Parallel()
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 
 	// chURL is never dialed: with no messages there is no flush, so a dummy
 	// host/port is fine.
 	stopFn, _, err := StartIngestWorker(context.Background(), emb, &testutil.MockCache{},
-		func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
+		func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, tenant.Default, nil)
 	require.NoError(t, err)
 
 	// Nothing to flush, so shutdown drains immediately and returns nil before the
@@ -887,7 +886,7 @@ func TestFlushTable_BadRow_DLQDisabledForTable_LeftUnacked(t *testing.T) {
 		},
 	}
 	w, pub, _, wait := newTestWorker(rt)
-	w.dlqEnabled = func(table string) bool { return table != "events" }
+	w.dlqEnabled = func(_ tenant.ID, table string) bool { return table != "events" }
 
 	good := newIngestMsg(t, "events", "", map[string]any{"id": 1, "poison": false})
 	poison := newIngestMsg(t, "events", "", map[string]any{"id": 2, "poison": true})
@@ -1051,7 +1050,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		batchB = maxBatch
 	)
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 
@@ -1087,7 +1086,6 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		dlq:        emb,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cache:      &testutil.MockCache{},
-		logger:     testutil.NopLogger(),
 		target: func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
@@ -1145,7 +1143,7 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 		total    = 4                // 3 → one full batch on the size trigger; 1 leftover
 	)
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 
@@ -1183,7 +1181,6 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 		dlq:        emb,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cache:      &testutil.MockCache{},
-		logger:     testutil.NopLogger(),
 		target: func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
@@ -1317,7 +1314,7 @@ func TestParseMsg_DuplicateColumn_Unpairable(t *testing.T) {
 func TestParseMsg_PoisonEnvelope_DLQDisabled_AckedAndDropped(t *testing.T) {
 	t.Parallel()
 	w, pub, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-	w.dlqEnabled = func(string) bool { return false }
+	w.dlqEnabled = func(tenant.ID, string) bool { return false }
 
 	m := &testutil.MockMessage{
 		MsgTopic: mq.Topic{Table: "events"},
@@ -1485,7 +1482,7 @@ func TestRejectPoison_CountedByDisposition(t *testing.T) {
 
 	// DLQ off for the table: acked and dropped, counted separately.
 	w2, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-	w2.dlqEnabled = func(string) bool { return false }
+	w2.dlqEnabled = func(tenant.ID, string) bool { return false }
 	_, ok = w2.parseMsg(context.Background(), poison().Message())
 	require.False(t, ok)
 	w2.ackWg.Wait()
@@ -1506,7 +1503,7 @@ func TestRejectPoison_CountedByDisposition(t *testing.T) {
 	// counting before the ack would report a row as gone forever — the meaning
 	// deployment.md gives "dropped" — once per redelivery, while it is still there.
 	w4, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-	w4.dlqEnabled = func(string) bool { return false }
+	w4.dlqEnabled = func(tenant.ID, string) bool { return false }
 	unackable := poison()
 	unackable.DoubleAckErr = errors.New("ack timed out")
 	_, ok = w4.parseMsg(context.Background(), unackable.Message())
@@ -1599,8 +1596,8 @@ func TestDispatchLoop_DeliveryEndedFailsLoud(t *testing.T) {
 	rt := &testutil.MockRoundTripper{}
 	w, _, _, _ := newTestWorker(rt)
 	w.maxBatch = 100
-	w.maxWait = time.Hour                             // only the shutdown flush can write the row
-	w.dlqEnabled = func(string) bool { return false } // the sentinel is acked-and-dropped, no publish
+	w.maxWait = time.Hour                                        // only the shutdown flush can write the row
+	w.dlqEnabled = func(tenant.ID, string) bool { return false } // the sentinel is acked-and-dropped, no publish
 
 	held := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 	sentinel := &testutil.MockMessage{MsgTopic: mq.Topic{Table: "events"}, MsgData: []byte("not json")}
@@ -1651,8 +1648,8 @@ func TestDispatchLoop_HandoffReturnsOnCancel(t *testing.T) {
 	t.Parallel()
 
 	w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-	w.maxBatch = 1                                    // msgChan holds 2
-	w.dlqEnabled = func(string) bool { return false } // any message parsed is acked-and-dropped, no publish
+	w.maxBatch = 1                                               // msgChan holds 2
+	w.dlqEnabled = func(tenant.ID, string) bool { return false } // any message parsed is acked-and-dropped, no publish
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already stopping: the loop exits at its first ctx.Done pick, leaving msgChan full
