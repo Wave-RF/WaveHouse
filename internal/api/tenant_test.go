@@ -62,6 +62,52 @@ func TestTenantMW(t *testing.T) {
 	}
 }
 
+// In a nested settings directory a tenant whose folder was rejected is known
+// but not served: a 503, never the 404 of an unknown tenant, and never a body
+// that quotes the settings — the middleware answers before authentication.
+func TestTenantMW_NestedDirectory(t *testing.T) {
+	t.Parallel()
+	tenants := nestedTenants(t, map[string]string{"acme": fullConfig(100), "globex": `{"unknown_key": true}`})
+	acme, ok := tenants.For("acme")
+	require.True(t, ok)
+
+	tests := []struct {
+		name, header string
+		wantStatus   int
+		wantBody     string
+	}{
+		{name: "served tenant", header: "acme", wantStatus: http.StatusOK},
+		{name: "rejected tenant", header: "globex", wantStatus: http.StatusServiceUnavailable, wantBody: `{"error":"tenant settings are invalid"}`},
+		{name: "unknown tenant", header: "initech", wantStatus: http.StatusNotFound, wantBody: `{"error":"unknown tenant: initech"}`},
+		{name: "no header is tenant 0, which a nested directory need not hold", wantStatus: http.StatusNotFound, wantBody: `{"error":"unknown tenant: 0"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var resolved *settings.Store
+			h := TenantMW(tenants)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resolved, _ = StoreFromContext(r.Context())
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/health", nil)
+			if tt.header != "" {
+				req.Header.Set(tenant.Header, tt.header)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			require.Equal(t, tt.wantStatus, w.Code, "body: %s", w.Body.String())
+			assert.Equal(t, []string{tenant.Header}, w.Header().Values("Vary"))
+			if tt.wantStatus == http.StatusOK {
+				assert.Same(t, acme, resolved)
+				return
+			}
+			assert.Nil(t, resolved, "a refused request must not reach the handler")
+			assert.JSONEq(t, tt.wantBody, w.Body.String())
+		})
+	}
+}
+
 func TestStoreFromContext_Absent(t *testing.T) {
 	t.Parallel()
 	store, ok := StoreFromContext(httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil).Context())

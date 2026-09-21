@@ -14,11 +14,12 @@
 // testcontainer.
 //
 // Each component is wired in one place, as one component value: what New
-// opens, what Run loops, and what Close releases. The settings store is
+// opens, what Run loops, and what Close releases. The settings registry is
 // handed whole to each component's wiring function, which derives the
-// per-call getters the internal packages take — so when the one store
-// becomes a per-tenant registry (#583), the injection points are those
-// wiring functions, not main.
+// per-call getters the internal packages take: keyed by the request's store
+// for the handlers, by tenant id for the async paths (perTenant), and fixed
+// to the default tenant for the process-wide resources #583 has not yet made
+// per tenant (defaultSetting).
 package app
 
 import (
@@ -86,12 +87,12 @@ type App struct {
 	logLevel *slog.LevelVar
 	listener net.Listener
 
-	// store is the default tenant's settings, which the process-wide
-	// resources (ClickHouse, dedupe, MQ, auth, CORS) still follow; tenants is
-	// the registry every tenant-aware path resolves through, and the owner of
-	// every reload.
-	store       *settings.Store
-	tenants     *settings.Registry
+	// tenants is the registry every tenant-aware path resolves through, and
+	// the owner of every reload. The process-wide resources (ClickHouse,
+	// dedupe, MQ, auth, CORS) still follow its default tenant: defaultSetting.
+	tenants *settings.Registry
+	// policies is the default tenant's policy, for the ops gate and the
+	// authenticator's operator-key path.
 	policies    policy.Source
 	promHandler http.Handler
 	ch          *chconn.Manager

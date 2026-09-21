@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -134,11 +135,232 @@ func TestRegistry_AfterAdoptRunsOnlyOnAdoption(t *testing.T) {
 	assert.Equal(t, []bool{true}, seen, "rejected reload must not fire the hook")
 }
 
-// Until the registry holds one store per tenant folder, a nested root is
-// refused rather than read as something it is not.
-func TestOpen_RefusesNestedRoot(t *testing.T) {
+// writeTenant (re)writes one tenant folder of a nested root.
+func writeTenant(t *testing.T, root, folder string, files map[string]string) {
+	t.Helper()
+	dir := filepath.Join(root, folder)
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	for name, content := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600))
+	}
+}
+
+// maxRowsFiles is a valid tenant folder whose query.default_max_rows tells
+// the tenants of a test apart.
+func maxRowsFiles(maxRows int) map[string]string {
+	files := validFiles()
+	files[FileConfig] = configJSON(fmt.Sprintf(`{"query": {"default_max_rows": %d}}`, maxRows))
+	return files
+}
+
+// brokenFiles is a tenant folder Validate rejects.
+func brokenFiles() map[string]string {
+	files := validFiles()
+	files[FileConfig] = configJSON(`{"query": {"default_max_rows": -1}}`)
+	return files
+}
+
+func TestOpen_NestedRoot(t *testing.T) {
 	t.Parallel()
-	reg, findings := Open(writeTree(t, map[string]map[string]string{"acme": validFiles()}))
+	reg, findings := Open(writeTree(t, map[string]map[string]string{"acme": maxRowsFiles(111), "globex": maxRowsFiles(222)}))
+	require.NotNil(t, reg, "findings: %s", findingStrings(findings))
+	assert.Empty(t, findings)
+	assert.True(t, reg.Nested())
+
+	acme, ok := reg.For("acme")
+	require.True(t, ok)
+	globex, ok := reg.For("globex")
+	require.True(t, ok)
+	assert.NotSame(t, acme, globex)
+	assert.Equal(t, 111, acme.DefaultMaxRows())
+	assert.Equal(t, 222, globex.DefaultMaxRows())
+
+	// A nested root defines the tenants it holds folders for and no other:
+	// the default tenant exists only as a 0 folder.
+	_, ok = reg.For(tenant.Default)
+	assert.False(t, ok)
+	store, known := reg.Resolve(tenant.Default)
+	assert.Nil(t, store)
+	assert.False(t, known)
+
+	assert.False(t, newLoadedRegistry(t, nil).Nested())
+}
+
+// Fail closed per tenant, at boot: the registry opens, the rejected tenant is
+// known but not served, and the tenant beside it is.
+func TestOpen_NestedRejectedFolder(t *testing.T) {
+	t.Parallel()
+	root := writeTree(t, map[string]map[string]string{"acme": maxRowsFiles(111), "globex": brokenFiles()})
+	reg, findings := Open(root)
+	require.NotNil(t, reg, "one bad folder must not cost the pod its other tenants")
+	assert.Contains(t, findingStrings(findings), "error: globex/config.json: query.default_max_rows")
+
+	_, ok := reg.For("acme")
+	assert.True(t, ok)
+	_, ok = reg.For("globex")
+	assert.False(t, ok, "a rejected tenant is not served")
+	store, known := reg.Resolve("globex")
+	assert.Nil(t, store)
+	assert.True(t, known, "rejected is not unknown: its requests are refused, not 404ed")
+
+	// Fixing the folder and reloading is the whole recovery.
+	writeTenant(t, root, "globex", maxRowsFiles(222))
+	findings, adopted := reg.Reload("test")
+	require.True(t, adopted, "findings: %s", findingStrings(findings))
+	globex, ok := reg.For("globex")
+	require.True(t, ok)
+	assert.Equal(t, 222, globex.DefaultMaxRows())
+}
+
+// A nested root whose every folder is rejected still opens: nothing is
+// served, and a reload of the fixed folders brings the tenants up.
+func TestOpen_NestedEveryFolderRejected(t *testing.T) {
+	t.Parallel()
+	reg, findings := Open(writeTree(t, map[string]map[string]string{"acme": brokenFiles()}))
+	require.NotNil(t, reg)
+	assert.True(t, HasErrors(findings))
+	_, ok := reg.For("acme")
+	assert.False(t, ok)
+}
+
+// A finding about the root itself refuses boot in either shape.
+func TestOpen_NestedLooseFileRefusesBoot(t *testing.T) {
+	t.Parallel()
+	root := writeTree(t, map[string]map[string]string{"acme": validFiles()})
+	require.NoError(t, os.WriteFile(filepath.Join(root, "notes.txt"), []byte("scratch"), 0o600))
+	reg, findings := Open(root)
 	assert.Nil(t, reg)
-	assert.Contains(t, findingStrings(findings), "one folder per tenant is not served yet")
+	assert.Contains(t, findingStrings(findings), "notes.txt: unexpected file")
+}
+
+// Fail closed per tenant, on reload: no previous-snapshot fallback. The
+// rejected tenant stops being served while the reload still adopts the tenant
+// beside it; a request already admitted keeps reading the document it was
+// admitted under; and the recovery lands in the same store.
+func TestRegistry_NestedReloadRejectsOneTenant(t *testing.T) {
+	t.Parallel()
+	root := writeTree(t, map[string]map[string]string{"acme": maxRowsFiles(111), "globex": maxRowsFiles(222)})
+	reg, _ := Open(root)
+	require.NotNil(t, reg)
+	var hooks [][]tenant.ID
+	reg.AfterAdopt(func(adopted []tenant.ID) { hooks = append(hooks, adopted) })
+	admitted, _ := reg.For("globex")
+
+	writeTenant(t, root, "acme", maxRowsFiles(333))
+	writeTenant(t, root, "globex", brokenFiles())
+	findings, adopted := reg.Reload("test")
+	assert.False(t, adopted, "not everything was adopted")
+	assert.Contains(t, findingStrings(findings), "error: globex/config.json")
+	assert.Equal(t, [][]tenant.ID{{"acme"}}, hooks, "the hooks hear of the tenants that were adopted, and only those")
+
+	acme, _ := reg.For("acme")
+	assert.Equal(t, 333, acme.DefaultMaxRows(), "the tenant beside the rejected one is adopted")
+	_, ok := reg.For("globex")
+	assert.False(t, ok)
+	_, known := reg.Resolve("globex")
+	assert.True(t, known)
+	assert.Equal(t, 222, admitted.DefaultMaxRows(), "a request already holding the store finishes on the document it started with")
+
+	writeTenant(t, root, "globex", maxRowsFiles(444))
+	_, adopted = reg.Reload("test")
+	require.True(t, adopted)
+	recovered, ok := reg.For("globex")
+	require.True(t, ok)
+	assert.Same(t, admitted, recovered, "a tenant keeps one store for life")
+	assert.Equal(t, 444, recovered.DefaultMaxRows())
+	assert.Equal(t, [][]tenant.ID{{"acme"}, {"acme", "globex"}}, hooks)
+}
+
+// A reload mirrors the folders: a new one is served, a removed one is
+// forgotten. A folder whose name is not a tenant id is reported and skipped.
+func TestRegistry_NestedReloadMirrorsTheFolders(t *testing.T) {
+	t.Parallel()
+	root := writeTree(t, map[string]map[string]string{"acme": maxRowsFiles(111), "globex": maxRowsFiles(222)})
+	reg, _ := Open(root)
+	require.NotNil(t, reg)
+
+	writeTenant(t, root, "initech", maxRowsFiles(333))
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	findings, adopted := reg.Reload("test")
+	require.True(t, adopted, "findings: %s", findingStrings(findings))
+
+	initech, ok := reg.For("initech")
+	require.True(t, ok, "a new folder is a new tenant")
+	assert.Equal(t, 333, initech.DefaultMaxRows())
+	store, known := reg.Resolve("acme")
+	assert.Nil(t, store)
+	assert.False(t, known, "a removed folder is an unknown tenant, not a rejected one")
+
+	writeTenant(t, root, "acme.bak", validFiles())
+	findings, adopted = reg.Reload("test")
+	assert.False(t, adopted)
+	assert.Contains(t, findingStrings(findings), "acme.bak: folder name is not a tenant id")
+	_, ok = reg.For("globex")
+	assert.True(t, ok, "a badly named folder costs no tenant its settings")
+}
+
+// A finding about the root itself rejects the reload whole: nothing on disk
+// is adopted, no tenant is dropped, no hook runs.
+func TestRegistry_RootLevelFailureChangesNothing(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		damage func(t *testing.T, root string)
+		want   string
+	}{
+		{name: "a loose file beside the folders", want: "notes.txt: unexpected file", damage: func(t *testing.T, root string) {
+			require.NoError(t, os.WriteFile(filepath.Join(root, "notes.txt"), []byte("scratch"), 0o600))
+		}},
+		{name: "the root is gone", want: "does not exist", damage: func(t *testing.T, root string) {
+			require.NoError(t, os.RemoveAll(root))
+		}},
+		{name: "the root turned flat", want: "changed shape", damage: func(t *testing.T, root string) {
+			require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+			require.NoError(t, os.RemoveAll(filepath.Join(root, "globex")))
+			writeTenant(t, root, ".", validFiles())
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeTree(t, map[string]map[string]string{"acme": maxRowsFiles(111), "globex": maxRowsFiles(222)})
+			reg, _ := Open(root)
+			require.NotNil(t, reg)
+			reg.AfterAdopt(func([]tenant.ID) { t.Error("a reload rejected whole must not run the hooks") })
+
+			// A change that would be adopted, were the reload not rejected whole.
+			writeTenant(t, root, "globex", maxRowsFiles(999))
+			tt.damage(t, root)
+			findings, adopted := reg.Reload("test")
+			assert.False(t, adopted)
+			assert.Contains(t, findingStrings(findings), tt.want)
+
+			for id, want := range map[tenant.ID]int{"acme": 111, "globex": 222} {
+				store, ok := reg.For(id)
+				require.True(t, ok, "%s must still be served", id)
+				assert.Equal(t, want, store.DefaultMaxRows())
+			}
+		})
+	}
+}
+
+// The shape is fixed at Open in the other direction too: a flat directory
+// that turns into tenant folders is a rejected reload, and the document it
+// was serving stays.
+func TestRegistry_FlatRootTurnedNestedIsRejected(t *testing.T) {
+	t.Parallel()
+	reg := newLoadedRegistry(t, map[string]string{FileConfig: configJSON(`{"query": {"default_max_rows": 42}}`)})
+	for _, name := range Files() {
+		require.NoError(t, os.Remove(filepath.Join(reg.Dir(), name)))
+	}
+	writeTenant(t, reg.Dir(), "acme", validFiles())
+
+	findings, adopted := reg.Reload("test")
+	assert.False(t, adopted)
+	assert.Contains(t, findingStrings(findings), "changed shape")
+	s, ok := reg.For(tenant.Default)
+	require.True(t, ok)
+	assert.Equal(t, 42, s.DefaultMaxRows())
+	_, ok = reg.For("acme")
+	assert.False(t, ok)
 }

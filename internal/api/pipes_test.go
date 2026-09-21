@@ -48,7 +48,7 @@ func TestPipesHandler_List(t *testing.T) {
 		&pipes.NamedQuery{Name: "recent", SQL: "SELECT * FROM clicks ORDER BY ts DESC LIMIT 10"},
 	)
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
-	h.OpsStore = testStore
+	h.Tenants = testTenants()
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/pipes", nil)
@@ -66,7 +66,7 @@ func TestPipesHandler_Get_Found(t *testing.T) {
 		&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT page FROM clicks"},
 	)
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
-	h.OpsStore = testStore
+	h.Tenants = testTenants()
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes/top_pages", "top_pages", nil)
@@ -82,7 +82,7 @@ func TestPipesHandler_Get_NotFound(t *testing.T) {
 	t.Parallel()
 	store := staticPipes()
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
-	h.OpsStore = testStore
+	h.Tenants = testTenants()
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes/nope", "nope", nil)
@@ -93,11 +93,43 @@ func TestPipesHandler_Get_NotFound(t *testing.T) {
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
+// The admin reads serve the default tenant, which a nested settings directory
+// need not hold and may hold rejected: the tenant routes' 404 and 503, never
+// a nil store.
+func TestPipesHandler_AdminReads_DefaultTenantNotServed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		configs    map[string]string
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "no 0 folder", configs: map[string]string{"acme": fullConfig(100)}, wantStatus: http.StatusNotFound, wantBody: "unknown tenant: 0"},
+		{name: "rejected 0 folder", configs: map[string]string{"acme": fullConfig(100), "0": `{"unknown_key": true}`}, wantStatus: http.StatusServiceUnavailable, wantBody: "tenant settings are invalid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1"}), nil, nil, nil, noTimeout)
+			h.Tenants = nestedTenants(t, tt.configs)
+
+			reads := map[string]func(http.ResponseWriter, *http.Request){"list": h.List, "get": h.Get}
+			for name, read := range reads {
+				w := httptest.NewRecorder()
+				read(w, pipesRequest(t, http.MethodGet, "/v1/ops/pipes/top_pages", "top_pages", nil))
+				assert.Equal(t, tt.wantStatus, w.Code, name)
+				assert.Contains(t, w.Body.String(), tt.wantBody, name)
+				testutil.AssertJSONErrorResponse(t, w)
+			}
+		})
+	}
+}
+
 func TestPipesHandler_List_Empty(t *testing.T) {
 	t.Parallel()
 	store := staticPipes()
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
-	h.OpsStore = testStore
+	h.Tenants = testTenants()
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes", "", nil)

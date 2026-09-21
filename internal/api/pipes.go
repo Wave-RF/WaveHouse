@@ -13,6 +13,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
 )
@@ -24,12 +25,13 @@ type PipesHandler struct {
 	// Source yields a tenant's pipes (the store itself in production).
 	Source       func(*settings.Store) pipes.Source
 	PolicySource PolicySource // resolves empty role to default_role; may be nil
-	// OpsStore is the store the admin reads (List, Get) serve: /v1/ops is
-	// tenant-exempt, so they carry no request tenant and read the default one.
-	OpsStore *settings.Store
-	CHConn   driver.Conn
-	Cache    cache.Cache
-	sf       singleflight.Group
+	// Tenants resolves the tenant the admin reads (List, Get) serve: /v1/ops
+	// is tenant-exempt, so they carry no request tenant and read the default
+	// one.
+	Tenants *settings.Registry
+	CHConn  driver.Conn
+	Cache   cache.Cache
+	sf      singleflight.Group
 	// queryTimeout bounds each pipe execution, read per request
 	// (chconn.Manager.QueryTimeout in production) so a settings reload
 	// applies without a restart.
@@ -49,8 +51,12 @@ func NewPipesHandler(source func(*settings.Store) pipes.Source, policySource Pol
 
 // List returns all named queries (admin endpoint).
 func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
+	store, ok := resolveStore(w, h.Tenants, tenant.Default)
+	if !ok {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	q := h.Source(h.OpsStore).Pipes()
+	q := h.Source(store).Pipes()
 	if q == nil {
 		q = []*pipes.NamedQuery{}
 	}
@@ -59,8 +65,12 @@ func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
 
 // Get returns a specific named query (admin endpoint).
 func (h *PipesHandler) Get(w http.ResponseWriter, r *http.Request) {
+	store, ok := resolveStore(w, h.Tenants, tenant.Default)
+	if !ok {
+		return
+	}
 	name := chi.URLParam(r, "name")
-	q := h.Source(h.OpsStore).Pipe(name)
+	q := h.Source(store).Pipe(name)
 	if q == nil {
 		writeJSONError(w, http.StatusNotFound, "pipe not found")
 		return

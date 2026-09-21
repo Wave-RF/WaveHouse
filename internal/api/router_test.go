@@ -337,7 +337,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		Version:      NewVersionHandler("test", "test", "test"),
 		Schema:       NewSchemaHandler(reg),
 		DLQ:          NewDLQHandler(emb),
-		Pipes:        &PipesHandler{Source: staticPipes(), PolicySource: staticPolicy(&policy.Policy{}), OpsStore: testStore},
+		Pipes:        &PipesHandler{Source: staticPipes(), PolicySource: staticPolicy(&policy.Policy{}), Tenants: testTenants()},
 		AuthMW:       func(next http.Handler) http.Handler { return next },
 		PolicySource: policy.Static(&policy.Policy{}),
 	}

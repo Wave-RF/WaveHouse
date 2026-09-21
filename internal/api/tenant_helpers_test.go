@@ -2,6 +2,11 @@ package api
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
@@ -21,6 +26,20 @@ func withTenant(r *http.Request) *http.Request {
 
 // testTenants is a registry whose default tenant is testStore.
 func testTenants() *settings.Registry { return settings.NewRegistry(testStore) }
+
+// nestedTenants opens a nested settings directory, one folder per entry:
+// tenant folder → its config.json (fullConfig for a tenant that is served,
+// anything Validate rejects for one that is not).
+func nestedTenants(t *testing.T, configs map[string]string) *settings.Registry {
+	t.Helper()
+	root := t.TempDir()
+	for folder, config := range configs {
+		require.NoError(t, os.Rename(writeSettingsFixture(t, config), filepath.Join(root, folder)))
+	}
+	tenants, _ := settings.Open(root)
+	require.NotNil(t, tenants)
+	return tenants
+}
 
 // staticPolicy is a PolicySource fixed to p, whatever the tenant.
 func staticPolicy(p *policy.Policy) PolicySource {
