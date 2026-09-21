@@ -62,7 +62,7 @@ func (s *Store) Dir() string { return s.dir }
 func (s *Store) Reload(trigger string) ([]Finding, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	doc, findings := Validate(s.dir)
+	doc, findings := ValidateDir(s.dir)
 	adopted := doc != nil
 	if adopted {
 		s.snap.Store(doc)

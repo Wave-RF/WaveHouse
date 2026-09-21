@@ -23,7 +23,7 @@ func TestValidate_NonRegularFile(t *testing.T) {
 	dir := writeDir(t, files)
 	require.NoError(t, syscall.Mkfifo(filepath.Join(dir, FilePipes), 0o600))
 
-	doc, findings := Validate(dir)
+	doc, findings := ValidateDir(dir)
 	assert.Nil(t, doc)
 	out := findingStrings(findings)
 	assert.Contains(t, out, "pipes.json: not a regular file")
@@ -44,7 +44,49 @@ func TestValidate_SymlinkedFiles(t *testing.T) {
 		require.NoError(t, os.Symlink(filepath.Join(dataDir, name), filepath.Join(dir, name)))
 	}
 
-	doc, findings := Validate(dir)
+	doc, findings := ValidateDir(dir)
 	require.NotNil(t, doc, "findings: %s", findingStrings(findings))
 	assert.Empty(t, findings)
+}
+
+// TestValidate_SymlinkedTenantFolders is the nested form of the same mount:
+// each tenant folder at the root is a symlink into the dot-prefixed data
+// directory. A directory entry's own type says "symlink", so reading the
+// shape off it would call every tenant a loose file.
+func TestValidate_SymlinkedTenantFolders(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	data := writeTree(t, map[string]map[string]string{"acme": validFiles(), "globex": validFiles()})
+	dataDir := filepath.Join(root, "..data")
+	require.NoError(t, os.Rename(data, dataDir))
+	for _, folder := range []string{"acme", "globex"} {
+		require.NoError(t, os.Symlink(filepath.Join(dataDir, folder), filepath.Join(root, folder)))
+	}
+
+	tree, findings := Validate(root)
+	require.Empty(t, findings)
+	require.NotNil(t, tree)
+	assert.True(t, tree.Nested)
+	assert.Len(t, tree.Tenants, 2)
+}
+
+// A finding about a tenant's folder itself, which ValidateDir reports with no
+// file, names the folder.
+func TestValidate_UnreadableTenantFolder(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permission bits")
+	}
+	root := writeTree(t, map[string]map[string]string{"acme": validFiles(), "globex": validFiles()})
+	locked := filepath.Join(root, "globex")
+	require.NoError(t, os.Chmod(locked, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) }) //nolint:gosec // G302: restores a test directory so TempDir cleanup can remove it
+
+	tree, findings := Validate(root)
+	require.NotNil(t, tree)
+	require.Len(t, findings, 1, "findings: %s", findingStrings(findings))
+	assert.Equal(t, "globex", findings[0].File)
+	assert.Contains(t, findings[0].Message, "read settings directory")
+	assert.Nil(t, tree.Tenants["globex"].Doc)
+	assert.NotNil(t, tree.Tenants["acme"].Doc)
 }

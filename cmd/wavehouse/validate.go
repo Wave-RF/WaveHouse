@@ -12,18 +12,19 @@ import (
 )
 
 // runValidate implements `wavehouse validate [dir]`: validate a settings
-// directory (roles.json, policies.json, pipes.json, config.json) without
-// starting the server, so an operator or CI can gate a config change before it
-// reaches a running instance. The directory comes from the argument, falling
-// back to WH_SETTINGS_DIR. Exit codes: 0 valid (warnings allowed), 1 invalid,
-// 2 usage.
+// directory (roles.json, policies.json, pipes.json, config.json — or one
+// folder per tenant, each holding those four) without starting the server, so
+// an operator or CI can gate a config change before it reaches a running
+// instance. The directory comes from the argument, falling back to
+// WH_SETTINGS_DIR. Exit codes: 0 valid (warnings allowed), 1 invalid, 2 usage.
 func runValidate(args []string) int {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(fs.Output(), `usage: wavehouse validate [dir]
 
-Validate a settings directory (%s) without
-starting the server. With no dir argument, the directory comes from %s.
+Validate a settings directory (%s, or one
+folder per tenant, each holding those files) without starting the server.
+With no dir argument, the directory comes from %s.
 
 Exit codes: 0 valid (warnings allowed), 1 invalid, 2 usage.
 `, strings.Join(settings.Files(), ", "), config.EnvSettingsDir)

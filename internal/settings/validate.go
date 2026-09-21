@@ -16,17 +16,18 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
 
-// Validate reads, decodes, and checks a settings directory in one pass and
-// returns every finding it can discover — an operator fixing a hand-edited
-// directory wants the whole list, not a fix-rerun-fix loop. No side effects:
-// no network, no ClickHouse, nothing written. The Document is returned only
-// when no finding is an error (warnings alone leave it usable), so what a
-// node adopts is byte-for-byte what was validated — this is the single
-// checking path, and every consumer (the `wavehouse validate` CLI, boot, a
-// live reload) goes through it. Callers translate the result per their own
-// contract: the CLI exits non-zero, boot refuses to start, and a live reload
-// keeps serving the previous good document.
-func Validate(dir string) (*Document, []Finding) {
+// ValidateDir reads, decodes, and checks one directory of the four settings
+// files — a flat root, or one tenant's folder of a nested one — in one pass
+// and returns every finding it can discover — an operator fixing a
+// hand-edited directory wants the whole list, not a fix-rerun-fix loop. No
+// side effects: no network, no ClickHouse, nothing written. The Document is
+// returned only when no finding is an error (warnings alone leave it usable),
+// so what a node adopts is byte-for-byte what was validated — this is the
+// single checking path, and every consumer (the `wavehouse validate` CLI,
+// boot, a live reload) goes through it, by way of Validate. Callers translate
+// the result per their own contract: the CLI exits non-zero, boot refuses to
+// start, and a live reload keeps serving the previous good document.
+func ValidateDir(dir string) (*Document, []Finding) {
 	v := &validator{}
 
 	files, ok := v.checkDir(dir)

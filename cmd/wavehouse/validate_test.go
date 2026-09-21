@@ -36,6 +36,20 @@ func TestRunValidate(t *testing.T) {
 		assert.Equal(t, 1, runValidate([]string{writeSettingsDir(t, `{"default_role": "ghost"}`)}))
 	})
 
+	// A nested root — one folder per tenant — shares the exit codes: every
+	// folder valid is 0, one invalid folder is 1.
+	t.Run("nested directory", func(t *testing.T) {
+		nested := func(policies map[string]string) string {
+			root := t.TempDir()
+			for folder, p := range policies {
+				require.NoError(t, os.Rename(writeSettingsDir(t, p), filepath.Join(root, folder)))
+			}
+			return root
+		}
+		assert.Equal(t, 0, runValidate([]string{nested(map[string]string{"acme": `{}`, "globex": `{}`})}))
+		assert.Equal(t, 1, runValidate([]string{nested(map[string]string{"acme": `{}`, "globex": `{"default_role": "ghost"}`})}))
+	})
+
 	t.Run("env fallback", func(t *testing.T) {
 		t.Setenv("WH_SETTINGS_DIR", writeSettingsDir(t, `{}`))
 		assert.Equal(t, 0, runValidate(nil))
