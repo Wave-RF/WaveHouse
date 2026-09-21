@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -54,17 +55,28 @@ func withoutContext(release func() error) func(context.Context) error {
 // are read per request off the adopted snapshot, so a reload applies to the
 // next request with no hook.
 func (a *App) wireSettings() error {
-	store, _ := settings.Open(a.cfg.Settings.Dir)
-	if store == nil {
+	tenants, _ := settings.Open(a.cfg.Settings.Dir)
+	if tenants == nil {
 		return fmt.Errorf("settings directory %s invalid, refusing to start — findings above; `wavehouse validate` reproduces them, `wavehouse bootstrap` writes a starter directory", a.cfg.Settings.Dir)
 	}
-	a.store = store
-	a.tenants = settings.NewRegistry(store)
-	a.policies = policy.Source(store.Policy)
-	if store.Policy() == nil {
+	a.tenants = tenants
+	a.store, _ = tenants.For(tenant.Default)
+	a.policies = policy.Source(a.store.Policy)
+	if a.store.Policy() == nil {
 		slog.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
 	}
 	return nil
+}
+
+// onDefaultAdopt registers fn to run after each reload that adopts the
+// default tenant, whose settings the process-wide resources (ClickHouse,
+// dedupe, MQ, auth, the keepalive wheel) follow.
+func (a *App) onDefaultAdopt(fn func()) {
+	a.tenants.AfterAdopt(func(adopted []tenant.ID) {
+		if slices.Contains(adopted, tenant.Default) {
+			fn()
+		}
+	})
 }
 
 // perTenant adapts a store accessor to the tenant-keyed getter the async
@@ -176,7 +188,7 @@ func (a *App) wireClickHouse() error {
 	}
 	a.ch = ch
 	a.add(component{name: "clickhouse", close: withoutContext(ch.Close)})
-	a.store.AfterAdopt(func() {
+	a.onDefaultAdopt(func() {
 		if err := ch.Reconfigure(params()); err != nil {
 			slog.Error("clickhouse reconfigure", "error", err)
 		}
@@ -248,7 +260,7 @@ func (a *App) wireDedupe() error {
 		}
 		return enabled, nil
 	}
-	a.store.AfterAdopt(func() {
+	a.onDefaultAdopt(func() {
 		if enabled, err := reconcile(); err == nil {
 			slog.Info("dedupe store reconciled with settings", "enabled", enabled)
 		}
@@ -289,7 +301,7 @@ func (a *App) wireMQ() error {
 	// Rooted in the App's stop context, so a reload caught mid-hook by
 	// SIGTERM gives up rather than holding the drain past
 	// server.shutdown_timeout.
-	a.store.AfterAdopt(func() {
+	a.onDefaultAdopt(func() {
 		mb := a.store.MQMaxBytes()
 		if mb == broker.MaxBytes() {
 			return
@@ -357,7 +369,7 @@ func (a *App) wireStreaming() {
 	// changes stream.keepalive_* rebuilds the ring in place under the live
 	// connections.
 	heartbeater := stream.NewHeartbeater(a.store.Keepalive())
-	a.store.AfterAdopt(func() { heartbeater.Reconfigure(a.store.Keepalive()) })
+	a.onDefaultAdopt(func() { heartbeater.Reconfigure(a.store.Keepalive()) })
 	a.heartbeater = heartbeater
 	a.add(component{name: "keepalive", run: func(ctx context.Context) error {
 		heartbeater.Run(ctx)
@@ -434,13 +446,13 @@ func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auth middleware init: %w", err)
 	}
-	a.store.AfterAdopt(func() { authn.Reconfigure(authConfig()) })
+	a.onDefaultAdopt(func() { authn.Reconfigure(authConfig()) })
 	return authn.Middleware(), nil
 }
 
 // wireReloadTriggers adds SIGHUP and the directory watcher. All three
 // triggers (these two and POST /v1/ops/settings/reload) funnel into the same
-// serialized Store.Reload, and a rejected reload keeps the previous good
+// serialized Registry.Reload, and a rejected reload keeps the previous good
 // snapshot. They only start in Run, after New has registered every
 // AfterAdopt hook (ClickHouse reconnect, dedupe store, keepalive wheel, auth
 // verifier): the watcher reloads once as soon as its watch exists, and that
@@ -471,14 +483,14 @@ func (a *App) wireReloadTriggers() {
 				if ctx.Err() != nil {
 					return nil
 				}
-				a.store.Reload("sighup")
+				a.tenants.Reload("sighup")
 			}
 		}
 	}})
 	a.add(component{name: "settings watcher", run: func(ctx context.Context) error {
 		// Watcher setup failure degrades, not fatal: SIGHUP and the ops
 		// endpoint still reload.
-		if err := a.store.Watch(ctx); err != nil {
+		if err := a.tenants.Watch(ctx); err != nil {
 			slog.Error("settings directory watcher failed; reload via SIGHUP or POST /v1/ops/settings/reload", "error", err)
 		}
 		return nil
@@ -526,7 +538,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Tenants:      a.tenants,
 		PolicySource: a.policies,
 		CORSOrigins:  a.store.CORSOrigins,
-		Settings:     api.NewSettingsHandler(a.store),
+		Settings:     api.NewSettingsHandler(a.tenants),
 	}
 
 	prom := a.cfg.Prometheus

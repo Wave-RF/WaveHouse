@@ -13,11 +13,11 @@ import (
 // none there is nothing to reload, so the route is simply absent (the same
 // pattern as the DLQ and policy handlers).
 type SettingsHandler struct {
-	Store *settings.Store
+	Tenants *settings.Registry
 }
 
-func NewSettingsHandler(store *settings.Store) *SettingsHandler {
-	return &SettingsHandler{Store: store}
+func NewSettingsHandler(tenants *settings.Registry) *SettingsHandler {
+	return &SettingsHandler{Tenants: tenants}
 }
 
 // reloadResponse is the POST /v1/ops/settings/reload body: whether the
@@ -34,7 +34,7 @@ type reloadResponse struct {
 // directory was adopted (warnings included in the body), 422 when validation
 // rejected it and the previous settings remain in effect.
 func (h *SettingsHandler) Reload(w http.ResponseWriter, r *http.Request) {
-	findings, adopted := h.Store.Reload("api")
+	findings, adopted := h.Tenants.Reload("api")
 	if findings == nil {
 		findings = []settings.Finding{}
 	}

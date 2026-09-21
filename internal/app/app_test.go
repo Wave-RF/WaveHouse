@@ -232,14 +232,14 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 		"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}},
 		"mq":     map[string]any{"max_bytes_gb": 2},
 	})
-	_, adopted := a.store.Reload("test")
+	_, adopted := a.tenants.Reload("test")
 	require.True(t, adopted)
 	assert.True(t, a.dedup.Open(), "dedupe hook opened the store")
 	// How the budget is split across the MQ's queues is internal/mq's to test.
 	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(), "mq hook applied the new byte budget")
 
 	rewriteSettings(t, dir, map[string]any{"mq": map[string]any{"max_bytes_gb": 2}})
-	_, adopted = a.store.Reload("test")
+	_, adopted = a.tenants.Reload("test")
 	require.True(t, adopted)
 	assert.False(t, a.dedup.Open(), "dedupe hook closed the store")
 }

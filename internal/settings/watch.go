@@ -38,15 +38,15 @@ const watchDebounce = 250 * time.Millisecond
 // The setup error is returned (directory missing, fd limits); runtime watcher
 // errors are logged and the loop continues — SIGHUP and the ops reload
 // endpoint remain as triggers even if the watcher degrades.
-func (s *Store) Watch(ctx context.Context) error {
+func (r *Registry) Watch(ctx context.Context) error {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("settings watcher: %w", err)
 	}
 	defer func() { _ = w.Close() }()
-	dir := filepath.Clean(s.dir)
+	dir := filepath.Clean(r.dir)
 	if err := w.Add(dir); err != nil {
-		return fmt.Errorf("settings watcher: watch %s: %w", s.dir, err)
+		return fmt.Errorf("settings watcher: watch %s: %w", r.dir, err)
 	}
 	// Best effort: a parent that can't be watched (e.g. "/" permissions)
 	// costs only the recreate case, not the watcher.
@@ -59,7 +59,7 @@ func (s *Store) Watch(ctx context.Context) error {
 	// an edit that landed in between (a ConfigMap update during a rolling
 	// restart, say) fired no event and would otherwise sit unnoticed, with
 	// every pod looking healthy, until something touched the directory again.
-	s.Reload("watch")
+	r.Reload("watch")
 
 	// The timer starts disarmed; each relevant event re-arms it, so the
 	// reload fires watchDebounce after the *last* event of a burst.
@@ -90,14 +90,14 @@ func (s *Store) Watch(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			slog.ErrorContext(ctx, "settings watcher error", "dir", s.dir, "error", werr)
+			slog.ErrorContext(ctx, "settings watcher error", "dir", r.dir, "error", werr)
 		case <-timer.C:
 			// Re-arm the directory watch before reloading: after a remove or
 			// rename fsnotify has dropped it, and Add is a no-op while it
 			// still exists. Failure (directory currently absent) is expected
 			// mid-replace; the next parent event retries.
 			_ = w.Add(dir)
-			s.Reload("watch")
+			r.Reload("watch")
 		}
 	}
 }
