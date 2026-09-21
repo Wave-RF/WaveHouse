@@ -40,8 +40,8 @@ type TenantResult struct {
 // the tenant folder in File ("acme/policies.json"), and a folder whose name
 // is not a tenant id is a finding against that folder alone. The Tree is nil
 // when the finding is about the root itself — it cannot be listed, or a
-// nested root holds a loose file — since no tenant can then be trusted to be
-// what the root's author meant.
+// nested root holds a loose file or an entry that cannot be stat'ed — since
+// no tenant can then be trusted to be what the root's author meant.
 func Validate(root string) (*Tree, []Finding) {
 	folders, loose, listed := listRoot(root)
 	if len(folders) == 0 {
@@ -53,8 +53,15 @@ func Validate(root string) (*Tree, []Finding) {
 	}
 
 	var findings []Finding
-	for _, name := range loose {
-		findings = append(findings, Finding{Severity: SeverityError, File: name, Message: "unexpected file — a nested settings directory holds only tenant folders, each named by its tenant id"})
+	for _, entry := range loose {
+		// An entry that cannot be stat'ed is no more a tenant folder than a
+		// loose file is, but say what it is: a dangling symlink reported as a
+		// stray file sends its reader looking for the wrong thing.
+		problem := "unexpected file"
+		if entry.err != nil {
+			problem = fmt.Sprintf("stat: %v", entry.err)
+		}
+		findings = append(findings, Finding{Severity: SeverityError, File: entry.name, Message: problem + " — a nested settings directory holds only tenant folders, each named by its tenant id"})
 	}
 	tree := &Tree{Nested: true, Tenants: make(map[tenant.ID]TenantResult, len(folders))}
 	for _, name := range folders {
@@ -84,11 +91,18 @@ func validateFolder(root, folder string) (*Document, []Finding) {
 	return doc, findings
 }
 
-// listRoot sorts the root's entries into tenant folders and loose files, in
+// looseEntry is a root entry that is not a tenant folder: a file, or
+// something that could not be stat'ed (err says why).
+type looseEntry struct {
+	name string
+	err  error
+}
+
+// listRoot sorts the root's entries into tenant folders and loose entries, in
 // name order. It returns no folders for a flat root — one holding any of the
 // four settings file names — and listed=false when the root cannot be read.
 // Dot-prefixed entries are skipped, as ValidateDir skips them.
-func listRoot(root string) (folders, loose []string, listed bool) {
+func listRoot(root string) (folders []string, loose []looseEntry, listed bool) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, nil, false
@@ -103,10 +117,11 @@ func listRoot(root string) (folders, loose []string, listed bool) {
 		}
 		// Stat, not the entry's own type: a Kubernetes ConfigMap mount
 		// publishes each folder as a symlink into its `..data` directory.
-		if info, err := os.Stat(filepath.Join(root, name)); err == nil && info.IsDir() {
+		info, err := os.Stat(filepath.Join(root, name))
+		if err == nil && info.IsDir() {
 			folders = append(folders, name)
 		} else {
-			loose = append(loose, name)
+			loose = append(loose, looseEntry{name: name, err: err})
 		}
 	}
 	return folders, loose, true

@@ -90,3 +90,20 @@ func TestValidate_UnreadableTenantFolder(t *testing.T) {
 	assert.Nil(t, tree.Tenants["globex"].Doc)
 	assert.NotNil(t, tree.Tenants["acme"].Doc)
 }
+
+// A tenant folder's symlink whose target is gone cannot be stat'ed, so it is
+// not a folder — and the finding says that, rather than sending its reader to
+// look for a stray file. It is a finding about the root: no Tree.
+func TestValidate_DanglingTenantSymlink(t *testing.T) {
+	t.Parallel()
+	root := writeTree(t, map[string]map[string]string{"acme": validFiles()})
+	require.NoError(t, os.Symlink(filepath.Join(root, "..data", "globex"), filepath.Join(root, "globex")))
+
+	tree, findings := Validate(root)
+	assert.Nil(t, tree)
+	require.Len(t, findings, 1, "findings: %s", findingStrings(findings))
+	assert.Equal(t, "globex", findings[0].File)
+	assert.Contains(t, findings[0].Message, "stat: ")
+	assert.Contains(t, findings[0].Message, "no such file or directory")
+	assert.NotContains(t, findings[0].Message, "unexpected file")
+}

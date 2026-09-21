@@ -31,7 +31,7 @@ A reload that fails validation is logged (and reported by the endpoint) and the 
 
 "Previous good settings" is the in-memory snapshot of the running process, nothing more: there is no persisted copy of the files. A restart re-validates the directory from scratch and refuses to start on the same findings the reload rejected, so bad files never survive a restart silently — fix them (or run `wavehouse validate`) before bouncing the server.
 
-A directory that holds one folder per tenant instead of the four files is [a nested settings directory](/deployment#the-nested-settings-directory): each folder is everything this page describes, but it is not watched, and a rejected folder stops its tenant being served rather than keeping the previous settings.
+A directory that holds one folder per tenant instead of the four files is [a nested settings directory](/deployment#the-nested-settings-directory): each folder is everything this page describes, but it is not watched, a rejected folder stops its tenant being served rather than keeping the previous settings, and the keys the whole process shares come from tenant `0`'s folder — that section lists which.
 
 Every adoption — boot and every reload — goes through the same `Validate`, so the policy, the roles, and the pipes are checked with the current rules each time they are read; there is no stored copy that can skip validation. All four files are adopted as one snapshot: a request is evaluated against the policy, pipes, and tunables of a single adoption, never a mix.
 
