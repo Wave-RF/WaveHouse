@@ -36,6 +36,7 @@ export type {
   // Ingest
   InsertRecordResult,
   InsertResult,
+  OpsRequestOptions,
   OrderClause,
   ParamDef,
   // Pipes
