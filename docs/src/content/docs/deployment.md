@@ -357,7 +357,7 @@ The probes (`/livez`, `/readyz`, `/healthz`, and the deprecated `/health` and `/
 
 ### Upgrading behind a proxy that already sends `X-Tenant-ID`
 
-`X-Tenant-ID` is a generic name, and some gateways and service meshes stamp one on every request. WaveHouse used to ignore it; now any value other than `0` names an unknown tenant, so **every `/v1` route answers `404 unknown tenant: <id>`** — the SDK's `/v1/health` reachability ping included, while the bare probes stay green. Strip the inbound header at the edge ([header forwarding](/reverse-proxy#header-and-auth-forwarding)) unless you are using it deliberately.
+`X-Tenant-ID` is a generic name, and some gateways and service meshes stamp one on every request. WaveHouse used to ignore it; now any value other than `0` names an unknown tenant, so **every `/v1` route outside `/v1/ops/*` answers `404 unknown tenant: <id>`** — the SDK's `/v1/health` reachability ping included, while the bare probes and the admin surface stay green. Strip the inbound header at the edge ([header forwarding](/reverse-proxy#header-and-auth-forwarding)) unless you are using it deliberately.
 
 ## ClickHouse Schema
 
