@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
@@ -105,6 +106,75 @@ func TestTenantMW_NestedDirectory(t *testing.T) {
 			assert.Nil(t, resolved, "a refused request must not reach the handler")
 			assert.JSONEq(t, tt.wantBody, w.Body.String())
 		})
+	}
+}
+
+// Threading the tenant is what TenantMW is for, and every other double in
+// this package discards the store it is handed (tenant_helpers_test.go) — so a
+// handler that passed the wrong one down (nil, tenant 0's, a captured one)
+// would pass all of them. This drives the real router over a two-tenant
+// registry and checks the store each handler's getters actually received. The
+// recorded policy is nil, which denies, so every route answers 403 straight
+// after asking.
+//
+// The subtests share the recorder and must alternate tenants through one
+// router — that is what would expose a captured store — so neither the parent
+// nor the subtests are parallel.
+func TestNewRouter_HandlersReceiveTheRequestTenantsStore(t *testing.T) {
+	tenants := nestedTenants(t, map[string]string{"acme": fullConfig(100), "globex": fullConfig(200)})
+	var handed []*settings.Store
+	recordPolicy := func(s *settings.Store) *policy.Policy {
+		handed = append(handed, s)
+		return nil
+	}
+	recordPipes := func(s *settings.Store) pipes.Source {
+		handed = append(handed, s)
+		return pipes.Static(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1"})
+	}
+	reg := testRegistry(t)
+	ingest := NewIngestHandler(reg, &testutil.MockPublisher{})
+	ingest.PolicySource = recordPolicy
+	router := NewRouter(Dependencies{
+		Tenants:         tenants,
+		Ingest:          ingest,
+		StructuredQuery: NewStructuredQueryHandler(nil, nil, reg, recordPolicy, func(*settings.Store) int { return 60 }, noTimeout, nil),
+		Pipes:           NewPipesHandler(recordPipes, recordPolicy, nil, nil, noTimeout),
+		Query:           &QueryHandler{},
+		SSE:             NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
+		Health:          &HealthHandler{},
+		Version:         NewVersionHandler("test", "test", "test"),
+		Schema:          NewSchemaHandler(reg),
+		AuthMW:          func(next http.Handler) http.Handler { return next },
+		PolicySource:    policy.Static(&policy.Policy{}),
+	})
+
+	routes := []struct {
+		name, path, body string
+		getters          int // store-keyed getters the route consults before it denies
+	}{
+		{name: "ingest", path: "/v1/ingest?table=clicks", body: `{"page": "/"}`, getters: 1},
+		{name: "structured query", path: "/v1/query?table=clicks", body: `{}`, getters: 1},
+		{name: "pipe execute", path: "/v1/pipes/top_pages", body: `{}`, getters: 2},
+	}
+	for _, route := range routes {
+		for _, id := range []tenant.ID{"acme", "globex", "acme"} {
+			t.Run(route.name+" as "+id.String(), func(t *testing.T) {
+				want, ok := tenants.For(id)
+				require.True(t, ok)
+				handed = nil
+				req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, route.path, strings.NewReader(route.body))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set(tenant.Header, id.String())
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, req)
+
+				require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+				require.Len(t, handed, route.getters)
+				for _, got := range handed {
+					assert.Same(t, want, got)
+				}
+			})
+		}
 	}
 }
 
