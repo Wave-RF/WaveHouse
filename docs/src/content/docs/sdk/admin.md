@@ -36,7 +36,7 @@ const { data, error } = await wh.settings.reload();
 //        { adopted: false, findings } and the previous settings stay in effect
 ```
 
-Over [a nested settings directory](/deployment#the-nested-settings-directory), pass `tenant` to reload that tenant's folder alone; without it the whole directory is reloaded, and a `422` can mean adopted in part.
+Over [a nested settings directory](/deployment#the-nested-settings-directory), pass `tenant` to reload that tenant's folder alone: a `422` then means the folder was rejected and the tenant is no longer served (its requests answer `503`), not that its previous settings stayed. Without `tenant` the whole directory is reloaded, and a `422` can mean adopted in part. Over a nested directory this route takes the [operator key](/api#authentication) alone; an admin-role token gets `403`.
 
 ```ts
 const { data, error } = await wh.settings.reload({ tenant: 'acme' });

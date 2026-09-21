@@ -206,7 +206,7 @@ The hot-reloadable half of configuration: a directory of four JSON files (`confi
 ```text wrap=false
 Client POST /v1/ingest?table={table}
   → Tenant resolution: X-Tenant-ID → settings.Registry → the request's *settings.Store
-    (absent = tenant 0; 400 malformed / 404 unknown, before auth)
+    (absent = tenant 0; 400 malformed / 404 unknown / 503 rejected, before auth)
   → JWT auth middleware (always runs; token optional)
   → Look up table schema from SchemaRegistry
   → Policy check: role allowed to insert into this table (before the body is parsed)
@@ -300,7 +300,7 @@ The proxy-pattern wins are: zero classification logic on the WaveHouse side (no 
 ```text
 Client GET /v1/stream
   → Tenant resolution: X-Tenant-ID → settings.Registry → the request's *settings.Store
-    (absent = tenant 0; 400 malformed / 404 unknown, before auth)
+    (absent = tenant 0; 400 malformed / 404 unknown / 503 rejected, before auth)
   → JWT auth middleware (always runs; token optional)
   → Announce the caller's projected column list as an `event: schema` frame
     (no `id:`, so it never moves Last-Event-ID) BEFORE registering, so a client

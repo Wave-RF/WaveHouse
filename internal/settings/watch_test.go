@@ -130,3 +130,16 @@ func TestRegistry_Watch_SurvivesDirectoryRecreate(t *testing.T) {
 	cancel()
 	assert.NoError(t, <-done)
 }
+
+// A nested directory is never watched: a watcher would validate a tenant's
+// folder halfway through being written, and with no previous-snapshot
+// fallback that drops the tenant. Watch refuses it itself rather than trust
+// every caller to know.
+func TestRegistry_Watch_RefusesANestedDirectory(t *testing.T) {
+	t.Parallel()
+	reg, _ := Open(writeTree(t, map[string]map[string]string{"acme": validFiles()}))
+	require.NotNil(t, reg)
+	err := reg.Watch(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "never watched")
+}

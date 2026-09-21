@@ -25,6 +25,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 )
 
 // None of these tests run in parallel: New installs a process-wide default
@@ -354,6 +355,37 @@ func TestNew_NestedOperatorReloadsOneTenant(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, do(http.MethodGet, "/v1/ops/pipes", operator...).Code)
 	assert.Equal(t, http.StatusNotFound, do(http.MethodPost, "/v1/ops/settings/reload?tenant=initech", operator...).Code)
 	assert.Equal(t, http.StatusForbidden, do(http.MethodPost, "/v1/ops/settings/reload?tenant=acme").Code)
+}
+
+// Over a nested directory the operator key is the only credential the ops
+// tree takes, and nothing watches the directory — so booting one without the
+// key leaves SIGHUP as the only reload, and boot says so rather than repeat
+// the flat directory's recovery advice.
+func TestNew_NestedWithoutAnOperatorKeyWarnsTheOpsTreeIsClosed(t *testing.T) {
+	const warning = "no caller can reach those routes"
+	boot := func(t *testing.T, settingsDir, operatorKey string) string {
+		t.Helper()
+		guardGlobals(t)
+		logs := logtest.Capture(t, slog.LevelWarn)
+		cfg := testConfig(t, settingsDir)
+		cfg.Auth.OperatorKey = operatorKey
+		a, err := New(t.Context(), Options{Config: cfg})
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, a.Close(context.Background())) })
+		return logs.String()
+	}
+
+	t.Run("nested, no key", func(t *testing.T) {
+		assert.Contains(t, boot(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil}), ""), warning)
+	})
+	t.Run("nested, key set", func(t *testing.T) {
+		assert.NotContains(t, boot(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil}), "unit-test-operator-key"), warning)
+	})
+	t.Run("flat, no key", func(t *testing.T) {
+		logs := boot(t, writeSettings(t, nil), "")
+		assert.NotContains(t, logs, warning)
+		assert.Contains(t, logs, "no auth.operator_key set")
+	})
 }
 
 // The process-wide resources follow tenant 0 alone: another tenant's reload

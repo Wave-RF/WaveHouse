@@ -2,6 +2,7 @@ package settings
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -38,7 +39,15 @@ const watchDebounce = 250 * time.Millisecond
 // The setup error is returned (directory missing, fd limits); runtime watcher
 // errors are logged and the loop continues — SIGHUP and the ops reload
 // endpoint remain as triggers even if the watcher degrades.
+//
+// Flat directories only, and a nested registry is refused rather than
+// trusted to its caller: "the previous good snapshot stays" does not hold
+// there. A watcher would validate a tenant's folder halfway through being
+// written, and with no previous-snapshot fallback that drops the tenant.
 func (r *Registry) Watch(ctx context.Context) error {
+	if r.nested {
+		return errors.New("settings watcher: a nested settings directory is never watched — reload it through POST /v1/ops/settings/reload or SIGHUP")
+	}
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("settings watcher: %w", err)

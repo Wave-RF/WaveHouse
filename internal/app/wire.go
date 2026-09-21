@@ -468,9 +468,14 @@ func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
 	}
 
 	operatorKey := strings.TrimSpace(cfg.Auth.OperatorKey)
-	if operatorKey == "" {
+	switch {
+	case operatorKey == "" && a.tenants.Nested():
+		// Not the recovery concern below: over a nested directory the key is
+		// the ops tree's only credential, and there is no watcher either.
+		slog.Warn("nested settings directory and no auth.operator_key set: the operator key is the only credential /v1/ops/* takes over a nested directory, so no caller can reach those routes — settings can only be reloaded by SIGHUP, which reloads every tenant")
+	case operatorKey == "":
 		slog.Warn("no auth.operator_key set: if you lose the JWT secret, lose control of the JWKS endpoint, or lose your HMAC secret — or policies.json is emptied — every token-based request is denied and the only recovery is editing the settings directory on the host")
-	} else {
+	default:
 		slog.Info("operator key is set: requests presenting it via 'Authorization: Operator <key>' (or the X-Operator-Key alias) are authorized as a full-access platform operator, and can trigger a settings reload over HTTP while the server is locked out")
 	}
 

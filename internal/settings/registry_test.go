@@ -2,6 +2,7 @@ package settings
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 )
 
 // newLoadedRegistry materializes a valid directory (with overrides applied)
@@ -329,6 +331,26 @@ func TestRegistry_NestedReloadMirrorsTheFolders(t *testing.T) {
 	assert.Contains(t, findingStrings(findings), "acme.bak: folder name is not a tenant id")
 	_, ok = reg.For("globex")
 	assert.True(t, ok, "a badly named folder costs no tenant its settings")
+}
+
+// A tenant whose folder is gone leaves the registry with no finding to show
+// for it — every request of its just turns into a 404 — so the reload's log
+// line names it. Captures the default logger, so it is not parallel.
+func TestRegistry_ReloadNamesARemovedTenantInTheLog(t *testing.T) {
+	root := writeTree(t, map[string]map[string]string{"acme": validFiles(), "globex": validFiles()})
+	reg, _ := Open(root)
+	require.NotNil(t, reg)
+	logs := logtest.Capture(t, slog.LevelInfo)
+
+	_, adopted := reg.Reload("test")
+	require.True(t, adopted)
+	assert.NotContains(t, logs.String(), "removed", "a reload that drops nobody says nothing of it")
+
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	_, adopted = reg.Reload("test")
+	require.True(t, adopted, "a removed folder is not a finding")
+	assert.Contains(t, logs.String(), `"level":"WARN"`)
+	assert.Contains(t, logs.String(), `"removed":["acme"]`)
 }
 
 // ReloadTenant reads one tenant's folder and nothing else: the tenant beside

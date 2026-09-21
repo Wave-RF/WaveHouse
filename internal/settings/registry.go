@@ -183,7 +183,7 @@ func (r *Registry) reload(trigger string, boot bool) (findings []Finding, adopte
 		tree = nil
 	}
 
-	var adoptedIDs, rejectedIDs []tenant.ID
+	var adoptedIDs, rejectedIDs, removedIDs []tenant.ID
 	if tree != nil {
 		prev := *r.tenants.Load()
 		next := make(map[tenant.ID]entry, len(tree.Tenants))
@@ -194,6 +194,13 @@ func (r *Registry) reload(trigger string, boot bool) (findings []Finding, adopte
 				rejectedIDs = append(rejectedIDs, id)
 			} else {
 				adoptedIDs = append(adoptedIDs, id)
+			}
+		}
+		// A tenant whose folder is gone leaves the map with no finding to show
+		// for it, and every request of its turns into a 404: name it in the log.
+		for _, id := range slices.Sorted(maps.Keys(prev)) {
+			if _, kept := next[id]; !kept {
+				removedIDs = append(removedIDs, id)
 			}
 		}
 		r.tenants.Store(&next)
@@ -207,7 +214,9 @@ func (r *Registry) reload(trigger string, boot bool) (findings []Finding, adopte
 	case tree == nil:
 		slog.Error("settings rejected — keeping previous settings", "trigger", trigger, "dir", r.dir, "errors", errs, "warnings", warns)
 	case errs > 0:
-		slog.Error("settings adopted in part — a tenant whose folder was rejected answers 503 until a reload adopts it", "trigger", trigger, "dir", r.dir, "adopted", len(adoptedIDs), "rejected", rejectedIDs, "errors", errs, "warnings", warns)
+		slog.Error("settings adopted in part — a tenant whose folder was rejected answers 503 until a reload adopts it", "trigger", trigger, "dir", r.dir, "adopted", len(adoptedIDs), "rejected", rejectedIDs, "removed", removedIDs, "errors", errs, "warnings", warns)
+	case len(removedIDs) > 0:
+		slog.Warn("settings adopted — a tenant whose folder is gone is no longer served", "trigger", trigger, "dir", r.dir, "tenants", len(adoptedIDs), "removed", removedIDs, "warnings", warns)
 	case r.nested:
 		slog.Info("settings adopted", "trigger", trigger, "dir", r.dir, "tenants", len(adoptedIDs), "warnings", warns)
 	default:

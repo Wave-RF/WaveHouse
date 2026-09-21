@@ -42,7 +42,7 @@ const { data: pipe } = await wh.pipes.get('top_pages');
 // pipe: { name, sql, parameters, description, allowed_roles }
 ```
 
-Both take a `tenant` option, sent as `?tenant=`, for a server with [a nested settings directory](/deployment#the-nested-settings-directory) — the admin routes ignore the `X-Tenant-ID` header, so [`options.headers`](/sdk#custom-headers) cannot select one. Without it they read the default tenant.
+Both take a `tenant` option, sent as `?tenant=`, for a server with [a nested settings directory](/deployment#the-nested-settings-directory) — the admin routes ignore the `X-Tenant-ID` header, so [`options.headers`](/sdk#custom-headers) cannot select one. Without it they read the default tenant. Over a nested directory these routes take the [operator key](/api#authentication) alone; an admin-role token gets `403`.
 
 ```ts
 const { data: acmePipes } = await wh.pipes.list({ tenant: 'acme' });
