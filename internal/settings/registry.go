@@ -174,7 +174,11 @@ func (r *Registry) reload(trigger string, boot bool) (findings []Finding, adopte
 	case boot:
 		r.nested = tree.Nested
 	case tree.Nested != r.nested:
-		findings = append(findings, Finding{Severity: SeverityError, Message: "the settings directory changed shape between the four files and one folder per tenant — switching is stop, restructure, start"})
+		booted := "the four files"
+		if r.nested {
+			booted = "one folder per tenant"
+		}
+		findings = append(findings, Finding{Severity: SeverityError, Message: "the settings directory no longer has the shape this server booted with (" + booted + ") — switching shapes is stop, restructure, start"})
 		tree = nil
 	}
 	// A flat directory with an error finding changes nothing, like a finding

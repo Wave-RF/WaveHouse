@@ -401,6 +401,16 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	a := newApp(t, testConfig(t, root), Options{})
 	require.False(t, a.dedup.Open())
 	require.Equal(t, int64(1<<30), a.mq.MaxBytes())
+	// The CORS list is read per request rather than reconciled by a hook; it
+	// is the seed's ["*"] in every folder here.
+	allowOrigin := func() string {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/version", nil)
+		req.Header.Set("Origin", "https://app.example.com")
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec.Header().Get("Access-Control-Allow-Origin")
+	}
+	require.Equal(t, "*", allowOrigin())
 
 	rewriteSettings(t, filepath.Join(root, "acme"), grown)
 	_, adopted := a.tenants.Reload("test")
@@ -419,6 +429,17 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	require.False(t, adopted)
 	assert.True(t, a.dedup.Open(), "a rejected 0 folder must not read as dedupe off")
 	assert.Equal(t, int64(2<<30), a.mq.MaxBytes())
+	assert.Equal(t, "*", allowOrigin(), "nor as an empty CORS list: that would cost every tenant its browser clients")
+
+	// A removed 0 folder is the same: the registry forgets the tenant, the
+	// process keeps the wiring it last adopted.
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "0")))
+	_, adopted = a.tenants.Reload("test")
+	require.True(t, adopted)
+	_, known := a.tenants.Resolve(tenant.Default)
+	require.False(t, known)
+	assert.True(t, a.dedup.Open())
+	assert.Equal(t, "*", allowOrigin())
 }
 
 // keepalive is a config.json patch setting the stream block's keepalive pair.

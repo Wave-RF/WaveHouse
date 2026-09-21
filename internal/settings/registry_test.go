@@ -466,7 +466,11 @@ func TestRegistry_RootLevelFailureChangesNothing(t *testing.T) {
 		{name: "the root is gone", want: "does not exist", damage: func(t *testing.T, root string) {
 			require.NoError(t, os.RemoveAll(root))
 		}},
-		{name: "the root turned flat", want: "changed shape", damage: func(t *testing.T, root string) {
+		{name: "every folder is gone", want: "no longer has the shape this server booted with (one folder per tenant)", damage: func(t *testing.T, root string) {
+			require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+			require.NoError(t, os.RemoveAll(filepath.Join(root, "globex")))
+		}},
+		{name: "the root turned flat", want: "no longer has the shape this server booted with (one folder per tenant)", damage: func(t *testing.T, root string) {
 			require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
 			require.NoError(t, os.RemoveAll(filepath.Join(root, "globex")))
 			writeTenant(t, root, ".", validFiles())
@@ -509,7 +513,7 @@ func TestRegistry_FlatRootTurnedNestedIsRejected(t *testing.T) {
 
 	findings, adopted := reg.Reload("test")
 	assert.False(t, adopted)
-	assert.Contains(t, findingStrings(findings), "changed shape")
+	assert.Contains(t, findingStrings(findings), "no longer has the shape this server booted with (the four files)")
 	s, ok := reg.For(tenant.Default)
 	require.True(t, ok)
 	assert.Equal(t, 42, s.DefaultMaxRows())

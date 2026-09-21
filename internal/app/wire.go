@@ -62,7 +62,11 @@ func (a *App) wireSettings() error {
 		return fmt.Errorf("settings directory %s invalid, refusing to start — findings above; `wavehouse validate` reproduces them, `wavehouse bootstrap` writes a starter directory", a.cfg.Settings.Dir)
 	}
 	a.tenants = tenants
-	a.policies = func() *policy.Policy { return defaultSetting(tenants, (*settings.Store).Policy) }
+	// Registered first: hooks run in registration order, and every other one
+	// reads tenant 0 through the store this one tracks.
+	a.trackDefaultStore()
+	a.onDefaultAdopt(a.trackDefaultStore)
+	a.policies = func() *policy.Policy { return defaultSetting(a, (*settings.Store).Policy) }
 	switch _, served := tenants.For(tenant.Default); {
 	case !tenants.Nested():
 		if a.policies() == nil {
@@ -74,14 +78,28 @@ func (a *App) wireSettings() error {
 	return nil
 }
 
+// trackDefaultStore remembers tenant 0's store as of its last adoption. The
+// registry stops handing out a rejected tenant's store and forgets a removed
+// one, but the store keeps its last adopted document either way — and that is
+// what the process-wide resources go on following (defaultSetting).
+func (a *App) trackDefaultStore() {
+	if store, ok := a.tenants.For(tenant.Default); ok {
+		a.defaultStore.Store(store)
+	}
+}
+
 // defaultSetting reads one setting of the default tenant, which the
 // process-wide resources (ClickHouse, dedupe, MQ, auth, CORS) follow until
-// #583 gives each tenant its own. A nested directory need not hold a 0
-// folder, and may hold a rejected one; the read is then T's zero value, which
-// wireSettings warned about at boot.
-func defaultSetting[T any](tenants *settings.Registry, get func(*settings.Store) T) T {
-	store, ok := tenants.For(tenant.Default)
-	if !ok {
+// #583 gives each tenant its own. It reads tenant 0's last adopted document,
+// so a 0 folder a reload rejected or removed leaves every one of them as it
+// was — the ones a hook reconciles and the ones read per request (the CORS
+// list, the operator key's admin role) alike; one tenant's bad folder must
+// not cost every tenant its browser clients. A nested directory that has
+// never served a tenant 0 reads T's zero value, which wireSettings warned
+// about at boot.
+func defaultSetting[T any](a *App, get func(*settings.Store) T) T {
+	store := a.defaultStore.Load()
+	if store == nil {
 		var zero T
 		return zero
 	}
@@ -215,7 +233,7 @@ func (a *App) wireObservability(ctx context.Context) {
 // per request.
 func (a *App) wireClickHouse() error {
 	params := func() chconn.Params {
-		c := defaultSetting(a.tenants, (*settings.Store).ClickHouse)
+		c := defaultSetting(a, (*settings.Store).ClickHouse)
 		return chconn.Params{
 			Addr: c.Addr, HTTPPort: c.HTTPPort, HTTPScheme: c.HTTPScheme,
 			Database: c.Database, Username: c.Username, Password: a.cfg.ClickHouse.Password,
@@ -290,7 +308,7 @@ func (a *App) wireDedupe() error {
 	a.dedup = dedup
 	a.add(component{name: "dedupe", close: withoutContext(dedup.Close)})
 	reconcile := func() (bool, error) {
-		enabled := defaultSetting(a.tenants, (*settings.Store).DedupeEnabled)
+		enabled := defaultSetting(a, (*settings.Store).DedupeEnabled)
 		if enabled && !dedup.Open() {
 			config.WarnIfFreshDataDir("pebble", dir)
 		}
@@ -320,7 +338,7 @@ func (a *App) wireMQ() error {
 	dir := filepath.Join(a.cfg.DataDir, "nats")
 	config.WarnIfFreshDataDir("nats", dir)
 	var broker mq.Broker
-	broker, err := mq.NewEmbedded(dir, defaultSetting(a.tenants, (*settings.Store).MQMaxBytes))
+	broker, err := mq.NewEmbedded(dir, defaultSetting(a, (*settings.Store).MQMaxBytes))
 	if err != nil {
 		config.LogStorageInitError("mq", dir, err)
 		return fmt.Errorf("mq open: %w", err)
@@ -342,7 +360,7 @@ func (a *App) wireMQ() error {
 	// SIGTERM gives up rather than holding the drain past
 	// server.shutdown_timeout.
 	a.onDefaultAdopt(func() {
-		mb := defaultSetting(a.tenants, (*settings.Store).MQMaxBytes)
+		mb := defaultSetting(a, (*settings.Store).MQMaxBytes)
 		if mb == broker.MaxBytes() {
 			return
 		}
@@ -461,7 +479,7 @@ func (a *App) wireIngestWorker() {
 func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
 	cfg := a.cfg
 	switch {
-	case cfg.Auth.JWTSecret == "" && defaultSetting(a.tenants, (*settings.Store).Auth).JWKSURL == "":
+	case cfg.Auth.JWTSecret == "" && defaultSetting(a, (*settings.Store).Auth).JWKSURL == "":
 		slog.Warn("no auth.jwt_secret (boot config) or auth.jwks_url (settings) set: no token can be validated, so every request resolves to the policy default_role (public access)")
 	case cfg.Auth.JWTSecret == "change-me-in-production":
 		slog.Warn("WH_AUTH_JWT_SECRET is using the default insecure value")
@@ -480,7 +498,7 @@ func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
 	}
 
 	authConfig := func() auth.Config {
-		s := defaultSetting(a.tenants, (*settings.Store).Auth)
+		s := defaultSetting(a, (*settings.Store).Auth)
 		return auth.Config{
 			JWTSecret:   cfg.Auth.JWTSecret,
 			JWKSURL:     s.JWKSURL,
@@ -592,7 +610,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		AuthMW:       authMW,
 		Tenants:      a.tenants,
 		PolicySource: a.policies,
-		CORSOrigins:  func() []string { return defaultSetting(a.tenants, (*settings.Store).CORSOrigins) },
+		CORSOrigins:  func() []string { return defaultSetting(a, (*settings.Store).CORSOrigins) },
 		Settings:     api.NewSettingsHandler(a.tenants),
 	}
 
