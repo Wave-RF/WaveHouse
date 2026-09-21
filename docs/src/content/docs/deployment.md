@@ -362,12 +362,12 @@ Serving more than one tenant from one process takes a settings directory that ho
 
 ```text
 settings/
-├── 0/
+├── acme/
 │   ├── config.json
 │   ├── pipes.json
 │   ├── policies.json
 │   └── roles.json
-└── acme/
+└── globex/
     ├── config.json
     ├── pipes.json
     ├── policies.json
