@@ -426,13 +426,26 @@ func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxB
 	}
 }
 
+// unresolvedRefreshInterval paces StartAutoRefresh while its tenant's interval
+// cannot be read.
+const unresolvedRefreshInterval = time.Minute
+
 // StartAutoRefresh runs a background goroutine that refreshes schemas
 // at the configured interval. Blocks until ctx is cancelled. The interval is
 // re-read after every tick, so a changed setting applies from the next cycle
 // — an in-flight wait finishes at the old cadence rather than resetting,
 // which keeps a reload from ever deferring an imminent refresh.
+//
+// A validated setting is at least a second, so a non-positive interval is a
+// tenant the settings registry could not resolve, read as the zero value.
+// NewTicker and Reset panic on one, so the loop keeps the cadence it has —
+// unresolvedRefreshInterval when it has none yet — and picks the setting up
+// on the first tick that resolves.
 func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 	interval := sr.refreshInterval(sr.tenant)
+	if interval <= 0 {
+		interval = unresolvedRefreshInterval
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -443,7 +456,7 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 			if err := sr.Refresh(ctx); err != nil {
 				slog.ErrorContext(ctx, "schema auto-refresh failed", "error", err)
 			}
-			if next := sr.refreshInterval(sr.tenant); next != interval {
+			if next := sr.refreshInterval(sr.tenant); next > 0 && next != interval {
 				interval = next
 				ticker.Reset(interval)
 			}

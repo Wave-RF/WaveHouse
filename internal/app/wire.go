@@ -84,6 +84,21 @@ func perTenant[T any](tenants *settings.Registry, get func(*settings.Store) T) f
 	}
 }
 
+// dlqFor adapts the registry to the ingest worker's per-table DLQ switch. A
+// miss reads as DLQ on, not as the zero value perTenant would give: off lets
+// the worker drop a message it cannot read, and not knowing the tenant is no
+// reason to destroy its row. Parked, it survives until the tenant resolves.
+func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
+	return func(id tenant.ID, table string) bool {
+		store, ok := tenants.For(id)
+		if !ok {
+			slog.Error("no settings store for tenant; parking its failed rows on the DLQ", "tenant", id, "table", table)
+			return true
+		}
+		return store.DLQFor(table)
+	}
+}
+
 // wireObservability initializes the OTel pipeline whenever either OTLP push
 // or Prometheus exposition is wanted — Prometheus-only operation
 // (Alloy/scrape, no collector) is a first-class mode, and the OTel SDK
@@ -355,15 +370,7 @@ func (a *App) wireStreaming() {
 // drain within the shutdown timeout.
 func (a *App) wireIngestWorker() {
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
-		dlqEnabled := func(id tenant.ID, table string) bool {
-			store, ok := a.tenants.For(id)
-			if !ok {
-				slog.Error("no settings store for tenant; treating its DLQ as off", "tenant", id, "table", table)
-				return false
-			}
-			return store.DLQFor(table)
-		}
-		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, a.cache, a.ch.Target, tenant.Default, dlqEnabled)
+		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, a.cache, a.ch.Target, tenant.Default, dlqFor(a.tenants))
 		if err != nil {
 			return err
 		}
@@ -499,7 +506,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	streamHandler.Closing = closing
 
 	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.ch, a.cache, a.ch.QueryTimeout)
-	pipesHandler.Tenants = a.tenants
+	pipesHandler.OpsStore = a.store
 
 	deps := api.Dependencies{
 		Ingest: ingestHandler,

@@ -174,6 +174,18 @@ func TestNew_TenantHeaderResolvesAgainstTheRegistry(t *testing.T) {
 	}
 }
 
+// A tenant the registry cannot resolve must not read as "DLQ off": off is what
+// lets the ingest worker ack and drop a message it cannot read, so the miss
+// parks instead. The other async getters degrade to their zero value.
+func TestAsyncGetters_RegistryMiss(t *testing.T) {
+	t.Parallel()
+	tenants := settings.NewRegistry(&settings.Store{})
+	unknown := tenant.ID("acme")
+
+	assert.True(t, dlqFor(tenants)(unknown, "events"), "an unknown tenant's failed rows park on the DLQ")
+	assert.Zero(t, perTenant(tenants, (*settings.Store).GapWindow)(unknown))
+}
+
 func TestNew_DedupeFollowsSettings(t *testing.T) {
 	tests := []struct {
 		name    string

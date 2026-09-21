@@ -50,29 +50,6 @@ WaveHouse extracts the role from a configurable JWT claim path (`auth.role_claim
 
 Policies support Hasura-style row-level and column-level permissions with JWT claim templating (e.g., `{{ jwt.app_metadata.tenant_id }}`).
 
-## Tenant Selection
-
-Every `/v1` route outside `/v1/ops/*` resolves a tenant before it authenticates the request. The tenant comes from the `X-Tenant-ID` request header:
-
-```text
-X-Tenant-ID: 0
-```
-
-A request without the header, or with an empty one, resolves to tenant `0`, the default tenant, whose settings are the [settings directory](/settings-directory). A settings directory defines that one tenant, so any other id is unknown. Setting the header on every request is the client's or the fronting proxy's job; WaveHouse never derives it from the token.
-
-A tenant id is 1–64 characters of ASCII letters, digits, `_`, and `-`. It is a string, not a number, so a long numeric id keeps every digit.
-
-| Status | Body | When |
-| ------ | ---- | ---- |
-| `400` | `{"error": "invalid X-Tenant-ID: …"}` | The id breaks the grammar above, or the header was sent more than once |
-| `404` | `{"error": "unknown tenant: <id>"}` | The id is well formed but no such tenant exists |
-
-Both are decided before authentication, so they are returned whatever token the request carries. Every response from a tenant route, these two included, carries `Vary: X-Tenant-ID`, so a shared cache keys on the header and never replays one tenant's response to another.
-
-The probes (`/livez`, `/readyz`, `/healthz`), `/version`, the Prometheus metrics path, and `/v1/ops/*` are tenant-exempt: they ignore the header entirely. The two admin pipe reads ([`GET /v1/ops/pipes`](#get-v1opspipes--list-named-pipes) and `GET /v1/ops/pipes/{name}`) name their tenant with an optional `?tenant=` query parameter instead, with the same grammar and the same `400`/`404` answers; no other ops route takes a tenant.
-
-`X-Tenant-ID` is in the CORS `Access-Control-Allow-Headers` list, so a browser client can send it cross-origin. The SDK sends it through [`options.headers`](/sdk#custom-headers).
-
 ## Response Format
 
 ### Error Responses
@@ -173,7 +150,7 @@ Status code: `503 Service Unavailable`
 
 ### `GET /v1/health` — Liveness ping (public, content-free)
 
-Returns **`200 OK` with an empty body** once the gateway is past boot, or **`503 Service Unavailable`** (also empty) while boot-time schema discovery is still failing. Like every other `/v1` route it [resolves a tenant](#tenant-selection) first, so a bad `X-Tenant-ID` answers `400`/`404` before the probe runs. No authentication required and no response body — the caller only branches on the status code, so there's nothing to JSON-encode or cache per request.
+Returns **`200 OK` with an empty body** once the gateway is past boot, or **`503 Service Unavailable`** (also empty) while boot-time schema discovery is still failing. Like every other `/v1` route it [resolves a tenant](/deployment#multi-tenant-deployments) first, so a bad `X-Tenant-ID` answers `400`/`404` before the probe runs. No authentication required and no response body — the caller only branches on the status code, so there's nothing to JSON-encode or cache per request.
 
 This is what the SDK's `wh.sys.health()` calls, and the endpoint to use when choosing among multiple servers in a distributed setup. It mirrors `/livez` under the hood but is intentionally a `/v1` API route rather than a Kubernetes probe path: an operator may filter the bare probe paths (`/livez`, `/readyz`, `/healthz`) out at the reverse proxy since they're internal probes, so the SDK relies on `/v1/health`, which is documented public API surface meant to stay reachable. It does **not** ping ClickHouse — readiness-based load balancing is the proxy/LB's job (via `/readyz`), not the client's.
 
@@ -781,11 +758,9 @@ The policy has no endpoints: it is the settings directory's [`policies.json`](/s
 
 Returns every adopted named query pipe — the settings directory's [`pipes.json`](/settings-directory#pipesjson). Pipes have no write endpoints: edit the file and reload.
 
-The ops routes are [tenant-exempt](#tenant-selection), so this read and `GET /v1/ops/pipes/{name}` name their tenant with an optional `?tenant=` query parameter instead of the header. Absent or empty means tenant `0`; a malformed id, a repeated parameter, or a query string that does not parse is a `400` (`{"error": "invalid ?tenant: …"}`), and an unknown tenant a `404` with the same body as the header.
-
 #### `GET /v1/ops/pipes/{name}` — Get Named Pipe
 
-Returns a specific named pipe definition from the tenant named by `?tenant=`, as above:
+Returns a specific named pipe definition:
 
 ```json
 {

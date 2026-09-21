@@ -48,7 +48,7 @@ func TestPipesHandler_List(t *testing.T) {
 		&pipes.NamedQuery{Name: "recent", SQL: "SELECT * FROM clicks ORDER BY ts DESC LIMIT 10"},
 	)
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
-	h.Tenants = testTenants()
+	h.OpsStore = testStore
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/pipes", nil)
@@ -66,7 +66,7 @@ func TestPipesHandler_Get_Found(t *testing.T) {
 		&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT page FROM clicks"},
 	)
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
-	h.Tenants = testTenants()
+	h.OpsStore = testStore
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes/top_pages", "top_pages", nil)
@@ -82,7 +82,7 @@ func TestPipesHandler_Get_NotFound(t *testing.T) {
 	t.Parallel()
 	store := staticPipes()
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
-	h.Tenants = testTenants()
+	h.OpsStore = testStore
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes/nope", "nope", nil)
@@ -97,7 +97,7 @@ func TestPipesHandler_List_Empty(t *testing.T) {
 	t.Parallel()
 	store := staticPipes()
 	h := NewPipesHandler(store, nil, nil, nil, noTimeout)
-	h.Tenants = testTenants()
+	h.OpsStore = testStore
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes", "", nil)

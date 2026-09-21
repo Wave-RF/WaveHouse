@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"net/url"
 
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
@@ -47,67 +46,38 @@ func requestStore(w http.ResponseWriter, r *http.Request) (*settings.Store, bool
 	return store, ok
 }
 
-// resolveTenant turns the tenant values a request carries — one header line
-// or one query value, none meaning tenant.Default — into that tenant's store.
-// A malformed id is a 400 and a well-formed id the registry does not hold is
-// a 404. A repeated value is refused rather than picked from, so a value a
-// proxy sets can never be shadowed by one the client sent. where names the
-// source in the error body.
-func resolveTenant(w http.ResponseWriter, tenants *settings.Registry, where string, values []string) (*settings.Store, bool) {
-	id := tenant.Default
-	if len(values) > 1 {
-		writeJSONError(w, http.StatusBadRequest, "invalid "+where+": sent more than once")
-		return nil, false
-	}
-	if len(values) == 1 && values[0] != "" {
-		parsed, err := tenant.Parse(values[0])
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid "+where+": "+err.Error())
-			return nil, false
-		}
-		id = parsed
-	}
-	store, ok := tenants.For(id)
-	if !ok {
-		writeJSONError(w, http.StatusNotFound, "unknown tenant: "+id.String())
-		return nil, false
-	}
-	return store, true
-}
-
-// TenantMW resolves the request's tenant from the tenant.Header before
-// authentication runs and stores it in the request context. Every answer,
-// the 400 and 404 included, carries Vary: X-Tenant-ID so a shared cache
-// cannot replay one tenant's response to another — added, not set, so the
-// CORS Vary: Origin survives.
+// TenantMW resolves the request's tenant before authentication runs and
+// stores it in the request context: the tenant.Header value, tenant.Default
+// when absent. A malformed id is a 400 and a well-formed id the registry does
+// not hold is a 404. A repeated header is refused rather than picked from, so
+// a value a proxy sets can never be shadowed by one the client sent. Every
+// answer, the 400 and 404 included, carries Vary: X-Tenant-ID so a shared
+// cache cannot replay one tenant's response to another — added, not set, so
+// the CORS Vary: Origin survives.
 func TenantMW(tenants *settings.Registry) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Add("Vary", tenant.Header)
-			store, ok := resolveTenant(w, tenants, tenant.Header, r.Header.Values(tenant.Header))
+			id := tenant.Default
+			values := r.Header.Values(tenant.Header)
+			if len(values) > 1 {
+				writeJSONError(w, http.StatusBadRequest, "invalid "+tenant.Header+": sent more than once")
+				return
+			}
+			if len(values) == 1 && values[0] != "" {
+				parsed, err := tenant.Parse(values[0])
+				if err != nil {
+					writeJSONError(w, http.StatusBadRequest, "invalid "+tenant.Header+": "+err.Error())
+					return
+				}
+				id = parsed
+			}
+			store, ok := tenants.For(id)
 			if !ok {
+				writeJSONError(w, http.StatusNotFound, "unknown tenant: "+id.String())
 				return
 			}
 			next.ServeHTTP(w, r.WithContext(WithStore(r.Context(), store)))
 		})
 	}
-}
-
-// opsTenantParam is the query parameter an ops route takes its tenant from.
-// The ops tree is tenant-exempt — it runs no TenantMW and ignores the header
-// — so an admin names the tenant explicitly, and none means tenant.Default.
-const opsTenantParam = "tenant"
-
-// opsStore resolves the tenant an ops route addresses from its
-// opsTenantParam, with the same answers as TenantMW. The query string is
-// parsed strictly: url.Values silently drops a malformed pair, which would
-// turn "?tenant=acme;x=1" into the default tenant rather than a 400.
-func opsStore(w http.ResponseWriter, r *http.Request, tenants *settings.Registry) (*settings.Store, bool) {
-	where := "?" + opsTenantParam
-	values, err := url.ParseQuery(r.URL.RawQuery)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid "+where+": malformed query string")
-		return nil, false
-	}
-	return resolveTenant(w, tenants, where, values[opsTenantParam])
 }

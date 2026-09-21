@@ -594,6 +594,52 @@ func TestStartAutoRefresh_ExitsOnContextCancel(t *testing.T) {
 	}
 }
 
+// TestStartAutoRefresh_UnresolvedIntervalDoesNotPanic pins the zero interval a
+// settings-registry miss reads as: time.NewTicker and Ticker.Reset panic on a
+// non-positive duration, which would take the process down. The loop keeps
+// its cadence instead — at boot and when the interval stops resolving mid-run.
+func TestStartAutoRefresh_UnresolvedIntervalDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		intervals []time.Duration // successive reads; the last repeats
+	}{
+		{name: "unresolved at boot", intervals: []time.Duration{0}},
+		{name: "stops resolving after a tick", intervals: []time.Duration{5 * time.Millisecond, 0}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			conn := &fakeConn{errsThenSuccess: []error{errors.New("transient")}}
+			var reads atomic.Int32
+			interval := func(tenant.ID) time.Duration {
+				i := int(reads.Add(1)) - 1
+				return tt.intervals[min(i, len(tt.intervals)-1)]
+			}
+			sr := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, interval)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				assert.NotPanics(t, func() { sr.StartAutoRefresh(ctx) })
+			}()
+
+			if len(tt.intervals) > 1 {
+				// Two ticks: the zero read after the first must not stop the second.
+				assert.Eventually(t, func() bool { return conn.calls.Load() >= 2 },
+					2*time.Second, 5*time.Millisecond, "the loop stopped ticking after an unresolved read")
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("StartAutoRefresh did not return after ctx cancel")
+			}
+		})
+	}
+}
+
 // TestStartAutoRefresh_LogsAndContinuesOnError covers the error branch in
 // StartAutoRefresh's ticker loop: a failed Refresh logs an ERROR line and
 // the loop keeps going. Operators rely on this so transient ClickHouse

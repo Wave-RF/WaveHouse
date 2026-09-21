@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
@@ -161,51 +160,6 @@ func TestNewRouter_TenantExemptRoutes(t *testing.T) {
 			// Roleless, so the admin gate answers — not the tenant middleware.
 			assert.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
 			assert.Equal(t, []bool{false}, sawStore, "ops runs AuthMW with no tenant resolved")
-		})
-	}
-}
-
-// The ops tree ignores the tenant header, so the admin pipe reads name their
-// tenant with ?tenant= instead — with TenantMW's answers.
-func TestPipesHandler_AdminReads_TenantParam(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		query      string
-		wantStatus int
-		wantBody   string
-	}{
-		{name: "absent resolves to the default tenant", wantStatus: http.StatusOK},
-		{name: "empty resolves to the default tenant", query: "?tenant=", wantStatus: http.StatusOK},
-		{name: "explicit default tenant", query: "?tenant=0", wantStatus: http.StatusOK},
-		{name: "unknown tenant", query: "?tenant=acme", wantStatus: http.StatusNotFound, wantBody: "unknown tenant: acme"},
-		{name: "malformed tenant", query: "?tenant=a.b", wantStatus: http.StatusBadRequest, wantBody: "invalid ?tenant"},
-		{name: "repeated parameter", query: "?tenant=0&tenant=0", wantStatus: http.StatusBadRequest, wantBody: "sent more than once"},
-		// url.Values would drop the malformed pair and default the tenant.
-		{name: "malformed query string", query: "?tenant=acme;x=1", wantStatus: http.StatusBadRequest, wantBody: "malformed query string"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			h := NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1"}), nil, nil, nil, noTimeout)
-			h.Tenants = testTenants()
-
-			w := httptest.NewRecorder()
-			h.List(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/ops/pipes"+tt.query, nil))
-			require.Equal(t, tt.wantStatus, w.Code, "List body: %s", w.Body.String())
-			if tt.wantBody != "" {
-				testutil.AssertJSONErrorResponse(t, w)
-			}
-
-			w = httptest.NewRecorder()
-			h.Get(w, pipesRequest(t, http.MethodGet, "/v1/ops/pipes/top_pages"+tt.query, "top_pages", nil))
-			require.Equal(t, tt.wantStatus, w.Code, "Get body: %s", w.Body.String())
-			if tt.wantBody != "" {
-				testutil.AssertJSONErrorResponse(t, w)
-				assert.Contains(t, w.Body.String(), tt.wantBody)
-			} else {
-				assert.Contains(t, w.Body.String(), `"top_pages"`)
-			}
 		})
 	}
 }

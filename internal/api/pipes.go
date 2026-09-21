@@ -24,12 +24,12 @@ type PipesHandler struct {
 	// Source yields a tenant's pipes (the store itself in production).
 	Source       func(*settings.Store) pipes.Source
 	PolicySource PolicySource // resolves empty role to default_role; may be nil
-	// Tenants resolves the ?tenant= of the admin reads (List, Get): the ops
-	// tree is tenant-exempt, so they name their tenant rather than carry one.
-	Tenants *settings.Registry
-	CHConn  driver.Conn
-	Cache   cache.Cache
-	sf      singleflight.Group
+	// OpsStore is the store the admin reads (List, Get) serve: /v1/ops is
+	// tenant-exempt, so they carry no request tenant and read the default one.
+	OpsStore *settings.Store
+	CHConn   driver.Conn
+	Cache    cache.Cache
+	sf       singleflight.Group
 	// queryTimeout bounds each pipe execution, read per request
 	// (chconn.Manager.QueryTimeout in production) so a settings reload
 	// applies without a restart.
@@ -47,28 +47,20 @@ func NewPipesHandler(source func(*settings.Store) pipes.Source, policySource Pol
 	return &PipesHandler{Source: source, PolicySource: policySource, CHConn: conn, Cache: c, queryTimeout: queryTimeout}
 }
 
-// List returns all named queries of the ?tenant= (admin endpoint).
-func (h *PipesHandler) List(w http.ResponseWriter, r *http.Request) {
-	store, ok := opsStore(w, r, h.Tenants)
-	if !ok {
-		return
-	}
+// List returns all named queries (admin endpoint).
+func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	q := h.Source(store).Pipes()
+	q := h.Source(h.OpsStore).Pipes()
 	if q == nil {
 		q = []*pipes.NamedQuery{}
 	}
 	_ = json.NewEncoder(w).Encode(q)
 }
 
-// Get returns a specific named query of the ?tenant= (admin endpoint).
+// Get returns a specific named query (admin endpoint).
 func (h *PipesHandler) Get(w http.ResponseWriter, r *http.Request) {
-	store, ok := opsStore(w, r, h.Tenants)
-	if !ok {
-		return
-	}
 	name := chi.URLParam(r, "name")
-	q := h.Source(store).Pipe(name)
+	q := h.Source(h.OpsStore).Pipe(name)
 	if q == nil {
 		writeJSONError(w, http.StatusNotFound, "pipe not found")
 		return

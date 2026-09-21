@@ -377,7 +377,7 @@ Your headers are applied *underneath* the SDK's own, and a collision means yours
 
 Nothing is ever comma-joined: on a collision the SDK's value stands alone, and two of your own entries differing only in case collapse to the last one — a header joined rather than replaced is how you end up sending `Content-Type: application/json, image/png`.
 
-From a **browser**, a cross-origin custom header must also survive CORS preflight, and WaveHouse allow-lists a fixed set (`Accept`, `Authorization`, `Content-Type`, `Last-Event-ID`, `X-Request-ID`, `X-Tenant-ID`) with no config knob. So any other custom header works server-side, or from a browser when the proxy in front owns CORS — which is the same proxy the header is usually for. [`X-Tenant-ID`](/api#tenant-selection) is on the list, so a browser can select a tenant with `headers: { "X-Tenant-ID": "…" }` directly.
+From a **browser**, a cross-origin custom header must also survive CORS preflight, and WaveHouse allow-lists a fixed set (`Accept`, `Authorization`, `Content-Type`, `Last-Event-ID`, `X-Request-ID`, `X-Tenant-ID`) with no config knob. So any other custom header works server-side, or from a browser when the proxy in front owns CORS — which is the same proxy the header is usually for. [`X-Tenant-ID`](/deployment#multi-tenant-deployments) is on the list, so a browser can select a tenant with `headers: { "X-Tenant-ID": "…" }` directly.
 
 Headers are static. For a credential that rotates per request, wrap the transport with [`options.fetch`](#supplying-your-own-fetch); a callback form is tracked in [#459](https://github.com/Wave-RF/WaveHouse/issues/459).
 
