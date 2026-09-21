@@ -95,8 +95,8 @@ createClient<DB>(config) → WaveHouseClient
 │   ├── .fetch(opts?) → Promise<Result<Row[]>>   // { signal } only — no limit
 │   └── .stream(opts?) → StreamController
 ├── .pipes (admin)
-│   ├── .list() → Promise<Result<Pipe[]>>
-│   └── .get(name) → Promise<Result<Pipe>>
+│   ├── .list(opts?) → Promise<Result<Pipe[]>>
+│   └── .get(name, opts?) → Promise<Result<Pipe>>
 ├── .sql(query, opts?) → Promise<Result<Row[]>>   (admin)
 ├── .schema (admin)
 │   ├── .list() → Promise<Result<Schemas>>

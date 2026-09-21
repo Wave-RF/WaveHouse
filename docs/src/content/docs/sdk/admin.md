@@ -36,6 +36,12 @@ const { data, error } = await wh.settings.reload();
 //        { adopted: false, findings } and the previous settings stay in effect
 ```
 
+Over [a nested settings directory](/deployment#the-nested-settings-directory), pass `tenant` to reload that tenant's folder alone; without it the whole directory is reloaded, and a `422` can mean adopted in part.
+
+```ts
+const { data, error } = await wh.settings.reload({ tenant: 'acme' });
+```
+
 ---
 
 ## DLQ — `wh.dlq`

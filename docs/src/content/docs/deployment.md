@@ -332,7 +332,7 @@ WaveHouse serves plain HTTP on `:8080` and does **not** terminate TLS, manage ce
 
 Most deployments serve one tenant and can skip this section: send no `X-Tenant-ID` header and none of it applies, with one exception — [a proxy that already sends the header](#upgrading-behind-a-proxy-that-already-sends-x-tenant-id).
 
-A *tenant* here is a [settings directory](/settings-directory): the `X-Tenant-ID` request header selects whose `roles.json`, `policies.json`, `pipes.json`, and `config.json` serve the request. The header is client-supplied and resolved before authentication, so it is **not** a row-isolation boundary — it picks which `policies.json` applies, and scoping a caller to their own rows stays that policy's job, from a value in the signed token ([row-level security](/access-control#row-level-security)). Tenant selection and row scoping are different axes.
+A *tenant* here is one set of the four [settings files](/settings-directory): the `X-Tenant-ID` request header selects whose `roles.json`, `policies.json`, `pipes.json`, and `config.json` serve the request. The header is client-supplied and resolved before authentication, so it is **not** a row-isolation boundary — it picks which `policies.json` applies, and scoping a caller to their own rows stays that policy's job, from a value in the signed token ([row-level security](/access-control#row-level-security)). Tenant selection and row scoping are different axes.
 
 Every `/v1` route outside `/v1/ops/*` resolves the tenant before it authenticates the request:
 
@@ -340,7 +340,7 @@ Every `/v1` route outside `/v1/ops/*` resolves the tenant before it authenticate
 X-Tenant-ID: 0
 ```
 
-A request without the header, or with an empty one, resolves to tenant `0`, the default tenant, whose settings are the settings directory. A settings directory defines that one tenant, so any other id is unknown. Setting the header on every request is the client's or the fronting proxy's job; WaveHouse never derives it from the token.
+A request without the header, or with an empty one, resolves to tenant `0`, the default tenant. A settings directory that holds the four files itself defines that one tenant, so any other id is unknown; [a nested settings directory](#the-nested-settings-directory) defines one tenant per folder. Setting the header on every request is the client's or the fronting proxy's job; WaveHouse never derives it from the token.
 
 A tenant id is 1–64 characters of ASCII letters, digits, `_`, and `-`. It is a string, not a number, so a long numeric id keeps every digit.
 
@@ -348,12 +348,41 @@ A tenant id is 1–64 characters of ASCII letters, digits, `_`, and `-`. It is a
 | ------ | ---- | ---- |
 | `400` | `{"error": "invalid X-Tenant-ID: …"}` | The id breaks the grammar above, or the header was sent more than once |
 | `404` | `{"error": "unknown tenant: <id>"}` | The id is well formed but no such tenant exists |
+| `503` | `{"error": "tenant settings are invalid"}` | The tenant exists but its settings folder was rejected ([nested directories](#the-nested-settings-directory) only) |
 
-Both are decided before authentication, so they are returned whatever token the request carries. Every response that passes through tenant resolution — a route's own answer and these two alike — carries `Vary: X-Tenant-ID`, so a shared cache that stores one keys it on the header. A router-level `405` and the CORS preflight `204` are answered before tenant resolution and carry no such `Vary`; neither depends on the tenant. `Vary` covers the tenant and nothing else: a response also depends on who is asking, which is why [a shared cache must not store the authenticated reads](/reverse-proxy#header-and-auth-forwarding).
+All three are decided before authentication, so they are returned whatever token the request carries — which is why the `503` says nothing about what was wrong with the settings. Every response that passes through tenant resolution — a route's own answer and these three alike — carries `Vary: X-Tenant-ID`, so a shared cache that stores one keys it on the header. A router-level `405` and the CORS preflight `204` are answered before tenant resolution and carry no such `Vary`; neither depends on the tenant. `Vary` covers the tenant and nothing else: a response also depends on who is asking, which is why [a shared cache must not store the authenticated reads](/reverse-proxy#header-and-auth-forwarding).
 
 The probes (`/livez`, `/readyz`, `/healthz`, and the deprecated `/health` and `/ready`), `/version`, the Prometheus metrics path, and `/v1/ops/*` are tenant-exempt: they ignore the header entirely.
 
 `X-Tenant-ID` is in the CORS `Access-Control-Allow-Headers` list, so a browser client can send it cross-origin. The SDK sends it through [`options.headers`](/sdk#custom-headers).
+
+### The nested settings directory
+
+Serving more than one tenant from one process takes a settings directory that holds one folder per tenant instead of the four files:
+
+```text
+settings/
+├── 0/
+│   ├── config.json
+│   ├── pipes.json
+│   ├── policies.json
+│   └── roles.json
+└── acme/
+    ├── config.json
+    ├── pipes.json
+    ├── policies.json
+    └── roles.json
+```
+
+The folder name is the tenant id, and each folder is a complete settings directory: everything on the [Settings Directory](/settings-directory) page applies to it as written, except the two rules below for a rejected folder and for reloading. The two shapes don't mix — a folder beside the four files, or a loose file beside the folders, is a validation error — and a running server keeps the shape it booted with, so switching is stop, restructure, start. Dot-prefixed entries are ignored in either shape. `wavehouse validate` checks either shape with the same exit codes; a finding in a nested directory names its folder (`acme/policies.json`), and a folder whose name is not a tenant id is a finding of its own.
+
+**A rejected folder fails closed, for that tenant alone.** A folder that fails validation stops its tenant being served — its requests answer `503` — while every other tenant carries on, at boot and on a reload alike. There is no fall back to the tenant's previous settings, unlike [the single-tenant directory](/settings-directory#loading-and-hot-reload): the recovery is fixing the folder and reloading it. A request already in flight finishes on the settings it started with. The findings go to the log and to the reload response, never into the `503`. A finding about the directory itself — a loose file, a directory that can't be read, a changed shape — is another matter: it refuses boot, and on a reload it rejects the reload whole and leaves every tenant as it was.
+
+**Reloading is the writer's call.** A nested directory is not watched, because a watcher would validate a folder halfway through being written and drop its tenant. Whoever writes a tenant's folder reloads it once it is complete: `POST /v1/ops/settings/reload?tenant=acme` re-validates that folder and reads nothing else. It must name a tenant the server already holds (`404` otherwise). Without the parameter — and on `SIGHUP` — the whole directory is reloaded and mirrors its folders: a new folder becomes a tenant, and a removed one becomes unknown. The response is the [single-tenant one](/api#post-v1opssettingsreload--reload-settings-directory). After a whole-directory reload, `adopted: false` with a `422` can mean adopted in part: the folders named in `findings` were rejected and the rest were adopted.
+
+**The admin routes take the operator key only.** `/v1/ops/*` reaches every tenant, so over a nested directory no tenant's admin role opens it: the [operator key](/api#authentication) alone does, and a token carrying an admin role gets `403`. `GET /v1/ops/pipes` and `GET /v1/ops/pipes/{name}` take the same `?tenant=`, and read tenant `0` without it. On all three routes the parameter is parsed strictly — a query string that does not parse, an empty or repeated `tenant`, or a malformed id is a `400`, never a silent read of the default tenant. The SDK sends it as the [`tenant` option](/sdk/admin#settings--whsettings).
+
+**What a tenant's folder decides, and what tenant `0`'s does.** A request is evaluated against its own tenant's `policies.json` and `pipes.json` (ingest, structured queries, pipes), its `query.*` keys, and its `dedupe` block (whether its records are deduplicated, and by which id). The process still has one ClickHouse connection, one message queue, one dedupe store, one token verifier, and one event hub, and those follow tenant `0`'s folder: `clickhouse.*`, `auth.*`, `mq.max_bytes_gb`, `cors.allowed_origins`, `schema.refresh_interval`, `stream.gap_window_minutes`, `dlq.*`, whether the dedupe store is open at all (tenant `0`'s `dedupe.enabled`), and the policy `GET /v1/stream` is authorized by. So every tenant reads and writes the same ClickHouse, a token that verifies is accepted under any tenant's header, and a nested directory without a `0` folder has no ClickHouse address: it boots, reports degraded on `/livez`, and answers no query. The one shared setting that weighs every tenant is the SSE keepalive: the wheel runs at the shortest `stream.keepalive_interval` among the tenants being served.
 
 ### Upgrading behind a proxy that already sends `X-Tenant-ID`
 
