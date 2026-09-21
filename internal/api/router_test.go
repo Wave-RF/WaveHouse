@@ -5,12 +5,15 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
@@ -633,6 +636,74 @@ func TestNewRouter_NestedOpsGateAdmitsTheOperatorKeyAlone(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The ?token= strip and the strict ?tenant= parse meet only in the router.
+// AuthMW runs first, and its strip used to re-encode the query on the way
+// through, which erased the very pair opsTenant exists to refuse: an admin's
+// `?tenant=acme;x=1&token=…` answered 200 with the default tenant's pipes,
+// and on the reload route would have reloaded every tenant. A handler-level
+// test cannot see that — the middleware that rewrote the URL never runs in
+// one — so this goes through NewRouter with the real authenticator. The
+// subtests share the directory and run in order, so nothing here is parallel.
+func TestNewRouter_MalformedTenantSurvivesTheTokenStrip(t *testing.T) {
+	dir := writeSettingsFixture(t, fullConfig(100))
+	tenants, _ := settings.Open(dir)
+	require.NotNil(t, tenants)
+	store, _ := tenants.For(tenant.Default)
+	authn, err := auth.NewAuthenticator(auth.Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role"}, store.Policy)
+	require.NoError(t, err)
+	reg := testutil.NewTestSchemaRegistry(t, nil)
+	pipesHandler := NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, nil, nil, nil, noTimeout)
+	pipesHandler.Tenants = tenants
+	router := NewRouter(Dependencies{
+		Tenants:      tenants,
+		Ingest:       NewIngestHandler(reg, &testutil.MockPublisher{}),
+		Query:        &QueryHandler{},
+		SSE:          NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
+		Health:       &HealthHandler{},
+		Schema:       NewSchemaHandler(reg),
+		Pipes:        pipesHandler,
+		Settings:     NewSettingsHandler(tenants),
+		AuthMW:       authn.Middleware(),
+		PolicySource: store.Policy,
+	})
+	token := "token=" + testutil.MakeJWT(t, map[string]any{"role": "admin"})
+	do := func(method, target string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), method, target, nil))
+		return rec
+	}
+
+	t.Run("the query token still authenticates", func(t *testing.T) {
+		assert.Equal(t, http.StatusOK, do(http.MethodGet, "/v1/ops/pipes?"+token).Code)
+		assert.Equal(t, http.StatusOK, do(http.MethodGet, "/v1/ops/pipes?tenant=0&"+token).Code)
+		assert.Equal(t, http.StatusForbidden, do(http.MethodGet, "/v1/ops/pipes?tenant=0").Code, "and nothing else does")
+	})
+
+	t.Run("a malformed tenant beside it is refused, not read as the default tenant", func(t *testing.T) {
+		for _, target := range []string{
+			"/v1/ops/pipes?tenant=acme;x=1&" + token,
+			"/v1/ops/pipes?" + token + "&tenant=acme;x=1",
+			"/v1/ops/pipes?tenant=%zz&" + token,
+			"/v1/ops/pipes/top_pages?tenant=acme;x=1&" + token,
+		} {
+			rec := do(http.MethodGet, target)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", target, rec.Body.String())
+			testutil.AssertJSONErrorResponse(t, rec)
+			assert.NotContains(t, rec.Body.String(), "eyJ", "the refusal must not echo the token")
+		}
+	})
+
+	t.Run("and on the reload route reloads nothing", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileConfig), []byte(fullConfig(200)), 0o600))
+		rec := do(http.MethodPost, "/v1/ops/settings/reload?tenant=acme;x=1&"+token)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, 100, store.DefaultMaxRows(), "a misread ?tenant= must not become a whole-tree reload")
+
+		assert.Equal(t, http.StatusOK, do(http.MethodPost, "/v1/ops/settings/reload?"+token).Code)
+		assert.Equal(t, 200, store.DefaultMaxRows())
+	})
 }
 
 func TestNewRouter_OptionalDepsNil(t *testing.T) {

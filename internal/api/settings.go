@@ -33,8 +33,28 @@ type reloadResponse struct {
 // serialized reload path SIGHUP and the directory watcher run. 200 when the
 // directory was adopted (warnings included in the body), 422 when validation
 // rejected it and the previous settings remain in effect.
+//
+// ?tenant= narrows the reload to that tenant's folder of a nested directory
+// (400 malformed, 404 unknown): adopted then speaks for that folder alone,
+// and a 422 means the tenant is no longer served. Without it the whole tree
+// is reloaded, and over a nested directory a 422 can mean adopted in part —
+// the findings name the folders that were not (settings.Registry.Reload).
 func (h *SettingsHandler) Reload(w http.ResponseWriter, r *http.Request) {
-	findings, adopted := h.Tenants.Reload("api")
+	id, named, ok := opsTenant(w, r)
+	if !ok {
+		return
+	}
+	var findings []settings.Finding
+	var adopted bool
+	if named {
+		var known bool
+		if findings, adopted, known = h.Tenants.ReloadTenant(id, "api"); !known {
+			writeJSONError(w, http.StatusNotFound, "unknown tenant: "+id.String())
+			return
+		}
+	} else {
+		findings, adopted = h.Tenants.Reload("api")
+	}
 	if findings == nil {
 		findings = []settings.Finding{}
 	}

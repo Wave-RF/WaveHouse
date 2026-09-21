@@ -63,11 +63,7 @@ func Validate(root string) (*Tree, []Finding) {
 			findings = append(findings, Finding{Severity: SeverityError, File: name, Message: fmt.Sprintf("folder name is not a tenant id: %v", err)})
 			continue
 		}
-		doc, fs := ValidateDir(filepath.Join(root, name))
-		for i := range fs {
-			// path, not filepath: File is part of the ops API, one spelling on every OS.
-			fs[i].File = path.Join(name, fs[i].File)
-		}
+		doc, fs := validateFolder(root, name)
 		tree.Tenants[id] = TenantResult{Doc: doc, Findings: fs}
 		findings = append(findings, fs...)
 	}
@@ -75,6 +71,17 @@ func Validate(root string) (*Tree, []Finding) {
 		return nil, findings
 	}
 	return tree, findings
+}
+
+// validateFolder is ValidateDir for one tenant folder of a nested root, with
+// the folder leading each finding's File.
+func validateFolder(root, folder string) (*Document, []Finding) {
+	doc, findings := ValidateDir(filepath.Join(root, folder))
+	for i := range findings {
+		// path, not filepath: File is part of the ops API, one spelling on every OS.
+		findings[i].File = path.Join(folder, findings[i].File)
+	}
+	return doc, findings
 }
 
 // listRoot sorts the root's entries into tenant folders and loose files, in

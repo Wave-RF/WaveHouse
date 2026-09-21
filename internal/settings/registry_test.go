@@ -331,6 +331,104 @@ func TestRegistry_NestedReloadMirrorsTheFolders(t *testing.T) {
 	assert.True(t, ok, "a badly named folder costs no tenant its settings")
 }
 
+// ReloadTenant reads one tenant's folder and nothing else: the tenant beside
+// it is neither adopted nor dropped, whatever state its folder is in.
+func TestRegistry_ReloadTenant(t *testing.T) {
+	t.Parallel()
+	root := writeTree(t, map[string]map[string]string{"acme": maxRowsFiles(111), "globex": maxRowsFiles(222)})
+	reg, _ := Open(root)
+	require.NotNil(t, reg)
+	var hooks [][]tenant.ID
+	reg.AfterAdopt(func(adopted []tenant.ID) { hooks = append(hooks, adopted) })
+	acme, _ := reg.For("acme")
+	globex, _ := reg.For("globex")
+
+	// Both folders change on disk; only the named one is read.
+	writeTenant(t, root, "acme", maxRowsFiles(333))
+	writeTenant(t, root, "globex", brokenFiles())
+	findings, adopted, known := reg.ReloadTenant("acme", "test")
+	require.True(t, known)
+	require.True(t, adopted, "findings: %s", findingStrings(findings))
+	assert.Equal(t, 333, acme.DefaultMaxRows())
+	assert.Equal(t, 222, globex.DefaultMaxRows())
+	_, ok := reg.For("globex")
+	assert.True(t, ok, "a broken folder nobody asked to reload costs its tenant nothing")
+	assert.Equal(t, [][]tenant.ID{{"acme"}}, hooks)
+
+	// Reloading the broken one is what drops it: no previous-snapshot fallback.
+	findings, adopted, known = reg.ReloadTenant("globex", "test")
+	require.True(t, known)
+	assert.False(t, adopted)
+	assert.Contains(t, findingStrings(findings), "error: globex/config.json: query.default_max_rows")
+	_, ok = reg.For("globex")
+	assert.False(t, ok)
+	_, known = reg.Resolve("globex")
+	assert.True(t, known)
+	_, ok = reg.For("acme")
+	assert.True(t, ok)
+	assert.Equal(t, [][]tenant.ID{{"acme"}}, hooks, "a rejected folder runs no hook")
+
+	// And reloading the fixed one brings it back, in the store it always had.
+	writeTenant(t, root, "globex", maxRowsFiles(444))
+	_, adopted, _ = reg.ReloadTenant("globex", "test")
+	require.True(t, adopted)
+	recovered, ok := reg.For("globex")
+	require.True(t, ok)
+	assert.Same(t, globex, recovered)
+	assert.Equal(t, 444, recovered.DefaultMaxRows())
+
+	// A tenant the registry does not hold is not looked for on disk: picking
+	// up a new folder is a whole-tree reload's job.
+	writeTenant(t, root, "initech", maxRowsFiles(555))
+	findings, adopted, known = reg.ReloadTenant("initech", "test")
+	assert.False(t, known)
+	assert.False(t, adopted)
+	assert.Empty(t, findings)
+	_, ok = reg.For("initech")
+	assert.False(t, ok)
+
+	// A folder that is gone is a rejected tenant here — the registry still
+	// holds it — and a forgotten one after a whole-tree reload.
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	findings, adopted, known = reg.ReloadTenant("acme", "test")
+	assert.True(t, known)
+	assert.False(t, adopted)
+	require.Len(t, findings, 1)
+	assert.Equal(t, "acme", findings[0].File)
+	assert.Contains(t, findings[0].Message, "does not exist")
+	_, known = reg.Resolve("acme")
+	assert.True(t, known)
+	reg.Reload("test")
+	_, known = reg.Resolve("acme")
+	assert.False(t, known)
+}
+
+// A flat directory is its default tenant's folder, so reloading that tenant
+// is Reload — keep-previous on a rejection included — and it has no other.
+func TestRegistry_ReloadTenant_FlatDirectory(t *testing.T) {
+	t.Parallel()
+	reg := newLoadedRegistry(t, map[string]string{FileConfig: configJSON(`{"query": {"default_max_rows": 500}}`)})
+	s, _ := reg.For(tenant.Default)
+
+	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 700}}`)), 0o600))
+	_, adopted, known := reg.ReloadTenant(tenant.Default, "test")
+	assert.True(t, known)
+	assert.True(t, adopted)
+	assert.Equal(t, 700, s.DefaultMaxRows())
+
+	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(`not json`), 0o600))
+	findings, adopted, known := reg.ReloadTenant(tenant.Default, "test")
+	assert.True(t, known)
+	assert.False(t, adopted)
+	assert.Contains(t, findingStrings(findings), "error: config.json:", "a flat directory's findings carry no folder")
+	got, ok := reg.For(tenant.Default)
+	require.True(t, ok, "a flat directory keeps its previous document")
+	assert.Equal(t, 700, got.DefaultMaxRows())
+
+	_, _, known = reg.ReloadTenant("acme", "test")
+	assert.False(t, known)
+}
+
 // A finding about the root itself rejects the reload whole: nothing on disk
 // is adopted, no tenant is dropped, no hook runs.
 func TestRegistry_RootLevelFailureChangesNothing(t *testing.T) {

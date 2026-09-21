@@ -65,6 +65,21 @@ type entry struct {
 	rejected bool
 }
 
+// adopt returns e after a validation pass over its folder: holding doc, or
+// rejected when the folder yielded none.
+func (e entry) adopt(doc *Document) entry {
+	if doc == nil {
+		e.rejected = true
+		return e
+	}
+	if e.store == nil {
+		e.store = &Store{}
+	}
+	e.store.adopt(doc)
+	e.rejected = false
+	return e
+}
+
 // Open validates dir and returns a Registry serving it. A rejected directory
 // — flat and invalid, or of either shape with a finding about the directory
 // itself — returns a nil Registry with the findings: the caller (boot)
@@ -174,38 +189,18 @@ func (r *Registry) reload(trigger string, boot bool) (findings []Finding, adopte
 		next := make(map[tenant.ID]entry, len(tree.Tenants))
 		// Sorted so the hooks and the log name the tenants in one order every run.
 		for _, id := range slices.Sorted(maps.Keys(tree.Tenants)) {
-			e := prev[id]
-			if doc := tree.Tenants[id].Doc; doc != nil {
-				if e.store == nil {
-					e.store = &Store{}
-				}
-				e.store.adopt(doc)
-				e.rejected = false
-				adoptedIDs = append(adoptedIDs, id)
-			} else {
-				e.rejected = true
+			next[id] = prev[id].adopt(tree.Tenants[id].Doc)
+			if next[id].rejected {
 				rejectedIDs = append(rejectedIDs, id)
+			} else {
+				adoptedIDs = append(adoptedIDs, id)
 			}
-			next[id] = e
 		}
 		r.tenants.Store(&next)
-		if len(adoptedIDs) > 0 {
-			for _, fn := range r.afterAdopt {
-				fn(adoptedIDs)
-			}
-		}
+		r.adopted(adoptedIDs)
 	}
 
-	var errs, warns int
-	for _, f := range findings {
-		if f.Severity == SeverityError {
-			errs++
-			slog.Error("settings finding", "trigger", trigger, "finding", f.String())
-		} else {
-			warns++
-			slog.Warn("settings finding", "trigger", trigger, "finding", f.String())
-		}
-	}
+	errs, warns := logFindings(trigger, findings)
 	switch {
 	case tree == nil && boot:
 		slog.Error("settings rejected", "trigger", trigger, "dir", r.dir, "errors", errs, "warnings", warns)
@@ -219,6 +214,66 @@ func (r *Registry) reload(trigger string, boot bool) (findings []Finding, adopte
 		slog.Info("settings adopted", "trigger", trigger, "dir", r.dir, "warnings", warns)
 	}
 	return findings, errs == 0, tree != nil
+}
+
+// ReloadTenant is Reload for one tenant's folder of a nested directory: the
+// rest of the directory is not read, so it can neither adopt nor drop another
+// tenant — what the writer of one folder calls when that folder is complete.
+// The folder is adopted, or the tenant stops being served. known is false for
+// a tenant the registry does not hold, and nothing is read: a whole-tree
+// Reload is what picks up a new folder. A flat directory is its default
+// tenant's folder, so there this is Reload.
+func (r *Registry) ReloadTenant(id tenant.ID, trigger string) (findings []Finding, adopted, known bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prev := *r.tenants.Load()
+	e, known := prev[id]
+	if !known {
+		return nil, false, false
+	}
+	if !r.nested {
+		findings, adopted, _ = r.reload(trigger, false)
+		return findings, adopted, true
+	}
+
+	doc, findings := validateFolder(r.dir, id.String())
+	next := maps.Clone(prev)
+	next[id] = e.adopt(doc)
+	r.tenants.Store(&next)
+	if doc != nil {
+		r.adopted([]tenant.ID{id})
+	}
+	errs, warns := logFindings(trigger, findings)
+	if doc == nil {
+		slog.Error("settings rejected — the tenant answers 503 until a reload adopts its folder", "trigger", trigger, "dir", r.dir, "tenant", id, "errors", errs, "warnings", warns)
+	} else {
+		slog.Info("settings adopted", "trigger", trigger, "dir", r.dir, "tenant", id, "warnings", warns)
+	}
+	return findings, doc != nil, true
+}
+
+// adopted runs the AfterAdopt hooks for a reload that adopted ids. Under mu.
+func (r *Registry) adopted(ids []tenant.ID) {
+	if len(ids) == 0 {
+		return
+	}
+	for _, fn := range r.afterAdopt {
+		fn(ids)
+	}
+}
+
+// logFindings logs each finding under its trigger and counts them by severity.
+func logFindings(trigger string, findings []Finding) (errs, warns int) {
+	for _, f := range findings {
+		if f.Severity == SeverityError {
+			errs++
+			slog.Error("settings finding", "trigger", trigger, "finding", f.String())
+		} else {
+			warns++
+			slog.Warn("settings finding", "trigger", trigger, "finding", f.String())
+		}
+	}
+	return errs, warns
 }
 
 // AfterAdopt registers fn to run after each subsequent reload that adopted a

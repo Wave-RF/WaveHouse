@@ -13,7 +13,6 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
 )
@@ -26,8 +25,8 @@ type PipesHandler struct {
 	Source       func(*settings.Store) pipes.Source
 	PolicySource PolicySource // resolves empty role to default_role; may be nil
 	// Tenants resolves the tenant the admin reads (List, Get) serve: /v1/ops
-	// is tenant-exempt, so they carry no request tenant and read the default
-	// one.
+	// is tenant-exempt, so they carry no request tenant and read the one
+	// ?tenant= names, the default one without it (opsStore).
 	Tenants *settings.Registry
 	CHConn  driver.Conn
 	Cache   cache.Cache
@@ -49,9 +48,9 @@ func NewPipesHandler(source func(*settings.Store) pipes.Source, policySource Pol
 	return &PipesHandler{Source: source, PolicySource: policySource, CHConn: conn, Cache: c, queryTimeout: queryTimeout}
 }
 
-// List returns all named queries (admin endpoint).
-func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
-	store, ok := resolveStore(w, h.Tenants, tenant.Default)
+// List returns all named queries of the ?tenant= (admin endpoint).
+func (h *PipesHandler) List(w http.ResponseWriter, r *http.Request) {
+	store, ok := opsStore(w, r, h.Tenants)
 	if !ok {
 		return
 	}
@@ -63,9 +62,9 @@ func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(q)
 }
 
-// Get returns a specific named query (admin endpoint).
+// Get returns a specific named query of the ?tenant= (admin endpoint).
 func (h *PipesHandler) Get(w http.ResponseWriter, r *http.Request) {
-	store, ok := resolveStore(w, h.Tenants, tenant.Default)
+	store, ok := opsStore(w, r, h.Tenants)
 	if !ok {
 		return
 	}

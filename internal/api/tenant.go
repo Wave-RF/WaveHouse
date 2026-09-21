@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/url"
 
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
@@ -63,6 +64,54 @@ func resolveStore(w http.ResponseWriter, tenants *settings.Registry, id tenant.I
 		writeJSONError(w, http.StatusNotFound, "unknown tenant: "+id.String())
 	}
 	return nil, false
+}
+
+// opsTenantParam names the tenant an ops route addresses. The ops tree is
+// tenant-exempt — no TenantMW, the header ignored — so a caller that means one
+// tenant says so in the query string.
+const opsTenantParam = "tenant"
+
+// opsTenant reads opsTenantParam, strictly: the whole query must parse.
+// ParseQuery skips a pair it cannot read and keeps going, so a lenient read
+// of `?tenant=acme;x=1` sees no tenant at all — the default tenant on a read,
+// every tenant on a reload — and answers 200 for a request it misread. An
+// empty value is refused for the same reason rather than read as absent.
+// named reports whether the parameter was sent; ok is false once a 400 has
+// been written.
+func opsTenant(w http.ResponseWriter, r *http.Request) (id tenant.ID, named, ok bool) {
+	params, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid query string: "+err.Error())
+		return "", false, false
+	}
+	values, named := params[opsTenantParam]
+	if !named {
+		return "", false, true
+	}
+	if len(values) > 1 {
+		writeJSONError(w, http.StatusBadRequest, "invalid ?"+opsTenantParam+": sent more than once")
+		return "", false, false
+	}
+	id, err = tenant.Parse(values[0])
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid ?"+opsTenantParam+": "+err.Error())
+		return "", false, false
+	}
+	return id, true, true
+}
+
+// opsStore resolves the store an ops read serves: the tenant opsTenantParam
+// names, tenant.Default when it names none, with TenantMW's answers when that
+// tenant cannot be served.
+func opsStore(w http.ResponseWriter, r *http.Request, tenants *settings.Registry) (*settings.Store, bool) {
+	id, named, ok := opsTenant(w, r)
+	if !ok {
+		return nil, false
+	}
+	if !named {
+		id = tenant.Default
+	}
+	return resolveStore(w, tenants, id)
 }
 
 // TenantMW resolves the request's tenant before authentication runs and

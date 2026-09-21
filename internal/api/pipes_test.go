@@ -13,6 +13,8 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
@@ -120,6 +122,69 @@ func TestPipesHandler_AdminReads_DefaultTenantNotServed(t *testing.T) {
 				assert.Equal(t, tt.wantStatus, w.Code, name)
 				assert.Contains(t, w.Body.String(), tt.wantBody, name)
 				testutil.AssertJSONErrorResponse(t, w)
+			}
+		})
+	}
+}
+
+// The admin reads name their tenant in ?tenant=, parsed strictly: the store
+// the pipes source receives is that tenant's, a query that does not parse is
+// a 400 rather than a read of the default tenant, and a tenant that cannot be
+// served gets the tenant routes' 404 or 503.
+func TestPipesHandler_AdminReads_TenantParam(t *testing.T) {
+	t.Parallel()
+	tenants := nestedTenants(t, map[string]string{"0": fullConfig(100), "acme": fullConfig(100), "globex": `{"unknown_key": true}`})
+	tests := []struct {
+		name, query string
+		wantStatus  int
+		wantTenant  tenant.ID // on 200, whose store the source was handed
+		wantBody    string
+	}{
+		{name: "no parameter is the default tenant", query: "", wantStatus: http.StatusOK, wantTenant: tenant.Default},
+		{name: "named tenant", query: "tenant=acme", wantStatus: http.StatusOK, wantTenant: "acme"},
+		{name: "explicit default tenant", query: "tenant=0", wantStatus: http.StatusOK, wantTenant: tenant.Default},
+		{name: "an unrelated parameter changes nothing", query: "tenant=acme&pretty=1", wantStatus: http.StatusOK, wantTenant: "acme"},
+		{name: "rejected tenant", query: "tenant=globex", wantStatus: http.StatusServiceUnavailable, wantBody: "tenant settings are invalid"},
+		{name: "unknown tenant", query: "tenant=initech", wantStatus: http.StatusNotFound, wantBody: "unknown tenant: initech"},
+		{name: "empty value is not absent", query: "tenant=", wantStatus: http.StatusBadRequest, wantBody: "invalid ?tenant: tenant id is empty"},
+		{name: "repeated, even agreeing", query: "tenant=acme&tenant=acme", wantStatus: http.StatusBadRequest, wantBody: "sent more than once"},
+		{name: "malformed id", query: "tenant=a.b", wantStatus: http.StatusBadRequest, wantBody: "invalid ?tenant"},
+		{name: "semicolon pair", query: "tenant=acme;x=1", wantStatus: http.StatusBadRequest, wantBody: "invalid query string"},
+		{name: "bad escape", query: "tenant=%zz", wantStatus: http.StatusBadRequest, wantBody: "invalid query string"},
+		{name: "a malformed pair elsewhere refuses the read too", query: "tenant=acme&x=%zz", wantStatus: http.StatusBadRequest, wantBody: "invalid query string"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			for _, read := range []string{"list", "get"} {
+				var handed *settings.Store
+				h := NewPipesHandler(func(s *settings.Store) pipes.Source {
+					handed = s
+					return pipes.Static(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1"})
+				}, nil, nil, nil, noTimeout)
+				h.Tenants = tenants
+
+				w := httptest.NewRecorder()
+				if read == "list" {
+					r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes", "", nil)
+					r.URL.RawQuery = tt.query
+					h.List(w, r)
+				} else {
+					r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes/top_pages", "top_pages", nil)
+					r.URL.RawQuery = tt.query
+					h.Get(w, r)
+				}
+
+				require.Equal(t, tt.wantStatus, w.Code, "%s: %s", read, w.Body.String())
+				if tt.wantStatus != http.StatusOK {
+					assert.Nil(t, handed, "%s: a refused read must not reach the pipes source", read)
+					assert.Contains(t, w.Body.String(), tt.wantBody, read)
+					testutil.AssertJSONErrorResponse(t, w)
+					continue
+				}
+				want, ok := tenants.For(tt.wantTenant)
+				require.True(t, ok)
+				assert.Same(t, want, handed, read)
 			}
 		})
 	}

@@ -315,6 +315,47 @@ func TestNew_NestedDirectory(t *testing.T) {
 	assert.Contains(t, pipe("broken").Body.String(), "pipe not found")
 }
 
+// The control plane's loop over a nested directory, through the real wiring:
+// write a tenant's folder, then reload that tenant with the operator key. An
+// admin token cannot — over a nested directory the ops routes reach every
+// tenant, so the operator key alone opens them.
+func TestNew_NestedOperatorReloadsOneTenant(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "broken": invalidQuery})
+	cfg := testConfig(t, root)
+	cfg.Auth.OperatorKey = "unit-test-operator-key"
+	a := newApp(t, cfg, Options{})
+
+	// header is one name and value, or none.
+	do := func(method, target string, header ...string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(t.Context(), method, target, nil)
+		if len(header) == 2 {
+			req.Header.Set(header[0], header[1])
+		}
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	operator := []string{"X-Operator-Key", cfg.Auth.OperatorKey}
+	as := func(id string) []string { return []string{tenant.Header, id} }
+
+	require.Equal(t, http.StatusServiceUnavailable, do(http.MethodGet, "/v1/pipes/nope", as("broken")...).Code)
+
+	rewriteSettings(t, filepath.Join(root, "broken"), nil)
+	rec := do(http.MethodPost, "/v1/ops/settings/reload?tenant=broken", operator...)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"adopted":true`)
+	rec = do(http.MethodGet, "/v1/pipes/nope", as("broken")...)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "pipe not found", "the tenant is served again, with no restart")
+
+	// The admin reads name their tenant the same way; without it they read
+	// tenant 0, which this directory does not hold.
+	assert.Equal(t, http.StatusOK, do(http.MethodGet, "/v1/ops/pipes?tenant=acme", operator...).Code)
+	assert.Equal(t, http.StatusNotFound, do(http.MethodGet, "/v1/ops/pipes", operator...).Code)
+	assert.Equal(t, http.StatusNotFound, do(http.MethodPost, "/v1/ops/settings/reload?tenant=initech", operator...).Code)
+	assert.Equal(t, http.StatusForbidden, do(http.MethodPost, "/v1/ops/settings/reload?tenant=acme").Code)
+}
+
 // The process-wide resources follow tenant 0 alone: another tenant's reload
 // never moves them, and a rejected 0 folder leaves them as they were rather
 // than reconfiguring them from nothing.
