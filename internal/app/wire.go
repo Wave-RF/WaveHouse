@@ -75,10 +75,10 @@ func (a *App) wireSettings() error {
 }
 
 // defaultSetting reads one setting of the default tenant, which the
-// process-wide resources (ClickHouse, dedupe, MQ, auth, the keepalive wheel,
-// CORS) follow until #583 gives each tenant its own. A nested directory need
-// not hold a 0 folder, and may hold a rejected one; the read is then T's zero
-// value, which wireSettings warned about at boot.
+// process-wide resources (ClickHouse, dedupe, MQ, auth, CORS) follow until
+// #583 gives each tenant its own. A nested directory need not hold a 0
+// folder, and may hold a rejected one; the read is then T's zero value, which
+// wireSettings warned about at boot.
 func defaultSetting[T any](tenants *settings.Registry, get func(*settings.Store) T) T {
 	store, ok := tenants.For(tenant.Default)
 	if !ok {
@@ -97,6 +97,25 @@ func (a *App) onDefaultAdopt(fn func()) {
 			fn()
 		}
 	})
+}
+
+// shortestKeepalive is the shape of the one keepalive wheel every tenant's
+// streams share: the stream.keepalive_* pair of the tenant with the shortest
+// keepalive_interval among those being served. The interval is an upper bound
+// on how long a quiet stream goes unwritten, so the shortest one keeps every
+// tenant's — at the cost of one tenant setting the cadence for all, which is
+// why honoring each tenant's own is tracked in #597. A flat directory's one
+// tenant gets exactly its own pair; with no tenant served the zeros fall back
+// to the wheel's defaults.
+func shortestKeepalive(tenants *settings.Registry) (period time.Duration, buckets int) {
+	for _, store := range tenants.All() {
+		// Strictly shorter, so tenants tied on the interval resolve to the
+		// first in id order rather than to map order.
+		if p, b := store.Keepalive(); period == 0 || p < period {
+			period, buckets = p, b
+		}
+	}
+	return period, buckets
 }
 
 // perTenant adapts a store accessor to the tenant-keyed getter the async
@@ -388,18 +407,10 @@ func (a *App) wireStreaming() {
 	// Shared keepalive wheel: one goroutine nudges idle streams so proxies
 	// don't idle-close them. Runs for the process lifetime; a reload that
 	// changes stream.keepalive_* rebuilds the ring in place under the live
-	// connections.
-	// Keepalive returns a pair, which defaultSetting cannot carry: a missing
-	// tenant 0 reads as zeros, and the wheel falls back to its own defaults.
-	keepalive := func() (time.Duration, int) {
-		store, ok := a.tenants.For(tenant.Default)
-		if !ok {
-			return 0, 0
-		}
-		return store.Keepalive()
-	}
-	heartbeater := stream.NewHeartbeater(keepalive())
-	a.onDefaultAdopt(func() { heartbeater.Reconfigure(keepalive()) })
+	// connections — any tenant's reload, since every tenant's streams ride
+	// the one wheel (shortestKeepalive).
+	heartbeater := stream.NewHeartbeater(shortestKeepalive(a.tenants))
+	a.tenants.AfterAdopt(func([]tenant.ID) { heartbeater.Reconfigure(shortestKeepalive(a.tenants)) })
 	a.heartbeater = heartbeater
 	a.add(component{name: "keepalive", run: func(ctx context.Context) error {
 		heartbeater.Run(ctx)

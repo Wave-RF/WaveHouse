@@ -271,6 +271,38 @@ func TestRegistry_NestedReloadRejectsOneTenant(t *testing.T) {
 	assert.Equal(t, [][]tenant.ID{{"acme"}, {"acme", "globex"}}, hooks)
 }
 
+// All is the served tenants in id order: a rejected tenant is left out, like
+// everywhere else, and comes back with its folder.
+func TestRegistry_All(t *testing.T) {
+	t.Parallel()
+	root := writeTree(t, map[string]map[string]string{"globex": maxRowsFiles(222), "acme": maxRowsFiles(111), "broken": brokenFiles()})
+	reg, _ := Open(root)
+	require.NotNil(t, reg)
+
+	served := func() (ids []tenant.ID, maxRows []int) {
+		for id, store := range reg.All() {
+			ids = append(ids, id)
+			maxRows = append(maxRows, store.DefaultMaxRows())
+		}
+		return ids, maxRows
+	}
+	ids, maxRows := served()
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, ids)
+	assert.Equal(t, []int{111, 222}, maxRows)
+
+	writeTenant(t, root, "broken", maxRowsFiles(333))
+	_, adopted := reg.Reload("test")
+	require.True(t, adopted)
+	ids, _ = served()
+	assert.Equal(t, []tenant.ID{"acme", "broken", "globex"}, ids)
+
+	// Stopping early is the iterator's contract, not the caller's problem.
+	for id := range reg.All() {
+		assert.Equal(t, tenant.ID("acme"), id)
+		break
+	}
+}
+
 // A reload mirrors the folders: a new one is served, a removed one is
 // forgotten. A folder whose name is not a tenant id is reported and skipped.
 func TestRegistry_NestedReloadMirrorsTheFolders(t *testing.T) {

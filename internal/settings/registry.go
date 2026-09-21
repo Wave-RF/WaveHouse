@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"iter"
 	"log/slog"
 	"maps"
 	"slices"
@@ -117,6 +118,20 @@ func (r *Registry) Resolve(id tenant.ID) (store *Store, known bool) {
 		return nil, known
 	}
 	return e.store, true
+}
+
+// All iterates over the tenants being served, in id order — for a consumer
+// that owns one resource every tenant shares and has to weigh their settings
+// against each other.
+func (r *Registry) All() iter.Seq2[tenant.ID, *Store] {
+	return func(yield func(tenant.ID, *Store) bool) {
+		tenants := *r.tenants.Load()
+		for _, id := range slices.Sorted(maps.Keys(tenants)) {
+			if e := tenants[id]; !e.rejected && !yield(id, e.store) {
+				return
+			}
+		}
+	}
 }
 
 // Reload re-validates the directory and adopts what it finds (see Registry

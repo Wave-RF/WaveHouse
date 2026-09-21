@@ -144,10 +144,11 @@ func TestNew_DegradedBootServesDiagnostics(t *testing.T) {
 	assert.NoError(t, a.Close(context.Background()), "Close is idempotent")
 }
 
-// A flat directory's registry holds the default tenant only: no header and "0" reach
-// the route, any other well-formed id is a 404, a malformed one a 400, and
-// the ops tree never looks at the header. A 503 is the handler's own answer —
-// boot is degraded without ClickHouse — so it proves the tenant resolved.
+// A flat directory's registry holds the default tenant only: no header and
+// "0" reach the route, any other well-formed id is a 404, a malformed one a
+// 400, and the ops tree never looks at the header. A 503 is the handler's own
+// answer — boot is degraded without ClickHouse — so it proves the tenant
+// resolved.
 func TestNew_TenantHeaderResolvesAgainstTheRegistry(t *testing.T) {
 	a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{})
 
@@ -345,6 +346,53 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	require.False(t, adopted)
 	assert.True(t, a.dedup.Open(), "a rejected 0 folder must not read as dedupe off")
 	assert.Equal(t, int64(2<<30), a.mq.MaxBytes())
+}
+
+// keepalive is a config.json patch setting the stream block's keepalive pair.
+func keepalive(interval, buckets int) map[string]any {
+	return map[string]any{"stream": map[string]any{"keepalive_interval": interval, "keepalive_buckets": buckets, "gap_window_minutes": 15}}
+}
+
+// One wheel keeps every tenant's streams alive, so it runs at the shortest
+// keepalive_interval among the tenants being served — an upper bound the
+// longer ones are inside of (#597 tracks honoring each tenant's own). A flat
+// directory's single tenant gets exactly its own pair.
+func TestShortestKeepalive(t *testing.T) {
+	open := func(t *testing.T, dir string) *settings.Registry {
+		t.Helper()
+		guardGlobals(t)
+		tenants, findings := settings.Open(dir)
+		require.NotNil(t, tenants, "findings: %v", findings)
+		return tenants
+	}
+
+	t.Run("flat directory", func(t *testing.T) {
+		period, buckets := shortestKeepalive(open(t, writeSettings(t, keepalive(45, 5))))
+		assert.Equal(t, 45*time.Second, period)
+		assert.Equal(t, 5, buckets)
+	})
+
+	t.Run("nested directory", func(t *testing.T) {
+		root := writeNestedSettings(t, map[string]map[string]any{"acme": keepalive(30, 3), "globex": keepalive(10, 2), "initech": keepalive(10, 7)})
+		tenants := open(t, root)
+		period, buckets := shortestKeepalive(tenants)
+		assert.Equal(t, 10*time.Second, period)
+		assert.Equal(t, 2, buckets, "tenants tied on the interval resolve to the first in id order")
+
+		// A rejected tenant is not being served, so its setting is not weighed.
+		rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+		rewriteSettings(t, filepath.Join(root, "initech"), invalidQuery)
+		tenants.Reload("test")
+		period, buckets = shortestKeepalive(tenants)
+		assert.Equal(t, 30*time.Second, period)
+		assert.Equal(t, 3, buckets)
+	})
+
+	t.Run("no tenant served falls back to the wheel's defaults", func(t *testing.T) {
+		period, buckets := shortestKeepalive(open(t, writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery})))
+		assert.Zero(t, period)
+		assert.Zero(t, buckets)
+	})
 }
 
 // A finding about a nested directory itself — a loose file beside the tenant
