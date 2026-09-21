@@ -1,5 +1,5 @@
 import { err, ok } from "./errors.js";
-import { request } from "./http.js";
+import { request, tenantParam } from "./http.js";
 import type { StreamController } from "./stream/controller.js";
 import type {
   HttpContext,
@@ -61,18 +61,6 @@ export class PipeRef<Row = Record<string, unknown>> implements PromiseLike<Resul
   ): Promise<TResult1 | TResult2> {
     return this.fetch().then(onfulfilled, onrejected);
   }
-}
-
-/**
- * The `?tenant=` query an admin call sends for `opts.tenant`. An empty string
- * is sent, not dropped: the server refuses it, where dropping it would turn a
- * caller's bug into a call that addresses the default tenant — or, on a
- * reload, every tenant.
- *
- * @internal
- */
-export function tenantParam(opts?: OpsRequestOptions): Record<string, string> | undefined {
-  return opts?.tenant === undefined ? undefined : { tenant: opts.tenant };
 }
 
 /**

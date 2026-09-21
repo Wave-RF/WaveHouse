@@ -3,7 +3,7 @@ title: "SDK Admin & System"
 description: "Schema introspection, settings reload, DLQ stats, and health checks in @wavehouse/sdk."
 ---
 
-Operational surfaces of `@wavehouse/sdk`. With one exception, everything on this page sits behind the server's admin gate: the caller must resolve to the admin role (`policy.admin_role`) or present the non-JWT [operator key](/api#authentication) — the SDK has no first-class operator-key option, but [`options.headers`](/sdk#custom-headers) can carry the `X-Operator-Key` header. The exception is `wh.sys.health()`, which calls the public, content-free `/v1/health` route and needs no credentials. See [Access Control](/access-control) for how roles resolve. Examples import from `@wavehouse/sdk` or `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
+Operational surfaces of `@wavehouse/sdk`. With one exception, everything on this page sits behind the server's admin gate: the caller must resolve to the admin role (`policy.admin_role`) or present the non-JWT [operator key](/api#authentication) — the SDK has no first-class operator-key option, but [`options.headers`](/sdk#custom-headers) can carry the `X-Operator-Key` header. Over a [nested settings directory](/deployment#the-nested-settings-directory) the operator key alone opens them, and an admin-role token gets `403`. The exception is `wh.sys.health()`, which calls the public, content-free `/v1/health` route and needs no credentials. See [Access Control](/access-control) for how roles resolve. Examples import from `@wavehouse/sdk` or `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 
 ## Schema — `wh.schema`
 
@@ -36,7 +36,7 @@ const { data, error } = await wh.settings.reload();
 //        { adopted: false, findings } and the previous settings stay in effect
 ```
 
-Over [a nested settings directory](/deployment#the-nested-settings-directory), pass `tenant` to reload that tenant's folder alone: a `422` then means the folder was rejected and the tenant is no longer served (its requests answer `503`), not that its previous settings stayed. Without `tenant` the whole directory is reloaded, and a `422` can mean adopted in part. Over a nested directory this route takes the [operator key](/api#authentication) alone; an admin-role token gets `403`.
+Over [a nested settings directory](/deployment#the-nested-settings-directory), pass `tenant` to reload that tenant's folder alone: a `422` then means the folder was rejected and the tenant is no longer served (its requests answer `503`), not that its previous settings stayed. Without `tenant` the whole directory is reloaded, and a `422` can mean adopted in part.
 
 ```ts
 const { data, error } = await wh.settings.reload({ tenant: 'acme' });

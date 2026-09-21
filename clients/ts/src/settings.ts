@@ -1,6 +1,5 @@
 import { err, ok } from "./errors.js";
-import { request } from "./http.js";
-import { tenantParam } from "./pipes.js";
+import { request, tenantParam } from "./http.js";
 import type { HttpContext, OpsRequestOptions, Result, SettingsReloadResult } from "./types.js";
 
 /**
