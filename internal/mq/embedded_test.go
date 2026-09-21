@@ -2,8 +2,6 @@ package mq
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -14,12 +12,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestEmbedded spins up an EmbeddedNATS with a silent logger and a
-// temporary store directory that is cleaned up by the test framework.
+// newTestEmbedded spins up an EmbeddedNATS with a temporary store directory
+// that is cleaned up by the test framework.
 func newTestEmbedded(t *testing.T) *EmbeddedNATS {
 	t.Helper()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	e, err := NewEmbedded(t.TempDir(), 64<<20, logger)
+	e, err := NewEmbedded(t.TempDir(), 64<<20)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = e.Close() })
 	return e
@@ -293,7 +290,7 @@ func TestEmbeddedNATS_SubscribeCancellation(t *testing.T) {
 func TestSlogNATSLogger_Levels(t *testing.T) {
 	t.Parallel()
 
-	l := &slogNATSLogger{l: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	l := slogNATSLogger{}
 	l.Noticef("notice %d", 1)
 	l.Warnf("warn %s", "w")
 	l.Errorf("err %v", "e")
@@ -511,8 +508,7 @@ func TestEmbeddedNATS_DeadLetter_IsAPrefixSwap(t *testing.T) {
 }
 
 func TestEmbeddedNATS_Publish_QueueFull(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	e, err := NewEmbedded(t.TempDir(), 4<<10, logger)
+	e, err := NewEmbedded(t.TempDir(), 4<<10)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = e.Close() })
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)

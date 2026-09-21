@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 
 	"go.opentelemetry.io/otel"
 )
@@ -177,11 +178,12 @@ type SchemaRegistry struct {
 	// ClickHouse reconfigure that changes clickhouse.database is honored by
 	// the next refresh (chconn.Manager.Database in production).
 	database func() string
-	// refreshInterval supplies the auto-refresh interval on each tick, so a
-	// settings reload retunes the cadence without restarting the loop
-	// (settings.Store.SchemaRefreshInterval in production).
-	refreshInterval func() time.Duration
-	logger          *slog.Logger
+	// tenant is whose tables the registry discovers.
+	tenant tenant.ID
+	// refreshInterval supplies the tenant's auto-refresh interval on each
+	// tick, so a settings reload retunes the cadence without restarting the
+	// loop (settings.Store.SchemaRefreshInterval in production).
+	refreshInterval func(tenant.ID) time.Duration
 	mu              sync.RWMutex
 	tables          map[string]*TableSchema
 	// serverVersion is the ClickHouse version string from the last successful
@@ -189,13 +191,14 @@ type SchemaRegistry struct {
 	serverVersion string
 }
 
-// NewSchemaRegistry creates a registry that discovers schemas from system.columns.
-func NewSchemaRegistry(conn driver.Conn, database func() string, refreshInterval func() time.Duration, logger *slog.Logger) *SchemaRegistry {
+// NewSchemaRegistry creates the registry of tenant id, which discovers
+// schemas from system.columns.
+func NewSchemaRegistry(conn driver.Conn, database func() string, id tenant.ID, refreshInterval func(tenant.ID) time.Duration) *SchemaRegistry {
 	return &SchemaRegistry{
 		conn:            conn,
 		database:        database,
+		tenant:          id,
 		refreshInterval: refreshInterval,
-		logger:          logger,
 		tables:          make(map[string]*TableSchema),
 	}
 }
@@ -237,7 +240,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	} else {
 		// Unresolvable — warn, not fatal, and no UTC fallback (that could move
 		// instants). A nil server zone means zone-less values pass through.
-		sr.logger.Warn("cannot resolve server timezone; zone-less timestamps will pass through un-canonicalized",
+		slog.WarnContext(ctx, "cannot resolve server timezone; zone-less timestamps will pass through un-canonicalized",
 			"timezone", tzName, "error", err)
 	}
 
@@ -296,7 +299,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	}
 
 	for _, ts := range tables {
-		resolveTimestampSpecs(ts, serverTZ, sr.logger)
+		resolveTimestampSpecs(ctx, ts, serverTZ)
 		ts.cacheInsertable()
 	}
 
@@ -304,7 +307,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	sr.tables = tables
 	sr.serverVersion = serverVersion
 	sr.mu.Unlock()
-	sr.logger.Info("schema registry refreshed", "tables", len(tables), "server_tz", tzName, "server_version", serverVersion)
+	slog.InfoContext(ctx, "schema registry refreshed", "tables", len(tables), "server_tz", tzName, "server_version", serverVersion)
 
 	return nil
 }
@@ -423,13 +426,26 @@ func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxB
 	}
 }
 
+// unresolvedRefreshInterval paces StartAutoRefresh while its tenant's interval
+// cannot be read.
+const unresolvedRefreshInterval = time.Minute
+
 // StartAutoRefresh runs a background goroutine that refreshes schemas
 // at the configured interval. Blocks until ctx is cancelled. The interval is
 // re-read after every tick, so a changed setting applies from the next cycle
 // — an in-flight wait finishes at the old cadence rather than resetting,
 // which keeps a reload from ever deferring an imminent refresh.
+//
+// A validated setting is at least a second, so a non-positive interval is a
+// tenant the settings registry could not resolve, read as the zero value.
+// NewTicker and Reset panic on one, so the loop keeps the cadence it has —
+// unresolvedRefreshInterval when it has none yet — and picks the setting up
+// on the first tick that resolves.
 func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
-	interval := sr.refreshInterval()
+	interval := sr.refreshInterval(sr.tenant)
+	if interval <= 0 {
+		interval = unresolvedRefreshInterval
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -438,9 +454,9 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := sr.Refresh(ctx); err != nil {
-				sr.logger.Error("schema auto-refresh failed", "error", err)
+				slog.ErrorContext(ctx, "schema auto-refresh failed", "error", err)
 			}
-			if next := sr.refreshInterval(); next != interval {
+			if next := sr.refreshInterval(sr.tenant); next > 0 && next != interval {
 				interval = next
 				ticker.Reset(interval)
 			}

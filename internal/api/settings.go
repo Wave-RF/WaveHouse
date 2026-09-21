@@ -13,12 +13,11 @@ import (
 // none there is nothing to reload, so the route is simply absent (the same
 // pattern as the DLQ and policy handlers).
 type SettingsHandler struct {
-	Store  *settings.Store
-	logger *slog.Logger
+	Store *settings.Store
 }
 
-func NewSettingsHandler(store *settings.Store, logger *slog.Logger) *SettingsHandler {
-	return &SettingsHandler{Store: store, logger: logger}
+func NewSettingsHandler(store *settings.Store) *SettingsHandler {
+	return &SettingsHandler{Store: store}
 }
 
 // reloadResponse is the POST /v1/ops/settings/reload body: whether the
@@ -34,7 +33,7 @@ type reloadResponse struct {
 // serialized reload path SIGHUP and the directory watcher run. 200 when the
 // directory was adopted (warnings included in the body), 422 when validation
 // rejected it and the previous settings remain in effect.
-func (h *SettingsHandler) Reload(w http.ResponseWriter, _ *http.Request) {
+func (h *SettingsHandler) Reload(w http.ResponseWriter, r *http.Request) {
 	findings, adopted := h.Store.Reload("api")
 	if findings == nil {
 		findings = []settings.Finding{}
@@ -46,6 +45,6 @@ func (h *SettingsHandler) Reload(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(reloadResponse{Adopted: adopted, Findings: findings}); err != nil {
-		h.logger.Error("settings reload response encode", "error", err)
+		slog.ErrorContext(r.Context(), "settings reload response encode", "error", err)
 	}
 }

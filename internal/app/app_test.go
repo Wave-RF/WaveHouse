@@ -24,6 +24,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // None of these tests run in parallel: New installs a process-wide default
@@ -141,6 +142,48 @@ func TestNew_DegradedBootServesDiagnostics(t *testing.T) {
 	assert.NotNil(t, a.MQ())
 	assert.NoError(t, a.Close(context.Background()))
 	assert.NoError(t, a.Close(context.Background()), "Close is idempotent")
+}
+
+// The wired registry holds the default tenant only: no header and "0" reach
+// the route, any other well-formed id is a 404, a malformed one a 400, and
+// the ops tree never looks at the header. A 503 is the handler's own answer —
+// boot is degraded without ClickHouse — so it proves the tenant resolved.
+func TestNew_TenantHeaderResolvesAgainstTheRegistry(t *testing.T) {
+	a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{})
+
+	tests := []struct {
+		name, path, header string
+		want               int
+	}{
+		{name: "no header", path: "/v1/health", want: http.StatusServiceUnavailable},
+		{name: "default tenant", path: "/v1/health", header: "0", want: http.StatusServiceUnavailable},
+		{name: "unknown tenant", path: "/v1/health", header: "acme", want: http.StatusNotFound},
+		{name: "malformed tenant", path: "/v1/health", header: "a.b", want: http.StatusBadRequest},
+		{name: "ops ignores the header", path: "/v1/ops/schema", header: "acme", want: http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, tt.path, nil)
+			if tt.header != "" {
+				req.Header.Set(tenant.Header, tt.header)
+			}
+			rec := httptest.NewRecorder()
+			a.Handler().ServeHTTP(rec, req)
+			assert.Equal(t, tt.want, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
+}
+
+// A tenant the registry cannot resolve must not read as "DLQ off": off is what
+// lets the ingest worker ack and drop a message it cannot read, so the miss
+// parks instead. The other async getters degrade to their zero value.
+func TestAsyncGetters_RegistryMiss(t *testing.T) {
+	t.Parallel()
+	tenants := settings.NewRegistry(&settings.Store{})
+	unknown := tenant.ID("acme")
+
+	assert.True(t, dlqFor(tenants)(unknown, "events"), "an unknown tenant's failed rows park on the DLQ")
+	assert.Zero(t, perTenant(tenants, (*settings.Store).GapWindow)(unknown))
 }
 
 func TestNew_DedupeFollowsSettings(t *testing.T) {

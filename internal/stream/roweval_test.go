@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // recordingEvaluator answers every row the same way and counts the calls, so a
@@ -57,7 +58,7 @@ func TestHub_RowEvaluatorSeam_LiveBroadcast(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			eval := &recordingEvaluator{visible: tt.visible}
-			hub := NewHub(policy.Static(filteredPolicy()), nil, nil)
+			hub := NewHub(tenant.Default, staticPolicy(filteredPolicy()), nil, nil)
 			hub.RowEvaluator = eval
 
 			sub := NewSubscriber(map[string]any{"tenant": "t1"}, nil)
@@ -85,7 +86,7 @@ func TestHub_RowEvaluatorSeam_LiveBroadcast(t *testing.T) {
 func TestHub_RowEvaluatorSeam_Replay(t *testing.T) {
 	t.Parallel()
 	eval := &recordingEvaluator{visible: false}
-	hub := NewHub(policy.Static(filteredPolicy()), nil, nil)
+	hub := NewHub(tenant.Default, staticPolicy(filteredPolicy()), nil, nil)
 	hub.RowEvaluator = eval
 
 	project := hub.ReplayProjector("viewer", NewSubscriber(map[string]any{"tenant": "t1"}, nil))
@@ -101,7 +102,7 @@ func TestHub_RowEvaluatorSeam_Replay(t *testing.T) {
 // row-level security. A nil seam must never read as "everything is visible".
 func TestHub_DefaultRowEvaluator_WhenUnwired(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(policy.Static(filteredPolicy()), nil, nil)
+	hub := NewHub(tenant.Default, staticPolicy(filteredPolicy()), nil, nil)
 	require.Nil(t, hub.RowEvaluator)
 	assert.IsType(t, policyRowEvaluator{}, hub.rowEvaluator())
 

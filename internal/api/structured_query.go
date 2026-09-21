@@ -15,6 +15,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -23,23 +24,22 @@ type StructuredQueryHandler struct {
 	CHConn       driver.Conn
 	Cache        cache.Cache
 	Registry     *discovery.SchemaRegistry
-	PolicySource policy.Source
+	PolicySource PolicySource
 	sf           singleflight.Group
 	// queryTimeout bounds each query, read per request
 	// (chconn.Manager.QueryTimeout in production) so a settings reload
 	// applies without a restart.
 	queryTimeout func() time.Duration
 
-	// bucketSecs returns the current time-range bucket
-	// (settings.Store.TimestampBucketSeconds in production) and defaultMaxRows
-	// the current fallback result LIMIT (settings.Store.DefaultMaxRows) —
-	// funcs, not ints, so a settings reload takes effect on the next query
-	// without a restart. A nil bucketSecs means no bucketing; a nil
-	// defaultMaxRows or a non-positive return means the builder's compiled
-	// constant.
-	bucketSecs     func() int
-	defaultMaxRows func() int
-	logger         *slog.Logger
+	// bucketSecs returns the request tenant's current time-range bucket
+	// ((*settings.Store).TimestampBucketSeconds in production) and
+	// defaultMaxRows its current fallback result LIMIT
+	// ((*settings.Store).DefaultMaxRows) — funcs, not ints, so a settings
+	// reload takes effect on the next query without a restart. A nil
+	// bucketSecs means no bucketing; a nil defaultMaxRows or a non-positive
+	// return means the builder's compiled constant.
+	bucketSecs     func(*settings.Store) int
+	defaultMaxRows func(*settings.Store) int
 
 	// maxRequestBytes optionally overrides the default inbound request body
 	// cap (maxControlBodyBytes). When 0, the default applies. Exists so
@@ -53,11 +53,10 @@ func NewStructuredQueryHandler(
 	conn driver.Conn,
 	c cache.Cache,
 	registry *discovery.SchemaRegistry,
-	policyStore policy.Source,
-	bucketSecs func() int,
+	policyStore PolicySource,
+	bucketSecs func(*settings.Store) int,
 	queryTimeout func() time.Duration,
-	defaultMaxRows func() int,
-	logger *slog.Logger,
+	defaultMaxRows func(*settings.Store) int,
 ) *StructuredQueryHandler {
 	return &StructuredQueryHandler{
 		CHConn:         conn,
@@ -67,11 +66,14 @@ func NewStructuredQueryHandler(
 		bucketSecs:     bucketSecs,
 		queryTimeout:   queryTimeout,
 		defaultMaxRows: defaultMaxRows,
-		logger:         logger,
 	}
 }
 
 func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	store, ok := requestStore(w, r)
+	if !ok {
+		return
+	}
 	table := r.URL.Query().Get("table")
 	if table == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing table")
@@ -105,12 +107,12 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Resolve permissions.
-	p := h.PolicySource()
+	p := h.PolicySource(store)
 	role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
 	claims, _ := auth.ClaimsFromContext(r.Context())
 	perms := policy.Evaluate(p, role, table, "select", claims)
 	if !perms.Allowed {
-		writeAuthzDenied(w, r, h.logger, role, nil,
+		writeAuthzDenied(w, r, role, nil,
 			slog.String("gate", "policy"),
 			slog.String("table", table),
 			slog.String("action", "select"),
@@ -128,11 +130,11 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// map to 403; a malformed query maps to 400.
 	maxRows := 0 // non-positive → the builder's compiled constant
 	if h.defaultMaxRows != nil {
-		maxRows = h.defaultMaxRows()
+		maxRows = h.defaultMaxRows(store)
 	}
 	bucketSecs := 0
 	if h.bucketSecs != nil {
-		bucketSecs = h.bucketSecs()
+		bucketSecs = h.bucketSecs(store)
 	}
 	result, err := query.Build(table, &sq, schema, perms, bucketSecs, maxRows)
 	if err != nil {

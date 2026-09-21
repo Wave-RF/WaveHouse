@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // Sweeper implements the Active Sweeper pattern. It runs every minute and
@@ -20,20 +21,21 @@ import (
 // finds the purge point is its own business (see mq.Purger).
 type Sweeper struct {
 	purger mq.Purger
-	// gapWindow is read on every sweep (settings.Store.GapWindow in
-	// production) so a reload of stream.gap_window_minutes applies from the
-	// next sweep without a restart.
-	gapWindow func() time.Duration
-	logger    *slog.Logger
+	tenant tenant.ID
+	// gapWindow is the tenant's gap window, read on every sweep
+	// (settings.Store.GapWindow in production) so a reload of
+	// stream.gap_window_minutes applies from the next sweep without a restart.
+	gapWindow func(tenant.ID) time.Duration
 }
 
-// NewSweeper creates an Active Sweeper. gapWindow is resolved per sweep.
+// NewSweeper creates the Active Sweeper of tenant id. gapWindow is resolved
+// per sweep.
 // TODO: (future) need leader election or shared lock to only run one instance of the sweeper in clustered mode
-func NewSweeper(purger mq.Purger, gapWindow func() time.Duration, logger *slog.Logger) *Sweeper {
+func NewSweeper(purger mq.Purger, id tenant.ID, gapWindow func(tenant.ID) time.Duration) *Sweeper {
 	return &Sweeper{
 		purger:    purger,
+		tenant:    id,
 		gapWindow: gapWindow,
-		logger:    logger,
 	}
 }
 
@@ -52,13 +54,13 @@ func (s *Sweeper) Start(ctx context.Context) {
 }
 
 func (s *Sweeper) sweep(ctx context.Context) {
-	_, err := s.purger.PurgeAcked(ctx, BufferConsumerName, time.Now().Add(-s.gapWindow()))
+	_, err := s.purger.PurgeAcked(ctx, BufferConsumerName, time.Now().Add(-s.gapWindow(s.tenant)))
 	if err != nil {
 		if errors.Is(err, mq.ErrConsumerNotFound) {
 			// Consumer may not exist yet if no messages have been ingested.
-			s.logger.Warn("sweeper: buffer consumer not found (may not exist yet)", "error", err)
+			slog.WarnContext(ctx, "sweeper: buffer consumer not found (may not exist yet)", "error", err)
 			return
 		}
-		s.logger.Error("sweeper: purge", "error", err)
+		slog.ErrorContext(ctx, "sweeper: purge", "error", err)
 	}
 }

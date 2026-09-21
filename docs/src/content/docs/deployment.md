@@ -328,6 +328,37 @@ Size the orchestrator's kill grace at `server.shutdown_timeout` plus 8s: at the 
 
 WaveHouse serves plain HTTP on `:8080` and does **not** terminate TLS, manage certificates, or rate-limit — put a reverse proxy, CDN, or tunnel (nginx, Caddy, Cloudflare Tunnel) in front for any internet-facing deployment. A few behaviors only matter behind a proxy: TLS termination, the request-body size limits, Server-Sent Events buffering (WaveHouse now sends keepalive comments so quiet streams survive proxy idle timeouts, [#226](https://github.com/Wave-RF/WaveHouse/issues/226)), header/auth forwarding, and which health paths to expose. See **[Behind a reverse proxy](/reverse-proxy)** for the full guide and example nginx/Caddy/Cloudflare configs.
 
+## Multi-tenant deployments
+
+Most deployments serve one tenant and can skip this section: send no `X-Tenant-ID` header and none of it applies, with one exception — [a proxy that already sends the header](#upgrading-behind-a-proxy-that-already-sends-x-tenant-id).
+
+A *tenant* here is a [settings directory](/settings-directory): the `X-Tenant-ID` request header selects whose `roles.json`, `policies.json`, `pipes.json`, and `config.json` serve the request. The header is client-supplied and resolved before authentication, so it is **not** a row-isolation boundary — it picks which `policies.json` applies, and scoping a caller to their own rows stays that policy's job, from a value in the signed token ([row-level security](/access-control#row-level-security)). Tenant selection and row scoping are different axes.
+
+Every `/v1` route outside `/v1/ops/*` resolves the tenant before it authenticates the request:
+
+```text
+X-Tenant-ID: 0
+```
+
+A request without the header, or with an empty one, resolves to tenant `0`, the default tenant, whose settings are the settings directory. A settings directory defines that one tenant, so any other id is unknown. Setting the header on every request is the client's or the fronting proxy's job; WaveHouse never derives it from the token.
+
+A tenant id is 1–64 characters of ASCII letters, digits, `_`, and `-`. It is a string, not a number, so a long numeric id keeps every digit.
+
+| Status | Body | When |
+| ------ | ---- | ---- |
+| `400` | `{"error": "invalid X-Tenant-ID: …"}` | The id breaks the grammar above, or the header was sent more than once |
+| `404` | `{"error": "unknown tenant: <id>"}` | The id is well formed but no such tenant exists |
+
+Both are decided before authentication, so they are returned whatever token the request carries. Every response that passes through tenant resolution — a route's own answer and these two alike — carries `Vary: X-Tenant-ID`, so a shared cache that stores one keys it on the header. A router-level `405` and the CORS preflight `204` are answered before tenant resolution and carry no such `Vary`; neither depends on the tenant. `Vary` covers the tenant and nothing else: a response also depends on who is asking, which is why [a shared cache must not store the authenticated reads](/reverse-proxy#header-and-auth-forwarding).
+
+The probes (`/livez`, `/readyz`, `/healthz`, and the deprecated `/health` and `/ready`), `/version`, the Prometheus metrics path, and `/v1/ops/*` are tenant-exempt: they ignore the header entirely.
+
+`X-Tenant-ID` is in the CORS `Access-Control-Allow-Headers` list, so a browser client can send it cross-origin. The SDK sends it through [`options.headers`](/sdk#custom-headers).
+
+### Upgrading behind a proxy that already sends `X-Tenant-ID`
+
+`X-Tenant-ID` is a generic name, and some gateways and service meshes stamp one on every request. WaveHouse used to ignore it; now any value other than `0` names an unknown tenant, so **every `/v1` route outside `/v1/ops/*` answers `404 unknown tenant: <id>`** — the SDK's `/v1/health` reachability ping included, while the bare probes and the admin surface stay green. Strip the inbound header at the edge ([header forwarding](/reverse-proxy#header-and-auth-forwarding)) unless you are using it deliberately.
+
 ## ClickHouse Schema
 
 WaveHouse uses a **Bring Your Own Schema** model. You create your tables in ClickHouse with whatever columns and engines you need. WaveHouse discovers the schemas automatically via `system.columns` and validates ingest data against them — see [Schema Validation](/api#post-v1ingesttabletable--ingest-data) for the rules a record must satisfy.

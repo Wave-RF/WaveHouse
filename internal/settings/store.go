@@ -25,8 +25,7 @@ import (
 // Validate, so the snapshot is exactly what the files said when they were
 // adopted. Defaults live in the seed directory (Seed / WriteSeed).
 type Store struct {
-	dir    string
-	logger *slog.Logger
+	dir string
 
 	// mu serializes Reload: concurrent triggers queue rather than racing
 	// validate-then-swap sequences (a stale document must not overwrite a newer one).
@@ -42,8 +41,8 @@ type Store struct {
 // Open validates dir and returns a Store holding its document. A rejected
 // directory returns a nil Store with the findings — the caller (boot)
 // refuses to start; it must never run without adopted settings.
-func Open(dir string, logger *slog.Logger) (*Store, []Finding) {
-	s := &Store{dir: dir, logger: logger}
+func Open(dir string) (*Store, []Finding) {
+	s := &Store{dir: dir}
 	findings, adopted := s.Reload("boot")
 	if !adopted {
 		return nil, findings
@@ -71,25 +70,23 @@ func (s *Store) Reload(trigger string) ([]Finding, bool) {
 			fn()
 		}
 	}
-	if s.logger != nil {
-		var errs, warns int
-		for _, f := range findings {
-			if f.Severity == SeverityError {
-				errs++
-				s.logger.Error("settings finding", "trigger", trigger, "finding", f.String())
-			} else {
-				warns++
-				s.logger.Warn("settings finding", "trigger", trigger, "finding", f.String())
-			}
+	var errs, warns int
+	for _, f := range findings {
+		if f.Severity == SeverityError {
+			errs++
+			slog.Error("settings finding", "trigger", trigger, "finding", f.String())
+		} else {
+			warns++
+			slog.Warn("settings finding", "trigger", trigger, "finding", f.String())
 		}
-		switch {
-		case adopted:
-			s.logger.Info("settings adopted", "trigger", trigger, "dir", s.dir, "warnings", warns)
-		case s.snap.Load() == nil:
-			s.logger.Error("settings rejected", "trigger", trigger, "dir", s.dir, "errors", errs, "warnings", warns)
-		default:
-			s.logger.Error("settings rejected — keeping previous settings", "trigger", trigger, "dir", s.dir, "errors", errs, "warnings", warns)
-		}
+	}
+	switch {
+	case adopted:
+		slog.Info("settings adopted", "trigger", trigger, "dir", s.dir, "warnings", warns)
+	case s.snap.Load() == nil:
+		slog.Error("settings rejected", "trigger", trigger, "dir", s.dir, "errors", errs, "warnings", warns)
+	default:
+		slog.Error("settings rejected — keeping previous settings", "trigger", trigger, "dir", s.dir, "errors", errs, "warnings", warns)
 	}
 	return findings, adopted
 }
