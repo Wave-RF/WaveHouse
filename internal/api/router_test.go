@@ -12,6 +12,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -562,6 +563,76 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 		testutil.AssertJSONErrorResponse(t, rec)
 	})
+}
+
+// Over a nested settings directory the ops tree reaches every tenant, so no
+// tenant's admin role may open it: the operator key alone passes, and a token
+// carrying the admin role gets the same 403 as anyone else. The router decides
+// this from the registry's shape — the PolicySource wired below would admit
+// "admin", and is what a caller binding tenant 0's policy would pass. A flat
+// directory keeps the gate it always had.
+func TestNewRouter_NestedOpsGateAdmitsTheOperatorKeyAlone(t *testing.T) {
+	t.Parallel()
+	reg := testutil.NewTestSchemaRegistry(t, nil)
+	routerOver := func(tenants *settings.Registry) http.Handler {
+		pipesHandler := NewPipesHandler(staticPipes(), nil, nil, nil, noTimeout)
+		pipesHandler.Tenants = tenants
+		return NewRouter(Dependencies{
+			Tenants:      tenants,
+			Ingest:       NewIngestHandler(reg, &testutil.MockPublisher{}),
+			Query:        &QueryHandler{},
+			SSE:          NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
+			Health:       &HealthHandler{},
+			Schema:       NewSchemaHandler(reg),
+			Pipes:        pipesHandler,
+			Settings:     NewSettingsHandler(tenants),
+			AuthMW:       func(next http.Handler) http.Handler { return next },
+			PolicySource: policy.Static(&policy.Policy{}),
+		})
+	}
+	flatTenants, _ := settings.Open(writeSettingsFixture(t, fullConfig(100)))
+	require.NotNil(t, flatTenants)
+	routers := map[string]http.Handler{
+		"nested": routerOver(nestedTenants(t, map[string]string{"0": fullConfig(100), "acme": fullConfig(100)})),
+		"flat":   routerOver(flatTenants),
+	}
+	routes := []struct{ method, path string }{
+		{http.MethodGet, "/v1/ops/schema"},
+		{http.MethodGet, "/v1/ops/pipes"},
+		{http.MethodPost, "/v1/ops/settings/reload"},
+	}
+	callers := []struct {
+		name         string
+		ctx          context.Context
+		passesNested bool
+		passesFlat   bool
+	}{
+		{name: "operator key", ctx: auth.WithOperator(context.Background()), passesNested: true, passesFlat: true},
+		{name: "admin token", ctx: auth.WithRole(context.Background(), "admin"), passesFlat: true},
+		{name: "viewer token", ctx: auth.WithRole(context.Background(), "viewer")},
+		{name: "no token", ctx: context.Background()},
+	}
+	for shape, router := range routers {
+		for _, caller := range callers {
+			for _, route := range routes {
+				t.Run(shape+" "+caller.name+" "+route.path, func(t *testing.T) {
+					t.Parallel()
+					rec := httptest.NewRecorder()
+					router.ServeHTTP(rec, httptest.NewRequestWithContext(caller.ctx, route.method, route.path, nil))
+					passes := caller.passesFlat
+					if shape == "nested" {
+						passes = caller.passesNested
+					}
+					if passes {
+						assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+						return
+					}
+					assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+					testutil.AssertJSONErrorResponse(t, rec)
+				})
+			}
+		}
+	}
 }
 
 func TestNewRouter_OptionalDepsNil(t *testing.T) {
