@@ -17,9 +17,10 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # NATS lives at /app/data/nats, Pebble at /app/data/pebble (or at
-      # /app/data/<tenant>/dedupe over a nested settings directory) — subdirs
-      # are convention, not config. The Dockerfile pre-creates /app/data
+      # NATS lives at /app/data/nats, each tenant's Pebble dedupe store at
+      # /app/data/<tenant>/dedupe (tenant 0's for the four-file settings
+      # directory) — subdirs are convention, not config. The Dockerfile
+      # pre-creates /app/data
       # owned by the nonroot user; bind-mount any persistent volume here.
       WH_DATA_DIR: /app/data
       # ClickHouse wiring (addr, ports, database, user) is in ./settings/config.json

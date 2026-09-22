@@ -35,7 +35,7 @@ This page is boot config only — what the platform operator owns (wiring, lifec
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; the Pebble dedupe stores (when dedupe is enabled) mirror the settings directory's shape — `<data_dir>/pebble` for [the four files](/settings-directory), one `<data_dir>/<tenant>/dedupe` per folder of [a nested directory](/deployment#the-nested-settings-directory). Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
+| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; each tenant's Pebble dedupe store (when its dedupe is enabled) at `<data_dir>/<tenant>/dedupe` — tenant `0`'s for [the four files](/settings-directory), one per folder of [a nested directory](/deployment#the-nested-settings-directory); an earlier layout's `<data_dir>/pebble` is moved to tenant `0`'s at boot. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
 
 ### Server
 
@@ -179,8 +179,8 @@ Every key, with its default. Save the YAML as `config.yaml` next to the binary (
 <TabItem label="YAML">
 
 ```yaml
-data_dir: ./data         # nats → ./data/nats, pebble → ./data/pebble
-                         # (./data/<tenant>/dedupe per tenant folder)
+data_dir: ./data         # nats → ./data/nats, dedupe → ./data/<tenant>/dedupe
+                         # (./data/0/dedupe for the four-file settings directory)
 
 server:
   port: 8080
