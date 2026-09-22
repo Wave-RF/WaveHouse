@@ -526,7 +526,7 @@ Table, column, and alias names may contain any characters ClickHouse accepts —
 
 **Response:**
 
-JSON array of result rows. Top-level `DateTime`/`DateTime64` values are returned in canonical RFC 3339 UTC (`2026-06-21T04:00:00.123Z`) — `Nullable` timestamp columns included (a SQL `NULL` renders as JSON `null`), while timestamps nested inside `Array`/`Map`/`Tuple` columns are rendered in the column's declared zone, else the ClickHouse server's, as the driver returns them — byte-identical to the [SSE stream](#get-v1stream--server-sent-events-stream) for values [canonicalized at ingest](#timestamp-canonicalization) (a fail-open pass-through that ClickHouse accepted still comes back canonical here, though it streamed in the producer's spelling). The response carries an `X-Cache: HIT` or `X-Cache: MISS` header — this endpoint shares the in-process L1 (Ristretto) + singleflight machinery (unlike `/v1/ops/query`, which always hits ClickHouse).
+JSON array of result rows. Top-level `DateTime`/`DateTime64` values are returned in canonical RFC 3339 UTC (`2026-06-21T04:00:00.123Z`) — `Nullable` timestamp columns included (a SQL `NULL` renders as JSON `null`), while timestamps nested inside `Array`/`Map`/`Tuple` columns are rendered in the column's declared zone, else the ClickHouse server's, as the driver returns them — byte-identical to the [SSE stream](#get-v1stream--server-sent-events-stream) for values [canonicalized at ingest](#timestamp-canonicalization) (a fail-open pass-through that ClickHouse accepted still comes back canonical here, though it streamed in the producer's spelling). The response carries an `X-Cache: HIT` or `X-Cache: MISS` header — this endpoint shares the in-process L1 (Ristretto) + singleflight machinery (unlike `/v1/ops/query`, which always hits ClickHouse), keyed by [tenant](/deployment#multi-tenant-deployments): a request is never served from, or coalesced with, another tenant's.
 
 The inbound request body is capped at 1 MiB; a body over the cap is rejected with `413`. A query AST is bounded by nature (far under 1 MiB even with a large `in`-list), and the cap blocks a single-request memory-exhaustion vector on this public endpoint. Set a tighter or higher outer limit at your [reverse proxy](/reverse-proxy#request-body-size-limits) — but it can only narrow the effective limit, not raise it past this cap.
 
@@ -545,7 +545,7 @@ The inbound request body is capped at 1 MiB; a body over the cap is rejected wit
 
 ### `GET/POST /v1/pipes/{name}` — Execute Named Pipe
 
-Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached in the shared L1 (Ristretto) with singleflight coalescing — same machinery as the structured query endpoint, and again, unlike `/v1/ops/query`.
+Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached in the shared L1 (Ristretto) with singleflight coalescing — same machinery as the structured query endpoint, keyed by [tenant](/deployment#multi-tenant-deployments) like it, and again, unlike `/v1/ops/query`.
 
 **Query Parameters:** Any key matching a pipe parameter name.
 

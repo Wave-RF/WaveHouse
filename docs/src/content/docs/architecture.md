@@ -109,9 +109,9 @@ The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https:/
 
 ### `cache/` — Query Cache
 
-- **cache.go** — `Cache` interface: `Get`, `Set`, `Close`.
-- **local.go** — In-process cache using [Ristretto](https://github.com/dgraph-io/ristretto) with `sync.Map` TTL tracking.
-- **tiered.go** — Wraps the local cache with [singleflight](https://pkg.go.dev/golang.org/x/sync/singleflight) to prevent cache stampede on concurrent misses. The tiered interface accepts an optional second cache slot for future shared-cache backends, but ships with the slot empty.
+- **cache.go** — `Cache` interface: `Get`, `Set`, `Invalidate`, `Close`, plus `QueryTimeToTTL`, which sets a result's TTL from how long its query took (10 s floor, 1 h ceiling). Every entry is keyed by the caller's query key — `<tenant>:query:<sha256 of SQL + params>`, built by the two cached handlers in `api/` (`queryCacheKey`, with the tenant read off the request's store — `settings.Store.Tenant`), which use it as their [singleflight](https://pkg.go.dev/golang.org/x/sync/singleflight) key too — folded with the `Namespace`s the result depends on, each naming its tenant, table and scope: one for a structured query, none yet for a pipe (a pipe's table dependencies are [#343](https://github.com/Wave-RF/WaveHouse/pull/343)).
+- **local.go** — `LocalCache`, the in-process L1 on [Ristretto](https://github.com/dgraph-io/ristretto): one pool shared by every tenant (a heavier tenant holds more of it), sized by the boot config's `cache.l1_max_cost`.
+- **version_manager.go** — `VersionManager`, the invalidation index behind `Invalidate`: a namespace key is `<tenant>.<table>.<table version>.<scope>`, and a query key is folded with each dependency's namespace key and namespace version, so bumping a table (a scopeless write) or one scope orphans every dependent entry without touching the pool. The tenant leads every key ([#583](https://github.com/Wave-RF/WaveHouse/issues/583) story 8): the same table under two tenants is two namespaces, so an insert for one tenant never invalidates — or serves — the other's results, and the flat directory's single tenant simply carries the `0` prefix.
 
 ### `config/` — Configuration
 
