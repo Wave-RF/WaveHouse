@@ -24,6 +24,18 @@ func NewEmbedded(dir string) (*EmbeddedDeduplicator, error) {
 	return &EmbeddedDeduplicator{db: db}, nil
 }
 
+// Embedded returns the opener of the Pebble store at dir, for NewManaged:
+// the one place the wiring names Pebble.
+func Embedded(dir string) func() (Deduplicator, error) {
+	return func() (Deduplicator, error) {
+		d, err := NewEmbedded(dir)
+		if err != nil {
+			return nil, err
+		}
+		return d, nil
+	}
+}
+
 // CheckAndMark returns true if the event was already seen.
 func (d *EmbeddedDeduplicator) CheckAndMark(_ context.Context, eventID string) (bool, error) {
 	key := []byte(eventID)

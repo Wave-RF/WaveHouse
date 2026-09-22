@@ -318,7 +318,7 @@ func (a *App) wireDedupe() error {
 		}
 		return filepath.Join(a.cfg.DataDir, id.String(), "dedupe")
 	}
-	stores := dedupe.NewStores(func(id tenant.ID) *dedupe.Managed { return dedupe.NewManaged(dir(id)) })
+	stores := dedupe.NewStores(func(id tenant.ID) *dedupe.Managed { return dedupe.NewManaged(dedupe.Embedded(dir(id))) })
 	a.dedup = stores
 	a.add(component{name: "dedupe", close: withoutContext(stores.Close)})
 	reconcile := func() error {

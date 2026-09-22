@@ -18,7 +18,7 @@ func pebbleStores(t *testing.T) (*Stores, func(tenant.ID) string) {
 	t.Helper()
 	root := t.TempDir()
 	dir := func(id tenant.ID) string { return filepath.Join(root, id.String(), "dedupe") }
-	s := NewStores(func(id tenant.ID) *Managed { return NewManaged(dir(id)) })
+	s := NewStores(func(id tenant.ID) *Managed { return NewManaged(Embedded(dir(id))) })
 	t.Cleanup(func() { _ = s.Close() })
 	return s, dir
 }

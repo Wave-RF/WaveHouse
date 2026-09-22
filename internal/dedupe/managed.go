@@ -14,27 +14,30 @@ import (
 var ErrDisabled = errors.New("dedupe is disabled")
 
 // ErrUnavailable is returned by Managed.CheckAndMark when dedupe is switched
-// on but the Pebble store failed to open. Ingest fails closed on it — the
-// settings asked for dedupe, so publishing un-deduped is not a fallback.
+// on but the store failed to open. Ingest fails closed on it — the settings
+// asked for dedupe, so publishing un-deduped is not a fallback.
 var ErrUnavailable = errors.New("dedupe store is not open")
 
-// Managed is a Deduplicator whose Pebble store follows the hot-reloadable
-// dedupe.enabled setting: Apply(true) opens it, Apply(false) closes it, and
-// in-flight CheckAndMark calls are serialized against that swap so a reload
-// can never close the database under a lookup.
+// Managed is a Deduplicator whose backing store follows the hot-reloadable
+// dedupe.enabled setting: Apply(true) opens it through the function
+// NewManaged was given, Apply(false) closes it, and in-flight CheckAndMark
+// calls are serialized against that swap so a reload can never close the
+// store under a lookup. Which store that is — the embedded Pebble one
+// (Embedded), a shared remote backend's per-tenant view later — is the
+// opener's business, so every backend gets the same switch semantics.
 type Managed struct {
-	dir string
-	mu  sync.RWMutex
+	open func() (Deduplicator, error)
+	mu   sync.RWMutex
 	// enabled is the last state passed to Apply; db is nil while disabled
 	// and also when an enabling open failed.
 	enabled bool
-	db      *EmbeddedDeduplicator
+	db      Deduplicator
 }
 
-// NewManaged returns a closed Managed store rooted at dir. Nothing is opened
+// NewManaged returns a closed Managed store over open. Nothing is opened
 // until Apply(true).
-func NewManaged(dir string) *Managed {
-	return &Managed{dir: dir}
+func NewManaged(open func() (Deduplicator, error)) *Managed {
+	return &Managed{open: open}
 }
 
 // Apply reconciles the store with the desired state, idempotently: an
@@ -47,7 +50,7 @@ func (m *Managed) Apply(enabled bool) error {
 	m.enabled = enabled
 	switch {
 	case enabled && m.db == nil:
-		db, err := NewEmbedded(m.dir)
+		db, err := m.open()
 		if err != nil {
 			return err
 		}
@@ -60,7 +63,7 @@ func (m *Managed) Apply(enabled bool) error {
 	return nil
 }
 
-// Open reports whether the Pebble store is currently open.
+// Open reports whether the store is currently open.
 func (m *Managed) Open() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

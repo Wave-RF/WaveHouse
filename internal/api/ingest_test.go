@@ -672,7 +672,7 @@ func TestIngest_DedupIsTheTenants(t *testing.T) {
 	tenants := nestedTenants(t, map[string]string{"acme": fullConfig(100), "globex": fullConfig(100)})
 	root := t.TempDir()
 	stores := dedupe.NewStores(func(id tenant.ID) *dedupe.Managed {
-		return dedupe.NewManaged(filepath.Join(root, id.String(), "dedupe"))
+		return dedupe.NewManaged(dedupe.Embedded(filepath.Join(root, id.String(), "dedupe")))
 	})
 	t.Cleanup(func() { _ = stores.Close() })
 	for id := range tenants.All() {
