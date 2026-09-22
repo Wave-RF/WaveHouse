@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -48,30 +49,99 @@ func withoutContext(release func() error) func(context.Context) error {
 // settings.TenantConfig). Required: config.Validate already rejected an
 // empty settings.dir, and an invalid directory refuses boot. The binary
 // carries no compiled defaults; `wavehouse bootstrap` writes the seed. A
-// *reload* of an invalid directory merely keeps the previous snapshot.
+// *reload* of an invalid directory merely keeps the previous snapshot. A
+// nested directory (one folder per tenant, #583) fails closed per tenant
+// instead, at boot and on reload alike: see settings.Registry.
 //
 // The access-control policy and the named pipes (policies.json / pipes.json)
 // are read per request off the adopted snapshot, so a reload applies to the
 // next request with no hook.
 func (a *App) wireSettings() error {
-	store, _ := settings.Open(a.cfg.Settings.Dir)
-	if store == nil {
+	tenants, _ := settings.Open(a.cfg.Settings.Dir)
+	if tenants == nil {
 		return fmt.Errorf("settings directory %s invalid, refusing to start — findings above; `wavehouse validate` reproduces them, `wavehouse bootstrap` writes a starter directory", a.cfg.Settings.Dir)
 	}
-	a.store = store
-	a.tenants = settings.NewRegistry(store)
-	a.policies = policy.Source(store.Policy)
-	if store.Policy() == nil {
-		slog.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
+	a.tenants = tenants
+	// Registered first: hooks run in registration order, and every other one
+	// reads tenant 0 through the store this one tracks.
+	a.trackDefaultStore()
+	a.onDefaultAdopt(a.trackDefaultStore)
+	a.policies = func() *policy.Policy { return defaultSetting(a, (*settings.Store).Policy) }
+	switch _, served := tenants.For(tenant.Default); {
+	case !tenants.Nested():
+		if a.policies() == nil {
+			slog.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
+		}
+	case !served:
+		slog.Warn("nested settings directory with no tenant 0 being served: the ClickHouse connection, the MQ byte budget, the dedupe store, the JWT verifier, CORS, and the async paths (ingest worker, sweeper, stream hub, schema refresh) are still configured from tenant 0's config.json, so they run unconfigured — no ClickHouse address, /livez degraded — until a 0 folder is adopted")
 	}
 	return nil
 }
 
+// trackDefaultStore remembers tenant 0's store as of its last adoption. The
+// registry stops handing out a rejected tenant's store and forgets a removed
+// one, but the store keeps its last adopted document either way — and that is
+// what the process-wide resources go on following (defaultSetting).
+func (a *App) trackDefaultStore() {
+	if store, ok := a.tenants.For(tenant.Default); ok {
+		a.defaultStore.Store(store)
+	}
+}
+
+// defaultSetting reads one setting of the default tenant, which the
+// process-wide resources (ClickHouse, dedupe, MQ, auth, CORS) follow until
+// #583 gives each tenant its own. It reads tenant 0's last adopted document,
+// so a 0 folder a reload rejected or removed leaves every one of them as it
+// was — the ones a hook reconciles and the ones read per request (the CORS
+// list, the operator key's admin role) alike; one tenant's bad folder must
+// not cost every tenant its browser clients. A nested directory that has
+// never served a tenant 0 reads T's zero value, which wireSettings warned
+// about at boot.
+func defaultSetting[T any](a *App, get func(*settings.Store) T) T {
+	store := a.defaultStore.Load()
+	if store == nil {
+		var zero T
+		return zero
+	}
+	return get(store)
+}
+
+// onDefaultAdopt registers fn to run after each reload that adopts the
+// default tenant, so a nested directory's other tenants never move the
+// process-wide resources, and a rejected 0 folder leaves them as they were.
+func (a *App) onDefaultAdopt(fn func()) {
+	a.tenants.AfterAdopt(func(adopted []tenant.ID) {
+		if slices.Contains(adopted, tenant.Default) {
+			fn()
+		}
+	})
+}
+
+// shortestKeepalive is the shape of the one keepalive wheel every tenant's
+// streams share: the stream.keepalive_* pair of the tenant with the shortest
+// keepalive_interval among those being served. The interval is an upper bound
+// on how long a quiet stream goes unwritten, so the shortest one keeps every
+// tenant's — at the cost of one tenant setting the cadence for all, which is
+// why honoring each tenant's own is tracked in #597. A flat directory's one
+// tenant gets exactly its own pair; with no tenant served the zeros fall back
+// to the wheel's defaults.
+func shortestKeepalive(tenants *settings.Registry) (period time.Duration, buckets int) {
+	for _, store := range tenants.All() {
+		// Strictly shorter, so tenants tied on the interval resolve to the
+		// first in id order rather than to map order.
+		if p, b := store.Keepalive(); period == 0 || p < period {
+			period, buckets = p, b
+		}
+	}
+	return period, buckets
+}
+
 // perTenant adapts a store accessor to the tenant-keyed getter the async
 // paths take: they hold a tenant id (tenant.Default today, the MQ subject's
-// from #583 story 5), not a request's resolved store. Only tenant.Default
-// exists, so a miss is a wiring bug: logged, and read as T's zero value —
-// what a removed tenant means to each async path is story 3's to decide.
+// from #583 story 5), not a request's resolved store. A miss — a nested
+// directory with no 0 folder, or with a rejected one — is logged and read as
+// T's zero value; what a removed tenant means to each async path is story
+// 3's to decide.
 func perTenant[T any](tenants *settings.Registry, get func(*settings.Store) T) func(tenant.ID) T {
 	return func(id tenant.ID) T {
 		store, ok := tenants.For(id)
@@ -163,7 +233,7 @@ func (a *App) wireObservability(ctx context.Context) {
 // per request.
 func (a *App) wireClickHouse() error {
 	params := func() chconn.Params {
-		c := a.store.ClickHouse()
+		c := defaultSetting(a, (*settings.Store).ClickHouse)
 		return chconn.Params{
 			Addr: c.Addr, HTTPPort: c.HTTPPort, HTTPScheme: c.HTTPScheme,
 			Database: c.Database, Username: c.Username, Password: a.cfg.ClickHouse.Password,
@@ -176,7 +246,7 @@ func (a *App) wireClickHouse() error {
 	}
 	a.ch = ch
 	a.add(component{name: "clickhouse", close: withoutContext(ch.Close)})
-	a.store.AfterAdopt(func() {
+	a.onDefaultAdopt(func() {
 		if err := ch.Reconfigure(params()); err != nil {
 			slog.Error("clickhouse reconfigure", "error", err)
 		}
@@ -238,7 +308,7 @@ func (a *App) wireDedupe() error {
 	a.dedup = dedup
 	a.add(component{name: "dedupe", close: withoutContext(dedup.Close)})
 	reconcile := func() (bool, error) {
-		enabled := a.store.DedupeEnabled()
+		enabled := defaultSetting(a, (*settings.Store).DedupeEnabled)
 		if enabled && !dedup.Open() {
 			config.WarnIfFreshDataDir("pebble", dir)
 		}
@@ -248,7 +318,7 @@ func (a *App) wireDedupe() error {
 		}
 		return enabled, nil
 	}
-	a.store.AfterAdopt(func() {
+	a.onDefaultAdopt(func() {
 		if enabled, err := reconcile(); err == nil {
 			slog.Info("dedupe store reconciled with settings", "enabled", enabled)
 		}
@@ -268,7 +338,7 @@ func (a *App) wireMQ() error {
 	dir := filepath.Join(a.cfg.DataDir, "nats")
 	config.WarnIfFreshDataDir("nats", dir)
 	var broker mq.Broker
-	broker, err := mq.NewEmbedded(dir, a.store.MQMaxBytes())
+	broker, err := mq.NewEmbedded(dir, defaultSetting(a, (*settings.Store).MQMaxBytes))
 	if err != nil {
 		config.LogStorageInitError("mq", dir, err)
 		return fmt.Errorf("mq open: %w", err)
@@ -289,8 +359,8 @@ func (a *App) wireMQ() error {
 	// Rooted in the App's stop context, so a reload caught mid-hook by
 	// SIGTERM gives up rather than holding the drain past
 	// server.shutdown_timeout.
-	a.store.AfterAdopt(func() {
-		mb := a.store.MQMaxBytes()
+	a.onDefaultAdopt(func() {
+		mb := defaultSetting(a, (*settings.Store).MQMaxBytes)
 		if mb == broker.MaxBytes() {
 			return
 		}
@@ -355,9 +425,10 @@ func (a *App) wireStreaming() {
 	// Shared keepalive wheel: one goroutine nudges idle streams so proxies
 	// don't idle-close them. Runs for the process lifetime; a reload that
 	// changes stream.keepalive_* rebuilds the ring in place under the live
-	// connections.
-	heartbeater := stream.NewHeartbeater(a.store.Keepalive())
-	a.store.AfterAdopt(func() { heartbeater.Reconfigure(a.store.Keepalive()) })
+	// connections — any tenant's reload, since every tenant's streams ride
+	// the one wheel (shortestKeepalive).
+	heartbeater := stream.NewHeartbeater(shortestKeepalive(a.tenants))
+	a.tenants.AfterAdopt(func([]tenant.ID) { heartbeater.Reconfigure(shortestKeepalive(a.tenants)) })
 	a.heartbeater = heartbeater
 	a.add(component{name: "keepalive", run: func(ctx context.Context) error {
 		heartbeater.Run(ctx)
@@ -408,21 +479,26 @@ func (a *App) wireIngestWorker() {
 func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
 	cfg := a.cfg
 	switch {
-	case cfg.Auth.JWTSecret == "" && a.store.Auth().JWKSURL == "":
+	case cfg.Auth.JWTSecret == "" && defaultSetting(a, (*settings.Store).Auth).JWKSURL == "":
 		slog.Warn("no auth.jwt_secret (boot config) or auth.jwks_url (settings) set: no token can be validated, so every request resolves to the policy default_role (public access)")
 	case cfg.Auth.JWTSecret == "change-me-in-production":
 		slog.Warn("WH_AUTH_JWT_SECRET is using the default insecure value")
 	}
 
 	operatorKey := strings.TrimSpace(cfg.Auth.OperatorKey)
-	if operatorKey == "" {
+	switch {
+	case operatorKey == "" && a.tenants.Nested():
+		// Not the recovery concern below: over a nested directory the key is
+		// the ops tree's only credential, and there is no watcher either.
+		slog.Warn("nested settings directory and no auth.operator_key set: the operator key is the only credential /v1/ops/* takes over a nested directory, so no caller can reach those routes — settings can only be reloaded by SIGHUP, which reloads every tenant")
+	case operatorKey == "":
 		slog.Warn("no auth.operator_key set: if you lose the JWT secret, lose control of the JWKS endpoint, or lose your HMAC secret — or policies.json is emptied — every token-based request is denied and the only recovery is editing the settings directory on the host")
-	} else {
+	default:
 		slog.Info("operator key is set: requests presenting it via 'Authorization: Operator <key>' (or the X-Operator-Key alias) are authorized as a full-access platform operator, and can trigger a settings reload over HTTP while the server is locked out")
 	}
 
 	authConfig := func() auth.Config {
-		s := a.store.Auth()
+		s := defaultSetting(a, (*settings.Store).Auth)
 		return auth.Config{
 			JWTSecret:   cfg.Auth.JWTSecret,
 			JWKSURL:     s.JWKSURL,
@@ -434,18 +510,23 @@ func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auth middleware init: %w", err)
 	}
-	a.store.AfterAdopt(func() { authn.Reconfigure(authConfig()) })
+	a.onDefaultAdopt(func() { authn.Reconfigure(authConfig()) })
 	return authn.Middleware(), nil
 }
 
 // wireReloadTriggers adds SIGHUP and the directory watcher. All three
 // triggers (these two and POST /v1/ops/settings/reload) funnel into the same
-// serialized Store.Reload, and a rejected reload keeps the previous good
+// serialized Registry.Reload, and a rejected reload keeps the previous good
 // snapshot. They only start in Run, after New has registered every
 // AfterAdopt hook (ClickHouse reconnect, dedupe store, keepalive wheel, auth
 // verifier): the watcher reloads once as soon as its watch exists, and that
 // reload must already drive every hook — a hook registered after the first
 // reload could miss it.
+//
+// A nested directory gets no watcher (#583): whoever writes a tenant's
+// folder calls the reload route once the folder is complete, where a watcher
+// would validate it half-written and, with no previous snapshot to fall back
+// on, drop the tenant. SIGHUP reloads the whole tree in both shapes.
 func (a *App) wireReloadTriggers() {
 	// Registered here and released only at the end of Close, deliberately:
 	// Notify takes SIGHUP off its default disposition (terminate), and a
@@ -471,14 +552,18 @@ func (a *App) wireReloadTriggers() {
 				if ctx.Err() != nil {
 					return nil
 				}
-				a.store.Reload("sighup")
+				a.tenants.Reload("sighup")
 			}
 		}
 	}})
+	if a.tenants.Nested() {
+		slog.Info("nested settings directory: no directory watcher — reload via POST /v1/ops/settings/reload or SIGHUP")
+		return
+	}
 	a.add(component{name: "settings watcher", run: func(ctx context.Context) error {
 		// Watcher setup failure degrades, not fatal: SIGHUP and the ops
 		// endpoint still reload.
-		if err := a.store.Watch(ctx); err != nil {
+		if err := a.tenants.Watch(ctx); err != nil {
 			slog.Error("settings directory watcher failed; reload via SIGHUP or POST /v1/ops/settings/reload", "error", err)
 		}
 		return nil
@@ -506,7 +591,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	streamHandler.Closing = closing
 
 	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.ch, a.cache, a.ch.QueryTimeout)
-	pipesHandler.OpsStore = a.store
+	pipesHandler.Tenants = a.tenants
 
 	deps := api.Dependencies{
 		Ingest: ingestHandler,
@@ -525,8 +610,8 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		AuthMW:       authMW,
 		Tenants:      a.tenants,
 		PolicySource: a.policies,
-		CORSOrigins:  a.store.CORSOrigins,
-		Settings:     api.NewSettingsHandler(a.store),
+		CORSOrigins:  func() []string { return defaultSetting(a, (*settings.Store).CORSOrigins) },
+		Settings:     api.NewSettingsHandler(a.tenants),
 	}
 
 	prom := a.cfg.Prometheus

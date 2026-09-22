@@ -1,5 +1,5 @@
 import { networkError, parseErrorResponse } from "./errors.js";
-import type { HttpContext, WaveHouseError } from "./types.js";
+import type { HttpContext, OpsRequestOptions, WaveHouseError } from "./types.js";
 import { resolveURL } from "./url.js";
 
 interface RequestSpec {
@@ -58,6 +58,18 @@ export function mergeHeaders(
     configured.set(lower, name);
   }
   return merged;
+}
+
+/**
+ * The `?tenant=` query an admin call sends for `opts.tenant`. An empty string
+ * is sent, not dropped: the server refuses it, where dropping it would turn a
+ * caller's bug into a call that addresses the default tenant — or, on a
+ * reload, every tenant.
+ *
+ * @internal
+ */
+export function tenantParam(opts?: OpsRequestOptions): Record<string, string> | undefined {
+  return opts?.tenant === undefined ? undefined : { tenant: opts.tenant };
 }
 
 /** The documented shape for a cancelled request: a Result, never a throw. */

@@ -4,7 +4,8 @@
 //
 // The directory holds exactly four files: roles.json (the role registry),
 // policies.json (the access-control policy), pipes.json (named queries), and
-// config.json (behavioral tunables migrated out of boot config). Validate is
+// config.json (behavioral tunables migrated out of boot config) — or, nested,
+// one folder per tenant, each holding those four (see Tree). Validate is
 // deliberately pure — no network, no ClickHouse, no side effects — so the same
 // function can gate the `wavehouse validate` CLI, boot, and a live reload.
 // Table/column existence is out of scope by design: WaveHouse is

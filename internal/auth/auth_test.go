@@ -33,6 +33,8 @@ type captured struct {
 	tokenInURL string
 	// a non-token query param, to prove the strip is surgical
 	otherQueryParam string
+	// the query string the handler was left with, byte for byte
+	rawQuery string
 }
 
 // run drives cfg's middleware over a request decorated by setup, returning what
@@ -60,6 +62,7 @@ func runOp(t *testing.T, cfg Config, store policy.Source, setup func(*http.Reque
 		c.isOperator = IsOperator(r.Context())
 		c.tokenInURL = r.URL.Query().Get("token")
 		c.otherQueryParam = r.URL.Query().Get("table")
+		c.rawQuery = r.URL.RawQuery
 		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
@@ -286,6 +289,37 @@ func TestMiddleware_QueryTokenStrippedWithUnusableHeader(t *testing.T) {
 	assert.Equal(t, "viewer", c.role, "a non-Bearer header falls through to the query token")
 	assert.Empty(t, c.tokenInURL)
 	assert.Equal(t, "clicks", c.otherQueryParam, "unrelated query params must survive the strip")
+}
+
+// The strip must not repair a query that does not parse. Re-encoding what
+// ParseQuery could read erases the pairs it could not, and a handler that
+// parses strictly in order to refuse them (the ops ?tenant=) would then see a
+// clean query: `?tenant=acme;x=1&token=…` read the default tenant. The token
+// is still read and still removed; every other byte reaches the handler as
+// it was sent.
+func TestMiddleware_QueryToken_MalformedQuerySurvivesTheStrip(t *testing.T) {
+	t.Parallel()
+	tok := testutil.MakeJWT(t, map[string]any{"role": "viewer"})
+	tests := []struct {
+		name, query, want string
+	}{
+		{name: "semicolon pair before the token", query: "tenant=acme;x=1&token=" + tok, want: "tenant=acme;x=1"},
+		{name: "semicolon pair after the token", query: "token=" + tok + "&tenant=acme;x=1", want: "tenant=acme;x=1"},
+		{name: "bad escape", query: "tenant=%zz&token=" + tok, want: "tenant=%zz"},
+		{name: "the rest is left in the order and spelling it was sent", query: "b=2&token=" + tok + "&a=%41&x=%zz", want: "b=2&a=%41&x=%zz"},
+		{name: "an escaped key is the token too", query: "%74oken=" + tok + "&x=%zz", want: "x=%zz"},
+		{name: "every token pair goes", query: "token=" + tok + "&x=%zz&token=second", want: "x=%zz"},
+		{name: "a pair the parser could not read as a token stays", query: "token=" + tok + "&token=%zz", want: "token=%zz"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := run(t, cfg(), func(r *http.Request) { r.URL.RawQuery = tt.query })
+			assert.Equal(t, "viewer", c.role, "a malformed pair elsewhere does not cost the request its token")
+			assert.Equal(t, tt.want, c.rawQuery)
+			assert.Empty(t, c.tokenInURL)
+		})
+	}
 }
 
 func TestMiddleware_InvalidQueryParamToken_FallsBackWithError(t *testing.T) {

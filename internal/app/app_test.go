@@ -25,6 +25,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 )
 
 // None of these tests run in parallel: New installs a process-wide default
@@ -144,10 +145,11 @@ func TestNew_DegradedBootServesDiagnostics(t *testing.T) {
 	assert.NoError(t, a.Close(context.Background()), "Close is idempotent")
 }
 
-// The wired registry holds the default tenant only: no header and "0" reach
-// the route, any other well-formed id is a 404, a malformed one a 400, and
-// the ops tree never looks at the header. A 503 is the handler's own answer —
-// boot is degraded without ClickHouse — so it proves the tenant resolved.
+// A flat directory's registry holds the default tenant only: no header and
+// "0" reach the route, any other well-formed id is a 404, a malformed one a
+// 400, and the ops tree never looks at the header. A 503 is the handler's own
+// answer — boot is degraded without ClickHouse — so it proves the tenant
+// resolved.
 func TestNew_TenantHeaderResolvesAgainstTheRegistry(t *testing.T) {
 	a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{})
 
@@ -232,16 +234,271 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 		"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}},
 		"mq":     map[string]any{"max_bytes_gb": 2},
 	})
-	_, adopted := a.store.Reload("test")
+	_, adopted := a.tenants.Reload("test")
 	require.True(t, adopted)
 	assert.True(t, a.dedup.Open(), "dedupe hook opened the store")
 	// How the budget is split across the MQ's queues is internal/mq's to test.
 	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(), "mq hook applied the new byte budget")
 
 	rewriteSettings(t, dir, map[string]any{"mq": map[string]any{"max_bytes_gb": 2}})
-	_, adopted = a.store.Reload("test")
+	_, adopted = a.tenants.Reload("test")
 	require.True(t, adopted)
 	assert.False(t, a.dedup.Open(), "dedupe hook closed the store")
+}
+
+// writeNestedSettings materializes a nested settings directory: tenant folder
+// → the patch writeSettings applies to that tenant's config.json.
+func writeNestedSettings(t *testing.T, tenants map[string]map[string]any) string {
+	t.Helper()
+	root := t.TempDir()
+	for folder, patch := range tenants {
+		require.NoError(t, os.Rename(writeSettings(t, patch), filepath.Join(root, folder)))
+	}
+	return root
+}
+
+// invalidQuery is a config.json patch Validate rejects.
+var invalidQuery = map[string]any{"query": map[string]any{"default_max_rows": -1, "timestamp_bucket_seconds": 60}}
+
+func componentNames(a *App) []string {
+	names := make([]string, len(a.components))
+	for i, c := range a.components {
+		names[i] = c.name
+	}
+	return names
+}
+
+// A nested directory boots without a 0 folder and with a rejected tenant:
+// each tenant route answers for the tenant its header names, and only the
+// rejected one is refused. GET /v1/pipes/{name} stands in for the tenant
+// routes because its own 404 needs no ClickHouse, so it proves the handler
+// ran with a resolved store.
+func TestNew_NestedDirectory(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil, "broken": invalidQuery})
+	a := newApp(t, testConfig(t, root), Options{})
+
+	assert.NotContains(t, componentNames(a), "settings watcher", "a nested directory is reloaded by whoever wrote the folder, never watched")
+	flat := newApp(t, testConfig(t, writeSettings(t, nil)), Options{})
+	assert.Contains(t, componentNames(flat), "settings watcher")
+
+	pipe := func(header string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/nope", nil)
+		if header != "" {
+			req.Header.Set(tenant.Header, header)
+		}
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	tests := []struct {
+		name, header string
+		wantStatus   int
+		wantBody     string
+	}{
+		{name: "served tenant", header: "acme", wantStatus: http.StatusNotFound, wantBody: "pipe not found"},
+		{name: "the tenant beside it", header: "globex", wantStatus: http.StatusNotFound, wantBody: "pipe not found"},
+		{name: "rejected tenant", header: "broken", wantStatus: http.StatusServiceUnavailable, wantBody: "tenant settings are invalid"},
+		{name: "unknown tenant", header: "initech", wantStatus: http.StatusNotFound, wantBody: "unknown tenant: initech"},
+		{name: "no header is tenant 0, which this directory does not hold", wantStatus: http.StatusNotFound, wantBody: "unknown tenant: 0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := pipe(tt.header)
+			assert.Equal(t, tt.wantStatus, rec.Code)
+			assert.Contains(t, rec.Body.String(), tt.wantBody)
+		})
+	}
+
+	// Fixing the folder and reloading is the recovery, with no restart.
+	rewriteSettings(t, filepath.Join(root, "broken"), nil)
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Contains(t, pipe("broken").Body.String(), "pipe not found")
+}
+
+// The control plane's loop over a nested directory, through the real wiring:
+// write a tenant's folder, then reload that tenant with the operator key. An
+// admin token cannot — over a nested directory the ops routes reach every
+// tenant, so the operator key alone opens them.
+func TestNew_NestedOperatorReloadsOneTenant(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "broken": invalidQuery})
+	cfg := testConfig(t, root)
+	cfg.Auth.OperatorKey = "unit-test-operator-key"
+	a := newApp(t, cfg, Options{})
+
+	// header is one name and value, or none.
+	do := func(method, target string, header ...string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(t.Context(), method, target, nil)
+		if len(header) == 2 {
+			req.Header.Set(header[0], header[1])
+		}
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	operator := []string{"X-Operator-Key", cfg.Auth.OperatorKey}
+	as := func(id string) []string { return []string{tenant.Header, id} }
+
+	require.Equal(t, http.StatusServiceUnavailable, do(http.MethodGet, "/v1/pipes/nope", as("broken")...).Code)
+
+	rewriteSettings(t, filepath.Join(root, "broken"), nil)
+	rec := do(http.MethodPost, "/v1/ops/settings/reload?tenant=broken", operator...)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"adopted":true`)
+	rec = do(http.MethodGet, "/v1/pipes/nope", as("broken")...)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "pipe not found", "the tenant is served again, with no restart")
+
+	// The admin reads name their tenant the same way; without it they read
+	// tenant 0, which this directory does not hold.
+	assert.Equal(t, http.StatusOK, do(http.MethodGet, "/v1/ops/pipes?tenant=acme", operator...).Code)
+	assert.Equal(t, http.StatusNotFound, do(http.MethodGet, "/v1/ops/pipes", operator...).Code)
+	assert.Equal(t, http.StatusNotFound, do(http.MethodPost, "/v1/ops/settings/reload?tenant=initech", operator...).Code)
+	assert.Equal(t, http.StatusForbidden, do(http.MethodPost, "/v1/ops/settings/reload?tenant=acme").Code)
+}
+
+// Over a nested directory the operator key is the only credential the ops
+// tree takes, and nothing watches the directory — so booting one without the
+// key leaves SIGHUP as the only reload, and boot says so rather than repeat
+// the flat directory's recovery advice.
+func TestNew_NestedWithoutAnOperatorKeyWarnsTheOpsTreeIsClosed(t *testing.T) {
+	const warning = "no caller can reach those routes"
+	boot := func(t *testing.T, settingsDir, operatorKey string) string {
+		t.Helper()
+		guardGlobals(t)
+		logs := logtest.Capture(t, slog.LevelWarn)
+		cfg := testConfig(t, settingsDir)
+		cfg.Auth.OperatorKey = operatorKey
+		a, err := New(t.Context(), Options{Config: cfg})
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, a.Close(context.Background())) })
+		return logs.String()
+	}
+
+	t.Run("nested, no key", func(t *testing.T) {
+		assert.Contains(t, boot(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil}), ""), warning)
+	})
+	t.Run("nested, key set", func(t *testing.T) {
+		assert.NotContains(t, boot(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil}), "unit-test-operator-key"), warning)
+	})
+	t.Run("flat, no key", func(t *testing.T) {
+		logs := boot(t, writeSettings(t, nil), "")
+		assert.NotContains(t, logs, warning)
+		assert.Contains(t, logs, "no auth.operator_key set")
+	})
+}
+
+// The process-wide resources follow tenant 0 alone: another tenant's reload
+// never moves them, and a rejected 0 folder leaves them as they were rather
+// than reconfiguring them from nothing.
+func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
+	dedupeOn := map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}
+	grown := map[string]any{"dedupe": dedupeOn, "mq": map[string]any{"max_bytes_gb": 2}}
+	root := writeNestedSettings(t, map[string]map[string]any{
+		"0":    {"mq": map[string]any{"max_bytes_gb": 1}},
+		"acme": {"mq": map[string]any{"max_bytes_gb": 1}},
+	})
+	a := newApp(t, testConfig(t, root), Options{})
+	require.False(t, a.dedup.Open())
+	require.Equal(t, int64(1<<30), a.mq.MaxBytes())
+	// The CORS list is read per request rather than reconciled by a hook; it
+	// is the seed's ["*"] in every folder here.
+	allowOrigin := func() string {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/version", nil)
+		req.Header.Set("Origin", "https://app.example.com")
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec.Header().Get("Access-Control-Allow-Origin")
+	}
+	require.Equal(t, "*", allowOrigin())
+
+	rewriteSettings(t, filepath.Join(root, "acme"), grown)
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.False(t, a.dedup.Open(), "acme's dedupe switch is not the process's")
+	assert.Equal(t, int64(1<<30), a.mq.MaxBytes())
+
+	rewriteSettings(t, filepath.Join(root, "0"), grown)
+	_, adopted = a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.True(t, a.dedup.Open())
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes())
+
+	rewriteSettings(t, filepath.Join(root, "0"), invalidQuery)
+	_, adopted = a.tenants.Reload("test")
+	require.False(t, adopted)
+	assert.True(t, a.dedup.Open(), "a rejected 0 folder must not read as dedupe off")
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes())
+	assert.Equal(t, "*", allowOrigin(), "nor as an empty CORS list: that would cost every tenant its browser clients")
+
+	// A removed 0 folder is the same: the registry forgets the tenant, the
+	// process keeps the wiring it last adopted.
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "0")))
+	_, adopted = a.tenants.Reload("test")
+	require.True(t, adopted)
+	_, known := a.tenants.Resolve(tenant.Default)
+	require.False(t, known)
+	assert.True(t, a.dedup.Open())
+	assert.Equal(t, "*", allowOrigin())
+}
+
+// keepalive is a config.json patch setting the stream block's keepalive pair.
+func keepalive(interval, buckets int) map[string]any {
+	return map[string]any{"stream": map[string]any{"keepalive_interval": interval, "keepalive_buckets": buckets, "gap_window_minutes": 15}}
+}
+
+// One wheel keeps every tenant's streams alive, so it runs at the shortest
+// keepalive_interval among the tenants being served — an upper bound the
+// longer ones are inside of (#597 tracks honoring each tenant's own). A flat
+// directory's single tenant gets exactly its own pair.
+func TestShortestKeepalive(t *testing.T) {
+	open := func(t *testing.T, dir string) *settings.Registry {
+		t.Helper()
+		guardGlobals(t)
+		tenants, findings := settings.Open(dir)
+		require.NotNil(t, tenants, "findings: %v", findings)
+		return tenants
+	}
+
+	t.Run("flat directory", func(t *testing.T) {
+		period, buckets := shortestKeepalive(open(t, writeSettings(t, keepalive(45, 5))))
+		assert.Equal(t, 45*time.Second, period)
+		assert.Equal(t, 5, buckets)
+	})
+
+	t.Run("nested directory", func(t *testing.T) {
+		root := writeNestedSettings(t, map[string]map[string]any{"acme": keepalive(30, 3), "globex": keepalive(10, 2), "initech": keepalive(10, 7)})
+		tenants := open(t, root)
+		period, buckets := shortestKeepalive(tenants)
+		assert.Equal(t, 10*time.Second, period)
+		assert.Equal(t, 2, buckets, "tenants tied on the interval resolve to the first in id order")
+
+		// A rejected tenant is not being served, so its setting is not weighed.
+		rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+		rewriteSettings(t, filepath.Join(root, "initech"), invalidQuery)
+		tenants.Reload("test")
+		period, buckets = shortestKeepalive(tenants)
+		assert.Equal(t, 30*time.Second, period)
+		assert.Equal(t, 3, buckets)
+	})
+
+	t.Run("no tenant served falls back to the wheel's defaults", func(t *testing.T) {
+		period, buckets := shortestKeepalive(open(t, writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery})))
+		assert.Zero(t, period)
+		assert.Zero(t, buckets)
+	})
+}
+
+// A finding about a nested directory itself — a loose file beside the tenant
+// folders — refuses boot, like an invalid flat directory.
+func TestNew_NestedLooseFileRefusesBoot(t *testing.T) {
+	guardGlobals(t)
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil})
+	require.NoError(t, os.WriteFile(filepath.Join(root, "notes.txt"), []byte("scratch"), 0o600))
+	a, err := New(t.Context(), Options{Config: testConfig(t, root)})
+	require.Error(t, err)
+	assert.Nil(t, a)
+	assert.Contains(t, err.Error(), "settings directory")
 }
 
 func TestNew_RefusesInvalidSettingsDirectory(t *testing.T) {

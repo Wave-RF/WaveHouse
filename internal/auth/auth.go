@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -362,20 +363,53 @@ func operatorKey(r *http.Request) string {
 // line. That only protects *our own* logs — it has already crossed every
 // intermediary in the request URI, so proxies must redact query strings
 // themselves.
+//
+// The strip must not repair the query on its way through. ParseQuery skips a
+// pair it cannot read and keeps going, so re-encoding what it did read erases
+// that pair — and a handler that parses the query strictly in order to refuse
+// a malformed one (the ops ?tenant=) would then see a clean query and serve
+// the default tenant. A query that does not parse therefore loses its token
+// pairs and nothing else.
 func bearerToken(r *http.Request) string {
 	// Strip before either return: a header-authenticated request carrying a
 	// stray ?token would otherwise keep the unused JWT in r.URL.
 	var queryToken string
-	if params := r.URL.Query(); params.Get("token") != "" {
-		queryToken = params.Get("token")
-		params.Del("token")
-		r.URL.RawQuery = params.Encode()
+	// params holds every pair that did parse, error or not — what r.URL.Query
+	// returns, so which token is read does not depend on the rest of the query.
+	params, err := url.ParseQuery(r.URL.RawQuery)
+	if tok := params.Get("token"); tok != "" {
+		queryToken = tok
+		if err == nil {
+			params.Del("token")
+			r.URL.RawQuery = params.Encode()
+		} else {
+			r.URL.RawQuery = withoutTokenPairs(r.URL.RawQuery)
+		}
 	}
 
 	if tok, ok := authScheme(r, "Bearer"); ok {
 		return tok
 	}
 	return queryToken
+}
+
+// withoutTokenPairs cuts the token pairs out of a raw query and leaves every
+// other byte as it was sent. A pair counts only if ParseQuery would have read
+// it as one: a malformed pair that merely looks like a token stays, for the
+// same strict parse to refuse.
+func withoutTokenPairs(raw string) string {
+	pairs := strings.Split(raw, "&")
+	kept := pairs[:0]
+	for _, pair := range pairs {
+		key, value, _ := strings.Cut(pair, "=")
+		k, kerr := url.QueryUnescape(key)
+		_, verr := url.QueryUnescape(value)
+		if k == "token" && kerr == nil && verr == nil && !strings.Contains(pair, ";") {
+			continue
+		}
+		kept = append(kept, pair)
+	}
+	return strings.Join(kept, "&")
 }
 
 // tokenError maps a jwt parse failure to a stable, caller-safe error for the

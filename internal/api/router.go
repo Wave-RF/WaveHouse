@@ -39,6 +39,8 @@ type Dependencies struct {
 	Tenants *settings.Registry
 	// PolicySource backs the RequireAdmin gate: the admin role (policy.AdminRole)
 	// is read live from the adopted policy, so admin_role changes apply on reload.
+	// NewRouter ignores it when Tenants is nested, whatever was wired here: the
+	// ops gate then admits the operator key alone (see NewRouter).
 	PolicySource policy.Source
 	// CORSOrigins returns the allowed CORS origins, read per request so a
 	// settings reload applies immediately (settings.Store.CORSOrigins in
@@ -166,8 +168,19 @@ func NewRouter(deps Dependencies) http.Handler {
 			// role is policy.AdminRole (configurable via admin_role, "admin" by
 			// default), read live from the policy store so changes apply
 			// without a restart.
+			//
+			// A nested settings directory has no one policy to read an admin
+			// role from, and no tenant's admin may act on another tenant — these
+			// routes reach every tenant — so there the gate reads no policy at
+			// all and the operator key alone passes; a token admin gets 403
+			// (#583). Decided here rather than by what the caller wired, so
+			// tenant 0's policy can never end up guarding a nested ops tree.
+			adminPolicy := deps.PolicySource
+			if deps.Tenants != nil && deps.Tenants.Nested() {
+				adminPolicy = nil
+			}
 			r.Use(deps.AuthMW)
-			r.Use(RequireAdmin(deps.PolicySource))
+			r.Use(RequireAdmin(adminPolicy))
 
 			// Schema discovery.
 			r.Get("/schema", deps.Schema.Get)
@@ -250,7 +263,9 @@ func jsonRecoverer(next http.Handler) http.Handler {
 // via a role — IsAdmin(nil) is false — so no token can re-open a locked-out
 // deployment through this gate. The exception is the operator key:
 // auth.IsOperator passes this gate even under a nil policy, so an operator can
-// still trigger a settings reload after fixing the files (break-glass).
+// still trigger a settings reload after fixing the files (break-glass). A nil
+// store is the same gate with nothing to read — the operator key alone — which
+// is what NewRouter mounts over a nested settings directory.
 //
 // Authentication is decoupled from this gate: a missing/invalid/expired token
 // resolves to an empty (non-admin) role and is denied here. Denials go through

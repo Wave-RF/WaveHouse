@@ -90,6 +90,24 @@ describe("PipesNamespace", () => {
     expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/pipes");
   });
 
+  it("list() and get() send opts.tenant as ?tenant=, and nothing without it", async () => {
+    fetchSpy.mockImplementation(async () => new Response("[]", { status: 200 }));
+    const ns = new PipesNamespace(makeCtx());
+
+    await ns.list({ tenant: "acme" });
+    await ns.get("p1", { tenant: "acme" });
+    await ns.list();
+    // An empty id is the caller's bug: it is sent for the server to refuse,
+    // never dropped into a read of the default tenant.
+    await ns.list({ tenant: "" });
+
+    const urls = fetchSpy.mock.calls.map((call) => new URL(call[0]));
+    expect(urls[0].pathname + urls[0].search).toBe("/v1/ops/pipes?tenant=acme");
+    expect(urls[1].pathname + urls[1].search).toBe("/v1/ops/pipes/p1?tenant=acme");
+    expect(urls[2].search).toBe("");
+    expect(urls[3].search).toBe("?tenant=");
+  });
+
   it("get() GETs /v1/ops/pipes/{name}", async () => {
     fetchSpy.mockResolvedValue(
       new Response(JSON.stringify({ name: "p1", sql: "SELECT 1" }), { status: 200 }),

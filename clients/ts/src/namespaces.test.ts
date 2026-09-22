@@ -172,6 +172,19 @@ describe("SettingsNamespace", () => {
     expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/settings/reload");
   });
 
+  it("reload() sends opts.tenant as ?tenant=, and nothing without it", async () => {
+    const body = { adopted: true, findings: [] };
+    fetchSpy.mockImplementation(async () => new Response(JSON.stringify(body), { status: 200 }));
+    const ns = new SettingsNamespace(makeCtx());
+
+    await ns.reload({ tenant: "acme" });
+    await ns.reload();
+
+    const urls = fetchSpy.mock.calls.map((call) => new URL(call[0]));
+    expect(urls[0].pathname + urls[0].search).toBe("/v1/ops/settings/reload?tenant=acme");
+    expect(urls[1].search).toBe("");
+  });
+
   it("reload() surfaces a 422 rejection as an error", async () => {
     const body = {
       adopted: false,

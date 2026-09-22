@@ -1,8 +1,6 @@
 package settings
 
 import (
-	"log/slog"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -10,100 +8,26 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
 
-// Store owns the settings snapshot a running instance has adopted. Open
-// validates and adopts the directory up front, so a *Store never exists
-// without a good document behind it. Reload is the single code path every
-// later trigger — SIGHUP, the directory watcher, and POST
-// /v1/ops/settings/reload — funnels through: re-validate the directory, and
-// swap the snapshot only when no finding is an error, so a bad edit (or a
-// deleted file, or a vanished directory) can never evict the last good
-// document. Readers go through one lock-free atomic load per lookup; the
-// typed accessors below each resolve from a single snapshot load, so a
-// reload lands between lookups, never inside one.
+// Store holds the settings snapshot one tenant has adopted, and nothing
+// else: the Registry validates, swaps the document in, and owns every reload
+// trigger. Readers go through one lock-free atomic load per lookup; the typed
+// accessors below each resolve from a single snapshot load, so a reload lands
+// between lookups, never inside one.
 //
 // There are no compiled defaults here on purpose: every key is required by
 // Validate, so the snapshot is exactly what the files said when they were
 // adopted. Defaults live in the seed directory (Seed / WriteSeed).
 type Store struct {
-	dir string
-
-	// mu serializes Reload: concurrent triggers queue rather than racing
-	// validate-then-swap sequences (a stale document must not overwrite a newer one).
-	mu   sync.Mutex
 	snap atomic.Pointer[Document]
-	// afterAdopt runs under mu after every successful swap, in registration
-	// order — for consumers that own a resource whose lifecycle follows a
-	// setting (the Pebble store behind dedupe.enabled) rather than reading
-	// the snapshot per call.
-	afterAdopt []func()
 }
 
-// Open validates dir and returns a Store holding its document. A rejected
-// directory returns a nil Store with the findings — the caller (boot)
-// refuses to start; it must never run without adopted settings.
-func Open(dir string) (*Store, []Finding) {
-	s := &Store{dir: dir}
-	findings, adopted := s.Reload("boot")
-	if !adopted {
-		return nil, findings
-	}
-	return s, findings
-}
+// adopt swaps in a validated document. The Registry calls it under its
+// reload lock.
+func (s *Store) adopt(doc *Document) { s.snap.Store(doc) }
 
-// Dir returns the directory this store reads.
-func (s *Store) Dir() string { return s.dir }
-
-// Reload re-validates the directory and adopts the parsed document when no
-// finding is an error (warnings don't block adoption, matching `wavehouse
-// validate`). On a rejected reload the previous snapshot stays in place.
-// The returned bool reports whether the document was adopted. trigger names
-// the path that fired ("boot", "sighup", "watch", "api") and tags every log
-// line so operators can tell them apart.
-func (s *Store) Reload(trigger string) ([]Finding, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc, findings := Validate(s.dir)
-	adopted := doc != nil
-	if adopted {
-		s.snap.Store(doc)
-		for _, fn := range s.afterAdopt {
-			fn()
-		}
-	}
-	var errs, warns int
-	for _, f := range findings {
-		if f.Severity == SeverityError {
-			errs++
-			slog.Error("settings finding", "trigger", trigger, "finding", f.String())
-		} else {
-			warns++
-			slog.Warn("settings finding", "trigger", trigger, "finding", f.String())
-		}
-	}
-	switch {
-	case adopted:
-		slog.Info("settings adopted", "trigger", trigger, "dir", s.dir, "warnings", warns)
-	case s.snap.Load() == nil:
-		slog.Error("settings rejected", "trigger", trigger, "dir", s.dir, "errors", errs, "warnings", warns)
-	default:
-		slog.Error("settings rejected — keeping previous settings", "trigger", trigger, "dir", s.dir, "errors", errs, "warnings", warns)
-	}
-	return findings, adopted
-}
-
-// AfterAdopt registers fn to run after each subsequent successful reload,
-// serialized with the reload itself. Open's boot adoption has already
-// happened by the time a caller can register, so the caller applies the
-// boot state itself.
-func (s *Store) AfterAdopt(fn func()) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.afterAdopt = append(s.afterAdopt, fn)
-}
-
-// doc returns the current snapshot. Never nil for a Store returned by Open:
-// adoption happened before the Store was handed out, and a rejected reload
-// leaves the previous document in place.
+// doc returns the current snapshot. Never nil for a Store a Registry from
+// Open hands out: adoption happened first, and a rejected reload leaves the
+// previous document in place.
 func (s *Store) doc() *Document {
 	return s.snap.Load()
 }

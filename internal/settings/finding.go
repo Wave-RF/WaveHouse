@@ -13,8 +13,10 @@ const (
 )
 
 // Finding is one validation result, located as precisely as the failure
-// allows: File is empty for directory-level findings, Path is a dotted JSON
-// path ("tables.clicks.analyst") and empty for whole-file findings.
+// allows: File is empty for directory-level findings and, in a nested root,
+// leads with the tenant folder ("acme/policies.json", or "acme" alone for a
+// finding about the folder); Path is a dotted JSON path
+// ("tables.clicks.analyst") and empty for whole-file findings.
 // The JSON shape is part of the ops API: POST /v1/ops/settings/reload returns
 // findings verbatim.
 type Finding struct {

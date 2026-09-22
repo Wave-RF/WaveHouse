@@ -413,7 +413,11 @@ export interface PolicyFilter {
 /** One validation finding from the server's settings directory. */
 export interface SettingsFinding {
   severity: "error" | "warning";
-  /** Settings file the finding is about; absent for directory-level findings. */
+  /**
+   * Settings file the finding is about; absent for directory-level findings.
+   * In a directory of tenant folders it leads with the folder
+   * (`acme/policies.json`).
+   */
   file?: string;
   /** Dotted JSON path within the file; absent for whole-file findings. */
   path?: string;
@@ -422,7 +426,13 @@ export interface SettingsFinding {
 
 /** Body of POST /v1/ops/settings/reload. */
 export interface SettingsReloadResult {
-  /** Whether the directory was adopted; false leaves the previous settings in effect. */
+  /**
+   * Whether everything the reload covered was adopted; false leaves the
+   * previous settings in effect. Over a directory of tenant folders false can
+   * mean adopted in part: the tenants with an error among their `findings`
+   * were not adopted and are no longer served, and the rest were — `findings`
+   * carries every folder's warnings too.
+   */
   adopted: boolean;
   /** Every finding from the validation pass (warnings included on success). */
   findings: SettingsFinding[];
@@ -456,6 +466,22 @@ export interface PipeRequestOptions {
   signal?: AbortSignal;
   /** Not supported on pipes — pass `limit` as a pipe parameter instead. */
   limit?: never;
+}
+
+/**
+ * Options for a call to one of the admin routes that address a tenant:
+ * `wh.pipes.list()`, `wh.pipes.get()`, and `wh.settings.reload()`.
+ */
+export interface OpsRequestOptions {
+  signal?: AbortSignal;
+  /**
+   * The tenant the call addresses, sent as `?tenant=`. The admin routes ignore
+   * the `X-Tenant-ID` header, so `options.headers` cannot select one. Omitted,
+   * the reads serve the default tenant (`0`) and `reload()` reloads every
+   * tenant. An id the server does not accept — the empty string included — is
+   * a `400`, never a silent fallback to the default.
+   */
+  tenant?: string;
 }
 
 // --- Stream options ---

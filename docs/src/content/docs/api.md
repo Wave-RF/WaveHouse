@@ -150,7 +150,7 @@ Status code: `503 Service Unavailable`
 
 ### `GET /v1/health` — Liveness ping (public, content-free)
 
-Returns **`200 OK` with an empty body** once the gateway is past boot, or **`503 Service Unavailable`** (also empty) while boot-time schema discovery is still failing. Like every `/v1` route outside `/v1/ops/*` it [resolves a tenant](/deployment#multi-tenant-deployments) first, so a bad `X-Tenant-ID` answers `400`/`404` before the probe runs. No authentication required and no response body — the caller only branches on the status code, so there's nothing to JSON-encode or cache per request.
+Returns **`200 OK` with an empty body** once the gateway is past boot, or **`503 Service Unavailable`** (also empty) while boot-time schema discovery is still failing. Like every `/v1` route outside `/v1/ops/*` it [resolves a tenant](/deployment#multi-tenant-deployments) first, so a malformed or unknown `X-Tenant-ID` answers `400`/`404` before the probe runs, and — over a [nested settings directory](/deployment#the-nested-settings-directory) — a tenant whose settings folder was rejected answers a `503` that carries the usual JSON error body rather than this route's empty one. No authentication required and no response body — the caller only branches on the status code, so there's nothing to JSON-encode or cache per request.
 
 This is what the SDK's `wh.sys.health()` calls, and the endpoint to use when choosing among multiple servers in a distributed setup. It mirrors `/livez` under the hood but is intentionally a `/v1` API route rather than a Kubernetes probe path: an operator may filter the bare probe paths (`/livez`, `/readyz`, `/healthz`) out at the reverse proxy since they're internal probes, so the SDK relies on `/v1/health`, which is documented public API surface meant to stay reachable. It does **not** ping ClickHouse — readiness-based load balancing is the proxy/LB's job (via `/readyz`), not the client's.
 
@@ -638,7 +638,7 @@ curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z
 
 ### Admin Endpoints
 
-Every admin-gated surface lives under the `/v1/ops/*` prefix, behind a single `RequireAdmin` gate: schema discovery, DLQ stats, and the pipe and settings-reload endpoints below, plus the raw-SQL passthrough [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse) documented with the query endpoints above. They require the policy `admin_role` (`"admin"` by default, exact case-sensitive match) — or the non-JWT [operator key](#authentication), which reaches the same surface without a token; other callers get 401 (present-but-invalid token) / 403, and the quickstart's trial `public` role cannot call any of them. There is no separate `service` role. The JWT middleware always runs — a tokenless request (or a valid token without a role claim) resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is denied `403`, while a present-but-invalid token keeps its stashed verification error and is denied `401`.
+Every admin-gated surface lives under the `/v1/ops/*` prefix, behind a single `RequireAdmin` gate: schema discovery, DLQ stats, and the pipe and settings-reload endpoints below, plus the raw-SQL passthrough [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse) documented with the query endpoints above. They require the policy `admin_role` (`"admin"` by default, exact case-sensitive match) — or the non-JWT [operator key](#authentication), which reaches the same surface without a token; other callers get 401 (present-but-invalid token) / 403, and the quickstart's trial `public` role cannot call any of them. Over a [nested settings directory](/deployment#the-nested-settings-directory) these routes reach every tenant, so the operator key alone opens them and an admin-role token gets `403`. There is no separate `service` role. The JWT middleware always runs — a tokenless request (or a valid token without a role claim) resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is denied `403`, while a present-but-invalid token keeps its stashed verification error and is denied `401`.
 
 No admin endpoint in this section accepts a request body — they are reads and triggers; the settings directory's files are the only write path. The raw-SQL `POST /v1/ops/query` carries the 16 MiB bulk-payload cap documented with the query endpoints above.
 
@@ -758,6 +758,14 @@ The policy has no endpoints: it is the settings directory's [`policies.json`](/s
 
 Returns every adopted named query pipe — the settings directory's [`pipes.json`](/settings-directory#pipesjson). Pipes have no write endpoints: edit the file and reload.
 
+Both pipe reads take an optional `?tenant=<id>` naming the [tenant](/deployment#the-nested-settings-directory) whose pipes are read; without it they read the default tenant `0`, which is the whole settings directory unless it is nested. The query string is parsed strictly, so that a request is never answered for a tenant it did not name:
+
+| Status | When |
+| ------ | ---- |
+| `400` | The query string does not parse (`?tenant=acme;x=1`, a bad `%` escape), or `tenant` is empty, repeated, or not a tenant id |
+| `404` | No such tenant |
+| `503` | The tenant's settings folder was rejected |
+
 #### `GET /v1/ops/pipes/{name}` — Get Named Pipe
 
 Returns a specific named pipe definition:
@@ -791,6 +799,8 @@ Re-validates the [settings directory](/settings-directory) — `roles.json`, `po
 ```
 
 `200` when adopted (warnings allowed); `422` when validation rejected the directory — the previous settings stay in effect, and `findings` says why.
+
+An optional `?tenant=<id>` reloads that tenant's folder of a [nested settings directory](/deployment#the-nested-settings-directory) and nothing else; it is parsed as strictly as on the [pipe reads](#get-v1opspipes--list-named-pipes) (`400`), and an unknown tenant is a `404`. Over a nested directory a rejected folder is not kept on its previous settings, and a `422` for the whole directory can mean adopted in part — see that section.
 
 ## Event Message Format
 

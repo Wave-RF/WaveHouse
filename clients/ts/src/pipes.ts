@@ -1,7 +1,14 @@
 import { err, ok } from "./errors.js";
-import { request } from "./http.js";
+import { request, tenantParam } from "./http.js";
 import type { StreamController } from "./stream/controller.js";
-import type { HttpContext, Pipe, PipeRequestOptions, Result, StreamOptions } from "./types.js";
+import type {
+  HttpContext,
+  OpsRequestOptions,
+  Pipe,
+  PipeRequestOptions,
+  Result,
+  StreamOptions,
+} from "./types.js";
 
 type CreateStreamFn<Row> = (table: string, opts?: StreamOptions) => StreamController<Row>;
 
@@ -71,22 +78,24 @@ export class PipesNamespace {
     this._ctx = ctx;
   }
 
-  /** List all registered pipes. */
-  async list(opts?: { signal?: AbortSignal }): Promise<Result<Pipe[]>> {
+  /** List all registered pipes — of `opts.tenant`, the default tenant without it. */
+  async list(opts?: OpsRequestOptions): Promise<Result<Pipe[]>> {
     const { data, error } = await request<Pipe[]>(this._ctx, {
       method: "GET",
       path: "/v1/ops/pipes",
+      params: tenantParam(opts),
       signal: opts?.signal,
     });
     if (error) return err(error);
     return ok(data!);
   }
 
-  /** Get a single pipe definition by name. */
-  async get(name: string, opts?: { signal?: AbortSignal }): Promise<Result<Pipe>> {
+  /** Get a single pipe definition by name — of `opts.tenant`, the default tenant without it. */
+  async get(name: string, opts?: OpsRequestOptions): Promise<Result<Pipe>> {
     const { data, error } = await request<Pipe>(this._ctx, {
       method: "GET",
       path: `/v1/ops/pipes/${encodeURIComponent(name)}`,
+      params: tenantParam(opts),
       signal: opts?.signal,
     });
     if (error) return err(error);

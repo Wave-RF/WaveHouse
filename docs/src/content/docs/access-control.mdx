@@ -62,7 +62,7 @@ Setting `default_role` equal to `admin_role` is permitted — it makes every una
 `admin_role` (default: `"admin"`) is the one role that bypasses the entire policy:
 
 - It is granted **full, unrestricted access** to every table and operation. An admin is **never** column-scoped or row-scoped, even by a policy entry that explicitly names the admin role — admin is an unconditional bypass, not a scoped grant.
-- It is the gate for the whole `/v1/ops/*` tree — raw SQL, pipe inspection, settings reload, schema discovery, and DLQ stats. The gate reads `admin_role` live from the policy, so changing it applies without a restart.
+- It is the gate for the whole `/v1/ops/*` tree — raw SQL, pipe inspection, settings reload, schema discovery, and DLQ stats. The gate reads `admin_role` live from the policy, so changing it applies without a restart — except over a [nested settings directory](/deployment#the-nested-settings-directory), where it reads no policy at all and the [operator key](#operator-key) alone passes.
 
 There is no separate `service` role. To reach an admin endpoint or to read data beyond what `default_role` grants, present a valid token whose `role_claim` is the admin role (or another granted role) — **or** present the non-JWT [operator key](#operator-key) described below.
 
@@ -213,7 +213,7 @@ On a structured query (`POST /v1/query?table={table}`) the allowlist is a **hard
 This produces `WHERE (tenant_id = ?)` with the caller's `app_metadata.tenant_id` claim bound as the parameter — so a `viewer` only ever sees rows for their own tenant, and the value comes from the signed token, not from anything the client sends.
 
 :::note[Two meanings of "tenant"]
-On this page a *tenant* is a row-scoping value carried in the signed token. The [`X-Tenant-ID` header](/deployment#multi-tenant-deployments) is a different axis: it selects which settings directory — and so which `policies.json` — serves the request. It is client-supplied, resolved before authentication, and isolates no rows. A settings directory is one such tenant (`0`), so most deployments never send it.
+On this page a *tenant* is a row-scoping value carried in the signed token. The [`X-Tenant-ID` header](/deployment#multi-tenant-deployments) is a different axis: it selects which set of settings files — and so which `policies.json` — serves the request. It is client-supplied, resolved before authentication, and isolates no rows. A settings directory that holds the four files is one such tenant (`0`), so most deployments never send it.
 :::
 
 Supported comparison operators:
