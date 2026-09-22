@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 func TestLocalCache_GetMiss(t *testing.T) {
@@ -15,7 +17,7 @@ func TestLocalCache_GetMiss(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = c.Close() }()
 
-	val, ttl, err := c.Get(context.Background(), "missing", []Namespace{{Table: "table"}})
+	val, ttl, err := c.Get(context.Background(), "missing", []Namespace{{Tenant: tenant.Default, Table: "table"}})
 	assert.NoError(t, err)
 	assert.Nil(t, val)
 	assert.Zero(t, ttl)
@@ -28,7 +30,7 @@ func TestLocalCache_SetAndGet(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
-	deps := []Namespace{{Table: "table", Scope: "scope"}}
+	deps := []Namespace{{Tenant: tenant.Default, Table: "table", Scope: "scope"}}
 	err = c.Set(ctx, "key1", deps, []byte("hello"), 10*time.Second)
 	assert.NoError(t, err)
 
@@ -48,7 +50,7 @@ func TestLocalCache_ExpiredKey(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
-	deps := []Namespace{{Table: "table"}}
+	deps := []Namespace{{Tenant: tenant.Default, Table: "table"}}
 	// Set with very short TTL.
 	err = c.Set(ctx, "expires", deps, []byte("data"), 1*time.Millisecond)
 	assert.NoError(t, err)
@@ -69,7 +71,7 @@ func TestLocalCache_Overwrite(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
-	deps := []Namespace{{Table: "table"}}
+	deps := []Namespace{{Tenant: tenant.Default, Table: "table"}}
 	require.NoError(t, c.Set(ctx, "key", deps, []byte("v1"), 10*time.Second))
 	c.Wait()
 	require.NoError(t, c.Set(ctx, "key", deps, []byte("v2"), 10*time.Second))
@@ -87,7 +89,7 @@ func TestLocalCache_ZeroTTL(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
-	deps := []Namespace{{Table: "table"}}
+	deps := []Namespace{{Tenant: tenant.Default, Table: "table"}}
 	err = c.Set(ctx, "notimed", deps, []byte("data"), 0)
 	assert.NoError(t, err)
 
@@ -109,7 +111,7 @@ func TestLocalCache_Invalidate(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
-	deps := []Namespace{{Table: "users", Scope: "org_1"}}
+	deps := []Namespace{{Tenant: tenant.Default, Table: "users", Scope: "org_1"}}
 
 	// Set value
 	err = c.Set(ctx, "queryHash", deps, []byte("my_data"), 10*time.Second)
@@ -143,7 +145,7 @@ func TestLocalCache_Invalidate_WholeTable(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
-	scoped := []Namespace{{Table: "events", Scope: "org_1"}}
+	scoped := []Namespace{{Tenant: tenant.Default, Table: "events", Scope: "org_1"}}
 
 	require.NoError(t, c.Set(ctx, "q", scoped, []byte("v1"), 10*time.Second))
 	c.Wait()
@@ -152,10 +154,52 @@ func TestLocalCache_Invalidate_WholeTable(t *testing.T) {
 	require.Equal(t, []byte("v1"), val)
 
 	// Whole-table invalidation (empty scope) must orphan the scoped entry.
-	_, err = c.Invalidate(ctx, []Namespace{{Table: "events"}})
+	_, err = c.Invalidate(ctx, []Namespace{{Tenant: tenant.Default, Table: "events"}})
 	require.NoError(t, err)
 
 	after, _, err := c.Get(ctx, "q", scoped)
 	assert.NoError(t, err)
 	assert.Nil(t, after, "whole-table bump must invalidate the scoped entry")
+}
+
+// The same sha and table under two tenants are two entries: a result cached
+// for one tenant never answers the other, and invalidating one tenant's table
+// leaves the other's entry in place — whole-table and per-scope bumps alike.
+func TestLocalCache_KeyedByTenant(t *testing.T) {
+	t.Parallel()
+	c, err := NewLocal(1 << 20)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	acme := []Namespace{{Tenant: "acme", Table: "events", Scope: "org_1"}}
+	globex := []Namespace{{Tenant: "globex", Table: "events", Scope: "org_1"}}
+
+	require.NoError(t, c.Set(ctx, "q", acme, []byte("acme rows"), 10*time.Second))
+	require.NoError(t, c.Set(ctx, "q", globex, []byte("globex rows"), 10*time.Second))
+	c.Wait()
+
+	val, _, err := c.Get(ctx, "q", acme)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("acme rows"), val)
+	val, _, err = c.Get(ctx, "q", globex)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("globex rows"), val, "a tenant must never be served another tenant's entry")
+
+	// A per-scope bump for acme orphans acme's entry only.
+	_, err = c.Invalidate(ctx, acme)
+	require.NoError(t, err)
+	val, _, err = c.Get(ctx, "q", acme)
+	require.NoError(t, err)
+	assert.Nil(t, val)
+	val, _, err = c.Get(ctx, "q", globex)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("globex rows"), val, "an invalidation must not reach another tenant's entry")
+
+	// So does a whole-table bump.
+	_, err = c.Invalidate(ctx, []Namespace{{Tenant: "acme", Table: "events"}})
+	require.NoError(t, err)
+	val, _, err = c.Get(ctx, "q", globex)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("globex rows"), val)
 }

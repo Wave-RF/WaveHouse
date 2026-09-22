@@ -652,37 +652,7 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 }
 
 func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs []parsedMsg) {
-	// Build the minimal set of namespaces to invalidate. Every msg here is for
-	// tableName, so a single scopeless write bumps the whole table — which subsumes
-	// every scope — and there's nothing more to add. Otherwise invalidate each
-	// distinct scope. Doing this here (we already loop the batch once, and know it's
-	// one table) keeps Cache.Invalidate a simple one-pass bump.
-	encodedTable := query.SafeEncodeToken(tableName)
-	seenScopes := make(map[string]struct{}, len(msgs))
-	namespaces := make([]cache.Namespace, 0, len(msgs))
-
-	for _, pm := range msgs {
-		if pm.scope == "" {
-			namespaces = []cache.Namespace{{Table: encodedTable}}
-			break
-		}
-		if _, exists := seenScopes[pm.scope]; exists {
-			continue
-		}
-		seenScopes[pm.scope] = struct{}{}
-		namespaces = append(namespaces, cache.Namespace{
-			Table: encodedTable,
-			Scope: query.SafeEncodeToken(pm.scope),
-		})
-	}
-
-	if len(namespaces) > 0 {
-		invCtx := trace.ContextWithSpanContext(context.WithoutCancel(ctx), trace.SpanContextFromContext(ctx))
-		_, err := w.cache.Invalidate(invCtx, namespaces)
-		if err != nil {
-			slog.ErrorContext(invCtx, "failed to invalidate cache after insert - your cache is holding stale data now!", "table", tableName, "error", err)
-		}
-	}
+	w.invalidate(ctx, w.tenant, tableName, msgs)
 
 	// Ack in the background, tracked on ackWg. DoubleAck is fsync-bound
 	// (SyncAlways) and slow, so it must stay off the insert path. dispatchLoop
@@ -699,6 +669,47 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 		}
 		acks.Wait()
 	})
+}
+
+// invalidate bumps the cache namespaces a batch of inserts into tableName
+// changed, for tenant id: the namespaces lead with the tenant (#583 story 8),
+// so the same table under another tenant keeps its cached results. id is a
+// parameter rather than the worker's own tenant because it is the one thing
+// story 5 changes here: the tenant read off the message.
+//
+// The set is the minimal one. Every msg here is for tableName, so a single
+// scopeless write bumps the whole table — which subsumes every scope — and
+// there's nothing more to add. Otherwise invalidate each distinct scope.
+// Doing this here (we already loop the batch once, and know it's one table)
+// keeps Cache.Invalidate a simple one-pass bump.
+func (w *IngestWorker) invalidate(ctx context.Context, id tenant.ID, tableName string, msgs []parsedMsg) {
+	encodedTable := query.SafeEncodeToken(tableName)
+	seenScopes := make(map[string]struct{}, len(msgs))
+	namespaces := make([]cache.Namespace, 0, len(msgs))
+
+	for _, pm := range msgs {
+		if pm.scope == "" {
+			namespaces = []cache.Namespace{{Tenant: id, Table: encodedTable}}
+			break
+		}
+		if _, exists := seenScopes[pm.scope]; exists {
+			continue
+		}
+		seenScopes[pm.scope] = struct{}{}
+		namespaces = append(namespaces, cache.Namespace{
+			Tenant: id,
+			Table:  encodedTable,
+			Scope:  query.SafeEncodeToken(pm.scope),
+		})
+	}
+
+	if len(namespaces) == 0 {
+		return
+	}
+	invCtx := trace.ContextWithSpanContext(context.WithoutCancel(ctx), trace.SpanContextFromContext(ctx))
+	if _, err := w.cache.Invalidate(invCtx, namespaces); err != nil {
+		slog.ErrorContext(invCtx, "failed to invalidate cache after insert - your cache is holding stale data now!", "tenant", id, "table", tableName, "error", err)
+	}
 }
 
 // rejectPoison disposes of a message the worker can never insert. The DLQ is

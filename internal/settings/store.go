@@ -19,18 +19,16 @@ import (
 // Validate, so the snapshot is exactly what the files said when they were
 // adopted. Defaults live in the seed directory (Seed / WriteSeed).
 type Store struct {
-	id   tenant.ID
-	snap atomic.Pointer[Document]
+	// tenant is the id the Registry created the store for; the zero value
+	// only for a Store built outside a Registry (tests).
+	tenant tenant.ID
+	snap   atomic.Pointer[Document]
 }
 
-// NewStore returns the empty store of tenant id: the Registry adopts a
-// document into it, and a test that fixes its getters hands it to NewRegistry
-// or straight to a handler.
-func NewStore(id tenant.ID) *Store { return &Store{id: id} }
-
-// Tenant is the tenant whose settings this store holds — what a handler
-// that was given the store addresses the message queue with.
-func (s *Store) Tenant() tenant.ID { return s.id }
+// Tenant returns the id of the tenant this store holds the settings of: how
+// a handler holding the request's store names its tenant to a per-tenant
+// resource (#583) without a second read of the context.
+func (s *Store) Tenant() tenant.ID { return s.tenant }
 
 // adopt swaps in a validated document. The Registry calls it under its
 // reload lock.

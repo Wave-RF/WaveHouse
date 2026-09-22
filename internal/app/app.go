@@ -90,8 +90,8 @@ type App struct {
 
 	// tenants is the registry every tenant-aware path resolves through, and
 	// the owner of every reload. The process-wide resources (ClickHouse, MQ,
-	// auth, CORS) still follow its default tenant, through defaultStore:
-	// tenant 0's store as of its last adoption (defaultSetting).
+	// auth) still follow its default tenant, through defaultStore: tenant
+	// 0's store as of its last adoption (defaultSetting).
 	tenants      *settings.Registry
 	defaultStore atomic.Pointer[settings.Store]
 	// policies is the default tenant's policy, for the ops gate and the
