@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel"
 
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
@@ -203,9 +204,9 @@ func TestNew_DedupeFollowsSettings(t *testing.T) {
 			}})
 			cfg := testConfig(t, dir)
 			a := newApp(t, cfg, Options{})
-			assert.Equal(t, tt.enabled, a.dedup.Open())
+			assert.Equal(t, tt.enabled, a.dedup.For(tenant.Default).Open())
 			_, err := os.Stat(filepath.Join(cfg.DataDir, "pebble"))
-			assert.Equal(t, tt.enabled, err == nil, "pebble directory exists iff dedupe is on")
+			assert.Equal(t, tt.enabled, err == nil, "pebble directory exists iff dedupe is on: a flat directory's one tenant keeps the path it always had")
 		})
 	}
 }
@@ -227,7 +228,8 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	dir := writeSettings(t, map[string]any{"mq": map[string]any{"max_bytes_gb": 1}})
 	cfg := testConfig(t, dir)
 	a := newApp(t, cfg, Options{})
-	require.False(t, a.dedup.Open())
+	dedup := a.dedup.For(tenant.Default)
+	require.False(t, dedup.Open())
 	require.Equal(t, int64(1<<30), a.mq.MaxBytes())
 
 	rewriteSettings(t, dir, map[string]any{
@@ -236,14 +238,14 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	})
 	_, adopted := a.tenants.Reload("test")
 	require.True(t, adopted)
-	assert.True(t, a.dedup.Open(), "dedupe hook opened the store")
+	assert.True(t, dedup.Open(), "dedupe hook opened the store")
 	// How the budget is split across the MQ's queues is internal/mq's to test.
 	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(), "mq hook applied the new byte budget")
 
 	rewriteSettings(t, dir, map[string]any{"mq": map[string]any{"max_bytes_gb": 2}})
 	_, adopted = a.tenants.Reload("test")
 	require.True(t, adopted)
-	assert.False(t, a.dedup.Open(), "dedupe hook closed the store")
+	assert.False(t, dedup.Open(), "dedupe hook closed the store")
 }
 
 // writeNestedSettings materializes a nested settings directory: tenant folder
@@ -390,7 +392,9 @@ func TestNew_NestedWithoutAnOperatorKeyWarnsTheOpsTreeIsClosed(t *testing.T) {
 
 // The process-wide resources follow tenant 0 alone: another tenant's reload
 // never moves them, and a rejected 0 folder leaves them as they were rather
-// than reconfiguring them from nothing.
+// than reconfiguring them from nothing. The dedupe stores are per tenant
+// (story 7), so each follows its own folder instead — the contrast the
+// same reloads show.
 func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	dedupeOn := map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}
 	grown := map[string]any{"dedupe": dedupeOn, "mq": map[string]any{"max_bytes_gb": 2}}
@@ -399,7 +403,9 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 		"acme": {"mq": map[string]any{"max_bytes_gb": 1}},
 	})
 	a := newApp(t, testConfig(t, root), Options{})
-	require.False(t, a.dedup.Open())
+	dedup0, dedupAcme := a.dedup.For(tenant.Default), a.dedup.For("acme")
+	require.False(t, dedup0.Open())
+	require.False(t, dedupAcme.Open())
 	require.Equal(t, int64(1<<30), a.mq.MaxBytes())
 	// The CORS list is read per request rather than reconciled by a hook; it
 	// is the seed's ["*"] in every folder here.
@@ -415,21 +421,23 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	rewriteSettings(t, filepath.Join(root, "acme"), grown)
 	_, adopted := a.tenants.Reload("test")
 	require.True(t, adopted)
-	assert.False(t, a.dedup.Open(), "acme's dedupe switch is not the process's")
+	assert.True(t, dedupAcme.Open(), "acme's dedupe switch opens acme's own store")
+	assert.False(t, dedup0.Open(), "and moves nothing of tenant 0's")
 	assert.Equal(t, int64(1<<30), a.mq.MaxBytes())
 
 	rewriteSettings(t, filepath.Join(root, "0"), grown)
 	_, adopted = a.tenants.Reload("test")
 	require.True(t, adopted)
-	assert.True(t, a.dedup.Open())
+	assert.True(t, dedup0.Open())
 	assert.Equal(t, int64(2<<30), a.mq.MaxBytes())
 
 	rewriteSettings(t, filepath.Join(root, "0"), invalidQuery)
 	_, adopted = a.tenants.Reload("test")
 	require.False(t, adopted)
-	assert.True(t, a.dedup.Open(), "a rejected 0 folder must not read as dedupe off")
-	assert.Equal(t, int64(2<<30), a.mq.MaxBytes())
-	assert.Equal(t, "*", allowOrigin(), "nor as an empty CORS list: that would cost every tenant its browser clients")
+	assert.False(t, dedup0.Open(), "a rejected 0 folder closes tenant 0's own store, which answers no request now")
+	assert.True(t, dedupAcme.Open(), "and costs acme nothing")
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(), "the process-wide budget stays as tenant 0 last adopted it")
+	assert.Equal(t, "*", allowOrigin(), "as does the CORS list: an empty one would cost every tenant its browser clients")
 
 	// A removed 0 folder is the same: the registry forgets the tenant, the
 	// process keeps the wiring it last adopted.
@@ -438,8 +446,107 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	require.True(t, adopted)
 	_, known := a.tenants.Resolve(tenant.Default)
 	require.False(t, known)
-	assert.True(t, a.dedup.Open())
+	assert.False(t, dedup0.Open())
+	assert.True(t, dedupAcme.Open())
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes())
 	assert.Equal(t, "*", allowOrigin())
+}
+
+// One dedupe store per tenant over a nested directory (#583 story 7), rooted
+// at data_dir/<tenant>/dedupe and following that tenant's own switch: opened
+// by its folder's adoption, closed — the directory left as it is — once the
+// folder is rejected or removed, and reopened over the same seen ids when
+// the folder is back. Close releases every open store.
+func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
+	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": nil, "broken": invalidQuery})
+	cfg := testConfig(t, root)
+	a := newApp(t, cfg, Options{})
+	ctx := t.Context()
+	dir := func(id string) string { return filepath.Join(cfg.DataDir, id, "dedupe") }
+
+	acme, globex := a.dedup.For("acme"), a.dedup.For("globex")
+	assert.True(t, acme.Open(), "acme's switch is on")
+	assert.DirExists(t, dir("acme"))
+	assert.False(t, globex.Open(), "globex's is off")
+	assert.NoDirExists(t, dir("globex"), "a closed store creates nothing")
+	assert.NoDirExists(t, dir("broken"), "nor does a rejected tenant")
+	assert.NoDirExists(t, filepath.Join(cfg.DataDir, "pebble"), "the flat directory's path is not used over a nested one")
+	dup, err := acme.CheckAndMark(ctx, "e1")
+	require.NoError(t, err)
+	assert.False(t, dup)
+
+	rewriteSettings(t, filepath.Join(root, "globex"), dedupeOn)
+	a.tenants.Reload("test")
+	assert.True(t, globex.Open(), "globex's reload opens globex's store")
+	assert.DirExists(t, dir("globex"))
+	dup, err = globex.CheckAndMark(ctx, "e1")
+	require.NoError(t, err)
+	assert.False(t, dup, "an id acme has seen is new to globex")
+
+	// A reload that rejects globex's folder alone closes globex's store, and
+	// nothing else: a rejected tenant answers no request, so it holds no store.
+	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+	_, adopted, known := a.tenants.ReloadTenant("globex", "test")
+	require.True(t, known)
+	require.False(t, adopted)
+	assert.False(t, globex.Open())
+	assert.True(t, acme.Open())
+
+	// A removed folder: the store closes, the directory stays as it is.
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	_, known = a.tenants.Resolve("acme")
+	require.False(t, known)
+	assert.False(t, acme.Open(), "a tenant the registry no longer holds has its store closed")
+	entries, err := os.ReadDir(dir("acme"))
+	require.NoError(t, err, "and its directory untouched")
+	assert.NotEmpty(t, entries)
+
+	// Restoring the folder restores the tenant, seen ids included.
+	require.NoError(t, os.Rename(writeSettings(t, dedupeOn), filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	restored := a.dedup.For("acme")
+	assert.True(t, restored.Open())
+	dup, err = restored.CheckAndMark(ctx, "e1")
+	require.NoError(t, err)
+	assert.True(t, dup, "an id seen before the folder was removed is still a duplicate")
+
+	require.NoError(t, a.Close(context.Background()))
+	assert.False(t, restored.Open(), "Close releases every open store")
+}
+
+// A store that cannot open follows the registry's own rule for the shape: a
+// flat directory refuses boot, like every other store, and a nested one
+// fails closed per tenant — that tenant's ingest answers 500 until a reload
+// or a restart opens it, and every other tenant carries on.
+func TestNew_DedupeOpenFailure(t *testing.T) {
+	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
+	// A regular file where the store's directory should be is what Pebble
+	// refuses to open.
+	block := func(t *testing.T, path string) {
+		t.Helper()
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
+		require.NoError(t, os.WriteFile(path, nil, 0o600))
+	}
+	t.Run("flat refuses boot", func(t *testing.T) {
+		guardGlobals(t)
+		cfg := testConfig(t, writeSettings(t, dedupeOn))
+		block(t, filepath.Join(cfg.DataDir, "pebble"))
+		_, err := New(t.Context(), Options{Config: cfg})
+		require.ErrorContains(t, err, "dedupe open")
+	})
+	t.Run("nested fails closed per tenant", func(t *testing.T) {
+		root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": dedupeOn})
+		cfg := testConfig(t, root)
+		block(t, filepath.Join(cfg.DataDir, "acme", "dedupe"))
+		a := newApp(t, cfg, Options{})
+		acme := a.dedup.For("acme")
+		assert.False(t, acme.Open())
+		_, err := acme.CheckAndMark(t.Context(), "e1")
+		require.ErrorIs(t, err, dedupe.ErrUnavailable, "switched on but not open: that tenant's ingest fails closed")
+		assert.True(t, a.dedup.For("globex").Open(), "the tenant beside it is served")
+	})
 }
 
 // keepalive is a config.json patch setting the stream block's keepalive pair.

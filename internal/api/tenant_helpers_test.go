@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
@@ -24,8 +25,13 @@ func withTenant(r *http.Request) *http.Request {
 	return r.WithContext(WithStore(r.Context(), testStore))
 }
 
+// testTenantRegistry is the registry whose default tenant is testStore, built
+// once: NewRegistry stamps the store with its tenant, and parallel tests must
+// not each restamp the one they share.
+var testTenantRegistry = settings.NewRegistry(testStore)
+
 // testTenants is a registry whose default tenant is testStore.
-func testTenants() *settings.Registry { return settings.NewRegistry(testStore) }
+func testTenants() *settings.Registry { return testTenantRegistry }
 
 // nestedTenants opens a nested settings directory, one folder per entry:
 // tenant folder → its config.json (fullConfig for a tenant that is served,
@@ -44,6 +50,11 @@ func nestedTenants(t *testing.T, configs map[string]string) *settings.Registry {
 // staticPolicy is a PolicySource fixed to p, whatever the tenant.
 func staticPolicy(p *policy.Policy) PolicySource {
 	return func(*settings.Store) *policy.Policy { return p }
+}
+
+// staticDedup is an IngestHandler.Dedup fixed to d, whatever the tenant.
+func staticDedup(d dedupe.Deduplicator) func(*settings.Store) dedupe.Deduplicator {
+	return func(*settings.Store) dedupe.Deduplicator { return d }
 }
 
 // staticPipes is a PipesHandler source fixed to queries, whatever the tenant.

@@ -73,7 +73,7 @@ func (a *App) wireSettings() error {
 			slog.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
 		}
 	case !served:
-		slog.Warn("nested settings directory with no tenant 0 being served: the ClickHouse connection, the MQ byte budget, the dedupe store, the JWT verifier, CORS, and the async paths (ingest worker, sweeper, stream hub, schema refresh) are still configured from tenant 0's config.json, so they run unconfigured — no ClickHouse address, /livez degraded — until a 0 folder is adopted")
+		slog.Warn("nested settings directory with no tenant 0 being served: the ClickHouse connection, the MQ byte budget, the JWT verifier, CORS, and the async paths (ingest worker, sweeper, stream hub, schema refresh) are still configured from tenant 0's config.json, so they run unconfigured — no ClickHouse address, /livez degraded — until a 0 folder is adopted")
 	}
 	return nil
 }
@@ -89,8 +89,8 @@ func (a *App) trackDefaultStore() {
 }
 
 // defaultSetting reads one setting of the default tenant, which the
-// process-wide resources (ClickHouse, dedupe, MQ, auth, CORS) follow until
-// #583 gives each tenant its own. It reads tenant 0's last adopted document,
+// process-wide resources (ClickHouse, MQ, auth, CORS) follow until #583
+// gives each tenant its own. It reads tenant 0's last adopted document,
 // so a 0 folder a reload rejected or removed leaves every one of them as it
 // was — the ones a hook reconciles and the ones read per request (the CORS
 // list, the operator key's admin role) alike; one tenant's bad folder must
@@ -292,38 +292,67 @@ func (a *App) wireDiscovery(ctx context.Context) {
 	}})
 }
 
-// wireDedupe opens the embedded dedupe store (Pebble) under data_dir/pebble.
-// The store follows the hot-reloadable dedupe.enabled setting: one
-// reconcile closure opens or closes it to match the current snapshot. It is
-// registered as the after-adopt hook BEFORE the boot apply (Apply is
-// idempotent), so a reload landing between the two can't leave the settings
-// saying "on" with the store still closed — either the hook sees it or the
-// boot apply reads it. A failed open is fatal at boot, like every other
-// store; on reload it is logged and leaves the store closed — ingest then
-// fails closed (500 "dedupe failed") rather than silently publishing
-// un-deduped, since the files asked for dedupe.
+// wireDedupe builds the dedupe stores: one embedded Pebble store per tenant
+// (#583 story 7), each following its own tenant's hot-reloadable
+// dedupe.enabled. The layout mirrors the settings directory's shape — a flat
+// directory's one tenant keeps data_dir/pebble, and a nested directory roots
+// each tenant at data_dir/<tenant>/dedupe. One reconcile closure sets every
+// store to what the registry says: open exactly when its tenant is served
+// with the switch on, closed — its data left on disk — when the tenant is
+// switched off, rejected, or removed. It is registered as the after-adopt
+// hook BEFORE the boot apply (Apply is idempotent), so a reload landing
+// between the two can't leave a tenant's settings saying "on" with its store
+// still closed — either the hook sees it or the boot apply reads it. A
+// failed open follows the registry's own rule for the shape: flat refuses
+// boot, like every other store, and on reload logs and leaves the store
+// closed — ingest then fails closed (500 "dedupe failed") rather than
+// silently publishing un-deduped, since the files asked for dedupe; nested
+// fails closed per tenant the same way at boot too, the next reload
+// retrying, so one tenant's unopenable store never costs the others their
+// process.
 func (a *App) wireDedupe() error {
-	dir := filepath.Join(a.cfg.DataDir, "pebble")
-	dedup := dedupe.NewManaged(dir)
-	a.dedup = dedup
-	a.add(component{name: "dedupe", close: withoutContext(dedup.Close)})
-	reconcile := func() (bool, error) {
-		enabled := defaultSetting(a, (*settings.Store).DedupeEnabled)
-		if enabled && !dedup.Open() {
-			config.WarnIfFreshDataDir("pebble", dir)
+	nested := a.tenants.Nested()
+	dir := func(id tenant.ID) string {
+		if !nested {
+			return filepath.Join(a.cfg.DataDir, "pebble")
 		}
-		if err := dedup.Apply(enabled); err != nil {
-			config.LogStorageInitError("dedupe", dir, err)
-			return enabled, err
-		}
-		return enabled, nil
+		return filepath.Join(a.cfg.DataDir, id.String(), "dedupe")
 	}
-	a.onDefaultAdopt(func() {
-		if enabled, err := reconcile(); err == nil {
-			slog.Info("dedupe store reconciled with settings", "enabled", enabled)
+	stores := dedupe.NewStores(func(id tenant.ID) *dedupe.Managed { return dedupe.NewManaged(dir(id)) })
+	a.dedup = stores
+	a.add(component{name: "dedupe", close: withoutContext(stores.Close)})
+	reconcile := func() error {
+		var errs []error
+		for id, store := range a.tenants.All() {
+			m := stores.For(id)
+			enabled := store.DedupeEnabled()
+			wasOpen := m.Open()
+			// A flat directory's store is the process's, so a fresh directory
+			// is a first run or a lost volume. A nested tenant's first enable
+			// always starts fresh, and a lost volume shows in the NATS check.
+			if enabled && !wasOpen && !nested {
+				config.WarnIfFreshDataDir("pebble", dir(id))
+			}
+			if err := m.Apply(enabled); err != nil {
+				config.LogStorageInitError("dedupe", dir(id), err)
+				errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
+				continue
+			}
+			if m.Open() != wasOpen {
+				slog.Info("dedupe store reconciled with settings", "tenant", id, "enabled", enabled)
+			}
 		}
-	})
-	if _, err := reconcile(); err != nil {
+		served := func(id tenant.ID) bool {
+			_, ok := a.tenants.For(id)
+			return ok
+		}
+		if err := stores.Retain(served); err != nil {
+			slog.Error("dedupe store close failed", "error", err)
+		}
+		return errors.Join(errs...)
+	}
+	a.tenants.AfterAdopt(func([]tenant.ID) { _ = reconcile() })
+	if err := reconcile(); err != nil && !nested {
 		return fmt.Errorf("dedupe open: %w", err)
 	}
 	return nil
@@ -351,7 +380,7 @@ func (a *App) wireMQ() error {
 	// provider and RegisterCallback silently no-ops, making this look
 	// authoritative when it's actually doing nothing.
 	if a.cfg.OTel.Enabled || a.cfg.Prometheus.Enabled {
-		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedup); err != nil {
+		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedup.Stats); err != nil {
 			slog.Error("failed to register system metrics", "error", err)
 		}
 	}
@@ -518,7 +547,7 @@ func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
 // triggers (these two and POST /v1/ops/settings/reload) funnel into the same
 // serialized Registry.Reload, and a rejected reload keeps the previous good
 // snapshot. They only start in Run, after New has registered every
-// AfterAdopt hook (ClickHouse reconnect, dedupe store, keepalive wheel, auth
+// AfterAdopt hook (ClickHouse reconnect, dedupe stores, keepalive wheel, auth
 // verifier): the watcher reloads once as soon as its watch exists, and that
 // reload must already drive every hook — a hook registered after the first
 // reload could miss it.
@@ -576,7 +605,7 @@ func (a *App) wireReloadTriggers() {
 func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	ingestHandler := api.NewIngestHandler(a.registry, a.mq)
 	ingestHandler.PolicySource = (*settings.Store).Policy
-	ingestHandler.Dedup = a.dedup
+	ingestHandler.Dedup = func(s *settings.Store) dedupe.Deduplicator { return a.dedup.For(s.Tenant()) }
 	ingestHandler.DedupeSettings = (*settings.Store).DedupeFor
 
 	healthHandler := api.NewHealthHandler(a.ch)
