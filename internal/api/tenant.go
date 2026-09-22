@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -114,31 +115,41 @@ func opsStore(w http.ResponseWriter, r *http.Request, tenants *settings.Registry
 	return resolveStore(w, tenants, id)
 }
 
+// requestTenant is the tenant a request names: the tenant.Header value,
+// tenant.Default when the header is absent or empty. A malformed id is an
+// error, and so is a repeated header — refused rather than picked from, so a
+// value a proxy sets can never be shadowed by one the client sent. The error
+// text is the 400 body TenantMW answers with; corsOrigins reads the tenant
+// the same way so a response is decorated for the tenant it is served for.
+func requestTenant(r *http.Request) (tenant.ID, error) {
+	values := r.Header.Values(tenant.Header)
+	if len(values) > 1 {
+		return "", fmt.Errorf("invalid %s: sent more than once", tenant.Header)
+	}
+	if len(values) == 0 || values[0] == "" {
+		return tenant.Default, nil
+	}
+	id, err := tenant.Parse(values[0])
+	if err != nil {
+		return "", fmt.Errorf("invalid %s: %w", tenant.Header, err)
+	}
+	return id, nil
+}
+
 // TenantMW resolves the request's tenant before authentication runs and
-// stores it in the request context: the tenant.Header value, tenant.Default
-// when absent. A malformed id is a 400; an id that cannot be served is
-// resolveStore's 404 or 503. A repeated header is refused rather than picked
-// from, so a value a proxy sets can never be shadowed by one the client sent.
-// Every answer, the refusals included, carries Vary: X-Tenant-ID so a shared
-// cache cannot replay one tenant's response to another — added, not set, so
-// the CORS Vary: Origin survives.
+// stores it in the request context: the tenant requestTenant names. A
+// malformed id is a 400; an id that cannot be served is resolveStore's 404
+// or 503. Every answer, the refusals included, carries Vary: X-Tenant-ID so
+// a shared cache cannot replay one tenant's response to another — added, not
+// set, so the CORS Vary: Origin survives.
 func TenantMW(tenants *settings.Registry) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Add("Vary", tenant.Header)
-			id := tenant.Default
-			values := r.Header.Values(tenant.Header)
-			if len(values) > 1 {
-				writeJSONError(w, http.StatusBadRequest, "invalid "+tenant.Header+": sent more than once")
+			id, err := requestTenant(r)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
 				return
-			}
-			if len(values) == 1 && values[0] != "" {
-				parsed, err := tenant.Parse(values[0])
-				if err != nil {
-					writeJSONError(w, http.StatusBadRequest, "invalid "+tenant.Header+": "+err.Error())
-					return
-				}
-				id = parsed
 			}
 			store, ok := resolveStore(w, tenants, id)
 			if !ok {

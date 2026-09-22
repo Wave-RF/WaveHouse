@@ -401,16 +401,21 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	a := newApp(t, testConfig(t, root), Options{})
 	require.False(t, a.dedup.Open())
 	require.Equal(t, int64(1<<30), a.mq.MaxBytes())
-	// The CORS list is read per request rather than reconciled by a hook; it
-	// is the seed's ["*"] in every folder here.
-	allowOrigin := func() string {
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/version", nil)
+	// CORS is per tenant, not a hook's: a tenant route reads its own tenant's
+	// list and the exempt routes tenant 0's (the seed's ["*"] in every folder
+	// here), both through the registry, so a lost 0 folder is felt at once.
+	allowOrigin := func(path string, id ...string) string {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
 		req.Header.Set("Origin", "https://app.example.com")
+		for _, id := range id {
+			req.Header.Set(tenant.Header, id)
+		}
 		rec := httptest.NewRecorder()
 		a.Handler().ServeHTTP(rec, req)
 		return rec.Header().Get("Access-Control-Allow-Origin")
 	}
-	require.Equal(t, "*", allowOrigin())
+	require.Equal(t, "*", allowOrigin("/version"))
+	require.Equal(t, "*", allowOrigin("/v1/health", "acme"))
 
 	rewriteSettings(t, filepath.Join(root, "acme"), grown)
 	_, adopted := a.tenants.Reload("test")
@@ -429,7 +434,8 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	require.False(t, adopted)
 	assert.True(t, a.dedup.Open(), "a rejected 0 folder must not read as dedupe off")
 	assert.Equal(t, int64(2<<30), a.mq.MaxBytes())
-	assert.Equal(t, "*", allowOrigin(), "nor as an empty CORS list: that would cost every tenant its browser clients")
+	assert.Empty(t, allowOrigin("/version"), "the exempt routes read tenant 0 through the registry, which is no longer serving it")
+	assert.Equal(t, "*", allowOrigin("/v1/health", "acme"), "acme's own routes keep acme's list")
 
 	// A removed 0 folder is the same: the registry forgets the tenant, the
 	// process keeps the wiring it last adopted.
@@ -439,7 +445,8 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	_, known := a.tenants.Resolve(tenant.Default)
 	require.False(t, known)
 	assert.True(t, a.dedup.Open())
-	assert.Equal(t, "*", allowOrigin())
+	assert.Empty(t, allowOrigin("/version"))
+	assert.Equal(t, "*", allowOrigin("/v1/health", "acme"))
 }
 
 // keepalive is a config.json patch setting the stream block's keepalive pair.

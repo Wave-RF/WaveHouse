@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -55,4 +56,26 @@ func staticPolicy(p *policy.Policy) PolicySource {
 func staticPipes(queries ...*pipes.NamedQuery) func(*settings.Store) pipes.Source {
 	src := pipes.Static(queries...)
 	return func(*settings.Store) pipes.Source { return src }
+}
+
+// staticOrigins is a CORS getter fixed to origins, whatever the tenant.
+func staticOrigins(origins ...string) func(*settings.Store) []string {
+	return func(*settings.Store) []string { return origins }
+}
+
+// configWithOrigins is fullConfig with cors.allowed_origins set to origins —
+// an empty list with none.
+func configWithOrigins(t *testing.T, origins ...string) string {
+	t.Helper()
+	if origins == nil {
+		origins = []string{}
+	}
+	var doc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(fullConfig(100)), &doc))
+	cors, err := json.Marshal(map[string][]string{"allowed_origins": origins})
+	require.NoError(t, err)
+	doc["cors"] = cors
+	out, err := json.Marshal(doc)
+	require.NoError(t, err)
+	return string(out)
 }
