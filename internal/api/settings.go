@@ -38,7 +38,8 @@ type reloadResponse struct {
 // (400 malformed, 404 unknown): adopted then speaks for that folder alone,
 // and a 422 means the tenant is no longer served. Without it the whole tree
 // is reloaded, and over a nested directory a 422 can mean adopted in part —
-// the findings name the folders that were not (settings.Registry.Reload).
+// the error findings name the folders that were not
+// (settings.Registry.Reload).
 func (h *SettingsHandler) Reload(w http.ResponseWriter, r *http.Request) {
 	id, named, ok := opsTenant(w, r)
 	if !ok {

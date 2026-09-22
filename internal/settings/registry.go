@@ -154,9 +154,9 @@ func (r *Registry) All() iter.Seq2[tenant.ID, *Store] {
 // matching `wavehouse validate`. The returned bool reports whether everything
 // was adopted: no finding is an error. In a nested directory false can
 // therefore mean adopted in part — the tenants whose folders validated were
-// adopted and the ones in the findings were not. trigger names the path that
-// fired ("boot", "sighup", "watch", "api") and tags every log line so
-// operators can tell them apart.
+// adopted, warnings and all, and the ones with an error finding were not.
+// trigger names the path that fired ("boot", "sighup", "watch", "api") and
+// tags every log line so operators can tell them apart.
 func (r *Registry) Reload(trigger string) ([]Finding, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

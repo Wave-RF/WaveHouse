@@ -32,7 +32,7 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 403 | `HTTP_403` | No | Insufficient permissions |
 | 404 | `HTTP_404` | No | Table, pipe, or tenant not found |
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
-| 503 | `HTTP_503` | Yes | Service unavailable, or a tenant whose settings folder was rejected (auto-retries with `Retry-After`) |
+| 503 | `HTTP_503` | Yes | Service unavailable, or a tenant whose settings folder was rejected (auto-retries, honoring `Retry-After` when the response carries one) |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `AbortSignal` |
 | 0 | `SSE_CONNECT_ERROR` | No | Stream could not be started (e.g. a non-absolute `baseURL`) |

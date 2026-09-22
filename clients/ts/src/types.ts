@@ -429,8 +429,9 @@ export interface SettingsReloadResult {
   /**
    * Whether everything the reload covered was adopted; false leaves the
    * previous settings in effect. Over a directory of tenant folders false can
-   * mean adopted in part: the tenants named in `findings` were not adopted and
-   * are no longer served, and the rest were.
+   * mean adopted in part: the tenants with an error among their `findings`
+   * were not adopted and are no longer served, and the rest were — `findings`
+   * carries every folder's warnings too.
    */
   adopted: boolean;
   /** Every finding from the validation pass (warnings included on success). */
