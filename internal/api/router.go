@@ -396,13 +396,18 @@ func tenantRoute(path string) bool {
 // preflight included, which the browser sends without X-Tenant-ID, so a
 // nested directory's preflights are per tenant only where the fronting proxy
 // stamps the header on them too (the deployment docs say so; a preflight
-// naming no tenant reads as tenant 0 like any other request). Everything
-// else is answered from the default tenant's list: the tenant-exempt routes,
-// which ignore the header, and a request naming a tenant that is not served,
-// whose 400/404/503 TenantMW is about to write. With no tenant 0 being
-// served, those carry no CORS headers at all. So no tenant's list ever widens
-// another tenant's routes, and a flat directory — one tenant, the default —
-// answers every request from its one list, as it always has.
+// naming no tenant reads as tenant 0 like any other request). That proxy
+// fixes the tenant from the host or path and overwrites a client's header on
+// every request: a browser caches a preflight by URL, not by header value,
+// so a tenant a page could choose would let one tenant's cached preflight
+// release writes at another — the docs pin that rule, and Max-Age stays.
+// Everything else is answered from the default tenant's list: the
+// tenant-exempt routes, which ignore the header, and a request naming a
+// tenant that is not served, whose 400/404/503 TenantMW is about to write.
+// With no tenant 0 being served, those carry no CORS headers at all. So,
+// with the tenant tied to the URL, no tenant's list widens another tenant's
+// routes, and a flat directory — one tenant, the default — answers every
+// request from its one list, as it always has.
 func corsOrigins(tenants *settings.Registry, get func(*settings.Store) []string) func(*http.Request) []string {
 	return func(r *http.Request) []string {
 		if tenants == nil || get == nil {
