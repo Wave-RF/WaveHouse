@@ -960,9 +960,10 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 // TestNewRouter_CORSPerTenant drives one router over a nested registry and
 // pins corsOrigins' rule: a tenant route is decorated from the list of the
 // tenant it names, the stamped preflight included, and everything else — the
-// tenant-exempt routes, a request naming a tenant that is not served — from
-// tenant 0's list, or from nothing when no tenant 0 is served. The tenants
-// alternate through one router, which is what would expose a captured list.
+// tenant-exempt routes, the ops tree, a request naming a tenant that is not
+// served — from tenant 0's list, or from nothing when no tenant 0 is served.
+// The tenants alternate through one router, which is what would expose a
+// captured list.
 func TestNewRouter_CORSPerTenant(t *testing.T) {
 	t.Parallel()
 	const (
@@ -1021,6 +1022,11 @@ func TestNewRouter_CORSPerTenant(t *testing.T) {
 			{"exempt route reads tenant 0", http.MethodGet, "/version", "", zeroApp, http.StatusOK, zeroApp},
 			{"exempt route ignores the header", http.MethodGet, "/version", "acme", acmeApp, http.StatusOK, ""},
 			{"exempt route ignores the header, still tenant 0", http.MethodGet, "/version", "acme", zeroApp, http.StatusOK, zeroApp},
+			{"ops route reads tenant 0", http.MethodGet, "/v1/ops/schema", "", zeroApp, http.StatusForbidden, zeroApp},
+			{"ops route ignores the header", http.MethodGet, "/v1/ops/schema", "acme", acmeApp, http.StatusForbidden, ""},
+			{"ops route ignores the header, still tenant 0", http.MethodGet, "/v1/ops/schema", "acme", zeroApp, http.StatusForbidden, zeroApp},
+			{"ops preflight ignores the header", http.MethodOptions, "/v1/ops/schema", "acme", acmeApp, http.StatusNoContent, ""},
+			{"ops preflight is tenant 0's", http.MethodOptions, "/v1/ops/schema", "acme", zeroApp, http.StatusNoContent, zeroApp},
 			{"unknown tenant reads tenant 0", http.MethodGet, "/v1/health", "initech", zeroApp, http.StatusNotFound, zeroApp},
 			{"unknown tenant is not acme", http.MethodGet, "/v1/health", "initech", acmeApp, http.StatusNotFound, ""},
 			{"rejected tenant reads tenant 0", http.MethodGet, "/v1/health", "broken", zeroApp, http.StatusServiceUnavailable, zeroApp},
@@ -1052,6 +1058,7 @@ func TestNewRouter_CORSPerTenant(t *testing.T) {
 		for _, tt := range []struct{ name, method, path, id string }{
 			{"unstamped preflight", http.MethodOptions, "/v1/ingest", ""},
 			{"exempt route", http.MethodGet, "/version", ""},
+			{"ops route", http.MethodGet, "/v1/ops/schema", "acme"},
 			{"unknown tenant", http.MethodGet, "/v1/health", "initech"},
 		} {
 			rec := do(router, tt.method, tt.path, tt.id, elsewhere)
