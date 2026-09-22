@@ -489,6 +489,44 @@ func TestShortestKeepalive(t *testing.T) {
 	})
 }
 
+func gapWindow(minutes int) map[string]any {
+	return map[string]any{"stream": map[string]any{"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": minutes}}
+}
+
+// One ingest stream holds every tenant's events and the sweeper purges below
+// one sequence, so it keeps the longest gap window among the tenants being
+// served — every tenant's gap-fill history is inside it (a stream per tenant
+// will honor each tenant's own, #583 story 5). A flat directory's single
+// tenant gets exactly its own window.
+func TestLongestGapWindow(t *testing.T) {
+	open := func(t *testing.T, dir string) *settings.Registry {
+		t.Helper()
+		guardGlobals(t)
+		tenants, findings := settings.Open(dir)
+		require.NotNil(t, tenants, "findings: %v", findings)
+		return tenants
+	}
+
+	t.Run("flat directory", func(t *testing.T) {
+		assert.Equal(t, 45*time.Minute, longestGapWindow(open(t, writeSettings(t, gapWindow(45)))))
+	})
+
+	t.Run("nested directory", func(t *testing.T) {
+		root := writeNestedSettings(t, map[string]map[string]any{"acme": gapWindow(15), "globex": gapWindow(60), "initech": gapWindow(30)})
+		tenants := open(t, root)
+		assert.Equal(t, 60*time.Minute, longestGapWindow(tenants))
+
+		// A rejected tenant is not being served, so its window is not weighed.
+		rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+		tenants.Reload("test")
+		assert.Equal(t, 30*time.Minute, longestGapWindow(tenants))
+	})
+
+	t.Run("no tenant served keeps nothing", func(t *testing.T) {
+		assert.Zero(t, longestGapWindow(open(t, writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery}))))
+	})
+}
+
 // A finding about a nested directory itself — a loose file beside the tenant
 // folders — refuses boot, like an invalid flat directory.
 func TestNew_NestedLooseFileRefusesBoot(t *testing.T) {
