@@ -194,6 +194,7 @@ func TestTenantRouteHandlers_NoResolvedTenantIs500(t *testing.T) {
 		"ingest":           NewIngestHandler(reg, &testutil.MockPublisher{}).Handle,
 		"structured query": newStructuredQueryHandler(t).Handle,
 		"pipe execute":     NewPipesHandler(staticPipes(), nil, nil, nil, noTimeout).Execute,
+		"stream":           NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil).Handle,
 	}
 	for name, handle := range handlers {
 		t.Run(name, func(t *testing.T) {

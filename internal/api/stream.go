@@ -45,6 +45,12 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "missing required query parameter: table")
 		return
 	}
+	// The tenant is the request's, read once: it names the table's events on
+	// the queue (mq.Topic) and the policy the Hub evaluates this stream under.
+	store, ok := requestStore(w, r)
+	if !ok {
+		return
+	}
 
 	// Resolve stream permissions for this request. The raw role from context is the
 	// bucket key: the Hub serializes the column projection once per (topic, role),
@@ -57,7 +63,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// TODO: impl scope
 	scope := ""
-	topic := mq.Topic{Table: table, Scope: scope}
+	topic := mq.Topic{Tenant: store.Tenant(), Table: table, Scope: scope}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -208,6 +214,6 @@ func (h *StreamHandler) replayContext(r *http.Request) (context.Context, context
 func (h *StreamHandler) replay(ctx context.Context, since time.Time, topic mq.Topic, send func([]byte) bool) {
 	if err := h.Replayer.ReplaySince(ctx, topic, since, send); err != nil && ctx.Err() == nil {
 		slog.Default().WarnContext(ctx, "gap-fill replay ended early; the client continues with live events only",
-			"component", "stream", "table", topic.Table, "scope", topic.Scope, "since", since, "error", err)
+			"component", "stream", "tenant", topic.Tenant, "table", topic.Table, "scope", topic.Scope, "since", since, "error", err)
 	}
 }

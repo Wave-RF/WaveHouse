@@ -59,7 +59,7 @@ func TestSSE_AcceptsSafeTableName(t *testing.T) {
 	cancel()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)
 	w := httptest.NewRecorder()
-	h.Handle(w, req)
+	h.Handle(w, withTenant(req))
 	// Past the validation gate — header set to text/event-stream, not the
 	// 400-path application/json.
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -89,7 +89,7 @@ func TestSSE_EmitsHeartbeatsWhenIdle(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.Handle(w, req)
+		h.Handle(w, withTenant(req))
 	}()
 	time.Sleep(200 * time.Millisecond)
 	cancel()
@@ -129,7 +129,7 @@ func TestSSE_WheelTickRacesHandlerTeardown(t *testing.T) {
 			hdone := make(chan struct{})
 			go func() {
 				defer close(hdone)
-				h.Handle(w, req)
+				h.Handle(w, withTenant(req))
 			}()
 			time.Sleep(8 * time.Millisecond) // let the wheel push at least once
 			rcancel()                        // client "disconnects" mid-stream
