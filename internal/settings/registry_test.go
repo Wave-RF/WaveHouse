@@ -176,6 +176,9 @@ func TestOpen_NestedRoot(t *testing.T) {
 	assert.NotSame(t, acme, globex)
 	assert.Equal(t, 111, acme.DefaultMaxRows())
 	assert.Equal(t, 222, globex.DefaultMaxRows())
+	// Each store knows the folder it was adopted from.
+	assert.Equal(t, tenant.ID("acme"), acme.Tenant())
+	assert.Equal(t, tenant.ID("globex"), globex.Tenant())
 
 	// A nested root defines the tenants it holds folders for and no other:
 	// the default tenant exists only as a 0 folder.
@@ -320,6 +323,10 @@ func TestRegistry_All(t *testing.T) {
 	require.True(t, adopted)
 	ids, _ = served()
 	assert.Equal(t, []tenant.ID{"acme", "broken", "globex"}, ids)
+	// A store created by a reload carries its tenant like one created at boot.
+	broken, ok := reg.For("broken")
+	require.True(t, ok)
+	assert.Equal(t, tenant.ID("broken"), broken.Tenant())
 
 	// Stopping early is the iterator's contract, not the caller's problem.
 	for id := range reg.All() {

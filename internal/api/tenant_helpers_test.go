@@ -12,12 +12,14 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // testStore stands in for the store TenantMW resolves. It holds no document:
 // handler tests inject fixed getters that ignore it, so a handler that read
-// it directly would panic rather than pass.
-var testStore = &settings.Store{}
+// it directly would panic rather than pass. It does carry its tenant, which
+// the publishers address the message queue with.
+var testStore = settings.NewStore(tenant.Default)
 
 // withTenant attaches testStore to r the way TenantMW would, for tests that
 // call a tenant-route handler without the router.
@@ -25,13 +27,8 @@ func withTenant(r *http.Request) *http.Request {
 	return r.WithContext(WithStore(r.Context(), testStore))
 }
 
-// testTenantRegistry is the registry whose default tenant is testStore, built
-// once: NewRegistry stamps the store with its tenant, and parallel tests must
-// not each restamp the one they share.
-var testTenantRegistry = settings.NewRegistry(testStore)
-
 // testTenants is a registry whose default tenant is testStore.
-func testTenants() *settings.Registry { return testTenantRegistry }
+func testTenants() *settings.Registry { return settings.NewRegistry(testStore) }
 
 // nestedTenants opens a nested settings directory, one folder per entry:
 // tenant folder → its config.json (fullConfig for a tenant that is served,

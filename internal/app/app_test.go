@@ -182,7 +182,7 @@ func TestNew_TenantHeaderResolvesAgainstTheRegistry(t *testing.T) {
 // parks instead. The other async getters degrade to their zero value.
 func TestAsyncGetters_RegistryMiss(t *testing.T) {
 	t.Parallel()
-	tenants := settings.NewRegistry(&settings.Store{})
+	tenants := settings.NewRegistry(settings.NewStore(tenant.Default))
 	unknown := tenant.ID("acme")
 
 	assert.True(t, dlqFor(tenants)(unknown, "events"), "an unknown tenant's failed rows park on the DLQ")

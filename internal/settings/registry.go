@@ -67,15 +67,15 @@ type entry struct {
 	rejected bool
 }
 
-// adopt returns e after a validation pass over id's folder: holding doc, or
-// rejected when the folder yielded none.
+// adopt returns e after a validation pass over tenant id's folder: holding
+// doc, or rejected when the folder yielded none.
 func (e entry) adopt(id tenant.ID, doc *Document) entry {
 	if doc == nil {
 		e.rejected = true
 		return e
 	}
 	if e.store == nil {
-		e.store = &Store{tenant: id}
+		e.store = NewStore(id)
 	}
 	e.store.adopt(doc)
 	e.rejected = false
@@ -101,9 +101,9 @@ func Open(dir string) (*Registry, []Finding) {
 
 // NewRegistry returns a flat Registry serving store as tenant.Default, with
 // no directory behind it: what a test that fixes its settings holds. The
-// store is stamped with that id, as one a Registry creates is.
+// store is keyed by that id whatever its own says, so build it with
+// NewStore(tenant.Default) for the two to agree.
 func NewRegistry(store *Store) *Registry {
-	store.tenant = tenant.Default
 	return newRegistry(map[tenant.ID]entry{tenant.Default: {store: store}})
 }
 
