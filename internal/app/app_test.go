@@ -205,8 +205,8 @@ func TestNew_DedupeFollowsSettings(t *testing.T) {
 			cfg := testConfig(t, dir)
 			a := newApp(t, cfg, Options{})
 			assert.Equal(t, tt.enabled, a.dedup.For(tenant.Default).Open())
-			_, err := os.Stat(filepath.Join(cfg.DataDir, "pebble"))
-			assert.Equal(t, tt.enabled, err == nil, "pebble directory exists iff dedupe is on: a flat directory's one tenant keeps the path it always had")
+			_, err := os.Stat(filepath.Join(cfg.DataDir, "0", "dedupe"))
+			assert.Equal(t, tt.enabled, err == nil, "tenant 0's directory exists iff dedupe is on: the four files are tenant 0")
 		})
 	}
 }
@@ -471,7 +471,7 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	assert.False(t, globex.Open(), "globex's is off")
 	assert.NoDirExists(t, dir("globex"), "a closed store creates nothing")
 	assert.NoDirExists(t, dir("broken"), "nor does a rejected tenant")
-	assert.NoDirExists(t, filepath.Join(cfg.DataDir, "pebble"), "the flat directory's path is not used over a nested one")
+	assert.NoDirExists(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "the earlier layout's directory is never created")
 	dup, err := acme.CheckAndMark(ctx, "e1")
 	require.NoError(t, err)
 	assert.False(t, dup)
@@ -516,6 +516,69 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	assert.False(t, restored.Open(), "Close releases every open store")
 }
 
+// seedLegacyStore writes a Pebble store at dir with ids seen, the way an
+// earlier layout — or an older binary rolled back to — leaves one.
+func seedLegacyStore(t *testing.T, dir string, ids ...string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(dir), 0o750))
+	d, err := dedupe.NewEmbedded(dir)
+	require.NoError(t, err)
+	for _, id := range ids {
+		_, err := d.CheckAndMark(t.Context(), id)
+		require.NoError(t, err)
+	}
+	require.NoError(t, d.Close())
+}
+
+// An earlier layout's data_dir/pebble is tenant 0's store: boot moves it to
+// data_dir/0/dedupe once, whatever the switch says, so a standalone
+// deployment keeps its seen ids across the upgrade. Both directories present
+// — an older binary ran in between — leaves both, the new one in use.
+func TestNew_MovesTheLegacyDedupeStore(t *testing.T) {
+	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
+	seen := func(t *testing.T, a *App, id string) bool {
+		t.Helper()
+		dup, err := a.dedup.For(tenant.Default).CheckAndMark(t.Context(), id)
+		require.NoError(t, err)
+		return dup
+	}
+	t.Run("seen ids survive the move", func(t *testing.T) {
+		cfg := testConfig(t, writeSettings(t, dedupeOn))
+		seedLegacyStore(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "e1")
+		a := newApp(t, cfg, Options{})
+		assert.NoDirExists(t, filepath.Join(cfg.DataDir, legacyDedupeDir))
+		assert.DirExists(t, filepath.Join(cfg.DataDir, "0", "dedupe"))
+		assert.True(t, seen(t, a, "e1"), "an id the old store had seen is still a duplicate")
+		assert.False(t, seen(t, a, "e2"))
+	})
+	t.Run("moved even with dedupe off", func(t *testing.T) {
+		cfg := testConfig(t, writeSettings(t, nil))
+		seedLegacyStore(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "e1")
+		a := newApp(t, cfg, Options{})
+		assert.NoDirExists(t, filepath.Join(cfg.DataDir, legacyDedupeDir))
+		assert.DirExists(t, filepath.Join(cfg.DataDir, "0", "dedupe"))
+		assert.False(t, a.dedup.For(tenant.Default).Open(), "moved, not opened: the switch is off")
+	})
+	t.Run("both present: the new one is in use, the old is left", func(t *testing.T) {
+		cfg := testConfig(t, writeSettings(t, dedupeOn))
+		seedLegacyStore(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "old")
+		seedLegacyStore(t, filepath.Join(cfg.DataDir, "0", "dedupe"), "new")
+		a := newApp(t, cfg, Options{})
+		assert.DirExists(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "deleting data is never boot's call")
+		assert.True(t, seen(t, a, "new"))
+		assert.False(t, seen(t, a, "old"), "the old store's ids are not merged in")
+	})
+	t.Run("a failed move refuses boot", func(t *testing.T) {
+		guardGlobals(t)
+		cfg := testConfig(t, writeSettings(t, dedupeOn))
+		seedLegacyStore(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "e1")
+		// Tenant 0's directory cannot be created under a regular file.
+		require.NoError(t, os.WriteFile(filepath.Join(cfg.DataDir, "0"), nil, 0o600))
+		_, err := New(t.Context(), Options{Config: cfg})
+		require.ErrorContains(t, err, "dedupe store relocation")
+	})
+}
+
 // A store that cannot open follows the registry's own rule for the shape: a
 // flat directory refuses boot, like every other store, and a nested one
 // fails closed per tenant — that tenant's ingest answers 500 until a reload
@@ -532,7 +595,7 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 	t.Run("flat refuses boot", func(t *testing.T) {
 		guardGlobals(t)
 		cfg := testConfig(t, writeSettings(t, dedupeOn))
-		block(t, filepath.Join(cfg.DataDir, "pebble"))
+		block(t, filepath.Join(cfg.DataDir, "0", "dedupe"))
 		_, err := New(t.Context(), Options{Config: cfg})
 		require.ErrorContains(t, err, "dedupe open")
 	})

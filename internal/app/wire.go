@@ -292,31 +292,34 @@ func (a *App) wireDiscovery(ctx context.Context) {
 	}})
 }
 
-// wireDedupe builds the dedupe stores: one embedded Pebble store per tenant
-// (#583 story 7), each following its own tenant's hot-reloadable
-// dedupe.enabled. The layout mirrors the settings directory's shape — a flat
-// directory's one tenant keeps data_dir/pebble, and a nested directory roots
-// each tenant at data_dir/<tenant>/dedupe. One reconcile closure sets every
-// store to what the registry says: open exactly when its tenant is served
-// with the switch on, closed — its data left on disk — when the tenant is
-// switched off, rejected, or removed. It is registered as the after-adopt
-// hook BEFORE the boot apply (Apply is idempotent), so a reload landing
-// between the two can't leave a tenant's settings saying "on" with its store
-// still closed — either the hook sees it or the boot apply reads it. A
-// failed open follows the registry's own rule for the shape: flat refuses
-// boot, like every other store, and on reload logs and leaves the store
-// closed — ingest then fails closed (500 "dedupe failed") rather than
-// silently publishing un-deduped, since the files asked for dedupe; nested
-// fails closed per tenant the same way at boot too, the next reload
-// retrying, so one tenant's unopenable store never costs the others their
-// process.
+// legacyDedupeDir is where the one store lived before #583 story 7 gave each
+// tenant its own: tenant 0's, implicitly.
+const legacyDedupeDir = "pebble"
+
+// wireDedupe builds the dedupe stores: one per tenant (#583 story 7), at
+// data_dir/<tenant>/dedupe whatever the settings directory's shape — the
+// four files are tenant 0 — each following its own tenant's hot-reloadable
+// dedupe.enabled. Which store that is, is the factory's business alone; the
+// embedded Pebble one is what a process chooses here, and an earlier
+// layout's data_dir/pebble is moved to tenant 0's directory once
+// (moveLegacyDedupeStore). One reconcile closure sets every store to what
+// the registry says: open exactly when its tenant is served with the switch
+// on, closed — its data left on disk — when the tenant is switched off,
+// rejected, or removed. It is registered as the after-adopt hook BEFORE the
+// boot apply (Apply is idempotent), so a reload landing between the two
+// can't leave a tenant's settings saying "on" with its store still closed —
+// either the hook sees it or the boot apply reads it. A failed open follows
+// the registry's own rule for the shape: flat refuses boot, like every other
+// store, and on reload logs and leaves the store closed — ingest then fails
+// closed (500 "dedupe failed") rather than silently publishing un-deduped,
+// since the files asked for dedupe; nested fails closed per tenant the same
+// way at boot too, the next reload retrying, so one tenant's unopenable
+// store never costs the others their process.
 func (a *App) wireDedupe() error {
 	nested := a.tenants.Nested()
-	dir := func(id tenant.ID) string {
-		if !nested {
-			return filepath.Join(a.cfg.DataDir, "pebble")
-		}
-		return filepath.Join(a.cfg.DataDir, id.String(), "dedupe")
+	dir := func(id tenant.ID) string { return filepath.Join(a.cfg.DataDir, id.String(), "dedupe") }
+	if err := moveLegacyDedupeStore(a.cfg.DataDir, dir(tenant.Default)); err != nil {
+		return fmt.Errorf("dedupe store relocation: %w", err)
 	}
 	stores := dedupe.NewStores(func(id tenant.ID) *dedupe.Managed { return dedupe.NewManaged(dedupe.Embedded(dir(id))) })
 	a.dedup = stores
@@ -327,10 +330,11 @@ func (a *App) wireDedupe() error {
 			m := stores.For(id)
 			enabled := store.DedupeEnabled()
 			wasOpen := m.Open()
-			// A flat directory's store is the process's, so a fresh directory
-			// is a first run or a lost volume. A nested tenant's first enable
-			// always starts fresh, and a lost volume shows in the NATS check.
-			if enabled && !wasOpen && !nested {
+			// Tenant 0's store is the one an earlier deployment had, so a
+			// fresh directory there is a first run or a lost volume. Another
+			// tenant's first enable always starts fresh, and a lost volume
+			// shows in the NATS check.
+			if enabled && !wasOpen && id == tenant.Default {
 				config.WarnIfFreshDataDir("pebble", dir(id))
 			}
 			if err := m.Apply(enabled); err != nil {
@@ -355,6 +359,36 @@ func (a *App) wireDedupe() error {
 	if err := reconcile(); err != nil && !nested {
 		return fmt.Errorf("dedupe open: %w", err)
 	}
+	return nil
+}
+
+// moveLegacyDedupeStore moves an earlier layout's data_dir/pebble — tenant
+// 0's store, implicitly — to dst, tenant 0's directory, once: a standalone
+// deployment keeps its seen ids across the upgrade, and later across the
+// move to a nested directory with an explicit 0 folder. Both present (an
+// older binary ran in between and started a new store at the old path) is
+// left alone and warned about: dst is the one in use, and deleting data is
+// never boot's call. A failed move refuses boot rather than open an empty
+// store and let duplicates through in silence.
+func moveLegacyDedupeStore(dataDir, dst string) error {
+	src := filepath.Join(dataDir, legacyDedupeDir)
+	if _, err := os.Stat(src); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if _, err := os.Stat(dst); err == nil {
+		slog.Warn("dedupe store already moved to tenant 0's directory; the old directory is unused and can be removed", "old", src, "path", dst)
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+		return err
+	}
+	if err := os.Rename(src, dst); err != nil {
+		return err
+	}
+	slog.Info("dedupe store moved to tenant 0's directory", "old", src, "path", dst)
 	return nil
 }
 
