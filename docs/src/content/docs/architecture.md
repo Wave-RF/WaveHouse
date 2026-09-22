@@ -51,10 +51,10 @@ WaveHouse ships a single binary, `wavehouse`: an all-in-one process running the 
 
 ```text
 internal/
-├── api/         HTTP layer (Chi router, handlers, middleware)
+├── api/         HTTP layer (Chi router, handlers, middleware, the cached read paths' singleflight)
 ├── app/         Process wiring: build every component, run them under one errgroup, release in reverse
 ├── auth/        JWT/JWKS authentication middleware (HMAC or JWKS, role extraction)
-├── cache/       In-process Ristretto cache with singleflight coalescing
+├── cache/       Query cache: Ristretto L1 + the tenant-led version index
 ├── chconn/      The one ClickHouse driver.Conn every consumer holds; reload swaps the connection behind it
 ├── chsql/       Shared ClickHouse SQL helpers (identifier quoting, bind-safety)
 ├── config/      YAML + env var configuration loading
@@ -109,9 +109,9 @@ The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https:/
 
 ### `cache/` — Query Cache
 
-- **cache.go** — `Cache` interface: `Get`, `Set`, `Close`.
-- **local.go** — In-process cache using [Ristretto](https://github.com/dgraph-io/ristretto) with `sync.Map` TTL tracking.
-- **tiered.go** — Wraps the local cache with [singleflight](https://pkg.go.dev/golang.org/x/sync/singleflight) to prevent cache stampede on concurrent misses. The tiered interface accepts an optional second cache slot for future shared-cache backends, but ships with the slot empty.
+- **cache.go** — `Cache` interface: `Get`, `Set`, `Invalidate`, `Close`, plus `QueryTimeToTTL`, which sets a result's TTL from how long its query took (10 s floor, 1 h ceiling). Every entry is keyed by the caller's query key — `<tenant>:query:<sha256 of SQL + params>`, built by the two cached handlers in `api/` (`queryCacheKey`, with the tenant read off the request's store — `settings.Store.Tenant`), which use it as their [singleflight](https://pkg.go.dev/golang.org/x/sync/singleflight) key too — folded with the `Namespace`s the result depends on, each naming its tenant, table and scope: one for a structured query, none yet for a pipe (a pipe's table dependencies are [#343](https://github.com/Wave-RF/WaveHouse/pull/343)).
+- **local.go** — `LocalCache`, the in-process L1 on [Ristretto](https://github.com/dgraph-io/ristretto): one pool shared by every tenant (a heavier tenant holds more of it), sized by the boot config's `cache.l1_max_cost`.
+- **version_manager.go** — `VersionManager`, the invalidation index behind `Invalidate`: a namespace key is `<tenant>.<table>.<table version>.<scope>`, and a query key is folded with each dependency's namespace key and namespace version, so bumping a table (a scopeless write) or one scope — scope is reserved and empty today, so every write is the whole-table bump — orphans every dependent entry without touching the pool. The tenant leads every key ([#583](https://github.com/Wave-RF/WaveHouse/issues/583) story 8): the same table under two tenants is two namespaces, so an insert for one tenant never invalidates — or serves — the other's results, and the flat directory's single tenant simply carries the `0` prefix.
 
 ### `config/` — Configuration
 
@@ -182,7 +182,7 @@ The hot-reloadable half of configuration: a directory of four JSON files (`confi
 - **validate.go** — `ValidateDir(dir)` reads, decodes, and checks one directory of the four files — a flat root, or one tenant's folder — in one pass (strict JSON — unknown fields and duplicate keys are errors; per-file shape rules; cross-file role references) and returns every `Finding` at once. Shared, by way of `Validate`, by `wavehouse validate`, boot, and every reload.
 - **finding.go** — `Finding` / `Severity`: errors make the directory invalid, warnings don't block adoption. The JSON shape is part of the ops API (`POST /v1/ops/settings/reload` returns them).
 - **tree.go** — `Validate(root)` reads the directory's shape off its entries and checks either one: a root holding any of the four file names is flat and goes through `ValidateDir` untouched; otherwise a root holding a folder is nested, each folder name going through `tenant.Parse` and each folder through `ValidateDir`, with the folder leading every finding's `File` (`acme/policies.json`). The `Tree` it returns is nil when the finding is about the root itself — it cannot be listed, or a nested root holds a loose file or an entry that cannot be stat'ed.
-- **store.go** — `Store` is a passive holder: one tenant's adopted document behind an atomic pointer, swapped by the registry. Consumers read typed accessors per call (`ClickHouse()`, `Auth()`, `DedupeFor(table)`, `DLQFor(table)`, `Keepalive()`, …) rather than holding values.
+- **store.go** — `Store` is a passive holder: one tenant's adopted document behind an atomic pointer, swapped by the registry, which stamps it with the id of the tenant it created the store for (`Tenant()`, how a handler names its tenant to a per-tenant resource). Consumers read typed accessors per call (`ClickHouse()`, `Auth()`, `DedupeFor(table)`, `DLQFor(table)`, `Keepalive()`, …) rather than holding values.
 - **registry.go** — `Registry` maps a tenant id to its `Store` and owns everything that changes one. `Open` validates and adopts at boot; `Reload` re-validates the whole directory and `ReloadTenant` one tenant's folder, serialized with each other; `AfterAdopt` hooks run after a reload with the tenants it adopted; `For(id)` and `All()` see only the tenants being served, and `Resolve(id)` tells a rejected tenant from an unknown one. The shape is fixed at `Open`. Flat: an invalid directory refuses boot, and a rejected reload keeps the previous snapshot. Nested: fail closed per tenant — a folder with an error finding stops being served (the store keeps its document for requests already admitted, and gets the next good one) while the rest carry on; a whole-directory reload mirrors the folders; and a finding about the directory itself refuses boot or rejects the reload whole, leaving every tenant as it was. The tenant map is replaced whole by a reload, so a lookup is one lock-free load.
 - **watch.go** — `Registry.Watch`, which `internal/app` starts for a flat directory only: fsnotify on the *directory* (not the files, so atomic-writer replaces and Kubernetes ConfigMap symlink swaps aren't lost), debounced into one reload; reloads once as soon as the watch exists so an edit between the boot read and the watch is never missed. `SIGHUP` and the reload endpoint funnel through the same serialized `Reload`.
 - **seed.go** / **seed/** — The embedded (`go:embed`) starter directory with every key at its default. The binary carries no compiled defaults: `wavehouse bootstrap [dir]` writes this seed, and the compose stack and e2e fixture ship copies of it.

@@ -4,69 +4,88 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 func TestVersionManager_NamespaceKey(t *testing.T) {
 	t.Parallel()
 	vm := NewVersionManager()
 
-	// Default table version (0); a scopeless namespace renders a trailing dot.
-	assert.Equal(t, "users.0.", vm.NamespaceKey("users", ""))
-	assert.Equal(t, "users.0.org_1", vm.NamespaceKey("users", "org_1"))
+	// The tenant leads, then the table at its default version (0); a scopeless
+	// namespace renders a trailing dot. The flat directory's tenant is "0".
+	assert.Equal(t, "acme.users.0.", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users"}))
+	assert.Equal(t, "acme.users.0.org_1", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users", Scope: "org_1"}))
+	assert.Equal(t, "0.users.0.", vm.NamespaceKey(Namespace{Tenant: tenant.Default, Table: "users"}))
 
-	// The table version is embedded in every namespace key for that table, so a
-	// BumpTable is reflected across all scopes at once.
-	vm.BumpTable("users")
-	assert.Equal(t, "users.1.", vm.NamespaceKey("users", ""))
-	assert.Equal(t, "users.1.org_1", vm.NamespaceKey("users", "org_1"))
+	// The table version is embedded in every namespace key for that tenant's
+	// table, so a BumpTable is reflected across all its scopes at once — and
+	// nowhere else: the same table under another tenant keeps its version.
+	vm.BumpTable("acme", "users")
+	assert.Equal(t, "acme.users.1.", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users"}))
+	assert.Equal(t, "acme.users.1.org_1", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users", Scope: "org_1"}))
+	assert.Equal(t, "globex.users.0.", vm.NamespaceKey(Namespace{Tenant: "globex", Table: "users"}))
 }
 
 func TestVersionManager_QueryKey(t *testing.T) {
 	t.Parallel()
 	vm := NewVersionManager()
 
-	// One dependency at default versions: sha | <table>.<tableVer>.<scope>.<nsVer>.
-	key := vm.QueryKey("hash123", []Namespace{{Table: "users", Scope: "org_1"}})
-	assert.Equal(t, "hash123|users.0.org_1.0", key)
+	// One dependency at default versions: sha | <tenant>.<table>.<tableVer>.<scope>.<nsVer>.
+	key := vm.QueryKey("hash123", []Namespace{{Tenant: "acme", Table: "users", Scope: "org_1"}})
+	assert.Equal(t, "hash123|acme.users.0.org_1.0", key)
 
 	// Dependency order must not change the key (segments are sorted).
-	deps1 := []Namespace{{Table: "a"}, {Table: "b"}}
-	deps2 := []Namespace{{Table: "b"}, {Table: "a"}}
+	deps1 := []Namespace{{Tenant: "acme", Table: "a"}, {Tenant: "acme", Table: "b"}}
+	deps2 := []Namespace{{Tenant: "acme", Table: "b"}, {Tenant: "acme", Table: "a"}}
 	assert.Equal(t, vm.QueryKey("h", deps1), vm.QueryKey("h", deps2))
+
+	// The same sha and table under two tenants fold to two keys.
+	assert.NotEqual(t,
+		vm.QueryKey("h", []Namespace{{Tenant: "acme", Table: "users"}}),
+		vm.QueryKey("h", []Namespace{{Tenant: "globex", Table: "users"}}))
 }
 
 func TestVersionManager_BumpTable(t *testing.T) {
 	t.Parallel()
 	vm := NewVersionManager()
 
-	users := []Namespace{{Table: "users", Scope: "org_1"}}
-	orders := []Namespace{{Table: "orders", Scope: "org_1"}}
+	users := []Namespace{{Tenant: "acme", Table: "users", Scope: "org_1"}}
+	orders := []Namespace{{Tenant: "acme", Table: "orders", Scope: "org_1"}}
+	globexUsers := []Namespace{{Tenant: "globex", Table: "users", Scope: "org_1"}}
 
 	usersBefore := vm.QueryKey("h", users)
 	ordersBefore := vm.QueryKey("h", orders)
+	globexBefore := vm.QueryKey("h", globexUsers)
 
-	// Bumping a table changes the key for that table but leaves other tables alone.
-	vm.BumpTable("users")
+	// Bumping a table changes the key for that tenant's table but leaves other
+	// tables — and the same table under another tenant — alone.
+	vm.BumpTable("acme", "users")
 	assert.NotEqual(t, usersBefore, vm.QueryKey("h", users))
 	assert.Equal(t, ordersBefore, vm.QueryKey("h", orders))
+	assert.Equal(t, globexBefore, vm.QueryKey("h", globexUsers))
 }
 
 func TestVersionManager_BumpNamespace(t *testing.T) {
 	t.Parallel()
 	vm := NewVersionManager()
 
-	scoped := []Namespace{{Table: "users", Scope: "org_1"}}
-	wholeTable := []Namespace{{Table: "users"}}
-	otherScope := []Namespace{{Table: "users", Scope: "org_2"}}
+	scoped := []Namespace{{Tenant: "acme", Table: "users", Scope: "org_1"}}
+	wholeTable := []Namespace{{Tenant: "acme", Table: "users"}}
+	otherScope := []Namespace{{Tenant: "acme", Table: "users", Scope: "org_2"}}
+	otherTenant := []Namespace{{Tenant: "globex", Table: "users", Scope: "org_1"}}
 
 	scopedBefore := vm.QueryKey("h", scoped)
 	wholeBefore := vm.QueryKey("h", wholeTable)
 	otherBefore := vm.QueryKey("h", otherScope)
+	otherTenantBefore := vm.QueryKey("h", otherTenant)
 
-	// Bumping (users, org_1) changes that scope AND the whole-table view, but leaves
-	// every other scope valid.
-	vm.BumpNamespace("users", "org_1")
+	// Bumping (acme, users, org_1) changes that scope AND the whole-table view,
+	// but leaves every other scope — and the same scope under another tenant —
+	// valid.
+	vm.BumpNamespace(Namespace{Tenant: "acme", Table: "users", Scope: "org_1"})
 	assert.NotEqual(t, scopedBefore, vm.QueryKey("h", scoped))
 	assert.NotEqual(t, wholeBefore, vm.QueryKey("h", wholeTable))
 	assert.Equal(t, otherBefore, vm.QueryKey("h", otherScope))
+	assert.Equal(t, otherTenantBefore, vm.QueryKey("h", otherTenant))
 }
