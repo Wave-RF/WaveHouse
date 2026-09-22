@@ -87,7 +87,7 @@ func makeEnvelopeCols(t *testing.T, tableName, scope string, cols []string, data
 // newIngestMsg builds a MockMessage shaped exactly the way the
 // /v1/ingest producer (internal/api/ingest.go) publishes events:
 //
-//	topic    = mq.Topic{Table: table, Scope: scope}                  // raw, not encoded
+//	topic    = mq.Topic{Tenant: tenant.Default, Table: table, Scope: scope}                  // raw, not encoded
 //	envelope = { table_name: table, scope: scope, ... }              // raw, not encoded
 //
 // Tests should use this helper instead of hand-rolling MsgTopic/MsgData pairs
@@ -95,7 +95,7 @@ func makeEnvelopeCols(t *testing.T, tableName, scope string, cols []string, data
 func newIngestMsg(t *testing.T, table, scope string, data map[string]any) *testutil.MockMessage {
 	t.Helper()
 	return &testutil.MockMessage{
-		MsgTopic: mq.Topic{Table: table, Scope: scope},
+		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: table, Scope: scope},
 		MsgData:  makeEnvelope(t, table, scope, data),
 	}
 }
@@ -210,7 +210,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 
 	// ── Publish an envelope on ingest.events ──
 	envelope := makeEnvelope(t, "events", "org_42", map[string]any{"id": 1, "v": "x"})
-	err = emb.Publish(ctx, mq.Topic{Table: "events", Scope: "org_42"}, envelope)
+	err = emb.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: "events", Scope: "org_42"}, envelope)
 	require.NoError(t, err)
 
 	// ── Wait for the worker to insert + ack ──
@@ -273,7 +273,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	require.NoError(t, err)
 
 	// Publish so there's an in-flight insert blocking on `release`.
-	err = emb.Publish(ctx, mq.Topic{Table: "events"}, makeEnvelope(t, "events", "", map[string]any{"id": 1}))
+	err = emb.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: "events"}, makeEnvelope(t, "events", "", map[string]any{"id": 1}))
 	require.NoError(t, err)
 
 	// Give the worker a moment to pick up the message and start the request.
@@ -578,7 +578,7 @@ func TestSendToDLQ(t *testing.T) {
 			name:          "publishes with headers and acks original",
 			table:         "events",
 			msgData:       []byte(`{"bad":"row"}`),
-			msgTopic:      mq.Topic{Table: "events"},
+			msgTopic:      mq.Topic{Tenant: tenant.Default, Table: "events"},
 			errMsg:        "Code: 60. DB::Exception: ...",
 			wantPublished: 1,
 			wantData:      []byte(`{"bad":"row"}`),
@@ -597,7 +597,7 @@ func TestSendToDLQ(t *testing.T) {
 			name:          "publish failure means no ack",
 			table:         "events",
 			msgData:       []byte(`{"bad":"row"}`),
-			msgTopic:      mq.Topic{Table: "events"},
+			msgTopic:      mq.Topic{Tenant: tenant.Default, Table: "events"},
 			errMsg:        "boom",
 			pubErr:        errors.New("nats unavailable"),
 			wantPublished: 0,
@@ -609,7 +609,7 @@ func TestSendToDLQ(t *testing.T) {
 			name:          "parks under the message's own topic",
 			table:         "events.staging",
 			msgData:       []byte("payload"),
-			msgTopic:      mq.Topic{Table: "events.staging", Scope: "org_42"},
+			msgTopic:      mq.Topic{Tenant: tenant.Default, Table: "events.staging", Scope: "org_42"},
 			errMsg:        "err",
 			wantPublished: 1,
 			wantData:      []byte("payload"),
@@ -689,7 +689,7 @@ func TestParseMsg(t *testing.T) {
 		t.Parallel()
 		w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
 		bad := &testutil.MockMessage{
-			MsgTopic: mq.Topic{Table: "events"},
+			MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 			MsgData:  []byte("not valid json"),
 		}
 
@@ -862,7 +862,7 @@ func TestFlushTable_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 	published := pub.Published()
 	require.Len(t, published, 1, "exactly one row should reach the DLQ")
 	assert.True(t, published[0].DeadLetter)
-	assert.Equal(t, mq.Topic{Table: "events"}, published[0].Topic)
+	assert.Equal(t, mq.Topic{Tenant: tenant.Default, Table: "events"}, published[0].Topic)
 	assert.Equal(t, "events", published[0].Headers.Get("X-DLQ-Table"))
 	assert.Contains(t, published[0].Headers.Get("X-DLQ-Error"), "Code: 60")
 }
@@ -1101,7 +1101,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 
 	// 1. Prime table A — too few events to hit either trigger on its own.
 	for i := range batchA {
-		err = emb.Publish(ctx, mq.Topic{Table: "tableA"},
+		err = emb.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: "tableA"},
 			makeEnvelope(t, "tableA", "", map[string]any{"id": i}))
 		require.NoError(t, err)
 	}
@@ -1109,7 +1109,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 	// 2. Then publish exactly maxBatch events to table B — should hit B's
 	//    own size trigger and flush immediately, regardless of what A did.
 	for i := range batchB {
-		err = emb.Publish(ctx, mq.Topic{Table: "tableB"},
+		err = emb.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: "tableB"},
 			makeEnvelope(t, "tableB", "", map[string]any{"id": i}))
 		require.NoError(t, err)
 	}
@@ -1195,7 +1195,7 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 	})
 
 	for i := range total {
-		err = emb.Publish(ctx, mq.Topic{Table: "tableX"},
+		err = emb.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: "tableX"},
 			makeEnvelope(t, "tableX", "", map[string]any{"id": i}))
 		require.NoError(t, err)
 	}
@@ -1256,7 +1256,7 @@ func TestParseMsg_PoisonEnvelope_ParkedOnDLQ(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			w, pub, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-			m := &testutil.MockMessage{MsgTopic: mq.Topic{Table: "events"}, MsgData: tt.data}
+			m := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"}, MsgData: tt.data}
 
 			_, ok := w.parseMsg(context.Background(), m.Message())
 			w.ackWg.Wait() // poison disposal is backgrounded now
@@ -1265,7 +1265,7 @@ func TestParseMsg_PoisonEnvelope_ParkedOnDLQ(t *testing.T) {
 			published := pub.Published()
 			require.Len(t, published, 1, "the row is parked, not dropped")
 			assert.True(t, published[0].DeadLetter)
-			assert.Equal(t, mq.Topic{Table: "events"}, published[0].Topic)
+			assert.Equal(t, mq.Topic{Tenant: tenant.Default, Table: "events"}, published[0].Topic)
 			assert.Equal(t, tt.data, published[0].Data, "the original bytes are preserved verbatim")
 			assert.NotEmpty(t, published[0].Headers.Get("X-DLQ-Error"))
 			assert.True(t, m.DoubleAcked.Load(), "acked once parked, so NATS stops redelivering it")
@@ -1298,7 +1298,7 @@ func TestParseMsg_DuplicateColumn_Unpairable(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	m := &testutil.MockMessage{MsgTopic: mq.Topic{Table: "events"}, MsgData: payload}
+	m := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"}, MsgData: payload}
 	_, ok := w.parseMsg(context.Background(), m.Message())
 	require.False(t, ok, "a repeated column name is unpairable")
 	w.ackWg.Wait()
@@ -1317,7 +1317,7 @@ func TestParseMsg_PoisonEnvelope_DLQDisabled_AckedAndDropped(t *testing.T) {
 	w.dlqEnabled = func(tenant.ID, string) bool { return false }
 
 	m := &testutil.MockMessage{
-		MsgTopic: mq.Topic{Table: "events"},
+		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 		MsgData:  v1Envelope(t, "events", map[string]any{"id": 1}),
 	}
 	_, ok := w.parseMsg(context.Background(), m.Message())
@@ -1337,7 +1337,7 @@ func TestParseMsg_PoisonEnvelope_DLQPublishFails_LeftUnacked(t *testing.T) {
 	pub.Err = errors.New("jetstream unavailable")
 
 	m := &testutil.MockMessage{
-		MsgTopic: mq.Topic{Table: "events"},
+		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 		MsgData:  v1Envelope(t, "events", map[string]any{"id": 1}),
 	}
 	_, ok := w.parseMsg(context.Background(), m.Message())
@@ -1410,11 +1410,11 @@ func TestFlushTable_MixedColumnLists_TwoInserts(t *testing.T) {
 	w, _, _, wait := newTestWorker(rt)
 
 	narrow := &testutil.MockMessage{
-		MsgTopic: mq.Topic{Table: "events"},
+		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 		MsgData:  makeEnvelopeCols(t, "events", "", []string{"id"}, map[string]any{"id": 1}),
 	}
 	wide := &testutil.MockMessage{
-		MsgTopic: mq.Topic{Table: "events"},
+		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 		MsgData:  makeEnvelopeCols(t, "events", "", []string{"id", "v"}, map[string]any{"id": 2, "v": "x"}),
 	}
 	w.flushTable(context.Background(), "events", parseAll(t, w, narrow, wide))
@@ -1468,7 +1468,7 @@ func TestRejectPoison_CountedByDisposition(t *testing.T) {
 
 	poison := func() *testutil.MockMessage {
 		return &testutil.MockMessage{
-			MsgTopic: mq.Topic{Table: "events"},
+			MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 			MsgData:  v1Envelope(t, "events", map[string]any{"id": 1}),
 		}
 	}
@@ -1538,7 +1538,7 @@ func (f *blockingFakeConsumer) Consume(handler func(*mq.Message), _ int) (func()
 	var wg sync.WaitGroup
 	for range f.n {
 		wg.Go(func() {
-			handler((&testutil.MockMessage{MsgTopic: mq.Topic{Table: "t"}, MsgData: []byte("not json")}).Message())
+			handler((&testutil.MockMessage{MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "t"}, MsgData: []byte("not json")}).Message())
 		})
 	}
 	go func() {
@@ -1600,7 +1600,7 @@ func TestDispatchLoop_DeliveryEndedFailsLoud(t *testing.T) {
 	w.dlqEnabled = func(tenant.ID, string) bool { return false } // the sentinel is acked-and-dropped, no publish
 
 	held := newIngestMsg(t, "events", "", map[string]any{"id": 1})
-	sentinel := &testutil.MockMessage{MsgTopic: mq.Topic{Table: "events"}, MsgData: []byte("not json")}
+	sentinel := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"}, MsgData: []byte("not json")}
 	ended := fmt.Errorf("%w: consumer deleted", mq.ErrDeliveryEnded)
 	cons := &failingFakeConsumer{msgs: []*testutil.MockMessage{held}, sentinel: sentinel, endWith: ended}
 

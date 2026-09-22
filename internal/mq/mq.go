@@ -14,25 +14,34 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
-// Topic addresses the events of one table, optionally narrowed to a scope
-// within it. It is the only address the rest of the process handles; the
-// broker's own naming (subjects, prefixes, wildcards, token encoding) is
+// Topic addresses the events of one tenant's table, optionally narrowed to a
+// scope within it. It is the only address the rest of the process handles;
+// the broker's own naming (subjects, prefixes, wildcards, token encoding) is
 // derived from it inside the implementation. Table and Scope are raw names —
 // never pre-encoded.
 type Topic struct {
-	Table string
-	Scope string
+	// Tenant is whose table it is — the settings folder the events were
+	// admitted under (#583). Required: Publish refuses a topic without one,
+	// so no caller falls into tenant.Default by omission.
+	Tenant tenant.ID
+	Table  string
+	Scope  string
 }
 
 // Key is an injective string form of the topic, for use as a map key (the SSE
-// hub's subscription index). Opaque: not a broker subject, and not parseable.
+// hub's subscription index): the tenant first, verbatim — its grammar makes
+// it one token — then the table and scope as encoded tokens. Opaque: not a
+// broker subject, and not parseable. A topic without a tenant has no
+// subject, and its key round-trips to nothing.
 func (t Topic) Key() string {
-	if t.Scope == "" {
-		return encodeToken(t.Table)
+	key := string(t.Tenant) + "." + encodeToken(t.Table)
+	if t.Scope != "" {
+		key += "." + encodeToken(t.Scope)
 	}
-	return encodeToken(t.Table) + "." + encodeToken(t.Scope)
+	return key
 }
 
 // Message represents a message received from the queue.
@@ -142,7 +151,8 @@ type Publisher interface {
 	Close() error
 }
 
-// Subscriber delivers every event on the ingest queue, across all topics.
+// Subscriber delivers every event on the ingest queue, across all tenants
+// and topics.
 type Subscriber interface {
 	// Subscribe registers a handler for incoming events under a durable
 	// consumer named consumerName.
@@ -216,9 +226,11 @@ type DeadLetterer interface {
 
 // DeadLetterCounts is what is parked on the dead-letter queue.
 type DeadLetterCounts struct {
-	// Tables maps table name → parked messages, for the tables asked about.
-	// Scope is not broken out yet (it is inert until #235): a message parked
-	// under a scoped topic counts under "table.scope", not under its table.
+	// Tables maps table name → parked messages, for the tables asked about,
+	// summed across tenants: the queue is one for every tenant until it is
+	// per tenant (#583 story 5, second half), and so is the count. Scope is
+	// not broken out yet (it is inert until #235): a message parked under a
+	// scoped topic counts under "table.scope", not under its table.
 	Tables map[string]uint64
 	// Total is every parked message, whatever the filter.
 	Total uint64
@@ -232,8 +244,8 @@ var ErrNoDeadLetterQueue = errors.New("dead-letter queue not found")
 // DeadLetterStats reports on the dead-letter queue.
 type DeadLetterStats interface {
 	// DeadLetterCounts counts parked messages per table; a non-empty table
-	// narrows Tables to that one (its unscoped messages — see
-	// DeadLetterCounts.Tables).
+	// narrows Tables to that one (its unscoped messages, under any tenant —
+	// see DeadLetterCounts.Tables).
 	DeadLetterCounts(ctx context.Context, table string) (DeadLetterCounts, error)
 }
 

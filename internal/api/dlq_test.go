@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,7 +18,7 @@ import (
 // parkedMsg is a message as the ingest worker would hand it to the DLQ.
 func parkedMsg(table string) *mq.Message {
 	return (&testutil.MockMessage{
-		MsgTopic: mq.Topic{Table: table},
+		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: table},
 		MsgData:  []byte(`{"table_name":"` + table + `"}`),
 	}).Message()
 }
