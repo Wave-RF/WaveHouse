@@ -42,11 +42,12 @@ type Dependencies struct {
 	// NewRouter ignores it when Tenants is nested, whatever was wired here: the
 	// ops gate then admits the operator key alone (see NewRouter).
 	PolicySource policy.Source
-	// CORSOrigins returns the allowed CORS origins, read per request so a
-	// settings reload applies immediately (settings.Store.CORSOrigins in
-	// production). An empty or nil list — including a nil func — denies every
-	// browser origin; ["*"] is the only allow-all spelling.
-	CORSOrigins func() []string
+	// CORSOrigins yields one tenant's allowed CORS origins, read per request
+	// so a settings reload applies immediately ((*settings.Store).CORSOrigins
+	// in production); which tenant's list answers a request is corsOrigins'
+	// rule. An empty or nil list — including a nil func, or no Tenants —
+	// denies every browser origin; ["*"] is the only allow-all spelling.
+	CORSOrigins func(*settings.Store) []string
 	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
 	// endpoint (Prometheus convention). Wired by internal/app from the OTel Prometheus
 	// exporter when observability.metrics.prometheus.enabled is true AND port is 0.
@@ -65,7 +66,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	// the reverse proxy's job). Trusted-proxy-aware client-IP capture for
 	// traces/logs is tracked in #333; don't re-add RealIP to get it.
 	r.Use(jsonRecoverer)
-	r.Use(corsMiddleware(deps.CORSOrigins))
+	r.Use(corsMiddleware(corsOrigins(deps.Tenants, deps.CORSOrigins)))
 
 	// Route the chi router's own 404/405 paths through writeJSONError so
 	// hits to unknown URLs and unsupported methods carry the same JSON
@@ -314,7 +315,7 @@ func RequireAdmin(store policy.Source) func(http.Handler) http.Handler {
 //
 // Non-CORS requests (no Origin header) are passed through unchanged — we
 // don't decorate same-origin responses with CORS noise.
-func corsMiddleware(origins func() []string) func(http.Handler) http.Handler {
+func corsMiddleware(origins func(*http.Request) []string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
@@ -330,7 +331,7 @@ func corsMiddleware(origins func() []string) func(http.Handler) http.Handler {
 			// handful of origins, so a linear scan beats rebuilding a set.
 			var allowedOrigins []string
 			if origins != nil {
-				allowedOrigins = origins()
+				allowedOrigins = origins(r)
 			}
 			allowAll := false
 			originListed := false
@@ -381,5 +382,44 @@ func corsMiddleware(origins func() []string) func(http.Handler) http.Handler {
 
 			next.ServeHTTP(w, r)
 		})
+	}
+}
+
+// tenantRoute reports whether path is served under TenantMW: the /v1 tree
+// outside /v1/ops. Kept beside the route tree it mirrors.
+func tenantRoute(path string) bool {
+	return strings.HasPrefix(path, "/v1/") && path != "/v1/ops" && !strings.HasPrefix(path, "/v1/ops/")
+}
+
+// corsOrigins is the allowlist a request's CORS answer comes from. On a
+// tenant route it is the list of the tenant the request names (#583) — the
+// preflight included, which the browser sends without X-Tenant-ID, so a
+// nested directory's preflights are per tenant only where the fronting proxy
+// stamps the header on them too (the deployment docs say so; a preflight
+// naming no tenant reads as tenant 0 like any other request). Everything
+// else is answered from the default tenant's list: the tenant-exempt routes,
+// which ignore the header, and a request naming a tenant that is not served,
+// whose 400/404/503 TenantMW is about to write. With no tenant 0 being
+// served, those carry no CORS headers at all. So no tenant's list ever widens
+// another tenant's routes, and a flat directory — one tenant, the default —
+// answers every request from its one list, as it always has.
+func corsOrigins(tenants *settings.Registry, get func(*settings.Store) []string) func(*http.Request) []string {
+	return func(r *http.Request) []string {
+		if tenants == nil || get == nil {
+			return nil
+		}
+		var store *settings.Store
+		if tenantRoute(r.URL.Path) {
+			if id, err := requestTenant(r); err == nil {
+				store, _ = tenants.For(id)
+			}
+		}
+		if store == nil {
+			store, _ = tenants.For(tenant.Default)
+		}
+		if store == nil {
+			return nil
+		}
+		return get(store)
 	}
 }

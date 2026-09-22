@@ -134,7 +134,7 @@ func TestCORSMiddleware_OriginsReloadBetweenRequests(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
 	origins := []string{"https://old.example.com"}
-	handler := corsMiddleware(func() []string {
+	handler := corsMiddleware(func(*http.Request) []string {
 		mu.Lock()
 		defer mu.Unlock()
 		return origins
@@ -162,7 +162,7 @@ func TestCORSMiddleware_OriginsReloadBetweenRequests(t *testing.T) {
 
 func TestCORSMiddleware_Preflight(t *testing.T) {
 	t.Parallel()
-	handler := corsMiddleware(func() []string { return []string{"*"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func(*http.Request) []string { return []string{"*"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("should not reach handler on OPTIONS")
 	}))
 
@@ -183,7 +183,7 @@ func TestCORSMiddleware_Preflight(t *testing.T) {
 func TestCORSMiddleware_NormalRequest(t *testing.T) {
 	t.Parallel()
 	var called bool
-	handler := corsMiddleware(func() []string { return []string{"*"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func(*http.Request) []string { return []string{"*"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -201,7 +201,7 @@ func TestCORSMiddleware_NormalRequest(t *testing.T) {
 func TestCORSMiddleware_AllowListedOrigin(t *testing.T) {
 	t.Parallel()
 	var called bool
-	handler := corsMiddleware(func() []string { return []string{"https://app.example.com"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func(*http.Request) []string { return []string{"https://app.example.com"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -220,7 +220,7 @@ func TestCORSMiddleware_AllowListedOrigin(t *testing.T) {
 func TestCORSMiddleware_BlockedOrigin(t *testing.T) {
 	t.Parallel()
 	var called bool
-	handler := corsMiddleware(func() []string { return []string{"https://allowed.com"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func(*http.Request) []string { return []string{"https://allowed.com"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -259,7 +259,7 @@ func TestCORSMiddleware_NoCredentialsHeader(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			handler := corsMiddleware(func() []string { return tc.allowed })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			handler := corsMiddleware(func(*http.Request) []string { return tc.allowed })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			}))
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
@@ -276,7 +276,7 @@ func TestCORSMiddleware_NoCredentialsHeader(t *testing.T) {
 // callers don't get CORS response headers stamped onto every response.
 func TestCORSMiddleware_NoOriginIsPassthrough(t *testing.T) {
 	t.Parallel()
-	handler := corsMiddleware(func() []string { return []string{"*"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func(*http.Request) []string { return []string{"*"} })(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
@@ -294,7 +294,7 @@ func TestCORSMiddleware_NoOriginIsPassthrough(t *testing.T) {
 // that as a preflight failure, so the actual request never fires.
 func TestCORSMiddleware_BlockedOriginPreflight(t *testing.T) {
 	t.Parallel()
-	handler := corsMiddleware(func() []string { return []string{"https://allowed.com"} })(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(func(*http.Request) []string { return []string{"https://allowed.com"} })(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatal("should not reach handler on OPTIONS")
 	}))
 
@@ -422,7 +422,7 @@ func TestNewRouter_CORSOnStream(t *testing.T) {
 		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
 		AuthMW:      func(next http.Handler) http.Handler { return next },
-		CORSOrigins: func() []string { return []string{"https://app.example.com"} },
+		CORSOrigins: staticOrigins("https://app.example.com"),
 	})
 
 	// A fetch-based EventSource resuming cross-origin sends both Authorization
@@ -485,7 +485,7 @@ func TestNewRouter_VaryOriginAndTenant(t *testing.T) {
 		Tenants:     testTenants(),
 		Health:      &HealthHandler{},
 		AuthMW:      func(next http.Handler) http.Handler { return next },
-		CORSOrigins: func() []string { return []string{"https://app.example.com"} },
+		CORSOrigins: staticOrigins("https://app.example.com"),
 	})
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/health", nil)
@@ -752,11 +752,11 @@ func TestCORSMiddleware_EmptyOrigins_DenyAll(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
-		origins func() []string
+		origins func(*http.Request) []string
 	}{
 		{"nil getter", nil},
-		{"nil list", func() []string { return nil }},
-		{"empty list", func() []string { return []string{} }},
+		{"nil list", func(*http.Request) []string { return nil }},
+		{"empty list", func(*http.Request) []string { return []string{} }},
 	}
 	for _, tt := range tests {
 		for _, method := range []string{http.MethodGet, http.MethodOptions} {
@@ -955,4 +955,108 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 			assert.Equal(t, http.StatusOK, rec.Code, "admin must reach schema")
 		})
 	}
+}
+
+// TestNewRouter_CORSPerTenant drives one router over a nested registry and
+// pins corsOrigins' rule: a tenant route is decorated from the list of the
+// tenant it names, the stamped preflight included, and everything else — the
+// tenant-exempt routes, a request naming a tenant that is not served — from
+// tenant 0's list, or from nothing when no tenant 0 is served. The tenants
+// alternate through one router, which is what would expose a captured list.
+func TestNewRouter_CORSPerTenant(t *testing.T) {
+	t.Parallel()
+	const (
+		zeroApp   = "https://zero.app"
+		acmeApp   = "https://app.acme.com"
+		elsewhere = "https://elsewhere.example"
+	)
+	newRouter := func(tenants *settings.Registry) http.Handler {
+		return NewRouter(Dependencies{
+			Tenants:     tenants,
+			Health:      &HealthHandler{},
+			Version:     NewVersionHandler("test", "test", "test"),
+			AuthMW:      func(next http.Handler) http.Handler { return next },
+			CORSOrigins: (*settings.Store).CORSOrigins,
+		})
+	}
+	do := func(router http.Handler, method, path, id, origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(t.Context(), method, path, nil)
+		req.Header.Set("Origin", origin)
+		if id != "" {
+			req.Header.Set(tenant.Header, id)
+		}
+		if method == http.MethodOptions {
+			req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+		}
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	allowOrigin := func(rec *httptest.ResponseRecorder) string { return rec.Header().Get("Access-Control-Allow-Origin") }
+
+	t.Run("with a tenant 0", func(t *testing.T) {
+		t.Parallel()
+		tenants := nestedTenants(t, map[string]string{
+			"0":      configWithOrigins(t, zeroApp),
+			"acme":   configWithOrigins(t, acmeApp),
+			"globex": configWithOrigins(t, "*"),
+			"nobody": configWithOrigins(t),
+			"broken": `{}`,
+		})
+		router := newRouter(tenants)
+		tests := []struct {
+			name, method, path, id, origin string
+			wantStatus                     int
+			wantAllow                      string
+		}{
+			{"acme's own origin", http.MethodGet, "/v1/health", "acme", acmeApp, http.StatusOK, acmeApp},
+			{"tenant 0's list does not reach acme", http.MethodGet, "/v1/health", "acme", zeroApp, http.StatusOK, ""},
+			{"globex allows every origin", http.MethodGet, "/v1/health", "globex", elsewhere, http.StatusOK, "*"},
+			{"globex's star does not widen acme", http.MethodGet, "/v1/health", "acme", elsewhere, http.StatusOK, ""},
+			{"an empty list denies its own tenant", http.MethodGet, "/v1/health", "nobody", zeroApp, http.StatusOK, ""},
+			{"stamped preflight is acme's", http.MethodOptions, "/v1/ingest", "acme", acmeApp, http.StatusNoContent, acmeApp},
+			{"stamped preflight is not tenant 0's", http.MethodOptions, "/v1/ingest", "acme", zeroApp, http.StatusNoContent, ""},
+			{"unstamped preflight reads tenant 0", http.MethodOptions, "/v1/ingest", "", zeroApp, http.StatusNoContent, zeroApp},
+			{"unstamped preflight is not acme's", http.MethodOptions, "/v1/ingest", "", acmeApp, http.StatusNoContent, ""},
+			{"exempt route reads tenant 0", http.MethodGet, "/version", "", zeroApp, http.StatusOK, zeroApp},
+			{"exempt route ignores the header", http.MethodGet, "/version", "acme", acmeApp, http.StatusOK, ""},
+			{"exempt route ignores the header, still tenant 0", http.MethodGet, "/version", "acme", zeroApp, http.StatusOK, zeroApp},
+			{"unknown tenant reads tenant 0", http.MethodGet, "/v1/health", "initech", zeroApp, http.StatusNotFound, zeroApp},
+			{"unknown tenant is not acme", http.MethodGet, "/v1/health", "initech", acmeApp, http.StatusNotFound, ""},
+			{"rejected tenant reads tenant 0", http.MethodGet, "/v1/health", "broken", zeroApp, http.StatusServiceUnavailable, zeroApp},
+			{"malformed id reads tenant 0", http.MethodGet, "/v1/health", "../etc", zeroApp, http.StatusBadRequest, zeroApp},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				rec := do(router, tt.method, tt.path, tt.id, tt.origin)
+				assert.Equal(t, tt.wantStatus, rec.Code, "body: %s", rec.Body.String())
+				assert.Equal(t, tt.wantAllow, allowOrigin(rec))
+			})
+		}
+
+		// A reload of acme's folder applies to acme's next request: no router
+		// rebuild, no hook.
+		require.NoError(t, os.WriteFile(filepath.Join(tenants.Dir(), "acme", settings.FileConfig), []byte(configWithOrigins(t, elsewhere)), 0o600))
+		_, adopted, known := tenants.ReloadTenant("acme", "test")
+		require.True(t, adopted && known)
+		assert.Equal(t, elsewhere, allowOrigin(do(router, http.MethodGet, "/v1/health", "acme", elsewhere)))
+		assert.Empty(t, allowOrigin(do(router, http.MethodGet, "/v1/health", "acme", acmeApp)))
+	})
+
+	t.Run("without a tenant 0", func(t *testing.T) {
+		t.Parallel()
+		router := newRouter(nestedTenants(t, map[string]string{"acme": configWithOrigins(t, acmeApp), "globex": configWithOrigins(t, "*")}))
+		assert.Equal(t, acmeApp, allowOrigin(do(router, http.MethodGet, "/v1/health", "acme", acmeApp)))
+		// Everything that would read tenant 0 carries no CORS headers, globex's
+		// star notwithstanding.
+		for _, tt := range []struct{ name, method, path, id string }{
+			{"unstamped preflight", http.MethodOptions, "/v1/ingest", ""},
+			{"exempt route", http.MethodGet, "/version", ""},
+			{"unknown tenant", http.MethodGet, "/v1/health", "initech"},
+		} {
+			rec := do(router, tt.method, tt.path, tt.id, elsewhere)
+			assert.Empty(t, allowOrigin(rec), tt.name)
+			assert.Empty(t, rec.Header().Get("Access-Control-Allow-Methods"), tt.name)
+		}
+	})
 }
