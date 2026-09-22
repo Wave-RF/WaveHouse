@@ -50,31 +50,36 @@ func (s *Stores) For(id tenant.ID) *Managed {
 
 // Retain closes and forgets every store whose tenant keep does not name — a
 // tenant the registry no longer serves — and touches nothing on disk. The
-// close failures are joined; the stores are forgotten either way.
+// map is edited under the lock and the stores closed outside it, so one
+// tenant's close (a Pebble close waits on its flushes and compactions)
+// never stalls another tenant's lookup. The close failures are joined; the
+// stores are forgotten either way. A store For builds for a dropped tenant
+// meanwhile is closed and stays so — only the reconcile that called Retain
+// opens one — so no directory is ever open twice.
 func (s *Stores) Retain(keep func(tenant.ID) bool) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	var errs []error
-	for _, id := range slices.Sorted(maps.Keys(s.byID)) {
-		if keep(id) {
-			continue
+	dropped := make(map[tenant.ID]*Managed)
+	for id, m := range s.byID {
+		if !keep(id) {
+			dropped[id] = m
+			delete(s.byID, id)
 		}
-		if err := s.byID[id].Close(); err != nil {
-			errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
-		}
-		delete(s.byID, id)
 	}
-	return errors.Join(errs...)
+	s.mu.Unlock()
+	return closeAll(dropped)
 }
 
 // Stats sums the open stores' metrics — the process's Pebble footprint,
 // which is what the system gauges report — and is nil while no store is
-// open, so the scraper skips the gauges as it does for one closed store.
+// open, so the scraper skips the gauges as it does for one closed store. The
+// stores are read outside the lock: a scrape waiting on one tenant's
+// opening store stalls no other tenant's lookup.
 func (s *Stores) Stats() map[string]int64 {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	stores := slices.Collect(maps.Values(s.byID))
+	s.mu.Unlock()
 	var sum map[string]int64
-	for _, m := range s.byID {
+	for _, m := range stores {
 		stats := m.Stats()
 		if stats == nil {
 			continue
@@ -93,10 +98,16 @@ func (s *Stores) Stats() map[string]int64 {
 // Safe to call more than once.
 func (s *Stores) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	stores := maps.Clone(s.byID)
+	s.mu.Unlock()
+	return closeAll(stores)
+}
+
+// closeAll closes the stores in id order and reports the failures joined.
+func closeAll(stores map[tenant.ID]*Managed) error {
 	var errs []error
-	for _, id := range slices.Sorted(maps.Keys(s.byID)) {
-		if err := s.byID[id].Close(); err != nil {
+	for _, id := range slices.Sorted(maps.Keys(stores)) {
+		if err := stores[id].Close(); err != nil {
 			errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
 		}
 	}

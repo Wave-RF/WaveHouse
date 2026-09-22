@@ -83,13 +83,17 @@ func Validate(root string) (*Tree, []Finding) {
 // validateFolder is ValidateDir for one tenant folder of a nested root, with
 // the folder leading each finding's File.
 //
-// This is the one place a tenant id becomes a filesystem path. Every caller
-// already hands it an id that passed tenant.Parse (which forbids '.', '/' and
-// '\'), so the check below is never reached today; it is here so the
-// guarantee that a name resolves to one folder under root — never root
-// itself, never outside it — lives beside the join that depends on it,
-// rather than in two callers — and it is the check CodeQL's path-injection
-// query recognizes as a sanitizer, which the grammar in tenant.Parse is not.
+// This is one of the two places a tenant id becomes a filesystem path; the
+// other is the tenant's dedupe store directory under data_dir
+// (internal/app's wireDedupe), which takes its ids from the registry, so
+// each is tenant 0, the constant, or a folder name checked here first.
+// Every caller already hands it an id that passed tenant.Parse (which
+// forbids '.', '/' and '\'), so the check below is never reached today; it
+// is here so the guarantee that a name resolves to one folder under root —
+// never root itself, never outside it — lives beside the join that depends
+// on it, rather than in two callers — and it is the check CodeQL's
+// path-injection query recognizes as a sanitizer, which the grammar in
+// tenant.Parse is not.
 func validateFolder(root, folder string) (*Document, []Finding) {
 	if folder == "" || folder == "." || strings.Contains(folder, "/") || strings.Contains(folder, `\`) || strings.Contains(folder, "..") {
 		return nil, []Finding{{Severity: SeverityError, File: folder, Message: "folder name is not a tenant id: it must name one folder — not empty, not \".\", no path separator, no \"..\""}}

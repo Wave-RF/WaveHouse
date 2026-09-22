@@ -20,8 +20,8 @@ services:
       # NATS lives at /app/data/nats, each tenant's Pebble dedupe store at
       # /app/data/<tenant>/dedupe (tenant 0's for the four-file settings
       # directory) — subdirs are convention, not config. The Dockerfile
-      # pre-creates /app/data
-      # owned by the nonroot user; bind-mount any persistent volume here.
+      # pre-creates /app/data owned by the nonroot user; bind-mount any
+      # persistent volume here.
       WH_DATA_DIR: /app/data
       # ClickHouse wiring (addr, ports, database, user) is in ./settings/config.json
       # — the settings directory below — where it hot-reloads. Only the

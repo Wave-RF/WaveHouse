@@ -291,7 +291,9 @@ func (a *App) wireDiscovery(ctx context.Context) {
 }
 
 // legacyDedupeDir is where the one store lived before #583 story 7 gave each
-// tenant its own: tenant 0's, implicitly.
+// tenant its own: tenant 0's, implicitly. tenant.Parse reserves the name, as
+// it does the queue's nats, in any letter case, so no tenant's directory is
+// ever this one — not on a case-insensitive filesystem either.
 const legacyDedupeDir = "pebble"
 
 // wireDedupe builds the dedupe stores: one per tenant (#583 story 7), at
@@ -323,6 +325,16 @@ func (a *App) wireDedupe() error {
 	a.dedup = stores
 	a.add(component{name: "dedupe", close: withoutContext(stores.Close)})
 	reconcile := func() error {
+		// The gone tenants' stores close first, so a tenant renamed only in
+		// letter case — one directory to a case-insensitive filesystem —
+		// never has both spellings open at once.
+		served := func(id tenant.ID) bool {
+			_, ok := a.tenants.For(id)
+			return ok
+		}
+		if err := stores.Retain(served); err != nil {
+			slog.Error("dedupe store close failed", "error", err)
+		}
 		var errs []error
 		for id, store := range a.tenants.All() {
 			m := stores.For(id)
@@ -343,13 +355,6 @@ func (a *App) wireDedupe() error {
 			if m.Open() != wasOpen {
 				slog.Info("dedupe store reconciled with settings", "tenant", id, "enabled", enabled)
 			}
-		}
-		served := func(id tenant.ID) bool {
-			_, ok := a.tenants.For(id)
-			return ok
-		}
-		if err := stores.Retain(served); err != nil {
-			slog.Error("dedupe store close failed", "error", err)
 		}
 		return errors.Join(errs...)
 	}

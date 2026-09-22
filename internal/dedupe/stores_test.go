@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -109,6 +110,64 @@ func TestStores_StatsSumsTheOpenStores(t *testing.T) {
 	assert.Contains(t, got, "pebble_wal_size")
 	assert.Contains(t, got, "pebble_table_count")
 	assert.Nil(t, closed.Stats())
+}
+
+// gatedDedup is a backend whose Close and Stats block until released: one
+// tenant's slow I/O, as a Pebble close waiting on a compaction or an open
+// replaying its log.
+type gatedDedup struct{ entered, release chan struct{} }
+
+func (g *gatedDedup) CheckAndMark(context.Context, string) (bool, error) { return false, nil }
+func (g *gatedDedup) Stats() map[string]int64                            { g.wait(); return map[string]int64{"seen": 0} }
+func (g *gatedDedup) Close() error                                       { g.wait(); return nil }
+func (g *gatedDedup) wait()                                              { g.entered <- struct{}{}; <-g.release }
+
+// One tenant's I/O is that tenant's wait alone: Retain edits the map under
+// the lock and closes outside it, and Stats reads the stores outside it, so
+// a dropped tenant's slow close or a scrape waiting on one store never
+// stalls another tenant's lookup, which every dedupe-enabled record makes.
+func TestStores_IOHappensOutsideTheLock(t *testing.T) {
+	t.Parallel()
+	setup := func(t *testing.T) (*Stores, *gatedDedup) {
+		t.Helper()
+		g := &gatedDedup{entered: make(chan struct{}), release: make(chan struct{})}
+		s := NewStores(func(tenant.ID) *Managed {
+			return NewManaged(func() (Deduplicator, error) { return g, nil })
+		})
+		require.NoError(t, s.For("acme").Apply(true))
+		return s, g
+	}
+	// forAnswers fails unless For answers while acme's gated call is in
+	// progress, then releases it.
+	forAnswers := func(t *testing.T, s *Stores, g *gatedDedup) {
+		t.Helper()
+		<-g.entered
+		defer close(g.release)
+		got := make(chan *Managed, 1)
+		go func() { got <- s.For("globex") }()
+		select {
+		case m := <-got:
+			assert.NotNil(t, m)
+		case <-time.After(2 * time.Second):
+			t.Fatal("For waited behind another tenant's I/O")
+		}
+	}
+	t.Run("Retain", func(t *testing.T) {
+		t.Parallel()
+		s, g := setup(t)
+		done := make(chan error, 1)
+		go func() { done <- s.Retain(func(tenant.ID) bool { return false }) }()
+		forAnswers(t, s, g)
+		require.NoError(t, <-done)
+	})
+	t.Run("Stats", func(t *testing.T) {
+		t.Parallel()
+		s, g := setup(t)
+		done := make(chan map[string]int64, 1)
+		go func() { done <- s.Stats() }()
+		forAnswers(t, s, g)
+		assert.Equal(t, map[string]int64{"seen": 0}, <-done)
+	})
 }
 
 func TestStores_CloseClosesEveryStore(t *testing.T) {
