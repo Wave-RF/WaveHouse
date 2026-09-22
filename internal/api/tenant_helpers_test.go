@@ -11,12 +11,14 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // testStore stands in for the store TenantMW resolves. It holds no document:
 // handler tests inject fixed getters that ignore it, so a handler that read
-// it directly would panic rather than pass.
-var testStore = &settings.Store{}
+// it directly would panic rather than pass. It does carry its tenant, which
+// the publishers address the message queue with.
+var testStore = settings.NewStore(tenant.Default)
 
 // withTenant attaches testStore to r the way TenantMW would, for tests that
 // call a tenant-route handler without the router.

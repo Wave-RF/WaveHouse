@@ -6,6 +6,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // Store holds the settings snapshot one tenant has adopted, and nothing
@@ -18,8 +19,18 @@ import (
 // Validate, so the snapshot is exactly what the files said when they were
 // adopted. Defaults live in the seed directory (Seed / WriteSeed).
 type Store struct {
+	id   tenant.ID
 	snap atomic.Pointer[Document]
 }
+
+// NewStore returns the empty store of tenant id: the Registry adopts a
+// document into it, and a test that fixes its getters hands it to NewRegistry
+// or straight to a handler.
+func NewStore(id tenant.ID) *Store { return &Store{id: id} }
+
+// Tenant is the tenant whose settings this store holds — what a handler
+// that was given the store addresses the message queue with.
+func (s *Store) Tenant() tenant.ID { return s.id }
 
 // adopt swaps in a validated document. The Registry calls it under its
 // reload lock.

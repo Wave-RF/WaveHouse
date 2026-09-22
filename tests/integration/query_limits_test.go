@@ -18,6 +18,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // TestStructuredQuery_ResourceCapsEnforcedServerSide is the executable proof
@@ -107,7 +108,7 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 			req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
 			// The handler is served without the router, so the test stands in
 			// for TenantMW; the fixed getters above never read the store.
-			req = req.WithContext(api.WithStore(req.Context(), &settings.Store{}))
+			req = req.WithContext(api.WithStore(req.Context(), settings.NewStore(tenant.Default)))
 			rec := httptest.NewRecorder()
 
 			h.Handle(rec, req)

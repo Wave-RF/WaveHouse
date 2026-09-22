@@ -21,6 +21,13 @@ func newLoadedStore(t *testing.T, overrides map[string]string) *Store {
 	return s
 }
 
+func TestStore_Tenant(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, tenant.ID("acme"), NewStore("acme").Tenant())
+	// A flat directory's one store is the default tenant's.
+	assert.Equal(t, tenant.Default, newLoadedStore(t, nil).Tenant())
+}
+
 func TestStore_DedupeFor_Cascade(t *testing.T) {
 	t.Parallel()
 	s := newLoadedStore(t, map[string]string{
