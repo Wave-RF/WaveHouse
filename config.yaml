@@ -4,9 +4,11 @@
 # variable no key binds.
 # Root for embedded state. NATS lives at <data_dir>/nats; each tenant's Pebble
 # dedupe store (when its dedupe is enabled) at <data_dir>/<tenant>/dedupe —
-# tenant 0's for a settings directory of the four files (an earlier layout's
-# <data_dir>/pebble is moved there at boot). In a container, this MUST be on a
-# host-backed volume — the relative default is for local binary use only.
+# tenant 0's for a settings directory of the four files. An earlier layout's
+# <data_dir>/pebble is moved there at boot when <data_dir>/0/dedupe is absent;
+# with both present, boot uses <data_dir>/0/dedupe, leaves the old directory
+# alone, and warns. In a container, this MUST be on a host-backed volume — the
+# relative default is for local binary use only.
 data_dir: ./data
 
 server:
