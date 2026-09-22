@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -165,6 +166,38 @@ func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 		}
 		return store.DLQFor(table)
 	}
+}
+
+// sharedTables is the cache the ingest worker invalidates through until #583
+// story 6 gives each tenant its own ClickHouse. Every tenant reads the same
+// tables today, so an insert into one changes what every served tenant would
+// read: the worker names one tenant's namespaces (its own), and this bumps
+// them under every tenant the registry serves, the named one included. Reads
+// are untouched — a tenant's cached results stay its own — and a tenant whose
+// folder is rejected is not served, so its entries wait for their TTL as
+// its requests wait for a reload. Goes away with story 6, when a table is one
+// tenant's.
+type sharedTables struct {
+	cache.Cache
+	tenants *settings.Registry
+}
+
+func (s sharedTables) Invalidate(ctx context.Context, namespaces []cache.Namespace) (uint64, error) {
+	ids := map[tenant.ID]bool{}
+	for _, ns := range namespaces {
+		ids[ns.Tenant] = true
+	}
+	for id := range s.tenants.All() {
+		ids[id] = true
+	}
+	all := make([]cache.Namespace, 0, len(ids)*len(namespaces))
+	for _, id := range slices.Sorted(maps.Keys(ids)) {
+		for _, ns := range namespaces {
+			ns.Tenant = id
+			all = append(all, ns)
+		}
+	}
+	return s.Cache.Invalidate(ctx, all)
 }
 
 // wireObservability initializes the OTel pipeline whenever either OTLP push
@@ -507,7 +540,7 @@ func (a *App) wireStreaming() {
 // drain within the shutdown timeout.
 func (a *App) wireIngestWorker() {
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
-		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, a.cache, a.ch.Target, tenant.Default, dlqFor(a.tenants))
+		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, sharedTables{Cache: a.cache, tenants: a.tenants}, a.ch.Target, tenant.Default, dlqFor(a.tenants))
 		if err != nil {
 			return err
 		}

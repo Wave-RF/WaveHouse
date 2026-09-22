@@ -21,11 +21,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 
+	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 )
 
@@ -617,6 +619,33 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 		require.ErrorIs(t, err, dedupe.ErrUnavailable, "switched on but not open: that tenant's ingest fails closed")
 		assert.True(t, a.dedup.For("globex").Open(), "the tenant beside it is served")
 	})
+}
+
+// Until story 6 every tenant reads the same ClickHouse tables, so an insert
+// invalidates a table's cached results under every served tenant, not only
+// under the worker's own: the cache the worker is handed fans the namespaces
+// out. A rejected tenant is not served and is left to its TTL.
+func TestSharedTables_InvalidatesEveryServedTenant(t *testing.T) {
+	t.Parallel()
+	tenants, findings := settings.Open(writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil, "broken": invalidQuery}))
+	require.NotNil(t, tenants, "findings: %v", findings)
+	mock := &testutil.MockCache{}
+	c := sharedTables{Cache: mock, tenants: tenants}
+
+	n, err := c.Invalidate(t.Context(), []cache.Namespace{
+		{Tenant: tenant.Default, Table: "events"},
+		{Tenant: tenant.Default, Table: "events", Scope: "org_1"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(6), n)
+	assert.ElementsMatch(t, []cache.Namespace{
+		{Tenant: tenant.Default, Table: "events"},
+		{Tenant: tenant.Default, Table: "events", Scope: "org_1"},
+		{Tenant: "acme", Table: "events"},
+		{Tenant: "acme", Table: "events", Scope: "org_1"},
+		{Tenant: "globex", Table: "events"},
+		{Tenant: "globex", Table: "events", Scope: "org_1"},
+	}, mock.GetNamespaces(), "the worker's own tenant and every served one; the rejected one waits for its TTL")
 }
 
 // keepalive is a config.json patch setting the stream block's keepalive pair.
