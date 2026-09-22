@@ -24,8 +24,13 @@ func withTenant(r *http.Request) *http.Request {
 	return r.WithContext(WithStore(r.Context(), testStore))
 }
 
+// testTenantRegistry is the registry whose default tenant is testStore, built
+// once: NewRegistry stamps the store with its tenant, and parallel tests must
+// not each restamp the one they share.
+var testTenantRegistry = settings.NewRegistry(testStore)
+
 // testTenants is a registry whose default tenant is testStore.
-func testTenants() *settings.Registry { return settings.NewRegistry(testStore) }
+func testTenants() *settings.Registry { return testTenantRegistry }
 
 // nestedTenants opens a nested settings directory, one folder per entry:
 // tenant folder → its config.json (fullConfig for a tenant that is served,

@@ -1,8 +1,10 @@
 package api
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -91,8 +93,8 @@ func TestQueryCacheKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			a := queryCacheKey(tt.sqlA, tt.paramsA)
-			b := queryCacheKey(tt.sqlB, tt.paramsB)
+			a := queryCacheKey(tenant.Default, tt.sqlA, tt.paramsA)
+			b := queryCacheKey(tenant.Default, tt.sqlB, tt.paramsB)
 			if tt.expectEqual {
 				assert.Equal(t, a, b)
 			} else {
@@ -100,4 +102,20 @@ func TestQueryCacheKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The tenant leads the key in the clear, so a key is tenant-keyed by
+// construction rather than by what went into the hash: identical SQL and
+// params under two tenants are two keys that differ in the prefix alone, and
+// the flat directory's tenant 0 simply gains its "0".
+func TestQueryCacheKey_LeadsWithTheTenant(t *testing.T) {
+	t.Parallel()
+	acme := queryCacheKey("acme", "SELECT 1", []any{"a"})
+	globex := queryCacheKey("globex", "SELECT 1", []any{"a"})
+	assert.True(t, strings.HasPrefix(acme, "acme:query:"), acme)
+	assert.True(t, strings.HasPrefix(globex, "globex:query:"), globex)
+	assert.NotEqual(t, acme, globex)
+	assert.Equal(t, strings.TrimPrefix(acme, "acme"), strings.TrimPrefix(globex, "globex"),
+		"the tenant is a prefix, not an input to the hash")
+	assert.True(t, strings.HasPrefix(queryCacheKey(tenant.Default, "SELECT 1", nil), "0:query:"))
 }
