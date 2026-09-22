@@ -402,14 +402,15 @@ func (a *App) wireSweeper() {
 // that role's subscribers; the MQ → Hub bridge; and the keepalive wheel.
 func (a *App) wireStreaming() {
 	a.sseMetrics = stream.NewMetrics()
-	a.hub = stream.NewHub(tenant.Default, perTenant(a.tenants, (*settings.Store).Policy), a.registry, a.sseMetrics)
+	a.hub = stream.NewHub(perTenant(a.tenants, (*settings.Store).Policy), a.registry, a.sseMetrics)
 
 	// Hub bridge: MQ → broadcast to connected SSE clients. The Hub decodes and
-	// projects each event itself (skipping malformed payloads), so the bridge
-	// just forwards the raw bytes and acks.
+	// projects each event itself (skipping malformed payloads) under the
+	// tenant the message's topic names, so the bridge just forwards the topic
+	// and the raw bytes, and acks.
 	a.add(component{name: "hub bridge", run: func(ctx context.Context) error {
 		err := a.mq.Subscribe(ctx, "hub-bridge", func(msg *mq.Message) error {
-			a.hub.Broadcast(msg.TopicKey(), msg.Data)
+			a.hub.Broadcast(msg.Topic(), msg.Data)
 			if err := msg.Ack(); err != nil {
 				slog.Warn("failed to ack message from embedded hub bridge", "error", err)
 			}

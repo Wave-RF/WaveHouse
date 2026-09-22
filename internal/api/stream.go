@@ -102,7 +102,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// setup finds the announcement already recorded and doesn't repeat it; if the
 	// registry can't supply the columns yet, the event path announces them before
 	// the first data frame instead.
-	if f, ok := h.Hub.SubscribeSchemaFrame(table, role, sub); ok {
+	if f, ok := h.Hub.SubscribeSchemaFrame(topic.Tenant, table, role, sub); ok {
 		n, err := w.Write(f.Data)
 		if err != nil {
 			return
@@ -111,9 +111,8 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		h.Metrics.FrameSent(f.Kind, n)
 	}
 
-	topicKey := topic.Key()
-	h.Hub.Add(topicKey, role, sub)
-	defer h.Hub.Remove(topicKey, role, sub)
+	h.Hub.Add(topic, role, sub)
+	defer h.Hub.Remove(topic, role, sub)
 
 	// Gap fill from the MQ's retained messages (DeliverByStartTime, see
 	// mq.Replayer).
@@ -129,7 +128,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		// low-volume and one-time, unlike the per-role live fan-out), write, and count
 		// the replayed frame. A write error means the client is gone, so stop the
 		// gap-fill and let the deferred cleanup unwind.
-		project := h.Hub.ReplayProjector(role, sub)
+		project := h.Hub.ReplayProjector(topic.Tenant, role, sub)
 		sendReplay := func(data []byte) bool {
 			// Zero frames means the event is filtered out for this role; two means
 			// the column list changed and is announced before the row.

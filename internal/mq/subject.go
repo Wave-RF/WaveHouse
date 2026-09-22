@@ -62,7 +62,7 @@ func subject(prefix string, t Topic) (string, error) {
 	if _, err := tenant.Parse(string(t.Tenant)); err != nil {
 		return "", fmt.Errorf("topic tenant: %w", err)
 	}
-	return prefix + t.Key(), nil
+	return prefix + t.key(), nil
 }
 
 // topicKey is the tail of a subject carrying prefix — by construction the

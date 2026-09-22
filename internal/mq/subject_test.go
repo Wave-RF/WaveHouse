@@ -70,14 +70,14 @@ func TestSubject_RoundTripsEveryTopic(t *testing.T) {
 	}
 
 	for _, topic := range topics {
-		t.Run(topic.Key(), func(t *testing.T) {
+		t.Run(topic.key(), func(t *testing.T) {
 			t.Parallel()
 			for _, prefix := range []string{ingestPrefix, dlqPrefix} {
 				subj, err := subject(prefix, topic)
 				require.NoError(t, err)
 				assert.NotContains(t, subj[len(prefix):], "*")
 				assert.NotContains(t, subj[len(prefix):], ">")
-				assert.Equal(t, topic.Key(), topicKey(prefix, subj), "a subject tail is the topic key")
+				assert.Equal(t, topic.key(), topicKey(prefix, subj), "a subject tail is the topic key")
 				assert.Equal(t, topic, parseTopicKey(topicKey(prefix, subj)))
 			}
 		})
@@ -121,9 +121,9 @@ func TestTopicKey_IsInjective(t *testing.T) {
 	t.Parallel()
 	// A dotted table must not collide with a table + scope pair, and a
 	// tenant's table must not collide with another tenant's.
-	assert.NotEqual(t, Topic{Tenant: "0", Table: "a.b"}.Key(), Topic{Tenant: "0", Table: "a", Scope: "b"}.Key())
-	assert.NotEqual(t, Topic{Tenant: "a", Table: "b"}.Key(), Topic{Tenant: "b", Table: "a"}.Key())
-	assert.Equal(t, Topic{Tenant: "0", Table: "a", Scope: "b"}.Key(), Topic{Tenant: "0", Table: "a", Scope: "b"}.Key())
+	assert.NotEqual(t, Topic{Tenant: "0", Table: "a.b"}.key(), Topic{Tenant: "0", Table: "a", Scope: "b"}.key())
+	assert.NotEqual(t, Topic{Tenant: "a", Table: "b"}.key(), Topic{Tenant: "b", Table: "a"}.key())
+	assert.Equal(t, Topic{Tenant: "0", Table: "a", Scope: "b"}.key(), Topic{Tenant: "0", Table: "a", Scope: "b"}.key())
 }
 
 // The form written before the tenant led the subject (#583 story 5) is the

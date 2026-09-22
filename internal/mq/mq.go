@@ -31,12 +31,12 @@ type Topic struct {
 	Scope  string
 }
 
-// Key is an injective string form of the topic, for use as a map key (the SSE
-// hub's subscription index): the tenant first, verbatim — its grammar makes
-// it one token — then the table and scope as encoded tokens. Opaque: not a
-// broker subject, and not parseable. A topic without a tenant has no
-// subject, and its key round-trips to nothing.
-func (t Topic) Key() string {
+// key is the injective string form of the topic that a subject's tail
+// carries: the tenant first, verbatim — its grammar makes it one token — then
+// the table and scope as encoded tokens. A topic without a tenant has no
+// subject, and its key parses back to nothing (parseTopicKey). Callers key
+// their own maps by the Topic value itself.
+func (t Topic) key() string {
 	key := string(t.Tenant) + "." + encodeToken(t.Table)
 	if t.Scope != "" {
 		key += "." + encodeToken(t.Scope)
@@ -60,20 +60,21 @@ type Message struct {
 
 // NewMessage constructs a Message with ack/nak callbacks.
 func NewMessage(ctx context.Context, topic Topic, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error) *Message {
-	return newMessage(ctx, topic.Key(), data, ts, doubleAck, ack, nak)
+	return newMessage(ctx, topic.key(), data, ts, doubleAck, ack, nak)
 }
 
 func newMessage(ctx context.Context, topicKey string, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error) *Message {
 	return &Message{Ctx: ctx, topicKey: topicKey, Data: data, Timestamp: ts, doubleAckFn: doubleAck, ackFn: ack, nakFn: nak}
 }
 
-// TopicKey is Topic().Key() for the topic the message was published on,
-// without decoding it: free, so it is what per-message paths (the SSE hub
-// bridge) use.
+// TopicKey is the delivered form of the topic the message was published on,
+// undecoded: free, and opaque — what a log line names the message by.
 func (m *Message) TopicKey() string { return m.topicKey }
 
-// Topic is the topic the message was published on. It decodes the names on
-// every call, so it is for failure paths and tests, not the per-message path.
+// Topic is the topic the message was published on — its tenant included,
+// which is how the consumers learn whose event it is. It decodes the key on
+// every call: a split and two unescapes, which the per-message paths (the
+// hub bridge, the worker) pay once each ahead of decoding the envelope.
 func (m *Message) Topic() Topic { return parseTopicKey(m.topicKey) }
 
 // DoubleAck acknowledges the message synchronously, blocking until the
