@@ -36,7 +36,8 @@ type Queue interface {
 
 type parsedMsg struct {
 	msg       *mq.Message
-	tableName string // routing key for per-table batching; raw (unencoded) name
+	tenant    tenant.ID // whose table it is: the topic the message arrived on names it (#583)
+	tableName string    // routing key for per-table batching; raw (unencoded) name
 	scope     string
 	columns   []string        // envelope column names, in declaration order
 	colSig    string          // columns joined; the within-table batch key
@@ -64,13 +65,11 @@ type IngestWorker struct {
 	target   func() chconn.Target
 	maxBatch int
 	maxWait  time.Duration
-	// tenant is whose events the worker writes; every event is its tenant's
-	// until the MQ subject carries one (#583 story 5).
-	tenant tenant.ID
 	// dlqEnabled reports, per tenant table, whether a row that still fails
 	// after row-by-row isolation is parked on the DLQ (settings.Store.DLQFor
-	// in production; nil means always). Resolved at the moment of the failure, so
-	// a settings reload applies to the next poison row without a restart.
+	// in production; nil means always). Resolved at the moment of the failure
+	// under the row's own tenant — the one its topic names — so a settings
+	// reload applies to the next poison row without a restart.
 	dlqEnabled func(id tenant.ID, table string) bool
 
 	// wg tracks the dispatch loop; ackWg tracks backgrounded DoubleAck goroutines.
@@ -131,7 +130,6 @@ const (
 func StartIngestWorker(
 	ctx context.Context, queue Queue, cache cache.Cache,
 	target func() chconn.Target,
-	id tenant.ID,
 	dlqEnabled func(id tenant.ID, table string) bool,
 ) (stop func(context.Context) error, failed <-chan error, err error) {
 	if queue == nil {
@@ -180,7 +178,6 @@ func StartIngestWorker(
 		target:     target,
 		maxBatch:   defaultMaxBatch,
 		maxWait:    defaultMaxWait,
-		tenant:     id,
 		dlqEnabled: dlqEnabled,
 	}
 
@@ -214,9 +211,9 @@ func waitOrDeadline(ctx context.Context, wg *sync.WaitGroup) error {
 }
 
 // dispatchLoop owns the single JetStream consumer and fans every message out to
-// a per-table tableLoop (lazily spawned on first sight of a table). It does no
-// batching itself — it parses just enough to route — so a low-volume table can
-// never strand another table's rows behind a shared timer. It is the ONLY
+// a tableLoop per tenant table (lazily spawned on first sight of one). It does
+// no batching itself — it parses just enough to route — so a low-volume table
+// can never strand another table's rows behind a shared timer. It is the ONLY
 // goroutine that watches ctx; tableLoops stop via channel-close, which gives a
 // deterministic drain with no abandoned messages.
 func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
@@ -248,7 +245,15 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 	// is bounded by the HTTP client timeout; shutdown waits up to stopFunc's deadline.
 	flushCtx := context.WithoutCancel(ctx)
 
-	tableChans := make(map[string]chan parsedMsg)
+	// One loop per tenant table (#583): the dead-letter switch, and in turn
+	// the ClickHouse target and the cache namespace (stories 6 and 8), are
+	// each resolved for one tenant, so a batch never mixes two — two tenants'
+	// tables of one name are two batches.
+	type batchKey struct {
+		tenant tenant.ID
+		table  string
+	}
+	tableChans := make(map[batchKey]chan parsedMsg)
 	var tableWg sync.WaitGroup
 
 	// shutdown drains in order: close every table channel so each tableLoop flushes
@@ -285,14 +290,16 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 			if !ok {
 				continue // unreadable envelope: parked on the DLQ (or acked-and-dropped) in parseMsg
 			}
-			ch, exists := tableChans[pm.tableName]
+			key := batchKey{tenant: pm.tenant, table: pm.tableName}
+			ch, exists := tableChans[key]
 			if !exists {
 				ch = make(chan parsedMsg, w.maxBatch)
-				tableChans[pm.tableName] = ch
+				tableChans[key] = ch
 
-				// TODO(#191): tableLoops are spawned per distinct table and never
-				// reaped — they live for the process lifetime. Safe while table
-				// names are bounded (schema-validated, in-process publishers only,
+				// TODO(#191): tableLoops are spawned per distinct tenant table and
+				// never reaped — they live for the process lifetime. Safe while
+				// tenants and table names are bounded (a settings folder per
+				// tenant, schema-validated tables, in-process publishers only,
 				// DontListen:true). Add idle-reaping + route/teardown coordination
 				// before remote/untrusted publishers can create unbounded cardinality.
 				table, in := pm.tableName, ch
@@ -460,22 +467,25 @@ func firstDuplicate(cols []string) (string, bool) {
 func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, bool) {
 	var envelope EventMessage
 
+	// The tenant is the subject's, never the envelope's: an envelope the
+	// worker cannot read still has one to be parked under.
+	id := m.Topic().Tenant
 	if err := json.Unmarshal(m.Data, &envelope); err != nil {
-		slog.ErrorContext(ctx, "failed to parse event envelope", "error", err)
-		w.rejectPoison(ctx, m, "", "malformed", err.Error())
+		slog.ErrorContext(ctx, "failed to parse event envelope", "tenant", id, "error", err)
+		w.rejectPoison(ctx, m, id, "", "malformed", err.Error())
 		return parsedMsg{}, false
 	}
 	if envelope.Format != FormatJSONCompactEachRow {
 		slog.ErrorContext(ctx, "event envelope declares an unknown row format",
-			"format", envelope.Format, "table", envelope.TableName)
-		w.rejectPoison(ctx, m, envelope.TableName, "unknown_format",
+			"format", envelope.Format, "tenant", id, "table", envelope.TableName)
+		w.rejectPoison(ctx, m, id, envelope.TableName, "unknown_format",
 			fmt.Sprintf("unknown row format %q (a pre-v2 envelope carries none); drain the ingest queue before upgrading", envelope.Format))
 		return parsedMsg{}, false
 	}
 	if len(envelope.Columns) == 0 || len(envelope.Row) == 0 {
 		slog.ErrorContext(ctx, "event envelope carries no columns or no row",
-			"table", envelope.TableName, "columns", len(envelope.Columns))
-		w.rejectPoison(ctx, m, envelope.TableName, "unpairable",
+			"tenant", id, "table", envelope.TableName, "columns", len(envelope.Columns))
+		w.rejectPoison(ctx, m, id, envelope.TableName, "unpairable",
 			"envelope carries no columns or no row, so its values cannot be mapped to columns")
 		return parsedMsg{}, false
 	}
@@ -488,21 +498,22 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 	var cells []json.RawMessage
 	if dup, ok := firstDuplicate(envelope.Columns); ok {
 		slog.ErrorContext(ctx, "unreadable envelope: a column name repeats",
-			"table", envelope.TableName, "column", dup)
-		w.rejectPoison(ctx, m, envelope.TableName, "unpairable",
+			"tenant", id, "table", envelope.TableName, "column", dup)
+		w.rejectPoison(ctx, m, id, envelope.TableName, "unpairable",
 			fmt.Sprintf("column %q appears more than once, so its values cannot be mapped to columns", dup))
 		return parsedMsg{}, false
 	}
 	if err := json.Unmarshal(envelope.Row, &cells); err != nil || len(cells) != len(envelope.Columns) {
 		slog.ErrorContext(ctx, "event envelope row does not pair with its columns",
-			"table", envelope.TableName, "columns", len(envelope.Columns), "error", err)
-		w.rejectPoison(ctx, m, envelope.TableName, "unpairable",
+			"tenant", id, "table", envelope.TableName, "columns", len(envelope.Columns), "error", err)
+		w.rejectPoison(ctx, m, id, envelope.TableName, "unpairable",
 			fmt.Sprintf("row does not pair with its %d column(s), so its values cannot be mapped to columns", len(envelope.Columns)))
 		return parsedMsg{}, false
 	}
 
 	return parsedMsg{
 		msg:       m,
+		tenant:    id,
 		tableName: envelope.TableName,
 		scope:     envelope.Scope,
 		columns:   envelope.Columns,
@@ -566,7 +577,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 		return
 	}
 
-	slog.WarnContext(ctx, "bulk insert failed, falling back to 1-by-1 isolation", "table", tableName, "error", err)
+	slog.WarnContext(ctx, "bulk insert failed, falling back to 1-by-1 isolation", "tenant", group[0].tenant, "table", tableName, "error", err)
 
 	// ISOLATE & DLQ: re-insert one row at a time so a single poison row can't
 	// sink the whole batch.
@@ -574,11 +585,11 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 	for _, pm := range group {
 		singleErr := w.insertToClickHouse(ctx, tableName, cols, []parsedMsg{pm})
 		if singleErr != nil {
-			if w.dlqEnabled != nil && !w.dlqEnabled(w.tenant, tableName) {
-				slog.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "table", tableName, "error", singleErr)
+			if w.dlqEnabled != nil && !w.dlqEnabled(pm.tenant, tableName) {
+				slog.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "tenant", pm.tenant, "table", tableName, "error", singleErr)
 				continue
 			}
-			slog.ErrorContext(ctx, "isolated bad row, sending to DLQ", "table", tableName, "error", singleErr)
+			slog.ErrorContext(ctx, "isolated bad row, sending to DLQ", "tenant", pm.tenant, "table", tableName, "error", singleErr)
 			w.sendToDLQ(ctx, tableName, pm, singleErr.Error())
 		} else {
 			w.handleSuccess(ctx, tableName, []parsedMsg{pm})
@@ -703,12 +714,13 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 
 // rejectPoison disposes of a message the worker can never insert. The DLQ is
 // preferred — the row is preserved for inspection and replay — and dropping is
-// the fallback when the DLQ is off for the table, since redelivering a message
-// that can never succeed would wedge the consumer behind it forever. A DLQ
-// publish that FAILS leaves the message unacked, exactly as the isolation path
-// does: that is a transient DLQ outage, and retrying beats destroying the row.
-func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, tableName, reason, detail string) {
-	if w.dlqEnabled == nil || w.dlqEnabled(w.tenant, tableName) {
+// the fallback when the DLQ is off for the table of tenant id (the topic's),
+// since redelivering a message that can never succeed would wedge the
+// consumer behind it forever. A DLQ publish that FAILS leaves the message
+// unacked, exactly as the isolation path does: that is a transient DLQ
+// outage, and retrying beats destroying the row.
+func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, id tenant.ID, tableName, reason, detail string) {
+	if w.dlqEnabled == nil || w.dlqEnabled(id, tableName) {
 		// Backgrounded on ackWg for the same reason handleSuccess backgrounds its
 		// acks: parkOnDLQ does a DLQ publish AND an fsync-bound DoubleAck,
 		// and parseMsg runs on the dispatchLoop goroutine. The scenario this whole
@@ -724,7 +736,7 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, tableNam
 		return
 	}
 	slog.ErrorContext(ctx, "unreadable envelope dropped — the DLQ is disabled for this table, and a message that can never insert must not redeliver forever",
-		"table", tableName, "reason", reason, "detail", detail)
+		"tenant", id, "table", tableName, "reason", reason, "detail", detail)
 	// Counted only once the ack lands, for the same reason the parked path waits
 	// on parkOnDLQ's verdict: a failed ack leaves the message in the stream to be
 	// redelivered and refused again, and "dropped" is documented to an operator as
@@ -733,7 +745,7 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, tableNam
 	w.ackWg.Go(func() {
 		if err := m.DoubleAck(ctx); err != nil {
 			slog.ErrorContext(ctx, "ack of a dropped unreadable envelope failed, so it stays in the stream and will be refused again",
-				"table", tableName, "reason", reason, "error", err)
+				"tenant", id, "table", tableName, "reason", reason, "error", err)
 			return
 		}
 		countPoison(ctx, tableName, reason, "dropped")

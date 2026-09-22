@@ -134,7 +134,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 			t.Parallel()
 			q, c := tt.setup(t)
 			_, _, err := StartIngestWorker(context.Background(), q, c,
-				func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, tenant.Default, nil)
+				func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrSub)
 		})
@@ -269,7 +269,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	stopFn, _, err := StartIngestWorker(ctx, emb, &testutil.MockCache{},
 		func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
-		}, tenant.Default, nil)
+		}, nil)
 	require.NoError(t, err)
 
 	// Publish so there's an in-flight insert blocking on `release`.
@@ -303,7 +303,7 @@ func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 	// chURL is never dialed: with no messages there is no flush, so a dummy
 	// host/port is fine.
 	stopFn, _, err := StartIngestWorker(context.Background(), emb, &testutil.MockCache{},
-		func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, tenant.Default, nil)
+		func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
 	require.NoError(t, err)
 
 	// Nothing to flush, so shutdown drains immediately and returns nil before the
@@ -1663,5 +1663,146 @@ func TestDispatchLoop_HandoffReturnsOnCancel(t *testing.T) {
 	case <-cons.done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("deliveries blocked on a full msgChan never returned after the loop stopped")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The tenant is the topic's (#583 story 5): read off each message, never held.
+// ---------------------------------------------------------------------------
+
+func TestParseMsg_ReadsTheTenantOffTheTopic(t *testing.T) {
+	t.Parallel()
+	w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+	m := &testutil.MockMessage{
+		MsgTopic: mq.Topic{Tenant: "acme", Table: "events"},
+		MsgData:  makeEnvelope(t, "events", "", map[string]any{"id": 1}),
+	}
+	pm, ok := w.parseMsg(context.Background(), m.Message())
+	require.True(t, ok)
+	assert.Equal(t, tenant.ID("acme"), pm.tenant)
+	assert.Equal(t, "events", pm.tableName)
+}
+
+// An envelope the worker cannot read still has a tenant — the topic's — to
+// resolve its dead-letter switch under and to be parked for.
+func TestParseMsg_PoisonEnvelope_SwitchIsTheTopicsTenants(t *testing.T) {
+	t.Parallel()
+	w, pub, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+	var asked []tenant.ID
+	w.dlqEnabled = func(id tenant.ID, _ string) bool {
+		asked = append(asked, id)
+		return true
+	}
+	m := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: "acme", Table: "events"}, MsgData: []byte("not json")}
+	_, ok := w.parseMsg(context.Background(), m.Message())
+	require.False(t, ok)
+	w.ackWg.Wait()
+
+	assert.Equal(t, []tenant.ID{"acme"}, asked)
+	published := pub.Published()
+	require.Len(t, published, 1)
+	assert.Equal(t, mq.Topic{Tenant: "acme", Table: "events"}, published[0].Topic, "parked under the tenant's own topic")
+}
+
+// Two tenants, one table name, and ClickHouse refusing every row: each row
+// reaches the dead-letter decision under its own tenant. acme's switch is off,
+// so its row stays unacked for redelivery; globex's is on, so its row is parked
+// under globex's topic and acked.
+func TestFlushTable_DLQSwitchIsTheRowsTenants(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{
+		Fn: func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(bytes.NewBufferString("Code: 60. bad row"))}, nil
+		},
+	}
+	w, pub, _, wait := newTestWorker(rt)
+	var asked []tenant.ID
+	w.dlqEnabled = func(id tenant.ID, table string) bool {
+		asked = append(asked, id)
+		return id == "globex" && table == "events"
+	}
+	acme := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: "acme", Table: "events"}, MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 1})}
+	globex := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: "globex", Table: "events"}, MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 1})}
+
+	// One flush per tenant table, as dispatchLoop batches them.
+	w.flushTable(context.Background(), "events", parseAll(t, w, acme))
+	w.flushTable(context.Background(), "events", parseAll(t, w, globex))
+	wait()
+
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, asked)
+	assert.False(t, acme.DoubleAcked.Load(), "acme's row stays unacked: its DLQ is off")
+	assert.True(t, globex.DoubleAcked.Load(), "globex's row is parked and acked")
+	published := pub.Published()
+	require.Len(t, published, 1)
+	assert.Equal(t, mq.Topic{Tenant: "globex", Table: "events"}, published[0].Topic, "parked under the tenant's own topic")
+}
+
+// Two tenants, one table name: each tenant's rows batch on their own, so an
+// INSERT never mixes tenants — what a per-tenant ClickHouse target and cache
+// namespace (stories 6 and 8) rely on. Published interleaved, so batching by
+// table alone would put both tenants' first rows in one INSERT.
+func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
+	t.Parallel()
+	const maxBatch = 2
+
+	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = emb.Close() })
+
+	// CH stub: record each INSERT's body.
+	var (
+		mu     sync.Mutex
+		bodies []string
+	)
+	chSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(chSrv.Close)
+	u, err := url.Parse(chSrv.URL)
+	require.NoError(t, err)
+	host, port, err := net.SplitHostPort(u.Host)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cons, err := emb.CreateConsumer(ctx, mq.ConsumerConfig{Durable: BufferConsumerName, MaxAckPending: 1000})
+	require.NoError(t, err)
+	worker := &IngestWorker{
+		dlq:        emb,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+		cache:      &testutil.MockCache{},
+		target: func() chconn.Target {
+			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
+		},
+		maxBatch: maxBatch,
+		maxWait:  30 * time.Second, // the size trigger is the one under test
+	}
+	worker.wg.Add(1)
+	go worker.dispatchLoop(ctx, cons)
+	t.Cleanup(func() {
+		cancel()
+		worker.wg.Wait()
+	})
+
+	for i := range maxBatch {
+		for _, id := range []tenant.ID{"acme", "globex"} {
+			require.NoError(t, emb.Publish(ctx, mq.Topic{Tenant: id, Table: "events"},
+				makeEnvelope(t, "events", "", map[string]any{"id": fmt.Sprintf("%s-%d", id, i)})))
+		}
+	}
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(bodies) == 2
+	}, defaultMaxWait, 25*time.Millisecond, "each tenant's table hits its own size trigger")
+	mu.Lock()
+	defer mu.Unlock()
+	for _, body := range bodies {
+		assert.Equal(t, maxBatch, strings.Count(body, "\n"), "a full batch: %q", body)
+		assert.NotEqual(t, strings.Contains(body, "acme"), strings.Contains(body, "globex"), "one tenant per INSERT: %q", body)
 	}
 }

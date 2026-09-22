@@ -137,11 +137,12 @@ func shortestKeepalive(tenants *settings.Registry) (period time.Duration, bucket
 }
 
 // perTenant adapts a store accessor to the tenant-keyed getter the async
-// paths take: they hold a tenant id (tenant.Default today, the MQ subject's
-// from #583 story 5), not a request's resolved store. A miss — a nested
-// directory with no 0 folder, or with a rejected one — is logged and read as
-// T's zero value; what a removed tenant means to each async path is story
-// 3's to decide.
+// paths take: they hold a tenant id — the one each message's topic names
+// for the stream hub and the ingest worker (#583 story 5), tenant.Default
+// for the schema registry until story 6 — not a request's resolved store. A
+// miss — a nested directory with no 0 folder, or with a rejected or removed
+// one — is logged and read as T's zero value; what a removed tenant means to
+// each async path is story 3's to decide.
 func perTenant[T any](tenants *settings.Registry, get func(*settings.Store) T) func(tenant.ID) T {
 	return func(id tenant.ID) T {
 		store, ok := tenants.For(id)
@@ -442,7 +443,7 @@ func (a *App) wireStreaming() {
 // drain within the shutdown timeout.
 func (a *App) wireIngestWorker() {
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
-		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, a.cache, a.ch.Target, tenant.Default, dlqFor(a.tenants))
+		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, a.cache, a.ch.Target, dlqFor(a.tenants))
 		if err != nil {
 			return err
 		}
