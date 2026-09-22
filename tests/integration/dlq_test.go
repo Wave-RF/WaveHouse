@@ -20,7 +20,7 @@ import (
 // TestDLQ_StatsEmptyOnFreshStart verifies the DLQ exposes an empty result
 // before any failures have been routed to it. Runs first because a later
 // test in the same package may publish a failed-table message that
-// permanently bumps the global counter for `dlq.<table>` while the
+// permanently bumps the global counter for `dlq.<tenant>.<table>` while the
 // embedded NATS lives.
 func TestDLQ_StatsEmptyOnFreshStart(t *testing.T) {
 	e := env(t)

@@ -22,11 +22,11 @@ The pipeline is **insert-only**. (Upgrading across the v2 envelope? [Drain the q
 
 ## High-level shape
 
-One process consumes a single durable JetStream consumer and fans events out to a goroutine per table. Each table batches independently and POSTs to ClickHouse over the HTTP interface (`JSONCompactEachRow`). On a bulk-insert failure the batch is re-inserted row by row, so a single poison row can't sink it: clean rows ack, and only the rows that fail again go to the dead-letter stream. An envelope the worker cannot *read* — malformed JSON, an unknown row `format` (what a pre-v2 message looks like), or columns and a row that don't pair — never reaches a table loop at all: `parseMsg` parks it on the same dead-letter stream, or, where the DLQ is off for the table, acks and drops it rather than redelivering a message that can never insert. A separate sweeper reclaims stream storage.
+One process consumes a single durable JetStream consumer and fans events out to a goroutine per tenant table — the tenant is the subject's leading token. Each tenant's table batches independently and POSTs to ClickHouse over the HTTP interface (`JSONCompactEachRow`). On a bulk-insert failure the batch is re-inserted row by row, so a single poison row can't sink it: clean rows ack, and only the rows that fail again go to the dead-letter stream. An envelope the worker cannot *read* — malformed JSON, an unknown row `format` (what a pre-v2 message looks like), or columns and a row that don't pair — never reaches a table loop at all: `parseMsg` parks it on the same dead-letter stream, or, where the DLQ is off for the table, acks and drops it rather than redelivering a message that can never insert. A separate sweeper reclaims stream storage.
 
 ```mermaid
 flowchart LR
-    API["POST /v1/ingest"] -->|"publish ingest.TABLE"| Stream
+    API["POST /v1/ingest"] -->|"publish ingest.TENANT.TABLE"| Stream
 
     subgraph NATS["Embedded NATS JetStream (in-process)"]
         Stream["WAVEHOUSE stream<br/>all ingest subjects<br/>LimitsPolicy + DiscardNew"]
@@ -37,7 +37,7 @@ flowchart LR
     Cons --> D
 
     subgraph Worker["Ingest worker (one process)"]
-        D["dispatchLoop<br/>(route by table)"]
+        D["dispatchLoop<br/>(route by tenant + table)"]
         D --> TLa["tableLoop: clicks"]
         D --> TLb["tableLoop: events"]
         D --> TLc["tableLoop: ..."]
@@ -46,7 +46,7 @@ flowchart LR
     TLa -->|"JSONCompactEachRow POST"| CH[("ClickHouse")]
     TLb --> CH
     TLc --> CH
-    TLa -.->|"poison rows"| DLQ["WAVEHOUSE_DLQ<br/>dlq.TABLE"]
+    TLa -.->|"poison rows"| DLQ["WAVEHOUSE_DLQ<br/>dlq.TENANT.TABLE"]
     D -.->|"unreadable envelope"| DLQ
 
     Sweep["Active Sweeper"] -.->|"reads AckFloor, purges"| Stream
@@ -227,7 +227,7 @@ Several layers throttle the pipeline, inner to outer:
 
 ## The Active Sweeper
 
-The worker advances the consumer's `AckFloor` by acking; the sweep observes it to decide what is safe to purge. They never call each other — the consumer's `AckFloor` is their only contract. The sweeper (`internal/ingest`) owns the schedule and the window: each tick it calls `mq.Purger.PurgeAcked(buffer-consumer, now − gap window)`. The steps after the tick below are the embedded broker's implementation of that call.
+The worker advances the consumer's `AckFloor` by acking; the sweep observes it to decide what is safe to purge. They never call each other — the consumer's `AckFloor` is their only contract. The sweeper (`internal/ingest`) owns the schedule and the window: each tick it calls `mq.Purger.PurgeAcked(buffer-consumer, now − gap window)`, where the window is the longest `stream.gap_window_minutes` among the tenants being served — the stream is one for every tenant and the purge one bound over it, so purging less is the safe direction until each tenant has its own stream. The steps after the tick below are the embedded broker's implementation of that call.
 
 ```mermaid
 flowchart TD
@@ -261,7 +261,7 @@ flowchart TD
 
 What will need to change, and the trade-offs (discussed at length on the batching work):
 
-- **Work distribution.** Either a *shared* durable pull consumer (competing consumers — coordination-free, but a hot table's rows spread across instances, shrinking per-instance batches), or **partitioned consumer groups** that hash by table-name subject token so a table always lands on one owner (pinned consumer → per-table affinity + automatic failover, at the cost of an assignment layer).
+- **Work distribution.** Either a *shared* durable pull consumer (competing consumers — coordination-free, but a hot table's rows spread across instances, shrinking per-instance batches), or **partitioned consumer groups** that hash by the tenant and table subject tokens so a tenant's table always lands on one owner (pinned consumer → per-table affinity + automatic failover, at the cost of an assignment layer).
 - **Idempotent inserts become mandatory.** At-least-once + redelivery-on-crash means another instance can re-insert a batch the dead one had written but not acked. Use `ReplacingMergeTree` (or a dedup key). The single-instance design hides this today.
 - **NATS resilience.** Remote NATS needs explicit reconnect/backoff for the connection itself — the embedded path never dials out, so there is nothing to reconnect. The `Consume` error handler that detects a dead consumer already lives in `embedded.go` and needs no change for a remote broker.
 - **The sweeper.** Its single-`AckFloor` model assumes one consumer. With per-table/partition consumers you either rework it to purge below the *minimum* AckFloor across consumers, or — cleaner — **split the dual-use stream**: a `WorkQueuePolicy` work stream (auto-deletes on ack, no sweeper) plus a `MaxAge` replay stream (server-expired by time, no sweeper), joined by stream sourcing. That deletes the sweeper and its leader-election problem entirely, at the cost of duplicating the in-flight overlap on disk.
