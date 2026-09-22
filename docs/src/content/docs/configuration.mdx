@@ -35,7 +35,7 @@ This page is boot config only — what the platform operator owns (wiring, lifec
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; Pebble (when dedupe is enabled) at `<data_dir>/pebble`. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
+| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; the Pebble dedupe stores (when dedupe is enabled) mirror the settings directory's shape — `<data_dir>/pebble` for [the four files](/settings-directory), one `<data_dir>/<tenant>/dedupe` per folder of [a nested directory](/deployment#the-nested-settings-directory). Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
 
 ### Server
 
@@ -180,6 +180,7 @@ Every key, with its default. Save the YAML as `config.yaml` next to the binary (
 
 ```yaml
 data_dir: ./data         # nats → ./data/nats, pebble → ./data/pebble
+                         # (./data/<tenant>/dedupe per tenant folder)
 
 server:
   port: 8080
