@@ -170,13 +170,15 @@ func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 
 // sharedTables is the cache the ingest worker invalidates through until #583
 // story 6 gives each tenant its own ClickHouse. Every tenant reads the same
-// tables today, so an insert into one changes what every served tenant would
-// read: the worker names one tenant's namespaces (its own), and this bumps
-// them under every tenant the registry serves, the named one included. Reads
-// are untouched — a tenant's cached results stay its own — and a tenant whose
-// folder is rejected is not served, so its entries wait for their TTL as
-// its requests wait for a reload. Goes away with story 6, when a table is one
-// tenant's.
+// tables today, so an insert into one changes what every tenant would read:
+// the worker names one tenant's namespaces (its own), and this bumps them
+// under every tenant the registry knows, the named one included. Known, not
+// served: a rejected tenant keeps its cache entries and comes back into
+// service with them, so leaving it out would let a folder repaired inside a
+// TTL serve pre-insert rows. A tenant removed and restored inside a TTL still
+// can — the registry forgets a removed tenant, and what becomes of its cache
+// is story 3's — and reads are untouched: a tenant's cached results stay its
+// own. Goes away with story 6, when a table is one tenant's.
 type sharedTables struct {
 	cache.Cache
 	tenants *settings.Registry
@@ -187,7 +189,7 @@ func (s sharedTables) Invalidate(ctx context.Context, namespaces []cache.Namespa
 	for _, ns := range namespaces {
 		ids[ns.Tenant] = true
 	}
-	for id := range s.tenants.All() {
+	for id := range s.tenants.Known() {
 		ids[id] = true
 	}
 	all := make([]cache.Namespace, 0, len(ids)*len(namespaces))

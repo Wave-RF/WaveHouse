@@ -622,10 +622,11 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 }
 
 // Until story 6 every tenant reads the same ClickHouse tables, so an insert
-// invalidates a table's cached results under every served tenant, not only
-// under the worker's own: the cache the worker is handed fans the namespaces
-// out. A rejected tenant is not served and is left to its TTL.
-func TestSharedTables_InvalidatesEveryServedTenant(t *testing.T) {
+// invalidates a table's cached results under every tenant the registry
+// knows, not only under the worker's own: the cache the worker is handed fans
+// the namespaces out. A rejected tenant is included — it comes back into
+// service with the entries it has.
+func TestSharedTables_InvalidatesEveryKnownTenant(t *testing.T) {
 	t.Parallel()
 	tenants, findings := settings.Open(writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil, "broken": invalidQuery}))
 	require.NotNil(t, tenants, "findings: %v", findings)
@@ -637,15 +638,17 @@ func TestSharedTables_InvalidatesEveryServedTenant(t *testing.T) {
 		{Tenant: tenant.Default, Table: "events", Scope: "org_1"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, uint64(6), n)
+	assert.Equal(t, uint64(8), n)
 	assert.ElementsMatch(t, []cache.Namespace{
 		{Tenant: tenant.Default, Table: "events"},
 		{Tenant: tenant.Default, Table: "events", Scope: "org_1"},
 		{Tenant: "acme", Table: "events"},
 		{Tenant: "acme", Table: "events", Scope: "org_1"},
+		{Tenant: "broken", Table: "events"},
+		{Tenant: "broken", Table: "events", Scope: "org_1"},
 		{Tenant: "globex", Table: "events"},
 		{Tenant: "globex", Table: "events", Scope: "org_1"},
-	}, mock.GetNamespaces(), "the worker's own tenant and every served one; the rejected one waits for its TTL")
+	}, mock.GetNamespaces(), "the worker's own tenant and every known one, the rejected one included")
 }
 
 // keepalive is a config.json patch setting the stream block's keepalive pair.

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -297,6 +298,26 @@ func TestRegistry_HooksRunOnAReloadThatAdoptsNothing(t *testing.T) {
 	assert.False(t, known)
 	_, ok := reg.For("globex")
 	assert.False(t, ok)
+}
+
+// Known is every tenant the registry holds, rejected ones included, in id
+// order: what a resource a rejected tenant comes back to is kept current for.
+func TestRegistry_Known(t *testing.T) {
+	t.Parallel()
+	root := writeTree(t, map[string]map[string]string{"globex": maxRowsFiles(222), "acme": maxRowsFiles(111), "broken": brokenFiles()})
+	reg, _ := Open(root)
+	require.NotNil(t, reg)
+	assert.Equal(t, []tenant.ID{"acme", "broken", "globex"}, slices.Collect(reg.Known()))
+	var served []tenant.ID
+	for id := range reg.All() {
+		served = append(served, id)
+	}
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, served, "All leaves the rejected tenant out; Known does not")
+	// Stopping early is the iterator's contract, not the caller's problem.
+	for id := range reg.Known() {
+		assert.Equal(t, tenant.ID("acme"), id)
+		break
+	}
 }
 
 // All is the served tenants in id order: a rejected tenant is left out, like
