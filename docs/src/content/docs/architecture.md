@@ -208,6 +208,9 @@ Client POST /v1/ingest?table={table}
   → Tenant resolution: X-Tenant-ID → settings.Registry → the request's *settings.Store
     (absent = tenant 0; 400 malformed / 404 unknown / 503 rejected, before auth)
   → JWT auth middleware (always runs; token optional)
+  → refuseUnverifiable (503 + Retry-After: 30 for a token sent while the
+    tenant's JWKS has not been fetched yet; tokenless and operator-key
+    requests pass through)
   → Look up table schema from SchemaRegistry
   → Policy check: role allowed to insert into this table (before the body is parsed)
   → Resolve the declared Content-Type into the body's format (415 if absent,
@@ -258,6 +261,9 @@ Active Sweeper (async goroutine, every 60s):
 Client POST /v1/ops/query
   → JWT auth middleware (always runs, never rejects; a bad token yields an
     empty role and stashes its verification error for the denying gate)
+  → refuseUnverifiable (503 + Retry-After: 30 for a token sent while tenant 0's
+    JWKS has not been fetched yet — the ops tree resolves no tenant; tokenless
+    and operator-key requests pass through)
   → policy.ResolveRole (empty role → default_role — the one sanctioned
     roleless exception)
   → /v1/ops RequireAdmin (resolved role == policy.admin_role, or the
@@ -302,6 +308,9 @@ Client GET /v1/stream
   → Tenant resolution: X-Tenant-ID → settings.Registry → the request's *settings.Store
     (absent = tenant 0; 400 malformed / 404 unknown / 503 rejected, before auth)
   → JWT auth middleware (always runs; token optional)
+  → refuseUnverifiable (503 + Retry-After: 30 for a token sent while the
+    tenant's JWKS has not been fetched yet; tokenless and operator-key
+    requests pass through)
   → Announce the caller's projected column list as an `event: schema` frame
     (no `id:`, so it never moves Last-Event-ID) BEFORE registering, so a client
     on a quiet table learns its columns before any row arrives and a live event

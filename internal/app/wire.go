@@ -480,14 +480,17 @@ func (a *App) wireIngestWorker() {
 // public deployment). That's a valid posture, so it warns rather than fails.
 func (a *App) wireAuth() func(http.Handler) http.Handler {
 	cfg := a.cfg
-	anyJWKS := false
-	for _, store := range a.tenants.All() {
-		anyJWKS = anyJWKS || store.Auth().JWKSURL != ""
-	}
-	switch {
-	case cfg.Auth.JWTSecret == "" && !anyJWKS:
-		slog.Warn("no auth.jwt_secret (boot config) or auth.jwks_url (settings) set: no token can be validated, so every request resolves to the policy default_role (public access)")
-	case cfg.Auth.JWTSecret == "change-me-in-production":
+	switch cfg.Auth.JWTSecret {
+	case "":
+		// Per tenant: with no boot secret each tenant is as public as its own
+		// jwks_url leaves it, and one tenant's provider says nothing about
+		// another's.
+		for id, store := range a.tenants.All() {
+			if store.Auth().JWKSURL == "" {
+				slog.Warn("no auth.jwt_secret (boot config) and no auth.jwks_url in this tenant's settings: no token can be validated for it, so its every request resolves to its policy default_role (public access)", "tenant", id)
+			}
+		}
+	case "change-me-in-production":
 		slog.Warn("WH_AUTH_JWT_SECRET is using the default insecure value")
 	}
 

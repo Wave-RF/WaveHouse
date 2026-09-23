@@ -83,6 +83,10 @@ var (
 	asymmetricMethods = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512", "EdDSA"}
 
 	errJWKSTooLarge = fmt.Errorf("jwks response exceeds %d bytes", jwksMaxBytes)
+	// errNoVerifier is a verifier with neither a JWKS URL nor a secret: no
+	// token can validate. Never hand the library an empty HMAC key — it
+	// verifies a token signed with one.
+	errNoVerifier = errors.New("no verifier configured")
 )
 
 // verifier is one tenant's immutable JWT verification setup: the key source,
@@ -116,6 +120,9 @@ func (v *verifier) keyFunc(t *jwt.Token) (any, error) {
 			return nil, ErrVerifierPending
 		}
 		return (*jwks).Keyfunc(t)
+	}
+	if v.secret == "" {
+		return nil, errNoVerifier
 	}
 	if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 		return nil, jwt.ErrSignatureInvalid
@@ -412,8 +419,10 @@ var operatorKeyFailures, _ = otel.Meter("wavehouse-auth").Int64Counter(
 // otherwise the HMAC secret (JWTSecret) is used. Accepted signing algorithms are
 // restricted to the active verifier's family (asymmetric for JWKS, HMAC
 // otherwise) so a token can't force an alg-confusion or alg:none bypass. With
-// neither JWKSURL nor JWTSecret configured, no token can validate and every
-// request falls back to the default role — i.e. a pure public deployment.
+// neither JWKSURL nor JWTSecret configured, no token can validate — keyFunc
+// refuses rather than verify against an empty key, which the library would
+// accept — and every request falls back to the default role, i.e. a pure
+// public deployment.
 //
 // The verifier is the request tenant's (current). A tenant that has no
 // verifier at all fails closed — every token is invalid — and a JWKS URL

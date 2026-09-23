@@ -379,6 +379,20 @@ func TestMiddleware_InvalidQueryParamToken_FallsBackWithError(t *testing.T) {
 	assert.True(t, errors.Is(c.authErr, errInvalidToken))
 }
 
+// With neither a secret nor a JWKS URL no token validates — including one
+// signed with the empty HMAC key, which the JWT library would otherwise
+// accept as an empty-secret match and hand its role claim through.
+func TestMiddleware_NoSecretNoJWKS_RejectsEmptyKeyToken(t *testing.T) {
+	t.Parallel()
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"role": "admin", "exp": time.Now().Add(time.Hour).Unix()})
+	signed, err := tok.SignedString([]byte(""))
+	require.NoError(t, err)
+	c := run(t, Config{}, Wiring{}, bearer(signed))
+	assert.Empty(t, c.role, "an empty-key token must never authenticate")
+	assert.False(t, c.hasClaims)
+	assert.True(t, errors.Is(c.authErr, errInvalidToken))
+}
+
 func TestMiddleware_NoneAlgToken_Rejected(t *testing.T) {
 	t.Parallel()
 	// A token using "alg": "none" carries claims but no signature. It must never
