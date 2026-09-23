@@ -752,3 +752,50 @@ func TestRun_StopEndsOpenStreams(t *testing.T) {
 	_, err = io.ReadAll(resp.Body)
 	assert.NoError(t, err, "the server ended the stream cleanly")
 }
+
+// poolSettings is a config.json patch: the seed's clickhouse block pointed
+// at addr with the native pool sized to open.
+func poolSettings(addr string, open int) map[string]any {
+	return map[string]any{"clickhouse": map[string]any{
+		"addr": addr, "http_port": 8123, "http_scheme": "http", "database": "default", "username": "default", "query_timeout": 30,
+		"tls":     map[string]any{"enabled": false, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": false, "server_name": ""},
+		"headers": map[string]any{}, "max_open_conns": open, "max_idle_conns": 5,
+	}}
+}
+
+// TestNew_RefusesAPoolAboveTheCeiling: clickhouse.max_total_conns is boot
+// config and the settings pool must fit under it, so an impossible pair
+// refuses to boot naming both numbers (#530).
+func TestNew_RefusesAPoolAboveTheCeiling(t *testing.T) {
+	guardGlobals(t)
+	cfg := testConfig(t, writeSettings(t, poolSettings(closedAddr(t), 10)))
+	cfg.ClickHouse.MaxTotalConns = 4
+	_, err := New(t.Context(), Options{Config: cfg})
+	require.ErrorContains(t, err, "clickhouse.max_open_conns 10")
+	require.ErrorContains(t, err, "clickhouse.max_total_conns 4")
+}
+
+// TestReload_PoolAboveTheCeilingKeepsTheConnection: a reload that raises the
+// pool above the ceiling is refused whole — the connection keeps its wiring,
+// not just its size — and the next reload that fits applies.
+func TestReload_PoolAboveTheCeilingKeepsTheConnection(t *testing.T) {
+	boot, moved := closedAddr(t), "127.0.0.1:9"
+	dir := writeSettings(t, poolSettings(boot, 10))
+	cfg := testConfig(t, dir)
+	cfg.ClickHouse.MaxTotalConns = 10
+	a := newApp(t, cfg, Options{})
+	require.Equal(t, boot, a.ch.Addr())
+
+	logs := logtest.Capture(t, slog.LevelError)
+	rewriteSettings(t, dir, poolSettings(moved, 20))
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Equal(t, boot, a.ch.Addr(), "the refused reload leaves the connection as it was")
+	assert.Contains(t, logs.String(), "clickhouse reconfigure refused")
+	assert.Contains(t, logs.String(), "clickhouse.max_open_conns 20")
+
+	rewriteSettings(t, dir, poolSettings(moved, 10))
+	_, adopted = a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Equal(t, moved, a.ch.Addr(), "the next reload that fits applies")
+}

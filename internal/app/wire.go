@@ -229,9 +229,13 @@ func (a *App) wireObservability(ctx context.Context) {
 // password; a reload that changes it swaps the connection behind the
 // manager unconditionally — the adopted settings are the authority, and
 // reachability surfaces where it already does (schema discovery retries,
-// /readyz, query errors). A certificate file that cannot be read is the one
-// exception: boot refuses, a reload keeps the connection it has. The
-// HTTP-side consumers read Target/QueryTimeout per request.
+// /readyz, query errors). Two exceptions keep the connection it has: a
+// certificate file that cannot be read, and a pool sized above the boot
+// config's clickhouse.max_total_conns — capacity is sized once, per
+// process, so a settings pool above it is refused at boot like the rest of
+// an impossible boot config (#530) and logged on a reload, which the next
+// reload retries. The HTTP-side consumers read Target/QueryTimeout per
+// request.
 func (a *App) wireClickHouse() error {
 	params := func() chconn.Params {
 		c := defaultSetting(a, (*settings.Store).ClickHouse)
@@ -244,14 +248,30 @@ func (a *App) wireClickHouse() error {
 			MaxOpenConns: c.MaxOpenConns, MaxIdleConns: c.MaxIdleConns,
 		}
 	}
-	ch, err := chconn.Open(params())
+	ceiling := a.cfg.ClickHouse.MaxTotalConns
+	withinCeiling := func(p chconn.Params) error {
+		if ceiling > 0 && p.MaxOpenConns > ceiling {
+			return fmt.Errorf("clickhouse.max_open_conns %d (settings) exceeds clickhouse.max_total_conns %d (boot config)", p.MaxOpenConns, ceiling)
+		}
+		return nil
+	}
+	p := params()
+	if err := withinCeiling(p); err != nil {
+		return err
+	}
+	ch, err := chconn.Open(p)
 	if err != nil {
 		return fmt.Errorf("clickhouse open: %w", err)
 	}
 	a.ch = ch
 	a.add(component{name: "clickhouse", close: withoutContext(ch.Close)})
 	a.onDefaultAdopt(func() {
-		if err := ch.Reconfigure(params()); err != nil {
+		p := params()
+		if err := withinCeiling(p); err != nil {
+			slog.Error("clickhouse reconfigure refused; the connection is unchanged", "error", err)
+			return
+		}
+		if err := ch.Reconfigure(p); err != nil {
 			slog.Error("clickhouse reconfigure", "error", err)
 		}
 	})

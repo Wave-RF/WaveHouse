@@ -116,13 +116,19 @@ type Server struct {
 	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT" env-default:"10"`
 }
 
-// ClickHouse holds only the password. The wiring — address, HTTP port and
-// scheme, database, username, query timeout — is the settings directory's
-// `clickhouse` block (hot-reloadable: a change swaps the connection). The password stays here because secrets
-// don't belong in a tracked JSON file; it is combined with the adopted
-// wiring on every (re)connect.
+// ClickHouse holds the password and the connection ceiling. The wiring —
+// address, HTTP port and scheme, database, username, query timeout, TLS,
+// headers, pool size — is the settings directory's `clickhouse` block
+// (hot-reloadable: a change swaps the connection). The password stays here
+// because secrets don't belong in a tracked JSON file; it is combined with
+// the adopted wiring on every (re)connect. The ceiling stays here because
+// it is capacity, sized once per process, not wiring.
 type ClickHouse struct {
 	Password string `yaml:"password" env:"WH_CH_PASSWORD"`
+	// MaxTotalConns caps the native connections the process may hold open
+	// across its pools: the settings directory's clickhouse.max_open_conns
+	// must not exceed it. 0, the default, is no ceiling.
+	MaxTotalConns int `yaml:"max_total_conns" env:"WH_CH_MAX_TOTAL_CONNS" env-default:"0"`
 }
 
 // Cache sizes the in-process L1 cache. The time-range bucket structured
@@ -164,6 +170,10 @@ func (c *Config) Validate() error {
 
 	if strings.TrimSpace(c.Settings.Dir) == "" {
 		return fmt.Errorf("settings.dir (%s) is required: point it at a settings directory, or create one with `wavehouse bootstrap [dir]`", EnvSettingsDir)
+	}
+
+	if c.ClickHouse.MaxTotalConns < 0 {
+		return fmt.Errorf("clickhouse.max_total_conns must be >= 0 (0 is no ceiling), got %d", c.ClickHouse.MaxTotalConns)
 	}
 
 	if c.OTel.Enabled {
