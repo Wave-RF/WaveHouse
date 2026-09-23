@@ -7,7 +7,14 @@ import { StreamController } from "./stream/controller.js";
 import { SSETransport } from "./stream/sse.js";
 import { SysNamespace } from "./sys.js";
 import { TableRef } from "./table.js";
-import type { ClientConfig, Database, HttpContext, Result, StreamOptions } from "./types.js";
+import type {
+  ClientConfig,
+  Database,
+  HttpContext,
+  OpsRequestOptions,
+  Result,
+  StreamOptions,
+} from "./types.js";
 
 type TableName<DB> = DB extends Database ? Extract<keyof DB, string> : string;
 type RowType<DB, T extends string> = DB extends Database
@@ -71,11 +78,13 @@ export class WaveHouseClient<DB extends Database = Database> {
    * `service` role). The endpoint proxies straight to ClickHouse's HTTP
    * interface so any ClickHouse-accepted SQL works; positional `?` param
    * binding is NOT supported — inline literals or use the structured query
-   * builder for safe binding. See sql.ts for details.
+   * builder for safe binding. See sql.ts for details. `opts.tenant` names the
+   * tenant whose ClickHouse the SQL runs against, the default tenant without
+   * it.
    */
   sql<Row = Record<string, unknown>>(
     query: string,
-    opts?: { signal?: AbortSignal },
+    opts?: OpsRequestOptions,
   ): Promise<Result<Row[]>> {
     // Migration guard: the second argument used to be a positional-`?`
     // params array. TS callers get a compile-time error from the type

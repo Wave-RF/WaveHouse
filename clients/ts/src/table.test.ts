@@ -226,6 +226,13 @@ describe("TableRef", () => {
 
     expect(result.data).toEqual(schema);
     expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/schema?table=clicks");
+
+    // The tenant rides beside the table, as on every admin route.
+    await table().schema({ tenant: "acme" });
+    const url = new URL(fetchSpy.mock.calls[1][0]);
+    expect(url.pathname).toBe("/v1/ops/schema");
+    expect(url.searchParams.get("table")).toBe("clicks");
+    expect(url.searchParams.get("tenant")).toBe("acme");
   });
 
   // --- stream ---

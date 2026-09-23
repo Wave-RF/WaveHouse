@@ -24,6 +24,12 @@ describe("sql", () => {
 
   it("POSTs to /v1/ops/query with sql field", async () => {
     const result = await sql(makeCtx(), "SELECT count() FROM clicks");
+    expect(new URL(fetchSpy.mock.calls[0][0]).search).toBe("");
+
+    await sql(makeCtx(), "SELECT 1", { tenant: "acme" });
+    expect(
+      new URL(fetchSpy.mock.calls[1][0]).pathname + new URL(fetchSpy.mock.calls[1][0]).search,
+    ).toBe("/v1/ops/query?tenant=acme");
 
     expect(result.data).toEqual([{ count: 10 }]);
     const [url, init] = fetchSpy.mock.calls[0];
@@ -77,6 +83,24 @@ describe("SchemaNamespace", () => {
 
     expect(result.data).toEqual(schemas);
     expect(fetchSpy.mock.calls[0][0]).toContain("/v1/ops/schema");
+  });
+
+  it("list() and refresh() send opts.tenant as ?tenant=, and nothing without it", async () => {
+    fetchSpy.mockImplementation(async () => new Response("[]", { status: 200 }));
+    const ns = new SchemaNamespace(makeCtx());
+
+    await ns.list({ tenant: "acme" });
+    await ns.refresh({ tenant: "acme" });
+    await ns.list();
+    // An empty id is the caller's bug: it is sent for the server to refuse,
+    // never dropped into a read of the default tenant.
+    await ns.refresh({ tenant: "" });
+
+    const urls = fetchSpy.mock.calls.map((call) => new URL(call[0]));
+    expect(urls[0].pathname + urls[0].search).toBe("/v1/ops/schema?tenant=acme");
+    expect(urls[1].pathname + urls[1].search).toBe("/v1/ops/schema/refresh?tenant=acme");
+    expect(urls[2].search).toBe("");
+    expect(urls[3].search).toBe("?tenant=");
   });
 
   it("refresh() POSTs to /v1/ops/schema/refresh", async () => {
