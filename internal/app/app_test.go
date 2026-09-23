@@ -569,6 +569,30 @@ func analystPipe(t *testing.T, dir string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FilePipes), []byte(`{"pipes": [{"name": "p", "sql": "SELECT 1", "allowed_roles": ["analyst"]}]}`), 0o600))
 }
 
+// A boot that fails after stores are open releases them, so the same data_dir
+// boots again: here the MQ refuses its directory (a regular file in its
+// place) once the dedupe store is already open, and a second New on the same
+// data_dir must find the Pebble lock released.
+func TestNew_LateBootFailureReleasesEverything(t *testing.T) {
+	guardGlobals(t)
+	dir := writeSettings(t, map[string]any{"dedupe": map[string]any{
+		"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{},
+	}})
+	cfg := testConfig(t, dir)
+	natsDir := filepath.Join(cfg.DataDir, "nats")
+	require.NoError(t, os.WriteFile(natsDir, []byte("not a directory"), 0o600))
+	a, err := New(t.Context(), Options{Config: cfg})
+	require.Error(t, err)
+	assert.Nil(t, a)
+	assert.Contains(t, err.Error(), "mq open")
+
+	require.NoError(t, os.Remove(natsDir))
+	a, err = New(t.Context(), Options{Config: cfg})
+	require.NoError(t, err, "the stores opened before the failure were released")
+	assert.True(t, a.dedup.Open())
+	assert.NoError(t, a.Close(context.Background()))
+}
+
 // An unreachable JWKS endpoint no longer refuses boot: the tenant's verifier
 // is in place, fail-closed, so a token of the wrong family is refused (401)
 // and one that could not be checked is turned away to retry (503) rather
