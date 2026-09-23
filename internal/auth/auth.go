@@ -153,8 +153,8 @@ func newVerifier(cfg Config, w Wiring) *verifier {
 
 // The library's refresh cadence, as keyfunc.NewDefault sets it: the hourly
 // refresh, and the refetch an unknown key id triggers — one per five minutes
-// per tenant, a request arriving while the limiter is closed waiting up to
-// a minute on it. Kept library-managed by decision (#583 story 9). Neither
+// per tenant, a request arriving while the limiter is closed refused at
+// once unless the next refetch is under a minute away, when it waits for it. Kept library-managed by decision (#583 story 9). Neither
 // helps a verifier that is still pending: keyFunc never reaches the library
 // then, so the first fetch is ours to retry (fetch) — from jwksRetryMin,
 // doubling to jwksRetryMax, until one succeeds.
