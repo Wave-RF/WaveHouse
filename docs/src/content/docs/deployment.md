@@ -134,9 +134,12 @@ All configuration can be set via environment variables. This is the recommended 
 Key variables for production:
 
 ```bash
-# ClickHouse: only the password is env. The address, HTTP port/scheme,
-# database, and user are clickhouse.* in the settings directory's config.json.
+# ClickHouse: only the password and the connection ceiling are env. The
+# address, HTTP port/scheme, database, user, TLS, headers and pool sizes are
+# clickhouse.* in the settings directory's config.json.
 WH_CH_PASSWORD=<clickhouse-password>
+# Ceiling on open native ClickHouse connections; 0 = none
+# WH_CH_MAX_TOTAL_CONNS=0
 
 # Auth secrets (the JWT middleware always runs — set a secret, or auth.jwks_url
 # in the settings directory, to validate tokens; without one, every request

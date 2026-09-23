@@ -536,7 +536,8 @@ var reservedHeaders = []string{"X-ClickHouse-User", "X-ClickHouse-Key", "Authori
 // checkClickHouseHeaders checks each header's shape and, case-insensitively
 // as HTTP compares names, that it is not one WaveHouse sets itself.
 func (v *validator) checkClickHouseHeaders(headers map[string]string) {
-	for name, value := range headers {
+	for _, name := range slices.Sorted(maps.Keys(headers)) {
+		value := headers[name]
 		path := "clickhouse.headers." + name
 		switch {
 		case !validHeaderName(name):

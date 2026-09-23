@@ -44,7 +44,7 @@ This page is boot config only — what the platform operator owns (wiring, lifec
 | `server.port` | `WH_SERVER_PORT` | `8080` | HTTP server listen port. |
 | `server.shutdown_timeout` | `WH_SERVER_SHUTDOWN_TIMEOUT` | `10` | Seconds the drain phase of a stop may take: in-flight requests and ingest batches finish (open SSE streams end immediately). The release of the stores (5s) and the telemetry flush (3s) have fixed budgets on top, so a stop takes at most this plus 8s; see [Stopping](/deployment#stopping). |
 
-The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate TLS at a [reverse proxy](/reverse-proxy#tls) for internet-facing deployments. (The settings directory's `clickhouse.http_scheme` is the *outbound* WaveHouse → ClickHouse hop, unrelated to your clients' TLS.)
+The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate TLS at a [reverse proxy](/reverse-proxy#tls) for internet-facing deployments. (The settings directory's `clickhouse.http_scheme` and `clickhouse.tls` are the *outbound* WaveHouse → ClickHouse hops, unrelated to your clients' TLS.)
 
 ### ClickHouse
 
@@ -238,6 +238,7 @@ WH_SERVER_PORT=8080
 WH_SERVER_SHUTDOWN_TIMEOUT=10
 
 WH_CH_PASSWORD=
+WH_CH_MAX_TOTAL_CONNS=0
 
 WH_CACHE_L1_MAX_COST=67108864
 

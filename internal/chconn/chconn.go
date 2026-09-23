@@ -300,6 +300,12 @@ func (m *Manager) Close() error {
 // worker's tuned transport, the proxy's redirect policy) and replaced when
 // a reload changes the tls block, with the replaced transport's idle
 // connections closed. Requests in flight on the old client finish.
+//
+// The factory gets a copy of the config, never the target's own: net/http
+// appends its HTTP/2 protocols to TLSClientConfig.NextProtos in place when
+// a transport first dials, which would race the driver's handshakes on the
+// shared config and offer HTTP protocols on the native hop. The target's
+// pointer stays the cache key.
 type HTTPClients struct {
 	build func(*tls.Config) *http.Client
 
@@ -322,7 +328,7 @@ func (c *HTTPClients) For(t Target) *http.Client {
 		if c.cur != nil {
 			c.cur.CloseIdleConnections()
 		}
-		c.cfg, c.cur = t.TLS, c.build(t.TLS)
+		c.cfg, c.cur = t.TLS, c.build(t.TLS.Clone())
 	}
 	return c.cur
 }

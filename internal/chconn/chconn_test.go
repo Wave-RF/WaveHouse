@@ -11,9 +11,11 @@ import (
 	"errors"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -303,4 +305,56 @@ func TestHTTPClients_RebuildOnlyWhenTheTLSConfigChanges(t *testing.T) {
 	assert.Equal(t, int32(1), transports[0].closed.Load(), "the replaced client's idle connections are closed")
 	assert.Same(t, second, clients.For(Target{TLS: cfg}))
 	assert.Equal(t, int32(0), transports[1].closed.Load())
+}
+
+// TestHTTPClients_HandsEachClientItsOwnTLSConfig: net/http rewrites a
+// transport's TLSClientConfig.NextProtos on its first dial, so two clients
+// built from the target's own config would race each other and the
+// driver, and would put HTTP protocols on the native hop. Each client gets
+// a copy; the target's config, the driver's, is never touched.
+func TestHTTPClients_HandsEachClientItsOwnTLSConfig(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(srv.Close)
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	shared := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	target := Target{URL: srv.URL, TLS: shared}
+
+	var handed []*tls.Config
+	build := func(cfg *tls.Config) *http.Client {
+		handed = append(handed, cfg)
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = cfg
+		transport.ForceAttemptHTTP2 = true
+		return &http.Client{Transport: transport}
+	}
+	// Both clients exist before either dials: the first dial is what
+	// rewrites NextProtos, and it must happen on each client's own copy.
+	clients := []*http.Client{NewHTTPClients(build).For(target), NewHTTPClients(build).For(target)}
+
+	var wg sync.WaitGroup
+	for _, c := range clients {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+			if !assert.NoError(t, err) {
+				return
+			}
+			resp, err := c.Do(req)
+			if assert.NoError(t, err) {
+				_ = resp.Body.Close()
+			}
+		}()
+	}
+	wg.Wait()
+
+	require.Len(t, handed, 2)
+	for _, cfg := range handed {
+		assert.NotSame(t, shared, cfg, "each client builds from a copy")
+		assert.NotEmpty(t, cfg.NextProtos, "net/http configured HTTP/2 on the copy")
+	}
+	assert.Nil(t, shared.NextProtos, "the target's config, which the driver dials with, is untouched")
+	assert.NotSame(t, handed[0], handed[1])
 }
