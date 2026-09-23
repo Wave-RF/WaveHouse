@@ -593,8 +593,9 @@ func (a *App) wireIngestWorker() {
 // from that tenant's auth block (jwks_url, role_claim), with the secrets from
 // boot config shared by all. A tenant's verifier is rebuilt after a reload
 // that adopts it with changed wiring, kept when the wiring is unchanged, and
-// dropped once the tenant stops being served, removed or rejected alike — no work runs for a tenant that is not served, and a folder
-// adopted again is rebuilt from scratch. A JWKS key set is fetched off the
+// dropped once the tenant stops being served, removed or rejected alike — no
+// work runs for a tenant that is not served, and a folder adopted again is
+// rebuilt from scratch. A JWKS key set is fetched off the
 // boot and reload paths, so an unreachable endpoint never holds either: until
 // a fetch succeeds — retried with backoff from a second, then kept fresh by
 // the library hourly and on an unknown key id — that tenant's token-bearing
@@ -602,9 +603,10 @@ func (a *App) wireIngestWorker() {
 // The verifiers are released with the other components.
 //
 // There is no on/off switch — the middleware always runs. With neither a
-// secret (boot config) nor a JWKS URL (any tenant's settings) no token can
-// validate, so every request falls back to the policy default_role (a pure
-// public deployment). That's a valid posture, so it warns rather than fails.
+// secret (boot config) nor a JWKS URL (that tenant's settings), no token can
+// validate for that tenant, so its every request falls back to its policy
+// default_role (a public tenant). That's a valid posture, so it warns per
+// tenant rather than fails.
 func (a *App) wireAuth() func(http.Handler) http.Handler {
 	cfg := a.cfg
 	switch cfg.Auth.JWTSecret {
