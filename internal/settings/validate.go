@@ -14,7 +14,6 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"golang.org/x/net/http/httpguts"
 )
 
 // ValidateDir reads, decodes, and checks one directory of the four settings
@@ -540,15 +539,45 @@ func (v *validator) checkClickHouseHeaders(headers map[string]string) {
 	for name, value := range headers {
 		path := "clickhouse.headers." + name
 		switch {
-		case !httpguts.ValidHeaderFieldName(name):
+		case !validHeaderName(name):
 			v.errorf(FileConfig, path, "not a valid HTTP header name")
 		case slices.ContainsFunc(reservedHeaders, func(r string) bool { return strings.EqualFold(r, name) }):
 			v.errorf(FileConfig, path, "set by WaveHouse itself; the credentials come from clickhouse.username and the boot password")
 		}
-		if !httpguts.ValidHeaderFieldValue(value) {
+		if !validHeaderValue(value) {
 			v.errorf(FileConfig, path, "not a valid HTTP header value")
 		}
 	}
+}
+
+// validHeaderName reports whether name is an HTTP field name: a non-empty
+// RFC 9110 token, printable ASCII minus the delimiters. The same rule
+// net/http applies when it writes a request, spelled out here so Validate
+// refuses at validation time what the client would refuse at send time.
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := range len(name) {
+		c := name[i]
+		if c <= ' ' || c >= 0x7f || strings.IndexByte("\"(),/:;<=>?@[\\]{}", c) >= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// validHeaderValue reports whether value can be sent as an HTTP field
+// value: no line breaks or other control characters (a tab is allowed),
+// and no DEL; bytes above ASCII pass, as net/http lets them through.
+func validHeaderValue(value string) bool {
+	for i := range len(value) {
+		c := value[i]
+		if (c < ' ' && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // checkClickHousePool checks the native pool's sizes: each >= 1, so the
