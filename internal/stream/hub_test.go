@@ -37,8 +37,9 @@ import (
 // nested-object claims decode unchanged, so literal maps stay faithful there.
 func jwtClaims(t *testing.T, claims map[string]any) map[string]any {
 	t.Helper()
-	authn, err := auth.NewAuthenticator(auth.Config{JWTSecret: testutil.TestJWTSecret}, nil)
-	require.NoError(t, err)
+	authn := auth.NewAuthenticator(auth.Config{JWTSecret: testutil.TestJWTSecret}, nil, nil)
+	authn.Reconfigure(tenant.Default, auth.Wiring{})
+	t.Cleanup(authn.Close)
 	var got map[string]any
 	h := authn.Middleware()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		c, ok := auth.ClaimsFromContext(r.Context())

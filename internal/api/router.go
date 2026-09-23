@@ -135,6 +135,7 @@ func NewRouter(deps Dependencies) http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(TenantMW(deps.Tenants))
 			r.Use(deps.AuthMW)
+			r.Use(refuseUnverifiable)
 
 			// Public content-free liveness ping. Lives under /v1 deliberately:
 			// it's documented API surface the SDK relies on to check "is this
@@ -181,6 +182,7 @@ func NewRouter(deps Dependencies) http.Handler {
 				adminPolicy = nil
 			}
 			r.Use(deps.AuthMW)
+			r.Use(refuseUnverifiable)
 			r.Use(RequireAdmin(adminPolicy))
 
 			// Schema discovery.
@@ -254,6 +256,27 @@ func jsonRecoverer(next http.Handler) http.Handler {
 			}
 		}()
 		next.ServeHTTP(ww, r)
+	})
+}
+
+// refuseUnverifiable answers 503 + Retry-After to a request whose token
+// could not be checked because its tenant's JWKS has not been fetched yet
+// (auth.ErrVerifierPending): at boot, or after a reload moved the tenant to
+// a new URL, until the library's next fetch lands. The alternative — the
+// roleless fall-through every other bad token gets — would evaluate the
+// request under the policy default_role and could accept its data under a
+// lesser role, while another pod holding the keys would have served it as
+// its own; refusing keeps the tenant's data whole and lets the client retry.
+// A tokenless request is unaffected: it is the default_role's either way. So
+// is the operator key, which never consults the verifier.
+func refuseUnverifiable(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := auth.AuthErrorFromContext(r.Context()); errors.Is(err, auth.ErrVerifierPending) {
+			w.Header().Set("Retry-After", "30")
+			writeJSONError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

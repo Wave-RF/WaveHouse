@@ -108,7 +108,7 @@ The stream's disk budget, `mq.max_bytes_gb`, is a hot-reloadable key in the [Set
 
 ### Authentication
 
-Only the secrets are boot config. The verifier wiring — `jwks_url` and `role_claim` — is the settings directory's [`auth` block](/settings-directory#authentication), where a change rebuilds the verifier without a restart.
+Only the secrets are boot config, shared by every tenant. The verifier wiring — `jwks_url` and `role_claim` — is the settings directory's [`auth` block](/settings-directory#authentication), one verifier per tenant, where a change rebuilds that tenant's verifier without a restart.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |

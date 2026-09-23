@@ -73,7 +73,7 @@ func (a *App) wireSettings() error {
 			slog.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
 		}
 	case !served:
-		slog.Warn("nested settings directory with no tenant 0 being served: the ClickHouse connection, the MQ byte budget, the dedupe store, the JWT verifier, and the async paths (ingest worker, sweeper, stream hub, schema refresh) are still configured from tenant 0's config.json, so they run unconfigured — no ClickHouse address, /livez degraded — until a 0 folder is adopted")
+		slog.Warn("nested settings directory with no tenant 0 being served: the ClickHouse connection, the MQ byte budget, the dedupe store, and the async paths (ingest worker, sweeper, stream hub, schema refresh) are still configured from tenant 0's config.json, so they run unconfigured — no ClickHouse address, /livez degraded — until a 0 folder is adopted")
 	}
 	return nil
 }
@@ -89,11 +89,11 @@ func (a *App) trackDefaultStore() {
 }
 
 // defaultSetting reads one setting of the default tenant, which the
-// process-wide resources (ClickHouse, dedupe, MQ, auth) follow until #583
+// process-wide resources (ClickHouse, dedupe, MQ) follow until #583
 // gives each tenant its own. It reads tenant 0's last adopted document, so a
 // 0 folder a reload rejected or removed leaves every one of them as it was —
-// the ones a hook reconciles and the one read per request (the operator
-// key's admin role) alike. A nested directory that has never served a tenant
+// the ones a hook reconciles and the one read per request (the ops
+// gate's admin role) alike. A nested directory that has never served a tenant
 // 0 reads T's zero value, which wireSettings warned about at boot.
 func defaultSetting[T any](a *App, get func(*settings.Store) T) T {
 	store := a.defaultStore.Load()
@@ -462,22 +462,30 @@ func (a *App) wireIngestWorker() {
 	}})
 }
 
-// wireAuth builds the JWT middleware up front so a misconfigured or
-// unreachable JWKS endpoint fails startup loudly rather than booting into a
-// degraded state. jwks_url and role_claim are settings; the secrets are boot
-// config. A reload rebuilds the verifier from the adopted settings
-// unconditionally — an unreachable JWKS then fails closed (no token
-// validates, requests fall to default_role) until it is reachable or the
-// next reload.
+// wireAuth builds the JWT middleware: one verifier per tenant being served,
+// from that tenant's auth block (jwks_url, role_claim), with the secrets from
+// boot config shared by all. A tenant's verifier is rebuilt after each reload
+// that adopts it and dropped once the tenant stops being served, removed or
+// rejected alike — no work runs for a tenant that is not served, and a folder
+// adopted again is rebuilt from scratch. A JWKS key set is fetched off the
+// boot and reload paths, so an unreachable endpoint never holds either: until
+// the fetch succeeds, which the library retries hourly and on an unknown key
+// id, that tenant's token-bearing requests are refused with a 503 (never
+// evaluated under its default_role). The verifiers are released with the
+// other components.
 //
 // There is no on/off switch — the middleware always runs. With neither a
-// secret (boot config) nor a JWKS URL (settings) no token can validate, so
-// every request falls back to the policy default_role (a pure public
-// deployment). That's a valid posture, so it warns rather than fails.
-func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
+// secret (boot config) nor a JWKS URL (any tenant's settings) no token can
+// validate, so every request falls back to the policy default_role (a pure
+// public deployment). That's a valid posture, so it warns rather than fails.
+func (a *App) wireAuth() func(http.Handler) http.Handler {
 	cfg := a.cfg
+	anyJWKS := false
+	for _, store := range a.tenants.All() {
+		anyJWKS = anyJWKS || store.Auth().JWKSURL != ""
+	}
 	switch {
-	case cfg.Auth.JWTSecret == "" && defaultSetting(a, (*settings.Store).Auth).JWKSURL == "":
+	case cfg.Auth.JWTSecret == "" && !anyJWKS:
 		slog.Warn("no auth.jwt_secret (boot config) or auth.jwks_url (settings) set: no token can be validated, so every request resolves to the policy default_role (public access)")
 	case cfg.Auth.JWTSecret == "change-me-in-production":
 		slog.Warn("WH_AUTH_JWT_SECRET is using the default insecure value")
@@ -495,21 +503,48 @@ func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
 		slog.Info("operator key is set: requests presenting it via 'Authorization: Operator <key>' (or the X-Operator-Key alias) are authorized as a full-access platform operator, and can trigger a settings reload over HTTP while the server is locked out")
 	}
 
-	authConfig := func() auth.Config {
-		s := defaultSetting(a, (*settings.Store).Auth)
-		return auth.Config{
-			JWTSecret:   cfg.Auth.JWTSecret,
-			JWKSURL:     s.JWKSURL,
-			RoleClaim:   s.RoleClaim,
-			OperatorKey: operatorKey,
+	// The operator key's admin role is the request tenant's. Silent on a
+	// miss, unlike perTenant: the one is the ops tree over a nested
+	// directory serving no tenant 0, where the gate reads no policy either.
+	policies := func(id tenant.ID) *policy.Policy {
+		if store, ok := a.tenants.For(id); ok {
+			return store.Policy()
 		}
+		return nil
 	}
-	authn, err := auth.NewAuthenticator(authConfig(), a.policies)
-	if err != nil {
-		return nil, fmt.Errorf("auth middleware init: %w", err)
+	// The request's tenant is its resolved store's — one read of the context,
+	// the one api.TenantMW wrote.
+	tenantOf := func(ctx context.Context) (tenant.ID, bool) {
+		store, ok := api.StoreFromContext(ctx)
+		if !ok {
+			return "", false
+		}
+		return store.Tenant(), true
 	}
-	a.onDefaultAdopt(func() { authn.Reconfigure(authConfig()) })
-	return authn.Middleware(), nil
+	authn := auth.NewAuthenticator(auth.Config{JWTSecret: cfg.Auth.JWTSecret, OperatorKey: operatorKey}, tenantOf, policies)
+	a.add(component{name: "auth", close: func(context.Context) error {
+		authn.Close()
+		return nil
+	}})
+	wiring := func(store *settings.Store) auth.Wiring {
+		s := store.Auth()
+		return auth.Wiring{JWKSURL: s.JWKSURL, RoleClaim: s.RoleClaim}
+	}
+	for id, store := range a.tenants.All() {
+		authn.Reconfigure(id, wiring(store))
+	}
+	a.tenants.AfterAdopt(func(adopted []tenant.ID) {
+		for _, id := range adopted {
+			if store, ok := a.tenants.For(id); ok {
+				authn.Reconfigure(id, wiring(store))
+			}
+		}
+		authn.Prune(func(id tenant.ID) bool {
+			_, served := a.tenants.For(id)
+			return served
+		})
+	})
+	return authn.Middleware()
 }
 
 // wireReloadTriggers adds SIGHUP and the directory watcher. All three
@@ -517,7 +552,7 @@ func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
 // serialized Registry.Reload, and a rejected reload keeps the previous good
 // snapshot. They only start in Run, after New has registered every
 // AfterAdopt hook (ClickHouse reconnect, dedupe store, keepalive wheel, auth
-// verifier): the watcher reloads once as soon as its watch exists, and that
+// verifiers): the watcher reloads once as soon as its watch exists, and that
 // reload must already drive every hook — a hook registered after the first
 // reload could miss it.
 //
