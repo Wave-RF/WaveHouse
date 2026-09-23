@@ -111,13 +111,15 @@ Status code: `503 Service Unavailable`
 
 The boot-degraded response lets an operator `curl /livez` to learn why the gateway isn't ready to serve traffic yet, instead of grepping a restart-loop log. The binary is bound on `:8080` and serves diagnostics, but is not yet accepting ingest/query traffic. Schema discovery retries with exponential backoff (2s → 60s); once a Refresh succeeds, `/livez` flips to `200` and stays there for the rest of the process lifetime — transient ClickHouse blips after that point are reflected in `/readyz`, not `/livez`.
 
+Over a [nested settings directory](/deployment#the-nested-settings-directory) the probe reads every tenant together: `/livez` is `503` while **no** tenant has completed a first discovery — the diagnostic names the tenant whose attempt it reports (`schema discovery: tenant acme: …`), and reads `no tenant has completed a first discovery yet` before any attempt or when the directory serves no tenant — and `200` from the first tenant's success on, for the rest of the process lifetime. A tenant whose ClickHouse is unreachable after that is a log line and the `wavehouse_schema_refresh_failures_total{tenant}` counter, never a probe failure; its own routes answer `503` until it discovers.
+
 ---
 
 ### `GET /readyz` — Readiness Probe
 
 > Canonical name (current Kubernetes convention). Also served at **`/ready`** — a deprecated alias kept for v0.1.x and scheduled for removal in v0.2.0.
 
-Returns `200 OK` if the process is fully booted (schema discovery complete) and ClickHouse is currently reachable. Returns `503 Service Unavailable` otherwise. No authentication required.
+Returns `200 OK` if the process is fully booted (schema discovery complete) and ClickHouse is currently reachable. Returns `503 Service Unavailable` otherwise. No authentication required. Over a [nested settings directory](/deployment#the-nested-settings-directory) it pings every open ClickHouse pool at once and answers `200` at the first one that does, so a tenant whose ClickHouse does not answer does not make the process unready; the `503` names every pool that failed (one per line in `error`) when none answers — including when no pool is open at all, a directory serving no tenant.
 
 **Response (ready):**
 
@@ -144,7 +146,7 @@ Status code: `503 Service Unavailable`
 | Post-boot, ClickHouse dies | 200 ★    | 503       |
 | Post-boot, ClickHouse back | 200      | 200       |
 
-★ Once boot completes, `/livez` no longer tracks ClickHouse state — a runtime ClickHouse outage surfaces in `/readyz` only. This is what keeps a Kubernetes `livenessProbe` from restart-looping the pod during a transient backend blip (see [Deployment → Boot-time degraded mode](/deployment#boot-time-degraded-mode)).
+★ Once boot completes, `/livez` no longer tracks ClickHouse state — a runtime ClickHouse outage surfaces in `/readyz` only. This is what keeps a Kubernetes `livenessProbe` from restart-looping the pod during a transient backend blip (see [Deployment → Boot-time degraded mode](/deployment#boot-time-degraded-mode)). Over a nested directory the rows hold per process rather than per tenant: "ClickHouse up" means at least one tenant's pool answers, and "discovery complete" means one tenant's has.
 
 ---
 
@@ -266,10 +268,11 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 403 | `{"error":"column \"x\" not allowed for insert"}` | The record names a column the role's `allow_columns`/`deny_columns` forbids ([Access control → Column permissions](/access-control#column-permissions)) |
 | 403 | `{"error":"check failed for column \"x\""}` | The record's value for a checked column doesn't satisfy the policy `check` (`_eq`/`_in`), or an `_in`-checked column is omitted ([Access control → Insert checks](/access-control#insert-checks)). On the batch path both this and the column error above are per-record failures reported in `results`, not whole-request rejections |
 | 403 | `{"error":"policy check references column \"x\", which table \"t\" does not have"}` (also `… which is materialized and cannot be inserted`, the same for `alias`, and `… which is ephemeral and is never stored`) | A **policy misconfiguration**, not a bad request: the role's `check` names a column the table lacks, one ClickHouse computes, or an `EPHEMERAL` one. None can be enforced — the published row carries one slot per insertable column, and an ephemeral column is never stored — so the check would have passed silently while enforcing nothing. Like the rejections above this is decided per record, so the **status depends on the body shape**: a single-object request answers `403`, while a batch answers `200` and carries the same message against each record in `results`. It fires on **every** insert by that role until the policy or the table is corrected, and names every offending column rather than one of them. `wavehouse validate` cannot catch it: it never sees the ClickHouse schema |
-| 404 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
+| 404 | `{"error":"unknown table: ..."}` | Table not found in the tenant's discovered schema |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
 | 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …` — see the note above on how declarations are echoed; conflicting variant: `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of …`) | The request declared no `Content-Type`, one whose media type is unsupported or does not parse, a comma-bearing value that does not parse as a single media type, or repeated header lines that disagree — different formats, or one supported and one not. Checked before the body is parsed |
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
+| 503 | `{"error":"schema not loaded yet"}` | The tenant's first schema discovery has not succeeded yet (its ClickHouse unreachable, or [no pool for it](/settings-directory#clickhouse)), so whether the table exists is not known; `Retry-After: 5`. Decided before the body is read |
 | 500 | `{"error":"publish failed"}` | Message queue error |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Response includes `Retry-After: 30` header. |
 
@@ -425,6 +428,8 @@ The route is mounted under `/v1/ops/*`, behind the `RequireAdmin` gate: only a c
 
 `/v1/ops/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate with the admin role (`admin_role`).
 
+An optional `?tenant=<id>` names the [tenant](/deployment#the-nested-settings-directory) whose ClickHouse the SQL runs against — its own database, credentials and HTTP wiring; without it the SQL runs against tenant `0`'s, which is the whole settings directory unless it is nested. The parameter is parsed as strictly as on the [schema routes](#get-v1opsschema--list-all-table-schemas): `400` for a query string that does not parse or an empty, repeated or malformed id, `404` for an unknown tenant, `503` for one whose settings folder was rejected — all decided before the body is read. A tenant on no ClickHouse pool ([the connection ceiling refused it](/settings-directory#clickhouse)) answers `503` `{"error":"no ClickHouse connection is open for this tenant"}` with `Retry-After: 30`.
+
 **Request:**
 
 ```json
@@ -538,8 +543,10 @@ The inbound request body is capped at 1 MiB; a body over the cap is rejected wit
 | 403 | `{"error":"forbidden"}` | Role lacks select permission on table |
 | 403 | `{"error":"column \"x\" not allowed"}` | Column denied by policy |
 | 403 | `{"error":"aggregation \"x\" not allowed"}` | Aggregation fn denied by policy |
-| 404 | `{"error":"unknown table: x"}` | Table not found |
+| 404 | `{"error":"unknown table: x"}` | Table not found in the tenant's discovered schema |
 | 413 | `{"error":"request body exceeded 1048576 bytes"}` | Request body over the 1 MiB cap |
+| 503 | `{"error":"schema not loaded yet"}` | The tenant's first schema discovery has not succeeded yet, so whether the table exists is not known; `Retry-After: 5` |
+| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [the connection ceiling refused it](/settings-directory#clickhouse) — so the query cannot run; decided ahead of the cache, so nothing cached before is served either; `Retry-After: 30`, a settings reload retries the pool |
 
 ---
 
@@ -569,6 +576,7 @@ The POST parameter body is capped at 1 MiB; a body over the cap is rejected with
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 404 | `{"error":"pipe not found"}` | Pipe name not registered |
+| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [the connection ceiling refused it](/settings-directory#clickhouse); decided ahead of the cache; `Retry-After: 30` |
 | 403 | `{"error":"forbidden"}` | Role not in pipe's `allowed_roles` (and not the admin role). Fails closed: a request with no role (no token, or a JWT missing `auth.role_claim`) is denied unless a `default_role` resolves it into the list; a pipe with no `allowed_roles` denies everyone but the admin role. |
 | 400 | `{"error":"missing required parameter: x"}` | Required parameter not supplied |
 | 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL literal form — a JSON object, whether supplied directly or nested as an array element. A JSON **array** is valid and renders as an `IN`-style `(…)` list. |
@@ -644,7 +652,7 @@ No admin endpoint in this section accepts a request body — they are reads and 
 
 #### `GET /v1/ops/schema` — List All Table Schemas
 
-Returns all discovered ClickHouse table schemas.
+Returns all discovered ClickHouse table schemas of one tenant. All three schema routes take an optional `?tenant=<id>` naming the [tenant](/deployment#the-nested-settings-directory) whose schema is read or refreshed; without it they address tenant `0`, which is the whole settings directory unless it is nested. The query string is parsed strictly, with the pipe reads' answers: `400` for a query that does not parse or an empty, repeated or malformed id, `404` for an unknown tenant, `503` for one whose settings folder was rejected. A tenant whose first discovery has not succeeded yet answers `503` `{"error":"schema not loaded yet"}` with `Retry-After: 5` rather than an empty list, which would read as "no tables".
 
 **Response:**
 
@@ -688,19 +696,22 @@ Per-column fields: `name`, `type` and `is_nullable` describe the column; `positi
 | ------ | ---- | ----- |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
-| 404 | `{"error":"table not found"}` | Table not in discovered schemas |
+| 404 | `{"error":"table not found"}` | Table not in the tenant's discovered schema |
+| 503 | `{"error":"schema not loaded yet"}` | The tenant's first schema discovery has not succeeded yet (its ClickHouse unreachable, or no pool for it); `Retry-After: 5` |
 
 ---
 
 #### `POST /v1/ops/schema/refresh` — Refresh Schemas
 
-Triggers an immediate re-discovery of ClickHouse table schemas, then returns the refreshed schema list (same array shape as `GET /v1/ops/schema`). Admin-only, like the rest of this section.
+Triggers an immediate re-discovery of the `?tenant=`'s ClickHouse table schemas (tenant `0`'s without it), then returns the refreshed schema list (same array shape as `GET /v1/ops/schema`). Admin-only, like the rest of this section.
 
 **Error responses:**
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 401 / 403 | as above | Not the admin role |
+| 400 / 404 / 503 | as on `GET /v1/ops/schema` | The `?tenant=` could not be resolved |
+| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [the connection ceiling refused it](/settings-directory#clickhouse) — so nothing can be discovered; `Retry-After: 30`, a settings reload retries the pool |
 | 500 | `{"error":"refresh failed"}` | ClickHouse discovery query failed |
 
 **Response:**
