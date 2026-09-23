@@ -171,29 +171,29 @@ func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 	}
 }
 
-// sharedTables is the cache the ingest worker invalidates through until #583
-// story 6 gives each tenant its own ClickHouse. Every tenant reads the same
-// tables today, so an insert into one changes what every tenant would read:
-// the worker names one tenant's namespaces (its own), and this bumps them
-// under every tenant the registry knows, the named one included. Known, not
-// served: a rejected tenant keeps its cache entries and comes back into
-// service with them, so leaving it out would let a folder repaired inside a
-// TTL serve pre-insert rows. A tenant removed and restored inside a TTL still
-// can — the registry forgets a removed tenant, and what becomes of its cache
-// is story 3's — and reads are untouched: a tenant's cached results stay its
-// own. Goes away with story 6, when a table is one tenant's.
+// sharedTables is the cache the ingest worker invalidates through. A
+// tenant's tables are the ones on its ClickHouse address and database, and
+// the tenants naming the same address and database — whatever their user or
+// tls block, so across pools — read the same tables: an insert into one
+// changes what every one of them would read. The worker names one tenant's
+// namespaces (its own), and this bumps them under every tenant sharing its
+// tables (chconn.Pools.SharingTables), the named one included. Reads are
+// untouched: a tenant's cached results stay its own. A tenant on no pool —
+// rejected, removed, or refused by the connection ceiling — is out of the
+// fan-out, and its whole cache is orphaned when it gets one (wireClickHouse),
+// so a folder repaired inside a TTL never serves pre-insert rows.
 type sharedTables struct {
 	cache.Cache
-	tenants *settings.Registry
+	sharing func(tenant.ID) []tenant.ID
 }
 
 func (s sharedTables) Invalidate(ctx context.Context, namespaces []cache.Namespace) (uint64, error) {
 	ids := map[tenant.ID]bool{}
 	for _, ns := range namespaces {
 		ids[ns.Tenant] = true
-	}
-	for id := range s.tenants.Known() {
-		ids[id] = true
+		for _, id := range s.sharing(ns.Tenant) {
+			ids[id] = true
+		}
 	}
 	all := make([]cache.Namespace, 0, len(ids)*len(namespaces))
 	for _, id := range slices.Sorted(maps.Keys(ids)) {
@@ -298,8 +298,17 @@ func (a *App) wireClickHouse() error {
 	a.pools = pools
 	a.add(component{name: "clickhouse", close: withoutContext(pools.Close)})
 	a.tenants.AfterAdopt(func([]tenant.ID) {
-		if _, err := pools.Reconcile(members()); err != nil {
+		readmitted, err := pools.Reconcile(members())
+		if err != nil {
 			slog.Error("clickhouse pools reconciled in part; the next reload retries", "error", err)
+		}
+		// A tenant back on a pool after an absence was out of the cache
+		// fan-out (sharedTables) while away: what it cached before is stale
+		// by every insert it missed, so all of it is orphaned at once.
+		for _, id := range readmitted {
+			if err := a.cache.InvalidateTenant(a.stopCtx, id); err != nil {
+				slog.Error("cache invalidation of a readmitted tenant failed; it may serve stale rows until they expire", "tenant", id, "error", err)
+			}
 		}
 	})
 	return nil
@@ -612,7 +621,7 @@ func (a *App) wireStreaming() {
 // drain within the shutdown timeout.
 func (a *App) wireIngestWorker() {
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
-		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, sharedTables{Cache: a.cache, tenants: a.tenants}, a.pools.Target, tenant.Default, dlqFor(a.tenants))
+		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, sharedTables{Cache: a.cache, sharing: a.pools.SharingTables}, a.pools.Target, tenant.Default, dlqFor(a.tenants))
 		if err != nil {
 			return err
 		}

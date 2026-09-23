@@ -12,19 +12,28 @@ func TestVersionManager_NamespaceKey(t *testing.T) {
 	t.Parallel()
 	vm := NewVersionManager()
 
-	// The tenant leads, then the table at its default version (0); a scopeless
-	// namespace renders a trailing dot. The flat directory's tenant is "0".
-	assert.Equal(t, "acme.users.0.", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users"}))
-	assert.Equal(t, "acme.users.0.org_1", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users", Scope: "org_1"}))
-	assert.Equal(t, "0.users.0.", vm.NamespaceKey(Namespace{Tenant: tenant.Default, Table: "users"}))
+	// The tenant leads at its default version (0), then the table at its
+	// default version (0); a scopeless namespace renders a trailing dot. The
+	// flat directory's tenant is "0".
+	assert.Equal(t, "acme.0.users.0.", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users"}))
+	assert.Equal(t, "acme.0.users.0.org_1", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users", Scope: "org_1"}))
+	assert.Equal(t, "0.0.users.0.", vm.NamespaceKey(Namespace{Tenant: tenant.Default, Table: "users"}))
 
 	// The table version is embedded in every namespace key for that tenant's
 	// table, so a BumpTable is reflected across all its scopes at once — and
 	// nowhere else: the same table under another tenant keeps its version.
 	vm.BumpTable("acme", "users")
-	assert.Equal(t, "acme.users.1.", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users"}))
-	assert.Equal(t, "acme.users.1.org_1", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users", Scope: "org_1"}))
-	assert.Equal(t, "globex.users.0.", vm.NamespaceKey(Namespace{Tenant: "globex", Table: "users"}))
+	assert.Equal(t, "acme.0.users.1.", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users"}))
+	assert.Equal(t, "acme.0.users.1.org_1", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users", Scope: "org_1"}))
+	assert.Equal(t, "globex.0.users.0.", vm.NamespaceKey(Namespace{Tenant: "globex", Table: "users"}))
+
+	// The tenant version leads every key of the tenant, so a BumpTenant moves
+	// every table of acme's — the never-bumped orders table included — to a
+	// fresh key space, at table version 0 again, and no other tenant's.
+	vm.BumpTenant("acme")
+	assert.Equal(t, "acme.1.users.0.", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users"}))
+	assert.Equal(t, "acme.1.orders.0.", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "orders"}))
+	assert.Equal(t, "globex.0.users.0.", vm.NamespaceKey(Namespace{Tenant: "globex", Table: "users"}))
 }
 
 func TestVersionManager_QueryKey(t *testing.T) {
@@ -33,7 +42,7 @@ func TestVersionManager_QueryKey(t *testing.T) {
 
 	// One dependency at default versions: sha | <tenant>.<table>.<tableVer>.<scope>.<nsVer>.
 	key := vm.QueryKey("hash123", []Namespace{{Tenant: "acme", Table: "users", Scope: "org_1"}})
-	assert.Equal(t, "hash123|acme.users.0.org_1.0", key)
+	assert.Equal(t, "hash123|acme.0.users.0.org_1.0", key)
 
 	// Dependency order must not change the key (segments are sorted).
 	deps1 := []Namespace{{Tenant: "acme", Table: "a"}, {Tenant: "acme", Table: "b"}}
@@ -88,4 +97,26 @@ func TestVersionManager_BumpNamespace(t *testing.T) {
 	assert.NotEqual(t, wholeBefore, vm.QueryKey("h", wholeTable))
 	assert.Equal(t, otherBefore, vm.QueryKey("h", otherScope))
 	assert.Equal(t, otherTenantBefore, vm.QueryKey("h", otherTenant))
+}
+
+// TestVersionManager_BumpTenant: a tenant's whole cache is orphaned in one
+// step — a table that was never bumped (so has no key of its own to bump)
+// included — and no other tenant's is touched.
+func TestVersionManager_BumpTenant(t *testing.T) {
+	t.Parallel()
+	vm := NewVersionManager()
+
+	users := []Namespace{{Tenant: "acme", Table: "users", Scope: "org_1"}}
+	orders := []Namespace{{Tenant: "acme", Table: "orders"}}
+	globexUsers := []Namespace{{Tenant: "globex", Table: "users", Scope: "org_1"}}
+	vm.BumpTable("acme", "users")
+
+	usersBefore := vm.QueryKey("h", users)
+	ordersBefore := vm.QueryKey("h", orders)
+	globexBefore := vm.QueryKey("h", globexUsers)
+
+	vm.BumpTenant("acme")
+	assert.NotEqual(t, usersBefore, vm.QueryKey("h", users))
+	assert.NotEqual(t, ordersBefore, vm.QueryKey("h", orders), "a table no bump ever keyed is orphaned too")
+	assert.Equal(t, globexBefore, vm.QueryKey("h", globexUsers))
 }

@@ -15,13 +15,18 @@ import (
 type VersionManager struct {
 	mu sync.RWMutex
 
-	tableVersions     map[string]uint64 // <tenant>.<table>                         -> table_version
-	namespaceVersions map[string]uint64 // <tenant>.<table>.<table_version>.<scope> -> namespace_version
+	// tenantVersions leads every key of a tenant, so BumpTenant orphans the
+	// tenant's every namespace and query in one step — the ones no bump ever
+	// keyed included, which is what an enumeration of the maps would miss.
+	tenantVersions    map[tenant.ID]uint64 // <tenant>                                                  -> tenant_version
+	tableVersions     map[string]uint64    // <tenant>.<tenant_version>.<table>                         -> table_version
+	namespaceVersions map[string]uint64    // <tenant>.<tenant_version>.<table>.<table_version>.<scope> -> namespace_version
 }
 
 // NewVersionManager initializes the thread-safe version store.
 func NewVersionManager() *VersionManager {
 	return &VersionManager{
+		tenantVersions:    make(map[tenant.ID]uint64),
 		tableVersions:     make(map[string]uint64),
 		namespaceVersions: make(map[string]uint64),
 	}
@@ -36,22 +41,24 @@ type Namespace struct {
 	Scope  string
 }
 
-// tableKey renders the table-versions key, "<tenant>.<table>". A tenant id
-// cannot contain a dot and callers encode the table dot-free, so the two
-// tokens can never run together.
-func tableKey(id tenant.ID, table string) string {
-	return string(id) + "." + table
+// tableKeyLocked renders the table-versions key,
+// "<tenant>.<tenant_version>.<table>"; caller must hold vm.mu. A tenant id
+// cannot contain a dot and callers encode the table dot-free, so the tokens
+// can never run together.
+func (vm *VersionManager) tableKeyLocked(id tenant.ID, table string) string {
+	return fmt.Sprintf("%s.%d.%s", id, vm.tenantVersions[id], table)
 }
 
 // namespaceKeyLocked builds the namespace-table key; caller must hold vm.mu.
 func (vm *VersionManager) namespaceKeyLocked(ns Namespace) string {
-	tk := tableKey(ns.Tenant, ns.Table)
+	tk := vm.tableKeyLocked(ns.Tenant, ns.Table)
 	return fmt.Sprintf("%s.%d.%s", tk, vm.tableVersions[tk], ns.Scope)
 }
 
-// NamespaceKey renders the namespace-table key for ns at its table's current
-// version: "<tenant>.<table>.<table_version>.<scope>" (scopeless scope is "",
-// so e.g. "<tenant>.<table>.<v>.").
+// NamespaceKey renders the namespace-table key for ns at its tenant's and
+// table's current versions:
+// "<tenant>.<tenant_version>.<table>.<table_version>.<scope>" (scopeless
+// scope is "", so e.g. "<tenant>.0.<table>.<v>.").
 func (vm *VersionManager) NamespaceKey(ns Namespace) string {
 	vm.mu.RLock()
 	defer vm.mu.RUnlock()
@@ -87,7 +94,18 @@ func (vm *VersionManager) QueryKey(sha string, deps []Namespace) string {
 func (vm *VersionManager) BumpTable(id tenant.ID, table string) {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
-	vm.tableVersions[tableKey(id, table)]++
+	vm.tableVersions[vm.tableKeyLocked(id, table)]++
+}
+
+// BumpTenant advances a tenant's version, orphaning its every namespace —
+// and every cached query — in one step (the whole-tenant nuke): every key
+// of the tenant carries the version, so nothing has to be enumerated, and a
+// table no bump ever keyed is orphaned like the rest. Other tenants are
+// untouched.
+func (vm *VersionManager) BumpTenant(id tenant.ID) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	vm.tenantVersions[id]++
 }
 
 // BumpNamespace advances one (tenant, table, scope) namespace plus the table's

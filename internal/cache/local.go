@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
+
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // LocalCache is an L1 in-process cache backed by Ristretto: one pool for
@@ -74,6 +76,13 @@ func (l *LocalCache) Invalidate(_ context.Context, namespaces []Namespace) (uint
 		}
 	}
 	return uint64(len(namespaces)), nil
+}
+
+// InvalidateTenant orphans every cached query of tenant id: one version
+// bump, nothing enumerated (see VersionManager.BumpTenant).
+func (l *LocalCache) InvalidateTenant(_ context.Context, id tenant.ID) error {
+	l.versionManager.BumpTenant(id)
+	return nil
 }
 
 // Wait blocks until all buffered writes have been applied.

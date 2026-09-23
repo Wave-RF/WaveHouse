@@ -203,3 +203,39 @@ func TestLocalCache_KeyedByTenant(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []byte("globex rows"), val)
 }
+
+// A tenant back after an absence from the invalidation fan-out has its every
+// entry orphaned at once — every table, bumped before or not — and the other
+// tenants keep theirs.
+func TestLocalCache_InvalidateTenant(t *testing.T) {
+	t.Parallel()
+	c, err := NewLocal(1 << 20)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	acmeEvents := []Namespace{{Tenant: "acme", Table: "events"}}
+	acmeOrders := []Namespace{{Tenant: "acme", Table: "orders", Scope: "org_1"}}
+	globex := []Namespace{{Tenant: "globex", Table: "events"}}
+	require.NoError(t, c.Set(ctx, "q", acmeEvents, []byte("acme events"), 10*time.Second))
+	require.NoError(t, c.Set(ctx, "q", acmeOrders, []byte("acme orders"), 10*time.Second))
+	require.NoError(t, c.Set(ctx, "q", globex, []byte("globex events"), 10*time.Second))
+	c.Wait()
+
+	require.NoError(t, c.InvalidateTenant(ctx, "acme"))
+	for name, deps := range map[string][]Namespace{"events": acmeEvents, "orders": acmeOrders} {
+		val, _, err := c.Get(ctx, "q", deps)
+		require.NoError(t, err)
+		assert.Nil(t, val, "acme's %s entry is orphaned", name)
+	}
+	val, _, err := c.Get(ctx, "q", globex)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("globex events"), val, "another tenant's entry stays")
+
+	// Entries cached after the bump are served: it is a generation, not a lock.
+	require.NoError(t, c.Set(ctx, "q", acmeEvents, []byte("acme again"), 10*time.Second))
+	c.Wait()
+	val, _, err = c.Get(ctx, "q", acmeEvents)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("acme again"), val)
+}

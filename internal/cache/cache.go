@@ -3,6 +3,8 @@ package cache
 import (
 	"context"
 	"time"
+
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // Cache provides versioned query-result storage with TTL support.
@@ -26,6 +28,13 @@ type Cache interface {
 	// view. A bump reaches the namespace's tenant alone: the same table under
 	// another tenant keeps its versions. Returns the number of namespaces processed.
 	Invalidate(ctx context.Context, namespaces []Namespace) (uint64, error)
+
+	// InvalidateTenant orphans every cached query of one tenant in one step —
+	// its every table and scope, bumped or not — for a tenant that comes back
+	// after an absence from the invalidation fan-out (its settings folder
+	// rejected or removed, #583 story 6): what it cached before is stale by
+	// every insert it missed.
+	InvalidateTenant(ctx context.Context, id tenant.ID) error
 
 	// TODO: for local cache, we can just store the versions in memory, but for distributed/L2 cache, we will need to be able to either have stored procedures/pipelines etc to query them and attach them to a query, or sync them to each edge api server.
 

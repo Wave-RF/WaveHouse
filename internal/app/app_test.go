@@ -621,34 +621,68 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 	})
 }
 
-// Until story 6 every tenant reads the same ClickHouse tables, so an insert
-// invalidates a table's cached results under every tenant the registry
-// knows, not only under the worker's own: the cache the worker is handed fans
-// the namespaces out. A rejected tenant is included — it comes back into
-// service with the entries it has.
-func TestSharedTables_InvalidatesEveryKnownTenant(t *testing.T) {
+// The tenants on the writer's ClickHouse address and database read the same
+// tables, so an insert invalidates a table's cached results under every one
+// of them — whatever their user, so across pools — and under no tenant on
+// another address or database: the cache the worker is handed fans the
+// namespaces out by the pools' sharing rule. The writer's own tenant is
+// bumped even when it is on no pool.
+func TestSharedTables_InvalidatesTheTenantsSharingTheTables(t *testing.T) {
 	t.Parallel()
-	tenants, findings := settings.Open(writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil, "broken": invalidQuery}))
-	require.NotNil(t, tenants, "findings: %v", findings)
+	sharing := map[tenant.ID][]tenant.ID{tenant.Default: {tenant.Default, "acme", "globex"}, "initech": {"initech"}}
 	mock := &testutil.MockCache{}
-	c := sharedTables{Cache: mock, tenants: tenants}
+	c := sharedTables{Cache: mock, sharing: func(id tenant.ID) []tenant.ID { return sharing[id] }}
 
 	n, err := c.Invalidate(t.Context(), []cache.Namespace{
 		{Tenant: tenant.Default, Table: "events"},
 		{Tenant: tenant.Default, Table: "events", Scope: "org_1"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, uint64(8), n)
+	assert.Equal(t, uint64(6), n)
 	assert.ElementsMatch(t, []cache.Namespace{
 		{Tenant: tenant.Default, Table: "events"},
 		{Tenant: tenant.Default, Table: "events", Scope: "org_1"},
 		{Tenant: "acme", Table: "events"},
 		{Tenant: "acme", Table: "events", Scope: "org_1"},
-		{Tenant: "broken", Table: "events"},
-		{Tenant: "broken", Table: "events", Scope: "org_1"},
 		{Tenant: "globex", Table: "events"},
 		{Tenant: "globex", Table: "events", Scope: "org_1"},
-	}, mock.GetNamespaces(), "the worker's own tenant and every known one, the rejected one included")
+	}, mock.GetNamespaces(), "the writer's tenant and the ones sharing its tables; initech reads another database")
+
+	mock = &testutil.MockCache{}
+	c = sharedTables{Cache: mock, sharing: func(tenant.ID) []tenant.ID { return nil }}
+	_, err = c.Invalidate(t.Context(), []cache.Namespace{{Tenant: "orphan", Table: "events"}})
+	require.NoError(t, err)
+	assert.Equal(t, []cache.Namespace{{Tenant: "orphan", Table: "events"}}, mock.GetNamespaces(), "a writer on no pool still bumps its own")
+}
+
+// A tenant back on a pool after an absence — its folder rejected, then
+// repaired; removed, then restored — was out of the fan-out while away, so
+// the wiring orphans its whole cache as it comes back; a tenant that stayed
+// is never touched, and a reload that changes nothing bumps nobody.
+func TestReload_ReadmittedTenantCacheIsOrphaned(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
+	a := newApp(t, testConfig(t, root), Options{})
+	// The hooks read a.cache at reload time: a recording cache from here on.
+	mock := &testutil.MockCache{}
+	a.cache = mock
+
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Empty(t, mock.GetTenants(), "nothing readmitted, nothing orphaned")
+
+	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+	a.tenants.Reload("test")
+	assert.Empty(t, mock.GetTenants(), "a rejection releases; it orphans nothing yet")
+	rewriteSettings(t, filepath.Join(root, "globex"), nil)
+	_, adopted = a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Equal(t, []tenant.ID{"globex"}, mock.GetTenants(), "repaired: back on a pool, its cache orphaned")
+
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	require.NoError(t, os.Rename(writeSettings(t, nil), filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	assert.Equal(t, []tenant.ID{"globex", "acme"}, mock.GetTenants(), "restored: the same")
 }
 
 // keepalive is a config.json patch setting the stream block's keepalive pair.
