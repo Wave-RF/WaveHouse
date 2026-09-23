@@ -111,8 +111,9 @@ type AuthConfig struct {
 }
 
 // DedupeConfig tunes dedupe behavior, including the switch itself: a reload
-// that flips enabled opens or closes the embedded Pebble store on the fly
-// (dedupe.Managed), so the whole block is tenant-owned.
+// that flips enabled opens or closes the tenant's embedded Pebble store on
+// the fly (dedupe.Managed, one per tenant), so the whole block is
+// tenant-owned.
 //
 // id_field and require_id are required here and optional per table: a table
 // override inherits whichever field it doesn't name. An empty,

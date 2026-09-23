@@ -89,9 +89,9 @@ type App struct {
 	listener net.Listener
 
 	// tenants is the registry every tenant-aware path resolves through, and
-	// the owner of every reload. The process-wide resources (ClickHouse,
-	// dedupe, MQ, auth) still follow its default tenant, through
-	// defaultStore: tenant 0's store as of its last adoption (defaultSetting).
+	// the owner of every reload. The process-wide resources (ClickHouse, MQ,
+	// auth) still follow its default tenant, through defaultStore: tenant
+	// 0's store as of its last adoption (defaultSetting).
 	tenants      *settings.Registry
 	defaultStore atomic.Pointer[settings.Store]
 	// policies is the default tenant's policy, for the ops gate and the
@@ -101,7 +101,8 @@ type App struct {
 	ch          *chconn.Manager
 	bootState   *api.BootState
 	registry    *discovery.SchemaRegistry
-	dedup       *dedupe.Managed
+	// dedup is one store per tenant, each following its own folder's switch.
+	dedup       *dedupe.Stores
 	mq          mq.Broker
 	cache       cache.Cache
 	sseMetrics  *stream.Metrics
