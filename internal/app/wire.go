@@ -591,9 +591,9 @@ func (a *App) wireIngestWorker() {
 
 // wireAuth builds the JWT middleware: one verifier per tenant being served,
 // from that tenant's auth block (jwks_url, role_claim), with the secrets from
-// boot config shared by all. A tenant's verifier is rebuilt after each reload
-// that adopts it and dropped once the tenant stops being served, removed or
-// rejected alike — no work runs for a tenant that is not served, and a folder
+// boot config shared by all. A tenant's verifier is rebuilt after a reload
+// that adopts it with changed wiring, kept when the wiring is unchanged, and
+// dropped once the tenant stops being served, removed or rejected alike — no work runs for a tenant that is not served, and a folder
 // adopted again is rebuilt from scratch. A JWKS key set is fetched off the
 // boot and reload paths, so an unreachable endpoint never holds either: until
 // a fetch succeeds — retried with backoff from a second, then kept fresh by
