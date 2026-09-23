@@ -41,8 +41,8 @@ type TLS struct {
 
 // config builds the tls.Config the block describes, reading the files now.
 // Nil for the zero block, so the https hop keeps net/http's defaults.
-// settings.Validate checked the shape without opening anything; an
-// unreadable path is the one error left, and it names the key.
+// settings.Validate checked the shape without opening anything; a file it
+// cannot read or parse is the one error left, and it names the key.
 func (t TLS) config() (*tls.Config, error) {
 	if t == (TLS{}) {
 		return nil, nil
@@ -151,8 +151,8 @@ var _ driver.Conn = (*Manager)(nil)
 
 // Open builds the boot-time connection. Like clickhouse.Open it does not
 // dial — boot tolerates an unreachable ClickHouse (schema discovery degrades
-// and retries) — so only a malformed option or an unreadable certificate
-// file errors here.
+// and retries) — so only a malformed option or a certificate file that
+// cannot be read or parsed errors here.
 func Open(p Params) (*Manager, error) {
 	m := &Manager{dial: dial, grace: p.QueryTimeout}
 	st, err := m.open(p, nil)
@@ -209,8 +209,8 @@ func dial(p Params, tlsCfg *tls.Config) (driver.Conn, error) {
 // surfaces where reachability is already handled (schema discovery
 // retries, /readyz, query errors) and is fixed by the next reload. Only a
 // malformed option, which settings.Validate already excludes, or a
-// certificate file that cannot be read errors, and then the current
-// connection stays. The replaced connection is closed after the grace
+// certificate file that cannot be read or parsed errors, and then the
+// current connection stays. The replaced connection is closed after the grace
 // period so in-flight queries on it finish.
 func (m *Manager) Reconfigure(p Params) error {
 	m.mu.Lock()

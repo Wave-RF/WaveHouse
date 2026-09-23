@@ -412,6 +412,7 @@ func TestValidate_Warnings(t *testing.T) {
 		{"empty dlq override sets nothing", FileConfig, configJSON(`{"dlq": {"tables": {"clicks": {}}}}`), "dlq.tables.clicks: override sets nothing"},
 		{"tls verification off", FileConfig, configJSON(`{"clickhouse": {"tls": {"enabled": true, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": true, "server_name": ""}}}`), "clickhouse.tls.insecure_skip_verify: certificate verification is off"},
 		{"native tls with a plaintext http hop", FileConfig, configJSON(`{"clickhouse": {"http_scheme": "http", "tls": {"enabled": true, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": false, "server_name": ""}}}`), "clickhouse.http_scheme: clickhouse.tls.enabled is on but this HTTP hop is plaintext"},
+		{"https with a plaintext native hop", FileConfig, configJSON(`{"clickhouse": {"http_scheme": "https"}}`), "clickhouse.tls.enabled: clickhouse.http_scheme is https but the native hop is plaintext"},
 		{"default on required parameter", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x", "required": true, "default": 5}]}]}`, "never used"},
 		{"grant with neither operation", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"analyst": {}}}}`, "neither select nor insert"},
 	}

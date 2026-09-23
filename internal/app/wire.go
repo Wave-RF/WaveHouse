@@ -263,7 +263,7 @@ func (a *App) wireObservability(ctx context.Context) {
 // manager unconditionally — the adopted settings are the authority, and
 // reachability surfaces where it already does (schema discovery retries,
 // /readyz, query errors). Two exceptions keep the connection it has: a
-// certificate file that cannot be read, and a pool sized above the boot
+// certificate file that cannot be read or parsed, and a pool sized above the boot
 // config's clickhouse.max_total_conns — capacity is sized once, per
 // process, so a settings pool above it is refused at boot like the rest of
 // an impossible boot config (#530) and logged on a reload, which the next

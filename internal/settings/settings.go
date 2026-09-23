@@ -84,8 +84,8 @@ type TenantConfig struct {
 // `clickhouse.password` / WH_CH_PASSWORD, a secret). A reload that changes
 // any of it swaps the connection unconditionally; reachability is a runtime
 // concern (schema discovery, /readyz), never a reload one. A certificate
-// file that cannot be read is the one exception: boot refuses, and a reload
-// keeps the previous connection.
+// file that cannot be read or parsed is the one exception: boot refuses,
+// and a reload keeps the previous connection.
 type ClickHouseConfig struct {
 	// Addr is the native-protocol host:port (schema discovery, structured
 	// queries, pipes, /readyz).

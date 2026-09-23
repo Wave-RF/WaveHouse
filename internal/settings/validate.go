@@ -505,11 +505,17 @@ func (v *validator) checkClickHouse(ch *ClickHouseConfig) {
 		v.checkClickHouseHeaders(ch.Headers)
 	}
 	v.checkClickHousePool(ch)
-	// Both hops reach the same host, and the HTTP one carries the
-	// credentials on every insert and raw-SQL query: encrypting the native
-	// hop alone is almost certainly not what the operator meant.
-	if ch.TLS != nil && ch.TLS.Enabled != nil && *ch.TLS.Enabled && ch.HTTPScheme != nil && *ch.HTTPScheme == "http" {
-		v.warnf(FileConfig, "clickhouse.http_scheme", "clickhouse.tls.enabled is on but this HTTP hop is plaintext, and it carries the ClickHouse credentials on every insert and raw-SQL query")
+	// Both hops reach the same host, and each carries the credentials in the
+	// clear without TLS — the HTTP one on every insert and raw-SQL query, the
+	// native one in its handshake — so encrypting one alone is almost
+	// certainly not what the operator meant. One warning per direction.
+	if ch.TLS != nil && ch.TLS.Enabled != nil && ch.HTTPScheme != nil {
+		switch {
+		case *ch.TLS.Enabled && *ch.HTTPScheme == "http":
+			v.warnf(FileConfig, "clickhouse.http_scheme", "clickhouse.tls.enabled is on but this HTTP hop is plaintext, and it carries the ClickHouse credentials on every insert and raw-SQL query")
+		case !*ch.TLS.Enabled && *ch.HTTPScheme == "https":
+			v.warnf(FileConfig, "clickhouse.tls.enabled", "clickhouse.http_scheme is https but the native hop is plaintext, and its handshake carries the ClickHouse password")
+		}
 	}
 }
 
