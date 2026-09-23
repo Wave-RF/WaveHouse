@@ -469,10 +469,10 @@ func (a *App) wireIngestWorker() {
 // rejected alike — no work runs for a tenant that is not served, and a folder
 // adopted again is rebuilt from scratch. A JWKS key set is fetched off the
 // boot and reload paths, so an unreachable endpoint never holds either: until
-// the fetch succeeds, which the library retries hourly and on an unknown key
-// id, that tenant's token-bearing requests are refused with a 503 (never
-// evaluated under its default_role). The verifiers are released with the
-// other components.
+// a fetch succeeds — retried with backoff from a second, then kept fresh by
+// the library hourly and on an unknown key id — that tenant's token-bearing
+// requests are refused with a 503 (never evaluated under its default_role).
+// The verifiers are released with the other components.
 //
 // There is no on/off switch — the middleware always runs. With neither a
 // secret (boot config) nor a JWKS URL (any tenant's settings) no token can

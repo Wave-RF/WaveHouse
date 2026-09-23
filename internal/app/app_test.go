@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -523,8 +524,9 @@ func TestNew_RefusesInvalidSettingsDirectory(t *testing.T) {
 }
 
 // jwksServer serves one Ed25519 verification key under kid and returns the
-// signer that pairs with it — one tenant's identity provider.
-func jwksServer(t *testing.T, kid string) (*httptest.Server, ed25519.PrivateKey) {
+// signer that pairs with it — one tenant's identity provider — and a count
+// of the fetches it answered.
+func jwksServer(t *testing.T, kid string) (*httptest.Server, ed25519.PrivateKey, *atomic.Int32) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -533,11 +535,13 @@ func jwksServer(t *testing.T, kid string) (*httptest.Server, ed25519.PrivateKey)
 		"x": base64.RawURLEncoding.EncodeToString(pub),
 	}}})
 	require.NoError(t, err)
+	var fetches atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
 		_, _ = w.Write(body)
 	}))
 	t.Cleanup(srv.Close)
-	return srv, priv
+	return srv, priv, &fetches
 }
 
 // signRole issues a token for role, signed by priv under kid.
@@ -601,8 +605,8 @@ func TestNew_UnreachableJWKSBootsFailClosed(t *testing.T) {
 // is refused under globex's header, and pointing acme's folder at another
 // provider and reloading it swaps acme's verifier alone.
 func TestNew_VerifierPerTenant(t *testing.T) {
-	acme, acmeKey := jwksServer(t, "acme-1")
-	globex, globexKey := jwksServer(t, "globex-1")
+	acme, acmeKey, _ := jwksServer(t, "acme-1")
+	globex, globexKey, globexFetches := jwksServer(t, "globex-1")
 	root := writeNestedSettings(t, map[string]map[string]any{
 		"acme":   authPatch(acme.URL),
 		"globex": authPatch(globex.URL),
@@ -652,6 +656,26 @@ func TestNew_VerifierPerTenant(t *testing.T) {
 	assert.False(t, verified("acme", acmeToken), "the swap is unconditional: acme's old provider is gone")
 	assert.True(t, verified("globex", globexToken))
 	assert.False(t, verified("globex", acmeToken))
+
+	// A reload that rejects globex's folder drops its verifier with it — the
+	// hooks run on a reload that adopts nothing — and the fixed folder gets
+	// a fresh one, fetched again.
+	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/settings/reload?tenant=globex", nil)
+	req.Header.Set("X-Operator-Key", cfg.Auth.OperatorKey)
+	a.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, http.StatusServiceUnavailable, pipe("globex", globexToken), "a rejected tenant is not served")
+	before := globexFetches.Load()
+	rewriteSettings(t, filepath.Join(root, "globex"), authPatch(globex.URL))
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/settings/reload?tenant=globex", nil)
+	req.Header.Set("X-Operator-Key", cfg.Auth.OperatorKey)
+	a.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	eventuallyVerified("globex", globexToken)
+	assert.Greater(t, globexFetches.Load(), before, "the fixed folder got a fresh verifier, fetched again")
 }
 
 func TestNew_PrometheusInlineMountsOnRouter(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -501,6 +502,37 @@ func TestMiddleware_JWKSEmptyKeySet_TokenDoesNotAuthenticate(t *testing.T) {
 	assert.Empty(t, c.role, "empty JWKS → no key validates the token → roleless default")
 	assert.False(t, c.hasClaims)
 	assert.True(t, errors.Is(c.authErr, errInvalidToken), "present-but-unverifiable token records invalid-token")
+}
+
+// A verifier whose first fetch fails keeps trying on its own — backing off
+// from a second — so an endpoint that comes back is picked up in seconds,
+// not at the hourly refresh, and a token then verifies.
+func TestMiddleware_JWKS_FirstFetchRetriedUntilItSucceeds(t *testing.T) {
+	t.Parallel()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	body, err := json.Marshal(map[string]any{"keys": []map[string]any{{
+		"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig", "kid": "k1",
+		"x": base64.RawURLEncoding.EncodeToString(pub),
+	}}})
+	require.NoError(t, err)
+	var fetches atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Down for the first two fetches, up from the third.
+		if fetches.Add(1) <= 2 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	a := newAuth(t, Config{}, Wiring{JWKSURL: srv.URL, RoleClaim: "role"}, nil)
+	tok := bearer(signEdDSA(t, priv, "k1", jwt.MapClaims{"role": "editor"}))
+	c := serve(t, a, tok)
+	assert.True(t, errors.Is(c.authErr, ErrVerifierPending), "pending while the endpoint is down")
+	roleEventually(t, a, tok, "editor")
+	assert.GreaterOrEqual(t, fetches.Load(), int32(3), "the fetch was retried, not left to the hourly refresh")
 }
 
 // A JWK Set response past the cap is refused, named as such in the refresh

@@ -128,9 +128,9 @@ func (v *verifier) keyFunc(t *jwt.Token) (any, error) {
 // jwt.Parse rejects an unexpected alg (including "none") before keyFunc runs
 // — defense-in-depth against alg-confusion and alg:none attacks. With a JWKS
 // URL the key set is fetched off this goroutine: the verifier is in place at
-// once and fails closed — no token validates, requests fall to the policy
-// default_role — until the fetch succeeds, the same posture as an
-// unreachable ClickHouse, so neither boot nor a reload waits on the URL.
+// once and pending — a token-bearing request is refused to retry
+// (ErrVerifierPending), never evaluated under the policy default_role —
+// until a fetch succeeds, so neither boot nor a reload waits on the URL.
 func newVerifier(cfg Config, w Wiring) *verifier {
 	v := &verifier{secret: cfg.JWTSecret, roleClaim: w.roleClaim(), url: w.JWKSURL}
 	if v.url == "" {
@@ -147,22 +147,53 @@ func newVerifier(cfg Config, w Wiring) *verifier {
 // The library's refresh cadence, as keyfunc.NewDefault sets it: the hourly
 // refresh, and the refetch an unknown key id triggers — one per five minutes
 // per tenant, a request arriving while the limiter is closed waiting up to
-// a minute on it. Kept library-managed by decision (#583 story 9).
+// a minute on it. Kept library-managed by decision (#583 story 9). Neither
+// helps a verifier that is still pending: keyFunc never reaches the library
+// then, so the first fetch is ours to retry (fetch) — from jwksRetryMin,
+// doubling to jwksRetryMax, until one succeeds.
 const (
 	jwksRefreshInterval  = time.Hour
 	jwksUnknownKIDEvery  = 5 * time.Minute
 	jwksRateLimitWaitMax = time.Minute
+	jwksRetryMin         = time.Second
+	jwksRetryMax         = time.Minute
 )
 
-// fetch builds the JWKS key source: keyfunc.NewDefault's wiring, spelled
-// out so the set is stored through observedKeys. The library fetches the
-// set once and then keeps it fresh on its own — hourly, and on the first
-// unknown key id, rate-limited — under ctx; a fetch that fails, the first
-// included, is logged and retried, never returned: the verifier stays
-// pending until one succeeds. The URL was validated as absolute http(s), so
-// construction itself cannot fail; if it ever did, the verifier stays
-// pending, which is the same fail-closed state.
+// fetch builds the JWKS key source and retries until a set has been
+// fetched: each attempt is build, whose first fetch either stores a set
+// (ready) or is reported and left behind; a failed attempt is cancelled
+// whole, refresh goroutine included, and the next waits jwksRetryMin
+// doubling to jwksRetryMax. Once ready the library keeps the set fresh on
+// its own — hourly, and on the first unknown key id, rate-limited. The
+// verifier is pending throughout, so no token validates until then.
 func (v *verifier) fetch(ctx context.Context) {
+	backoff := jwksRetryMin
+	for {
+		attempt, cancel := context.WithCancel(ctx)
+		if jwks, err := v.build(attempt); err == nil && v.ready.Load() {
+			// The successful attempt lives on with the verifier; its context
+			// ends with the verifier's.
+			context.AfterFunc(ctx, cancel)
+			v.jwks.Store(&jwks)
+			return
+		} else if err != nil {
+			slog.Error("jwks key source not created; retrying", "url", v.url, "error", err)
+		}
+		cancel()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, jwksRetryMax)
+	}
+}
+
+// build is keyfunc.NewDefault's wiring for one URL, spelled out so the set
+// is stored through observedKeys. The URL was validated as absolute
+// http(s), so construction itself cannot fail; the first fetch's failure is
+// reported through the error handler, not returned.
+func (v *verifier) build(ctx context.Context) (keyfunc.Keyfunc, error) {
 	remote, err := jwkset.NewStorageFromHTTP(v.url, jwkset.HTTPClientStorageOptions{
 		Client:                    jwksClient,
 		Ctx:                       ctx,
@@ -178,22 +209,18 @@ func (v *verifier) fetch(ctx context.Context) {
 			}
 		},
 	})
-	if err == nil {
-		var client jwkset.Storage
-		client, err = jwkset.NewHTTPClient(jwkset.HTTPClientOptions{
-			HTTPURLs:          map[string]jwkset.Storage{v.url: remote},
-			RateLimitWaitMax:  jwksRateLimitWaitMax,
-			RefreshUnknownKID: rate.NewLimiter(rate.Every(jwksUnknownKIDEvery), 1),
-		})
-		if err == nil {
-			var jwks keyfunc.Keyfunc
-			if jwks, err = keyfunc.New(keyfunc.Options{Ctx: ctx, Storage: client}); err == nil {
-				v.jwks.Store(&jwks)
-				return
-			}
-		}
+	if err != nil {
+		return nil, err
 	}
-	slog.Error("jwks key source not created; no token validates for this verifier", "url", v.url, "error", err)
+	client, err := jwkset.NewHTTPClient(jwkset.HTTPClientOptions{
+		HTTPURLs:          map[string]jwkset.Storage{v.url: remote},
+		RateLimitWaitMax:  jwksRateLimitWaitMax,
+		RefreshUnknownKID: rate.NewLimiter(rate.Every(jwksUnknownKIDEvery), 1),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return keyfunc.New(keyfunc.Options{Ctx: ctx, Storage: client})
 }
 
 // observedKeys is the key set behind a verifier, marking it ready the first
