@@ -16,6 +16,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
@@ -531,6 +532,6 @@ func TestStructuredQuery_CacheKeyIsolatesColumnVisibility(t *testing.T) {
 	}
 	viewerSQL, auditorSQL := sqlFor("viewer"), sqlFor("auditor")
 	assert.NotEqual(t, viewerSQL, auditorSQL)
-	assert.NotEqual(t, queryCacheKey(viewerSQL, nil), queryCacheKey(auditorSQL, nil),
+	assert.NotEqual(t, queryCacheKey(tenant.Default, viewerSQL, nil), queryCacheKey(tenant.Default, auditorSQL, nil),
 		"roles with different column visibility must not share a cache key")
 }

@@ -6,13 +6,24 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // queryCacheKey produces a deterministic L1/L2 cache key for a (sql, params)
-// pair. The raw-SQL endpoint (`POST /v1/ops/query`) does not cache, but the
-// structured query (`POST /v1/query?table={table}`) and named pipes
-// (`GET/POST /v1/pipes/{name}`) handlers do — they share this helper so a
-// key change in one place propagates to every cached read path.
+// pair of one tenant: "<tenant>:query:<sha256>". The raw-SQL endpoint
+// (`POST /v1/ops/query`) does not cache, but the structured query
+// (`POST /v1/query?table={table}`) and named pipes (`GET/POST /v1/pipes/{name}`)
+// handlers do — they share this helper so a key change in one place propagates
+// to every cached read path, and each uses the key it returns as its
+// singleflight key too.
+//
+// The tenant leads the key in the clear rather than going into the hash, so
+// a key is tenant-keyed by construction and readable as such (#583 story 8):
+// identical SQL and params under two tenants are two entries and two flights,
+// and a pipe — whose result carries no dependency namespaces — can never
+// answer one tenant with another's rows once each tenant has its own
+// ClickHouse (story 6).
 //
 // Every section is framed with a 1-byte type marker (0x01 for sql, 0x00 for
 // param) plus an 8-byte big-endian length, then the payload. Without
@@ -24,7 +35,7 @@ import (
 // confused for a frame boundary, and the JSON `{type, value}` payload
 // shape additionally separates `"42"` (string) from `42` (int) so the
 // cache can't serve a string-typed row to an int-typed lookup.
-func queryCacheKey(sql string, params []any) string {
+func queryCacheKey(id tenant.ID, sql string, params []any) string {
 	h := sha256.New()
 	var sqlLen [8]byte
 	binary.BigEndian.PutUint64(sqlLen[:], uint64(len(sql)))
@@ -53,5 +64,5 @@ func queryCacheKey(sql string, params []any) string {
 		_, _ = h.Write(n[:])
 		_, _ = h.Write(payload)
 	}
-	return "query:" + hex.EncodeToString(h.Sum(nil))
+	return id.String() + ":query:" + hex.EncodeToString(h.Sum(nil))
 }

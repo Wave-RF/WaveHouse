@@ -81,10 +81,13 @@ func TestIngest_PublishesOnTheRequestTenantsTopic(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub)
+	tenants := nestedTenants(t, map[string]string{"acme": fullConfig(100), "globex": fullConfig(200)})
 
 	for _, id := range []tenant.ID{"acme", "globex"} {
+		store, ok := tenants.For(id)
+		require.True(t, ok)
 		req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "count": 1})
-		req = req.WithContext(WithStore(req.Context(), settings.NewStore(id)))
+		req = req.WithContext(WithStore(req.Context(), store))
 		w := httptest.NewRecorder()
 		h.Handle(w, req)
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())

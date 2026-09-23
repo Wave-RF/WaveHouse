@@ -21,11 +21,26 @@ func newLoadedStore(t *testing.T, overrides map[string]string) *Store {
 	return s
 }
 
+// A store names its tenant, whichever way it was built: the one Open creates
+// carries its folder's name, the flat directory's carries tenant.Default,
+// and so does the one NewRegistry is handed.
 func TestStore_Tenant(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, tenant.ID("acme"), NewStore("acme").Tenant())
-	// A flat directory's one store is the default tenant's.
 	assert.Equal(t, tenant.Default, newLoadedStore(t, nil).Tenant())
+
+	handed := &Store{}
+	assert.Empty(t, handed.Tenant(), "a store outside a registry names no tenant")
+	NewRegistry(handed)
+	assert.Equal(t, tenant.Default, handed.Tenant())
+
+	reg, findings := Open(writeTree(t, map[string]map[string]string{"acme": validFiles(), "globex": validFiles()}))
+	require.NotNil(t, reg, "findings: %s", findingStrings(findings))
+	for id, store := range reg.All() {
+		assert.Equal(t, id, store.Tenant())
+	}
+	acme, ok := reg.For("acme")
+	require.True(t, ok)
+	assert.Equal(t, tenant.ID("acme"), acme.Tenant())
 }
 
 func TestStore_DedupeFor_Cascade(t *testing.T) {

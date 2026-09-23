@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -152,14 +151,17 @@ func TestSSE_SubscribesUnderTheRequestTenant(t *testing.T) {
 	t.Parallel()
 	hub := stream.NewHub(nil, nil, nil)
 	h := &StreamHandler{Hub: hub}
+	tenants := nestedTenants(t, map[string]string{"acme": fullConfig(100), "globex": fullConfig(200)})
 
 	// One context for both connections: cancelling it is the clients going away.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var wg sync.WaitGroup
 	for _, id := range []tenant.ID{"acme", "globex"} {
+		store, ok := tenants.For(id)
+		require.True(t, ok)
 		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)
-		req = req.WithContext(WithStore(req.Context(), settings.NewStore(id)))
+		req = req.WithContext(WithStore(req.Context(), store))
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
