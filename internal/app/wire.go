@@ -229,8 +229,9 @@ func (a *App) wireObservability(ctx context.Context) {
 // password; a reload that changes it swaps the connection behind the
 // manager unconditionally — the adopted settings are the authority, and
 // reachability surfaces where it already does (schema discovery retries,
-// /readyz, query errors). The HTTP-side consumers read Target/QueryTimeout
-// per request.
+// /readyz, query errors). A certificate file that cannot be read is the one
+// exception: boot refuses, a reload keeps the connection it has. The
+// HTTP-side consumers read Target/QueryTimeout per request.
 func (a *App) wireClickHouse() error {
 	params := func() chconn.Params {
 		c := defaultSetting(a, (*settings.Store).ClickHouse)
@@ -238,6 +239,9 @@ func (a *App) wireClickHouse() error {
 			Addr: c.Addr, HTTPPort: c.HTTPPort, HTTPScheme: c.HTTPScheme,
 			Database: c.Database, Username: c.Username, Password: a.cfg.ClickHouse.Password,
 			QueryTimeout: c.QueryTimeout,
+			TLS:          chconn.TLS(c.TLS),
+			Headers:      c.Headers,
+			MaxOpenConns: c.MaxOpenConns, MaxIdleConns: c.MaxIdleConns,
 		}
 	}
 	ch, err := chconn.Open(params())
