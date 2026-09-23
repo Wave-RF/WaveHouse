@@ -213,9 +213,16 @@ func (v *verifier) build(ctx context.Context) (keyfunc.Keyfunc, error) {
 			// A replaced verifier's cancelled fetch is not a failure. The
 			// verifier's own context, not the handler's: the library hands
 			// over the fetch's, already cancelled.
-			if ctx.Err() == nil {
-				slog.WarnContext(ctx, "jwks refresh failed; no token validates until it succeeds", "url", v.url, "error", err)
+			if ctx.Err() != nil {
+				return
 			}
+			// Past the first fetch a failed refresh leaves the stored set
+			// in use, so tokens go on validating.
+			if v.ready.Load() {
+				slog.WarnContext(ctx, "jwks refresh failed; the previously fetched key set stays in use", "url", v.url, "error", err)
+				return
+			}
+			slog.WarnContext(ctx, "jwks refresh failed; no token validates until it succeeds", "url", v.url, "error", err)
 		},
 	})
 	if err != nil {
