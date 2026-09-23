@@ -71,7 +71,8 @@ const jwksMaxBytes = 1 << 20
 
 // ErrVerifierPending is the auth error stashed for a token that could not
 // be checked because its tenant's JWKS has not been fetched yet — at boot,
-// or after a reload moved the tenant to a new URL. Distinct from an invalid
+// or after a reload changed the tenant's jwks_url or role_claim (either
+// rebuilds the verifier, fetch included). Distinct from an invalid
 // token on purpose: the token may well be good, so the tenant route answers
 // 503 + Retry-After (api) rather than evaluate the request under the policy
 // default_role, which could accept its data under a lesser role while
@@ -292,9 +293,10 @@ func (b *cappedBody) Read(p []byte) (int, error) {
 // Authenticator owns one verifier per tenant behind the middleware, so a
 // settings reload can replace a tenant's without restarting: Reconfigure
 // builds a new verifier from the tenant's adopted wiring and swaps it in
-// unconditionally; Prune drops the verifiers of tenants a reload removed;
-// Close stops every JWKS refresh. The secrets are boot config and never
-// change.
+// when that wiring changed, keeping the one it has when it did not; Prune
+// drops the verifiers of tenants that stopped being served, rejected or
+// removed; Close stops every JWKS refresh. The secrets are boot config and
+// never change.
 type Authenticator struct {
 	cfg      Config
 	tenantOf TenantSource

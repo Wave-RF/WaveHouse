@@ -261,12 +261,13 @@ func jsonRecoverer(next http.Handler) http.Handler {
 
 // refuseUnverifiable answers 503 + Retry-After to a request whose token
 // could not be checked because its tenant's JWKS has not been fetched yet
-// (auth.ErrVerifierPending): at boot, or after a reload moved the tenant to
-// a new URL, until the library's next fetch lands. The alternative — the
-// roleless fall-through every other bad token gets — would evaluate the
-// request under the policy default_role and could accept its data under a
-// lesser role, while another pod holding the keys would have served it as
-// its own; refusing keeps the tenant's data whole and lets the client retry.
+// (auth.ErrVerifierPending): at boot, or after a reload changed the tenant's
+// jwks_url or role_claim, until the library's next fetch lands. The
+// alternative — the roleless fall-through every other bad token gets — would
+// evaluate the request under the policy default_role and could accept its
+// data under a lesser role, while another pod holding the keys would have
+// served it as its own; refusing keeps the tenant's data whole and lets the
+// client retry.
 // A tokenless request is unaffected: it is the default_role's either way. So
 // is the operator key, which never consults the verifier.
 func refuseUnverifiable(next http.Handler) http.Handler {

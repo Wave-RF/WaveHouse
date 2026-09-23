@@ -15,7 +15,7 @@ Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, and the admi
 Authorization: Bearer <token>
 ```
 
-The JWT must use HMAC signing (HS256/HS384/HS512) or be validated via a JWKS endpoint (configured via `auth.jwks_url` in the [settings directory](/settings-directory#authentication) — per tenant, over [a nested directory](/deployment#the-nested-settings-directory), so a token verifies only under the tenant whose provider issued it). While a tenant's JWKS has not been fetched yet — at boot, or after a reload rebuilt its verifier (a changed `jwks_url` or `role_claim`) — a request carrying a token is answered `503 {"error": "token verifier not ready: the tenant's JWKS has not been fetched yet"}` with `Retry-After: 30` rather than evaluated under the `default_role`; requests without a token are unaffected. The accepted signing algorithm is pinned to the active verifier and checked *before* any key is consulted: an HMAC deployment accepts only `HS256`/`HS384`/`HS512`, and a JWKS deployment accepts only the asymmetric family (`RS256/384/512`, `ES256/384/512`, `PS256/384/512`, `EdDSA`). Tokens using `alg: none`, or an algorithm from the other family (e.g. an `HS256` token sent to a JWKS deployment), are rejected outright.
+The JWT must use HMAC signing (HS256/HS384/HS512) or be validated via a JWKS endpoint (configured via `auth.jwks_url` in the [settings directory](/settings-directory#authentication) — per tenant, over [a nested directory](/deployment#the-nested-settings-directory), so a token verifies only under the tenants whose `jwks_url` names its provider's key set). While a tenant's JWKS has not been fetched yet — at boot, or after a reload rebuilt its verifier (a changed `jwks_url` or `role_claim`) — a request carrying a token is answered `503 {"error": "token verifier not ready: the tenant's JWKS has not been fetched yet"}` with `Retry-After: 30` rather than evaluated under the `default_role`; requests without a token are unaffected. The accepted signing algorithm is pinned to the active verifier and checked *before* any key is consulted: an HMAC deployment accepts only `HS256`/`HS384`/`HS512`, and a JWKS deployment accepts only the asymmetric family (`RS256/384/512`, `ES256/384/512`, `PS256/384/512`, `EdDSA`). Tokens using `alg: none`, or an algorithm from the other family (e.g. an `HS256` token sent to a JWKS deployment), are rejected outright.
 
 For SSE connections where custom headers are not possible, you can pass the token as a query parameter:
 
@@ -464,7 +464,7 @@ The earlier handler accepted a `params` array bound to `?` placeholders; the HTT
 | 400 | `{"error":"missing sql"}` | Missing `sql` field |
 | 400 | `{"error":"<ClickHouse error message>"}` | ClickHouse rejected the statement with a 4xx (bad SQL, missing table, type error, …). The body carries ClickHouse's own error text verbatim, e.g. `Code: 60. DB::Exception: Table default.x doesn't exist.`. The proxy maps any ClickHouse 4xx to HTTP 400 — caller-fault, the request itself is what's wrong. |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | The request carried a present-but-invalid/expired token and was denied for lacking permission (the gate surfaces the token reason) |
-| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 | 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
 | 502 | `{"error":"<ClickHouse error message>"}` | ClickHouse returned a 5xx (internal error, overloaded, etc.). The proxy maps any ClickHouse 5xx to HTTP 502 — gateway-fault, the upstream service had a problem. Same body convention: ClickHouse's text is forwarded as-is. |
 | 502 | `{"error":"clickhouse request failed: ..."}` | Transport-level failure reaching ClickHouse (connection refused, timeout, the upstream went away mid-request) |
@@ -543,6 +543,7 @@ The inbound request body is capped at 1 MiB; a body over the cap is rejected wit
 | 403 | `{"error":"aggregation \"x\" not allowed"}` | Aggregation fn denied by policy |
 | 404 | `{"error":"unknown table: x"}` | Table not found |
 | 413 | `{"error":"request body exceeded 1048576 bytes"}` | Request body over the 1 MiB cap |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 ---
 
@@ -577,6 +578,7 @@ The POST parameter body is capped at 1 MiB; a body over the cap is rejected with
 | 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL literal form — a JSON object, whether supplied directly or nested as an array element. A JSON **array** is valid and renders as an `IN`-style `(…)` list. |
 | 400 | `{"error":"parameter \"x\": array parameter must not be empty"}` | An empty array — it would render as the invalid `IN ()`. |
 | 413 | `{"error":"request body exceeded 1048576 bytes"}` | POST body over the 1 MiB cap |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 ---
 
@@ -690,7 +692,7 @@ Per-column fields: `name`, `type` and `is_nullable` describe the column; `positi
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
-| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 | 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
 | 404 | `{"error":"table not found"}` | Table not in discovered schemas |
 
@@ -706,6 +708,7 @@ Triggers an immediate re-discovery of ClickHouse table schemas, then returns the
 | ------ | ---- | ----- |
 | 401 / 403 | as above | Not the admin role |
 | 500 | `{"error":"refresh failed"}` | ClickHouse discovery query failed |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 **Response:**
 
@@ -731,7 +734,7 @@ Returns per-table message counts in the Dead Letter Queue. Admin-only, like the 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
-| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 | 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
 | 500 | `{"error":"stream info failed"}` | NATS JetStream stream-info lookup failed |
 
@@ -770,6 +773,7 @@ Both pipe reads take an optional `?tenant=<id>` naming the [tenant](/deployment#
 | `400` | The query string does not parse (`?tenant=acme;x=1`, a bad `%` escape), or `tenant` is empty, repeated, or not a tenant id |
 | `404` | No such tenant |
 | `503` | The tenant's settings folder was rejected |
+| `503` | A token was supplied while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`), with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 #### `GET /v1/ops/pipes/{name}` — Get Named Pipe
 
