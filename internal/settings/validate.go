@@ -541,12 +541,13 @@ func (v *validator) checkClickHouseTLS(t *ClickHouseTLS) {
 	}
 }
 
-// reservedHeaders are the HTTP-interface request headers WaveHouse sets
-// itself, the credentials, which a configured header must not shadow.
+// reservedHeaders are the HTTP-interface request headers that carry
+// ClickHouse credentials: the two WaveHouse sets itself, and Authorization,
+// which ClickHouse's HTTP interface reads as Basic credentials.
 var reservedHeaders = []string{"X-ClickHouse-User", "X-ClickHouse-Key", "Authorization"}
 
 // checkClickHouseHeaders checks each header's shape and, case-insensitively
-// as HTTP compares names, that it is not one WaveHouse sets itself.
+// as HTTP compares names, that it is not one that carries credentials.
 func (v *validator) checkClickHouseHeaders(headers map[string]string) {
 	for _, name := range slices.Sorted(maps.Keys(headers)) {
 		value := headers[name]
@@ -555,7 +556,7 @@ func (v *validator) checkClickHouseHeaders(headers map[string]string) {
 		case !validHeaderName(name):
 			v.errorf(FileConfig, path, "not a valid HTTP header name")
 		case slices.ContainsFunc(reservedHeaders, func(r string) bool { return strings.EqualFold(r, name) }):
-			v.errorf(FileConfig, path, "set by WaveHouse itself; the credentials come from clickhouse.username and the boot password")
+			v.errorf(FileConfig, path, "carries ClickHouse credentials, which come from clickhouse.username and the boot password")
 		}
 		if !validHeaderValue(value) {
 			v.errorf(FileConfig, path, "not a valid HTTP header value")
