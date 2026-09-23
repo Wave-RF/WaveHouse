@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"golang.org/x/net/http/httpguts"
 )
 
 // ValidateDir reads, decodes, and checks one directory of the four settings
@@ -493,6 +494,75 @@ func (v *validator) checkClickHouse(ch *ClickHouseConfig) {
 		v.required("clickhouse.query_timeout")
 	} else if *ch.QueryTimeout < 1 {
 		v.errorf(FileConfig, "clickhouse.query_timeout", "must be >= 1 second, got %d", *ch.QueryTimeout)
+	}
+	if ch.TLS == nil {
+		v.required("clickhouse.tls")
+	} else {
+		v.checkClickHouseTLS(ch.TLS)
+	}
+	if ch.Headers == nil {
+		v.required("clickhouse.headers")
+	} else {
+		v.checkClickHouseHeaders(ch.Headers)
+	}
+	v.checkClickHousePool(ch)
+}
+
+// checkClickHouseTLS checks the block's shape. The paths are not opened:
+// Validate is pure and also runs on the control plane, where the files need
+// not exist; an unreadable file fails where the connection is built.
+func (v *validator) checkClickHouseTLS(t *ClickHouseTLS) {
+	for path, val := range map[string]*bool{"clickhouse.tls.enabled": t.Enabled, "clickhouse.tls.insecure_skip_verify": t.InsecureSkipVerify} {
+		if val == nil {
+			v.required(path)
+		}
+	}
+	for path, val := range map[string]*string{"clickhouse.tls.ca_file": t.CAFile, "clickhouse.tls.cert_file": t.CertFile, "clickhouse.tls.key_file": t.KeyFile, "clickhouse.tls.server_name": t.ServerName} {
+		if val == nil {
+			v.required(path)
+		}
+	}
+	if t.CertFile != nil && t.KeyFile != nil && (*t.CertFile == "") != (*t.KeyFile == "") {
+		v.errorf(FileConfig, "clickhouse.tls.cert_file", "cert_file and key_file must be set together")
+	}
+	if t.InsecureSkipVerify != nil && *t.InsecureSkipVerify {
+		v.warnf(FileConfig, "clickhouse.tls.insecure_skip_verify", "certificate verification is off: the ClickHouse hops accept any certificate")
+	}
+}
+
+// reservedHeaders are the HTTP-interface request headers WaveHouse sets
+// itself, the credentials, which a configured header must not shadow.
+var reservedHeaders = []string{"X-ClickHouse-User", "X-ClickHouse-Key", "Authorization"}
+
+// checkClickHouseHeaders checks each header's shape and, case-insensitively
+// as HTTP compares names, that it is not one WaveHouse sets itself.
+func (v *validator) checkClickHouseHeaders(headers map[string]string) {
+	for name, value := range headers {
+		path := "clickhouse.headers." + name
+		switch {
+		case !httpguts.ValidHeaderFieldName(name):
+			v.errorf(FileConfig, path, "not a valid HTTP header name")
+		case slices.ContainsFunc(reservedHeaders, func(r string) bool { return strings.EqualFold(r, name) }):
+			v.errorf(FileConfig, path, "set by WaveHouse itself; the credentials come from clickhouse.username and the boot password")
+		}
+		if !httpguts.ValidHeaderFieldValue(value) {
+			v.errorf(FileConfig, path, "not a valid HTTP header value")
+		}
+	}
+}
+
+// checkClickHousePool checks the native pool's sizes: each >= 1, so the
+// driver never substitutes its own defaults for a zero, and open >= idle.
+func (v *validator) checkClickHousePool(ch *ClickHouseConfig) {
+	for path, val := range map[string]*int{"clickhouse.max_open_conns": ch.MaxOpenConns, "clickhouse.max_idle_conns": ch.MaxIdleConns} {
+		if val == nil {
+			v.required(path)
+		} else if *val < 1 {
+			v.errorf(FileConfig, path, "must be >= 1, got %d", *val)
+		}
+	}
+	if ch.MaxOpenConns != nil && ch.MaxIdleConns != nil && *ch.MaxOpenConns < *ch.MaxIdleConns {
+		v.errorf(FileConfig, "clickhouse.max_open_conns", "must be >= clickhouse.max_idle_conns (%d), got %d", *ch.MaxIdleConns, *ch.MaxOpenConns)
 	}
 }
 

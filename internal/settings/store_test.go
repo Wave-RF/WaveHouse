@@ -64,7 +64,7 @@ func TestStore_SeedIsValid(t *testing.T) {
 	_, id, req := s.DedupeFor("anything")
 	assert.Equal(t, "event_id", id)
 	assert.False(t, req)
-	assert.Equal(t, ClickHouse{Addr: "localhost:9000", HTTPPort: 8123, HTTPScheme: "http", Database: "default", Username: "default", QueryTimeout: 30 * time.Second}, s.ClickHouse())
+	assert.Equal(t, ClickHouse{Addr: "localhost:9000", HTTPPort: 8123, HTTPScheme: "http", Database: "default", Username: "default", QueryTimeout: 30 * time.Second, Headers: map[string]string{}, MaxOpenConns: 10, MaxIdleConns: 5}, s.ClickHouse())
 	assert.Equal(t, Auth{JWKSURL: "", RoleClaim: "role"}, s.Auth())
 	assert.True(t, s.DLQFor("anything"))
 	assert.Equal(t, 10000, s.DefaultMaxRows())
@@ -107,7 +107,7 @@ func TestStore_ClickHouseAndAuthAccessors(t *testing.T) {
 	s := newLoadedStore(t, map[string]string{
 		FileConfig: configJSON(`{"clickhouse": {"addr": "ch.internal:9440", "http_port": 8443, "http_scheme": "https", "database": "analytics", "username": "wh", "query_timeout": 5}, "auth": {"jwks_url": "https://idp.example/.well-known/jwks.json", "role_claim": "app_metadata.role"}}`),
 	})
-	assert.Equal(t, ClickHouse{Addr: "ch.internal:9440", HTTPPort: 8443, HTTPScheme: "https", Database: "analytics", Username: "wh", QueryTimeout: 5 * time.Second}, s.ClickHouse())
+	assert.Equal(t, ClickHouse{Addr: "ch.internal:9440", HTTPPort: 8443, HTTPScheme: "https", Database: "analytics", Username: "wh", QueryTimeout: 5 * time.Second, Headers: map[string]string{}, MaxOpenConns: 10, MaxIdleConns: 5}, s.ClickHouse())
 	assert.Equal(t, Auth{JWKSURL: "https://idp.example/.well-known/jwks.json", RoleClaim: "app_metadata.role"}, s.Auth())
 }
 

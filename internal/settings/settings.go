@@ -83,7 +83,9 @@ type TenantConfig struct {
 // ClickHouseConfig is the ClickHouse wiring minus the password (boot config
 // `clickhouse.password` / WH_CH_PASSWORD, a secret). A reload that changes
 // any of it swaps the connection unconditionally; reachability is a runtime
-// concern (schema discovery, /readyz), never a reload one.
+// concern (schema discovery, /readyz), never a reload one. A certificate
+// file that cannot be read is the one exception: boot refuses, and a reload
+// keeps the previous connection.
 type ClickHouseConfig struct {
 	// Addr is the native-protocol host:port (schema discovery, structured
 	// queries, pipes, /readyz).
@@ -96,6 +98,30 @@ type ClickHouseConfig struct {
 	Username   *string `json:"username"`
 	// QueryTimeout is the read deadline in seconds (>= 1).
 	QueryTimeout *int `json:"query_timeout"`
+	// TLS is the TLS wiring of both hops: `enabled` switches the native
+	// protocol to TLS, `http_scheme` stays the HTTP hop's switch, and the
+	// material applies to whichever hop uses TLS. Paths, checked for shape
+	// only — the files are read when the connection is (re)built.
+	TLS *ClickHouseTLS `json:"tls"`
+	// Headers are set on every HTTP-interface request (ingest INSERTs, the
+	// raw-SQL proxy) ahead of WaveHouse's own credential and content-type
+	// headers, which therefore win. The native protocol carries none.
+	Headers map[string]string `json:"headers"`
+	// MaxOpenConns and MaxIdleConns size the native driver's pool: each
+	// >= 1, open >= idle.
+	MaxOpenConns *int `json:"max_open_conns"`
+	MaxIdleConns *int `json:"max_idle_conns"`
+}
+
+// ClickHouseTLS is the `clickhouse.tls` block. Every key is required, like
+// the rest of config.json; cert_file and key_file go together.
+type ClickHouseTLS struct {
+	Enabled            *bool   `json:"enabled"`
+	CAFile             *string `json:"ca_file"`
+	CertFile           *string `json:"cert_file"`
+	KeyFile            *string `json:"key_file"`
+	InsecureSkipVerify *bool   `json:"insecure_skip_verify"`
+	ServerName         *string `json:"server_name"`
 }
 
 // AuthConfig is the JWT verifier wiring minus the secrets (boot config
