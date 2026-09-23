@@ -153,6 +153,20 @@ func (r *Registry) All() iter.Seq2[tenant.ID, *Store] {
 	}
 }
 
+// Known iterates over every tenant the registry holds, served or rejected,
+// in id order — for a consumer that must keep a rejected tenant's resources
+// current too: the tenant comes back into service with them, and a rejection
+// is the common reload failure (a typo, fixed and reloaded minutes later).
+func (r *Registry) Known() iter.Seq[tenant.ID] {
+	return func(yield func(tenant.ID) bool) {
+		for _, id := range slices.Sorted(maps.Keys(*r.tenants.Load())) {
+			if !yield(id) {
+				return
+			}
+		}
+	}
+}
+
 // Reload re-validates the directory and adopts what it finds (see Registry
 // for what a rejection costs in each shape). Warnings don't block adoption,
 // matching `wavehouse validate`. The returned bool reports whether everything

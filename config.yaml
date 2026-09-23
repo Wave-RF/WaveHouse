@@ -2,9 +2,14 @@
 # declare (a typo, or a tunable that moved to the settings directory) refuses
 # to boot and is named — whether it arrives as a YAML key here or as a WH_*
 # variable no key binds.
-# Root for embedded state. NATS lives at <data_dir>/nats; Pebble (when dedupe
-# is enabled) lives at <data_dir>/pebble. In a container, this MUST be on a
-# host-backed volume — the relative default is for local binary use only.
+# Root for embedded state. NATS lives at <data_dir>/nats; each tenant's Pebble
+# dedupe store (when its dedupe is enabled) at <data_dir>/<tenant>/dedupe —
+# tenant 0's for a settings directory of the four files. An earlier layout's
+# <data_dir>/pebble is moved there at boot when <data_dir>/0/dedupe is absent;
+# with both present, boot uses <data_dir>/0/dedupe, leaves the old directory
+# alone, and warns; a move that fails refuses boot. In a container, this MUST
+# be on a host-backed volume — the relative default is for local binary use
+# only.
 data_dir: ./data
 
 server:
@@ -35,10 +40,12 @@ prometheus:
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
 
-# Only the password is boot config; addr, http_port, http_scheme, database,
-# username, query_timeout are the settings directory's clickhouse block.
+# Only the password and the connection ceiling are boot config; addr,
+# http_port, http_scheme, database, username, query_timeout, tls, headers and
+# the pool sizes are the settings directory's clickhouse block.
 clickhouse:
   password: ""
+  max_total_conns: 0 # ceiling on open native connections across pools; 0 = none
 
 # In-process L1 cache size. The query time-bucket
 # (query.timestamp_bucket_seconds) is a settings key.
@@ -58,7 +65,8 @@ auth:
 # Settings directory (REQUIRED): roles.json, policies.json, pipes.json,
 # config.json. The behavioral configuration lives in its config.json —
 # clickhouse wiring (addr, http_port, http_scheme, database, username,
-# query_timeout), auth (jwks_url, role_claim), dedupe (enabled/id_field/
+# query_timeout, tls, headers, max_open_conns, max_idle_conns), auth
+# (jwks_url, role_claim), dedupe (enabled/id_field/
 # require_id + per-table overrides), dlq.enabled (+ per table),
 # query.default_max_rows / timestamp_bucket_seconds,
 # schema.refresh_interval, stream keepalive_interval / keepalive_buckets /

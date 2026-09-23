@@ -146,6 +146,7 @@ func TestValidate_NestedFolderNames(t *testing.T) {
 		{name: "dot", folder: "acme.bak", want: `error: acme.bak: folder name is not a tenant id: tenant id has '.' at byte 4`},
 		{name: "space", folder: "acme corp", want: `error: acme corp: folder name is not a tenant id: tenant id has ' ' at byte 4`},
 		{name: "over the length cap", folder: strings.Repeat("a", tenant.MaxLen+1), want: "folder name is not a tenant id: tenant id is 65 bytes, the limit is 64"},
+		{name: "reserved", folder: "nats", want: `error: nats: folder name is not a tenant id: tenant id "nats" is reserved: data_dir/nats is the embedded queue's directory`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

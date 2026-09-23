@@ -298,6 +298,26 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"clickhouse.database empty", FileConfig, `{"clickhouse": {"database": " "}}`, "clickhouse.database: must not be empty"},
 		{"clickhouse.username empty", FileConfig, `{"clickhouse": {"username": ""}}`, "clickhouse.username: must not be empty"},
 		{"clickhouse.query_timeout zero", FileConfig, `{"clickhouse": {"query_timeout": 0}}`, "clickhouse.query_timeout: must be >= 1"},
+		{"missing clickhouse.tls", FileConfig, `{"clickhouse": {"headers": {}, "max_open_conns": 10, "max_idle_conns": 5}}`, "clickhouse.tls: required"},
+		{"missing clickhouse.tls.enabled", FileConfig, `{"clickhouse": {"tls": {"ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": false, "server_name": ""}}}`, "clickhouse.tls.enabled: required"},
+		{"missing clickhouse.tls.ca_file", FileConfig, `{"clickhouse": {"tls": {"enabled": false}}}`, "clickhouse.tls.ca_file: required"},
+		{"missing clickhouse.tls.cert_file", FileConfig, `{"clickhouse": {"tls": {"enabled": false}}}`, "clickhouse.tls.cert_file: required"},
+		{"missing clickhouse.tls.key_file", FileConfig, `{"clickhouse": {"tls": {"enabled": false}}}`, "clickhouse.tls.key_file: required"},
+		{"missing clickhouse.tls.insecure_skip_verify", FileConfig, `{"clickhouse": {"tls": {"enabled": false}}}`, "clickhouse.tls.insecure_skip_verify: required"},
+		{"missing clickhouse.tls.server_name", FileConfig, `{"clickhouse": {"tls": {"enabled": false}}}`, "clickhouse.tls.server_name: required"},
+		{"clickhouse.tls cert without key", FileConfig, `{"clickhouse": {"tls": {"enabled": true, "ca_file": "", "cert_file": "/etc/wavehouse/client.pem", "key_file": "", "insecure_skip_verify": false, "server_name": ""}}}`, "clickhouse.tls.cert_file: cert_file and key_file must be set together"},
+		{"clickhouse.tls key without cert", FileConfig, `{"clickhouse": {"tls": {"enabled": true, "ca_file": "", "cert_file": "", "key_file": "/etc/wavehouse/client.key", "insecure_skip_verify": false, "server_name": ""}}}`, "clickhouse.tls.cert_file: cert_file and key_file must be set together"},
+		{"missing clickhouse.headers", FileConfig, `{"clickhouse": {"max_open_conns": 10, "max_idle_conns": 5}}`, "clickhouse.headers: required"},
+		{"null clickhouse.headers", FileConfig, `{"clickhouse": {"headers": null}}`, "clickhouse.headers: required"},
+		{"clickhouse.headers bad name", FileConfig, `{"clickhouse": {"headers": {"X Custom": "v"}}}`, "clickhouse.headers.X Custom: not a valid HTTP header name"},
+		{"clickhouse.headers bad value", FileConfig, `{"clickhouse": {"headers": {"X-Custom": "line\nbreak"}}}`, "clickhouse.headers.X-Custom: not a valid HTTP header value"},
+		{"clickhouse.headers reserved credential", FileConfig, `{"clickhouse": {"headers": {"x-clickhouse-key": "v"}}}`, "clickhouse.headers.x-clickhouse-key: carries ClickHouse credentials"},
+		{"clickhouse.headers reserved authorization", FileConfig, `{"clickhouse": {"headers": {"Authorization": "Basic xyz"}}}`, "clickhouse.headers.Authorization: carries ClickHouse credentials"},
+		{"clickhouse.headers two spellings of one name", FileConfig, `{"clickhouse": {"headers": {"X-Trace": "a", "x-trace": "b"}}}`, `clickhouse.headers.x-trace: spells the same header as "X-Trace"`},
+		{"missing clickhouse.max_open_conns", FileConfig, `{"clickhouse": {"max_idle_conns": 5}}`, "clickhouse.max_open_conns: required"},
+		{"missing clickhouse.max_idle_conns", FileConfig, `{"clickhouse": {"max_open_conns": 10}}`, "clickhouse.max_idle_conns: required"},
+		{"clickhouse.max_idle_conns zero", FileConfig, `{"clickhouse": {"max_idle_conns": 0}}`, "clickhouse.max_idle_conns: must be >= 1, got 0"},
+		{"clickhouse.max_open_conns below idle", FileConfig, `{"clickhouse": {"max_open_conns": 2, "max_idle_conns": 5}}`, "clickhouse.max_open_conns: must be >= clickhouse.max_idle_conns (5), got 2"},
 		{"missing auth.jwks_url", FileConfig, `{"auth": {"role_claim": "role"}}`, "auth.jwks_url: required"},
 		{"missing auth.role_claim", FileConfig, `{"auth": {"jwks_url": ""}}`, "auth.role_claim: required"},
 		{"auth.jwks_url relative", FileConfig, `{"auth": {"jwks_url": "/.well-known/jwks.json"}}`, "must be an absolute http(s) URL"},
@@ -321,6 +341,26 @@ func TestValidate_ContentRules(t *testing.T) {
 			assert.Contains(t, findingStrings(findings), tt.want)
 		})
 	}
+}
+
+// TestValidate_ClickHouseTLSPathsAreNotOpened pins that the tls block is
+// checked for shape only: Validate is pure and also runs on the control
+// plane, so paths that exist nowhere still validate, and the values reach
+// the document as written.
+func TestValidate_ClickHouseTLSPathsAreNotOpened(t *testing.T) {
+	t.Parallel()
+	files := validFiles()
+	files[FileConfig] = configJSON(`{"clickhouse": {"http_scheme": "https", "tls": {"enabled": true, "ca_file": "/nowhere/ca.pem", "cert_file": "/nowhere/client.pem", "key_file": "/nowhere/client.key", "insecure_skip_verify": false, "server_name": "ch.internal"}, "headers": {"X-Proxy-Token": "abc"}, "max_open_conns": 20, "max_idle_conns": 20}}`)
+	doc, findings := ValidateDir(writeDir(t, files))
+	require.NotNil(t, doc, "findings: %s", findingStrings(findings))
+	assert.Empty(t, findings)
+	ch := doc.Config.ClickHouse
+	assert.True(t, *ch.TLS.Enabled)
+	assert.Equal(t, "/nowhere/ca.pem", *ch.TLS.CAFile)
+	assert.Equal(t, "ch.internal", *ch.TLS.ServerName)
+	assert.Equal(t, map[string]string{"X-Proxy-Token": "abc"}, ch.Headers)
+	assert.Equal(t, 20, *ch.MaxOpenConns)
+	assert.Equal(t, 20, *ch.MaxIdleConns)
 }
 
 func TestValidate_RoleReferences(t *testing.T) {
@@ -371,6 +411,9 @@ func TestValidate_Warnings(t *testing.T) {
 		{"admin in pipe allowlist is redundant", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "allowed_roles": ["admin"]}]}`, "listing it is redundant"},
 		{"empty dedupe override sets nothing", FileConfig, configJSON(`{"dedupe": {"tables": {"clicks": {}}}}`), "override sets nothing"},
 		{"empty dlq override sets nothing", FileConfig, configJSON(`{"dlq": {"tables": {"clicks": {}}}}`), "dlq.tables.clicks: override sets nothing"},
+		{"tls verification off", FileConfig, configJSON(`{"clickhouse": {"tls": {"enabled": true, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": true, "server_name": ""}}}`), "clickhouse.tls.insecure_skip_verify: certificate verification is off"},
+		{"native tls with a plaintext http hop", FileConfig, configJSON(`{"clickhouse": {"http_scheme": "http", "tls": {"enabled": true, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": false, "server_name": ""}}}`), "clickhouse.http_scheme: clickhouse.tls.enabled is on but this HTTP hop is plaintext"},
+		{"https with a plaintext native hop", FileConfig, configJSON(`{"clickhouse": {"http_scheme": "https"}}`), "clickhouse.tls.enabled: clickhouse.http_scheme is https but the native hop is plaintext"},
 		{"default on required parameter", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x", "required": true, "default": 5}]}]}`, "never used"},
 		{"grant with neither operation", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"analyst": {}}}}`, "neither select nor insert"},
 	}

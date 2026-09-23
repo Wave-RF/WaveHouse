@@ -105,13 +105,22 @@ The tenant tunables. Every key is required (a missing one is a validation error)
 | --- | ---- | ----------- |
 | `clickhouse.addr` | `localhost:9000` | Native-protocol `host:port` — schema discovery, structured queries, pipes, `/readyz`. See [ClickHouse](#clickhouse). |
 | `clickhouse.http_port` | `8123` | HTTP interface port on the same host (ingest `INSERT`s and the raw-SQL proxy), `1–65535`. |
-| `clickhouse.http_scheme` | `http` | `http` or `https` for that HTTP hop (the *outbound* TLS setting, unrelated to your clients' TLS). |
+| `clickhouse.http_scheme` | `http` | `http` or `https` for that HTTP hop — one of the two *outbound* TLS switches, with `tls.enabled` for the native hop; unrelated to your clients' TLS. |
 | `clickhouse.database` | `default` | Database tables are discovered from. |
 | `clickhouse.username` | `default` | Connection user; the password is boot config (`WH_CH_PASSWORD`). |
 | `clickhouse.query_timeout` | `30` | Seconds (`>= 1`) a read may take; bounds the client deadline, from which the driver derives a server-side `max_execution_time`. |
+| `clickhouse.tls.enabled` | `false` | Switches the native-protocol hop (`addr`) to TLS. The HTTP hop's switch stays `http_scheme`; the rest of the `tls` block applies to whichever hop uses TLS. See [ClickHouse](#clickhouse). |
+| `clickhouse.tls.ca_file` | `""` | PEM bundle the server certificate is verified against; empty uses the system roots. A path, read when the connection is built and re-read when the `tls` block changes — validation does not open it. |
+| `clickhouse.tls.cert_file` | `""` | Client certificate for mutual TLS, PEM; set together with `key_file` or not at all. |
+| `clickhouse.tls.key_file` | `""` | The client certificate's private key, PEM. |
+| `clickhouse.tls.insecure_skip_verify` | `false` | Skips server certificate verification. `true` validates with a warning: both hops then accept any certificate. |
+| `clickhouse.tls.server_name` | `""` | Name the server certificate is verified against; empty derives it from the host in `addr` (native) or the URL (HTTP). |
+| `clickhouse.headers` | `{}` | Extra request headers for the HTTP interface (ingest `INSERT`s, `POST /v1/ops/query`). WaveHouse's own `Content-Type` and credential headers are set after them and win; naming `X-ClickHouse-User`, `X-ClickHouse-Key` or `Authorization` is a validation error, and so are two spellings of one name (names are case-insensitive). See [ClickHouse](#clickhouse). |
+| `clickhouse.max_open_conns` | `10` | Native connection pool size (`>= max_idle_conns`). Must also not exceed the boot config's [`clickhouse.max_total_conns`](/configuration#clickhouse) when one is set. |
+| `clickhouse.max_idle_conns` | `5` | Idle native connections kept open (`>= 1`). |
 | `auth.jwks_url` | `""` | JWKS endpoint (absolute `http(s)` URL). When set, JWKS is the **sole** verifier and `jwt_secret` is ignored. See [Authentication](#authentication). |
 | `auth.role_claim` | `role` | Dot-separated JWT claim path the role is read from (e.g. `app_metadata.role`). |
-| `dedupe.enabled` | `false` | Turn deduplication on; a reload opens or closes the Pebble store — see [Deduplication](#deduplication). |
+| `dedupe.enabled` | `false` | Turn deduplication on; a reload opens or closes this tenant's Pebble store — see [Deduplication](#deduplication). |
 | `dedupe.id_field` | `event_id` | Dedup key field — see [Deduplication](#deduplication). |
 | `dedupe.require_id` | `false` | Reject rows missing the id field — see [Deduplication](#deduplication). |
 | `dedupe.tables.<table>.{id_field, require_id}` | `{}` | Optional per-table overrides; each entry overrides only the fields it names and inherits the rest. |
@@ -129,12 +138,23 @@ The tenant tunables. Every key is required (a missing one is a validation error)
 ```json
 {
   "clickhouse": {
-    "addr": "clickhouse.internal:9000",
-    "http_port": 8123,
-    "http_scheme": "http",
+    "addr": "clickhouse.internal:9440",
+    "http_port": 8443,
+    "http_scheme": "https",
     "database": "analytics",
     "username": "wavehouse",
-    "query_timeout": 30
+    "query_timeout": 30,
+    "tls": {
+      "enabled": true,
+      "ca_file": "/etc/wavehouse/clickhouse-ca.pem",
+      "cert_file": "",
+      "key_file": "",
+      "insecure_skip_verify": false,
+      "server_name": ""
+    },
+    "headers": {},
+    "max_open_conns": 10,
+    "max_idle_conns": 5
   },
   "auth": { "jwks_url": "https://auth.example.com/.well-known/jwks.json", "role_claim": "app_metadata.role" },
   "dedupe": {
@@ -159,22 +179,28 @@ The tenant tunables. Every key is required (a missing one is a validation error)
 }
 ```
 
-What stays in boot config is only what cannot change under a running process — resource sizing (`data_dir`, `cache.l1_max_cost`), the listeners, the observability exporters — and the **secrets**: `clickhouse.password`, `auth.jwt_secret`, `auth.operator_key`. Secrets never belong in a tracked JSON file, so they stay in the environment and are combined with the wiring here on every (re)connect; rotating one is a restart. See [Configuration](/configuration). Everything else lives here and reloads.
+What stays in boot config is only what cannot change under a running process — resource sizing (`data_dir`, `cache.l1_max_cost`, `clickhouse.max_total_conns`), the listeners, the observability exporters — and the **secrets**: `clickhouse.password`, `auth.jwt_secret`, `auth.operator_key`. Secrets never belong in a tracked JSON file, so they stay in the environment and are combined with the wiring here on every (re)connect; rotating one is a restart. See [Configuration](/configuration). Everything else lives here and reloads.
 
 ## Deduplication
 
 Every dedupe knob lives here — there are no boot-config keys for it. The switch and its fields are resolved per record from one snapshot (table override → global value):
 
-- `dedupe.enabled` (seed default `false`) — turns deduplication on. Hot-reloadable: a reload that flips it opens the embedded Pebble store at `<data_dir>/pebble` (or closes it), so no restart is needed; seen ids persist across an off/on cycle. If the store fails to open on a reload, the failure is logged and ingest fails closed (`500 dedupe failed`) until the next reload or restart — the files asked for dedupe, so publishing un-deduped is not a fallback. At boot a failed open refuses to start, like every other store. A record that lands in the instant of the flip itself is published un-deduped: if the settings already say on but the store is not yet open, it's counted by `wavehouse_ingest_dedupe_disabled_total`; in the reverse case (settings already say off, store still open) the handler skips dedupe like any other disabled record and nothing is counted. Over a directory that holds the four files that counter should only ever tick during a reload, so a steadily climbing rate means the store and the settings have come apart; over [a nested directory](/deployment#the-nested-settings-directory) it climbs for any tenant whose `dedupe.enabled` is on while tenant `0`'s is off.
+- `dedupe.enabled` (seed default `false`) — turns deduplication on. Hot-reloadable: a reload that flips it opens this tenant's embedded Pebble store at `<data_dir>/<tenant>/dedupe` — `<data_dir>/0/dedupe` for a directory of the four files — or closes it, so no restart is needed; seen ids persist across an off/on cycle. If the store fails to open on a reload, the failure is logged and ingest fails closed (`500 dedupe failed`) until the next reload or restart — the files asked for dedupe, so publishing un-deduped is not a fallback. At boot a failed open refuses to start, like every other store. A record that lands in the instant of the flip itself is published un-deduped: if the settings already say on but the store is not yet open, it's counted by `wavehouse_ingest_dedupe_disabled_total`; in the reverse case (settings already say off, store still open) the handler skips dedupe like any other disabled record and nothing is counted. That counter should only ever tick during a reload, so a steadily climbing rate means the store and the settings have come apart. Over [a nested directory](/deployment#the-nested-settings-directory) each tenant's store follows its own folder's `dedupe.enabled` the same way; a tenant's seen ids are never another's; a rejected or removed folder closes its tenant's store and leaves its data on disk for the folder that restores it; and a tenant whose store fails to open, at boot or on reload, fails closed alone — its ingest answers `500 dedupe failed` until a reload opens it — while every other tenant carries on.
 - `dedupe.id_field` (seed default `event_id`) — JSON field name in the ingest body used as the dedup key.
 - `dedupe.require_id` (seed default `false`) — controls what happens to a row missing `id_field` (which can't be deduped, so idempotency wouldn't apply to it). Such a row is always logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`, in both modes. `false`: it is then published un-deduped. `true` rejects it instead (`400` for a single insert; a per-record failure in a batch) — a server-side tripwire for producers that must guarantee the id.
 - `dedupe.tables.<table>.{id_field, require_id}` — per-table overrides; each entry overrides only the fields it names and inherits the rest.
 
 ## ClickHouse
 
-The `clickhouse` block is the connection wiring, minus the password. A reload that changes any of it swaps the connection behind every consumer (schema discovery, structured queries, pipes, `/readyz`, the ingest worker's HTTP `INSERT`s, and the raw-SQL proxy — the HTTP-side ones re-read the target per request). The replaced connection stays open for one `query_timeout` so in-flight queries finish. The swap is **unconditional**: the adopted settings are the authority, so an address that isn't reachable is applied all the same and shows up where reachability already does — schema discovery retries and logs, `/readyz` fails, queries return errors — until the next reload fixes it. Validation checks shape only (`host:port`, port range, scheme, non-empty database and user, timeout `>= 1`); reachability is a runtime concern, so `wavehouse validate` needs no ClickHouse. At boot the address is dialed lazily, as before: an unreachable ClickHouse degrades `/livez` and retries rather than refusing to start.
+The `clickhouse` block is the connection wiring, minus the password. A reload that changes any of it swaps the connection behind every consumer (schema discovery, structured queries, pipes, `/readyz`, the ingest worker's HTTP `INSERT`s, and the raw-SQL proxy — the HTTP-side ones re-read the target per request). The replaced connection stays open for one `query_timeout` so in-flight queries finish. The swap is **unconditional**: the adopted settings are the authority, so an address that isn't reachable is applied all the same and shows up where reachability already does — schema discovery retries and logs, `/readyz` fails, queries return errors — until the next reload fixes it. Two things are refused instead, and the connection then keeps its previous wiring until the next reload: a `tls` block whose certificate files cannot be loaded (unreadable, not PEM, or a `cert_file` and `key_file` that do not pair), and a `max_open_conns` above the boot config's [`clickhouse.max_total_conns`](/configuration#clickhouse). The reload itself still reports `adopted` — the refusal is an `ERROR` log line, not a finding — and the next reload retries it; at boot either refuses to start. Validation checks shape only (`host:port`, port range, scheme, non-empty database and user, timeout `>= 1`, the `tls` block's shape without opening its paths, header names and values, pool sizes); reachability is a runtime concern, so `wavehouse validate` needs no ClickHouse and no certificate files. At boot the address is dialed lazily, as before: an unreachable ClickHouse degrades `/livez` and retries rather than refusing to start.
 
-Ingest traffic is unaffected by a migration: events land in the embedded queue regardless, and the worker's next flush uses the new target.
+**TLS.** There are two hops and two switches: `tls.enabled` puts the native-protocol connection (`addr`) on TLS, and `http_scheme: "https"` does the same for the HTTP interface (`http_port`). The rest of the `tls` block — the authority bundle, a client certificate, `insecure_skip_verify`, `server_name` — applies to whichever hop uses TLS, so a ClickHouse behind a private authority needs `ca_file` once for both. The certificate files are read when the connection is built and re-read only when the `tls` block itself changes: at boot, and on a reload that changes `tls`; a reload that changes another `clickhouse` key reuses the material already loaded. A file replaced in place with the `tls` block unchanged is picked up by a restart, like a rotated secret. Both switches move the hop to ClickHouse's TLS listeners, so the ports move too: `addr` to the secure native port (`9440` by default) and `http_port` to the HTTPS one (`8443`), as the example above does. Validation warns when only one hop is on TLS: a plaintext HTTP hop carries the credentials on every insert and raw-SQL query, and a plaintext native hop sends the password in its handshake. In the container images these are container paths: bind-mount the bundle (`-v /srv/clickhouse-ca.pem:/etc/wavehouse/clickhouse-ca.pem:ro`) and make it readable by UID 65532, like the settings directory.
+
+**Headers.** `clickhouse.headers` rides on every HTTP-interface request: routing or identification metadata for a proxy or gateway in front of ClickHouse. Values are stored in the file as written, so a credential placed there is only as protected as the settings directory itself; secrets stay in boot config. WaveHouse's own headers — `Content-Type` and the `X-ClickHouse-User` / `X-ClickHouse-Key` credentials — are set after them and win. Naming `X-ClickHouse-User` or `X-ClickHouse-Key` is a validation error, and so is `Authorization`: ClickHouse's HTTP interface reads it as Basic credentials, a second and conflicting credential path, so a gateway that authenticates that way needs a header name of its own. The native protocol carries no headers.
+
+**Existing directories.** Every key is required, so a `config.json` written before these keys existed fails validation until `tls`, `headers`, `max_open_conns` and `max_idle_conns` are added. The seed values — `tls.enabled: false` with the other `tls` keys empty, `headers: {}`, `10` and `5` — change nothing; `wavehouse bootstrap` in an empty directory writes them for reference.
+
+Moving to a different ClickHouse leaves ingest traffic unaffected: events land in the embedded queue regardless, and the worker's next flush uses the new target.
 
 ## Authentication
 

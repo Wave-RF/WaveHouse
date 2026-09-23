@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,7 +43,8 @@ import (
 //   - The cache (TieredCache + singleflight) was already removed in an
 //     earlier commit; this completes the simplification.
 type QueryHandler struct {
-	HTTPClient *http.Client
+	// clients follows the target's TLS config (chconn.HTTPClients).
+	clients *chconn.HTTPClients
 	// target resolves the ClickHouse HTTP wiring per request (chconn.Manager
 	// in production): the base URL (e.g. `http://localhost:8123`) the handler
 	// appends query-string params (`default_format`, `database`,
@@ -112,19 +114,26 @@ const (
 // inbound context longer than queryTimeout).
 func NewQueryHandler(target func() chconn.Target, queryTimeout func() time.Duration) *QueryHandler {
 	return &QueryHandler{
-		HTTPClient: &http.Client{
-			// ClickHouse's HTTP interface doesn't 3xx in normal operation,
-			// and the target URL is operator-controlled config (not user
-			// input). Don't chase redirects — if an operator misconfigures
-			// the endpoint to point at something that 3xx's, surface the
-			// 3xx response as-is. Our status-mapping below classifies
-			// anything outside 2xx/4xx as 502.
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		clients:      chconn.NewHTTPClients(proxyHTTPClient),
 		target:       target,
 		queryTimeout: queryTimeout,
+	}
+}
+
+// proxyHTTPClient is the proxy's client for the ClickHouse HTTP interface:
+// net/http's default transport with the target's TLS config for an https
+// target. ClickHouse's HTTP interface doesn't 3xx in normal operation, and
+// the target URL is operator-controlled config (not user input), so
+// redirects are not chased — a misconfigured endpoint that 3xx's surfaces
+// as-is, and the status mapping in Handle classifies it as 502.
+func proxyHTTPClient(tlsCfg *tls.Config) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsCfg
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 }
 
@@ -210,12 +219,12 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
-	// Defensive: NewQueryHandler always sets HTTPClient, but a zero-value
+	// Defensive: NewQueryHandler always sets clients, but a zero-value
 	// QueryHandler{} (used in routing-only tests that never reach the
 	// handler body) would panic here. Surface as a 500 with a clear
 	// diagnostic instead of relying on the chi recoverer.
-	if h.HTTPClient == nil {
-		writeJSONError(w, http.StatusInternalServerError, "query handler not configured: HTTPClient is nil")
+	if h.clients == nil {
+		writeJSONError(w, http.StatusInternalServerError, "query handler not configured: no HTTP client")
 		return
 	}
 
@@ -223,6 +232,11 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// The configured headers first, so WaveHouse's own win over a
+	// same-named one.
+	for name, value := range target.Headers {
+		httpReq.Header.Set(name, value)
 	}
 	httpReq.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	if target.Username != "" {
@@ -232,7 +246,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		httpReq.Header.Set("X-ClickHouse-Key", target.Password)
 	}
 
-	resp, err := h.HTTPClient.Do(httpReq)
+	resp, err := h.clients.For(target).Do(httpReq)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "clickhouse request failed: "+err.Error())
 		return

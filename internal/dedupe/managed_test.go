@@ -2,6 +2,7 @@ package dedupe
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,7 +13,7 @@ import (
 
 func TestManaged_FollowsEnabled(t *testing.T) {
 	t.Parallel()
-	m := NewManaged(filepath.Join(t.TempDir(), "pebble"))
+	m := NewManaged(Embedded(filepath.Join(t.TempDir(), "pebble")))
 	t.Cleanup(func() { _ = m.Close() })
 	ctx := context.Background()
 
@@ -45,6 +46,51 @@ func TestManaged_FollowsEnabled(t *testing.T) {
 	assert.True(t, dup, "toggling off and on must not forget seen ids")
 }
 
+// memDedup is the smallest possible backend: what a shared remote store's
+// per-tenant view would be, minus the network.
+type memDedup struct {
+	seen   map[string]bool
+	closed bool
+}
+
+func (m *memDedup) CheckAndMark(_ context.Context, id string) (bool, error) {
+	if m.seen[id] {
+		return true, nil
+	}
+	m.seen[id] = true
+	return false, nil
+}
+func (m *memDedup) Stats() map[string]int64 { return map[string]int64{"seen": int64(len(m.seen))} }
+func (m *memDedup) Close() error            { m.closed = true; return nil }
+
+// The switch semantics belong to Managed, not to Pebble: any Deduplicator
+// an opener returns gets them, and a failing opener reads as unavailable.
+func TestManaged_AnyBackend(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	backend := &memDedup{seen: map[string]bool{}}
+	m := NewManaged(func() (Deduplicator, error) { return backend, nil })
+	_, err := m.CheckAndMark(ctx, "e1")
+	require.ErrorIs(t, err, ErrDisabled)
+
+	require.NoError(t, m.Apply(true))
+	dup, err := m.CheckAndMark(ctx, "e1")
+	require.NoError(t, err)
+	assert.False(t, dup)
+	dup, err = m.CheckAndMark(ctx, "e1")
+	require.NoError(t, err)
+	assert.True(t, dup)
+	assert.Equal(t, map[string]int64{"seen": 1}, m.Stats())
+	require.NoError(t, m.Close())
+	assert.True(t, backend.closed, "closing the switch closes the backend")
+
+	failing := NewManaged(func() (Deduplicator, error) { return nil, errors.New("backend down") })
+	require.ErrorContains(t, failing.Apply(true), "backend down")
+	assert.False(t, failing.Open())
+	_, err = failing.CheckAndMark(ctx, "e1")
+	require.ErrorIs(t, err, ErrUnavailable)
+}
+
 func TestManaged_OpenFailureStaysClosed(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "not-a-dir")
@@ -52,7 +98,7 @@ func TestManaged_OpenFailureStaysClosed(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	m := NewManaged(path)
+	m := NewManaged(Embedded(path))
 	require.Error(t, m.Apply(true))
 	assert.False(t, m.Open())
 	_, err = m.CheckAndMark(context.Background(), "e1")

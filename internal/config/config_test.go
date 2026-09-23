@@ -39,6 +39,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 8080, cfg.Server.Port)
 	assert.Equal(t, 10, cfg.Server.ShutdownTimeout)
 	assert.Equal(t, "", cfg.ClickHouse.Password)
+	assert.Equal(t, 0, cfg.ClickHouse.MaxTotalConns, "no connection ceiling by default")
 	assert.Empty(t, cfg.Auth.OperatorKey, "operator key is empty by default (feature off)")
 	assert.Equal(t, "./data", cfg.DataDir)
 	assert.False(t, cfg.OTel.Enabled)
@@ -57,6 +58,7 @@ server:
   port: 9090
 clickhouse:
   password: "ch-pass"
+  max_total_conns: 40
 auth:
   jwt_secret: "test-secret"
   operator_key: "op-key"
@@ -69,6 +71,7 @@ auth:
 
 	assert.Equal(t, 9090, cfg.Server.Port)
 	assert.Equal(t, "ch-pass", cfg.ClickHouse.Password)
+	assert.Equal(t, 40, cfg.ClickHouse.MaxTotalConns)
 	assert.Equal(t, "test-secret", cfg.Auth.JWTSecret)
 	assert.Equal(t, "op-key", cfg.Auth.OperatorKey)
 }
@@ -405,4 +408,12 @@ settings:
 	assert.Contains(t, err.Error(), "server.cors_allowed_origins")
 	assert.NotContains(t, err.Error(), "clickhouse.password", "declared keys are never reported")
 	assert.NotContains(t, err.Error(), "settings.dir")
+}
+
+func TestValidate_NegativeMaxTotalConns(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{Server: Server{Port: 8080}, Settings: Settings{Dir: "./settings"}, ClickHouse: ClickHouse{MaxTotalConns: -1}}
+	err := cfg.Validate()
+	require.ErrorContains(t, err, "clickhouse.max_total_conns must be >= 0")
+	require.ErrorContains(t, err, "got -1")
 }

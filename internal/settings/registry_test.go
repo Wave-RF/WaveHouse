@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -176,6 +177,9 @@ func TestOpen_NestedRoot(t *testing.T) {
 	assert.NotSame(t, acme, globex)
 	assert.Equal(t, 111, acme.DefaultMaxRows())
 	assert.Equal(t, 222, globex.DefaultMaxRows())
+	// Each store knows the folder it was adopted from.
+	assert.Equal(t, tenant.ID("acme"), acme.Tenant())
+	assert.Equal(t, tenant.ID("globex"), globex.Tenant())
 
 	// A nested root defines the tenants it holds folders for and no other:
 	// the default tenant exists only as a 0 folder.
@@ -296,6 +300,26 @@ func TestRegistry_HooksRunOnAReloadThatAdoptsNothing(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// Known is every tenant the registry holds, rejected ones included, in id
+// order: what a resource a rejected tenant comes back to is kept current for.
+func TestRegistry_Known(t *testing.T) {
+	t.Parallel()
+	root := writeTree(t, map[string]map[string]string{"globex": maxRowsFiles(222), "acme": maxRowsFiles(111), "broken": brokenFiles()})
+	reg, _ := Open(root)
+	require.NotNil(t, reg)
+	assert.Equal(t, []tenant.ID{"acme", "broken", "globex"}, slices.Collect(reg.Known()))
+	var served []tenant.ID
+	for id := range reg.All() {
+		served = append(served, id)
+	}
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, served, "All leaves the rejected tenant out; Known does not")
+	// Stopping early is the iterator's contract, not the caller's problem.
+	for id := range reg.Known() {
+		assert.Equal(t, tenant.ID("acme"), id)
+		break
+	}
+}
+
 // All is the served tenants in id order: a rejected tenant is left out, like
 // everywhere else, and comes back with its folder.
 func TestRegistry_All(t *testing.T) {
@@ -320,6 +344,10 @@ func TestRegistry_All(t *testing.T) {
 	require.True(t, adopted)
 	ids, _ = served()
 	assert.Equal(t, []tenant.ID{"acme", "broken", "globex"}, ids)
+	// A store created by a reload carries its tenant like one created at boot.
+	broken, ok := reg.For("broken")
+	require.True(t, ok)
+	assert.Equal(t, tenant.ID("broken"), broken.Tenant())
 
 	// Stopping early is the iterator's contract, not the caller's problem.
 	for id := range reg.All() {

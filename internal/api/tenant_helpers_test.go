@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
@@ -50,6 +51,11 @@ func nestedTenants(t *testing.T, configs map[string]string) *settings.Registry {
 // staticPolicy is a PolicySource fixed to p, whatever the tenant.
 func staticPolicy(p *policy.Policy) PolicySource {
 	return func(*settings.Store) *policy.Policy { return p }
+}
+
+// staticDedup is an IngestHandler.Dedup fixed to d, whatever the tenant.
+func staticDedup(d dedupe.Deduplicator) func(*settings.Store) dedupe.Deduplicator {
+	return func(*settings.Store) dedupe.Deduplicator { return d }
 }
 
 // staticPipes is a PipesHandler source fixed to queries, whatever the tenant.

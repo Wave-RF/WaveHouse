@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -493,6 +494,127 @@ func (v *validator) checkClickHouse(ch *ClickHouseConfig) {
 		v.required("clickhouse.query_timeout")
 	} else if *ch.QueryTimeout < 1 {
 		v.errorf(FileConfig, "clickhouse.query_timeout", "must be >= 1 second, got %d", *ch.QueryTimeout)
+	}
+	if ch.TLS == nil {
+		v.required("clickhouse.tls")
+	} else {
+		v.checkClickHouseTLS(ch.TLS)
+	}
+	if ch.Headers == nil {
+		v.required("clickhouse.headers")
+	} else {
+		v.checkClickHouseHeaders(ch.Headers)
+	}
+	v.checkClickHousePool(ch)
+	// Both hops reach the same host, and each carries the credentials in the
+	// clear without TLS — the HTTP one on every insert and raw-SQL query, the
+	// native one in its handshake — so encrypting one alone is almost
+	// certainly not what the operator meant. One warning per direction.
+	if ch.TLS != nil && ch.TLS.Enabled != nil && ch.HTTPScheme != nil {
+		switch {
+		case *ch.TLS.Enabled && *ch.HTTPScheme == "http":
+			v.warnf(FileConfig, "clickhouse.http_scheme", "clickhouse.tls.enabled is on but this HTTP hop is plaintext, and it carries the ClickHouse credentials on every insert and raw-SQL query")
+		case !*ch.TLS.Enabled && *ch.HTTPScheme == "https":
+			v.warnf(FileConfig, "clickhouse.tls.enabled", "clickhouse.http_scheme is https but the native hop is plaintext, and its handshake carries the ClickHouse password")
+		}
+	}
+}
+
+// checkClickHouseTLS checks the block's shape. The paths are not opened:
+// Validate is pure and also runs on the control plane, where the files need
+// not exist; an unreadable file fails where the connection is built.
+func (v *validator) checkClickHouseTLS(t *ClickHouseTLS) {
+	for path, val := range map[string]*bool{"clickhouse.tls.enabled": t.Enabled, "clickhouse.tls.insecure_skip_verify": t.InsecureSkipVerify} {
+		if val == nil {
+			v.required(path)
+		}
+	}
+	for path, val := range map[string]*string{"clickhouse.tls.ca_file": t.CAFile, "clickhouse.tls.cert_file": t.CertFile, "clickhouse.tls.key_file": t.KeyFile, "clickhouse.tls.server_name": t.ServerName} {
+		if val == nil {
+			v.required(path)
+		}
+	}
+	if t.CertFile != nil && t.KeyFile != nil && (*t.CertFile == "") != (*t.KeyFile == "") {
+		v.errorf(FileConfig, "clickhouse.tls.cert_file", "cert_file and key_file must be set together")
+	}
+	if t.InsecureSkipVerify != nil && *t.InsecureSkipVerify {
+		v.warnf(FileConfig, "clickhouse.tls.insecure_skip_verify", "certificate verification is off: the ClickHouse hops accept any certificate")
+	}
+}
+
+// reservedHeaders are the HTTP-interface request headers that carry
+// ClickHouse credentials: the two WaveHouse sets itself, and Authorization,
+// which ClickHouse's HTTP interface reads as Basic credentials.
+var reservedHeaders = []string{"X-ClickHouse-User", "X-ClickHouse-Key", "Authorization"}
+
+// checkClickHouseHeaders checks each header's shape and, case-insensitively
+// as HTTP compares names, that it is not one that carries credentials and
+// that no two entries spell the same name: the consumers apply the map
+// with Header.Set, which canonicalizes, so two spellings would be one
+// header with whichever value came last.
+func (v *validator) checkClickHouseHeaders(headers map[string]string) {
+	seen := map[string]string{}
+	for _, name := range slices.Sorted(maps.Keys(headers)) {
+		value := headers[name]
+		path := "clickhouse.headers." + name
+		switch canonical := http.CanonicalHeaderKey(name); {
+		case !validHeaderName(name):
+			v.errorf(FileConfig, path, "not a valid HTTP header name")
+		case slices.ContainsFunc(reservedHeaders, func(r string) bool { return strings.EqualFold(r, name) }):
+			v.errorf(FileConfig, path, "carries ClickHouse credentials, which come from clickhouse.username and the boot password")
+		case seen[canonical] != "":
+			v.errorf(FileConfig, path, "spells the same header as %q; names are case-insensitive", seen[canonical])
+		default:
+			seen[canonical] = name
+		}
+		if !validHeaderValue(value) {
+			v.errorf(FileConfig, path, "not a valid HTTP header value")
+		}
+	}
+}
+
+// validHeaderName reports whether name is an HTTP field name: a non-empty
+// RFC 9110 token, printable ASCII minus the delimiters. The same rule
+// net/http applies when it writes a request, spelled out here so Validate
+// refuses at validation time what the client would refuse at send time.
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := range len(name) {
+		c := name[i]
+		if c <= ' ' || c >= 0x7f || strings.IndexByte("\"(),/:;<=>?@[\\]{}", c) >= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// validHeaderValue reports whether value can be sent as an HTTP field
+// value: no line breaks or other control characters (a tab is allowed),
+// and no DEL; bytes above ASCII pass, as net/http lets them through.
+func validHeaderValue(value string) bool {
+	for i := range len(value) {
+		c := value[i]
+		if (c < ' ' && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// checkClickHousePool checks the native pool's sizes: each >= 1, so the
+// driver never substitutes its own defaults for a zero, and open >= idle.
+func (v *validator) checkClickHousePool(ch *ClickHouseConfig) {
+	for path, val := range map[string]*int{"clickhouse.max_open_conns": ch.MaxOpenConns, "clickhouse.max_idle_conns": ch.MaxIdleConns} {
+		if val == nil {
+			v.required(path)
+		} else if *val < 1 {
+			v.errorf(FileConfig, path, "must be >= 1, got %d", *val)
+		}
+	}
+	if ch.MaxOpenConns != nil && ch.MaxIdleConns != nil && *ch.MaxOpenConns < *ch.MaxIdleConns {
+		v.errorf(FileConfig, "clickhouse.max_open_conns", "must be >= clickhouse.max_idle_conns (%d), got %d", *ch.MaxIdleConns, *ch.MaxOpenConns)
 	}
 }
 

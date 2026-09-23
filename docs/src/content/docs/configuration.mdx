@@ -35,7 +35,7 @@ This page is boot config only — what the platform operator owns (wiring, lifec
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; Pebble (when dedupe is enabled) at `<data_dir>/pebble`. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
+| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; each tenant's Pebble dedupe store (when its dedupe is enabled) at `<data_dir>/<tenant>/dedupe` — tenant `0`'s for [the four files](/settings-directory), one per folder of [a nested directory](/deployment#the-nested-settings-directory); an earlier layout's `<data_dir>/pebble` is moved to tenant `0`'s at boot when `<data_dir>/0/dedupe` is absent — with both present, boot uses `<data_dir>/0/dedupe`, leaves the old directory alone, and warns; a move that fails refuses boot rather than start an empty store. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
 
 ### Server
 
@@ -44,15 +44,16 @@ This page is boot config only — what the platform operator owns (wiring, lifec
 | `server.port` | `WH_SERVER_PORT` | `8080` | HTTP server listen port. |
 | `server.shutdown_timeout` | `WH_SERVER_SHUTDOWN_TIMEOUT` | `10` | Seconds the drain phase of a stop may take: in-flight requests and ingest batches finish (open SSE streams end immediately). The release of the stores (5s) and the telemetry flush (3s) have fixed budgets on top, so a stop takes at most this plus 8s; see [Stopping](/deployment#stopping). |
 
-The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate TLS at a [reverse proxy](/reverse-proxy#tls) for internet-facing deployments. (The settings directory's `clickhouse.http_scheme` is the *outbound* WaveHouse → ClickHouse hop, unrelated to your clients' TLS.)
+The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate TLS at a [reverse proxy](/reverse-proxy#tls) for internet-facing deployments. (The settings directory's `clickhouse.http_scheme` and `clickhouse.tls` are the *outbound* WaveHouse → ClickHouse hops, unrelated to your clients' TLS.)
 
 ### ClickHouse
 
-Only the secret is boot config. The wiring — native address, HTTP port and scheme, database, username, query timeout — is the settings directory's [`clickhouse` block](/settings-directory#clickhouse), where a change re-dials without a restart.
+Only the secret and the connection ceiling are boot config. The wiring — native address, HTTP port and scheme, database, username, query timeout, TLS, headers, pool sizes — is the settings directory's [`clickhouse` block](/settings-directory#clickhouse), where a change re-dials without a restart.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password, combined with the settings directory's `clickhouse.username` on every (re)connect. A secret, so it never lives in a tracked JSON file; rotating it is a restart. |
+| `clickhouse.max_total_conns` | `WH_CH_MAX_TOTAL_CONNS` | `0` | Ceiling on the native ClickHouse connections the process holds open: the settings directory's `clickhouse.max_open_conns` must not exceed it. A settings pool above the ceiling refuses boot, naming both numbers in the error; a reload that raises the pool above it is refused and logged (the reload itself still reports `adopted`), and the connection keeps its previous wiring until the next reload. `0` is no ceiling. Capacity is sized once per process, which is why it is boot config rather than a settings key. |
 
 ### Server-side resource limits
 
@@ -179,15 +180,17 @@ Every key, with its default. Save the YAML as `config.yaml` next to the binary (
 <TabItem label="YAML">
 
 ```yaml
-data_dir: ./data         # nats → ./data/nats, pebble → ./data/pebble
+data_dir: ./data         # nats → ./data/nats, dedupe → ./data/<tenant>/dedupe
+                         # (./data/0/dedupe for the four-file settings directory)
 
 server:
   port: 8080
   shutdown_timeout: 10
 
 clickhouse:
-  password: ""           # the only ClickHouse key here — addr, ports, database,
-                         # username, query_timeout are settings (config.json)
+  password: ""           # addr, ports, database, username, query_timeout, tls,
+                         # headers and pool sizes are settings (config.json)
+  max_total_conns: 0     # ceiling on open native connections; 0 = none
 
 cache:
   l1_max_cost: 67108864
@@ -235,6 +238,7 @@ WH_SERVER_PORT=8080
 WH_SERVER_SHUTDOWN_TIMEOUT=10
 
 WH_CH_PASSWORD=
+WH_CH_MAX_TOTAL_CONNS=0
 
 WH_CACHE_L1_MAX_COST=67108864
 

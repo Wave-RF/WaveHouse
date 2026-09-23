@@ -3,7 +3,6 @@ package observability
 import (
 	"context"
 
-	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -18,9 +17,11 @@ type MQStats struct {
 
 // RegisterSystemMetrics creates asynchronous gauges that periodically pull
 // stats from embedded systems (the MQ, Pebble) and push them to OpenTelemetry.
-// mqStats is read on every scrape; nil skips the MQ gauges, as a nil dedup
-// skips the Pebble ones.
-func RegisterSystemMetrics(mqStats func() (MQStats, error), dedup dedupe.Deduplicator) error {
+// Both are read on every scrape; nil skips the MQ gauges, as a nil
+// pebbleStats — or a nil map from it, no store being open — skips the Pebble
+// ones. The Pebble figures are the process's, summed across the tenants'
+// stores (dedupe.Stores.Stats in production).
+func RegisterSystemMetrics(mqStats func() (MQStats, error), pebbleStats func() map[string]int64) error {
 	meter := otel.Meter("wavehouse-system")
 
 	// NATS Instruments
@@ -42,9 +43,8 @@ func RegisterSystemMetrics(mqStats func() (MQStats, error), dedup dedupe.Dedupli
 		}
 
 		// Scrape Pebble (if using embedded dedupe)
-		if dedup != nil {
-			stats := dedup.Stats()
-			if stats != nil {
+		if pebbleStats != nil {
+			if stats := pebbleStats(); stats != nil {
 				o.ObserveInt64(pebbleWalSize, stats["pebble_wal_size"])
 				o.ObserveInt64(pebbleTableCount, stats["pebble_table_count"])
 			}
