@@ -53,6 +53,9 @@ func (v *verifier) keyFunc(t *jwt.Token) (any, error) {
 	if v.jwks != nil {
 		return v.jwks.Keyfunc(t)
 	}
+	if v.secret == "" {
+		return nil, errNoVerifier
+	}
 	if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 		return nil, jwt.ErrSignatureInvalid
 	}
@@ -163,6 +166,10 @@ func (a *Authenticator) Middleware() func(http.Handler) http.Handler {
 var (
 	errInvalidToken = errors.New("invalid token")
 	errTokenExpired = errors.New("token expired")
+	// errNoVerifier is a verifier with neither a JWKS key source nor a
+	// secret: no token can validate. Never hand the library an empty HMAC
+	// key — it verifies a token signed with one.
+	errNoVerifier = errors.New("no verifier configured")
 )
 
 // operatorKeyFailures counts requests that presented an operator credential
@@ -191,8 +198,10 @@ var operatorKeyFailures, _ = otel.Meter("wavehouse-auth").Int64Counter(
 // otherwise the HMAC secret (JWTSecret) is used. Accepted signing algorithms are
 // restricted to the active verifier's family (asymmetric for JWKS, HMAC
 // otherwise) so a token can't force an alg-confusion or alg:none bypass. With
-// neither JWKSURL nor JWTSecret configured, no token can validate and every
-// request falls back to the default role — i.e. a pure public deployment.
+// neither JWKSURL nor JWTSecret configured, no token can validate — keyFunc
+// refuses rather than verify against an empty key, which the library would
+// accept — and every request falls back to the default role, i.e. a pure
+// public deployment.
 //
 // If JWKSURL is set but its JWK Set can't be fetched at startup,
 // NewAuthenticator returns an error so the caller can fail fast instead of
