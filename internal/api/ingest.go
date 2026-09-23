@@ -37,7 +37,8 @@ const maxReportedResults = 10000
 
 // IngestHandler handles POST /v1/ingest?table={table}
 type IngestHandler struct {
-	Registry *discovery.SchemaRegistry
+	// Registry yields the request tenant's schema registry.
+	Registry RegistrySource
 	// Dedup resolves the request tenant's deduplicator — the tenant's own
 	// store, picked off the store the handler already holds (#583 story 7;
 	// dedupe.Stores in production). nil when no dedupe store is wired (tests).
@@ -64,7 +65,7 @@ type IngestHandler struct {
 	maxRequestBytes int64
 }
 
-func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher) *IngestHandler {
+func NewIngestHandler(registry RegistrySource, pub mq.Publisher) *IngestHandler {
 	return &IngestHandler{Registry: registry, Publisher: pub}
 }
 
@@ -167,10 +168,11 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// TODO: prevent table-enumeration...
-	schema := h.Registry.Get(table)
-	if schema == nil {
-		slog.WarnContext(ctx, "unknown table requested", "table", table)
-		writeJSONError(w, http.StatusNotFound, "unknown table: "+table)
+	schema, err := lookupSchema(w, h.Registry, store, table, "unknown table: "+table)
+	if err != nil {
+		if errors.Is(err, discovery.ErrUnknownTable) {
+			slog.WarnContext(ctx, "unknown table requested", "table", table)
+		}
 		return
 	}
 

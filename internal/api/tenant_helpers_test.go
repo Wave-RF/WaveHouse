@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
@@ -46,6 +48,24 @@ func nestedTenants(t *testing.T, configs map[string]string) *settings.Registry {
 	tenants, _ := settings.Open(root)
 	require.NotNil(t, tenants)
 	return tenants
+}
+
+// fixedRegistry is a RegistrySource fixed to reg, whatever the tenant.
+func fixedRegistry(reg *discovery.SchemaRegistry) RegistrySource {
+	return func(*settings.Store) *discovery.SchemaRegistry { return reg }
+}
+
+// schemaHandlerOver is a SchemaHandler serving reg for every tenant of
+// tenants, which the ops reads resolve ?tenant= against.
+func schemaHandlerOver(reg *discovery.SchemaRegistry, tenants *settings.Registry) *SchemaHandler {
+	h := NewSchemaHandler(fixedRegistry(reg))
+	h.Tenants = tenants
+	return h
+}
+
+// fixedConn is a connection source fixed to conn, whatever the tenant.
+func fixedConn(conn driver.Conn) func(*settings.Store) driver.Conn {
+	return func(*settings.Store) driver.Conn { return conn }
 }
 
 // staticPolicy is a PolicySource fixed to p, whatever the tenant.

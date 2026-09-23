@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 )
 
 // QueryHandler handles POST /v1/ops/query.
@@ -43,16 +44,21 @@ import (
 //   - The cache (TieredCache + singleflight) was already removed in an
 //     earlier commit; this completes the simplification.
 type QueryHandler struct {
-	// clients follows the target's TLS config (chconn.HTTPClients).
+	// clients follows each target's TLS config (chconn.HTTPClients).
 	clients *chconn.HTTPClients
-	// target resolves the ClickHouse HTTP wiring per request (chconn.Manager
-	// in production): the base URL (e.g. `http://localhost:8123`) the handler
-	// appends query-string params (`default_format`, `database`,
-	// `date_time_output_format`) to and POSTs the SQL against, plus the
-	// credentials and database. queryTimeout bounds each proxied query.
+	// target resolves the tenant's ClickHouse HTTP wiring per request
+	// (chconn.Pools.Target in production): the base URL (e.g.
+	// `http://localhost:8123`) the handler appends query-string params
+	// (`default_format`, `database`, `date_time_output_format`) to and POSTs
+	// the SQL against, plus the credentials and database; the zero Target is
+	// a tenant on no pool, a 503. queryTimeout bounds each proxied query.
 	// Funcs, not values, so a settings reload applies to the next request.
-	target       func() chconn.Target
-	queryTimeout func() time.Duration
+	target       func(*settings.Store) chconn.Target
+	queryTimeout func(*settings.Store) time.Duration
+	// Tenants resolves the tenant the proxy queries: /v1/ops is
+	// tenant-exempt, so the request carries no tenant and the query runs
+	// against the one ?tenant= names, the default one without it (opsStore).
+	Tenants *settings.Registry
 	// maxResponseBytes optionally overrides the default upstream response
 	// buffer cap (maxCHResponseBytes). When 0, the default applies. Exists
 	// so same-package tests can pin the cap-overflow path without
@@ -112,7 +118,7 @@ const (
 // bounds the whole exchange including body read. Setting `Timeout` here
 // too would just duplicate that bound (and silently truncate any
 // inbound context longer than queryTimeout).
-func NewQueryHandler(target func() chconn.Target, queryTimeout func() time.Duration) *QueryHandler {
+func NewQueryHandler(target func(*settings.Store) chconn.Target, queryTimeout func(*settings.Store) time.Duration) *QueryHandler {
 	return &QueryHandler{
 		clients:      chconn.NewHTTPClients(proxyHTTPClient),
 		target:       target,
@@ -154,6 +160,11 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// `FORMAT HTML`). nosniff defangs the browser-as-renderer concern;
 	// matches writeJSONError's posture on the error path.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	store, ok := opsStore(w, r, h.Tenants)
+	if !ok {
+		return
+	}
 
 	reqCap := int64(maxRequestBodyBytes)
 	if h.maxRequestBytes > 0 {
@@ -197,7 +208,11 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, timeout := h.target(), h.queryTimeout()
+	target, timeout := h.target(store), timeoutOf(h.queryTimeout, store)
+	if target.URL == "" {
+		writeUnavailable(w, noConnectionMessage, retryAfterPool)
+		return
+	}
 	u, err := url.Parse(target.URL)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "invalid clickhouse endpoint: "+err.Error())

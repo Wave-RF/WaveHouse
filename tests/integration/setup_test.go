@@ -45,6 +45,7 @@ const (
 
 // testEnv holds the shared infrastructure available to every test.
 type testEnv struct {
+	ch         *chInstance
 	chConn     driver.Conn
 	chHTTPURL  string
 	embeddedMQ mq.Broker
@@ -192,6 +193,7 @@ func setup() (int, func()) {
 	}
 
 	sharedEnv = &testEnv{
+		ch:         ch,
 		chConn:     ch.conn,
 		chHTTPURL:  ch.httpURL(),
 		embeddedMQ: a.MQ(),
@@ -209,18 +211,32 @@ func setup() (int, func()) {
 // unit tests and the e2e SDK suite. The stream budget is shrunk to 1 GiB
 // like the e2e fixture so the scratch directory stays small.
 func writeTestSettings(ch *chInstance) (string, error) {
-	files, err := settings.Seed()
+	files, err := tenantSettings(ch, testCHDatabase)
 	if err != nil {
 		return "", err
 	}
+	dir := mustTempDir()
+	if err := writeSettingsFiles(dir, files); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// tenantSettings is one tenant's four files: the seed with the ClickHouse
+// block pointed at the testcontainer's database, and the dev-style policy.
+func tenantSettings(ch *chInstance, database string) (map[string][]byte, error) {
+	files, err := settings.Seed()
+	if err != nil {
+		return nil, err
+	}
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(files[settings.FileConfig], &doc); err != nil {
-		return "", fmt.Errorf("seed config.json: %w", err)
+		return nil, fmt.Errorf("seed config.json: %w", err)
 	}
 	patch := map[string]any{
 		"clickhouse": map[string]any{
 			"addr": ch.nativeAddr(), "http_port": mustAtoi(ch.httpPort), "http_scheme": "http",
-			"database": testCHDatabase, "username": testCHUser, "query_timeout": 30,
+			"database": database, "username": testCHUser, "query_timeout": 30,
 			"tls":     map[string]any{"enabled": false, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": false, "server_name": ""},
 			"headers": map[string]any{}, "max_open_conns": 10, "max_idle_conns": 5,
 		},
@@ -228,22 +244,28 @@ func writeTestSettings(ch *chInstance) (string, error) {
 	}
 	for key, val := range patch {
 		if doc[key], err = json.Marshal(val); err != nil {
-			return "", err
+			return nil, err
 		}
 	}
 	if files[settings.FileConfig], err = json.MarshalIndent(doc, "", "  "); err != nil {
-		return "", err
+		return nil, err
 	}
 	files[settings.FileRoles] = []byte(`{"roles": ["admin"]}`)
 	files[settings.FilePolicies] = []byte(`{"default_role": "admin"}`)
+	return files, nil
+}
 
-	dir := mustTempDir()
+// writeSettingsFiles writes one tenant's files into dir.
+func writeSettingsFiles(dir string, files map[string][]byte) error {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
 	for name, data := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
-			return "", err
+			return err
 		}
 	}
-	return dir, nil
+	return nil
 }
 
 // waitForLive polls /livez until it returns 200 or the timeout elapses,

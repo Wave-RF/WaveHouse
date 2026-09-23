@@ -48,7 +48,7 @@ func TestIngest_RecordValidatorSeam_IsUsed(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
 		v := &recordingValidator{validateErr: errors.New("seam says no")}
-		h := NewIngestHandler(testRegistry(t), pub)
+		h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 		h.Validator = v
 
 		w := httptest.NewRecorder()
@@ -66,7 +66,7 @@ func TestIngest_RecordValidatorSeam_IsUsed(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
 		v := &recordingValidator{canonicalizeAs: "/rewritten"}
-		h := NewIngestHandler(testRegistry(t), pub)
+		h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 		h.Validator = v
 
 		w := httptest.NewRecorder()
@@ -85,7 +85,7 @@ func TestIngest_RecordValidatorSeam_IsUsed(t *testing.T) {
 func TestIngest_DefaultValidator_WhenUnwired(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub)
+	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	require.Nil(t, h.Validator)
 	assert.IsType(t, discoveryValidator{}, h.validator())
 
@@ -129,7 +129,7 @@ func TestIngest_InsertCheckerSeam_IsUsed(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub)
+			h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 			h.PolicySource = staticPolicy(p)
 			h.Checker = alwaysChecker{matches: tt.matches}
 
@@ -168,7 +168,7 @@ func TestIngest_InsertCheckerSeam_InSet_IsUsed(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(t), pub)
+			h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 			h.PolicySource = checkInStore()
 			h.Checker = alwaysChecker{inSet: tt.inSet}
 
@@ -198,7 +198,7 @@ func TestIngest_DefaultChecker_WhenUnwired(t *testing.T) {
 		}}},
 	}}
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(t), pub)
+	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.PolicySource = staticPolicy(p)
 	require.Nil(t, h.Checker)
 	assert.IsType(t, canonicalChecker{}, h.checker())
@@ -224,7 +224,7 @@ func TestIngest_SeamOrdering_ChecksSitBetweenValidateAndCanonicalize(t *testing.
 	}}
 	pub := &testutil.MockPublisher{}
 	v := &recordingValidator{}
-	h := NewIngestHandler(testRegistry(t), pub)
+	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.PolicySource = staticPolicy(p)
 	h.Validator = v
 

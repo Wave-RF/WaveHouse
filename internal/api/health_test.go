@@ -65,7 +65,7 @@ func TestHealth_Readiness_PingFails(t *testing.T) {
 	// without a test for the failure path a future refactor that moves
 	// header setup into the success branch would silently drop them on
 	// 503 responses.
-	h := NewHealthHandler(pingFailConn{err: errors.New("ch ping failed")})
+	h := NewHealthHandler(pingFailConn{err: errors.New("ch ping failed")}.Ping)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)

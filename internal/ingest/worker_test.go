@@ -50,7 +50,7 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockPublisher
 		clients: chconn.NewHTTPClients(func(*tls.Config) *http.Client { return &http.Client{Transport: rt} }),
 		cache:   cache,
 		tenant:  tenant.Default,
-		target: func() chconn.Target {
+		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: "http://test-clickhouse:8123", Username: "test_user", Password: "test_pass", Database: "test_db"}
 		},
 	}
@@ -137,7 +137,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 			t.Parallel()
 			q, c := tt.setup(t)
 			_, _, err := StartIngestWorker(context.Background(), q, c,
-				func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, tenant.Default, nil)
+				func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, tenant.Default, nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrSub)
 		})
@@ -198,7 +198,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 		dlq:     emb,
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
 		cache:   cache,
-		target: func() chconn.Target {
+		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
 		maxBatch: defaultMaxBatch,
@@ -270,7 +270,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	t.Cleanup(cancel)
 
 	stopFn, _, err := StartIngestWorker(ctx, emb, &testutil.MockCache{},
-		func() chconn.Target {
+		func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		}, tenant.Default, nil)
 	require.NoError(t, err)
@@ -306,7 +306,7 @@ func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 	// chURL is never dialed: with no messages there is no flush, so a dummy
 	// host/port is fine.
 	stopFn, _, err := StartIngestWorker(context.Background(), emb, &testutil.MockCache{},
-		func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, tenant.Default, nil)
+		func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, tenant.Default, nil)
 	require.NoError(t, err)
 
 	// Nothing to flush, so shutdown drains immediately and returns nil before the
@@ -1131,7 +1131,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		dlq:     emb,
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
 		cache:   &testutil.MockCache{},
-		target: func() chconn.Target {
+		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
 		maxBatch: maxBatch,
@@ -1226,7 +1226,7 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 		dlq:     emb,
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
 		cache:   &testutil.MockCache{},
-		target: func() chconn.Target {
+		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
 		maxBatch: maxBatch,
@@ -1724,7 +1724,7 @@ func TestInsertToClickHouse_SetsConfiguredHeaders(t *testing.T) {
 		},
 	}
 	w, _, _, _ := newTestWorker(rt)
-	w.target = func() chconn.Target {
+	w.target = func(tenant.ID) chconn.Target {
 		return chconn.Target{
 			URL: "http://test-clickhouse:8123", Username: "test_user", Password: "test_pass", Database: "test_db",
 			Headers: map[string]string{"X-Proxy-Token": "abc", "Content-Type": "text/plain", "X-ClickHouse-User": "someone-else"},
@@ -1745,8 +1745,8 @@ func TestInsertToClickHouse_UsesTargetTLS(t *testing.T) {
 	t.Cleanup(srv.Close)
 	pool := x509.NewCertPool()
 	pool.AddCert(srv.Certificate())
-	target := func(cfg *tls.Config) func() chconn.Target {
-		return func() chconn.Target {
+	target := func(cfg *tls.Config) func(tenant.ID) chconn.Target {
+		return func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: srv.URL, Username: "u", Password: "p", Database: "db", TLS: cfg}
 		}
 	}
@@ -1761,4 +1761,26 @@ func TestInsertToClickHouse_UsesTargetTLS(t *testing.T) {
 
 	w.target = target(nil)
 	require.ErrorContains(t, insert(), "unknown authority")
+}
+
+// TestInsertToClickHouse_NoTargetIsAnError: a tenant on no pool — its tuple
+// refused by the connection ceiling — has no HTTP target, and its insert
+// fails naming the tenant before any request is built, into the same
+// failure path an unreachable ClickHouse takes.
+func TestInsertToClickHouse_NoTargetIsAnError(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{Fn: func(*http.Request) (*http.Response, error) {
+		t.Fatal("no request must be made without a target")
+		return nil, nil
+	}}
+	w, _, _, _ := newTestWorker(rt)
+	var asked []tenant.ID
+	w.target = func(id tenant.ID) chconn.Target {
+		asked = append(asked, id)
+		return chconn.Target{}
+	}
+	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}})
+	require.ErrorContains(t, err, "no ClickHouse connection is open for tenant 0")
+	assert.Equal(t, []tenant.ID{tenant.Default}, asked, "the target is the worker's own tenant's")
+	assert.Zero(t, rt.Hits())
 }

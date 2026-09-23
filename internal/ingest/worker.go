@@ -61,10 +61,11 @@ type IngestWorker struct {
 	// replaced when a reload changes it (chconn.HTTPClients).
 	clients *chconn.HTTPClients
 	cache   cache.Cache
-	// target resolves the ClickHouse HTTP wiring per insert
-	// (chconn.Manager.Target in production) so a settings reload that
-	// re-points ClickHouse applies to the next flush.
-	target   func() chconn.Target
+	// target resolves a tenant's ClickHouse HTTP wiring per insert
+	// (chconn.Pools.Target in production) so a settings reload that
+	// re-points the tenant applies to the next flush; the zero Target is a
+	// tenant on no pool, whose insert fails like an unreachable one.
+	target   func(tenant.ID) chconn.Target
 	maxBatch int
 	maxWait  time.Duration
 	// tenant is whose events the worker writes; every event is its tenant's
@@ -133,7 +134,7 @@ const (
 // still the caller's to call.
 func StartIngestWorker(
 	ctx context.Context, queue Queue, cache cache.Cache,
-	target func() chconn.Target,
+	target func(tenant.ID) chconn.Target,
 	id tenant.ID,
 	dlqEnabled func(id tenant.ID, table string) bool,
 ) (stop func(context.Context) error, failed <-chan error, err error) {
@@ -611,7 +612,10 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 		quoted[i] = chsql.QuoteIdent(c)
 	}
 
-	t := w.target()
+	t := w.target(w.tenant)
+	if t.URL == "" {
+		return fmt.Errorf("no ClickHouse connection is open for tenant %s", w.tenant)
+	}
 	q := url.Values{}
 	q.Set("database", t.Database)
 	q.Set("param_target_table", tableName)

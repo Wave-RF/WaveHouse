@@ -11,11 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 )
@@ -99,7 +101,7 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 				},
 			}
 			h := api.NewStructuredQueryHandler(
-				e.chConn, nil, e.registry, func(*settings.Store) *policy.Policy { return p }, func(*settings.Store) int { return 60 }, func() time.Duration { return 30 * time.Second }, nil,
+				func(*settings.Store) driver.Conn { return e.chConn }, nil, func(*settings.Store) *discovery.SchemaRegistry { return e.registry }, func(*settings.Store) *policy.Policy { return p }, func(*settings.Store) int { return 60 }, func(*settings.Store) time.Duration { return 30 * time.Second }, nil,
 			)
 
 			req := httptest.NewRequest(http.MethodPost,

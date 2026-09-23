@@ -68,17 +68,17 @@ func cachedRouter(t *testing.T, tenants *settings.Registry, conn driver.Conn, c 
 		DefaultRole: "viewer",
 		Tables:      map[string]policy.TablePolicy{"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}}},
 	})
-	timeout := func() time.Duration { return 5 * time.Second }
+	timeout := func(*settings.Store) time.Duration { return 5 * time.Second }
 	return NewRouter(Dependencies{
 		Tenants:         tenants,
-		Ingest:          NewIngestHandler(reg, &testutil.MockPublisher{}),
-		StructuredQuery: NewStructuredQueryHandler(conn, c, reg, viewer, func(*settings.Store) int { return 60 }, timeout, nil),
-		Pipes:           NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), viewer, conn, c, timeout),
+		Ingest:          NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
+		StructuredQuery: NewStructuredQueryHandler(fixedConn(conn), c, fixedRegistry(reg), viewer, func(*settings.Store) int { return 60 }, timeout, nil),
+		Pipes:           NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), viewer, fixedConn(conn), c, timeout),
 		Query:           &QueryHandler{},
 		SSE:             NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
 		Health:          &HealthHandler{},
 		Version:         NewVersionHandler("test", "test", "test"),
-		Schema:          NewSchemaHandler(reg),
+		Schema:          schemaHandlerOver(reg, tenants),
 		AuthMW:          func(next http.Handler) http.Handler { return next },
 		PolicySource:    policy.Static(&policy.Policy{}),
 	})

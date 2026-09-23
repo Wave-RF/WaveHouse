@@ -1,6 +1,7 @@
 package chconn
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -14,7 +15,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,32 +23,78 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
-// fakeConn records closes; embedding the interface leaves the unused
-// methods nil, which is fine — they are never called here.
+// fakeConn records closes and answers Ping as told; embedding the interface
+// leaves the unused methods nil, which is fine — they are never called here.
 type fakeConn struct {
 	driver.Conn
-	name   string
+	id     Identity
+	sizes  Sizes
 	closed atomic.Bool
+	// ping answers Ping; nil means success at once.
+	ping func(context.Context) error
 }
 
 func (f *fakeConn) Close() error { f.closed.Store(true); return nil }
+
+func (f *fakeConn) Ping(ctx context.Context) error {
+	if f.ping == nil {
+		return nil
+	}
+	return f.ping(ctx)
+}
+
+// fakeDial stands in for the driver; the TLS config still comes through
+// the real path (TLS.config), which is what the TLS tests exercise.
+func fakeDial(id Identity, s Sizes, _ *tls.Config) (driver.Conn, error) {
+	return &fakeConn{id: id, sizes: s}, nil
+}
+
+// dialRecorder is a fakeDial that keeps every connection it made, by
+// address, latest last.
+type dialRecorder struct {
+	mu    sync.Mutex
+	conns map[string][]*fakeConn
+	// ping is given to every connection made.
+	ping func(context.Context) error
+}
+
+func (r *dialRecorder) dial(id Identity, s Sizes, _ *tls.Config) (driver.Conn, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.conns == nil {
+		r.conns = map[string][]*fakeConn{}
+	}
+	c := &fakeConn{id: id, sizes: s, ping: r.ping}
+	r.conns[id.Addr] = append(r.conns[id.Addr], c)
+	return c, nil
+}
+
+// latest is the newest connection made for addr.
+func (r *dialRecorder) latest(addr string) *fakeConn {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cs := r.conns[addr]
+	return cs[len(cs)-1]
+}
+
+func (r *dialRecorder) count(addr string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.conns[addr])
+}
 
 func params(addr string) Params {
 	return Params{Addr: addr, HTTPPort: 8123, HTTPScheme: "http", Database: "db", Username: "u", Password: "p", QueryTimeout: time.Second, MaxOpenConns: 10, MaxIdleConns: 5}
 }
 
-// fakeDial stands in for the driver; the TLS config still comes through
-// the real path (TLS.config), which is what the TLS tests exercise.
-func fakeDial(p Params, _ *tls.Config) (driver.Conn, error) { return &fakeConn{name: p.Addr}, nil }
-
-func newManager(t *testing.T, dial func(Params, *tls.Config) (driver.Conn, error)) *Manager {
+func newManager(t *testing.T, d dialer) *Manager {
 	t.Helper()
-	m := &Manager{dial: dial, grace: 10 * time.Millisecond}
-	st, err := m.open(params("a:9000"), nil)
+	m, err := open(d, params("a:9000").Identity(), Sizes{MaxOpenConns: 10, MaxIdleConns: 5})
 	require.NoError(t, err)
-	m.cur.Store(st)
 	return m
 }
 
@@ -85,66 +131,116 @@ func writeTestPKI(t *testing.T) (caFile, certFile, keyFile string) {
 	return write("ca.pem", "CERTIFICATE", caDER), write("client.pem", "CERTIFICATE", leafDER), write("client.key", "EC PRIVATE KEY", keyDER)
 }
 
-func TestManager_TargetDerivesHTTPURL(t *testing.T) {
+func TestParams_TargetDerivesHTTPURL(t *testing.T) {
 	t.Parallel()
-	m := newManager(t, fakeDial)
-	assert.Equal(t, Target{URL: "http://a:8123", Username: "u", Password: "p", Database: "db"}, m.Target())
-	assert.Equal(t, "db", m.Database())
-	assert.Equal(t, time.Second, m.QueryTimeout())
+	assert.Equal(t, Target{URL: "http://a:8123", Username: "u", Password: "p", Database: "db"}, params("a:9000").target(nil))
+	p := params("a:9000")
+	p.HTTPScheme, p.HTTPPort, p.Headers = "https", 8443, map[string]string{"X-Proxy-Token": "abc"}
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	tgt := p.target(cfg)
+	assert.Equal(t, "https://a:8443", tgt.URL)
+	assert.Same(t, cfg, tgt.TLS)
+	assert.Equal(t, map[string]string{"X-Proxy-Token": "abc"}, tgt.Headers)
 }
 
-func TestManager_ReconfigureSwapsAndClosesOldAfterGrace(t *testing.T) {
+// TestIdentity_IsTheComparableTuple: the tuple is a plain value, so two
+// Params naming the same pool compare equal and index the same map entry,
+// and every field of the tuple — the tls block included — tells them apart.
+func TestIdentity_IsTheComparableTuple(t *testing.T) {
 	t.Parallel()
-	conns := map[string]*fakeConn{}
-	m := newManager(t, func(p Params, _ *tls.Config) (driver.Conn, error) {
-		c := &fakeConn{name: p.Addr}
-		conns[p.Addr] = c
-		return c, nil
-	})
-	require.NoError(t, m.Reconfigure(params("b:9000")))
-	assert.Equal(t, "b:9000", m.Addr())
-	assert.Equal(t, "http://b:8123", m.Target().URL)
-	assert.Same(t, conns["b:9000"], m.conn())
-	assert.Eventually(t, func() bool { return conns["a:9000"].closed.Load() }, time.Second, 5*time.Millisecond, "old connection closes after the grace period")
-	assert.False(t, conns["b:9000"].closed.Load())
+	base := params("a:9000")
+	base.TLS = TLS{Enabled: true, ServerName: "ch.internal"}
+	same := base
+	same.HTTPPort, same.QueryTimeout, same.MaxOpenConns, same.Headers = 9999, time.Hour, 99, map[string]string{"X-A": "1"}
+	assert.Equal(t, base.Identity(), same.Identity(), "the HTTP wiring, the deadline, the sizes and the headers are the tenant's own")
+
+	for name, change := range map[string]func(*Params){
+		"addr":     func(p *Params) { p.Addr = "b:9000" },
+		"database": func(p *Params) { p.Database = "other" },
+		"username": func(p *Params) { p.Username = "reporting" },
+		"password": func(p *Params) { p.Password = "x" },
+		"tls":      func(p *Params) { p.TLS.InsecureSkipVerify = true },
+	} {
+		changed := base
+		change(&changed)
+		assert.NotEqual(t, base.Identity(), changed.Identity(), name)
+	}
+	assert.Equal(t, "a:9000 database db user u", base.Identity().String(), "named without the password")
 }
 
-func TestManager_ReconfigureSameParamsIsNoop(t *testing.T) {
+func TestSizes_MaxIsPerDimension(t *testing.T) {
 	t.Parallel()
-	dials := 0
-	m := newManager(t, func(p Params, _ *tls.Config) (driver.Conn, error) { dials++; return &fakeConn{name: p.Addr}, nil })
-	require.NoError(t, m.Reconfigure(params("a:9000")))
-	assert.Equal(t, 1, dials, "identical wiring must not re-dial")
+	a, b := Sizes{MaxOpenConns: 10, MaxIdleConns: 5}, Sizes{MaxOpenConns: 8, MaxIdleConns: 8}
+	assert.Equal(t, Sizes{MaxOpenConns: 10, MaxIdleConns: 8}, a.max(b))
+	assert.Equal(t, a.max(b), b.max(a))
 }
 
-// TestManager_ReconfigureDialError pins one of the two ways a swap can
-// fail: a malformed option (excluded by settings.Validate) leaves the
-// current connection in place. Reachability is never checked here.
-func TestManager_ReconfigureDialError(t *testing.T) {
+func TestManager_ResizeSwapsAndClosesOldAfterGrace(t *testing.T) {
 	t.Parallel()
-	m := newManager(t, func(p Params, _ *tls.Config) (driver.Conn, error) {
-		if p.Addr == "bad:9000" {
+	rec := &dialRecorder{}
+	m := newManager(t, rec.dial)
+	first := rec.latest("a:9000")
+	require.NoError(t, m.Resize(Sizes{MaxOpenConns: 20, MaxIdleConns: 8}, 10*time.Millisecond))
+	assert.Equal(t, Sizes{MaxOpenConns: 20, MaxIdleConns: 8}, m.Sizes())
+	assert.Same(t, rec.latest("a:9000"), m.conn())
+	assert.Equal(t, Sizes{MaxOpenConns: 20, MaxIdleConns: 8}, rec.latest("a:9000").sizes, "the driver is opened at the new size")
+	assert.Eventually(t, func() bool { return first.closed.Load() }, time.Second, 5*time.Millisecond, "old connection closes after the grace period")
+	assert.False(t, rec.latest("a:9000").closed.Load())
+	assert.Equal(t, "a:9000", m.Identity().Addr)
+}
+
+func TestManager_ResizeSameSizesIsNoop(t *testing.T) {
+	t.Parallel()
+	rec := &dialRecorder{}
+	m := newManager(t, rec.dial)
+	require.NoError(t, m.Resize(m.Sizes(), time.Millisecond))
+	assert.Equal(t, 1, rec.count("a:9000"), "an unchanged size must not re-dial")
+}
+
+// TestManager_ResizeDialError: a malformed option (excluded by
+// settings.Validate) leaves the current connection in place.
+func TestManager_ResizeDialError(t *testing.T) {
+	t.Parallel()
+	var fail atomic.Bool
+	m := newManager(t, func(id Identity, s Sizes, _ *tls.Config) (driver.Conn, error) {
+		if fail.Load() {
 			return nil, errors.New("bad options")
 		}
-		return &fakeConn{name: p.Addr}, nil
+		return &fakeConn{id: id, sizes: s}, nil
 	})
-	require.ErrorContains(t, m.Reconfigure(params("bad:9000")), "open bad:9000")
-	assert.Equal(t, "a:9000", m.Addr())
+	fail.Store(true)
+	require.ErrorContains(t, m.Resize(Sizes{MaxOpenConns: 20, MaxIdleConns: 8}, time.Millisecond), "open a:9000")
+	assert.Equal(t, Sizes{MaxOpenConns: 10, MaxIdleConns: 5}, m.Sizes())
 }
 
-// TestManager_ReconfigureUnreadableCertificateKeepsTheConnection pins the
-// other: a certificate file that cannot be read, which Validate does not
-// open, errors here and leaves the current connection in place.
-func TestManager_ReconfigureUnreadableCertificateKeepsTheConnection(t *testing.T) {
+func TestManager_ReleaseClosesAfterGrace(t *testing.T) {
 	t.Parallel()
-	m := newManager(t, fakeDial)
-	p := params("b:9000")
-	p.TLS = TLS{Enabled: true, CAFile: "/nowhere/ca.pem"}
-	err := m.Reconfigure(p)
-	require.ErrorContains(t, err, "open b:9000")
+	rec := &dialRecorder{}
+	m := newManager(t, rec.dial)
+	c := rec.latest("a:9000")
+	m.Release(20 * time.Millisecond)
+	assert.False(t, c.closed.Load(), "a consumer that resolved the pool before the swap still finishes on it")
+	assert.Eventually(t, func() bool { return c.closed.Load() }, time.Second, 5*time.Millisecond)
+}
+
+func TestManager_CloseIsImmediate(t *testing.T) {
+	t.Parallel()
+	rec := &dialRecorder{}
+	m := newManager(t, rec.dial)
+	require.NoError(t, m.Close())
+	assert.True(t, rec.latest("a:9000").closed.Load())
+}
+
+// TestOpen_UnreadableCertificateNamesTheKeyAndPath: a certificate file that
+// cannot be read, which Validate does not open, is the one thing Open
+// refuses.
+func TestOpen_UnreadableCertificateNamesTheKeyAndPath(t *testing.T) {
+	t.Parallel()
+	id := params("b:9000").Identity()
+	id.TLS = TLS{Enabled: true, CAFile: "/nowhere/ca.pem"}
+	_, err := open(fakeDial, id, Sizes{MaxOpenConns: 1, MaxIdleConns: 1})
 	require.ErrorContains(t, err, "clickhouse.tls.ca_file")
 	require.ErrorContains(t, err, "/nowhere/ca.pem")
-	assert.Equal(t, "a:9000", m.Addr())
 }
 
 func TestTLS_ConfigReadsTheFiles(t *testing.T) {
@@ -195,83 +291,355 @@ func TestTLS_UnreadableFilesNameTheKeyAndPath(t *testing.T) {
 func TestOptions_ReachTheDriver(t *testing.T) {
 	t.Parallel()
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	p := params("a:9000")
-	o := options(p, cfg)
+	id := params("a:9000").Identity()
+	o := options(id, Sizes{MaxOpenConns: 10, MaxIdleConns: 5}, cfg)
 	assert.Equal(t, []string{"a:9000"}, o.Addr)
+	assert.Equal(t, "db", o.Auth.Database)
+	assert.Equal(t, "u", o.Auth.Username)
+	assert.Equal(t, "p", o.Auth.Password)
 	assert.Equal(t, 10, o.MaxOpenConns)
 	assert.Equal(t, 5, o.MaxIdleConns)
 	assert.Nil(t, o.TLS, "the native hop stays plain while tls.enabled is false")
-	p.TLS.Enabled = true
-	assert.Same(t, cfg, options(p, cfg).TLS)
+	id.TLS.Enabled = true
+	assert.Same(t, cfg, options(id, Sizes{}, cfg).TLS)
 }
 
-func TestManager_TargetCarriesTLSAndHeaders(t *testing.T) {
+// TestManager_TLSConfigIsTheTuplesAndBuiltOnce: the tls block is part of
+// the tuple, so a Manager reads the files once and every resize keeps the
+// same config — the HTTP transports keyed on it are never rebuilt.
+func TestManager_TLSConfigIsTheTuplesAndBuiltOnce(t *testing.T) {
 	t.Parallel()
 	ca, _, _ := writeTestPKI(t)
 	p := params("a:9000")
 	p.HTTPScheme = "https"
 	p.TLS = TLS{CAFile: ca}
-	p.Headers = map[string]string{"X-Proxy-Token": "abc"}
-	m := &Manager{dial: fakeDial}
-	st, err := m.open(p, nil)
+	m, err := open(fakeDial, p.Identity(), p.Sizes())
 	require.NoError(t, err)
-	m.cur.Store(st)
-	tgt := m.Target()
-	assert.Equal(t, "https://a:8123", tgt.URL)
-	require.NotNil(t, tgt.TLS, "the material applies to the https hop even with tls.enabled false")
-	assert.NotNil(t, tgt.TLS.RootCAs)
-	assert.Equal(t, map[string]string{"X-Proxy-Token": "abc"}, tgt.Headers)
+	first := m.TLSConfig()
+	require.NotNil(t, first, "the material applies to the https hop even with tls.enabled false")
+	assert.NotNil(t, first.RootCAs)
+	require.NoError(t, m.Resize(Sizes{MaxOpenConns: 20, MaxIdleConns: 8}, time.Millisecond))
+	assert.Same(t, first, m.TLSConfig())
+	assert.Same(t, first, p.target(m.TLSConfig()).TLS)
 }
 
-func TestManager_ReconfigureKeepsTLSConfigWhileTheBlockIsUnchanged(t *testing.T) {
-	t.Parallel()
-	ca, _, _ := writeTestPKI(t)
-	p := params("a:9000")
-	p.TLS = TLS{Enabled: true, CAFile: ca}
-	m := &Manager{dial: fakeDial, grace: 10 * time.Millisecond}
-	st, err := m.open(p, nil)
-	require.NoError(t, err)
-	m.cur.Store(st)
-	first := m.Target().TLS
-	require.NotNil(t, first)
-
-	q := p
-	q.Database = "other"
-	require.NoError(t, m.Reconfigure(q))
-	assert.Same(t, first, m.Target().TLS, "an unchanged tls block keeps the config, so the HTTP transports are not rebuilt")
-
-	q.TLS.ServerName = "ch.internal"
-	require.NoError(t, m.Reconfigure(q))
-	assert.NotSame(t, first, m.Target().TLS)
-	assert.Equal(t, "ch.internal", m.Target().TLS.ServerName)
+// member is one tenant asking for the pool at addr, with its own sizes.
+func member(id tenant.ID, addr string, open, idle int) Member {
+	p := params(addr)
+	p.MaxOpenConns, p.MaxIdleConns = open, idle
+	return Member{Tenant: id, Params: p}
 }
 
-// TestParams_EqualCoversEveryField mutates each field in turn, so a field
-// added to Params without a clause in equal fails here rather than making
-// Reconfigure skip a real change.
-func TestParams_EqualCoversEveryField(t *testing.T) {
+func TestPools_DifferentTuplesGetDifferentPools(t *testing.T) {
 	t.Parallel()
-	base := params("a:9000")
-	base.Headers = map[string]string{"X-A": "1"}
-	require.True(t, base.equal(base))
-	rt := reflect.TypeFor[Params]()
-	for i := range rt.NumField() {
-		changed := base
-		f := reflect.ValueOf(&changed).Elem().Field(i)
-		switch f.Kind() { //nolint:exhaustive // the default names any kind a new field would add
-		case reflect.String:
-			f.SetString(f.String() + "x")
-		case reflect.Int, reflect.Int64:
-			f.SetInt(f.Int() + 1)
-		case reflect.Map:
-			f.Set(reflect.ValueOf(map[string]string{"X-A": "2"}))
-		case reflect.Struct:
-			f.Field(0).SetBool(!f.Field(0).Bool())
-		default:
-			t.Fatalf("field %s: kind %s not covered", rt.Field(i).Name, f.Kind())
-		}
-		assert.False(t, base.equal(changed), "field %s must take part in equal", rt.Field(i).Name)
-	}
+	p := newPools(0, fakeDial)
+	readmitted, err := p.Reconcile([]Member{member("acme", "a:9000", 10, 5), member("globex", "b:9000", 10, 5)})
+	require.NoError(t, err)
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, readmitted)
+	require.NotNil(t, p.For("acme"))
+	require.NotNil(t, p.For("globex"))
+	assert.NotSame(t, p.For("acme"), p.For("globex"))
+	assert.Equal(t, "http://a:8123", p.Target("acme").URL)
+	assert.Equal(t, "http://b:8123", p.Target("globex").URL)
+	assert.Equal(t, []tenant.ID{"acme"}, p.SharingTables("acme"))
+	assert.Nil(t, p.For("initech"), "a tenant on no pool")
+	assert.Equal(t, Target{}, p.Target("initech"))
+	assert.Nil(t, p.SharingTables("initech"))
+}
+
+// TestPools_SharedTupleGetsOnePool: tenants naming the same tuple share one
+// Manager, sized to the largest ask in each dimension, each with a Target of
+// its own HTTP wiring.
+func TestPools_SharedTupleGetsOnePool(t *testing.T) {
+	t.Parallel()
+	rec := &dialRecorder{}
+	p := newPools(0, rec.dial)
+	globex := member("globex", "a:9000", 8, 8)
+	globex.Params.HTTPPort, globex.Params.Headers = 8443, map[string]string{"X-Proxy-Token": "g"}
+	_, err := p.Reconcile([]Member{member("acme", "a:9000", 10, 5), globex})
+	require.NoError(t, err)
+	require.NotNil(t, p.For("acme"))
+	assert.Same(t, p.For("acme"), p.For("globex"))
+	assert.Equal(t, 1, rec.count("a:9000"), "one pool, opened once")
+	assert.Equal(t, Sizes{MaxOpenConns: 10, MaxIdleConns: 8}, p.For("acme").Sizes(), "the largest ask in each dimension")
+	assert.Equal(t, "http://a:8123", p.Target("acme").URL)
+	assert.Equal(t, "http://a:8443", p.Target("globex").URL)
+	assert.Equal(t, map[string]string{"X-Proxy-Token": "g"}, p.Target("globex").Headers)
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, p.SharingTables("acme"))
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, p.SharingTables("globex"))
+}
+
+// TestPools_TupleChangeRepointsWithoutTouchingTheOther is the worked
+// example: two tenants on one tuple, one changes its username. It moves to a
+// pool of its own; the other keeps the very same Manager, resized down to
+// its own ask with the old connection closed after the grace; and both still
+// read the same tables, so the fan-out still pairs them.
+func TestPools_TupleChangeRepointsWithoutTouchingTheOther(t *testing.T) {
+	t.Parallel()
+	rec := &dialRecorder{}
+	p := newPools(40, rec.dial)
+	acme, globex := member("acme", "a:9000", 10, 5), member("globex", "a:9000", 20, 8)
+	acme.Params.QueryTimeout, globex.Params.QueryTimeout = 30*time.Millisecond, 10*time.Millisecond
+	_, err := p.Reconcile([]Member{acme, globex})
+	require.NoError(t, err)
+	shared := p.For("acme")
+	require.Same(t, shared, p.For("globex"))
+	require.Equal(t, Sizes{MaxOpenConns: 20, MaxIdleConns: 8}, shared.Sizes())
+	before := rec.latest("a:9000")
+
+	globex.Params.Username = "reporting"
+	readmitted, err := p.Reconcile([]Member{acme, globex})
+	require.NoError(t, err)
+	assert.Empty(t, readmitted, "a repointed tenant was on a pool before")
+	assert.Same(t, shared, p.For("acme"), "acme keeps its Manager")
+	assert.NotSame(t, shared, p.For("globex"), "globex moved to a pool of its own")
+	assert.Equal(t, "reporting", p.For("globex").Identity().Username)
+	assert.Equal(t, Sizes{MaxOpenConns: 20, MaxIdleConns: 8}, p.For("globex").Sizes())
+	assert.Equal(t, Sizes{MaxOpenConns: 10, MaxIdleConns: 5}, shared.Sizes(), "acme's pool shrinks to acme's ask")
+	assert.Equal(t, 3, rec.count("a:9000"), "the shrink and the new pool are two new connections")
+	assert.Eventually(t, func() bool { return before.closed.Load() }, time.Second, 5*time.Millisecond, "the replaced connection closes after the longest member timeout")
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, p.SharingTables("acme"), "same address and database: still the same tables")
+	assert.Equal(t, "reporting", p.Target("globex").Username)
+	assert.Equal(t, "u", p.Target("acme").Username)
+}
+
+func TestPools_TenantGoneReleasesItsPoolAfterGrace(t *testing.T) {
+	t.Parallel()
+	rec := &dialRecorder{}
+	p := newPools(0, rec.dial)
+	acme := member("acme", "a:9000", 10, 5)
+	acme.Params.QueryTimeout = 20 * time.Millisecond
+	_, err := p.Reconcile([]Member{acme, member("globex", "b:9000", 10, 5)})
+	require.NoError(t, err)
+	c := rec.latest("a:9000")
+	globexPool := p.For("globex")
+
+	readmitted, err := p.Reconcile([]Member{member("globex", "b:9000", 10, 5)})
+	require.NoError(t, err)
+	assert.Empty(t, readmitted)
+	assert.Nil(t, p.For("acme"))
+	assert.Same(t, globexPool, p.For("globex"))
+	assert.False(t, c.closed.Load(), "released after the grace, not at once")
+	assert.Eventually(t, func() bool { return c.closed.Load() }, time.Second, 5*time.Millisecond)
+
+	readmitted, err = p.Reconcile([]Member{acme, member("globex", "b:9000", 10, 5)})
+	require.NoError(t, err)
+	assert.Equal(t, []tenant.ID{"acme"}, readmitted, "back after an absence: its cache is stale")
+	require.NotNil(t, p.For("acme"))
+	assert.NotSame(t, c, p.For("acme").conn())
+}
+
+// TestPools_CeilingRefusesBoot: at boot the pools must fit the ceiling
+// together, and a refusal names the sum and the ceiling and leaves nothing
+// open.
+func TestPools_CeilingRefusesBoot(t *testing.T) {
+	t.Parallel()
+	rec := &dialRecorder{}
+	p := newPools(15, rec.dial)
+	_, err := p.Reconcile([]Member{member("acme", "a:9000", 10, 5), member("globex", "b:9000", 10, 5)})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "not opened for tenant globex")
+	assert.ErrorContains(t, err, "clickhouse.max_open_conns 10")
+	assert.ErrorContains(t, err, "at 20, above clickhouse.max_total_conns 15")
+	assert.NotContains(t, err.Error(), "keeps its previous pool", "a tenant that was on no pool ends up on none")
+	assert.Nil(t, p.For("globex"))
+	require.NotNil(t, p.For("acme"), "the walk opened what fit")
+	require.NoError(t, p.Close())
+	assert.True(t, rec.latest("a:9000").closed.Load(), "and boot's refusal closes it")
+	assert.Nil(t, p.For("acme"))
+}
+
+// TestPools_CeilingRefusesAThirdTupleThenOpensIt: a reload's new tuple over
+// the ceiling is not opened and the open pools are untouched; the next
+// reload that frees the budget opens it.
+func TestPools_CeilingRefusesAThirdTupleThenOpensIt(t *testing.T) {
+	t.Parallel()
+	rec := &dialRecorder{}
+	p := newPools(25, rec.dial)
+	acme, globex, initech := member("acme", "a:9000", 10, 5), member("globex", "b:9000", 10, 5), member("initech", "c:9000", 10, 5)
+	_, err := p.Reconcile([]Member{acme, globex})
+	require.NoError(t, err)
+	acmePool, globexPool := p.For("acme"), p.For("globex")
+
+	readmitted, err := p.Reconcile([]Member{acme, globex, initech})
+	require.ErrorContains(t, err, "clickhouse pool c:9000 database db user u not opened for tenant initech")
+	assert.ErrorContains(t, err, "at 30, above clickhouse.max_total_conns 25")
+	assert.Empty(t, readmitted)
+	assert.Nil(t, p.For("initech"), "its tenant fails closed")
+	assert.Same(t, acmePool, p.For("acme"))
+	assert.Same(t, globexPool, p.For("globex"))
+	assert.Equal(t, 0, rec.count("c:9000"), "not even opened")
+	assert.Equal(t, 1, rec.count("a:9000"))
+
+	acme.Params.MaxOpenConns = 5
+	readmitted, err = p.Reconcile([]Member{acme, globex, initech})
+	require.NoError(t, err)
+	assert.Equal(t, []tenant.ID{"initech"}, readmitted)
+	require.NotNil(t, p.For("initech"))
+	assert.Same(t, acmePool, p.For("acme"))
+	assert.Equal(t, 5, acmePool.Sizes().MaxOpenConns, "the shrink that made room")
+}
+
+// TestPools_RefusedResizeKeepsTheSize: a reload that grows a pool above the
+// ceiling is refused and the pool keeps its size — the rest of the tenant's
+// Params apply — and the next reload retries.
+func TestPools_RefusedResizeKeepsTheSize(t *testing.T) {
+	t.Parallel()
+	p := newPools(20, fakeDial)
+	acme, globex := member("acme", "a:9000", 10, 5), member("globex", "b:9000", 10, 5)
+	_, err := p.Reconcile([]Member{acme, globex})
+	require.NoError(t, err)
+
+	acme.Params.MaxOpenConns, acme.Params.HTTPPort = 15, 8124
+	_, err = p.Reconcile([]Member{acme, globex})
+	require.ErrorContains(t, err, "clickhouse pool a:9000 database db user u not resized for tenants [acme]")
+	assert.ErrorContains(t, err, "clickhouse.max_open_conns 15")
+	assert.ErrorContains(t, err, "at 25, above clickhouse.max_total_conns 20")
+	assert.ErrorContains(t, err, "it keeps 10")
+	assert.Equal(t, 10, p.For("acme").Sizes().MaxOpenConns)
+	assert.Equal(t, "http://a:8124", p.Target("acme").URL, "the HTTP wiring applied all the same")
+
+	globex.Params.MaxOpenConns = 5
+	_, err = p.Reconcile([]Member{acme, globex})
+	require.NoError(t, err)
+	assert.Equal(t, 15, p.For("acme").Sizes().MaxOpenConns, "retried by the next reload")
+	assert.Equal(t, 5, p.For("globex").Sizes().MaxOpenConns)
+}
+
+// TestPools_SharedGrowthIsOneRefusal: a shared pool whose members' ask grows
+// past the ceiling is refused once, naming every member, not once per member.
+func TestPools_SharedGrowthIsOneRefusal(t *testing.T) {
+	t.Parallel()
+	p := newPools(20, fakeDial)
+	acme, globex, initech := member("acme", "a:9000", 10, 5), member("globex", "a:9000", 10, 5), member("initech", "b:9000", 10, 5)
+	_, err := p.Reconcile([]Member{acme, globex, initech})
+	require.NoError(t, err)
+	acme.Params.MaxOpenConns, globex.Params.MaxOpenConns = 12, 12
+	_, err = p.Reconcile([]Member{acme, globex, initech})
+	require.Error(t, err)
+	joined, ok := err.(interface{ Unwrap() []error })
+	require.True(t, ok)
+	assert.Len(t, joined.Unwrap(), 1, "one refusal for the shared pool, not one per member")
+	assert.ErrorContains(t, err, "for tenants [acme globex]")
+	assert.Equal(t, 10, p.For("acme").Sizes().MaxOpenConns)
+}
+
+// TestPools_RefusedMoveKeepsThePreviousPool: a tenant whose new tuple the
+// ceiling refuses stays where it was, with the Params it had — #603's
+// keep-the-previous-wiring rule — and the next reload retries.
+func TestPools_RefusedMoveKeepsThePreviousPool(t *testing.T) {
+	t.Parallel()
+	rec := &dialRecorder{}
+	p := newPools(15, rec.dial)
+	acme := member("acme", "a:9000", 10, 5)
+	acme.Params.QueryTimeout = 10 * time.Millisecond
+	_, err := p.Reconcile([]Member{acme})
+	require.NoError(t, err)
+	before := p.For("acme")
+	beforeConn := rec.latest("a:9000")
+
+	moved := member("acme", "b:9000", 20, 5)
+	moved.Params.HTTPPort = 8124
+	readmitted, err := p.Reconcile([]Member{moved})
+	require.ErrorContains(t, err, "clickhouse pool b:9000 database db user u not opened for tenant acme")
+	assert.ErrorContains(t, err, "tenant acme keeps its previous pool a:9000 database db user u")
+	assert.Empty(t, readmitted)
+	assert.Same(t, before, p.For("acme"))
+	assert.Equal(t, "http://a:8123", p.Target("acme").URL, "the previous Params, whole")
+	assert.False(t, beforeConn.closed.Load())
+	assert.Equal(t, 0, rec.count("b:9000"))
+
+	moved.Params.MaxOpenConns = 15
+	_, err = p.Reconcile([]Member{moved})
+	require.NoError(t, err)
+	assert.Equal(t, "b:9000", p.For("acme").Identity().Addr, "the next reload that fits moves it")
+	assert.Equal(t, "http://b:8124", p.Target("acme").URL)
+	assert.Eventually(t, func() bool { return beforeConn.closed.Load() }, time.Second, 5*time.Millisecond)
+}
+
+// TestPools_MoveAtTheCeilingIsAllowed: the pool a move leaves frees its
+// budget for the pool the move opens, so a flat directory at the ceiling can
+// still change its address.
+func TestPools_MoveAtTheCeilingIsAllowed(t *testing.T) {
+	t.Parallel()
+	p := newPools(10, fakeDial)
+	_, err := p.Reconcile([]Member{member("0", "a:9000", 10, 5)})
+	require.NoError(t, err)
+	_, err = p.Reconcile([]Member{member("0", "b:9000", 10, 5)})
+	require.NoError(t, err)
+	assert.Equal(t, "b:9000", p.For("0").Identity().Addr)
+}
+
+// TestPools_UnreadableCertificateRefusesTheTuple: a tls block whose files
+// cannot be read refuses that tuple like the ceiling does — boot refuses, a
+// reload leaves the tenant on its previous pool.
+func TestPools_UnreadableCertificateRefusesTheTuple(t *testing.T) {
+	t.Parallel()
+	p := newPools(0, fakeDial)
+	acme := member("acme", "a:9000", 10, 5)
+	_, err := p.Reconcile([]Member{acme})
+	require.NoError(t, err)
+	before := p.For("acme")
+
+	acme.Params.TLS = TLS{Enabled: true, CAFile: "/nowhere/ca.pem"}
+	_, err = p.Reconcile([]Member{acme})
+	require.ErrorContains(t, err, "clickhouse.tls.ca_file")
+	assert.ErrorContains(t, err, "/nowhere/ca.pem")
+	assert.ErrorContains(t, err, "keeps its previous pool")
+	assert.Same(t, before, p.For("acme"))
+
+	_, err = newPools(0, fakeDial).Reconcile([]Member{acme})
+	require.ErrorContains(t, err, "not opened for tenant acme")
+}
+
+func TestPools_PingFirstSuccessWins(t *testing.T) {
+	t.Parallel()
+	t.Run("none open", func(t *testing.T) {
+		t.Parallel()
+		require.ErrorContains(t, newPools(0, fakeDial).Ping(context.Background()), "no ClickHouse pool is open")
+	})
+	t.Run("every pool down names each", func(t *testing.T) {
+		t.Parallel()
+		rec := &dialRecorder{ping: func(context.Context) error { return errors.New("connection refused") }}
+		p := newPools(0, rec.dial)
+		_, err := p.Reconcile([]Member{member("acme", "a:9000", 10, 5), member("globex", "b:9000", 10, 5)})
+		require.NoError(t, err)
+		err = p.Ping(context.Background())
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "a:9000 database db user u: connection refused")
+		assert.ErrorContains(t, err, "b:9000 database db user u: connection refused")
+	})
+	t.Run("one answering pool is ready, whatever the others do", func(t *testing.T) {
+		t.Parallel()
+		rec := &dialRecorder{ping: func(ctx context.Context) error {
+			// A host that does not answer: the driver would wait for its dial
+			// timeout; here, until the probe gives up on it.
+			<-ctx.Done()
+			return ctx.Err()
+		}}
+		p := newPools(0, rec.dial)
+		_, err := p.Reconcile([]Member{member("acme", "a:9000", 10, 5), member("globex", "b:9000", 10, 5)})
+		require.NoError(t, err)
+		rec.latest("b:9000").ping = nil
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		start := time.Now()
+		require.NoError(t, p.Ping(ctx))
+		assert.Less(t, time.Since(start), time.Second, "answered at the first success, not after the hung pool")
+	})
+}
+
+func TestPools_CloseClosesEveryPool(t *testing.T) {
+	t.Parallel()
+	rec := &dialRecorder{}
+	p := newPools(0, rec.dial)
+	_, err := p.Reconcile([]Member{member("acme", "a:9000", 10, 5), member("globex", "b:9000", 10, 5)})
+	require.NoError(t, err)
+	require.NoError(t, p.Close())
+	assert.True(t, rec.latest("a:9000").closed.Load())
+	assert.True(t, rec.latest("b:9000").closed.Load())
+	assert.Nil(t, p.For("acme"))
+	assert.Error(t, p.Ping(context.Background()), "nothing left to ping")
 }
 
 // closeCounter is a transport that counts CloseIdleConnections, which
@@ -283,15 +651,12 @@ func (c *closeCounter) RoundTrip(*http.Request) (*http.Response, error) {
 }
 func (c *closeCounter) CloseIdleConnections() { c.closed.Add(1) }
 
-func TestHTTPClients_RebuildOnlyWhenTheTLSConfigChanges(t *testing.T) {
+func TestHTTPClients_OneClientPerTLSConfig(t *testing.T) {
 	t.Parallel()
 	var builds int
-	var transports []*closeCounter
 	clients := NewHTTPClients(func(*tls.Config) *http.Client {
 		builds++
-		rt := &closeCounter{}
-		transports = append(transports, rt)
-		return &http.Client{Transport: rt}
+		return &http.Client{Transport: &closeCounter{}}
 	})
 	plain := Target{}
 	first := clients.For(plain)
@@ -302,9 +667,9 @@ func TestHTTPClients_RebuildOnlyWhenTheTLSConfigChanges(t *testing.T) {
 	second := clients.For(Target{TLS: cfg})
 	assert.NotSame(t, first, second)
 	assert.Equal(t, 2, builds)
-	assert.Equal(t, int32(1), transports[0].closed.Load(), "the replaced client's idle connections are closed")
 	assert.Same(t, second, clients.For(Target{TLS: cfg}))
-	assert.Equal(t, int32(0), transports[1].closed.Load())
+	assert.Same(t, first, clients.For(plain), "tenants on different configs alternate without rebuilding")
+	assert.Equal(t, 2, builds)
 }
 
 // TestHTTPClients_HandsEachClientItsOwnTLSConfig: net/http rewrites a

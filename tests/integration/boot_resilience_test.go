@@ -73,7 +73,7 @@ func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
 	require.Error(t, err, "Refresh against stopped CH must fail")
 	bootState.Set(fmt.Errorf("schema discovery: %w", err))
 
-	h := api.NewHealthHandler(ch.conn)
+	h := api.NewHealthHandler(ch.conn.Ping)
 	h.Boot = bootState
 
 	assertHealth(t, "/livez", h.Liveness, http.StatusServiceUnavailable, `"status":"degraded"`)
@@ -89,7 +89,7 @@ func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
 	ch.conn, err = openDriver(ch.nativeAddr())
 	require.NoError(t, err, "reopen driver against restarted CH")
 	registry = discovery.NewSchemaRegistry(func() driver.Conn { return ch.conn }, func() string { return testCHDatabase }, tenant.Default, func(tenant.ID) time.Duration { return time.Minute })
-	h.CHConn = ch.conn
+	h.Ping = ch.conn.Ping
 	require.NoError(t, waitForNativeReady(ctx, ch.conn, 30*time.Second), "CH native should be ready after restart")
 
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
@@ -123,7 +123,7 @@ func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
 	_ = ch.conn.Close()
 	ch.conn, err = openDriver(ch.nativeAddr())
 	require.NoError(t, err, "reopen driver against final restart")
-	h.CHConn = ch.conn
+	h.Ping = ch.conn.Ping
 	require.NoError(t, waitForNativeReady(ctx, ch.conn, 30*time.Second), "CH native should be ready after second restart")
 
 	// === Row 4: Post-boot, CH back ===

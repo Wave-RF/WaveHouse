@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -76,7 +77,7 @@ func (a *App) wireSettings() error {
 			slog.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
 		}
 	case !served:
-		slog.Warn("nested settings directory with no tenant 0 being served: the ClickHouse connection, the MQ byte budget, the JWT verifier, and the async paths (ingest worker, sweeper, stream hub, schema refresh) are still configured from tenant 0's config.json, so they run unconfigured — no ClickHouse address, /livez degraded — until a 0 folder is adopted")
+		slog.Warn("nested settings directory with no tenant 0 being served: the MQ byte budget, the JWT verifier, and the async paths (ingest worker, sweeper, stream hub) are still configured from tenant 0's config.json, so they run unconfigured — the ingest worker has no ClickHouse connection — until a 0 folder is adopted")
 	}
 	return nil
 }
@@ -92,8 +93,8 @@ func (a *App) trackDefaultStore() {
 }
 
 // defaultSetting reads one setting of the default tenant, which the
-// process-wide resources (ClickHouse, MQ, auth) follow until #583 gives
-// each tenant its own. It reads tenant 0's last adopted document, so a
+// process-wide resources (MQ, auth) follow until #583 gives each tenant its
+// own. It reads tenant 0's last adopted document, so a
 // 0 folder a reload rejected or removed leaves every one of them as it was —
 // the ones a hook reconciles and the one read per request (the operator
 // key's admin role) alike. A nested directory that has never served a tenant
@@ -259,96 +260,139 @@ func (a *App) wireObservability(ctx context.Context) {
 	}
 }
 
-// wireClickHouse opens the one driver.Conn every consumer holds. The wiring
-// is the settings directory's clickhouse block plus the boot-config
-// password; a reload that changes it swaps the connection behind the
-// manager unconditionally — the adopted settings are the authority, and
-// reachability surfaces where it already does (schema discovery retries,
-// /readyz, query errors). Two exceptions keep the connection it has: a
-// certificate file that cannot be read or parsed, and a pool sized above the boot
-// config's clickhouse.max_total_conns — capacity is sized once, per
-// process, so a settings pool above it is refused at boot like the rest of
-// an impossible boot config (#530) and logged on a reload, which the next
-// reload retries. The HTTP-side consumers read Target/QueryTimeout per
-// request.
+// wireClickHouse opens the ClickHouse pools: one per distinct address,
+// database, user, password and tls tuple among the served tenants' clickhouse
+// blocks (with the boot-config password), shared by the tenants naming it and
+// sized to their largest ask (#583 story 6). Every reload reconciles them —
+// a new tuple opens (no dial), a tenant whose tuple changed is repointed, a
+// tuple no tenant names is released after its grace — under the boot
+// config's clickhouse.max_total_conns, the ceiling on the open pools' sizes
+// together: capacity is sized once, per process, so pools above it refuse
+// boot like the rest of an impossible boot config (#530), and at a reload a
+// resize above it is refused with the pool kept at its size, and a tuple
+// that cannot be opened — the ceiling, or a certificate file that cannot be
+// read — leaves its tenants on the pool they had, or on none when they had
+// none; both logged, and retried by the next reload. Reachability surfaces
+// where it already does (schema discovery retries, /readyz, query errors).
+// Every consumer resolves its tenant's pool per call (chConn, chTargetFor).
 func (a *App) wireClickHouse() error {
-	params := func() chconn.Params {
-		c := defaultSetting(a, (*settings.Store).ClickHouse)
-		return chconn.Params{
-			Addr: c.Addr, HTTPPort: c.HTTPPort, HTTPScheme: c.HTTPScheme,
-			Database: c.Database, Username: c.Username, Password: a.cfg.ClickHouse.Password,
-			QueryTimeout: c.QueryTimeout,
-			TLS:          chconn.TLS(c.TLS),
-			Headers:      c.Headers,
-			MaxOpenConns: c.MaxOpenConns, MaxIdleConns: c.MaxIdleConns,
+	members := func() []chconn.Member {
+		var ms []chconn.Member
+		for id, store := range a.tenants.All() {
+			c := store.ClickHouse()
+			ms = append(ms, chconn.Member{Tenant: id, Params: chconn.Params{
+				Addr: c.Addr, HTTPPort: c.HTTPPort, HTTPScheme: c.HTTPScheme,
+				Database: c.Database, Username: c.Username, Password: a.cfg.ClickHouse.Password,
+				QueryTimeout: c.QueryTimeout,
+				TLS:          chconn.TLS(c.TLS),
+				Headers:      c.Headers,
+				MaxOpenConns: c.MaxOpenConns, MaxIdleConns: c.MaxIdleConns,
+			}})
 		}
+		return ms
 	}
-	ceiling := a.cfg.ClickHouse.MaxTotalConns
-	withinCeiling := func(p chconn.Params) error {
-		if ceiling > 0 && p.MaxOpenConns > ceiling {
-			return fmt.Errorf("clickhouse.max_open_conns %d (settings) exceeds clickhouse.max_total_conns %d (boot config)", p.MaxOpenConns, ceiling)
-		}
-		return nil
-	}
-	p := params()
-	if err := withinCeiling(p); err != nil {
-		return err
-	}
-	ch, err := chconn.Open(p)
+	pools, err := chconn.NewPools(a.cfg.ClickHouse.MaxTotalConns, members())
 	if err != nil {
 		return fmt.Errorf("clickhouse open: %w", err)
 	}
-	a.ch = ch
-	a.add(component{name: "clickhouse", close: withoutContext(ch.Close)})
-	a.onDefaultAdopt(func() {
-		p := params()
-		if err := withinCeiling(p); err != nil {
-			slog.Error("clickhouse reconfigure refused; the connection is unchanged", "error", err)
-			return
-		}
-		if err := ch.Reconfigure(p); err != nil {
-			slog.Error("clickhouse reconfigure", "error", err)
+	a.pools = pools
+	a.add(component{name: "clickhouse", close: withoutContext(pools.Close)})
+	a.tenants.AfterAdopt(func([]tenant.ID) {
+		if _, err := pools.Reconcile(members()); err != nil {
+			slog.Error("clickhouse pools reconciled in part; the next reload retries", "error", err)
 		}
 	})
 	return nil
 }
 
-// wireDiscovery runs the boot-time schema discovery — non-fatal. If the
-// first Refresh fails (ClickHouse unreachable, database missing, etc.) the
-// binary is marked degraded via bootState (which /livez surfaces as 503 +
-// diagnostic) and Run retries in the background with exponential backoff.
-// The process still binds its port so operators can `curl /livez` instead
-// of grepping a restart-loop log. Once a Refresh succeeds, bootState flips
-// to nil and /livez returns 200. The periodic auto-refresh starts only after
-// the first successful Refresh (boot or retry) so it never races
-// RetryRefresh on Refresh calls or on bootState writes.
+// chConn is the connection of tenant id, or an untyped nil when the tenant
+// is on no pool — never a nil *Manager inside a non-nil driver.Conn, which
+// would pass a nil check and panic on use.
+func (a *App) chConn(id tenant.ID) driver.Conn {
+	m := a.pools.For(id)
+	if m == nil {
+		return nil
+	}
+	return m
+}
+
+// The store-keyed getters the handlers take: each resolves the request
+// tenant's pool or registry per call, so a reload that repoints the tenant
+// applies to the next request.
+
+func (a *App) chConnFor(s *settings.Store) driver.Conn { return a.chConn(s.Tenant()) }
+
+func (a *App) chTargetFor(s *settings.Store) chconn.Target { return a.pools.Target(s.Tenant()) }
+
+func (a *App) registryFor(s *settings.Store) *discovery.SchemaRegistry {
+	return a.discoveries.For(s.Tenant())
+}
+
+// queryTimeout is the tenant's read deadline, a per-call setting rather
+// than a property of the pool it shares.
+func queryTimeout(s *settings.Store) time.Duration { return s.ClickHouse().QueryTimeout }
+
+// wireDiscovery builds one schema registry per served tenant, each with a
+// refresh loop of its own (discoveries), and the boot state /livez reports:
+// 503 with the latest discovery failure while no tenant has completed a
+// first discovery, then 200 for the rest of the process lifetime — with one
+// tenant, the rule there always was. Non-fatal either way. A flat
+// directory's tenant 0 is refreshed synchronously here, as before, so the
+// port binds with the state known; a failure marks the binary degraded and
+// leaves the retry (backoff 2s → 60s) to its loop. A nested directory's
+// tenants refresh in their loops from the start, so boot never waits on a
+// tenant's ClickHouse, and a nested directory serving no tenant stays
+// degraded until a reload adopts one that loads. The process still binds its
+// port so operators can `curl /livez` instead of grepping a restart-loop
+// log; once a tenant has loaded, another tenant's outage is that tenant's
+// log line and counter, never a probe failure.
 func (a *App) wireDiscovery(ctx context.Context) {
 	a.bootState = api.NewBootState(nil)
-	// Both sources are read per refresh, so a settings reload retunes the
-	// cadence and a ClickHouse reconfigure moves the database without a restart.
-	registry := discovery.NewSchemaRegistry(func() driver.Conn { return a.ch }, a.ch.Database, tenant.Default, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
-	a.registry = registry
-	bootErr := registry.Refresh(ctx)
-	if bootErr != nil {
-		slog.Warn("schema discovery failed on boot, retrying in background", "error", bootErr)
-		a.bootState.Set(fmt.Errorf("schema discovery: %w", bootErr))
-	}
-	a.add(component{name: "schema discovery", run: func(ctx context.Context) error {
-		if bootErr != nil {
-			err := registry.RetryRefresh(ctx, 2*time.Second, 60*time.Second, func(attemptErr error) {
-				slog.Warn("schema discovery retry failed", "error", attemptErr)
-				a.bootState.Set(fmt.Errorf("schema discovery: %w", attemptErr))
-			})
-			if err != nil {
-				// ctx cancelled before success — the process is shutting down.
-				return nil
-			}
-			slog.Info("schema discovery succeeded after retry, /livez now 200")
-			a.bootState.Set(nil)
+	nested := a.tenants.Nested()
+	var loaded atomic.Bool
+	diagnostic := func(id tenant.ID, err error) error {
+		if nested {
+			return fmt.Errorf("schema discovery: tenant %s: %w", id, err)
 		}
-		registry.StartAutoRefresh(ctx)
-		return nil
-	}})
+		return fmt.Errorf("schema discovery: %w", err)
+	}
+	d := newDiscoveries(a.stopCtx,
+		func(id tenant.ID, store *settings.Store) *discovery.SchemaRegistry {
+			// Both getters are read per refresh, so a reload that repoints
+			// the tenant or moves its database applies to the next one.
+			return discovery.NewSchemaRegistry(func() driver.Conn { return a.chConn(id) }, func() string { return store.ClickHouse().Database }, id, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
+		},
+		func(id tenant.ID, err error) {
+			if loaded.Load() {
+				return
+			}
+			slog.Warn("schema discovery retry failed", "tenant", id, "error", err)
+			a.bootState.Set(diagnostic(id, err))
+		},
+		func(id tenant.ID) {
+			if loaded.CompareAndSwap(false, true) {
+				slog.Info("schema discovery succeeded after retry, /livez now 200", "tenant", id)
+				a.bootState.Set(nil)
+			}
+		})
+	a.discoveries = d
+	if nested {
+		a.bootState.Set(errors.New("schema discovery: no tenant has completed a first discovery yet"))
+		d.reconcile(a.tenants)
+	} else {
+		// A flat registry always serves tenant 0: Open refused boot otherwise.
+		store, _ := a.tenants.For(tenant.Default)
+		reg := d.build(tenant.Default, store)
+		if err := reg.Refresh(ctx); err != nil {
+			slog.Warn("schema discovery failed on boot, retrying in background", "error", err)
+			a.bootState.Set(diagnostic(tenant.Default, err))
+		} else {
+			loaded.Store(true)
+		}
+		d.adopt(tenant.Default, reg)
+	}
+	a.tenants.AfterAdopt(func([]tenant.ID) { d.reconcile(a.tenants) })
+	a.add(component{name: "schema discovery", close: d.close})
 }
 
 // legacyDedupeDir is where the one store lived before #583 story 7 gave each
@@ -529,7 +573,7 @@ func (a *App) wireSweeper() {
 // that role's subscribers; the MQ → Hub bridge; and the keepalive wheel.
 func (a *App) wireStreaming() {
 	a.sseMetrics = stream.NewMetrics()
-	a.hub = stream.NewHub(tenant.Default, perTenant(a.tenants, (*settings.Store).Policy), a.registry, a.sseMetrics)
+	a.hub = stream.NewHub(tenant.Default, perTenant(a.tenants, (*settings.Store).Policy), a.discoveries.For, a.sseMetrics)
 
 	// Hub bridge: MQ → broadcast to connected SSE clients. The Hub decodes and
 	// projects each event itself (skipping malformed payloads), so the bridge
@@ -568,7 +612,7 @@ func (a *App) wireStreaming() {
 // drain within the shutdown timeout.
 func (a *App) wireIngestWorker() {
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
-		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, sharedTables{Cache: a.cache, tenants: a.tenants}, a.ch.Target, tenant.Default, dlqFor(a.tenants))
+		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, sharedTables{Cache: a.cache, tenants: a.tenants}, a.pools.Target, tenant.Default, dlqFor(a.tenants))
 		if err != nil {
 			return err
 		}
@@ -701,12 +745,14 @@ func (a *App) wireReloadTriggers() {
 // prometheus.port set — the metrics sidecar. Same-port Prometheus mounts on
 // the API router instead.
 func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
-	ingestHandler := api.NewIngestHandler(a.registry, a.mq)
+	ingestHandler := api.NewIngestHandler(a.registryFor, a.mq)
 	ingestHandler.PolicySource = (*settings.Store).Policy
 	ingestHandler.Dedup = func(s *settings.Store) dedupe.Deduplicator { return a.dedup.For(s.Tenant()) }
 	ingestHandler.DedupeSettings = (*settings.Store).DedupeFor
 
-	healthHandler := api.NewHealthHandler(a.ch)
+	// Readiness pings every open pool at once and is ready at the first
+	// answer: one tenant's ClickHouse outage is not the process's.
+	healthHandler := api.NewHealthHandler(a.pools.Ping)
 	healthHandler.Boot = a.bootState
 
 	streamHandler := api.NewStreamHandler(a.hub, a.mq)
@@ -717,22 +763,28 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	closing := make(chan struct{})
 	streamHandler.Closing = closing
 
-	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.ch, a.cache, a.ch.QueryTimeout)
+	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.chConnFor, a.cache, queryTimeout)
 	pipesHandler.Tenants = a.tenants
 
+	schemaHandler := api.NewSchemaHandler(a.registryFor)
+	schemaHandler.Tenants = a.tenants
+
+	// /v1/ops/query proxies straight to ClickHouse over HTTP — no native
+	// driver involvement. The HTTP target of the tenant ?tenant= names,
+	// resolved per request like the ingest worker's.
+	queryHandler := api.NewQueryHandler(a.chTargetFor, queryTimeout)
+	queryHandler.Tenants = a.tenants
+
 	deps := api.Dependencies{
-		Ingest: ingestHandler,
-		// /v1/ops/query proxies straight to ClickHouse over HTTP — no native
-		// driver involvement. Same HTTP target as the ingest worker, resolved
-		// per request.
-		Query:           api.NewQueryHandler(a.ch.Target, a.ch.QueryTimeout),
+		Ingest:          ingestHandler,
+		Query:           queryHandler,
 		SSE:             streamHandler,
 		Health:          healthHandler,
 		Version:         api.NewVersionHandler(a.build.Version, a.build.GitCommit, a.build.BuildTime),
-		Schema:          api.NewSchemaHandler(a.registry),
+		Schema:          schemaHandler,
 		DLQ:             api.NewDLQHandler(a.mq),
 		Pipes:           pipesHandler,
-		StructuredQuery: api.NewStructuredQueryHandler(a.ch, a.cache, a.registry, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, a.ch.QueryTimeout, (*settings.Store).DefaultMaxRows),
+		StructuredQuery: api.NewStructuredQueryHandler(a.chConnFor, a.cache, a.registryFor, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, queryTimeout, (*settings.Store).DefaultMaxRows),
 
 		AuthMW:       authMW,
 		Tenants:      a.tenants,

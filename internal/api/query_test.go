@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
@@ -29,10 +30,18 @@ func safeHandle(handler http.HandlerFunc, w *httptest.ResponseRecorder, r *http.
 	handler(w, r)
 }
 
+// newTestQueryHandler is NewQueryHandler over the test tenant registry, so
+// a handler called without the router still resolves ?tenant=.
+func newTestQueryHandler(target func(*settings.Store) chconn.Target, timeout func(*settings.Store) time.Duration) *QueryHandler {
+	h := NewQueryHandler(target, timeout)
+	h.Tenants = testTenants()
+	return h
+}
+
 // staticTarget is a fixed-wiring source for tests — production hands the
-// handler chconn.Manager.Target.
-func staticTarget(url, username, password, database string) func() chconn.Target {
-	return func() chconn.Target {
+// handler chconn.Pools.Target by the request's tenant.
+func staticTarget(url, username, password, database string) func(*settings.Store) chconn.Target {
+	return func(*settings.Store) chconn.Target {
 		return chconn.Target{URL: url, Username: username, Password: password, Database: database}
 	}
 }
@@ -41,7 +50,7 @@ func newProxyHandler(t *testing.T, fakeCH http.Handler) *QueryHandler {
 	t.Helper()
 	srv := httptest.NewServer(fakeCH)
 	t.Cleanup(srv.Close)
-	return NewQueryHandler(staticTarget(srv.URL, "default", "secret", "default"), func() time.Duration { return 30 * time.Second })
+	return newTestQueryHandler(staticTarget(srv.URL, "default", "secret", "default"), func(*settings.Store) time.Duration { return 30 * time.Second })
 }
 
 func postQuery(h *QueryHandler, body []byte) *httptest.ResponseRecorder {
@@ -118,7 +127,7 @@ func TestQueryHandler_RejectsMalformedRequests(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			h := NewQueryHandler(staticTarget("http://unused.invalid", "", "", ""), func() time.Duration { return 30 * time.Second })
+			h := newTestQueryHandler(staticTarget("http://unused.invalid", "", "", ""), func(*settings.Store) time.Duration { return 30 * time.Second })
 			w := httptest.NewRecorder()
 			r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ops/query", bytes.NewReader([]byte(tt.body)))
 			h.Handle(w, r)
@@ -139,7 +148,7 @@ func TestQueryHandler_RejectsMalformedRequests(t *testing.T) {
 // that surfaces via the chi recoverer.
 func TestQueryHandler_NilHTTPClientReturnsError(t *testing.T) {
 	t.Parallel()
-	h := &QueryHandler{target: staticTarget("http://unused.invalid", "", "", ""), queryTimeout: func() time.Duration { return time.Second }} // no HTTPClient
+	h := &QueryHandler{target: staticTarget("http://unused.invalid", "", "", ""), queryTimeout: func(*settings.Store) time.Duration { return time.Second }, Tenants: testTenants()} // no HTTPClient
 	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
 	w := postQuery(h, body)
 
@@ -362,7 +371,7 @@ func TestQueryHandler_NoAuthHeadersWhenBlank(t *testing.T) {
 	})
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
-	h := NewQueryHandler(staticTarget(srv.URL, "", "", ""), func() time.Duration { return 30 * time.Second })
+	h := newTestQueryHandler(staticTarget(srv.URL, "", "", ""), func(*settings.Store) time.Duration { return 30 * time.Second })
 
 	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
 	w := postQuery(h, body)
@@ -442,7 +451,7 @@ func TestQueryHandler_RequestBodyCap(t *testing.T) {
 	t.Parallel()
 
 	const testCap = 64
-	h := NewQueryHandler(staticTarget("http://unused.invalid", "", "", ""), func() time.Duration { return 30 * time.Second })
+	h := newTestQueryHandler(staticTarget("http://unused.invalid", "", "", ""), func(*settings.Store) time.Duration { return 30 * time.Second })
 	h.maxRequestBytes = testCap
 
 	body, _ := json.Marshal(queryRequest{SQL: strings.Repeat("x", 200)})
@@ -482,7 +491,7 @@ func TestQueryHandler_ContextCancelPropagates(t *testing.T) {
 	defer srv.Close()
 	defer close(allowReturn)
 
-	h := NewQueryHandler(staticTarget(srv.URL, "", "", ""), func() time.Duration { return 30 * time.Second })
+	h := newTestQueryHandler(staticTarget(srv.URL, "", "", ""), func(*settings.Store) time.Duration { return 30 * time.Second })
 	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
 
 	w := httptest.NewRecorder()
@@ -532,13 +541,13 @@ func TestQueryHandler_SetsConfiguredHeaders(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
-	target := func() chconn.Target {
+	target := func(*settings.Store) chconn.Target {
 		return chconn.Target{
 			URL: srv.URL, Username: "default", Password: "secret", Database: "default",
 			Headers: map[string]string{"X-Proxy-Token": "abc", "Content-Type": "application/json", "X-ClickHouse-Key": "someone-else"},
 		}
 	}
-	h := NewQueryHandler(target, func() time.Duration { return 30 * time.Second })
+	h := newTestQueryHandler(target, func(*settings.Store) time.Duration { return 30 * time.Second })
 	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
 	w := postQuery(h, body)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -558,9 +567,9 @@ func TestQueryHandler_UsesTargetTLS(t *testing.T) {
 	pool := x509.NewCertPool()
 	pool.AddCert(srv.Certificate())
 	handler := func(cfg *tls.Config) *QueryHandler {
-		return NewQueryHandler(func() chconn.Target {
+		return newTestQueryHandler(func(*settings.Store) chconn.Target {
 			return chconn.Target{URL: srv.URL, Username: "default", Password: "secret", Database: "default", TLS: cfg}
-		}, func() time.Duration { return 30 * time.Second })
+		}, func(*settings.Store) time.Duration { return 30 * time.Second })
 	}
 	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
 
