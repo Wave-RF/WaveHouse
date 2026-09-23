@@ -200,7 +200,7 @@ The `clickhouse` block is the connection wiring, minus the password. A reload th
 
 **Existing directories.** Every key is required, so a `config.json` written before these keys existed fails validation until `tls`, `headers`, `max_open_conns` and `max_idle_conns` are added. The seed values — `tls.enabled: false` with the other `tls` keys empty, `headers: {}`, `10` and `5` — change nothing; `wavehouse bootstrap` in an empty directory writes them for reference.
 
-Ingest traffic is unaffected by a migration: events land in the embedded queue regardless, and the worker's next flush uses the new target.
+Moving to a different ClickHouse leaves ingest traffic unaffected: events land in the embedded queue regardless, and the worker's next flush uses the new target.
 
 ## Authentication
 
