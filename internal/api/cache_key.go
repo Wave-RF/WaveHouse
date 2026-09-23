@@ -22,7 +22,7 @@ import (
 // a key is tenant-keyed by construction and readable as such (#583 story 8):
 // identical SQL and params under two tenants are two entries and two flights,
 // and a pipe — whose result carries no dependency namespaces — can never
-// answer one tenant with another's rows once each tenant has its own
+// answer one tenant with another's rows now that each tenant reads its own
 // ClickHouse (story 6).
 //
 // Every section is framed with a 1-byte type marker (0x01 for sql, 0x00 for
