@@ -349,7 +349,7 @@ func TestValidate_ContentRules(t *testing.T) {
 func TestValidate_ClickHouseTLSPathsAreNotOpened(t *testing.T) {
 	t.Parallel()
 	files := validFiles()
-	files[FileConfig] = configJSON(`{"clickhouse": {"tls": {"enabled": true, "ca_file": "/nowhere/ca.pem", "cert_file": "/nowhere/client.pem", "key_file": "/nowhere/client.key", "insecure_skip_verify": false, "server_name": "ch.internal"}, "headers": {"X-Proxy-Token": "abc"}, "max_open_conns": 20, "max_idle_conns": 20}}`)
+	files[FileConfig] = configJSON(`{"clickhouse": {"http_scheme": "https", "tls": {"enabled": true, "ca_file": "/nowhere/ca.pem", "cert_file": "/nowhere/client.pem", "key_file": "/nowhere/client.key", "insecure_skip_verify": false, "server_name": "ch.internal"}, "headers": {"X-Proxy-Token": "abc"}, "max_open_conns": 20, "max_idle_conns": 20}}`)
 	doc, findings := ValidateDir(writeDir(t, files))
 	require.NotNil(t, doc, "findings: %s", findingStrings(findings))
 	assert.Empty(t, findings)
@@ -411,6 +411,7 @@ func TestValidate_Warnings(t *testing.T) {
 		{"empty dedupe override sets nothing", FileConfig, configJSON(`{"dedupe": {"tables": {"clicks": {}}}}`), "override sets nothing"},
 		{"empty dlq override sets nothing", FileConfig, configJSON(`{"dlq": {"tables": {"clicks": {}}}}`), "dlq.tables.clicks: override sets nothing"},
 		{"tls verification off", FileConfig, configJSON(`{"clickhouse": {"tls": {"enabled": true, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": true, "server_name": ""}}}`), "clickhouse.tls.insecure_skip_verify: certificate verification is off"},
+		{"native tls with a plaintext http hop", FileConfig, configJSON(`{"clickhouse": {"http_scheme": "http", "tls": {"enabled": true, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": false, "server_name": ""}}}`), "clickhouse.http_scheme: clickhouse.tls.enabled is on but this HTTP hop is plaintext"},
 		{"default on required parameter", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x", "required": true, "default": 5}]}]}`, "never used"},
 		{"grant with neither operation", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"analyst": {}}}}`, "neither select nor insert"},
 	}

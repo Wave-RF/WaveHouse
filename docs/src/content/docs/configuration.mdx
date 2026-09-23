@@ -53,7 +53,7 @@ Only the secret and the connection ceiling are boot config. The wiring — nativ
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password, combined with the settings directory's `clickhouse.username` on every (re)connect. A secret, so it never lives in a tracked JSON file; rotating it is a restart. |
-| `clickhouse.max_total_conns` | `WH_CH_MAX_TOTAL_CONNS` | `0` | Ceiling on the native ClickHouse connections the process holds open: the settings directory's `clickhouse.max_open_conns` must not exceed it. Boot refuses naming both numbers; a reload that raises the pool above it is refused and logged, and the connection keeps its previous wiring until the next reload. `0` is no ceiling. Capacity is sized once per process, which is why it is boot config rather than a settings key. |
+| `clickhouse.max_total_conns` | `WH_CH_MAX_TOTAL_CONNS` | `0` | Ceiling on the native ClickHouse connections the process holds open: the settings directory's `clickhouse.max_open_conns` must not exceed it. A settings pool above the ceiling refuses boot, naming both numbers in the error; a reload that raises the pool above it is refused and logged (the reload itself still reports `adopted`), and the connection keeps its previous wiring until the next reload. `0` is no ceiling. Capacity is sized once per process, which is why it is boot config rather than a settings key. |
 
 ### Server-side resource limits
 
