@@ -40,10 +40,12 @@ prometheus:
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
 
-# Only the password is boot config; addr, http_port, http_scheme, database,
-# username, query_timeout are the settings directory's clickhouse block.
+# Only the password and the connection ceiling are boot config; addr,
+# http_port, http_scheme, database, username, query_timeout, tls, headers and
+# the pool sizes are the settings directory's clickhouse block.
 clickhouse:
   password: ""
+  max_total_conns: 0 # ceiling on open native connections across pools; 0 = none
 
 # In-process L1 cache size. The query time-bucket
 # (query.timestamp_bucket_seconds) is a settings key.
@@ -63,7 +65,8 @@ auth:
 # Settings directory (REQUIRED): roles.json, policies.json, pipes.json,
 # config.json. The behavioral configuration lives in its config.json —
 # clickhouse wiring (addr, http_port, http_scheme, database, username,
-# query_timeout), auth (jwks_url, role_claim), dedupe (enabled/id_field/
+# query_timeout, tls, headers, max_open_conns, max_idle_conns), auth
+# (jwks_url, role_claim), dedupe (enabled/id_field/
 # require_id + per-table overrides), dlq.enabled (+ per table),
 # query.default_max_rows / timestamp_bucket_seconds,
 # schema.refresh_interval, stream keepalive_interval / keepalive_buckets /

@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -130,7 +132,7 @@ func TestQueryHandler_RejectsMalformedRequests(t *testing.T) {
 
 // TestQueryHandler_NilHTTPClientReturnsError pins the defensive nil-check
 // CR flagged: a zero-value QueryHandler{} (constructed without
-// NewQueryHandler) would panic when Handle reached HTTPClient.Do. The
+// NewQueryHandler) would panic when Handle looked up its client. The
 // router-only routing tests use that shape to verify the role gate
 // fires BEFORE the handler runs — but a future routing test that
 // accidentally reaches the handler should get a clean 500, not a panic
@@ -141,7 +143,7 @@ func TestQueryHandler_NilHTTPClientReturnsError(t *testing.T) {
 	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
 	w := postQuery(h, body)
 
-	testutil.AssertJSONContains(t, w, http.StatusInternalServerError, map[string]any{"error": "query handler not configured: HTTPClient is nil"})
+	testutil.AssertJSONContains(t, w, http.StatusInternalServerError, map[string]any{"error": "query handler not configured: no HTTP client"})
 	testutil.AssertJSONErrorResponse(t, w)
 	assertSecurityHeaders(t, w)
 }
@@ -518,3 +520,55 @@ func TestQueryHandler_ContextCancelPropagates(t *testing.T) {
 }
 
 // TODO: new test for very short max query duration to test
+
+// TestQueryHandler_SetsConfiguredHeaders: the target's headers ride on the
+// proxied request, and WaveHouse's own — the credentials, the content type
+// — win over a configured value of the same name.
+func TestQueryHandler_SetsConfiguredHeaders(t *testing.T) {
+	t.Parallel()
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	target := func() chconn.Target {
+		return chconn.Target{
+			URL: srv.URL, Username: "default", Password: "secret", Database: "default",
+			Headers: map[string]string{"X-Proxy-Token": "abc", "Content-Type": "application/json", "X-ClickHouse-Key": "someone-else"},
+		}
+	}
+	h := NewQueryHandler(target, func() time.Duration { return 30 * time.Second })
+	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
+	w := postQuery(h, body)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "abc", got.Get("X-Proxy-Token"))
+	assert.Equal(t, "text/plain; charset=utf-8", got.Get("Content-Type"))
+	assert.Equal(t, "secret", got.Get("X-ClickHouse-Key"))
+}
+
+// TestQueryHandler_UsesTargetTLS: an https target is dialed with the
+// target's TLS config — here a private authority — and without it the same
+// server is refused by certificate verification, which the proxy reports
+// as a 502.
+func TestQueryHandler_UsesTargetTLS(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(srv.Close)
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	handler := func(cfg *tls.Config) *QueryHandler {
+		return NewQueryHandler(func() chconn.Target {
+			return chconn.Target{URL: srv.URL, Username: "default", Password: "secret", Database: "default", TLS: cfg}
+		}, func() time.Duration { return 30 * time.Second })
+	}
+	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
+
+	w := postQuery(handler(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}), body)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	w = postQuery(handler(nil), body)
+	require.Equal(t, http.StatusBadGateway, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "clickhouse request failed")
+	assert.Contains(t, w.Body.String(), "unknown authority")
+}

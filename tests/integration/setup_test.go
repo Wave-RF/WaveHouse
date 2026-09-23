@@ -221,6 +221,8 @@ func writeTestSettings(ch *chInstance) (string, error) {
 		"clickhouse": map[string]any{
 			"addr": ch.nativeAddr(), "http_port": mustAtoi(ch.httpPort), "http_scheme": "http",
 			"database": testCHDatabase, "username": testCHUser, "query_timeout": 30,
+			"tls":     map[string]any{"enabled": false, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": false, "server_name": ""},
+			"headers": map[string]any{}, "max_open_conns": 10, "max_idle_conns": 5,
 		},
 		"mq": map[string]any{"max_bytes_gb": 1},
 	}

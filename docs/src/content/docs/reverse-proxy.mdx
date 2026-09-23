@@ -9,7 +9,7 @@ sidebar:
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
-WaveHouse serves plain HTTP on `:8080` and is meant to run **behind a reverse proxy, CDN, or tunnel** for any internet-facing deployment. It deliberately does *not* terminate TLS, manage certificates, rate-limit by IP, or mitigate slow-connection attacks — those are the proxy's job, and pushing them out keeps WaveHouse from growing a second, redundant set of knobs you'd have to tune in two places. This page covers everything that behaves differently behind a proxy: TLS, request-body limits, Server-Sent Events, header forwarding, and health probes.
+WaveHouse serves plain HTTP on `:8080` and is meant to run **behind a reverse proxy, CDN, or tunnel** for any internet-facing deployment. It deliberately does *not* terminate TLS or manage a server certificate, rate-limit by IP, or mitigate slow-connection attacks — those are the proxy's job, and pushing them out keeps WaveHouse from growing a second, redundant set of knobs you'd have to tune in two places. This page covers everything that behaves differently behind a proxy: TLS, request-body limits, Server-Sent Events, header forwarding, and health probes.
 
 ## Division of responsibility
 
@@ -31,10 +31,10 @@ The body-size caps below exist in **both** layers on purpose. Your proxy limit i
 
 ## TLS
 
-WaveHouse speaks plain HTTP and has no certificate management. Terminate TLS at the proxy and forward cleartext to `http://<wavehouse-host>:8080`.
+WaveHouse serves plain HTTP and terminates no TLS of its own: it manages no server certificate and no inbound key. Terminate TLS at the proxy and forward cleartext to `http://<wavehouse-host>:8080`.
 
-:::caution[`clickhouse.http_scheme` is a different setting]
-The `clickhouse.http_scheme` key in the [settings directory](/settings-directory#clickhouse) controls TLS on the **WaveHouse → ClickHouse** hop, not the inbound edge. It has nothing to do with terminating TLS for your clients — that's the proxy's job.
+:::caution[`clickhouse.http_scheme` and `clickhouse.tls` are different settings]
+The `clickhouse.http_scheme` and `clickhouse.tls` keys in the [settings directory](/settings-directory#clickhouse) control TLS on the **WaveHouse → ClickHouse** hops, not the inbound edge. They have nothing to do with terminating TLS for your clients — that's the proxy's job.
 :::
 
 ## Path prefixes

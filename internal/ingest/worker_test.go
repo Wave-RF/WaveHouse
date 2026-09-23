@@ -3,6 +3,8 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,11 +45,11 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockPublisher
 	pub := &testutil.MockPublisher{}
 	cache := &testutil.MockCache{}
 	w := &IngestWorker{
-		dlq:        pub,
-		failed:     make(chan error, 1),
-		httpClient: &http.Client{Transport: rt},
-		cache:      cache,
-		tenant:     tenant.Default,
+		dlq:     pub,
+		failed:  make(chan error, 1),
+		clients: chconn.NewHTTPClients(func(*tls.Config) *http.Client { return &http.Client{Transport: rt} }),
+		cache:   cache,
+		tenant:  tenant.Default,
 		target: func() chconn.Target {
 			return chconn.Target{URL: "http://test-clickhouse:8123", Username: "test_user", Password: "test_pass", Database: "test_db"}
 		},
@@ -193,9 +195,9 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 	// 5s default. StartIngestWorker's own setup is covered by
 	// TestStartIngestWorker_Validation + _StopFunc.
 	worker := &IngestWorker{
-		dlq:        emb,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		cache:      cache,
+		dlq:     emb,
+		clients: chconn.NewHTTPClients(ingestHTTPClient),
+		cache:   cache,
 		target: func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
@@ -1126,9 +1128,9 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 	require.NoError(t, err)
 
 	worker := &IngestWorker{
-		dlq:        emb,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		cache:      &testutil.MockCache{},
+		dlq:     emb,
+		clients: chconn.NewHTTPClients(ingestHTTPClient),
+		cache:   &testutil.MockCache{},
 		target: func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
@@ -1221,9 +1223,9 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 	require.NoError(t, err)
 
 	worker := &IngestWorker{
-		dlq:        emb,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		cache:      &testutil.MockCache{},
+		dlq:     emb,
+		clients: chconn.NewHTTPClients(ingestHTTPClient),
+		cache:   &testutil.MockCache{},
 		target: func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
@@ -1707,4 +1709,56 @@ func TestDispatchLoop_HandoffReturnsOnCancel(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("deliveries blocked on a full msgChan never returned after the loop stopped")
 	}
+}
+
+// TestInsertToClickHouse_SetsConfiguredHeaders: the target's headers ride on
+// every INSERT, and WaveHouse's own — the credentials, the content type —
+// win over a configured value of the same name.
+func TestInsertToClickHouse_SetsConfiguredHeaders(t *testing.T) {
+	t.Parallel()
+	var got http.Header
+	rt := &testutil.MockRoundTripper{
+		Fn: func(req *http.Request) (*http.Response, error) {
+			got = req.Header.Clone()
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
+		},
+	}
+	w, _, _, _ := newTestWorker(rt)
+	w.target = func() chconn.Target {
+		return chconn.Target{
+			URL: "http://test-clickhouse:8123", Username: "test_user", Password: "test_pass", Database: "test_db",
+			Headers: map[string]string{"X-Proxy-Token": "abc", "Content-Type": "text/plain", "X-ClickHouse-User": "someone-else"},
+		}
+	}
+	require.NoError(t, w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}}))
+	assert.Equal(t, "abc", got.Get("X-Proxy-Token"))
+	assert.Equal(t, "application/json", got.Get("Content-Type"))
+	assert.Equal(t, "test_user", got.Get("X-ClickHouse-User"))
+}
+
+// TestInsertToClickHouse_UsesTargetTLS: an https target is dialed with the
+// target's TLS config — here a private authority — and without it the
+// same server is refused by certificate verification.
+func TestInsertToClickHouse_UsesTargetTLS(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(srv.Close)
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	target := func(cfg *tls.Config) func() chconn.Target {
+		return func() chconn.Target {
+			return chconn.Target{URL: srv.URL, Username: "u", Password: "p", Database: "db", TLS: cfg}
+		}
+	}
+	w, _, _, _ := newTestWorker(nil)
+	w.clients = chconn.NewHTTPClients(ingestHTTPClient)
+	insert := func() error {
+		return w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}})
+	}
+
+	w.target = target(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12})
+	require.NoError(t, insert())
+
+	w.target = target(nil)
+	require.ErrorContains(t, insert(), "unknown authority")
 }
