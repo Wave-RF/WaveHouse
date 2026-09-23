@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,8 +25,13 @@ func withTenant(r *http.Request) *http.Request {
 	return r.WithContext(WithStore(r.Context(), testStore))
 }
 
+// testTenantRegistry is the registry whose default tenant is testStore, built
+// once: NewRegistry stamps the store with its tenant, and parallel tests must
+// not each restamp the one they share.
+var testTenantRegistry = settings.NewRegistry(testStore)
+
 // testTenants is a registry whose default tenant is testStore.
-func testTenants() *settings.Registry { return settings.NewRegistry(testStore) }
+func testTenants() *settings.Registry { return testTenantRegistry }
 
 // nestedTenants opens a nested settings directory, one folder per entry:
 // tenant folder → its config.json (fullConfig for a tenant that is served,
@@ -50,4 +56,26 @@ func staticPolicy(p *policy.Policy) PolicySource {
 func staticPipes(queries ...*pipes.NamedQuery) func(*settings.Store) pipes.Source {
 	src := pipes.Static(queries...)
 	return func(*settings.Store) pipes.Source { return src }
+}
+
+// staticOrigins is a CORS getter fixed to origins, whatever the tenant.
+func staticOrigins(origins ...string) func(*settings.Store) []string {
+	return func(*settings.Store) []string { return origins }
+}
+
+// configWithOrigins is fullConfig with cors.allowed_origins set to origins —
+// an empty list with none.
+func configWithOrigins(t *testing.T, origins ...string) string {
+	t.Helper()
+	if origins == nil {
+		origins = []string{}
+	}
+	var doc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(fullConfig(100)), &doc))
+	cors, err := json.Marshal(map[string][]string{"allowed_origins": origins})
+	require.NoError(t, err)
+	doc["cors"] = cors
+	out, err := json.Marshal(doc)
+	require.NoError(t, err)
+	return string(out)
 }

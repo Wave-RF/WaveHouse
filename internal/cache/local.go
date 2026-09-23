@@ -8,7 +8,9 @@ import (
 	"github.com/dgraph-io/ristretto/v2"
 )
 
-// LocalCache is an L1 in-process cache backed by Ristretto.
+// LocalCache is an L1 in-process cache backed by Ristretto: one pool for
+// every tenant (#583 story 8) — a heavier tenant holds more of it — with the
+// tenant leading every key, so no entry is shared across tenants.
 type LocalCache struct {
 	cache          *ristretto.Cache[string, []byte]
 	versionManager *VersionManager
@@ -66,9 +68,9 @@ func (l *LocalCache) Set(_ context.Context, sha string, deps []Namespace, value 
 func (l *LocalCache) Invalidate(_ context.Context, namespaces []Namespace) (uint64, error) {
 	for _, ns := range namespaces {
 		if ns.Scope == "" {
-			l.versionManager.BumpTable(ns.Table)
+			l.versionManager.BumpTable(ns.Tenant, ns.Table)
 		} else {
-			l.versionManager.BumpNamespace(ns.Table, ns.Scope)
+			l.versionManager.BumpNamespace(ns)
 		}
 	}
 	return uint64(len(namespaces)), nil

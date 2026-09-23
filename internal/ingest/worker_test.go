@@ -49,6 +49,7 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockPublisher
 		failed:  make(chan error, 1),
 		clients: chconn.NewHTTPClients(func(*tls.Config) *http.Client { return &http.Client{Transport: rt} }),
 		cache:   cache,
+		tenant:  tenant.Default,
 		target: func() chconn.Target {
 			return chconn.Target{URL: "http://test-clickhouse:8123", Username: "test_user", Password: "test_pass", Database: "test_db"}
 		},
@@ -481,21 +482,21 @@ func TestHandleSuccess(t *testing.T) {
 			name:           "invalidates each unique scope",
 			table:          "events",
 			scopes:         []string{"org_1", "org_2"},
-			wantNamespaces: []cache.Namespace{{Table: "events", Scope: "org_1"}, {Table: "events", Scope: "org_2"}},
+			wantNamespaces: []cache.Namespace{{Tenant: tenant.Default, Table: "events", Scope: "org_1"}, {Tenant: tenant.Default, Table: "events", Scope: "org_2"}},
 		},
 		{
 			// 3 msgs, 2 distinct scopes → 2 namespaces.
 			name:           "deduplicates repeated scopes",
 			table:          "events",
 			scopes:         []string{"org_1", "org_1", "org_2"},
-			wantNamespaces: []cache.Namespace{{Table: "events", Scope: "org_1"}, {Table: "events", Scope: "org_2"}},
+			wantNamespaces: []cache.Namespace{{Tenant: tenant.Default, Table: "events", Scope: "org_1"}, {Tenant: tenant.Default, Table: "events", Scope: "org_2"}},
 		},
 		{
 			// Scopeless message → empty-scope namespace (a whole-table bump).
 			name:           "scopeless message yields whole-table namespace",
 			table:          "events",
 			scopes:         []string{""},
-			wantNamespaces: []cache.Namespace{{Table: "events", Scope: ""}},
+			wantNamespaces: []cache.Namespace{{Tenant: tenant.Default, Table: "events", Scope: ""}},
 		},
 		{
 			// A scopeless message bumps the whole table, which subsumes every scope,
@@ -503,7 +504,7 @@ func TestHandleSuccess(t *testing.T) {
 			name:           "scopeless message subsumes other scopes",
 			table:          "events",
 			scopes:         []string{"org_1", "", "org_2"},
-			wantNamespaces: []cache.Namespace{{Table: "events", Scope: ""}},
+			wantNamespaces: []cache.Namespace{{Tenant: tenant.Default, Table: "events", Scope: ""}},
 		},
 		{
 			// Table and scope are percent-encoded so keys line up with the reader
@@ -511,7 +512,7 @@ func TestHandleSuccess(t *testing.T) {
 			name:           "table and scope are percent-encoded",
 			table:          "events.staging",
 			scopes:         []string{"org.1"},
-			wantNamespaces: []cache.Namespace{{Table: "events%2Estaging", Scope: "org%2E1"}},
+			wantNamespaces: []cache.Namespace{{Tenant: tenant.Default, Table: "events%2Estaging", Scope: "org%2E1"}},
 		},
 		{
 			// Cache failure must not prevent ack — failure is logged, non-fatal.
@@ -519,7 +520,7 @@ func TestHandleSuccess(t *testing.T) {
 			table:          "events",
 			scopes:         []string{"org_1"},
 			cacheErr:       errors.New("cache backend down"),
-			wantNamespaces: []cache.Namespace{{Table: "events", Scope: "org_1"}},
+			wantNamespaces: []cache.Namespace{{Tenant: tenant.Default, Table: "events", Scope: "org_1"}},
 		},
 		{
 			// DoubleAck error is logged but DoubleAcked flag still flips.
@@ -527,7 +528,7 @@ func TestHandleSuccess(t *testing.T) {
 			table:           "events",
 			scopes:          []string{"org_1"},
 			msgDoubleAckErr: errors.New("server unavailable"),
-			wantNamespaces:  []cache.Namespace{{Table: "events", Scope: "org_1"}},
+			wantNamespaces:  []cache.Namespace{{Tenant: tenant.Default, Table: "events", Scope: "org_1"}},
 		},
 	}
 
@@ -555,6 +556,48 @@ func TestHandleSuccess(t *testing.T) {
 			}
 		})
 	}
+}
+
+// invalidate bumps the namespaces of the tenant it is handed, not the
+// worker's own: handleSuccess passes w.tenant today, and story 5 passes the
+// message's, so the parameter is what must reach the cache.
+func TestInvalidate_BumpsTheGivenTenant(t *testing.T) {
+	t.Parallel()
+	w, _, mc, _ := newTestWorker(&testutil.MockRoundTripper{})
+	require.Equal(t, tenant.Default, w.tenant)
+
+	msgs := []parsedMsg{{scope: "org_1"}, {scope: ""}}
+	w.invalidate(context.Background(), "acme", "events", msgs)
+
+	assert.Equal(t, []cache.Namespace{{Tenant: "acme", Table: "events"}}, mc.GetNamespaces())
+}
+
+// Through the real cache: a batch inserted for one tenant orphans that
+// tenant's cached results for the table and leaves the other tenant's — same
+// table, same scope, same query — in place.
+func TestInvalidate_ReachesOneTenantsEntries(t *testing.T) {
+	t.Parallel()
+	l1, err := cache.NewLocal(1 << 20)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l1.Close() })
+	w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+	w.cache = l1
+
+	ctx := context.Background()
+	acme := []cache.Namespace{{Tenant: "acme", Table: "events", Scope: "org_1"}}
+	globex := []cache.Namespace{{Tenant: "globex", Table: "events", Scope: "org_1"}}
+	require.NoError(t, l1.Set(ctx, "q", acme, []byte("acme rows"), time.Minute))
+	require.NoError(t, l1.Set(ctx, "q", globex, []byte("globex rows"), time.Minute))
+	l1.Wait()
+
+	w.invalidate(ctx, "acme", "events", []parsedMsg{{scope: "org_1"}})
+
+	val, _, err := l1.Get(ctx, "q", acme)
+	require.NoError(t, err)
+	assert.Nil(t, val, "acme's entry is orphaned by acme's insert")
+	val, _, err = l1.Get(ctx, "q", globex)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("globex rows"), val, "globex's entry survives acme's insert")
 }
 
 // ---------------------------------------------------------------------------
@@ -737,7 +780,7 @@ func TestFlushTable_HappyPath(t *testing.T) {
 
 	// Cache invalidation: one namespace for the single shared scope.
 	assert.ElementsMatch(t,
-		[]cache.Namespace{{Table: "events", Scope: "org_1"}},
+		[]cache.Namespace{{Tenant: tenant.Default, Table: "events", Scope: "org_1"}},
 		mc.GetNamespaces(),
 	)
 }
@@ -768,8 +811,8 @@ func TestFlushTable_MultiScope(t *testing.T) {
 	// Cache: one namespace per unique scope, deduped.
 	assert.ElementsMatch(t,
 		[]cache.Namespace{
-			{Table: "events", Scope: "org_1"},
-			{Table: "events", Scope: "org_2"},
+			{Tenant: tenant.Default, Table: "events", Scope: "org_1"},
+			{Tenant: tenant.Default, Table: "events", Scope: "org_2"},
 		},
 		mc.GetNamespaces(),
 	)

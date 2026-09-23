@@ -65,15 +65,15 @@ type entry struct {
 	rejected bool
 }
 
-// adopt returns e after a validation pass over its folder: holding doc, or
+// adopt returns e after a validation pass over id's folder: holding doc, or
 // rejected when the folder yielded none.
-func (e entry) adopt(doc *Document) entry {
+func (e entry) adopt(id tenant.ID, doc *Document) entry {
 	if doc == nil {
 		e.rejected = true
 		return e
 	}
 	if e.store == nil {
-		e.store = &Store{}
+		e.store = &Store{tenant: id}
 	}
 	e.store.adopt(doc)
 	e.rejected = false
@@ -98,8 +98,10 @@ func Open(dir string) (*Registry, []Finding) {
 }
 
 // NewRegistry returns a flat Registry serving store as tenant.Default, with
-// no directory behind it: what a test that fixes its settings holds.
+// no directory behind it: what a test that fixes its settings holds. The
+// store is stamped with that id, as one a Registry creates is.
 func NewRegistry(store *Store) *Registry {
+	store.tenant = tenant.Default
 	return newRegistry(map[tenant.ID]entry{tenant.Default: {store: store}})
 }
 
@@ -193,7 +195,7 @@ func (r *Registry) reload(trigger string, boot bool) (findings []Finding, adopte
 		next := make(map[tenant.ID]entry, len(tree.Tenants))
 		// Sorted so the hooks and the log name the tenants in one order every run.
 		for _, id := range slices.Sorted(maps.Keys(tree.Tenants)) {
-			next[id] = prev[id].adopt(tree.Tenants[id].Doc)
+			next[id] = prev[id].adopt(id, tree.Tenants[id].Doc)
 			if next[id].rejected {
 				rejectedIDs = append(rejectedIDs, id)
 			} else {
@@ -251,7 +253,7 @@ func (r *Registry) ReloadTenant(id tenant.ID, trigger string) (findings []Findin
 
 	doc, findings := validateFolder(r.dir, id.String())
 	next := maps.Clone(prev)
-	next[id] = e.adopt(doc)
+	next[id] = e.adopt(id, doc)
 	r.tenants.Store(&next)
 	if doc != nil {
 		r.adopted([]tenant.ID{id})

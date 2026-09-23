@@ -73,7 +73,7 @@ func (a *App) wireSettings() error {
 			slog.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
 		}
 	case !served:
-		slog.Warn("nested settings directory with no tenant 0 being served: the ClickHouse connection, the MQ byte budget, the dedupe store, the JWT verifier, CORS, and the async paths (ingest worker, sweeper, stream hub, schema refresh) are still configured from tenant 0's config.json, so they run unconfigured — no ClickHouse address, /livez degraded — until a 0 folder is adopted")
+		slog.Warn("nested settings directory with no tenant 0 being served: the ClickHouse connection, the MQ byte budget, the dedupe store, the JWT verifier, and the async paths (ingest worker, sweeper, stream hub, schema refresh) are still configured from tenant 0's config.json, so they run unconfigured — no ClickHouse address, /livez degraded — until a 0 folder is adopted")
 	}
 	return nil
 }
@@ -89,14 +89,12 @@ func (a *App) trackDefaultStore() {
 }
 
 // defaultSetting reads one setting of the default tenant, which the
-// process-wide resources (ClickHouse, dedupe, MQ, auth, CORS) follow until
-// #583 gives each tenant its own. It reads tenant 0's last adopted document,
-// so a 0 folder a reload rejected or removed leaves every one of them as it
-// was — the ones a hook reconciles and the ones read per request (the CORS
-// list, the operator key's admin role) alike; one tenant's bad folder must
-// not cost every tenant its browser clients. A nested directory that has
-// never served a tenant 0 reads T's zero value, which wireSettings warned
-// about at boot.
+// process-wide resources (ClickHouse, dedupe, MQ, auth) follow until #583
+// gives each tenant its own. It reads tenant 0's last adopted document, so a
+// 0 folder a reload rejected or removed leaves every one of them as it was —
+// the ones a hook reconciles and the one read per request (the operator
+// key's admin role) alike. A nested directory that has never served a tenant
+// 0 reads T's zero value, which wireSettings warned about at boot.
 func defaultSetting[T any](a *App, get func(*settings.Store) T) T {
 	store := a.defaultStore.Load()
 	if store == nil {
@@ -634,7 +632,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		AuthMW:       authMW,
 		Tenants:      a.tenants,
 		PolicySource: a.policies,
-		CORSOrigins:  func() []string { return defaultSetting(a, (*settings.Store).CORSOrigins) },
+		CORSOrigins:  (*settings.Store).CORSOrigins,
 		Settings:     api.NewSettingsHandler(a.tenants),
 	}
 
