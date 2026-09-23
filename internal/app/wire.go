@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+
 	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
@@ -324,7 +326,7 @@ func (a *App) wireDiscovery(ctx context.Context) {
 	a.bootState = api.NewBootState(nil)
 	// Both sources are read per refresh, so a settings reload retunes the
 	// cadence and a ClickHouse reconfigure moves the database without a restart.
-	registry := discovery.NewSchemaRegistry(a.ch, a.ch.Database, tenant.Default, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
+	registry := discovery.NewSchemaRegistry(func() driver.Conn { return a.ch }, a.ch.Database, tenant.Default, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
 	a.registry = registry
 	bootErr := registry.Refresh(ctx)
 	if bootErr != nil {

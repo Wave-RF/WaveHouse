@@ -18,6 +18,9 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 )
 
+// connOf wraps a fake connection in the getter NewSchemaRegistry takes.
+func connOf(c driver.Conn) func() driver.Conn { return func() driver.Conn { return c } }
+
 func TestTableSchema_ColumnNames(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -50,7 +53,7 @@ func TestTableSchema_ColumnNames(t *testing.T) {
 
 func TestNewSchemaRegistry_ConstructorDefaults(t *testing.T) {
 	t.Parallel()
-	sr := NewSchemaRegistry(nil, func() string { return "wavehouse" }, tenant.Default, func(tenant.ID) time.Duration { return 30 * time.Second })
+	sr := NewSchemaRegistry(connOf(nil), func() string { return "wavehouse" }, tenant.Default, func(tenant.ID) time.Duration { return 30 * time.Second })
 	require.NotNil(t, sr)
 	assert.Equal(t, "wavehouse", sr.database())
 	assert.Equal(t, 30*time.Second, sr.refreshInterval(tenant.Default))
@@ -78,7 +81,7 @@ func TestRefresh_PopulatesAndLookups(t *testing.T) {
 			{"ghost", "CREATE TABLE test.ghost (`x` String) ENGINE = MergeTree"},
 		},
 	}
-	sr := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	sr := NewSchemaRegistry(connOf(conn), func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 	require.NoError(t, sr.Refresh(context.Background()))
 
 	clicks := sr.Get("clicks")
@@ -98,6 +101,81 @@ func TestRefresh_PopulatesAndLookups(t *testing.T) {
 	assert.Equal(t, "25.3.1.1", sr.ServerVersion())
 }
 
+// TestLookup_NotLoadedThenUnknown: until a Refresh has succeeded, Lookup
+// cannot tell an unknown table from one it has not seen, and says so with
+// ErrNotLoaded — the handlers' 503 — where Get would answer nil; once loaded,
+// a table the schema lacks is ErrUnknownTable, the 404.
+func TestLookup_NotLoadedThenUnknown(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{columns: []fakeColumn{{table: "clicks", name: "id", chType: "String", position: 1}}}
+	sr := NewSchemaRegistry(connOf(conn), func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	assert.False(t, sr.Loaded())
+	ts, err := sr.Lookup("clicks")
+	require.ErrorIs(t, err, ErrNotLoaded)
+	assert.Nil(t, ts)
+	assert.Nil(t, sr.Get("clicks"), "Get keeps its fail-closed nil")
+
+	require.NoError(t, sr.Refresh(context.Background()))
+	assert.True(t, sr.Loaded())
+	ts, err = sr.Lookup("clicks")
+	require.NoError(t, err)
+	assert.Equal(t, "clicks", ts.Name)
+	ts, err = sr.Lookup("missing")
+	require.ErrorIs(t, err, ErrUnknownTable)
+	assert.ErrorContains(t, err, "missing")
+	assert.Nil(t, ts)
+
+	// A later failed refresh keeps the prior schema, and with it the loaded state.
+	conn.versionErr = errors.New("code: 497, not enough privileges")
+	require.Error(t, sr.Refresh(context.Background()))
+	assert.True(t, sr.Loaded())
+	_, err = sr.Lookup("clicks")
+	require.NoError(t, err)
+}
+
+// TestRefresh_NoConnection: a getter yielding no connection — a tenant with
+// no open pool — is ErrNoConnection naming the tenant, not a panic, and the
+// registry stays unloaded until the getter yields one.
+func TestRefresh_NoConnection(t *testing.T) {
+	t.Parallel()
+	var conn driver.Conn
+	sr := NewSchemaRegistry(func() driver.Conn { return conn }, func() string { return "test" }, "acme", func(tenant.ID) time.Duration { return time.Hour })
+	err := sr.Refresh(context.Background())
+	require.ErrorIs(t, err, ErrNoConnection)
+	assert.ErrorContains(t, err, "acme")
+	assert.False(t, sr.Loaded())
+
+	conn = &fakeConn{}
+	require.NoError(t, sr.Refresh(context.Background()))
+	assert.True(t, sr.Loaded())
+}
+
+// TestRefresh_ConnectionReadOncePerRefresh: like the database, the connection
+// is resolved once per refresh, so every query of one refresh runs against
+// the same server even if a reload repoints the tenant halfway through.
+func TestRefresh_ConnectionReadOncePerRefresh(t *testing.T) {
+	t.Parallel()
+	first := &fakeConn{columns: []fakeColumn{{table: "clicks", name: "id", chType: "String", position: 1}}}
+	second := &fakeConn{}
+	var reads atomic.Int32
+	conn := func() driver.Conn {
+		if reads.Add(1) == 1 {
+			return first
+		}
+		return second
+	}
+	sr := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	require.NoError(t, sr.Refresh(context.Background()))
+	assert.Equal(t, int32(1), reads.Load(), "one read per refresh")
+	assert.Equal(t, int32(1), first.calls.Load())
+	assert.Zero(t, second.calls.Load(), "the repointed connection is for the next refresh")
+	require.NotNil(t, sr.Get("clicks"))
+
+	require.NoError(t, sr.Refresh(context.Background()))
+	assert.Equal(t, int32(1), second.calls.Load())
+	assert.Nil(t, sr.Get("clicks"), "the next refresh reads the new connection")
+}
+
 // TestRefresh_DDLIsNotSerialized: the schema endpoint marshals TableSchema
 // straight to the client, and an external-engine table renders its wiring in
 // create_table_query — endpoint, bucket, username, access key id. ClickHouse
@@ -111,7 +189,7 @@ func TestRefresh_DDLIsNotSerialized(t *testing.T) {
 		// topology is not. The field is withheld for the topology.
 		tables: [][2]string{{"clicks", "CREATE TABLE test.clicks (`id` String) ENGINE = S3('https://acme-private.s3.amazonaws.com/events.csv', 'AKIAEXAMPLEKEY', '[HIDDEN]', 'CSV')"}},
 	}
-	sr := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	sr := NewSchemaRegistry(connOf(conn), func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 	require.NoError(t, sr.Refresh(context.Background()))
 
 	encoded, err := json.Marshal(sr.Get("clicks"))
@@ -131,7 +209,7 @@ func TestRefresh_ServerVersionQueryFails(t *testing.T) {
 		version: "25.3.2.2",
 		columns: []fakeColumn{{table: "clicks", name: "id", chType: "String", position: 1}},
 	}
-	sr := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	sr := NewSchemaRegistry(connOf(conn), func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 	require.NoError(t, sr.Refresh(context.Background()))
 	require.Equal(t, "25.3.2.2", sr.ServerVersion())
 
@@ -152,7 +230,7 @@ func TestRefresh_TablesQueryFails(t *testing.T) {
 		columns: []fakeColumn{{table: "clicks", name: "id", chType: "String", position: 1}},
 		tables:  [][2]string{{"clicks", "CREATE TABLE test.clicks (id String) ENGINE = MergeTree"}},
 	}
-	sr := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	sr := NewSchemaRegistry(connOf(conn), func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 	require.NoError(t, sr.Refresh(context.Background()))
 	require.NotNil(t, sr.Get("clicks"))
 	require.NotEmpty(t, sr.Get("clicks").DDL)
@@ -354,7 +432,7 @@ func (*fakeTableRows) Err() error   { return nil }
 func newFakeRegistry(t *testing.T, errs []error) (*SchemaRegistry, *fakeConn) {
 	t.Helper()
 	conn := &fakeConn{errsThenSuccess: errs}
-	return NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour }), conn
+	return NewSchemaRegistry(connOf(conn), func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour }), conn
 }
 
 // TestRefresh_UnresolvableServerTimezone_NotFatal: an unresolvable server zone
@@ -362,7 +440,7 @@ func newFakeRegistry(t *testing.T, errs []error) (*SchemaRegistry, *fakeConn) {
 func TestRefresh_UnresolvableServerTimezone_NotFatal(t *testing.T) {
 	t.Parallel()
 	conn := &fakeConn{tz: "Not/AZone"}
-	sr := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	sr := NewSchemaRegistry(connOf(conn), func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 	require.NoError(t, sr.Refresh(context.Background()))
 }
 
@@ -376,7 +454,7 @@ func TestRefresh_RowsIterationError_Fails(t *testing.T) {
 		columns: []fakeColumn{{table: "events", name: "id", chType: "String", position: 1}},
 		iterErr: errors.New("network drop mid-stream"),
 	}
-	sr := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	sr := NewSchemaRegistry(connOf(conn), func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 	err := sr.Refresh(context.Background())
 	require.ErrorContains(t, err, "network drop mid-stream")
 	require.Nil(t, sr.Get("events"), "truncated scan must not be published")
@@ -484,7 +562,7 @@ func TestRetryRefresh_DoesNotFireOnAttemptDuringCancel(t *testing.T) {
 	// looks real, but ctx.Err() reveals we're shutting down anyway.
 	conn := &fakeConn{errsThenSuccess: []error{errors.New("transient")}}
 	sr, _ := newFakeRegistry(t, nil)
-	sr.conn = conn // override the no-error conn from newFakeRegistry
+	sr.conn = connOf(conn) // override the no-error conn from newFakeRegistry
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled before RetryRefresh starts
@@ -575,7 +653,7 @@ func TestClampBackoff(t *testing.T) {
 func TestStartAutoRefresh_ExitsOnContextCancel(t *testing.T) {
 	t.Parallel()
 	// Long interval so the ticker never fires before cancel.
-	sr := NewSchemaRegistry(nil, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	sr := NewSchemaRegistry(connOf(nil), func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -592,6 +670,39 @@ func TestStartAutoRefresh_ExitsOnContextCancel(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("StartAutoRefresh did not return after ctx cancel")
 	}
+}
+
+// TestStartAutoRefresh_FirstTickWithinTheInterval: the first refresh fires
+// at a point within the interval rather than a full interval in, so tenants
+// adopted together do not refresh together; the cadence runs from there.
+func TestStartAutoRefresh_FirstTickWithinTheInterval(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{}
+	sr := NewSchemaRegistry(connOf(conn), func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	for range 50 {
+		offset := sr.firstTick(time.Hour)
+		assert.GreaterOrEqual(t, offset, time.Duration(0))
+		assert.Less(t, offset, time.Hour)
+	}
+
+	// Pinned at zero: the first refresh fires at once, an hour before the
+	// ticker would have.
+	var asked []time.Duration
+	sr.firstTick = func(interval time.Duration) time.Duration {
+		asked = append(asked, interval)
+		return 0
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sr.StartAutoRefresh(ctx)
+	}()
+	assert.Eventually(t, func() bool { return conn.calls.Load() == 1 }, 2*time.Second, time.Millisecond)
+	cancel()
+	<-done
+	assert.Equal(t, []time.Duration{time.Hour}, asked, "the offset is drawn from the interval")
+	assert.Equal(t, int32(1), conn.calls.Load(), "and the ticker did not add a second refresh")
 }
 
 // TestStartAutoRefresh_UnresolvedIntervalDoesNotPanic pins the zero interval a
@@ -616,7 +727,7 @@ func TestStartAutoRefresh_UnresolvedIntervalDoesNotPanic(t *testing.T) {
 				i := int(reads.Add(1)) - 1
 				return tt.intervals[min(i, len(tt.intervals)-1)]
 			}
-			sr := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, interval)
+			sr := NewSchemaRegistry(connOf(conn), func() string { return "test" }, tenant.Default, interval)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
@@ -657,7 +768,7 @@ func TestStartAutoRefresh_LogsAndContinuesOnError(t *testing.T) {
 	conn := &fakeConn{errsThenSuccess: errs}
 
 	buf := logtest.Capture(t, slog.LevelDebug)
-	sr := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return 5 * time.Millisecond })
+	sr := NewSchemaRegistry(connOf(conn), func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return 5 * time.Millisecond })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -711,7 +822,7 @@ func TestRefresh_DatabaseSnapshottedForWholeRefresh(t *testing.T) {
 		}
 		return "old"
 	}
-	sr := NewSchemaRegistry(conn, db, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	sr := NewSchemaRegistry(connOf(conn), db, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 	require.NoError(t, sr.Refresh(context.Background()))
 
 	require.Len(t, seen, 2, "both scans should be parameterised by a database")
@@ -784,7 +895,7 @@ func TestRefresh_CapturesDefaultKind(t *testing.T) {
 		{table: "t", name: "mat", chType: "String", defaultKind: "MATERIALIZED", defaultExpr: "concat('m', id)", position: 2},
 		{table: "t", name: "page", chType: "String", defaultKind: "DEFAULT", defaultExpr: "'/'", position: 3},
 	}}
-	sr := NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	sr := NewSchemaRegistry(connOf(conn), func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 	require.NoError(t, sr.Refresh(context.Background()))
 
 	ts := sr.Get("t")
