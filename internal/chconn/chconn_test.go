@@ -156,7 +156,7 @@ func TestTLS_ConfigReadsTheFiles(t *testing.T) {
 	assert.Len(t, cfg.Certificates, 1)
 	assert.True(t, cfg.InsecureSkipVerify)
 	assert.Equal(t, "ch.internal", cfg.ServerName)
-	assert.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
+	assert.EqualValues(t, tls.VersionTLS12, cfg.MinVersion)
 }
 
 func TestTLS_ZeroBlockIsNil(t *testing.T) {

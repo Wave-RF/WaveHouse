@@ -313,6 +313,7 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"clickhouse.headers bad value", FileConfig, `{"clickhouse": {"headers": {"X-Custom": "line\nbreak"}}}`, "clickhouse.headers.X-Custom: not a valid HTTP header value"},
 		{"clickhouse.headers reserved credential", FileConfig, `{"clickhouse": {"headers": {"x-clickhouse-key": "v"}}}`, "clickhouse.headers.x-clickhouse-key: carries ClickHouse credentials"},
 		{"clickhouse.headers reserved authorization", FileConfig, `{"clickhouse": {"headers": {"Authorization": "Basic xyz"}}}`, "clickhouse.headers.Authorization: carries ClickHouse credentials"},
+		{"clickhouse.headers two spellings of one name", FileConfig, `{"clickhouse": {"headers": {"X-Trace": "a", "x-trace": "b"}}}`, `clickhouse.headers.x-trace: spells the same header as "X-Trace"`},
 		{"missing clickhouse.max_open_conns", FileConfig, `{"clickhouse": {"max_idle_conns": 5}}`, "clickhouse.max_open_conns: required"},
 		{"missing clickhouse.max_idle_conns", FileConfig, `{"clickhouse": {"max_open_conns": 10}}`, "clickhouse.max_idle_conns: required"},
 		{"clickhouse.max_idle_conns zero", FileConfig, `{"clickhouse": {"max_idle_conns": 0}}`, "clickhouse.max_idle_conns: must be >= 1, got 0"},

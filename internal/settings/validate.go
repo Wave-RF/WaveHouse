@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -547,16 +548,24 @@ func (v *validator) checkClickHouseTLS(t *ClickHouseTLS) {
 var reservedHeaders = []string{"X-ClickHouse-User", "X-ClickHouse-Key", "Authorization"}
 
 // checkClickHouseHeaders checks each header's shape and, case-insensitively
-// as HTTP compares names, that it is not one that carries credentials.
+// as HTTP compares names, that it is not one that carries credentials and
+// that no two entries spell the same name: the consumers apply the map
+// with Header.Set, which canonicalizes, so two spellings would be one
+// header with whichever value came last.
 func (v *validator) checkClickHouseHeaders(headers map[string]string) {
+	seen := map[string]string{}
 	for _, name := range slices.Sorted(maps.Keys(headers)) {
 		value := headers[name]
 		path := "clickhouse.headers." + name
-		switch {
+		switch canonical := http.CanonicalHeaderKey(name); {
 		case !validHeaderName(name):
 			v.errorf(FileConfig, path, "not a valid HTTP header name")
 		case slices.ContainsFunc(reservedHeaders, func(r string) bool { return strings.EqualFold(r, name) }):
 			v.errorf(FileConfig, path, "carries ClickHouse credentials, which come from clickhouse.username and the boot password")
+		case seen[canonical] != "":
+			v.errorf(FileConfig, path, "spells the same header as %q; names are case-insensitive", seen[canonical])
+		default:
+			seen[canonical] = name
 		}
 		if !validHeaderValue(value) {
 			v.errorf(FileConfig, path, "not a valid HTTP header value")
