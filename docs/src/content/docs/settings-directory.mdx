@@ -109,6 +109,15 @@ The tenant tunables. Every key is required (a missing one is a validation error)
 | `clickhouse.database` | `default` | Database tables are discovered from. |
 | `clickhouse.username` | `default` | Connection user; the password is boot config (`WH_CH_PASSWORD`). |
 | `clickhouse.query_timeout` | `30` | Seconds (`>= 1`) a read may take; bounds the client deadline, from which the driver derives a server-side `max_execution_time`. |
+| `clickhouse.tls.enabled` | `false` | Switches the native-protocol hop (`addr`) to TLS. The HTTP hop's switch stays `http_scheme`; the rest of the `tls` block applies to whichever hop uses TLS. See [ClickHouse](#clickhouse). |
+| `clickhouse.tls.ca_file` | `""` | PEM bundle the server certificate is verified against; empty uses the system roots. A path, read when the connection is built — validation does not open it. |
+| `clickhouse.tls.cert_file` | `""` | Client certificate for mutual TLS, PEM; set together with `key_file` or not at all. |
+| `clickhouse.tls.key_file` | `""` | The client certificate's private key, PEM. |
+| `clickhouse.tls.insecure_skip_verify` | `false` | Skips server certificate verification. `true` validates with a warning: both hops then accept any certificate. |
+| `clickhouse.tls.server_name` | `""` | Name the server certificate is verified against; empty derives it from the host in `addr` (native) or the URL (HTTP). |
+| `clickhouse.headers` | `{}` | Extra request headers for the HTTP interface (ingest `INSERT`s, `POST /v1/ops/query`), for a proxy or gateway in front of ClickHouse. WaveHouse sets its own `Content-Type`, `X-ClickHouse-User` and `X-ClickHouse-Key` after them, so those win; naming `X-ClickHouse-User`, `X-ClickHouse-Key` or `Authorization` is a validation error. |
+| `clickhouse.max_open_conns` | `10` | Native connection pool size (`>= max_idle_conns`). Must also fit under the boot config's [`clickhouse.max_total_conns`](/configuration#clickhouse) when one is set. |
+| `clickhouse.max_idle_conns` | `5` | Idle native connections kept open (`>= 1`). |
 | `auth.jwks_url` | `""` | JWKS endpoint (absolute `http(s)` URL). When set, JWKS is the **sole** verifier and `jwt_secret` is ignored. See [Authentication](#authentication). |
 | `auth.role_claim` | `role` | Dot-separated JWT claim path the role is read from (e.g. `app_metadata.role`). |
 | `dedupe.enabled` | `false` | Turn deduplication on; a reload opens or closes the Pebble store — see [Deduplication](#deduplication). |
@@ -131,10 +140,21 @@ The tenant tunables. Every key is required (a missing one is a validation error)
   "clickhouse": {
     "addr": "clickhouse.internal:9000",
     "http_port": 8123,
-    "http_scheme": "http",
+    "http_scheme": "https",
     "database": "analytics",
     "username": "wavehouse",
-    "query_timeout": 30
+    "query_timeout": 30,
+    "tls": {
+      "enabled": true,
+      "ca_file": "/etc/wavehouse/clickhouse-ca.pem",
+      "cert_file": "",
+      "key_file": "",
+      "insecure_skip_verify": false,
+      "server_name": ""
+    },
+    "headers": {},
+    "max_open_conns": 10,
+    "max_idle_conns": 5
   },
   "auth": { "jwks_url": "https://auth.example.com/.well-known/jwks.json", "role_claim": "app_metadata.role" },
   "dedupe": {
@@ -172,7 +192,13 @@ Every dedupe knob lives here — there are no boot-config keys for it. The switc
 
 ## ClickHouse
 
-The `clickhouse` block is the connection wiring, minus the password. A reload that changes any of it swaps the connection behind every consumer (schema discovery, structured queries, pipes, `/readyz`, the ingest worker's HTTP `INSERT`s, and the raw-SQL proxy — the HTTP-side ones re-read the target per request). The replaced connection stays open for one `query_timeout` so in-flight queries finish. The swap is **unconditional**: the adopted settings are the authority, so an address that isn't reachable is applied all the same and shows up where reachability already does — schema discovery retries and logs, `/readyz` fails, queries return errors — until the next reload fixes it. Validation checks shape only (`host:port`, port range, scheme, non-empty database and user, timeout `>= 1`); reachability is a runtime concern, so `wavehouse validate` needs no ClickHouse. At boot the address is dialed lazily, as before: an unreachable ClickHouse degrades `/livez` and retries rather than refusing to start.
+The `clickhouse` block is the connection wiring, minus the password. A reload that changes any of it swaps the connection behind every consumer (schema discovery, structured queries, pipes, `/readyz`, the ingest worker's HTTP `INSERT`s, and the raw-SQL proxy — the HTTP-side ones re-read the target per request). The replaced connection stays open for one `query_timeout` so in-flight queries finish. The swap is **unconditional**: the adopted settings are the authority, so an address that isn't reachable is applied all the same and shows up where reachability already does — schema discovery retries and logs, `/readyz` fails, queries return errors — until the next reload fixes it. Two things are refused instead, and the connection then keeps its previous wiring until the next reload: a certificate file that cannot be read, and a `max_open_conns` above the boot config's [`clickhouse.max_total_conns`](/configuration#clickhouse); at boot either refuses to start. Validation checks shape only (`host:port`, port range, scheme, non-empty database and user, timeout `>= 1`, the `tls` block's shape without opening its paths, header names and values, pool sizes); reachability is a runtime concern, so `wavehouse validate` needs no ClickHouse and no certificate files. At boot the address is dialed lazily, as before: an unreachable ClickHouse degrades `/livez` and retries rather than refusing to start.
+
+**TLS.** There are two hops and two switches: `tls.enabled` puts the native-protocol connection (`addr`) on TLS, and `http_scheme: "https"` does the same for the HTTP interface (`http_port`). The rest of the `tls` block — the authority bundle, a client certificate, `insecure_skip_verify`, `server_name` — applies to whichever hop uses TLS, so a ClickHouse behind a private authority needs `ca_file` once for both. The certificate files are read when the connection is built: at boot, and on a reload that changes the `clickhouse` block. A file replaced in place with the block unchanged is picked up by a restart, like a rotated secret.
+
+**Headers.** `clickhouse.headers` rides on every HTTP-interface request, for a proxy or gateway in front of ClickHouse that wants a token of its own. WaveHouse's own headers — `Content-Type` and the `X-ClickHouse-User` / `X-ClickHouse-Key` credentials — are set after them and win, and naming a credential header is a validation error. The native protocol carries no headers.
+
+**Existing directories.** Every key is required, so a `config.json` written before these keys existed fails validation until `tls`, `headers`, `max_open_conns` and `max_idle_conns` are added. The seed values — `tls.enabled: false` with the other `tls` keys empty, `headers: {}`, `10` and `5` — change nothing; `wavehouse bootstrap` in an empty directory writes them for reference.
 
 Ingest traffic is unaffected by a migration: events land in the embedded queue regardless, and the worker's next flush uses the new target.
 
