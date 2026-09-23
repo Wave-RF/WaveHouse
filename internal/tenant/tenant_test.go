@@ -15,6 +15,7 @@ func TestParse(t *testing.T) {
 		{name: "letters digits underscore dash", in: "Acme_co-42"},
 		{name: "19 digit id", in: "9223372036854775807"},
 		{name: "at the length cap", in: strings.Repeat("a", MaxLen)},
+		{name: "a reserved name is exact", in: "nats-eu"},
 		{name: "empty", in: "", wantErr: true},
 		{name: "over the length cap", in: strings.Repeat("a", MaxLen+1), wantErr: true},
 		{name: "dot", in: "a.b", wantErr: true},
@@ -26,6 +27,10 @@ func TestParse(t *testing.T) {
 		{name: "subject wildcard tail", in: ">", wantErr: true},
 		{name: "non-ascii letter", in: "ténant", wantErr: true},
 		{name: "newline", in: "a\n", wantErr: true},
+		{name: "reserved: the queue's directory", in: "nats", wantErr: true},
+		{name: "reserved: the earlier dedupe store", in: "pebble", wantErr: true},
+		{name: "reserved in any letter case", in: "Pebble", wantErr: true},
+		{name: "reserved in upper case", in: "NATS", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -35,7 +35,7 @@ This page is boot config only — what the platform operator owns (wiring, lifec
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; Pebble (when dedupe is enabled) at `<data_dir>/pebble`. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
+| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; each tenant's Pebble dedupe store (when its dedupe is enabled) at `<data_dir>/<tenant>/dedupe` — tenant `0`'s for [the four files](/settings-directory), one per folder of [a nested directory](/deployment#the-nested-settings-directory); an earlier layout's `<data_dir>/pebble` is moved to tenant `0`'s at boot when `<data_dir>/0/dedupe` is absent — with both present, boot uses `<data_dir>/0/dedupe`, leaves the old directory alone, and warns; a move that fails refuses boot rather than start an empty store. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
 
 ### Server
 
@@ -180,7 +180,8 @@ Every key, with its default. Save the YAML as `config.yaml` next to the binary (
 <TabItem label="YAML">
 
 ```yaml
-data_dir: ./data         # nats → ./data/nats, pebble → ./data/pebble
+data_dir: ./data         # nats → ./data/nats, dedupe → ./data/<tenant>/dedupe
+                         # (./data/0/dedupe for the four-file settings directory)
 
 server:
   port: 8080
