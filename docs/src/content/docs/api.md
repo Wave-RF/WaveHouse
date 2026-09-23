@@ -584,7 +584,7 @@ The POST parameter body is capped at 1 MiB; a body over the cap is rejected with
 
 ### `GET /v1/stream` — Server-Sent Events Stream
 
-Opens a persistent SSE connection for real-time event streaming. Supports historical gap-fill from NATS JetStream using `DeliverByStartTime`.
+Opens a persistent SSE connection for real-time event streaming. Supports historical gap-fill from NATS JetStream using `DeliverByStartTime`. A connection that carries a token while the tenant's JWKS has not been fetched yet is refused with `503` + `Retry-After: 30` (see [Authentication](#authentication)); a browser `EventSource` treats that as fatal rather than reconnecting, so reopen it after the delay (the SDK's stream re-dials on its own).
 
 **Query Parameters:**
 
@@ -809,7 +809,7 @@ Re-validates the [settings directory](/settings-directory) — `roles.json`, `po
 
 `200` when adopted (warnings allowed); `422` when validation rejected the directory — the previous settings stay in effect, and `findings` says why.
 
-An optional `?tenant=<id>` reloads that tenant's folder of a [nested settings directory](/deployment#the-nested-settings-directory) and nothing else; it is parsed as strictly as on the [pipe reads](#get-v1opspipes--list-named-pipes) (`400`), and an unknown tenant is a `404`. Over a nested directory a rejected folder is not kept on its previous settings, and a `422` for the whole directory can mean adopted in part — see that section.
+An optional `?tenant=<id>` reloads that tenant's folder of a [nested settings directory](/deployment#the-nested-settings-directory) and nothing else; it is parsed as strictly as on the [pipe reads](#get-v1opspipes--list-named-pipes) (`400`), and an unknown tenant is a `404`. A token sent while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`) is refused with `503` + `Retry-After: 30`. Over a nested directory a rejected folder is not kept on its previous settings, and a `422` for the whole directory can mean adopted in part — see that section.
 
 ## Event Message Format
 
