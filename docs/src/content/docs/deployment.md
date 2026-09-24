@@ -446,7 +446,7 @@ Message-queue subjects now lead with the tenant: `ingest.{tenant}.{table}` and `
 
 ## Dead Letter Queue (DLQ)
 
-A failed batch insert is retried row by row; while the tenant's `dlq.enabled` is `true` for the table (the seed default — a hot-reloadable [settings directory](/settings-directory#dead-letter-queue) key, overridable per table), the rows that fail again are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{tenant}.{table}` (`0` for a directory that holds the four files) instead of retrying forever. Monitor DLQ depth via `GET /v1/ops/dlq/stats`.
+A failed batch insert is retried row by row (a batch whose tenant has no ClickHouse connection — one no longer served, or refused a pool by the connection ceiling — skips the retry, which no row of it could pass, and is decided whole); while the tenant's `dlq.enabled` is `true` for the table (the seed default — a hot-reloadable [settings directory](/settings-directory#dead-letter-queue) key, overridable per table), the rows that fail again are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{tenant}.{table}` (`0` for a directory that holds the four files) instead of retrying forever. Monitor DLQ depth via `GET /v1/ops/dlq/stats`.
 
 ## Observability
 
