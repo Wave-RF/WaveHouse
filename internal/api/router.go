@@ -150,8 +150,8 @@ func NewRouter(deps Dependencies) http.Handler {
 			// tenant is not served, but so does every tenant route's, since all
 			// of them answer before authenticating, which needs the tenant's
 			// verifier. Exempt, it would take its CORS answer from tenant 0's
-			// list, which a nested directory need not have; resolved, it tells
-			// a client whether its own tenant is served.
+			// list, which a nested directory need not have; resolved, a served
+			// tenant's ping answers from that tenant's own.
 			r.Get("/health", deps.Health.Online)
 
 			r.Post("/ingest", deps.Ingest.Handle)
