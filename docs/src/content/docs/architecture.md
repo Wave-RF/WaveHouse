@@ -241,6 +241,8 @@ Ingest worker pipeline (StartIngestWorker):
     ClickHouse 26.5; see /ingest-pipeline for the basic-vs-best_effort divergence)
   → On success: DoubleAck messages
   → On failure: re-insert row by row; each row that fails again → DLQ output (dlq.{tenant}.{table}), then Ack to prevent infinite retry
+    (a batch whose tenant has no ClickHouse connection skips the row-by-row pass
+    and meets the DLQ switch whole — parkBatch)
 
   (Insert-only pipeline. The wire format `EventMessage` carries only
   {table_name, scope, received_timestamp, format, columns, row}; non-insert mutations
