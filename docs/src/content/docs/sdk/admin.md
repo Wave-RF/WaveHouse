@@ -20,7 +20,7 @@ await wh.schema.refresh();
 
 Individual table schema is also available via `wh.from('clicks').schema()`.
 
-Over [a nested settings directory](/deployment#the-nested-settings-directory), pass `tenant` to read or refresh that tenant's schema, authenticating with the [operator key](/api#authentication) (sent as `X-Operator-Key` via [`options.headers`](/sdk#custom-headers)): the nested `/v1/ops/*` routes admit it alone, and a token carrying an admin role gets `403`; without it the calls address tenant `0`. A `503` with `Retry-After` is a tenant whose first discovery has not succeeded yet (the SDK retries it), and `wh.sql()` takes the same option to run against that tenant's ClickHouse:
+Over [a nested settings directory](/deployment#the-nested-settings-directory), pass `tenant` to read or refresh that tenant's schema, authenticating with the [operator key](/api#authentication) (sent as `X-Operator-Key` via [`options.headers`](/sdk#custom-headers)): the nested `/v1/ops/*` routes admit it alone, and a token carrying an admin role gets `403`; without it the calls address tenant `0`. A `503` with `Retry-After` is a tenant whose first discovery has not succeeded yet (`Retry-After: 5`), or one on no ClickHouse pool — refused by the connection ceiling — on the refresh (`Retry-After: 30`); the SDK retries both, and `wh.sql()` takes the same option to run against that tenant's ClickHouse:
 
 ```ts
 const { data } = await wh.schema.list({ tenant: 'acme' });
