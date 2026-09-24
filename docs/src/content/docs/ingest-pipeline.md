@@ -13,7 +13,7 @@ It is deliberately detailed: this is a hot, concurrency-heavy path, and the goro
 
 | File | Contents |
 | --- | --- |
-| `worker.go` | `StartIngestWorker`, the `dispatchLoop`, `parseMsg` (+ `rejectPoison` for an envelope it cannot read), the per-table `tableBatcher`/`tableLoop`, `flushTable` (splits a batch per column list via `groupByColumns`) and `flushGroup` (bulk insert with a row-by-row poison-isolation fallback), `insertToClickHouse`, `handleSuccess` (acks, after `invalidate` bumps the tenant's cache namespaces — under every tenant the registry knows, through the cache `internal/app` hands the worker, while the tenants share one ClickHouse), `sendToDLQ`/`parkOnDLQ` |
+| `worker.go` | `StartIngestWorker`, the `dispatchLoop`, `parseMsg` (+ `rejectPoison` for an envelope it cannot read), the per-tenant-table `tableBatcher`/`tableLoop`, `flushTable` (splits a batch per column list via `groupByColumns`) and `flushGroup` (bulk insert with a row-by-row poison-isolation fallback), `insertToClickHouse`, `handleSuccess` (acks, after `invalidate` bumps the tenant's cache namespaces — under every tenant the registry knows, through the cache `internal/app` hands the worker, while the tenants share one ClickHouse), `sendToDLQ`/`parkOnDLQ` |
 | `compact.go` | `EncodeCompactRow` — renders one record as a `JSONCompactEachRow` line over the table's **insertable** columns, in declaration order. Serialization only: it validates nothing and judges no value |
 | `sweeper.go` | The **Active Sweeper** — every minute, asks the MQ to purge the events that are both written to ClickHouse and past the SSE gap window (the purge arithmetic below lives in `internal/mq/purge.go`) |
 | `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |
@@ -50,7 +50,8 @@ flowchart LR
     D -.->|"unreadable envelope"| DLQ
 
     Sweep["Active Sweeper"] -.->|"reads AckFloor, purges"| Stream
-    Stream -.->|"DeliverByStartTime gap-fill"| Hub["hub-bridge consumer<br/>(SSE fan-out)"]
+    Stream -.->|"live events"| Hub["hub-bridge consumer<br/>(SSE fan-out)"]
+    Stream -.->|"DeliverByStartTime gap-fill"| Replay["replay consumer, one per connection<br/>(the tenant's subject)"]
 ```
 
 Note the stream is **dual-use**: it is both the durable buffer feeding the worker and the replay buffer that SSE clients gap-fill from. That is why a custom sweeper exists instead of plain work-queue auto-deletion (see [Scaling out](#scaling-to-multiple-instances)).
@@ -73,11 +74,11 @@ sequenceDiagram
     participant D as dispatchLoop
     participant TL as tableLoop
     participant CH as ClickHouse
-    P->>JS: publish ingest.clicks (EventMessage)
+    P->>JS: publish ingest.0.clicks (EventMessage)
     JS->>CB: deliver (prefetch up to pullMaxMessages)
     CB->>D: msgChan channel send
-    D->>D: parseMsg (validate envelope, route key = table_name)
-    D->>TL: per-table channel send
+    D->>D: parseMsg (validate envelope, route key = tenant + table_name)
+    D->>TL: per-tenant-table channel send
     TL->>TL: add row#59; arm deadline timer on first row
     Note over TL: flush on size (maxBatch) OR deadline (maxWait)
     TL->>CH: POST JSONCompactEachRow (flush goroutine)
@@ -94,7 +95,7 @@ The design rule is **single-owner state, lock-free**: each piece of mutable stat
 flowchart TD
     CB["Consume callback<br/>(nats.go goroutine)"] -->|"msgChan (cap maxBatch*2)"| D
     D["dispatchLoop<br/>1 goroutine — owns the routing map<br/>the ONLY ctx watcher — tracked by wg"]
-    D -->|"per-table chan (cap maxBatch)"| T1["tableLoop: clicks<br/>owns its batch + timer<br/>tracked by tableWg"]
+    D -->|"per-tenant-table chan (cap maxBatch)"| T1["tableLoop: clicks<br/>owns its batch + timer<br/>tracked by tableWg"]
     D --> T2["tableLoop: events<br/>tracked by tableWg"]
     T1 -->|"go (at most 1 in flight)"| F1["flush goroutine<br/>insert to ClickHouse"]
     F1 -->|"go"| A1["ack goroutines<br/>DoubleAck — tracked by ackWg"]
@@ -105,7 +106,7 @@ flowchart TD
 Three `WaitGroup`s form a strict containment hierarchy, which is what makes shutdown correct (below):
 
 - **`wg`** tracks the `dispatchLoop` goroutine.
-- **`tableWg`** (owned by `dispatchLoop`) tracks the per-table `tableLoop`s.
+- **`tableWg`** (owned by `dispatchLoop`) tracks the per-tenant-table `tableLoop`s.
 - **`ackWg`** tracks the background `DoubleAck` goroutines, and the poison disposal (a DLQ publish *plus* a `DoubleAck`) that `rejectPoison` backgrounds from the dispatch loop.
 
 ## Why per table? The bug this design fixes
@@ -114,7 +115,7 @@ A single shared batch across all tables couples them: a high-volume table can tr
 
 ## The `tableBatcher` state machine
 
-Each `tableLoop` owns a `tableBatcher`. It has exactly two flush **triggers** — the batch reaching `maxBatch` (checked in `add`) and the `maxWait` deadline timer — plus a rule that **at most one insert runs per table at a time** ("coalescing"). A flush *completing* is **not** a trigger.
+Each `tableLoop` owns a `tableBatcher`. It has exactly two flush **triggers** — the batch reaching `maxBatch` (checked in `add`) and the `maxWait` deadline timer — plus a rule that **at most one insert runs per tenant table at a time** ("coalescing"). A flush *completing* is **not** a trigger.
 
 The `flushing` channel signals "an insert is in flight" (it is `nil` when idle — and receiving from a `nil` channel blocks forever, so the loop's `<-flushing` arm is automatically inert while idle). The `flushQueued` flag **latches** a trigger that fires while an insert is already running, so the deferred flush runs the moment the slot frees.
 
@@ -184,7 +185,7 @@ sequenceDiagram
     M->>M: run ctx canceled (SIGTERM via app.Run) → shutCtx (deadline)
     M->>SF: stop(shutCtx)
     SF->>D: workerCancel() → ctx.Done fires
-    D->>TL: close every per-table channel
+    D->>TL: close every per-tenant-table channel
     TL->>TL: drain buffered rows, await in-flight insert, final flush
     TL-->>D: tableWg drains
     D->>A: ackWg.Wait()
@@ -197,7 +198,7 @@ Why this ordering is correct: every `ackWg.Add` happens either inside a `tableLo
 
 If the deadline fires first, `waitOrDeadline` returns the deadline error and the in-flight goroutines are abandoned — the process is exiting anyway, and anything un-acked is redelivered on the next boot (at-least-once).
 
-Messages still sitting in `msgChan` or the consumer's prefetch buffer at shutdown are **not** flushed; they are simply redelivered next boot. Graceful shutdown flushes the in-hand per-table batches, not the entire in-flight pipeline.
+Messages still sitting in `msgChan` or the consumer's prefetch buffer at shutdown are **not** flushed; they are simply redelivered next boot. Graceful shutdown flushes the in-hand per-tenant-table batches, not the entire in-flight pipeline.
 
 ### When the consumer dies
 
@@ -227,7 +228,7 @@ Several layers throttle the pipeline, inner to outer:
 
 ## The Active Sweeper
 
-The worker advances the consumer's `AckFloor` by acking; the sweep observes it to decide what is safe to purge. They never call each other — the consumer's `AckFloor` is their only contract. The sweeper (`internal/ingest`) owns the schedule and the window: each tick it calls `mq.Purger.PurgeAcked(buffer-consumer, now − gap window)`, where the window is the longest `stream.gap_window_minutes` among the tenants being served — the stream is one for every tenant and the purge one bound over it, so purging less is the safe direction until each tenant has its own stream. The steps after the tick below are the embedded broker's implementation of that call.
+The worker advances the consumer's `AckFloor` by acking; the sweep observes it to decide what is safe to purge. They never call each other — the consumer's `AckFloor` is their only contract. The sweeper (`internal/ingest`) owns the schedule and the window: each tick it calls `mq.Purger.PurgeAcked(buffer-consumer, now − gap window)`, where the window is the longest `stream.gap_window_minutes` among the tenants being served — every tenant's events share one stream and a purge is one bound over it, so purging less is the safe direction until each tenant has its own stream. The steps after the tick below are the embedded broker's implementation of that call.
 
 ```mermaid
 flowchart TD
@@ -270,7 +271,7 @@ What will need to change, and the trade-offs (discussed at length on the batchin
 
 Tracked under [#191](https://github.com/Wave-RF/WaveHouse/issues/191):
 
-- **Pipelining beyond coalescing** — more than one insert in flight per table (with a documented bound), once benchmarks justify the added concurrency.
-- **`tableLoop` reaping** — loops are spawned per distinct table and never reaped; safe while table names are bounded (schema-validated, in-process publishers only). Needs idle-reaping before untrusted/remote publishers can create unbounded cardinality.
+- **Pipelining beyond coalescing** — more than one insert in flight per tenant table (with a documented bound), once benchmarks justify the added concurrency.
+- **`tableLoop` reaping** — loops are spawned per distinct tenant table and never reaped; safe while tenants and table names are bounded (a settings folder per tenant, schema-validated tables, in-process publishers only). Needs idle-reaping before untrusted/remote publishers can create unbounded cardinality. Tracked in [#263](https://github.com/Wave-RF/WaveHouse/issues/263).
 - **Per-table / partitioned consumers** and the **two-stream retention redesign**.
 - **Parallel e2e test files.** The e2e suite now isolates tables **per file** (`tests/e2e/sdk/tables.ts` — each file gets its own `clicks_<suite>`/`events_<suite>`/`users_<suite>`), so cross-file *data* contamination is structurally impossible. Running the files in parallel (dropping `maxWorkers: 1` in `vitest.config.ts`) is still deferred: several files do read-modify-write on the **single global policy document** and `streaming.test.ts` flips the global `default_role`, so concurrent files would race those writes. Parallelism needs per-table policy storage with atomic per-table updates first — tracked in [#214](https://github.com/Wave-RF/WaveHouse/issues/214).

@@ -727,7 +727,7 @@ Triggers an immediate re-discovery of ClickHouse table schemas, then returns the
 
 #### `GET /v1/ops/dlq/stats` — DLQ Statistics
 
-Returns per-table message counts in the Dead Letter Queue — a table's count summed across tenants, since the queue is one for every tenant until it is per tenant. Admin-only, like the rest of this section. Whether a poison row lands here is the settings directory's [`dlq.enabled`](/settings-directory#dead-letter-queue) switch (global or per table); the stream and this endpoint always exist. Before any failure has ever occurred, the endpoint returns `200` with `{"tables":{},"total":0}`.
+Returns per-table message counts in the Dead Letter Queue — a table's count summed across tenants, since one queue serves every tenant until each has its own. Admin-only, like the rest of this section. Whether a poison row lands here is the settings directory's [`dlq.enabled`](/settings-directory#dead-letter-queue) switch (global or per table); the stream and this endpoint always exist. Before any failure has ever occurred, the endpoint returns `200` with `{"tables":{},"total":0}`.
 
 **Error responses:**
 

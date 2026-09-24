@@ -710,7 +710,7 @@ func gapWindow(minutes int) map[string]any {
 // One ingest stream holds every tenant's events and the sweeper purges below
 // one sequence, so it keeps the longest gap window among the tenants being
 // served — every tenant's gap-fill history is inside it (a stream per tenant
-// will honor each tenant's own, #583 story 5). A flat directory's single
+// will honor each tenant's own, #583 story 5b). A flat directory's single
 // tenant gets exactly its own window.
 func TestLongestGapWindow(t *testing.T) {
 	open := func(t *testing.T, dir string) *settings.Registry {

@@ -213,7 +213,7 @@ On a structured query (`POST /v1/query?table={table}`) the allowlist is a **hard
 This produces `WHERE (tenant_id = ?)` with the caller's `app_metadata.tenant_id` claim bound as the parameter — so a `viewer` only ever sees rows for their own tenant, and the value comes from the signed token, not from anything the client sends.
 
 :::note[Two meanings of "tenant"]
-On this page a *tenant* is a row-scoping value carried in the signed token. The [`X-Tenant-ID` header](/deployment#multi-tenant-deployments) is a different axis: it selects which set of settings files — and so which `policies.json` — serves the request. It is client-supplied, resolved before authentication, and isolates no rows. A settings directory that holds the four files is one such tenant (`0`), so most deployments never send it.
+On this page a *tenant* is a row-scoping value carried in the signed token. The [`X-Tenant-ID` header](/deployment#multi-tenant-deployments) is a different axis: it selects which set of settings files — and so which `policies.json` — serves the request. It is client-supplied and resolved before authentication, so it is no row-isolation boundary: queries under every tenant read the same tables, and the one place rows divide by tenant is the live stream, which carries only the events ingested under the tenant it names. A settings directory that holds the four files is one such tenant (`0`), so most deployments never send it.
 :::
 
 Supported comparison operators:

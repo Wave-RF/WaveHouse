@@ -65,8 +65,9 @@ func subject(prefix string, t Topic) (string, error) {
 	return prefix + t.key(), nil
 }
 
-// topicKey is the tail of a subject carrying prefix — by construction the
-// Key() of the topic it was published on. A trim, no decoding.
+// topicKey is the tail of a subject carrying prefix — the key() of the topic
+// it was published on, or a one-token tail written before the tenant led the
+// subject (see parseTopicKey). A trim, no decoding.
 func topicKey(prefix, subj string) string {
 	return strings.TrimPrefix(subj, prefix)
 }

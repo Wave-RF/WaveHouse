@@ -38,7 +38,7 @@ type Queue interface {
 type parsedMsg struct {
 	msg       *mq.Message
 	tenant    tenant.ID // whose table it is: the topic the message arrived on names it (#583)
-	tableName string    // routing key for per-table batching; raw (unencoded) name
+	tableName string    // with tenant, the routing key for per-tenant-table batching; raw (unencoded) name
 	scope     string
 	columns   []string        // envelope column names, in declaration order
 	colSig    string          // columns joined; the within-table batch key
@@ -168,7 +168,7 @@ func StartIngestWorker(
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	worker.wg.Add(1)
 
-	// Dispatch loop: one consumer, fanned out to a goroutine per table.
+	// Dispatch loop: one consumer, fanned out to a goroutine per tenant table.
 	go worker.dispatchLoop(workerCtx, cons)
 
 	stopFunc := func(shutdownCtx context.Context) error {
@@ -302,7 +302,7 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 				ch = make(chan parsedMsg, w.maxBatch)
 				tableChans[key] = ch
 
-				// TODO(#191): tableLoops are spawned per distinct tenant table and
+				// TODO(#263): tableLoops are spawned per distinct tenant table and
 				// never reaped — they live for the process lifetime. Safe while
 				// tenants and table names are bounded (a settings folder per
 				// tenant, schema-validated tables, in-process publishers only,
@@ -331,7 +331,7 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 // goroutine started in flushPending — and it operates on a private copy of the
 // rows, never on these fields, so there is no shared mutable state.
 //
-// Coalescing: at most one flush runs per table at a time. A size or timer
+// Coalescing: at most one flush runs per tenant table at a time. A size or timer
 // trigger that fires while a flush is in flight is deferred (flushQueued) and
 // runs the moment the slot frees. A flush *completing* is not itself a trigger,
 // so a partial batch left behind keeps waiting for its own size/timer.
@@ -534,8 +534,8 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 // each that fails again is sent to the DLQ — or, with the DLQ switched off for
 // the table, left unacked so NATS redelivers it (the row is never dropped, it
 // retries until it inserts or the DLQ is switched on). tableLoop guarantees at
-// most one concurrent flushTable per table; different tables may flush
-// concurrently.
+// most one concurrent flushTable per tenant table; different tables — two
+// tenants' tables of one name included — may flush concurrently.
 func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg) {
 	if len(msgs) == 0 {
 		return
@@ -690,7 +690,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 		for _, pm := range msgs {
 			acks.Go(func() {
 				if err := pm.msg.DoubleAck(context.WithoutCancel(ctx)); err != nil {
-					slog.ErrorContext(context.WithoutCancel(ctx), "double ack failed for processed message", "error", err, "table", tableName)
+					slog.ErrorContext(context.WithoutCancel(ctx), "double ack failed for processed message", "error", err, "tenant", pm.tenant, "table", tableName)
 				}
 			})
 		}

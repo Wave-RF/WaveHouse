@@ -34,8 +34,9 @@ type Topic struct {
 // key is the injective string form of the topic that a subject's tail
 // carries: the tenant first, verbatim — its grammar makes it one token — then
 // the table and scope as encoded tokens. A topic without a tenant has no
-// subject, and its key parses back to nothing (parseTopicKey). Callers key
-// their own maps by the Topic value itself.
+// subject, and its key parses back to a topic of no tenant with the whole key
+// as its table (parseTopicKey's fallback). Callers key their own maps by the
+// Topic value itself.
 func (t Topic) key() string {
 	key := string(t.Tenant) + "." + encodeToken(t.Table)
 	if t.Scope != "" {
@@ -50,8 +51,9 @@ type Message struct {
 	Data      []byte
 	Timestamp time.Time
 	// topicKey is the key of the topic the message was published on, kept in
-	// the form the broker delivered it so the per-message path never decodes
-	// or re-encodes a name (see TopicKey / Topic).
+	// the form the broker delivered it, so parking it (DeadLetter) is a prefix
+	// swap that never decodes or re-encodes a name, and TopicKey is free (see
+	// TopicKey / Topic).
 	topicKey    string
 	doubleAckFn func(ctx context.Context) error
 	ackFn       func() error
@@ -228,8 +230,8 @@ type DeadLetterer interface {
 // DeadLetterCounts is what is parked on the dead-letter queue.
 type DeadLetterCounts struct {
 	// Tables maps table name → parked messages, for the tables asked about,
-	// summed across tenants: the queue is one for every tenant until it is
-	// per tenant (#583 story 5b), and so is the count. Scope is
+	// summed across tenants: one queue serves every tenant until each has its
+	// own (#583 story 5b), so one count covers them all. Scope is
 	// not broken out yet (it is inert until #235): a message parked under a
 	// scoped topic counts under "table.scope", not under its table.
 	Tables map[string]uint64

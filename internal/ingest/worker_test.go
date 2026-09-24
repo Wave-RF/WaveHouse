@@ -1783,8 +1783,9 @@ func TestFlushTable_DLQSwitchIsTheRowsTenants(t *testing.T) {
 
 // Two tenants, one table name: each tenant's rows batch on their own, so an
 // INSERT never mixes tenants — what a per-tenant ClickHouse target and cache
-// namespace (stories 6 and 8) rely on. Published interleaved, so batching by
-// table alone would put both tenants' first rows in one INSERT.
+// namespace (stories 6 and 8) rely on — and each batch invalidates its own
+// tenant's namespaces. Published interleaved, so batching by table alone
+// would put both tenants' first rows in one INSERT.
 func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 	t.Parallel()
 	const maxBatch = 2
@@ -1814,10 +1815,11 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cons, err := emb.CreateConsumer(ctx, mq.ConsumerConfig{Durable: BufferConsumerName, MaxAckPending: 1000})
 	require.NoError(t, err)
+	mc := &testutil.MockCache{}
 	worker := &IngestWorker{
 		dlq:     emb,
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
-		cache:   &testutil.MockCache{},
+		cache:   mc,
 		target: func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
@@ -1843,6 +1845,10 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 		defer mu.Unlock()
 		return len(bodies) == 2
 	}, defaultMaxWait, 25*time.Millisecond, "each tenant's table hits its own size trigger")
+	// Invalidation follows the INSERT's answer, on the worker's side.
+	require.Eventually(t, func() bool { return len(mc.GetNamespaces()) == 2 }, defaultMaxWait, 25*time.Millisecond)
+	assert.ElementsMatch(t, []cache.Namespace{{Tenant: "acme", Table: "events"}, {Tenant: "globex", Table: "events"}}, mc.GetNamespaces(),
+		"each batch bumps its own tenant's namespaces")
 	mu.Lock()
 	defer mu.Unlock()
 	for _, body := range bodies {

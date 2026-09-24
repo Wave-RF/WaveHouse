@@ -1491,13 +1491,17 @@ func TestHub_SubscribeSchemaFrame_ExcludesComputedColumns(t *testing.T) {
 // TestHub_TopicsAreTenantScoped: two tenants, one table name (#583). A
 // broadcast on one tenant's topic reaches that tenant's subscribers alone,
 // projected under that tenant's policy — the policy source is asked for the
-// event's tenant, and for the connection's on a gap-fill — never a fixed one.
+// event's tenant, and for the connection's on a gap-fill and on the schema
+// frame it opens with — never a fixed one.
 func TestHub_TopicsAreTenantScoped(t *testing.T) {
 	t.Parallel()
 	policies := map[tenant.ID]*policy.Policy{
 		"acme":   {Tables: map[string]policy.TablePolicy{"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page", "secret"}}}}}},
 		"globex": {Tables: map[string]policy.TablePolicy{"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}}}},
 	}
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
+		{Name: "clicks", Columns: []discovery.Column{{Name: "page", Type: "String"}, {Name: "secret", Type: "String"}}},
+	})
 	var mu sync.Mutex
 	var asked []tenant.ID
 	hub := NewHub(func(id tenant.ID) *policy.Policy {
@@ -1505,7 +1509,7 @@ func TestHub_TopicsAreTenantScoped(t *testing.T) {
 		defer mu.Unlock()
 		asked = append(asked, id)
 		return policies[id]
-	}, nil, nil)
+	}, reg, nil)
 	acmeTopic := mq.Topic{Tenant: "acme", Table: "clicks"}
 	globexTopic := mq.Topic{Tenant: "globex", Table: "clicks"}
 
@@ -1532,6 +1536,11 @@ func TestHub_TopicsAreTenantScoped(t *testing.T) {
 	require.Len(t, frames, 2, "a schema frame and the row")
 	assert.Equal(t, []string{"page"}, frameColumns(t, frames[0]))
 
+	// So does the schema frame a connection opens with.
+	f, ok := hub.SubscribeSchemaFrame("globex", "clicks", "viewer", NewSubscriber(nil, nil))
+	require.True(t, ok)
+	assert.Equal(t, []string{"page"}, frameColumns(t, f))
+
 	// A tenant the source does not know reads a nil policy: the lockout.
 	unknown := NewSubscriber(nil, nil)
 	hub.Add(mq.Topic{Tenant: "initech", Table: "clicks"}, "viewer", unknown)
@@ -1540,5 +1549,5 @@ func TestHub_TopicsAreTenantScoped(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Equal(t, []tenant.ID{"acme", "globex", "globex", "initech"}, asked, "each read names the event's or the connection's tenant")
+	assert.Equal(t, []tenant.ID{"acme", "globex", "globex", "globex", "initech"}, asked, "each read names the event's or the connection's tenant")
 }
