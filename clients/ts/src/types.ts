@@ -470,16 +470,19 @@ export interface PipeRequestOptions {
 
 /**
  * Options for a call to one of the admin routes that address a tenant:
- * `wh.pipes.list()`, `wh.pipes.get()`, and `wh.settings.reload()`.
+ * `wh.pipes.list()`, `wh.pipes.get()`, `wh.settings.reload()`,
+ * `wh.schema.list()`, `wh.schema.refresh()`, `wh.from(t).schema()` and
+ * `wh.sql()`.
  */
 export interface OpsRequestOptions {
   signal?: AbortSignal;
   /**
    * The tenant the call addresses, sent as `?tenant=`. The admin routes ignore
    * the `X-Tenant-ID` header, so `options.headers` cannot select one. Omitted,
-   * the reads serve the default tenant (`0`) and `reload()` reloads every
-   * tenant. An id the server does not accept — the empty string included — is
-   * a `400`, never a silent fallback to the default.
+   * the reads, the refresh and `sql()` serve the default tenant (`0`) and
+   * `reload()` reloads every tenant. An id the server does not accept — the
+   * empty string included — is a `400`, never a silent fallback to the
+   * default.
    */
   tenant?: string;
 }

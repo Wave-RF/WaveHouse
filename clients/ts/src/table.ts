@@ -1,11 +1,12 @@
 import { err, ok } from "./errors.js";
-import { request } from "./http.js";
+import { request, tenantParam } from "./http.js";
 import { QueryBuilder } from "./query-builder.js";
 import type { StreamController } from "./stream/controller.js";
 import type {
   HttpContext,
   InsertRecordResult,
   InsertResult,
+  OpsRequestOptions,
   RequestOptions,
   Result,
   StreamOptions,
@@ -190,11 +191,12 @@ export class TableRef<Row = Record<string, unknown>> {
     return ok(result);
   }
 
-  /** Fetch the schema for this table. */
-  async schema(opts?: { signal?: AbortSignal }): Promise<Result<TableSchema>> {
+  /** Fetch the schema for this table — under `opts.tenant`, the default tenant without it. */
+  async schema(opts?: OpsRequestOptions): Promise<Result<TableSchema>> {
     const { data, error } = await request<TableSchema>(this._ctx, {
       method: "GET",
-      path: `/v1/ops/schema?table=${encodeURIComponent(this._table)}`,
+      path: "/v1/ops/schema",
+      params: { table: this._table, ...tenantParam(opts) },
       signal: opts?.signal,
     });
     if (error) return err(error);

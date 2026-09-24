@@ -132,18 +132,18 @@ func TestNewRouter_HandlersReceiveTheRequestTenantsStore(t *testing.T) {
 		return pipes.Static(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1"})
 	}
 	reg := testRegistry(t)
-	ingest := NewIngestHandler(reg, &testutil.MockPublisher{})
+	ingest := NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{})
 	ingest.PolicySource = recordPolicy
 	router := NewRouter(Dependencies{
 		Tenants:         tenants,
 		Ingest:          ingest,
-		StructuredQuery: NewStructuredQueryHandler(nil, nil, reg, recordPolicy, func(*settings.Store) int { return 60 }, noTimeout, nil),
+		StructuredQuery: NewStructuredQueryHandler(nil, nil, fixedRegistry(reg), recordPolicy, func(*settings.Store) int { return 60 }, noTimeout, nil),
 		Pipes:           NewPipesHandler(recordPipes, recordPolicy, nil, nil, noTimeout),
 		Query:           &QueryHandler{},
 		SSE:             NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:          &HealthHandler{},
 		Version:         NewVersionHandler("test", "test", "test"),
-		Schema:          NewSchemaHandler(reg),
+		Schema:          schemaHandlerOver(reg, tenants),
 		AuthMW:          func(next http.Handler) http.Handler { return next },
 		PolicySource:    policy.Static(&policy.Policy{}),
 	})
@@ -191,7 +191,7 @@ func TestTenantRouteHandlers_NoResolvedTenantIs500(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t)
 	handlers := map[string]http.HandlerFunc{
-		"ingest":           NewIngestHandler(reg, &testutil.MockPublisher{}).Handle,
+		"ingest":           NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}).Handle,
 		"structured query": newStructuredQueryHandler(t).Handle,
 		"pipe execute":     NewPipesHandler(staticPipes(), nil, nil, nil, noTimeout).Execute,
 		"stream":           NewStreamHandler(stream.NewHub(nil, nil, nil), nil).Handle,
@@ -213,12 +213,12 @@ func tenantProbeRouter(t *testing.T, sawStore *[]bool) http.Handler {
 	reg := testRegistry(t)
 	return NewRouter(Dependencies{
 		Tenants: testTenants(),
-		Ingest:  NewIngestHandler(reg, &testutil.MockPublisher{}),
+		Ingest:  NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
 		Query:   &QueryHandler{},
 		SSE:     NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:  &HealthHandler{},
 		Version: NewVersionHandler("test", "test", "test"),
-		Schema:  NewSchemaHandler(reg),
+		Schema:  schemaHandlerOver(reg, testTenants()),
 		AuthMW: func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_, ok := StoreFromContext(r.Context())

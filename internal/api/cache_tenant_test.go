@@ -68,17 +68,17 @@ func cachedRouter(t *testing.T, tenants *settings.Registry, conn driver.Conn, c 
 		DefaultRole: "viewer",
 		Tables:      map[string]policy.TablePolicy{"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}}},
 	})
-	timeout := func() time.Duration { return 5 * time.Second }
+	timeout := func(*settings.Store) time.Duration { return 5 * time.Second }
 	return NewRouter(Dependencies{
 		Tenants:         tenants,
-		Ingest:          NewIngestHandler(reg, &testutil.MockPublisher{}),
-		StructuredQuery: NewStructuredQueryHandler(conn, c, reg, viewer, func(*settings.Store) int { return 60 }, timeout, nil),
-		Pipes:           NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), viewer, conn, c, timeout),
+		Ingest:          NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
+		StructuredQuery: NewStructuredQueryHandler(fixedConn(conn), c, fixedRegistry(reg), viewer, func(*settings.Store) int { return 60 }, timeout, nil),
+		Pipes:           NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), viewer, fixedConn(conn), c, timeout),
 		Query:           &QueryHandler{},
 		SSE:             NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:          &HealthHandler{},
 		Version:         NewVersionHandler("test", "test", "test"),
-		Schema:          NewSchemaHandler(reg),
+		Schema:          schemaHandlerOver(reg, tenants),
 		AuthMW:          func(next http.Handler) http.Handler { return next },
 		PolicySource:    policy.Static(&policy.Policy{}),
 	})
@@ -103,9 +103,9 @@ func serveAs(t *testing.T, router http.Handler, path, body string, id tenant.ID)
 // behind them — each miss once and hit once, and ClickHouse is queried once
 // per tenant: the second tenant is never served the first one's rows. The
 // query key, the singleflight key, and the dependency namespaces all lead
-// with the tenant (#583 story 8), which is what keeps this true once each
-// tenant has its own ClickHouse (story 6) — a tenant-blind key would then be
-// a silent cross-tenant read.
+// with the tenant (#583 story 8), which is what keeps this true now that each
+// tenant reads its own ClickHouse (story 6) — a tenant-blind key would be a
+// silent cross-tenant read.
 //
 // The subtests share one router, one pool and one query counter, so they run
 // in order: neither the parent nor the subtests are parallel.

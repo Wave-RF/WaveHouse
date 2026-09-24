@@ -20,6 +20,14 @@ await wh.schema.refresh();
 
 Individual table schema is also available via `wh.from('clicks').schema()`.
 
+Over [a nested settings directory](/deployment#the-nested-settings-directory), pass `tenant` to read or refresh that tenant's schema, authenticating with the [operator key](/api#authentication) (sent as `X-Operator-Key` via [`options.headers`](/sdk#custom-headers)): the nested `/v1/ops/*` routes admit it alone, and a token carrying an admin role gets `403`; without it the calls address tenant `0`. A `503` with `Retry-After` is a tenant whose first discovery has not succeeded yet (`Retry-After: 5`), or one on no ClickHouse pool — [no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused — on the refresh (`Retry-After: 30`); the SDK retries both, and `wh.sql()` takes the same option to run against that tenant's ClickHouse:
+
+```ts
+const { data } = await wh.schema.list({ tenant: 'acme' });
+await wh.schema.refresh({ tenant: 'acme' });
+const { data: rows } = await wh.sql('SELECT count() FROM clicks', { tenant: 'acme' });
+```
+
 > `wh.schema.list()`, `wh.schema.refresh()`, and `wh.from(t).schema()` hit `/v1/ops/schema*`, which are **admin-only** endpoints: the caller must pass the admin gate — resolve to the policy admin role (`admin_role`, `"admin"` by default) or present the non-JWT [operator key](/api#authentication). Unless the deployment deliberately sets `default_role` to the admin role (the loudly-warned dev-only setting), construct the client with an admin-role token — or send the operator key via [`options.headers`](/sdk#custom-headers) — or these calls return `403`.
 
 ---

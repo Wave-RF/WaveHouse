@@ -28,13 +28,15 @@ type PipesHandler struct {
 	// is tenant-exempt, so they carry no request tenant and read the one
 	// ?tenant= names, the default one without it (opsStore).
 	Tenants *settings.Registry
-	CHConn  driver.Conn
-	Cache   cache.Cache
-	sf      singleflight.Group
-	// queryTimeout bounds each pipe execution, read per request
-	// (chconn.Manager.QueryTimeout in production) so a settings reload
-	// applies without a restart.
-	queryTimeout func() time.Duration
+	// CHConn yields the request tenant's connection (chconn.Pools.For in
+	// production); nil is a tenant on no pool, a 503.
+	CHConn func(*settings.Store) driver.Conn
+	Cache  cache.Cache
+	sf     singleflight.Group
+	// queryTimeout bounds each pipe execution, read per request off the
+	// tenant's settings ((*settings.Store).ClickHouse().QueryTimeout in
+	// production) so a settings reload applies without a restart.
+	queryTimeout func(*settings.Store) time.Duration
 
 	// maxRequestBytes optionally overrides the default inbound request body
 	// cap (maxControlBodyBytes) for the body-decoding path (Execute).
@@ -44,7 +46,7 @@ type PipesHandler struct {
 	maxRequestBytes int64
 }
 
-func NewPipesHandler(source func(*settings.Store) pipes.Source, policySource PolicySource, conn driver.Conn, c cache.Cache, queryTimeout func() time.Duration) *PipesHandler {
+func NewPipesHandler(source func(*settings.Store) pipes.Source, policySource PolicySource, conn func(*settings.Store) driver.Conn, c cache.Cache, queryTimeout func(*settings.Store) time.Duration) *PipesHandler {
 	return &PipesHandler{Source: source, PolicySource: policySource, CHConn: conn, Cache: c, queryTimeout: queryTimeout}
 }
 
@@ -150,6 +152,15 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The tenant's pool, ahead of the cache: a tenant on none — its tuple
+	// could not be opened, such as by the connection ceiling — fails
+	// closed rather than serve what it cached before (#583 story 6).
+	conn := connOf(h.CHConn, store)
+	if conn == nil {
+		writeUnavailable(w, noConnectionMessage, retryAfterPool)
+		return
+	}
+
 	// Cache. A pipe can read several tables, but the current pipe impl doesn't
 	// expose its table/scope dependencies, so we pass no deps: the result is keyed
 	// by the tenant and sha alone (TTL-only) and the ingest worker cannot
@@ -169,12 +180,12 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		queryCtx, cancel := context.WithTimeout(r.Context(), h.queryTimeout())
+		queryCtx, cancel := context.WithTimeout(r.Context(), timeoutOf(h.queryTimeout, store))
 		defer cancel()
 
 		start := time.Now()
 
-		rows, err := executeCHQuery(queryCtx, h.CHConn, sql, params)
+		rows, err := executeCHQuery(queryCtx, conn, sql, params)
 		queryDuration := time.Since(start)
 		if err != nil {
 			// TODO: depending on the error, we may actually want to cache it

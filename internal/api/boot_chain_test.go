@@ -87,7 +87,7 @@ func TestBoot_Chain_DegradedThenRecovers(t *testing.T) {
 	// comes up partway through the retry backoff.
 	conn := &errsThenSuccessConn{errs: []error{connRefused, connRefused, dbMissing}}
 
-	registry := discovery.NewSchemaRegistry(conn, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	registry := discovery.NewSchemaRegistry(func() (driver.Conn, string) { return conn, "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 
 	// Phase 0 — synchronous boot Refresh fails. internal/app records the
 	// diagnostic in BootState and proceeds with the retry loop in a

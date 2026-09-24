@@ -28,7 +28,8 @@ import (
 // type string), not the caller's structs.
 func NewTestSchemaRegistry(t testing.TB, tables []*discovery.TableSchema) *discovery.SchemaRegistry {
 	t.Helper()
-	reg := discovery.NewSchemaRegistry(&schemaConn{tables: tables}, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	conn := &schemaConn{tables: tables}
+	reg := discovery.NewSchemaRegistry(func() (driver.Conn, string) { return conn, "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 	require.NoError(t, reg.Refresh(context.Background()))
 	return reg
 }

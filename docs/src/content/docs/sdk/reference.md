@@ -32,7 +32,7 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 403 | `HTTP_403` | No | Insufficient permissions |
 | 404 | `HTTP_404` | No | Table, pipe, or tenant not found |
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
-| 503 | `HTTP_503` | Yes | Service unavailable, a tenant whose settings folder was rejected, or a token sent while that tenant's JWKS has not been fetched yet (`token verifier not ready`, `Retry-After: 30`). REST calls auto-retry, honoring `Retry-After` when the response carries one — so each attempt on that last cause waits the 30 s; a stream re-dials on its own jittered backoff instead |
+| 503 | `HTTP_503` | Yes | Service unavailable, a tenant whose settings folder was rejected, a schema not discovered yet, a tenant on no ClickHouse pool, or a token sent while that tenant's JWKS has not been fetched yet (`token verifier not ready`, `Retry-After: 30`). REST calls auto-retry, honoring `Retry-After` when the response carries one — so each attempt on that last cause waits the 30 s; a stream re-dials on its own jittered backoff instead |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `AbortSignal` |
 | 0 | `SSE_CONNECT_ERROR` | No | Stream could not be started (e.g. a non-absolute `baseURL`) |
@@ -89,7 +89,7 @@ createClient<DB>(config) → WaveHouseClient
 │   ├── .selectAll() → QueryBuilder (PromiseLike)
 │   ├── .insert(data) → Promise<Result<InsertResult>>
 │   ├── .insertNDJSON(source) → Promise<Result<InsertResult>>
-│   ├── .schema() → Promise<Result<TableSchema>>   (admin)
+│   ├── .schema(opts?) → Promise<Result<TableSchema>>   (admin)
 │   └── .stream(opts?) → StreamController
 ├── .pipe(name, params?) → PipeRef (PromiseLike)
 │   ├── .fetch(opts?) → Promise<Result<Row[]>>   // { signal } only — no limit
@@ -99,8 +99,8 @@ createClient<DB>(config) → WaveHouseClient
 │   └── .get(name, opts?) → Promise<Result<Pipe>>
 ├── .sql(query, opts?) → Promise<Result<Row[]>>   (admin)
 ├── .schema (admin)
-│   ├── .list() → Promise<Result<Schemas>>
-│   └── .refresh() → Promise<Result<void>>
+│   ├── .list(opts?) → Promise<Result<Schemas>>
+│   └── .refresh(opts?) → Promise<Result<void>>
 ├── .settings (admin)
 │   └── .reload(opts?) → Promise<Result<SettingsReloadResult>>
 ├── .dlq (admin)
@@ -129,7 +129,7 @@ npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`.
+Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server of the four settings files, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`. Codegen does not support [a nested settings directory](/deployment#the-nested-settings-directory): its `/v1/ops/*` routes admit the operator key alone, which codegen has no option to send, and it would read tenant `0`'s schema only.
 
 **Options:**
 

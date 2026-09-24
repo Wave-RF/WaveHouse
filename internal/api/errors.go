@@ -24,6 +24,26 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
+// The Retry-After hints of the two 503s a tenant's ClickHouse side answers
+// with: a schema not discovered yet, which discovery retries on a 2s → 60s
+// backoff, and no pool — one that could not be opened, such as one the
+// connection ceiling refused — which the next settings reload retries (the
+// ingest backpressure hint).
+const (
+	retryAfterSchema = "5"
+	retryAfterPool   = "30"
+
+	schemaNotLoadedMessage = "schema not loaded yet"
+	noConnectionMessage    = "no ClickHouse connection is open for this tenant"
+)
+
+// writeUnavailable writes a 503 with a Retry-After hint: what the request
+// needs is not there yet, and a retry is the right response.
+func writeUnavailable(w http.ResponseWriter, message, retryAfter string) {
+	w.Header().Set("Retry-After", retryAfter)
+	writeJSONError(w, http.StatusServiceUnavailable, message)
+}
+
 // writeAuthzDenied writes the response for an authorization denial and emits a
 // structured WARN (see logAuthzDenied) so a misconfigured role or policy shows
 // up in the logs without having to reproduce the request. When the request

@@ -46,6 +46,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // BuildInfo is the ldflags-stamped identity of the binary, served by
@@ -89,18 +90,21 @@ type App struct {
 	listener net.Listener
 
 	// tenants is the registry every tenant-aware path resolves through, and
-	// the owner of every reload. The process-wide resources (ClickHouse,
-	// MQ) still follow its default tenant, through defaultStore: tenant
-	// 0's store as of its last adoption (defaultSetting).
+	// the owner of every reload. The one process-wide resource left, the MQ,
+	// still follows its default tenant, through defaultStore: tenant 0's
+	// store as of its last adoption (defaultSetting).
 	tenants      *settings.Registry
 	defaultStore atomic.Pointer[settings.Store]
 	// policies is the default tenant's policy, for the ops gate of a flat
 	// directory.
 	policies    policy.Source
 	promHandler http.Handler
-	ch          *chconn.Manager
+	// pools is one ClickHouse pool per tuple the served tenants name, and
+	// discoveries one schema registry per served tenant, each resolved per
+	// call by the tenant.
+	pools       *chconn.Pools
 	bootState   *api.BootState
-	registry    *discovery.SchemaRegistry
+	discoveries *discoveries
 	// dedup is one store per tenant, each following its own folder's switch.
 	dedup       *dedupe.Stores
 	mq          mq.Broker
@@ -293,9 +297,10 @@ func closeWithin(ctx context.Context, name string, release func(context.Context)
 // Handler is the API router, for a harness that serves it itself.
 func (a *App) Handler() http.Handler { return a.handler }
 
-// Registry is the schema registry, for a harness that refreshes it after
-// creating tables.
-func (a *App) Registry() *discovery.SchemaRegistry { return a.registry }
+// Registry is the default tenant's schema registry, for a harness that
+// refreshes it after creating tables; nil over a nested directory serving
+// no tenant 0.
+func (a *App) Registry() *discovery.SchemaRegistry { return a.discoveries.For(tenant.Default) }
 
 // MQ is the broker, for a harness that publishes straight onto the ingest
 // queue.

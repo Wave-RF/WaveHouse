@@ -2,15 +2,39 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+)
+
+var (
+	// ErrNotLoaded is Lookup's answer before the first successful Refresh:
+	// the table may well exist, the registry just cannot say yet.
+	ErrNotLoaded = errors.New("schema not loaded yet")
+	// ErrUnknownTable is Lookup's answer for a table the loaded schema lacks.
+	ErrUnknownTable = errors.New("unknown table")
+	// ErrNoConnection is Refresh's answer when the connection getter yields
+	// none: the tenant has no open ClickHouse pool.
+	ErrNoConnection = errors.New("no ClickHouse connection")
+)
+
+// refreshFailures counts the refresh loops' failed attempts per tenant: a
+// tenant's ClickHouse outage after its first discovery is this counter and a
+// log line, never a probe failure.
+var refreshFailures, _ = otel.Meter("wavehouse-discovery").Int64Counter(
+	"wavehouse_schema_refresh_failures_total",
+	metric.WithDescription("Failed schema refresh attempts of the boot retry and auto-refresh loops, per tenant"),
 )
 
 // Column describes a single ClickHouse column.
@@ -171,34 +195,48 @@ func (ts *TableSchema) InsertableColumnNames() []string {
 	return columnNames(ts.InsertableColumns())
 }
 
-// SchemaRegistry discovers and caches ClickHouse table schemas.
+// SchemaRegistry discovers and caches one tenant's ClickHouse table schemas.
 type SchemaRegistry struct {
-	conn driver.Conn
-	// database supplies the database to discover from on each Refresh, so a
-	// ClickHouse reconfigure that changes clickhouse.database is honored by
-	// the next refresh (chconn.Manager.Database in production).
-	database func() string
+	// source supplies the tenant's connection and the database to discover
+	// from, read together once per Refresh, so a settings reload that moves
+	// the tenant to another pool or database is honored by the next refresh
+	// (the tenant's chconn.Pools entry in production).
+	source Source
 	// tenant is whose tables the registry discovers.
 	tenant tenant.ID
 	// refreshInterval supplies the tenant's auto-refresh interval on each
 	// tick, so a settings reload retunes the cadence without restarting the
 	// loop (settings.Store.SchemaRefreshInterval in production).
 	refreshInterval func(tenant.ID) time.Duration
-	mu              sync.RWMutex
-	tables          map[string]*TableSchema
+	// firstTick picks how long StartAutoRefresh waits before its first
+	// refresh, within the interval; rand.N, substituted by tests.
+	firstTick func(interval time.Duration) time.Duration
+	// loaded is set by the first successful Refresh and never cleared: the
+	// line between "no schema known yet" and "this table is unknown".
+	loaded atomic.Bool
+	mu     sync.RWMutex
+	tables map[string]*TableSchema
 	// serverVersion is the ClickHouse version string from the last successful
 	// Refresh, guarded by mu alongside tables.
 	serverVersion string
 }
 
+// Source yields a tenant's connection and the database it discovers from,
+// one snapshot: the database is the one the connection's own pool was
+// opened for, so the schema discovered always describes the database the
+// tenant's queries and inserts run against. A nil connection is a tenant
+// with no open pool, which Refresh reports as ErrNoConnection.
+type Source func() (driver.Conn, string)
+
 // NewSchemaRegistry creates the registry of tenant id, which discovers
-// schemas from system.columns.
-func NewSchemaRegistry(conn driver.Conn, database func() string, id tenant.ID, refreshInterval func(tenant.ID) time.Duration) *SchemaRegistry {
+// schemas from system.columns over the connection and database source
+// yields.
+func NewSchemaRegistry(source Source, id tenant.ID, refreshInterval func(tenant.ID) time.Duration) *SchemaRegistry {
 	return &SchemaRegistry{
-		conn:            conn,
-		database:        database,
+		source:          source,
 		tenant:          id,
 		refreshInterval: refreshInterval,
+		firstTick:       rand.N[time.Duration],
 		tables:          make(map[string]*TableSchema),
 	}
 }
@@ -211,26 +249,34 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
 	defer span.End()
 
+	// One connection and one database per refresh, read together: a reload
+	// that moves the tenant to another pool or database applies to the NEXT
+	// refresh, so every query of this one runs against the same server and
+	// database — reading the database twice would let a reconfigure land
+	// between the system.columns and system.tables queries and attach DDL
+	// from the new database to same-named schemas discovered from the old
+	// one. (The pool's own connection can still be swapped underneath
+	// mid-refresh by a resize, which stays on the same server.)
+	conn, database := sr.source()
+	if conn == nil {
+		return fmt.Errorf("%w for tenant %s", ErrNoConnection, sr.tenant)
+	}
+
 	// ClickHouse interprets zone-less timestamp strings in the server's default
 	// zone; canonicalization applies the same rule so the instant never changes (#372).
 	var tzName string
-	if err := sr.conn.QueryRow(ctx, "SELECT timezone()").Scan(&tzName); err != nil {
+	if err := conn.QueryRow(ctx, "SELECT timezone()").Scan(&tzName); err != nil {
 		return fmt.Errorf("query server timezone: %w", err)
 	}
 	// The server version is metadata about the schema source, probed on the same
 	// refresh so a stale version cannot outlive the schemas it describes.
 	//
-	// It is NOT a same-server guarantee: chconn.Manager resolves the connection
-	// per call, so a reload changing clickhouse.addr between this probe and the
-	// system.columns query below would pair a version from one server with
-	// schemas from another. Narrow, self-correcting on the next refresh, and
-	// shared with the timezone probe above — but do not read this as atomic.
-	//
-	// Nor is the read side: ServerVersion() and Get()/List() take separate
-	// RLocks, so a caller doing both across a refresh boundary pairs version N
-	// with schemas N+1. They are published together; nothing reads them together.
+	// The read side is not atomic: ServerVersion() and Get()/List() take
+	// separate RLocks, so a caller doing both across a refresh boundary pairs
+	// version N with schemas N+1. They are published together; nothing reads
+	// them together.
 	var serverVersion string
-	if err := sr.conn.QueryRow(ctx, "SELECT version()").Scan(&serverVersion); err != nil {
+	if err := conn.QueryRow(ctx, "SELECT version()").Scan(&serverVersion); err != nil {
 		return fmt.Errorf("query server version: %w", err)
 	}
 
@@ -244,14 +290,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 			"timezone", tzName, "error", err)
 	}
 
-	// One database per refresh. `database` is a live getter so a ClickHouse
-	// reconfigure is honored on the NEXT refresh — reading it twice would let a
-	// reconfigure land between the system.columns and system.tables queries and
-	// attach DDL from the new database to same-named schemas discovered from the
-	// old one.
-	database := sr.database()
-
-	rows, err := sr.conn.Query(ctx,
+	rows, err := conn.Query(ctx,
 		`SELECT table, name, type, default_kind, default_expression, position
 		 FROM system.columns
 		 WHERE database = ?
@@ -294,7 +333,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		return fmt.Errorf("iterate system.columns: %w", err)
 	}
 
-	if err := sr.attachDDL(ctx, database, tables); err != nil {
+	if err := attachDDL(ctx, conn, database, tables); err != nil {
 		return err
 	}
 
@@ -307,7 +346,8 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	sr.tables = tables
 	sr.serverVersion = serverVersion
 	sr.mu.Unlock()
-	slog.InfoContext(ctx, "schema registry refreshed", "tables", len(tables), "server_tz", tzName, "server_version", serverVersion)
+	sr.loaded.Store(true)
+	slog.InfoContext(ctx, "schema registry refreshed", "tenant", sr.tenant, "tables", len(tables), "server_tz", tzName, "server_version", serverVersion)
 
 	return nil
 }
@@ -317,8 +357,8 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 // scan didn't return, and one created between the two queries — is skipped rather
 // than added: a TableSchema with no columns is not a schema, and the two queries
 // are not a snapshot.
-func (sr *SchemaRegistry) attachDDL(ctx context.Context, database string, tables map[string]*TableSchema) error {
-	rows, err := sr.conn.Query(ctx,
+func attachDDL(ctx context.Context, conn driver.Conn, database string, tables map[string]*TableSchema) error {
+	rows, err := conn.Query(ctx,
 		`SELECT name, create_table_query
 		 FROM system.tables
 		 WHERE database = ?
@@ -356,11 +396,32 @@ func (sr *SchemaRegistry) ServerVersion() string {
 	return sr.serverVersion
 }
 
-// Get returns the schema for a table, or nil if not found.
+// Get returns the schema for a table, or nil if not found — before the first
+// refresh as much as for a table the schema lacks, which is the fail-closed
+// reading the stream hub wants. A handler that answers 404 uses Lookup.
 func (sr *SchemaRegistry) Get(name string) *TableSchema {
 	sr.mu.RLock()
 	defer sr.mu.RUnlock()
 	return sr.tables[name]
+}
+
+// Loaded reports whether a Refresh has ever succeeded: until one has, the
+// registry cannot tell an unknown table from one it has not seen yet.
+func (sr *SchemaRegistry) Loaded() bool { return sr.loaded.Load() }
+
+// Lookup is Get for a caller that answers the two misses differently:
+// ErrNotLoaded before the first successful Refresh (the table may exist —
+// a 503 with Retry-After, not a 404), ErrUnknownTable for a table the loaded
+// schema lacks.
+func (sr *SchemaRegistry) Lookup(name string) (*TableSchema, error) {
+	if !sr.Loaded() {
+		return nil, ErrNotLoaded
+	}
+	ts := sr.Get(name)
+	if ts == nil {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownTable, name)
+	}
+	return ts, nil
 }
 
 // List returns all discovered table schemas.
@@ -403,7 +464,7 @@ func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxB
 	for {
 		if err := sr.Refresh(ctx); err == nil {
 			return nil
-		} else if ctx.Err() == nil && onAttempt != nil {
+		} else if ctx.Err() == nil {
 			// Skip the callback when Refresh's error is just a downstream
 			// reflection of ctx cancellation — that's a shutdown signal,
 			// not a real diagnostic. Without this guard, a clean shutdown
@@ -412,7 +473,10 @@ func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxB
 			//   "schema discovery: context canceled"
 			// — visible to anyone curl'ing /livez during the shutdown
 			// window. Not wrong, just noise.
-			onAttempt(err)
+			sr.countFailure(ctx)
+			if onAttempt != nil {
+				onAttempt(err)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -431,10 +495,13 @@ func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxB
 const unresolvedRefreshInterval = time.Minute
 
 // StartAutoRefresh runs a background goroutine that refreshes schemas
-// at the configured interval. Blocks until ctx is cancelled. The interval is
-// re-read after every tick, so a changed setting applies from the next cycle
-// — an in-flight wait finishes at the old cadence rather than resetting,
-// which keeps a reload from ever deferring an imminent refresh.
+// at the configured interval. Blocks until ctx is cancelled. The first
+// refresh fires at a random point within the interval, so tenants adopted
+// together do not refresh together; the cadence runs from there. The
+// interval is re-read after every tick, so a changed setting applies from
+// the next cycle — an in-flight wait finishes at the old cadence rather
+// than resetting, which keeps a reload from ever deferring an imminent
+// refresh.
 //
 // A validated setting is at least a second, so a non-positive interval is a
 // tenant the settings registry could not resolve, read as the zero value.
@@ -446,22 +513,33 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 	if interval <= 0 {
 		interval = unresolvedRefreshInterval
 	}
+	first := time.NewTimer(sr.firstTick(interval))
+	defer first.Stop()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-first.C:
+			// The cadence starts from the first refresh, not from the loop.
+			ticker.Reset(interval)
 		case <-ticker.C:
-			if err := sr.Refresh(ctx); err != nil {
-				slog.ErrorContext(ctx, "schema auto-refresh failed", "error", err)
-			}
-			if next := sr.refreshInterval(sr.tenant); next > 0 && next != interval {
-				interval = next
-				ticker.Reset(interval)
-			}
+		}
+		if err := sr.Refresh(ctx); err != nil {
+			sr.countFailure(ctx)
+			slog.ErrorContext(ctx, "schema auto-refresh failed", "tenant", sr.tenant, "error", err)
+		}
+		if next := sr.refreshInterval(sr.tenant); next > 0 && next != interval {
+			interval = next
+			ticker.Reset(interval)
 		}
 	}
+}
+
+// countFailure bumps the tenant's refresh-failure counter.
+func (sr *SchemaRegistry) countFailure(ctx context.Context) {
+	refreshFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("tenant", sr.tenant.String())))
 }
 
 // isNullable checks if a ClickHouse type string is Nullable.

@@ -1,19 +1,18 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"sync"
-
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
 // BootState tracks a one-shot startup diagnostic surfaced by /livez. While
 // Err() returns non-nil the binary is considered to be in degraded-boot mode:
 // /livez responds 503 with the diagnostic message instead of 200, so an
 // operator can curl the endpoint to learn why the gateway isn't accepting
-// traffic yet. Once boot work (today: ClickHouse schema discovery) succeeds,
-// Set(nil) flips /livez back to 200.
+// traffic yet. Once boot work (today: the first tenant's ClickHouse schema
+// discovery) succeeds, Set(nil) flips /livez back to 200.
 //
 // BootState is safe for concurrent use.
 type BootState struct {
@@ -45,7 +44,10 @@ func (b *BootState) Err() error {
 
 // HealthHandler provides liveness and readiness probes.
 type HealthHandler struct {
-	CHConn driver.Conn
+	// Ping is Readiness's ClickHouse check (chconn.Pools.Ping in production:
+	// every open pool at once, ready at the first answer, 503 with every
+	// pool's error when none answers). Nil skips the check.
+	Ping func(context.Context) error
 	// Boot is consulted by both Liveness and Readiness. When non-nil and
 	// its Err() is non-nil, both endpoints report 503 with the diagnostic
 	// — used while boot-time schema discovery is still failing in the
@@ -54,8 +56,8 @@ type HealthHandler struct {
 	Boot *BootState
 }
 
-func NewHealthHandler(chConn driver.Conn) *HealthHandler {
-	return &HealthHandler{CHConn: chConn}
+func NewHealthHandler(ping func(context.Context) error) *HealthHandler {
+	return &HealthHandler{Ping: ping}
 }
 
 func (h *HealthHandler) Liveness(w http.ResponseWriter, _ *http.Request) {
@@ -83,8 +85,8 @@ func (h *HealthHandler) Readiness(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if h.CHConn != nil {
-		if err := h.CHConn.Ping(r.Context()); err != nil {
+	if h.Ping != nil {
+		if err := h.Ping(r.Context()); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "not ready", "error": err.Error()})
 			return

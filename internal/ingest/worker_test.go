@@ -49,7 +49,7 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockPublisher
 		failed:  make(chan error, 1),
 		clients: chconn.NewHTTPClients(func(*tls.Config) *http.Client { return &http.Client{Transport: rt} }),
 		cache:   cache,
-		target: func() chconn.Target {
+		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: "http://test-clickhouse:8123", Username: "test_user", Password: "test_pass", Database: "test_db"}
 		},
 	}
@@ -136,7 +136,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 			t.Parallel()
 			q, c := tt.setup(t)
 			_, _, err := StartIngestWorker(context.Background(), q, c,
-				func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
+				func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrSub)
 		})
@@ -197,7 +197,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 		dlq:     emb,
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
 		cache:   cache,
-		target: func() chconn.Target {
+		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
 		maxBatch: defaultMaxBatch,
@@ -269,7 +269,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	t.Cleanup(cancel)
 
 	stopFn, _, err := StartIngestWorker(ctx, emb, &testutil.MockCache{},
-		func() chconn.Target {
+		func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		}, nil)
 	require.NoError(t, err)
@@ -305,7 +305,7 @@ func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 	// chURL is never dialed: with no messages there is no flush, so a dummy
 	// host/port is fine.
 	stopFn, _, err := StartIngestWorker(context.Background(), emb, &testutil.MockCache{},
-		func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
+		func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
 	require.NoError(t, err)
 
 	// Nothing to flush, so shutdown drains immediately and returns nil before the
@@ -1130,7 +1130,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		dlq:     emb,
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
 		cache:   &testutil.MockCache{},
-		target: func() chconn.Target {
+		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
 		maxBatch: maxBatch,
@@ -1225,7 +1225,7 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 		dlq:     emb,
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
 		cache:   &testutil.MockCache{},
-		target: func() chconn.Target {
+		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
 		maxBatch: maxBatch,
@@ -1784,8 +1784,9 @@ func TestFlushTable_DLQSwitchIsTheRowsTenants(t *testing.T) {
 // Two tenants, one table name: each tenant's rows batch on their own, so an
 // INSERT never mixes tenants — what a per-tenant ClickHouse target and cache
 // namespace (stories 6 and 8) rely on — and each batch invalidates its own
-// tenant's namespaces. Published interleaved, so batching by table alone
-// would put both tenants' first rows in one INSERT.
+// tenant's namespaces and goes to its own tenant's target. Published
+// interleaved, so batching by table alone would put both tenants' first rows
+// in one INSERT.
 func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 	t.Parallel()
 	const maxBatch = 2
@@ -1794,15 +1795,15 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 
-	// CH stub: record each INSERT's body.
+	// CH stub: record each INSERT's body under the database it named.
 	var (
 		mu     sync.Mutex
-		bodies []string
+		bodies = map[string]string{}
 	)
 	chSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
-		bodies = append(bodies, string(body))
+		bodies[r.URL.Query().Get("database")] = string(body)
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -1820,8 +1821,9 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 		dlq:     emb,
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
 		cache:   mc,
-		target: func() chconn.Target {
-			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
+		// Each tenant's target names its own database.
+		target: func(id tenant.ID) chconn.Target {
+			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db_" + string(id)}
 		},
 		maxBatch: maxBatch,
 		maxWait:  30 * time.Second, // the size trigger is the one under test
@@ -1851,9 +1853,11 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 		"each batch bumps its own tenant's namespaces")
 	mu.Lock()
 	defer mu.Unlock()
-	for _, body := range bodies {
+	for _, id := range []string{"acme", "globex"} {
+		body, ok := bodies["db_"+id]
+		require.True(t, ok, "tenant %s's batch reached its own target", id)
 		assert.Equal(t, maxBatch, strings.Count(body, "\n"), "a full batch: %q", body)
-		assert.NotEqual(t, strings.Contains(body, "acme"), strings.Contains(body, "globex"), "one tenant per INSERT: %q", body)
+		assert.Equal(t, maxBatch, strings.Count(body, id), "only tenant %s's rows: %q", id, body)
 	}
 }
 
@@ -1870,7 +1874,7 @@ func TestInsertToClickHouse_SetsConfiguredHeaders(t *testing.T) {
 		},
 	}
 	w, _, _, _ := newTestWorker(rt)
-	w.target = func() chconn.Target {
+	w.target = func(tenant.ID) chconn.Target {
 		return chconn.Target{
 			URL: "http://test-clickhouse:8123", Username: "test_user", Password: "test_pass", Database: "test_db",
 			Headers: map[string]string{"X-Proxy-Token": "abc", "Content-Type": "text/plain", "X-ClickHouse-User": "someone-else"},
@@ -1891,8 +1895,8 @@ func TestInsertToClickHouse_UsesTargetTLS(t *testing.T) {
 	t.Cleanup(srv.Close)
 	pool := x509.NewCertPool()
 	pool.AddCert(srv.Certificate())
-	target := func(cfg *tls.Config) func() chconn.Target {
-		return func() chconn.Target {
+	target := func(cfg *tls.Config) func(tenant.ID) chconn.Target {
+		return func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: srv.URL, Username: "u", Password: "p", Database: "db", TLS: cfg}
 		}
 	}
@@ -1907,4 +1911,26 @@ func TestInsertToClickHouse_UsesTargetTLS(t *testing.T) {
 
 	w.target = target(nil)
 	require.ErrorContains(t, insert(), "unknown authority")
+}
+
+// TestInsertToClickHouse_NoTargetIsAnError: a tenant on no pool — its tuple
+// could not be opened, such as by the connection ceiling — has no HTTP
+// target, and its insert fails naming the tenant before any request is
+// built, into the same failure path an unreachable ClickHouse takes.
+func TestInsertToClickHouse_NoTargetIsAnError(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{Fn: func(*http.Request) (*http.Response, error) {
+		t.Fatal("no request must be made without a target")
+		return nil, nil
+	}}
+	w, _, _, _ := newTestWorker(rt)
+	var asked []tenant.ID
+	w.target = func(id tenant.ID) chconn.Target {
+		asked = append(asked, id)
+		return chconn.Target{}
+	}
+	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`), tenant: "acme"}})
+	require.ErrorContains(t, err, "no ClickHouse connection is open for tenant acme")
+	assert.Equal(t, []tenant.ID{"acme"}, asked, "the target is the batch's own tenant's")
+	assert.Zero(t, rt.Hits())
 }

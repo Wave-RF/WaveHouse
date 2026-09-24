@@ -11,6 +11,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // Compile-time interface assertions. Catch breakage early when an interface
@@ -143,8 +144,10 @@ func (m *MockDeduplicator) Close() error { return nil }
 type MockCache struct {
 	cache.Cache   // Embed to satisfy remaining interface methods silently
 	InvNamespaces []cache.Namespace
-	InvErr        error
-	mu            sync.Mutex
+	// InvTenants records every InvalidateTenant, in order.
+	InvTenants []tenant.ID
+	InvErr     error
+	mu         sync.Mutex
 }
 
 func (m *MockCache) Invalidate(_ context.Context, namespaces []cache.Namespace) (uint64, error) {
@@ -152,6 +155,20 @@ func (m *MockCache) Invalidate(_ context.Context, namespaces []cache.Namespace) 
 	defer m.mu.Unlock()
 	m.InvNamespaces = append(m.InvNamespaces, namespaces...)
 	return uint64(len(namespaces)), m.InvErr
+}
+
+func (m *MockCache) InvalidateTenant(_ context.Context, id tenant.ID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.InvTenants = append(m.InvTenants, id)
+	return m.InvErr
+}
+
+// GetTenants returns the tenants InvalidateTenant was called for, in order.
+func (m *MockCache) GetTenants() []tenant.ID {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]tenant.ID(nil), m.InvTenants...)
 }
 
 func (m *MockCache) GetNamespaces() []cache.Namespace {

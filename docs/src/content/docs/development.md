@@ -455,7 +455,7 @@ WaveHouse/
 │   ├── app/                # Process wiring (build every component, run under one errgroup, release in reverse)
 │   ├── auth/               # JWT/JWKS authentication middleware
 │   ├── cache/              # L1 (Ristretto) + L2 caching
-│   ├── chconn/             # ClickHouse connection manager (swapped on settings reload)
+│   ├── chconn/             # ClickHouse pools, one per connection tuple (reconciled on settings reload)
 │   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration
 │   ├── dedupe/             # Optional deduplication (Pebble)

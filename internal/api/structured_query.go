@@ -12,7 +12,6 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
-	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
@@ -21,15 +20,17 @@ import (
 
 // StructuredQueryHandler handles POST /v1/query?table={table}
 type StructuredQueryHandler struct {
-	CHConn       driver.Conn
+	// CHConn yields the request tenant's connection (chconn.Pools.For in
+	// production); nil is a tenant on no pool, a 503.
+	CHConn       func(*settings.Store) driver.Conn
 	Cache        cache.Cache
-	Registry     *discovery.SchemaRegistry
+	Registry     RegistrySource
 	PolicySource PolicySource
 	sf           singleflight.Group
-	// queryTimeout bounds each query, read per request
-	// (chconn.Manager.QueryTimeout in production) so a settings reload
-	// applies without a restart.
-	queryTimeout func() time.Duration
+	// queryTimeout bounds each query, read per request off the tenant's
+	// settings ((*settings.Store).ClickHouse().QueryTimeout in production)
+	// so a settings reload applies without a restart.
+	queryTimeout func(*settings.Store) time.Duration
 
 	// bucketSecs returns the request tenant's current time-range bucket
 	// ((*settings.Store).TimestampBucketSeconds in production) and
@@ -50,12 +51,12 @@ type StructuredQueryHandler struct {
 }
 
 func NewStructuredQueryHandler(
-	conn driver.Conn,
+	conn func(*settings.Store) driver.Conn,
 	c cache.Cache,
-	registry *discovery.SchemaRegistry,
+	registry RegistrySource,
 	policyStore PolicySource,
 	bucketSecs func(*settings.Store) int,
-	queryTimeout func() time.Duration,
+	queryTimeout func(*settings.Store) time.Duration,
 	defaultMaxRows func(*settings.Store) int,
 ) *StructuredQueryHandler {
 	return &StructuredQueryHandler{
@@ -80,9 +81,8 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	schema := h.Registry.Get(table)
-	if schema == nil {
-		writeJSONError(w, http.StatusNotFound, "unknown table: "+table)
+	schema, err := lookupSchema(w, h.Registry, store, table, "unknown table: "+table)
+	if err != nil {
 		return
 	}
 
@@ -159,6 +159,15 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// The tenant's pool, ahead of the cache: a tenant on none — its tuple
+	// could not be opened, such as by the connection ceiling — fails
+	// closed rather than serve what it cached before (#583 story 6).
+	conn := connOf(h.CHConn, store)
+	if conn == nil {
+		writeUnavailable(w, noConnectionMessage, retryAfterPool)
+		return
+	}
+
 	// Cache key, led by the tenant the store was resolved for (#583 story 8);
 	// the singleflight key too.
 	cacheKey := queryCacheKey(store.Tenant(), result.SQL, result.Params)
@@ -185,7 +194,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		timeout := h.queryTimeout()
+		timeout := timeoutOf(h.queryTimeout, store)
 		// Bare Select reads: this handler resolved the grant for "select" (above),
 		// so Select is non-nil, and query.Build has already rejected a mis-resolved
 		// grant before this closure runs. If that changed, these would panic rather
@@ -219,7 +228,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 		start := time.Now()
 
-		rows, err := executeCHQuery(queryCtx, h.CHConn, result.SQL, result.Params)
+		rows, err := executeCHQuery(queryCtx, conn, result.SQL, result.Params)
 		queryDuration := time.Since(start)
 		if err != nil {
 			// TODO: depending on the error, we may actually want to cache it

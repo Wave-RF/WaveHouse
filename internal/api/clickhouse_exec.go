@@ -8,8 +8,27 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/google/uuid"
 )
+
+// connOf is conn's answer for store — the tenant's pool — and nil for an
+// unwired source or a tenant on no pool. The nil is untyped: a nil *Manager
+// inside a non-nil driver.Conn would pass a nil check and panic on use.
+func connOf(conn func(*settings.Store) driver.Conn, store *settings.Store) driver.Conn {
+	if conn == nil {
+		return nil
+	}
+	return conn(store)
+}
+
+// timeoutOf is timeout's answer for store, zero for an unwired source.
+func timeoutOf(timeout func(*settings.Store) time.Duration, store *settings.Store) time.Duration {
+	if timeout == nil {
+		return 0
+	}
+	return timeout(store)
+}
 
 // executeCHQuery runs sql against the native-protocol driver conn,
 // classifying by leading SQL verb to pick the Exec-vs-Query path —

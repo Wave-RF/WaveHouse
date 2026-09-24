@@ -1,6 +1,6 @@
 import { err, ok } from "./errors.js";
-import { request } from "./http.js";
-import type { HttpContext, Result } from "./types.js";
+import { request, tenantParam } from "./http.js";
+import type { HttpContext, OpsRequestOptions, Result } from "./types.js";
 
 /**
  * Execute a raw SQL query against ClickHouse.
@@ -37,11 +37,12 @@ import type { HttpContext, Result } from "./types.js";
 export async function sql<Row = Record<string, unknown>>(
   ctx: HttpContext,
   query: string,
-  opts?: { signal?: AbortSignal },
+  opts?: OpsRequestOptions,
 ): Promise<Result<Row[]>> {
   const { data, error } = await request<Row[]>(ctx, {
     method: "POST",
     path: "/v1/ops/query",
+    params: tenantParam(opts),
     body: { sql: query },
     signal: opts?.signal,
   });

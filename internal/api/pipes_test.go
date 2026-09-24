@@ -41,7 +41,7 @@ func pipesRequest(t *testing.T, method, path, name string, body any) *http.Reque
 
 // noTimeout is the pipe-execution deadline source for handler tests that
 // never reach ClickHouse.
-func noTimeout() time.Duration { return 0 }
+func noTimeout(*settings.Store) time.Duration { return 0 }
 
 func TestPipesHandler_List(t *testing.T) {
 	t.Parallel()

@@ -626,34 +626,68 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 	})
 }
 
-// Until story 6 every tenant reads the same ClickHouse tables, so an insert
-// invalidates a table's cached results under every tenant the registry
-// knows, not only under the batch's tenant: the cache the worker is handed fans
-// the namespaces out. A rejected tenant is included — it comes back into
-// service with the entries it has.
-func TestSharedTables_InvalidatesEveryKnownTenant(t *testing.T) {
+// The tenants on the writer's ClickHouse address and database read the same
+// tables, so an insert invalidates a table's cached results under every one
+// of them — whatever their user, so across pools — and under no tenant on
+// another address or database: the cache the worker is handed fans the
+// namespaces out by the pools' sharing rule. The writer's own tenant is
+// bumped even when it is on no pool.
+func TestSharedTables_InvalidatesTheTenantsSharingTheTables(t *testing.T) {
 	t.Parallel()
-	tenants, findings := settings.Open(writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil, "broken": invalidQuery}))
-	require.NotNil(t, tenants, "findings: %v", findings)
+	sharing := map[tenant.ID][]tenant.ID{tenant.Default: {tenant.Default, "acme", "globex"}, "initech": {"initech"}}
 	mock := &testutil.MockCache{}
-	c := sharedTables{Cache: mock, tenants: tenants}
+	c := sharedTables{Cache: mock, sharing: func(id tenant.ID) []tenant.ID { return sharing[id] }}
 
 	n, err := c.Invalidate(t.Context(), []cache.Namespace{
 		{Tenant: tenant.Default, Table: "events"},
 		{Tenant: tenant.Default, Table: "events", Scope: "org_1"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, uint64(8), n)
+	assert.Equal(t, uint64(6), n)
 	assert.ElementsMatch(t, []cache.Namespace{
 		{Tenant: tenant.Default, Table: "events"},
 		{Tenant: tenant.Default, Table: "events", Scope: "org_1"},
 		{Tenant: "acme", Table: "events"},
 		{Tenant: "acme", Table: "events", Scope: "org_1"},
-		{Tenant: "broken", Table: "events"},
-		{Tenant: "broken", Table: "events", Scope: "org_1"},
 		{Tenant: "globex", Table: "events"},
 		{Tenant: "globex", Table: "events", Scope: "org_1"},
-	}, mock.GetNamespaces(), "the batch's tenant and every known one, the rejected one included")
+	}, mock.GetNamespaces(), "the batch's tenant and the ones sharing its tables; initech reads another database")
+
+	mock = &testutil.MockCache{}
+	c = sharedTables{Cache: mock, sharing: func(tenant.ID) []tenant.ID { return nil }}
+	_, err = c.Invalidate(t.Context(), []cache.Namespace{{Tenant: "orphan", Table: "events"}})
+	require.NoError(t, err)
+	assert.Equal(t, []cache.Namespace{{Tenant: "orphan", Table: "events"}}, mock.GetNamespaces(), "a writer on no pool still bumps its own")
+}
+
+// A tenant back on a pool after an absence — its folder rejected, then
+// repaired; removed, then restored — was out of the fan-out while away, so
+// the wiring orphans its table-keyed cache as it comes back; a tenant that stayed
+// is never touched, and a reload that changes nothing bumps nobody.
+func TestReload_ReadmittedTenantCacheIsOrphaned(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
+	a := newApp(t, testConfig(t, root), Options{})
+	// The hooks read a.cache at reload time: a recording cache from here on.
+	mock := &testutil.MockCache{}
+	a.cache = mock
+
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Empty(t, mock.GetTenants(), "nothing readmitted, nothing orphaned")
+
+	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+	a.tenants.Reload("test")
+	assert.Empty(t, mock.GetTenants(), "a rejection releases; it orphans nothing yet")
+	rewriteSettings(t, filepath.Join(root, "globex"), nil)
+	_, adopted = a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Equal(t, []tenant.ID{"globex"}, mock.GetTenants(), "repaired: back on a pool, its cache orphaned")
+
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	require.NoError(t, os.Rename(writeSettings(t, nil), filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	assert.Equal(t, []tenant.ID{"globex", "acme"}, mock.GetTenants(), "restored: the same")
 }
 
 // keepalive is a config.json patch setting the stream block's keepalive pair.
@@ -1196,18 +1230,248 @@ func TestReload_PoolAboveTheCeilingKeepsTheConnection(t *testing.T) {
 	cfg := testConfig(t, dir)
 	cfg.ClickHouse.MaxTotalConns = 10
 	a := newApp(t, cfg, Options{})
-	require.Equal(t, boot, a.ch.Addr())
+	require.Equal(t, boot, a.pools.For(tenant.Default).Identity().Addr)
 
 	logs := logtest.Capture(t, slog.LevelError)
-	rewriteSettings(t, dir, poolSettings(moved, 20))
+	refused := poolSettings(moved, 20)
+	refused["clickhouse"].(map[string]any)["database"] = "moved_db"
+	rewriteSettings(t, dir, refused)
 	_, adopted := a.tenants.Reload("test")
 	require.True(t, adopted)
-	assert.Equal(t, boot, a.ch.Addr(), "the refused reload leaves the connection as it was")
-	assert.Contains(t, logs.String(), "clickhouse reconfigure refused")
+	assert.Equal(t, boot, a.pools.For(tenant.Default).Identity().Addr, "the refused reload leaves the connection as it was")
+	_, database := a.discoverySource(tenant.Default)()
+	assert.Equal(t, a.pools.For(tenant.Default).Identity().Database, database, "discovery reads the kept pool's database")
+	assert.NotEqual(t, "moved_db", database, "not the adopted document's")
+	assert.Contains(t, logs.String(), "clickhouse pools reconciled in part")
 	assert.Contains(t, logs.String(), "clickhouse.max_open_conns 20")
+	assert.Contains(t, logs.String(), "tenant 0 keeps its previous pool")
 
 	rewriteSettings(t, dir, poolSettings(moved, 10))
 	_, adopted = a.tenants.Reload("test")
 	require.True(t, adopted)
-	assert.Equal(t, moved, a.ch.Addr(), "the next reload that fits applies")
+	assert.Equal(t, moved, a.pools.For(tenant.Default).Identity().Addr, "the next reload that fits applies")
+}
+
+// chSettings is a config.json patch: the seed's clickhouse block pointed at
+// addr as user, with the native pool sized to open.
+func chSettings(addr, user string, open int) map[string]any {
+	p := poolSettings(addr, open)
+	p["clickhouse"].(map[string]any)["username"] = user
+	return p
+}
+
+// A nested directory gets one pool per tuple among its tenants (#583 story
+// 6): tenants naming the same address, database, user and tls share one
+// Manager, sized to their largest ask; a tenant naming another gets its own.
+// A reload that changes one sharer's username moves that tenant to a pool of
+// its own and leaves the other on the very same Manager, resized to its own
+// ask — the worked example of the story.
+func TestNew_NestedPoolsFollowEachTenantsTuple(t *testing.T) {
+	shared, other := closedAddr(t), closedAddr(t)
+	root := writeNestedSettings(t, map[string]map[string]any{
+		"acme":    chSettings(shared, "default", 10),
+		"globex":  chSettings(shared, "default", 20),
+		"initech": chSettings(other, "default", 10),
+	})
+	a := newApp(t, testConfig(t, root), Options{})
+
+	acme, globex, initech := a.pools.For("acme"), a.pools.For("globex"), a.pools.For("initech")
+	require.NotNil(t, acme)
+	assert.Same(t, acme, globex, "one tuple, one pool")
+	assert.NotSame(t, acme, initech)
+	assert.Equal(t, 20, acme.Sizes().MaxOpenConns, "the largest ask among the sharers")
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, a.pools.SharingTables("acme"))
+	assert.NotNil(t, a.discoveries.For("acme"))
+	assert.NotNil(t, a.discoveries.For("initech"))
+	assert.NotSame(t, a.discoveries.For("acme"), a.discoveries.For("globex"), "one registry per tenant, shared pool or not")
+
+	rewriteSettings(t, filepath.Join(root, "globex"), chSettings(shared, "reporting", 20))
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Same(t, acme, a.pools.For("acme"), "acme keeps its Manager")
+	assert.NotSame(t, acme, a.pools.For("globex"), "globex moved to a pool of its own")
+	assert.Equal(t, "reporting", a.pools.For("globex").Identity().Username)
+	assert.Equal(t, 10, acme.Sizes().MaxOpenConns, "acme's pool shrank to acme's ask")
+	assert.Same(t, initech, a.pools.For("initech"))
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, a.pools.SharingTables("acme"), "same address and database: still the same tables")
+}
+
+// A nested directory's pools must fit the ceiling together: boot is refused
+// naming the sum and the ceiling, like a flat directory's one pool.
+func TestNew_NestedRefusesPoolsAboveTheCeiling(t *testing.T) {
+	guardGlobals(t)
+	root := writeNestedSettings(t, map[string]map[string]any{
+		"acme":   chSettings(closedAddr(t), "default", 10),
+		"globex": chSettings(closedAddr(t), "default", 10),
+	})
+	cfg := testConfig(t, root)
+	cfg.ClickHouse.MaxTotalConns = 15
+	_, err := New(t.Context(), Options{Config: cfg})
+	require.ErrorContains(t, err, "clickhouse.max_open_conns 10")
+	require.ErrorContains(t, err, "at 20, above clickhouse.max_total_conns 15")
+}
+
+// A reload whose new tenant's pool would put the pools over the ceiling
+// leaves that tenant on no pool — it fails closed, its schema never
+// discovered — and the open pools untouched; the next reload that frees the
+// budget opens it.
+func TestReload_CeilingRefusesAThirdTupleThenOpensIt(t *testing.T) {
+	a1, a2, a3 := closedAddr(t), closedAddr(t), closedAddr(t)
+	root := writeNestedSettings(t, map[string]map[string]any{
+		"acme":   chSettings(a1, "default", 10),
+		"globex": chSettings(a2, "default", 10),
+	})
+	cfg := testConfig(t, root)
+	cfg.ClickHouse.MaxTotalConns = 25
+	a := newApp(t, cfg, Options{})
+	acme, globex := a.pools.For("acme"), a.pools.For("globex")
+
+	logs := logtest.Capture(t, slog.LevelError)
+	require.NoError(t, os.Rename(writeSettings(t, chSettings(a3, "default", 10)), filepath.Join(root, "initech")))
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Nil(t, a.pools.For("initech"), "not opened")
+	assert.Contains(t, logs.String(), "clickhouse pools reconciled in part")
+	assert.Contains(t, logs.String(), "not opened for tenant initech")
+	assert.Contains(t, logs.String(), "at 30, above clickhouse.max_total_conns 25")
+	assert.Same(t, acme, a.pools.For("acme"))
+	assert.Same(t, globex, a.pools.For("globex"))
+
+	// The tenant is served — its settings are fine — but fails closed on
+	// its ClickHouse side: no pool, so no discovery, so no table is known.
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ingest?table=clicks", strings.NewReader(`{"page": "/"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(tenant.Header, "initech")
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "5", rec.Header().Get("Retry-After"))
+
+	rewriteSettings(t, filepath.Join(root, "acme"), chSettings(a1, "default", 5))
+	_, adopted = a.tenants.Reload("test")
+	require.True(t, adopted)
+	require.NotNil(t, a.pools.For("initech"), "opened once a sharer made room")
+	assert.Same(t, acme, a.pools.For("acme"))
+	assert.Equal(t, 5, acme.Sizes().MaxOpenConns)
+}
+
+// A tenant the registry stops serving — its folder rejected, then removed —
+// releases its pool and its schema registry; the tenant beside it keeps
+// both; restoring the folder restores both.
+func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
+	a := newApp(t, testConfig(t, root), Options{})
+	acme, acmeRegistry := a.pools.For("acme"), a.discoveries.For("acme")
+	require.NotNil(t, acme)
+	require.NotNil(t, acmeRegistry)
+	require.NotNil(t, a.pools.For("globex"))
+
+	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+	_, adopted, known := a.tenants.ReloadTenant("globex", "test")
+	require.True(t, known)
+	require.False(t, adopted)
+	assert.Nil(t, a.pools.For("globex"), "a rejected tenant is on no pool")
+	assert.Nil(t, a.discoveries.For("globex"), "and has no registry")
+	assert.Same(t, acme, a.pools.For("acme"))
+	assert.Same(t, acmeRegistry, a.discoveries.For("acme"))
+
+	// Adopted in part from here on: globex's folder stays rejected.
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	assert.Nil(t, a.pools.For("acme"))
+	assert.Nil(t, a.discoveries.For("acme"))
+
+	require.NoError(t, os.Rename(writeSettings(t, nil), filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	assert.NotNil(t, a.pools.For("acme"))
+	assert.NotNil(t, a.discoveries.For("acme"), "back, over a fresh registry")
+	assert.NotSame(t, acmeRegistry, a.discoveries.For("acme"))
+}
+
+// Over a nested directory the probes read every tenant together: /livez is
+// degraded while no tenant has completed a first discovery, names the tenant
+// in its diagnostic, and turns 200 for good at the first success, whatever
+// another tenant's discovery does afterwards; /readyz then pings every open
+// pool and names each one that does not answer.
+func TestNew_NestedProbesFollowTheFirstTenantToLoad(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
+	a := newApp(t, testConfig(t, root), Options{})
+
+	rec := get(t, a.Handler(), "/livez")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "schema discovery")
+	// The loops' first attempts fail at once against closed ports and
+	// name their tenant; boot itself starts with the no-tenant diagnostic.
+	assert.Eventually(t, func() bool {
+		body := get(t, a.Handler(), "/livez").Body.String()
+		return strings.Contains(body, "tenant acme") || strings.Contains(body, "tenant globex")
+	}, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, http.StatusServiceUnavailable, get(t, a.Handler(), "/readyz").Code, "not ready while degraded, before any ping")
+
+	// The first success anywhere, as the loops report it.
+	a.discoveries.onLoaded("acme")
+	assert.Equal(t, http.StatusOK, get(t, a.Handler(), "/livez").Code)
+	a.discoveries.onAttempt("globex", errors.New("connection refused"))
+	assert.Equal(t, http.StatusOK, get(t, a.Handler(), "/livez").Code, "sticky: another tenant's outage is not a probe failure")
+	online := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/health", nil)
+	online.Header.Set(tenant.Header, "globex")
+	rec = httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, online)
+	assert.Equal(t, http.StatusOK, rec.Code, "the SDK ping mirrors /livez, for the tenant still failing too")
+
+	rec = get(t, a.Handler(), "/readyz")
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	for _, id := range []tenant.ID{"acme", "globex"} {
+		assert.Contains(t, rec.Body.String(), a.pools.For(id).Identity().Addr, "every pool that did not answer is named")
+	}
+}
+
+// Before a tenant's first discovery a table lookup is a 503 with
+// Retry-After, not a 404: in a flat directory during the degraded boot, and
+// in a nested one per tenant.
+func TestNew_SchemaNotLoadedIs503(t *testing.T) {
+	ingest := func(t *testing.T, a *App, id string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ingest?table=clicks", strings.NewReader(`{"page": "/"}`))
+		req.Header.Set("Content-Type", "application/json")
+		if id != "" {
+			req.Header.Set(tenant.Header, id)
+		}
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	t.Run("flat, degraded boot", func(t *testing.T) {
+		a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{})
+		rec := ingest(t, a, "")
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, "5", rec.Header().Get("Retry-After"))
+		assert.Contains(t, rec.Body.String(), "schema not loaded yet")
+	})
+	t.Run("nested, per tenant", func(t *testing.T) {
+		a := newApp(t, testConfig(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil})), Options{})
+		rec := ingest(t, a, "acme")
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, "5", rec.Header().Get("Retry-After"))
+		rec = get(t, a.Handler(), "/v1/ops/schema?tenant=acme")
+		assert.Equal(t, http.StatusForbidden, rec.Code, "the ops tree keeps its gate")
+	})
+}
+
+// Close stops every tenant's discovery loop within the release budget, and
+// the pools after them.
+func TestClose_StopsTheDiscoveryLoops(t *testing.T) {
+	a := newApp(t, testConfig(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})), Options{})
+	loops := *a.discoveries.cur.Load()
+	require.Len(t, loops, 2)
+	require.NoError(t, a.Close(context.Background()))
+	for id, td := range loops {
+		select {
+		case <-td.done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the loop of tenant %s did not stop", id)
+		}
+	}
+	assert.Nil(t, a.discoveries.For("acme"))
+	assert.Nil(t, a.pools.For("acme"))
 }

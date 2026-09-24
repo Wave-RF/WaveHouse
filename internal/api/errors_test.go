@@ -154,7 +154,7 @@ func TestPipesHandler_Execute_DenialLogsAllowedRoles(t *testing.T) {
 // /v1/ingest route pattern alone doesn't say which check failed, or on what.
 func TestIngest_DenialLogsPolicyGate(t *testing.T) {
 	buf := captureWarns(t)
-	h := NewIngestHandler(testRegistry(t), &testutil.MockPublisher{})
+	h := NewIngestHandler(fixedRegistry(testRegistry(t)), &testutil.MockPublisher{})
 	h.PolicySource = staticPolicy(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{}}}, // no insert for viewer
@@ -185,11 +185,11 @@ func TestAuthzDenied_LogsChiRoutePattern(t *testing.T) {
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	router := NewRouter(Dependencies{
 		Tenants:      testTenants(),
-		Ingest:       NewIngestHandler(reg, &testutil.MockPublisher{}),
+		Ingest:       NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:       &HealthHandler{},
-		Schema:       NewSchemaHandler(reg),
+		Schema:       schemaHandlerOver(reg, testTenants()),
 		AuthMW:       func(next http.Handler) http.Handler { return next },
 		PolicySource: policy.Static(&policy.Policy{}),
 	})

@@ -338,12 +338,12 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 
 	deps := Dependencies{
 		Tenants:      testTenants(),
-		Ingest:       NewIngestHandler(reg, pub),
+		Ingest:       NewIngestHandler(fixedRegistry(reg), pub),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(hub, nil),
 		Health:       &HealthHandler{},
 		Version:      NewVersionHandler("test", "test", "test"),
-		Schema:       NewSchemaHandler(reg),
+		Schema:       schemaHandlerOver(reg, testTenants()),
 		DLQ:          NewDLQHandler(emb),
 		Pipes:        &PipesHandler{Source: staticPipes(), PolicySource: staticPolicy(&policy.Policy{}), Tenants: testTenants()},
 		AuthMW:       func(next http.Handler) http.Handler { return next },
@@ -520,11 +520,11 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 
 	router := NewRouter(Dependencies{
 		Tenants:      testTenants(),
-		Ingest:       NewIngestHandler(reg, pub),
+		Ingest:       NewIngestHandler(fixedRegistry(reg), pub),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(hub, nil),
 		Health:       &HealthHandler{},
-		Schema:       NewSchemaHandler(reg),
+		Schema:       schemaHandlerOver(reg, testTenants()),
 		AuthMW:       func(next http.Handler) http.Handler { return next },
 		PolicySource: policy.Static(&policy.Policy{}),
 	})
@@ -586,11 +586,11 @@ func TestNewRouter_NestedOpsGateAdmitsTheOperatorKeyAlone(t *testing.T) {
 		pipesHandler.Tenants = tenants
 		return NewRouter(Dependencies{
 			Tenants:      tenants,
-			Ingest:       NewIngestHandler(reg, &testutil.MockPublisher{}),
+			Ingest:       NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
 			Query:        &QueryHandler{},
 			SSE:          NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 			Health:       &HealthHandler{},
-			Schema:       NewSchemaHandler(reg),
+			Schema:       schemaHandlerOver(reg, tenants),
 			Pipes:        pipesHandler,
 			Settings:     NewSettingsHandler(tenants),
 			AuthMW:       func(next http.Handler) http.Handler { return next },
@@ -663,11 +663,11 @@ func TestNewRouter_MalformedTenantSurvivesTheTokenStrip(t *testing.T) {
 	pipesHandler.Tenants = tenants
 	router := NewRouter(Dependencies{
 		Tenants:      tenants,
-		Ingest:       NewIngestHandler(reg, &testutil.MockPublisher{}),
+		Ingest:       NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:       &HealthHandler{},
-		Schema:       NewSchemaHandler(reg),
+		Schema:       schemaHandlerOver(reg, tenants),
 		Pipes:        pipesHandler,
 		Settings:     NewSettingsHandler(tenants),
 		AuthMW:       authn.Middleware(),
@@ -731,11 +731,11 @@ func TestNewRouter_TokenUnderPendingJWKSIs503(t *testing.T) {
 	pipesHandler.Tenants = tenants
 	router := NewRouter(Dependencies{
 		Tenants: tenants,
-		Ingest:  NewIngestHandler(reg, &testutil.MockPublisher{}),
+		Ingest:  NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
 		Query:   &QueryHandler{},
 		SSE:     NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:  &HealthHandler{},
-		Schema:  NewSchemaHandler(reg),
+		Schema:  NewSchemaHandler(fixedRegistry(reg)),
 		Pipes:   pipesHandler,
 		AuthMW:  authn.Middleware(),
 	})
@@ -775,11 +775,11 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 
 	deps := Dependencies{
 		Tenants:      testTenants(),
-		Ingest:       NewIngestHandler(reg, pub),
+		Ingest:       NewIngestHandler(fixedRegistry(reg), pub),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(hub, nil),
 		Health:       &HealthHandler{},
-		Schema:       NewSchemaHandler(reg),
+		Schema:       schemaHandlerOver(reg, testTenants()),
 		AuthMW:       func(next http.Handler) http.Handler { return next },
 		PolicySource: policy.Static(&policy.Policy{}),
 	}
@@ -853,11 +853,11 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 	hub := stream.NewHub(nil, nil, nil)
 	deps := Dependencies{
 		Tenants: testTenants(),
-		Ingest:  NewIngestHandler(reg, pub),
+		Ingest:  NewIngestHandler(fixedRegistry(reg), pub),
 		Query:   &QueryHandler{},
 		SSE:     NewStreamHandler(hub, nil),
 		Health:  &HealthHandler{},
-		Schema:  NewSchemaHandler(reg),
+		Schema:  schemaHandlerOver(reg, testTenants()),
 		AuthMW:  func(next http.Handler) http.Handler { return next },
 	}
 	router := NewRouter(deps)
@@ -878,11 +878,11 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 	hub := stream.NewHub(nil, nil, nil)
 	deps := Dependencies{
 		Tenants: testTenants(),
-		Ingest:  NewIngestHandler(reg, pub),
+		Ingest:  NewIngestHandler(fixedRegistry(reg), pub),
 		Query:   &QueryHandler{},
 		SSE:     NewStreamHandler(hub, nil),
 		Health:  &HealthHandler{},
-		Schema:  NewSchemaHandler(reg),
+		Schema:  schemaHandlerOver(reg, testTenants()),
 		AuthMW:  func(next http.Handler) http.Handler { return next },
 	}
 	router := NewRouter(deps)
@@ -978,11 +978,11 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 
 	router := NewRouter(Dependencies{
 		Tenants:      testTenants(),
-		Ingest:       NewIngestHandler(reg, pub),
+		Ingest:       NewIngestHandler(fixedRegistry(reg), pub),
 		Query:        &QueryHandler{},
 		SSE:          NewStreamHandler(hub, nil),
 		Health:       &HealthHandler{},
-		Schema:       NewSchemaHandler(reg),
+		Schema:       schemaHandlerOver(reg, testTenants()),
 		AuthMW:       func(next http.Handler) http.Handler { return next },
 		PolicySource: policy.Static(&policy.Policy{}),
 	})

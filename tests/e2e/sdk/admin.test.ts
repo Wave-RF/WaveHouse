@@ -58,6 +58,32 @@ describe("Admin", () => {
       expect(result.error).toBeNull();
     });
 
+    // The schema routes and the raw-SQL proxy name their tenant in ?tenant=
+    // like the pipe reads. This stack's settings directory is the single
+    // tenant 0.
+    it("addresses a tenant with the tenant option", async () => {
+      const named = await wh.schema.list({ tenant: "0" });
+      expect(named.error).toBeNull();
+      expect(named.data).toHaveProperty(T.clicks);
+
+      const one = await wh.from(T.clicks).schema({ tenant: "0" });
+      expect(one.error).toBeNull();
+      expect(one.data?.name).toBe(T.clicks);
+
+      const refreshed = await wh.schema.refresh({ tenant: "0" });
+      expect(refreshed.error).toBeNull();
+
+      const rows = await wh.sql("SELECT 1 AS one", { tenant: "0" });
+      expect(rows.error).toBeNull();
+
+      const unknown = await wh.schema.list({ tenant: "acme" });
+      expect(unknown.error?.status).toBe(404);
+      expect(unknown.error?.message).toContain("unknown tenant: acme");
+
+      const malformed = await wh.sql("SELECT 1", { tenant: "a.b" });
+      expect(malformed.error?.status).toBe(400);
+    });
+
     it("gets per-table schema", async () => {
       const result = await wh.from(T.clicks).schema();
       expect(result.error).toBeNull();

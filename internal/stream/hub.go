@@ -34,9 +34,9 @@ import (
 type Hub struct {
 	mu       sync.RWMutex
 	topics   map[mq.Topic]*topicRoutes
-	policy   PolicySource              // nil ⇒ policy filtering not configured (legacy passthrough)
-	registry *discovery.SchemaRegistry // nil ⇒ no column types; row-filter comparison degrades fail-closed (see columnSpecs)
-	metric   *Metrics                  // nil-safe
+	policy   PolicySource   // nil ⇒ policy filtering not configured (legacy passthrough)
+	registry RegistrySource // nil, or yielding nil ⇒ no column types; row-filter comparison degrades fail-closed (see columnSpecs)
+	metric   *Metrics       // nil-safe
 
 	// RowEvaluator is the seam a native type layer will take over: the one
 	// place a row's visibility under a role's row-filter is decided. nil means
@@ -86,14 +86,33 @@ type topicRoutes struct {
 // is a deliberate lockout — a tenant the registry no longer serves included.
 type PolicySource func(tenant.ID) *policy.Policy
 
+// RegistrySource yields a tenant's schema registry, its own since #583
+// story 6, read per event so a reload that rebuilds it applies to the next
+// one. nil is a tenant with no registry, read as no schema.
+type RegistrySource func(tenant.ID) *discovery.SchemaRegistry
+
 // NewHub builds the event hub. A nil policy store passes every event through
 // unfiltered (the unwired-tests case); a non-nil store whose Get returns nil is a
-// total lockout (a deleted/absent policy denies everyone). A nil registry leaves
+// total lockout (a deleted/absent policy denies everyone). A nil registry source leaves
 // every column's type unknown, so row-filter comparison degrades FAIL-CLOSED:
 // equality/set predicates admit only a byte-identical value and ordering/!= admit
 // nothing (see policy.ColumnKind); metric may be nil.
-func NewHub(policyStore PolicySource, registry *discovery.SchemaRegistry, metric *Metrics) *Hub {
+func NewHub(policyStore PolicySource, registry RegistrySource, metric *Metrics) *Hub {
 	return &Hub{topics: make(map[mq.Topic]*topicRoutes), policy: policyStore, registry: registry, metric: metric}
+}
+
+// schema is tenant id's schema for table, nil when the hub has no registry
+// source, the tenant no registry, or the registry no such table — every one
+// of them the fail-closed reading.
+func (h *Hub) schema(id tenant.ID, table string) *discovery.TableSchema {
+	if h.registry == nil {
+		return nil
+	}
+	reg := h.registry(id)
+	if reg == nil {
+		return nil
+	}
+	return reg.Get(table)
 }
 
 // Add registers sub to receive events for (topic, role), creating the role bucket
@@ -215,7 +234,7 @@ func (h *Hub) Broadcast(topic mq.Topic, raw []byte) {
 		// evaluate visibility per subscriber. Predicates read the full event row (a
 		// filter may key on a column the role can't SELECT), not the projected columns.
 		if !specsResolved {
-			colSpecs = h.columnSpecs(ev.evt.TableName)
+			colSpecs = h.columnSpecs(topic.Tenant, ev.evt.TableName)
 			specsResolved = true
 		}
 		for _, sub := range rb.bucket.Snapshot() {
@@ -274,11 +293,8 @@ func (h *Hub) rowAdmitted(p *policy.Policy, role string, ev *eventView, claims m
 // no schema is available (unknown table, or a Hub built without a registry), which
 // reads as every column Opaque: the fail-closed floor, never a lexicographic
 // fallback that could admit rows the query path excludes ("9" > "100" as text).
-func (h *Hub) columnSpecs(table string) map[string]policy.ColumnSpec {
-	if h.registry == nil {
-		return nil
-	}
-	schema := h.registry.Get(table)
+func (h *Hub) columnSpecs(id tenant.ID, table string) map[string]policy.ColumnSpec {
+	schema := h.schema(id, table)
 	if schema == nil {
 		return nil
 	}
@@ -495,7 +511,7 @@ func (h *Hub) ReplayProjector(id tenant.ID, role string, sub *Subscriber) func(r
 			// One topic ⇒ one table, so this resolves once per replay in practice; the
 			// guard re-resolves if a stream ever mixes tables rather than going stale.
 			if specsFor != ev.evt.TableName {
-				colSpecs = h.columnSpecs(ev.evt.TableName)
+				colSpecs = h.columnSpecs(id, ev.evt.TableName)
 				specsFor = ev.evt.TableName
 			}
 			if !h.rowAdmitted(p, role, ev, sub.claims, colSpecs) {
@@ -524,10 +540,7 @@ func (h *Hub) ReplayProjector(id tenant.ID, role string, sub *Subscriber) func(r
 // table, or a role that cannot read it. That is not an error — the event path's
 // drift check still sends a schema frame before the first data frame.
 func (h *Hub) SubscribeSchemaFrame(id tenant.ID, table, role string, sub *Subscriber) (Frame, bool) {
-	if h.registry == nil {
-		return Frame{}, false
-	}
-	schema := h.registry.Get(table)
+	schema := h.schema(id, table)
 	if schema == nil {
 		return Frame{}, false
 	}

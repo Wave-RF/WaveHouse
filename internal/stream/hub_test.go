@@ -629,7 +629,7 @@ func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"amount": {Gt: new("100")}}}}},
 		},
 	}
-	hub := NewHub(staticPolicy(p), reg, nil)
+	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
 	topic := topicOf("clicks")
 
 	sub := NewSubscriber(nil, nil) // constant filter value ⇒ no claims needed
@@ -669,7 +669,7 @@ func TestHub_RowFilter_FloatNarrowing_SchemaInformed(t *testing.T) {
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"score": {Gt: new("16777216")}}}}},
 		},
 	}
-	hub := NewHub(staticPolicy(p), reg, nil)
+	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
 	topic := topicOf("clicks")
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
@@ -1003,7 +1003,7 @@ func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}}}}},
 		},
 	}
-	hub := NewHub(staticPolicy(p), reg, nil)
+	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
 	topic := topicOf("clicks")
 
 	// Claims come from real signed tokens through the production middleware, so a
@@ -1048,7 +1048,7 @@ func TestHub_RowFilter_TimestampInstantMatch(t *testing.T) {
 			},
 		},
 	}
-	hub := NewHub(staticPolicy(p), reg, nil)
+	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
 	topic := topicOf("clicks")
 
 	sub := NewSubscriber(nil, nil)
@@ -1341,7 +1341,7 @@ func TestHub_SubscribeSchemaFrame(t *testing.T) {
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}},
 		},
 	}
-	hub := NewHub(staticPolicy(p), reg, nil)
+	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
 
 	sub := NewSubscriber(nil, nil)
 	f, ok := hub.SubscribeSchemaFrame(tenant.Default, "clicks", "viewer", sub)
@@ -1378,8 +1378,8 @@ func TestHub_SubscribeSchemaFrame_NothingToAnnounce(t *testing.T) {
 		role  string
 	}{
 		{"no registry", NewHub(staticPolicy(p), nil, nil), "clicks", "viewer"},
-		{"unknown table", NewHub(staticPolicy(p), reg, nil), "missing", "viewer"},
-		{"role cannot read the table", NewHub(staticPolicy(p), reg, nil), "clicks", "stranger"},
+		{"unknown table", NewHub(staticPolicy(p), fixedRegistry(reg), nil), "missing", "viewer"},
+		{"role cannot read the table", NewHub(staticPolicy(p), fixedRegistry(reg), nil), "clicks", "stranger"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1472,7 +1472,7 @@ func TestHub_SubscribeSchemaFrame_ExcludesComputedColumns(t *testing.T) {
 			{Name: "country", Type: "String"},
 		}},
 	})
-	hub := NewHub(nil, reg, nil)
+	hub := NewHub(nil, fixedRegistry(reg), nil)
 
 	sub := NewSubscriber(nil, nil)
 	f, ok := hub.SubscribeSchemaFrame(tenant.Default, "clicks", "public", sub)
@@ -1486,6 +1486,27 @@ func TestHub_SubscribeSchemaFrame_ExcludesComputedColumns(t *testing.T) {
 		map[string]any{"page": "/a", "country": "US"}))
 	_, row := recvEventCols(t, sub, cols)
 	assert.Equal(t, "/a", row["page"])
+}
+
+// fixedRegistry is a RegistrySource fixed to reg, whatever the tenant.
+func fixedRegistry(reg *discovery.SchemaRegistry) RegistrySource {
+	return func(tenant.ID) *discovery.SchemaRegistry { return reg }
+}
+
+// TestHub_RegistrySourceYieldingNilIsNoSchema: a tenant with no registry —
+// not served, or its registry not built yet — reads exactly like a hub with
+// no registry at all: nothing to announce, every column opaque.
+func TestHub_RegistrySourceYieldingNilIsNoSchema(t *testing.T) {
+	t.Parallel()
+	var asked []tenant.ID
+	hub := NewHub(nil, func(id tenant.ID) *discovery.SchemaRegistry {
+		asked = append(asked, id)
+		return nil
+	}, nil)
+	_, ok := hub.SubscribeSchemaFrame("acme", "clicks", "viewer", NewSubscriber(nil, nil))
+	assert.False(t, ok)
+	assert.Nil(t, hub.columnSpecs("globex", "clicks"))
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, asked, "the source is asked for the tenant the lookup names")
 }
 
 // TestHub_TopicsAreTenantScoped: two tenants, one table name (#583). A
@@ -1509,7 +1530,7 @@ func TestHub_TopicsAreTenantScoped(t *testing.T) {
 		defer mu.Unlock()
 		asked = append(asked, id)
 		return policies[id]
-	}, reg, nil)
+	}, fixedRegistry(reg), nil)
 	acmeTopic := mq.Topic{Tenant: "acme", Table: "clicks"}
 	globexTopic := mq.Topic{Tenant: "globex", Table: "clicks"}
 

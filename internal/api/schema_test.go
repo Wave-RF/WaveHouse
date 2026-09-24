@@ -19,7 +19,8 @@ func TestSchema_List(t *testing.T) {
 		{Name: "clicks", Columns: []discovery.Column{{Name: "page", Type: "String"}}},
 		{Name: "users", Columns: []discovery.Column{{Name: "name", Type: "String"}}},
 	})
-	h := NewSchemaHandler(reg)
+	h := NewSchemaHandler(fixedRegistry(reg))
+	h.Tenants = testTenants()
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/schema", nil)
@@ -40,7 +41,8 @@ func TestSchema_Get_Exists(t *testing.T) {
 			{Name: "count", Type: "UInt64"},
 		}},
 	})
-	h := NewSchemaHandler(reg)
+	h := NewSchemaHandler(fixedRegistry(reg))
+	h.Tenants = testTenants()
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/schema?table=clicks", nil)
@@ -58,7 +60,8 @@ func TestSchema_Get_Exists(t *testing.T) {
 func TestSchema_Get_NotFound(t *testing.T) {
 	t.Parallel()
 	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{})
-	h := NewSchemaHandler(reg)
+	h := NewSchemaHandler(fixedRegistry(reg))
+	h.Tenants = testTenants()
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/schema?table=nonexistent", nil)
