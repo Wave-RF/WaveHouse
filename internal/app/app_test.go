@@ -1164,6 +1164,13 @@ func TestRun_StopEndsOpenStreams(t *testing.T) {
 		baseURL, stop = runApp(t, a, ln)
 		return a, baseURL, stop
 	}
+	// registered waits for tenant id's stream to join the hub: openStream
+	// returns at the ": connected" preamble, which the handler writes first.
+	registered := func(t *testing.T, a *App, id tenant.ID) {
+		t.Helper()
+		topic := mq.Topic{Tenant: id, Table: "events"}
+		require.Eventually(t, func() bool { return a.hub.Len(topic) == 1 }, 5*time.Second, 5*time.Millisecond)
+	}
 
 	t.Run("the stop", func(t *testing.T) {
 		_, baseURL, stop := start(t, writeSettings(t, nil))
@@ -1188,6 +1195,8 @@ func TestRun_StopEndsOpenStreams(t *testing.T) {
 			return resp.StatusCode
 		}
 		acme, globex := openStream(t, baseURL, "acme"), openStream(t, baseURL, "globex")
+		registered(t, a, "acme")
+		registered(t, a, "globex")
 
 		rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
 		_, adopted, known := a.tenants.ReloadTenant("globex", "test")
@@ -1207,10 +1216,13 @@ func TestRun_StopEndsOpenStreams(t *testing.T) {
 		dir := writeSettings(t, nil)
 		a, baseURL, stop := start(t, dir)
 		resp := openStream(t, baseURL, "")
+		registered(t, a, tenant.Default)
 		rewriteSettings(t, dir, invalidQuery)
 		_, adopted := a.tenants.Reload("test")
 		require.False(t, adopted)
-		assert.Equal(t, 1, a.hub.Len(mq.Topic{Tenant: tenant.Default, Table: "events"}), "tenant 0 keeps its previous settings, and its stream")
+		// An evicted stream leaves the hub only once its handler returns.
+		assert.Never(t, func() bool { return a.hub.Len(mq.Topic{Tenant: tenant.Default, Table: "events"}) == 0 },
+			200*time.Millisecond, 10*time.Millisecond, "tenant 0 keeps its previous settings, and its stream")
 		assert.NoError(t, stop())
 		endsCleanly(t, resp)
 	})
