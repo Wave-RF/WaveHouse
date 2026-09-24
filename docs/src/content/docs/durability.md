@@ -81,7 +81,7 @@ Read the measured p99 against these bands, which track WaveHouse's `SyncAlways` 
 | 1–5 ms | **Good** |
 | 5–50 ms | **Workable** — watch bursty load |
 | 50 ms – 1 s | **Marginal** — relax durability once `mq.sync_interval` ([#139](https://github.com/Wave-RF/WaveHouse/issues/139)) lands, or move to faster storage |
-| > 1 s | **Broken** — `create stream` will time out under load; fix the storage substrate |
+| > 1 s | **Broken** — opening a tenant's queue (`open dlq stream`) will time out under load; fix the storage substrate |
 
 :::caution[macOS `fsync` lies by default]
 A plain `fsync()` on macOS returns once data is in the drive's volatile cache — it does **not** force a flush to NAND; only `fcntl(fd, F_FULLFSYNC)` does (NATS, Postgres, and SQLite all use it). On a Mac, any per-flush number under ~1 ms is almost certainly not a real flush — the gap between plain `fsync()` and `F_FULLFSYNC` can be ~180× on the same consumer NVMe. `fio` on macOS calls plain `fsync()`, so don't trust Mac `fio` numbers for tail-latency planning. This mostly matters when benchmarking a dev machine; production WaveHouse runs on Linux, where `fio` is honest.
@@ -93,7 +93,7 @@ A self-contained `wavehouse storage-check` preflight subcommand that bakes this 
 
 If you see any of these, benchmark the `<data_dir>/nats` volume as above:
 
-- `create stream: ... context deadline exceeded` at startup.
+- `open dlq stream: ... context deadline exceeded` when a tenant's queue first opens, at the first boot or at the reload that adopts the tenant.
 - Ingest p99 latency in the seconds, or occasional `200`s that take multiple seconds to return.
 - Intermittent `503 Service Unavailable` from `/v1/ingest` when ClickHouse is healthy (the worker can't drain fast enough because acking is `fsync`-bound).
 - Flaky CI or load tests that pass on fast storage and fail on a shared/virtualized host.

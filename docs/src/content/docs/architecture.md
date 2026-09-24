@@ -190,7 +190,7 @@ The hot-reloadable half of configuration: a directory of four JSON files (`confi
 
 ### `tenant/` — Tenant Identifier
 
-- **tenant.go** — `ID`, a validated string (never a number: a 19-digit id already rounds as a float64), and `Parse`, the one grammar that makes an id safe both as a folder name and as a message-queue subject token: ASCII letters, digits, `_`, `-`, at most `MaxLen` (64) bytes. `Default` (`"0"`) is the tenant a request without the header resolves to; `Header` is `X-Tenant-ID`. The package imports nothing from the rest of the repository, so any package can name a tenant. HTTP handlers receive the tenant as its resolved `*settings.Store`, which knows its id (`Store.Tenant`) for the topics they publish and subscribe on; the stream hub and the ingest worker read each event's tenant off its `mq.Topic` — the leading subject token — and their settings getters take it as a parameter, which `internal/app` resolves through the registry; the sweeper folds over the tenants served; each served tenant has a schema registry of its own, built with its id (story 6).
+- **tenant.go** — `ID`, a validated string (never a number: a 19-digit id already rounds as a float64), and `Parse`, the one grammar that makes an id safe both as a folder name and as a message-queue subject token: ASCII letters, digits, `_`, `-`, at most `MaxLen` (64) bytes. `Default` (`"0"`) is the tenant a request without the header resolves to; `Header` is `X-Tenant-ID`. The package imports nothing from the rest of the repository, so any package can name a tenant. HTTP handlers receive the tenant as its resolved `*settings.Store`, which knows its id (`Store.Tenant`) for the topics they publish and subscribe on; the stream hub and the ingest worker read each event's tenant off its `mq.Topic` — the leading subject token — and their settings getters take it as a parameter, which `internal/app` resolves through the registry; the sweeper hands the MQ each served tenant's own gap window (`gapWindows`); each served tenant has a schema registry of its own, built with its id (story 6).
 
 ### `chconn/` — ClickHouse Connection Pools
 
@@ -228,7 +228,7 @@ Client POST /v1/ingest?table={table}
     field is published un-deduped + logged/counted, or rejected under require_id)
   → Publish to NATS JetStream (ingest.{tenant}.{table})
   → 200 OK returned immediately
-  → (If NATS stream is full: 503 + Retry-After header)
+  → (If the tenant's NATS stream is full, or not open: 503 + Retry-After header)
 
 Ingest worker pipeline (StartIngestWorker):
   ← JetStream pull consumer (buffer-consumer) on ingest.>
@@ -251,9 +251,10 @@ Ingest worker pipeline (StartIngestWorker):
   a no/invalid-token request (resolved to default_role, not admin in a
   production config) cannot reach the proxy.)
 
-Active Sweeper (async goroutine, every 60s):
+Active Sweeper (async goroutine, every 60s), on each tenant's stream:
   → Read buffer consumer's AckFloor (highest contiguous ACKed seq)
-  → Binary search for first message within the gap window (the longest among the tenants served)
+  → Binary search for first message within that tenant's own gap window
+    (none for a tenant no longer served)
   → Purge target = MIN(ack_floor + 1, gap_window_seq)
   → Purge all messages below target from JetStream
 ```

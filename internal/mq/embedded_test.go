@@ -713,6 +713,48 @@ func TestEmbeddedNATS_Publish_OpensTheQueueAtTheLastBudget(t *testing.T) {
 	require.ErrorIs(t, err, jetstream.ErrStreamNotFound)
 }
 
+// The context a publish reopens a queue under is one client's request, but
+// the queue is every consumer's: a client gone before the consumers join must
+// not leave a queue that no consumer holds, which the ingest worker would
+// report as its delivery ending. So the reopen — joins included — outlives
+// the caller's cancellation.
+func TestEmbeddedNATS_ReopenOutlivesTheCallersCancellation(t *testing.T) {
+	e := newTestEmbedded(t, "acme")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	cons, err := e.CreateConsumer(ctx, ConsumerConfig{Durable: "buffer", MaxAckPending: 10})
+	require.NoError(t, err)
+	for _, name := range []string{"INGEST_acme", "DLQ_acme"} {
+		require.NoError(t, e.js.DeleteStream(ctx, name))
+	}
+
+	gone, stop := context.WithCancel(ctx)
+	stop()
+	require.NoError(t, e.reopen(gone, "acme"))
+
+	_, err = e.js.Consumer(ctx, "INGEST_acme", "buffer")
+	require.NoError(t, err, "the consumer joined the reopened queue")
+	select {
+	case err := <-cons.(*workerConsumer).failed:
+		t.Fatalf("the reopen was reported as the consumer's failure: %v", err)
+	default:
+	}
+	got := make(chan byte, 1)
+	stopConsume, _, err := cons.Consume(func(msg *Message) {
+		_ = msg.Ack()
+		got <- msg.Data[0]
+	}, 4)
+	require.NoError(t, err)
+	t.Cleanup(stopConsume)
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: "acme", Table: "t"}, []byte{7}))
+	select {
+	case b := <-got:
+		assert.Equal(t, byte(7), b)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reopened queue is not delivered")
+	}
+}
+
 func TestEmbeddedNATS_PurgeAcked(t *testing.T) {
 	e := newTestEmbedded(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)

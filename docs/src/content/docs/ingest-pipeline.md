@@ -61,7 +61,7 @@ Inserts also pin `input_format_null_as_default=1`. A positional row has one valu
 :::
 
 :::note[ClickHouse timestamp parsing]
-Inserts pin `date_time_input_format=best_effort` — the server default since ClickHouse 26.5, but on older servers the `basic` default rejects the canonical RFC 3339 form's `Z` suffix ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). The ordinary spellings (zone-less date-times, 9–10-digit Unix-seconds strings) parse identically under both settings. (This is moot for anything still buffered from an older build: a message published before the v2 envelope cannot be read at all — see [Upgrading across the v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope).) Bare digit-strings of other lengths are the exception: `best_effort` reads them as ClickHouse's calendar/epoch shapes, where `basic` read a plain `DateTime` column's digit string of five or more digits as Unix seconds (shorter runs it rejected outright, where `best_effort` reads `"2026"` as a year): under `best_effort` `"20260711"` stores 2026-07-11, where `basic` stored 1970-08-23. `DateTime64` columns diverge the same way on calendar-shaped runs, and additionally whenever an epoch run's unit doesn't match the column scale (under `basic`, runs longer than 10 digits are ticks at the column's own scale; `best_effort` unit-detects 13/16/19-digit runs as ms/µs/ns). A producer relying on the old `basic` reading changes meaning as soon as this WaveHouse version is deployed — the pin, not a ClickHouse upgrade, is what flips the parse.
+Inserts pin `date_time_input_format=best_effort` — the server default since ClickHouse 26.5, but on older servers the `basic` default rejects the canonical RFC 3339 form's `Z` suffix ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). The ordinary spellings (zone-less date-times, 9–10-digit Unix-seconds strings) parse identically under both settings. (This is moot for anything an older build buffered: the upgrade deletes it — see [Upgrading across the v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope).) Bare digit-strings of other lengths are the exception: `best_effort` reads them as ClickHouse's calendar/epoch shapes, where `basic` read a plain `DateTime` column's digit string of five or more digits as Unix seconds (shorter runs it rejected outright, where `best_effort` reads `"2026"` as a year): under `best_effort` `"20260711"` stores 2026-07-11, where `basic` stored 1970-08-23. `DateTime64` columns diverge the same way on calendar-shaped runs, and additionally whenever an epoch run's unit doesn't match the column scale (under `basic`, runs longer than 10 digits are ticks at the column's own scale; `best_effort` unit-detects 13/16/19-digit runs as ms/µs/ns). A producer relying on the old `basic` reading changes meaning as soon as this WaveHouse version is deployed — the pin, not a ClickHouse upgrade, is what flips the parse.
 :::
 
 ## The journey of one event
@@ -70,7 +70,7 @@ Inserts pin `date_time_input_format=best_effort` — the server default since Cl
 sequenceDiagram
     participant P as POST /v1/ingest
     participant JS as JetStream
-    participant CB as Consume callback
+    participant CB as Consume callback (the tenant's)
     participant D as dispatchLoop
     participant TL as tableLoop
     participant CH as ClickHouse
@@ -89,11 +89,11 @@ sequenceDiagram
 
 ## Goroutine topology
 
-The design rule is **single-owner state, lock-free**: each piece of mutable state is touched by exactly one goroutine. There are no mutexes in the hot path.
+The design rule is **single-owner state, lock-free**: each piece of mutable state is touched by exactly one goroutine. There are no mutexes in the hot path. The one fan-in is at the top: each tenant's stream is delivered on a nats.go goroutine of its own, and they all send into the one `msgChan`, which is safe from all of them at once; everything from `dispatchLoop` down stays single-owner, and a full `msgChan` pauses every tenant's delivery (layer 2 below).
 
 ```mermaid
 flowchart TD
-    CB["Consume callback<br/>(nats.go goroutine)"] -->|"msgChan (cap maxBatch*2)"| D
+    CB["Consume callbacks<br/>(one nats.go goroutine per tenant stream)"] -->|"msgChan (cap maxBatch*2)"| D
     D["dispatchLoop<br/>1 goroutine — owns the routing map<br/>the ONLY ctx watcher — tracked by wg"]
     D -->|"per-tenant-table chan (cap maxBatch)"| T1["tableLoop: clicks<br/>owns its batch + timer<br/>tracked by tableWg"]
     D --> T2["tableLoop: events<br/>tracked by tableWg"]
@@ -213,7 +213,7 @@ Several layers throttle the pipeline, inner to outer:
 1. **`batch`** flushes at `maxBatch` rows or `maxWait`.
 2. **`msgChan`** (cap `maxBatch*2`) — when full, the consume callback blocks and delivery pauses.
 3. **`pullMaxMessages`** — nats.go's client-side prefetch buffer in front of `msgChan`, shared by the tenants' streams (at least one message each).
-4. **`maxAckPending`** — the server suspends a tenant's delivery once this many of its messages are delivered-but-unacked; no other tenant's delivery waits on it. The outermost in-memory bound.
+4. **`maxAckPending`** — the server suspends a tenant's delivery once this many of its messages are delivered-but-unacked; no other tenant's delivery waits on it. The outermost in-memory bound, and a per-tenant one: while ClickHouse stalls, the worker can hold up to `maxAckPending` rows for every tenant served.
 5. **`MaxBytes` + `DiscardNew`** on each tenant's stream (its `mq.max_bytes_gb` in the [settings directory](/settings-directory#message-queue), resized in place on reload) — when it fills (e.g. ClickHouse is down so nothing acks/purges), that tenant's new publishes are rejected and the API returns 503.
 
 | Knob | Default | Meaning / invariant |

@@ -225,9 +225,10 @@ type MQConfig struct {
 	// tenth of it). Must be >= 1. A reload updates the live queues in place:
 	// growing takes effect immediately; shrinking below what is currently
 	// buffered makes the ingest queue refuse new publishes (DiscardNew → 503
-	// backpressure) until the worker drains it — nothing already buffered is
-	// dropped — and a dead-letter queue holding more than a tenth of the new
-	// budget keeps what it holds rather than dropping its oldest rows.
+	// backpressure) until the sweeper purges it back under the limit —
+	// nothing already buffered is dropped — and a dead-letter queue holding
+	// more than a tenth of the new budget keeps what it holds rather than
+	// dropping its oldest rows.
 	MaxBytesGB *int `json:"max_bytes_gb"`
 }
 

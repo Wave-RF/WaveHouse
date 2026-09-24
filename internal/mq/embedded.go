@@ -336,8 +336,13 @@ func (e *EmbeddedNATS) apply(ctx context.Context, id tenant.ID, q *tenantQueue, 
 			return fmt.Errorf("open ingest stream: %w", err)
 		}
 		q.ingest, q.maxBytes = true, maxBytes
+		// The joins run on a budget of their own: a queue that opened but no
+		// consumer holds fails every consumer (fail), so a slow open must not
+		// leave them no time.
+		joinCtx, cancelJoin := context.WithTimeout(ctx, resizeTimeout)
+		defer cancelJoin()
 		for _, f := range e.consumers {
-			if err := f.join(resizeCtx, id); err != nil {
+			if err := f.join(joinCtx, id); err != nil {
 				f.fail(fmt.Errorf("tenant %s: %w: join its queue: %w", id, ErrDeliveryEnded, err))
 			}
 		}
@@ -394,7 +399,13 @@ func (e *EmbeddedNATS) applyDLQ(ctx context.Context, id tenant.ID, q *tenantQueu
 // publish or park that found one of its streams missing. errNoQueue when no
 // budget has been asked for the tenant yet: a reload can make a tenant
 // resolvable an instant before its budget arrives.
+//
+// It runs detached from ctx's cancellation, bounded by its own timeouts:
+// ctx is one caller's — an ingest request — while the queue is every
+// consumer's, and a client that goes away between the open and the joins
+// would leave a queue no consumer holds, which fails the ingest worker.
 func (e *EmbeddedNATS) reopen(ctx context.Context, id tenant.ID) error {
+	ctx = context.WithoutCancel(ctx)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	q := e.queues[id]
