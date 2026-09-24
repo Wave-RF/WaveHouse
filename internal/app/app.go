@@ -144,7 +144,8 @@ const (
 )
 
 // New wires every component. ctx bounds construction only — the boot-time
-// schema refresh and the JetStream stream setup; the loops start in Run. A
+// schema refresh and the opening of each served tenant's queue; the loops
+// start in Run. A
 // failure releases whatever was already opened and returns the error, so
 // the caller never holds a half-built App.
 func New(ctx context.Context, opts Options) (app *App, err error) {
@@ -177,7 +178,7 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	if err := a.wireDedupe(); err != nil {
 		return nil, err
 	}
-	if err := a.wireMQ(); err != nil {
+	if err := a.wireMQ(ctx); err != nil {
 		return nil, err
 	}
 	if err := a.wireCache(); err != nil {

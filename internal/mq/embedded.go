@@ -96,7 +96,9 @@ const (
 	// fails: in-process JetStream fails by stalling rather than erroring, so
 	// the likely cause is that resizeTimeout has just run out, and an undo on
 	// that context would fail without touching the stream. SetMaxBytes runs
-	// for at most the sum of the two.
+	// for at most the sum of the two when it resizes, and for two
+	// resizeTimeouts when it opens a queue: the consumers join on a budget of
+	// their own (apply).
 	rollbackTimeout = 5 * time.Second
 )
 
@@ -303,7 +305,8 @@ func (e *EmbeddedNATS) MaxBytes(id tenant.ID) int64 {
 // call with the new budget reapplies both.
 //
 // The JetStream calls are bounded by resizeTimeout, plus rollbackTimeout for
-// the undo, both rooted in ctx. That is deliberate: ctx is the process's stop
+// the undo — or another resizeTimeout for the consumers joining a queue just
+// opened — all rooted in ctx. That is deliberate: ctx is the process's stop
 // context, so a reload caught mid-hook by a stop gives up — undo included —
 // rather than holding the drain past server.shutdown_timeout. A cancellation
 // between the two updates is therefore the one way to leave the pair split,

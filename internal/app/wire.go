@@ -541,9 +541,11 @@ func (a *App) wireDedupe() error {
 // resized follows the registry's rule for the shape: a flat directory
 // refuses boot, like every other store, and on a reload logs it, keeping the
 // previous budget; a nested directory logs it at boot too, so it never costs
-// the process — the tenant's ingest answers 503 until a reload opens its
-// queue. The hook is registered before the boot apply, as the dedupe one is.
-func (a *App) wireMQ() error {
+// the process — the tenant's ingest answers 503 until its queue opens, each
+// publish and each reload trying again. The hook is registered before the
+// boot apply, as the dedupe one is. The boot apply runs on ctx, New's, so a
+// stop signalled during a boot that opens many queues is not held up by them.
+func (a *App) wireMQ(ctx context.Context) error {
 	dir := filepath.Join(a.cfg.DataDir, "nats")
 	config.WarnIfFreshDataDir("nats", dir)
 	var broker mq.Broker
@@ -565,17 +567,21 @@ func (a *App) wireMQ() error {
 		}
 	}
 
-	// Rooted in the App's stop context, so a reload caught mid-hook by
-	// SIGTERM gives up rather than holding the drain past
-	// server.shutdown_timeout.
-	reconcile := func() error {
+	// The hook's apply is rooted in the App's stop context, so a reload
+	// caught mid-hook by SIGTERM gives up rather than holding the drain past
+	// server.shutdown_timeout; a done ctx ends the pass over the tenants.
+	reconcile := func(ctx context.Context) error {
 		var errs []error
 		for id, store := range a.tenants.All() {
+			if err := ctx.Err(); err != nil {
+				errs = append(errs, err)
+				break
+			}
 			mb := store.MQMaxBytes()
 			if mb == broker.MaxBytes(id) {
 				continue
 			}
-			if err := broker.SetMaxBytes(a.stopCtx, id, mb); err != nil {
+			if err := broker.SetMaxBytes(ctx, id, mb); err != nil {
 				slog.Error("mq queue not reconciled with settings; the next reload retries", "tenant", id, "error", err)
 				errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
 				continue
@@ -584,8 +590,8 @@ func (a *App) wireMQ() error {
 		}
 		return errors.Join(errs...)
 	}
-	a.tenants.AfterAdopt(func([]tenant.ID) { _ = reconcile() })
-	if err := reconcile(); err != nil && !a.tenants.Nested() {
+	a.tenants.AfterAdopt(func([]tenant.ID) { _ = reconcile(a.stopCtx) })
+	if err := reconcile(ctx); err != nil && !a.tenants.Nested() {
 		return fmt.Errorf("mq open: %w", err)
 	}
 	return nil

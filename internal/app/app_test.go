@@ -571,6 +571,50 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 	})
 }
 
+// A tenant's queue the MQ cannot open follows the registry's rule for the
+// shape, as the dedupe store does: a flat directory refuses boot, and a nested
+// one boots with that tenant's queue closed and every other tenant's open.
+// The obstacle is a regular file where the embedded server keeps a stream's
+// store — the embedded implementation's layout, which this test takes on to
+// force the failure, as TestNew_DedupeOpenFailure does Pebble's. The failed
+// open clears it, so the next publish opens the queue: each one tries again.
+func TestNew_QueueOpenFailure(t *testing.T) {
+	block := func(t *testing.T, dataDir, stream string) {
+		t.Helper()
+		p := filepath.Join(dataDir, "nats", "jetstream", "$G", "streams", stream)
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o750))
+		require.NoError(t, os.WriteFile(p, nil, 0o600))
+	}
+	t.Run("flat refuses boot", func(t *testing.T) {
+		guardGlobals(t)
+		cfg := testConfig(t, writeSettings(t, nil))
+		block(t, cfg.DataDir, "DLQ_0")
+		_, err := New(t.Context(), Options{Config: cfg})
+		require.ErrorContains(t, err, "mq open")
+	})
+	t.Run("nested costs the tenant alone", func(t *testing.T) {
+		cfg := testConfig(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil}))
+		block(t, cfg.DataDir, "DLQ_acme")
+		a := newApp(t, cfg, Options{})
+		assert.Zero(t, a.mq.MaxBytes("acme"), "acme's queue did not open")
+		assert.Equal(t, int64(50<<30), a.mq.MaxBytes("globex"), "and costs globex nothing")
+
+		require.NoError(t, a.MQ().Publish(t.Context(), mq.Topic{Tenant: "acme", Table: "t"}, []byte("x")))
+		assert.Equal(t, int64(50<<30), a.mq.MaxBytes("acme"), "a publish opened it at acme's budget")
+	})
+}
+
+// Boot opens each served tenant's queue under New's context, as New's doc
+// says: a stop signalled during boot is not held up by one open per tenant.
+func TestNew_QueueSetupHonorsTheBootContext(t *testing.T) {
+	guardGlobals(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := New(ctx, Options{Config: testConfig(t, writeSettings(t, nil))})
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorContains(t, err, "mq open")
+}
+
 // The tenants on the writer's ClickHouse address and database read the same
 // tables, so an insert invalidates a table's cached results under every one
 // of them — whatever their user, so across pools — and under no tenant on
