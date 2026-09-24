@@ -49,7 +49,6 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockPublisher
 		failed:  make(chan error, 1),
 		clients: chconn.NewHTTPClients(func(*tls.Config) *http.Client { return &http.Client{Transport: rt} }),
 		cache:   cache,
-		tenant:  tenant.Default,
 		target: func() chconn.Target {
 			return chconn.Target{URL: "http://test-clickhouse:8123", Username: "test_user", Password: "test_pass", Database: "test_db"}
 		},
@@ -90,7 +89,7 @@ func makeEnvelopeCols(t *testing.T, tableName, scope string, cols []string, data
 // newIngestMsg builds a MockMessage shaped exactly the way the
 // /v1/ingest producer (internal/api/ingest.go) publishes events:
 //
-//	topic    = mq.Topic{Table: table, Scope: scope}                  // raw, not encoded
+//	topic    = mq.Topic{Tenant: tenant.Default, Table: table, Scope: scope}                  // raw, not encoded
 //	envelope = { table_name: table, scope: scope, ... }              // raw, not encoded
 //
 // Tests should use this helper instead of hand-rolling MsgTopic/MsgData pairs
@@ -98,7 +97,7 @@ func makeEnvelopeCols(t *testing.T, tableName, scope string, cols []string, data
 func newIngestMsg(t *testing.T, table, scope string, data map[string]any) *testutil.MockMessage {
 	t.Helper()
 	return &testutil.MockMessage{
-		MsgTopic: mq.Topic{Table: table, Scope: scope},
+		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: table, Scope: scope},
 		MsgData:  makeEnvelope(t, table, scope, data),
 	}
 }
@@ -137,7 +136,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 			t.Parallel()
 			q, c := tt.setup(t)
 			_, _, err := StartIngestWorker(context.Background(), q, c,
-				func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, tenant.Default, nil)
+				func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrSub)
 		})
@@ -213,7 +212,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 
 	// ── Publish an envelope on ingest.events ──
 	envelope := makeEnvelope(t, "events", "org_42", map[string]any{"id": 1, "v": "x"})
-	err = emb.Publish(ctx, mq.Topic{Table: "events", Scope: "org_42"}, envelope)
+	err = emb.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: "events", Scope: "org_42"}, envelope)
 	require.NoError(t, err)
 
 	// ── Wait for the worker to insert + ack ──
@@ -272,11 +271,11 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	stopFn, _, err := StartIngestWorker(ctx, emb, &testutil.MockCache{},
 		func() chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
-		}, tenant.Default, nil)
+		}, nil)
 	require.NoError(t, err)
 
 	// Publish so there's an in-flight insert blocking on `release`.
-	err = emb.Publish(ctx, mq.Topic{Table: "events"}, makeEnvelope(t, "events", "", map[string]any{"id": 1}))
+	err = emb.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: "events"}, makeEnvelope(t, "events", "", map[string]any{"id": 1}))
 	require.NoError(t, err)
 
 	// Give the worker a moment to pick up the message and start the request.
@@ -306,7 +305,7 @@ func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 	// chURL is never dialed: with no messages there is no flush, so a dummy
 	// host/port is fine.
 	stopFn, _, err := StartIngestWorker(context.Background(), emb, &testutil.MockCache{},
-		func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, tenant.Default, nil)
+		func() chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
 	require.NoError(t, err)
 
 	// Nothing to flush, so shutdown drains immediately and returns nil before the
@@ -541,9 +540,10 @@ func TestHandleSuccess(t *testing.T) {
 			msgs := make([]*testutil.MockMessage, len(tt.scopes))
 			parsed := make([]parsedMsg, len(tt.scopes))
 			for i, scope := range tt.scopes {
-				// handleSuccess reads scope off parsedMsg, not the MQ message itself.
+				// handleSuccess reads the tenant and scope off parsedMsg, not the
+				// MQ message itself.
 				msgs[i] = &testutil.MockMessage{DoubleAckErr: tt.msgDoubleAckErr}
-				parsed[i] = parsedMsg{msg: msgs[i].Message(), scope: scope}
+				parsed[i] = parsedMsg{msg: msgs[i].Message(), tenant: tenant.Default, scope: scope}
 			}
 
 			w.handleSuccess(context.Background(), tt.table, parsed)
@@ -558,13 +558,12 @@ func TestHandleSuccess(t *testing.T) {
 	}
 }
 
-// invalidate bumps the namespaces of the tenant it is handed, not the
-// worker's own: handleSuccess passes w.tenant today, and story 5 passes the
-// message's, so the parameter is what must reach the cache.
+// invalidate bumps the namespaces of the tenant it is handed — the batch's,
+// which handleSuccess reads off the message — so the parameter is what must
+// reach the cache.
 func TestInvalidate_BumpsTheGivenTenant(t *testing.T) {
 	t.Parallel()
 	w, _, mc, _ := newTestWorker(&testutil.MockRoundTripper{})
-	require.Equal(t, tenant.Default, w.tenant)
 
 	msgs := []parsedMsg{{scope: "org_1"}, {scope: ""}}
 	w.invalidate(context.Background(), "acme", "events", msgs)
@@ -623,7 +622,7 @@ func TestSendToDLQ(t *testing.T) {
 			name:          "publishes with headers and acks original",
 			table:         "events",
 			msgData:       []byte(`{"bad":"row"}`),
-			msgTopic:      mq.Topic{Table: "events"},
+			msgTopic:      mq.Topic{Tenant: tenant.Default, Table: "events"},
 			errMsg:        "Code: 60. DB::Exception: ...",
 			wantPublished: 1,
 			wantData:      []byte(`{"bad":"row"}`),
@@ -642,7 +641,7 @@ func TestSendToDLQ(t *testing.T) {
 			name:          "publish failure means no ack",
 			table:         "events",
 			msgData:       []byte(`{"bad":"row"}`),
-			msgTopic:      mq.Topic{Table: "events"},
+			msgTopic:      mq.Topic{Tenant: tenant.Default, Table: "events"},
 			errMsg:        "boom",
 			pubErr:        errors.New("nats unavailable"),
 			wantPublished: 0,
@@ -654,7 +653,7 @@ func TestSendToDLQ(t *testing.T) {
 			name:          "parks under the message's own topic",
 			table:         "events.staging",
 			msgData:       []byte("payload"),
-			msgTopic:      mq.Topic{Table: "events.staging", Scope: "org_42"},
+			msgTopic:      mq.Topic{Tenant: tenant.Default, Table: "events.staging", Scope: "org_42"},
 			errMsg:        "err",
 			wantPublished: 1,
 			wantData:      []byte("payload"),
@@ -734,7 +733,7 @@ func TestParseMsg(t *testing.T) {
 		t.Parallel()
 		w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
 		bad := &testutil.MockMessage{
-			MsgTopic: mq.Topic{Table: "events"},
+			MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 			MsgData:  []byte("not valid json"),
 		}
 
@@ -907,7 +906,7 @@ func TestFlushTable_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 	published := pub.Published()
 	require.Len(t, published, 1, "exactly one row should reach the DLQ")
 	assert.True(t, published[0].DeadLetter)
-	assert.Equal(t, mq.Topic{Table: "events"}, published[0].Topic)
+	assert.Equal(t, mq.Topic{Tenant: tenant.Default, Table: "events"}, published[0].Topic)
 	assert.Equal(t, "events", published[0].Headers.Get("X-DLQ-Table"))
 	assert.Contains(t, published[0].Headers.Get("X-DLQ-Error"), "Code: 60")
 }
@@ -1146,7 +1145,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 
 	// 1. Prime table A — too few events to hit either trigger on its own.
 	for i := range batchA {
-		err = emb.Publish(ctx, mq.Topic{Table: "tableA"},
+		err = emb.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: "tableA"},
 			makeEnvelope(t, "tableA", "", map[string]any{"id": i}))
 		require.NoError(t, err)
 	}
@@ -1154,7 +1153,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 	// 2. Then publish exactly maxBatch events to table B — should hit B's
 	//    own size trigger and flush immediately, regardless of what A did.
 	for i := range batchB {
-		err = emb.Publish(ctx, mq.Topic{Table: "tableB"},
+		err = emb.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: "tableB"},
 			makeEnvelope(t, "tableB", "", map[string]any{"id": i}))
 		require.NoError(t, err)
 	}
@@ -1240,7 +1239,7 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 	})
 
 	for i := range total {
-		err = emb.Publish(ctx, mq.Topic{Table: "tableX"},
+		err = emb.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: "tableX"},
 			makeEnvelope(t, "tableX", "", map[string]any{"id": i}))
 		require.NoError(t, err)
 	}
@@ -1301,7 +1300,7 @@ func TestParseMsg_PoisonEnvelope_ParkedOnDLQ(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			w, pub, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-			m := &testutil.MockMessage{MsgTopic: mq.Topic{Table: "events"}, MsgData: tt.data}
+			m := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"}, MsgData: tt.data}
 
 			_, ok := w.parseMsg(context.Background(), m.Message())
 			w.ackWg.Wait() // poison disposal is backgrounded now
@@ -1310,7 +1309,7 @@ func TestParseMsg_PoisonEnvelope_ParkedOnDLQ(t *testing.T) {
 			published := pub.Published()
 			require.Len(t, published, 1, "the row is parked, not dropped")
 			assert.True(t, published[0].DeadLetter)
-			assert.Equal(t, mq.Topic{Table: "events"}, published[0].Topic)
+			assert.Equal(t, mq.Topic{Tenant: tenant.Default, Table: "events"}, published[0].Topic)
 			assert.Equal(t, tt.data, published[0].Data, "the original bytes are preserved verbatim")
 			assert.NotEmpty(t, published[0].Headers.Get("X-DLQ-Error"))
 			assert.True(t, m.DoubleAcked.Load(), "acked once parked, so NATS stops redelivering it")
@@ -1343,7 +1342,7 @@ func TestParseMsg_DuplicateColumn_Unpairable(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	m := &testutil.MockMessage{MsgTopic: mq.Topic{Table: "events"}, MsgData: payload}
+	m := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"}, MsgData: payload}
 	_, ok := w.parseMsg(context.Background(), m.Message())
 	require.False(t, ok, "a repeated column name is unpairable")
 	w.ackWg.Wait()
@@ -1362,7 +1361,7 @@ func TestParseMsg_PoisonEnvelope_DLQDisabled_AckedAndDropped(t *testing.T) {
 	w.dlqEnabled = func(tenant.ID, string) bool { return false }
 
 	m := &testutil.MockMessage{
-		MsgTopic: mq.Topic{Table: "events"},
+		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 		MsgData:  v1Envelope(t, "events", map[string]any{"id": 1}),
 	}
 	_, ok := w.parseMsg(context.Background(), m.Message())
@@ -1382,7 +1381,7 @@ func TestParseMsg_PoisonEnvelope_DLQPublishFails_LeftUnacked(t *testing.T) {
 	pub.Err = errors.New("jetstream unavailable")
 
 	m := &testutil.MockMessage{
-		MsgTopic: mq.Topic{Table: "events"},
+		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 		MsgData:  v1Envelope(t, "events", map[string]any{"id": 1}),
 	}
 	_, ok := w.parseMsg(context.Background(), m.Message())
@@ -1455,11 +1454,11 @@ func TestFlushTable_MixedColumnLists_TwoInserts(t *testing.T) {
 	w, _, _, wait := newTestWorker(rt)
 
 	narrow := &testutil.MockMessage{
-		MsgTopic: mq.Topic{Table: "events"},
+		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 		MsgData:  makeEnvelopeCols(t, "events", "", []string{"id"}, map[string]any{"id": 1}),
 	}
 	wide := &testutil.MockMessage{
-		MsgTopic: mq.Topic{Table: "events"},
+		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 		MsgData:  makeEnvelopeCols(t, "events", "", []string{"id", "v"}, map[string]any{"id": 2, "v": "x"}),
 	}
 	w.flushTable(context.Background(), "events", parseAll(t, w, narrow, wide))
@@ -1513,7 +1512,7 @@ func TestRejectPoison_CountedByDisposition(t *testing.T) {
 
 	poison := func() *testutil.MockMessage {
 		return &testutil.MockMessage{
-			MsgTopic: mq.Topic{Table: "events"},
+			MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 			MsgData:  v1Envelope(t, "events", map[string]any{"id": 1}),
 		}
 	}
@@ -1583,7 +1582,7 @@ func (f *blockingFakeConsumer) Consume(handler func(*mq.Message), _ int) (func()
 	var wg sync.WaitGroup
 	for range f.n {
 		wg.Go(func() {
-			handler((&testutil.MockMessage{MsgTopic: mq.Topic{Table: "t"}, MsgData: []byte("not json")}).Message())
+			handler((&testutil.MockMessage{MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "t"}, MsgData: []byte("not json")}).Message())
 		})
 	}
 	go func() {
@@ -1645,7 +1644,7 @@ func TestDispatchLoop_DeliveryEndedFailsLoud(t *testing.T) {
 	w.dlqEnabled = func(tenant.ID, string) bool { return false } // the sentinel is acked-and-dropped, no publish
 
 	held := newIngestMsg(t, "events", "", map[string]any{"id": 1})
-	sentinel := &testutil.MockMessage{MsgTopic: mq.Topic{Table: "events"}, MsgData: []byte("not json")}
+	sentinel := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"}, MsgData: []byte("not json")}
 	ended := fmt.Errorf("%w: consumer deleted", mq.ErrDeliveryEnded)
 	cons := &failingFakeConsumer{msgs: []*testutil.MockMessage{held}, sentinel: sentinel, endWith: ended}
 
@@ -1708,6 +1707,153 @@ func TestDispatchLoop_HandoffReturnsOnCancel(t *testing.T) {
 	case <-cons.done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("deliveries blocked on a full msgChan never returned after the loop stopped")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The tenant is the topic's (#583 story 5): read off each message, never held.
+// ---------------------------------------------------------------------------
+
+func TestParseMsg_ReadsTheTenantOffTheTopic(t *testing.T) {
+	t.Parallel()
+	w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+	m := &testutil.MockMessage{
+		MsgTopic: mq.Topic{Tenant: "acme", Table: "events"},
+		MsgData:  makeEnvelope(t, "events", "", map[string]any{"id": 1}),
+	}
+	pm, ok := w.parseMsg(context.Background(), m.Message())
+	require.True(t, ok)
+	assert.Equal(t, tenant.ID("acme"), pm.tenant)
+	assert.Equal(t, "events", pm.tableName)
+}
+
+// An envelope the worker cannot read still has a tenant — the topic's — to
+// resolve its dead-letter switch under and to be parked for.
+func TestParseMsg_PoisonEnvelope_SwitchIsTheTopicsTenants(t *testing.T) {
+	t.Parallel()
+	w, pub, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+	var asked []tenant.ID
+	w.dlqEnabled = func(id tenant.ID, _ string) bool {
+		asked = append(asked, id)
+		return true
+	}
+	m := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: "acme", Table: "events"}, MsgData: []byte("not json")}
+	_, ok := w.parseMsg(context.Background(), m.Message())
+	require.False(t, ok)
+	w.ackWg.Wait()
+
+	assert.Equal(t, []tenant.ID{"acme"}, asked)
+	published := pub.Published()
+	require.Len(t, published, 1)
+	assert.Equal(t, mq.Topic{Tenant: "acme", Table: "events"}, published[0].Topic, "parked under the tenant's own topic")
+}
+
+// Two tenants, one table name, and ClickHouse refusing every row: each row
+// reaches the dead-letter decision under its own tenant. acme's switch is off,
+// so its row stays unacked for redelivery; globex's is on, so its row is parked
+// under globex's topic and acked.
+func TestFlushTable_DLQSwitchIsTheRowsTenants(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{
+		Fn: func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(bytes.NewBufferString("Code: 60. bad row"))}, nil
+		},
+	}
+	w, pub, _, wait := newTestWorker(rt)
+	var asked []tenant.ID
+	w.dlqEnabled = func(id tenant.ID, table string) bool {
+		asked = append(asked, id)
+		return id == "globex" && table == "events"
+	}
+	acme := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: "acme", Table: "events"}, MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 1})}
+	globex := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: "globex", Table: "events"}, MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 1})}
+
+	// One flush per tenant table, as dispatchLoop batches them.
+	w.flushTable(context.Background(), "events", parseAll(t, w, acme))
+	w.flushTable(context.Background(), "events", parseAll(t, w, globex))
+	wait()
+
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, asked)
+	assert.False(t, acme.DoubleAcked.Load(), "acme's row stays unacked: its DLQ is off")
+	assert.True(t, globex.DoubleAcked.Load(), "globex's row is parked and acked")
+	published := pub.Published()
+	require.Len(t, published, 1)
+	assert.Equal(t, mq.Topic{Tenant: "globex", Table: "events"}, published[0].Topic, "parked under the tenant's own topic")
+}
+
+// Two tenants, one table name: each tenant's rows batch on their own, so an
+// INSERT never mixes tenants — what a per-tenant ClickHouse target and cache
+// namespace (stories 6 and 8) rely on — and each batch invalidates its own
+// tenant's namespaces. Published interleaved, so batching by table alone
+// would put both tenants' first rows in one INSERT.
+func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
+	t.Parallel()
+	const maxBatch = 2
+
+	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = emb.Close() })
+
+	// CH stub: record each INSERT's body.
+	var (
+		mu     sync.Mutex
+		bodies []string
+	)
+	chSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(chSrv.Close)
+	u, err := url.Parse(chSrv.URL)
+	require.NoError(t, err)
+	host, port, err := net.SplitHostPort(u.Host)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cons, err := emb.CreateConsumer(ctx, mq.ConsumerConfig{Durable: BufferConsumerName, MaxAckPending: 1000})
+	require.NoError(t, err)
+	mc := &testutil.MockCache{}
+	worker := &IngestWorker{
+		dlq:     emb,
+		clients: chconn.NewHTTPClients(ingestHTTPClient),
+		cache:   mc,
+		target: func() chconn.Target {
+			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
+		},
+		maxBatch: maxBatch,
+		maxWait:  30 * time.Second, // the size trigger is the one under test
+	}
+	worker.wg.Add(1)
+	go worker.dispatchLoop(ctx, cons)
+	t.Cleanup(func() {
+		cancel()
+		worker.wg.Wait()
+	})
+
+	for i := range maxBatch {
+		for _, id := range []tenant.ID{"acme", "globex"} {
+			require.NoError(t, emb.Publish(ctx, mq.Topic{Tenant: id, Table: "events"},
+				makeEnvelope(t, "events", "", map[string]any{"id": fmt.Sprintf("%s-%d", id, i)})))
+		}
+	}
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(bodies) == 2
+	}, defaultMaxWait, 25*time.Millisecond, "each tenant's table hits its own size trigger")
+	// Invalidation follows the INSERT's answer, on the worker's side.
+	require.Eventually(t, func() bool { return len(mc.GetNamespaces()) == 2 }, defaultMaxWait, 25*time.Millisecond)
+	assert.ElementsMatch(t, []cache.Namespace{{Tenant: "acme", Table: "events"}, {Tenant: "globex", Table: "events"}}, mc.GetNamespaces(),
+		"each batch bumps its own tenant's namespaces")
+	mu.Lock()
+	defer mu.Unlock()
+	for _, body := range bodies {
+		assert.Equal(t, maxBatch, strings.Count(body, "\n"), "a full batch: %q", body)
+		assert.NotEqual(t, strings.Contains(body, "acme"), strings.Contains(body, "globex"), "one tenant per INSERT: %q", body)
 	}
 }
 

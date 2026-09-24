@@ -628,7 +628,7 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 
 // Until story 6 every tenant reads the same ClickHouse tables, so an insert
 // invalidates a table's cached results under every tenant the registry
-// knows, not only under the worker's own: the cache the worker is handed fans
+// knows, not only under the batch's tenant: the cache the worker is handed fans
 // the namespaces out. A rejected tenant is included — it comes back into
 // service with the entries it has.
 func TestSharedTables_InvalidatesEveryKnownTenant(t *testing.T) {
@@ -653,7 +653,7 @@ func TestSharedTables_InvalidatesEveryKnownTenant(t *testing.T) {
 		{Tenant: "broken", Table: "events", Scope: "org_1"},
 		{Tenant: "globex", Table: "events"},
 		{Tenant: "globex", Table: "events", Scope: "org_1"},
-	}, mock.GetNamespaces(), "the worker's own tenant and every known one, the rejected one included")
+	}, mock.GetNamespaces(), "the batch's tenant and every known one, the rejected one included")
 }
 
 // keepalive is a config.json patch setting the stream block's keepalive pair.
@@ -700,6 +700,44 @@ func TestShortestKeepalive(t *testing.T) {
 		period, buckets := shortestKeepalive(open(t, writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery})))
 		assert.Zero(t, period)
 		assert.Zero(t, buckets)
+	})
+}
+
+func gapWindow(minutes int) map[string]any {
+	return map[string]any{"stream": map[string]any{"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": minutes}}
+}
+
+// One ingest stream holds every tenant's events and the sweeper purges below
+// one sequence, so it keeps the longest gap window among the tenants being
+// served — every tenant's gap-fill history is inside it (a stream per tenant
+// will honor each tenant's own, #583 story 5b). A flat directory's single
+// tenant gets exactly its own window.
+func TestLongestGapWindow(t *testing.T) {
+	open := func(t *testing.T, dir string) *settings.Registry {
+		t.Helper()
+		guardGlobals(t)
+		tenants, findings := settings.Open(dir)
+		require.NotNil(t, tenants, "findings: %v", findings)
+		return tenants
+	}
+
+	t.Run("flat directory", func(t *testing.T) {
+		assert.Equal(t, 45*time.Minute, longestGapWindow(open(t, writeSettings(t, gapWindow(45)))))
+	})
+
+	t.Run("nested directory", func(t *testing.T) {
+		root := writeNestedSettings(t, map[string]map[string]any{"acme": gapWindow(15), "globex": gapWindow(60), "initech": gapWindow(30)})
+		tenants := open(t, root)
+		assert.Equal(t, 60*time.Minute, longestGapWindow(tenants))
+
+		// A rejected tenant is not being served, so its window is not weighed.
+		rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+		tenants.Reload("test")
+		assert.Equal(t, 30*time.Minute, longestGapWindow(tenants))
+	})
+
+	t.Run("no tenant served keeps nothing", func(t *testing.T) {
+		assert.Zero(t, longestGapWindow(open(t, writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery}))))
 	})
 }
 

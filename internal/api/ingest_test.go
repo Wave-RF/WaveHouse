@@ -73,7 +73,31 @@ func TestIngest_ValidPayload(t *testing.T) {
 
 	msg := pub.LastMessage()
 	require.NotNil(t, msg)
-	assert.Equal(t, mq.Topic{Table: "clicks"}, msg.Topic)
+	assert.Equal(t, mq.Topic{Tenant: tenant.Default, Table: "clicks"}, msg.Topic)
+}
+
+// The event is addressed to the request's tenant (#583): two tenants
+// ingesting the same table name publish on two topics.
+func TestIngest_PublishesOnTheRequestTenantsTopic(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub)
+	tenants := nestedTenants(t, map[string]string{"acme": fullConfig(100), "globex": fullConfig(200)})
+
+	for _, id := range []tenant.ID{"acme", "globex"} {
+		store, ok := tenants.For(id)
+		require.True(t, ok)
+		req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "count": 1})
+		req = req.WithContext(WithStore(req.Context(), store))
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	}
+
+	published := pub.Published()
+	require.Len(t, published, 2)
+	assert.Equal(t, mq.Topic{Tenant: "acme", Table: "clicks"}, published[0].Topic)
+	assert.Equal(t, mq.Topic{Tenant: "globex", Table: "clicks"}, published[1].Topic)
 }
 
 func TestIngest_MissingTable(t *testing.T) {

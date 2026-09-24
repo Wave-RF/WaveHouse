@@ -17,7 +17,9 @@ import (
 
 // testStore stands in for the store TenantMW resolves. It holds no document:
 // handler tests inject fixed getters that ignore it, so a handler that read
-// it directly would panic rather than pass.
+// it directly would panic rather than pass. It does carry its tenant — the
+// registry below stamps it — which the ingest and stream handlers address the
+// message queue with.
 var testStore = &settings.Store{}
 
 // withTenant attaches testStore to r the way TenantMW would, for tests that

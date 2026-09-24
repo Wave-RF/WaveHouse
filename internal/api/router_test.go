@@ -330,7 +330,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		{Name: "events", Columns: []discovery.Column{{Name: "id", Type: "String"}}},
 	})
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024)
 	require.NoError(t, err)
@@ -420,7 +420,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 func TestNewRouter_CORSOnStream(t *testing.T) {
 	t.Parallel()
 
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 	router := NewRouter(Dependencies{
 		Tenants:     testTenants(),
 		SSE:         NewStreamHandler(hub, nil),
@@ -516,7 +516,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
 		Tenants:      testTenants(),
@@ -588,7 +588,7 @@ func TestNewRouter_NestedOpsGateAdmitsTheOperatorKeyAlone(t *testing.T) {
 			Tenants:      tenants,
 			Ingest:       NewIngestHandler(reg, &testutil.MockPublisher{}),
 			Query:        &QueryHandler{},
-			SSE:          NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
+			SSE:          NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 			Health:       &HealthHandler{},
 			Schema:       NewSchemaHandler(reg),
 			Pipes:        pipesHandler,
@@ -665,7 +665,7 @@ func TestNewRouter_MalformedTenantSurvivesTheTokenStrip(t *testing.T) {
 		Tenants:      tenants,
 		Ingest:       NewIngestHandler(reg, &testutil.MockPublisher{}),
 		Query:        &QueryHandler{},
-		SSE:          NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
+		SSE:          NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:       &HealthHandler{},
 		Schema:       NewSchemaHandler(reg),
 		Pipes:        pipesHandler,
@@ -733,7 +733,7 @@ func TestNewRouter_TokenUnderPendingJWKSIs503(t *testing.T) {
 		Tenants: tenants,
 		Ingest:  NewIngestHandler(reg, &testutil.MockPublisher{}),
 		Query:   &QueryHandler{},
-		SSE:     NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
+		SSE:     NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:  &HealthHandler{},
 		Schema:  NewSchemaHandler(reg),
 		Pipes:   pipesHandler,
@@ -771,7 +771,7 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	deps := Dependencies{
 		Tenants:      testTenants(),
@@ -850,7 +850,7 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 	deps := Dependencies{
 		Tenants: testTenants(),
 		Ingest:  NewIngestHandler(reg, pub),
@@ -875,7 +875,7 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 	deps := Dependencies{
 		Tenants: testTenants(),
 		Ingest:  NewIngestHandler(reg, pub),
@@ -974,7 +974,7 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 		{Name: "events", Columns: []discovery.Column{{Name: "id", Type: "String"}}},
 	})
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
 		Tenants:      testTenants(),

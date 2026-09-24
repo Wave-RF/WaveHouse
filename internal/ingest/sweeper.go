@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // Sweeper implements the Active Sweeper pattern. It runs every minute and
@@ -21,20 +20,21 @@ import (
 // finds the purge point is its own business (see mq.Purger).
 type Sweeper struct {
 	purger mq.Purger
-	tenant tenant.ID
-	// gapWindow is the tenant's gap window, read on every sweep
-	// (settings.Store.GapWindow in production) so a reload of
-	// stream.gap_window_minutes applies from the next sweep without a restart.
-	gapWindow func(tenant.ID) time.Duration
+	// gapWindow is the history to keep, read on every sweep so a reload of
+	// stream.gap_window_minutes applies from the next sweep without a
+	// restart. The ingest queue is one stream for every tenant and a purge
+	// is one bound over it, so in production this is the longest window
+	// among the tenants being served (internal/app's longestGapWindow); a
+	// tenant's own window follows once the streams are per tenant (#583
+	// story 5b).
+	gapWindow func() time.Duration
 }
 
-// NewSweeper creates the Active Sweeper of tenant id. gapWindow is resolved
-// per sweep.
+// NewSweeper creates the Active Sweeper. gapWindow is resolved per sweep.
 // TODO: (future) need leader election or shared lock to only run one instance of the sweeper in clustered mode
-func NewSweeper(purger mq.Purger, id tenant.ID, gapWindow func(tenant.ID) time.Duration) *Sweeper {
+func NewSweeper(purger mq.Purger, gapWindow func() time.Duration) *Sweeper {
 	return &Sweeper{
 		purger:    purger,
-		tenant:    id,
 		gapWindow: gapWindow,
 	}
 }
@@ -54,7 +54,7 @@ func (s *Sweeper) Start(ctx context.Context) {
 }
 
 func (s *Sweeper) sweep(ctx context.Context) {
-	_, err := s.purger.PurgeAcked(ctx, BufferConsumerName, time.Now().Add(-s.gapWindow(s.tenant)))
+	_, err := s.purger.PurgeAcked(ctx, BufferConsumerName, time.Now().Add(-s.gapWindow()))
 	if err != nil {
 		if errors.Is(err, mq.ErrConsumerNotFound) {
 			// Consumer may not exist yet if no messages have been ingested.

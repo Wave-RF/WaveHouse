@@ -10,10 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Per-role projection (column filtering, table denial, passthrough, the id: line)
@@ -23,7 +25,7 @@ import (
 
 func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
 	t.Parallel()
-	h := &StreamHandler{Hub: stream.NewHub(tenant.Default, nil, nil, nil)}
+	h := &StreamHandler{Hub: stream.NewHub(nil, nil, nil)}
 
 	cases := []struct {
 		name    string
@@ -51,7 +53,7 @@ func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
 
 func TestSSE_AcceptsSafeTableName(t *testing.T) {
 	t.Parallel()
-	h := &StreamHandler{Hub: stream.NewHub(tenant.Default, nil, nil, nil)}
+	h := &StreamHandler{Hub: stream.NewHub(nil, nil, nil)}
 
 	// Use a request context that's already cancelled so the handler exits
 	// the live-stream select loop immediately instead of blocking the test.
@@ -59,7 +61,7 @@ func TestSSE_AcceptsSafeTableName(t *testing.T) {
 	cancel()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)
 	w := httptest.NewRecorder()
-	h.Handle(w, req)
+	h.Handle(w, withTenant(req))
 	// Past the validation gate — header set to text/event-stream, not the
 	// 400-path application/json.
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -76,7 +78,7 @@ func TestSSE_EmitsHeartbeatsWhenIdle(t *testing.T) {
 	hb := stream.NewHeartbeater(20*time.Millisecond, 1)
 	go hb.Run(t.Context())
 
-	h := &StreamHandler{Hub: stream.NewHub(tenant.Default, nil, nil, nil), Heartbeater: hb}
+	h := &StreamHandler{Hub: stream.NewHub(nil, nil, nil), Heartbeater: hb}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)
@@ -89,7 +91,7 @@ func TestSSE_EmitsHeartbeatsWhenIdle(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.Handle(w, req)
+		h.Handle(w, withTenant(req))
 	}()
 	time.Sleep(200 * time.Millisecond)
 	cancel()
@@ -115,7 +117,7 @@ func TestSSE_WheelTickRacesHandlerTeardown(t *testing.T) {
 	defer cancel()
 	go hb.Run(ctx)
 
-	h := &StreamHandler{Hub: stream.NewHub(tenant.Default, nil, nil, nil), Heartbeater: hb}
+	h := &StreamHandler{Hub: stream.NewHub(nil, nil, nil), Heartbeater: hb}
 
 	const conns = 40
 	var wg sync.WaitGroup
@@ -129,7 +131,7 @@ func TestSSE_WheelTickRacesHandlerTeardown(t *testing.T) {
 			hdone := make(chan struct{})
 			go func() {
 				defer close(hdone)
-				h.Handle(w, req)
+				h.Handle(w, withTenant(req))
 			}()
 			time.Sleep(8 * time.Millisecond) // let the wheel push at least once
 			rcancel()                        // client "disconnects" mid-stream
@@ -140,4 +142,38 @@ func TestSSE_WheelTickRacesHandlerTeardown(t *testing.T) {
 
 	assert.Equal(t, 0, hb.Len(),
 		"every handler runs its deferred Remove on disconnect; the wheel ring drains")
+}
+
+// Two tenants stream the same table name on two topics (#583): a connection
+// registers under its own tenant's, where only that tenant's events are
+// broadcast.
+func TestSSE_SubscribesUnderTheRequestTenant(t *testing.T) {
+	t.Parallel()
+	hub := stream.NewHub(nil, nil, nil)
+	h := &StreamHandler{Hub: hub}
+	tenants := nestedTenants(t, map[string]string{"acme": fullConfig(100), "globex": fullConfig(200)})
+
+	// One context for both connections: cancelling it is the clients going away.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, id := range []tenant.ID{"acme", "globex"} {
+		store, ok := tenants.For(id)
+		require.True(t, ok)
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)
+		req = req.WithContext(WithStore(req.Context(), store))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.Handle(httptest.NewRecorder(), req)
+		}()
+	}
+	require.Eventually(t, func() bool {
+		return hub.Len(mq.Topic{Tenant: "acme", Table: "clicks"}) == 1 && hub.Len(mq.Topic{Tenant: "globex", Table: "clicks"}) == 1
+	}, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, 0, hub.Len(mq.Topic{Tenant: tenant.Default, Table: "clicks"}), "neither connection is the default tenant's")
+
+	cancel()
+	wg.Wait()
+	assert.Equal(t, 0, hub.Len(mq.Topic{Tenant: "acme", Table: "clicks"}), "every subscriber is removed")
 }

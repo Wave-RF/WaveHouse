@@ -703,7 +703,7 @@ func (h *IngestHandler) processRecord(
 	}
 
 	slog.DebugContext(ctx, "publishing event to the ingest queue", "table", table, "scope", scope)
-	if err := h.Publisher.Publish(ctx, mq.Topic{Table: table, Scope: scope}, payload); err != nil {
+	if err := h.Publisher.Publish(ctx, mq.Topic{Tenant: store.Tenant(), Table: table, Scope: scope}, payload); err != nil {
 		if errors.Is(err, mq.ErrQueueFull) {
 			slog.WarnContext(ctx, "ingest queue is full", "table", table, "scope", scope)
 			return false, nil, &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30"}

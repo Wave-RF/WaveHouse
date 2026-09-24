@@ -75,7 +75,7 @@ func cachedRouter(t *testing.T, tenants *settings.Registry, conn driver.Conn, c 
 		StructuredQuery: NewStructuredQueryHandler(conn, c, reg, viewer, func(*settings.Store) int { return 60 }, timeout, nil),
 		Pipes:           NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), viewer, conn, c, timeout),
 		Query:           &QueryHandler{},
-		SSE:             NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
+		SSE:             NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:          &HealthHandler{},
 		Version:         NewVersionHandler("test", "test", "test"),
 		Schema:          NewSchemaHandler(reg),

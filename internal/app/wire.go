@@ -74,7 +74,7 @@ func (a *App) wireSettings() error {
 			slog.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
 		}
 	case !served:
-		slog.Warn("nested settings directory with no tenant 0 being served: the ClickHouse connection, the MQ byte budget, and the async paths (ingest worker, sweeper, stream hub, schema refresh) are still configured from tenant 0's config.json, so they run unconfigured — no ClickHouse address, /livez degraded — until a 0 folder is adopted")
+		slog.Warn("nested settings directory with no tenant 0 being served: the ClickHouse connection, the MQ byte budget, and the schema refresh cadence are still configured from tenant 0's config.json, so they run unconfigured — no ClickHouse address, /livez degraded — until a 0 folder is adopted")
 	}
 	return nil
 }
@@ -135,12 +135,29 @@ func shortestKeepalive(tenants *settings.Registry) (period time.Duration, bucket
 	return period, buckets
 }
 
+// longestGapWindow is the shape of the one purge bound every tenant's events
+// share: the ingest queue is one stream and the sweeper purges below one
+// sequence, so the history kept is the longest stream.gap_window_minutes
+// among the tenants being served — purging less, never more, so every
+// tenant's gap-fill history survives — at the cost of one tenant holding the
+// others' history for longer, which a stream per tenant will end (#583 story
+// 5b). A flat directory's one tenant gets exactly its own window;
+// with no tenant served the zero window purges everything acknowledged.
+func longestGapWindow(tenants *settings.Registry) time.Duration {
+	var window time.Duration
+	for _, store := range tenants.All() {
+		window = max(window, store.GapWindow())
+	}
+	return window
+}
+
 // perTenant adapts a store accessor to the tenant-keyed getter the async
-// paths take: they hold a tenant id (tenant.Default today, the MQ subject's
-// from #583 story 5), not a request's resolved store. A miss — a nested
-// directory with no 0 folder, or with a rejected one — is logged and read as
-// T's zero value; what a removed tenant means to each async path is story
-// 3's to decide.
+// paths take: they hold a tenant id — the one each message's topic names
+// for the stream hub and the ingest worker (#583 story 5), tenant.Default
+// for the schema registry until story 6 — not a request's resolved store. A
+// miss — a nested directory with no 0 folder, or with a rejected or removed
+// one — is logged and read as T's zero value; what a removed tenant means to
+// each async path is story 3's to decide.
 func perTenant[T any](tenants *settings.Registry, get func(*settings.Store) T) func(tenant.ID) T {
 	return func(id tenant.ID) T {
 		store, ok := tenants.For(id)
@@ -171,7 +188,7 @@ func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 // sharedTables is the cache the ingest worker invalidates through until #583
 // story 6 gives each tenant its own ClickHouse. Every tenant reads the same
 // tables today, so an insert into one changes what every tenant would read:
-// the worker names one tenant's namespaces (its own), and this bumps them
+// the worker names one tenant's namespaces (the batch's), and this bumps them
 // under every tenant the registry knows, the named one included. Known, not
 // served: a rejected tenant keeps its cache entries and comes back into
 // service with them, so leaving it out would let a folder repaired inside a
@@ -511,10 +528,11 @@ func (a *App) wireCache() error {
 }
 
 // wireSweeper adds the active sweeper — purges messages that are both
-// written to ClickHouse and older than the SSE gap window
-// (stream.gap_window_minutes, re-read every sweep). Runs every minute.
+// written to ClickHouse and older than the SSE gap window (the longest
+// stream.gap_window_minutes among the tenants served, re-read every sweep —
+// see longestGapWindow). Runs every minute.
 func (a *App) wireSweeper() {
-	sweeper := ingest.NewSweeper(a.mq, tenant.Default, perTenant(a.tenants, (*settings.Store).GapWindow))
+	sweeper := ingest.NewSweeper(a.mq, func() time.Duration { return longestGapWindow(a.tenants) })
 	a.add(component{name: "sweeper", run: func(ctx context.Context) error {
 		sweeper.Start(ctx)
 		return nil
@@ -527,14 +545,15 @@ func (a *App) wireSweeper() {
 // that role's subscribers; the MQ → Hub bridge; and the keepalive wheel.
 func (a *App) wireStreaming() {
 	a.sseMetrics = stream.NewMetrics()
-	a.hub = stream.NewHub(tenant.Default, perTenant(a.tenants, (*settings.Store).Policy), a.registry, a.sseMetrics)
+	a.hub = stream.NewHub(perTenant(a.tenants, (*settings.Store).Policy), a.registry, a.sseMetrics)
 
 	// Hub bridge: MQ → broadcast to connected SSE clients. The Hub decodes and
-	// projects each event itself (skipping malformed payloads), so the bridge
-	// just forwards the raw bytes and acks.
+	// projects each event itself (skipping malformed payloads) under the
+	// tenant the message's topic names, so the bridge just forwards the topic
+	// and the raw bytes, and acks.
 	a.add(component{name: "hub bridge", run: func(ctx context.Context) error {
 		err := a.mq.Subscribe(ctx, "hub-bridge", func(msg *mq.Message) error {
-			a.hub.Broadcast(msg.TopicKey(), msg.Data)
+			a.hub.Broadcast(msg.Topic(), msg.Data)
 			if err := msg.Ack(); err != nil {
 				slog.Warn("failed to ack message from embedded hub bridge", "error", err)
 			}
@@ -566,7 +585,7 @@ func (a *App) wireStreaming() {
 // drain within the shutdown timeout.
 func (a *App) wireIngestWorker() {
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
-		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, sharedTables{Cache: a.cache, tenants: a.tenants}, a.ch.Target, tenant.Default, dlqFor(a.tenants))
+		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, sharedTables{Cache: a.cache, tenants: a.tenants}, a.ch.Target, dlqFor(a.tenants))
 		if err != nil {
 			return err
 		}

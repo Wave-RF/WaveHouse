@@ -14,25 +14,35 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
-// Topic addresses the events of one table, optionally narrowed to a scope
-// within it. It is the only address the rest of the process handles; the
-// broker's own naming (subjects, prefixes, wildcards, token encoding) is
+// Topic addresses the events of one tenant's table, optionally narrowed to a
+// scope within it. It is the only address the rest of the process handles;
+// the broker's own naming (subjects, prefixes, wildcards, token encoding) is
 // derived from it inside the implementation. Table and Scope are raw names —
 // never pre-encoded.
 type Topic struct {
-	Table string
-	Scope string
+	// Tenant is whose table it is — the settings folder the events were
+	// admitted under (#583). Required: Publish refuses a topic without one,
+	// so no caller falls into tenant.Default by omission.
+	Tenant tenant.ID
+	Table  string
+	Scope  string
 }
 
-// Key is an injective string form of the topic, for use as a map key (the SSE
-// hub's subscription index). Opaque: not a broker subject, and not parseable.
-func (t Topic) Key() string {
-	if t.Scope == "" {
-		return encodeToken(t.Table)
+// key is the injective string form of the topic that a subject's tail
+// carries: the tenant first, verbatim — its grammar makes it one token — then
+// the table and scope as encoded tokens. A topic without a tenant has no
+// subject, and its key parses back to a topic of no tenant with the whole key
+// as its table (parseTopicKey's fallback). Callers key their own maps by the
+// Topic value itself.
+func (t Topic) key() string {
+	key := string(t.Tenant) + "." + encodeToken(t.Table)
+	if t.Scope != "" {
+		key += "." + encodeToken(t.Scope)
 	}
-	return encodeToken(t.Table) + "." + encodeToken(t.Scope)
+	return key
 }
 
 // Message represents a message received from the queue.
@@ -41,8 +51,9 @@ type Message struct {
 	Data      []byte
 	Timestamp time.Time
 	// topicKey is the key of the topic the message was published on, kept in
-	// the form the broker delivered it so the per-message path never decodes
-	// or re-encodes a name (see TopicKey / Topic).
+	// the form the broker delivered it, so parking it (DeadLetter) is a prefix
+	// swap that never decodes or re-encodes a name, and TopicKey is free (see
+	// TopicKey / Topic).
 	topicKey    string
 	doubleAckFn func(ctx context.Context) error
 	ackFn       func() error
@@ -51,20 +62,21 @@ type Message struct {
 
 // NewMessage constructs a Message with ack/nak callbacks.
 func NewMessage(ctx context.Context, topic Topic, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error) *Message {
-	return newMessage(ctx, topic.Key(), data, ts, doubleAck, ack, nak)
+	return newMessage(ctx, topic.key(), data, ts, doubleAck, ack, nak)
 }
 
 func newMessage(ctx context.Context, topicKey string, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error) *Message {
 	return &Message{Ctx: ctx, topicKey: topicKey, Data: data, Timestamp: ts, doubleAckFn: doubleAck, ackFn: ack, nakFn: nak}
 }
 
-// TopicKey is Topic().Key() for the topic the message was published on,
-// without decoding it: free, so it is what per-message paths (the SSE hub
-// bridge) use.
+// TopicKey is the delivered form of the topic the message was published on,
+// undecoded: free, and opaque — what a log line names the message by.
 func (m *Message) TopicKey() string { return m.topicKey }
 
-// Topic is the topic the message was published on. It decodes the names on
-// every call, so it is for failure paths and tests, not the per-message path.
+// Topic is the topic the message was published on — its tenant included,
+// which is how the consumers learn whose event it is. It decodes the key on
+// every call: a split and two unescapes, which the per-message paths (the
+// hub bridge, the worker) pay once each ahead of decoding the envelope.
 func (m *Message) Topic() Topic { return parseTopicKey(m.topicKey) }
 
 // DoubleAck acknowledges the message synchronously, blocking until the
@@ -142,7 +154,8 @@ type Publisher interface {
 	Close() error
 }
 
-// Subscriber delivers every event on the ingest queue, across all topics.
+// Subscriber delivers every event on the ingest queue, across all tenants
+// and topics.
 type Subscriber interface {
 	// Subscribe registers a handler for incoming events under a durable
 	// consumer named consumerName.
@@ -216,9 +229,11 @@ type DeadLetterer interface {
 
 // DeadLetterCounts is what is parked on the dead-letter queue.
 type DeadLetterCounts struct {
-	// Tables maps table name → parked messages, for the tables asked about.
-	// Scope is not broken out yet (it is inert until #235): a message parked
-	// under a scoped topic counts under "table.scope", not under its table.
+	// Tables maps table name → parked messages, for the tables asked about,
+	// summed across tenants: one queue serves every tenant until each has its
+	// own (#583 story 5b), so one count covers them all. Scope is
+	// not broken out yet (it is inert until #235): a message parked under a
+	// scoped topic counts under "table.scope", not under its table.
 	Tables map[string]uint64
 	// Total is every parked message, whatever the filter.
 	Total uint64
@@ -232,8 +247,8 @@ var ErrNoDeadLetterQueue = errors.New("dead-letter queue not found")
 // DeadLetterStats reports on the dead-letter queue.
 type DeadLetterStats interface {
 	// DeadLetterCounts counts parked messages per table; a non-empty table
-	// narrows Tables to that one (its unscoped messages — see
-	// DeadLetterCounts.Tables).
+	// narrows Tables to that one (its unscoped messages, under any tenant —
+	// see DeadLetterCounts.Tables).
 	DeadLetterCounts(ctx context.Context, table string) (DeadLetterCounts, error)
 }
 

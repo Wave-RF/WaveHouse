@@ -58,16 +58,16 @@ func TestHub_RowEvaluatorSeam_LiveBroadcast(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			eval := &recordingEvaluator{visible: tt.visible}
-			hub := NewHub(tenant.Default, staticPolicy(filteredPolicy()), nil, nil)
+			hub := NewHub(staticPolicy(filteredPolicy()), nil, nil)
 			hub.RowEvaluator = eval
 
 			sub := NewSubscriber(map[string]any{"tenant": "t1"}, nil)
-			hub.Add("clicks", "viewer", sub)
+			hub.Add(topicOf("clicks"), "viewer", sub)
 
 			// The claim is "t1", so tenant_id "t2" is a row the real predicate
 			// withholds and "t1" is one it admits — the seam's verdict must win
 			// either way.
-			hub.Broadcast("clicks", rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
+			hub.Broadcast(topicOf("clicks"), rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
 				map[string]any{"tenant_id": tt.tenantID, "page": "/a"}))
 
 			assert.Equal(t, 1, eval.calls, "the live path must consult the seam")
@@ -86,10 +86,10 @@ func TestHub_RowEvaluatorSeam_LiveBroadcast(t *testing.T) {
 func TestHub_RowEvaluatorSeam_Replay(t *testing.T) {
 	t.Parallel()
 	eval := &recordingEvaluator{visible: false}
-	hub := NewHub(tenant.Default, staticPolicy(filteredPolicy()), nil, nil)
+	hub := NewHub(staticPolicy(filteredPolicy()), nil, nil)
 	hub.RowEvaluator = eval
 
-	project := hub.ReplayProjector("viewer", NewSubscriber(map[string]any{"tenant": "t1"}, nil))
+	project := hub.ReplayProjector(tenant.Default, "viewer", NewSubscriber(map[string]any{"tenant": "t1"}, nil))
 	// tenant_id "t1" matches the claim: the real predicate would admit this row.
 	frames := project(rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
 		map[string]any{"tenant_id": "t1", "page": "/a"}))
@@ -102,17 +102,17 @@ func TestHub_RowEvaluatorSeam_Replay(t *testing.T) {
 // row-level security. A nil seam must never read as "everything is visible".
 func TestHub_DefaultRowEvaluator_WhenUnwired(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, staticPolicy(filteredPolicy()), nil, nil)
+	hub := NewHub(staticPolicy(filteredPolicy()), nil, nil)
 	require.Nil(t, hub.RowEvaluator)
 	assert.IsType(t, policyRowEvaluator{}, hub.rowEvaluator())
 
 	sub := NewSubscriber(map[string]any{"tenant": "t1"}, nil)
-	hub.Add("clicks", "viewer", sub)
-	hub.Broadcast("clicks", rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
+	hub.Add(topicOf("clicks"), "viewer", sub)
+	hub.Broadcast(topicOf("clicks"), rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
 		map[string]any{"tenant_id": "t2", "page": "/a"}))
 	assertNoFrame(t, sub)
 
-	hub.Broadcast("clicks", rawEvent(t, "clicks", "2026-06-26T00:00:01Z",
+	hub.Broadcast(topicOf("clicks"), rawEvent(t, "clicks", "2026-06-26T00:00:01Z",
 		map[string]any{"tenant_id": "t1", "page": "/a"}))
 	f, _, _ := recvEvent(t, sub)
 	assert.NotEmpty(t, f.Data)

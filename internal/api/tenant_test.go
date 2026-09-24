@@ -140,7 +140,7 @@ func TestNewRouter_HandlersReceiveTheRequestTenantsStore(t *testing.T) {
 		StructuredQuery: NewStructuredQueryHandler(nil, nil, reg, recordPolicy, func(*settings.Store) int { return 60 }, noTimeout, nil),
 		Pipes:           NewPipesHandler(recordPipes, recordPolicy, nil, nil, noTimeout),
 		Query:           &QueryHandler{},
-		SSE:             NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
+		SSE:             NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:          &HealthHandler{},
 		Version:         NewVersionHandler("test", "test", "test"),
 		Schema:          NewSchemaHandler(reg),
@@ -194,6 +194,7 @@ func TestTenantRouteHandlers_NoResolvedTenantIs500(t *testing.T) {
 		"ingest":           NewIngestHandler(reg, &testutil.MockPublisher{}).Handle,
 		"structured query": newStructuredQueryHandler(t).Handle,
 		"pipe execute":     NewPipesHandler(staticPipes(), nil, nil, nil, noTimeout).Execute,
+		"stream":           NewStreamHandler(stream.NewHub(nil, nil, nil), nil).Handle,
 	}
 	for name, handle := range handlers {
 		t.Run(name, func(t *testing.T) {
@@ -214,7 +215,7 @@ func tenantProbeRouter(t *testing.T, sawStore *[]bool) http.Handler {
 		Tenants: testTenants(),
 		Ingest:  NewIngestHandler(reg, &testutil.MockPublisher{}),
 		Query:   &QueryHandler{},
-		SSE:     NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
+		SSE:     NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:  &HealthHandler{},
 		Version: NewVersionHandler("test", "test", "test"),
 		Schema:  NewSchemaHandler(reg),

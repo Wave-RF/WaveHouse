@@ -9,6 +9,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
@@ -25,10 +26,14 @@ import (
 // subscriber (ResolvedPermissions.RowVisible) before delivering — closing the
 // query/stream RLS drift in #319. Roles without a row-filter keep the pure
 // once-per-role fast path unchanged. See projectColumns.
+//
+// A topic is one tenant's table (mq.Topic, #583): subscribers register under
+// the full topic, so one tenant's subscribers never see another's rows for a
+// table of the same name, and each event is evaluated under its own tenant's
+// policy — the one the PolicySource yields for the topic's tenant.
 type Hub struct {
 	mu       sync.RWMutex
-	topics   map[string]*topicRoutes
-	tenant   tenant.ID                 // whose policy every event and subscriber is evaluated against
+	topics   map[mq.Topic]*topicRoutes
 	policy   PolicySource              // nil ⇒ policy filtering not configured (legacy passthrough)
 	registry *discovery.SchemaRegistry // nil ⇒ no column types; row-filter comparison degrades fail-closed (see columnSpecs)
 	metric   *Metrics                  // nil-safe
@@ -78,22 +83,22 @@ type topicRoutes struct {
 
 // PolicySource yields a tenant's access-control policy, read per event so a
 // settings reload applies to the next one. A nil policy from a wired source
-// is a deliberate lockout.
+// is a deliberate lockout — a tenant the registry no longer serves included.
 type PolicySource func(tenant.ID) *policy.Policy
 
-// NewHub builds the event hub of tenant id. A nil policy store passes every event through
+// NewHub builds the event hub. A nil policy store passes every event through
 // unfiltered (the unwired-tests case); a non-nil store whose Get returns nil is a
 // total lockout (a deleted/absent policy denies everyone). A nil registry leaves
 // every column's type unknown, so row-filter comparison degrades FAIL-CLOSED:
 // equality/set predicates admit only a byte-identical value and ordering/!= admit
 // nothing (see policy.ColumnKind); metric may be nil.
-func NewHub(id tenant.ID, policyStore PolicySource, registry *discovery.SchemaRegistry, metric *Metrics) *Hub {
-	return &Hub{topics: make(map[string]*topicRoutes), tenant: id, policy: policyStore, registry: registry, metric: metric}
+func NewHub(policyStore PolicySource, registry *discovery.SchemaRegistry, metric *Metrics) *Hub {
+	return &Hub{topics: make(map[mq.Topic]*topicRoutes), policy: policyStore, registry: registry, metric: metric}
 }
 
 // Add registers sub to receive events for (topic, role), creating the role bucket
 // (and topic) on first use.
-func (h *Hub) Add(topic, role string, sub *Subscriber) {
+func (h *Hub) Add(topic mq.Topic, role string, sub *Subscriber) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	tr := h.topics[topic]
@@ -112,7 +117,7 @@ func (h *Hub) Add(topic, role string, sub *Subscriber) {
 // Remove deregisters sub from (topic, role), garbage-collecting the bucket and the
 // topic once empty. A no-op if the registration is already gone, so the handler's
 // deferred Remove is always safe.
-func (h *Hub) Remove(topic, role string, sub *Subscriber) {
+func (h *Hub) Remove(topic mq.Topic, role string, sub *Subscriber) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	tr := h.topics[topic]
@@ -133,7 +138,7 @@ func (h *Hub) Remove(topic, role string, sub *Subscriber) {
 }
 
 // Len reports the live subscriber count across one topic (for tests and metrics).
-func (h *Hub) Len(topic string) int {
+func (h *Hub) Len(topic mq.Topic) int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	tr := h.topics[topic]
@@ -154,12 +159,13 @@ type roleBucket struct {
 }
 
 // Broadcast projects raw — a published EventMessage JSON delivered on topic — and
-// fans the finished SSE frame to each subscribed role's bucket. The column
-// projection (decode, evaluate, marshal) happens once per distinct role. For a role
-// that carries a row-level-security filter, that shared frame is still delivered only
-// to the subscribers whose claims admit this row (evaluated per subscriber); a role
-// without a filter takes the pure once-per-role fast path.
-func (h *Hub) Broadcast(topic string, raw []byte) {
+// fans the finished SSE frame to each subscribed role's bucket, evaluated under
+// the topic's tenant's policy. The column projection (decode, evaluate, marshal)
+// happens once per distinct role. For a role that carries a row-level-security
+// filter, that shared frame is still delivered only to the subscribers whose
+// claims admit this row (evaluated per subscriber); a role without a filter
+// takes the pure once-per-role fast path.
+func (h *Hub) Broadcast(topic mq.Topic, raw []byte) {
 	// Snapshot the role->bucket set under the read lock; do the unmarshal / project
 	// / serialize outside it. Skip the decode entirely when nobody is listening.
 	h.mu.RLock()
@@ -177,7 +183,7 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 	}
 
 	ev := newEventView(raw)
-	p, filter := h.snapshotPolicy()
+	p, filter := h.snapshotPolicy(topic.Tenant)
 
 	// Column specs for type-aware row-filter comparison — resolved lazily at most
 	// once per event, only when some role actually carries a row-filter, and reused
@@ -426,19 +432,21 @@ func decodeEvent(raw []byte, evt *ingest.EventMessage) bool {
 	return err == io.EOF
 }
 
-// snapshotPolicy returns the current policy and whether filtering is configured.
-// filter is false only when no store is wired (legacy passthrough); a wired store
-// returning a nil policy is a deliberate lockout that Evaluate denies.
-func (h *Hub) snapshotPolicy() (p *policy.Policy, filter bool) {
+// snapshotPolicy returns tenant id's current policy and whether filtering is
+// configured. filter is false only when no store is wired (legacy passthrough);
+// a wired store returning a nil policy is a deliberate lockout that Evaluate
+// denies.
+func (h *Hub) snapshotPolicy(id tenant.ID) (p *policy.Policy, filter bool) {
 	if h.policy == nil {
 		return nil, false
 	}
-	return h.policy(h.tenant), true
+	return h.policy(id), true
 }
 
-// ReplayProjector returns the projection function for one connection's gap-fill:
-// each call projects a single replayed event for the connection's role+claims into
-// a ready-to-write replay frame, or ok=false to skip it (denied table, invalid
+// ReplayProjector returns the projection function for one connection's gap-fill
+// under tenant id — the connection's, which is the replayed topic's: each call
+// projects a single replayed event for the connection's role+claims into a
+// ready-to-write replay frame, or ok=false to skip it (denied table, invalid
 // payload, or a row the claims aren't entitled to see). It is a Hub method so
 // replay shares the Hub's policy store and schema registry with the live fan-out —
 // the handler can't accidentally project replay against a different (or nil)
@@ -450,7 +458,7 @@ func (h *Hub) snapshotPolicy() (p *policy.Policy, filter bool) {
 // lookup and map build per event.
 // The closure is for a single goroutine — each connection makes its own. The live
 // path uses Broadcast.
-func (h *Hub) ReplayProjector(role string, sub *Subscriber) func(raw []byte) []Frame {
+func (h *Hub) ReplayProjector(id tenant.ID, role string, sub *Subscriber) func(raw []byte) []Frame {
 	var colSpecs map[string]policy.ColumnSpec
 	specsFor := "" // table name colSpecs was resolved for ("" ⇒ not yet resolved)
 	// Schema-drift state is LOCAL to this gap-fill, not the connection's shared
@@ -477,7 +485,7 @@ func (h *Hub) ReplayProjector(role string, sub *Subscriber) func(raw []byte) []F
 	return func(raw []byte) []Frame {
 		// Read per event, like Broadcast, so a policy adopted mid-gap-fill
 		// applies to the next replayed row rather than after the fill ends.
-		p, filter := h.snapshotPolicy()
+		p, filter := h.snapshotPolicy(id)
 		ev := newEventView(raw)
 		plan, ok := planForRole(p, filter, role, ev, KindReplay)
 		if !ok {
@@ -508,14 +516,14 @@ func (h *Hub) ReplayProjector(role string, sub *Subscriber) func(raw []byte) []F
 // connection opens, before any data or replay frame — so a client knows the
 // column list of the rows it is about to receive even on a table that is
 // currently quiet. It reads the columns from the schema registry (there is no
-// event to read them from yet) and projects them for the role exactly as the
-// event path does, recording the signature on sub so the first data event does
-// not repeat it.
+// event to read them from yet) and projects them for the role under tenant
+// id's policy exactly as the event path does, recording the signature on sub
+// so the first data event does not repeat it.
 //
 // ok is false when there is nothing to announce: no registry, no schema for the
 // table, or a role that cannot read it. That is not an error — the event path's
 // drift check still sends a schema frame before the first data frame.
-func (h *Hub) SubscribeSchemaFrame(table, role string, sub *Subscriber) (Frame, bool) {
+func (h *Hub) SubscribeSchemaFrame(id tenant.ID, table, role string, sub *Subscriber) (Frame, bool) {
 	if h.registry == nil {
 		return Frame{}, false
 	}
@@ -523,7 +531,7 @@ func (h *Hub) SubscribeSchemaFrame(table, role string, sub *Subscriber) (Frame, 
 	if schema == nil {
 		return Frame{}, false
 	}
-	p, filter := h.snapshotPolicy()
+	p, filter := h.snapshotPolicy(id)
 	var perms *policy.ResolvedPermissions
 	if filter {
 		// Column visibility is claims-independent, so nil claims, exactly as the
