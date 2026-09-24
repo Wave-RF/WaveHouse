@@ -333,9 +333,9 @@ func member(id tenant.ID, addr string, open, idle int) Member {
 func TestPools_DifferentTuplesGetDifferentPools(t *testing.T) {
 	t.Parallel()
 	p := newPools(0, fakeDial)
-	readmitted, err := p.Reconcile([]Member{member("acme", "a:9000", 10, 5), member("globex", "b:9000", 10, 5)})
+	stale, err := p.Reconcile([]Member{member("acme", "a:9000", 10, 5), member("globex", "b:9000", 10, 5)})
 	require.NoError(t, err)
-	assert.Equal(t, []tenant.ID{"acme", "globex"}, readmitted)
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, stale)
 	require.NotNil(t, p.For("acme"))
 	require.NotNil(t, p.For("globex"))
 	assert.NotSame(t, p.For("acme"), p.For("globex"))
@@ -388,9 +388,9 @@ func TestPools_TupleChangeRepointsWithoutTouchingTheOther(t *testing.T) {
 	before := rec.latest("a:9000")
 
 	globex.Params.Username = "reporting"
-	readmitted, err := p.Reconcile([]Member{acme, globex})
+	stale, err := p.Reconcile([]Member{acme, globex})
 	require.NoError(t, err)
-	assert.Empty(t, readmitted, "a repointed tenant was on a pool before")
+	assert.Empty(t, stale, "a new username reads the same tables: not stale")
 	assert.Same(t, shared, p.For("acme"), "acme keeps its Manager")
 	assert.NotSame(t, shared, p.For("globex"), "globex moved to a pool of its own")
 	assert.Equal(t, "reporting", p.For("globex").Identity().Username)
@@ -401,6 +401,31 @@ func TestPools_TupleChangeRepointsWithoutTouchingTheOther(t *testing.T) {
 	assert.Equal(t, []tenant.ID{"acme", "globex"}, p.SharingTables("acme"), "same address and database: still the same tables")
 	assert.Equal(t, "reporting", p.Target("globex").Username)
 	assert.Equal(t, "u", p.Target("acme").Username)
+}
+
+// A tenant moved to another address or database reads other tables, so its
+// cache is stale like a readmitted tenant's; the tenant left where it was is
+// not, and neither is one whose move keeps the address and database.
+func TestPools_MoveToOtherTablesIsStale(t *testing.T) {
+	t.Parallel()
+	p := newPools(0, fakeDial)
+	acme, globex := member("acme", "a:9000", 10, 5), member("globex", "a:9000", 10, 5)
+	_, err := p.Reconcile([]Member{acme, globex})
+	require.NoError(t, err)
+
+	acme.Params.Addr = "b:9000"
+	stale, err := p.Reconcile([]Member{acme, globex})
+	require.NoError(t, err)
+	assert.Equal(t, []tenant.ID{"acme"}, stale, "another address")
+
+	globex.Params.Database = "other"
+	stale, err = p.Reconcile([]Member{acme, globex})
+	require.NoError(t, err)
+	assert.Equal(t, []tenant.ID{"globex"}, stale, "another database")
+
+	stale, err = p.Reconcile([]Member{acme, globex})
+	require.NoError(t, err)
+	assert.Empty(t, stale, "nothing moved")
 }
 
 func TestPools_TenantGoneReleasesItsPoolAfterGrace(t *testing.T) {
@@ -414,17 +439,17 @@ func TestPools_TenantGoneReleasesItsPoolAfterGrace(t *testing.T) {
 	c := rec.latest("a:9000")
 	globexPool := p.For("globex")
 
-	readmitted, err := p.Reconcile([]Member{member("globex", "b:9000", 10, 5)})
+	stale, err := p.Reconcile([]Member{member("globex", "b:9000", 10, 5)})
 	require.NoError(t, err)
-	assert.Empty(t, readmitted)
+	assert.Empty(t, stale)
 	assert.Nil(t, p.For("acme"))
 	assert.Same(t, globexPool, p.For("globex"))
 	assert.False(t, c.closed.Load(), "released after the grace, not at once")
 	assert.Eventually(t, func() bool { return c.closed.Load() }, time.Second, 5*time.Millisecond)
 
-	readmitted, err = p.Reconcile([]Member{acme, member("globex", "b:9000", 10, 5)})
+	stale, err = p.Reconcile([]Member{acme, member("globex", "b:9000", 10, 5)})
 	require.NoError(t, err)
-	assert.Equal(t, []tenant.ID{"acme"}, readmitted, "back after an absence: its cache is stale")
+	assert.Equal(t, []tenant.ID{"acme"}, stale, "back after an absence: its cache is stale")
 	require.NotNil(t, p.For("acme"))
 	assert.NotSame(t, c, p.For("acme").conn())
 }
@@ -461,10 +486,10 @@ func TestPools_CeilingRefusesAThirdTupleThenOpensIt(t *testing.T) {
 	require.NoError(t, err)
 	acmePool, globexPool := p.For("acme"), p.For("globex")
 
-	readmitted, err := p.Reconcile([]Member{acme, globex, initech})
+	stale, err := p.Reconcile([]Member{acme, globex, initech})
 	require.ErrorContains(t, err, "clickhouse pool c:9000 database db user u not opened for tenant initech")
 	assert.ErrorContains(t, err, "at 30, above clickhouse.max_total_conns 25")
-	assert.Empty(t, readmitted)
+	assert.Empty(t, stale)
 	assert.Nil(t, p.For("initech"), "its tenant fails closed")
 	assert.Same(t, acmePool, p.For("acme"))
 	assert.Same(t, globexPool, p.For("globex"))
@@ -472,9 +497,9 @@ func TestPools_CeilingRefusesAThirdTupleThenOpensIt(t *testing.T) {
 	assert.Equal(t, 1, rec.count("a:9000"))
 
 	acme.Params.MaxOpenConns = 5
-	readmitted, err = p.Reconcile([]Member{acme, globex, initech})
+	stale, err = p.Reconcile([]Member{acme, globex, initech})
 	require.NoError(t, err)
-	assert.Equal(t, []tenant.ID{"initech"}, readmitted)
+	assert.Equal(t, []tenant.ID{"initech"}, stale)
 	require.NotNil(t, p.For("initech"))
 	assert.Same(t, acmePool, p.For("acme"))
 	assert.Equal(t, 5, acmePool.Sizes().MaxOpenConns, "the shrink that made room")
@@ -540,10 +565,10 @@ func TestPools_RefusedMoveKeepsThePreviousPool(t *testing.T) {
 
 	moved := member("acme", "b:9000", 20, 5)
 	moved.Params.HTTPPort = 8124
-	readmitted, err := p.Reconcile([]Member{moved})
+	stale, err := p.Reconcile([]Member{moved})
 	require.ErrorContains(t, err, "clickhouse pool b:9000 database db user u not opened for tenant acme")
 	assert.ErrorContains(t, err, "tenant acme keeps its previous pool a:9000 database db user u")
-	assert.Empty(t, readmitted)
+	assert.Empty(t, stale, "a refused move stays on the tables it had")
 	assert.Same(t, before, p.For("acme"))
 	assert.Equal(t, "http://a:8123", p.Target("acme").URL, "the previous Params, whole")
 	assert.False(t, beforeConn.closed.Load())

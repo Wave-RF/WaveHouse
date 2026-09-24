@@ -316,16 +316,17 @@ func (a *App) wireClickHouse() error {
 	a.pools = pools
 	a.add(component{name: "clickhouse", close: withoutContext(pools.Close)})
 	a.tenants.AfterAdopt(func([]tenant.ID) {
-		readmitted, err := pools.Reconcile(members())
+		stale, err := pools.Reconcile(members())
 		if err != nil {
 			slog.Error("clickhouse pools reconciled in part; the next reload retries", "error", err)
 		}
 		// A tenant back on a pool after an absence was out of the cache
-		// fan-out (sharedTables) while away: what it cached before is stale
-		// by every insert it missed, so all of it is orphaned at once.
-		for _, id := range readmitted {
+		// fan-out (sharedTables) while away, and one moved to another
+		// address or database now reads other tables: either way what it
+		// cached is stale, so all of it is orphaned at once.
+		for _, id := range stale {
 			if err := a.cache.InvalidateTenant(a.stopCtx, id); err != nil {
-				slog.Error("cache invalidation of a readmitted tenant failed; it may serve stale rows until they expire", "tenant", id, "error", err)
+				slog.Error("cache invalidation of a stale tenant failed; it may serve stale rows until they expire", "tenant", id, "error", err)
 			}
 		}
 	})

@@ -421,16 +421,20 @@ func newPools(ceiling int, d dialer) *Pools {
 }
 
 // Reconcile sets the pools to what want names (the served tenants, in id
-// order), and returns the tenants it admitted that were not on a pool
-// before — new, or back after a rejection or removal — for the caller to
-// treat their cache as stale, with every refusal joined. The walk keeps the
+// order), and returns the tenants whose cache is stale, for the caller to
+// orphan, with every refusal joined: the ones it admitted that were not on a
+// pool before — new, or back after a rejection or removal, so out of the
+// fan-out (SharingTables) while away — and the ones it moved to another
+// address or database, whose cached results were read from other tables. A
+// move that keeps the address and database (a username or tls change) reads
+// the same tables and is not stale. The walk keeps the
 // ceiling at every step: tenants no longer wanted leave first, then each
 // wanted tenant is placed in turn, and a placement the ceiling refuses is
 // undone before the next, so a refused move leaves the tenant on the pool it
 // had, with the Params it had. What was refused is placed once more at the
 // end, since a shrink or a move placed after it may have freed the budget it
 // needed; only what the second pass refuses is reported.
-func (p *Pools) Reconcile(want []Member) (readmitted []tenant.ID, err error) {
+func (p *Pools) Reconcile(want []Member) (stale []tenant.ID, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	cur := p.cur.Load()
@@ -495,11 +499,13 @@ func (p *Pools) Reconcile(want []Member) (readmitted []tenant.ID, err error) {
 	}
 	p.cur.Store(w.next)
 	for _, id := range slices.Sorted(maps.Keys(w.next.tenants)) {
-		if _, had := cur.tenants[id]; !had {
-			readmitted = append(readmitted, id)
+		prev, had := cur.tenants[id]
+		now := w.next.tenants[id]
+		if !had || prev.Addr != now.Addr || prev.Database != now.Database {
+			stale = append(stale, id)
 		}
 	}
-	return readmitted, errors.Join(w.errs...)
+	return stale, errors.Join(w.errs...)
 }
 
 // walk is one Reconcile's working state: the snapshot being built, and the
