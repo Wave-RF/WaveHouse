@@ -144,6 +144,14 @@ func NewRouter(deps Dependencies) http.Handler {
 			// paths at the reverse proxy. AuthMW runs but never rejects, so no
 			// token is required and there's no authz gate. Mirrors /livez under
 			// the hood (200 past boot, 503 while degraded), no body.
+			//
+			// It resolves a tenant like the routes beside it, deliberately
+			// (#583 story 3): its 404 tells a caller with no token that a
+			// tenant is not served, but so does every tenant route's, since all
+			// of them answer before authenticating, which needs the tenant's
+			// verifier. Exempt, it would take its CORS answer from tenant 0's
+			// list, which a nested directory need not have; resolved, it tells
+			// a client whether its own tenant is served.
 			r.Get("/health", deps.Health.Online)
 
 			r.Post("/ingest", deps.Ingest.Handle)
