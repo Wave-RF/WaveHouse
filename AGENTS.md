@@ -428,7 +428,7 @@ internal/api/           → HTTP layer (handlers, router, middleware, schema/DLQ
 internal/app/           → Process wiring (build every component, run them under one errgroup, release in reverse)
 internal/auth/          → JWT/JWKS authentication middleware (HMAC or JWKS, role extraction from claims)
 internal/cache/         → Query cache (interface, Ristretto L1, tenant-led version index)
-internal/chconn/        → ClickHouse connection manager (driver.Conn swapped on settings reload)
+internal/chconn/        → ClickHouse pools, one per connection tuple among the served tenants (reconciled on settings reload)
 internal/chsql/         → Shared ClickHouse SQL helpers (identifier quoting + bind-safety)
 internal/config/        → Configuration structs + loader
 internal/dedupe/        → Optional deduplication (interface + embedded/distributed)

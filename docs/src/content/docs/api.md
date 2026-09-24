@@ -130,7 +130,7 @@ Returns `200 OK` if the process is fully booted (schema discovery complete) and 
 **Response (not ready):**
 
 ```json
-{"status": "not ready", "error": "connection refused"}
+{"status": "not ready", "error": "localhost:9000 database default user default: dial tcp 127.0.0.1:9000: connect: connection refused"}
 ```
 
 Status code: `503 Service Unavailable`
