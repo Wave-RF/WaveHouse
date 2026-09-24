@@ -153,13 +153,22 @@ func longestGapWindow(tenants *settings.Registry) time.Duration {
 	return window
 }
 
+// served reports whether the registry is serving tenant id: what the
+// per-tenant resources — verifiers, dedupe stores, open streams — are pruned
+// by once a reload removes or rejects their tenant.
+func (a *App) served(id tenant.ID) bool {
+	_, ok := a.tenants.For(id)
+	return ok
+}
+
 // perTenant adapts a store accessor to the tenant-keyed getter the async
 // paths take: they hold a tenant id — the one each message's topic names
 // for the stream hub and the ingest worker (#583 story 5) — not a request's
-// resolved store. A
-// miss — a nested directory with no 0 folder, or with a rejected or removed
-// one — is logged and read as T's zero value; what a removed tenant means to
-// each async path is story 3's to decide.
+// resolved store. A miss — a tenant no longer served, or a 0 a nested
+// directory does not hold — is logged and read as T's zero value. By then a
+// tenant a reload removed or rejected has had its streams ended (Hub.Prune)
+// and its schema loop stopped (discoveries), so a miss is an event still in
+// flight; the ingest worker reads its DLQ switch through dlqFor instead.
 func perTenant[T any](tenants *settings.Registry, get func(*settings.Store) T) func(tenant.ID) T {
 	return func(id tenant.ID) T {
 		store, ok := tenants.For(id)
@@ -176,6 +185,10 @@ func perTenant[T any](tenants *settings.Registry, get func(*settings.Store) T) f
 // miss reads as DLQ on, not as the zero value perTenant would give: off lets
 // the worker drop a message it cannot read, and not knowing the tenant is no
 // reason to destroy its row. Parked, it survives until the tenant resolves.
+// So a removed or rejected tenant's queued rows are parked under its own
+// subject rather than left unacked for its return: an unacked row holds the
+// ack floor, the sweeper stops purging, and the one shared stream fills
+// toward mq.max_bytes_gb until every tenant's ingest answers 503.
 func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 	return func(id tenant.ID, table string) bool {
 		store, ok := tenants.For(id)
@@ -490,11 +503,7 @@ func (a *App) wireDedupe() error {
 		// The gone tenants' stores close first, so a tenant renamed only in
 		// letter case — one directory to a case-insensitive filesystem —
 		// never has both spellings open at once.
-		served := func(id tenant.ID) bool {
-			_, ok := a.tenants.For(id)
-			return ok
-		}
-		if err := stores.Retain(served); err != nil {
+		if err := stores.Retain(a.served); err != nil {
 			slog.Error("dedupe store close failed", "error", err)
 		}
 		var errs []error
@@ -629,9 +638,13 @@ func (a *App) wireSweeper() {
 // (drop counts) and the stream handler (write counts); the Hub that
 // projects/serializes each event once per (topic, role) and pushes it to
 // that role's subscribers; the MQ → Hub bridge; and the keepalive wheel.
+// After every reload the Hub ends the open streams of each tenant no longer
+// served, removed or rejected alike (Hub.Prune); the client reconnects into
+// that tenant's 404 or 503 and gap-fills once it is served again.
 func (a *App) wireStreaming() {
 	a.sseMetrics = stream.NewMetrics()
 	a.hub = stream.NewHub(perTenant(a.tenants, (*settings.Store).Policy), a.discoveries.For, a.sseMetrics)
+	a.tenants.AfterAdopt(func([]tenant.ID) { a.hub.Prune(a.served) })
 
 	// Hub bridge: MQ → broadcast to connected SSE clients. The Hub decodes and
 	// projects each event itself (skipping malformed payloads) under the
@@ -776,10 +789,7 @@ func (a *App) wireAuth() func(http.Handler) http.Handler {
 				authn.Reconfigure(id, wiring(store))
 			}
 		}
-		authn.Prune(func(id tenant.ID) bool {
-			_, served := a.tenants.For(id)
-			return served
-		})
+		authn.Prune(a.served)
 	})
 	return authn.Middleware()
 }
@@ -788,10 +798,10 @@ func (a *App) wireAuth() func(http.Handler) http.Handler {
 // triggers (these two and POST /v1/ops/settings/reload) funnel into the same
 // serialized Registry.Reload, and a rejected reload keeps the previous good
 // snapshot. They only start in Run, after New has registered every
-// AfterAdopt hook (ClickHouse reconnect, dedupe stores, keepalive wheel, auth
-// verifiers): the watcher reloads once as soon as its watch exists, and that
-// reload must already drive every hook — a hook registered after the first
-// reload could miss it.
+// AfterAdopt hook (ClickHouse reconnect, dedupe stores, keepalive wheel, open
+// streams, auth verifiers): the watcher reloads once as soon as its watch
+// exists, and that reload must already drive every hook — a hook registered
+// after the first reload could miss it.
 //
 // A nested directory gets no watcher (#583): whoever writes a tenant's
 // folder calls the reload route once the folder is complete, where a watcher
@@ -857,6 +867,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	streamHandler := api.NewStreamHandler(a.hub, a.mq)
 	streamHandler.Metrics = a.sseMetrics
 	streamHandler.Heartbeater = a.heartbeater
+	streamHandler.Served = a.served
 	// Closed when the API server begins shutting down, ending every open
 	// stream at once (see serve).
 	closing := make(chan struct{})

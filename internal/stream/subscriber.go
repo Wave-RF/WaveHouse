@@ -38,12 +38,13 @@ type Subscriber struct {
 	// row-filter closed.
 	claims map[string]any
 
-	// evict is closed (once) to ask the owning handler to disconnect a wedged slow
-	// consumer; the handler selects on Evicted() and tears the stream down, after
-	// which the client reconnects and gap-fills via Last-Event-ID. The seam is wired
-	// here and consumed by the handler; the policy that *closes* it (consecutive-drop
-	// threshold) lands with the slow-consumer follow-up (#294 / #94).
-	evict chan struct{}
+	// evict is closed, once, by Evict to ask the owning handler to end the stream;
+	// the handler selects on Evicted() and tears the stream down, after which the
+	// client reconnects. The Hub evicts every subscriber of a tenant no longer
+	// served (Hub.Prune); disconnecting a wedged slow consumer is the other
+	// closer it is meant for (#294 / #94).
+	evict     chan struct{}
+	evictOnce sync.Once
 
 	// metric counts queue-full drops inside Send itself (by frame kind), so every
 	// producer — the event fan-out, replay, the keepalive wheel — is covered without
@@ -155,9 +156,14 @@ func (s *Subscriber) Send(f Frame) bool {
 	}
 }
 
-// Evicted is closed when the subscriber has been marked for disconnection. The
-// handler selects on it to tear the connection down. Inert until the slow-consumer
-// follow-up wires the threshold that closes it.
+// Evict marks the subscriber for disconnection: its handler ends the stream.
+// Safe to call more than once, from any goroutine.
+func (s *Subscriber) Evict() {
+	s.evictOnce.Do(func() { close(s.evict) })
+}
+
+// Evicted is closed once the subscriber has been marked for disconnection. The
+// handler selects on it to tear the connection down.
 func (s *Subscriber) Evicted() <-chan struct{} {
 	return s.evict
 }

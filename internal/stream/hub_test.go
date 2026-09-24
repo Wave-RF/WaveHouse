@@ -1572,3 +1572,31 @@ func TestHub_TopicsAreTenantScoped(t *testing.T) {
 	defer mu.Unlock()
 	assert.Equal(t, []tenant.ID{"acme", "globex", "globex", "globex", "initech"}, asked, "each read names the event's or the connection's tenant")
 }
+
+// TestHub_PruneEvictsTheTenantsNoLongerServed: Prune evicts every subscriber
+// of a tenant no longer served — on each of its topics, under each role — and
+// no other tenant's. It only marks them: each stays registered until its
+// handler's Remove.
+func TestHub_PruneEvictsTheTenantsNoLongerServed(t *testing.T) {
+	t.Parallel()
+	hub := NewHub(nil, nil, nil)
+	evicted := func(sub *Subscriber) bool {
+		select {
+		case <-sub.Evicted():
+			return true
+		default:
+			return false
+		}
+	}
+	acmeClicks := mq.Topic{Tenant: "acme", Table: "clicks"}
+	viewer, admin, globex := NewSubscriber(nil, nil), NewSubscriber(nil, nil), NewSubscriber(nil, nil)
+	hub.Add(acmeClicks, "viewer", viewer)
+	hub.Add(mq.Topic{Tenant: "acme", Table: "views"}, "admin", admin)
+	hub.Add(mq.Topic{Tenant: "globex", Table: "clicks"}, "viewer", globex)
+
+	hub.Prune(func(id tenant.ID) bool { return id == "globex" })
+	assert.True(t, evicted(viewer), "acme is no longer served")
+	assert.True(t, evicted(admin), "on every topic and under every role of it")
+	assert.False(t, evicted(globex), "globex is still served")
+	assert.Equal(t, 1, hub.Len(acmeClicks), "evicted, not removed: the handler removes it")
+}

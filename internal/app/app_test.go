@@ -1170,33 +1170,109 @@ func TestClose_AbandonsAStuckCloseAtTheDeadline(t *testing.T) {
 	assert.NotContains(t, err.Error(), "fine")
 }
 
-func TestRun_StopEndsOpenStreams(t *testing.T) {
-	var lc net.ListenConfig
-	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	cfg := testConfig(t, writeSettings(t, nil))
-	a := newApp(t, cfg, Options{Listener: ln})
-	baseURL, stop := runApp(t, a, ln)
-
+// openStream opens GET /v1/stream?table=events for tenant id ("" sends no
+// header) and returns its body once the ": connected" preamble arrives.
+func openStream(t *testing.T, baseURL, id string) io.Reader {
+	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/v1/stream?table=events", nil)
 	require.NoError(t, err)
+	if id != "" {
+		req.Header.Set(tenant.Header, id)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	buf := make([]byte, 64)
 	n, err := resp.Body.Read(buf)
 	require.NoError(t, err)
 	require.Contains(t, string(buf[:n]), ": connected", "the stream is open")
+	return resp.Body
+}
 
-	// A stream is a connection to close, not work to drain: the stop ends it
-	// at once rather than waiting out server.shutdown_timeout and then
-	// force-closing it anyway.
-	started := time.Now()
-	assert.NoError(t, stop())
-	assert.Less(t, time.Since(started), time.Second, "the open stream held the stop for the drain budget")
-	_, err = io.ReadAll(resp.Body)
-	assert.NoError(t, err, "the server ended the stream cleanly")
+// endsCleanly fails unless the server ends the stream within a second, and
+// with the clean end of the response rather than a broken connection.
+func endsCleanly(t *testing.T, stream io.Reader) {
+	t.Helper()
+	read := make(chan error, 1)
+	go func() {
+		_, err := io.ReadAll(stream)
+		read <- err
+	}()
+	select {
+	case err := <-read:
+		assert.NoError(t, err, "the server ended the stream cleanly")
+	case <-time.After(time.Second):
+		t.Fatal("the stream is still open")
+	}
+}
+
+// A stream is a connection to close, not work to drain: the stop ends every
+// open one at once rather than waiting out server.shutdown_timeout. A reload
+// that stops serving a tenant — its folder rejected or removed — ends that
+// tenant's streams the same way, and no other tenant's; the client's
+// reconnect then meets the tenant's 503 or 404. A flat directory never stops
+// serving tenant 0, so a reload it rejects leaves the stream open.
+func TestRun_StopEndsOpenStreams(t *testing.T) {
+	start := func(t *testing.T, settingsDir string) (a *App, baseURL string, stop func() error) {
+		t.Helper()
+		var lc net.ListenConfig
+		ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		a = newApp(t, testConfig(t, settingsDir), Options{Listener: ln})
+		baseURL, stop = runApp(t, a, ln)
+		return a, baseURL, stop
+	}
+
+	t.Run("the stop", func(t *testing.T) {
+		_, baseURL, stop := start(t, writeSettings(t, nil))
+		resp := openStream(t, baseURL, "")
+		started := time.Now()
+		assert.NoError(t, stop())
+		assert.Less(t, time.Since(started), time.Second, "the open stream held the stop for the drain budget")
+		endsCleanly(t, resp)
+	})
+
+	t.Run("a reload that stops serving the tenant", func(t *testing.T) {
+		root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
+		a, baseURL, stop := start(t, root)
+		defer func() { assert.NoError(t, stop()) }()
+		reconnect := func(id string) int {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/v1/stream?table=events", nil)
+			require.NoError(t, err)
+			req.Header.Set(tenant.Header, id)
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+			return resp.StatusCode
+		}
+		acme, globex := openStream(t, baseURL, "acme"), openStream(t, baseURL, "globex")
+
+		rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+		_, adopted, known := a.tenants.ReloadTenant("globex", "test")
+		require.True(t, known)
+		require.False(t, adopted)
+		endsCleanly(t, globex)
+		assert.Equal(t, 1, a.hub.Len(mq.Topic{Tenant: "acme", Table: "events"}), "acme's stream stays open")
+		assert.Equal(t, http.StatusServiceUnavailable, reconnect("globex"), "rejected: retried until its folder is fixed")
+
+		require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+		a.tenants.Reload("test")
+		endsCleanly(t, acme)
+		assert.Equal(t, http.StatusNotFound, reconnect("acme"), "removed: the client stops")
+	})
+
+	t.Run("a reload the flat directory rejects", func(t *testing.T) {
+		dir := writeSettings(t, nil)
+		a, baseURL, stop := start(t, dir)
+		resp := openStream(t, baseURL, "")
+		rewriteSettings(t, dir, invalidQuery)
+		_, adopted := a.tenants.Reload("test")
+		require.False(t, adopted)
+		assert.Equal(t, 1, a.hub.Len(mq.Topic{Tenant: tenant.Default, Table: "events"}), "tenant 0 keeps its previous settings, and its stream")
+		assert.NoError(t, stop())
+		endsCleanly(t, resp)
+	})
 }
 
 // poolSettings is a config.json patch: the seed's clickhouse block pointed

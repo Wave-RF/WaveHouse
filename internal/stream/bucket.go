@@ -7,7 +7,7 @@ import "sync"
 // that both Hub paths iterate Snapshot, since the schema announcement is per
 // connection even where the projection is shared per role (Send itself counts
 // any queue-full drop); Snapshot exposes the members so the event Hub can
-// evaluate row visibility per subscriber before sending (and, later, evict).
+// evaluate row visibility per subscriber before sending, and evict them.
 type Bucket interface {
 	Add(sub *Subscriber)
 	Remove(sub *Subscriber)

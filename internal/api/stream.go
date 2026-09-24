@@ -10,6 +10,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // StreamHandler handles GET /v1/stream
@@ -24,6 +25,11 @@ type StreamHandler struct {
 	// the client reconnects and gap-fills via Last-Event-ID. A nil channel
 	// never fires (a harness that serves the handler itself).
 	Closing <-chan struct{}
+	// Served, when set, reports whether a tenant is still being served. A
+	// reload that stops serving one evicts its streams (Hub.Prune), but not a
+	// stream TenantMW admitted just before the reload and registered with the
+	// Hub just after it: this check, made after registering, ends that one.
+	Served func(tenant.ID) bool
 }
 
 func NewStreamHandler(hub *stream.Hub, replayer mq.Replayer) *StreamHandler {
@@ -113,6 +119,11 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	h.Hub.Add(topic, role, sub)
 	defer h.Hub.Remove(topic, role, sub)
+	// The registry stops serving a tenant before its hooks run, so a reload
+	// either finds this subscriber to evict or is seen here.
+	if h.Served != nil && !h.Served(topic.Tenant) {
+		return
+	}
 
 	// Gap fill from the MQ's retained messages (DeliverByStartTime, see
 	// mq.Replayer).
@@ -142,7 +153,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 			return true
 		}
-		replayCtx, cancelReplay := h.replayContext(r)
+		replayCtx, cancelReplay := h.replayContext(r, sub)
 		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.Replayer != nil {
 			h.replay(replayCtx, ts, topic, sendReplay)
 		} else if err != nil {
@@ -168,8 +179,9 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		case <-h.Closing:
 			return
 		case <-sub.Evicted():
-			// Marked for disconnection (slow consumer). The client reconnects and
-			// gap-fills via Last-Event-ID. Inert until the slow-consumer follow-up.
+			// Its tenant is no longer served (Hub.Prune). The client reconnects
+			// into that tenant's 404 or 503, and gap-fills via Last-Event-ID once
+			// the tenant is served again.
 			return
 		case f := <-sub.Frames():
 			// One byte-pump for every frame kind: keepalive comments from the wheel and
@@ -186,20 +198,21 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // replayContext is the gap-fill's context: the request's, cancelled early
-// when the server begins shutting down. Shutdown never cancels a request
-// context itself, so without this the consumer creation — an MQ round trip
-// made before the replay loop's first check — could hold the drain.
-func (h *StreamHandler) replayContext(r *http.Request) (context.Context, context.CancelFunc) {
+// when the server begins shutting down or sub is evicted. Neither cancels a
+// request context itself, so without this the consumer creation — an MQ
+// round trip made before the replay loop's first check — could hold the
+// drain, and a long gap-fill would run on for a tenant no longer served.
+func (h *StreamHandler) replayContext(r *http.Request, sub *stream.Subscriber) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(r.Context())
-	if h.Closing != nil {
-		go func() {
-			select {
-			case <-h.Closing:
-				cancel()
-			case <-ctx.Done():
-			}
-		}()
-	}
+	go func() {
+		select {
+		case <-h.Closing:
+		case <-sub.Evicted():
+		case <-ctx.Done():
+			return
+		}
+		cancel()
+	}()
 	return ctx, cancel
 }
 
