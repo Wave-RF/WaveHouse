@@ -93,7 +93,13 @@ type Identity struct {
 
 // String names the tuple for logs and errors: the address, database and
 // user, never the password.
-func (id Identity) String() string {
+func (id Identity) String() string { return id.name() }
+
+// name is String for this package's own errors. It is not a String method,
+// which static analysis reads as carrying every field of its receiver — the
+// password included — into whatever formats it; name reads three fields and
+// no other.
+func (id Identity) name() string {
 	return id.Addr + " database " + id.Database + " user " + id.Username
 }
 
@@ -489,7 +495,7 @@ func (p *Pools) Reconcile(want []Member) (stale []tenant.ID, err error) {
 			delete(w.next.tuples, id)
 		case s != t.manager.Sizes():
 			if err := t.manager.Resize(s, grace); err != nil {
-				w.errs = append(w.errs, fmt.Errorf("clickhouse pool %s kept at %d open connections: %w", id.String(), t.manager.Sizes().MaxOpenConns, err))
+				w.errs = append(w.errs, fmt.Errorf("clickhouse pool %s kept at %d open connections: %w", id.name(), t.manager.Sizes().MaxOpenConns, err))
 			}
 		}
 	}
@@ -600,7 +606,7 @@ func (w *walk) place(m Member) bool {
 		w.next.tuples[prev].members[m.Tenant] = prevParams
 		w.next.tenants[m.Tenant] = prev
 		w.planned[prev] = prevPlanned
-		err = fmt.Errorf("%w; tenant %s keeps its previous pool %s", err, m.Tenant, prev.String())
+		err = fmt.Errorf("%w; tenant %s keeps its previous pool %s", err, m.Tenant, prev.name())
 	}
 	w.errs = append(w.errs, err)
 	return false
@@ -613,15 +619,15 @@ func (w *walk) join(m Member, ident Identity) error {
 	if !exists {
 		s := m.Params.Sizes()
 		if ok, sum := w.fits(ident, s); !ok {
-			return fmt.Errorf("clickhouse pool %s not opened for tenant %s: its clickhouse.max_open_conns %d would put the open pools at %d, above clickhouse.max_total_conns %d (boot config)", ident.String(), m.Tenant, s.MaxOpenConns, sum, w.ceiling)
+			return fmt.Errorf("clickhouse pool %s not opened for tenant %s: its clickhouse.max_open_conns %d would put the open pools at %d, above clickhouse.max_total_conns %d (boot config)", ident.name(), m.Tenant, s.MaxOpenConns, sum, w.ceiling)
 		}
 		tlsCfg, err := ident.TLS.config()
 		if err != nil {
-			return fmt.Errorf("clickhouse pool %s not opened for tenant %s: %w", ident.String(), m.Tenant, err)
+			return fmt.Errorf("clickhouse pool %s not opened for tenant %s: %w", ident.name(), m.Tenant, err)
 		}
 		mgr, err := openWith(w.dial, ident, w.asks[ident], tlsCfg)
 		if err != nil {
-			return fmt.Errorf("clickhouse pool %s not opened for tenant %s: %w", ident.String(), m.Tenant, err)
+			return fmt.Errorf("clickhouse pool %s not opened for tenant %s: %w", ident.name(), m.Tenant, err)
 		}
 		w.next.tuples[ident] = &tuple{manager: mgr, members: map[tenant.ID]Params{m.Tenant: m.Params}}
 		w.next.tenants[m.Tenant] = ident
@@ -634,7 +640,7 @@ func (w *walk) join(m Member, ident Identity) error {
 	s := w.planned[ident].max(m.Params.Sizes())
 	if s.MaxOpenConns > w.planned[ident].MaxOpenConns {
 		if ok, sum := w.fits(ident, s); !ok {
-			return fmt.Errorf("clickhouse pool %s not grown for tenant %s: its clickhouse.max_open_conns %d would put the open pools at %d, above clickhouse.max_total_conns %d (boot config)", ident.String(), m.Tenant, s.MaxOpenConns, sum, w.ceiling)
+			return fmt.Errorf("clickhouse pool %s not grown for tenant %s: its clickhouse.max_open_conns %d would put the open pools at %d, above clickhouse.max_total_conns %d (boot config)", ident.name(), m.Tenant, s.MaxOpenConns, sum, w.ceiling)
 		}
 	}
 	w.planned[ident] = s
@@ -659,7 +665,7 @@ func (w *walk) grow(ident Identity) bool {
 				w.refused = map[Identity]bool{}
 			}
 			w.refused[ident] = true
-			w.errs = append(w.errs, fmt.Errorf("clickhouse pool %s not resized for tenants %v: their clickhouse.max_open_conns %d would put the open pools at %d, above clickhouse.max_total_conns %d (boot config); it keeps %d", ident.String(), t.tenants(), s.MaxOpenConns, sum, w.ceiling, w.planned[ident].MaxOpenConns))
+			w.errs = append(w.errs, fmt.Errorf("clickhouse pool %s not resized for tenants %v: their clickhouse.max_open_conns %d would put the open pools at %d, above clickhouse.max_total_conns %d (boot config); it keeps %d", ident.name(), t.tenants(), s.MaxOpenConns, sum, w.ceiling, w.planned[ident].MaxOpenConns))
 		}
 		return false
 	}
@@ -738,7 +744,7 @@ func (p *Pools) Ping(ctx context.Context) error {
 		if r.err == nil {
 			return nil
 		}
-		errs[r.i] = fmt.Errorf("%s: %w", ids[r.i].String(), r.err)
+		errs[r.i] = fmt.Errorf("%s: %w", ids[r.i].name(), r.err)
 	}
 	return errors.Join(errs...)
 }
