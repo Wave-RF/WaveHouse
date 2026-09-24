@@ -197,15 +197,11 @@ func (ts *TableSchema) InsertableColumnNames() []string {
 
 // SchemaRegistry discovers and caches one tenant's ClickHouse table schemas.
 type SchemaRegistry struct {
-	// conn supplies the tenant's connection on each Refresh, so a settings
-	// reload that moves the tenant to another pool is honored by the next
-	// refresh (chconn.Pools.For in production). nil is a tenant with no open
-	// pool, which Refresh reports as ErrNoConnection.
-	conn func() driver.Conn
-	// database supplies the database to discover from on each Refresh, so a
-	// ClickHouse reconfigure that changes clickhouse.database is honored by
-	// the next refresh (the tenant's settings.Store in production).
-	database func() string
+	// source supplies the tenant's connection and the database to discover
+	// from, read together once per Refresh, so a settings reload that moves
+	// the tenant to another pool or database is honored by the next refresh
+	// (the tenant's chconn.Pools entry in production).
+	source Source
 	// tenant is whose tables the registry discovers.
 	tenant tenant.ID
 	// refreshInterval supplies the tenant's auto-refresh interval on each
@@ -225,12 +221,19 @@ type SchemaRegistry struct {
 	serverVersion string
 }
 
+// Source yields a tenant's connection and the database it discovers from,
+// one snapshot: the database is the one the connection's own pool was
+// opened for, so the schema discovered always describes the database the
+// tenant's queries and inserts run against. A nil connection is a tenant
+// with no open pool, which Refresh reports as ErrNoConnection.
+type Source func() (driver.Conn, string)
+
 // NewSchemaRegistry creates the registry of tenant id, which discovers
-// schemas from system.columns over the connection conn yields.
-func NewSchemaRegistry(conn func() driver.Conn, database func() string, id tenant.ID, refreshInterval func(tenant.ID) time.Duration) *SchemaRegistry {
+// schemas from system.columns over the connection and database source
+// yields.
+func NewSchemaRegistry(source Source, id tenant.ID, refreshInterval func(tenant.ID) time.Duration) *SchemaRegistry {
 	return &SchemaRegistry{
-		conn:            conn,
-		database:        database,
+		source:          source,
 		tenant:          id,
 		refreshInterval: refreshInterval,
 		firstTick:       rand.N[time.Duration],
@@ -246,12 +249,15 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
 	defer span.End()
 
-	// One connection per refresh, like the database below: a reload that
-	// moves the tenant to another pool applies to the NEXT refresh, so every
-	// query of this one runs against the same server. (The pool's own
-	// connection can still be swapped underneath mid-refresh by a resize,
-	// which stays on the same server.)
-	conn := sr.conn()
+	// One connection and one database per refresh, read together: a reload
+	// that moves the tenant to another pool or database applies to the NEXT
+	// refresh, so every query of this one runs against the same server and
+	// database — reading the database twice would let a reconfigure land
+	// between the system.columns and system.tables queries and attach DDL
+	// from the new database to same-named schemas discovered from the old
+	// one. (The pool's own connection can still be swapped underneath
+	// mid-refresh by a resize, which stays on the same server.)
+	conn, database := sr.source()
 	if conn == nil {
 		return fmt.Errorf("%w for tenant %s", ErrNoConnection, sr.tenant)
 	}
@@ -283,13 +289,6 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		slog.WarnContext(ctx, "cannot resolve server timezone; zone-less timestamps will pass through un-canonicalized",
 			"timezone", tzName, "error", err)
 	}
-
-	// One database per refresh. `database` is a live getter so a ClickHouse
-	// reconfigure is honored on the NEXT refresh — reading it twice would let a
-	// reconfigure land between the system.columns and system.tables queries and
-	// attach DDL from the new database to same-named schemas discovered from the
-	// old one.
-	database := sr.database()
 
 	rows, err := conn.Query(ctx,
 		`SELECT table, name, type, default_kind, default_expression, position

@@ -42,7 +42,7 @@ func closedAddr(t *testing.T) string {
 // unloadedRegistry is a registry no refresh has ever succeeded on: a tenant
 // whose ClickHouse has not answered yet, or which has no pool.
 func unloadedRegistry() *discovery.SchemaRegistry {
-	return discovery.NewSchemaRegistry(func() driver.Conn { return nil }, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	return discovery.NewSchemaRegistry(func() (driver.Conn, string) { return nil, "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 }
 
 // assertUnavailable pins the 503 a tenant's ClickHouse side answers with: the

@@ -343,6 +343,22 @@ func (a *App) chConn(id tenant.ID) driver.Conn {
 	return m
 }
 
+// discoverySource is what tenant id's schema registry discovers from, read
+// per refresh so a reload that repoints the tenant or moves its database
+// applies to the next one: its pool's connection and the database that pool
+// was opened for — never the adopted document's, which a move the ceiling
+// refused would pair with the pool the tenant kept, discovering a database
+// its queries and inserts do not use.
+func (a *App) discoverySource(id tenant.ID) discovery.Source {
+	return func() (driver.Conn, string) {
+		m := a.pools.For(id)
+		if m == nil {
+			return nil, ""
+		}
+		return m, m.Identity().Database
+	}
+}
+
 // The store-keyed getters the handlers take: each resolves the request
 // tenant's pool or registry per call, so a reload that repoints the tenant
 // applies to the next request.
@@ -391,10 +407,8 @@ func (a *App) wireDiscovery(ctx context.Context) {
 		return fmt.Errorf("schema discovery: %w", err)
 	}
 	d := newDiscoveries(a.stopCtx,
-		func(id tenant.ID, store *settings.Store) *discovery.SchemaRegistry {
-			// Both getters are read per refresh, so a reload that repoints
-			// the tenant or moves its database applies to the next one.
-			return discovery.NewSchemaRegistry(func() driver.Conn { return a.chConn(id) }, func() string { return store.ClickHouse().Database }, id, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
+		func(id tenant.ID, _ *settings.Store) *discovery.SchemaRegistry {
+			return discovery.NewSchemaRegistry(a.discoverySource(id), id, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
 		},
 		func(id tenant.ID, err error) {
 			slog.Warn("schema discovery retry failed", "tenant", id, "error", err)

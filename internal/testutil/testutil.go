@@ -29,7 +29,7 @@ import (
 func NewTestSchemaRegistry(t testing.TB, tables []*discovery.TableSchema) *discovery.SchemaRegistry {
 	t.Helper()
 	conn := &schemaConn{tables: tables}
-	reg := discovery.NewSchemaRegistry(func() driver.Conn { return conn }, func() string { return "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	reg := discovery.NewSchemaRegistry(func() (driver.Conn, string) { return conn, "test" }, tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 	require.NoError(t, reg.Refresh(context.Background()))
 	return reg
 }

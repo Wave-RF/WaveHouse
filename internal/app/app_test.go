@@ -1233,10 +1233,15 @@ func TestReload_PoolAboveTheCeilingKeepsTheConnection(t *testing.T) {
 	require.Equal(t, boot, a.pools.For(tenant.Default).Identity().Addr)
 
 	logs := logtest.Capture(t, slog.LevelError)
-	rewriteSettings(t, dir, poolSettings(moved, 20))
+	refused := poolSettings(moved, 20)
+	refused["clickhouse"].(map[string]any)["database"] = "moved_db"
+	rewriteSettings(t, dir, refused)
 	_, adopted := a.tenants.Reload("test")
 	require.True(t, adopted)
 	assert.Equal(t, boot, a.pools.For(tenant.Default).Identity().Addr, "the refused reload leaves the connection as it was")
+	_, database := a.discoverySource(tenant.Default)()
+	assert.Equal(t, a.pools.For(tenant.Default).Identity().Database, database, "discovery reads the kept pool's database")
+	assert.NotEqual(t, "moved_db", database, "not the adopted document's")
 	assert.Contains(t, logs.String(), "clickhouse pools reconciled in part")
 	assert.Contains(t, logs.String(), "clickhouse.max_open_conns 20")
 	assert.Contains(t, logs.String(), "tenant 0 keeps its previous pool")
