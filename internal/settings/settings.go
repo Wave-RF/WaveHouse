@@ -163,10 +163,10 @@ type TableDedupe struct {
 }
 
 // DLQConfig gates the Dead Letter Queue: whether a row that still fails
-// after the row-by-row isolation retry is parked on the WAVEHOUSE_DLQ stream
-// (and its original acked) or left unacked to be redelivered indefinitely.
-// The stream itself always exists — it is an empty limits-policy stream
-// until something lands on it — so the switch is purely behavioral and
+// after the row-by-row isolation retry is parked on the tenant's dead-letter
+// queue (and its original acked) or left unacked to be redelivered
+// indefinitely. The queue exists from the moment the tenant is first served —
+// empty until something lands on it — so the switch is purely behavioral and
 // resolves per table through the same override cascade as dedupe.
 type DLQConfig struct {
 	Enabled *bool `json:"enabled"`
@@ -219,14 +219,15 @@ type StreamConfig struct {
 	GapWindowMinutes *int `json:"gap_window_minutes"`
 }
 
-// MQConfig sizes the embedded JetStream streams on disk.
+// MQConfig sizes the tenant's message queue on disk.
 type MQConfig struct {
-	// MaxBytesGB caps the WAVEHOUSE ingest stream (the DLQ stream gets a
-	// tenth of it). Must be >= 1. A reload updates the live streams in
-	// place: growing takes effect immediately; shrinking below what is
-	// currently buffered makes the ingest stream refuse new publishes
-	// (DiscardNew → 503 backpressure) until the worker drains it — nothing
-	// already buffered is dropped.
+	// MaxBytesGB caps the tenant's ingest queue (its dead-letter queue gets a
+	// tenth of it). Must be >= 1. A reload updates the live queues in place:
+	// growing takes effect immediately; shrinking below what is currently
+	// buffered makes the ingest queue refuse new publishes (DiscardNew → 503
+	// backpressure) until the worker drains it — nothing already buffered is
+	// dropped — and a dead-letter queue holding more than a tenth of the new
+	// budget keeps what it holds rather than dropping its oldest rows.
 	MaxBytesGB *int `json:"max_bytes_gb"`
 }
 

@@ -471,8 +471,8 @@ export interface PipeRequestOptions {
 /**
  * Options for a call to one of the admin routes that address a tenant:
  * `wh.pipes.list()`, `wh.pipes.get()`, `wh.settings.reload()`,
- * `wh.schema.list()`, `wh.schema.refresh()`, `wh.from(t).schema()` and
- * `wh.sql()`.
+ * `wh.schema.list()`, `wh.schema.refresh()`, `wh.from(t).schema()`,
+ * `wh.dlq.list()`, `wh.dlq.table()` and `wh.sql()`.
  */
 export interface OpsRequestOptions {
   signal?: AbortSignal;

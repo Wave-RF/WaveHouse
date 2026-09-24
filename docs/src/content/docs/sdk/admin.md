@@ -65,6 +65,13 @@ const { data } = await wh.dlq.list();
 const { data } = await wh.dlq.table('clicks');
 ```
 
+Each tenant has a dead-letter queue of its own, and the calls read tenant `0`'s without `tenant`. Over [a nested settings directory](/deployment#the-nested-settings-directory), pass `tenant` to read another's — a tenant whose folder was rejected or removed included, since its queue is kept — with the [operator key](/api#authentication), as for the schema reads above. A tenant with no dead-letter queue is a `404`:
+
+```ts
+const { data } = await wh.dlq.list({ tenant: 'acme' });
+const { data: clicks } = await wh.dlq.table('clicks', { tenant: 'acme' });
+```
+
 `wh.dlq.stream()` exists in the API but is **not yet functional**: there is no server-side DLQ stream today (the SSE bridge only carries `ingest.>` subjects), so it connects and receives no events rather than failing. Live DLQ streaming is tracked in [#197](https://github.com/Wave-RF/WaveHouse/issues/197).
 
 ---

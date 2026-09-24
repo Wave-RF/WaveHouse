@@ -116,10 +116,12 @@ const (
 // maxAckPending, and ackWait > defaultMaxWait + CH flush (else in-flight
 // messages are redelivered mid-processing → duplicate inserts).
 const (
-	// Server-side cap on unacked messages; suspends delivery when hit (backpressure).
+	// Server-side cap on a tenant's unacked messages; suspends that tenant's
+	// delivery when hit (backpressure), and no other tenant's.
 	maxAckPending = 10_000 // TODO: raise if NATS delivery becomes the bottleneck
 
-	// Client prefetch buffer in front of msgChan (was the implicit jetstream default).
+	// Client prefetch buffer in front of msgChan (was the implicit jetstream
+	// default), shared by the tenants' queues (mq.Consumer.Consume).
 	pullMaxMessages = 500
 
 	// Redelivery timeout. 60s ≈ 5s batch + ~30s HTTP timeout + margin.
@@ -219,8 +221,9 @@ func waitOrDeadline(ctx context.Context, wg *sync.WaitGroup) error {
 	}
 }
 
-// dispatchLoop owns the single JetStream consumer and fans every message out to
-// a tableLoop per tenant table (lazily spawned on first sight of one). It does
+// dispatchLoop owns the one consumer — held on every tenant's queue — and fans
+// every message out to a tableLoop per tenant table (lazily spawned on first
+// sight of one). It does
 // no batching itself — it parses just enough to route — so a low-volume table
 // can never strand another table's rows behind a shared timer. It is the ONLY
 // goroutine that watches ctx; tableLoops stop via channel-close, which gives a
@@ -230,11 +233,13 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 
 	msgChan := make(chan *mq.Message, w.maxBatch*2)
 
-	// Pull consumer with a push-like callback (the client prefetches pullMaxMessages).
-	// Hand off to msgChan only, so the consume goroutine never blocks on flush work.
+	// Pull consumer with a push-like callback (the client prefetches pullMaxMessages,
+	// shared by the tenants' queues). It runs on one delivery goroutine per tenant,
+	// so the handoff is a channel send, safe from all of them at once. Hand off to
+	// msgChan only, so a consume goroutine never blocks on flush work.
 	// The handoff also watches ctx: stop (deferred below) does not wait for a
 	// delivery already in the handler, so once this loop has stopped draining
-	// msgChan a full channel would otherwise pin the client's delivery goroutine
+	// msgChan a full channel would otherwise pin a delivery goroutine
 	// forever. A message dropped here is unacked and simply redelivered.
 	stop, deliveryEnded, err := cons.Consume(func(msg *mq.Message) {
 		select {

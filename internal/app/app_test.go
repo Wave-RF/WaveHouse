@@ -237,7 +237,7 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	a := newApp(t, cfg, Options{})
 	dedup := a.dedup.For(tenant.Default)
 	require.False(t, dedup.Open())
-	require.Equal(t, int64(1<<30), a.mq.MaxBytes())
+	require.Equal(t, int64(1<<30), a.mq.MaxBytes(tenant.Default))
 
 	rewriteSettings(t, dir, map[string]any{
 		"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}},
@@ -246,8 +246,8 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	_, adopted := a.tenants.Reload("test")
 	require.True(t, adopted)
 	assert.True(t, dedup.Open(), "dedupe hook opened the store")
-	// How the budget is split across the MQ's queues is internal/mq's to test.
-	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(), "mq hook applied the new byte budget")
+	// How the budget is split across the tenant's queues is internal/mq's to test.
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(tenant.Default), "mq hook applied the new byte budget")
 
 	rewriteSettings(t, dir, map[string]any{"mq": map[string]any{"max_bytes_gb": 2}})
 	_, adopted = a.tenants.Reload("test")
@@ -397,12 +397,13 @@ func TestNew_NestedWithoutAnOperatorKeyWarnsTheOpsTreeIsClosed(t *testing.T) {
 	})
 }
 
-// The process-wide resources follow tenant 0 alone: another tenant's reload
-// never moves them, and a rejected 0 folder leaves them as they were rather
-// than reconfiguring them from nothing. The dedupe stores are per tenant
-// (story 7), so each follows its own folder instead — the contrast the
-// same reloads show.
-func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
+// A tenant's queue budget and dedupe store follow its own folder alone:
+// another tenant's reload moves neither. A rejected or removed folder keeps
+// its tenant's queue at the budget it last had — removing never touches
+// data — while its dedupe store closes, its seen ids kept. CORS is read per
+// request, so a lost 0 folder is felt at once on the routes that read tenant
+// 0's list.
+func TestReload_NestedHooksFollowEachTenant(t *testing.T) {
 	dedupeOn := map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}
 	grown := map[string]any{"dedupe": dedupeOn, "mq": map[string]any{"max_bytes_gb": 2}}
 	root := writeNestedSettings(t, map[string]map[string]any{
@@ -413,7 +414,8 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	dedup0, dedupAcme := a.dedup.For(tenant.Default), a.dedup.For("acme")
 	require.False(t, dedup0.Open())
 	require.False(t, dedupAcme.Open())
-	require.Equal(t, int64(1<<30), a.mq.MaxBytes())
+	require.Equal(t, int64(1<<30), a.mq.MaxBytes(tenant.Default))
+	require.Equal(t, int64(1<<30), a.mq.MaxBytes("acme"), "each served tenant's queue opens at boot at its own budget")
 	// CORS is per tenant, not a hook's: a tenant route reads its own tenant's
 	// list and the exempt routes tenant 0's (the seed's ["*"] in every folder
 	// here), both through the registry, so a lost 0 folder is felt at once.
@@ -434,26 +436,27 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	_, adopted := a.tenants.Reload("test")
 	require.True(t, adopted)
 	assert.True(t, dedupAcme.Open(), "acme's dedupe switch opens acme's own store")
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes("acme"), "acme's budget resizes acme's own queue")
 	assert.False(t, dedup0.Open(), "and moves nothing of tenant 0's")
-	assert.Equal(t, int64(1<<30), a.mq.MaxBytes())
+	assert.Equal(t, int64(1<<30), a.mq.MaxBytes(tenant.Default))
 
 	rewriteSettings(t, filepath.Join(root, "0"), grown)
 	_, adopted = a.tenants.Reload("test")
 	require.True(t, adopted)
 	assert.True(t, dedup0.Open())
-	assert.Equal(t, int64(2<<30), a.mq.MaxBytes())
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(tenant.Default))
 
 	rewriteSettings(t, filepath.Join(root, "0"), invalidQuery)
 	_, adopted = a.tenants.Reload("test")
 	require.False(t, adopted)
 	assert.False(t, dedup0.Open(), "a rejected 0 folder closes tenant 0's own store, which answers no request now")
 	assert.True(t, dedupAcme.Open(), "and costs acme nothing")
-	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(), "the process-wide budget stays as tenant 0 last adopted it")
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(tenant.Default), "tenant 0's queue is kept at the budget it last had")
 	assert.Empty(t, allowOrigin("/version"), "the exempt routes read tenant 0 through the registry, which is no longer serving it")
 	assert.Equal(t, "*", allowOrigin("/v1/health", "acme"), "acme's own routes keep acme's list")
 
-	// A removed 0 folder is the same: the registry forgets the tenant, the
-	// process keeps the wiring it last adopted.
+	// A removed 0 folder is the same: the registry forgets the tenant, and
+	// its queue stays at the budget it last had.
 	require.NoError(t, os.RemoveAll(filepath.Join(root, "0")))
 	_, adopted = a.tenants.Reload("test")
 	require.True(t, adopted)
@@ -461,7 +464,8 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	require.False(t, known)
 	assert.False(t, dedup0.Open())
 	assert.True(t, dedupAcme.Open())
-	assert.Equal(t, int64(2<<30), a.mq.MaxBytes())
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(tenant.Default))
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes("acme"))
 	assert.Empty(t, allowOrigin("/version"))
 	assert.Equal(t, "*", allowOrigin("/v1/health", "acme"))
 }
@@ -682,12 +686,11 @@ func gapWindow(minutes int) map[string]any {
 	return map[string]any{"stream": map[string]any{"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": minutes}}
 }
 
-// One ingest stream holds every tenant's events and the sweeper purges below
-// one sequence, so it keeps the longest gap window among the tenants being
-// served — every tenant's gap-fill history is inside it (a stream per tenant
-// will honor each tenant's own, #583 story 5b). A flat directory's single
+// Each tenant being served keeps its own stream.gap_window_minutes, since
+// each has a queue of its own; a rejected tenant is not served, so it is not
+// named and keeps no history (mq.Purger.PurgeAcked). A flat directory's single
 // tenant gets exactly its own window.
-func TestLongestGapWindow(t *testing.T) {
+func TestGapWindows(t *testing.T) {
 	open := func(t *testing.T, dir string) *settings.Registry {
 		t.Helper()
 		guardGlobals(t)
@@ -697,22 +700,21 @@ func TestLongestGapWindow(t *testing.T) {
 	}
 
 	t.Run("flat directory", func(t *testing.T) {
-		assert.Equal(t, 45*time.Minute, longestGapWindow(open(t, writeSettings(t, gapWindow(45)))))
+		assert.Equal(t, map[tenant.ID]time.Duration{tenant.Default: 45 * time.Minute}, gapWindows(open(t, writeSettings(t, gapWindow(45)))))
 	})
 
 	t.Run("nested directory", func(t *testing.T) {
 		root := writeNestedSettings(t, map[string]map[string]any{"acme": gapWindow(15), "globex": gapWindow(60), "initech": gapWindow(30)})
 		tenants := open(t, root)
-		assert.Equal(t, 60*time.Minute, longestGapWindow(tenants))
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "globex": 60 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants))
 
-		// A rejected tenant is not being served, so its window is not weighed.
 		rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
 		tenants.Reload("test")
-		assert.Equal(t, 30*time.Minute, longestGapWindow(tenants))
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants))
 	})
 
-	t.Run("no tenant served keeps nothing", func(t *testing.T) {
-		assert.Zero(t, longestGapWindow(open(t, writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery}))))
+	t.Run("no tenant served names none", func(t *testing.T) {
+		assert.Empty(t, gapWindows(open(t, writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery}))))
 	})
 }
 

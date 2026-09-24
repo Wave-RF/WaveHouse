@@ -193,7 +193,7 @@ func (s *Store) GapWindow() time.Duration {
 	return time.Duration(*s.doc().Config.Stream.GapWindowMinutes) * time.Minute
 }
 
-// MQMaxBytes returns the ingest stream's disk budget in bytes.
+// MQMaxBytes returns the disk budget of the tenant's ingest queue in bytes.
 func (s *Store) MQMaxBytes() int64 {
 	return int64(*s.doc().Config.MQ.MaxBytesGB) << 30
 }

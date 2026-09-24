@@ -18,8 +18,7 @@
 // handed whole to each component's wiring function, which derives the
 // per-call getters the internal packages take: keyed by the request's store
 // for the handlers, by tenant id for the async paths (perTenant), and fixed
-// to the default tenant for the process-wide resources #583 has not yet made
-// per tenant (defaultSetting).
+// to the default tenant for the ops gate of a flat directory (defaultSetting).
 package app
 
 import (
@@ -90,9 +89,9 @@ type App struct {
 	listener net.Listener
 
 	// tenants is the registry every tenant-aware path resolves through, and
-	// the owner of every reload. The one process-wide resource left, the MQ,
-	// still follows its default tenant, through defaultStore: tenant 0's
-	// store as of its last adoption (defaultSetting).
+	// the owner of every reload. defaultStore is tenant 0's store as of its
+	// last adoption, which the ops gate of a flat directory reads its admin
+	// role from (defaultSetting).
 	tenants      *settings.Registry
 	defaultStore atomic.Pointer[settings.Store]
 	// policies is the default tenant's policy, for the ops gate of a flat
