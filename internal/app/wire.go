@@ -195,8 +195,8 @@ func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 // namespaces (the batch's), and this bumps them under every tenant sharing
 // its tables (chconn.Pools.SharingTables), the named one included. Reads are
 // untouched: a tenant's cached results stay its own. A tenant on no pool —
-// rejected, removed, or refused by the connection ceiling — is out of the
-// fan-out, and its table-keyed cache is orphaned when it gets one
+// rejected, removed, or one no pool could be opened for, such as by the
+// connection ceiling — is out of the fan-out, and its table-keyed cache is orphaned when it gets one
 // (wireClickHouse, Cache.InvalidateTenant), so a folder repaired or restored
 // inside a TTL never serves pre-insert structured-query rows; a pipe result
 // keeps its TTL, as on any insert (#343).
@@ -288,8 +288,8 @@ func (a *App) wireObservability(ctx context.Context) {
 // together: capacity is sized once, per process, so pools above it refuse
 // boot like the rest of an impossible boot config (#530), and at a reload a
 // resize above it is refused with the pool kept at its size, and a tuple
-// that cannot be opened — the ceiling, or a certificate file that cannot be
-// read — leaves its tenants on the pool they had, or on none when they had
+// that cannot be opened — the ceiling, a certificate file that cannot be
+// read, or options the driver refuses — leaves its tenants on the pool they had, or on none when they had
 // none; both logged, and retried by the next reload. Reachability surfaces
 // where it already does (schema discovery retries, /readyz, query errors).
 // Every consumer resolves its tenant's pool per call (chConn, chTargetFor).
@@ -347,8 +347,8 @@ func (a *App) chConn(id tenant.ID) driver.Conn {
 // discoverySource is what tenant id's schema registry discovers from, read
 // per refresh so a reload that repoints the tenant or moves its database
 // applies to the next one: its pool's connection and the database that pool
-// was opened for — never the adopted document's, which a move the ceiling
-// refused would pair with the pool the tenant kept, discovering a database
+// was opened for — never the adopted document's, which a refused move would
+// pair with the pool the tenant kept, discovering a database
 // its queries and inserts do not use.
 func (a *App) discoverySource(id tenant.ID) discovery.Source {
 	return func() (driver.Conn, string) {

@@ -100,8 +100,8 @@ func (h *SchemaHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 // Refresh forces an immediate schema refresh of the ?tenant= from its
 // ClickHouse, then returns its schemas. A tenant with no open pool — one
-// could not be opened for it, such as by the connection ceiling — is a 503 with Retry-After, like the reads
-// it would answer.
+// could not be opened for it, such as by the connection ceiling — is a 503
+// with Retry-After, like the reads it would answer.
 func (h *SchemaHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	store, ok := opsStore(w, r, h.Tenants)
 	if !ok {

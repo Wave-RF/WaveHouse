@@ -1914,9 +1914,9 @@ func TestInsertToClickHouse_UsesTargetTLS(t *testing.T) {
 }
 
 // TestInsertToClickHouse_NoTargetIsAnError: a tenant on no pool — its tuple
-// refused by the connection ceiling — has no HTTP target, and its insert
-// fails naming the tenant before any request is built, into the same
-// failure path an unreachable ClickHouse takes.
+// could not be opened, such as by the connection ceiling — has no HTTP
+// target, and its insert fails naming the tenant before any request is
+// built, into the same failure path an unreachable ClickHouse takes.
 func TestInsertToClickHouse_NoTargetIsAnError(t *testing.T) {
 	t.Parallel()
 	rt := &testutil.MockRoundTripper{Fn: func(*http.Request) (*http.Response, error) {

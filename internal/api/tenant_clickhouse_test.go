@@ -107,10 +107,10 @@ func TestClickHouseRoutes_SchemaNotLoadedIs503(t *testing.T) {
 // selectAllQuery is the structured query a permissive role may run.
 func selectAllQuery() query.StructuredQuery { return query.StructuredQuery{SelectAll: true} }
 
-// A tenant on no pool — its tuple refused by the connection ceiling — fails
-// closed on every route that reaches its ClickHouse: a 503 with Retry-After
-// ahead of the cache, so nothing it cached before is served either, and on
-// the refresh, which cannot run.
+// A tenant on no pool — its tuple could not be opened, such as by the
+// connection ceiling — fails closed on every route that reaches its
+// ClickHouse: a 503 with Retry-After ahead of the cache, so nothing it
+// cached before is served either, and on the refresh, which cannot run.
 func TestClickHouseRoutes_NoPoolIs503(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t)

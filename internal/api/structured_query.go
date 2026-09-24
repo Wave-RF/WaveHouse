@@ -160,8 +160,8 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// The tenant's pool, ahead of the cache: a tenant on none — its tuple
-	// could not be opened, such as by the connection ceiling — fails closed rather than serve
-	// what it cached before (#583 story 6).
+	// could not be opened, such as by the connection ceiling — fails
+	// closed rather than serve what it cached before (#583 story 6).
 	conn := connOf(h.CHConn, store)
 	if conn == nil {
 		writeUnavailable(w, noConnectionMessage, retryAfterPool)
