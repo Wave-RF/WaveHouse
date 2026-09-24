@@ -430,7 +430,7 @@ The route is mounted under `/v1/ops/*`, behind the `RequireAdmin` gate: only a c
 
 `/v1/ops/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate with the admin role (`admin_role`).
 
-An optional `?tenant=<id>` names the [tenant](/deployment#the-nested-settings-directory) whose ClickHouse the SQL runs against — its own database, credentials and HTTP wiring; without it the SQL runs against tenant `0`'s, which is the whole settings directory unless it is nested. The parameter is parsed as strictly as on the [schema routes](#get-v1opsschema--list-all-table-schemas): `400` for a query string that does not parse or an empty, repeated or malformed id, `404` for an unknown tenant, `503` for one whose settings folder was rejected — all decided before the body is read. A tenant on no ClickHouse pool ([the connection ceiling refused it](/settings-directory#clickhouse)) answers `503` `{"error":"no ClickHouse connection is open for this tenant"}` with `Retry-After: 30`.
+An optional `?tenant=<id>` names the [tenant](/deployment#the-nested-settings-directory) whose ClickHouse the SQL runs against — its own database, credentials and HTTP wiring; without it the SQL runs against tenant `0`'s, which is the whole settings directory unless it is nested. The parameter is parsed as strictly as on the [schema routes](#get-v1opsschema--list-all-table-schemas): `400` for a query string that does not parse or an empty, repeated or malformed id, `404` for an unknown tenant, `503` for one whose settings folder was rejected — all decided before the body is read. A tenant on no ClickHouse pool ([no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused) answers `503` `{"error":"no ClickHouse connection is open for this tenant"}` with `Retry-After: 30`.
 
 **Request:**
 
@@ -476,7 +476,7 @@ The earlier handler accepted a `params` array bound to `?` placeholders; the HTT
 | 502 | `{"error":"<ClickHouse error message>"}` | ClickHouse returned a 5xx (internal error, overloaded, etc.). The proxy maps any ClickHouse 5xx to HTTP 502 — gateway-fault, the upstream service had a problem. Same body convention: ClickHouse's text is forwarded as-is. |
 | 502 | `{"error":"clickhouse request failed: ..."}` | Transport-level failure reaching ClickHouse (connection refused, timeout, the upstream went away mid-request) |
 | 502 | `{"error":"clickhouse response exceeded N bytes; ..."}` | Response body exceeded the 64 MiB memory-safety cap. Narrow the query, add a `LIMIT`, or use `FORMAT JSONEachRow` with a streaming client outside WaveHouse. |
-| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [the connection ceiling refused it](/settings-directory#clickhouse) — so the SQL cannot run; `Retry-After: 30`, a settings reload retries the pool |
+| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused — so the SQL cannot run; `Retry-After: 30`, a settings reload retries the pool |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 **curl example:**
@@ -553,7 +553,7 @@ The inbound request body is capped at 1 MiB; a body over the cap is rejected wit
 | 404 | `{"error":"unknown table: x"}` | Table not found in the tenant's discovered schema |
 | 413 | `{"error":"request body exceeded 1048576 bytes"}` | Request body over the 1 MiB cap |
 | 503 | `{"error":"schema not loaded yet"}` | The tenant's first schema discovery has not succeeded yet, so whether the table exists is not known; `Retry-After: 5` |
-| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [the connection ceiling refused it](/settings-directory#clickhouse) — so the query cannot run; decided ahead of the cache, so nothing cached before is served either; `Retry-After: 30`, a settings reload retries the pool |
+| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused — so the query cannot run; decided ahead of the cache, so nothing cached before is served either; `Retry-After: 30`, a settings reload retries the pool |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 ---
@@ -584,7 +584,7 @@ The POST parameter body is capped at 1 MiB; a body over the cap is rejected with
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 404 | `{"error":"pipe not found"}` | Pipe name not registered |
-| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [the connection ceiling refused it](/settings-directory#clickhouse); decided ahead of the cache; `Retry-After: 30` |
+| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused; decided ahead of the cache; `Retry-After: 30` |
 | 403 | `{"error":"forbidden"}` | Role not in pipe's `allowed_roles` (and not the admin role). Fails closed: a request with no role (no token, or a JWT missing `auth.role_claim`) is denied unless a `default_role` resolves it into the list; a pipe with no `allowed_roles` denies everyone but the admin role. |
 | 400 | `{"error":"missing required parameter: x"}` | Required parameter not supplied |
 | 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL literal form — a JSON object, whether supplied directly or nested as an array element. A JSON **array** is valid and renders as an `IN`-style `(…)` list. |
@@ -724,7 +724,7 @@ Triggers an immediate re-discovery of the `?tenant=`'s ClickHouse table schemas 
 | ------ | ---- | ----- |
 | 401 / 403 | as above | Not the admin role |
 | 400 / 404 / 503 | as on `GET /v1/ops/schema` | The `?tenant=` could not be resolved |
-| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [the connection ceiling refused it](/settings-directory#clickhouse) — so nothing can be discovered; `Retry-After: 30`, a settings reload retries the pool |
+| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused — so nothing can be discovered; `Retry-After: 30`, a settings reload retries the pool |
 | 500 | `{"error":"refresh failed"}` | ClickHouse discovery query failed |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
