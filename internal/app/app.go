@@ -105,8 +105,10 @@ type App struct {
 	pools       *chconn.Pools
 	bootState   *api.BootState
 	discoveries *discoveries
-	// dedup is one store per tenant, each following its own folder's switch.
+	// dedup is one store per tenant, each following its own folder's switch,
+	// and dedupeStats the figures of the one Pebble instance they share.
 	dedup       *dedupe.Stores
+	dedupeStats func() map[string]int64
 	mq          mq.Broker
 	cache       cache.Cache
 	sseMetrics  *stream.Metrics

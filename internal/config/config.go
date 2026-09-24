@@ -11,11 +11,8 @@ import (
 // Config is the top-level application configuration.
 type Config struct {
 	// DataDir is the root for embedded state. NATS JetStream lives at
-	// `<DataDir>/nats`; each tenant's Pebble dedupe store (when its dedupe
-	// is enabled) at `<DataDir>/<tenant>/dedupe` — tenant 0's for the four
-	// files. An earlier layout's `<DataDir>/pebble` is moved there at boot
-	// when `<DataDir>/0/dedupe` is absent; with both present, boot uses the
-	// new one, leaves the old one alone, and warns; a failed move refuses boot.
+	// `<DataDir>/nats`; Pebble, holding every tenant's dedupe store while any
+	// tenant has dedupe enabled, at `<DataDir>/pebble`.
 	// Subdirectory names are conventions, not config — one knob, one mount.
 	// In a container this MUST resolve to a host-backed volume; the relative
 	// `./data` default is fine for local binary use only.

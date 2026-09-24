@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -687,17 +686,15 @@ func TestIngest_Policy_CheckIn_AbsentClaim_FailsClosed(t *testing.T) {
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
-// Two tenants, one event id: each tenant's store is its own (#583 story 7),
-// so the id is first seen under both and a duplicate only within the tenant
-// that sent it before — through a handler holding nothing but the request's
+// Two tenants, one event id: each tenant's store is its own (#583 story 7)
+// though every tenant's seen ids share one Pebble instance (story 3), so the
+// id is first seen under both and a duplicate only within the tenant that
+// sent it before — through a handler holding nothing but the request's
 // store, the way internal/app wires it.
 func TestIngest_DedupIsTheTenants(t *testing.T) {
 	t.Parallel()
 	tenants := nestedTenants(t, map[string]string{"acme": fullConfig(100), "globex": fullConfig(100)})
-	root := t.TempDir()
-	stores := dedupe.NewStores(func(id tenant.ID) *dedupe.Managed {
-		return dedupe.NewManaged(dedupe.Embedded(filepath.Join(root, id.String(), "dedupe")))
-	})
+	stores := dedupe.NewStores(dedupe.NewEmbedded(t.TempDir()).Tenant)
 	t.Cleanup(func() { _ = stores.Close() })
 	for id := range tenants.All() {
 		require.NoError(t, stores.For(id).Apply(true))

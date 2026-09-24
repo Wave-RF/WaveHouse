@@ -22,9 +22,9 @@ var ErrUnavailable = errors.New("dedupe store is not open")
 // dedupe.enabled setting: Apply(true) opens it through the function
 // NewManaged was given, Apply(false) closes it, and in-flight CheckAndMark
 // calls are serialized against that swap so a reload can never close the
-// store under a lookup. Which store that is — the embedded Pebble one
-// (Embedded), a shared remote backend's per-tenant view later — is the
-// opener's business, so every backend gets the same switch semantics.
+// store under a lookup. Which store that is — a tenant's share of the
+// embedded Pebble instance (Embedded.Tenant), a remote backend's view later —
+// is the opener's business, so every backend gets the same switch semantics.
 type Managed struct {
 	open func() (Deduplicator, error)
 	mu   sync.RWMutex
@@ -82,17 +82,6 @@ func (m *Managed) CheckAndMark(ctx context.Context, eventID string) (bool, error
 		return false, ErrUnavailable
 	}
 	return m.db.CheckAndMark(ctx, eventID)
-}
-
-// Stats returns the open store's metrics, or nil while closed (the metrics
-// scraper skips a nil map).
-func (m *Managed) Stats() map[string]int64 {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if m.db == nil {
-		return nil
-	}
-	return m.db.Stats()
 }
 
 // Close releases the store if open. Safe to call when already closed.

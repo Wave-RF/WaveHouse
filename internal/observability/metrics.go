@@ -19,8 +19,8 @@ type MQStats struct {
 // stats from embedded systems (the MQ, Pebble) and push them to OpenTelemetry.
 // Both are read on every scrape; nil skips the MQ gauges, as a nil
 // pebbleStats — or a nil map from it, no store being open — skips the Pebble
-// ones. The Pebble figures are the process's, summed across the tenants'
-// stores (dedupe.Stores.Stats in production).
+// ones. The Pebble figures are the one instance's that every tenant's seen
+// ids share (dedupe.Embedded.Stats in production).
 func RegisterSystemMetrics(mqStats func() (MQStats, error), pebbleStats func() map[string]int64) error {
 	meter := otel.Meter("wavehouse-system")
 

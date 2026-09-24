@@ -83,10 +83,8 @@ func Validate(root string) (*Tree, []Finding) {
 // validateFolder is ValidateDir for one tenant folder of a nested root, with
 // the folder leading each finding's File.
 //
-// This is one of the two places a tenant id becomes a filesystem path; the
-// other is the tenant's dedupe store directory under data_dir
-// (internal/app's wireDedupe), which takes its ids from the registry, so
-// each is tenant 0, the constant, or a folder name checked here first.
+// This is the one place a tenant id becomes a filesystem path: the dedupe
+// store keys by tenant, not by directory (internal/dedupe's Embedded).
 // Every caller already hands it an id that passed tenant.Parse (which
 // forbids '.', '/' and '\'), so the check below is never reached today; it
 // is here so the guarantee that a name resolves to one folder under root —

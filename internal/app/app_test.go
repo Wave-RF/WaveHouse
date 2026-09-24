@@ -212,8 +212,8 @@ func TestNew_DedupeFollowsSettings(t *testing.T) {
 			cfg := testConfig(t, dir)
 			a := newApp(t, cfg, Options{})
 			assert.Equal(t, tt.enabled, a.dedup.For(tenant.Default).Open())
-			_, err := os.Stat(filepath.Join(cfg.DataDir, "0", "dedupe"))
-			assert.Equal(t, tt.enabled, err == nil, "tenant 0's directory exists iff dedupe is on: the four files are tenant 0")
+			_, err := os.Stat(filepath.Join(cfg.DataDir, "pebble"))
+			assert.Equal(t, tt.enabled, err == nil, "the Pebble instance exists iff dedupe is on: a server with dedupe off opens nothing")
 		})
 	}
 }
@@ -466,26 +466,26 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	assert.Equal(t, "*", allowOrigin("/v1/health", "acme"))
 }
 
-// One dedupe store per tenant over a nested directory (#583 story 7), rooted
-// at data_dir/<tenant>/dedupe and following that tenant's own switch: opened
-// by its folder's adoption, closed — the directory left as it is — once the
-// folder is rejected or removed, and reopened over the same seen ids when
-// the folder is back. Close releases every open store.
+// One dedupe store per tenant over a nested directory (#583 story 7), each
+// following its own tenant's switch, and every one a share of the one Pebble
+// instance at data_dir/pebble (story 3): opened by its folder's adoption,
+// closed — its seen ids kept — once the folder is rejected or removed, and
+// reopened over the same seen ids when the folder is back. The instance is
+// open while some tenant's store is, and Close releases it.
 func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": nil, "broken": invalidQuery})
 	cfg := testConfig(t, root)
 	a := newApp(t, cfg, Options{})
 	ctx := t.Context()
-	dir := func(id string) string { return filepath.Join(cfg.DataDir, id, "dedupe") }
 
 	acme, globex := a.dedup.For("acme"), a.dedup.For("globex")
 	assert.True(t, acme.Open(), "acme's switch is on")
-	assert.DirExists(t, dir("acme"))
 	assert.False(t, globex.Open(), "globex's is off")
-	assert.NoDirExists(t, dir("globex"), "a closed store creates nothing")
-	assert.NoDirExists(t, dir("broken"), "nor does a rejected tenant")
-	assert.NoDirExists(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "the earlier layout's directory is never created")
+	assert.DirExists(t, filepath.Join(cfg.DataDir, "pebble"), "one instance for every tenant")
+	for _, id := range []string{"acme", "globex", "broken"} {
+		assert.NoDirExists(t, filepath.Join(cfg.DataDir, id), "and no directory of a tenant's own")
+	}
 	dup, err := acme.CheckAndMark(ctx, "e1")
 	require.NoError(t, err)
 	assert.False(t, dup)
@@ -493,7 +493,6 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	rewriteSettings(t, filepath.Join(root, "globex"), dedupeOn)
 	a.tenants.Reload("test")
 	assert.True(t, globex.Open(), "globex's reload opens globex's store")
-	assert.DirExists(t, dir("globex"))
 	dup, err = globex.CheckAndMark(ctx, "e1")
 	require.NoError(t, err)
 	assert.False(t, dup, "an id acme has seen is new to globex")
@@ -507,14 +506,16 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	assert.False(t, globex.Open())
 	assert.True(t, acme.Open())
 
-	// A removed folder: the store closes, the directory stays as it is.
+	// A removed folder closes its store; with none left open, the instance
+	// closes too, its files staying where they are.
 	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
 	a.tenants.Reload("test")
 	_, known = a.tenants.Resolve("acme")
 	require.False(t, known)
 	assert.False(t, acme.Open(), "a tenant the registry no longer holds has its store closed")
-	entries, err := os.ReadDir(dir("acme"))
-	require.NoError(t, err, "and its directory untouched")
+	assert.Nil(t, a.dedupeStats(), "no store open: the instance is closed")
+	entries, err := os.ReadDir(filepath.Join(cfg.DataDir, "pebble"))
+	require.NoError(t, err)
 	assert.NotEmpty(t, entries)
 
 	// Restoring the folder restores the tenant, seen ids included.
@@ -530,99 +531,39 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	assert.False(t, restored.Open(), "Close releases every open store")
 }
 
-// seedLegacyStore writes a Pebble store at dir with ids seen, the way an
-// earlier layout — or an older binary rolled back to — leaves one.
-func seedLegacyStore(t *testing.T, dir string, ids ...string) {
-	t.Helper()
-	require.NoError(t, os.MkdirAll(filepath.Dir(dir), 0o750))
-	d, err := dedupe.NewEmbedded(dir)
-	require.NoError(t, err)
-	for _, id := range ids {
-		_, err := d.CheckAndMark(t.Context(), id)
-		require.NoError(t, err)
-	}
-	require.NoError(t, d.Close())
-}
-
-// An earlier layout's data_dir/pebble is tenant 0's store: boot moves it to
-// data_dir/0/dedupe once, whatever the switch says, so a standalone
-// deployment keeps its seen ids across the upgrade. Both directories present
-// — an older binary ran in between — leaves both, the new one in use.
-func TestNew_MovesTheLegacyDedupeStore(t *testing.T) {
-	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
-	seen := func(t *testing.T, a *App, id string) bool {
-		t.Helper()
-		dup, err := a.dedup.For(tenant.Default).CheckAndMark(t.Context(), id)
-		require.NoError(t, err)
-		return dup
-	}
-	t.Run("seen ids survive the move", func(t *testing.T) {
-		cfg := testConfig(t, writeSettings(t, dedupeOn))
-		seedLegacyStore(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "e1")
-		a := newApp(t, cfg, Options{})
-		assert.NoDirExists(t, filepath.Join(cfg.DataDir, legacyDedupeDir))
-		assert.DirExists(t, filepath.Join(cfg.DataDir, "0", "dedupe"))
-		assert.True(t, seen(t, a, "e1"), "an id the old store had seen is still a duplicate")
-		assert.False(t, seen(t, a, "e2"))
-	})
-	t.Run("moved even with dedupe off", func(t *testing.T) {
-		cfg := testConfig(t, writeSettings(t, nil))
-		seedLegacyStore(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "e1")
-		a := newApp(t, cfg, Options{})
-		assert.NoDirExists(t, filepath.Join(cfg.DataDir, legacyDedupeDir))
-		assert.DirExists(t, filepath.Join(cfg.DataDir, "0", "dedupe"))
-		assert.False(t, a.dedup.For(tenant.Default).Open(), "moved, not opened: the switch is off")
-	})
-	t.Run("both present: the new one is in use, the old is left", func(t *testing.T) {
-		cfg := testConfig(t, writeSettings(t, dedupeOn))
-		seedLegacyStore(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "old")
-		seedLegacyStore(t, filepath.Join(cfg.DataDir, "0", "dedupe"), "new")
-		a := newApp(t, cfg, Options{})
-		assert.DirExists(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "deleting data is never boot's call")
-		assert.True(t, seen(t, a, "new"))
-		assert.False(t, seen(t, a, "old"), "the old store's ids are not merged in")
-	})
-	t.Run("a failed move refuses boot", func(t *testing.T) {
-		guardGlobals(t)
-		cfg := testConfig(t, writeSettings(t, dedupeOn))
-		seedLegacyStore(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "e1")
-		// Tenant 0's directory cannot be created under a regular file.
-		require.NoError(t, os.WriteFile(filepath.Join(cfg.DataDir, "0"), nil, 0o600))
-		_, err := New(t.Context(), Options{Config: cfg})
-		require.ErrorContains(t, err, "dedupe store relocation")
-	})
-}
-
-// A store that cannot open follows the registry's own rule for the shape: a
-// flat directory refuses boot, like every other store, and a nested one
-// fails closed per tenant — that tenant's ingest answers 500 until a reload
-// or a restart opens it, and every other tenant carries on.
+// A Pebble instance that cannot open follows the registry's own rule for the
+// shape: a flat directory refuses boot, like every other store, and a nested
+// one fails closed for every tenant with dedupe on, since they share the
+// instance — their ingest answers 500 until a reload or a restart opens it —
+// while the process, and every tenant with dedupe off, carries on.
 func TestNew_DedupeOpenFailure(t *testing.T) {
 	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
-	// A regular file where the store's directory should be is what Pebble
+	// A regular file where the instance's directory should be is what Pebble
 	// refuses to open.
-	block := func(t *testing.T, path string) {
+	block := func(t *testing.T, dataDir string) {
 		t.Helper()
-		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
-		require.NoError(t, os.WriteFile(path, nil, 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(dataDir, "pebble"), nil, 0o600))
 	}
 	t.Run("flat refuses boot", func(t *testing.T) {
 		guardGlobals(t)
 		cfg := testConfig(t, writeSettings(t, dedupeOn))
-		block(t, filepath.Join(cfg.DataDir, "0", "dedupe"))
+		block(t, cfg.DataDir)
 		_, err := New(t.Context(), Options{Config: cfg})
 		require.ErrorContains(t, err, "dedupe open")
 	})
-	t.Run("nested fails closed per tenant", func(t *testing.T) {
-		root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": dedupeOn})
+	t.Run("nested fails closed", func(t *testing.T) {
+		root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": dedupeOn, "initech": nil})
 		cfg := testConfig(t, root)
-		block(t, filepath.Join(cfg.DataDir, "acme", "dedupe"))
+		block(t, cfg.DataDir)
 		a := newApp(t, cfg, Options{})
-		acme := a.dedup.For("acme")
-		assert.False(t, acme.Open())
-		_, err := acme.CheckAndMark(t.Context(), "e1")
-		require.ErrorIs(t, err, dedupe.ErrUnavailable, "switched on but not open: that tenant's ingest fails closed")
-		assert.True(t, a.dedup.For("globex").Open(), "the tenant beside it is served")
+		for _, id := range []tenant.ID{"acme", "globex"} {
+			store := a.dedup.For(id)
+			assert.False(t, store.Open())
+			_, err := store.CheckAndMark(t.Context(), "e1")
+			require.ErrorIs(t, err, dedupe.ErrUnavailable, "%s: switched on but not open, so its ingest fails closed", id)
+		}
+		_, err := a.dedup.For("initech").CheckAndMark(t.Context(), "e1")
+		require.ErrorIs(t, err, dedupe.ErrDisabled, "a tenant with dedupe off is as it would be anyway")
 	})
 }
 

@@ -481,44 +481,30 @@ func (a *App) wireDiscovery(ctx context.Context) {
 	a.add(component{name: "schema discovery", close: d.close})
 }
 
-// legacyDedupeDir is where the one store lived before #583 story 7 gave each
-// tenant its own: tenant 0's, implicitly. tenant.Parse reserves the name, as
-// it does the queue's nats, in any letter case, so no tenant's directory is
-// ever this one — not on a case-insensitive filesystem either.
-const legacyDedupeDir = "pebble"
-
-// wireDedupe builds the dedupe stores: one per tenant (#583 story 7), at
-// data_dir/<tenant>/dedupe whatever the settings directory's shape — the
-// four files are tenant 0 — each following its own tenant's hot-reloadable
-// dedupe.enabled. Which store that is, is the factory's business alone; the
-// embedded Pebble one is what a process chooses here, and an earlier
-// layout's data_dir/pebble is moved to tenant 0's directory once
-// (moveLegacyDedupeStore). One reconcile closure sets every store to what
-// the registry says: open exactly when its tenant is served with the switch
-// on, closed — its data left on disk — when the tenant is switched off,
-// rejected, or removed. It is registered as the after-adopt hook BEFORE the
-// boot apply (Apply is idempotent), so a reload landing between the two
-// can't leave a tenant's settings saying "on" with its store still closed —
-// either the hook sees it or the boot apply reads it. A failed open follows
-// the registry's own rule for the shape: flat refuses boot, like every other
-// store, and on reload logs and leaves the store closed — ingest then fails
-// closed (500 "dedupe failed") rather than silently publishing un-deduped,
-// since the files asked for dedupe; nested fails closed per tenant the same
-// way at boot too, the next reload retrying, so one tenant's unopenable
-// store never costs the others their process.
+// wireDedupe builds the dedupe stores: one per tenant (#583 story 7), each
+// following its own tenant's hot-reloadable dedupe.enabled, over the
+// embedded Pebble implementation, which is handed data_dir and decides the
+// rest: every tenant's seen ids in one instance there, open while any
+// tenant's store is (dedupe.Embedded). One reconcile closure sets every
+// store to what the registry says: open exactly when its tenant is served
+// with the switch on, closed — its seen ids kept — when the tenant is
+// switched off, rejected, or removed. It is registered as the after-adopt
+// hook BEFORE the boot apply (Apply is idempotent), so a reload landing
+// between the two can't leave a tenant's settings saying "on" with its store
+// still closed — either the hook sees it or the boot apply reads it. An
+// instance that cannot open follows the registry's own rule for the shape:
+// flat refuses boot, like every other store, and on reload logs and leaves
+// the store closed — ingest then fails closed (500 "dedupe failed") rather
+// than silently publishing un-deduped, since the files asked for dedupe;
+// nested fails closed the same way at boot too, for every tenant with
+// dedupe on, the next reload retrying, so it never costs the process.
 func (a *App) wireDedupe() error {
 	nested := a.tenants.Nested()
-	dir := func(id tenant.ID) string { return filepath.Join(a.cfg.DataDir, id.String(), "dedupe") }
-	if err := moveLegacyDedupeStore(a.cfg.DataDir, dir(tenant.Default)); err != nil {
-		return fmt.Errorf("dedupe store relocation: %w", err)
-	}
-	stores := dedupe.NewStores(func(id tenant.ID) *dedupe.Managed { return dedupe.NewManaged(dedupe.Embedded(dir(id))) })
-	a.dedup = stores
+	embedded := dedupe.NewEmbedded(a.cfg.DataDir)
+	stores := dedupe.NewStores(embedded.Tenant)
+	a.dedup, a.dedupeStats = stores, embedded.Stats
 	a.add(component{name: "dedupe", close: withoutContext(stores.Close)})
 	reconcile := func() error {
-		// The gone tenants' stores close first, so a tenant renamed only in
-		// letter case — one directory to a case-insensitive filesystem —
-		// never has both spellings open at once.
 		if err := stores.Retain(a.served); err != nil {
 			slog.Error("dedupe store close failed", "error", err)
 		}
@@ -527,15 +513,17 @@ func (a *App) wireDedupe() error {
 			m := stores.For(id)
 			enabled := store.DedupeEnabled()
 			wasOpen := m.Open()
-			// Tenant 0's store is the one an earlier deployment had, so a
-			// fresh directory there is a first run or a lost volume. Another
-			// tenant's first enable always starts fresh, and a lost volume
-			// shows in the NATS check.
-			if enabled && !wasOpen && id == tenant.Default {
-				config.WarnIfFreshDataDir("pebble", dir(id))
+			// The instance opens with the first store switched on: a fresh
+			// directory then is a first run or a lost volume.
+			if enabled && !embedded.Open() && len(errs) == 0 {
+				config.WarnIfFreshDataDir("pebble", embedded.Dir())
 			}
 			if err := m.Apply(enabled); err != nil {
-				config.LogStorageInitError("dedupe", dir(id), err)
+				// The stores share the one instance, so a failure is every
+				// store's: logged once, not once per tenant.
+				if len(errs) == 0 {
+					config.LogStorageInitError("dedupe", embedded.Dir(), err)
+				}
 				errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
 				continue
 			}
@@ -549,36 +537,6 @@ func (a *App) wireDedupe() error {
 	if err := reconcile(); err != nil && !nested {
 		return fmt.Errorf("dedupe open: %w", err)
 	}
-	return nil
-}
-
-// moveLegacyDedupeStore moves an earlier layout's data_dir/pebble — tenant
-// 0's store, implicitly — to dst, tenant 0's directory, once: a standalone
-// deployment keeps its seen ids across the upgrade, and later across the
-// move to a nested directory with an explicit 0 folder. Both present (an
-// older binary ran in between and started a new store at the old path) is
-// left alone and warned about: dst is the one in use, and deleting data is
-// never boot's call. A failed move refuses boot rather than open an empty
-// store and let duplicates through in silence.
-func moveLegacyDedupeStore(dataDir, dst string) error {
-	src := filepath.Join(dataDir, legacyDedupeDir)
-	if _, err := os.Stat(src); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	if _, err := os.Stat(dst); err == nil {
-		slog.Warn("dedupe store already moved to tenant 0's directory; the old directory is unused and can be removed", "old", src, "path", dst)
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
-		return err
-	}
-	if err := os.Rename(src, dst); err != nil {
-		return err
-	}
-	slog.Info("dedupe store moved to tenant 0's directory", "old", src, "path", dst)
 	return nil
 }
 
@@ -604,7 +562,7 @@ func (a *App) wireMQ() error {
 	// provider and RegisterCallback silently no-ops, making this look
 	// authoritative when it's actually doing nothing.
 	if a.cfg.OTel.Enabled || a.cfg.Prometheus.Enabled {
-		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedup.Stats); err != nil {
+		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedupeStats); err != nil {
 			slog.Error("failed to register system metrics", "error", err)
 		}
 	}
