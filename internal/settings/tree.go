@@ -106,6 +106,21 @@ func validateFolder(root, folder string) (*Document, []Finding) {
 	return doc, findings
 }
 
+// emptyRoot reports whether root can be listed and holds nothing but
+// dot-prefixed entries, which both shapes skip.
+func emptyRoot(root string) bool {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), ".") {
+			return false
+		}
+	}
+	return true
+}
+
 // looseEntry is a root entry that is not a tenant folder: a file, or
 // something that could not be stat'ed (err says why).
 type looseEntry struct {
