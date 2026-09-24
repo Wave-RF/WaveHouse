@@ -141,7 +141,7 @@ func shortestKeepalive(tenants *settings.Registry) (period time.Duration, bucket
 // among the tenants being served — purging less, never more, so every
 // tenant's gap-fill history survives — at the cost of one tenant holding the
 // others' history for longer, which a stream per tenant will end (#583 story
-// 5, second half). A flat directory's one tenant gets exactly its own window;
+// 5b). A flat directory's one tenant gets exactly its own window;
 // with no tenant served the zero window purges everything acknowledged.
 func longestGapWindow(tenants *settings.Registry) time.Duration {
 	var window time.Duration

@@ -26,7 +26,7 @@ type Sweeper struct {
 	// is one bound over it, so in production this is the longest window
 	// among the tenants being served (internal/app's longestGapWindow); a
 	// tenant's own window follows once the streams are per tenant (#583
-	// story 5, second half).
+	// story 5b).
 	gapWindow func() time.Duration
 }
 

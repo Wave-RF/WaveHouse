@@ -229,7 +229,7 @@ type DeadLetterer interface {
 type DeadLetterCounts struct {
 	// Tables maps table name → parked messages, for the tables asked about,
 	// summed across tenants: the queue is one for every tenant until it is
-	// per tenant (#583 story 5, second half), and so is the count. Scope is
+	// per tenant (#583 story 5b), and so is the count. Scope is
 	// not broken out yet (it is inert until #235): a message parked under a
 	// scoped topic counts under "table.scope", not under its table.
 	Tables map[string]uint64
