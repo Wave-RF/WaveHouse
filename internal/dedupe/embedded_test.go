@@ -3,64 +3,134 @@ package dedupe
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
-func newEmbedded(t *testing.T) *EmbeddedDeduplicator {
+// switchedOn returns tenant id's store over e, switched on, and switches it
+// off at cleanup.
+func switchedOn(t *testing.T, e *Embedded, id tenant.ID) *Managed {
 	t.Helper()
-	d, err := NewEmbedded(t.TempDir())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = d.Close() })
-	return d
+	m := e.Tenant(id)
+	require.NoError(t, m.Apply(true))
+	t.Cleanup(func() { _ = m.Close() })
+	return m
 }
 
-func TestEmbeddedDeduplicator_FirstSeenThenDuplicate(t *testing.T) {
+func TestEmbedded_FirstSeenThenDuplicate(t *testing.T) {
 	t.Parallel()
-
-	d := newEmbedded(t)
+	m := switchedOn(t, NewEmbedded(t.TempDir()), "acme")
 	ctx := context.Background()
 
-	dup, err := d.CheckAndMark(ctx, "event-1")
+	dup, err := m.CheckAndMark(ctx, "event-1")
 	require.NoError(t, err)
 	assert.False(t, dup, "first occurrence must not be a duplicate")
 
-	dup, err = d.CheckAndMark(ctx, "event-1")
+	dup, err = m.CheckAndMark(ctx, "event-1")
 	require.NoError(t, err)
 	assert.True(t, dup, "second occurrence of the same id must be a duplicate")
 
-	dup, err = d.CheckAndMark(ctx, "event-2")
+	dup, err = m.CheckAndMark(ctx, "event-2")
 	require.NoError(t, err)
 	assert.False(t, dup, "distinct ids are independent")
 }
 
-func TestEmbeddedDeduplicator_Stats(t *testing.T) {
+// Every tenant's seen ids live in one instance and never meet: the tenant
+// leads each key, ended by a byte no tenant id holds, so tenant "a" with id
+// "bc" and tenant "ab" with id "c" — one key, were the two just joined — are
+// two.
+func TestEmbedded_TenantsDoNotShareSeenIDs(t *testing.T) {
 	t.Parallel()
+	e := NewEmbedded(t.TempDir())
+	ctx := context.Background()
+	a, ab := switchedOn(t, e, "a"), switchedOn(t, e, "ab")
 
-	d := newEmbedded(t)
-
-	stats := d.Stats()
-	require.NotNil(t, stats)
-	_, hasWAL := stats["pebble_wal_size"]
-	_, hasTables := stats["pebble_table_count"]
-	assert.True(t, hasWAL, "stats must include pebble_wal_size")
-	assert.True(t, hasTables, "stats must include pebble_table_count")
+	dup, err := a.CheckAndMark(ctx, "bc")
+	require.NoError(t, err)
+	assert.False(t, dup)
+	dup, err = ab.CheckAndMark(ctx, "c")
+	require.NoError(t, err)
+	assert.False(t, dup, "another tenant's key, however the two would join")
+	dup, err = ab.CheckAndMark(ctx, "bc")
+	require.NoError(t, err)
+	assert.False(t, dup, "an id tenant a has seen is new to tenant ab")
+	dup, err = a.CheckAndMark(ctx, "bc")
+	require.NoError(t, err)
+	assert.True(t, dup, "and still a duplicate within its own tenant")
 }
 
-func TestEmbeddedDeduplicator_OpenFailsOnInvalidPath(t *testing.T) {
+// The instance is open exactly while some tenant's store is: nothing is
+// opened, nor its directory created, until the first store switches on, and
+// it closes with the last one, its files kept for the next open.
+func TestEmbedded_OpenWhileAnyTenantStoreIs(t *testing.T) {
 	t.Parallel()
+	e := NewEmbedded(t.TempDir())
+	ctx := context.Background()
+	acme, globex := e.Tenant("acme"), e.Tenant("globex")
+	assert.False(t, e.Open())
+	assert.NoDirExists(t, e.Dir(), "a store built but never switched on opens nothing")
 
-	// A path that already exists as a regular file is invalid for Pebble —
-	// it needs a directory. This exercises the error branch of NewEmbedded.
-	dir := t.TempDir()
-	path := filepath.Join(dir, "not-a-dir")
-	f, err := os.Create(path) //nolint:gosec // G304: path is rooted in t.TempDir()
+	require.NoError(t, acme.Apply(true))
+	require.NoError(t, globex.Apply(true))
+	assert.True(t, e.Open())
+	_, err := acme.CheckAndMark(ctx, "e1")
 	require.NoError(t, err)
-	require.NoError(t, f.Close())
 
-	_, err = NewEmbedded(path)
-	require.Error(t, err)
+	require.NoError(t, acme.Apply(false))
+	assert.True(t, e.Open(), "globex's store still holds the instance open")
+	require.NoError(t, globex.Apply(false))
+	assert.False(t, e.Open(), "closed with the last store")
+	entries, err := os.ReadDir(e.Dir())
+	require.NoError(t, err)
+	assert.NotEmpty(t, entries, "its files stay")
+
+	require.NoError(t, acme.Apply(true))
+	t.Cleanup(func() { _ = acme.Close() })
+	dup, err := acme.CheckAndMark(ctx, "e1")
+	require.NoError(t, err)
+	assert.True(t, dup, "a tenant switched off keeps its seen ids")
+}
+
+// The gauges read the one instance: nil while it is closed, and its own
+// figures — one set, not one per tenant — while two tenants' stores are open.
+func TestEmbedded_StatsAreTheInstances(t *testing.T) {
+	t.Parallel()
+	e := NewEmbedded(t.TempDir())
+	assert.Nil(t, e.Stats(), "closed: the scraper skips the gauges")
+
+	acme := switchedOn(t, e, "acme")
+	switchedOn(t, e, "globex")
+	_, err := acme.CheckAndMark(context.Background(), "e1")
+	require.NoError(t, err)
+	stats := e.Stats()
+	m := e.db.Metrics()
+	require.Positive(t, stats["pebble_wal_size"])
+	assert.EqualValues(t, m.WAL.Size, stats["pebble_wal_size"], "the instance's, not summed per tenant")
+	assert.Equal(t, m.Total().NumFiles, stats["pebble_table_count"])
+	assert.Len(t, stats, 2)
+}
+
+// An instance that cannot open fails every tenant's store — they share it —
+// and stays closed with no store holding it; the next open retries.
+func TestEmbedded_OpenFailure(t *testing.T) {
+	t.Parallel()
+	e := NewEmbedded(t.TempDir())
+	// A regular file where the instance's directory should be is what Pebble
+	// refuses to open.
+	require.NoError(t, os.WriteFile(e.Dir(), nil, 0o600))
+	acme, globex := e.Tenant("acme"), e.Tenant("globex")
+	require.Error(t, acme.Apply(true))
+	require.Error(t, globex.Apply(true), "one instance: its failure is every tenant's")
+	assert.False(t, e.Open())
+	_, err := acme.CheckAndMark(context.Background(), "e1")
+	require.ErrorIs(t, err, ErrUnavailable)
+
+	require.NoError(t, os.Remove(e.Dir()))
+	require.NoError(t, acme.Apply(true), "the next apply retries the open")
+	t.Cleanup(func() { _ = acme.Close() })
+	assert.True(t, e.Open())
 }

@@ -4,7 +4,7 @@
 # variant in lockstep with deployments/Dockerfile (source-build) so the two
 # images expose the same /app filesystem layout to operators.
 #
-# Only the parents are pre-created — the binary mkdirs `nats/` and `<tenant>/dedupe/`
+# Only the parents are pre-created — the binary mkdirs `nats/` and `pebble/`
 # subdirs itself when NATS/Pebble open their stores. Named-volume copy-up
 # runs against `/app/data`; bind mounts mask the image dir entirely and
 # require the host directory to be writable by UID 65532.

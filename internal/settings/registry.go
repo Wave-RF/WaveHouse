@@ -31,10 +31,10 @@ import (
 //     registry still knows the tenant, so its requests are refused rather
 //     than unknown — and every other tenant carries on; there is no
 //     previous-snapshot fallback. A reload mirrors the folders: a new one is
-//     served and a removed one is forgotten. A finding about the directory
-//     itself (a loose file, an unreadable directory, a changed shape) rejects
-//     the reload whole and leaves every tenant as it was; at Open it refuses
-//     boot.
+//     served and a removed one is forgotten, the last one too. A finding about
+//     the directory itself (a loose file, an unreadable directory, a changed
+//     shape) rejects the reload whole and leaves every tenant as it was; at
+//     Open it refuses boot.
 type Registry struct {
 	dir    string
 	nested bool
@@ -186,7 +186,7 @@ func (r *Registry) Reload(trigger string) ([]Finding, bool) {
 // directory's shape rather than holding it to one. applied reports whether
 // the registry took the tree at all.
 func (r *Registry) reload(trigger string, boot bool) (findings []Finding, adopted, applied bool) {
-	tree, findings := Validate(r.dir)
+	tree, findings := r.validate(boot)
 	switch {
 	case tree == nil:
 	case boot:
@@ -245,6 +245,18 @@ func (r *Registry) reload(trigger string, boot bool) (findings []Finding, adopte
 		slog.Info("settings adopted", "trigger", trigger, "dir", r.dir, "warnings", warns)
 	}
 	return findings, errs == 0, tree != nil
+}
+
+// validate is Validate, but for an empty root under a registry serving
+// folders, which it reads as the nested directory it is with no folder left
+// rather than as Validate's flat directory missing its files — so removing
+// the last tenant's folder removes the tenant, like any other. At Open an
+// empty root still reads as flat: nothing says it was meant to hold folders.
+func (r *Registry) validate(boot bool) (*Tree, []Finding) {
+	if !boot && r.nested && emptyRoot(r.dir) {
+		return &Tree{Nested: true, Tenants: map[tenant.ID]TenantResult{}}, nil
+	}
+	return Validate(r.dir)
 }
 
 // ReloadTenant is Reload for one tenant's folder of a nested directory: the

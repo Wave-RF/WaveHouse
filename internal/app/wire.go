@@ -153,13 +153,22 @@ func longestGapWindow(tenants *settings.Registry) time.Duration {
 	return window
 }
 
+// served reports whether the registry is serving tenant id: what the
+// per-tenant resources — verifiers, dedupe stores, open streams — are pruned
+// by once a reload removes or rejects their tenant.
+func (a *App) served(id tenant.ID) bool {
+	_, ok := a.tenants.For(id)
+	return ok
+}
+
 // perTenant adapts a store accessor to the tenant-keyed getter the async
 // paths take: they hold a tenant id — the one each message's topic names
 // for the stream hub and the ingest worker (#583 story 5) — not a request's
-// resolved store. A
-// miss — a nested directory with no 0 folder, or with a rejected or removed
-// one — is logged and read as T's zero value; what a removed tenant means to
-// each async path is story 3's to decide.
+// resolved store. A miss — a tenant no longer served, or a 0 a nested
+// directory does not hold — is logged and read as T's zero value. By then a
+// tenant a reload removed or rejected has had its streams ended (Hub.Prune)
+// and its schema loop stopped (discoveries), so a miss is an event still in
+// flight; the ingest worker reads its DLQ switch through dlqFor instead.
 func perTenant[T any](tenants *settings.Registry, get func(*settings.Store) T) func(tenant.ID) T {
 	return func(id tenant.ID) T {
 		store, ok := tenants.For(id)
@@ -176,6 +185,10 @@ func perTenant[T any](tenants *settings.Registry, get func(*settings.Store) T) f
 // miss reads as DLQ on, not as the zero value perTenant would give: off lets
 // the worker drop a message it cannot read, and not knowing the tenant is no
 // reason to destroy its row. Parked, it survives until the tenant resolves.
+// So a removed or rejected tenant's queued rows are parked under its own
+// subject rather than left unacked for its return: an unacked row holds the
+// ack floor, the sweeper stops purging, and the one shared stream fills
+// toward mq.max_bytes_gb until every tenant's ingest answers 503.
 func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 	return func(id tenant.ID, table string) bool {
 		store, ok := tenants.For(id)
@@ -382,7 +395,9 @@ func queryTimeout(s *settings.Store) time.Duration { return s.ClickHouse().Query
 // refresh loop of its own (discoveries), and the boot state /livez reports:
 // 503 with the latest discovery failure while no tenant has completed a
 // first discovery, then 200 for the rest of the process lifetime — with one
-// tenant, the rule there always was. Non-fatal either way. A flat
+// tenant, the rule there always was. A failure goes with its tenant: once the
+// tenant it names is no longer served, the diagnostic is the no-tenant one
+// again. Non-fatal either way. A flat
 // directory's tenant 0 is refreshed synchronously here, as before, so the
 // port binds with the state known; a failure marks the binary degraded and
 // leaves the retry (backoff 2s → 60s) to its loop. A nested directory's
@@ -402,7 +417,10 @@ func (a *App) wireDiscovery(ctx context.Context) {
 	var (
 		mu     sync.Mutex
 		loaded bool
+		// failing is the tenant the degraded diagnostic names.
+		failing tenant.ID
 	)
+	noTenantLoaded := errors.New("schema discovery: no tenant has completed a first discovery yet")
 	diagnostic := func(id tenant.ID, err error) error {
 		if nested {
 			return fmt.Errorf("schema discovery: tenant %s: %w", id, err)
@@ -417,7 +435,10 @@ func (a *App) wireDiscovery(ctx context.Context) {
 			slog.Warn("schema discovery retry failed", "tenant", id, "error", err)
 			mu.Lock()
 			defer mu.Unlock()
-			if !loaded {
+			// A loop a reload stopped may report one last attempt after its
+			// tenant has gone.
+			if !loaded && a.served(id) {
+				failing = id
 				a.bootState.Set(diagnostic(id, err))
 			}
 		},
@@ -434,7 +455,7 @@ func (a *App) wireDiscovery(ctx context.Context) {
 		})
 	a.discoveries = d
 	if nested {
-		a.bootState.Set(errors.New("schema discovery: no tenant has completed a first discovery yet"))
+		a.bootState.Set(noTenantLoaded)
 		d.reconcile(a.tenants)
 	} else {
 		// A flat registry always serves tenant 0: Open refused boot otherwise.
@@ -448,53 +469,43 @@ func (a *App) wireDiscovery(ctx context.Context) {
 		}
 		d.adopt(tenant.Default, reg)
 	}
-	a.tenants.AfterAdopt(func([]tenant.ID) { d.reconcile(a.tenants) })
+	a.tenants.AfterAdopt(func([]tenant.ID) {
+		d.reconcile(a.tenants)
+		mu.Lock()
+		defer mu.Unlock()
+		if !loaded && failing != "" && !a.served(failing) {
+			failing = ""
+			a.bootState.Set(noTenantLoaded)
+		}
+	})
 	a.add(component{name: "schema discovery", close: d.close})
 }
 
-// legacyDedupeDir is where the one store lived before #583 story 7 gave each
-// tenant its own: tenant 0's, implicitly. tenant.Parse reserves the name, as
-// it does the queue's nats, in any letter case, so no tenant's directory is
-// ever this one — not on a case-insensitive filesystem either.
-const legacyDedupeDir = "pebble"
-
-// wireDedupe builds the dedupe stores: one per tenant (#583 story 7), at
-// data_dir/<tenant>/dedupe whatever the settings directory's shape — the
-// four files are tenant 0 — each following its own tenant's hot-reloadable
-// dedupe.enabled. Which store that is, is the factory's business alone; the
-// embedded Pebble one is what a process chooses here, and an earlier
-// layout's data_dir/pebble is moved to tenant 0's directory once
-// (moveLegacyDedupeStore). One reconcile closure sets every store to what
-// the registry says: open exactly when its tenant is served with the switch
-// on, closed — its data left on disk — when the tenant is switched off,
-// rejected, or removed. It is registered as the after-adopt hook BEFORE the
-// boot apply (Apply is idempotent), so a reload landing between the two
-// can't leave a tenant's settings saying "on" with its store still closed —
-// either the hook sees it or the boot apply reads it. A failed open follows
-// the registry's own rule for the shape: flat refuses boot, like every other
-// store, and on reload logs and leaves the store closed — ingest then fails
-// closed (500 "dedupe failed") rather than silently publishing un-deduped,
-// since the files asked for dedupe; nested fails closed per tenant the same
-// way at boot too, the next reload retrying, so one tenant's unopenable
-// store never costs the others their process.
+// wireDedupe builds the dedupe stores: one per tenant (#583 story 7), each
+// following its own tenant's hot-reloadable dedupe.enabled, over the
+// embedded Pebble implementation, which is handed data_dir and decides the
+// rest: every tenant's seen ids in one instance there, open while any
+// tenant's store is (dedupe.Embedded). One reconcile closure sets every
+// store to what the registry says: open exactly when its tenant is served
+// with the switch on, closed — its seen ids kept — when the tenant is
+// switched off, rejected, or removed. It is registered as the after-adopt
+// hook BEFORE the boot apply (Apply is idempotent), so a reload landing
+// between the two can't leave a tenant's settings saying "on" with its store
+// still closed — either the hook sees it or the boot apply reads it. An
+// instance that cannot open follows the registry's own rule for the shape:
+// flat refuses boot, like every other store, and on reload logs and leaves
+// the store closed — ingest then fails closed (500 "dedupe failed") rather
+// than silently publishing un-deduped, since the files asked for dedupe;
+// nested fails closed the same way at boot too, for every tenant with
+// dedupe on, the next reload retrying, so it never costs the process.
 func (a *App) wireDedupe() error {
 	nested := a.tenants.Nested()
-	dir := func(id tenant.ID) string { return filepath.Join(a.cfg.DataDir, id.String(), "dedupe") }
-	if err := moveLegacyDedupeStore(a.cfg.DataDir, dir(tenant.Default)); err != nil {
-		return fmt.Errorf("dedupe store relocation: %w", err)
-	}
-	stores := dedupe.NewStores(func(id tenant.ID) *dedupe.Managed { return dedupe.NewManaged(dedupe.Embedded(dir(id))) })
-	a.dedup = stores
+	embedded := dedupe.NewEmbedded(a.cfg.DataDir)
+	stores := dedupe.NewStores(embedded.Tenant)
+	a.dedup, a.dedupeStats = stores, embedded.Stats
 	a.add(component{name: "dedupe", close: withoutContext(stores.Close)})
 	reconcile := func() error {
-		// The gone tenants' stores close first, so a tenant renamed only in
-		// letter case — one directory to a case-insensitive filesystem —
-		// never has both spellings open at once.
-		served := func(id tenant.ID) bool {
-			_, ok := a.tenants.For(id)
-			return ok
-		}
-		if err := stores.Retain(served); err != nil {
+		if err := stores.Retain(a.served); err != nil {
 			slog.Error("dedupe store close failed", "error", err)
 		}
 		var errs []error
@@ -502,15 +513,17 @@ func (a *App) wireDedupe() error {
 			m := stores.For(id)
 			enabled := store.DedupeEnabled()
 			wasOpen := m.Open()
-			// Tenant 0's store is the one an earlier deployment had, so a
-			// fresh directory there is a first run or a lost volume. Another
-			// tenant's first enable always starts fresh, and a lost volume
-			// shows in the NATS check.
-			if enabled && !wasOpen && id == tenant.Default {
-				config.WarnIfFreshDataDir("pebble", dir(id))
+			// The instance opens with the first store switched on: a fresh
+			// directory then is a first run or a lost volume.
+			if enabled && !embedded.Open() && len(errs) == 0 {
+				config.WarnIfFreshDataDir("pebble", embedded.Dir())
 			}
 			if err := m.Apply(enabled); err != nil {
-				config.LogStorageInitError("dedupe", dir(id), err)
+				// The stores share the one instance, so a failure is every
+				// store's: logged once, not once per tenant.
+				if len(errs) == 0 {
+					config.LogStorageInitError("dedupe", embedded.Dir(), err)
+				}
 				errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
 				continue
 			}
@@ -524,36 +537,6 @@ func (a *App) wireDedupe() error {
 	if err := reconcile(); err != nil && !nested {
 		return fmt.Errorf("dedupe open: %w", err)
 	}
-	return nil
-}
-
-// moveLegacyDedupeStore moves an earlier layout's data_dir/pebble — tenant
-// 0's store, implicitly — to dst, tenant 0's directory, once: a standalone
-// deployment keeps its seen ids across the upgrade, and later across the
-// move to a nested directory with an explicit 0 folder. Both present (an
-// older binary ran in between and started a new store at the old path) is
-// left alone and warned about: dst is the one in use, and deleting data is
-// never boot's call. A failed move refuses boot rather than open an empty
-// store and let duplicates through in silence.
-func moveLegacyDedupeStore(dataDir, dst string) error {
-	src := filepath.Join(dataDir, legacyDedupeDir)
-	if _, err := os.Stat(src); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	if _, err := os.Stat(dst); err == nil {
-		slog.Warn("dedupe store already moved to tenant 0's directory; the old directory is unused and can be removed", "old", src, "path", dst)
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
-		return err
-	}
-	if err := os.Rename(src, dst); err != nil {
-		return err
-	}
-	slog.Info("dedupe store moved to tenant 0's directory", "old", src, "path", dst)
 	return nil
 }
 
@@ -579,7 +562,7 @@ func (a *App) wireMQ() error {
 	// provider and RegisterCallback silently no-ops, making this look
 	// authoritative when it's actually doing nothing.
 	if a.cfg.OTel.Enabled || a.cfg.Prometheus.Enabled {
-		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedup.Stats); err != nil {
+		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedupeStats); err != nil {
 			slog.Error("failed to register system metrics", "error", err)
 		}
 	}
@@ -629,9 +612,13 @@ func (a *App) wireSweeper() {
 // (drop counts) and the stream handler (write counts); the Hub that
 // projects/serializes each event once per (topic, role) and pushes it to
 // that role's subscribers; the MQ → Hub bridge; and the keepalive wheel.
+// After every reload the Hub ends the open streams of each tenant no longer
+// served, removed or rejected alike (Hub.Prune); the client reconnects into
+// that tenant's 404 or 503 and gap-fills once it is served again.
 func (a *App) wireStreaming() {
 	a.sseMetrics = stream.NewMetrics()
 	a.hub = stream.NewHub(perTenant(a.tenants, (*settings.Store).Policy), a.discoveries.For, a.sseMetrics)
+	a.tenants.AfterAdopt(func([]tenant.ID) { a.hub.Prune(a.served) })
 
 	// Hub bridge: MQ → broadcast to connected SSE clients. The Hub decodes and
 	// projects each event itself (skipping malformed payloads) under the
@@ -776,10 +763,7 @@ func (a *App) wireAuth() func(http.Handler) http.Handler {
 				authn.Reconfigure(id, wiring(store))
 			}
 		}
-		authn.Prune(func(id tenant.ID) bool {
-			_, served := a.tenants.For(id)
-			return served
-		})
+		authn.Prune(a.served)
 	})
 	return authn.Middleware()
 }
@@ -788,10 +772,10 @@ func (a *App) wireAuth() func(http.Handler) http.Handler {
 // triggers (these two and POST /v1/ops/settings/reload) funnel into the same
 // serialized Registry.Reload, and a rejected reload keeps the previous good
 // snapshot. They only start in Run, after New has registered every
-// AfterAdopt hook (ClickHouse reconnect, dedupe stores, keepalive wheel, auth
-// verifiers): the watcher reloads once as soon as its watch exists, and that
-// reload must already drive every hook — a hook registered after the first
-// reload could miss it.
+// AfterAdopt hook (ClickHouse reconnect, dedupe stores, keepalive wheel, open
+// streams, auth verifiers): the watcher reloads once as soon as its watch
+// exists, and that reload must already drive every hook — a hook registered
+// after the first reload could miss it.
 //
 // A nested directory gets no watcher (#583): whoever writes a tenant's
 // folder calls the reload route once the folder is complete, where a watcher
@@ -857,6 +841,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	streamHandler := api.NewStreamHandler(a.hub, a.mq)
 	streamHandler.Metrics = a.sseMetrics
 	streamHandler.Heartbeater = a.heartbeater
+	streamHandler.Served = a.served
 	// Closed when the API server begins shutting down, ending every open
 	// stream at once (see serve).
 	closing := make(chan struct{})

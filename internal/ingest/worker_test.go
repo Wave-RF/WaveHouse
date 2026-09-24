@@ -1934,3 +1934,66 @@ func TestInsertToClickHouse_NoTargetIsAnError(t *testing.T) {
 	assert.Equal(t, []tenant.ID{"acme"}, asked, "the target is the batch's own tenant's")
 	assert.Zero(t, rt.Hits())
 }
+
+// A tenant on no pool — no longer served, or refused one by the connection
+// ceiling — has no ClickHouse to insert into, so its batch, whatever its
+// column lists, skips the row-by-row retry and meets its DLQ switch once:
+// parked under its own topic and acked with the switch on — what the wiring's
+// dlqFor answers for a tenant it no longer serves — or left unacked for
+// redelivery with it off. No request is made for it, and the served tenant
+// beside it inserts its own rows into its own ClickHouse alone.
+func TestFlushTable_NoTargetParksTheBatchInOnePass(t *testing.T) {
+	t.Parallel()
+	for _, dlqOn := range []bool{true, false} {
+		t.Run(fmt.Sprintf("dlq enabled %v", dlqOn), func(t *testing.T) {
+			t.Parallel()
+			rt := &testutil.MockRoundTripper{}
+			w, pub, _, wait := newTestWorker(rt)
+			w.target = func(id tenant.ID) chconn.Target {
+				if id == "acme" {
+					return chconn.Target{}
+				}
+				return chconn.Target{URL: "http://globex-clickhouse:8123", Username: "u", Password: "p", Database: "globex"}
+			}
+			var asked []tenant.ID
+			w.dlqEnabled = func(id tenant.ID, _ string) bool {
+				asked = append(asked, id)
+				return dlqOn
+			}
+			msg := func(id tenant.ID, data map[string]any) *testutil.MockMessage {
+				return &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: id, Table: "events"}, MsgData: makeEnvelope(t, "events", "", data)}
+			}
+			// Two column lists — a schema change mid-batch — are two INSERTs
+			// for a tenant with a pool, and still one decision without one.
+			acme := []*testutil.MockMessage{msg("acme", map[string]any{"id": "acme-1"}), msg("acme", map[string]any{"id": "acme-2", "page": "/"})}
+			globex := msg("globex", map[string]any{"id": "globex-1"})
+
+			w.flushTable(context.Background(), "events", parseAll(t, w, acme...))
+			w.flushTable(context.Background(), "events", parseAll(t, w, globex))
+			wait()
+
+			assert.Equal(t, []tenant.ID{"acme"}, asked, "the switch is asked once for the batch")
+			captured := rt.Captured()
+			require.Len(t, captured, 1, "no request is made for acme's rows")
+			assert.Contains(t, captured[0].URL, "globex-clickhouse")
+			assert.NotContains(t, string(captured[0].Body), "acme")
+			assert.True(t, globex.DoubleAcked.Load())
+
+			published := pub.Published()
+			if !dlqOn {
+				assert.Empty(t, published)
+				for _, m := range acme {
+					assert.False(t, m.DoubleAcked.Load(), "left unacked for redelivery")
+				}
+				return
+			}
+			require.Len(t, published, 2)
+			for i, p := range published {
+				assert.True(t, p.DeadLetter)
+				assert.Equal(t, mq.Topic{Tenant: "acme", Table: "events"}, p.Topic, "parked under its own topic")
+				assert.Equal(t, "no ClickHouse connection is open for tenant acme", p.Headers.Get("X-DLQ-Error"))
+				assert.True(t, acme[i].DoubleAcked.Load())
+			}
+		})
+	}
+}

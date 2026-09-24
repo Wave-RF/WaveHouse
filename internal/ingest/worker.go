@@ -65,13 +65,15 @@ type IngestWorker struct {
 	// target resolves a tenant's ClickHouse HTTP wiring per insert
 	// (chconn.Pools.Target in production) so a settings reload that
 	// re-points the tenant applies to the next flush; the zero Target is a
-	// tenant on no pool, whose insert fails like an unreachable one.
+	// tenant on no pool, whose batch goes to the dead-letter decision whole
+	// (parkBatch).
 	target   func(tenant.ID) chconn.Target
 	maxBatch int
 	maxWait  time.Duration
 	// dlqEnabled reports, per tenant table, whether a row that still fails
-	// after row-by-row isolation is parked on the DLQ (settings.Store.DLQFor
-	// in production; nil means always). Resolved at the moment of the failure
+	// after row-by-row isolation — or every row of a batch with no ClickHouse
+	// connection — is parked on the DLQ (settings.Store.DLQFor in production;
+	// nil means always). Resolved at the moment of the failure
 	// under the row's own tenant — the one its topic names — so a settings
 	// reload applies to the next poison row without a restart.
 	dlqEnabled func(id tenant.ID, table string) bool
@@ -534,11 +536,17 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 // it falls back to 1-by-1 isolation: each row that re-inserts cleanly is acked,
 // each that fails again is sent to the DLQ — or, with the DLQ switched off for
 // the table, left unacked so NATS redelivers it (the row is never dropped, it
-// retries until it inserts or the DLQ is switched on). tableLoop guarantees at
-// most one concurrent flushTable per tenant table; different tables — two
-// tenants' tables of one name included — may flush concurrently.
+// retries until it inserts or the DLQ is switched on). A batch whose tenant has
+// no ClickHouse connection is not tried at all: it meets its DLQ switch once,
+// whole, whatever its column lists (parkBatch). tableLoop guarantees at most
+// one concurrent flushTable per tenant table; different tables — two tenants'
+// tables of one name included — may flush concurrently.
 func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg) {
 	if len(msgs) == 0 {
+		return
+	}
+	if id := msgs[0].tenant; w.target(id).URL == "" {
+		w.parkBatch(ctx, tableName, msgs, noTargetError(id))
 		return
 	}
 
@@ -628,7 +636,7 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	id := msgs[0].tenant
 	t := w.target(id)
 	if t.URL == "" {
-		return fmt.Errorf("no ClickHouse connection is open for tenant %s", id)
+		return noTargetError(id)
 	}
 	q := url.Values{}
 	q.Set("database", t.Database)
@@ -678,6 +686,31 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
+}
+
+// noTargetError is the failure of tenant id's inserts while it is on no pool:
+// no longer served, or refused one, such as by the connection ceiling. No
+// request is made.
+func noTargetError(id tenant.ID) error {
+	return fmt.Errorf("no ClickHouse connection is open for tenant %s", id)
+}
+
+// parkBatch disposes of a batch whose tenant has no ClickHouse connection in
+// one pass: row-by-row isolation would fail every row the same way, logging
+// two lines each. The tenant's DLQ switch is asked once for the batch, which
+// is parked under its own topic — a tenant no longer served reads as on
+// (dlqFor in internal/app) — or, switched off, left unacked for redelivery
+// until the tenant has a pool.
+func (w *IngestWorker) parkBatch(ctx context.Context, tableName string, msgs []parsedMsg, cause error) {
+	id := msgs[0].tenant
+	if w.dlqEnabled != nil && !w.dlqEnabled(id, tableName) {
+		slog.ErrorContext(ctx, "no ClickHouse connection for tenant, DLQ disabled for table — batch left unacked, NATS will redeliver it until the tenant has one or dlq is enabled", "tenant", id, "table", tableName, "rows", len(msgs))
+		return
+	}
+	slog.ErrorContext(ctx, "no ClickHouse connection for tenant, parking the batch on the DLQ", "tenant", id, "table", tableName, "rows", len(msgs))
+	for _, pm := range msgs {
+		w.sendToDLQ(ctx, tableName, pm, cause.Error())
+	}
 }
 
 func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs []parsedMsg) {

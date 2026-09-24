@@ -92,6 +92,12 @@ func TestOpen_RejectsInvalid(t *testing.T) {
 	reg, findings = Open(filepath.Join(t.TempDir(), "nope"))
 	assert.Nil(t, reg)
 	assert.True(t, HasErrors(findings))
+
+	// Nothing says an empty directory was meant to hold tenant folders, so
+	// it boots as the four files, missing.
+	reg, findings = Open(t.TempDir())
+	assert.Nil(t, reg)
+	assert.Contains(t, findingStrings(findings), "error: config.json: missing")
 }
 
 // TestRegistry_SurvivesVanishedDirectory pins the runtime half of the same
@@ -384,6 +390,47 @@ func TestRegistry_NestedReloadMirrorsTheFolders(t *testing.T) {
 	assert.True(t, ok, "a badly named folder costs no tenant its settings")
 }
 
+// Removing the last folder removes the last tenant, like any other: the
+// empty root it leaves is no change of shape to a registry serving folders.
+// A flat directory emptied the same way is still a rejected reload.
+func TestRegistry_NestedReloadRemovesTheLastTenant(t *testing.T) {
+	t.Parallel()
+	root := writeTree(t, map[string]map[string]string{"acme": maxRowsFiles(111), "globex": maxRowsFiles(222)})
+	reg, _ := Open(root)
+	require.NotNil(t, reg)
+	var hooks [][]tenant.ID
+	reg.AfterAdopt(func(adopted []tenant.ID) { hooks = append(hooks, adopted) })
+
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "globex")))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".keep"), nil, 0o600), "dot-prefixed entries count for neither shape")
+	findings, adopted := reg.Reload("test")
+	assert.True(t, adopted)
+	assert.Empty(t, findings)
+	for _, id := range []tenant.ID{"acme", "globex"} {
+		_, known := reg.Resolve(id)
+		assert.False(t, known, "%s is removed, not rejected", id)
+	}
+	assert.Equal(t, [][]tenant.ID{nil}, hooks, "the hooks ran, with nothing adopted")
+
+	writeTenant(t, root, "acme", maxRowsFiles(333))
+	_, adopted = reg.Reload("test")
+	require.True(t, adopted)
+	store, ok := reg.For("acme")
+	require.True(t, ok, "a folder written back is a tenant again")
+	assert.Equal(t, 333, store.DefaultMaxRows())
+
+	flat := newLoadedRegistry(t, map[string]string{FileConfig: configJSON(`{"query": {"default_max_rows": 42}}`)})
+	for _, name := range Files() {
+		require.NoError(t, os.Remove(filepath.Join(flat.Dir(), name)))
+	}
+	_, adopted = flat.Reload("test")
+	assert.False(t, adopted)
+	store, ok = flat.For(tenant.Default)
+	require.True(t, ok)
+	assert.Equal(t, 42, store.DefaultMaxRows(), "the four files' tenant keeps its document")
+}
+
 // A tenant whose folder is gone leaves the registry with no finding to show
 // for it — every request of its just turns into a 404 — so the reload's log
 // line names it. Captures the default logger, so it is not parallel.
@@ -516,10 +563,6 @@ func TestRegistry_RootLevelFailureChangesNothing(t *testing.T) {
 		}},
 		{name: "the root is gone", want: "does not exist", damage: func(t *testing.T, root string) {
 			require.NoError(t, os.RemoveAll(root))
-		}},
-		{name: "every folder is gone", want: "no longer has the shape this server booted with (one folder per tenant)", damage: func(t *testing.T, root string) {
-			require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
-			require.NoError(t, os.RemoveAll(filepath.Join(root, "globex")))
 		}},
 		{name: "the root turned flat", want: "no longer has the shape this server booted with (one folder per tenant)", damage: func(t *testing.T, root string) {
 			require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))

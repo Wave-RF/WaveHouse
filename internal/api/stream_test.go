@@ -177,3 +177,82 @@ func TestSSE_SubscribesUnderTheRequestTenant(t *testing.T) {
 	wg.Wait()
 	assert.Equal(t, 0, hub.Len(mq.Topic{Tenant: "acme", Table: "clicks"}), "every subscriber is removed")
 }
+
+// blockingReplayer is a gap-fill that never catches up: it signals once it
+// has started, then holds until its context ends.
+type blockingReplayer struct{ started chan struct{} }
+
+func (b blockingReplayer) ReplaySince(ctx context.Context, _ mq.Topic, _ time.Time, _ func([]byte) bool) error {
+	close(b.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// A stream ends on its own once its tenant stops being served — removed or
+// rejected by a reload — whether it is idle, mid-gap-fill, or was admitted by
+// TenantMW before the reload and registered with the hub after it pruned.
+func TestSSE_EndsWhenItsTenantIsNoLongerServed(t *testing.T) {
+	t.Parallel()
+	topic := mq.Topic{Tenant: tenant.Default, Table: "clicks"}
+	served := func(tenant.ID) bool { return true }
+	unserved := func(tenant.ID) bool { return false }
+	// handle runs the stream in the background; the request is never
+	// cancelled, so the handler returns only by ending the stream itself.
+	handle := func(t *testing.T, h *StreamHandler, lastEventID string) (<-chan struct{}, *httptest.ResponseRecorder) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel) // only a stream that failed to end is still open here
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)
+		if lastEventID != "" {
+			req.Header.Set("Last-Event-ID", lastEventID)
+		}
+		w := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			h.Handle(w, withTenant(req))
+		}()
+		return done, w
+	}
+	ended := func(t *testing.T, done <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the stream outlived its tenant")
+		}
+	}
+
+	t.Run("idle", func(t *testing.T) {
+		t.Parallel()
+		hub := stream.NewHub(nil, nil, nil)
+		done, _ := handle(t, &StreamHandler{Hub: hub, Served: served}, "")
+		require.Eventually(t, func() bool { return hub.Len(topic) == 1 }, 5*time.Second, 5*time.Millisecond)
+		hub.Prune(unserved)
+		ended(t, done)
+		assert.Zero(t, hub.Len(topic))
+	})
+	t.Run("mid gap-fill", func(t *testing.T) {
+		t.Parallel()
+		hub := stream.NewHub(nil, nil, nil)
+		replayer := blockingReplayer{started: make(chan struct{})}
+		done, _ := handle(t, &StreamHandler{Hub: hub, Replayer: replayer, Served: served}, "2026-09-24T00:00:00Z")
+		select {
+		case <-replayer.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the gap-fill never started")
+		}
+		hub.Prune(unserved)
+		ended(t, done)
+	})
+	t.Run("no longer served when it registers", func(t *testing.T) {
+		t.Parallel()
+		hub := stream.NewHub(nil, nil, nil)
+		hb := stream.NewHeartbeater(time.Hour, 1)
+		done, w := handle(t, &StreamHandler{Hub: hub, Heartbeater: hb, Served: unserved}, "")
+		ended(t, done)
+		assert.Zero(t, hub.Len(topic), "the deferred Remove ran")
+		assert.Zero(t, hb.Len(), "it never reached the keepalive wheel")
+		assert.Contains(t, w.Body.String(), ": connected", "admitted, then ended")
+	})
+}

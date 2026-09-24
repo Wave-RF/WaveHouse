@@ -171,6 +171,27 @@ func (h *Hub) Len(topic mq.Topic) int {
 	return n
 }
 
+// Prune evicts every subscriber of a tenant served does not vouch for — one a
+// reload removed or rejected — so its handler ends the stream, and the
+// client's reconnect meets that tenant's 404 or 503 until it is served again.
+// Left open, the stream would outlive its tenant: every row withheld under the
+// nil policy read for it, the keepalive wheel holding it open, a quiet table
+// to the client. The handlers' deferred Remove takes the subscribers out.
+func (h *Hub) Prune(served func(tenant.ID) bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for topic, tr := range h.topics {
+		if served(topic.Tenant) {
+			continue
+		}
+		for _, b := range tr.roles {
+			for _, sub := range b.Snapshot() {
+				sub.Evict()
+			}
+		}
+	}
+}
+
 // roleBucket pairs a subscribed role with its bucket for the lock-free fan-out.
 type roleBucket struct {
 	role   string

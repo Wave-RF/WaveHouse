@@ -27,15 +27,23 @@ func TestSubscriber_SendDeliversThenDropsWhenFull(t *testing.T) {
 	assert.True(t, sub.Send(frame), "Send enqueues again once the queue drained")
 }
 
-func TestSubscriber_EvictedIsOpenUntilClosed(t *testing.T) {
+func TestSubscriber_EvictedIsOpenUntilEvicted(t *testing.T) {
 	t.Parallel()
 	sub := NewSubscriber(nil, nil)
 
-	// The eviction seam is inert until the slow-consumer follow-up closes it: the
-	// channel stays open, so a non-blocking read finds nothing.
 	select {
 	case <-sub.Evicted():
 		t.Fatal("Evicted must not fire until the subscriber is marked for eviction")
 	default:
+	}
+
+	// Evicting twice is safe: the Hub's Prune and the slow-consumer threshold
+	// may both reach the same subscriber.
+	sub.Evict()
+	sub.Evict()
+	select {
+	case <-sub.Evicted():
+	default:
+		t.Fatal("Evicted must fire once the subscriber is evicted")
 	}
 }

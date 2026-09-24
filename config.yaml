@@ -2,14 +2,10 @@
 # declare (a typo, or a tunable that moved to the settings directory) refuses
 # to boot and is named — whether it arrives as a YAML key here or as a WH_*
 # variable no key binds.
-# Root for embedded state. NATS lives at <data_dir>/nats; each tenant's Pebble
-# dedupe store (when its dedupe is enabled) at <data_dir>/<tenant>/dedupe —
-# tenant 0's for a settings directory of the four files. An earlier layout's
-# <data_dir>/pebble is moved there at boot when <data_dir>/0/dedupe is absent;
-# with both present, boot uses <data_dir>/0/dedupe, leaves the old directory
-# alone, and warns; a move that fails refuses boot. In a container, this MUST
-# be on a host-backed volume — the relative default is for local binary use
-# only.
+# Root for embedded state. NATS lives at <data_dir>/nats; Pebble, holding every
+# tenant's dedupe store while any tenant has dedupe enabled, at
+# <data_dir>/pebble. In a container, this MUST be on a host-backed volume —
+# the relative default is for local binary use only.
 data_dir: ./data
 
 server:

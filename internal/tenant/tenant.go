@@ -7,7 +7,6 @@ package tenant
 import (
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // ID is a validated tenant identifier. It is a string, never a number: ids
@@ -26,25 +25,10 @@ const (
 	MaxLen = 64
 )
 
-// reserved are the names that fit the grammar and are no tenant's, in any
-// letter case: the entries data_dir keeps for itself beside the tenants' own
-// directories (data_dir/<tenant>, #583 story 7) — the embedded queue's nats
-// and the earlier layout's pebble dedupe store — so no tenant's directory is
-// ever one of those. Any letter case, because the path a name becomes is
-// only as case-sensitive as the filesystem under data_dir (macOS and Windows
-// are not, by default) and the grammar is ASCII, so lowercasing is exact.
-// Data-directory conventions, but named here: the grammar is the one check
-// every path a tenant is named on goes through.
-var reserved = map[string]string{
-	"nats":   "the embedded queue's directory",
-	"pebble": "the earlier layout's dedupe store",
-}
-
 // Parse validates s against the one grammar an id must satisfy to be safe
 // both as a folder name and as a message-queue subject token: ASCII letters,
-// digits, '_' and '-', at most MaxLen bytes, and not a reserved name in any
-// letter case. Dots, slashes, spaces, and wildcards are rejected because
-// each means something to one of the two.
+// digits, '_' and '-', at most MaxLen bytes. Dots, slashes, spaces, and
+// wildcards are rejected because each means something to one of the two.
 func Parse(s string) (ID, error) {
 	if s == "" {
 		return "", errors.New("tenant id is empty")
@@ -59,9 +43,6 @@ func Parse(s string) (ID, error) {
 		default:
 			return "", fmt.Errorf("tenant id has %q at byte %d: only letters, digits, '_' and '-' are allowed", c, i)
 		}
-	}
-	if what, ok := reserved[strings.ToLower(s)]; ok {
-		return "", fmt.Errorf("tenant id %q is reserved: data_dir/%s is %s", s, strings.ToLower(s), what)
 	}
 	return ID(s), nil
 }

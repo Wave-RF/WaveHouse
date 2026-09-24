@@ -344,11 +344,14 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       // is transient even though the stream still ends (#469). Note WaveHouse
       // doesn't reject here *for authentication* — the endpoint is ungated and
       // answers a bad token with a reduced view, which is why `auth` is re-read
-      // per attempt (#239 tracks enforcing expiry). The one 4xx it raises itself
-      // is a 400 on this route for a missing or empty `table`
-      // (internal/api/stream.go); a 404/405 means the request missed the route
-      // entirely (router.go's chi handlers), and anything else comes from
-      // something in front — a gateway, or a proxy.
+      // per attempt (#239 tracks enforcing expiry). The 4xx it raises itself are
+      // a 400 for a missing or empty `table` (internal/api/stream.go) or a
+      // malformed `X-Tenant-ID`, and a 404 `unknown tenant` for a tenant it does
+      // not serve (internal/api/tenant.go) — never held, or removed, which is
+      // what a stream the server ended with its tenant reconnects into; a
+      // rejected tenant's 503 is retried like any 5xx. Any other 404/405 means
+      // the request missed the route entirely (router.go's chi handlers), and
+      // anything else comes from something in front — a gateway, or a proxy.
       return { liveMs: 0, terminal: !error.retryable };
     }
 
