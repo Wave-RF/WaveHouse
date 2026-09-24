@@ -1431,6 +1431,9 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 	assert.Nil(t, a.pools.For("acme"))
 	assert.Nil(t, a.discoveries.For("acme"))
 	assert.True(t, stopped("acme"))
+	// A stopped loop's last attempt can land after the reload: its line must
+	// not come back.
+	a.discoveries.onAttempt("acme", errors.New("connection refused"))
 	assert.False(t, acmeDedup.Open(), "its dedupe store is closed")
 	assert.Contains(t, pipe("acme"), "404 {\"error\":\"unknown tenant: acme\"}")
 	assert.Empty(t, a.pools.Target("acme").URL, "the worker has no ClickHouse to insert its queued rows into")
