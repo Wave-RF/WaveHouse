@@ -395,7 +395,9 @@ func queryTimeout(s *settings.Store) time.Duration { return s.ClickHouse().Query
 // refresh loop of its own (discoveries), and the boot state /livez reports:
 // 503 with the latest discovery failure while no tenant has completed a
 // first discovery, then 200 for the rest of the process lifetime — with one
-// tenant, the rule there always was. Non-fatal either way. A flat
+// tenant, the rule there always was. A failure goes with its tenant: once the
+// tenant it names is no longer served, the diagnostic is the no-tenant one
+// again. Non-fatal either way. A flat
 // directory's tenant 0 is refreshed synchronously here, as before, so the
 // port binds with the state known; a failure marks the binary degraded and
 // leaves the retry (backoff 2s → 60s) to its loop. A nested directory's
@@ -415,7 +417,10 @@ func (a *App) wireDiscovery(ctx context.Context) {
 	var (
 		mu     sync.Mutex
 		loaded bool
+		// failing is the tenant the degraded diagnostic names.
+		failing tenant.ID
 	)
+	noTenantLoaded := errors.New("schema discovery: no tenant has completed a first discovery yet")
 	diagnostic := func(id tenant.ID, err error) error {
 		if nested {
 			return fmt.Errorf("schema discovery: tenant %s: %w", id, err)
@@ -430,7 +435,10 @@ func (a *App) wireDiscovery(ctx context.Context) {
 			slog.Warn("schema discovery retry failed", "tenant", id, "error", err)
 			mu.Lock()
 			defer mu.Unlock()
-			if !loaded {
+			// A loop a reload stopped may report one last attempt after its
+			// tenant has gone.
+			if !loaded && a.served(id) {
+				failing = id
 				a.bootState.Set(diagnostic(id, err))
 			}
 		},
@@ -447,7 +455,7 @@ func (a *App) wireDiscovery(ctx context.Context) {
 		})
 	a.discoveries = d
 	if nested {
-		a.bootState.Set(errors.New("schema discovery: no tenant has completed a first discovery yet"))
+		a.bootState.Set(noTenantLoaded)
 		d.reconcile(a.tenants)
 	} else {
 		// A flat registry always serves tenant 0: Open refused boot otherwise.
@@ -461,7 +469,15 @@ func (a *App) wireDiscovery(ctx context.Context) {
 		}
 		d.adopt(tenant.Default, reg)
 	}
-	a.tenants.AfterAdopt(func([]tenant.ID) { d.reconcile(a.tenants) })
+	a.tenants.AfterAdopt(func([]tenant.ID) {
+		d.reconcile(a.tenants)
+		mu.Lock()
+		defer mu.Unlock()
+		if !loaded && failing != "" && !a.served(failing) {
+			failing = ""
+			a.bootState.Set(noTenantLoaded)
+		}
+	})
 	a.add(component{name: "schema discovery", close: d.close})
 }
 

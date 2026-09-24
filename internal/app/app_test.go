@@ -1432,15 +1432,44 @@ func TestReload_CeilingRefusesAThirdTupleThenOpensIt(t *testing.T) {
 }
 
 // A tenant the registry stops serving — its folder rejected, then removed —
-// releases its pool and its schema registry; the tenant beside it keeps
-// both; restoring the folder restores both.
+// releases what it held: its pool, its schema registry and the loop
+// refreshing it, its verifier, and its dedupe store, its seen ids kept. Once
+// removed its routes answer 404, the ingest worker is handed no ClickHouse
+// and a DLQ switch that reads on for it — its queued rows are parked — and a
+// /livez diagnostic naming it goes back to the no-tenant line; the tenant
+// beside it keeps its own. Restoring the folder restores the tenant over a
+// fresh pool, registry and verifier, and an id it sent before the removal is
+// still a duplicate. Its open streams end too: TestRun_StopEndsOpenStreams.
 func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
-	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
+	jwks, _, fetches := jwksServer(t, "acme-1")
+	acmeSettings := authPatch(jwks.URL)
+	acmeSettings["dedupe"] = map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": acmeSettings, "globex": nil})
 	a := newApp(t, testConfig(t, root), Options{})
-	acme, acmeRegistry := a.pools.For("acme"), a.discoveries.For("acme")
+	acme, acmeRegistry, acmeDedup := a.pools.For("acme"), a.discoveries.For("acme"), a.dedup.For("acme")
 	require.NotNil(t, acme)
 	require.NotNil(t, acmeRegistry)
 	require.NotNil(t, a.pools.For("globex"))
+	loops := *a.discoveries.cur.Load()
+	stopped := func(id tenant.ID) bool {
+		select {
+		case <-loops[id].done:
+			return true
+		case <-time.After(5 * time.Second):
+			return false
+		}
+	}
+	pipe := func(id string) string {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/nope", nil)
+		req.Header.Set(tenant.Header, id)
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return fmt.Sprintf("%d %s", rec.Code, rec.Body.String())
+	}
+	dup, err := acmeDedup.CheckAndMark(t.Context(), "e1")
+	require.NoError(t, err)
+	require.False(t, dup)
+	require.Eventually(t, func() bool { return fetches.Load() > 0 }, 5*time.Second, 10*time.Millisecond, "acme's key set is fetched off the boot path")
 
 	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
 	_, adopted, known := a.tenants.ReloadTenant("globex", "test")
@@ -1448,20 +1477,39 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 	require.False(t, adopted)
 	assert.Nil(t, a.pools.For("globex"), "a rejected tenant is on no pool")
 	assert.Nil(t, a.discoveries.For("globex"), "and has no registry")
+	assert.True(t, stopped("globex"), "nor a loop refreshing one")
 	assert.Same(t, acme, a.pools.For("acme"))
 	assert.Same(t, acmeRegistry, a.discoveries.For("acme"))
 
-	// Adopted in part from here on: globex's folder stays rejected.
+	// Adopted in part from here on: globex's folder stays rejected. No
+	// tenant has completed a first discovery, and the diagnostic names acme.
+	a.discoveries.onAttempt("acme", errors.New("connection refused"))
+	require.Contains(t, get(t, a.Handler(), "/livez").Body.String(), "tenant acme")
 	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
 	a.tenants.Reload("test")
 	assert.Nil(t, a.pools.For("acme"))
 	assert.Nil(t, a.discoveries.For("acme"))
+	assert.True(t, stopped("acme"))
+	assert.False(t, acmeDedup.Open(), "its dedupe store is closed")
+	assert.Contains(t, pipe("acme"), "404 {\"error\":\"unknown tenant: acme\"}")
+	assert.Empty(t, a.pools.Target("acme").URL, "the worker has no ClickHouse to insert its queued rows into")
+	assert.True(t, dlqFor(a.tenants)("acme", "events"), "and parks them")
+	livez := get(t, a.Handler(), "/livez")
+	assert.Equal(t, http.StatusServiceUnavailable, livez.Code)
+	assert.Contains(t, livez.Body.String(), "no tenant has completed a first discovery yet", "the diagnostic went with its tenant")
 
-	require.NoError(t, os.Rename(writeSettings(t, nil), filepath.Join(root, "acme")))
+	fetched := fetches.Load()
+	require.NoError(t, os.Rename(writeSettings(t, acmeSettings), filepath.Join(root, "acme")))
 	a.tenants.Reload("test")
+	assert.Contains(t, pipe("acme"), "pipe not found", "served again")
 	assert.NotNil(t, a.pools.For("acme"))
-	assert.NotNil(t, a.discoveries.For("acme"), "back, over a fresh registry")
-	assert.NotSame(t, acmeRegistry, a.discoveries.For("acme"))
+	assert.NotSame(t, acme, a.pools.For("acme"), "over a fresh pool")
+	assert.NotNil(t, a.discoveries.For("acme"))
+	assert.NotSame(t, acmeRegistry, a.discoveries.For("acme"), "and a fresh registry")
+	assert.Eventually(t, func() bool { return fetches.Load() > fetched }, 5*time.Second, 10*time.Millisecond, "and a fresh verifier, fetching the key set again")
+	dup, err = a.dedup.For("acme").CheckAndMark(t.Context(), "e1")
+	require.NoError(t, err)
+	assert.True(t, dup, "an id acme sent before the removal is still a duplicate")
 }
 
 // Over a nested directory the probes read every tenant together: /livez is
