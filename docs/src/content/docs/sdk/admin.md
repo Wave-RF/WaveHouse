@@ -66,7 +66,7 @@ const { data } = await wh.dlq.table('clicks');
 Content-free server-online check.
 
 ```ts
-// health() hits the public, content-free /v1/health route — 200/503, no body.
+// health() hits the public, content-free /v1/health route — 200, or 503 while degraded.
 // Use it to check a server is reachable before sending data.
 const result = await wh.sys.health();
 if (result.ok) {
@@ -74,5 +74,7 @@ if (result.ok) {
 }
 // on failure, result.error carries the reason (network vs. server error)
 ```
+
+With `auth` configured, the ping carries your token, so while the tenant's JWKS has not been fetched yet it fails with `HTTP_503` (`token verifier not ready`), after waiting out `Retry-After: 30` on each retry — the server is up, but cannot check the token yet. See [API → Authentication](/api#authentication).
 
 > Readiness (`/readyz`) is intentionally **not** exposed through the SDK — it runs a ClickHouse query per call and is a load-balancer / reverse-proxy concern, not the client's. Probe `/readyz` directly from your orchestrator if you need it.

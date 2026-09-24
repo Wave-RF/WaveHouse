@@ -89,13 +89,13 @@ type App struct {
 	listener net.Listener
 
 	// tenants is the registry every tenant-aware path resolves through, and
-	// the owner of every reload. The process-wide resources (ClickHouse, MQ,
-	// auth) still follow its default tenant, through defaultStore: tenant
+	// the owner of every reload. The process-wide resources (ClickHouse,
+	// MQ) still follow its default tenant, through defaultStore: tenant
 	// 0's store as of its last adoption (defaultSetting).
 	tenants      *settings.Registry
 	defaultStore atomic.Pointer[settings.Store]
-	// policies is the default tenant's policy, for the ops gate and the
-	// authenticator's operator-key path.
+	// policies is the default tenant's policy, for the ops gate of a flat
+	// directory.
 	policies    policy.Source
 	promHandler http.Handler
 	ch          *chconn.Manager
@@ -181,10 +181,7 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	a.wireSweeper()
 	a.wireStreaming()
 	a.wireIngestWorker()
-	authMW, err := a.wireAuth()
-	if err != nil {
-		return nil, err
-	}
+	authMW := a.wireAuth()
 	a.wireReloadTriggers()
 	a.wireHTTP(authMW)
 	return a, nil

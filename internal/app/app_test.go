@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,10 +16,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -719,23 +724,183 @@ func TestNew_RefusesInvalidSettingsDirectory(t *testing.T) {
 	assert.Contains(t, err.Error(), "settings directory")
 }
 
-func TestNew_AuthBootFailureReleasesEverything(t *testing.T) {
+// jwksServer serves one Ed25519 verification key under kid and returns the
+// signer that pairs with it — one tenant's identity provider — and a count
+// of the fetches it answered.
+func jwksServer(t *testing.T, kid string) (*httptest.Server, ed25519.PrivateKey, *atomic.Int32) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	body, err := json.Marshal(map[string]any{"keys": []map[string]any{{
+		"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig", "kid": kid,
+		"x": base64.RawURLEncoding.EncodeToString(pub),
+	}}})
+	require.NoError(t, err)
+	var fetches atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, priv, &fetches
+}
+
+// signRole issues a token for role, signed by priv under kid.
+func signRole(t *testing.T, priv ed25519.PrivateKey, kid, role string) string {
+	t.Helper()
+	tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.MapClaims{"role": role, "exp": jwt.NewNumericDate(time.Now().Add(time.Hour))})
+	tok.Header["kid"] = kid
+	signed, err := tok.SignedString(priv)
+	require.NoError(t, err)
+	return signed
+}
+
+// authPatch is a config.json patch pointing the tenant's verifier at jwksURL.
+func authPatch(jwksURL string) map[string]any {
+	return map[string]any{"auth": map[string]any{"jwks_url": jwksURL, "role_claim": "role"}}
+}
+
+// analystPipe gives the settings directory at dir one pipe, `p`, that the
+// analyst role may run: the one tenant route whose answer tells a token that
+// verified (the query runs, and fails against the closed ClickHouse) from
+// one that did not (401, the fail-loud denial) without a ClickHouse.
+func analystPipe(t *testing.T, dir string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileRoles), []byte(`{"roles": ["analyst"]}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FilePipes), []byte(`{"pipes": [{"name": "p", "sql": "SELECT 1", "allowed_roles": ["analyst"]}]}`), 0o600))
+}
+
+// A boot that fails after stores are open releases them, so the same data_dir
+// boots again: here the MQ refuses its directory (a regular file in its
+// place) once the dedupe store is already open, and a second New on the same
+// data_dir must find the Pebble lock released.
+func TestNew_LateBootFailureReleasesEverything(t *testing.T) {
 	guardGlobals(t)
-	// An unreachable JWKS endpoint fails boot loudly; the stores opened
-	// before it must be released, so the same data_dir boots again.
-	dir := writeSettings(t, map[string]any{"auth": map[string]any{
-		"jwks_url": "http://" + closedAddr(t) + "/jwks.json", "role_claim": "role",
+	dir := writeSettings(t, map[string]any{"dedupe": map[string]any{
+		"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{},
 	}})
 	cfg := testConfig(t, dir)
+	natsDir := filepath.Join(cfg.DataDir, "nats")
+	require.NoError(t, os.WriteFile(natsDir, []byte("not a directory"), 0o600))
 	a, err := New(t.Context(), Options{Config: cfg})
 	require.Error(t, err)
 	assert.Nil(t, a)
-	assert.Contains(t, err.Error(), "auth middleware init")
+	assert.Contains(t, err.Error(), "mq open")
 
-	cfg.Settings.Dir = writeSettings(t, nil)
+	require.NoError(t, os.Remove(natsDir))
 	a, err = New(t.Context(), Options{Config: cfg})
-	require.NoError(t, err)
+	require.NoError(t, err, "the stores opened before the failure were released")
+	assert.True(t, a.dedup.For(tenant.Default).Open())
 	assert.NoError(t, a.Close(context.Background()))
+}
+
+// An unreachable JWKS endpoint no longer refuses boot: the tenant's verifier
+// is in place, fail-closed, so a token of the wrong family is refused (401)
+// and one that could not be checked is turned away to retry (503) rather
+// than evaluated under the default_role, and the process serves everything
+// else.
+func TestNew_UnreachableJWKSBootsFailClosed(t *testing.T) {
+	dir := writeSettings(t, authPatch("http://"+closedAddr(t)+"/jwks.json"))
+	analystPipe(t, dir)
+	started := time.Now()
+	a := newApp(t, testConfig(t, dir), Options{})
+	assert.Less(t, time.Since(started), 5*time.Second, "boot must not wait on the endpoint")
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/p", nil)
+	// Signed with the boot secret: the HMAC family, which a JWKS tenant never
+	// accepts, fetched or not.
+	req.Header.Set("Authorization", "Bearer "+testutil.MakeJWT(t, map[string]any{"role": "analyst"}))
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "invalid token")
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/p", nil)
+	req.Header.Set("Authorization", "Bearer "+signRole(t, priv, "k1", "analyst"))
+	rec = httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+}
+
+// Each tenant verifies tokens with its own folder's auth block, through the
+// real wiring: a token acme's identity provider issued runs acme's pipe and
+// is refused under globex's header, and pointing acme's folder at another
+// provider and reloading it swaps acme's verifier alone.
+func TestNew_VerifierPerTenant(t *testing.T) {
+	acme, acmeKey, _ := jwksServer(t, "acme-1")
+	globex, globexKey, globexFetches := jwksServer(t, "globex-1")
+	root := writeNestedSettings(t, map[string]map[string]any{
+		"acme":   authPatch(acme.URL),
+		"globex": authPatch(globex.URL),
+	})
+	analystPipe(t, filepath.Join(root, "acme"))
+	analystPipe(t, filepath.Join(root, "globex"))
+	cfg := testConfig(t, root)
+	cfg.Auth.OperatorKey = "unit-test-operator-key"
+	a := newApp(t, cfg, Options{})
+
+	pipe := func(id, token string) int {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/p", nil)
+		req.Header.Set(tenant.Header, id)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	// verified reports whether the token passed the pipe's role gate: the
+	// query then runs and fails against the closed ClickHouse, never the
+	// 401 of a refused token or the 503 of a verifier still fetching.
+	verified := func(id, token string) bool {
+		code := pipe(id, token)
+		return code != http.StatusUnauthorized && code != http.StatusServiceUnavailable
+	}
+	eventuallyVerified := func(id, token string) {
+		t.Helper()
+		require.Eventually(t, func() bool { return verified(id, token) }, 5*time.Second, 10*time.Millisecond,
+			"%s's token never verified under %s: the key set is fetched off the boot path", id, id)
+	}
+	acmeToken := signRole(t, acmeKey, "acme-1", "analyst")
+	globexToken := signRole(t, globexKey, "globex-1", "analyst")
+	eventuallyVerified("acme", acmeToken)
+	eventuallyVerified("globex", globexToken)
+	assert.False(t, verified("globex", acmeToken), "acme's token is refused under globex's header")
+	assert.False(t, verified("acme", globexToken))
+	assert.False(t, verified("acme", testutil.MakeJWT(t, map[string]any{"role": "analyst"})), "the boot secret's HMAC family never verifies under a JWKS tenant")
+
+	// acme moves to globex's provider; globex's folder is untouched.
+	rewriteSettings(t, filepath.Join(root, "acme"), authPatch(globex.URL))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/settings/reload?tenant=acme", nil)
+	req.Header.Set("X-Operator-Key", cfg.Auth.OperatorKey)
+	a.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	eventuallyVerified("acme", globexToken)
+	assert.False(t, verified("acme", acmeToken), "the swap is unconditional: acme's old provider is gone")
+	assert.True(t, verified("globex", globexToken))
+	assert.False(t, verified("globex", acmeToken))
+
+	// A reload that rejects globex's folder drops its verifier with it — the
+	// hooks run on a reload that adopts nothing — and the fixed folder gets
+	// a fresh one, fetched again.
+	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/settings/reload?tenant=globex", nil)
+	req.Header.Set("X-Operator-Key", cfg.Auth.OperatorKey)
+	a.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, http.StatusServiceUnavailable, pipe("globex", globexToken), "a rejected tenant is not served")
+	before := globexFetches.Load()
+	rewriteSettings(t, filepath.Join(root, "globex"), authPatch(globex.URL))
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/settings/reload?tenant=globex", nil)
+	req.Header.Set("X-Operator-Key", cfg.Auth.OperatorKey)
+	a.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	eventuallyVerified("globex", globexToken)
+	assert.Greater(t, globexFetches.Load(), before, "the fixed folder got a fresh verifier, fetched again")
 }
 
 func TestNew_PrometheusInlineMountsOnRouter(t *testing.T) {
