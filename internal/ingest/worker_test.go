@@ -1936,12 +1936,12 @@ func TestInsertToClickHouse_NoTargetIsAnError(t *testing.T) {
 }
 
 // A tenant on no pool — no longer served, or refused one by the connection
-// ceiling — has no ClickHouse to insert into, so its batch skips the
-// row-by-row retry and meets its DLQ switch once: parked under its own topic
-// and acked with the switch on — what the wiring's dlqFor answers for a
-// tenant it no longer serves — or left unacked for redelivery with it off.
-// No request is made for it, and the served tenant beside it inserts its own
-// rows into its own ClickHouse alone.
+// ceiling — has no ClickHouse to insert into, so its batch, whatever its
+// column lists, skips the row-by-row retry and meets its DLQ switch once:
+// parked under its own topic and acked with the switch on — what the wiring's
+// dlqFor answers for a tenant it no longer serves — or left unacked for
+// redelivery with it off. No request is made for it, and the served tenant
+// beside it inserts its own rows into its own ClickHouse alone.
 func TestFlushTable_NoTargetParksTheBatchInOnePass(t *testing.T) {
 	t.Parallel()
 	for _, dlqOn := range []bool{true, false} {
@@ -1960,11 +1960,13 @@ func TestFlushTable_NoTargetParksTheBatchInOnePass(t *testing.T) {
 				asked = append(asked, id)
 				return dlqOn
 			}
-			msg := func(id tenant.ID, row int) *testutil.MockMessage {
-				return &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: id, Table: "events"}, MsgData: makeEnvelope(t, "events", "", map[string]any{"id": fmt.Sprintf("%s-%d", id, row)})}
+			msg := func(id tenant.ID, data map[string]any) *testutil.MockMessage {
+				return &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: id, Table: "events"}, MsgData: makeEnvelope(t, "events", "", data)}
 			}
-			acme := []*testutil.MockMessage{msg("acme", 1), msg("acme", 2)}
-			globex := msg("globex", 1)
+			// Two column lists — a schema change mid-batch — are two INSERTs
+			// for a tenant with a pool, and still one decision without one.
+			acme := []*testutil.MockMessage{msg("acme", map[string]any{"id": "acme-1"}), msg("acme", map[string]any{"id": "acme-2", "page": "/"})}
+			globex := msg("globex", map[string]any{"id": "globex-1"})
 
 			w.flushTable(context.Background(), "events", parseAll(t, w, acme...))
 			w.flushTable(context.Background(), "events", parseAll(t, w, globex))

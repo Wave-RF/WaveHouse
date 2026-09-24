@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -538,11 +537,16 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 // each that fails again is sent to the DLQ — or, with the DLQ switched off for
 // the table, left unacked so NATS redelivers it (the row is never dropped, it
 // retries until it inserts or the DLQ is switched on). A batch whose tenant has
-// no ClickHouse connection skips the isolation (parkBatch). tableLoop
-// guarantees at most one concurrent flushTable per tenant table; different
-// tables — two tenants' tables of one name included — may flush concurrently.
+// no ClickHouse connection is not tried at all: it meets its DLQ switch once,
+// whole, whatever its column lists (parkBatch). tableLoop guarantees at most
+// one concurrent flushTable per tenant table; different tables — two tenants'
+// tables of one name included — may flush concurrently.
 func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg) {
 	if len(msgs) == 0 {
+		return
+	}
+	if id := msgs[0].tenant; w.target(id).URL == "" {
+		w.parkBatch(ctx, tableName, msgs, noTargetError(id))
 		return
 	}
 
@@ -577,19 +581,14 @@ func groupByColumns(msgs []parsedMsg) [][]parsedMsg {
 }
 
 // flushGroup inserts one (table, column list) batch, falling back to row-by-row
-// isolation on failure — unless it could not be sent at all, for want of a
-// ClickHouse connection (parkBatch). Every message in group shares a column
-// signature, so the first one's columns describe them all.
+// isolation on failure. Every message in group shares a column signature, so the
+// first one's columns describe them all.
 func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group []parsedMsg) {
 	cols := group[0].columns
 
 	err := w.insertToClickHouse(ctx, tableName, cols, group)
 	if err == nil {
 		w.handleSuccess(ctx, tableName, group)
-		return
-	}
-	if errors.Is(err, errNoTarget) {
-		w.parkBatch(ctx, tableName, group, err)
 		return
 	}
 
@@ -637,7 +636,7 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	id := msgs[0].tenant
 	t := w.target(id)
 	if t.URL == "" {
-		return fmt.Errorf("%w for tenant %s", errNoTarget, id)
+		return noTargetError(id)
 	}
 	q := url.Values{}
 	q.Set("database", t.Database)
@@ -689,9 +688,12 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	return nil
 }
 
-// errNoTarget is the insert of a tenant on no pool: no longer served, or
-// refused one, such as by the connection ceiling. No request was made.
-var errNoTarget = errors.New("no ClickHouse connection is open")
+// noTargetError is the failure of tenant id's inserts while it is on no pool:
+// no longer served, or refused one, such as by the connection ceiling. No
+// request is made.
+func noTargetError(id tenant.ID) error {
+	return fmt.Errorf("no ClickHouse connection is open for tenant %s", id)
+}
 
 // parkBatch disposes of a batch whose tenant has no ClickHouse connection in
 // one pass: row-by-row isolation would fail every row the same way, logging
@@ -699,14 +701,14 @@ var errNoTarget = errors.New("no ClickHouse connection is open")
 // is parked under its own topic — a tenant no longer served reads as on
 // (dlqFor in internal/app) — or, switched off, left unacked for redelivery
 // until the tenant has a pool.
-func (w *IngestWorker) parkBatch(ctx context.Context, tableName string, group []parsedMsg, cause error) {
-	id := group[0].tenant
+func (w *IngestWorker) parkBatch(ctx context.Context, tableName string, msgs []parsedMsg, cause error) {
+	id := msgs[0].tenant
 	if w.dlqEnabled != nil && !w.dlqEnabled(id, tableName) {
-		slog.ErrorContext(ctx, "no ClickHouse connection for tenant, DLQ disabled for table — batch left unacked, NATS will redeliver it until the tenant has one or dlq is enabled", "tenant", id, "table", tableName, "rows", len(group))
+		slog.ErrorContext(ctx, "no ClickHouse connection for tenant, DLQ disabled for table — batch left unacked, NATS will redeliver it until the tenant has one or dlq is enabled", "tenant", id, "table", tableName, "rows", len(msgs))
 		return
 	}
-	slog.ErrorContext(ctx, "no ClickHouse connection for tenant, parking the batch on the DLQ", "tenant", id, "table", tableName, "rows", len(group))
-	for _, pm := range group {
+	slog.ErrorContext(ctx, "no ClickHouse connection for tenant, parking the batch on the DLQ", "tenant", id, "table", tableName, "rows", len(msgs))
+	for _, pm := range msgs {
 		w.sendToDLQ(ctx, tableName, pm, cause.Error())
 	}
 }
