@@ -99,9 +99,9 @@ func (vm *VersionManager) BumpTable(id tenant.ID, table string) {
 
 // BumpTenant advances a tenant's version, orphaning its every namespace —
 // and every cached query keyed by one — in one step (the whole-tenant
-// nuke): every namespace key of the tenant carries the version, so nothing has to be enumerated, and a
-// table no bump ever keyed is orphaned like the rest. Other tenants are
-// untouched.
+// nuke): every namespace key of the tenant carries the version, so nothing
+// has to be enumerated, and a table no bump ever keyed is orphaned like the
+// rest. Other tenants are untouched.
 func (vm *VersionManager) BumpTenant(id tenant.ID) {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()

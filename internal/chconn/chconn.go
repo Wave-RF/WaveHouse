@@ -409,8 +409,9 @@ type Pools struct {
 }
 
 // NewPools opens the pools want names, under ceiling. Any refusal — a
-// certificate file that cannot be read, or pools that would add up to more
-// than the ceiling, named with the sum — refuses boot: nothing is left open.
+// certificate file that cannot be read, options the driver refuses, or pools
+// that would add up to more than the ceiling, named with the sum — refuses
+// boot: nothing is left open.
 func NewPools(ceiling int, want []Member) (*Pools, error) {
 	p := newPools(ceiling, dial)
 	if _, err := p.Reconcile(want); err != nil {
@@ -433,13 +434,14 @@ func newPools(ceiling int, d dialer) *Pools {
 // fan-out (SharingTables) while away — and the ones it moved to another
 // address or database, whose cached results were read from other tables. A
 // move that keeps the address and database (a username or tls change) reads
-// the same tables and is not stale. The walk keeps the
-// ceiling at every step: tenants no longer wanted leave first, then each
-// wanted tenant is placed in turn, and a placement the ceiling refuses is
-// undone before the next, so a refused move leaves the tenant on the pool it
-// had, with the Params it had. What was refused is placed once more at the
-// end, since a shrink or a move placed after it may have freed the budget it
-// needed; only what the second pass refuses is reported.
+// the same tables and is not stale. The walk keeps the ceiling at every
+// step: tenants no longer wanted leave first, then each wanted tenant is
+// placed in turn, and a refused placement — the ceiling, or a pool that
+// cannot be opened — is undone before the next, so a refused move leaves the
+// tenant on the pool it had, with the Params it had. What was refused is
+// placed once more at the end, since a shrink or a move placed after it may
+// have freed the budget it needed; only what the second pass refuses is
+// reported.
 func (p *Pools) Reconcile(want []Member) (stale []tenant.ID, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -580,8 +582,8 @@ func (w *walk) leave(id tenant.ID) {
 }
 
 // place puts m on the tuple its Params name — its current one, updated in
-// place, or another, which it moves to when the tuple opens under the
-// ceiling — and reports whether the ceiling let it. A refused move leaves m
+// place, or another, which it moves to when that tuple's pool opens under
+// the ceiling — and reports whether it was placed. A refused move leaves m
 // on the tuple it had, with the Params it had.
 func (w *walk) place(m Member) bool {
 	ident := m.Params.Identity()
