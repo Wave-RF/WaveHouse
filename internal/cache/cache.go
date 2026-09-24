@@ -32,11 +32,11 @@ type Cache interface {
 	// InvalidateTenant orphans every cached query of one tenant that is keyed
 	// by its tables in one step — every table and scope, bumped or not; a
 	// pipe result names no table, so neither this nor any insert
-	// invalidates it and it stays until its TTL expires (#343) — for a tenant that comes back after an absence from the
-	// invalidation fan-out (its settings folder rejected or removed, #583
-	// story 6), stale by every insert it missed, or that moved to another
-	// ClickHouse address or database, whose cached results were read from
-	// other tables.
+	// invalidates it and it stays until its TTL expires (#343) — for a
+	// tenant that comes back after an absence from the invalidation fan-out
+	// (its settings folder rejected or removed, #583 story 6), stale by every
+	// insert it missed, or that moved to another ClickHouse address or
+	// database, whose cached results were read from other tables.
 	InvalidateTenant(ctx context.Context, id tenant.ID) error
 
 	// TODO: for local cache, we can just store the versions in memory, but for distributed/L2 cache, we will need to be able to either have stored procedures/pipelines etc to query them and attach them to a query, or sync them to each edge api server.
