@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -35,7 +36,7 @@ func TestEmbeddedNATS_PublishSubscribe(t *testing.T) {
 	done := make(chan struct{}, 1)
 
 	// A name that needs encoding on the wire comes back as it went in.
-	topic := Topic{Table: "default.events", Scope: "t1"}
+	topic := Topic{Tenant: tenant.Default, Table: "default.events", Scope: "t1"}
 	err := e.Subscribe(ctx, "test-consumer", func(msg *Message) error {
 		mu.Lock()
 		received[msg.Topic()] = msg.Data
@@ -77,14 +78,14 @@ func TestEmbeddedNATS_PublishHeaders(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	require.NoError(t, e.Publish(ctx, Topic{Table: "hdr"}, []byte("x"),
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "hdr"}, []byte("x"),
 		WithHeader("X-One", "1"), WithHeader("X-One", "2"), WithHeader("X-Two", "b")))
 
 	// Read the stored message back raw: the option headers are on the wire
 	// exactly as set, exact-key, with Add appending rather than replacing.
 	s, err := e.js.Stream(ctx, ingestStream)
 	require.NoError(t, err)
-	raw, err := s.GetLastMsgForSubject(ctx, "ingest.hdr")
+	raw, err := s.GetLastMsgForSubject(ctx, "ingest.0.hdr")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"1", "2"}, raw.Header.Values("X-One"))
 	assert.Equal(t, "b", raw.Header.Get("X-Two"))
@@ -128,9 +129,9 @@ func TestEmbeddedNATS_StreamHandle(t *testing.T) {
 
 	before := time.Now()
 	for i := range 3 {
-		require.NoError(t, e.Publish(ctx, Topic{Table: "a"}, []byte{byte(i)}))
+		require.NoError(t, e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "a"}, []byte{byte(i)}))
 	}
-	require.NoError(t, e.Publish(ctx, Topic{Table: "b"}, []byte("b")))
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "b"}, []byte("b")))
 
 	st, err := s.state(ctx, "")
 	require.NoError(t, err)
@@ -139,14 +140,14 @@ func TestEmbeddedNATS_StreamHandle(t *testing.T) {
 	assert.Equal(t, uint64(4), st.Msgs)
 	assert.Nil(t, st.Subjects, "no filter → no per-subject counts")
 
-	filtered, err := s.state(ctx, "ingest.a")
+	filtered, err := s.state(ctx, "ingest.0.a")
 	require.NoError(t, err)
-	assert.Equal(t, map[string]uint64{"ingest.a": 3}, filtered.Subjects)
+	assert.Equal(t, map[string]uint64{"ingest.0.a": 3}, filtered.Subjects)
 	assert.Equal(t, uint64(4), filtered.Msgs, "Msgs is the whole stream, filter or not")
 
 	all, err := s.state(ctx, ">")
 	require.NoError(t, err)
-	assert.Equal(t, map[string]uint64{"ingest.a": 3, "ingest.b": 1}, all.Subjects)
+	assert.Equal(t, map[string]uint64{"ingest.0.a": 3, "ingest.0.b": 1}, all.Subjects)
 
 	ts, err := s.messageTime(ctx, 1)
 	require.NoError(t, err)
@@ -165,7 +166,7 @@ func TestEmbeddedNATS_StreamHandle(t *testing.T) {
 	// client's delivery goroutine, where a require would Goexit the wrong one.
 	acked := make(chan error, 4)
 	stop, _, err := cons.Consume(func(msg *Message) {
-		if msg.TopicKey() == "a" && msg.Data[0] < 2 {
+		if msg.TopicKey() == "0.a" && msg.Data[0] < 2 {
 			acked <- msg.DoubleAck(ctx)
 		}
 	}, 2)
@@ -228,16 +229,16 @@ func TestEmbeddedNATS_ReplaySince(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	require.NoError(t, e.Publish(ctx, Topic{Table: "r"}, []byte("old")))
-	require.NoError(t, e.Publish(ctx, Topic{Table: "other"}, []byte("other")))
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "r"}, []byte("old")))
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "other"}, []byte("other")))
 	time.Sleep(20 * time.Millisecond)
 	since := time.Now()
 	time.Sleep(20 * time.Millisecond)
-	require.NoError(t, e.Publish(ctx, Topic{Table: "r"}, []byte("new1")))
-	require.NoError(t, e.Publish(ctx, Topic{Table: "r"}, []byte("new2")))
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "r"}, []byte("new1")))
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "r"}, []byte("new2")))
 
 	var got []string
-	require.NoError(t, e.ReplaySince(ctx, Topic{Table: "r"}, since, func(data []byte) bool {
+	require.NoError(t, e.ReplaySince(ctx, Topic{Tenant: tenant.Default, Table: "r"}, since, func(data []byte) bool {
 		got = append(got, string(data))
 		return true
 	}))
@@ -245,14 +246,14 @@ func TestEmbeddedNATS_ReplaySince(t *testing.T) {
 
 	// send returning false stops the replay early.
 	got = nil
-	require.NoError(t, e.ReplaySince(ctx, Topic{Table: "r"}, time.Time{}, func(data []byte) bool {
+	require.NoError(t, e.ReplaySince(ctx, Topic{Tenant: tenant.Default, Table: "r"}, time.Time{}, func(data []byte) bool {
 		got = append(got, string(data))
 		return false
 	}))
 	assert.Equal(t, []string{"old"}, got)
 
 	// Nothing stored at or after since: the replay ends cleanly with no sends.
-	require.NoError(t, e.ReplaySince(ctx, Topic{Table: "r"}, time.Now().Add(time.Hour), func([]byte) bool {
+	require.NoError(t, e.ReplaySince(ctx, Topic{Tenant: tenant.Default, Table: "r"}, time.Now().Add(time.Hour), func([]byte) bool {
 		t.Fatal("nothing should be replayed")
 		return false
 	}))
@@ -372,13 +373,13 @@ func TestEmbeddedNATS_ReplaySince_PullFailureIsAnError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	require.NoError(t, e.Publish(ctx, Topic{Table: "r"}, []byte("one")))
-	require.NoError(t, e.Publish(ctx, Topic{Table: "r"}, []byte("two")))
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "r"}, []byte("one")))
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "r"}, []byte("two")))
 
 	// Closing the client connection under a running replay makes the next pull
 	// fail outright — that is not "caught up" and must reach the caller.
 	var got []string
-	err := e.ReplaySince(ctx, Topic{Table: "r"}, time.Time{}, func(data []byte) bool {
+	err := e.ReplaySince(ctx, Topic{Tenant: tenant.Default, Table: "r"}, time.Time{}, func(data []byte) bool {
 		got = append(got, string(data))
 		e.conn.Close()
 		return true
@@ -393,13 +394,13 @@ func TestEmbeddedNATS_ReplaySince_StopsWhenContextIsDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	require.NoError(t, e.Publish(ctx, Topic{Table: "r"}, []byte("one")))
-	require.NoError(t, e.Publish(ctx, Topic{Table: "r"}, []byte("two")))
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "r"}, []byte("one")))
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "r"}, []byte("two")))
 
 	// Cancelling mid-replay (the client went away, or the server is shutting
 	// down) ends the drain before the next pull rather than running to caught up.
 	var got []string
-	err := e.ReplaySince(ctx, Topic{Table: "r"}, time.Time{}, func(data []byte) bool {
+	err := e.ReplaySince(ctx, Topic{Tenant: tenant.Default, Table: "r"}, time.Time{}, func(data []byte) bool {
 		got = append(got, string(data))
 		cancel()
 		return true
@@ -422,15 +423,21 @@ func TestEmbeddedNATS_DeadLetter(t *testing.T) {
 		msg := NewMessage(ctx, topic, []byte(data), time.Now(), nil, nil, nil)
 		require.NoError(t, e.DeadLetter(ctx, msg, WithHeader("X-DLQ-Error", "boom")))
 	}
-	park(Topic{Table: "default.orders"}, "o1")
-	park(Topic{Table: "default.orders"}, "o2")
-	park(Topic{Table: "users"}, "u1")
+	park(Topic{Tenant: tenant.Default, Table: "default.orders"}, "o1")
+	park(Topic{Tenant: tenant.Default, Table: "default.orders"}, "o2")
+	park(Topic{Tenant: tenant.Default, Table: "users"}, "u1")
+	// Another tenant's table of the same name counts with it: one queue, one
+	// count, until the queue is per tenant. So does a subject parked before
+	// the tenant led it — the queue is never drained, so those stay.
+	park(Topic{Tenant: "acme", Table: "users"}, "acme-u1")
+	_, err = e.js.Publish(ctx, "dlq.users", []byte("pre-tenant"))
+	require.NoError(t, err)
 
 	// Parked under the same topic on the DLQ stream, headers intact, and
 	// nothing lands on the ingest stream.
 	dlq, err := e.js.Stream(ctx, dlqStream)
 	require.NoError(t, err)
-	raw, err := dlq.GetLastMsgForSubject(ctx, "dlq.default%2Eorders")
+	raw, err := dlq.GetLastMsgForSubject(ctx, "dlq.0.default%2Eorders")
 	require.NoError(t, err)
 	assert.Equal(t, []byte("o2"), raw.Data)
 	assert.Equal(t, "boom", raw.Header.Get("X-DLQ-Error"))
@@ -442,11 +449,15 @@ func TestEmbeddedNATS_DeadLetter(t *testing.T) {
 
 	all, err := e.DeadLetterCounts(ctx, "")
 	require.NoError(t, err)
-	assert.Equal(t, DeadLetterCounts{Tables: map[string]uint64{"default.orders": 2, "users": 1}, Total: 3}, all, "table names come back decoded")
+	assert.Equal(t, DeadLetterCounts{Tables: map[string]uint64{"default.orders": 2, "users": 3}, Total: 5}, all, "table names come back decoded, summed across tenants")
 
 	one, err := e.DeadLetterCounts(ctx, "default.orders")
 	require.NoError(t, err)
-	assert.Equal(t, DeadLetterCounts{Tables: map[string]uint64{"default.orders": 2}, Total: 3}, one, "Total is every parked message, filter or not")
+	assert.Equal(t, DeadLetterCounts{Tables: map[string]uint64{"default.orders": 2}, Total: 5}, one, "Total is every parked message, filter or not")
+
+	users, err := e.DeadLetterCounts(ctx, "users")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]uint64{"users": 3}, users.Tables, "the filter is by table under any tenant, the pre-tenant subject included")
 
 	none, err := e.DeadLetterCounts(ctx, "never_failed")
 	require.NoError(t, err)
@@ -481,9 +492,10 @@ func TestEmbeddedNATS_DeadLetter_IsAPrefixSwap(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	// A subject this package would never write still parks under the very
-	// same tail: nothing on the dead-letter path decodes or re-encodes it.
-	_, err := e.js.Publish(ctx, "ingest.a.b.c", []byte("foreign"))
+	// A subject this package would never write (four tokens) still parks
+	// under the very same tail: nothing on the dead-letter path decodes or
+	// re-encodes it.
+	_, err := e.js.Publish(ctx, "ingest.a.b.c.d", []byte("foreign"))
 	require.NoError(t, err)
 
 	got := make(chan *Message, 1)
@@ -497,12 +509,13 @@ func TestEmbeddedNATS_DeadLetter_IsAPrefixSwap(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for delivery")
 	}
-	assert.Equal(t, "a.b.c", msg.TopicKey())
+	assert.Equal(t, "a.b.c.d", msg.TopicKey())
+	assert.Equal(t, Topic{Table: "a.b.c.d"}, msg.Topic(), "a foreign tail is the table of no tenant")
 	require.NoError(t, e.DeadLetter(ctx, msg))
 
 	dlq, err := e.js.Stream(ctx, dlqStream)
 	require.NoError(t, err)
-	raw, err := dlq.GetLastMsgForSubject(ctx, "dlq.a.b.c")
+	raw, err := dlq.GetLastMsgForSubject(ctx, "dlq.a.b.c.d")
 	require.NoError(t, err)
 	assert.Equal(t, []byte("foreign"), raw.Data)
 }
@@ -518,7 +531,7 @@ func TestEmbeddedNATS_Publish_QueueFull(t *testing.T) {
 	// the backpressure signal, named so callers need not read broker errors.
 	payload := make([]byte, 1<<10)
 	for range 8 {
-		if err = e.Publish(ctx, Topic{Table: "full"}, payload); err != nil {
+		if err = e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "full"}, payload); err != nil {
 			break
 		}
 	}
@@ -535,7 +548,7 @@ func TestEmbeddedNATS_PurgeAcked(t *testing.T) {
 	require.ErrorIs(t, err, ErrConsumerNotFound)
 
 	for i := range 4 {
-		require.NoError(t, e.Publish(ctx, Topic{Table: "p"}, []byte{byte(i)}))
+		require.NoError(t, e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "p"}, []byte{byte(i)}))
 	}
 
 	// Ack the first two; the last two stay unwritten.
@@ -626,4 +639,72 @@ func TestEmbeddedNATS_Consume_StopIsNotAFailure(t *testing.T) {
 		t.Fatalf("our own stop was reported as a failure: %v", err)
 	case <-time.After(time.Second):
 	}
+}
+
+// Nothing lands on the default tenant by omission (#583): the tenant is a
+// required token, checked against its grammar before anything is sent.
+func TestEmbeddedNATS_Publish_RefusesATopicWithoutATenant(t *testing.T) {
+	e := newTestEmbedded(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	for _, topic := range []Topic{{Table: "events"}, {Tenant: "a.b", Table: "events"}} {
+		require.Error(t, e.Publish(ctx, topic, []byte("x")), "%+v", topic)
+		require.Error(t, e.ReplaySince(ctx, topic, time.Time{}, func([]byte) bool { return true }), "%+v", topic)
+	}
+	s, err := e.stream(ctx, ingestStream)
+	require.NoError(t, err)
+	st, err := s.state(ctx, "")
+	require.NoError(t, err)
+	assert.Zero(t, st.Msgs)
+}
+
+// Two tenants, one table name: a replay of one never carries the other's rows.
+func TestEmbeddedNATS_ReplaySince_IsPerTenant(t *testing.T) {
+	e := newTestEmbedded(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: "acme", Table: "r"}, []byte("acme1")))
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: "globex", Table: "r"}, []byte("globex1")))
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: "acme", Table: "r"}, []byte("acme2")))
+
+	var got []string
+	require.NoError(t, e.ReplaySince(ctx, Topic{Tenant: "acme", Table: "r"}, time.Time{}, func(data []byte) bool {
+		got = append(got, string(data))
+		return true
+	}))
+	assert.Equal(t, []string{"acme1", "acme2"}, got)
+}
+
+// A message published before the tenant led the subject (#583 story 5) is
+// still delivered after the upgrade — the durable consumers filter ingest.>
+// — and reads as the default tenant's, so it inserts, streams and parks as
+// it did.
+func TestEmbeddedNATS_PreTenantSubjectsStillDeliver(t *testing.T) {
+	e := newTestEmbedded(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	_, err := e.js.Publish(ctx, "ingest.events", []byte("old"))
+	require.NoError(t, err)
+
+	got := make(chan *Message, 1)
+	require.NoError(t, e.Subscribe(ctx, "upgrade", func(msg *Message) error {
+		got <- msg
+		return nil
+	}))
+	var msg *Message
+	select {
+	case msg = <-got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for delivery")
+	}
+	assert.Equal(t, Topic{Tenant: tenant.Default, Table: "events"}, msg.Topic())
+	require.NoError(t, e.DeadLetter(ctx, msg))
+	dlq, err := e.js.Stream(ctx, dlqStream)
+	require.NoError(t, err)
+	raw, err := dlq.GetLastMsgForSubject(ctx, "dlq.events")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("old"), raw.Data, "parked under the tail it arrived on")
 }

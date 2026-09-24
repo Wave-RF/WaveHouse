@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
@@ -19,6 +22,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -326,7 +330,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		{Name: "events", Columns: []discovery.Column{{Name: "id", Type: "String"}}},
 	})
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024)
 	require.NoError(t, err)
@@ -416,7 +420,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 func TestNewRouter_CORSOnStream(t *testing.T) {
 	t.Parallel()
 
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 	router := NewRouter(Dependencies{
 		Tenants:     testTenants(),
 		SSE:         NewStreamHandler(hub, nil),
@@ -512,7 +516,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
 		Tenants:      testTenants(),
@@ -584,7 +588,7 @@ func TestNewRouter_NestedOpsGateAdmitsTheOperatorKeyAlone(t *testing.T) {
 			Tenants:      tenants,
 			Ingest:       NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
 			Query:        &QueryHandler{},
-			SSE:          NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
+			SSE:          NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 			Health:       &HealthHandler{},
 			Schema:       schemaHandlerOver(reg, tenants),
 			Pipes:        pipesHandler,
@@ -651,8 +655,9 @@ func TestNewRouter_MalformedTenantSurvivesTheTokenStrip(t *testing.T) {
 	tenants, _ := settings.Open(dir)
 	require.NotNil(t, tenants)
 	store, _ := tenants.For(tenant.Default)
-	authn, err := auth.NewAuthenticator(auth.Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role"}, store.Policy)
-	require.NoError(t, err)
+	authn := auth.NewAuthenticator(auth.Config{JWTSecret: testutil.TestJWTSecret}, nil, func(tenant.ID) *policy.Policy { return store.Policy() })
+	authn.Reconfigure(tenant.Default, auth.Wiring{RoleClaim: "role"})
+	t.Cleanup(authn.Close)
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pipesHandler := NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, nil, nil, nil, noTimeout)
 	pipesHandler.Tenants = tenants
@@ -660,7 +665,7 @@ func TestNewRouter_MalformedTenantSurvivesTheTokenStrip(t *testing.T) {
 		Tenants:      tenants,
 		Ingest:       NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
 		Query:        &QueryHandler{},
-		SSE:          NewStreamHandler(stream.NewHub(tenant.Default, nil, nil, nil), nil),
+		SSE:          NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:       &HealthHandler{},
 		Schema:       schemaHandlerOver(reg, tenants),
 		Pipes:        pipesHandler,
@@ -706,12 +711,67 @@ func TestNewRouter_MalformedTenantSurvivesTheTokenStrip(t *testing.T) {
 	})
 }
 
+// A tenant whose JWKS has not been fetched refuses a token-bearing request
+// with 503 + Retry-After rather than evaluate it under the default_role: the
+// token may be good, and a lesser role could accept its data wrongly. A
+// tokenless request and the operator key are served as before.
+func TestNewRouter_TokenUnderPendingJWKSIs503(t *testing.T) {
+	t.Parallel()
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(down.Close)
+	tenants, _ := settings.Open(writeSettingsFixture(t, fullConfig(100)))
+	require.NotNil(t, tenants)
+	authn := auth.NewAuthenticator(auth.Config{OperatorKey: "op-key"}, nil, nil)
+	authn.Reconfigure(tenant.Default, auth.Wiring{JWKSURL: down.URL, RoleClaim: "role"})
+	t.Cleanup(authn.Close)
+	reg := testutil.NewTestSchemaRegistry(t, nil)
+	pipesHandler := NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, nil, nil, nil, noTimeout)
+	pipesHandler.Tenants = tenants
+	router := NewRouter(Dependencies{
+		Tenants: tenants,
+		Ingest:  NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
+		Query:   &QueryHandler{},
+		SSE:     NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
+		Health:  &HealthHandler{},
+		Schema:  NewSchemaHandler(fixedRegistry(reg)),
+		Pipes:   pipesHandler,
+		AuthMW:  authn.Middleware(),
+	})
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.MapClaims{"role": "admin", "exp": jwt.NewNumericDate(time.Now().Add(time.Hour))})
+	signed, err := tok.SignedString(priv)
+	require.NoError(t, err)
+	do := func(path string, header ...string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
+		if len(header) == 2 {
+			req.Header.Set(header[0], header[1])
+		}
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for _, path := range []string{"/v1/pipes/nope", "/v1/ops/pipes"} {
+		rec := do(path, "Authorization", "Bearer "+signed)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "%s: %s", path, rec.Body.String())
+		assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+		testutil.AssertJSONErrorResponse(t, rec)
+		assert.Contains(t, rec.Body.String(), "not ready")
+	}
+	assert.Equal(t, http.StatusNotFound, do("/v1/pipes/nope").Code, "tokenless is the default_role's request either way")
+	assert.Equal(t, http.StatusNotFound, do("/v1/pipes/nope", "X-Operator-Key", "op-key").Code, "the operator key never consults the verifier")
+	assert.Equal(t, http.StatusOK, do("/v1/ops/pipes", "X-Operator-Key", "op-key").Code)
+}
+
 func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	t.Parallel()
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	deps := Dependencies{
 		Tenants:      testTenants(),
@@ -790,7 +850,7 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 	deps := Dependencies{
 		Tenants: testTenants(),
 		Ingest:  NewIngestHandler(fixedRegistry(reg), pub),
@@ -815,7 +875,7 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 	deps := Dependencies{
 		Tenants: testTenants(),
 		Ingest:  NewIngestHandler(fixedRegistry(reg), pub),
@@ -914,7 +974,7 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 		{Name: "events", Columns: []discovery.Column{{Name: "id", Type: "String"}}},
 	})
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(tenant.Default, nil, nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
 		Tenants:      testTenants(),

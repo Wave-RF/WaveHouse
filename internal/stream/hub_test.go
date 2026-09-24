@@ -17,6 +17,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -37,8 +38,9 @@ import (
 // nested-object claims decode unchanged, so literal maps stay faithful there.
 func jwtClaims(t *testing.T, claims map[string]any) map[string]any {
 	t.Helper()
-	authn, err := auth.NewAuthenticator(auth.Config{JWTSecret: testutil.TestJWTSecret}, nil)
-	require.NoError(t, err)
+	authn := auth.NewAuthenticator(auth.Config{JWTSecret: testutil.TestJWTSecret}, nil, nil)
+	authn.Reconfigure(tenant.Default, auth.Wiring{})
+	t.Cleanup(authn.Close)
 	var got map[string]any
 	h := authn.Middleware()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		c, ok := auth.ClaimsFromContext(r.Context())
@@ -77,8 +79,8 @@ func rawEvent(tb testing.TB, table, ts string, data map[string]any) []byte {
 // pins the defence for an envelope we did not write.
 func TestBroadcast_DuplicateColumnWithheld(t *testing.T) {
 	t.Parallel()
-	const topic = "clicks"
-	hub := NewHub(tenant.Default, nil, nil, nil) // nil store ⇒ passthrough, so nothing else withholds
+	topic := topicOf("clicks")
+	hub := NewHub(nil, nil, nil) // nil store ⇒ passthrough, so nothing else withholds
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
 
@@ -111,8 +113,8 @@ func TestBroadcast_DuplicateColumnWithheld(t *testing.T) {
 // The pairable control is load-bearing: without it a projector that returned no
 // frames for EVERY envelope would pass.
 func TestReplayProjector_UnpairableWithheld(t *testing.T) {
-	hub := NewHub(tenant.Default, nil, nil, NewMetrics())
-	project := hub.ReplayProjector("viewer", NewSubscriber(nil, nil))
+	hub := NewHub(nil, nil, NewMetrics())
+	project := hub.ReplayProjector(tenant.Default, "viewer", NewSubscriber(nil, nil))
 
 	bad, err := json.Marshal(ingest.EventMessage{
 		TableName:         "clicks",
@@ -140,8 +142,8 @@ func TestReplayProjector_UnpairableWithheld(t *testing.T) {
 // The columns and row here pair perfectly, so ONLY the format can withhold it,
 // and the positive control proves the withholding is the format's doing.
 func TestEventView_UnknownFormatWithheld(t *testing.T) {
-	const topic = "clicks"
-	hub := NewHub(tenant.Default, nil, nil, NewMetrics())
+	topic := topicOf("clicks")
+	hub := NewHub(nil, nil, NewMetrics())
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
 
@@ -159,7 +161,7 @@ func TestEventView_UnknownFormatWithheld(t *testing.T) {
 
 	hub.Broadcast(topic, envelope("JSONEachRow"))
 	assertNoFrame(t, sub)
-	assert.Empty(t, hub.ReplayProjector("viewer", sub)(envelope("JSONEachRow")),
+	assert.Empty(t, hub.ReplayProjector(tenant.Default, "viewer", sub)(envelope("JSONEachRow")),
 		"the gap-fill path refuses it too, on the same grounds")
 
 	hub.Broadcast(topic, envelope(ingest.FormatJSONCompactEachRow))
@@ -316,8 +318,8 @@ func recvEventCols(t *testing.T, sub *Subscriber, cols []string) (Frame, map[str
 
 func TestHub_ProjectsOncePerRole_FanOutToAllSubscribers(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, nil, nil, nil) // nil store ⇒ passthrough, no filtering
-	const topic = "clicks"
+	hub := NewHub(nil, nil, nil) // nil store ⇒ passthrough, no filtering
+	topic := topicOf("clicks")
 
 	a, b := NewSubscriber(nil, nil), NewSubscriber(nil, nil)
 	hub.Add(topic, "public", a)
@@ -349,8 +351,8 @@ func TestHub_ProjectsPerRole_ColumnFilterAndDenial(t *testing.T) {
 			},
 		},
 	}
-	hub := NewHub(tenant.Default, staticPolicy(p), nil, nil)
-	const topic = "clicks"
+	hub := NewHub(staticPolicy(p), nil, nil)
+	topic := topicOf("clicks")
 
 	viewer := NewSubscriber(nil, nil)
 	blocked := NewSubscriber(nil, nil)
@@ -429,8 +431,8 @@ func TestHub_ProjectsPerRole_DistinctRolesGetDistinctFrames(t *testing.T) {
 			},
 		},
 	}
-	hub := NewHub(tenant.Default, staticPolicy(p), nil, nil)
-	const topic = "clicks"
+	hub := NewHub(staticPolicy(p), nil, nil)
+	topic := topicOf("clicks")
 
 	viewer, editor := NewSubscriber(nil, nil), NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", viewer)
@@ -482,8 +484,8 @@ func rowFilterPolicy() *policy.Policy {
 // matching the constant-false predicate the query path binds for it.
 func TestHub_RowFilter_PerSubscriberIsolation(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, staticPolicy(rowFilterPolicy()), nil, nil)
-	const topic = "clicks"
+	hub := NewHub(staticPolicy(rowFilterPolicy()), nil, nil)
+	topic := topicOf("clicks")
 
 	acme := NewSubscriber(jwtClaims(t, map[string]any{"tenant": "acme"}), nil)
 	globex := NewSubscriber(jwtClaims(t, map[string]any{"tenant": "globex"}), nil)
@@ -526,8 +528,8 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"tenant_id": {Eq: new("{{ jwt.org.tenant }}")}}}}},
 		},
 	}
-	hub := NewHub(tenant.Default, staticPolicy(p), nil, nil)
-	const topic = "clicks"
+	hub := NewHub(staticPolicy(p), nil, nil)
+	topic := topicOf("clicks")
 
 	org := map[string]any{"tenant": "globex"}
 	claims := map[string]any{"org": org}
@@ -552,7 +554,7 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"tenant_id": {In: new("{{ jwt.tenants }}")}}}}},
 		},
 	}
-	inHub := NewHub(tenant.Default, staticPolicy(inPolicy), nil, nil)
+	inHub := NewHub(staticPolicy(inPolicy), nil, nil)
 	tenants := []any{"globex"}
 	inSub := NewSubscriber(map[string]any{"tenants": tenants}, nil)
 	inHub.Add(topic, "viewer", inSub)
@@ -572,8 +574,8 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 // column can't be proven visible, so it is withheld rather than leaked.
 func TestHub_RowFilter_MissingColumn_FailsClosed(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, staticPolicy(rowFilterPolicy()), nil, nil)
-	const topic = "clicks"
+	hub := NewHub(staticPolicy(rowFilterPolicy()), nil, nil)
+	topic := topicOf("clicks")
 
 	acme := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
 	hub.Add(topic, "viewer", acme)
@@ -589,8 +591,8 @@ func TestHub_RowFilter_MissingColumn_FailsClosed(t *testing.T) {
 // per-subscriber, not the serialization.
 func TestHub_RowFilter_SharedProjectionAcrossSameClaims(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, staticPolicy(rowFilterPolicy()), nil, nil)
-	const topic = "clicks"
+	hub := NewHub(staticPolicy(rowFilterPolicy()), nil, nil)
+	topic := topicOf("clicks")
 
 	a := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
 	b := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
@@ -627,8 +629,8 @@ func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"amount": {Gt: new("100")}}}}},
 		},
 	}
-	hub := NewHub(tenant.Default, staticPolicy(p), fixedRegistry(reg), nil)
-	const topic = "clicks"
+	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
+	topic := topicOf("clicks")
 
 	sub := NewSubscriber(nil, nil) // constant filter value ⇒ no claims needed
 	hub.Add(topic, "viewer", sub)
@@ -643,7 +645,7 @@ func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 	// Same policy, no schema registry: an ordering predicate can't be proven either
 	// way, so both rows are withheld — including the one the schema-informed path
 	// delivers above.
-	noSchema := NewHub(tenant.Default, staticPolicy(p), nil, nil)
+	noSchema := NewHub(staticPolicy(p), nil, nil)
 	blind := NewSubscriber(nil, nil)
 	noSchema.Add(topic, "viewer", blind)
 	noSchema.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"amount": float64(9), "page": "/a"}))
@@ -667,8 +669,8 @@ func TestHub_RowFilter_FloatNarrowing_SchemaInformed(t *testing.T) {
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"score": {Gt: new("16777216")}}}}},
 		},
 	}
-	hub := NewHub(tenant.Default, staticPolicy(p), fixedRegistry(reg), nil)
-	const topic = "clicks"
+	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
+	topic := topicOf("clicks")
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
 
@@ -682,12 +684,12 @@ func TestHub_RowFilter_FloatNarrowing_SchemaInformed(t *testing.T) {
 
 func TestHub_TopicIsolation(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, nil, nil, nil)
+	hub := NewHub(nil, nil, nil)
 	clicks, views := NewSubscriber(nil, nil), NewSubscriber(nil, nil)
-	hub.Add("clicks", "public", clicks)
-	hub.Add("views", "public", views)
+	hub.Add(topicOf("clicks"), "public", clicks)
+	hub.Add(topicOf("views"), "public", views)
 
-	hub.Broadcast("clicks", rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)}))
+	hub.Broadcast(topicOf("clicks"), rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)}))
 
 	f, _, _ := recvEvent(t, clicks)
 	assert.NotEmpty(t, f.Data)
@@ -732,8 +734,8 @@ func TestHub_PassthroughAndFailClosed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			hub := NewHub(tenant.Default, tt.store, nil, nil)
-			const topic = "custom"
+			hub := NewHub(tt.store, nil, nil)
+			topic := topicOf("custom")
 			sub := NewSubscriber(nil, nil)
 			hub.Add(topic, "public", sub)
 			hub.Broadcast(topic, []byte(tt.payload))
@@ -753,8 +755,8 @@ func TestHub_PassthroughAndFailClosed(t *testing.T) {
 
 func TestHub_AddRemoveGCsBucketsAndTopics(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, nil, nil, nil)
-	const topic = "clicks"
+	hub := NewHub(nil, nil, nil)
+	topic := topicOf("clicks")
 	sub := NewSubscriber(nil, nil)
 
 	hub.Add(topic, "public", sub)
@@ -774,9 +776,9 @@ func TestHub_AddRemoveGCsBucketsAndTopics(t *testing.T) {
 
 func TestHub_BroadcastNoSubscribers_NoOp(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, nil, nil, nil)
+	hub := NewHub(nil, nil, nil)
 	assert.NotPanics(t, func() {
-		hub.Broadcast("nobody", rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)}))
+		hub.Broadcast(topicOf("nobody"), rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)}))
 	})
 }
 
@@ -792,8 +794,8 @@ func TestHub_SlowConsumerDropIncrementsMetric(t *testing.T) {
 	})
 
 	m := NewMetrics()
-	hub := NewHub(tenant.Default, nil, nil, m)
-	const topic = "clicks"
+	hub := NewHub(nil, nil, m)
+	topic := topicOf("clicks")
 	// cap-2: the first broadcast fills it with the schema frame plus the row, so
 	// the second undrained broadcast's row drops (its column list is unchanged, so
 	// no second schema frame is due). The shared seam NewSubscriber wires metrics through.
@@ -823,7 +825,7 @@ func TestHub_ReplayProjector(t *testing.T) {
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}},
 		},
 	}
-	hub := NewHub(tenant.Default, staticPolicy(p), nil, nil)
+	hub := NewHub(staticPolicy(p), nil, nil)
 	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z", map[string]any{"page": "/home", "secret": "x"})
 
 	tests := []struct {
@@ -846,7 +848,7 @@ func TestHub_ReplayProjector(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			frames := hub.ReplayProjector(tt.role, NewSubscriber(nil, nil))(tt.raw)
+			frames := hub.ReplayProjector(tenant.Default, tt.role, NewSubscriber(nil, nil))(tt.raw)
 			require.Equal(t, tt.want, len(frames) > 0)
 			if !tt.want {
 				return
@@ -875,10 +877,10 @@ func TestHub_ReplayProjector_ReadsPolicyPerEvent(t *testing.T) {
 	}
 	var current atomic.Pointer[policy.Policy]
 	current.Store(granted)
-	hub := NewHub(tenant.Default, func(tenant.ID) *policy.Policy { return current.Load() }, nil, nil)
+	hub := NewHub(func(tenant.ID) *policy.Policy { return current.Load() }, nil, nil)
 	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z", map[string]any{"page": "/home"})
 
-	project := hub.ReplayProjector("viewer", NewSubscriber(nil, nil))
+	project := hub.ReplayProjector(tenant.Default, "viewer", NewSubscriber(nil, nil))
 	require.Len(t, project(raw), 2, "granted before the reload")
 	current.Store(&policy.Policy{}) // the reload revokes the grant mid-fill
 	assert.Empty(t, project(raw), "the next replayed row sees the revocation")
@@ -889,13 +891,13 @@ func TestHub_ReplayProjector_ReadsPolicyPerEvent(t *testing.T) {
 // gap-fill event is projected only when the connection's claims satisfy the filter.
 func TestHub_ReplayProjector_RowFilter(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, staticPolicy(rowFilterPolicy()), nil, nil)
+	hub := NewHub(staticPolicy(rowFilterPolicy()), nil, nil)
 	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
 		map[string]any{"tenant_id": "acme", "page": "/a", "secret": "x"})
 
 	t.Run("matching claims replay the row, projected to allowed columns", func(t *testing.T) {
 		t.Parallel()
-		project := hub.ReplayProjector("viewer", NewSubscriber(map[string]any{"tenant": "acme"}, nil))
+		project := hub.ReplayProjector(tenant.Default, "viewer", NewSubscriber(map[string]any{"tenant": "acme"}, nil))
 		frames := project(raw)
 		require.Len(t, frames, 2, "the first replayed row announces the column list")
 		cols := frameColumns(t, frames[0])
@@ -914,15 +916,15 @@ func TestHub_ReplayProjector_RowFilter(t *testing.T) {
 
 	t.Run("non-matching claims withhold the row", func(t *testing.T) {
 		t.Parallel()
-		frames := hub.ReplayProjector("viewer", NewSubscriber(map[string]any{"tenant": "globex"}, nil))(raw)
+		frames := hub.ReplayProjector(tenant.Default, "viewer", NewSubscriber(map[string]any{"tenant": "globex"}, nil))(raw)
 		require.Empty(t, frames, "row must be withheld when claims don't satisfy the filter")
 	})
 }
 
 func TestHub_ConcurrentAddRemoveBroadcast_Race(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, nil, nil, nil)
-	const topic = "clicks"
+	hub := NewHub(nil, nil, nil)
+	topic := topicOf("clicks")
 	raw := rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)})
 
 	var wg sync.WaitGroup
@@ -952,8 +954,8 @@ func TestHub_ConcurrentAddRemoveBroadcast_Race(t *testing.T) {
 // racing silently on a security decision.
 func TestHub_ConcurrentRowFilteredBroadcast_Race(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, staticPolicy(rowFilterPolicy()), nil, nil)
-	const topic = "clicks"
+	hub := NewHub(staticPolicy(rowFilterPolicy()), nil, nil)
+	topic := topicOf("clicks")
 	raw := rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "acme", "page": "/a"})
 
 	var wg sync.WaitGroup
@@ -1001,8 +1003,8 @@ func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}}}}},
 		},
 	}
-	hub := NewHub(tenant.Default, staticPolicy(p), fixedRegistry(reg), nil)
-	const topic = "clicks"
+	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
+	topic := topicOf("clicks")
 
 	// Claims come from real signed tokens through the production middleware, so a
 	// bare JSON-number tenant claim reaches the filter exactly as production
@@ -1046,8 +1048,8 @@ func TestHub_RowFilter_TimestampInstantMatch(t *testing.T) {
 			},
 		},
 	}
-	hub := NewHub(tenant.Default, staticPolicy(p), fixedRegistry(reg), nil)
-	const topic = "clicks"
+	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
+	topic := topicOf("clicks")
 
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
@@ -1080,8 +1082,8 @@ func TestHub_RowFilterWithheldIncrementsMetric(t *testing.T) {
 		otel.SetMeterProvider(savedMP)
 	})
 
-	hub := NewHub(tenant.Default, staticPolicy(rowFilterPolicy()), nil, NewMetrics())
-	const topic = "clicks"
+	hub := NewHub(staticPolicy(rowFilterPolicy()), nil, NewMetrics())
+	topic := topicOf("clicks")
 	acme := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
 	globex := NewSubscriber(map[string]any{"tenant": "globex"}, nil)
 	hub.Add(topic, "viewer", acme)
@@ -1090,7 +1092,7 @@ func TestHub_RowFilterWithheldIncrementsMetric(t *testing.T) {
 	raw := rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "acme", "page": "/a"})
 	hub.Broadcast(topic, raw) // delivered to acme, withheld from globex → 1
 
-	frames := hub.ReplayProjector("viewer", NewSubscriber(map[string]any{"tenant": "globex"}, nil))(raw)
+	frames := hub.ReplayProjector(tenant.Default, "viewer", NewSubscriber(map[string]any{"tenant": "globex"}, nil))(raw)
 	require.Empty(t, frames) // replay withhold → 2
 
 	var rm metricdata.ResourceMetrics
@@ -1109,13 +1111,13 @@ func TestHub_RowFilterWithheldIncrementsMetric(t *testing.T) {
 // per-subscriber evaluation, which is the cost under measurement. See #435 for the
 // memoization follow-up this benchmark exists to arbitrate.
 func BenchmarkBroadcast_RowFilteredFanout(b *testing.B) {
-	const topic = "clicks"
+	topic := topicOf("clicks")
 	raw := rawEvent(b, "clicks", "2026-06-26T00:00:00Z",
 		map[string]any{"tenant_id": "acme", "page": "/a", "secret": "x"})
 
 	for _, n := range []int{100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("subscribers=%d", n), func(b *testing.B) {
-			hub := NewHub(tenant.Default, staticPolicy(rowFilterPolicy()), nil, nil)
+			hub := NewHub(staticPolicy(rowFilterPolicy()), nil, nil)
 			subs := make([]*Subscriber, n)
 			for i := range n {
 				tenant := "acme"
@@ -1246,8 +1248,8 @@ func sumByName(rm metricdata.ResourceMetrics, name string) int64 {
 // stream.
 func TestHub_SchemaFrame_AnnouncedOncePerConnection(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, nil, nil, nil)
-	const topic = "clicks"
+	hub := NewHub(nil, nil, nil)
+	topic := topicOf("clicks")
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "public", sub)
 
@@ -1272,8 +1274,8 @@ func TestHub_SchemaFrame_AnnouncedOncePerConnection(t *testing.T) {
 // it — otherwise a client zips values under the wrong names.
 func TestHub_SchemaFrame_ReannouncedOnDrift(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, nil, nil, nil)
-	const topic = "clicks"
+	hub := NewHub(nil, nil, nil)
+	topic := topicOf("clicks")
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "public", sub)
 
@@ -1303,8 +1305,8 @@ func TestHub_SchemaFrame_ReannouncedOnDrift(t *testing.T) {
 // told the column list even though an earlier subscriber already was.
 func TestHub_SchemaFrame_PerConnectionNotPerRole(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, nil, nil, nil)
-	const topic = "clicks"
+	hub := NewHub(nil, nil, nil)
+	topic := topicOf("clicks")
 	early := NewSubscriber(nil, nil)
 	hub.Add(topic, "public", early)
 
@@ -1339,16 +1341,16 @@ func TestHub_SubscribeSchemaFrame(t *testing.T) {
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}},
 		},
 	}
-	hub := NewHub(tenant.Default, staticPolicy(p), fixedRegistry(reg), nil)
+	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
 
 	sub := NewSubscriber(nil, nil)
-	f, ok := hub.SubscribeSchemaFrame("clicks", "viewer", sub)
+	f, ok := hub.SubscribeSchemaFrame(tenant.Default, "clicks", "viewer", sub)
 	require.True(t, ok)
 	assert.Equal(t, []string{"page"}, frameColumns(t, f), "announced list is the role's projection")
 
 	// The first live event does not re-announce what the connection was told.
-	hub.Add("clicks", "viewer", sub)
-	hub.Broadcast("clicks", rawEventCols(t, "clicks", "t1", []string{"page", "secret"},
+	hub.Add(topicOf("clicks"), "viewer", sub)
+	hub.Broadcast(topicOf("clicks"), rawEventCols(t, "clicks", "t1", []string{"page", "secret"},
 		map[string]any{"page": "/a", "secret": "x"}))
 	data, row := recvEventCols(t, sub, []string{"page"})
 	assert.Equal(t, "/a", row["page"])
@@ -1375,14 +1377,14 @@ func TestHub_SubscribeSchemaFrame_NothingToAnnounce(t *testing.T) {
 		table string
 		role  string
 	}{
-		{"no registry", NewHub(tenant.Default, staticPolicy(p), nil, nil), "clicks", "viewer"},
-		{"unknown table", NewHub(tenant.Default, staticPolicy(p), fixedRegistry(reg), nil), "missing", "viewer"},
-		{"role cannot read the table", NewHub(tenant.Default, staticPolicy(p), fixedRegistry(reg), nil), "clicks", "stranger"},
+		{"no registry", NewHub(staticPolicy(p), nil, nil), "clicks", "viewer"},
+		{"unknown table", NewHub(staticPolicy(p), fixedRegistry(reg), nil), "missing", "viewer"},
+		{"role cannot read the table", NewHub(staticPolicy(p), fixedRegistry(reg), nil), "clicks", "stranger"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, ok := tt.hub.SubscribeSchemaFrame(tt.table, tt.role, NewSubscriber(nil, nil))
+			_, ok := tt.hub.SubscribeSchemaFrame(tenant.Default, tt.table, tt.role, NewSubscriber(nil, nil))
 			assert.False(t, ok)
 		})
 	}
@@ -1393,8 +1395,8 @@ func TestHub_SubscribeSchemaFrame_NothingToAnnounce(t *testing.T) {
 // the client with every digit — a float64 round trip would round it.
 func TestHub_DataFrame_PreservesRawCellBytes(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, nil, nil, nil)
-	const topic = "clicks"
+	hub := NewHub(nil, nil, nil)
+	topic := topicOf("clicks")
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "public", sub)
 
@@ -1413,17 +1415,17 @@ func TestHub_DataFrame_PreservesRawCellBytes(t *testing.T) {
 // ahead of it with nothing to zip against. Replay announces on its own.
 func TestHub_ReplayProjector_SchemaTrackingIsIndependentOfLive(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, nil, nil, nil)
+	hub := NewHub(nil, nil, nil)
 	sub := NewSubscriber(nil, nil)
 	raw := rawEventCols(t, "clicks", "t1", []string{"page"}, map[string]any{"page": "/a"})
 
 	// A live event records the connection's column list first...
-	hub.Add("clicks", "public", sub)
-	hub.Broadcast("clicks", raw)
+	hub.Add(topicOf("clicks"), "public", sub)
+	hub.Broadcast(topicOf("clicks"), raw)
 	_, _, _ = recvEvent(t, sub)
 
 	// ...and the gap-fill still announces before its first row.
-	frames := hub.ReplayProjector("public", sub)(raw)
+	frames := hub.ReplayProjector(tenant.Default, "public", sub)(raw)
 	require.Len(t, frames, 2)
 	assert.Equal(t, []string{"page"}, frameColumns(t, frames[0]))
 	assert.Equal(t, KindReplay, frames[1].Kind)
@@ -1437,8 +1439,8 @@ func TestHub_ReplayProjector_SchemaTrackingIsIndependentOfLive(t *testing.T) {
 // for good.
 func TestHub_SchemaFrame_DroppedAnnouncementDropsItsRow(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, nil, nil, nil)
-	const topic = "clicks"
+	hub := NewHub(nil, nil, nil)
+	topic := topicOf("clicks")
 	sub := newSubscriber(1, nil) // cap-1: room for the announcement, not the row
 	hub.Add(topic, "public", sub)
 
@@ -1470,17 +1472,17 @@ func TestHub_SubscribeSchemaFrame_ExcludesComputedColumns(t *testing.T) {
 			{Name: "country", Type: "String"},
 		}},
 	})
-	hub := NewHub(tenant.Default, nil, fixedRegistry(reg), nil)
+	hub := NewHub(nil, fixedRegistry(reg), nil)
 
 	sub := NewSubscriber(nil, nil)
-	f, ok := hub.SubscribeSchemaFrame("clicks", "public", sub)
+	f, ok := hub.SubscribeSchemaFrame(tenant.Default, "clicks", "public", sub)
 	require.True(t, ok)
 	cols := frameColumns(t, f)
 	assert.Equal(t, []string{"page", "country"}, cols)
 
 	// The first event announces nothing new, because the lists agree.
-	hub.Add("clicks", "public", sub)
-	hub.Broadcast("clicks", rawEventCols(t, "clicks", "t1", cols,
+	hub.Add(topicOf("clicks"), "public", sub)
+	hub.Broadcast(topicOf("clicks"), rawEventCols(t, "clicks", "t1", cols,
 		map[string]any{"page": "/a", "country": "US"}))
 	_, row := recvEventCols(t, sub, cols)
 	assert.Equal(t, "/a", row["page"])
@@ -1496,8 +1498,77 @@ func fixedRegistry(reg *discovery.SchemaRegistry) RegistrySource {
 // no registry at all: nothing to announce, every column opaque.
 func TestHub_RegistrySourceYieldingNilIsNoSchema(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(tenant.Default, nil, func(tenant.ID) *discovery.SchemaRegistry { return nil }, nil)
-	_, ok := hub.SubscribeSchemaFrame("clicks", "viewer", NewSubscriber(nil, nil))
+	var asked []tenant.ID
+	hub := NewHub(nil, func(id tenant.ID) *discovery.SchemaRegistry {
+		asked = append(asked, id)
+		return nil
+	}, nil)
+	_, ok := hub.SubscribeSchemaFrame("acme", "clicks", "viewer", NewSubscriber(nil, nil))
 	assert.False(t, ok)
-	assert.Nil(t, hub.columnSpecs("clicks"))
+	assert.Nil(t, hub.columnSpecs("globex", "clicks"))
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, asked, "the source is asked for the tenant the lookup names")
+}
+
+// TestHub_TopicsAreTenantScoped: two tenants, one table name (#583). A
+// broadcast on one tenant's topic reaches that tenant's subscribers alone,
+// projected under that tenant's policy — the policy source is asked for the
+// event's tenant, and for the connection's on a gap-fill and on the schema
+// frame it opens with — never a fixed one.
+func TestHub_TopicsAreTenantScoped(t *testing.T) {
+	t.Parallel()
+	policies := map[tenant.ID]*policy.Policy{
+		"acme":   {Tables: map[string]policy.TablePolicy{"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page", "secret"}}}}}},
+		"globex": {Tables: map[string]policy.TablePolicy{"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}}}},
+	}
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
+		{Name: "clicks", Columns: []discovery.Column{{Name: "page", Type: "String"}, {Name: "secret", Type: "String"}}},
+	})
+	var mu sync.Mutex
+	var asked []tenant.ID
+	hub := NewHub(func(id tenant.ID) *policy.Policy {
+		mu.Lock()
+		defer mu.Unlock()
+		asked = append(asked, id)
+		return policies[id]
+	}, fixedRegistry(reg), nil)
+	acmeTopic := mq.Topic{Tenant: "acme", Table: "clicks"}
+	globexTopic := mq.Topic{Tenant: "globex", Table: "clicks"}
+
+	acme, globex := NewSubscriber(nil, nil), NewSubscriber(nil, nil)
+	hub.Add(acmeTopic, "viewer", acme)
+	hub.Add(globexTopic, "viewer", globex)
+	assert.Equal(t, 1, hub.Len(acmeTopic))
+	assert.Equal(t, 1, hub.Len(globexTopic))
+	assert.Equal(t, 0, hub.Len(topicOf("clicks")), "the default tenant's table of the same name is another topic")
+
+	row := map[string]any{"page": "/a", "secret": "x"}
+	hub.Broadcast(acmeTopic, rawEvent(t, "clicks", "2026-06-26T00:00:00Z", row))
+	_, cols, _ := recvEvent(t, acme)
+	assert.Equal(t, []string{"page", "secret"}, cols, "acme's policy admits both columns")
+	assertNoFrame(t, globex)
+
+	hub.Broadcast(globexTopic, rawEvent(t, "clicks", "2026-06-26T00:00:01Z", row))
+	_, cols, _ = recvEvent(t, globex)
+	assert.Equal(t, []string{"page"}, cols, "globex's policy admits page alone")
+	assertNoFrame(t, acme)
+
+	// A gap-fill projects under the tenant the connection was opened for.
+	frames := hub.ReplayProjector("globex", "viewer", globex)(rawEvent(t, "clicks", "2026-06-26T00:00:02Z", row))
+	require.Len(t, frames, 2, "a schema frame and the row")
+	assert.Equal(t, []string{"page"}, frameColumns(t, frames[0]))
+
+	// So does the schema frame a connection opens with.
+	f, ok := hub.SubscribeSchemaFrame("globex", "clicks", "viewer", NewSubscriber(nil, nil))
+	require.True(t, ok)
+	assert.Equal(t, []string{"page"}, frameColumns(t, f))
+
+	// A tenant the source does not know reads a nil policy: the lockout.
+	unknown := NewSubscriber(nil, nil)
+	hub.Add(mq.Topic{Tenant: "initech", Table: "clicks"}, "viewer", unknown)
+	hub.Broadcast(mq.Topic{Tenant: "initech", Table: "clicks"}, rawEvent(t, "clicks", "2026-06-26T00:00:03Z", row))
+	assertNoFrame(t, unknown)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []tenant.ID{"acme", "globex", "globex", "globex", "initech"}, asked, "each read names the event's or the connection's tenant")
 }

@@ -217,10 +217,16 @@ func (e *EmbeddedNATS) SetMaxBytes(ctx context.Context, maxBytes int64) error {
 	return nil
 }
 
-// Publish stores data on topic's ingest subject. A stream at its byte budget
-// (DiscardNew) refuses the publish; that is reported as ErrQueueFull.
+// Publish stores data on topic's ingest subject. A topic without a valid
+// tenant is refused before anything is sent (see subject). A stream at its
+// byte budget (DiscardNew) refuses the publish; that is reported as
+// ErrQueueFull.
 func (e *EmbeddedNATS) Publish(ctx context.Context, topic Topic, data []byte, opts ...PublishOpt) error {
-	err := e.publish(ctx, subject(ingestPrefix, topic), data, opts)
+	subj, err := subject(ingestPrefix, topic)
+	if err != nil {
+		return err
+	}
+	err = e.publish(ctx, subj, data, opts)
 	if err != nil && strings.Contains(err.Error(), "maximum bytes exceeded") {
 		// The server reports a full store as a generic store failure whose
 		// text is the only thing that names the cause.
@@ -453,8 +459,12 @@ func (e *EmbeddedNATS) PurgeAcked(ctx context.Context, consumer string, olderTha
 	return report.purged, nil
 }
 
-// DeadLetterCounts reads the DLQ stream's per-subject counts. A scoped topic
-// counts under "table.scope"; the table filter matches the unscoped subject.
+// DeadLetterCounts reads the DLQ stream's per-subject counts and keys them by
+// table across every tenant (see DeadLetterCounts.Tables). The table filter
+// matches that table's unscoped subject under any tenant, so it is applied
+// to the parsed topic rather than as a subject filter; a scoped topic counts
+// under "table.scope". A subject written before the tenant led it counts
+// under its table like any other (parseTopicKey).
 func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, table string) (DeadLetterCounts, error) {
 	s, err := e.stream(ctx, dlqStream)
 	if err != nil {
@@ -464,23 +474,23 @@ func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, table string) (Dead
 		return DeadLetterCounts{}, fmt.Errorf("get dlq stream: %w", err)
 	}
 
-	filter := dlqAll
-	if table != "" {
-		filter = subject(dlqPrefix, Topic{Table: table})
-	}
-	state, err := s.state(ctx, filter)
+	state, err := s.state(ctx, dlqAll)
 	if err != nil {
 		return DeadLetterCounts{}, fmt.Errorf("dlq stream info: %w", err)
 	}
 
 	counts := DeadLetterCounts{Tables: make(map[string]uint64, len(state.Subjects)), Total: state.Msgs}
 	for subj, n := range state.Subjects {
-		// TODO: do we need to break out scopes here?
-		name, err := decodeToken(strings.TrimPrefix(subj, dlqPrefix))
-		if err != nil {
+		t := parseTopicKey(topicKey(dlqPrefix, subj))
+		if table != "" && (t.Table != table || t.Scope != "") {
 			continue
 		}
-		counts.Tables[name] = n
+		name := t.Table
+		if t.Scope != "" {
+			// TODO(#235): break scopes out rather than fold them into the name.
+			name += "." + t.Scope
+		}
+		counts.Tables[name] += n
 	}
 	return counts, nil
 }
@@ -491,10 +501,16 @@ func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, table string) (Dead
 // client's no-messages or request-timeout answer to a pull; any other pull
 // failure (a closed connection, a deleted consumer) is returned so the caller
 // knows the replay ended short rather than empty. A done ctx ends the drain
-// between pulls and returns ctx's error.
+// between pulls and returns ctx's error. A topic without a valid tenant is
+// refused like a publish (see subject): the subject it names is exact, so
+// events published before the tenant led the subject are not replayed.
 func (e *EmbeddedNATS) ReplaySince(ctx context.Context, topic Topic, since time.Time, send func(data []byte) bool) error {
+	subj, err := subject(ingestPrefix, topic)
+	if err != nil {
+		return err
+	}
 	cons, err := e.js.CreateOrUpdateConsumer(ctx, ingestStream, jetstream.ConsumerConfig{
-		FilterSubject:     subject(ingestPrefix, topic),
+		FilterSubject:     subj,
 		DeliverPolicy:     jetstream.DeliverByStartTimePolicy,
 		OptStartTime:      &since,
 		AckPolicy:         jetstream.AckNonePolicy,

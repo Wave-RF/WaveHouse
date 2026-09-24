@@ -45,6 +45,12 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "missing required query parameter: table")
 		return
 	}
+	// The tenant is the request's, read once: it names the table's events on
+	// the queue (mq.Topic) and the policy the Hub evaluates this stream under.
+	store, ok := requestStore(w, r)
+	if !ok {
+		return
+	}
 
 	// Resolve stream permissions for this request. The raw role from context is the
 	// bucket key: the Hub serializes the column projection once per (topic, role),
@@ -57,7 +63,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// TODO: impl scope
 	scope := ""
-	topic := mq.Topic{Table: table, Scope: scope}
+	topic := mq.Topic{Tenant: store.Tenant(), Table: table, Scope: scope}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -96,7 +102,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// setup finds the announcement already recorded and doesn't repeat it; if the
 	// registry can't supply the columns yet, the event path announces them before
 	// the first data frame instead.
-	if f, ok := h.Hub.SubscribeSchemaFrame(table, role, sub); ok {
+	if f, ok := h.Hub.SubscribeSchemaFrame(topic.Tenant, table, role, sub); ok {
 		n, err := w.Write(f.Data)
 		if err != nil {
 			return
@@ -105,9 +111,8 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		h.Metrics.FrameSent(f.Kind, n)
 	}
 
-	topicKey := topic.Key()
-	h.Hub.Add(topicKey, role, sub)
-	defer h.Hub.Remove(topicKey, role, sub)
+	h.Hub.Add(topic, role, sub)
+	defer h.Hub.Remove(topic, role, sub)
 
 	// Gap fill from the MQ's retained messages (DeliverByStartTime, see
 	// mq.Replayer).
@@ -123,7 +128,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		// low-volume and one-time, unlike the per-role live fan-out), write, and count
 		// the replayed frame. A write error means the client is gone, so stop the
 		// gap-fill and let the deferred cleanup unwind.
-		project := h.Hub.ReplayProjector(role, sub)
+		project := h.Hub.ReplayProjector(topic.Tenant, role, sub)
 		sendReplay := func(data []byte) bool {
 			// Zero frames means the event is filtered out for this role; two means
 			// the column list changed and is announced before the row.
@@ -208,6 +213,6 @@ func (h *StreamHandler) replayContext(r *http.Request) (context.Context, context
 func (h *StreamHandler) replay(ctx context.Context, since time.Time, topic mq.Topic, send func([]byte) bool) {
 	if err := h.Replayer.ReplaySince(ctx, topic, since, send); err != nil && ctx.Err() == nil {
 		slog.Default().WarnContext(ctx, "gap-fill replay ended early; the client continues with live events only",
-			"component", "stream", "table", topic.Table, "scope", topic.Scope, "since", since, "error", err)
+			"component", "stream", "tenant", topic.Tenant, "table", topic.Table, "scope", topic.Scope, "since", since, "error", err)
 	}
 }

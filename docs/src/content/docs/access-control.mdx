@@ -42,7 +42,7 @@ A role is an opaque string. Matching is **exact and case-sensitive** — `Viewer
 
 The role is read from a single JWT claim — the dot-path `auth.role_claim` (default `role`; e.g. `app_metadata.role` for a nested claim). The token plumbing around it — HMAC vs. JWKS validation, accepted signing algorithms, the `?token=` query fallback for streams — is covered in [API Reference — Authentication](/api#authentication), and the knobs that configure it in [Configuration — Authentication](/configuration#authentication).
 
-For authorization, the behavior that matters is what happens with **no** role: the request falls back to `default_role`. A request is roleless when there is no token, when the token is invalid/expired/malformed (the reason is remembered, so a later denial is a `401`, not a bare `403`), or when a valid token simply carries no `role_claim`.
+For authorization, the behavior that matters is what happens with **no** role: the request falls back to `default_role`. A request is roleless when there is no token, when the token is invalid/expired/malformed (the reason is remembered, so a later denial is a `401`, not a bare `403`), or when a valid token simply carries no `role_claim`. The one token that is neither verified nor roleless is one sent while its tenant's JWKS has not been fetched yet: it is refused with a retryable `503` before any policy runs, never downgraded to `default_role` (see [API — Authentication](/api#authentication)).
 
 ### `default_role` — public (unauthenticated) access
 
@@ -213,7 +213,7 @@ On a structured query (`POST /v1/query?table={table}`) the allowlist is a **hard
 This produces `WHERE (tenant_id = ?)` with the caller's `app_metadata.tenant_id` claim bound as the parameter — so a `viewer` only ever sees rows for their own tenant, and the value comes from the signed token, not from anything the client sends.
 
 :::note[Two meanings of "tenant"]
-On this page a *tenant* is a row-scoping value carried in the signed token. The [`X-Tenant-ID` header](/deployment#multi-tenant-deployments) is a different axis: it selects which set of settings files — and so which `policies.json` — serves the request. It is client-supplied, resolved before authentication, and isolates no rows. A settings directory that holds the four files is one such tenant (`0`), so most deployments never send it.
+On this page a *tenant* is a row-scoping value carried in the signed token. The [`X-Tenant-ID` header](/deployment#multi-tenant-deployments) is a different axis: it selects which set of settings files — and so which `policies.json` — serves the request. It is client-supplied and resolved before authentication, so it is no row-isolation boundary: queries under every tenant read the same tables, and the one place rows divide by tenant is the live stream, which carries only the events ingested under the tenant it names. A settings directory that holds the four files is one such tenant (`0`), so most deployments never send it.
 :::
 
 Supported comparison operators:

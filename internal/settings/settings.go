@@ -125,9 +125,9 @@ type ClickHouseTLS struct {
 }
 
 // AuthConfig is the JWT verifier wiring minus the secrets (boot config
-// `auth.jwt_secret` and `auth.operator_key`). A reload rebuilds the
-// verifier unconditionally; a JWKS endpoint that can't be fetched fails
-// closed until it can.
+// `auth.jwt_secret` and `auth.operator_key`). A reload that changes it
+// rebuilds the tenant's verifier; until a JWKS endpoint's key set has been
+// fetched, a token-bearing request is refused (503) rather than verified.
 type AuthConfig struct {
 	// JWKSURL, when non-empty, makes JWKS the sole verifier (the HMAC
 	// secret is then ignored). Must be an absolute http(s) URL.

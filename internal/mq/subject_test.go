@@ -62,21 +62,22 @@ func TestDecodeToken(t *testing.T) {
 func TestSubject_RoundTripsEveryTopic(t *testing.T) {
 	t.Parallel()
 	topics := []Topic{
-		{Table: "normal_table"},
-		{Table: "db.schema.table"},
-		{Table: "table-with-dashes", Scope: "org-1"},
-		{Table: "table with spaces and / slashes !!", Scope: "a.b"},
-		{Table: "~weird_chars_@#$%", Scope: "*.>"},
+		{Tenant: "0", Table: "normal_table"},
+		{Tenant: "acme-co", Table: "db.schema.table"},
+		{Tenant: "Acme_42", Table: "table-with-dashes", Scope: "org-1"},
+		{Tenant: "9223372036854775807", Table: "table with spaces and / slashes !!", Scope: "a.b"},
+		{Tenant: "0", Table: "~weird_chars_@#$%", Scope: "*.>"},
 	}
 
 	for _, topic := range topics {
-		t.Run(topic.Key(), func(t *testing.T) {
+		t.Run(topic.key(), func(t *testing.T) {
 			t.Parallel()
 			for _, prefix := range []string{ingestPrefix, dlqPrefix} {
-				subj := subject(prefix, topic)
+				subj, err := subject(prefix, topic)
+				require.NoError(t, err)
 				assert.NotContains(t, subj[len(prefix):], "*")
 				assert.NotContains(t, subj[len(prefix):], ">")
-				assert.Equal(t, topic.Key(), topicKey(prefix, subj), "a subject tail is the topic key")
+				assert.Equal(t, topic.key(), topicKey(prefix, subj), "a subject tail is the topic key")
 				assert.Equal(t, topic, parseTopicKey(topicKey(prefix, subj)))
 			}
 		})
@@ -85,23 +86,67 @@ func TestSubject_RoundTripsEveryTopic(t *testing.T) {
 
 func TestSubject_Shape(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, "ingest.events", subject(ingestPrefix, Topic{Table: "events"}))
-	assert.Equal(t, "ingest.default%2Eclicks.org_1", subject(ingestPrefix, Topic{Table: "default.clicks", Scope: "org_1"}))
+	subj, err := subject(ingestPrefix, Topic{Tenant: "0", Table: "events"})
+	require.NoError(t, err)
+	assert.Equal(t, "ingest.0.events", subj)
+	// The tenant leads, verbatim — a dash is not encoded — so one wildcard
+	// selects a tenant's traffic; the table and scope are encoded tokens.
+	subj, err = subject(ingestPrefix, Topic{Tenant: "acme-co", Table: "default.clicks", Scope: "org_1"})
+	require.NoError(t, err)
+	assert.Equal(t, "ingest.acme-co.default%2Eclicks.org_1", subj)
 	// The same topic has the same tail on the DLQ: parking is a prefix swap.
-	assert.Equal(t, "dlq.default%2Eclicks.org_1", subject(dlqPrefix, Topic{Table: "default.clicks", Scope: "org_1"}))
+	subj, err = subject(dlqPrefix, Topic{Tenant: "acme-co", Table: "default.clicks", Scope: "org_1"})
+	require.NoError(t, err)
+	assert.Equal(t, "dlq.acme-co.default%2Eclicks.org_1", subj)
+}
+
+// A topic reaches the wire only with a tenant that satisfies the grammar: an
+// empty one is a caller that never set it, and one with a dot or a wildcard
+// would split or widen the subject.
+func TestSubject_RefusesATenantOutsideTheGrammar(t *testing.T) {
+	t.Parallel()
+	for _, topic := range []Topic{
+		{Table: "events"},
+		{Tenant: "a.b", Table: "events"},
+		{Tenant: "*", Table: "events"},
+		{Tenant: ">", Table: "events"},
+		{Tenant: "a b", Table: "events"},
+	} {
+		_, err := subject(ingestPrefix, topic)
+		assert.Error(t, err, "%+v", topic)
+	}
 }
 
 func TestTopicKey_IsInjective(t *testing.T) {
 	t.Parallel()
-	// A dotted table must not collide with a table + scope pair.
-	assert.NotEqual(t, Topic{Table: "a.b"}.Key(), Topic{Table: "a", Scope: "b"}.Key())
-	assert.Equal(t, Topic{Table: "a", Scope: "b"}.Key(), Topic{Table: "a", Scope: "b"}.Key())
+	// A dotted table must not collide with a table + scope pair, and a
+	// tenant's table must not collide with another tenant's.
+	assert.NotEqual(t, Topic{Tenant: "0", Table: "a.b"}.key(), Topic{Tenant: "0", Table: "a", Scope: "b"}.key())
+	assert.NotEqual(t, Topic{Tenant: "a", Table: "b"}.key(), Topic{Tenant: "b", Table: "a"}.key())
+	assert.Equal(t, Topic{Tenant: "0", Table: "a", Scope: "b"}.key(), Topic{Tenant: "0", Table: "a", Scope: "b"}.key())
+}
+
+// The form written before the tenant led the subject (#583 story 5) is the
+// default tenant's: it is what the durable consumers deliver across the
+// upgrade, and what the dead-letter queue keeps holding after it.
+func TestParseTopicKey_PreTenantTailIsTheDefaultTenants(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, Topic{Tenant: "0", Table: "events"}, parseTopicKey("events"))
+	assert.Equal(t, Topic{Tenant: "0", Table: "default.clicks"}, parseTopicKey("default%2Eclicks"))
 }
 
 func TestParseTopicKey_ForeignTailKeepsItself(t *testing.T) {
 	t.Parallel()
-	// Subjects this package did not write still yield one usable topic rather
-	// than being dropped.
-	assert.Equal(t, Topic{Table: "a.b.c"}, parseTopicKey("a.b.c"))
-	assert.Equal(t, Topic{Table: "bad%2Gtoken"}, parseTopicKey("bad%2Gtoken"))
+	// Subjects this package did not write still yield one usable topic, of
+	// no tenant, rather than being dropped.
+	for _, tail := range []string{
+		"a.b.c.d",       // more tokens than any topic renders
+		"0.bad%2Gtoken", // a token that does not decode
+		"a%2Eb.events",  // a tenant outside the grammar
+		".events",       // a topic whose tenant was never set
+		"bad%2G",        // one token that does not decode
+	} {
+		assert.Equal(t, Topic{Table: tail}, parseTopicKey(tail), tail)
+	}
+	assert.Equal(t, Topic{}, parseTopicKey(""))
 }

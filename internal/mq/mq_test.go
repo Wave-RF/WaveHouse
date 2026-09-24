@@ -14,7 +14,7 @@ func TestMessage_AckNak(t *testing.T) {
 	var doubleAcked, acked, naked int
 	msg := NewMessage(
 		t.Context(),
-		Topic{Table: "x"},
+		Topic{Tenant: "0", Table: "x"},
 		[]byte("hi"),
 		time.Unix(1000, 0),
 		func(ctx context.Context) error { doubleAcked++; return nil },
@@ -22,8 +22,8 @@ func TestMessage_AckNak(t *testing.T) {
 		func() error { naked++; return nil },
 	)
 
-	assert.Equal(t, Topic{Table: "x"}, msg.Topic())
-	assert.Equal(t, "x", msg.TopicKey())
+	assert.Equal(t, Topic{Tenant: "0", Table: "x"}, msg.Topic())
+	assert.Equal(t, "0.x", msg.TopicKey())
 	assert.Equal(t, []byte("hi"), msg.Data)
 	assert.Equal(t, int64(1000), msg.Timestamp.Unix())
 
@@ -39,7 +39,7 @@ func TestMessage_NilCallbacks(t *testing.T) {
 	t.Parallel()
 
 	// Ack/Nak on a message with nil callbacks must be a no-op, not panic.
-	msg := NewMessage(t.Context(), Topic{Table: "s"}, nil, time.Now(), nil, nil, nil)
+	msg := NewMessage(t.Context(), Topic{Tenant: "0", Table: "s"}, nil, time.Now(), nil, nil, nil)
 	assert.NotPanics(t, func() { _ = msg.DoubleAck(t.Context()) })
 	assert.NotPanics(t, func() { _ = msg.Ack() })
 	assert.NotPanics(t, func() { _ = msg.Nak() })

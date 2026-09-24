@@ -12,6 +12,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,7 +20,7 @@ import (
 // TestDLQ_StatsEmptyOnFreshStart verifies the DLQ exposes an empty result
 // before any failures have been routed to it. Runs first because a later
 // test in the same package may publish a failed-table message that
-// permanently bumps the global counter for `dlq.<table>` while the
+// permanently bumps the global counter for `dlq.<tenant>.<table>` while the
 // embedded NATS lives.
 func TestDLQ_StatsEmptyOnFreshStart(t *testing.T) {
 	e := env(t)
@@ -61,7 +62,7 @@ func TestDLQ_PopulatedOnIngestWorkerFailure(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, e.embeddedMQ.Publish(ctx, mq.Topic{Table: rawTableName}, payload))
+	require.NoError(t, e.embeddedMQ.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: rawTableName}, payload))
 
 	// Ingest worker batches every 5s; 30s upper bound gives generous slack on a
 	// loaded CI runner. The condition polls the API rather than the
@@ -104,7 +105,7 @@ func TestDLQ_PopulatedOnIngestWorkerFailureWithBadName(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, e.embeddedMQ.Publish(ctx, mq.Topic{Table: rawTableName}, payload))
+	require.NoError(t, e.embeddedMQ.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: rawTableName}, payload))
 
 	// Ingest worker batches every 5s; 30s upper bound gives generous slack on a
 	// loaded CI runner. The condition polls the API rather than the
