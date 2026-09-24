@@ -78,7 +78,8 @@ func (l *LocalCache) Invalidate(_ context.Context, namespaces []Namespace) (uint
 	return uint64(len(namespaces)), nil
 }
 
-// InvalidateTenant orphans every cached query of tenant id: one version
+// InvalidateTenant orphans every cached query of tenant id keyed by its
+// tables (a pipe result names none and keeps its TTL): one version
 // bump, nothing enumerated (see VersionManager.BumpTenant).
 func (l *LocalCache) InvalidateTenant(_ context.Context, id tenant.ID) error {
 	l.versionManager.BumpTenant(id)

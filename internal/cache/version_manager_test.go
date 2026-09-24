@@ -99,8 +99,8 @@ func TestVersionManager_BumpNamespace(t *testing.T) {
 	assert.Equal(t, otherTenantBefore, vm.QueryKey("h", otherTenant))
 }
 
-// TestVersionManager_BumpTenant: a tenant's whole cache is orphaned in one
-// step — a table that was never bumped (so has no key of its own to bump)
+// TestVersionManager_BumpTenant: a tenant's every namespace is orphaned in
+// one step — a table that was never bumped (so has no key of its own to bump)
 // included — and no other tenant's is touched.
 func TestVersionManager_BumpTenant(t *testing.T) {
 	t.Parallel()

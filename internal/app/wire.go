@@ -14,7 +14,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -197,8 +196,10 @@ func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 // its tables (chconn.Pools.SharingTables), the named one included. Reads are
 // untouched: a tenant's cached results stay its own. A tenant on no pool —
 // rejected, removed, or refused by the connection ceiling — is out of the
-// fan-out, and its whole cache is orphaned when it gets one (wireClickHouse),
-// so a folder repaired or restored inside a TTL never serves pre-insert rows.
+// fan-out, and its table-keyed cache is orphaned when it gets one
+// (wireClickHouse, Cache.InvalidateTenant), so a folder repaired or restored
+// inside a TTL never serves pre-insert structured-query rows; a pipe result
+// keeps its TTL, as on any insert (#343).
 type sharedTables struct {
 	cache.Cache
 	sharing func(tenant.ID) []tenant.ID
@@ -375,7 +376,14 @@ func queryTimeout(s *settings.Store) time.Duration { return s.ClickHouse().Query
 func (a *App) wireDiscovery(ctx context.Context) {
 	a.bootState = api.NewBootState(nil)
 	nested := a.tenants.Nested()
-	var loaded atomic.Bool
+	// loaded flips once, on the first tenant's first success. The check and
+	// the BootState write happen under one lock, so a failure reported
+	// while another tenant's success lands can never overwrite the cleared
+	// state for good and pin /livez at 503.
+	var (
+		mu     sync.Mutex
+		loaded bool
+	)
 	diagnostic := func(id tenant.ID, err error) error {
 		if nested {
 			return fmt.Errorf("schema discovery: tenant %s: %w", id, err)
@@ -389,17 +397,23 @@ func (a *App) wireDiscovery(ctx context.Context) {
 			return discovery.NewSchemaRegistry(func() driver.Conn { return a.chConn(id) }, func() string { return store.ClickHouse().Database }, id, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
 		},
 		func(id tenant.ID, err error) {
-			if loaded.Load() {
-				return
-			}
 			slog.Warn("schema discovery retry failed", "tenant", id, "error", err)
-			a.bootState.Set(diagnostic(id, err))
+			mu.Lock()
+			defer mu.Unlock()
+			if !loaded {
+				a.bootState.Set(diagnostic(id, err))
+			}
 		},
 		func(id tenant.ID) {
-			if loaded.CompareAndSwap(false, true) {
-				slog.Info("schema discovery succeeded after retry, /livez now 200", "tenant", id)
-				a.bootState.Set(nil)
+			mu.Lock()
+			defer mu.Unlock()
+			if loaded {
+				slog.Info("schema discovery succeeded after retry", "tenant", id)
+				return
 			}
+			loaded = true
+			slog.Info("schema discovery succeeded after retry, /livez now 200", "tenant", id)
+			a.bootState.Set(nil)
 		})
 	a.discoveries = d
 	if nested {
@@ -413,7 +427,7 @@ func (a *App) wireDiscovery(ctx context.Context) {
 			slog.Warn("schema discovery failed on boot, retrying in background", "error", err)
 			a.bootState.Set(diagnostic(tenant.Default, err))
 		} else {
-			loaded.Store(true)
+			loaded = true // no loop has started yet
 		}
 		d.adopt(tenant.Default, reg)
 	}

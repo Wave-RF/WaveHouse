@@ -749,9 +749,10 @@ func (p *Pools) Close() error {
 // HTTPClients hands an HTTP-interface consumer the client for a target: one
 // per TLS config, made by the consumer's own factory (the worker's tuned
 // transport, the proxy's redirect policy) and kept for the process lifetime.
-// A config is a tuple's, so the set grows with the distinct tls blocks ever
-// applied, not with requests; a client whose tuple is gone keeps only its
-// transport, whose idle connections time out on their own.
+// A config is built each time a pool opens on a tls block, so the set grows
+// with the pools ever opened on one — a block whose pool closed and
+// reopened adds another — not with requests; a client whose pool is gone
+// keeps only its transport, whose idle connections time out on their own.
 //
 // The factory gets a copy of the config, never the target's own: net/http
 // appends its HTTP/2 protocols to TLSClientConfig.NextProtos in place when

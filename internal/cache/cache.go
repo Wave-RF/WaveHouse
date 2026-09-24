@@ -29,8 +29,10 @@ type Cache interface {
 	// another tenant keeps its versions. Returns the number of namespaces processed.
 	Invalidate(ctx context.Context, namespaces []Namespace) (uint64, error)
 
-	// InvalidateTenant orphans every cached query of one tenant in one step —
-	// its every table and scope, bumped or not — for a tenant that comes back
+	// InvalidateTenant orphans every cached query of one tenant that is keyed
+	// by its tables in one step — every table and scope, bumped or not; a
+	// pipe result names no table and keeps its TTL, as on any insert
+	// (#343) — for a tenant that comes back
 	// after an absence from the invalidation fan-out (its settings folder
 	// rejected or removed, #583 story 6): what it cached before is stale by
 	// every insert it missed.

@@ -465,6 +465,9 @@ The earlier handler accepted a `params` array bound to `?` placeholders; the HTT
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
+| 400 | `{"error":"invalid ?tenant: …"}` / `{"error":"invalid query string: …"}` | The query string does not parse (`?tenant=acme;x=1`, a bad `%` escape), or `tenant` is empty, repeated, or not a tenant id — parsed as strictly as on the [pipe reads](#get-v1opspipes--list-named-pipes) |
+| 404 | `{"error":"unknown tenant: <id>"}` | No such tenant |
+| 503 | `{"error":"tenant settings are invalid"}` | The tenant's settings folder was rejected |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"missing sql"}` | Missing `sql` field |
 | 400 | `{"error":"<ClickHouse error message>"}` | ClickHouse rejected the statement with a 4xx (bad SQL, missing table, type error, …). The body carries ClickHouse's own error text verbatim, e.g. `Code: 60. DB::Exception: Table default.x doesn't exist.`. The proxy maps any ClickHouse 4xx to HTTP 400 — caller-fault, the request itself is what's wrong. |
@@ -473,6 +476,7 @@ The earlier handler accepted a `params` array bound to `?` placeholders; the HTT
 | 502 | `{"error":"<ClickHouse error message>"}` | ClickHouse returned a 5xx (internal error, overloaded, etc.). The proxy maps any ClickHouse 5xx to HTTP 502 — gateway-fault, the upstream service had a problem. Same body convention: ClickHouse's text is forwarded as-is. |
 | 502 | `{"error":"clickhouse request failed: ..."}` | Transport-level failure reaching ClickHouse (connection refused, timeout, the upstream went away mid-request) |
 | 502 | `{"error":"clickhouse response exceeded N bytes; ..."}` | Response body exceeded the 64 MiB memory-safety cap. Narrow the query, add a `LIMIT`, or use `FORMAT JSONEachRow` with a streaming client outside WaveHouse. |
+| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [the connection ceiling refused it](/settings-directory#clickhouse) — so the SQL cannot run; `Retry-After: 30`, a settings reload retries the pool |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 **curl example:**
@@ -701,6 +705,9 @@ Per-column fields: `name`, `type` and `is_nullable` describe the column; `positi
 | ------ | ---- | ----- |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
+| 400 | `{"error":"invalid ?tenant: …"}` / `{"error":"invalid query string: …"}` | The query string does not parse (`?tenant=acme;x=1`, a bad `%` escape), or `tenant` is empty, repeated, or not a tenant id — parsed as strictly as on the [pipe reads](#get-v1opspipes--list-named-pipes) |
+| 404 | `{"error":"unknown tenant: <id>"}` | No such tenant |
+| 503 | `{"error":"tenant settings are invalid"}` | The tenant's settings folder was rejected |
 | 404 | `{"error":"table not found"}` | Table not in the tenant's discovered schema |
 | 503 | `{"error":"schema not loaded yet"}` | The tenant's first schema discovery has not succeeded yet (its ClickHouse unreachable, or no pool for it); `Retry-After: 5` |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
