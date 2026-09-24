@@ -369,6 +369,22 @@ func TestPools_SharedTupleGetsOnePool(t *testing.T) {
 	assert.Equal(t, []tenant.ID{"acme", "globex"}, p.SharingTables("globex"))
 }
 
+// A shared tuple opens at its tenants' largest ask only when that fits the
+// ceiling: with a ceiling of 10, acme asking 1 and globex 20 on one tuple,
+// the pool opens at acme's 1 — never above the ceiling, not even before the
+// walk refuses globex's growth — and stays there.
+func TestPools_NewPoolNeverOpensAboveTheCeiling(t *testing.T) {
+	t.Parallel()
+	rec := &dialRecorder{}
+	p := newPools(10, rec.dial)
+	_, err := p.Reconcile([]Member{member("acme", "a:9000", 1, 1), member("globex", "a:9000", 20, 5)})
+	require.ErrorContains(t, err, "not grown for tenant globex")
+	require.Equal(t, 1, rec.count("a:9000"))
+	assert.Equal(t, Sizes{MaxOpenConns: 1, MaxIdleConns: 1}, rec.latest("a:9000").sizes, "opened at acme's ask, within the ceiling")
+	assert.Equal(t, Sizes{MaxOpenConns: 1, MaxIdleConns: 1}, p.For("acme").Sizes())
+	assert.Nil(t, p.For("globex"), "refused, and it had no pool to keep")
+}
+
 // TestPools_TupleChangeRepointsWithoutTouchingTheOther is the worked
 // example: two tenants on one tuple, one changes its username. It moves to a
 // pool of its own; the other keeps the very same Manager, resized down to

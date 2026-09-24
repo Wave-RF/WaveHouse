@@ -527,7 +527,8 @@ type walk struct {
 	// first joins its tuple (reading its certificate files; the driver
 	// never dials), so a pool that cannot be opened is a refusal to undo in
 	// place, like the ceiling's. It opens at asks, the largest ask among
-	// the wanted tenants naming it, so it opens once when they all fit.
+	// the wanted tenants naming it, when that fits the ceiling, so it opens
+	// once when they all fit; otherwise at the joining tenant's own ask.
 	// Until the walk is applied no consumer holds one, so an opened pool
 	// left with no members is closed at once and one the walk settled on
 	// another size for is resized with no grace.
@@ -627,7 +628,14 @@ func (w *walk) join(m Member, ident Identity) error {
 		if err != nil {
 			return fmt.Errorf("clickhouse pool %s not opened for tenant %s: %w", ident.name(), m.Tenant, err)
 		}
-		mgr, err := openWith(w.dial, ident, w.asks[ident], tlsCfg)
+		// Open at the largest ask among the tenants naming the tuple when
+		// the ceiling allows it, so a shared tuple opens once; otherwise at
+		// this tenant's own, which it just fit.
+		open := w.asks[ident]
+		if ok, _ := w.fits(ident, open); !ok {
+			open = s
+		}
+		mgr, err := openWith(w.dial, ident, open, tlsCfg)
 		if err != nil {
 			return fmt.Errorf("clickhouse pool %s not opened for tenant %s: %w", ident.name(), m.Tenant, err)
 		}

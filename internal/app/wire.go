@@ -199,8 +199,8 @@ func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 // connection ceiling — is out of the fan-out, and its table-keyed cache is
 // orphaned when it gets one (wireClickHouse, Cache.InvalidateTenant), so a
 // folder repaired or restored inside a TTL never serves pre-insert
-// structured-query rows; a pipe result keeps its TTL, as on any insert
-// (#343).
+// structured-query rows; a pipe result names no table, so no insert
+// invalidates it and it stays until its TTL expires (#343).
 type sharedTables struct {
 	cache.Cache
 	sharing func(tenant.ID) []tenant.ID
