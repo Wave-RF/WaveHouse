@@ -226,11 +226,10 @@ func waitOrDeadline(ctx context.Context, wg *sync.WaitGroup) error {
 
 // dispatchLoop owns the one consumer — held on every tenant's queue — and fans
 // every message out to a tableLoop per tenant table (lazily spawned on first
-// sight of one). It does
-// no batching itself — it parses just enough to route — so a low-volume table
-// can never strand another table's rows behind a shared timer. It is the ONLY
-// goroutine that watches ctx; tableLoops stop via channel-close, which gives a
-// deterministic drain with no abandoned messages.
+// sight of one). It does no batching itself — it parses just enough to route —
+// so a low-volume table can never strand another table's rows behind a shared
+// timer. It is the ONLY goroutine that watches ctx; tableLoops stop via
+// channel-close, which gives a deterministic drain with no abandoned messages.
 func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 	defer w.wg.Done()
 

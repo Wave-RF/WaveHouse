@@ -605,7 +605,7 @@ func TestNew_QueueOpenFailure(t *testing.T) {
 }
 
 // Boot opens each served tenant's queue under New's context, as New's doc
-// says: a stop signalled during boot is not held up by one open per tenant.
+// says: a stop signaled during boot is not held up by one open per tenant.
 func TestNew_QueueSetupHonorsTheBootContext(t *testing.T) {
 	guardGlobals(t)
 	ctx, cancel := context.WithCancel(t.Context())

@@ -74,8 +74,9 @@ type tenantQueue struct {
 	ingest, dlq bool
 	// maxBytes is the budget last applied in full (MaxBytes); asked is the
 	// budget last asked for, which a publish or park that finds a stream
-	// missing opens it at. Both are read back from the ingest stream at boot,
-	// so a tenant no longer served keeps the budget it last had.
+	// missing opens it at. Boot reads asked back from the ingest stream, so a
+	// tenant no longer served keeps the budget it last had, and maxBytes too
+	// when the pair is whole at it (takeStock).
 	maxBytes, asked int64
 }
 
@@ -182,19 +183,38 @@ func (e *EmbeddedNATS) takeStock(ctx context.Context) error {
 			return err
 		}
 	}
+	type dlqState struct {
+		limit int64
+		held  uint64
+	}
+	dlqs := map[tenant.ID]dlqState{}
 	streams := e.js.ListStreams(ctx)
 	for info := range streams.Info() {
 		name := info.Config.Name
 		if id, ok := streamTenant(ingestStreamPrefix, name); ok {
 			q := e.queue(id)
 			q.ingest = true
-			q.maxBytes, q.asked = info.Config.MaxBytes, info.Config.MaxBytes
+			q.asked = info.Config.MaxBytes
 		} else if id, ok := streamTenant(dlqStreamPrefix, name); ok {
 			e.queue(id).dlq = true
+			dlqs[id] = dlqState{limit: info.Config.MaxBytes, held: info.State.Bytes}
 		}
 	}
 	if err := streams.Err(); err != nil {
 		return fmt.Errorf("list streams: %w", err)
+	}
+	// A pair is at its budget when its dead-letter stream is at a tenth of
+	// the ingest cap, or above it holding more than that: the shrink guard's
+	// doing. Anything else is a pair a stop or a failed update left split, or
+	// one missing its dead-letter stream, so its budget stays unapplied and
+	// the boot's SetMaxBytes applies it to both streams again.
+	for id, q := range e.queues {
+		d, ok := dlqs[id]
+		tenth := q.asked / dlqShare
+		guarded := d.limit > tenth && d.held <= math.MaxInt64 && int64(d.held) > tenth
+		if q.ingest && ok && (d.limit == tenth || guarded) {
+			q.maxBytes = q.asked
+		}
 	}
 	return nil
 }
@@ -668,8 +688,8 @@ func sameConsumer(have, want jetstream.ConsumerConfig) bool {
 }
 
 // share is one tenant's part of the fetch-ahead: the total spread over the
-// tenants' queues, at least one each. 0 leaves the client default. Under
-// e.mu.
+// tenants' queues joined so far, at least one each, fixed when that queue's
+// delivery starts. 0 leaves the client default. Under e.mu.
 func (f *fanIn) share() int {
 	if f.prefetch <= 0 {
 		return 0

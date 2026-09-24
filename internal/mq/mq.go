@@ -195,17 +195,19 @@ type ConsumerConfig struct {
 
 // Consumer is a live durable consumer created by ConsumerManager.
 type Consumer interface {
-	// Consume delivers each message to handler on a delivery goroutine of
-	// its tenant's: one per tenant, so a tenant's messages arrive in order,
-	// one at a time, while different tenants' arrive concurrently — handler
-	// must be safe for that. A handler that blocks holds back its tenant's
-	// delivery — that is the backpressure the ingest worker relies on. About
-	// prefetch messages are fetched ahead across the tenants together, at
-	// least one per tenant (0 = the client default, per tenant). The returned
-	// stop asks delivery to end and returns without waiting: a handler
-	// invocation already in flight, or one for a message already queued
-	// client-side, may still run after stop returns, so a handler must not
-	// write to anything the caller tears down right after stopping.
+	// Consume delivers each message to handler on a delivery goroutine of its
+	// tenant's: one per tenant, so a tenant's messages arrive in order, one at
+	// a time, while different tenants' arrive concurrently — handler must be
+	// safe for that. A handler that blocks holds back its tenant's delivery —
+	// that is the backpressure the ingest worker relies on. About prefetch
+	// messages are fetched ahead across the tenants together: the tenants'
+	// queues when delivery starts split it, and a queue joined later fetches
+	// ahead its share of it at that point, at least one message each (0 = the
+	// client default, per tenant). The returned stop asks delivery to end and
+	// returns without waiting: a handler invocation already in flight, or one
+	// for a message already queued client-side, may still run after stop
+	// returns, so a handler must not write to anything the caller tears down
+	// right after stopping.
 	//
 	// Delivery can also end on its own after Consume has returned: the broker
 	// or the client gives up on the consumer (it was deleted, the connection

@@ -1083,6 +1083,46 @@ func TestNewEmbedded_DeletesTheStreamsAnEarlierBuildShared(t *testing.T) {
 	require.NoError(t, e.Publish(ctx, Topic{Tenant: tenant.Default, Table: "events"}, []byte("x")))
 }
 
+// A pair a stop or a failed update left split — its dead-letter stream not
+// at a tenth of the ingest cap — or one missing its dead-letter stream is not
+// at its budget, so the boot's SetMaxBytes applies the budget to both streams
+// again; a dead-letter stream kept above its tenth because it holds more (the
+// shrink guard) is at its budget and left as it is.
+func TestNewEmbedded_ASplitPairIsAppliedAgainAtBoot(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	first, err := NewEmbedded(dir)
+	require.NoError(t, err)
+	for _, id := range []tenant.ID{"split", "gone", "guarded"} {
+		require.NoError(t, first.SetMaxBytes(ctx, id, 10<<20))
+	}
+	_, err = first.js.UpdateStream(ctx, dlqStreamConfig("split", 2<<20))
+	require.NoError(t, err)
+	require.NoError(t, first.js.DeleteStream(ctx, "DLQ_gone"))
+	payload := make([]byte, 1<<10)
+	for range 200 {
+		require.NoError(t, first.DeadLetter(ctx, NewMessage(ctx, Topic{Tenant: "guarded", Table: "t"}, payload, time.Now(), nil, nil, nil)))
+	}
+	require.NoError(t, first.SetMaxBytes(ctx, "guarded", 1<<20))
+	guardedCap := streamConfig(t, first, "DLQ_guarded").MaxBytes
+	require.Greater(t, guardedCap, int64(1<<20)/10, "the guard kept the parked rows")
+	require.NoError(t, first.Close())
+
+	e := openEmbedded(t, dir)
+	assert.Zero(t, e.MaxBytes("split"), "a split pair is not at its budget")
+	assert.Zero(t, e.MaxBytes("gone"), "nor one missing its dead-letter stream")
+	assert.Equal(t, int64(1<<20), e.MaxBytes("guarded"), "a guarded dead-letter stream is")
+
+	for _, id := range []tenant.ID{"split", "gone"} {
+		require.NoError(t, e.SetMaxBytes(ctx, id, 10<<20))
+		assert.Equal(t, int64(10<<20), e.MaxBytes(id))
+		assert.Equal(t, int64(10<<20)/10, streamConfig(t, e, dlqStreamName(id)).MaxBytes, "%s: the pair is whole again", id)
+	}
+	require.NoError(t, e.SetMaxBytes(ctx, "guarded", 1<<20))
+	assert.Equal(t, guardedCap, streamConfig(t, e, "DLQ_guarded").MaxBytes, "left as the guard kept it")
+}
+
 // A boot takes stock of the queues on disk: each keeps the budget it last
 // had, and a consumer created afterwards is held on every one of them — a
 // tenant no longer served, which is never given a budget again, included —

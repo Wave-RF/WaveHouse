@@ -419,9 +419,9 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 
 ## Upgrading across the v2 ingest envelope
 
-The NATS envelope changed shape in this release: the row now travels positionally, with `format`, `columns` and `row` replacing `data`. **The new worker cannot read a message published by an older version** — it carries no `format`, so there is no way to say which value belongs to which column.
+The NATS envelope changed shape in this release: the row now travels positionally, with `format`, `columns` and `row` replacing `data` — and the queue changed layout with it: boot deletes the earlier build's queue (below), so nothing an older version published reaches the new worker, which could not read it anyway (it carries no `format`, so there is no way to say which value belongs to which column). **Drain first** to keep what the old build had not yet inserted.
 
-This affects the streaming surface too, and more quietly. SSE gap-fill (`?since=` / `Last-Event-ID`) replays from the queue, and the upgrade deletes the old one (next paragraph) — the acknowledged history kept for replay included — so this outlives a *correct* drain: any replay spanning the upgrade silently omits the pre-upgrade events, with **no error and no frame**. Clients that need them should backfill over REST.
+The streaming surface loses something too, more quietly. SSE gap-fill (`?since=` / `Last-Event-ID`) replays from the queue, so the deletion takes the replay history with it, even after a *correct* drain: any replay spanning the upgrade silently omits the pre-upgrade events, with **no error and no frame**. Clients that need them should backfill over REST.
 
 **The upgrade does not carry the old queue over at all.** Boot deletes the earlier build's queue and dead-letter queue (`WAVEHOUSE`, `WAVEHOUSE_DLQ`) and everything in them, logging a `WARN` with each one's message count: an event the old build had not yet inserted, and a row it had already parked, do not survive the upgrade. Draining first keeps the events not yet inserted; a row already parked is lost with the queue, since the earlier build offers no way to read one back (`GET /v1/ops/dlq/stats` returns counts only).
 

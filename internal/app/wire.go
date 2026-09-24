@@ -544,7 +544,7 @@ func (a *App) wireDedupe() error {
 // the process — the tenant's ingest answers 503 until its queue opens, each
 // publish and each reload trying again. The hook is registered before the
 // boot apply, as the dedupe one is. The boot apply runs on ctx, New's, so a
-// stop signalled during a boot that opens many queues is not held up by them.
+// stop signaled during a boot that opens many queues is not held up by them.
 func (a *App) wireMQ(ctx context.Context) error {
 	dir := filepath.Join(a.cfg.DataDir, "nats")
 	config.WarnIfFreshDataDir("nats", dir)
