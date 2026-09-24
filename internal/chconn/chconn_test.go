@@ -428,6 +428,35 @@ func TestPools_MoveToOtherTablesIsStale(t *testing.T) {
 	assert.Empty(t, stale, "nothing moved")
 }
 
+// A pool that cannot be opened is a refusal like the ceiling's: a tenant
+// moving onto it stays on the pool it had, with the Params it had, and that
+// pool is not released even when the mover was its only member.
+func TestPools_UnopenablePoolKeepsTheMoverWhereItWas(t *testing.T) {
+	t.Parallel()
+	rec := &dialRecorder{}
+	p := newPools(0, func(id Identity, s Sizes, c *tls.Config) (driver.Conn, error) {
+		if id.Addr == "bad:9000" {
+			return nil, errors.New("malformed option")
+		}
+		return rec.dial(id, s, c)
+	})
+	acme := member("acme", "a:9000", 10, 5)
+	_, err := p.Reconcile([]Member{acme})
+	require.NoError(t, err)
+	before := p.For("acme")
+	beforeConn := rec.latest("a:9000")
+
+	moved := member("acme", "bad:9000", 10, 5)
+	moved.Params.HTTPPort = 8124
+	stale, err := p.Reconcile([]Member{moved})
+	require.ErrorContains(t, err, "clickhouse pool bad:9000 database db user u not opened for tenant acme: malformed option")
+	assert.ErrorContains(t, err, "tenant acme keeps its previous pool a:9000 database db user u")
+	assert.Empty(t, stale)
+	assert.Same(t, before, p.For("acme"))
+	assert.Equal(t, "http://a:8123", p.Target("acme").URL, "the previous Params, whole")
+	assert.False(t, beforeConn.closed.Load(), "the pool it kept is not released")
+}
+
 func TestPools_TenantGoneReleasesItsPoolAfterGrace(t *testing.T) {
 	t.Parallel()
 	rec := &dialRecorder{}

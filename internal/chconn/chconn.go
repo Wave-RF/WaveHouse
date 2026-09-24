@@ -438,14 +438,17 @@ func (p *Pools) Reconcile(want []Member) (stale []tenant.ID, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	cur := p.cur.Load()
-	w := &walk{ceiling: p.ceiling, dial: p.dial, next: cur.clone(), planned: map[Identity]Sizes{}, pending: map[Identity]*tls.Config{}}
+	w := &walk{ceiling: p.ceiling, dial: p.dial, next: cur.clone(), planned: map[Identity]Sizes{}, opened: map[Identity]bool{}}
 	for id, t := range w.next.tuples {
 		w.planned[id] = t.manager.Sizes()
 	}
 
 	wanted := make(map[tenant.ID]bool, len(want))
+	w.asks = make(map[Identity]Sizes, len(want))
 	for _, m := range want {
 		wanted[m.Tenant] = true
+		id := m.Params.Identity()
+		w.asks[id] = w.asks[id].max(m.Params.Sizes())
 	}
 	for _, id := range slices.Sorted(maps.Keys(w.next.tenants)) {
 		if !wanted[id] {
@@ -465,34 +468,27 @@ func (p *Pools) Reconcile(want []Member) (stale []tenant.ID, err error) {
 		}
 	}
 
-	// Apply: release the emptied tuples, open the planned ones at the size
-	// the walk settled on, resize the rest to their plan. A connection the
-	// previous members may still be querying stays open for the longest of
-	// their timeouts.
+	// Apply: release the emptied tuples and resize the rest to their plan.
+	// A connection the previous members may still be querying stays open
+	// for the longest of their timeouts; one this walk opened has had no
+	// consumer, so it goes at once.
 	for _, id := range w.order() {
 		t := w.next.tuples[id]
 		s := w.planned[id]
+		grace := w.graceBefore(cur, id)
+		if w.opened[id] {
+			grace = 0
+		}
 		switch {
 		case len(t.members) == 0:
-			if t.manager != nil {
-				t.manager.Release(w.graceBefore(cur, id))
+			if w.opened[id] {
+				_ = t.manager.Close()
+			} else {
+				t.manager.Release(grace)
 			}
 			delete(w.next.tuples, id)
-		case t.manager == nil:
-			mgr, err := openWith(w.dial, id, s, w.pending[id])
-			if err != nil {
-				// A malformed option, which settings.Validate excludes: the
-				// tenants planned onto it end up on no pool.
-				w.errs = append(w.errs, fmt.Errorf("clickhouse pool %s not opened for tenants %v: %w", id, t.tenants(), err))
-				for tid := range t.members {
-					delete(w.next.tenants, tid)
-				}
-				delete(w.next.tuples, id)
-				continue
-			}
-			t.manager = mgr
 		case s != t.manager.Sizes():
-			if err := t.manager.Resize(s, w.graceBefore(cur, id)); err != nil {
+			if err := t.manager.Resize(s, grace); err != nil {
 				w.errs = append(w.errs, fmt.Errorf("clickhouse pool %s kept at %d open connections: %w", id, t.manager.Sizes().MaxOpenConns, err))
 			}
 		}
@@ -519,12 +515,17 @@ type walk struct {
 	// refused is the tuples whose growth this pass already refused, so a
 	// shared pool's refusal is reported once, naming every member.
 	refused map[Identity]bool
-	// pending is the TLS config of each tuple planned but not opened yet:
-	// the files are read when the tuple is planned, since an unreadable one
-	// is a refusal to undo in place, and the pool opens once the walk knows
-	// its size.
-	pending map[Identity]*tls.Config
-	errs    []error
+	// opened is the tuples this walk opened: a pool opens when a tenant
+	// first joins its tuple (reading its certificate files; the driver
+	// never dials), so a pool that cannot be opened is a refusal to undo in
+	// place, like the ceiling's. It opens at asks, the largest ask among
+	// the wanted tenants naming it, so it opens once when they all fit.
+	// Until the walk is applied no consumer holds one, so an opened pool
+	// left with no members is closed at once and one the walk settled on
+	// another size for is resized with no grace.
+	opened map[Identity]bool
+	asks   map[Identity]Sizes
+	errs   []error
 }
 
 // order is the tuples in a fixed order, for logs and errors.
@@ -618,10 +619,14 @@ func (w *walk) join(m Member, ident Identity) error {
 		if err != nil {
 			return fmt.Errorf("clickhouse pool %s not opened for tenant %s: %w", ident, m.Tenant, err)
 		}
-		w.next.tuples[ident] = &tuple{members: map[tenant.ID]Params{m.Tenant: m.Params}}
+		mgr, err := openWith(w.dial, ident, w.asks[ident], tlsCfg)
+		if err != nil {
+			return fmt.Errorf("clickhouse pool %s not opened for tenant %s: %w", ident, m.Tenant, err)
+		}
+		w.next.tuples[ident] = &tuple{manager: mgr, members: map[tenant.ID]Params{m.Tenant: m.Params}}
 		w.next.tenants[m.Tenant] = ident
 		w.planned[ident] = s
-		w.pending[ident] = tlsCfg
+		w.opened[ident] = true
 		return nil
 	}
 	// An existing pool takes a tenant whose ask fits its planned size, and

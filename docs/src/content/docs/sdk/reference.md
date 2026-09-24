@@ -129,7 +129,7 @@ npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`. It reads tenant `0`'s schema: over a [nested settings directory](/deployment#the-nested-settings-directory) the types describe tenant `0`'s database, and with no `0` folder the call answers `404`.
+Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server of the four settings files, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`. Codegen does not support [a nested settings directory](/deployment#the-nested-settings-directory): its `/v1/ops/*` routes admit the operator key alone, which codegen has no option to send, and it would read tenant `0`'s schema only.
 
 **Options:**
 
