@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -73,7 +74,7 @@ func (a *App) wireSettings() error {
 			slog.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
 		}
 	case !served:
-		slog.Warn("nested settings directory with no tenant 0 being served: the ClickHouse connection, the MQ byte budget, the dedupe store, the JWT verifier, and the schema refresh cadence are still configured from tenant 0's config.json, so they run unconfigured — no ClickHouse address, /livez degraded — until a 0 folder is adopted")
+		slog.Warn("nested settings directory with no tenant 0 being served: the ClickHouse connection, the MQ byte budget, and the schema refresh cadence are still configured from tenant 0's config.json, so they run unconfigured — no ClickHouse address, /livez degraded — until a 0 folder is adopted")
 	}
 	return nil
 }
@@ -89,11 +90,11 @@ func (a *App) trackDefaultStore() {
 }
 
 // defaultSetting reads one setting of the default tenant, which the
-// process-wide resources (ClickHouse, dedupe, MQ, auth) follow until #583
-// gives each tenant its own. It reads tenant 0's last adopted document, so a
+// process-wide resources (ClickHouse, MQ) follow until #583 gives each
+// tenant its own. It reads tenant 0's last adopted document, so a
 // 0 folder a reload rejected or removed leaves every one of them as it was —
-// the ones a hook reconciles and the one read per request (the operator
-// key's admin role) alike. A nested directory that has never served a tenant
+// the ones a hook reconciles and the one read per request (the ops
+// gate's admin role) alike. A nested directory that has never served a tenant
 // 0 reads T's zero value, which wireSettings warned about at boot.
 func defaultSetting[T any](a *App, get func(*settings.Store) T) T {
 	store := a.defaultStore.Load()
@@ -184,6 +185,40 @@ func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 	}
 }
 
+// sharedTables is the cache the ingest worker invalidates through until #583
+// story 6 gives each tenant its own ClickHouse. Every tenant reads the same
+// tables today, so an insert into one changes what every tenant would read:
+// the worker names one tenant's namespaces (the batch's), and this bumps them
+// under every tenant the registry knows, the named one included. Known, not
+// served: a rejected tenant keeps its cache entries and comes back into
+// service with them, so leaving it out would let a folder repaired inside a
+// TTL serve pre-insert rows. A tenant removed and restored inside a TTL still
+// can — the registry forgets a removed tenant, and what becomes of its cache
+// is story 3's — and reads are untouched: a tenant's cached results stay its
+// own. Goes away with story 6, when a table is one tenant's.
+type sharedTables struct {
+	cache.Cache
+	tenants *settings.Registry
+}
+
+func (s sharedTables) Invalidate(ctx context.Context, namespaces []cache.Namespace) (uint64, error) {
+	ids := map[tenant.ID]bool{}
+	for _, ns := range namespaces {
+		ids[ns.Tenant] = true
+	}
+	for id := range s.tenants.Known() {
+		ids[id] = true
+	}
+	all := make([]cache.Namespace, 0, len(ids)*len(namespaces))
+	for _, id := range slices.Sorted(maps.Keys(ids)) {
+		for _, ns := range namespaces {
+			ns.Tenant = id
+			all = append(all, ns)
+		}
+	}
+	return s.Cache.Invalidate(ctx, all)
+}
+
 // wireObservability initializes the OTel pipeline whenever either OTLP push
 // or Prometheus exposition is wanted — Prometheus-only operation
 // (Alloy/scrape, no collector) is a first-class mode, and the OTel SDK
@@ -244,8 +279,13 @@ func (a *App) wireObservability(ctx context.Context) {
 // password; a reload that changes it swaps the connection behind the
 // manager unconditionally — the adopted settings are the authority, and
 // reachability surfaces where it already does (schema discovery retries,
-// /readyz, query errors). The HTTP-side consumers read Target/QueryTimeout
-// per request.
+// /readyz, query errors). Two exceptions keep the connection it has: a
+// certificate file that cannot be read or parsed, and a pool sized above the boot
+// config's clickhouse.max_total_conns — capacity is sized once, per
+// process, so a settings pool above it is refused at boot like the rest of
+// an impossible boot config (#530) and logged on a reload, which the next
+// reload retries. The HTTP-side consumers read Target/QueryTimeout per
+// request.
 func (a *App) wireClickHouse() error {
 	params := func() chconn.Params {
 		c := defaultSetting(a, (*settings.Store).ClickHouse)
@@ -253,16 +293,35 @@ func (a *App) wireClickHouse() error {
 			Addr: c.Addr, HTTPPort: c.HTTPPort, HTTPScheme: c.HTTPScheme,
 			Database: c.Database, Username: c.Username, Password: a.cfg.ClickHouse.Password,
 			QueryTimeout: c.QueryTimeout,
+			TLS:          chconn.TLS(c.TLS),
+			Headers:      c.Headers,
+			MaxOpenConns: c.MaxOpenConns, MaxIdleConns: c.MaxIdleConns,
 		}
 	}
-	ch, err := chconn.Open(params())
+	ceiling := a.cfg.ClickHouse.MaxTotalConns
+	withinCeiling := func(p chconn.Params) error {
+		if ceiling > 0 && p.MaxOpenConns > ceiling {
+			return fmt.Errorf("clickhouse.max_open_conns %d (settings) exceeds clickhouse.max_total_conns %d (boot config)", p.MaxOpenConns, ceiling)
+		}
+		return nil
+	}
+	p := params()
+	if err := withinCeiling(p); err != nil {
+		return err
+	}
+	ch, err := chconn.Open(p)
 	if err != nil {
 		return fmt.Errorf("clickhouse open: %w", err)
 	}
 	a.ch = ch
 	a.add(component{name: "clickhouse", close: withoutContext(ch.Close)})
 	a.onDefaultAdopt(func() {
-		if err := ch.Reconfigure(params()); err != nil {
+		p := params()
+		if err := withinCeiling(p); err != nil {
+			slog.Error("clickhouse reconfigure refused; the connection is unchanged", "error", err)
+			return
+		}
+		if err := ch.Reconfigure(p); err != nil {
 			slog.Error("clickhouse reconfigure", "error", err)
 		}
 	})
@@ -307,40 +366,108 @@ func (a *App) wireDiscovery(ctx context.Context) {
 	}})
 }
 
-// wireDedupe opens the embedded dedupe store (Pebble) under data_dir/pebble.
-// The store follows the hot-reloadable dedupe.enabled setting: one
-// reconcile closure opens or closes it to match the current snapshot. It is
-// registered as the after-adopt hook BEFORE the boot apply (Apply is
-// idempotent), so a reload landing between the two can't leave the settings
-// saying "on" with the store still closed — either the hook sees it or the
-// boot apply reads it. A failed open is fatal at boot, like every other
-// store; on reload it is logged and leaves the store closed — ingest then
-// fails closed (500 "dedupe failed") rather than silently publishing
-// un-deduped, since the files asked for dedupe.
+// legacyDedupeDir is where the one store lived before #583 story 7 gave each
+// tenant its own: tenant 0's, implicitly. tenant.Parse reserves the name, as
+// it does the queue's nats, in any letter case, so no tenant's directory is
+// ever this one — not on a case-insensitive filesystem either.
+const legacyDedupeDir = "pebble"
+
+// wireDedupe builds the dedupe stores: one per tenant (#583 story 7), at
+// data_dir/<tenant>/dedupe whatever the settings directory's shape — the
+// four files are tenant 0 — each following its own tenant's hot-reloadable
+// dedupe.enabled. Which store that is, is the factory's business alone; the
+// embedded Pebble one is what a process chooses here, and an earlier
+// layout's data_dir/pebble is moved to tenant 0's directory once
+// (moveLegacyDedupeStore). One reconcile closure sets every store to what
+// the registry says: open exactly when its tenant is served with the switch
+// on, closed — its data left on disk — when the tenant is switched off,
+// rejected, or removed. It is registered as the after-adopt hook BEFORE the
+// boot apply (Apply is idempotent), so a reload landing between the two
+// can't leave a tenant's settings saying "on" with its store still closed —
+// either the hook sees it or the boot apply reads it. A failed open follows
+// the registry's own rule for the shape: flat refuses boot, like every other
+// store, and on reload logs and leaves the store closed — ingest then fails
+// closed (500 "dedupe failed") rather than silently publishing un-deduped,
+// since the files asked for dedupe; nested fails closed per tenant the same
+// way at boot too, the next reload retrying, so one tenant's unopenable
+// store never costs the others their process.
 func (a *App) wireDedupe() error {
-	dir := filepath.Join(a.cfg.DataDir, "pebble")
-	dedup := dedupe.NewManaged(dir)
-	a.dedup = dedup
-	a.add(component{name: "dedupe", close: withoutContext(dedup.Close)})
-	reconcile := func() (bool, error) {
-		enabled := defaultSetting(a, (*settings.Store).DedupeEnabled)
-		if enabled && !dedup.Open() {
-			config.WarnIfFreshDataDir("pebble", dir)
-		}
-		if err := dedup.Apply(enabled); err != nil {
-			config.LogStorageInitError("dedupe", dir, err)
-			return enabled, err
-		}
-		return enabled, nil
+	nested := a.tenants.Nested()
+	dir := func(id tenant.ID) string { return filepath.Join(a.cfg.DataDir, id.String(), "dedupe") }
+	if err := moveLegacyDedupeStore(a.cfg.DataDir, dir(tenant.Default)); err != nil {
+		return fmt.Errorf("dedupe store relocation: %w", err)
 	}
-	a.onDefaultAdopt(func() {
-		if enabled, err := reconcile(); err == nil {
-			slog.Info("dedupe store reconciled with settings", "enabled", enabled)
+	stores := dedupe.NewStores(func(id tenant.ID) *dedupe.Managed { return dedupe.NewManaged(dedupe.Embedded(dir(id))) })
+	a.dedup = stores
+	a.add(component{name: "dedupe", close: withoutContext(stores.Close)})
+	reconcile := func() error {
+		// The gone tenants' stores close first, so a tenant renamed only in
+		// letter case — one directory to a case-insensitive filesystem —
+		// never has both spellings open at once.
+		served := func(id tenant.ID) bool {
+			_, ok := a.tenants.For(id)
+			return ok
 		}
-	})
-	if _, err := reconcile(); err != nil {
+		if err := stores.Retain(served); err != nil {
+			slog.Error("dedupe store close failed", "error", err)
+		}
+		var errs []error
+		for id, store := range a.tenants.All() {
+			m := stores.For(id)
+			enabled := store.DedupeEnabled()
+			wasOpen := m.Open()
+			// Tenant 0's store is the one an earlier deployment had, so a
+			// fresh directory there is a first run or a lost volume. Another
+			// tenant's first enable always starts fresh, and a lost volume
+			// shows in the NATS check.
+			if enabled && !wasOpen && id == tenant.Default {
+				config.WarnIfFreshDataDir("pebble", dir(id))
+			}
+			if err := m.Apply(enabled); err != nil {
+				config.LogStorageInitError("dedupe", dir(id), err)
+				errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
+				continue
+			}
+			if m.Open() != wasOpen {
+				slog.Info("dedupe store reconciled with settings", "tenant", id, "enabled", enabled)
+			}
+		}
+		return errors.Join(errs...)
+	}
+	a.tenants.AfterAdopt(func([]tenant.ID) { _ = reconcile() })
+	if err := reconcile(); err != nil && !nested {
 		return fmt.Errorf("dedupe open: %w", err)
 	}
+	return nil
+}
+
+// moveLegacyDedupeStore moves an earlier layout's data_dir/pebble — tenant
+// 0's store, implicitly — to dst, tenant 0's directory, once: a standalone
+// deployment keeps its seen ids across the upgrade, and later across the
+// move to a nested directory with an explicit 0 folder. Both present (an
+// older binary ran in between and started a new store at the old path) is
+// left alone and warned about: dst is the one in use, and deleting data is
+// never boot's call. A failed move refuses boot rather than open an empty
+// store and let duplicates through in silence.
+func moveLegacyDedupeStore(dataDir, dst string) error {
+	src := filepath.Join(dataDir, legacyDedupeDir)
+	if _, err := os.Stat(src); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if _, err := os.Stat(dst); err == nil {
+		slog.Warn("dedupe store already moved to tenant 0's directory; the old directory is unused and can be removed", "old", src, "path", dst)
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+		return err
+	}
+	if err := os.Rename(src, dst); err != nil {
+		return err
+	}
+	slog.Info("dedupe store moved to tenant 0's directory", "old", src, "path", dst)
 	return nil
 }
 
@@ -366,7 +493,7 @@ func (a *App) wireMQ() error {
 	// provider and RegisterCallback silently no-ops, making this look
 	// authoritative when it's actually doing nothing.
 	if a.cfg.OTel.Enabled || a.cfg.Prometheus.Enabled {
-		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedup); err != nil {
+		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedup.Stats); err != nil {
 			slog.Error("failed to register system metrics", "error", err)
 		}
 	}
@@ -458,7 +585,7 @@ func (a *App) wireStreaming() {
 // drain within the shutdown timeout.
 func (a *App) wireIngestWorker() {
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
-		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, a.cache, a.ch.Target, dlqFor(a.tenants))
+		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, sharedTables{Cache: a.cache, tenants: a.tenants}, a.ch.Target, dlqFor(a.tenants))
 		if err != nil {
 			return err
 		}
@@ -481,24 +608,37 @@ func (a *App) wireIngestWorker() {
 	}})
 }
 
-// wireAuth builds the JWT middleware up front so a misconfigured or
-// unreachable JWKS endpoint fails startup loudly rather than booting into a
-// degraded state. jwks_url and role_claim are settings; the secrets are boot
-// config. A reload rebuilds the verifier from the adopted settings
-// unconditionally — an unreachable JWKS then fails closed (no token
-// validates, requests fall to default_role) until it is reachable or the
-// next reload.
+// wireAuth builds the JWT middleware: one verifier per tenant being served,
+// from that tenant's auth block (jwks_url, role_claim), with the secrets from
+// boot config shared by all. A tenant's verifier is rebuilt after a reload
+// that adopts it with changed wiring, kept when the wiring is unchanged, and
+// dropped once the tenant stops being served, removed or rejected alike — no
+// work runs for a tenant that is not served, and a folder adopted again is
+// rebuilt from scratch. A JWKS key set is fetched off the
+// boot and reload paths, so an unreachable endpoint never holds either: until
+// a fetch succeeds — retried with backoff from a second, then kept fresh by
+// the library hourly and on an unknown key id — that tenant's token-bearing
+// requests are refused with a 503 (never evaluated under its default_role).
+// The verifiers are released with the other components.
 //
 // There is no on/off switch — the middleware always runs. With neither a
-// secret (boot config) nor a JWKS URL (settings) no token can validate, so
-// every request falls back to the policy default_role (a pure public
-// deployment). That's a valid posture, so it warns rather than fails.
-func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
+// secret (boot config) nor a JWKS URL (that tenant's settings), no token can
+// validate for that tenant, so its every request falls back to its policy
+// default_role (a public tenant). That's a valid posture, so it warns per
+// tenant rather than fails.
+func (a *App) wireAuth() func(http.Handler) http.Handler {
 	cfg := a.cfg
-	switch {
-	case cfg.Auth.JWTSecret == "" && defaultSetting(a, (*settings.Store).Auth).JWKSURL == "":
-		slog.Warn("no auth.jwt_secret (boot config) or auth.jwks_url (settings) set: no token can be validated, so every request resolves to the policy default_role (public access)")
-	case cfg.Auth.JWTSecret == "change-me-in-production":
+	switch cfg.Auth.JWTSecret {
+	case "":
+		// Per tenant: with no boot secret each tenant is as public as its own
+		// jwks_url leaves it, and one tenant's provider says nothing about
+		// another's.
+		for id, store := range a.tenants.All() {
+			if store.Auth().JWKSURL == "" {
+				slog.Warn("no auth.jwt_secret (boot config) and no auth.jwks_url in this tenant's settings: no token can be validated for it, so its every request resolves to its policy default_role (public access)", "tenant", id)
+			}
+		}
+	case "change-me-in-production":
 		slog.Warn("WH_AUTH_JWT_SECRET is using the default insecure value")
 	}
 
@@ -514,29 +654,56 @@ func (a *App) wireAuth() (func(http.Handler) http.Handler, error) {
 		slog.Info("operator key is set: requests presenting it via 'Authorization: Operator <key>' (or the X-Operator-Key alias) are authorized as a full-access platform operator, and can trigger a settings reload over HTTP while the server is locked out")
 	}
 
-	authConfig := func() auth.Config {
-		s := defaultSetting(a, (*settings.Store).Auth)
-		return auth.Config{
-			JWTSecret:   cfg.Auth.JWTSecret,
-			JWKSURL:     s.JWKSURL,
-			RoleClaim:   s.RoleClaim,
-			OperatorKey: operatorKey,
+	// The operator key's admin role is the request tenant's. Silent on a
+	// miss, unlike perTenant: the one is the ops tree over a nested
+	// directory serving no tenant 0, where the gate reads no policy either.
+	policies := func(id tenant.ID) *policy.Policy {
+		if store, ok := a.tenants.For(id); ok {
+			return store.Policy()
 		}
+		return nil
 	}
-	authn, err := auth.NewAuthenticator(authConfig(), a.policies)
-	if err != nil {
-		return nil, fmt.Errorf("auth middleware init: %w", err)
+	// The request's tenant is its resolved store's — one read of the context,
+	// the one api.TenantMW wrote.
+	tenantOf := func(ctx context.Context) (tenant.ID, bool) {
+		store, ok := api.StoreFromContext(ctx)
+		if !ok {
+			return "", false
+		}
+		return store.Tenant(), true
 	}
-	a.onDefaultAdopt(func() { authn.Reconfigure(authConfig()) })
-	return authn.Middleware(), nil
+	authn := auth.NewAuthenticator(auth.Config{JWTSecret: cfg.Auth.JWTSecret, OperatorKey: operatorKey}, tenantOf, policies)
+	a.add(component{name: "auth", close: func(context.Context) error {
+		authn.Close()
+		return nil
+	}})
+	wiring := func(store *settings.Store) auth.Wiring {
+		s := store.Auth()
+		return auth.Wiring{JWKSURL: s.JWKSURL, RoleClaim: s.RoleClaim}
+	}
+	for id, store := range a.tenants.All() {
+		authn.Reconfigure(id, wiring(store))
+	}
+	a.tenants.AfterAdopt(func(adopted []tenant.ID) {
+		for _, id := range adopted {
+			if store, ok := a.tenants.For(id); ok {
+				authn.Reconfigure(id, wiring(store))
+			}
+		}
+		authn.Prune(func(id tenant.ID) bool {
+			_, served := a.tenants.For(id)
+			return served
+		})
+	})
+	return authn.Middleware()
 }
 
 // wireReloadTriggers adds SIGHUP and the directory watcher. All three
 // triggers (these two and POST /v1/ops/settings/reload) funnel into the same
 // serialized Registry.Reload, and a rejected reload keeps the previous good
 // snapshot. They only start in Run, after New has registered every
-// AfterAdopt hook (ClickHouse reconnect, dedupe store, keepalive wheel, auth
-// verifier): the watcher reloads once as soon as its watch exists, and that
+// AfterAdopt hook (ClickHouse reconnect, dedupe stores, keepalive wheel, auth
+// verifiers): the watcher reloads once as soon as its watch exists, and that
 // reload must already drive every hook — a hook registered after the first
 // reload could miss it.
 //
@@ -593,7 +760,7 @@ func (a *App) wireReloadTriggers() {
 func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	ingestHandler := api.NewIngestHandler(a.registry, a.mq)
 	ingestHandler.PolicySource = (*settings.Store).Policy
-	ingestHandler.Dedup = a.dedup
+	ingestHandler.Dedup = func(s *settings.Store) dedupe.Deduplicator { return a.dedup.For(s.Tenant()) }
 	ingestHandler.DedupeSettings = (*settings.Store).DedupeFor
 
 	healthHandler := api.NewHealthHandler(a.ch)

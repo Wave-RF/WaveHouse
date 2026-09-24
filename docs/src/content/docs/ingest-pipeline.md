@@ -13,7 +13,7 @@ It is deliberately detailed: this is a hot, concurrency-heavy path, and the goro
 
 | File | Contents |
 | --- | --- |
-| `worker.go` | `StartIngestWorker`, the `dispatchLoop`, `parseMsg` (+ `rejectPoison` for an envelope it cannot read), the per-table `tableBatcher`/`tableLoop`, `flushTable` (splits a batch per column list via `groupByColumns`) and `flushGroup` (bulk insert with a row-by-row poison-isolation fallback), `insertToClickHouse`, `handleSuccess` (acks, after `invalidate` bumps the tenant's cache namespaces), `sendToDLQ`/`parkOnDLQ` |
+| `worker.go` | `StartIngestWorker`, the `dispatchLoop`, `parseMsg` (+ `rejectPoison` for an envelope it cannot read), the per-table `tableBatcher`/`tableLoop`, `flushTable` (splits a batch per column list via `groupByColumns`) and `flushGroup` (bulk insert with a row-by-row poison-isolation fallback), `insertToClickHouse`, `handleSuccess` (acks, after `invalidate` bumps the tenant's cache namespaces — under every tenant the registry knows, through the cache `internal/app` hands the worker, while the tenants share one ClickHouse), `sendToDLQ`/`parkOnDLQ` |
 | `compact.go` | `EncodeCompactRow` — renders one record as a `JSONCompactEachRow` line over the table's **insertable** columns, in declaration order. Serialization only: it validates nothing and judges no value |
 | `sweeper.go` | The **Active Sweeper** — every minute, asks the MQ to purge the events that are both written to ClickHouse and past the SSE gap window (the purge arithmetic below lives in `internal/mq/purge.go`) |
 | `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |

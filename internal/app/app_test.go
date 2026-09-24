@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,18 +16,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 
+	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 )
 
@@ -203,9 +211,9 @@ func TestNew_DedupeFollowsSettings(t *testing.T) {
 			}})
 			cfg := testConfig(t, dir)
 			a := newApp(t, cfg, Options{})
-			assert.Equal(t, tt.enabled, a.dedup.Open())
-			_, err := os.Stat(filepath.Join(cfg.DataDir, "pebble"))
-			assert.Equal(t, tt.enabled, err == nil, "pebble directory exists iff dedupe is on")
+			assert.Equal(t, tt.enabled, a.dedup.For(tenant.Default).Open())
+			_, err := os.Stat(filepath.Join(cfg.DataDir, "0", "dedupe"))
+			assert.Equal(t, tt.enabled, err == nil, "tenant 0's directory exists iff dedupe is on: the four files are tenant 0")
 		})
 	}
 }
@@ -227,7 +235,8 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	dir := writeSettings(t, map[string]any{"mq": map[string]any{"max_bytes_gb": 1}})
 	cfg := testConfig(t, dir)
 	a := newApp(t, cfg, Options{})
-	require.False(t, a.dedup.Open())
+	dedup := a.dedup.For(tenant.Default)
+	require.False(t, dedup.Open())
 	require.Equal(t, int64(1<<30), a.mq.MaxBytes())
 
 	rewriteSettings(t, dir, map[string]any{
@@ -236,14 +245,14 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	})
 	_, adopted := a.tenants.Reload("test")
 	require.True(t, adopted)
-	assert.True(t, a.dedup.Open(), "dedupe hook opened the store")
+	assert.True(t, dedup.Open(), "dedupe hook opened the store")
 	// How the budget is split across the MQ's queues is internal/mq's to test.
 	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(), "mq hook applied the new byte budget")
 
 	rewriteSettings(t, dir, map[string]any{"mq": map[string]any{"max_bytes_gb": 2}})
 	_, adopted = a.tenants.Reload("test")
 	require.True(t, adopted)
-	assert.False(t, a.dedup.Open(), "dedupe hook closed the store")
+	assert.False(t, dedup.Open(), "dedupe hook closed the store")
 }
 
 // writeNestedSettings materializes a nested settings directory: tenant folder
@@ -390,7 +399,9 @@ func TestNew_NestedWithoutAnOperatorKeyWarnsTheOpsTreeIsClosed(t *testing.T) {
 
 // The process-wide resources follow tenant 0 alone: another tenant's reload
 // never moves them, and a rejected 0 folder leaves them as they were rather
-// than reconfiguring them from nothing.
+// than reconfiguring them from nothing. The dedupe stores are per tenant
+// (story 7), so each follows its own folder instead — the contrast the
+// same reloads show.
 func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	dedupeOn := map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}
 	grown := map[string]any{"dedupe": dedupeOn, "mq": map[string]any{"max_bytes_gb": 2}}
@@ -399,7 +410,9 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 		"acme": {"mq": map[string]any{"max_bytes_gb": 1}},
 	})
 	a := newApp(t, testConfig(t, root), Options{})
-	require.False(t, a.dedup.Open())
+	dedup0, dedupAcme := a.dedup.For(tenant.Default), a.dedup.For("acme")
+	require.False(t, dedup0.Open())
+	require.False(t, dedupAcme.Open())
 	require.Equal(t, int64(1<<30), a.mq.MaxBytes())
 	// CORS is per tenant, not a hook's: a tenant route reads its own tenant's
 	// list and the exempt routes tenant 0's (the seed's ["*"] in every folder
@@ -420,20 +433,22 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	rewriteSettings(t, filepath.Join(root, "acme"), grown)
 	_, adopted := a.tenants.Reload("test")
 	require.True(t, adopted)
-	assert.False(t, a.dedup.Open(), "acme's dedupe switch is not the process's")
+	assert.True(t, dedupAcme.Open(), "acme's dedupe switch opens acme's own store")
+	assert.False(t, dedup0.Open(), "and moves nothing of tenant 0's")
 	assert.Equal(t, int64(1<<30), a.mq.MaxBytes())
 
 	rewriteSettings(t, filepath.Join(root, "0"), grown)
 	_, adopted = a.tenants.Reload("test")
 	require.True(t, adopted)
-	assert.True(t, a.dedup.Open())
+	assert.True(t, dedup0.Open())
 	assert.Equal(t, int64(2<<30), a.mq.MaxBytes())
 
 	rewriteSettings(t, filepath.Join(root, "0"), invalidQuery)
 	_, adopted = a.tenants.Reload("test")
 	require.False(t, adopted)
-	assert.True(t, a.dedup.Open(), "a rejected 0 folder must not read as dedupe off")
-	assert.Equal(t, int64(2<<30), a.mq.MaxBytes())
+	assert.False(t, dedup0.Open(), "a rejected 0 folder closes tenant 0's own store, which answers no request now")
+	assert.True(t, dedupAcme.Open(), "and costs acme nothing")
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes(), "the process-wide budget stays as tenant 0 last adopted it")
 	assert.Empty(t, allowOrigin("/version"), "the exempt routes read tenant 0 through the registry, which is no longer serving it")
 	assert.Equal(t, "*", allowOrigin("/v1/health", "acme"), "acme's own routes keep acme's list")
 
@@ -444,9 +459,201 @@ func TestReload_NestedHooksFollowTheDefaultTenant(t *testing.T) {
 	require.True(t, adopted)
 	_, known := a.tenants.Resolve(tenant.Default)
 	require.False(t, known)
-	assert.True(t, a.dedup.Open())
+	assert.False(t, dedup0.Open())
+	assert.True(t, dedupAcme.Open())
+	assert.Equal(t, int64(2<<30), a.mq.MaxBytes())
 	assert.Empty(t, allowOrigin("/version"))
 	assert.Equal(t, "*", allowOrigin("/v1/health", "acme"))
+}
+
+// One dedupe store per tenant over a nested directory (#583 story 7), rooted
+// at data_dir/<tenant>/dedupe and following that tenant's own switch: opened
+// by its folder's adoption, closed — the directory left as it is — once the
+// folder is rejected or removed, and reopened over the same seen ids when
+// the folder is back. Close releases every open store.
+func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
+	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": nil, "broken": invalidQuery})
+	cfg := testConfig(t, root)
+	a := newApp(t, cfg, Options{})
+	ctx := t.Context()
+	dir := func(id string) string { return filepath.Join(cfg.DataDir, id, "dedupe") }
+
+	acme, globex := a.dedup.For("acme"), a.dedup.For("globex")
+	assert.True(t, acme.Open(), "acme's switch is on")
+	assert.DirExists(t, dir("acme"))
+	assert.False(t, globex.Open(), "globex's is off")
+	assert.NoDirExists(t, dir("globex"), "a closed store creates nothing")
+	assert.NoDirExists(t, dir("broken"), "nor does a rejected tenant")
+	assert.NoDirExists(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "the earlier layout's directory is never created")
+	dup, err := acme.CheckAndMark(ctx, "e1")
+	require.NoError(t, err)
+	assert.False(t, dup)
+
+	rewriteSettings(t, filepath.Join(root, "globex"), dedupeOn)
+	a.tenants.Reload("test")
+	assert.True(t, globex.Open(), "globex's reload opens globex's store")
+	assert.DirExists(t, dir("globex"))
+	dup, err = globex.CheckAndMark(ctx, "e1")
+	require.NoError(t, err)
+	assert.False(t, dup, "an id acme has seen is new to globex")
+
+	// A reload that rejects globex's folder alone closes globex's store, and
+	// nothing else: a rejected tenant answers no request, so it holds no store.
+	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+	_, adopted, known := a.tenants.ReloadTenant("globex", "test")
+	require.True(t, known)
+	require.False(t, adopted)
+	assert.False(t, globex.Open())
+	assert.True(t, acme.Open())
+
+	// A removed folder: the store closes, the directory stays as it is.
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	_, known = a.tenants.Resolve("acme")
+	require.False(t, known)
+	assert.False(t, acme.Open(), "a tenant the registry no longer holds has its store closed")
+	entries, err := os.ReadDir(dir("acme"))
+	require.NoError(t, err, "and its directory untouched")
+	assert.NotEmpty(t, entries)
+
+	// Restoring the folder restores the tenant, seen ids included.
+	require.NoError(t, os.Rename(writeSettings(t, dedupeOn), filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	restored := a.dedup.For("acme")
+	assert.True(t, restored.Open())
+	dup, err = restored.CheckAndMark(ctx, "e1")
+	require.NoError(t, err)
+	assert.True(t, dup, "an id seen before the folder was removed is still a duplicate")
+
+	require.NoError(t, a.Close(context.Background()))
+	assert.False(t, restored.Open(), "Close releases every open store")
+}
+
+// seedLegacyStore writes a Pebble store at dir with ids seen, the way an
+// earlier layout — or an older binary rolled back to — leaves one.
+func seedLegacyStore(t *testing.T, dir string, ids ...string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(dir), 0o750))
+	d, err := dedupe.NewEmbedded(dir)
+	require.NoError(t, err)
+	for _, id := range ids {
+		_, err := d.CheckAndMark(t.Context(), id)
+		require.NoError(t, err)
+	}
+	require.NoError(t, d.Close())
+}
+
+// An earlier layout's data_dir/pebble is tenant 0's store: boot moves it to
+// data_dir/0/dedupe once, whatever the switch says, so a standalone
+// deployment keeps its seen ids across the upgrade. Both directories present
+// — an older binary ran in between — leaves both, the new one in use.
+func TestNew_MovesTheLegacyDedupeStore(t *testing.T) {
+	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
+	seen := func(t *testing.T, a *App, id string) bool {
+		t.Helper()
+		dup, err := a.dedup.For(tenant.Default).CheckAndMark(t.Context(), id)
+		require.NoError(t, err)
+		return dup
+	}
+	t.Run("seen ids survive the move", func(t *testing.T) {
+		cfg := testConfig(t, writeSettings(t, dedupeOn))
+		seedLegacyStore(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "e1")
+		a := newApp(t, cfg, Options{})
+		assert.NoDirExists(t, filepath.Join(cfg.DataDir, legacyDedupeDir))
+		assert.DirExists(t, filepath.Join(cfg.DataDir, "0", "dedupe"))
+		assert.True(t, seen(t, a, "e1"), "an id the old store had seen is still a duplicate")
+		assert.False(t, seen(t, a, "e2"))
+	})
+	t.Run("moved even with dedupe off", func(t *testing.T) {
+		cfg := testConfig(t, writeSettings(t, nil))
+		seedLegacyStore(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "e1")
+		a := newApp(t, cfg, Options{})
+		assert.NoDirExists(t, filepath.Join(cfg.DataDir, legacyDedupeDir))
+		assert.DirExists(t, filepath.Join(cfg.DataDir, "0", "dedupe"))
+		assert.False(t, a.dedup.For(tenant.Default).Open(), "moved, not opened: the switch is off")
+	})
+	t.Run("both present: the new one is in use, the old is left", func(t *testing.T) {
+		cfg := testConfig(t, writeSettings(t, dedupeOn))
+		seedLegacyStore(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "old")
+		seedLegacyStore(t, filepath.Join(cfg.DataDir, "0", "dedupe"), "new")
+		a := newApp(t, cfg, Options{})
+		assert.DirExists(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "deleting data is never boot's call")
+		assert.True(t, seen(t, a, "new"))
+		assert.False(t, seen(t, a, "old"), "the old store's ids are not merged in")
+	})
+	t.Run("a failed move refuses boot", func(t *testing.T) {
+		guardGlobals(t)
+		cfg := testConfig(t, writeSettings(t, dedupeOn))
+		seedLegacyStore(t, filepath.Join(cfg.DataDir, legacyDedupeDir), "e1")
+		// Tenant 0's directory cannot be created under a regular file.
+		require.NoError(t, os.WriteFile(filepath.Join(cfg.DataDir, "0"), nil, 0o600))
+		_, err := New(t.Context(), Options{Config: cfg})
+		require.ErrorContains(t, err, "dedupe store relocation")
+	})
+}
+
+// A store that cannot open follows the registry's own rule for the shape: a
+// flat directory refuses boot, like every other store, and a nested one
+// fails closed per tenant — that tenant's ingest answers 500 until a reload
+// or a restart opens it, and every other tenant carries on.
+func TestNew_DedupeOpenFailure(t *testing.T) {
+	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
+	// A regular file where the store's directory should be is what Pebble
+	// refuses to open.
+	block := func(t *testing.T, path string) {
+		t.Helper()
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
+		require.NoError(t, os.WriteFile(path, nil, 0o600))
+	}
+	t.Run("flat refuses boot", func(t *testing.T) {
+		guardGlobals(t)
+		cfg := testConfig(t, writeSettings(t, dedupeOn))
+		block(t, filepath.Join(cfg.DataDir, "0", "dedupe"))
+		_, err := New(t.Context(), Options{Config: cfg})
+		require.ErrorContains(t, err, "dedupe open")
+	})
+	t.Run("nested fails closed per tenant", func(t *testing.T) {
+		root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": dedupeOn})
+		cfg := testConfig(t, root)
+		block(t, filepath.Join(cfg.DataDir, "acme", "dedupe"))
+		a := newApp(t, cfg, Options{})
+		acme := a.dedup.For("acme")
+		assert.False(t, acme.Open())
+		_, err := acme.CheckAndMark(t.Context(), "e1")
+		require.ErrorIs(t, err, dedupe.ErrUnavailable, "switched on but not open: that tenant's ingest fails closed")
+		assert.True(t, a.dedup.For("globex").Open(), "the tenant beside it is served")
+	})
+}
+
+// Until story 6 every tenant reads the same ClickHouse tables, so an insert
+// invalidates a table's cached results under every tenant the registry
+// knows, not only under the batch's tenant: the cache the worker is handed fans
+// the namespaces out. A rejected tenant is included — it comes back into
+// service with the entries it has.
+func TestSharedTables_InvalidatesEveryKnownTenant(t *testing.T) {
+	t.Parallel()
+	tenants, findings := settings.Open(writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil, "broken": invalidQuery}))
+	require.NotNil(t, tenants, "findings: %v", findings)
+	mock := &testutil.MockCache{}
+	c := sharedTables{Cache: mock, tenants: tenants}
+
+	n, err := c.Invalidate(t.Context(), []cache.Namespace{
+		{Tenant: tenant.Default, Table: "events"},
+		{Tenant: tenant.Default, Table: "events", Scope: "org_1"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(8), n)
+	assert.ElementsMatch(t, []cache.Namespace{
+		{Tenant: tenant.Default, Table: "events"},
+		{Tenant: tenant.Default, Table: "events", Scope: "org_1"},
+		{Tenant: "acme", Table: "events"},
+		{Tenant: "acme", Table: "events", Scope: "org_1"},
+		{Tenant: "broken", Table: "events"},
+		{Tenant: "broken", Table: "events", Scope: "org_1"},
+		{Tenant: "globex", Table: "events"},
+		{Tenant: "globex", Table: "events", Scope: "org_1"},
+	}, mock.GetNamespaces(), "the batch's tenant and every known one, the rejected one included")
 }
 
 // keepalive is a config.json patch setting the stream block's keepalive pair.
@@ -555,23 +762,183 @@ func TestNew_RefusesInvalidSettingsDirectory(t *testing.T) {
 	assert.Contains(t, err.Error(), "settings directory")
 }
 
-func TestNew_AuthBootFailureReleasesEverything(t *testing.T) {
+// jwksServer serves one Ed25519 verification key under kid and returns the
+// signer that pairs with it — one tenant's identity provider — and a count
+// of the fetches it answered.
+func jwksServer(t *testing.T, kid string) (*httptest.Server, ed25519.PrivateKey, *atomic.Int32) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	body, err := json.Marshal(map[string]any{"keys": []map[string]any{{
+		"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig", "kid": kid,
+		"x": base64.RawURLEncoding.EncodeToString(pub),
+	}}})
+	require.NoError(t, err)
+	var fetches atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, priv, &fetches
+}
+
+// signRole issues a token for role, signed by priv under kid.
+func signRole(t *testing.T, priv ed25519.PrivateKey, kid, role string) string {
+	t.Helper()
+	tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.MapClaims{"role": role, "exp": jwt.NewNumericDate(time.Now().Add(time.Hour))})
+	tok.Header["kid"] = kid
+	signed, err := tok.SignedString(priv)
+	require.NoError(t, err)
+	return signed
+}
+
+// authPatch is a config.json patch pointing the tenant's verifier at jwksURL.
+func authPatch(jwksURL string) map[string]any {
+	return map[string]any{"auth": map[string]any{"jwks_url": jwksURL, "role_claim": "role"}}
+}
+
+// analystPipe gives the settings directory at dir one pipe, `p`, that the
+// analyst role may run: the one tenant route whose answer tells a token that
+// verified (the query runs, and fails against the closed ClickHouse) from
+// one that did not (401, the fail-loud denial) without a ClickHouse.
+func analystPipe(t *testing.T, dir string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileRoles), []byte(`{"roles": ["analyst"]}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FilePipes), []byte(`{"pipes": [{"name": "p", "sql": "SELECT 1", "allowed_roles": ["analyst"]}]}`), 0o600))
+}
+
+// A boot that fails after stores are open releases them, so the same data_dir
+// boots again: here the MQ refuses its directory (a regular file in its
+// place) once the dedupe store is already open, and a second New on the same
+// data_dir must find the Pebble lock released.
+func TestNew_LateBootFailureReleasesEverything(t *testing.T) {
 	guardGlobals(t)
-	// An unreachable JWKS endpoint fails boot loudly; the stores opened
-	// before it must be released, so the same data_dir boots again.
-	dir := writeSettings(t, map[string]any{"auth": map[string]any{
-		"jwks_url": "http://" + closedAddr(t) + "/jwks.json", "role_claim": "role",
+	dir := writeSettings(t, map[string]any{"dedupe": map[string]any{
+		"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{},
 	}})
 	cfg := testConfig(t, dir)
+	natsDir := filepath.Join(cfg.DataDir, "nats")
+	require.NoError(t, os.WriteFile(natsDir, []byte("not a directory"), 0o600))
 	a, err := New(t.Context(), Options{Config: cfg})
 	require.Error(t, err)
 	assert.Nil(t, a)
-	assert.Contains(t, err.Error(), "auth middleware init")
+	assert.Contains(t, err.Error(), "mq open")
 
-	cfg.Settings.Dir = writeSettings(t, nil)
+	require.NoError(t, os.Remove(natsDir))
 	a, err = New(t.Context(), Options{Config: cfg})
-	require.NoError(t, err)
+	require.NoError(t, err, "the stores opened before the failure were released")
+	assert.True(t, a.dedup.For(tenant.Default).Open())
 	assert.NoError(t, a.Close(context.Background()))
+}
+
+// An unreachable JWKS endpoint no longer refuses boot: the tenant's verifier
+// is in place, fail-closed, so a token of the wrong family is refused (401)
+// and one that could not be checked is turned away to retry (503) rather
+// than evaluated under the default_role, and the process serves everything
+// else.
+func TestNew_UnreachableJWKSBootsFailClosed(t *testing.T) {
+	dir := writeSettings(t, authPatch("http://"+closedAddr(t)+"/jwks.json"))
+	analystPipe(t, dir)
+	started := time.Now()
+	a := newApp(t, testConfig(t, dir), Options{})
+	assert.Less(t, time.Since(started), 5*time.Second, "boot must not wait on the endpoint")
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/p", nil)
+	// Signed with the boot secret: the HMAC family, which a JWKS tenant never
+	// accepts, fetched or not.
+	req.Header.Set("Authorization", "Bearer "+testutil.MakeJWT(t, map[string]any{"role": "analyst"}))
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "invalid token")
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/p", nil)
+	req.Header.Set("Authorization", "Bearer "+signRole(t, priv, "k1", "analyst"))
+	rec = httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+}
+
+// Each tenant verifies tokens with its own folder's auth block, through the
+// real wiring: a token acme's identity provider issued runs acme's pipe and
+// is refused under globex's header, and pointing acme's folder at another
+// provider and reloading it swaps acme's verifier alone.
+func TestNew_VerifierPerTenant(t *testing.T) {
+	acme, acmeKey, _ := jwksServer(t, "acme-1")
+	globex, globexKey, globexFetches := jwksServer(t, "globex-1")
+	root := writeNestedSettings(t, map[string]map[string]any{
+		"acme":   authPatch(acme.URL),
+		"globex": authPatch(globex.URL),
+	})
+	analystPipe(t, filepath.Join(root, "acme"))
+	analystPipe(t, filepath.Join(root, "globex"))
+	cfg := testConfig(t, root)
+	cfg.Auth.OperatorKey = "unit-test-operator-key"
+	a := newApp(t, cfg, Options{})
+
+	pipe := func(id, token string) int {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/p", nil)
+		req.Header.Set(tenant.Header, id)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	// verified reports whether the token passed the pipe's role gate: the
+	// query then runs and fails against the closed ClickHouse, never the
+	// 401 of a refused token or the 503 of a verifier still fetching.
+	verified := func(id, token string) bool {
+		code := pipe(id, token)
+		return code != http.StatusUnauthorized && code != http.StatusServiceUnavailable
+	}
+	eventuallyVerified := func(id, token string) {
+		t.Helper()
+		require.Eventually(t, func() bool { return verified(id, token) }, 5*time.Second, 10*time.Millisecond,
+			"%s's token never verified under %s: the key set is fetched off the boot path", id, id)
+	}
+	acmeToken := signRole(t, acmeKey, "acme-1", "analyst")
+	globexToken := signRole(t, globexKey, "globex-1", "analyst")
+	eventuallyVerified("acme", acmeToken)
+	eventuallyVerified("globex", globexToken)
+	assert.False(t, verified("globex", acmeToken), "acme's token is refused under globex's header")
+	assert.False(t, verified("acme", globexToken))
+	assert.False(t, verified("acme", testutil.MakeJWT(t, map[string]any{"role": "analyst"})), "the boot secret's HMAC family never verifies under a JWKS tenant")
+
+	// acme moves to globex's provider; globex's folder is untouched.
+	rewriteSettings(t, filepath.Join(root, "acme"), authPatch(globex.URL))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/settings/reload?tenant=acme", nil)
+	req.Header.Set("X-Operator-Key", cfg.Auth.OperatorKey)
+	a.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	eventuallyVerified("acme", globexToken)
+	assert.False(t, verified("acme", acmeToken), "the swap is unconditional: acme's old provider is gone")
+	assert.True(t, verified("globex", globexToken))
+	assert.False(t, verified("globex", acmeToken))
+
+	// A reload that rejects globex's folder drops its verifier with it — the
+	// hooks run on a reload that adopts nothing — and the fixed folder gets
+	// a fresh one, fetched again.
+	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/settings/reload?tenant=globex", nil)
+	req.Header.Set("X-Operator-Key", cfg.Auth.OperatorKey)
+	a.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, http.StatusServiceUnavailable, pipe("globex", globexToken), "a rejected tenant is not served")
+	before := globexFetches.Load()
+	rewriteSettings(t, filepath.Join(root, "globex"), authPatch(globex.URL))
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/settings/reload?tenant=globex", nil)
+	req.Header.Set("X-Operator-Key", cfg.Auth.OperatorKey)
+	a.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	eventuallyVerified("globex", globexToken)
+	assert.Greater(t, globexFetches.Load(), before, "the fixed folder got a fresh verifier, fetched again")
 }
 
 func TestNew_PrometheusInlineMountsOnRouter(t *testing.T) {
@@ -796,4 +1163,51 @@ func TestRun_StopEndsOpenStreams(t *testing.T) {
 	assert.Less(t, time.Since(started), time.Second, "the open stream held the stop for the drain budget")
 	_, err = io.ReadAll(resp.Body)
 	assert.NoError(t, err, "the server ended the stream cleanly")
+}
+
+// poolSettings is a config.json patch: the seed's clickhouse block pointed
+// at addr with the native pool sized to open.
+func poolSettings(addr string, open int) map[string]any {
+	return map[string]any{"clickhouse": map[string]any{
+		"addr": addr, "http_port": 8123, "http_scheme": "http", "database": "default", "username": "default", "query_timeout": 30,
+		"tls":     map[string]any{"enabled": false, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": false, "server_name": ""},
+		"headers": map[string]any{}, "max_open_conns": open, "max_idle_conns": 5,
+	}}
+}
+
+// TestNew_RefusesAPoolAboveTheCeiling: clickhouse.max_total_conns is boot
+// config and the settings pool must fit under it, so an impossible pair
+// refuses to boot naming both numbers (#530).
+func TestNew_RefusesAPoolAboveTheCeiling(t *testing.T) {
+	guardGlobals(t)
+	cfg := testConfig(t, writeSettings(t, poolSettings(closedAddr(t), 10)))
+	cfg.ClickHouse.MaxTotalConns = 4
+	_, err := New(t.Context(), Options{Config: cfg})
+	require.ErrorContains(t, err, "clickhouse.max_open_conns 10")
+	require.ErrorContains(t, err, "clickhouse.max_total_conns 4")
+}
+
+// TestReload_PoolAboveTheCeilingKeepsTheConnection: a reload that raises the
+// pool above the ceiling is refused whole — the connection keeps its wiring,
+// not just its size — and the next reload that fits applies.
+func TestReload_PoolAboveTheCeilingKeepsTheConnection(t *testing.T) {
+	boot, moved := closedAddr(t), "127.0.0.1:9"
+	dir := writeSettings(t, poolSettings(boot, 10))
+	cfg := testConfig(t, dir)
+	cfg.ClickHouse.MaxTotalConns = 10
+	a := newApp(t, cfg, Options{})
+	require.Equal(t, boot, a.ch.Addr())
+
+	logs := logtest.Capture(t, slog.LevelError)
+	rewriteSettings(t, dir, poolSettings(moved, 20))
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Equal(t, boot, a.ch.Addr(), "the refused reload leaves the connection as it was")
+	assert.Contains(t, logs.String(), "clickhouse reconfigure refused")
+	assert.Contains(t, logs.String(), "clickhouse.max_open_conns 20")
+
+	rewriteSettings(t, dir, poolSettings(moved, 10))
+	_, adopted = a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Equal(t, moved, a.ch.Addr(), "the next reload that fits applies")
 }

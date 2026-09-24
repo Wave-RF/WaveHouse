@@ -38,7 +38,10 @@ const maxReportedResults = 10000
 // IngestHandler handles POST /v1/ingest?table={table}
 type IngestHandler struct {
 	Registry *discovery.SchemaRegistry
-	Dedup    dedupe.Deduplicator // nil when no dedupe store is wired (tests)
+	// Dedup resolves the request tenant's deduplicator — the tenant's own
+	// store, picked off the store the handler already holds (#583 story 7;
+	// dedupe.Stores in production). nil when no dedupe store is wired (tests).
+	Dedup func(store *settings.Store) dedupe.Deduplicator
 	// DedupeSettings resolves the effective dedupe id_field/require_id for a
 	// table of the request's tenant ((*settings.Store).DedupeFor in
 	// production). Called once per record so a settings reload lands at a
@@ -650,7 +653,7 @@ func (h *IngestHandler) processRecord(
 				slog.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", idField, "table", table)
 			} else {
 				eventID := fmt.Sprint(idVal)
-				dup, err := h.Dedup.CheckAndMark(ctx, eventID)
+				dup, err := h.Dedup(store).CheckAndMark(ctx, eventID)
 				switch {
 				case errors.Is(err, dedupe.ErrDisabled):
 					// A reload flipped dedupe.enabled between the snapshot

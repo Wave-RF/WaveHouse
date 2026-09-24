@@ -42,10 +42,12 @@ type Registry struct {
 	// mu serializes Reload: concurrent triggers queue rather than racing
 	// validate-then-swap sequences (a stale document must not overwrite a newer one).
 	mu sync.Mutex
-	// afterAdopt runs under mu after every reload that adopted a tenant, in
-	// registration order — for consumers that own a resource whose lifecycle
-	// follows a setting (the Pebble store behind dedupe.enabled) rather than
-	// reading the snapshot per call.
+	// afterAdopt runs under mu after every reload the registry applied, in
+	// registration order, with the tenants that reload adopted — none when it
+	// only rejected or removed — for consumers that own a resource whose
+	// lifecycle follows the tenants served and their settings (the dedupe
+	// store behind each tenant's dedupe.enabled) rather than reading the
+	// snapshot per call.
 	afterAdopt []func(adopted []tenant.ID)
 
 	// tenants is replaced whole by a reload, never edited, so a lookup is one
@@ -145,6 +147,20 @@ func (r *Registry) All() iter.Seq2[tenant.ID, *Store] {
 		tenants := *r.tenants.Load()
 		for _, id := range slices.Sorted(maps.Keys(tenants)) {
 			if e := tenants[id]; !e.rejected && !yield(id, e.store) {
+				return
+			}
+		}
+	}
+}
+
+// Known iterates over every tenant the registry holds, served or rejected,
+// in id order — for a consumer that must keep a rejected tenant's resources
+// current too: the tenant comes back into service with them, and a rejection
+// is the common reload failure (a typo, fixed and reloaded minutes later).
+func (r *Registry) Known() iter.Seq[tenant.ID] {
+	return func(yield func(tenant.ID) bool) {
+		for _, id := range slices.Sorted(maps.Keys(*r.tenants.Load())) {
+			if !yield(id) {
 				return
 			}
 		}
@@ -255,9 +271,11 @@ func (r *Registry) ReloadTenant(id tenant.ID, trigger string) (findings []Findin
 	next := maps.Clone(prev)
 	next[id] = e.adopt(id, doc)
 	r.tenants.Store(&next)
+	var adoptedIDs []tenant.ID
 	if doc != nil {
-		r.adopted([]tenant.ID{id})
+		adoptedIDs = []tenant.ID{id}
 	}
+	r.adopted(adoptedIDs)
 	errs, warns := logFindings(trigger, findings)
 	if doc == nil {
 		slog.Error("settings rejected — the tenant answers 503 until a reload adopts its folder", "trigger", trigger, "dir", r.dir, "tenant", id, "errors", errs, "warnings", warns)
@@ -267,11 +285,9 @@ func (r *Registry) ReloadTenant(id tenant.ID, trigger string) (findings []Findin
 	return findings, doc != nil, true
 }
 
-// adopted runs the AfterAdopt hooks for a reload that adopted ids. Under mu.
+// adopted runs the AfterAdopt hooks for an applied reload that adopted ids —
+// none, when it only rejected or removed. Under mu.
 func (r *Registry) adopted(ids []tenant.ID) {
-	if len(ids) == 0 {
-		return
-	}
 	for _, fn := range r.afterAdopt {
 		fn(ids)
 	}
@@ -291,10 +307,13 @@ func logFindings(trigger string, findings []Finding) (errs, warns int) {
 	return errs, warns
 }
 
-// AfterAdopt registers fn to run after each subsequent reload that adopted a
-// tenant, serialized with the reload itself, with the tenants it adopted.
-// Open's boot adoption has already happened by the time a caller can
-// register, so the caller applies the boot state itself.
+// AfterAdopt registers fn to run after each subsequent reload the registry
+// applied, serialized with the reload itself, with the tenants it adopted:
+// none for a reload that only rejected or removed a tenant, which a consumer
+// holding a resource per tenant needs to hear of as much as an adoption. A
+// reload rejected whole runs nothing, since nothing changed. Open's boot
+// adoption has already happened by the time a caller can register, so the
+// caller applies the boot state itself.
 func (r *Registry) AfterAdopt(fn func(adopted []tenant.ID)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

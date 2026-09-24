@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"maps"
 	"sync/atomic"
 	"time"
 
@@ -104,6 +105,21 @@ type ClickHouse struct {
 	Database     string
 	Username     string
 	QueryTimeout time.Duration
+	TLS          TLS
+	// Headers is this reader's own copy of the HTTP-interface headers.
+	Headers      map[string]string
+	MaxOpenConns int
+	MaxIdleConns int
+}
+
+// TLS is the adopted `clickhouse.tls` block (see ClickHouseTLS).
+type TLS struct {
+	Enabled            bool
+	CAFile             string
+	CertFile           string
+	KeyFile            string
+	InsecureSkipVerify bool
+	ServerName         string
 }
 
 // ClickHouse returns the adopted ClickHouse wiring.
@@ -116,6 +132,17 @@ func (s *Store) ClickHouse() ClickHouse {
 		Database:     *c.Database,
 		Username:     *c.Username,
 		QueryTimeout: time.Duration(*c.QueryTimeout) * time.Second,
+		TLS: TLS{
+			Enabled:            *c.TLS.Enabled,
+			CAFile:             *c.TLS.CAFile,
+			CertFile:           *c.TLS.CertFile,
+			KeyFile:            *c.TLS.KeyFile,
+			InsecureSkipVerify: *c.TLS.InsecureSkipVerify,
+			ServerName:         *c.TLS.ServerName,
+		},
+		Headers:      maps.Clone(c.Headers),
+		MaxOpenConns: *c.MaxOpenConns,
+		MaxIdleConns: *c.MaxIdleConns,
 	}
 }
 

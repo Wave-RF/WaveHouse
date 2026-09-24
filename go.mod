@@ -16,6 +16,7 @@ tool (
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.48.0
+	github.com/MicahParks/jwkset v0.11.3
 	github.com/MicahParks/keyfunc/v3 v3.8.2
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/dgraph-io/ristretto/v2 v2.4.2
@@ -48,6 +49,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.46.0
 	go.opentelemetry.io/proto/otlp v1.11.0
 	golang.org/x/sync v0.23.0
+	golang.org/x/time v0.15.0
 	google.golang.org/grpc v1.83.2
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -58,7 +60,6 @@ require (
 	github.com/BurntSushi/toml v1.5.0 // indirect
 	github.com/ClickHouse/ch-go v0.74.0 // indirect
 	github.com/DataDog/zstd v1.5.6 // indirect
-	github.com/MicahParks/jwkset v0.11.3 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Zxilly/go-size-analyzer v1.12.6 // indirect
 	github.com/ZxillyFork/gore v0.0.0-20260412044020-eb86d5eb93fc // indirect
@@ -203,7 +204,6 @@ require (
 	golang.org/x/telemetry v0.0.0-20260708182218-49f421fb7959 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
-	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect
 	golang.org/x/vuln v1.3.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect

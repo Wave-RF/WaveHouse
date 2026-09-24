@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -56,9 +57,11 @@ type IngestWorker struct {
 	// failed carries the one error that ends the worker on its own — the
 	// consumer could not start, or delivery ended underneath it. Buffered so
 	// the dispatch loop never blocks on a caller that has already gone.
-	failed     chan error
-	httpClient *http.Client
-	cache      cache.Cache
+	failed chan error
+	// clients follows the target's TLS config: one client per config,
+	// replaced when a reload changes it (chconn.HTTPClients).
+	clients *chconn.HTTPClients
+	cache   cache.Cache
 	// target resolves the ClickHouse HTTP wiring per insert
 	// (chconn.Manager.Target in production) so a settings reload that
 	// re-points ClickHouse applies to the next flush.
@@ -151,29 +154,10 @@ func StartIngestWorker(
 		return nil, nil, err
 	}
 
-	// Tune the HTTP Transport for high-throughput ClickHouse ingestion
-	customTransport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		MaxIdleConnsPerHost:   100,
-		MaxConnsPerHost:       100,
-	}
-
 	worker := &IngestWorker{
-		dlq:    queue,
-		failed: make(chan error, 1),
-		httpClient: &http.Client{
-			Transport: customTransport,
-			Timeout:   30 * time.Second,
-		},
+		dlq:        queue,
+		failed:     make(chan error, 1),
+		clients:    chconn.NewHTTPClients(ingestHTTPClient),
 		cache:      cache,
 		target:     target,
 		maxBatch:   defaultMaxBatch,
@@ -192,6 +176,28 @@ func StartIngestWorker(
 		return waitOrDeadline(shutdownCtx, &worker.wg)
 	}
 	return stopFunc, worker.failed, nil
+}
+
+// ingestHTTPClient is the worker's client for the ClickHouse HTTP
+// interface: a transport tuned for high-throughput inserts, with the
+// target's TLS config for an https target.
+func ingestHTTPClient(tlsCfg *tls.Config) *http.Client {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		TLSClientConfig:       tlsCfg,
+		ExpectContinueTimeout: 1 * time.Second,
+		MaxIdleConnsPerHost:   100,
+		MaxConnsPerHost:       100,
+	}
+	return &http.Client{Transport: transport, Timeout: 30 * time.Second}
 }
 
 // waitOrDeadline returns nil once wg drains, or ctx.Err() if ctx fires first
@@ -640,12 +646,17 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	if err != nil {
 		return fmt.Errorf("failed to create http request: %w", err)
 	}
+	// The configured headers first, so WaveHouse's own win over a
+	// same-named one.
+	for name, value := range t.Headers {
+		req.Header.Set(name, value)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-ClickHouse-User", t.Username)
 	req.Header.Set("X-ClickHouse-Key", t.Password)
 
 	// TODO: future optimization: could build list for cache invalidation here while waiting on the network request
-	resp, err := w.httpClient.Do(req)
+	resp, err := w.clients.For(t).Do(req)
 	if err != nil {
 		return err
 	}

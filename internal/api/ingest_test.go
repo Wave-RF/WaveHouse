@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -199,7 +200,7 @@ func TestIngest_Dedup_FirstTime(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub)
-	h.Dedup = dedup
+	h.Dedup = staticDedup(dedup)
 	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "evt-1"})
@@ -215,7 +216,7 @@ func TestIngest_Dedup_Duplicate(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub)
-	h.Dedup = dedup
+	h.Dedup = staticDedup(dedup)
 	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
 
 	// First call.
@@ -686,12 +687,47 @@ func TestIngest_Policy_CheckIn_AbsentClaim_FailsClosed(t *testing.T) {
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
+// Two tenants, one event id: each tenant's store is its own (#583 story 7),
+// so the id is first seen under both and a duplicate only within the tenant
+// that sent it before — through a handler holding nothing but the request's
+// store, the way internal/app wires it.
+func TestIngest_DedupIsTheTenants(t *testing.T) {
+	t.Parallel()
+	tenants := nestedTenants(t, map[string]string{"acme": fullConfig(100), "globex": fullConfig(100)})
+	root := t.TempDir()
+	stores := dedupe.NewStores(func(id tenant.ID) *dedupe.Managed {
+		return dedupe.NewManaged(dedupe.Embedded(filepath.Join(root, id.String(), "dedupe")))
+	})
+	t.Cleanup(func() { _ = stores.Close() })
+	for id := range tenants.All() {
+		require.NoError(t, stores.For(id).Apply(true))
+	}
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub)
+	h.Dedup = func(s *settings.Store) dedupe.Deduplicator { return stores.For(s.Tenant()) }
+	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
+
+	ingest := func(id tenant.ID) string {
+		store, ok := tenants.For(id)
+		require.True(t, ok)
+		req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"})
+		w := httptest.NewRecorder()
+		h.Handle(w, req.WithContext(WithStore(req.Context(), store)))
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		return w.Body.String()
+	}
+	assert.Contains(t, ingest("acme"), `"ok":true`)
+	assert.Contains(t, ingest("globex"), `"ok":true`, "the same id is first seen under the other tenant")
+	assert.Contains(t, ingest("acme"), `"duplicate":true`)
+	assert.Contains(t, ingest("globex"), `"duplicate":true`)
+}
+
 func TestIngest_Dedup_MissingIDField(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub)
-	h.Dedup = dedup
+	h.Dedup = staticDedup(dedup)
 	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
 
 	// Payload omits event_id and require_id is off: the row skips
@@ -710,7 +746,7 @@ func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub)
-	h.Dedup = testutil.NewMockDeduplicator()
+	h.Dedup = staticDedup(testutil.NewMockDeduplicator())
 	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", true }
 
 	w := httptest.NewRecorder()
@@ -732,7 +768,7 @@ func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(t), pub)
-	h.Dedup = testutil.NewMockDeduplicator()
+	h.Dedup = staticDedup(testutil.NewMockDeduplicator())
 	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", true }
 
 	req := ndjsonRequest(t, "clicks",
@@ -980,7 +1016,7 @@ func TestIngest_NDJSON_Dedup(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(t), pub)
-	h.Dedup = dedup
+	h.Dedup = staticDedup(dedup)
 	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
 
 	req := ndjsonRequest(t, "clicks",
@@ -2271,7 +2307,7 @@ func TestIngest_Dedup_DisabledBySettings(t *testing.T) {
 			dedup := testutil.NewMockDeduplicator()
 			dedup.Err = errors.New("must not be called while disabled")
 			h := NewIngestHandler(testRegistry(t), pub)
-			h.Dedup = dedup
+			h.Dedup = staticDedup(dedup)
 			h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return false, "event_id", true }
 
 			w := httptest.NewRecorder()
@@ -2291,7 +2327,7 @@ func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	dedup.Err = dedupe.ErrDisabled
 	h := NewIngestHandler(testRegistry(t), pub)
-	h.Dedup = dedup
+	h.Dedup = staticDedup(dedup)
 	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", true }
 
 	w := httptest.NewRecorder()

@@ -5,7 +5,18 @@
     "http_scheme": "http",
     "database": "default",
     "username": "default",
-    "query_timeout": 30
+    "query_timeout": 30,
+    "tls": {
+      "enabled": false,
+      "ca_file": "",
+      "cert_file": "",
+      "key_file": "",
+      "insecure_skip_verify": false,
+      "server_name": ""
+    },
+    "headers": {},
+    "max_open_conns": 10,
+    "max_idle_conns": 5
   },
   "auth": {
     "jwks_url": "",

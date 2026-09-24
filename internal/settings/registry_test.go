@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -112,10 +113,10 @@ func TestRegistry_SurvivesVanishedDirectory(t *testing.T) {
 	assert.False(t, req)
 }
 
-// TestRegistry_AfterAdoptRunsOnlyOnAdoption pins the lifecycle hook contract:
-// it fires after every successful reload (with the new snapshot already
-// visible), names the tenant that reload adopted, and never fires on a
-// rejected one.
+// TestRegistry_AfterAdoptRunsOnlyOnAdoption pins the lifecycle hook contract
+// over a flat directory: it fires after every successful reload (with the
+// new snapshot already visible), names the tenant that reload adopted, and
+// never fires on a rejected one, which the registry does not apply.
 func TestRegistry_AfterAdoptRunsOnlyOnAdoption(t *testing.T) {
 	t.Parallel()
 	reg := newLoadedRegistry(t, nil)
@@ -276,6 +277,49 @@ func TestRegistry_NestedReloadRejectsOneTenant(t *testing.T) {
 	assert.Equal(t, [][]tenant.ID{{"acme"}, {"acme", "globex"}}, hooks)
 }
 
+// A reload that adopts nobody but still changes who is served — every
+// surviving folder rejected, another removed — runs the hooks with nothing
+// adopted: a consumer holding a resource per tenant releases the gone
+// tenants' on it, rather than at the next adoption.
+func TestRegistry_HooksRunOnAReloadThatAdoptsNothing(t *testing.T) {
+	t.Parallel()
+	root := writeTree(t, map[string]map[string]string{"acme": maxRowsFiles(111), "globex": maxRowsFiles(222)})
+	reg, _ := Open(root)
+	require.NotNil(t, reg)
+	var hooks [][]tenant.ID
+	reg.AfterAdopt(func(adopted []tenant.ID) { hooks = append(hooks, adopted) })
+
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	writeTenant(t, root, "globex", brokenFiles())
+	_, adopted := reg.Reload("test")
+	assert.False(t, adopted)
+	assert.Equal(t, [][]tenant.ID{nil}, hooks, "the hooks ran once, with nothing adopted")
+	_, known := reg.Resolve("acme")
+	assert.False(t, known)
+	_, ok := reg.For("globex")
+	assert.False(t, ok)
+}
+
+// Known is every tenant the registry holds, rejected ones included, in id
+// order: what a resource a rejected tenant comes back to is kept current for.
+func TestRegistry_Known(t *testing.T) {
+	t.Parallel()
+	root := writeTree(t, map[string]map[string]string{"globex": maxRowsFiles(222), "acme": maxRowsFiles(111), "broken": brokenFiles()})
+	reg, _ := Open(root)
+	require.NotNil(t, reg)
+	assert.Equal(t, []tenant.ID{"acme", "broken", "globex"}, slices.Collect(reg.Known()))
+	var served []tenant.ID
+	for id := range reg.All() {
+		served = append(served, id)
+	}
+	assert.Equal(t, []tenant.ID{"acme", "globex"}, served, "All leaves the rejected tenant out; Known does not")
+	// Stopping early is the iterator's contract, not the caller's problem.
+	for id := range reg.Known() {
+		assert.Equal(t, tenant.ID("acme"), id)
+		break
+	}
+}
+
 // All is the served tenants in id order: a rejected tenant is left out, like
 // everywhere else, and comes back with its folder.
 func TestRegistry_All(t *testing.T) {
@@ -395,7 +439,7 @@ func TestRegistry_ReloadTenant(t *testing.T) {
 	assert.True(t, known)
 	_, ok = reg.For("acme")
 	assert.True(t, ok)
-	assert.Equal(t, [][]tenant.ID{{"acme"}}, hooks, "a rejected folder runs no hook")
+	assert.Equal(t, [][]tenant.ID{{"acme"}, nil}, hooks, "a rejected folder runs the hooks with nothing adopted: a resource held per tenant closes on it")
 
 	// And reloading the fixed one brings it back, in the store it always had.
 	writeTenant(t, root, "globex", maxRowsFiles(444))

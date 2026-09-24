@@ -15,7 +15,7 @@ Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, and the admi
 Authorization: Bearer <token>
 ```
 
-The JWT must use HMAC signing (HS256/HS384/HS512) or be validated via a JWKS endpoint (configured via `auth.jwks_url` in the [settings directory](/settings-directory#authentication)). The accepted signing algorithm is pinned to the active verifier and checked *before* any key is consulted: an HMAC deployment accepts only `HS256`/`HS384`/`HS512`, and a JWKS deployment accepts only the asymmetric family (`RS256/384/512`, `ES256/384/512`, `PS256/384/512`, `EdDSA`). Tokens using `alg: none`, or an algorithm from the other family (e.g. an `HS256` token sent to a JWKS deployment), are rejected outright.
+The JWT must use HMAC signing (HS256/HS384/HS512) or be validated via a JWKS endpoint (configured via `auth.jwks_url` in the [settings directory](/settings-directory#authentication) — per tenant, over [a nested directory](/deployment#the-nested-settings-directory), so a JWKS-issued token verifies only under the tenants whose `jwks_url` names its provider's key set; tenants that leave `jwks_url` empty all verify against the shared boot `jwt_secret` and accept each other's tokens, or validate no token at all while it is unset). While a tenant's JWKS has not been fetched yet — at boot, or after a reload built or rebuilt its verifier (a new tenant folder, one adopted again after being rejected or removed, or a changed `jwks_url` or `role_claim`) — a request carrying a token is answered `503 {"error": "token verifier not ready: the tenant's JWKS has not been fetched yet"}` with `Retry-After: 30` rather than evaluated under the `default_role`; requests without a token are unaffected, and so is one authenticated by a valid operator key, which is checked first and never consults the verifier. The accepted signing algorithm is pinned to the active verifier and checked *before* any key is consulted: an HMAC deployment accepts only `HS256`/`HS384`/`HS512`, and a JWKS deployment accepts only the asymmetric family (`RS256/384/512`, `ES256/384/512`, `PS256/384/512`, `EdDSA`). Tokens using `alg: none`, or an algorithm from the other family (e.g. an `HS256` token sent to a JWKS deployment), are rejected outright.
 
 For SSE connections where custom headers are not possible, you can pass the token as a query parameter:
 
@@ -150,7 +150,7 @@ Status code: `503 Service Unavailable`
 
 ### `GET /v1/health` — Liveness ping (public, content-free)
 
-Returns **`200 OK` with an empty body** once the gateway is past boot, or **`503 Service Unavailable`** (also empty) while boot-time schema discovery is still failing. Like every `/v1` route outside `/v1/ops/*` it [resolves a tenant](/deployment#multi-tenant-deployments) first, so a malformed or unknown `X-Tenant-ID` answers `400`/`404` before the probe runs, and — over a [nested settings directory](/deployment#the-nested-settings-directory) — a tenant whose settings folder was rejected answers a `503` that carries the usual JSON error body rather than this route's empty one. No authentication required and no response body — the caller only branches on the status code, so there's nothing to JSON-encode or cache per request.
+Returns **`200 OK` with an empty body** once the gateway is past boot, or **`503 Service Unavailable`** (also empty) while boot-time schema discovery is still failing. Like every `/v1` route outside `/v1/ops/*` it [resolves a tenant](/deployment#multi-tenant-deployments) first, so a malformed or unknown `X-Tenant-ID` answers `400`/`404` before the probe runs, and — over a [nested settings directory](/deployment#the-nested-settings-directory) — a tenant whose settings folder was rejected answers a `503` that carries the usual JSON error body rather than this route's empty one, as does a request carrying a token, with no valid operator key, while that tenant's [JWKS has not been fetched yet](#authentication) (`Retry-After: 30`; the SDK sends its token on this ping too). No authentication required and no response body — the caller only branches on the status code, so there's nothing to JSON-encode or cache per request.
 
 This is what the SDK's `wh.sys.health()` calls, and the endpoint to use when choosing among multiple servers in a distributed setup. It mirrors `/livez` under the hood but is intentionally a `/v1` API route rather than a Kubernetes probe path: an operator may filter the bare probe paths (`/livez`, `/readyz`, `/healthz`) out at the reverse proxy since they're internal probes, so the SDK relies on `/v1/health`, which is documented public API surface meant to stay reachable. It does **not** ping ClickHouse — readiness-based load balancing is the proxy/LB's job (via `/readyz`), not the client's.
 
@@ -272,6 +272,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
 | 500 | `{"error":"publish failed"}` | Message queue error |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Response includes `Retry-After: 30` header. |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 **curl example:**
 
@@ -382,6 +383,7 @@ A `200` is returned whenever the body was read and the records were processed �
 | 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …` — see the note above on how declarations are echoed; conflicting variant: `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of …`) | The request declared no `Content-Type`, one whose media type is unsupported or does not parse, a comma-bearing value that does not parse as a single media type, or repeated header lines that disagree — different formats, or one supported and one not. Checked before the body is parsed |
 | 500 | `{"error":"publish failed"}` / `{"error":"dedupe failed"}` | Message-queue or dedup-backend failure mid-batch |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream full (backpressure) mid-batch; includes `Retry-After: 30` |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 :::caution[At-least-once on retry]
 A batch aborted partway (a `503`/`500`, a JSON-array syntax error, or an NDJSON line over the 10 MiB line bound, after some leading records were already published) re-publishes those leading records when the whole batch is retried. A whole-body read failure is **not** one of these: a `413`, or the `400 invalid request body` of an upload cut off in transit, is decided before any record is processed, so nothing is published — safe to retry, once split for a `413`. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
@@ -466,6 +468,7 @@ The earlier handler accepted a `params` array bound to `?` placeholders; the HTT
 | 502 | `{"error":"<ClickHouse error message>"}` | ClickHouse returned a 5xx (internal error, overloaded, etc.). The proxy maps any ClickHouse 5xx to HTTP 502 — gateway-fault, the upstream service had a problem. Same body convention: ClickHouse's text is forwarded as-is. |
 | 502 | `{"error":"clickhouse request failed: ..."}` | Transport-level failure reaching ClickHouse (connection refused, timeout, the upstream went away mid-request) |
 | 502 | `{"error":"clickhouse response exceeded N bytes; ..."}` | Response body exceeded the 64 MiB memory-safety cap. Narrow the query, add a `LIMIT`, or use `FORMAT JSONEachRow` with a streaming client outside WaveHouse. |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 **curl example:**
 
@@ -540,6 +543,7 @@ The inbound request body is capped at 1 MiB; a body over the cap is rejected wit
 | 403 | `{"error":"aggregation \"x\" not allowed"}` | Aggregation fn denied by policy |
 | 404 | `{"error":"unknown table: x"}` | Table not found |
 | 413 | `{"error":"request body exceeded 1048576 bytes"}` | Request body over the 1 MiB cap |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 ---
 
@@ -574,12 +578,13 @@ The POST parameter body is capped at 1 MiB; a body over the cap is rejected with
 | 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL literal form — a JSON object, whether supplied directly or nested as an array element. A JSON **array** is valid and renders as an `IN`-style `(…)` list. |
 | 400 | `{"error":"parameter \"x\": array parameter must not be empty"}` | An empty array — it would render as the invalid `IN ()`. |
 | 413 | `{"error":"request body exceeded 1048576 bytes"}` | POST body over the 1 MiB cap |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 ---
 
 ### `GET /v1/stream` — Server-Sent Events Stream
 
-Opens a persistent SSE connection for real-time event streaming. Supports historical gap-fill from NATS JetStream using `DeliverByStartTime`.
+Opens a persistent SSE connection for real-time event streaming. Supports historical gap-fill from NATS JetStream using `DeliverByStartTime`. A connection that carries a token, with no valid operator key, while the tenant's JWKS has not been fetched yet is refused with `503` + `Retry-After: 30` (see [Authentication](#authentication)); a browser `EventSource` treats that as fatal rather than reconnecting, so reopen it after the delay (the SDK's stream re-dials on its own).
 
 **Query Parameters:**
 
@@ -689,6 +694,7 @@ Per-column fields: `name`, `type` and `is_nullable` describe the column; `positi
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
 | 404 | `{"error":"table not found"}` | Table not in discovered schemas |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 ---
 
@@ -702,6 +708,7 @@ Triggers an immediate re-discovery of ClickHouse table schemas, then returns the
 | ------ | ---- | ----- |
 | 401 / 403 | as above | Not the admin role |
 | 500 | `{"error":"refresh failed"}` | ClickHouse discovery query failed |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 **Response:**
 
@@ -729,6 +736,7 @@ Returns per-table message counts in the Dead Letter Queue — a table's count su
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
 | 500 | `{"error":"stream info failed"}` | NATS JetStream stream-info lookup failed |
+| 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 **Query Parameters:**
 
@@ -765,6 +773,7 @@ Both pipe reads take an optional `?tenant=<id>` naming the [tenant](/deployment#
 | `400` | The query string does not parse (`?tenant=acme;x=1`, a bad `%` escape), or `tenant` is empty, repeated, or not a tenant id |
 | `404` | No such tenant |
 | `503` | The tenant's settings folder was rejected |
+| `503` | A token was supplied, with no valid operator key, while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`), with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 #### `GET /v1/ops/pipes/{name}` — Get Named Pipe
 
@@ -800,7 +809,7 @@ Re-validates the [settings directory](/settings-directory) — `roles.json`, `po
 
 `200` when adopted (warnings allowed); `422` when validation rejected the directory — the previous settings stay in effect, and `findings` says why.
 
-An optional `?tenant=<id>` reloads that tenant's folder of a [nested settings directory](/deployment#the-nested-settings-directory) and nothing else; it is parsed as strictly as on the [pipe reads](#get-v1opspipes--list-named-pipes) (`400`), and an unknown tenant is a `404`. Over a nested directory a rejected folder is not kept on its previous settings, and a `422` for the whole directory can mean adopted in part — see that section.
+An optional `?tenant=<id>` reloads that tenant's folder of a [nested settings directory](/deployment#the-nested-settings-directory) and nothing else; it is parsed as strictly as on the [pipe reads](#get-v1opspipes--list-named-pipes) (`400`), and an unknown tenant is a `404`. A token sent with no valid operator key while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`) is refused with `503` + `Retry-After: 30`. Over a nested directory a rejected folder is not kept on its previous settings, and a `422` for the whole directory can mean adopted in part — see that section.
 
 ## Event Message Format
 
