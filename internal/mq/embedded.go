@@ -78,6 +78,10 @@ type tenantQueue struct {
 	// tenant no longer served keeps the budget it last had, and maxBytes too
 	// when the pair is whole at it (takeStock).
 	maxBytes, asked int64
+	// ingestCap is the cap the ingest stream has — what a failed resize
+	// restores it to. Not maxBytes: a pair boot found split has a cap but no
+	// budget applied in full, and a cap of 0 would be none at all.
+	ingestCap int64
 }
 
 // EmbeddedNATS is the one implementation of every mq interface.
@@ -194,7 +198,7 @@ func (e *EmbeddedNATS) takeStock(ctx context.Context) error {
 		if id, ok := streamTenant(ingestStreamPrefix, name); ok {
 			q := e.queue(id)
 			q.ingest = true
-			q.asked = info.Config.MaxBytes
+			q.asked, q.ingestCap = info.Config.MaxBytes, info.Config.MaxBytes
 		} else if id, ok := streamTenant(dlqStreamPrefix, name); ok {
 			e.queue(id).dlq = true
 			dlqs[id] = dlqState{limit: info.Config.MaxBytes, held: info.State.Bytes}
@@ -310,10 +314,10 @@ func (e *EmbeddedNATS) MaxBytes(id tenant.ID) int64 {
 // JetStream applies a limit change to a live stream without touching its
 // messages: growing takes effect immediately; shrinking the ingest stream
 // below its current size makes DiscardNew refuse new publishes until the
-// worker drains it — nothing buffered is dropped. The dead-letter stream is
-// DiscardOld, which would delete its oldest parked rows to fit a smaller cap,
-// so it is never capped below the bytes it holds (#532): it keeps what it
-// has, and that is logged.
+// sweeper purges it back under the cap — nothing buffered is dropped. The
+// dead-letter stream is DiscardOld, which would delete its oldest parked rows
+// to fit a smaller cap, so it is never capped below the bytes it holds (#532):
+// it keeps what it has, and that is logged.
 //
 // The pair moves together where it can. If the dead-letter update fails after
 // the ingest one succeeded, the ingest resize is undone so the pair stays at
@@ -358,7 +362,7 @@ func (e *EmbeddedNATS) apply(ctx context.Context, id tenant.ID, q *tenantQueue, 
 		if _, err := e.js.CreateOrUpdateStream(resizeCtx, ingestStreamConfig(id, maxBytes)); err != nil {
 			return fmt.Errorf("open ingest stream: %w", err)
 		}
-		q.ingest, q.maxBytes = true, maxBytes
+		q.ingest, q.maxBytes, q.ingestCap = true, maxBytes, maxBytes
 		// The joins run on a budget of their own: a queue that opened but no
 		// consumer holds fails every consumer (fail), so a slow open must not
 		// leave them no time.
@@ -371,17 +375,20 @@ func (e *EmbeddedNATS) apply(ctx context.Context, id tenant.ID, q *tenantQueue, 
 		}
 		return nil
 	}
+	prevCap := q.ingestCap
 	if _, err := e.js.UpdateStream(resizeCtx, ingestStreamConfig(id, maxBytes)); err != nil {
 		return fmt.Errorf("resize ingest stream: %w", err)
 	}
+	q.ingestCap = maxBytes
 	if err := e.applyDLQ(resizeCtx, id, q, maxBytes); err != nil {
 		// The undo runs on its own budget, not the one the dead-letter call
 		// has likely just exhausted.
 		rollbackCtx, cancelRollback := context.WithTimeout(ctx, rollbackTimeout)
 		defer cancelRollback()
-		if _, rollbackErr := e.js.UpdateStream(rollbackCtx, ingestStreamConfig(id, q.maxBytes)); rollbackErr != nil {
+		if _, rollbackErr := e.js.UpdateStream(rollbackCtx, ingestStreamConfig(id, prevCap)); rollbackErr != nil {
 			return fmt.Errorf("%w (ingest stream rollback failed, so it stays at the new limit and the dlq at the previous: %w)", err, rollbackErr)
 		}
+		q.ingestCap = prevCap
 		return fmt.Errorf("%w (ingest stream restored to the previous limit)", err)
 	}
 	q.maxBytes = maxBytes

@@ -33,7 +33,7 @@ WaveHouse does not currently expose a knob to relax this — `SyncAlways` is alw
 Because the publish blocks on `fsync`, **your typical ingest latency is your storage's typical `fsync` latency, and your worst-case publish is your storage's worst-case `fsync`.** When that tail is healthy (sub-millisecond to single-digit milliseconds) the guarantee is essentially free. When it is not, the same code path that handles every production message stalls:
 
 - Publishes block for the duration of the `fsync`, so a multi-second `fsync` tail is a multi-second ingest tail.
-- The embedded server's stream/consumer setup and every publish run under the JetStream client's request timeout; a slow-enough substrate makes them exceed it. The symptom at a first boot, which opens every tenant's queue, is `open dlq stream: ... context deadline exceeded`; a later boot writes nothing, so the first publish is where it shows.
+- The embedded server's consumer setup and every publish run under the JetStream client's request timeout, and opening or resizing a tenant's queue under a ten-second budget of WaveHouse's own; a slow-enough substrate makes them exceed it. The symptom when a tenant's queue first opens — at the boot or reload that first serves the tenant — is `open dlq stream: ... context deadline exceeded`, or `open ingest stream: ...` (the two share the budget); a boot that finds every queue already at its budget writes nothing, so there the first publish is where it shows.
 - If the worker cannot drain to ClickHouse faster than producers publish, a tenant's stream fills toward its [`mq.max_bytes_gb`](/settings-directory#message-queue) and the API returns `503` to that tenant ([backpressure by construction](/ingest-pipeline#backpressure-and-durability-knobs)).
 
 ## Where `SyncAlways` is cheap vs. expensive
@@ -81,7 +81,7 @@ Read the measured p99 against these bands, which track WaveHouse's `SyncAlways` 
 | 1–5 ms | **Good** |
 | 5–50 ms | **Workable** — watch bursty load |
 | 50 ms – 1 s | **Marginal** — relax durability once `mq.sync_interval` ([#139](https://github.com/Wave-RF/WaveHouse/issues/139)) lands, or move to faster storage |
-| > 1 s | **Broken** — opening a tenant's queue (`open dlq stream`) will time out under load; fix the storage substrate |
+| > 1 s | **Broken** — opening a tenant's queue (`open dlq stream` / `open ingest stream`) will time out under load; fix the storage substrate |
 
 :::caution[macOS `fsync` lies by default]
 A plain `fsync()` on macOS returns once data is in the drive's volatile cache — it does **not** force a flush to NAND; only `fcntl(fd, F_FULLFSYNC)` does (NATS, Postgres, and SQLite all use it). On a Mac, any per-flush number under ~1 ms is almost certainly not a real flush — the gap between plain `fsync()` and `F_FULLFSYNC` can be ~180× on the same consumer NVMe. `fio` on macOS calls plain `fsync()`, so don't trust Mac `fio` numbers for tail-latency planning. This mostly matters when benchmarking a dev machine; production WaveHouse runs on Linux, where `fio` is honest.
@@ -93,7 +93,7 @@ A self-contained `wavehouse storage-check` preflight subcommand that bakes this 
 
 If you see any of these, benchmark the `<data_dir>/nats` volume as above:
 
-- `open dlq stream: ... context deadline exceeded` when a tenant's queue first opens, at the first boot or at the reload that adopts the tenant.
+- `open dlq stream: ... context deadline exceeded`, or `open ingest stream: ...`, when a tenant's queue first opens, at the boot or reload that first serves the tenant.
 - Ingest p99 latency in the seconds, or occasional `200`s that take multiple seconds to return.
 - Intermittent `503 Service Unavailable` from `/v1/ingest` when ClickHouse is healthy (the worker can't drain fast enough because acking is `fsync`-bound).
 - Flaky CI or load tests that pass on fast storage and fail on a shared/virtualized host.

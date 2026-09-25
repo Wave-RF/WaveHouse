@@ -458,6 +458,55 @@ func TestEmbeddedNATS_SetMaxBytes_AQueueThatCannotOpen(t *testing.T) {
 	assert.Equal(t, int64(testBudget), e.MaxBytes("acme"))
 }
 
+// A resize whose dead-letter update fails undoes the ingest one, back to the
+// cap the ingest stream had. That is not the budget applied in full: a boot
+// that found the pair split applied none, and a cap of 0 would leave the
+// ingest stream with no cap at all.
+func TestEmbeddedNATS_SetMaxBytes_UndoRestoresTheIngestStreamsCap(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	first, err := NewEmbedded(dir)
+	require.NoError(t, err)
+	require.NoError(t, first.SetMaxBytes(ctx, "acme", 8<<20))
+	require.NoError(t, first.js.DeleteStream(ctx, "DLQ_acme"))
+	require.NoError(t, first.Close())
+	// The dead-letter stream cannot open again: a file where its store goes.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "jetstream", "$G", "streams", dlqStreamName("acme")), nil, 0o600))
+
+	e := openEmbedded(t, dir)
+	require.Zero(t, e.MaxBytes("acme"), "a pair without its dead-letter stream is not at its budget")
+	err = e.SetMaxBytes(ctx, "acme", 16<<20)
+	require.ErrorContains(t, err, "ingest stream restored to the previous limit")
+	assert.Equal(t, int64(8<<20), streamConfig(t, e, "INGEST_acme").MaxBytes, "back at the cap it had, not unlimited")
+	assert.Zero(t, e.MaxBytes("acme"), "and the next call retries")
+}
+
+// A consumer that cannot join a tenant's queue opened after it started says so
+// on failed — the one report that stops the ingest worker, which would
+// otherwise let the tenant's ingest answer 200 for rows nobody reads. The
+// queue itself is open, so SetMaxBytes succeeds.
+func TestEmbeddedNATS_Consume_ReportsAQueueItCannotJoin(t *testing.T) {
+	e := openEmbedded(t, t.TempDir())
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	// A durable name the client refuses: with no queue yet, nothing checks it.
+	cons, err := e.CreateConsumer(ctx, ConsumerConfig{Durable: "bad.name", MaxAckPending: 10})
+	require.NoError(t, err)
+	stop, failed, err := cons.Consume(func(*Message) {}, 4)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+
+	require.NoError(t, e.SetMaxBytes(ctx, "acme", testBudget))
+	select {
+	case err := <-failed:
+		require.ErrorIs(t, err, ErrDeliveryEnded)
+		assert.Contains(t, err.Error(), "acme")
+	case <-time.After(5 * time.Second):
+		t.Fatal("a queue the consumer could not join was not reported")
+	}
+}
+
 // A budget that shrinks a tenant's dead-letter stream below what it holds
 // would have DiscardOld delete the oldest parked rows to fit (#532), so the
 // stream keeps what it holds, capped at that, and every row survives.
