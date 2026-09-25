@@ -518,6 +518,22 @@ func (e *ExternalNATS) Publish(ctx context.Context, topic Topic, data []byte, op
 	return e.publish(ctx, subj, e.partitions[partitionOf(topic.Tenant, e.topo.Partitions)], data, opts)
 }
 
+// DuplicateWindow is the shortest duplicate_window among the partitions: how
+// long an idempotency key is remembered everywhere a tenant may publish.
+func (e *ExternalNATS) DuplicateWindow(ctx context.Context) (time.Duration, error) {
+	var shortest time.Duration
+	for _, name := range e.partitions {
+		s, err := e.js.Stream(ctx, name)
+		if err != nil {
+			return 0, fmt.Errorf("stream %s: %w", name, err)
+		}
+		if d := s.CachedInfo().Config.Duplicates; shortest == 0 || d < shortest {
+			shortest = d
+		}
+	}
+	return shortest, nil
+}
+
 // DeadLetter parks msg's data on the shared dead-letter stream under its
 // topic, with a fresh Nats-Msg-Id. It does not ack msg.
 func (e *ExternalNATS) DeadLetter(ctx context.Context, msg *Message, opts ...PublishOpt) error {

@@ -86,7 +86,7 @@ Whether a tenant dedupes, and on which field, are settings-directory keys ([Dedu
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `dedupe.lease` | `WH_DEDUPE_LEASE` | `30s` | How long a record's id stays claimed while the record is published. Another request carrying the same id meanwhile gets `503` with this as `Retry-After`, in whole seconds; a claim that is neither committed nor released, because its process died mid-publish, lapses after it. At most `2m` with `mq.backend: embedded`, the embedded queue's duplicate window: a longer lease refuses boot. A Go duration (`30s`, `1m`); `0` = the default. |
+| `dedupe.lease` | `WH_DEDUPE_LEASE` | `30s` | How long a record's id stays claimed while the record is published. Another request carrying the same id meanwhile gets `503` with this as `Retry-After`, in whole seconds; a claim that is neither committed nor released, because its process died mid-publish, lapses after it. At most `2m` with `mq.backend: embedded`, the embedded queue's duplicate window: a longer lease refuses boot. Under `mq.backend: nats`, every partition's `duplicate_window` must be at least the lease, or boot refuses with a topology finding. A Go duration (`30s`, `1m`); `0` = the default. |
 | `dedupe.reserve_concurrency` | `WH_DEDUPE_RESERVE_CONCURRENCY` | `64` | The most parallel calls one Reserve, Commit or Release makes to a remote dedupe backend: ingest reserves a window of up to 256 ids at once, which the backend spreads over at most this many requests. `pebble` ignores it. `0` = the default. |
 
 #### DynamoDB dedupe
@@ -112,6 +112,7 @@ Some valid combinations are right for a single replica only, and one process can
 - **`mq.backend=nats` with `coord.backend=local`**, in a process running `sweeper`: every such process holds its own sweeper lease. This is harmless for now, because under `nats` the sweeper removes nothing: retention is your streams'. A later release will require a shared `coord.backend` here once this build has one.
 - **`mq.backend=nats`**: `mq.max_bytes_gb` is not applied (above).
 - **`mq.nats` set with `mq.backend=embedded`**: the block is ignored.
+- **`mq.backend=nats` and a tenant with dedupe on whose finite `dedupe.retention` is under the partitions' `duplicate_window`**, in a process running `api`, at boot and after every reload: see [Deployment → External NATS](/deployment#external-nats).
 
 ### Process roles
 

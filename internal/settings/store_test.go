@@ -64,6 +64,8 @@ func TestStore_DedupeFor_Cascade(t *testing.T) {
 			assert.Equal(t, tt.want, s.DedupeFor(tt.table))
 		})
 	}
+	// Only the overrides that name a retention are listed; "" is the default.
+	assert.Equal(t, map[string]time.Duration{"": 720 * time.Hour, "views": 24 * time.Hour, "audit": 0}, s.DedupeRetentions())
 }
 
 // TestStore_SeedIsValid pins that the shipped starter directory passes its

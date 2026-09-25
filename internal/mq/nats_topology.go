@@ -34,6 +34,11 @@ type NATSTopology struct {
 	// window must cover every attempt (minDuplicateWindow), so a retried
 	// publish is not stored twice.
 	PublishTimeout time.Duration
+	// DedupeLease is the longest a dedupe claim stays pending (dedupe.lease);
+	// 0 skips its rule. An uncertain publish's claim lapses after it, and the
+	// retry is published under the same idempotency key, so a partition's
+	// duplicate window must still hold the first copy by then.
+	DedupeLease time.Duration
 	// AckWait, MaxAckPending and Prefetch are what the ingest worker asks of
 	// the durable (internal/ingest/worker.go, which imports this package).
 	AckWait       time.Duration
@@ -361,6 +366,9 @@ func (v *topologyVerifier) partition(ctx context.Context, p int) (string, error)
 	}
 	if cfg.Duplicates < t.minDuplicateWindow() {
 		req("duplicate_window", "is %s; must be at least %s (every attempt of a retried publish), so it is stored once", cfg.Duplicates, t.minDuplicateWindow())
+	}
+	if t.DedupeLease > 0 && cfg.Duplicates < t.DedupeLease {
+		req("duplicate_window", "is %s; must be at least dedupe.lease (%s), so the retry of a publish whose outcome was unknown is stored once", cfg.Duplicates, t.DedupeLease)
 	}
 	if cfg.NoAck {
 		req("no_ack", "is set; publishes must be acknowledged")

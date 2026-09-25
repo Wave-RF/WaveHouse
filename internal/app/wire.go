@@ -667,6 +667,7 @@ func (a *App) wireNATSMQ(ctx context.Context) error {
 			IngestConsumer: n.IngestConsumer,
 			HistoryStream:  n.HistoryStream,
 			PublishTimeout: n.PublishTimeout,
+			DedupeLease:    a.dedupeLease(),
 		},
 		ConnectTimeout: n.ConnectTimeout,
 		TopologyWait:   n.TopologyWait,
@@ -675,7 +676,45 @@ func (a *App) wireNATSMQ(ctx context.Context) error {
 		return fmt.Errorf("mq open: %w", err)
 	}
 	a.adoptMQ(broker)
+	if !a.cfg.Has(config.RoleAPI) {
+		return nil // dedupe runs on the API path only
+	}
+	window, err := broker.DuplicateWindow(ctx)
+	if err != nil {
+		slog.Warn("mq: could not read the partitions' duplicate window; dedupe retention is not checked against it", "error", err)
+		return nil
+	}
+	a.warnShortRetention(window)
+	a.tenants.AfterAdopt(func([]tenant.ID) { a.warnShortRetention(window) })
 	return nil
+}
+
+// dedupeLease is the lease ingest runs with: dedupe.lease, or the default for 0.
+func (a *App) dedupeLease() time.Duration {
+	if l := a.cfg.Dedupe.Lease; l > 0 {
+		return l
+	}
+	return dedupe.DefaultLease
+}
+
+// warnShortRetention logs each served tenant with dedupe on whose finite
+// retention, default or per table, is under the operator's duplicate window.
+// settings refuses one under the embedded window; a longer operator window
+// can't be seen there. Such an id re-sent after it expires but inside the
+// window is claimed again, then dropped by the queue while the client hears
+// it was accepted.
+func (a *App) warnShortRetention(window time.Duration) {
+	for id, store := range a.tenants.All() {
+		if !store.DedupeEnabled() {
+			continue
+		}
+		for table, r := range store.DedupeRetentions() {
+			if r > 0 && r < window {
+				slog.Warn("dedupe retention is shorter than the nats partitions' duplicate_window: an id re-sent between the two is dropped by the queue while the client is told it was accepted; use a retention of at least the window, or \"0\"",
+					"tenant", id, "table", table, "retention", r, "duplicate_window", window)
+			}
+		}
+	}
 }
 
 // adoptMQ makes broker the process's MQ, closed with it.
