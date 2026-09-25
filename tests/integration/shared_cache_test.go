@@ -48,7 +48,10 @@ func startRedis(t *testing.T) (testcontainers.Container, string) {
 			HostConfigModifier: func(hc *container.HostConfig) {
 				hc.Tmpfs = map[string]string{"/data": ""}
 			},
-			WaitingFor: wait.ForLog("Ready to accept connections").WithStartupTimeout(90 * time.Second),
+			WaitingFor: wait.ForAll(
+				wait.ForLog("Ready to accept connections"),
+				wait.ForListeningPort("6379/tcp"),
+			).WithDeadline(90 * time.Second),
 		},
 		Started: true,
 	})

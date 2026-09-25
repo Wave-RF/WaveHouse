@@ -433,7 +433,12 @@ func startNATS(t *testing.T) string {
 			Files: []testcontainers.ContainerFile{{
 				Reader: bytes.NewReader(conf), ContainerFilePath: "/etc/nats/nats-server.conf", FileMode: 0o644,
 			}},
-			WaitingFor: wait.ForLog("Server is ready").WithStartupTimeout(60 * time.Second),
+			// The log line alone can precede the host port's forwarding when
+			// several containers start at once.
+			WaitingFor: wait.ForAll(
+				wait.ForLog("Server is ready"),
+				wait.ForListeningPort("4222/tcp"),
+			).WithDeadline(60 * time.Second),
 		},
 		Started: true,
 	})
