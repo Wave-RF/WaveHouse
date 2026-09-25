@@ -633,7 +633,7 @@ func (a *App) wireCache() error {
 // refuses a backend with no case, so reaching it means a Config built by hand
 // without one (the zero value is not the default), or a case missing here.
 func unreachableBackend[T ~string](key string, got T) error {
-	return fmt.Errorf("%s %q has no wiring: a Config built without config.Load must name every backend", key, got)
+	return fmt.Errorf("%s %q has no wiring: a Config built without config.Load must name the backend of every layer it wires", key, got)
 }
 
 // wireSweeper adds the active sweeper — purges messages that are both

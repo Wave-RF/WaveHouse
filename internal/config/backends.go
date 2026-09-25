@@ -71,12 +71,12 @@ func (d Dedupe) validate() error {
 	return checkBackend("dedupe.backend", "WH_DEDUPE_BACKEND", d.Backend, dedupeBackends)
 }
 
-// CoordBackend names the lease implementation singleton work (the sweeper)
-// is elected through.
+// CoordBackend names where leases for singleton work (the sweeper) are held.
+// Nothing reads it yet: the lease layer (#613) wires it.
 type CoordBackend string
 
-// CoordLocal holds leases in this process: correct while no other process
-// shares its queue.
+// CoordLocal holds leases in this process, which is enough while no other
+// process shares its queue.
 const CoordLocal CoordBackend = "local"
 
 var coordBackends = []CoordBackend{CoordLocal}
