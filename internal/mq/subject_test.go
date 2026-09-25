@@ -43,7 +43,7 @@ func TestSubject_Golden(t *testing.T) {
 // so a message it queued reads as the same topic.
 func TestParseTopicKey_LenientTokens(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, Topic{Tenant: "a", Table: "b-c", Scope: "d.e"}, parseTopicKey("a.b-c.d%2ee"))
+	assert.Equal(t, Topic{Tenant: "a", Table: "b~c", Scope: "d.e"}, parseTopicKey("a.b~c.d%2ee"))
 	assert.Equal(t, parseTopicKey("a.table-with-dashes.org-1"), parseTopicKey("a.table%2Dwith%2Ddashes.org%2D1"))
 }
 
