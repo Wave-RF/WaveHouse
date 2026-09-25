@@ -320,6 +320,7 @@ var cases = []struct {
 			{Table: "\xff\xfe", ID: "e1"},
 			{Table: "tab\tle \n", ID: "e1"},
 			{Table: "a/b", ID: "c"},
+			{Table: "a/b", ID: "d"},
 			{Table: "t", ID: "%23x"},
 		}
 		fresh := []dedupe.Key{
@@ -329,6 +330,7 @@ var cases = []struct {
 			{Table: "\xff", ID: "\xfee1"},
 			{Table: "tab\tle", ID: " \ne1"},
 			{Table: "a%2Fb", ID: "c"},
+			{Table: "a", ID: "b/d"},
 			{Table: "t", ID: "#x"},
 		}
 		first := reserve(t, d, long, seen...)
