@@ -76,23 +76,52 @@ func (s *Store) DedupeEnabled() bool {
 	return *s.doc().Config.Dedupe.Enabled
 }
 
+// Dedupe is a table's effective dedupe settings.
+type Dedupe struct {
+	Enabled   bool
+	IDField   string
+	RequireID bool
+	// Retention is how long a committed id stays a duplicate; 0 is forever.
+	Retention time.Duration
+}
+
 // DedupeFor resolves the effective dedupe settings for a table: the switch,
 // then the table override for each field it names, the global value
-// otherwise. All three resolve from one snapshot load, so a reload can never
-// hand a record the id_field of one document and the require_id (or enabled)
-// of another.
-func (s *Store) DedupeFor(table string) (enabled bool, idField string, requireID bool) {
+// otherwise. Every field resolves from one snapshot load, so a reload can
+// never hand a record the id_field of one document and the require_id,
+// retention or switch of another.
+func (s *Store) DedupeFor(table string) Dedupe {
 	d := s.doc().Config.Dedupe
-	enabled, idField, requireID = *d.Enabled, *d.IDField, *d.RequireID
+	out := Dedupe{Enabled: *d.Enabled, IDField: *d.IDField, RequireID: *d.RequireID}
+	retention := *d.Retention
 	if td, ok := d.Tables[table]; ok {
 		if td.IDField != nil {
-			idField = *td.IDField
+			out.IDField = *td.IDField
 		}
 		if td.RequireID != nil {
-			requireID = *td.RequireID
+			out.RequireID = *td.RequireID
+		}
+		if td.Retention != nil {
+			retention = *td.Retention
 		}
 	}
-	return enabled, idField, requireID
+	// Validate has parsed it already.
+	out.Retention, _ = time.ParseDuration(retention)
+	return out
+}
+
+// DedupeRetentions is the effective retention of the default (key "") and of
+// every table override, from one snapshot.
+func (s *Store) DedupeRetentions() map[string]time.Duration {
+	d := s.doc().Config.Dedupe
+	out := map[string]time.Duration{}
+	out[""], _ = time.ParseDuration(*d.Retention)
+	for table, td := range d.Tables {
+		if td.Retention != nil {
+			out[table], _ = time.ParseDuration(*td.Retention)
+		}
+	}
+	return out
 }
 
 // ClickHouse is the adopted connection wiring, resolved as one value from

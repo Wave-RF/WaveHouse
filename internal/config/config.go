@@ -1,8 +1,11 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/ilyakaznacheev/cleanenv"
@@ -16,10 +19,20 @@ type Config struct {
 	// Subdirectory names are conventions, not config — one knob, one mount.
 	// In a container this MUST resolve to a host-backed volume; the relative
 	// `./data` default is fine for local binary use only.
-	DataDir    string     `yaml:"data_dir" env:"WH_DATA_DIR" env-default:"./data"`
+	DataDir string `yaml:"data_dir" env:"WH_DATA_DIR"`
+	// Roles are the components this process runs (every role by default);
+	// a Deployment per role differs only in this. See Role.
+	Roles []Role `yaml:"roles" env:"WH_ROLES"`
+	// InstanceID names this process: logged at boot, and the holder a
+	// coord.backend=nats lease names. Empty resolves to <hostname>-<8 hex> at
+	// Load.
+	InstanceID string     `yaml:"instance_id" env:"WH_INSTANCE_ID"`
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
+	MQ         MQ         `yaml:"mq"`
 	Cache      Cache      `yaml:"cache"`
+	Dedupe     Dedupe     `yaml:"dedupe"`
+	Coord      Coord      `yaml:"coord"`
 	Auth       Auth       `yaml:"auth"`
 	OTel       OTel       `yaml:"otel"`
 	Prometheus Prometheus `yaml:"prometheus"`
@@ -63,19 +76,19 @@ type Settings struct {
 // variables read by the OpenTelemetry SDK, not WaveHouse config. See
 // docs/src/content/docs/configuration.mdx.
 type OTel struct {
-	Enabled bool        `yaml:"enabled" env:"WH_OTEL_ENABLED" env-default:"false"`
+	Enabled bool        `yaml:"enabled" env:"WH_OTEL_ENABLED"`
 	Traces  OTelTraces  `yaml:"traces"`
 	Metrics OTelMetrics `yaml:"metrics"`
 	Logs    OTelLogs    `yaml:"logs"`
 }
 
 type OTelTraces struct {
-	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_TRACES_ENABLED" env-default:"true"`
-	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_TRACES_SAMPLE_RATE" env-default:"1.0"`
+	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_TRACES_ENABLED"`
+	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_TRACES_SAMPLE_RATE"`
 }
 
 type OTelMetrics struct {
-	Enabled bool `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
+	Enabled bool `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED"`
 }
 
 // Prometheus controls a Prometheus exposition endpoint served alongside (or
@@ -94,9 +107,9 @@ type OTelMetrics struct {
 // port spins up a dedicated HTTP listener — useful for firewalling metrics
 // off the public API surface in production.
 type Prometheus struct {
-	Enabled bool   `yaml:"enabled" env:"WH_PROMETHEUS_ENABLED" env-default:"false"`
-	Path    string `yaml:"path" env:"WH_PROMETHEUS_PATH" env-default:"/metrics"`
-	Port    int    `yaml:"port" env:"WH_PROMETHEUS_PORT" env-default:"0"`
+	Enabled bool   `yaml:"enabled" env:"WH_PROMETHEUS_ENABLED"`
+	Path    string `yaml:"path" env:"WH_PROMETHEUS_PATH"`
+	Port    int    `yaml:"port" env:"WH_PROMETHEUS_PORT"`
 }
 
 // OTelLogs sample rate applies to OTLP export of DEBUG/INFO only.
@@ -105,16 +118,16 @@ type Prometheus struct {
 // records regardless of this rate (sampling for scraped-log pipelines like
 // Loki/Promtail belongs at the scraper, not the application).
 type OTelLogs struct {
-	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_LOGS_ENABLED" env-default:"true"`
-	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_LOGS_SAMPLE_RATE" env-default:"1.0"`
+	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_LOGS_ENABLED"`
+	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_LOGS_SAMPLE_RATE"`
 }
 
 // Server holds listener wiring. The CORS allowlist is a tenant tunable and
 // lives in the settings directory's config.json (internal/settings), as do
 // the SSE keepalive and gap-window knobs (stream.*).
 type Server struct {
-	Port            int `yaml:"port" env:"WH_SERVER_PORT" env-default:"8080"`
-	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT" env-default:"10"`
+	Port            int `yaml:"port" env:"WH_SERVER_PORT"`
+	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT"`
 }
 
 // ClickHouse holds the password and the connection ceiling. The wiring —
@@ -129,14 +142,7 @@ type ClickHouse struct {
 	// MaxTotalConns caps the native connections the process may hold open
 	// across its pools: the settings directory's clickhouse.max_open_conns
 	// must not exceed it. 0, the default, is no ceiling.
-	MaxTotalConns int `yaml:"max_total_conns" env:"WH_CH_MAX_TOTAL_CONNS" env-default:"0"`
-}
-
-// Cache sizes the in-process L1 cache. The time-range bucket structured
-// queries normalize to is a settings-directory key
-// (query.timestamp_bucket_seconds) — query shaping, not process memory.
-type Cache struct {
-	L1MaxCost int64 `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
+	MaxTotalConns int `yaml:"max_total_conns" env:"WH_CH_MAX_TOTAL_CONNS"`
 }
 
 // Auth holds the authentication secrets. The verifier wiring — `jwks_url`,
@@ -157,6 +163,116 @@ type Cache struct {
 type Auth struct {
 	JWTSecret   string `yaml:"jwt_secret" env:"WH_AUTH_JWT_SECRET"`
 	OperatorKey string `yaml:"operator_key" env:"WH_AUTH_OPERATOR_KEY"`
+}
+
+// defaults is the one definition of every boot-config default: Load starts
+// from it, then decodes the YAML over it, then applies WH_* variables over
+// that. A key the file sets — to false, 0 or "" too — therefore wins over its
+// default, which an `env-default` tag cannot do: cleanenv applies those after
+// the decode, to any field still zero, so it can't tell an explicit zero from
+// an absent key (#631). A key absent here defaults to its zero value.
+// configuration.mdx documents these; a config test pins the two together.
+func defaults() Config {
+	return Config{
+		DataDir: "./data",
+		Roles:   AllRoles(),
+		Server:  Server{Port: 8080, ShutdownTimeout: 10},
+		MQ:      MQ{Backend: MQEmbedded, NATS: defaultMQNATS()},
+		Cache:   Cache{Backend: CacheLocal, L1MaxCost: 64 << 20, Redis: defaultCacheRedis()},
+		Dedupe:  defaultDedupe(),
+		Coord:   Coord{Backend: CoordLocal},
+		OTel: OTel{
+			Traces:  OTelTraces{Enabled: true, SampleRate: 1.0},
+			Metrics: OTelMetrics{Enabled: true},
+			Logs:    OTelLogs{Enabled: true, SampleRate: 1.0},
+		},
+		Prometheus: Prometheus{Path: "/metrics"},
+	}
+}
+
+// Role is one part of the work a process can run.
+type Role string
+
+const (
+	// RoleAPI serves the HTTP API and everything that answers it: schema
+	// discovery, the auth verifiers, the dedupe stores, and the SSE hub with
+	// its bridge off the queue and its keepalive wheel. Per process: every
+	// API process runs its own.
+	RoleAPI Role = "api"
+	// RoleIngest runs the ingest worker, queue to ClickHouse. Every ingest
+	// process consumes the one shared durable, competing for messages.
+	RoleIngest Role = "ingest"
+	// RoleSweeper runs the sweeper, one per queue, under the sweeper lease.
+	RoleSweeper Role = "sweeper"
+)
+
+var allRoles = []Role{RoleAPI, RoleIngest, RoleSweeper}
+
+// AllRoles is every role, the default: one process runs all the work.
+func AllRoles() []Role { return slices.Clone(allRoles) }
+
+// Has reports whether this process runs role r.
+func (c *Config) Has(r Role) bool { return slices.Contains(c.Roles, r) }
+
+// splitsCache reports whether this process runs exactly one of api and
+// ingest: the ingest worker invalidates the cache the API reads, so that
+// pair must reach one cache. A process running neither holds no cache.
+func (c *Config) splitsCache() bool { return c.Has(RoleAPI) != c.Has(RoleIngest) }
+
+func (c *Config) validateRoles() error {
+	if len(c.Roles) == 0 {
+		return fmt.Errorf("roles (WH_ROLES) is empty: name at least one of %s", joinRoles(allRoles))
+	}
+	for i, r := range c.Roles {
+		switch {
+		case r == "":
+			return fmt.Errorf("roles (WH_ROLES) %s has an empty entry", joinRoles(c.Roles))
+		case !slices.Contains(allRoles, r):
+			return fmt.Errorf("roles (WH_ROLES) %q is not a role; valid: %s", r, joinRoles(allRoles))
+		case slices.Contains(c.Roles[:i], r):
+			return fmt.Errorf("roles (WH_ROLES) names %q twice", r)
+		}
+	}
+	return nil
+}
+
+// validateTopology refuses a role set the selected backends cannot serve.
+func (c *Config) validateTopology() error {
+	if c.MQ.Backend == MQEmbedded && len(c.Roles) != len(allRoles) {
+		return fmt.Errorf("roles %s with mq.backend=embedded: the embedded MQ lives inside this process, and a process without it cannot reach its queue — run every role (%s), or set a shared mq.backend", joinRoles(c.Roles), joinRoles(allRoles))
+	}
+	if c.Coord.Backend == CoordNATS && c.MQ.Backend != MQNATS {
+		return fmt.Errorf("coord.backend=nats with mq.backend=%s: the NATS leases ride mq.nats's connection — set mq.backend=nats, or coord.backend=local", c.MQ.Backend)
+	}
+	// Only the sweeper runs under a lease today, so only a process running it
+	// needs a shared one.
+	if c.MQ.Backend == MQNATS && c.Coord.Backend == CoordLocal && c.Has(RoleSweeper) {
+		return fmt.Errorf("coord.backend=local with mq.backend=nats in a process running the sweeper: a shared queue needs a shared lease, or every replica sweeps it — set coord.backend=nats")
+	}
+	if c.splitsCache() && c.Cache.Backend == CacheLocal {
+		return fmt.Errorf("roles %s with cache.backend=local: api and ingest run in different processes, and the ingest worker's cache invalidation would never reach the API's cache — run api and ingest together, or set a shared cache.backend", joinRoles(c.Roles))
+	}
+	return nil
+}
+
+func joinRoles(roles []Role) string {
+	names := make([]string, len(roles))
+	for i, r := range roles {
+		names[i] = string(r)
+	}
+	return strings.Join(names, ",")
+}
+
+// defaultInstanceID is <hostname>-<8 hex>: the hostname for a reader (a
+// pod's name), the random suffix so a restarted process is a new instance.
+func defaultInstanceID() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "wavehouse"
+	}
+	var suffix [4]byte
+	_, _ = rand.Read(suffix[:]) // never fails (crypto/rand)
+	return host + "-" + hex.EncodeToString(suffix[:])
 }
 
 // Validate checks the loaded configuration for logical consistency.
@@ -224,7 +340,13 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	return nil
+	if err := c.validateRoles(); err != nil {
+		return err
+	}
+	if err := c.validateBackends(); err != nil {
+		return err
+	}
+	return c.validateTopology()
 }
 
 // Load reads config from a YAML file (if it exists) with env var overrides.
@@ -239,7 +361,7 @@ func Load(path string) (*Config, error) {
 	if err := rejectUnboundEnv(os.Environ()); err != nil {
 		return nil, err
 	}
-	var cfg Config
+	cfg := defaults()
 	if _, err := os.Stat(path); err == nil {
 		if err := cleanenv.ReadConfig(path, &cfg); err != nil {
 			return nil, fmt.Errorf("read config: %w", err)
@@ -253,6 +375,15 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
+	for i, r := range cfg.Roles {
+		cfg.Roles[i] = Role(strings.TrimSpace(string(r)))
+	}
+	for i, u := range cfg.MQ.NATS.URLs {
+		cfg.MQ.NATS.URLs[i] = strings.TrimSpace(u)
+	}
+	if cfg.InstanceID = strings.TrimSpace(cfg.InstanceID); cfg.InstanceID == "" {
+		cfg.InstanceID = defaultInstanceID()
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}

@@ -182,12 +182,15 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// SafeEncodeToken("") is "", so this is a no-op while scope is empty.
 	deps := []cache.Namespace{{Tenant: store.Tenant(), Table: safeTableName, Scope: query.SafeEncodeToken(scope)}}
 
-	// Try cache.
+	// Try cache. The snapshot is of the versions before the query runs, so a
+	// write landing mid-query orphans the fill (#382).
+	var snap cache.Snapshot
 	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey, deps); err == nil && data != nil {
+		var entry cache.Entry
+		if entry, snap, _ = h.Cache.Lookup(r.Context(), store.Tenant(), cacheKey, deps); entry.Value != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
-			_, _ = w.Write(data) //nolint:gosec // G705: the tenant id on the key only selects the entry; the bytes are JSON the handler marshalled from ClickHouse rows
+			_, _ = w.Write(entry.Value)
 			return
 		}
 	}
@@ -205,6 +208,16 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		}
 
 		queryCtx, cancel := context.WithTimeout(r.Context(), timeout)
+		if perms.Select.MaxExecutionTime > 0 {
+			// ClickHouse enforces the role's cap (max_execution_time below)
+			// and answers an overrun with TIMEOUT_EXCEEDED. A context
+			// deadline would let the driver raise that setting to
+			// deadline+5s and turn every overrun into a bare
+			// DeadlineExceeded — indistinguishable from a pool wait or a
+			// dial timeout, which are outages, not the caller's cost.
+			cancel()
+			queryCtx, cancel = cancelAfter(r.Context(), timeout+capBackstop)
+		}
 		defer cancel()
 
 		// Enforce the role's resource caps server-side, not just via the client
@@ -244,12 +257,13 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		ttl := cache.QueryTimeToTTL(queryDuration)
 
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, deps, data, ttl)
+			_ = h.Cache.Set(r.Context(), snap, data, ttl)
 		}
 		return data, nil
 	})
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		caps := queryCaps{time: perms.Select.MaxExecutionTime > 0, memory: perms.Select.MaxMemoryUsage > 0}
+		writeCHError(w, r, err, err.Error(), http.StatusInternalServerError, caps)
 		return
 	}
 

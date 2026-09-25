@@ -1,0 +1,411 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"reflect"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
+)
+
+// Each layer's implementation is chosen here, once, at boot: `<layer>.backend`
+// names it, and the default is today's in-process one. Settings for one
+// backend go in `<layer>.<backend>`, a sub-block read only when that backend
+// is selected. Adding a backend is its constant in the layer's list, a case
+// in the layer's validate for its sub-block, and a case in the layer's
+// wire function in internal/app — nothing else in Validate changes.
+
+// MQBackend names the message queue implementation.
+type MQBackend string
+
+// MQEmbedded is the NATS JetStream server inside this process, under
+// <data_dir>/nats.
+const MQEmbedded MQBackend = "embedded"
+
+// MQNATS is a NATS JetStream cluster the operator runs, holding the streams
+// and durables deployments/nats describes; every process naming it shares
+// one queue. Its settings are the mq.nats block.
+const MQNATS MQBackend = "nats"
+
+var mqBackends = []MQBackend{MQEmbedded, MQNATS}
+
+// MQ selects the message queue. The per-tenant byte budget, mq.max_bytes_gb,
+// is a settings-directory key, not this block's.
+type MQ struct {
+	Backend MQBackend `yaml:"backend" env:"WH_MQ_BACKEND"`
+	// NATS is read only when Backend is nats.
+	NATS MQNATSConfig `yaml:"nats"`
+}
+
+// MQNATSConfig is how to reach the operator's NATS and what topology to
+// expect there (mq.NATSConfig, which internal/app builds from it). Secrets
+// are file paths only: nothing inline.
+type MQNATSConfig struct {
+	URLs []string `yaml:"urls" env:"WH_MQ_NATS_URLS"`
+	// Name is the connection name the server reports; empty is
+	// wavehouse-<hostname>.
+	Name string `yaml:"name" env:"WH_MQ_NATS_NAME"`
+	// CredsFile, NKeySeedFile and User are exclusive: one way to
+	// authenticate, or none.
+	CredsFile    string    `yaml:"creds_file" env:"WH_MQ_NATS_CREDS_FILE"`
+	NKeySeedFile string    `yaml:"nkey_seed_file" env:"WH_MQ_NATS_NKEY_SEED_FILE"`
+	User         string    `yaml:"user" env:"WH_MQ_NATS_USER"`
+	PasswordFile string    `yaml:"password_file" env:"WH_MQ_NATS_PASSWORD_FILE"`
+	TLS          MQNATSTLS `yaml:"tls"`
+	// JSDomain is the JetStream domain, for a leafnode or hub-and-spoke
+	// deployment.
+	JSDomain       string `yaml:"js_domain" env:"WH_MQ_NATS_JS_DOMAIN"`
+	SubjectPrefix  string `yaml:"subject_prefix" env:"WH_MQ_NATS_SUBJECT_PREFIX"`
+	Partitions     int    `yaml:"partitions" env:"WH_MQ_NATS_PARTITIONS"`
+	IngestConsumer string `yaml:"ingest_consumer" env:"WH_MQ_NATS_INGEST_CONSUMER"`
+	// HistoryStream has no subjects to be found by, so it is named; empty is
+	// <SUBJECT_PREFIX>_HISTORY, the name the generated manifests give it.
+	HistoryStream  string        `yaml:"history_stream" env:"WH_MQ_NATS_HISTORY_STREAM"`
+	ConnectTimeout time.Duration `yaml:"connect_timeout" env:"WH_MQ_NATS_CONNECT_TIMEOUT"`
+	PublishTimeout time.Duration `yaml:"publish_timeout" env:"WH_MQ_NATS_PUBLISH_TIMEOUT"`
+	TopologyWait   time.Duration `yaml:"topology_wait" env:"WH_MQ_NATS_TOPOLOGY_WAIT"`
+}
+
+// MQNATSTLS is the client side of TLS to the NATS servers.
+type MQNATSTLS struct {
+	CAFile         string `yaml:"ca_file" env:"WH_MQ_NATS_TLS_CA_FILE"`
+	CertFile       string `yaml:"cert_file" env:"WH_MQ_NATS_TLS_CERT_FILE"`
+	KeyFile        string `yaml:"key_file" env:"WH_MQ_NATS_TLS_KEY_FILE"`
+	ServerName     string `yaml:"server_name" env:"WH_MQ_NATS_TLS_SERVER_NAME"`
+	HandshakeFirst bool   `yaml:"handshake_first" env:"WH_MQ_NATS_TLS_HANDSHAKE_FIRST"`
+}
+
+// defaultMQNATS is the mq.nats part of defaults()
+// (TestLoad_MQNATSDefaults pins what Load returns to it).
+func defaultMQNATS() MQNATSConfig {
+	return MQNATSConfig{
+		SubjectPrefix: "wh", Partitions: 1, IngestConsumer: "wh-ingest",
+		ConnectTimeout: 5 * time.Second, PublishTimeout: 5 * time.Second, TopologyWait: time.Minute,
+	}
+}
+
+// natsSubjectPrefix is internal/mq's grammar for the prefix: one subject
+// token.
+var natsSubjectPrefix = regexp.MustCompile(`^[a-z0-9_-]+$`)
+
+func (m MQ) validate() error {
+	if err := checkBackend("mq.backend", "WH_MQ_BACKEND", m.Backend, mqBackends); err != nil {
+		return err
+	}
+	if m.Backend == MQNATS {
+		return m.NATS.validate()
+	}
+	return nil
+}
+
+func (n MQNATSConfig) validate() error {
+	if len(n.URLs) == 0 {
+		return errors.New("mq.nats.urls (WH_MQ_NATS_URLS) is required with mq.backend=nats")
+	}
+	for _, u := range n.URLs {
+		if u == "" {
+			return fmt.Errorf("mq.nats.urls (WH_MQ_NATS_URLS) %q has an empty entry", strings.Join(n.URLs, ","))
+		}
+		// A user, password or token in the URL is an inline secret, and would
+		// also sidestep the one-way-to-authenticate check below.
+		if strings.Contains(u, "@") {
+			return errors.New("mq.nats.urls (WH_MQ_NATS_URLS) must not carry credentials (an '@' in a URL): use password_file, nkey_seed_file or creds_file")
+		}
+	}
+	if !natsSubjectPrefix.MatchString(n.SubjectPrefix) {
+		return fmt.Errorf("mq.nats.subject_prefix (WH_MQ_NATS_SUBJECT_PREFIX) %q must be one token of [a-z0-9_-]", n.SubjectPrefix)
+	}
+	if n.Partitions < 1 {
+		return fmt.Errorf("mq.nats.partitions (WH_MQ_NATS_PARTITIONS) must be at least 1, got %d", n.Partitions)
+	}
+	if n.IngestConsumer == "" {
+		return errors.New("mq.nats.ingest_consumer (WH_MQ_NATS_INGEST_CONSUMER) must not be empty")
+	}
+	auth := 0
+	for _, set := range []string{n.CredsFile, n.NKeySeedFile, n.User} {
+		if set != "" {
+			auth++
+		}
+	}
+	if auth > 1 {
+		return errors.New("mq.nats: set at most one of creds_file, nkey_seed_file and user")
+	}
+	if n.PasswordFile != "" && n.User == "" {
+		return errors.New("mq.nats.password_file needs mq.nats.user")
+	}
+	if (n.TLS.CertFile == "") != (n.TLS.KeyFile == "") {
+		return errors.New("mq.nats.tls: cert_file and key_file come as a pair")
+	}
+	for _, d := range []struct {
+		key string
+		v   time.Duration
+	}{
+		{"connect_timeout (WH_MQ_NATS_CONNECT_TIMEOUT)", n.ConnectTimeout},
+		{"publish_timeout (WH_MQ_NATS_PUBLISH_TIMEOUT)", n.PublishTimeout},
+		{"topology_wait (WH_MQ_NATS_TOPOLOGY_WAIT)", n.TopologyWait},
+	} {
+		if d.v <= 0 {
+			return fmt.Errorf("mq.nats.%s must be positive, got %s", d.key, d.v)
+		}
+	}
+	return nil
+}
+
+// isSet reports whether the block says anything beyond its defaults (or the
+// zero value a Config built without Load carries).
+func (n MQNATSConfig) isSet() bool {
+	return !reflect.DeepEqual(n, MQNATSConfig{}) && !reflect.DeepEqual(n, defaultMQNATS())
+}
+
+// CacheBackend names the query-result cache implementation.
+type CacheBackend string
+
+const (
+	// CacheLocal is the in-process Ristretto cache, sized by
+	// cache.l1_max_cost.
+	CacheLocal CacheBackend = "local"
+	// CacheRedis is one Redis-compatible server shared by every process,
+	// configured by cache.redis.
+	CacheRedis CacheBackend = "redis"
+)
+
+var cacheBackends = []CacheBackend{CacheLocal, CacheRedis}
+
+// Cache selects and sizes the query-result cache. The time-range bucket
+// structured queries normalize to is a settings-directory key
+// (query.timestamp_bucket_seconds) — query shaping, not process memory.
+type Cache struct {
+	Backend   CacheBackend     `yaml:"backend" env:"WH_CACHE_BACKEND"`
+	L1MaxCost int64            `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST"`
+	Redis     CacheRedisConfig `yaml:"redis"`
+}
+
+func (c Cache) validate() error {
+	if err := checkBackend("cache.backend", "WH_CACHE_BACKEND", c.Backend, cacheBackends); err != nil {
+		return err
+	}
+	if c.Backend == CacheRedis {
+		return c.Redis.validate()
+	}
+	return nil
+}
+
+// DedupeBackend names where ingest dedupe keeps the ids it has seen.
+type DedupeBackend string
+
+const (
+	// DedupePebble is the Pebble instance inside this process, under
+	// <data_dir>/pebble, opened while any tenant has dedupe on. Seen ids are
+	// per process.
+	DedupePebble DedupeBackend = "pebble"
+	// DedupeDynamoDB is one DynamoDB table every tenant and every process
+	// shares, configured by dedupe.dynamodb.
+	DedupeDynamoDB DedupeBackend = "dynamodb"
+)
+
+var dedupeBackends = []DedupeBackend{DedupePebble, DedupeDynamoDB}
+
+// Dedupe selects the dedupe store. Whether a tenant dedupes, on which field,
+// and for how long are settings-directory keys, not this block's.
+type Dedupe struct {
+	Backend DedupeBackend `yaml:"backend" env:"WH_DEDUPE_BACKEND"`
+	// Lease is how long a claimed id stays pending while its record is
+	// published; a claim its request never settles lapses after it.
+	Lease time.Duration `yaml:"lease" env:"WH_DEDUPE_LEASE"`
+	// ReserveConcurrency bounds the parallel calls one Reserve, Commit or
+	// Release makes to a remote backend. Pebble ignores it.
+	ReserveConcurrency int                  `yaml:"reserve_concurrency" env:"WH_DEDUPE_RESERVE_CONCURRENCY"`
+	DynamoDB           DedupeDynamoDBConfig `yaml:"dynamodb"`
+}
+
+// DedupeDynamoDBConfig is the dynamodb backend's block, read only when it is
+// selected. Credentials are the AWS SDK's default chain (EKS Pod Identity,
+// IRSA, AWS_* variables), never keys here.
+type DedupeDynamoDBConfig struct {
+	// Table is the shared table; WaveHouse never creates it outside
+	// dynamodb-local. Required.
+	Table string `yaml:"table" env:"WH_DEDUPE_DYNAMODB_TABLE"`
+	// Region overrides the SDK chain's (AWS_REGION).
+	Region string `yaml:"region" env:"WH_DEDUPE_DYNAMODB_REGION"`
+	// Endpoint points the client at dynamodb-local.
+	Endpoint    string        `yaml:"endpoint" env:"WH_DEDUPE_DYNAMODB_ENDPOINT"`
+	Timeout     time.Duration `yaml:"timeout" env:"WH_DEDUPE_DYNAMODB_TIMEOUT"`
+	MaxAttempts int           `yaml:"max_attempts" env:"WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS"`
+	RetryMode   string        `yaml:"retry_mode" env:"WH_DEDUPE_DYNAMODB_RETRY_MODE"`
+	// CreateTable creates the table at boot if it is missing. Development
+	// only: refused unless Endpoint is set.
+	CreateTable bool `yaml:"create_table" env:"WH_DEDUPE_DYNAMODB_CREATE_TABLE"`
+}
+
+// defaultDedupe is the dedupe part of defaults(). A zero lease, count or
+// timeout still reads as the default downstream (ingest, dedupe.DynamoConfig).
+func defaultDedupe() Dedupe {
+	return Dedupe{
+		Backend: DedupePebble, Lease: 30 * time.Second, ReserveConcurrency: 64,
+		DynamoDB: DedupeDynamoDBConfig{Timeout: 250 * time.Millisecond, MaxAttempts: 3, RetryMode: "standard"},
+	}
+}
+
+func (d Dedupe) validate() error {
+	if err := checkBackend("dedupe.backend", "WH_DEDUPE_BACKEND", d.Backend, dedupeBackends); err != nil {
+		return err
+	}
+	if d.Lease < 0 {
+		return fmt.Errorf("dedupe.lease (WH_DEDUPE_LEASE) must be >= 0, got %s", d.Lease)
+	}
+	if d.ReserveConcurrency < 0 {
+		return fmt.Errorf("dedupe.reserve_concurrency (WH_DEDUPE_RESERVE_CONCURRENCY) must be >= 0, got %d", d.ReserveConcurrency)
+	}
+	if d.Backend == DedupeDynamoDB {
+		return d.DynamoDB.validate()
+	}
+	return nil
+}
+
+func (d DedupeDynamoDBConfig) validate() error {
+	switch {
+	case strings.TrimSpace(d.Table) == "":
+		return errors.New("dedupe.dynamodb.table (WH_DEDUPE_DYNAMODB_TABLE) is required when dedupe.backend is dynamodb")
+	case d.Timeout < 0:
+		return fmt.Errorf("dedupe.dynamodb.timeout (WH_DEDUPE_DYNAMODB_TIMEOUT) must be >= 0, got %s", d.Timeout)
+	case d.MaxAttempts < 0:
+		return fmt.Errorf("dedupe.dynamodb.max_attempts (WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS) must be >= 0, got %d", d.MaxAttempts)
+	case d.RetryMode != "" && d.RetryMode != "standard" && d.RetryMode != "adaptive":
+		return fmt.Errorf("dedupe.dynamodb.retry_mode (WH_DEDUPE_DYNAMODB_RETRY_MODE) %q: want standard or adaptive", d.RetryMode)
+	case d.CreateTable && d.Endpoint == "":
+		return errors.New("dedupe.dynamodb.create_table (WH_DEDUPE_DYNAMODB_CREATE_TABLE) is for dynamodb-local only: set dedupe.dynamodb.endpoint, or create the table with your infrastructure code")
+	}
+	return nil
+}
+
+// CoordBackend names where leases for singleton work (the sweeper) are held.
+type CoordBackend string
+
+// CoordLocal holds leases in this process, which is enough while no other
+// process shares its queue.
+const CoordLocal CoordBackend = "local"
+
+// CoordNATS holds leases in a KV bucket on mq.nats's connection, so every
+// process on the shared queue contends for the same ones. It needs
+// mq.backend=nats; its settings are the coord.nats block.
+const CoordNATS CoordBackend = "nats"
+
+var coordBackends = []CoordBackend{CoordLocal, CoordNATS}
+
+// Coord selects the coordination layer.
+type Coord struct {
+	Backend CoordBackend `yaml:"backend" env:"WH_COORD_BACKEND"`
+	// NATS is read only when Backend is nats.
+	NATS CoordNATSConfig `yaml:"nats"`
+}
+
+// CoordNATSConfig names the operator's KV bucket. There is no connection
+// block: coord.backend=nats rides mq.nats's connection and credentials.
+type CoordNATSConfig struct {
+	// Bucket is the KV bucket the leases live in; empty is
+	// <mq.nats.subject_prefix>_coord, the name the generated manifests give it.
+	Bucket string `yaml:"bucket" env:"WH_COORD_NATS_BUCKET"`
+}
+
+// natsBucketName is JetStream's grammar for a KV bucket name.
+var natsBucketName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+func (c Coord) validate() error {
+	if err := checkBackend("coord.backend", "WH_COORD_BACKEND", c.Backend, coordBackends); err != nil {
+		return err
+	}
+	if c.Backend == CoordNATS && c.NATS.Bucket != "" && !natsBucketName.MatchString(c.NATS.Bucket) {
+		return fmt.Errorf("coord.nats.bucket (WH_COORD_NATS_BUCKET) %q must be a KV bucket name of [a-zA-Z0-9_-]", c.NATS.Bucket)
+	}
+	return nil
+}
+
+// checkBackend refuses a backend this build has no implementation for,
+// listing the ones it has. env repeats the struct tag's literal: a tag can't
+// reference a constant.
+func checkBackend[T ~string](key, env string, got T, valid []T) error {
+	if slices.Contains(valid, got) {
+		return nil
+	}
+	names := make([]string, len(valid))
+	for i, v := range valid {
+		names[i] = string(v)
+	}
+	return fmt.Errorf("%s (%s) %q is not a backend this build has; valid: %s", key, env, got, strings.Join(names, ", "))
+}
+
+// embeddedDuplicateWindow mirrors mq.EmbeddedDuplicateWindow, the embedded
+// ingest stream's duplicate window (#613 F2); config stays a leaf, so
+// TestEmbeddedDuplicateWindow_MatchesMQ pins the two. A lease longer than it
+// would let the republish of a publish whose outcome was unknown land twice.
+const embeddedDuplicateWindow = 2 * time.Minute
+
+// validateBackends checks every layer's backend and its sub-block, then the
+// rules that span two layers.
+func (c *Config) validateBackends() error {
+	for _, check := range []func() error{c.MQ.validate, c.Cache.validate, c.Dedupe.validate, c.Coord.validate} {
+		if err := check(); err != nil {
+			return err
+		}
+	}
+	if c.MQ.Backend == MQEmbedded && c.Dedupe.Lease > embeddedDuplicateWindow {
+		return fmt.Errorf("dedupe.lease (WH_DEDUPE_LEASE) %s exceeds the embedded mq's %s duplicate window: a claim must lapse before the queue forgets the publish it guards", c.Dedupe.Lease, embeddedDuplicateWindow)
+	}
+	return nil
+}
+
+// Distributed reports whether the message queue is shared with other
+// processes. The embedded one listens on no port, so while it is selected
+// every process is an island: nothing else can reach its queue.
+func (c *Config) Distributed() bool { return c.MQ.Backend != MQEmbedded }
+
+// NeedsDataDir reports whether a backend this process opens keeps state
+// under data_dir, and so whether boot must probe it (CheckDataDir). Only the
+// api role opens the dedupe stores.
+func (c *Config) NeedsDataDir() bool {
+	return c.MQ.Backend == MQEmbedded || (c.Has(RoleAPI) && c.Dedupe.Backend == DedupePebble)
+}
+
+// Warnings returns what a valid configuration is still likely to get wrong,
+// one line each, for boot to log at WARN. They are not errors: each is
+// harmless or correct for a single replica, and one process cannot count its
+// replicas.
+func (c *Config) Warnings() []string {
+	var out []string
+	if c.MQ.Backend != MQNATS && c.MQ.NATS.isSet() {
+		out = append(out, fmt.Sprintf("mq.nats is set but mq.backend=%s: the block is ignored", c.MQ.Backend))
+	}
+	if c.MQ.Backend == MQNATS {
+		// WARN although it is by design and fires on every nats boot: the
+		// key is required in every tenant's config.json, so an operator
+		// setting a budget there must hear it does nothing (#613 core G.3).
+		out = append(out, "mq.max_bytes_gb (settings directory) is not applied with mq.backend=nats: a tenant's queue is bounded by its partition stream's limits, which are the operator's")
+	}
+	if c.Coord.Backend != CoordNATS && c.Coord.NATS != (CoordNATSConfig{}) {
+		out = append(out, fmt.Sprintf("coord.nats is set but coord.backend=%s: the block is ignored", c.Coord.Backend))
+	}
+	if c.Cache.Backend == CacheRedis && c.Cache.Redis.TLS.InsecureSkipVerify {
+		out = append(out, "cache.redis.tls.insecure_skip_verify is on: the cache accepts any certificate, so whoever can intercept the connection can read and replace cached query results")
+	}
+	if c.Cache.Backend != CacheRedis && c.Cache.Redis.hasAddrs() {
+		out = append(out, "cache.redis.addrs is set but cache.backend is "+string(c.Cache.Backend)+": the redis block is not read; set cache.backend=redis to share the cache")
+	}
+	if !c.Distributed() {
+		return out
+	}
+	// Both are the api role's: a process without it opens neither a cache it
+	// reads nor a dedupe store (a split that would need the cache shared is
+	// refused, validateTopology).
+	if !c.Has(RoleAPI) {
+		return out
+	}
+	if c.Cache.Backend == CacheLocal {
+		out = append(out, "cache.backend=local with a shared mq.backend is correct for one replica only: an event ingested on another replica never invalidates this one's cache, so its reads stay stale until the cached entry expires")
+	}
+	if c.Dedupe.Backend == DedupePebble {
+		out = append(out, "dedupe.backend=pebble with a shared mq.backend dedupes per replica only: an id seen by another replica is not seen by this one")
+	}
+	return out
+}

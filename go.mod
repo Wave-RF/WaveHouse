@@ -18,6 +18,11 @@ require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.48.0
 	github.com/MicahParks/jwkset v0.11.3
 	github.com/MicahParks/keyfunc/v3 v3.8.2
+	github.com/aws/aws-sdk-go-v2 v1.47.1
+	github.com/aws/aws-sdk-go-v2/config v1.33.6
+	github.com/aws/aws-sdk-go-v2/credentials v1.20.6
+	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.69.1
+	github.com/aws/smithy-go v1.28.1
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/dgraph-io/ristretto/v2 v2.4.2
 	github.com/dustin/go-humanize v1.0.1
@@ -26,9 +31,16 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/ilyakaznacheev/cleanenv v1.5.0
+	github.com/klauspost/compress v1.19.2
+	github.com/moby/moby/api v1.55.0
+	github.com/moby/moby/client v0.5.1
+	github.com/nats-io/jwt/v2 v2.8.2
 	github.com/nats-io/nats-server/v2 v2.14.6
 	github.com/nats-io/nats.go v1.53.1
+	github.com/nats-io/nkeys v0.4.16
+	github.com/nats-io/nuid v1.0.1
 	github.com/prometheus/client_golang v1.24.1
+	github.com/redis/rueidis v1.0.78
 	github.com/samber/slog-multi v1.8.0
 	github.com/samber/slog-sampling v1.7.0
 	github.com/stretchr/testify v1.12.1
@@ -72,6 +84,17 @@ require (
 	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op // indirect
 	github.com/aws/aws-sdk-go v1.49.4 // indirect
+	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.1 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.4 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.4 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.19 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.13.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/signin v1.10.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.38.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.51.1 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bitfield/gotestdox v0.2.2 // indirect
@@ -132,7 +155,6 @@ require (
 	github.com/jedib0t/go-pretty/v6 v6.7.10 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/joho/godotenv v1.5.1 // indirect
-	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/knadh/profiler v0.2.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
@@ -147,8 +169,6 @@ require (
 	github.com/minio/highwayhash v1.0.4 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/go-archive v0.3.0 // indirect
-	github.com/moby/moby/api v1.55.0 // indirect
-	github.com/moby/moby/client v0.5.1 // indirect
 	github.com/moby/patternmatcher v0.6.1 // indirect
 	github.com/moby/sys/sequential v0.7.0 // indirect
 	github.com/moby/sys/user v0.4.1 // indirect
@@ -160,9 +180,6 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/narqo/go-badge v0.0.0-20230821190521-c9a75c019a59 // indirect
-	github.com/nats-io/jwt/v2 v2.8.2 // indirect
-	github.com/nats-io/nkeys v0.4.16 // indirect
-	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/nikolaydubina/treemap v1.2.5 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect

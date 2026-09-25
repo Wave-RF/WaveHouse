@@ -71,8 +71,8 @@ ClickHouse is a phenomenal OLAP database, but pointing a frontend right at it le
 
 If you're building user-facing analytics, WaveHouse is like **Supabase for ClickHouse**. Or an **open-source Tinybird** that pushes data to the frontend in real time over SSE, not just pull-based REST.
 
-- **Ingest** — async durable WAL (embedded NATS JetStream), `200 OK` instantly, background batch-flush; schema-validated against `system.columns`; optional ID-based dedup (idempotent ingest); dead-letter queue for failed inserts.
-- **Query** — in-process Ristretto cache + `singleflight` coalescing; type-safe structured query AST; Tinybird-style named pipes (parameterized SQL endpoints).
+- **Ingest** — async durable WAL (embedded NATS JetStream), `200 OK` instantly, background batch-flush; schema-validated against `system.columns`; optional ID-based dedup (idempotent ingest); dead-letter queue for rows ClickHouse rejects (an unavailable ClickHouse is retried with backoff, not dead-lettered).
+- **Query** — result cache (in-process Ristretto, or a Redis shared by every instance) + `singleflight` coalescing; type-safe structured query AST; Tinybird-style named pipes (parameterized SQL endpoints).
 - **Real-time** — native SSE push, broadcast *before* the ClickHouse flush, with JetStream gap-fill for late/reconnecting clients.
 - **Security** — Hasura-style per-table, per-role column + row policies with JWT claim templating, defined in the hot-reloadable settings directory.
 - **Client** — `@wavehouse/sdk`: TypeScript client with query builder, live queries, streaming, and schema codegen; one runtime dependency (an SSE frame parser, ~1.4 KB gzipped).

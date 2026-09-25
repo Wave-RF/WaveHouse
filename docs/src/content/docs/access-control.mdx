@@ -331,7 +331,7 @@ Four fields cap the cost of a single structured query for this role. All must be
 }
 ```
 
-These bound a role's blast radius on the cached read path. They do not apply to raw admin SQL, which is unbounded by design (other than the 64 MiB response cap noted in the [API reference](/api)).
+A read that exceeds `max_execution_time`, `max_rows_to_read` or `max_memory_usage` is answered `400` with `"code": "clickhouse.limit_exceeded"` and `"retryable": false` — the same query under the same cap fails again, so the SDK does not retry it (see [ClickHouse errors on the query paths](/api#clickhouse-errors-on-the-query-paths)). These bound a role's blast radius on the cached read path. They do not apply to raw admin SQL, which is unbounded by design (other than the 64 MiB response cap noted in the [API reference](/api)).
 
 ### Server-wide limits live in ClickHouse
 

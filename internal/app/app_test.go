@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -28,7 +29,9 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
+	"github.com/Wave-RF/WaveHouse/internal/dedupe/dedupetest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
@@ -95,7 +98,11 @@ func testConfig(t *testing.T, settingsDir string) *config.Config {
 	return &config.Config{
 		DataDir:  t.TempDir(),
 		Server:   config.Server{Port: closedPort(t), ShutdownTimeout: 2},
-		Cache:    config.Cache{L1MaxCost: 1 << 20},
+		MQ:       config.MQ{Backend: config.MQEmbedded},
+		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
+		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
+		Coord:    config.Coord{Backend: config.CoordLocal},
+		Roles:    config.AllRoles(),
 		Auth:     config.Auth{JWTSecret: "unit-test-secret"},
 		Settings: config.Settings{Dir: settingsDir},
 	}
@@ -207,7 +214,7 @@ func TestNew_DedupeFollowsSettings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := writeSettings(t, map[string]any{"dedupe": map[string]any{
-				"enabled": tt.enabled, "id_field": "event_id", "require_id": false, "tables": map[string]any{},
+				"enabled": tt.enabled, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{},
 			}})
 			cfg := testConfig(t, dir)
 			a := newApp(t, cfg, Options{})
@@ -240,7 +247,7 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	require.Equal(t, int64(1<<30), a.mq.MaxBytes(tenant.Default))
 
 	rewriteSettings(t, dir, map[string]any{
-		"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}},
+		"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}},
 		"mq":     map[string]any{"max_bytes_gb": 2},
 	})
 	_, adopted := a.tenants.Reload("test")
@@ -404,7 +411,7 @@ func TestNew_NestedWithoutAnOperatorKeyWarnsTheOpsTreeIsClosed(t *testing.T) {
 // request, so a lost 0 folder is felt at once on the routes that read tenant
 // 0's list.
 func TestReload_NestedHooksFollowEachTenant(t *testing.T) {
-	dedupeOn := map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}
+	dedupeOn := map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}
 	grown := map[string]any{"dedupe": dedupeOn, "mq": map[string]any{"max_bytes_gb": 2}}
 	root := writeNestedSettings(t, map[string]map[string]any{
 		"0":    {"mq": map[string]any{"max_bytes_gb": 1}},
@@ -477,7 +484,7 @@ func TestReload_NestedHooksFollowEachTenant(t *testing.T) {
 // reopened over the same seen ids when the folder is back. The instance is
 // open while some tenant's store is, and Close releases it.
 func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
-	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
+	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}}
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": nil, "broken": invalidQuery})
 	cfg := testConfig(t, root)
 	a := newApp(t, cfg, Options{})
@@ -490,14 +497,14 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	for _, id := range []string{"acme", "globex", "broken"} {
 		assert.NoDirExists(t, filepath.Join(cfg.DataDir, id), "and no directory of a tenant's own")
 	}
-	dup, err := acme.CheckAndMark(ctx, "e1")
+	dup, err := dedupetest.Mark(ctx, acme, eventKey)
 	require.NoError(t, err)
 	assert.False(t, dup)
 
 	rewriteSettings(t, filepath.Join(root, "globex"), dedupeOn)
 	a.tenants.Reload("test")
 	assert.True(t, globex.Open(), "globex's reload opens globex's store")
-	dup, err = globex.CheckAndMark(ctx, "e1")
+	dup, err = dedupetest.Mark(ctx, globex, eventKey)
 	require.NoError(t, err)
 	assert.False(t, dup, "an id acme has seen is new to globex")
 
@@ -527,12 +534,35 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	a.tenants.Reload("test")
 	restored := a.dedup.For("acme")
 	assert.True(t, restored.Open())
-	dup, err = restored.CheckAndMark(ctx, "e1")
+	dup, err = dedupetest.Mark(ctx, restored, eventKey)
 	require.NoError(t, err)
 	assert.True(t, dup, "an id seen before the folder was removed is still a duplicate")
 
 	require.NoError(t, a.Close(context.Background()))
 	assert.False(t, restored.Open(), "Close releases every open store")
+}
+
+// Validate refuses a backend no layer has a case for, so the switch's default
+// is reached only by a Config built by hand; it must refuse boot, not wire
+// nothing.
+func TestNew_RefusesALayerWithoutABackend(t *testing.T) {
+	for _, tc := range []struct {
+		key   string
+		unset func(*config.Config)
+	}{
+		{"dedupe.backend", func(c *config.Config) { c.Dedupe.Backend = "" }},
+		{"mq.backend", func(c *config.Config) { c.MQ.Backend = "" }},
+		{"cache.backend", func(c *config.Config) { c.Cache.Backend = "" }},
+		{"coord.backend", func(c *config.Config) { c.Coord.Backend = "" }},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			guardGlobals(t)
+			cfg := testConfig(t, writeSettings(t, nil))
+			tc.unset(cfg)
+			_, err := New(t.Context(), Options{Config: cfg})
+			require.ErrorContains(t, err, tc.key+` "" has no wiring`)
+		})
+	}
 }
 
 // A Pebble instance that cannot open follows the registry's own rule for the
@@ -541,7 +571,7 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 // instance — their ingest answers 500 until a reload or a restart opens it —
 // while the process, and every tenant with dedupe off, carries on.
 func TestNew_DedupeOpenFailure(t *testing.T) {
-	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
+	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}}
 	// A regular file where the instance's directory should be is what Pebble
 	// refuses to open.
 	block := func(t *testing.T, dataDir string) {
@@ -563,10 +593,10 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 		for _, id := range []tenant.ID{"acme", "globex"} {
 			store := a.dedup.For(id)
 			assert.False(t, store.Open())
-			_, err := store.CheckAndMark(t.Context(), "e1")
+			_, err := dedupetest.Mark(t.Context(), store, eventKey)
 			require.ErrorIs(t, err, dedupe.ErrUnavailable, "%s: switched on but not open, so its ingest fails closed", id)
 		}
-		_, err := a.dedup.For("initech").CheckAndMark(t.Context(), "e1")
+		_, err := dedupetest.Mark(t.Context(), a.dedup.For("initech"), eventKey)
 		require.ErrorIs(t, err, dedupe.ErrDisabled, "a tenant with dedupe off is as it would be anyway")
 	})
 }
@@ -681,6 +711,118 @@ func TestReload_ReadmittedTenantCacheIsOrphaned(t *testing.T) {
 	require.NoError(t, os.Rename(writeSettings(t, nil), filepath.Join(root, "acme")))
 	a.tenants.Reload("test")
 	assert.Equal(t, []tenant.ID{"globex", "acme"}, mock.GetTenants(), "restored: the same")
+}
+
+// pruneRecorder is a cache that records, at each Prune, which of the tenants
+// it is asked about are still served.
+type pruneRecorder struct {
+	testutil.MockCache
+	mu     sync.Mutex
+	served []map[tenant.ID]bool
+}
+
+func (p *pruneRecorder) Prune(served func(tenant.ID) bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.served = append(p.served, map[tenant.ID]bool{"acme": served("acme"), "globex": served("globex")})
+}
+
+func (p *pruneRecorder) last() map[tenant.ID]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.served) == 0 {
+		return nil
+	}
+	return p.served[len(p.served)-1]
+}
+
+// Every reload prunes the cache's version index down to the tenants served,
+// so a tenant rejected or removed stops holding it (#262).
+func TestReload_PrunesCacheIndexToServedTenants(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
+	a := newApp(t, testConfig(t, root), Options{})
+	rec := &pruneRecorder{}
+	a.cache = rec
+
+	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+	a.tenants.Reload("test")
+	assert.Equal(t, map[tenant.ID]bool{"acme": true, "globex": false}, rec.last(), "rejected")
+
+	rewriteSettings(t, filepath.Join(root, "globex"), nil)
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	assert.Equal(t, map[tenant.ID]bool{"acme": false, "globex": true}, rec.last(), "removed; the repaired one served again")
+}
+
+// redisTestConfig is testConfig with cache.backend=redis at addr, carrying
+// the defaults Load would apply.
+func redisTestConfig(t *testing.T, settingsDir, addr string) *config.Config {
+	t.Helper()
+	cfg := testConfig(t, settingsDir)
+	cfg.Cache = config.Cache{Backend: config.CacheRedis, Redis: config.CacheRedisConfig{
+		Addrs: []string{addr}, Mode: config.RedisStandalone, KeyPrefix: "wh",
+		Timeout: 100 * time.Millisecond, DialTimeout: 200 * time.Millisecond,
+		MaxValueBytes: 1 << 20, CompressMinBytes: 1 << 10, VersionTTL: time.Hour,
+	}}
+	require.NoError(t, cfg.Validate())
+	return cfg
+}
+
+// cache.backend=redis wires the shared backend. A server that cannot be
+// reached does not refuse boot: the cache starts bypassed, and the reload
+// hook that prunes an in-process index leaves it alone.
+func TestNew_RedisCacheBootsBypassedWhenUnreachable(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
+	a := newApp(t, redisTestConfig(t, root, closedAddr(t)), Options{})
+	_, ok := a.cache.(*cache.RedisCache)
+	require.True(t, ok, "cache is %T", a.cache)
+	assert.Contains(t, componentNames(a), "cache")
+
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	a.tenants.Reload("test") // the prune hook must not trip on a non-pruner
+
+	entry, snap, err := a.cache.Lookup(t.Context(), "globex", "sha", nil)
+	require.NoError(t, err)
+	assert.Nil(t, entry.Value, "bypassed: a miss")
+	assert.NoError(t, a.cache.Set(t.Context(), snap, []byte("v"), time.Minute), "and the fill a no-op")
+}
+
+// A TLS file that went missing between validation and wiring refuses boot,
+// naming the key.
+func TestNew_RedisCacheRefusesAnUnreadableTLSFile(t *testing.T) {
+	guardGlobals(t)
+	cfg := redisTestConfig(t, writeSettings(t, nil), closedAddr(t))
+	cfg.Cache.Redis.TLS = config.CacheRedisTLS{Enabled: true, CAFile: filepath.Join(t.TempDir(), "gone.pem")}
+	_, err := New(t.Context(), Options{Config: cfg})
+	require.ErrorContains(t, err, "cache init: cache.redis.tls.ca_file")
+}
+
+// The boot config's defaults are the backend's, and -1 is the backend's
+// "never compress". Driven from Load, not a literal, so a default changed on
+// one side only fails here.
+func TestRedisConfig_FromLoadedDefaults(t *testing.T) {
+	t.Setenv("WH_SETTINGS_DIR", t.TempDir())
+	t.Setenv("WH_CACHE_BACKEND", "redis")
+	t.Setenv("WH_CACHE_REDIS_ADDRS", "a:6379,b:6379")
+	t.Setenv("WH_CACHE_REDIS_PASSWORD", "pw")
+	loaded, err := config.Load(filepath.Join(t.TempDir(), "none.yaml"))
+	require.NoError(t, err)
+	got, err := redisConfig(loaded.Cache.Redis)
+	require.NoError(t, err)
+	assert.Equal(t, cache.RedisConfig{
+		Addrs: []string{"a:6379", "b:6379"}, Mode: cache.RedisStandalone, Password: "pw",
+		KeyPrefix: cache.DefaultRedisKeyPrefix, Timeout: cache.DefaultRedisTimeout,
+		DialTimeout: cache.DefaultRedisDialTimeout, MaxValueBytes: cache.DefaultRedisMaxValueBytes,
+		CompressMinBytes: cache.DefaultRedisCompressMinBytes, VersionTTL: cache.DefaultRedisVersionTTL,
+	}, got)
+
+	loaded.Cache.Redis.CompressMinBytes = 0
+	loaded.Cache.Redis.Mode = config.RedisCluster
+	got, err = redisConfig(loaded.Cache.Redis)
+	require.NoError(t, err)
+	assert.Zero(t, got.CompressMinBytes)
+	assert.Equal(t, cache.RedisCluster, got.Mode)
+	assert.Equal(t, cache.RedisSentinel, config.RedisSentinel)
 }
 
 // keepalive is a config.json patch setting the stream block's keepalive pair.
@@ -855,7 +997,7 @@ func analystPipe(t *testing.T, dir string) {
 func TestNew_LateBootFailureReleasesEverything(t *testing.T) {
 	guardGlobals(t)
 	dir := writeSettings(t, map[string]any{"dedupe": map[string]any{
-		"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{},
+		"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{},
 	}})
 	cfg := testConfig(t, dir)
 	natsDir := filepath.Join(cfg.DataDir, "nats")
@@ -920,20 +1062,20 @@ func TestNew_VerifierPerTenant(t *testing.T) {
 	cfg.Auth.OperatorKey = "unit-test-operator-key"
 	a := newApp(t, cfg, Options{})
 
-	pipe := func(id, token string) int {
+	serve := func(id, token string) *httptest.ResponseRecorder {
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/p", nil)
 		req.Header.Set(tenant.Header, id)
 		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
 		a.Handler().ServeHTTP(rec, req)
-		return rec.Code
+		return rec
 	}
 	// verified reports whether the token passed the pipe's role gate: the
-	// query then runs and fails against the closed ClickHouse, never the
-	// 401 of a refused token or the 503 of a verifier still fetching.
+	// query then runs and fails against the closed ClickHouse with a
+	// ClickHouse error code — a 503 too, so the body, not the status, tells
+	// it from the 503 of a verifier still fetching or the 401 of a refusal.
 	verified := func(id, token string) bool {
-		code := pipe(id, token)
-		return code != http.StatusUnauthorized && code != http.StatusServiceUnavailable
+		return strings.Contains(serve(id, token).Body.String(), `"code":"clickhouse.`)
 	}
 	eventuallyVerified := func(id, token string) {
 		t.Helper()
@@ -969,7 +1111,9 @@ func TestNew_VerifierPerTenant(t *testing.T) {
 	req.Header.Set("X-Operator-Key", cfg.Auth.OperatorKey)
 	a.Handler().ServeHTTP(rec, req)
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
-	assert.Equal(t, http.StatusServiceUnavailable, pipe("globex", globexToken), "a rejected tenant is not served")
+	rejected := serve("globex", globexToken)
+	assert.Equal(t, http.StatusServiceUnavailable, rejected.Code)
+	assert.Contains(t, rejected.Body.String(), "tenant settings are invalid", "a rejected tenant is not served")
 	before := globexFetches.Load()
 	rewriteSettings(t, filepath.Join(root, "globex"), authPatch(globex.URL))
 	rec = httptest.NewRecorder()
@@ -1051,6 +1195,28 @@ func TestRun_ServesUntilCancelled(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 	assert.Error(t, err, "the listener is closed after Run returns")
+}
+
+func TestRun_SweeperRunsUnderItsLease(t *testing.T) {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{Listener: ln})
+	rival := a.coord.(*coord.Local).Peer()
+
+	_, stop := runApp(t, a, ln)
+	require.Eventually(t, func() bool {
+		term, err := rival.TryAcquire(t.Context(), sweeperLease)
+		if err == nil { // the sweeper has not campaigned yet: give it back
+			require.NoError(t, term.Resign(t.Context()))
+		}
+		return errors.Is(err, coord.ErrHeld)
+	}, 5*time.Second, 5*time.Millisecond, "the sweeper campaigns for its lease and keeps it while it runs")
+	require.NoError(t, stop())
+
+	term, err := rival.TryAcquire(t.Context(), sweeperLease)
+	require.NoError(t, err, "a stopped sweeper hands its lease on")
+	require.NoError(t, term.Resign(t.Context()))
 }
 
 func TestRun_PrometheusSidecar(t *testing.T) {
@@ -1461,7 +1627,7 @@ func TestReload_CeilingRefusesAThirdTupleThenOpensIt(t *testing.T) {
 func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 	jwks, _, fetches := jwksServer(t, "acme-1")
 	acmeSettings := authPatch(jwks.URL)
-	acmeSettings["dedupe"] = map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}
+	acmeSettings["dedupe"] = map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": acmeSettings, "globex": nil})
 	a := newApp(t, testConfig(t, root), Options{})
 	acme, acmeRegistry, acmeDedup := a.pools.For("acme"), a.discoveries.For("acme"), a.dedup.For("acme")
@@ -1484,7 +1650,7 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 		a.Handler().ServeHTTP(rec, req)
 		return fmt.Sprintf("%d %s", rec.Code, rec.Body.String())
 	}
-	dup, err := acmeDedup.CheckAndMark(t.Context(), "e1")
+	dup, err := dedupetest.Mark(t.Context(), acmeDedup, eventKey)
 	require.NoError(t, err)
 	require.False(t, dup)
 	require.Eventually(t, func() bool { return fetches.Load() > 0 }, 5*time.Second, 10*time.Millisecond, "acme's key set is fetched off the boot path")
@@ -1528,7 +1694,7 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 	assert.NotNil(t, a.discoveries.For("acme"))
 	assert.NotSame(t, acmeRegistry, a.discoveries.For("acme"), "and a fresh registry")
 	assert.Eventually(t, func() bool { return fetches.Load() > fetched }, 5*time.Second, 10*time.Millisecond, "and a fresh verifier, fetching the key set again")
-	dup, err = a.dedup.For("acme").CheckAndMark(t.Context(), "e1")
+	dup, err = dedupetest.Mark(t.Context(), a.dedup.For("acme"), eventKey)
 	require.NoError(t, err)
 	assert.True(t, dup, "an id acme sent before the removal is still a duplicate")
 }
@@ -1620,3 +1786,6 @@ func TestClose_StopsTheDiscoveryLoops(t *testing.T) {
 	assert.Nil(t, a.discoveries.For("acme"))
 	assert.Nil(t, a.pools.For("acme"))
 }
+
+// eventKey is the one dedupe key the tenant-lifecycle tests mark.
+var eventKey = dedupe.Key{Table: "events", ID: "e1"}

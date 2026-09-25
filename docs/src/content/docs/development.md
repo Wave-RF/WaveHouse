@@ -82,7 +82,7 @@ make dev
 WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 - **Embedded NATS** (JetStream) — no external MQ needed
-- **L1 cache only** (Ristretto) — no external cache needed
+- **In-process cache** (Ristretto, `cache.backend: local`) — no external cache needed; to try the shared one, start Redis with `docker compose -f deployments/compose/dependencies.yaml --profile redis up -d` and set `WH_CACHE_BACKEND=redis WH_CACHE_REDIS_ADDRS=localhost:6379`
 - **Trial policy** — the dev settings directory `./settings` is seeded on first run with the compose stack's permissive `public` policy, so tokenless requests to the demo tables work (see [Test the API](#test-the-api))
 - **Dedup disabled** by default — no Pebble needed
 - **Schema discovery** — automatically finds your ClickHouse tables
@@ -341,18 +341,18 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 | -------- | -------- | ------- | ------- |
 | Unit tests | `internal/*/_test.go` | No | `make test` |
 | SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-ts` (always includes coverage + gate) |
-| Integration tests (Go) | `tests/integration/*_test.go` | Yes | `make test-integration` |
+| Integration tests (Go) | `tests/integration/*_test.go`, `internal/cache/*_integration_test.go`, plus `internal/mq/natsspike` and `internal/mq`'s integration-tagged tests | Yes | `make test-integration` |
 | E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
 
 - **Unit tests** live beside the code they test (e.g., `internal/discovery/discovery_test.go`). They use mocks or embedded NATS (in-process, no Docker needed).
-- **Integration tests** use the `//go:build integration` build tag. `TestMain` starts one ClickHouse testcontainer and boots the production wiring against it through `app.New` (embedded NATS, ingest worker, sweeper, hub, the API server on a random loopback port); tests reach it via `env(t)` and create their own tables. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second ingest worker batch window.
+- **Integration tests** use the `//go:build integration` build tag. `TestMain` starts one ClickHouse testcontainer and boots the production wiring against it through `app.New` (embedded NATS, ingest worker, sweeper, hub, the API server on a random loopback port); tests reach it via `env(t)` and create their own tables. `TestNATSBackend_EndToEnd` also starts a NATS container configured from `deployments/nats/values.yaml`, applies `deployments/nats/jetstream.yaml` to it through `internal/mq/natstest`, and boots two processes on `mq.backend: nats` against it. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second ingest worker batch window. A test that brings up its own ClickHouse, `app.New`, processes or backends calls `t.Parallel()`, since in series they do not fit the target's 240-second `-timeout` on a CI runner; a test that changes shared state (the shared app, the process environment) stays sequential, and Go starts the parallel tests only after those finish. `TestMain` builds the `wavehouse` binary that the `TestRoles_*` tests run as separate processes while the containers start, so the build is not charged to that `-timeout`, which counts from the first test. The same target also runs `internal/mq/natsspike`. That package pins the nats-server behavior the external-NATS topology depends on, against an in-process server with no Docker. It lives under `internal/mq` because only that tree may import NATS, and it runs here rather than in the unit suite because each test takes seconds and the unit suite has a 15-second limit per package. For the same reason the external NATS broker's tests (`internal/mq/external*_test.go`, including its run of the `mqtest` conformance suite) and the NATS KV lease tests (`internal/mq/lease_test.go`, including their run of the `coordtest` conformance suite) carry the `integration` tag inside `internal/mq`, and the target runs them by name, so the package's untagged tests stay in the unit suite alone.
 
 Shared test utilities live in `internal/testutil/`. The packages log through `slog.Default()`, so tests reach log output through `internal/testutil/logtest`: `logtest.Silence()` in a package's `TestMain` discards it, and `logtest.Capture(t, level)` routes it to a buffer for a test that asserts on log lines — such a test must not call `t.Parallel()`, because the default logger is process-wide.
 
 ### Adding New Tests
 
 - **Unit test for `internal/foo/`** → create `internal/foo/foo_test.go` (same package).
-- **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`).
+- **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`). A test of one package against its own external server — the shared cache backend against Redis, Valkey and Dragonfly containers — lives beside the package instead (`internal/cache/redis_integration_test.go`, same build tag), and the package is listed in the `test-integration` target.
 - **E2E test via SDK** → add a `tests/e2e/sdk/*.test.ts` file. These tests exercise the full pipeline (ingest → ClickHouse → query) through the TypeScript SDK. Run with `make test-e2e`.
 - **Test helpers** → add to `internal/testutil/` (Go) or `tests/e2e/sdk/helpers.ts` (E2E).
 
@@ -454,10 +454,11 @@ WaveHouse/
 │   ├── api/                # HTTP handlers, router, middleware
 │   ├── app/                # Process wiring (build every component, run under one errgroup, release in reverse)
 │   ├── auth/               # JWT/JWKS authentication middleware
-│   ├── cache/              # L1 (Ristretto) + L2 caching
+│   ├── cache/              # Query cache: in-process (Ristretto) or shared (Redis-compatible)
 │   ├── chconn/             # ClickHouse pools, one per connection tuple (reconciled on settings reload)
 │   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration
+│   ├── coord/              # Leases with fencing tokens (in-process Local, RunElected, coordtest suite)
 │   ├── dedupe/             # Optional deduplication (Pebble)
 │   ├── discovery/          # ClickHouse schema introspection + validation
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper

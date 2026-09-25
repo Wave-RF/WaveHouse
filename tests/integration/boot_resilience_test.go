@@ -39,6 +39,7 @@ import (
 // shared env assumes CH stays up for the duration of every test in this
 // package, which is exactly the assumption this test needs to violate.
 func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	ch, err := startClickHouse(ctx)

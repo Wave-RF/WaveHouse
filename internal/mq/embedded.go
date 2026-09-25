@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -105,7 +106,7 @@ type tenantQueue struct {
 	ingestCap int64
 }
 
-// EmbeddedNATS is the one implementation of every mq interface.
+// EmbeddedNATS implements every mq interface.
 var _ Broker = (*EmbeddedNATS)(nil)
 
 const (
@@ -131,6 +132,11 @@ const (
 	reopenRetry = 5 * time.Second
 )
 
+// EmbeddedSyncAlways is NewEmbedded's SyncAlways. Only a TestMain may turn it
+// off, before any broker starts: unit tests assert nothing across a crash, and
+// on macOS an fsync per write is most of their run time (#617).
+var EmbeddedSyncAlways = true
+
 // errNoQueue is why a publish or park finds no queue it can open: no budget
 // has been asked for the tenant yet (see SetMaxBytes). Publish reports it as
 // ErrQueueFull.
@@ -146,11 +152,16 @@ var errNoQueue = errors.New("no queue is open for it yet")
 // applied, or by a publish or park that finds it missing, at the budget last
 // asked for it. The server logs through slog's default logger.
 func NewEmbedded(storeDir string) (*EmbeddedNATS, error) {
+	// A store the server cannot create fails JetStream in the background, and
+	// ReadyForConnections would only give up on it after its whole wait.
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
+		return nil, fmt.Errorf("nats store: %w", err)
+	}
 	opts := &natsserver.Options{
 		DontListen: true,
 		JetStream:  true,
 		StoreDir:   storeDir,
-		SyncAlways: true, // fsync every JetStream write — publish ACKs only after data is on disk
+		SyncAlways: EmbeddedSyncAlways, // fsync every JetStream write — publish ACKs only after data is on disk
 		// Without NoSigs, Start() installs a process-wide SIGINT handler that
 		// races the app's graceful shutdown (double Shutdown → "close of nil
 		// channel" panic) and os.Exit(0)s past its cleanup. WaveHouse owns
@@ -306,17 +317,24 @@ func (e *EmbeddedNATS) record(id tenant.ID, q *tenantQueue) {
 	}
 }
 
+// EmbeddedDuplicateWindow is how long an ingest queue remembers a
+// WithIdempotencyKey key. A dedupe lease must not exceed it: a claim left to
+// lapse after an uncertain publish is republished once the lease ends, and
+// only this window drops that second copy.
+const EmbeddedDuplicateWindow = 2 * time.Minute
+
 // ingestStreamConfig is tenant id's ingest stream. LimitsPolicy: standard
 // append-only log; the Active Sweeper handles message purging. MaxBytes caps
 // the tenant's share of the disk. DiscardNew rejects new messages when full,
 // propagating backpressure to the upstream API — for this tenant alone.
 func ingestStreamConfig(id tenant.ID, maxBytes int64) jetstream.StreamConfig {
 	return jetstream.StreamConfig{
-		Name:      ingestStreamName(id),
-		Subjects:  []string{tenantSubjects(ingestPrefix, id)},
-		Retention: jetstream.LimitsPolicy,
-		MaxBytes:  maxBytes,
-		Discard:   jetstream.DiscardNew,
+		Name:       ingestStreamName(id),
+		Subjects:   []string{tenantSubjects(ingestPrefix, id)},
+		Retention:  jetstream.LimitsPolicy,
+		MaxBytes:   maxBytes,
+		Discard:    jetstream.DiscardNew,
+		Duplicates: EmbeddedDuplicateWindow,
 	}
 }
 
@@ -617,6 +635,7 @@ func wrapMsg(ctx context.Context, m jetstream.Msg) *Message {
 		func() error {
 			return m.Nak()
 		},
+		WithNakDelay(m.NakWithDelay),
 	)
 }
 
@@ -668,14 +687,13 @@ func (e *EmbeddedNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (
 		failed: make(chan error, 1),
 	}
 	c.fail = func(err error) {
-		// Exactly one error, and nothing once stop has been called.
-		if c.stopped.Load() {
+		// Exactly one error, and nothing once stop has been called: a durable
+		// deleted on several tenants' queues ends each delivery, and a caller
+		// that already drained the first must not see the next.
+		if c.stopped.Load() || !c.reported.CompareAndSwap(false, true) {
 			return
 		}
-		select {
-		case c.failed <- err:
-		default:
-		}
+		c.failed <- err
 	}
 	if err := e.register(ctx, c.fanIn); err != nil {
 		return nil, fmt.Errorf("create consumer: %w", err)
@@ -861,7 +879,8 @@ func (f *fanIn) start(deliver func(jetstream.Msg), prefetch int, watch bool) (st
 // failed channel its contract promises.
 type workerConsumer struct {
 	*fanIn
-	failed chan error
+	failed   chan error
+	reported atomic.Bool
 }
 
 func (c *workerConsumer) Consume(handler func(msg *Message), prefetch int) (func(), <-chan error, error) {
@@ -1058,7 +1077,9 @@ func (e *EmbeddedNATS) ReplaySince(ctx context.Context, topic Topic, since time.
 		}
 		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
 		if err != nil {
-			if errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout) {
+			// A pull that raced the connection closing can end in either
+			// answer too, and that is not caught up.
+			if (errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout)) && !e.conn.IsClosed() {
 				return nil // caught up
 			}
 			return fmt.Errorf("replay next: %w", err)

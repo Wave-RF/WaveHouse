@@ -3,6 +3,7 @@ package testutil
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
@@ -33,6 +35,10 @@ type MockPublisher struct {
 	mu       sync.Mutex
 	Messages []PublishedMessage
 	Err      error // if set, Publish and DeadLetter return this error
+	// ErrAfter lets that many calls succeed before Err applies, to fail a
+	// batch part-way through.
+	ErrAfter int
+	calls    int
 }
 
 // PublishedMessage records a single Publish or DeadLetter call, with the
@@ -53,15 +59,16 @@ func (m *MockPublisher) DeadLetter(_ context.Context, msg *mq.Message, opts ...m
 }
 
 func (m *MockPublisher) record(pm PublishedMessage, opts []mq.PublishOpt) error {
-	if m.Err != nil {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	if m.Err != nil && m.calls > m.ErrAfter {
 		return m.Err
 	}
 	headers := mq.Headers{}
 	for _, opt := range opts {
 		opt(headers)
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	pm.Headers = headers
 	m.Messages = append(m.Messages, pm)
 	return nil
@@ -104,28 +111,118 @@ func (m *MockSubscriber) Close() error { return nil }
 
 // ── Mock Deduplicator ────────────────────────────────────────────
 
-// MockDeduplicator implements dedupe.Deduplicator for testing.
+// MockDeduplicator implements dedupe.Deduplicator in memory, with per-phase
+// error injection and a record of what was committed and released.
 type MockDeduplicator struct {
-	mu   sync.Mutex
-	seen map[string]bool
-	Err  error // if set, CheckAndMark returns this error
+	mu        sync.Mutex
+	committed map[dedupe.Key]bool
+	retention map[dedupe.Key]time.Duration // each commit's retention
+	pending   map[dedupe.Key]string
+	tokens    int
+	// Err, if set, fails Reserve — after ErrAfter calls have succeeded;
+	// CommitErr and ReleaseErr fail their phase.
+	Err        error
+	ErrAfter   int
+	CommitErr  error
+	ReleaseErr error
+	Released   []dedupe.Claim // every claim Release was given
+	// Calls to each phase, for tests that count round trips.
+	Reserves, Commits int
 }
+
+var _ dedupe.Deduplicator = (*MockDeduplicator)(nil)
 
 func NewMockDeduplicator() *MockDeduplicator {
-	return &MockDeduplicator{seen: make(map[string]bool)}
+	return &MockDeduplicator{committed: map[dedupe.Key]bool{}, retention: map[dedupe.Key]time.Duration{}, pending: map[dedupe.Key]string{}}
 }
 
-func (m *MockDeduplicator) CheckAndMark(_ context.Context, eventID string) (bool, error) {
-	if m.Err != nil {
-		return false, m.Err
-	}
+// Reserve answers Duplicate for a key repeated in one call, as Managed does.
+func (m *MockDeduplicator) Reserve(_ context.Context, keys []dedupe.Key, _ time.Duration) ([]dedupe.Claim, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.seen[eventID] {
-		return true, nil
+	m.Reserves++
+	if m.Err != nil && m.Reserves > m.ErrAfter {
+		return nil, m.Err
 	}
-	m.seen[eventID] = true
-	return false, nil
+	claims := make([]dedupe.Claim, 0, len(keys))
+	seen := make(map[dedupe.Key]bool, len(keys))
+	for _, k := range keys {
+		repeat := seen[k]
+		seen[k] = true
+		switch {
+		case repeat, m.committed[k]:
+			claims = append(claims, dedupe.Claim{Key: k, Status: dedupe.Duplicate})
+		case m.pending[k] != "":
+			claims = append(claims, dedupe.Claim{Key: k, Status: dedupe.InFlight})
+		default:
+			m.tokens++
+			tok := fmt.Sprint(m.tokens)
+			m.pending[k] = tok
+			claims = append(claims, dedupe.Claim{Key: k, Status: dedupe.Claimed, Token: tok})
+		}
+	}
+	return claims, nil
+}
+
+func (m *MockDeduplicator) Commit(_ context.Context, claims []dedupe.Claim, retention time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Commits++
+	if m.CommitErr != nil {
+		return m.CommitErr
+	}
+	for _, c := range claims {
+		if c.Status == dedupe.Claimed {
+			m.committed[c.Key] = true
+			m.retention[c.Key] = retention
+			delete(m.pending, c.Key)
+		}
+	}
+	return nil
+}
+
+func (m *MockDeduplicator) Release(_ context.Context, claims []dedupe.Claim) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Released = append(m.Released, claims...)
+	if m.ReleaseErr != nil {
+		return m.ReleaseErr
+	}
+	for _, c := range claims {
+		if c.Status == dedupe.Claimed && m.pending[c.Key] == c.Token {
+			delete(m.pending, c.Key)
+		}
+	}
+	return nil
+}
+
+// Hold claims k as another in-flight request would, so Reserve answers
+// InFlight for it.
+func (m *MockDeduplicator) Hold(k dedupe.Key) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pending[k] = "held"
+}
+
+// Committed reports whether k was committed.
+func (m *MockDeduplicator) Committed(k dedupe.Key) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.committed[k]
+}
+
+// Retention is the retention k was last committed with.
+func (m *MockDeduplicator) Retention(k dedupe.Key) time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.retention[k]
+}
+
+// Pending reports whether k is claimed and neither committed nor released.
+func (m *MockDeduplicator) Pending(k dedupe.Key) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pending[k] != ""
 }
 
 func (m *MockDeduplicator) Close() error { return nil }
@@ -186,6 +283,8 @@ type MockMessage struct {
 	Acked       atomic.Bool
 	Naked       atomic.Bool
 	DoubleAcked atomic.Bool
+	// NakDelay is the delay of the last NakWithDelay (which also sets Naked).
+	NakDelay atomic.Int64
 }
 
 // Message returns an mq.Message wired to this mock's flags. Every call returns
@@ -204,6 +303,11 @@ func (m *MockMessage) Message() *mq.Message {
 			m.Naked.Store(true)
 			return m.NakErr
 		},
+		mq.WithNakDelay(func(d time.Duration) error {
+			m.NakDelay.Store(int64(d))
+			m.Naked.Store(true)
+			return m.NakErr
+		}),
 	)
 }
 

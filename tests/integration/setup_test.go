@@ -7,9 +7,15 @@
 // env(). Each test creates its own ClickHouse table for data
 // isolation; the shared infra avoids the per-test container churn that drove
 // flakes and slow runs in the previous monolithic file.
+//
+// A test that brings up its own ClickHouse, app, processes or backends calls
+// t.Parallel: in series they do not fit the suite's -timeout on a CI runner.
+// One that changes shared state (the shared app, the process environment)
+// stays sequential; Go starts the parallel tests only after those finish.
 package tests
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,6 +40,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/mq/natstest"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 )
 
@@ -51,6 +58,9 @@ type testEnv struct {
 	embeddedMQ mq.Broker
 	baseURL    string // the wired API server, e.g. http://127.0.0.1:41234
 	registry   *discovery.SchemaRegistry
+	// dynamoEndpoint is dynamodb-local, for the DynamoDB dedupe backend's
+	// tests; the wired app does not use it.
+	dynamoEndpoint string
 }
 
 var sharedEnv *testEnv
@@ -105,14 +115,18 @@ func createTable(t *testing.T, columns, tableOpts string) string {
 }
 
 func TestMain(m *testing.M) {
+	go buildWavehouseBinary()
 	code, cleanup := setup()
 	if code != 0 {
 		cleanup()
+		removeRolesBinary()
 		os.Exit(code)
 	}
+	<-binaryBuilt
 
 	exit := m.Run()
 	cleanup()
+	removeRolesBinary()
 	os.Exit(exit)
 }
 
@@ -136,6 +150,13 @@ func setup() (int, func()) {
 		}
 		_ = ch.container.Terminate(context.Background())
 	})
+
+	ddb, endpoint, err := startDynamoDBLocal(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration setup: dynamodb-local: %v\n", err)
+		return 1, cleanup
+	}
+	cleanups.push(func() { _ = ddb.Terminate(context.Background()) })
 
 	settingsDir, err := writeTestSettings(ch)
 	if err != nil {
@@ -161,7 +182,11 @@ func setup() (int, func()) {
 		DataDir:    dataDir,
 		Server:     config.Server{ShutdownTimeout: 10},
 		ClickHouse: config.ClickHouse{Password: testCHPassword},
-		Cache:      config.Cache{L1MaxCost: 1 << 30}, // 1 GB
+		MQ:         config.MQ{Backend: config.MQEmbedded},
+		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 30}, // 1 GB
+		Dedupe:     config.Dedupe{Backend: config.DedupePebble},
+		Coord:      config.Coord{Backend: config.CoordLocal},
+		Roles:      config.AllRoles(),
 		Settings:   config.Settings{Dir: settingsDir},
 	}
 	a, err := app.New(ctx, app.Options{Config: cfg, Listener: ln})
@@ -199,6 +224,8 @@ func setup() (int, func()) {
 		embeddedMQ: a.MQ(),
 		baseURL:    baseURL,
 		registry:   a.Registry(),
+
+		dynamoEndpoint: endpoint,
 	}
 	return 0, cleanup
 }
@@ -381,6 +408,73 @@ func startClickHouse(ctx context.Context) (*chInstance, error) {
 		return ch, fmt.Errorf("native ping: %w", err)
 	}
 	return ch, nil
+}
+
+// natsImage is the server line WaveHouse embeds, and the one the shipped
+// Helm values pin.
+const natsImage = "nats:2.14.6-alpine"
+
+// startNATS starts NATS as deployments/nats/values.yaml configures it — its
+// accounts, users and permissions, JetStream on file storage — and returns
+// its client URL. Nothing is created on it: that is the operator's step.
+// The store is a tmpfs, so the container leaves nothing behind.
+func startNATS(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	conf, err := natstest.ServerConfig(natstest.ShippedValues(), "/data")
+	if err != nil {
+		t.Fatalf("nats config: %v", err)
+	}
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        natsImage,
+			ExposedPorts: []string{"4222/tcp"},
+			Tmpfs:        map[string]string{"/data": "rw"},
+			Files: []testcontainers.ContainerFile{{
+				Reader: bytes.NewReader(conf), ContainerFilePath: "/etc/nats/nats-server.conf", FileMode: 0o644,
+			}},
+			// The log line alone can precede the host port's forwarding when
+			// several containers start at once.
+			WaitingFor: wait.ForAll(
+				wait.ForLog("Server is ready"),
+				wait.ForListeningPort("4222/tcp"),
+			).WithDeadline(60 * time.Second),
+		},
+		Started: true,
+	})
+	if container != nil {
+		t.Cleanup(func() { _ = container.Terminate(context.Background()) })
+	}
+	if err != nil {
+		t.Fatalf("start nats: %v", err)
+	}
+	endpoint, err := container.PortEndpoint(ctx, "4222/tcp", "nats")
+	if err != nil {
+		t.Fatalf("nats endpoint: %v", err)
+	}
+	return endpoint
+}
+
+// startDynamoDBLocal starts dynamodb-local in memory (no volume) and
+// returns it with its endpoint URL.
+func startDynamoDBLocal(ctx context.Context) (testcontainers.Container, string, error) {
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        "amazon/dynamodb-local:3.3.1",
+			Cmd:          []string{"-jar", "DynamoDBLocal.jar", "-inMemory"},
+			ExposedPorts: []string{"8000/tcp"},
+			WaitingFor:   wait.ForListeningPort("8000/tcp").WithStartupTimeout(60 * time.Second),
+		},
+		Started: true,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("start container: %w", err)
+	}
+	endpoint, err := container.PortEndpoint(ctx, "8000/tcp", "http")
+	if err != nil {
+		return container, "", fmt.Errorf("endpoint: %w", err)
+	}
+	return container, endpoint, nil
 }
 
 func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Duration) error {

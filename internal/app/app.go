@@ -38,6 +38,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
@@ -106,6 +107,7 @@ type App struct {
 	dedupeStats func() map[string]int64
 	mq          mq.Broker
 	cache       cache.Cache
+	coord       coord.Coordinator
 	sseMetrics  *stream.Metrics
 	hub         *stream.Hub
 	heartbeater *stream.Heartbeater
@@ -162,29 +164,62 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 		}
 	}()
 
+	if len(a.cfg.Roles) == 0 {
+		return nil, errors.New("roles is empty: a Config built without config.Load must name the roles it runs (config.AllRoles for one process running all of them)")
+	}
 	if err := a.wireSettings(); err != nil {
 		return nil, err
 	}
 	a.wireObservability(ctx)
-	if err := a.wireClickHouse(); err != nil {
-		return nil, err
+	// After observability, so an OTLP log pipeline carries them too.
+	for _, w := range a.cfg.Warnings() {
+		slog.Warn(w)
 	}
-	a.wireDiscovery(ctx)
-	if err := a.wireDedupe(); err != nil {
-		return nil, err
+	slog.Info("process roles", "roles", a.cfg.Roles, "instance_id", a.cfg.InstanceID)
+	// What each role wires; config.Validate refused a set these cannot serve.
+	// The API's discovery, dedupe, auth verifiers, hub bridge and keepalive
+	// wheel are per process: every API process runs its own.
+	apiRole, ingestRole := a.cfg.Has(config.RoleAPI), a.cfg.Has(config.RoleIngest)
+	if apiRole || ingestRole {
+		if err := a.wireClickHouse(); err != nil {
+			return nil, err
+		}
+	}
+	if apiRole {
+		a.wireDiscovery(ctx)
+		if err := a.wireDedupe(ctx); err != nil {
+			return nil, err
+		}
 	}
 	if err := a.wireMQ(ctx); err != nil {
 		return nil, err
 	}
-	if err := a.wireCache(); err != nil {
+	if apiRole || ingestRole {
+		if err := a.wireCache(); err != nil {
+			return nil, err
+		}
+	}
+	if err := a.wireCoord(ctx); err != nil {
 		return nil, err
 	}
-	a.wireSweeper()
-	a.wireStreaming()
-	a.wireIngestWorker()
-	authMW := a.wireAuth()
-	a.wireReloadTriggers()
-	a.wireHTTP(authMW)
+	if a.cfg.Has(config.RoleSweeper) {
+		a.wireSweeper()
+	}
+	if apiRole {
+		a.wireStreaming()
+	}
+	if ingestRole {
+		a.wireIngestWorker()
+	}
+	if apiRole {
+		authMW := a.wireAuth()
+		a.wireReloadTriggers()
+		a.wireHTTP(authMW)
+	} else {
+		authMW := a.wireOpsAuth()
+		a.wireReloadTriggers()
+		a.wireOpsHTTP(authMW)
+	}
 	return a, nil
 }
 
@@ -291,13 +326,19 @@ func closeWithin(ctx context.Context, name string, release func(context.Context)
 	}
 }
 
-// Handler is the API router, for a harness that serves it itself.
+// Handler is the router this process serves — the API's, or the ops-only
+// one without the api role — for a harness that serves it itself.
 func (a *App) Handler() http.Handler { return a.handler }
 
 // Registry is the default tenant's schema registry, for a harness that
 // refreshes it after creating tables; nil over a nested directory serving
-// no tenant 0.
-func (a *App) Registry() *discovery.SchemaRegistry { return a.discoveries.For(tenant.Default) }
+// no tenant 0, and in a process without the api role.
+func (a *App) Registry() *discovery.SchemaRegistry {
+	if a.discoveries == nil {
+		return nil
+	}
+	return a.discoveries.For(tenant.Default)
+}
 
 // MQ is the broker, for a harness that publishes straight onto the ingest
 // queue.

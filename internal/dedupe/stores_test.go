@@ -2,6 +2,7 @@ package dedupe
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -30,7 +31,7 @@ func TestStores_ForBuildsOneClosedStorePerTenant(t *testing.T) {
 	assert.Same(t, acme, s.For("acme"), "one store per tenant, however often it is named")
 	assert.NotSame(t, acme, s.For("globex"))
 	assert.False(t, acme.Open(), "built closed: nothing opens until the tenant's switch is applied")
-	_, err := acme.CheckAndMark(ctx, "e1")
+	_, err := mark(ctx, acme, "e1")
 	require.ErrorIs(t, err, ErrDisabled, "a store not yet applied answers as a disabled one, the reload-window case")
 	assert.NoDirExists(t, e.Dir())
 
@@ -49,12 +50,12 @@ func TestStores_TenantsDoNotShareSeenIDs(t *testing.T) {
 	}
 
 	for _, id := range tenants {
-		dup, err := s.For(id).CheckAndMark(ctx, "e1")
+		dup, err := mark(ctx, s.For(id), "e1")
 		require.NoError(t, err)
 		assert.False(t, dup, "%s: the same event id is first seen in each tenant", id)
 	}
 	for _, id := range tenants {
-		dup, err := s.For(id).CheckAndMark(ctx, "e1")
+		dup, err := mark(ctx, s.For(id), "e1")
 		require.NoError(t, err)
 		assert.True(t, dup, "%s: and a duplicate within its own tenant", id)
 	}
@@ -67,7 +68,7 @@ func TestStores_RetainClosesTheRestAndKeepsTheirData(t *testing.T) {
 	acme, globex := s.For("acme"), s.For("globex")
 	require.NoError(t, acme.Apply(true))
 	require.NoError(t, globex.Apply(true))
-	_, err := acme.CheckAndMark(ctx, "e1")
+	_, err := mark(ctx, acme, "e1")
 	require.NoError(t, err)
 
 	require.NoError(t, s.Retain(func(id tenant.ID) bool { return id == "globex" }))
@@ -79,7 +80,7 @@ func TestStores_RetainClosesTheRestAndKeepsTheirData(t *testing.T) {
 	restored := s.For("acme")
 	assert.NotSame(t, acme, restored, "the closed store was forgotten")
 	require.NoError(t, restored.Apply(true))
-	dup, err := restored.CheckAndMark(ctx, "e1")
+	dup, err := mark(ctx, restored, "e1")
 	require.NoError(t, err)
 	assert.True(t, dup, "an id seen before the tenant was dropped is still seen")
 }
@@ -88,8 +89,12 @@ func TestStores_RetainClosesTheRestAndKeepsTheirData(t *testing.T) {
 // slow I/O, as the last Pebble close waiting on a compaction.
 type gatedDedup struct{ entered, release chan struct{} }
 
-func (g *gatedDedup) CheckAndMark(context.Context, string) (bool, error) { return false, nil }
-func (g *gatedDedup) Close() error                                       { g.entered <- struct{}{}; <-g.release; return nil }
+func (g *gatedDedup) Reserve(context.Context, []Key, time.Duration) ([]Claim, error) {
+	return nil, nil
+}
+func (g *gatedDedup) Commit(context.Context, []Claim, time.Duration) error { return nil }
+func (g *gatedDedup) Release(context.Context, []Claim) error               { return nil }
+func (g *gatedDedup) Close() error                                         { g.entered <- struct{}{}; <-g.release; return nil }
 
 // One tenant's I/O is that tenant's wait alone: Retain edits the map under
 // the lock and closes outside it, so a dropped tenant's slow close never
@@ -129,4 +134,22 @@ func TestStores_CloseClosesEveryStore(t *testing.T) {
 	assert.False(t, globex.Open())
 	assert.False(t, e.Open(), "the instance closes with the last store")
 	require.NoError(t, s.Close(), "closing again is a no-op")
+}
+
+func TestFactory_GatedOpensOnlyOnceReady(t *testing.T) {
+	t.Parallel()
+	notReady := errors.New("table missing")
+	ready := notReady
+	gated := NewStores(Factory(NewEmbedded(t.TempDir()).Tenant).Gated(func() error { return ready }))
+	t.Cleanup(func() { _ = gated.Close() })
+	acme := gated.For("acme")
+
+	require.ErrorIs(t, acme.Apply(true), notReady)
+	assert.False(t, acme.Open())
+	_, err := mark(context.Background(), acme, "e1")
+	require.ErrorIs(t, err, ErrUnavailable, "switched on but not ready: fails closed, never open")
+
+	ready = nil
+	require.NoError(t, acme.Apply(true), "the next apply finds it ready")
+	assert.True(t, acme.Open())
 }

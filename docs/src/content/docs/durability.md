@@ -28,6 +28,10 @@ This is the strongest mode JetStream offers. It is stronger than the default, wh
 
 WaveHouse does not currently expose a knob to relax this — `SyncAlways` is always on. Exposing a configurable group-commit interval (`mq.sync_interval`) is tracked in [#139](https://github.com/Wave-RF/WaveHouse/issues/139).
 
+## With an external NATS cluster
+
+Under [`mq.backend: nats`](/deployment#external-nats) the buffer is your NATS cluster, not `<data_dir>/nats`, and the `200` means the partition stream has stored the event under its own storage settings: WaveHouse does not choose them, and the rest of this page describes the embedded server. What does not change is that no event is dropped before it is written: the partition streams have no age limit, and a full one refuses new events with `503` rather than dropping old ones. A full partition refuses every tenant whose events it holds, not one tenant. The replay history is a separate stream whose `max_age` you set, and every tenant's parked rows share one dead-letter stream.
+
 ## Why the fsync tail is your ingest floor
 
 Because the publish blocks on `fsync`, **your typical ingest latency is your storage's typical `fsync` latency, and your worst-case publish is your storage's worst-case `fsync`.** When that tail is healthy (sub-millisecond to single-digit milliseconds) the guarantee is essentially free. When it is not, the same code path that handles every production message stalls:
@@ -57,6 +61,14 @@ The strict guarantee translates well to managed cloud infrastructure — the pre
 | Spinning disks | Mechanical seek on the NAND-equivalent program path: multi-millisecond baseline, multi-second tail. |
 
 The tell for a commit-cadence problem (ZFS-without-SLOG, noisy-neighbor VM host) is that a single-threaded benchmark looks fine while a concurrent one is far worse — so always benchmark with multiple writers, and benchmark the guest **and** the host if virtualized.
+
+## Deduplication: one more fsync per window
+
+With [deduplication](/settings-directory#deduplication) on, a `200` also means the records' ids were committed to the dedupe store, or, if that commit failed, that the failure was counted by `wavehouse_dedupe_commit_failed_total` and the ids lapse with their lease. On the embedded Pebble store that commit is an `fsync` of its own. It is taken once per window of up to 256 records of a request, after the window's publishes, rather than once per record: a 1,000-record batch costs four dedupe syncs, not a thousand. Measured with `BenchmarkIngest_DedupBatchOnPebble` on a developer laptop, with the queue stubbed out so only the dedupe store touched disk, the dedupe work for that batch took 24 ms windowed against 5.7 s one record at a time; the JetStream publishes' own fsyncs come on top. A single-record request still pays one sync for its publish and one for its commit.
+
+With a finite `dedupe.retention`, expired ids are deleted by a background sweep, an hour apart. Its deletes are not fsynced (a delete lost to a crash is redone by the next pass), so it adds no sync to the ingest path; it reads 1,024 keys at a time, deleting the expired ones, and a commit that arrives mid-chunk waits for that chunk. An expired id is already treated as new by the next claim of it, sweep or no sweep, so retention never depends on the sweep having run.
+
+A publish can also fail after JetStream stored the event (a timeout on the ack). The record's id is then left to lapse with its 30-second dedupe lease rather than given back, and every deduped record is published under an idempotency key derived from its tenant, table and id, which each tenant's ingest stream remembers for two minutes after the first publish. A retry after the lease but inside those two minutes is therefore dropped by the stream rather than stored twice; one later than that is stored again. The 30-second lease sits well inside those two minutes, so a prompt retry is covered. For the same reason a finite `dedupe.retention` must be at least those two minutes: an id re-sent after a shorter retention ended would be claimed again, then dropped by the stream as a copy while the client was told it was accepted. Settings validation refuses one below it.
 
 ## Check your storage before you trust it
 

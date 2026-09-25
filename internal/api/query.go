@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -131,7 +132,7 @@ func NewQueryHandler(target func(*settings.Store) chconn.Target, queryTimeout fu
 // target. ClickHouse's HTTP interface doesn't 3xx in normal operation, and
 // the target URL is operator-controlled config (not user input), so
 // redirects are not chased — a misconfigured endpoint that 3xx's surfaces
-// as-is, and the status mapping in Handle classifies it as 502.
+// as-is, and writeCHError answers it with a 502.
 func proxyHTTPClient(tlsCfg *tls.Config) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = tlsCfg
@@ -263,7 +264,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.clients.For(target).Do(httpReq)
 	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, "clickhouse request failed: "+err.Error())
+		writeCHError(w, r, err, "clickhouse request failed: "+err.Error(), http.StatusBadGateway, queryCaps{})
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -276,40 +277,31 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, respCap+1))
 	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, "read clickhouse response: "+err.Error())
+		writeCHError(w, r, err, "read clickhouse response: "+err.Error(), http.StatusBadGateway, queryCaps{})
 		return
 	}
 	if int64(len(body)) > respCap {
-		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("clickhouse response exceeded %d bytes; narrow the query or use FORMAT JSONEachRow with streaming", respCap))
+		// The same query overflows again, so not retryable.
+		retryable := false
+		writeJSONErrorBody(w, http.StatusBadGateway, errorBody{
+			Error:     fmt.Sprintf("clickhouse response exceeded %d bytes; narrow the query or use FORMAT JSONEachRow with streaming", respCap),
+			Code:      codeCHResponseTooLarge,
+			Retryable: &retryable,
+		})
 		return
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		// ClickHouse returns plain-text error messages with non-200 status.
-		// Forward the trimmed message as a JSON error, and map the upstream
-		// status into one of two buckets so admin tooling can tell
-		// caller-fault from upstream-fault:
-		//   4xx (bad SQL, missing table, type error, …) → 400 — the
-		//                                                  request itself
-		//                                                  was bad.
-		//   5xx, anything else                          → 502 — we're a
-		//                                                  gateway and the
-		//                                                  upstream
-		//                                                  service had a
-		//                                                  problem.
-		// Distinguishing ClickHouse's specific error codes (Code: 60 for
-		// "table doesn't exist" etc.) would need a parser and is out of
-		// scope here. The body carries ClickHouse's exact message so the
-		// admin still sees the diagnostic verbatim.
-		status := http.StatusBadGateway
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			status = http.StatusBadRequest
-		}
+		// ClickHouse answers most errors with HTTP 500 — bad SQL, a missing
+		// grant, an unknown table alike — so the status says nothing; the
+		// exception code it sends with it does (#403). The message is
+		// ClickHouse's own text, verbatim.
+		chErr := chconn.NewHTTPError(&http.Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: io.NopCloser(bytes.NewReader(body))})
 		msg := strings.TrimSpace(string(body))
 		if msg == "" {
 			msg = fmt.Sprintf("clickhouse returned status %d", resp.StatusCode)
 		}
-		writeJSONError(w, status, msg)
+		writeCHError(w, r, chErr, msg, http.StatusBadGateway, queryCaps{})
 		return
 	}
 

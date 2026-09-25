@@ -113,9 +113,7 @@ func TestRegistry_SurvivesVanishedDirectory(t *testing.T) {
 	assert.False(t, adopted)
 	assert.True(t, HasErrors(findings))
 	assert.Equal(t, 42, s.DefaultMaxRows())
-	_, id, req := s.DedupeFor("clicks")
-	assert.Equal(t, "event_id", id)
-	assert.False(t, req)
+	assert.Equal(t, "event_id", s.DedupeFor("clicks").IDField)
 }
 
 // TestRegistry_AfterAdoptRunsOnlyOnAdoption pins the lifecycle hook contract
