@@ -56,7 +56,7 @@ Read only with `mq.backend: nats`. WaveHouse connects to NATS you run and uses s
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `mq.nats.urls` | `WH_MQ_NATS_URLS` | *(none)* | Required. The servers to dial: a YAML list, or a comma-separated variable. |
+| `mq.nats.urls` | `WH_MQ_NATS_URLS` | *(none)* | Required. The servers to dial: a YAML list, or a comma-separated variable. A URL carrying credentials (`user:password@` or `token@`) refuses boot. |
 | `mq.nats.name` | `WH_MQ_NATS_NAME` | `wavehouse-<hostname>` | The connection name the server reports. |
 | `mq.nats.creds_file` | `WH_MQ_NATS_CREDS_FILE` | *(empty)* | A `.creds` file (user JWT and nkey seed), for decentralized auth. |
 | `mq.nats.nkey_seed_file` | `WH_MQ_NATS_NKEY_SEED_FILE` | *(empty)* | An nkey seed file. |
@@ -75,7 +75,7 @@ Read only with `mq.backend: nats`. WaveHouse connects to NATS you run and uses s
 | `mq.nats.publish_timeout` | `WH_MQ_NATS_PUBLISH_TIMEOUT` | `5s` | Bounds one publish attempt. A publish is tried at most three times; a partition's `duplicate_window` must cover all three, or boot refuses. |
 | `mq.nats.topology_wait` | `WH_MQ_NATS_TOPOLOGY_WAIT` | `60s` | How long boot waits for the cluster and for your streams and consumers to be right. Boot then refuses with every finding at once. |
 
-Boot refuses a `nats` block with no URLs, more than one of `creds_file`, `nkey_seed_file` and `user`, half a certificate pair, a prefix outside the grammar, fewer than one partition, or a timeout that is not positive. Durations take Go syntax (`5s`, `2m`).
+Boot refuses a `nats` block with no URLs, a URL with credentials in it, more than one of `creds_file`, `nkey_seed_file` and `user`, half a certificate pair, a prefix outside the grammar, fewer than one partition, or a timeout that is not positive. Durations take Go syntax (`5s`, `2m`).
 
 A tenant's [`mq.max_bytes_gb`](/settings-directory#message-queue) is not applied under `nats`: its events share a partition stream with other tenants, and that stream's limits, which you set, bound them. Boot logs a warning saying so.
 

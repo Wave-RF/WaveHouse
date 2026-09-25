@@ -139,6 +139,8 @@ func TestValidate_MQNATS(t *testing.T) {
 		{"user alone", func(n *MQNATSConfig) { n.User = "wavehouse" }, ""},
 		{"mutual tls", func(n *MQNATSConfig) { n.TLS.CertFile, n.TLS.KeyFile = "/c", "/k" }, ""},
 		{"no urls", func(n *MQNATSConfig) { n.URLs = nil }, "mq.nats.urls (WH_MQ_NATS_URLS) is required with mq.backend=nats"},
+		{"password in a url", func(n *MQNATSConfig) { n.URLs = []string{"nats://wavehouse:hunter2@nats:4222"} }, "must not carry credentials"},
+		{"token in a url", func(n *MQNATSConfig) { n.URLs = []string{"nats://nats:4222", "tls://s3cr3t@nats:4222"} }, "must not carry credentials"},
 		{"empty url", func(n *MQNATSConfig) { n.URLs = []string{"nats://a:4222", ""} }, "has an empty entry"},
 		{"prefix with a dot", func(n *MQNATSConfig) { n.SubjectPrefix = "wh.prod" }, `mq.nats.subject_prefix (WH_MQ_NATS_SUBJECT_PREFIX) "wh.prod" must be one token`},
 		{"prefix upper case", func(n *MQNATSConfig) { n.SubjectPrefix = "WH" }, "must be one token"},

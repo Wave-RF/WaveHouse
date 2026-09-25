@@ -11,7 +11,7 @@ How to run WaveHouse in production — single binary, Docker images, releases, h
 
 ## Single binary
 
-WaveHouse runs as one process with embedded NATS and optional Pebble dedup. The only external dependency is ClickHouse.
+WaveHouse runs as one process with embedded NATS and optional Pebble dedup. The only external dependency is ClickHouse, unless [`mq.backend: nats`](#external-nats) puts the queue on a NATS cluster you run.
 
 ### Quick Start with Docker Compose
 
@@ -377,6 +377,8 @@ subscribe:
 
 WaveHouse's replies arrive under `_INBOX_<prefix>.>`, which is why the subscribe permission can be that narrow.
 
+**Publishing to `<prefix>.ingest.>` or `<prefix>.dlq.>` is trusted as WaveHouse itself.** The ingest worker takes the tenant from the subject and writes the event as published, so a principal with that right writes to any tenant without passing authentication, policy or schema validation. Grant it to the `wavehouse` user alone. (`nack` has full access to the account; keep its credentials to the controller.)
+
 ### Limits that differ from the embedded queue
 
 - **Per-tenant budgets are not enforced.** A tenant's [`mq.max_bytes_gb`](/settings-directory#message-queue) is not applied; a partition's byte limit is shared by the tenants in it. `maxMsgsPerSubject` with `discardPerSubject: true`, which the generated manifests set, refuses one tenant's table once it holds that many unwritten rows, before it fills the partition.
@@ -388,8 +390,10 @@ WaveHouse's replies arrive under `_INBOX_<prefix>.>`, which is why the subscribe
 
 A tenant lives in one partition, so one tenant's ingest rate is bounded by what one stream can take. More partitions spread tenants, and so the damage one tenant can do, more thinly. N must match `mq.nats.partitions` in every process. Changing it moves most tenants to another partition, and their events are no longer in order across the move. WaveHouse consumes only partitions `0` to `N−1`:
 
-- **To raise N,** create the new partitions and their durables, add them to the history's sources, then roll WaveHouse out with the new N. The old partitions keep being consumed.
-- **To lower N,** stop ingest traffic and wait until the partitions you are removing are empty before you roll WaveHouse out with the smaller N. Rows left in them are not consumed after that. Boot warns about each stream that still holds ingest subjects outside the N partitions; delete it once it is empty.
+Every generated partition records its index and N in its metadata (`wavehouse.dev/partition`, `wavehouse.dev/partitions`), and a process configured for another N refuses them. So change N by regenerating: `wavehouse mq manifests --partitions <new N>`, and apply the whole output, which updates every partition's metadata and the history's sources. From then until every process runs the new N, the processes still on the old N report `wavehouse_mq_topology_ok` `0` at their next check and cannot restart, so roll out promptly.
+
+- **To raise N,** apply the regenerated manifests, then roll WaveHouse out with the new N. The old partitions keep being consumed.
+- **To lower N,** stop ingest traffic and wait until the partitions you are removing are empty, then apply the regenerated manifests and roll WaveHouse out with the smaller N. Rows left in the removed partitions are not consumed after that. Boot warns about each stream that still holds ingest subjects outside the N partitions; delete it once it is empty.
 
 ### Monitoring
 
@@ -421,6 +425,7 @@ By default one process runs all of WaveHouse. [`roles`](/configuration#process-r
 A split needs backends that every process can reach: a shared `mq.backend`, so that every process reaches the same queue; a shared `cache.backend`, so that the ingest pods' invalidations reach the API pods' cache; and a shared `coord.backend`, so that the sweeper lease spans pods. This build has one shared backend, [`mq.backend: nats`](#external-nats), and boot refuses any split without it, naming the backend to change. With it:
 
 - **`api` and `ingest` still run together.** Without a shared `cache.backend`, boot refuses a process that runs one of them without the other. Run them as one Deployment (`WH_ROLES=api,ingest`) with as many replicas as you need; each replica's cache serves reads that may be stale until an entry expires (boot warns).
+- **Dedupe holds per replica.** With `dedupe.backend: pebble` each replica dedupes only the event ids it has seen itself, so a retry that lands on another replica is written twice (boot warns).
 - **The sweeper can run on its own** (`WH_ROLES=sweeper`), or in every replica. Without a shared `coord.backend` each process holds its own sweeper lease, so several may sweep at once. Under `nats` that is harmless, because the sweeper removes nothing there (boot warns).
 
 Run every role in one process, the default, until you need more than one.

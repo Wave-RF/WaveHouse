@@ -108,6 +108,11 @@ func (n MQNATSConfig) validate() error {
 		if u == "" {
 			return fmt.Errorf("mq.nats.urls (WH_MQ_NATS_URLS) %q has an empty entry", strings.Join(n.URLs, ","))
 		}
+		// A user, password or token in the URL is an inline secret, and would
+		// also sidestep the one-way-to-authenticate check below.
+		if strings.Contains(u, "@") {
+			return errors.New("mq.nats.urls (WH_MQ_NATS_URLS) must not carry credentials (an '@' in a URL): use password_file, nkey_seed_file or creds_file")
+		}
 	}
 	if !natsSubjectPrefix.MatchString(n.SubjectPrefix) {
 		return fmt.Errorf("mq.nats.subject_prefix (WH_MQ_NATS_SUBJECT_PREFIX) %q must be one token of [a-z0-9_-]", n.SubjectPrefix)
@@ -257,6 +262,9 @@ func (c *Config) Warnings() []string {
 		out = append(out, fmt.Sprintf("mq.nats is set but mq.backend=%s: the block is ignored", c.MQ.Backend))
 	}
 	if c.MQ.Backend == MQNATS {
+		// WARN although it is by design and fires on every nats boot: the
+		// key is required in every tenant's config.json, so an operator
+		// setting a budget there must hear it does nothing (#613 core G.3).
 		out = append(out, "mq.max_bytes_gb (settings directory) is not applied with mq.backend=nats: a tenant's queue is bounded by its partition stream's limits, which are the operator's")
 		// Harmless until the sweeper has something to do under nats: its
 		// PurgeAcked removes nothing (retention is the operator's), so two
