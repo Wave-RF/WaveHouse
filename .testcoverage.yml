@@ -73,3 +73,11 @@ exclude:
       - ^internal/settings/
       - ^cmd/wavehouse/validate\.go$
       - ^cmd/wavehouse/bootstrap\.go$
+      # The external-NATS topology spec, verifier and manifest generator
+      # (and the `mq manifests` CLI) run against an operator's NATS, which
+      # the e2e stack (embedded broker) never has: unit territory, covered
+      # there by a fixture server. Excluding them keeps e2e at ~61%.
+      - ^internal/mq/nats_topology\.go$
+      - ^internal/mq/nats_manifests\.go$
+      - ^internal/mq/subject_nats\.go$
+      - ^cmd/wavehouse/mq\.go$
