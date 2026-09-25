@@ -75,7 +75,7 @@ func (e *Embedded) startSweep(db *pebble.DB) (stop func()) {
 }
 
 // sweep makes one pass over the whole instance, deleting keys whose
-// retention has ended and version-0 keys, which nothing reads: those from
+// retention has ended and version-0 keys, which never count: those from
 // before ids were keyed by table (tenant ‖ 0x00 ‖ id, or the bare id before
 // that). They are told apart by value, since a bare id may be any bytes, a
 // current key's included: only commits are stored, and every commit has the
