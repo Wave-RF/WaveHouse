@@ -73,9 +73,3 @@ exclude:
       - ^internal/settings/
       - ^cmd/wavehouse/validate\.go$
       - ^cmd/wavehouse/bootstrap\.go$
-      # The Redis-compatible cache backend: the e2e stack runs LocalCache
-      # (no Redis server, and no config selects the backend yet — #613 E4),
-      # so the binary carries these files but e2e can never reach them; they
-      # pulled the e2e gate to 56.4%. The integration suite runs them against
-      # real servers, and the merged total still counts them.
-      - ^internal/cache/(redis|redis_codec|breaker|pending|metrics)\.go$

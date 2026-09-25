@@ -169,7 +169,7 @@ curl -X POST http://localhost:8080/v1/pipes/top_pages \
   -d '{"start_date": "2024-01-01", "limit": 20}'
 ```
 
-The response is a JSON array of rows. Results flow through the shared in-process L1 cache (Ristretto) with singleflight coalescing, so concurrent identical calls hit ClickHouse once; an `X-Cache: HIT` or `X-Cache: MISS` header tells you which path served the response.
+The response is a JSON array of rows. Results flow through the query cache (in-process by default, or a Redis shared by every instance with [`cache.backend: redis`](/configuration#cache)) with singleflight coalescing, so concurrent identical calls hit ClickHouse once; an `X-Cache: HIT` or `X-Cache: MISS` header tells you which path served the response.
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |

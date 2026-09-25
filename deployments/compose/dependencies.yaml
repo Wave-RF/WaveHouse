@@ -33,5 +33,18 @@ services:
       timeout: 2s
       retries: 15
 
+  # Optional shared cache for trying cache.backend=redis locally, e.g. two
+  # host-side instances on different ports: `--profile redis`. No
+  # persistence, and /data on tmpfs, so it leaves no volume behind.
+  redis:
+    profiles: [redis]
+    # Pinned to match internal/cache's integration suite.
+    image: redis:8.10.2-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    tmpfs:
+      - /data
+
 volumes:
   clickhouse-data:

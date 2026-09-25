@@ -82,7 +82,7 @@ make dev
 WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 - **Embedded NATS** (JetStream) — no external MQ needed
-- **L1 cache only** (Ristretto) — no external cache needed
+- **In-process cache** (Ristretto, `cache.backend: local`) — no external cache needed; to try the shared one, start Redis with `docker compose -f deployments/compose/dependencies.yaml --profile redis up -d` and set `WH_CACHE_BACKEND=redis WH_CACHE_REDIS_ADDRS=localhost:6379`
 - **Trial policy** — the dev settings directory `./settings` is seeded on first run with the compose stack's permissive `public` policy, so tokenless requests to the demo tables work (see [Test the API](#test-the-api))
 - **Dedup disabled** by default — no Pebble needed
 - **Schema discovery** — automatically finds your ClickHouse tables
@@ -454,7 +454,7 @@ WaveHouse/
 │   ├── api/                # HTTP handlers, router, middleware
 │   ├── app/                # Process wiring (build every component, run under one errgroup, release in reverse)
 │   ├── auth/               # JWT/JWKS authentication middleware
-│   ├── cache/              # L1 (Ristretto) + L2 caching
+│   ├── cache/              # Query cache: in-process (Ristretto) or shared (Redis-compatible)
 │   ├── chconn/             # ClickHouse pools, one per connection tuple (reconciled on settings reload)
 │   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration

@@ -627,7 +627,7 @@ var _ pruner = (*cache.LocalCache)(nil)
 // is chosen. After every reload a tenant no longer served, removed or
 // rejected alike, has its in-process version index dropped (#262); its cache
 // is orphaned with it, as it would be anyway when it came back
-// (wireClickHouse).
+// (wireClickHouse). A shared backend keeps no such index and is skipped.
 func (a *App) wireCache() error {
 	var c cache.Cache
 	switch b := a.cfg.Cache.Backend; b {
@@ -637,6 +637,16 @@ func (a *App) wireCache() error {
 			return fmt.Errorf("cache init: %w", err)
 		}
 		c = l1
+	case config.CacheRedis:
+		rc, err := redisConfig(a.cfg.Cache.Redis)
+		if err != nil {
+			return fmt.Errorf("cache init: %w", err)
+		}
+		r, err := cache.NewRedis(rc)
+		if err != nil {
+			return fmt.Errorf("cache init: %w", err)
+		}
+		c = r
 	default:
 		return unreachableBackend("cache.backend", b)
 	}
@@ -648,6 +658,35 @@ func (a *App) wireCache() error {
 		}
 	})
 	return nil
+}
+
+// redisConfig maps the boot config's cache.redis block onto the backend's
+// config. Load has applied every default and validated the block; the TLS
+// files are read again here, so the connection uses what is on disk now.
+func redisConfig(r config.CacheRedisConfig) (cache.RedisConfig, error) {
+	t, err := r.TLS.Config()
+	if err != nil {
+		return cache.RedisConfig{}, err
+	}
+	compressMin := r.CompressMinBytes
+	if compressMin < 0 {
+		compressMin = 0 // the backend's "never"
+	}
+	return cache.RedisConfig{
+		Addrs:            r.Addrs,
+		Mode:             r.Mode,
+		SentinelMaster:   r.SentinelMaster,
+		Username:         r.Username,
+		Password:         r.Password,
+		DB:               r.DB,
+		TLS:              t,
+		KeyPrefix:        r.KeyPrefix,
+		Timeout:          r.Timeout,
+		DialTimeout:      r.DialTimeout,
+		MaxValueBytes:    r.MaxValueBytes,
+		CompressMinBytes: compressMin,
+		VersionTTL:       r.VersionTTL,
+	}, nil
 }
 
 // unreachableBackend is each layer switch's default case. config.Validate

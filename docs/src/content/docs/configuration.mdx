@@ -39,16 +39,16 @@ This page is boot config only — what the platform operator owns (wiring, lifec
 
 ### Backends
 
-Each layer's implementation is chosen once, at boot. Today every layer has one backend, the in-process one, and it is the default, so a config that sets none of these keys runs as it always has. A value this build has no backend for refuses boot and names the valid ones.
+Each layer's implementation is chosen once, at boot. Every layer defaults to its in-process backend, so a config that sets none of these keys runs as it always has; the cache also has a shared one, `redis`. A value this build has no backend for refuses boot and names the valid ones.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `mq.backend` | `WH_MQ_BACKEND` | `embedded` | The message queue. `embedded`: NATS JetStream inside this process, under `<data_dir>/nats`. It listens on no port, so no other process can reach its queue. |
-| `cache.backend` | `WH_CACHE_BACKEND` | `local` | The query-result cache. `local`: in this process, sized by `cache.l1_max_cost`. |
+| `cache.backend` | `WH_CACHE_BACKEND` | `local` | The query-result cache. `local`: in this process, sized by `cache.l1_max_cost`. `redis`: one Redis-compatible server shared by every process, configured by [`cache.redis`](#cache), so an insert one process makes invalidates what every process has cached. |
 | `dedupe.backend` | `WH_DEDUPE_BACKEND` | `pebble` | Where ingest dedupe keeps the event ids it has seen. `pebble`: in this process, under `<data_dir>/pebble`, open while any tenant has dedupe on. |
 | `coord.backend` | `WH_COORD_BACKEND` | `local` | Reserved for the leases that will elect work only one process may do at a time, such as the sweeper. Nothing is elected yet: every process runs its own sweeper, and `local`, the only value, changes nothing. |
 
-Settings for one backend will go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. No backend has settings yet, so today any such sub-block, `mq.embedded` included, is an unknown key and refuses boot. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
+Settings for one backend go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. `cache.redis` is the only one so far; any other, `mq.embedded` included, is an unknown key and refuses boot. A `cache.redis.addrs` set while `cache.backend` is `local` is logged at `WARN` at boot, since the block is not read. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
 
 ### Server
 
@@ -120,7 +120,34 @@ Each tenant's queue has its own disk budget, `mq.max_bytes_gb`, a hot-reloadable
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `cache.l1_max_cost` | `WH_CACHE_L1_MAX_COST` | `67108864` | Maximum L1 cache size in bytes (~64 MB). The time-range bucket structured queries normalize to is `query.timestamp_bucket_seconds` in the [Settings Directory](/settings-directory#configjson-keys). |
+| `cache.l1_max_cost` | `WH_CACHE_L1_MAX_COST` | `67108864` | Maximum size in bytes (~64 MB) of the `local` backend's in-process cache. The time-range bucket structured queries normalize to is `query.timestamp_bucket_seconds` in the [Settings Directory](/settings-directory#configjson-keys). |
+
+The `redis` backend's settings, read only when `cache.backend` is `redis`. It runs on Redis, Valkey, Dragonfly, ElastiCache (including Serverless) and MemoryDB: it sends only `GET`, `SET`, `MGET` and `PING`. [Deployment](/deployment#multiple-instances-and-the-shared-cache) covers sizing, `maxmemory-policy` and what a reader on another instance can see.
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `cache.redis.addrs` | `WH_CACHE_REDIS_ADDRS` | — | **Required** with `backend: redis.` `host:port` of the server; several are a cluster's seed nodes or the sentinels. Comma-separated in the env var. |
+| `cache.redis.mode` | `WH_CACHE_REDIS_MODE` | `standalone` | `standalone`, `cluster` or `sentinel`. |
+| `cache.redis.sentinel_master` | `WH_CACHE_REDIS_SENTINEL_MASTER` | — | The master set name. Required with `mode: sentinel`. |
+| `cache.redis.username` | `WH_CACHE_REDIS_USERNAME` | — | ACL user. Empty uses the server's `default` user. |
+| `cache.redis.password` | `WH_CACHE_REDIS_PASSWORD` | — | A secret: set it through the environment (or your secret store's env injection), not in a tracked `config.yaml`. |
+| `cache.redis.db` | `WH_CACHE_REDIS_DB` | `0` | Database number (`SELECT`). Standalone and sentinel only: a cluster has only database `0`, and any other value refuses boot. |
+| `cache.redis.tls.enabled` | `WH_CACHE_REDIS_TLS_ENABLED` | `false` | Connect over TLS, verifying the server against the system roots or `ca_file`. Any other `tls` key set while this is off refuses boot, rather than connecting in plaintext. |
+| `cache.redis.tls.ca_file` | `WH_CACHE_REDIS_TLS_CA_FILE` | — | PEM file of the authorities to trust instead of the system roots. |
+| `cache.redis.tls.cert_file` | `WH_CACHE_REDIS_TLS_CERT_FILE` | — | Client certificate (PEM) for mutual TLS. Set together with `key_file`. |
+| `cache.redis.tls.key_file` | `WH_CACHE_REDIS_TLS_KEY_FILE` | — | The client certificate's private key (PEM). |
+| `cache.redis.tls.server_name` | `WH_CACHE_REDIS_TLS_SERVER_NAME` | — | Name to verify the server's certificate against, when it differs from the address. |
+| `cache.redis.tls.insecure_skip_verify` | `WH_CACHE_REDIS_TLS_INSECURE_SKIP_VERIFY` | `false` | Accept any server certificate. Logged at `WARN` at boot: whoever can intercept the connection can read and replace cached results. |
+| `cache.redis.key_prefix` | `WH_CACHE_REDIS_KEY_PREFIX` | `wh` | Leads every key, so several deployments can share one server. No `{` or `}`. |
+| `cache.redis.timeout` | `WH_CACHE_REDIS_TIMEOUT` | `100ms` | Per operation. A lookup or fill that takes longer is a miss or a skipped fill, never a failed query. |
+| `cache.redis.dial_timeout` | `WH_CACHE_REDIS_DIAL_TIMEOUT` | `1s` | Per connection attempt. |
+| `cache.redis.max_value_bytes` | `WH_CACHE_REDIS_MAX_VALUE_BYTES` | `1048576` | Largest result stored, after compression (1 MiB). A larger one is returned to the caller but not cached. |
+| `cache.redis.compress_min_bytes` | `WH_CACHE_REDIS_COMPRESS_MIN_BYTES` | `1024` | Results at least this large are zstd-compressed when that makes them smaller. `-1` never compresses. `0` is not "off": in the YAML file it reads as unset and takes the default, and in the env var it refuses boot. |
+| `cache.redis.version_ttl` | `WH_CACHE_REDIS_VERSION_TTL` | `168h` | How long a table's or tenant's version token outlives its last write, so the tokens of dropped tables and removed tenants eventually expire. At least `2s`. An expired token only causes misses. |
+
+**When the server is unreachable or misbehaves, the cache is bypassed; queries are not.** A failure or a timeout makes the lookup a miss and the fill a no-op, and five in a row open a circuit breaker that skips the server entirely until a probe, every 5 s, gets an answer. Queries then go straight to ClickHouse, still coalesced per instance by `singleflight`. An invalidation the server did not take is kept and retried until it lands. `/readyz` does not depend on the cache.
+
+**Boot does not wait for the server.** A malformed block (an address without a port, `mode: cluster` with `db` other than `0`, an unreadable or unparsable TLS file) refuses boot. A server that cannot be reached, or that refuses the credentials, does not: the process boots with the cache bypassed and keeps reconnecting, with backoff up to 30 s. A rejected password (`WRONGPASS`, `NOAUTH`) is logged at `ERROR` on every attempt; any other failure at `WARN`. This is deliberate: a rotated Redis password must not crash-loop every instance at once. Watch `wavehouse_cache_breaker_open`, which reads `1` while the cache is bypassed, including before the first connection.
 
 ### Authentication
 
@@ -210,8 +237,28 @@ mq:
   backend: embedded      # in-process NATS JetStream under <data_dir>/nats
 
 cache:
-  backend: local
-  l1_max_cost: 67108864
+  backend: local         # local | redis
+  l1_max_cost: 67108864  # the local backend's size
+  redis:                 # read only with backend: redis
+    addrs: []            # required with backend: redis, e.g. ["redis:6379"]
+    mode: standalone     # standalone | cluster | sentinel
+    sentinel_master: ""
+    username: ""
+    password: ""         # a secret: set WH_CACHE_REDIS_PASSWORD instead
+    db: 0
+    tls:
+      enabled: false
+      ca_file: ""
+      cert_file: ""
+      key_file: ""
+      server_name: ""
+      insecure_skip_verify: false
+    key_prefix: wh
+    timeout: 100ms
+    dial_timeout: 1s
+    max_value_bytes: 1048576
+    compress_min_bytes: 1024   # -1 = never
+    version_ttl: 168h
 
 dedupe:
   backend: pebble        # in-process Pebble under <data_dir>/pebble
@@ -267,6 +314,25 @@ WH_CH_MAX_TOTAL_CONNS=0
 WH_MQ_BACKEND=embedded
 WH_CACHE_BACKEND=local
 WH_CACHE_L1_MAX_COST=67108864
+# Read only with WH_CACHE_BACKEND=redis; WH_CACHE_REDIS_ADDRS is then required.
+WH_CACHE_REDIS_ADDRS=
+WH_CACHE_REDIS_MODE=standalone
+WH_CACHE_REDIS_SENTINEL_MASTER=
+WH_CACHE_REDIS_USERNAME=
+WH_CACHE_REDIS_PASSWORD=
+WH_CACHE_REDIS_DB=0
+WH_CACHE_REDIS_TLS_ENABLED=false
+WH_CACHE_REDIS_TLS_CA_FILE=
+WH_CACHE_REDIS_TLS_CERT_FILE=
+WH_CACHE_REDIS_TLS_KEY_FILE=
+WH_CACHE_REDIS_TLS_SERVER_NAME=
+WH_CACHE_REDIS_TLS_INSECURE_SKIP_VERIFY=false
+WH_CACHE_REDIS_KEY_PREFIX=wh
+WH_CACHE_REDIS_TIMEOUT=100ms
+WH_CACHE_REDIS_DIAL_TIMEOUT=1s
+WH_CACHE_REDIS_MAX_VALUE_BYTES=1048576
+WH_CACHE_REDIS_COMPRESS_MIN_BYTES=1024
+WH_CACHE_REDIS_VERSION_TTL=168h
 WH_DEDUPE_BACKEND=pebble
 WH_COORD_BACKEND=local
 
