@@ -9,27 +9,44 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
-// VersionManager handles the safe tracking of table + scope versioning.
-// It uses a standard map because versions must NEVER be evicted under memory pressure.
-// TODO: this potentially could be bad/dangerous with a low amount of RAM available/high memory pressure AND a TON of tables/scopes per table... will need to work out eventually
+// VersionManager is the invalidation index: one version per tenant, per
+// (tenant, table) and per (tenant, table, scope), in maps keyed by name
+// alone, never by another version (#262). A bump overwrites a version in
+// place, so the index holds one entry per live tenant, table and scope
+// however often each is bumped, and forgetting a tenant releases all of it.
+//
+// A query key folds all three versions of each dependency, which gives the
+// lattice: a table bump orphans every scope, a scope bump that scope and the
+// whole-table view, and a tenant bump everything of the tenant's.
 type VersionManager struct {
 	mu sync.RWMutex
 
-	// tenantVersions leads every key of a tenant, so BumpTenant orphans the
-	// tenant's every namespace and query in one step — the ones no bump ever
-	// keyed included, which is what an enumeration of the maps would miss.
-	tenantVersions    map[tenant.ID]uint64 // <tenant>                                                  -> tenant_version
-	tableVersions     map[string]uint64    // <tenant>.<tenant_version>.<table>                         -> table_version
-	namespaceVersions map[string]uint64    // <tenant>.<tenant_version>.<table>.<table_version>.<scope> -> namespace_version
+	// tenants holds each tenant's index from the first query key built for
+	// it until the tenant is bumped or pruned.
+	tenants map[tenant.ID]*tenantVersions
+
+	// lastGen is the last generation handed to a tenant; see tenantVersions.gen.
+	lastGen uint64
 }
 
-// NewVersionManager initializes the thread-safe version store.
-func NewVersionManager() *VersionManager {
-	return &VersionManager{
-		tenantVersions:    make(map[tenant.ID]uint64),
-		tableVersions:     make(map[string]uint64),
-		namespaceVersions: make(map[string]uint64),
-	}
+// tenantVersions is one tenant's slice of the index.
+type tenantVersions struct {
+	// gen is the tenant's version: unique within the process, so a tenant
+	// forgotten and recreated can never fold a generation an entry was
+	// cached under. That is what makes dropping the tenant's whole index a
+	// safe bump.
+	gen    uint64
+	tables map[string]*tableVersions
+}
+
+// tableVersions is one table's version and its scopes'. A missing table or
+// scope reads as 0: an entry is only ever removed together with a bump of
+// the version above it (a table bump clears the scopes, a tenant bump
+// drops the tables), so a 0 read after a removal never matches an entry
+// cached before it.
+type tableVersions struct {
+	version uint64
+	scopes  map[string]uint64
 }
 
 // Namespace is one (tenant, table, scope) a cached result depends on. The
@@ -41,76 +58,101 @@ type Namespace struct {
 	Scope  string
 }
 
-// tableKeyLocked renders the table-versions key,
-// "<tenant>.<tenant_version>.<table>"; caller must hold vm.mu. A tenant id
-// cannot contain a dot and callers encode the table dot-free, so the tokens
-// can never run together.
-func (vm *VersionManager) tableKeyLocked(id tenant.ID, table string) string {
-	return fmt.Sprintf("%s.%d.%s", id, vm.tenantVersions[id], table)
-}
-
-// namespaceKeyLocked builds the namespace-table key; caller must hold vm.mu.
-func (vm *VersionManager) namespaceKeyLocked(ns Namespace) string {
-	tk := vm.tableKeyLocked(ns.Tenant, ns.Table)
-	return fmt.Sprintf("%s.%d.%s", tk, vm.tableVersions[tk], ns.Scope)
-}
-
-// NamespaceKey renders the namespace-table key for ns at its tenant's and
-// table's current versions:
-// "<tenant>.<tenant_version>.<table>.<table_version>.<scope>" (scopeless
-// scope is "", so e.g. "<tenant>.0.<table>.<v>.").
-func (vm *VersionManager) NamespaceKey(ns Namespace) string {
-	vm.mu.RLock()
-	defer vm.mu.RUnlock()
-	return vm.namespaceKeyLocked(ns)
+// NewVersionManager initializes the thread-safe version store.
+func NewVersionManager() *VersionManager {
+	return &VersionManager{tenants: make(map[tenant.ID]*tenantVersions)}
 }
 
 // QueryKey builds the queries-table key for tenant id's result that depends
 // on deps: the query's sha (hash of SQL+params) folded with the tenant's
-// version and every dependency's namespace key AND its namespace version, so
-// a bump of the tenant or of any dependency misses the key — a result with no
-// deps (a pipe) is orphaned by BumpTenant too. A structured query passes one
-// Namespace; a pipe passes several. Deps are sorted so their order never
-// changes the key.
+// version and, for every dependency, its tenant's, table's and scope's
+// versions, so a bump of the tenant or of any dependency misses the key — a
+// result with no deps (a pipe) is orphaned by BumpTenant too. A structured
+// query passes one Namespace, a pipe none yet (#343). Deps are sorted so
+// their order never changes the key. Every version is read under one lock,
+// so the key is one consistent snapshot.
+//
+// The first key built for a tenant creates its index at a fresh generation.
 func (vm *VersionManager) QueryKey(id tenant.ID, sha string, deps []Namespace) string {
-	segs := make([]string, len(deps))
-	// Lock per dependency rather than across the whole loop: each dep's table +
-	// namespace versions are read together (consistent for that dep), but we don't
-	// hold the lock across all deps. A concurrent bump can land between deps; the
-	// caller files its fill under this key (a Snapshot), so a bump that lands
-	// anywhere after the read of a version orphans it. The sort/join run with
-	// no lock held.
-	for i, d := range deps {
-		vm.mu.RLock()
-		nsKey := vm.namespaceKeyLocked(d)
-		segs[i] = fmt.Sprintf("%s.%d", nsKey, vm.namespaceVersions[nsKey])
-		vm.mu.RUnlock()
-	}
 	vm.mu.RLock()
-	tv := vm.tenantVersions[id]
+	key, ok := vm.queryKeyLocked(id, sha, deps, false)
 	vm.mu.RUnlock()
+	if ok {
+		return key
+	}
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	key, _ = vm.queryKeyLocked(id, sha, deps, true)
+	return key
+}
+
+// queryKeyLocked renders QueryKey with vm.mu held — for writing when create
+// is set, which creates the index of each tenant the key names that has
+// none; otherwise such a tenant reports !ok.
+func (vm *VersionManager) queryKeyLocked(id tenant.ID, sha string, deps []Namespace, create bool) (string, bool) {
+	index := func(id tenant.ID) (*tenantVersions, bool) {
+		tv := vm.tenants[id]
+		if tv == nil && create {
+			tv = vm.newTenantLocked(id)
+		}
+		return tv, tv != nil
+	}
+	own, ok := index(id)
+	if !ok {
+		return "", false
+	}
+	segs := make([]string, len(deps))
+	for i, d := range deps {
+		tv, ok := index(d.Tenant)
+		if !ok {
+			return "", false
+		}
+		var table, scope uint64
+		if t := tv.tables[d.Table]; t != nil {
+			table, scope = t.version, t.scopes[d.Scope]
+		}
+		segs[i] = fmt.Sprintf("%s.%d.%s.%d.%s.%d", d.Tenant, tv.gen, d.Table, table, d.Scope, scope)
+	}
 	sort.Strings(segs)
-	return fmt.Sprintf("%s|%s.%d|%s", sha, id, tv, strings.Join(segs, "|"))
+	return fmt.Sprintf("%s|%s.%d|%s", sha, id, own.gen, strings.Join(segs, "|")), true
+}
+
+func (vm *VersionManager) newTenantLocked(id tenant.ID) *tenantVersions {
+	vm.lastGen++
+	tv := &tenantVersions{gen: vm.lastGen, tables: make(map[string]*tableVersions)}
+	vm.tenants[id] = tv
+	return tv
+}
+
+// tableLocked is the entry for a tenant's table, created at version 0, or
+// nil when the tenant has no index: no key folds its current generation
+// yet, so there is nothing a bump could orphan. Caller holds vm.mu for
+// writing.
+func (vm *VersionManager) tableLocked(id tenant.ID, table string) *tableVersions {
+	tv := vm.tenants[id]
+	if tv == nil {
+		return nil
+	}
+	t := tv.tables[table]
+	if t == nil {
+		t = &tableVersions{}
+		tv.tables[table] = t
+	}
+	return t
 }
 
 // BumpTable advances a tenant's table version, orphaning every namespace — and
 // every cached query — that depends on the table, in one step (the whole-table
-// nuke). The same table under another tenant is untouched.
+// nuke). The table's scope versions are dropped with it: every key they were
+// folded into also folds the old table version. The same table under another
+// tenant is untouched.
 func (vm *VersionManager) BumpTable(id tenant.ID, table string) {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
-	vm.tableVersions[vm.tableKeyLocked(id, table)]++
-}
-
-// BumpTenant advances a tenant's version, orphaning its every namespace —
-// and every cached query, whatever its deps — in one step (the whole-tenant
-// nuke): every namespace and query key of the tenant carries the version, so
-// nothing has to be enumerated, and a table no bump ever keyed is orphaned
-// like the rest. Other tenants are untouched.
-func (vm *VersionManager) BumpTenant(id tenant.ID) {
-	vm.mu.Lock()
-	defer vm.mu.Unlock()
-	vm.tenantVersions[id]++
+	if t := vm.tableLocked(id, table); t != nil {
+		t.version++
+		t.scopes = nil
+	}
 }
 
 // BumpNamespace advances one (tenant, table, scope) namespace plus the table's
@@ -119,8 +161,54 @@ func (vm *VersionManager) BumpTenant(id tenant.ID) {
 func (vm *VersionManager) BumpNamespace(ns Namespace) {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
-	vm.namespaceVersions[vm.namespaceKeyLocked(ns)]++
-	if ns.Scope != "" {
-		vm.namespaceVersions[vm.namespaceKeyLocked(Namespace{Tenant: ns.Tenant, Table: ns.Table})]++
+	t := vm.tableLocked(ns.Tenant, ns.Table)
+	if t == nil {
+		return
 	}
+	if t.scopes == nil {
+		t.scopes = make(map[string]uint64)
+	}
+	t.scopes[ns.Scope]++
+	if ns.Scope != "" {
+		t.scopes[""]++
+	}
+}
+
+// BumpTenant orphans every cached query of a tenant, whatever its deps, in
+// one step (the whole-tenant nuke), by dropping the tenant's index: the next
+// key built for it gets a fresh generation, which no cached entry folds.
+// Nothing has to be enumerated, a table no bump ever keyed is orphaned like
+// the rest, and the index the tenant held is released. Other tenants are
+// untouched.
+func (vm *VersionManager) BumpTenant(id tenant.ID) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	delete(vm.tenants, id)
+}
+
+// Prune drops the index of every tenant keep rejects, as BumpTenant would,
+// so a tenant that stops being served stops holding memory; one served again
+// starts over at a fresh generation.
+func (vm *VersionManager) Prune(keep func(tenant.ID) bool) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	for id := range vm.tenants {
+		if !keep(id) {
+			delete(vm.tenants, id)
+		}
+	}
+}
+
+// size is the number of versions the index holds, for tests.
+func (vm *VersionManager) size() int {
+	vm.mu.RLock()
+	defer vm.mu.RUnlock()
+	n := len(vm.tenants)
+	for _, tv := range vm.tenants {
+		n += len(tv.tables)
+		for _, t := range tv.tables {
+			n += len(t.scopes)
+		}
+	}
+	return n
 }
