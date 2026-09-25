@@ -591,7 +591,16 @@ func (a *App) wireMQ() error {
 	return nil
 }
 
-// wireCache opens the L1 cache — the only tier in standalone mode.
+// pruner is a cache whose version index lives in the process and would
+// otherwise keep a tenant that stopped being served (cache.LocalCache).
+type pruner interface {
+	Prune(served func(tenant.ID) bool)
+}
+
+// wireCache opens the L1 cache — the only tier in standalone mode. After
+// every reload a tenant no longer served, removed or rejected alike, has its
+// version index dropped (#262); its cache is orphaned with it, as it would
+// be anyway when it came back (wireClickHouse).
 func (a *App) wireCache() error {
 	l1, err := cache.NewLocal(a.cfg.Cache.L1MaxCost)
 	if err != nil {
@@ -600,6 +609,11 @@ func (a *App) wireCache() error {
 	// TODO: eventually this is where we can switch between ristretto, redis, tiered (both), etc
 	a.cache = l1
 	a.add(component{name: "cache", close: withoutContext(l1.Close)})
+	a.tenants.AfterAdopt(func([]tenant.ID) {
+		if p, ok := a.cache.(pruner); ok {
+			p.Prune(a.served)
+		}
+	})
 	return nil
 }
 
