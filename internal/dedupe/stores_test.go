@@ -2,6 +2,7 @@ package dedupe
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -133,4 +134,22 @@ func TestStores_CloseClosesEveryStore(t *testing.T) {
 	assert.False(t, globex.Open())
 	assert.False(t, e.Open(), "the instance closes with the last store")
 	require.NoError(t, s.Close(), "closing again is a no-op")
+}
+
+func TestFactory_GatedOpensOnlyOnceReady(t *testing.T) {
+	t.Parallel()
+	notReady := errors.New("table missing")
+	ready := notReady
+	gated := NewStores(Factory(NewEmbedded(t.TempDir()).Tenant).Gated(func() error { return ready }))
+	t.Cleanup(func() { _ = gated.Close() })
+	acme := gated.For("acme")
+
+	require.ErrorIs(t, acme.Apply(true), notReady)
+	assert.False(t, acme.Open())
+	_, err := mark(context.Background(), acme, "e1")
+	require.ErrorIs(t, err, ErrUnavailable, "switched on but not ready: fails closed, never open")
+
+	ready = nil
+	require.NoError(t, acme.Apply(true), "the next apply finds it ready")
+	assert.True(t, acme.Open())
 }

@@ -39,16 +39,39 @@ This page is boot config only — what the platform operator owns (wiring, lifec
 
 ### Backends
 
-Each layer's implementation is chosen once, at boot. Today every layer has one backend, the in-process one, and it is the default, so a config that sets none of these keys runs as it always has. A value this build has no backend for refuses boot and names the valid ones.
+Each layer's implementation is chosen once, at boot. The in-process backend is every layer's default, so a config that sets none of these keys runs as it always has. A value this build has no backend for refuses boot and names the valid ones.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `mq.backend` | `WH_MQ_BACKEND` | `embedded` | The message queue. `embedded`: NATS JetStream inside this process, under `<data_dir>/nats`. It listens on no port, so no other process can reach its queue. |
 | `cache.backend` | `WH_CACHE_BACKEND` | `local` | The query-result cache. `local`: in this process, sized by `cache.l1_max_cost`. |
-| `dedupe.backend` | `WH_DEDUPE_BACKEND` | `pebble` | Where ingest dedupe keeps the event ids it has seen. `pebble`: in this process, under `<data_dir>/pebble`, open while any tenant has dedupe on. |
+| `dedupe.backend` | `WH_DEDUPE_BACKEND` | `pebble` | Where ingest dedupe keeps the event ids it has seen. `pebble`: in this process, under `<data_dir>/pebble`, open while any tenant has dedupe on; two processes do not share seen ids. `dynamodb`: one DynamoDB table that every tenant and every process shares, configured by [`dedupe.dynamodb`](#dynamodb-dedupe). |
 | `coord.backend` | `WH_COORD_BACKEND` | `local` | Reserved for the leases that will elect work only one process may do at a time, such as the sweeper. Nothing is elected yet: every process runs its own sweeper, and `local`, the only value, changes nothing. |
 
-Settings for one backend will go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. No backend has settings yet, so today any such sub-block, `mq.embedded` included, is an unknown key and refuses boot. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
+Settings for one backend go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. `dedupe.dynamodb` is the only one so far; any other, `mq.embedded` included, is an unknown key and refuses boot. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
+
+### Dedupe
+
+Whether a tenant dedupes, and on which field, are settings-directory keys ([Deduplication](/settings-directory#deduplication)). What is boot config is where the seen ids live and how a claim behaves.
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `dedupe.lease` | `WH_DEDUPE_LEASE` | `30s` | How long a record's id stays claimed while the record is published. Another request carrying the same id meanwhile gets `503` with this as `Retry-After`, in whole seconds; a claim that is neither committed nor released, because its process died mid-publish, lapses after it. At most `2m` with `mq.backend: embedded`, the embedded queue's duplicate window: a longer lease refuses boot. A Go duration (`30s`, `1m`). |
+| `dedupe.reserve_concurrency` | `WH_DEDUPE_RESERVE_CONCURRENCY` | `64` | The most calls one request makes to a remote dedupe backend at once. `pebble` ignores it. |
+
+#### DynamoDB dedupe
+
+Read only when `dedupe.backend` is `dynamodb`. Credentials come from the AWS SDK's default chain (EKS Pod Identity or IRSA in a pod; `AWS_*` variables or a profile locally), never from this file; the table and its IAM policy are described in [Deployment](/deployment#a-shared-dedupe-table-on-dynamodb). At boot WaveHouse checks the table: its key schema must be `pk` (Binary) alone, and TTL off on `ex` is logged as a warning. A table that fails the check, or cannot be reached, refuses boot with a flat settings directory. With a nested one, the process boots, every tenant with dedupe on answers ingest with an error until the check passes, and every reload checks again. The check runs whether or not any tenant has dedupe on.
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `dedupe.dynamodb.table` | `WH_DEDUPE_DYNAMODB_TABLE` | *(none)* | The shared table. Required. |
+| `dedupe.dynamodb.region` | `WH_DEDUPE_DYNAMODB_REGION` | *(empty)* | The table's region. Empty uses the SDK chain's (`AWS_REGION`). |
+| `dedupe.dynamodb.endpoint` | `WH_DEDUPE_DYNAMODB_ENDPOINT` | *(empty)* | A custom endpoint, for [dynamodb-local](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html) in development and tests. Leave it empty against AWS. |
+| `dedupe.dynamodb.timeout` | `WH_DEDUPE_DYNAMODB_TIMEOUT` | `250ms` | Deadline for each DynamoDB call, the SDK's retries included. |
+| `dedupe.dynamodb.max_attempts` | `WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS` | `3` | Attempts per call, the first included. |
+| `dedupe.dynamodb.retry_mode` | `WH_DEDUPE_DYNAMODB_RETRY_MODE` | `standard` | `standard`, or `adaptive`, which also slows the client down after throttling. |
+| `dedupe.dynamodb.create_table` | `WH_DEDUPE_DYNAMODB_CREATE_TABLE` | `false` | Development only: create the table at boot if it is missing, with TTL on `ex`. Refused unless `endpoint` is set, so it never creates a table in AWS; the production table belongs to your infrastructure code. |
 
 ### Server
 
@@ -214,7 +237,17 @@ cache:
   l1_max_cost: 67108864
 
 dedupe:
-  backend: pebble        # in-process Pebble under <data_dir>/pebble
+  backend: pebble        # in-process Pebble under <data_dir>/pebble; or dynamodb
+  lease: 30s             # at most 2m with the embedded mq
+  reserve_concurrency: 64
+  # dynamodb:            # read only when backend is dynamodb
+  #   table: wavehouse-dedupe-prod
+  #   region: ""         # empty = AWS_REGION
+  #   endpoint: ""       # dynamodb-local only
+  #   timeout: 250ms
+  #   max_attempts: 3
+  #   retry_mode: standard
+  #   create_table: false  # dynamodb-local only
 
 coord:
   backend: local        # reserved: nothing is elected yet
@@ -268,6 +301,16 @@ WH_MQ_BACKEND=embedded
 WH_CACHE_BACKEND=local
 WH_CACHE_L1_MAX_COST=67108864
 WH_DEDUPE_BACKEND=pebble
+WH_DEDUPE_LEASE=30s
+WH_DEDUPE_RESERVE_CONCURRENCY=64
+# Read only with WH_DEDUPE_BACKEND=dynamodb:
+# WH_DEDUPE_DYNAMODB_TABLE=wavehouse-dedupe-prod
+# WH_DEDUPE_DYNAMODB_REGION=
+# WH_DEDUPE_DYNAMODB_ENDPOINT=
+# WH_DEDUPE_DYNAMODB_TIMEOUT=250ms
+# WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS=3
+# WH_DEDUPE_DYNAMODB_RETRY_MODE=standard
+# WH_DEDUPE_DYNAMODB_CREATE_TABLE=false
 WH_COORD_BACKEND=local
 
 WH_AUTH_JWT_SECRET=change-me-in-production

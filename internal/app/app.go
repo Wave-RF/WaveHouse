@@ -174,7 +174,7 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 		return nil, err
 	}
 	a.wireDiscovery(ctx)
-	if err := a.wireDedupe(); err != nil {
+	if err := a.wireDedupe(ctx); err != nil {
 		return nil, err
 	}
 	if err := a.wireMQ(ctx); err != nil {
