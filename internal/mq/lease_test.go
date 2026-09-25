@@ -201,6 +201,34 @@ func TestLeases_StalledHolderIsReplacedAfterTheWindow(t *testing.T) {
 	assert.GreaterOrEqual(t, tookOver.Sub(stalledAt), testLeaseDuration-testRenewEvery)
 }
 
+// A renewal stuck on an unanswering server never holds a resign up: Resign
+// aborts it, however long the renew deadline.
+func TestLeases_ResignAbortsAStuckRenewal(t *testing.T) {
+	t.Parallel()
+	f := leaseFixture(t)
+	akv := &stallableKV{KeyValue: f.bucketAs(t)}
+	a := newNATSLeases(akv, "a", WithLeaseTimings(2*time.Hour, time.Hour, testRenewEvery))
+	t.Cleanup(func() { _ = a.Close(context.Background()) })
+	term, err := a.TryAcquire(t.Context(), "sweeper")
+	require.NoError(t, err)
+	akv.stall()
+	time.Sleep(3 * testRenewEvery) // a renewal is now waiting on the stall
+	start := time.Now()
+	require.NoError(t, term.Resign(t.Context()))
+	assert.Less(t, time.Since(start), time.Second)
+	assertTermEnded(t, term)
+	require.NoError(t, term.Err())
+}
+
+func assertTermEnded(t *testing.T, term coord.Term) {
+	t.Helper()
+	select {
+	case <-term.Done():
+	default:
+		t.Fatal("the term is still live")
+	}
+}
+
 // Close resigns by deleting the key, so a candidate takes the lease at once
 // rather than after the lease duration.
 func TestLeases_CloseHandsOverAtOnce(t *testing.T) {

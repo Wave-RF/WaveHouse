@@ -76,9 +76,10 @@ func newNATSLeases(kv jetstream.KeyValue, holder string, opts ...LeaseOption) *n
 	}
 	return &natsLeases{
 		kv: kv, timings: t,
-		value: leaseValue{Holder: holder, DurationMS: t.duration.Milliseconds(), Session: nuid.Next()},
-		held:  map[string]*natsTerm{},
-		seen:  map[string]leaseSighting{},
+		value:     leaseValue{Holder: holder, DurationMS: t.duration.Milliseconds(), Session: nuid.Next()},
+		held:      map[string]*natsTerm{},
+		acquiring: map[string]struct{}{},
+		seen:      map[string]leaseSighting{},
 	}
 }
 
@@ -88,9 +89,13 @@ type natsLeases struct {
 	timings leaseTimings
 	value   leaseValue
 
+	// mu guards the fields below and is never held across a request, so a
+	// slow campaign cannot hold up another term ending.
 	mu     sync.Mutex
 	closed bool
 	held   map[string]*natsTerm
+	// acquiring holds the names a TryAcquire is campaigning for.
+	acquiring map[string]struct{}
 	// seen is, per lease another holder has, the revision last seen and when
 	// it was first seen on this process's monotonic clock.
 	seen map[string]leaseSighting
@@ -109,62 +114,94 @@ func (l *natsLeases) TryAcquire(ctx context.Context, name string) (coord.Term, e
 		return nil, err
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.closed {
+		l.mu.Unlock()
 		return nil, coord.ErrClosed
 	}
-	if _, ok := l.held[name]; ok {
+	_, held := l.held[name]
+	_, busy := l.acquiring[name]
+	if held || busy {
+		l.mu.Unlock()
 		return nil, coord.ErrHeld
 	}
+	l.acquiring[name] = struct{}{}
+	l.mu.Unlock()
+	defer func() {
+		l.mu.Lock()
+		delete(l.acquiring, name)
+		l.mu.Unlock()
+	}()
+
 	key := leaseKeyPrefix + name
 	val, err := json.Marshal(l.value)
 	if err != nil {
 		return nil, err
 	}
+	// The renew deadline runs from before the write, never from its answer:
+	// a candidate's clock can start as soon as the write is stored.
+	sent := time.Now()
+	rev, err := l.campaign(ctx, name, key, val)
+	if err != nil {
+		return nil, err
+	}
 
+	l.mu.Lock()
+	if l.closed {
+		// Close ran while the write was in flight; hand the lease straight back.
+		l.mu.Unlock()
+		_ = l.kv.Delete(ctx, key, jetstream.LastRevision(rev))
+		return nil, coord.ErrClosed
+	}
+	delete(l.seen, name)
+	tctx, cancel := context.WithCancel(context.Background())
+	t := &natsTerm{
+		owner: l, name: name, key: key, val: val, token: rev, rev: rev,
+		done: make(chan struct{}), stopped: make(chan struct{}), ctx: tctx, cancel: cancel,
+	}
+	l.held[name] = t
+	l.mu.Unlock()
+	go t.renew(sent)
+	return t, nil
+}
+
+// campaign writes this coordinator's value to key if the lease is free,
+// quiet past its duration, or already this coordinator's own write, and
+// returns the revision written; coord.ErrHeld otherwise.
+func (l *natsLeases) campaign(ctx context.Context, name, key string, val []byte) (uint64, error) {
 	entry, err := l.kv.Get(ctx, key)
 	var rev uint64
 	switch {
 	case errors.Is(err, jetstream.ErrKeyNotFound):
 		// Never held, or resigned: a delete marker is as good as absent.
 		rev, err = l.kv.Create(ctx, key, val)
-		if casConflict(err) {
-			return nil, coord.ErrHeld
-		}
 	case err != nil:
 	default:
 		var cur leaseValue
 		mine := json.Unmarshal(entry.Value(), &cur) == nil && cur.Session == l.value.Session
-		if !mine && !l.expiredLocked(name, entry.Revision(), cur) {
-			return nil, coord.ErrHeld
+		if !mine && !l.expired(name, entry.Revision(), cur) {
+			return 0, coord.ErrHeld
 		}
 		// This coordinator's own write outlived a term it gave up (a renewal
 		// past its deadline), or the holder went quiet: take it at the
 		// revision seen, so a renewal in between wins instead.
 		rev, err = l.kv.Update(ctx, key, val, entry.Revision())
-		if casConflict(err) {
-			return nil, coord.ErrHeld
-		}
+	}
+	if casConflict(err) {
+		return 0, coord.ErrHeld
 	}
 	if err != nil {
-		return nil, fmt.Errorf("coord lease %s: %w", name, err)
+		return 0, fmt.Errorf("coord lease %s: %w", name, err)
 	}
-	delete(l.seen, name)
-	t := &natsTerm{
-		owner: l, name: name, key: key, val: val, token: rev, rev: rev,
-		done: make(chan struct{}), stop: make(chan struct{}), stopped: make(chan struct{}),
-	}
-	l.held[name] = t
-	go t.renew() //nolint:gosec // G118: the term outlives the call that took it; Resign or loss ends it
-	return t, nil
+	return rev, nil
 }
 
-// expiredLocked reports whether another holder's lease at revision has been
-// seen unchanged for its duration (the holder's own, or this coordinator's
-// when the value does not say), starting the clock on a revision not seen
-// before.
-func (l *natsLeases) expiredLocked(name string, revision uint64, cur leaseValue) bool {
+// expired reports whether another holder's lease at revision has been seen
+// unchanged for its duration (the holder's own, or this coordinator's when
+// the value does not say), starting the clock on a revision not seen before.
+func (l *natsLeases) expired(name string, revision uint64, cur leaseValue) bool {
 	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	s, ok := l.seen[name]
 	if !ok || s.revision != revision {
 		l.seen[name] = leaseSighting{revision: revision, since: now}
@@ -219,10 +256,13 @@ type natsTerm struct {
 	// runs and read by Resign after it has stopped.
 	rev uint64
 
-	done          chan struct{}
-	stop, stopped chan struct{}
-	stopOnce      sync.Once
-	err           error // guarded by owner.mu, set before done closes
+	done    chan struct{}
+	stopped chan struct{}
+	// ctx bounds the renew loop's requests; Resign cancels it, so an
+	// in-flight renewal never holds a resign up.
+	ctx    context.Context
+	cancel context.CancelFunc
+	err    error // guarded by owner.mu, set before done closes
 }
 
 var _ coord.Term = (*natsTerm)(nil)
@@ -238,26 +278,34 @@ func (t *natsTerm) Err() error {
 }
 
 // renew rewrites the key at the revision last written, every renewEvery. A
-// write at the wrong revision means another holder took the lease; no
-// successful write within the renew deadline means it may be about to.
-func (t *natsTerm) renew() {
+// write at the wrong revision means another holder took the lease. The term
+// also ends the moment the renew deadline passes without a stored renewal,
+// timed from when that renewal was sent (last): a candidate may start its
+// lease-duration clock as soon as the write is stored, so the holder steps
+// down no later than renewDeadline after it, before any takeover.
+func (t *natsTerm) renew(last time.Time) {
 	defer close(t.stopped)
 	tm := t.owner.timings
-	last := time.Now()
+	deadline := time.NewTimer(time.Until(last.Add(tm.renewDeadline)))
+	defer deadline.Stop()
 	tick := time.NewTicker(tm.renewEvery)
 	defer tick.Stop()
+	var lastErr error
 	for {
 		select {
-		case <-t.stop:
+		case <-t.ctx.Done():
+			return
+		case <-deadline.C:
+			err := fmt.Errorf("%w: %s not renewed within %s", coord.ErrLost, t.name, tm.renewDeadline)
+			if lastErr != nil {
+				err = fmt.Errorf("%w: %w", err, lastErr)
+			}
+			t.end(err)
 			return
 		case <-tick.C:
 		}
-		left := time.Until(last.Add(tm.renewDeadline))
-		if left <= 0 {
-			t.end(fmt.Errorf("%w: %s not renewed within %s", coord.ErrLost, t.name, tm.renewDeadline))
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), left)
+		sent := time.Now()
+		ctx, cancel := context.WithDeadline(t.ctx, last.Add(tm.renewDeadline))
 		rev, err := t.owner.kv.Update(ctx, t.key, t.val, t.rev)
 		if casConflict(err) {
 			rev, err = t.adoptLostReply(ctx)
@@ -265,13 +313,14 @@ func (t *natsTerm) renew() {
 		cancel()
 		switch {
 		case err == nil:
-			t.rev, last = rev, time.Now()
+			t.rev, last = rev, sent
+			deadline.Reset(time.Until(last.Add(tm.renewDeadline)))
 		case errors.Is(err, coord.ErrLost):
 			t.end(err)
 			return
-		case time.Since(last) >= tm.renewDeadline:
-			t.end(fmt.Errorf("%w: %s not renewed within %s: %w", coord.ErrLost, t.name, tm.renewDeadline, err))
-			return
+		default:
+			// Retried next tick; the deadline timer ends the term on time.
+			lastErr = err
 		}
 	}
 }
@@ -306,15 +355,32 @@ func (t *natsTerm) end(err error) bool {
 	return true
 }
 
-// Resign implements coord.Term: it stops renewing and deletes the key at the
-// revision last written, so a lease someone else has taken is left alone.
+// Resign implements coord.Term: it stops renewing, aborting a renewal in
+// flight, and deletes the key at the revision last written, so a lease
+// someone else has taken is left alone. If ctx ends first the term still
+// ends here, and the lease runs out on its own.
 func (t *natsTerm) Resign(ctx context.Context) error {
-	t.stopOnce.Do(func() { close(t.stop) })
-	<-t.stopped
+	t.cancel()
+	select {
+	case <-t.stopped:
+	case <-ctx.Done():
+		t.end(nil)
+		return fmt.Errorf("resign coord lease %s: %w", t.name, ctx.Err())
+	}
 	if !t.end(nil) {
 		return nil // already ended: lost, or resigned before
 	}
 	err := t.owner.kv.Delete(ctx, t.key, jetstream.LastRevision(t.rev))
+	if casConflict(err) {
+		// A renewal the cancel cut short may still have been stored: delete
+		// this term's own value at its later revision, and nothing else.
+		var entry jetstream.KeyValueEntry
+		if entry, err = t.owner.kv.Get(ctx, t.key); err == nil && entry.Revision() > t.rev && string(entry.Value()) == string(t.val) {
+			err = t.owner.kv.Delete(ctx, t.key, jetstream.LastRevision(entry.Revision()))
+		} else if err == nil || errors.Is(err, jetstream.ErrKeyNotFound) {
+			err = nil
+		}
+	}
 	if err != nil && !casConflict(err) {
 		// The term has ended here; the lease runs out on its own.
 		return fmt.Errorf("resign coord lease %s: %w", t.name, err)

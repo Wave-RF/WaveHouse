@@ -24,8 +24,8 @@ type Config struct {
 	// a Deployment per role differs only in this. See Role.
 	Roles []Role `yaml:"roles" env:"WH_ROLES" env-default:"api,ingest,sweeper"`
 	// InstanceID names this process: logged at boot, and the holder a
-	// distributed coordinator will record. Empty resolves to <hostname>-<8 hex>
-	// at Load.
+	// coord.backend=nats lease names. Empty resolves to <hostname>-<8 hex> at
+	// Load.
 	InstanceID string     `yaml:"instance_id" env:"WH_INSTANCE_ID"`
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`

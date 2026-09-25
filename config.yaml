@@ -51,8 +51,8 @@ clickhouse:
   password: ""
   max_total_conns: 0 # ceiling on open native connections across pools; 0 = none
 
-# Each layer's implementation, chosen at boot. Only the in-process backend
-# exists for each today, and it is the default.
+# Each layer's implementation, chosen at boot. Every layer defaults to its
+# in-process backend; mq and coord also take nats.
 mq:
   backend: embedded # NATS JetStream under <data_dir>/nats
   # backend: nats reads this block instead: the operator's NATS JetStream
