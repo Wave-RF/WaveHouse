@@ -22,10 +22,10 @@ import (
 // (see mq.Purger).
 type Sweeper struct {
 	purger mq.Purger
-	// gapWindows is the history to keep for each tenant being served, read on
-	// every sweep so a reload of stream.gap_window_minutes applies from the
-	// next sweep without a restart. A tenant it does not name — one removed
-	// or rejected — keeps no history (mq.Purger.PurgeAcked).
+	// gapWindows is the history to keep for each tenant, read on every sweep
+	// so a reload of stream.gap_window_minutes applies from the next sweep
+	// without a restart. A tenant it does not name keeps no history
+	// (mq.Purger.PurgeAcked).
 	gapWindows func() map[tenant.ID]time.Duration
 }
 

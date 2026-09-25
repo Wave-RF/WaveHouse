@@ -228,7 +228,7 @@ Several layers throttle the pipeline, inner to outer:
 
 ## The Active Sweeper
 
-The worker advances the consumer's `AckFloor` by acking; the sweep observes it to decide what is safe to purge. They never call each other — the consumer's `AckFloor` is their only contract. The sweeper (`internal/ingest`) owns the schedule and the window: each tick it calls `mq.Purger.PurgeAcked(buffer-consumer, cutoffs)` with each served tenant's cutoff at now − its own `stream.gap_window_minutes`; a tenant no longer served — its folder removed or rejected — is given none, and keeps none of the history it has acknowledged. The steps after the tick below are the embedded broker's implementation of that call, run on each tenant's stream at that tenant's cutoff.
+The worker advances the consumer's `AckFloor` by acking; the sweep observes it to decide what is safe to purge. They never call each other — the consumer's `AckFloor` is their only contract. The sweeper (`internal/ingest`) owns the schedule and the window: each tick it calls `mq.Purger.PurgeAcked(buffer-consumer, cutoffs)` with each tenant's cutoff at now − its own `stream.gap_window_minutes` — a rejected tenant's as its folder last had it, or one before anything it holds if its folder has been rejected since boot, so its clients resume once the folder is fixed; a removed tenant is given none, and keeps none of the history it has acknowledged. The steps after the tick below are the embedded broker's implementation of that call, run on each tenant's stream at that tenant's cutoff.
 
 ```mermaid
 flowchart TD

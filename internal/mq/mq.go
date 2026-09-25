@@ -276,10 +276,10 @@ type Purger interface {
 	// its first unacked event) AND stored before that tenant's cutoff in
 	// olderThan. Either bound alone keeps the event: unacked events are not
 	// yet written, and recent ones are still needed for replay. A tenant
-	// olderThan does not name — one no longer served — keeps no history:
-	// everything it has acknowledged goes. Reports whether anything was
-	// removed. ErrConsumerNotFound when the consumer has not been created on
-	// some tenant's queue; the other tenants' are purged all the same.
+	// olderThan does not name keeps no history: everything it has
+	// acknowledged goes. Reports whether anything was removed.
+	// ErrConsumerNotFound when the consumer has not been created on some
+	// tenant's queue; the other tenants' are purged all the same.
 	PurgeAcked(ctx context.Context, consumer string, olderThan map[tenant.ID]time.Time) (purged bool, err error)
 }
 

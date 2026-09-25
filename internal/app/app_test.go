@@ -730,10 +730,12 @@ func gapWindow(minutes int) map[string]any {
 	return map[string]any{"stream": map[string]any{"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": minutes}}
 }
 
-// Each tenant being served keeps its own stream.gap_window_minutes, since
-// each has a queue of its own; a rejected tenant is not served, so it is not
-// named and keeps no history (mq.Purger.PurgeAcked). A flat directory's single
-// tenant gets exactly its own window.
+// Each tenant keeps its own stream.gap_window_minutes, since each has a queue
+// of its own — a rejected tenant the window its folder last had, so its
+// clients resume once the folder is fixed, and everything while that window
+// is unknown. A removed tenant is not named and keeps no history
+// (mq.Purger.PurgeAcked). A flat directory's single tenant gets exactly its
+// own window.
 func TestGapWindows(t *testing.T) {
 	open := func(t *testing.T, dir string) *settings.Registry {
 		t.Helper()
@@ -754,11 +756,24 @@ func TestGapWindows(t *testing.T) {
 
 		rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
 		tenants.Reload("test")
-		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants))
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "globex": 60 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants),
+			"a rejected tenant keeps the window its folder last had")
+
+		require.NoError(t, os.RemoveAll(filepath.Join(root, "globex")))
+		tenants.Reload("test")
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants),
+			"a removed tenant keeps none")
 	})
 
-	t.Run("no tenant served names none", func(t *testing.T) {
-		assert.Empty(t, gapWindows(open(t, writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery}))))
+	t.Run("a folder rejected since boot keeps everything", func(t *testing.T) {
+		root := writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery})
+		tenants := open(t, root)
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": keepEverything}, gapWindows(tenants))
+
+		rewriteSettings(t, filepath.Join(root, "acme"), gapWindow(15))
+		tenants.Reload("test")
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute}, gapWindows(tenants),
+			"its own window once its folder validates")
 	})
 }
 

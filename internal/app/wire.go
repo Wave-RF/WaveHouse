@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -130,17 +131,30 @@ func shortestKeepalive(tenants *settings.Registry) (period time.Duration, bucket
 	return period, buckets
 }
 
-// gapWindows is the history the sweeper keeps for each tenant being served:
-// its own stream.gap_window_minutes, since each tenant's events have a queue
-// of their own. A tenant it does not name — removed or rejected — keeps no
-// history (mq.Purger.PurgeAcked).
+// gapWindows is the history the sweeper keeps for each tenant: its own
+// stream.gap_window_minutes, since each tenant's events have a queue of their
+// own — for a rejected tenant, the window its folder last had, because a
+// rejection is the common reload failure (a typo, fixed minutes later) and
+// its clients resume from Last-Event-ID once it is served again. A removed
+// tenant is not named, so it keeps no history (mq.Purger.PurgeAcked).
 func gapWindows(tenants *settings.Registry) map[tenant.ID]time.Duration {
 	windows := map[tenant.ID]time.Duration{}
-	for id, store := range tenants.All() {
+	for id, store := range tenants.Known() {
+		if store == nil {
+			windows[id] = keepEverything
+			continue
+		}
 		windows[id] = store.GapWindow()
 	}
 	return windows
 }
+
+// keepEverything is the window of a tenant whose folder has been rejected
+// since boot: this process has never read its stream.gap_window_minutes, so
+// none of the history its queue holds is known to be past it. A rejected
+// tenant is sent no new events, so what it keeps is what its queue held at
+// boot.
+const keepEverything = time.Duration(math.MaxInt64)
 
 // served reports whether the registry is serving tenant id: what the
 // per-tenant resources — verifiers, dedupe stores, open streams — are pruned
