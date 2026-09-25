@@ -33,7 +33,7 @@ WaveHouse does not currently expose a knob to relax this — `SyncAlways` is alw
 Because the publish blocks on `fsync`, **your typical ingest latency is your storage's typical `fsync` latency, and your worst-case publish is your storage's worst-case `fsync`.** When that tail is healthy (sub-millisecond to single-digit milliseconds) the guarantee is essentially free. When it is not, the same code path that handles every production message stalls:
 
 - Publishes block for the duration of the `fsync`, so a multi-second `fsync` tail is a multi-second ingest tail.
-- The embedded server's consumer setup and every publish run under the JetStream client's request timeout, and opening or resizing a tenant's queue under a ten-second budget of WaveHouse's own; a slow-enough substrate makes them exceed it. The symptom when a tenant's queue first opens — at the boot or reload that first serves the tenant — is `open dlq stream: ... context deadline exceeded`, or `open ingest stream: ...` (the two share the budget); a boot that finds every queue already at its budget writes nothing, so there the first publish is where it shows.
+- The embedded server's consumer setup at boot and every publish run under the JetStream client's request timeout, and opening or resizing a tenant's queue — and joining the consumers to one that opens while the server runs — under ten-second budgets of WaveHouse's own; a slow-enough substrate makes them exceed it. The symptom when a tenant's queue first opens — at the boot or reload that first serves the tenant — is `open dlq stream: ... context deadline exceeded`, or `open ingest stream: ...` (the two share the budget); a boot that finds every queue already at its budget writes nothing, so there the first publish is where it shows.
 - If the worker cannot drain to ClickHouse faster than producers publish, a tenant's stream fills toward its [`mq.max_bytes_gb`](/settings-directory#message-queue) and the API returns `503` to that tenant ([backpressure by construction](/ingest-pipeline#backpressure-and-durability-knobs)).
 
 ## Where `SyncAlways` is cheap vs. expensive
@@ -94,6 +94,7 @@ A self-contained `wavehouse storage-check` preflight subcommand that bakes this 
 If you see any of these, benchmark the `<data_dir>/nats` volume as above:
 
 - `open dlq stream: ... context deadline exceeded`, or `open ingest stream: ...`, when a tenant's queue first opens, at the boot or reload that first serves the tenant.
+- `ingest consumer delivery ended; ingestion has stopped` with `join its queue: ... context deadline exceeded`, and the process exiting, when a tenant's queue opens while the server runs and the ingest worker's consumer cannot join it in time; the stream hub's consumer failing the same way logs `a tenant's events do not reach this consumer until the next boot` instead.
 - Ingest p99 latency in the seconds, or occasional `200`s that take multiple seconds to return.
 - Intermittent `503 Service Unavailable` from `/v1/ingest` when ClickHouse is healthy (the worker can't drain fast enough because acking is `fsync`-bound).
 - Flaky CI or load tests that pass on fast storage and fail on a shared/virtualized host.

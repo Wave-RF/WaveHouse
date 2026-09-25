@@ -66,10 +66,11 @@ type EmbeddedNATS struct {
 	// consumers are the durable consumers held on every tenant's queue, each
 	// joined to a queue as it opens.
 	consumers []*fanIn
-	// opened holds the tenants whose queue has both streams and every
-	// registered consumer joined — what Publish trusts, rather than a stream
-	// answering: an open that gave up can leave behind a stream JetStream goes
-	// on to create, which no consumer holds. Written under mu, read without it.
+	// opened holds the tenants whose queue has both streams, every registered
+	// consumer joined to it or told it could not be (fanIn.fail) — what
+	// Publish trusts, rather than a stream answering: an open that gave up can
+	// leave behind a stream JetStream goes on to create, which no consumer
+	// holds. Written under mu, read without it.
 	opened sync.Map // tenant.ID → struct{}
 }
 
@@ -274,10 +275,10 @@ func (e *EmbeddedNATS) ingestTenants() []tenant.ID {
 }
 
 // record brings opened in line with what the broker knows of tenant id's
-// queue. Both streams known means every consumer holds the queue too: apply
-// joins the consumers to a queue it opens before this records it, and a
-// consumer registered later joins every ingest stream there is. Under e.mu
-// (or before e is shared).
+// queue. Both streams known means every consumer has been joined to the
+// queue too, or told it could not be: apply joins the consumers to a queue it
+// opens before this records it, and a consumer registered later joins every
+// ingest stream there is. Under e.mu (or before e is shared).
 func (e *EmbeddedNATS) record(id tenant.ID, q *tenantQueue) {
 	if q.ingest && q.dlq {
 		e.opened.Store(id, struct{}{})
