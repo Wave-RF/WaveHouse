@@ -1000,6 +1000,56 @@ func TestEmbeddedNATS_PurgeAcked_EachTenantAtItsOwnCutoff(t *testing.T) {
 	assert.Zero(t, msgs("initech"), "a tenant the cutoffs do not name keeps nothing it has acknowledged")
 }
 
+// One tenant's purge failing stops no other tenant's: the errors say which
+// failed, and the sweep goes on to the next tenant at its own cutoff — here
+// after one whose durable is gone and one whose stream is. A sweep whose
+// context has already ended touches no tenant.
+func TestEmbeddedNATS_PurgeAcked_OneTenantsFailureStopsNoOther(t *testing.T) {
+	ids := []tenant.ID{"acme", "globex", "initech", "umbrella"}
+	e := newTestEmbedded(t, ids...)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	for _, id := range ids {
+		for i := range 2 {
+			require.NoError(t, e.Publish(ctx, Topic{Tenant: id, Table: "p"}, []byte{byte(i)}))
+		}
+	}
+	ackAll(t, e, "buffer", 8)
+	for _, id := range ids {
+		s, err := e.stream(ctx, ingestStreamName(id))
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			floor, err := s.consumerAckFloor(ctx, "buffer")
+			return err == nil && floor == 2
+		}, 5*time.Second, 20*time.Millisecond, id)
+	}
+	msgs := func(id tenant.ID) uint64 {
+		s, err := e.stream(ctx, ingestStreamName(id))
+		require.NoError(t, err)
+		st, err := s.state(ctx, "")
+		require.NoError(t, err)
+		return st.Msgs
+	}
+
+	ended, end := context.WithCancel(ctx)
+	end()
+	purged, err := e.PurgeAcked(ended, "buffer", nil)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, purged)
+	assert.Equal(t, uint64(2), msgs("umbrella"), "a sweep whose context has ended touches nothing")
+
+	require.NoError(t, e.js.DeleteConsumer(ctx, ingestStreamName("acme"), "buffer"))
+	require.NoError(t, e.js.DeleteStream(ctx, ingestStreamName("globex")))
+	purged, err = e.PurgeAcked(ctx, "buffer", map[tenant.ID]time.Time{"initech": time.Now().Add(-time.Hour)})
+	require.ErrorIs(t, err, ErrConsumerNotFound, "acme's durable is gone")
+	require.ErrorContains(t, err, "tenant globex: get stream")
+	assert.True(t, purged, "the tenants after them are purged all the same")
+	assert.Equal(t, uint64(2), msgs("acme"))
+	assert.Equal(t, uint64(2), msgs("initech"), "kept for its own window")
+	assert.Zero(t, msgs("umbrella"))
+}
+
 // The isolation per-tenant queues buy: a tenant at MaxAckPending, or one
 // whose handler is stuck, holds back its own delivery and no other tenant's —
 // each tenant's messages arrive on a delivery of their own, in order.
@@ -1327,4 +1377,64 @@ func TestNewEmbedded_TakesStockOfTheQueuesOnDisk(t *testing.T) {
 	// And a publish to it opens nothing new: the queue is there at its budget.
 	require.NoError(t, e.Publish(ctx, Topic{Tenant: "acme", Table: "t"}, []byte("x")))
 	assert.Equal(t, int64(8<<20), streamConfig(t, e, "INGEST_acme").MaxBytes)
+}
+
+// A durable found on disk is kept as it stands when it holds the settings
+// asked for — a boot over many queues writes nothing it need not — and is
+// updated in place when they differ; either way delivery resumes past what it
+// acknowledged before the restart.
+func TestEmbeddedNATS_ADurableOnDiskIsReusedAcrossARestart(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		maxAckPending int
+	}{
+		{"same settings", 10},
+		{"other settings", 20},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			topic := Topic{Tenant: "acme", Table: "t"}
+
+			first, err := NewEmbedded(dir)
+			require.NoError(t, err)
+			require.NoError(t, first.SetMaxBytes(ctx, "acme", 8<<20))
+			require.NoError(t, first.Publish(ctx, topic, []byte{0}))
+			cons, err := first.CreateConsumer(ctx, ConsumerConfig{Durable: "buffer", MaxAckPending: 10})
+			require.NoError(t, err)
+			acked := make(chan error, 2)
+			stop, _, err := cons.Consume(func(msg *Message) { acked <- msg.DoubleAck(ctx) }, 1)
+			require.NoError(t, err)
+			select {
+			case err := <-acked:
+				require.NoError(t, err)
+			case <-ctx.Done():
+				t.Fatal("the first row was not delivered")
+			}
+			stop()
+			require.NoError(t, first.Close())
+
+			e := openEmbedded(t, dir)
+			require.NoError(t, e.Publish(ctx, topic, []byte{1}))
+			cons, err = e.CreateConsumer(ctx, ConsumerConfig{Durable: "buffer", MaxAckPending: tt.maxAckPending})
+			require.NoError(t, err)
+			got := make(chan byte, 2)
+			stop, _, err = cons.Consume(func(msg *Message) {
+				_ = msg.Ack()
+				got <- msg.Data[0]
+			}, 4)
+			require.NoError(t, err)
+			t.Cleanup(stop)
+			select {
+			case b := <-got:
+				assert.Equal(t, byte(1), b, "delivery resumes past what was acknowledged before the restart")
+			case <-ctx.Done():
+				t.Fatal("the row published after the restart was not delivered")
+			}
+			c, err := e.js.Consumer(ctx, ingestStreamName("acme"), "buffer")
+			require.NoError(t, err)
+			assert.Equal(t, tt.maxAckPending, c.CachedInfo().Config.MaxAckPending)
+		})
+	}
 }
