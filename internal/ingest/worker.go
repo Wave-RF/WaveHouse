@@ -391,7 +391,7 @@ func newTableBatcher(w *IngestWorker, table string) *tableBatcher {
 // it here would only pin it in memory until a flush that is certain to hand
 // it back, so the backlog of an outage stays in the queue, not in the worker.
 func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
-	if wait, ok := b.w.backoffs.waiting(b.w.target(pm.tenant), b.table, b.w.clock()); ok {
+	if wait, ok := b.w.backoffs.waiting(func() chconn.Target { return b.w.target(pm.tenant) }, b.table, b.w.clock()); ok {
 		b.w.retryLater(ctx, b.table, []parsedMsg{pm}, wait, "backoff")
 		return
 	}

@@ -209,7 +209,7 @@ The worker does not try to revive the consumer. The app's ingest-worker componen
 
 ## When ClickHouse cannot take an insert
 
-A failed insert is classed by `chconn.Classify` (`internal/chconn/errclass.go`) before anything else happens to it, because two very different failures look alike from the worker — an `HTTP 500` is both a row ClickHouse cannot parse and a server out of memory:
+A failed insert is classed by `chconn.Classify` (`internal/chconn/errclass.go`) before anything else happens to it, because the HTTP status does not tell a rejected row from a ClickHouse that cannot take work — a row it cannot parse is a `400` and an unknown table a `404`, but a server out of memory, and many a rejected row, are a `500` — so the exception code decides:
 
 | Class | What it covers | What the worker does |
 | --- | --- | --- |

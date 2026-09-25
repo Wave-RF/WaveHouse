@@ -2257,6 +2257,25 @@ func TestTableBatcher_Add_HandsRowsBackWhileThePoolBacksOff(t *testing.T) {
 	assert.False(t, late.Naked.Load())
 }
 
+// TestTableBatcher_Add_ResolvesNoTargetWhileNothingBacksOff: the per-row
+// backoff check is one atomic load while no pool or table has failed — the
+// target, which formats a URL, is resolved only once some backoff is open.
+func TestTableBatcher_Add_ResolvesNoTargetWhileNothingBacksOff(t *testing.T) {
+	t.Parallel()
+	b, w, _ := newTestBatcher(t, okRoundTripper())
+	var resolved atomic.Int32
+	target := w.target
+	w.target = func(id tenant.ID) chconn.Target { resolved.Add(1); return target(id) }
+
+	b.add(context.Background(), parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1}))[0])
+	assert.Zero(t, resolved.Load(), "no target is resolved while every backoff is closed")
+
+	w.backoffs.forTable(target(tenant.Default), "other").fail(w.clock())
+	b.add(context.Background(), parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 2}))[0])
+	assert.Equal(t, int32(1), resolved.Load(), "an open backoff anywhere makes the check resolve the target")
+	assert.Len(t, b.batch, 2, "another table's backoff does not hold this one's rows")
+}
+
 // TestFlushTable_ReadOnlyTable_BacksOffAlone: a table ClickHouse reports as
 // read-only backs off on its own. Its healthy neighbour on the same pool keeps
 // inserting, and that neighbour's success does not reopen the read-only table.
