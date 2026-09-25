@@ -22,7 +22,7 @@ The pipeline is **insert-only**. (Upgrading across the v2 envelope? [Drain the q
 
 ## High-level shape
 
-Each tenant's events are queued on a JetStream stream of its own. One process holds one durable consumer on each tenant's stream, delivered into one handler, and fans events out to a goroutine per tenant table — the tenant is the subject's leading token. Each tenant's table batches independently and POSTs to ClickHouse over the HTTP interface (`JSONCompactEachRow`). On a bulk-insert failure the batch is re-inserted row by row, so a single poison row can't sink it: clean rows ack, and only the rows that fail again go to the dead-letter stream. A batch whose tenant has no ClickHouse connection — one no longer served, or one no pool could be opened for (such as by the connection ceiling) — skips that retry, which no row of it could pass, and meets the dead-letter switch once, whole; a tenant no longer served has no switch to read, so its batch is parked. An envelope the worker cannot *read* — malformed JSON, an unknown row `format` (what a pre-v2 message looks like), or columns and a row that don't pair — never reaches a table loop at all: `parseMsg` parks it on the same dead-letter stream, or, where the DLQ is off for the table, acks and drops it rather than redelivering a message that can never insert. A separate sweeper reclaims stream storage.
+Each tenant's events are queued on a JetStream stream of its own. One process holds one durable consumer on each tenant's stream, delivered into one handler, and fans events out to a goroutine per tenant table — the tenant is the subject's leading token. Each tenant's table batches independently and POSTs to ClickHouse over the HTTP interface (`JSONCompactEachRow`). On a bulk-insert failure the batch is re-inserted row by row, so a single poison row can't sink it: clean rows ack, and only the rows that fail again go to the dead-letter stream. A batch whose tenant has no ClickHouse connection — one no longer served, or one no pool could be opened for (such as by the connection ceiling) — skips that retry, which no row of it could pass, and meets the dead-letter switch once, whole; a tenant no longer served has no switch to read, so its batch is parked. An envelope the worker cannot *read* — malformed JSON, an unknown row `format`, or columns and a row that don't pair — never reaches a table loop at all: `parseMsg` parks it on the same dead-letter stream, or, where the DLQ is off for the table, acks and drops it rather than redelivering a message that can never insert. A separate sweeper reclaims stream storage.
 
 ```mermaid
 flowchart LR
@@ -61,7 +61,7 @@ Inserts also pin `input_format_null_as_default=1`. A positional row has one valu
 :::
 
 :::note[ClickHouse timestamp parsing]
-Inserts pin `date_time_input_format=best_effort` — the server default since ClickHouse 26.5, but on older servers the `basic` default rejects the canonical RFC 3339 form's `Z` suffix ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). The ordinary spellings (zone-less date-times, 9–10-digit Unix-seconds strings) parse identically under both settings. (This is moot for anything still buffered from an older build: a message published before the v2 envelope cannot be read at all — see [Upgrading across the v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope).) Bare digit-strings of other lengths are the exception: `best_effort` reads them as ClickHouse's calendar/epoch shapes, where `basic` read a plain `DateTime` column's digit string of five or more digits as Unix seconds (shorter runs it rejected outright, where `best_effort` reads `"2026"` as a year): under `best_effort` `"20260711"` stores 2026-07-11, where `basic` stored 1970-08-23. `DateTime64` columns diverge the same way on calendar-shaped runs, and additionally whenever an epoch run's unit doesn't match the column scale (under `basic`, runs longer than 10 digits are ticks at the column's own scale; `best_effort` unit-detects 13/16/19-digit runs as ms/µs/ns). A producer relying on the old `basic` reading changes meaning as soon as this WaveHouse version is deployed — the pin, not a ClickHouse upgrade, is what flips the parse.
+Inserts pin `date_time_input_format=best_effort` — the server default since ClickHouse 26.5, but on older servers the `basic` default rejects the canonical RFC 3339 form's `Z` suffix ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). The ordinary spellings (zone-less date-times, 9–10-digit Unix-seconds strings) parse identically under both settings. (This is moot for anything an older build buffered: the upgrade deletes it — see [Upgrading across the v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope).) Bare digit-strings of other lengths are the exception: `best_effort` reads them as ClickHouse's calendar/epoch shapes, where `basic` read a plain `DateTime` column's digit string of five or more digits as Unix seconds (shorter runs it rejected outright, where `best_effort` reads `"2026"` as a year): under `best_effort` `"20260711"` stores 2026-07-11, where `basic` stored 1970-08-23. `DateTime64` columns diverge the same way on calendar-shaped runs, and additionally whenever an epoch run's unit doesn't match the column scale (under `basic`, runs longer than 10 digits are ticks at the column's own scale; `best_effort` unit-detects 13/16/19-digit runs as ms/µs/ns). A producer relying on the old `basic` reading changes meaning as soon as this WaveHouse version is deployed — the pin, not a ClickHouse upgrade, is what flips the parse.
 :::
 
 ## The journey of one event
@@ -70,7 +70,7 @@ Inserts pin `date_time_input_format=best_effort` — the server default since Cl
 sequenceDiagram
     participant P as POST /v1/ingest
     participant JS as JetStream
-    participant CB as Consume callback
+    participant CB as Consume callback (the tenant's)
     participant D as dispatchLoop
     participant TL as tableLoop
     participant CH as ClickHouse
@@ -89,11 +89,11 @@ sequenceDiagram
 
 ## Goroutine topology
 
-The design rule is **single-owner state, lock-free**: each piece of mutable state is touched by exactly one goroutine. There are no mutexes in the hot path.
+The design rule is **single-owner state, lock-free**: each piece of mutable state is touched by exactly one goroutine. There are no mutexes in the hot path. The one fan-in is at the top: each tenant's stream is delivered on a nats.go goroutine of its own, and they all send into the one `msgChan`, which is safe from all of them at once; everything from `dispatchLoop` down stays single-owner, and a full `msgChan` pauses every tenant's delivery (layer 2 below).
 
 ```mermaid
 flowchart TD
-    CB["Consume callback<br/>(nats.go goroutine)"] -->|"msgChan (cap maxBatch*2)"| D
+    CB["Consume callbacks<br/>(one nats.go goroutine per tenant stream)"] -->|"msgChan (cap maxBatch*2)"| D
     D["dispatchLoop<br/>1 goroutine — owns the routing map<br/>the ONLY ctx watcher — tracked by wg"]
     D -->|"per-tenant-table chan (cap maxBatch)"| T1["tableLoop: clicks<br/>owns its batch + timer<br/>tracked by tableWg"]
     D --> T2["tableLoop: events<br/>tracked by tableWg"]
@@ -202,7 +202,7 @@ Messages still sitting in `msgChan` or the consumer's prefetch buffer at shutdow
 
 ### When the consumer dies
 
-Delivery can end underneath a running worker: the durable consumer is deleted, or the MQ connection closes. The broker client reports that only through an asynchronous error callback and then stops delivering — no message ever arrives to say so, so a loop that only watches `msgChan` would wait forever while the API kept accepting events nothing writes. `mq.Consumer.Consume` therefore returns a `failed` channel next to `stop` (`mq.ErrDeliveryEnded`, wrapping the broker's reason), and `dispatchLoop` selects on it beside `ctx.Done()` and `msgChan`. On a failure it runs the same bottom-up drain as a shutdown — the rows already in hand are flushed and acked, not abandoned — and then reports the error on the worker's own `failed` channel. A consumer that cannot start at all takes the same path.
+Delivery can end underneath a running worker: the durable consumer is deleted, the MQ connection closes, or a tenant's queue opened while the server runs cannot be joined. The broker client reports the first two only through an asynchronous error callback and then stops delivering, and `internal/mq` reports the third when it opens the queue — no message ever arrives to say so, so a loop that only watches `msgChan` would wait forever while the API kept accepting events nothing writes. `mq.Consumer.Consume` therefore returns a `failed` channel next to `stop` (`mq.ErrDeliveryEnded`, wrapping the broker's reason), and `dispatchLoop` selects on it beside `ctx.Done()` and `msgChan`. On a failure it runs the same bottom-up drain as a shutdown — the rows already in hand are flushed and acked, not abandoned — and then reports the error on the worker's own `failed` channel. A consumer that cannot start at all takes the same path.
 
 The worker does not try to revive the consumer. The app's ingest-worker component returns the error from `app.Run`, which stops every other component and exits non-zero, the same way any failed component does; the supervisor's restart recreates the durable consumer at boot, and everything unacked is redelivered (at-least-once). Passing conditions the client also reports through that callback (a missed heartbeat, a leadership change) are logged at `WARN` and do not end the worker. With the embedded broker (`DontListen`, no external client that could delete a durable) this path is hard to reach; the likeliest way in is a tenant's queue, opened at runtime, that the consumer cannot join. It matters more once a remote broker exists.
 
@@ -213,7 +213,7 @@ Several layers throttle the pipeline, inner to outer:
 1. **`batch`** flushes at `maxBatch` rows or `maxWait`.
 2. **`msgChan`** (cap `maxBatch*2`) — when full, the consume callback blocks and delivery pauses.
 3. **`pullMaxMessages`** — nats.go's client-side prefetch buffer in front of `msgChan`, shared by the tenants' streams (at least one message each).
-4. **`maxAckPending`** — the server suspends a tenant's delivery once this many of its messages are delivered-but-unacked; no other tenant's delivery waits on it. The outermost in-memory bound.
+4. **`maxAckPending`** — the server suspends a tenant's delivery once this many of its messages are delivered-but-unacked; no other tenant's delivery waits on it. The outermost in-memory bound, and a per-tenant one: while ClickHouse stalls, the worker can hold up to `maxAckPending` rows for every tenant served.
 5. **`MaxBytes` + `DiscardNew`** on each tenant's stream (its `mq.max_bytes_gb` in the [settings directory](/settings-directory#message-queue), resized in place on reload) — when it fills (e.g. ClickHouse is down so nothing acks/purges), that tenant's new publishes are rejected and the API returns 503.
 
 | Knob | Default | Meaning / invariant |
@@ -228,7 +228,7 @@ Several layers throttle the pipeline, inner to outer:
 
 ## The Active Sweeper
 
-The worker advances the consumer's `AckFloor` by acking; the sweep observes it to decide what is safe to purge. They never call each other — the consumer's `AckFloor` is their only contract. The sweeper (`internal/ingest`) owns the schedule and the window: each tick it calls `mq.Purger.PurgeAcked(buffer-consumer, cutoffs)` with each served tenant's cutoff at now − its own `stream.gap_window_minutes`; a tenant no longer served — its folder removed or rejected — is given none, and keeps none of the history it has acknowledged. The steps after the tick below are the embedded broker's implementation of that call, run on each tenant's stream at that tenant's cutoff.
+The worker advances the consumer's `AckFloor` by acking; the sweep observes it to decide what is safe to purge. They never call each other — the consumer's `AckFloor` is their only contract. The sweeper (`internal/ingest`) owns the schedule and the window: each tick it calls `mq.Purger.PurgeAcked(buffer-consumer, cutoffs)` with each tenant's cutoff at now − its own `stream.gap_window_minutes` — a rejected tenant's as its folder last had it, or one before anything it holds if its folder has been rejected since boot, so its clients resume once the folder is fixed; a removed tenant is given none, and keeps none of the history it has acknowledged. The steps after the tick below are the embedded broker's implementation of that call, run on each tenant's stream at that tenant's cutoff.
 
 ```mermaid
 flowchart TD

@@ -708,15 +708,15 @@ func (h *IngestHandler) processRecord(
 	slog.DebugContext(ctx, "publishing event to the ingest queue", "table", table, "scope", scope)
 	if err := h.Publisher.Publish(ctx, mq.Topic{Tenant: store.Tenant(), Table: table, Scope: scope}, payload); err != nil {
 		if errors.Is(err, mq.ErrQueueFull) {
-			slog.WarnContext(ctx, "ingest queue is full", "error", err, "table", table, "scope", scope)
+			slog.WarnContext(ctx, "ingest queue is full", "tenant", store.Tenant(), "error", err, "table", table, "scope", scope)
 			return false, nil, &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30"}
 		}
 		if errors.Is(err, mq.ErrUnavailable) {
 			// A broker blip, not a full queue: a sooner retry is likely to land.
-			slog.WarnContext(ctx, "ingest queue unavailable", "error", err, "table", table, "scope", scope)
+			slog.WarnContext(ctx, "ingest queue unavailable", "tenant", store.Tenant(), "error", err, "table", table, "scope", scope)
 			return false, nil, &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "5"}
 		}
-		slog.ErrorContext(ctx, "failed to publish to the ingest queue", "error", err, "table", table, "scope", scope)
+		slog.ErrorContext(ctx, "failed to publish to the ingest queue", "tenant", store.Tenant(), "error", err, "table", table, "scope", scope)
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed"}
 	}
 

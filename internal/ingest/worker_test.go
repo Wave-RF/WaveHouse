@@ -1265,10 +1265,10 @@ func v1Envelope(t *testing.T, table string, data map[string]any) []byte {
 }
 
 // TestParseMsg_PoisonEnvelope_ParkedOnDLQ: an envelope the worker can never
-// insert — a pre-v2 message left in the queue across an upgrade, malformed
+// insert — one of an unknown format (the pre-v2 shape carries none), malformed
 // JSON, or columns and a row that can't be paired — is preserved on the DLQ
-// rather than dropped, so a missed pre-deploy drain costs an operator a replay
-// rather than the rows themselves.
+// rather than dropped, so it costs an operator a replay rather than the rows
+// themselves.
 func TestParseMsg_PoisonEnvelope_ParkedOnDLQ(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
