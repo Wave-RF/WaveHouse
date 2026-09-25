@@ -55,15 +55,17 @@ type Subscriber struct {
 	// which reads nothing here but may run alongside the fan-out.
 	//
 	// It does NOT make Hub.deliver's check→send→record sequence atomic, and
-	// deliver does not need it to be: Broadcast runs on ONE goroutine — the
-	// single jetstream Consume callback the hub bridge registers in
-	// internal/app, invoked inline per message — so no two events race
-	// to announce the same connection's columns. A future change that fans
-	// Broadcast out across goroutines must hold a lock across that whole
-	// sequence, or two events will both send an announcement (harmless) while a
-	// third slips a row between a check and its record (not harmless: the client
-	// zips it against the previous list). Replay does not touch this field at
-	// all — it tracks drift in its own closure; see Hub.ReplayProjector.
+	// deliver does not need it to be: the hub bridge registered in
+	// internal/app calls Broadcast inline per message, on one delivery
+	// goroutine per tenant (mq.Subscriber), and a connection subscribes to one
+	// tenant's topic — so all of its events come from that one goroutine, and
+	// no two events race to announce the same connection's columns. A future
+	// change that fans one tenant's Broadcasts out across goroutines must hold
+	// a lock across that whole sequence, or two events will both send an
+	// announcement (harmless) while a third slips a row between a check and its
+	// record (not harmless: the client zips it against the previous list).
+	// Replay does not touch this field at all — it tracks drift in its own
+	// closure; see Hub.ReplayProjector.
 	schemaMu sync.Mutex
 	// lastSchema is the signature of the column list most recently announced to
 	// this connection ("" ⇒ none yet). Rows travel positionally, so a client that
