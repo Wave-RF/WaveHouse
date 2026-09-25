@@ -1275,6 +1275,17 @@ func TestEmbeddedNATS_ReplaySince_IsPerTenant(t *testing.T) {
 	assert.Equal(t, []string{"acme1", "acme2"}, got)
 }
 
+// A store directory that cannot be created refuses the boot at once, rather
+// than after the server's whole wait for a JetStream that will never start.
+func TestNewEmbedded_AStoreItCannotCreateFailsAtOnce(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "nats")
+	require.NoError(t, os.WriteFile(file, nil, 0o600))
+	start := time.Now()
+	_, err := NewEmbedded(file)
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 3*time.Second)
+}
+
 // A boot over a directory an earlier build wrote deletes the pair of streams
 // it kept for every tenant together: their subjects overlap every tenant's,
 // so no tenant's queue could open beside them.
