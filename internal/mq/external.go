@@ -771,9 +771,10 @@ func (c *externalConsumer) fail(err error) {
 }
 
 // DeadLetterCounts counts tenant id's parked messages on the shared
-// dead-letter stream, by a subject filter on its tenant: one call. A tenant
-// with nothing parked has zero counts; there is no queue of its own whose
-// absence could mean anything.
+// dead-letter stream, by a subject filter on its tenant: one call. Per-table
+// counts are keyed by deadLetterTables, whose table filter matches every
+// scope of that table. A tenant with nothing parked has zero counts; there is
+// no queue of its own whose absence could mean anything.
 func (e *ExternalNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table string) (DeadLetterCounts, error) {
 	if _, err := tenant.Parse(string(id)); err != nil {
 		return DeadLetterCounts{}, fmt.Errorf("tenant: %w", err)
@@ -787,21 +788,11 @@ func (e *ExternalNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table
 	if err != nil {
 		return DeadLetterCounts{}, fmt.Errorf("dead-letter stream %s: %w", e.dlq, e.apiError(err))
 	}
-	counts := DeadLetterCounts{Tables: map[string]uint64{}}
-	for subj, n := range info.State.Subjects {
-		counts.Total += n
-		t := parseTopicKey(topicKey(prefix, subj))
-		if table != "" && (t.Table != table || t.Scope != "") {
-			continue
-		}
-		name := t.Table
-		if t.Scope != "" {
-			// TODO(#235): break scopes out rather than fold them into the name.
-			name += "." + t.Scope
-		}
-		counts.Tables[name] += n
+	var total uint64
+	for _, n := range info.State.Subjects {
+		total += n
 	}
-	return counts, nil
+	return DeadLetterCounts{Tables: deadLetterTables(info.State.Subjects, prefix, table), Total: total}, nil
 }
 
 // PurgeAcked removes nothing: the partitions delete each row once it is

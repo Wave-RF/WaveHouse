@@ -301,11 +301,12 @@ func deadLetterKeepsTheTopicAndDoesNotAck(t *testing.T, h Harness) {
 
 	counts, err := b.DeadLetterCounts(ctx(t), Acme, "")
 	require.NoError(t, err)
-	assert.Equal(t, map[string]uint64{"t.s": 1}, counts.Tables, "a scoped topic counts under table.scope")
+	assert.Equal(t, map[string]uint64{"t": 1}, counts.Tables, "a scoped topic counts under its table")
 	assert.Equal(t, uint64(1), counts.Total)
 }
 
-// Counts are per tenant and per table, a table filter narrows Tables but not
+// Counts are per tenant and per table (every scope of a table folded into
+// it), a table filter narrows Tables to all of that table's scopes but not
 // Total, and a tenant with nothing parked has zero counts.
 func deadLetterCounts(t *testing.T, h Harness) {
 	b := h.New(t)
@@ -334,8 +335,8 @@ func deadLetterCounts(t *testing.T, h Harness) {
 		tables map[string]uint64
 		total  uint64
 	}{
-		{"every table", Acme, "", map[string]uint64{"t1": 2, "t2": 1, "t1.s": 1, "odd.name": 1}, 5},
-		{"one table", Acme, "t1", map[string]uint64{"t1": 2}, 5},
+		{"every table", Acme, "", map[string]uint64{"t1": 3, "t2": 1, "odd.name": 1}, 5},
+		{"one table", Acme, "t1", map[string]uint64{"t1": 3}, 5},
 		{"a table with nothing parked", Acme, "none", map[string]uint64{}, 5},
 		{"the other tenant", Globex, "", map[string]uint64{"t1": 1}, 1},
 	}
