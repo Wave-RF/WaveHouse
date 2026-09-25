@@ -4,6 +4,7 @@ package mq
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -132,6 +133,8 @@ type stallableKV struct {
 	jetstream.KeyValue
 	mu      sync.Mutex
 	stalled bool
+	// loseReplies stores each write, then withholds its answer.
+	loseReplies bool
 }
 
 func (s *stallableKV) stall() {
@@ -142,9 +145,14 @@ func (s *stallableKV) stall() {
 
 func (s *stallableKV) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
 	s.mu.Lock()
-	stalled := s.stalled
+	stalled, lose := s.stalled, s.loseReplies
 	s.mu.Unlock()
-	if stalled {
+	if lose {
+		if _, err := s.KeyValue.Update(ctx, key, value, revision); err != nil {
+			return 0, err
+		}
+	}
+	if stalled || lose {
 		<-ctx.Done()
 		return 0, ctx.Err()
 	}
@@ -218,6 +226,93 @@ func TestLeases_ResignAbortsAStuckRenewal(t *testing.T) {
 	assert.Less(t, time.Since(start), time.Second)
 	assertTermEnded(t, term)
 	require.NoError(t, term.Err())
+}
+
+// A renewal that was stored but whose answer Resign cut off still leaves
+// the key this term's own; Resign deletes it, so the lease is free at once.
+func TestLeases_ResignClearsARenewalItCutShort(t *testing.T) {
+	t.Parallel()
+	f := leaseFixture(t)
+	akv := &stallableKV{KeyValue: f.bucketAs(t)}
+	a := newNATSLeases(akv, "a", WithLeaseTimings(2*time.Hour, time.Hour, testRenewEvery))
+	b := newNATSLeases(f.bucketAs(t), "b", WithLeaseTimings(2*time.Hour, time.Hour, testRenewEvery))
+	t.Cleanup(func() { _ = a.Close(context.Background()); _ = b.Close(context.Background()) })
+	term, err := a.TryAcquire(t.Context(), "sweeper")
+	require.NoError(t, err)
+	admin, err := f.admin.KeyValue(t.Context(), natstest.CoordBucket)
+	require.NoError(t, err)
+	akv.mu.Lock()
+	akv.loseReplies = true
+	akv.mu.Unlock()
+	require.Eventually(t, func() bool {
+		e, err := admin.Get(t.Context(), leaseKeyPrefix+"sweeper")
+		return err == nil && e.Revision() > term.Token()
+	}, 2*time.Second, testRenewEvery/2, "a renewal is stored with its answer withheld")
+	require.NoError(t, term.Resign(t.Context()))
+	_, err = admin.Get(t.Context(), leaseKeyPrefix+"sweeper")
+	require.ErrorIs(t, err, jetstream.ErrKeyNotFound, "the resign deleted the renewal it cut short")
+	_, err = b.TryAcquire(t.Context(), "sweeper")
+	require.NoError(t, err, "free at once, with no lease duration to wait out")
+}
+
+// Each term writes its own id, so a term never mistakes its coordinator's
+// later term for itself.
+func TestLeases_TermsWriteTheirOwnIDs(t *testing.T) {
+	t.Parallel()
+	f := leaseFixture(t)
+	a := newNATSLeases(f.bucketAs(t), "a", testTimings())
+	t.Cleanup(func() { _ = a.Close(context.Background()) })
+	admin, err := f.admin.KeyValue(t.Context(), natstest.CoordBucket)
+	require.NoError(t, err)
+	var ids []string
+	for range 2 {
+		term, err := a.TryAcquire(t.Context(), "sweeper")
+		require.NoError(t, err)
+		e, err := admin.Get(t.Context(), leaseKeyPrefix+"sweeper")
+		require.NoError(t, err)
+		var v leaseValue
+		require.NoError(t, json.Unmarshal(e.Value(), &v))
+		assert.Equal(t, "a", v.Holder)
+		assert.NotEmpty(t, v.Term)
+		ids = append(ids, v.Term)
+		require.NoError(t, term.Resign(t.Context()))
+	}
+	assert.NotEqual(t, ids[0], ids[1])
+}
+
+// gatedCreateKV holds each Create, once stored, until released.
+type gatedCreateKV struct {
+	jetstream.KeyValue
+	stored, release chan struct{}
+}
+
+func (g *gatedCreateKV) Create(ctx context.Context, key string, value []byte, opts ...jetstream.KVCreateOpt) (uint64, error) {
+	rev, err := g.KeyValue.Create(ctx, key, value, opts...)
+	close(g.stored)
+	<-g.release
+	return rev, err
+}
+
+// A Close that lands while a TryAcquire's write is in flight wins: the
+// campaign hands the lease straight back and reports ErrClosed.
+func TestLeases_CloseDuringACampaign(t *testing.T) {
+	t.Parallel()
+	f := leaseFixture(t)
+	g := &gatedCreateKV{KeyValue: f.bucketAs(t), stored: make(chan struct{}), release: make(chan struct{})}
+	a := newNATSLeases(g, "a", testTimings())
+	got := make(chan error, 1)
+	go func() {
+		_, err := a.TryAcquire(context.Background(), "sweeper")
+		got <- err
+	}()
+	<-g.stored
+	require.NoError(t, a.Close(t.Context()))
+	close(g.release)
+	require.ErrorIs(t, <-got, coord.ErrClosed)
+	admin, err := f.admin.KeyValue(t.Context(), natstest.CoordBucket)
+	require.NoError(t, err)
+	_, err = admin.Get(t.Context(), leaseKeyPrefix+"sweeper")
+	require.ErrorIs(t, err, jetstream.ErrKeyNotFound, "the lease was handed back")
 }
 
 func assertTermEnded(t *testing.T, term coord.Term) {
@@ -357,4 +452,62 @@ func TestNATSPermissions_RefuseBucketChanges(t *testing.T) {
 	}))
 	_, err = f.admin.KeyValue(ctx, natstest.CoordBucket)
 	require.NoError(t, err, "the bucket is still there")
+}
+
+// Every rule the verifier holds the lease bucket to, one mutation each. It is
+// checked only when the process holds leases there (CoordBucket set).
+func TestLeases_VerifierChecksTheBucket(t *testing.T) {
+	t.Parallel()
+	const obj = "kv bucket wh_coord"
+	coordSpec := NATSTopology{Partitions: 4, CoordBucket: natstest.CoordBucket}
+	bucket := func(mut func(*jetstream.KeyValueConfig)) func(*fixtureTopology) {
+		return func(tp *fixtureTopology) { mut(&tp.KeyValues[0]) }
+	}
+	// raw stands the bucket's stream up by hand, for what CreateKeyValue
+	// would not create.
+	raw := func(mut func(*jetstream.StreamConfig)) func(*fixtureTopology) {
+		return func(tp *fixtureTopology) {
+			tp.KeyValues = nil
+			cfg := jetstream.StreamConfig{
+				Name: "KV_wh_coord", Subjects: []string{"$KV.wh_coord.>"}, MaxMsgsPerSubject: 1,
+				AllowDirect: true, Storage: jetstream.FileStorage, Discard: jetstream.DiscardNew,
+			}
+			mut(&cfg)
+			tp.Streams = append(tp.Streams, cfg)
+		}
+	}
+	cases := []struct {
+		name   string
+		mutate func(*fixtureTopology)
+		spec   NATSTopology
+		sev    FindingSeverity
+		object string
+		field  string
+	}{
+		{"missing", func(tp *fixtureTopology) { tp.KeyValues = nil }, coordSpec, FindingRequired, obj, "bucket"},
+		{"named elsewhere", nil, NATSTopology{Partitions: 4, CoordBucket: "other"}, FindingRequired, "kv bucket other", "bucket"},
+		{"ttl", bucket(func(kv *jetstream.KeyValueConfig) { kv.TTL = time.Hour }), coordSpec, FindingRequired, obj, "ttl"},
+		{"no direct get", raw(func(s *jetstream.StreamConfig) { s.AllowDirect = false }), coordSpec, FindingRequired, obj, "allow_direct"},
+		{"keeps no value", raw(func(s *jetstream.StreamConfig) { s.MaxMsgsPerSubject = 0 }), coordSpec, FindingRequired, obj, "history"},
+		{"memory storage", bucket(func(kv *jetstream.KeyValueConfig) { kv.Storage = jetstream.MemoryStorage }), coordSpec, FindingRecommended, obj, "storage"},
+	}
+	f := newNATSFixture(t)
+	js := f.connect(t, "wavehouse")
+	for _, tc := range cases {
+		f.reset(t)
+		tp := shippedTopology(t)
+		if tc.mutate != nil {
+			tc.mutate(tp)
+		}
+		require.NoError(t, f.create(t.Context(), tp), tc.name)
+		findings, err := verifyNATSTopology(t.Context(), js, tc.spec)
+		require.NoError(t, err, tc.name)
+		found := false
+		for _, got := range findings {
+			if got.Severity == tc.sev && got.Object == tc.object && got.Field == tc.field {
+				found = true
+			}
+		}
+		assert.True(t, found, "%s: want %s %s/%s among %v", tc.name, tc.sev, tc.object, tc.field, findings)
+	}
 }

@@ -78,26 +78,6 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 	durable := func(mut func(*jetstream.ConsumerConfig)) func(*testing.T, *fixtureTopology) {
 		return func(t *testing.T, tp *fixtureTopology) { mut(tp.consumer(t, p0)) }
 	}
-	bucket := func(mut func(*jetstream.KeyValueConfig)) func(*testing.T, *fixtureTopology) {
-		return func(t *testing.T, tp *fixtureTopology) {
-			require.Len(t, tp.KeyValues, 1)
-			mut(&tp.KeyValues[0])
-		}
-	}
-	// rawBucket stands a bucket's stream up by hand, for what CreateKeyValue
-	// would not create.
-	rawBucket := func(mut func(*jetstream.StreamConfig)) func(*testing.T, *fixtureTopology) {
-		return func(_ *testing.T, tp *fixtureTopology) {
-			tp.KeyValues = nil
-			cfg := jetstream.StreamConfig{
-				Name: "KV_wh_coord", Subjects: []string{"$KV.wh_coord.>"}, MaxMsgsPerSubject: 1,
-				AllowDirect: true, Storage: jetstream.FileStorage, Discard: jetstream.DiscardNew,
-			}
-			mut(&cfg)
-			tp.Streams = append(tp.Streams, cfg)
-		}
-	}
-	const kvObj = "kv bucket wh_coord"
 
 	cases := []struct {
 		name   string
@@ -184,14 +164,6 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		{"dlq storage", stream(dlq, func(s *jetstream.StreamConfig) { s.Storage = jetstream.MemoryStorage }), shippedSpec, req(dlq, "storage")},
 		{"dlq max_bytes", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), shippedSpec, req(dlq, "max_bytes")},
 		{"dlq per-subject cap", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxMsgsPerSubject = 0 }), shippedSpec, rec(dlq, "max_msgs_per_subject")},
-
-		// The lease bucket, checked only when the process holds leases there.
-		{"bucket missing", func(_ *testing.T, tp *fixtureTopology) { tp.KeyValues = nil }, coordSpec, req(kvObj, "bucket")},
-		{"bucket named elsewhere", nil, NATSTopology{Partitions: 4, CoordBucket: "other"}, req("kv bucket other", "bucket")},
-		{"bucket ttl", bucket(func(kv *jetstream.KeyValueConfig) { kv.TTL = time.Hour }), coordSpec, req(kvObj, "ttl")},
-		{"bucket without direct get", rawBucket(func(s *jetstream.StreamConfig) { s.AllowDirect = false }), coordSpec, req(kvObj, "allow_direct")},
-		{"bucket keeps no value", rawBucket(func(s *jetstream.StreamConfig) { s.MaxMsgsPerSubject = 0 }), coordSpec, req(kvObj, "history")},
-		{"bucket storage", bucket(func(kv *jetstream.KeyValueConfig) { kv.Storage = jetstream.MemoryStorage }), coordSpec, rec(kvObj, "storage")},
 	}
 	// One server for every case, emptied between them: a server per case
 	// costs more than the unit suite's per-package timeout can spare.

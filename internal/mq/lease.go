@@ -40,13 +40,15 @@ func WithLeaseTimings(duration, renewDeadline, renewEvery time.Duration) LeaseOp
 }
 
 // leaseValue is what a lease's key holds: who holds it, for how long a
-// candidate must see it unchanged, and the holding coordinator's session, so
-// a coordinator recognizes its own writes and no one else's — two processes
-// misconfigured with one instance_id still contend.
+// candidate must see it unchanged, the holding coordinator's session, so a
+// coordinator recognizes its own writes and no one else's (two processes
+// misconfigured with one instance_id still contend), and the term's own id,
+// so a term recognizes its own writes and not a later term's.
 type leaseValue struct {
 	Holder     string `json:"holder"`
 	DurationMS int64  `json:"duration_ms"`
 	Session    string `json:"session"`
+	Term       string `json:"term"`
 }
 
 // Leases returns a coord.Coordinator over the operator's KV bucket on this
@@ -133,7 +135,9 @@ func (l *natsLeases) TryAcquire(ctx context.Context, name string) (coord.Term, e
 	}()
 
 	key := leaseKeyPrefix + name
-	val, err := json.Marshal(l.value)
+	v := l.value
+	v.Term = nuid.Next()
+	val, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
 	}
