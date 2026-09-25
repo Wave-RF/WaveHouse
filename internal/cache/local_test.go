@@ -1,241 +1,25 @@
-package cache
+package cache_test
 
 import (
-	"context"
 	"testing"
-	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/cachetest"
 )
 
-func TestLocalCache_GetMiss(t *testing.T) {
-	t.Parallel()
-	c, err := NewLocal(1 << 20) // 1 MB
-	require.NoError(t, err)
-	defer func() { _ = c.Close() }()
+const localMaxCost = 1 << 20
 
-	val, ttl, err := c.Get(context.Background(), "missing", []Namespace{{Tenant: tenant.Default, Table: "table"}})
-	assert.NoError(t, err)
-	assert.Nil(t, val)
-	assert.Zero(t, ttl)
+func newLocal(t *testing.T) cache.Cache {
+	t.Helper()
+	c, err := cache.NewLocal(localMaxCost)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	return c
 }
 
-func TestLocalCache_SetAndGet(t *testing.T) {
+func TestLocalCache_Conformance(t *testing.T) {
 	t.Parallel()
-	c, err := NewLocal(1 << 20)
-	require.NoError(t, err)
-	defer func() { _ = c.Close() }()
-
-	ctx := context.Background()
-	deps := []Namespace{{Tenant: tenant.Default, Table: "table", Scope: "scope"}}
-	err = c.Set(ctx, "key1", deps, []byte("hello"), 10*time.Second)
-	assert.NoError(t, err)
-
-	// Ristretto uses async admission — wait briefly for it to be admitted.
-	c.Wait()
-
-	val, ttl, err := c.Get(ctx, "key1", deps)
-	assert.NoError(t, err)
-	assert.Equal(t, []byte("hello"), val)
-	assert.True(t, ttl > 0, "expected positive remaining TTL")
-}
-
-func TestLocalCache_ExpiredKey(t *testing.T) {
-	t.Parallel()
-	c, err := NewLocal(1 << 20)
-	require.NoError(t, err)
-	defer func() { _ = c.Close() }()
-
-	ctx := context.Background()
-	deps := []Namespace{{Tenant: tenant.Default, Table: "table"}}
-	// Set with very short TTL.
-	err = c.Set(ctx, "expires", deps, []byte("data"), 1*time.Millisecond)
-	assert.NoError(t, err)
-
-	// Ensure async admission completes, then wait for expiry.
-	c.Wait()
-	time.Sleep(50 * time.Millisecond)
-
-	val, _, err := c.Get(ctx, "expires", deps)
-	assert.NoError(t, err)
-	assert.Nil(t, val, "expected nil for expired key")
-}
-
-func TestLocalCache_Overwrite(t *testing.T) {
-	t.Parallel()
-	c, err := NewLocal(1 << 20)
-	require.NoError(t, err)
-	defer func() { _ = c.Close() }()
-
-	ctx := context.Background()
-	deps := []Namespace{{Tenant: tenant.Default, Table: "table"}}
-	require.NoError(t, c.Set(ctx, "key", deps, []byte("v1"), 10*time.Second))
-	c.Wait()
-	require.NoError(t, c.Set(ctx, "key", deps, []byte("v2"), 10*time.Second))
-	c.Wait()
-
-	val, _, err := c.Get(ctx, "key", deps)
-	assert.NoError(t, err)
-	assert.Equal(t, []byte("v2"), val)
-}
-
-func TestLocalCache_ZeroTTL(t *testing.T) {
-	t.Parallel()
-	c, err := NewLocal(1 << 20)
-	require.NoError(t, err)
-	defer func() { _ = c.Close() }()
-
-	ctx := context.Background()
-	deps := []Namespace{{Tenant: tenant.Default, Table: "table"}}
-	err = c.Set(ctx, "notimed", deps, []byte("data"), 0)
-	assert.NoError(t, err)
-
-	c.Wait()
-	time.Sleep(10 * time.Millisecond) // arbitrary tiny sleep to see its still here after
-
-	val, ttl, err := c.Get(ctx, "notimed", deps)
-	assert.NoError(t, err)
-	if val != nil {
-		assert.Equal(t, []byte("data"), val)
-		assert.Zero(t, ttl, "expected zero remaining TTL for key without TTL")
-	}
-}
-
-func TestLocalCache_Invalidate(t *testing.T) {
-	t.Parallel()
-	c, err := NewLocal(1 << 20)
-	require.NoError(t, err)
-	defer func() { _ = c.Close() }()
-
-	ctx := context.Background()
-	deps := []Namespace{{Tenant: tenant.Default, Table: "users", Scope: "org_1"}}
-
-	// Set value
-	err = c.Set(ctx, "queryHash", deps, []byte("my_data"), 10*time.Second)
-	assert.NoError(t, err)
-	c.Wait()
-
-	// Ensure readable
-	val, _, err := c.Get(ctx, "queryHash", deps)
-	assert.NoError(t, err)
-	assert.Equal(t, []byte("my_data"), val)
-
-	// Invalidate the (users, org_1) namespace.
-	count, err := c.Invalidate(ctx, deps)
-	assert.NoError(t, err)
-	assert.Equal(t, uint64(1), count)
-
-	// The folded key embeds the namespace version, which was just bumped, so this
-	// must now miss.
-	valAfter, ttlAfter, errAfter := c.Get(ctx, "queryHash", deps)
-	assert.NoError(t, errAfter)
-	assert.Nil(t, valAfter)
-	assert.Zero(t, ttlAfter)
-}
-
-// Invalidate with an empty-scope namespace bumps the whole table, which must
-// orphan that table's scoped entries too — not just the whole-table view.
-func TestLocalCache_Invalidate_WholeTable(t *testing.T) {
-	t.Parallel()
-	c, err := NewLocal(1 << 20)
-	require.NoError(t, err)
-	defer func() { _ = c.Close() }()
-
-	ctx := context.Background()
-	scoped := []Namespace{{Tenant: tenant.Default, Table: "events", Scope: "org_1"}}
-
-	require.NoError(t, c.Set(ctx, "q", scoped, []byte("v1"), 10*time.Second))
-	c.Wait()
-	val, _, err := c.Get(ctx, "q", scoped)
-	require.NoError(t, err)
-	require.Equal(t, []byte("v1"), val)
-
-	// Whole-table invalidation (empty scope) must orphan the scoped entry.
-	_, err = c.Invalidate(ctx, []Namespace{{Tenant: tenant.Default, Table: "events"}})
-	require.NoError(t, err)
-
-	after, _, err := c.Get(ctx, "q", scoped)
-	assert.NoError(t, err)
-	assert.Nil(t, after, "whole-table bump must invalidate the scoped entry")
-}
-
-// The same sha and table under two tenants are two entries: a result cached
-// for one tenant never answers the other, and invalidating one tenant's table
-// leaves the other's entry in place — whole-table and per-scope bumps alike.
-func TestLocalCache_KeyedByTenant(t *testing.T) {
-	t.Parallel()
-	c, err := NewLocal(1 << 20)
-	require.NoError(t, err)
-	defer func() { _ = c.Close() }()
-
-	ctx := context.Background()
-	acme := []Namespace{{Tenant: "acme", Table: "events", Scope: "org_1"}}
-	globex := []Namespace{{Tenant: "globex", Table: "events", Scope: "org_1"}}
-
-	require.NoError(t, c.Set(ctx, "q", acme, []byte("acme rows"), 10*time.Second))
-	require.NoError(t, c.Set(ctx, "q", globex, []byte("globex rows"), 10*time.Second))
-	c.Wait()
-
-	val, _, err := c.Get(ctx, "q", acme)
-	require.NoError(t, err)
-	assert.Equal(t, []byte("acme rows"), val)
-	val, _, err = c.Get(ctx, "q", globex)
-	require.NoError(t, err)
-	assert.Equal(t, []byte("globex rows"), val, "a tenant must never be served another tenant's entry")
-
-	// A per-scope bump for acme orphans acme's entry only.
-	_, err = c.Invalidate(ctx, acme)
-	require.NoError(t, err)
-	val, _, err = c.Get(ctx, "q", acme)
-	require.NoError(t, err)
-	assert.Nil(t, val)
-	val, _, err = c.Get(ctx, "q", globex)
-	require.NoError(t, err)
-	assert.Equal(t, []byte("globex rows"), val, "an invalidation must not reach another tenant's entry")
-
-	// So does a whole-table bump.
-	_, err = c.Invalidate(ctx, []Namespace{{Tenant: "acme", Table: "events"}})
-	require.NoError(t, err)
-	val, _, err = c.Get(ctx, "q", globex)
-	require.NoError(t, err)
-	assert.Equal(t, []byte("globex rows"), val)
-}
-
-// A tenant back after an absence from the invalidation fan-out has its every
-// entry orphaned at once — every table, bumped before or not — and the other
-// tenants keep theirs.
-func TestLocalCache_InvalidateTenant(t *testing.T) {
-	t.Parallel()
-	c, err := NewLocal(1 << 20)
-	require.NoError(t, err)
-	defer func() { _ = c.Close() }()
-
-	ctx := context.Background()
-	acmeEvents := []Namespace{{Tenant: "acme", Table: "events"}}
-	acmeOrders := []Namespace{{Tenant: "acme", Table: "orders", Scope: "org_1"}}
-	globex := []Namespace{{Tenant: "globex", Table: "events"}}
-	require.NoError(t, c.Set(ctx, "q", acmeEvents, []byte("acme events"), 10*time.Second))
-	require.NoError(t, c.Set(ctx, "q", acmeOrders, []byte("acme orders"), 10*time.Second))
-	require.NoError(t, c.Set(ctx, "q", globex, []byte("globex events"), 10*time.Second))
-	c.Wait()
-
-	require.NoError(t, c.InvalidateTenant(ctx, "acme"))
-	for name, deps := range map[string][]Namespace{"events": acmeEvents, "orders": acmeOrders} {
-		val, _, err := c.Get(ctx, "q", deps)
-		require.NoError(t, err)
-		assert.Nil(t, val, "acme's %s entry is orphaned", name)
-	}
-	val, _, err := c.Get(ctx, "q", globex)
-	require.NoError(t, err)
-	assert.Equal(t, []byte("globex events"), val, "another tenant's entry stays")
-
-	// Entries cached after the bump are served: it is a generation, not a lock.
-	require.NoError(t, c.Set(ctx, "q", acmeEvents, []byte("acme again"), 10*time.Second))
-	c.Wait()
-	val, _, err = c.Get(ctx, "q", acmeEvents)
-	require.NoError(t, err)
-	assert.Equal(t, []byte("acme again"), val)
+	cachetest.Run(t, newLocal, cachetest.Options{MaxValueBytes: localMaxCost})
 }

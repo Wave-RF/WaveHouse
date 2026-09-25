@@ -162,18 +162,20 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cache. A pipe can read several tables, but the current pipe impl doesn't
-	// expose its table/scope dependencies, so we pass no deps: the result is keyed
-	// by the tenant and sha alone (TTL-only) and the ingest worker cannot
-	// version-invalidate it. The tenant on the key is what keeps one tenant's
-	// pipe result from answering another until then (#583 story 8).
+	// expose its table/scope dependencies, so we pass no deps: the result folds
+	// the tenant's version alone, so InvalidateTenant orphans it but no insert
+	// does (TTL-bound until #343). The snapshot is of the versions before the
+	// query runs, so a bump landing mid-query orphans the fill (#382).
 	// TODO: once pipes expose their tables/scopes, pass them as deps here so writes
 	// invalidate cached pipe results.
 	cacheKey := queryCacheKey(store.Tenant(), sql, params)
+	var snap cache.Snapshot
 	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey, nil); err == nil && data != nil {
+		var entry cache.Entry
+		if entry, snap, _ = h.Cache.Lookup(r.Context(), store.Tenant(), cacheKey, nil); entry.Value != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
-			_, _ = w.Write(data) //nolint:gosec // G705: the tenant id on the key only selects the entry; the bytes are JSON the handler marshalled from ClickHouse rows
+			_, _ = w.Write(entry.Value)
 			return
 		}
 	}
@@ -201,7 +203,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		ttl := cache.QueryTimeToTTL(queryDuration)
 
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, nil, data, ttl)
+			_ = h.Cache.Set(r.Context(), snap, data, ttl)
 		}
 		return data, nil
 	})

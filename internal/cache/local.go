@@ -15,6 +15,7 @@ import (
 // tenant leading every key, so no entry is shared across tenants.
 type LocalCache struct {
 	cache          *ristretto.Cache[string, []byte]
+	maxCost        int64
 	versionManager *VersionManager
 }
 
@@ -29,31 +30,36 @@ func NewLocal(maxCost int64) (*LocalCache, error) {
 		return nil, err
 	}
 	vm := NewVersionManager()
-	return &LocalCache{cache: cache, versionManager: vm}, nil
+	return &LocalCache{cache: cache, maxCost: maxCost, versionManager: vm}, nil
 }
 
-// Get looks up a cached query RESULT by its sha (hash of SQL+params) and the
-// namespaces it depends on. Used by BOTH structured queries (which pass one
-// Namespace) and pipes (which pass several). Returns nil, 0, nil on miss.
-func (l *LocalCache) Get(_ context.Context, sha string, deps []Namespace) ([]byte, time.Duration, error) {
-	cacheKey := l.versionManager.QueryKey(sha, deps)
-
-	val, found := l.cache.Get(cacheKey)
+// Lookup reads a cached query RESULT by its sha (hash of SQL+params) and the
+// namespaces it depends on, and snapshots the key at their current versions.
+// Used by BOTH structured queries (which pass one Namespace) and pipes (none
+// yet).
+func (l *LocalCache) Lookup(_ context.Context, id tenant.ID, sha string, deps []Namespace) (Entry, Snapshot, error) {
+	for _, d := range deps {
+		if d.Tenant != id {
+			return Entry{}, Snapshot{}, fmt.Errorf("%w: %q under %q", ErrForeignDependency, d.Tenant, id)
+		}
+	}
+	key := l.versionManager.QueryKey(id, sha, deps)
+	snap := Snapshot{key: key}
+	val, found := l.cache.Get(key)
 	if !found {
-		return nil, 0, nil
+		return Entry{}, snap, nil
 	}
-	remaining, _ := l.cache.GetTTL(cacheKey)
-	return val, remaining, nil
+	remaining, _ := l.cache.GetTTL(key)
+	return Entry{Value: val, TTL: remaining}, snap, nil
 }
 
-// Set stores a query result under the folded key for its dependency namespaces.
-// Used by both structured queries and pipes.
-func (l *LocalCache) Set(_ context.Context, sha string, deps []Namespace, value []byte, ttl time.Duration) error {
-	cacheKey := l.versionManager.QueryKey(sha, deps)
-
-	if ok := l.cache.SetWithTTL(cacheKey, value, int64(len(value)), ttl); !ok {
-		return fmt.Errorf("cache admission rejected for key %q", cacheKey)
+// Set stores a query result under the key its Lookup snapshotted. Admission
+// is asynchronous (see Wait), and Ristretto may still decline the value.
+func (l *LocalCache) Set(_ context.Context, snap Snapshot, value []byte, ttl time.Duration) error {
+	if snap.key == "" || ttl <= 0 || int64(len(value)) > l.maxCost {
+		return nil
 	}
+	l.cache.SetWithTTL(snap.key, value, int64(len(value)), ttl)
 	return nil
 }
 
@@ -78,9 +84,9 @@ func (l *LocalCache) Invalidate(_ context.Context, namespaces []Namespace) (uint
 	return uint64(len(namespaces)), nil
 }
 
-// InvalidateTenant orphans every cached query of tenant id keyed by its
-// tables (a pipe result names none and keeps its TTL): one version
-// bump, nothing enumerated (see VersionManager.BumpTenant).
+// InvalidateTenant orphans every cached result of tenant id, pipe results
+// included: one version bump, nothing enumerated (see
+// VersionManager.BumpTenant).
 func (l *LocalCache) InvalidateTenant(_ context.Context, id tenant.ID) error {
 	l.versionManager.BumpTenant(id)
 	return nil

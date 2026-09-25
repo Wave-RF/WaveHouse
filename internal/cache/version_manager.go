@@ -65,18 +65,20 @@ func (vm *VersionManager) NamespaceKey(ns Namespace) string {
 	return vm.namespaceKeyLocked(ns)
 }
 
-// QueryKey builds the queries-table key for a result that depends on deps: the
-// query's sha (hash of SQL+params) folded with every dependency's namespace key
-// AND its namespace version, so a bump of any dependency misses the key. A
-// structured query passes one Namespace; a pipe passes several. Deps are sorted
-// so their order never changes the key.
-func (vm *VersionManager) QueryKey(sha string, deps []Namespace) string {
+// QueryKey builds the queries-table key for tenant id's result that depends
+// on deps: the query's sha (hash of SQL+params) folded with the tenant's
+// version and every dependency's namespace key AND its namespace version, so
+// a bump of the tenant or of any dependency misses the key — a result with no
+// deps (a pipe) is orphaned by BumpTenant too. A structured query passes one
+// Namespace; a pipe passes several. Deps are sorted so their order never
+// changes the key.
+func (vm *VersionManager) QueryKey(id tenant.ID, sha string, deps []Namespace) string {
 	segs := make([]string, len(deps))
 	// Lock per dependency rather than across the whole loop: each dep's table +
 	// namespace versions are read together (consistent for that dep), but we don't
-	// hold the lock across all deps. A concurrent bump can land between deps, but the
-	// key is already a racy snapshot (versions can move between building it and using
-	// it), so cross-dep consistency buys nothing. Crucially, the sort/join run with
+	// hold the lock across all deps. A concurrent bump can land between deps; the
+	// caller files its fill under this key (a Snapshot), so a bump that lands
+	// anywhere after the read of a version orphans it. The sort/join run with
 	// no lock held.
 	for i, d := range deps {
 		vm.mu.RLock()
@@ -84,8 +86,11 @@ func (vm *VersionManager) QueryKey(sha string, deps []Namespace) string {
 		segs[i] = fmt.Sprintf("%s.%d", nsKey, vm.namespaceVersions[nsKey])
 		vm.mu.RUnlock()
 	}
+	vm.mu.RLock()
+	tv := vm.tenantVersions[id]
+	vm.mu.RUnlock()
 	sort.Strings(segs)
-	return sha + "|" + strings.Join(segs, "|")
+	return fmt.Sprintf("%s|%s.%d|%s", sha, id, tv, strings.Join(segs, "|"))
 }
 
 // BumpTable advances a tenant's table version, orphaning every namespace — and
@@ -98,10 +103,10 @@ func (vm *VersionManager) BumpTable(id tenant.ID, table string) {
 }
 
 // BumpTenant advances a tenant's version, orphaning its every namespace —
-// and every cached query keyed by one — in one step (the whole-tenant
-// nuke): every namespace key of the tenant carries the version, so nothing
-// has to be enumerated, and a table no bump ever keyed is orphaned like the
-// rest. Other tenants are untouched.
+// and every cached query, whatever its deps — in one step (the whole-tenant
+// nuke): every namespace and query key of the tenant carries the version, so
+// nothing has to be enumerated, and a table no bump ever keyed is orphaned
+// like the rest. Other tenants are untouched.
 func (vm *VersionManager) BumpTenant(id tenant.ID) {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()

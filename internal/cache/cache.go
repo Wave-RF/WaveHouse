@@ -2,22 +2,51 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
-// Cache provides versioned query-result storage with TTL support.
-type Cache interface {
-	// Get retrieves a cached query result and its remaining TTL. sha is the
-	// caller's key for the SQL+params, led by the tenant it was built for; deps
-	// are the namespaces the result depends on (one for a structured query,
-	// several for a pipe), each naming its tenant. Returns nil, 0, nil on miss.
-	Get(ctx context.Context, sha string, deps []Namespace) ([]byte, time.Duration, error)
+// Entry is what a Lookup found. A nil Value is a miss.
+type Entry struct {
+	Value []byte
+	TTL   time.Duration // remaining
+}
 
-	// TODO: TTL should be set based on query execution time
-	// Set stores a query result keyed by sha + its dependency namespaces.
-	Set(ctx context.Context, sha string, deps []Namespace, value []byte, ttl time.Duration) error
+// Snapshot is the dependency versions a Lookup observed. Set files a result
+// under the snapshot taken before its query ran, so a bump that lands while
+// the query runs orphans the fill rather than re-homing pre-write rows under
+// the post-bump versions (#382). The zero Snapshot makes Set a no-op.
+type Snapshot struct {
+	key string // the backend's key for the entry at the observed versions
+}
+
+// ErrForeignDependency is a Lookup whose dependencies name a tenant other
+// than the one it is for: a cached result is one tenant's, and so is every
+// version it is filed under.
+var ErrForeignDependency = errors.New("cache: dependency names another tenant")
+
+// Cache provides versioned query-result storage with TTL support.
+//
+// Every entry is one tenant's and folds that tenant's version, so
+// InvalidateTenant orphans all of it — a result with no dependencies (a pipe)
+// included. A backend that cannot be reached is a miss on Lookup and a no-op
+// on Set; the caller runs its query either way.
+type Cache interface {
+	// Lookup reads the entry for sha under tenant id at deps' current
+	// versions, and returns the snapshot of those versions for the Set that
+	// fills it on a miss. sha is the caller's key for the SQL and params;
+	// deps are the namespaces the result reads (one for a structured query,
+	// none yet for a pipe), each of tenant id — any other is
+	// ErrForeignDependency. An error is a miss with a zero Snapshot.
+	Lookup(ctx context.Context, id tenant.ID, sha string, deps []Namespace) (Entry, Snapshot, error)
+
+	// Set stores value under snap, the Snapshot a Lookup returned before the
+	// value was computed. It returns an error only when the backend failed;
+	// a value the cache declines to keep — too large, refused admission, a
+	// non-positive ttl, or a zero snap — is not an error.
+	Set(ctx context.Context, snap Snapshot, value []byte, ttl time.Duration) error
 
 	// TODO: option to prefetch pipes when invalidated?
 	// TODO: AST query builder needs to give us a deterministic key or bypass cache entirely
@@ -29,17 +58,13 @@ type Cache interface {
 	// another tenant keeps its versions. Returns the number of namespaces processed.
 	Invalidate(ctx context.Context, namespaces []Namespace) (uint64, error)
 
-	// InvalidateTenant orphans every cached query of one tenant that is keyed
-	// by its tables in one step — every table and scope, bumped or not; a
-	// pipe result names no table, so neither this nor any insert
-	// invalidates it and it stays until its TTL expires (#343) — for a
+	// InvalidateTenant orphans every cached result of one tenant in one step
+	// — every table and scope, bumped or not, and every pipe result — for a
 	// tenant that comes back after an absence from the invalidation fan-out
 	// (its settings folder rejected or removed, #583 story 6), stale by every
 	// insert it missed, or that moved to another ClickHouse address or
 	// database, whose cached results were read from other tables.
 	InvalidateTenant(ctx context.Context, id tenant.ID) error
-
-	// TODO: for local cache, we can just store the versions in memory, but for distributed/L2 cache, we will need to be able to either have stored procedures/pipelines etc to query them and attach them to a query, or sync them to each edge api server.
 
 	// Close releases resources.
 	Close() error
