@@ -717,17 +717,7 @@ func (a *App) wireCoord(ctx context.Context) error {
 		a.add(component{name: "coord", close: c.Close})
 		return nil
 	case config.CoordNATS:
-		broker, ok := a.mq.(*mq.ExternalNATS)
-		if !ok {
-			return fmt.Errorf("coord.backend=nats needs mq.backend=nats, got %T", a.mq)
-		}
-		c, err := broker.Leases(ctx, a.coordBucket(), a.cfg.InstanceID)
-		if err != nil {
-			return fmt.Errorf("coord open: %w", err)
-		}
-		a.coord = c
-		a.add(component{name: "coord", close: c.Close})
-		return nil
+		return a.wireNATSCoord(ctx)
 	default:
 		return unreachableBackend("coord.backend", b)
 	}

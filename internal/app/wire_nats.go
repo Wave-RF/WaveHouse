@@ -105,3 +105,19 @@ func (a *App) coordBucket() string {
 	}
 	return mq.DefaultNATSCoordBucket(a.cfg.MQ.NATS.SubjectPrefix)
 }
+
+// wireNATSCoord holds the leases in the operator's KV bucket, on the MQ's own
+// connection (coord.backend: nats).
+func (a *App) wireNATSCoord(ctx context.Context) error {
+	broker, ok := a.mq.(*mq.ExternalNATS)
+	if !ok {
+		return fmt.Errorf("coord.backend=nats needs mq.backend=nats, got %T", a.mq)
+	}
+	c, err := broker.Leases(ctx, a.coordBucket(), a.cfg.InstanceID)
+	if err != nil {
+		return fmt.Errorf("coord open: %w", err)
+	}
+	a.coord = c
+	a.add(component{name: "coord", close: c.Close})
+	return nil
+}
