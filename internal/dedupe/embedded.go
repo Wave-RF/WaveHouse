@@ -125,8 +125,8 @@ type tenantStore struct {
 }
 
 // Committed values are committedMark ‖ expiry (big-endian UnixNano, 0 =
-// never). Version-0 values were a bare 8-byte timestamp under version-0
-// keys, which no version-1 key reads.
+// never). Values written before #222 were a bare 8-byte timestamp, so one
+// under a key that happens to equal a current one reads as absent.
 const (
 	committedMark = 2
 	valueLen      = 9
