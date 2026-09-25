@@ -710,6 +710,11 @@ func (h *IngestHandler) processRecord(
 			slog.WarnContext(ctx, "ingest queue is full", "error", err, "table", table, "scope", scope)
 			return false, nil, &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30"}
 		}
+		if errors.Is(err, mq.ErrUnavailable) {
+			// A broker blip, not a full queue: a sooner retry is likely to land.
+			slog.WarnContext(ctx, "ingest queue unavailable", "error", err, "table", table, "scope", scope)
+			return false, nil, &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "5"}
+		}
 		slog.ErrorContext(ctx, "failed to publish to the ingest queue", "error", err, "table", table, "scope", scope)
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed"}
 	}
