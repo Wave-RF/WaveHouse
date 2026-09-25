@@ -749,7 +749,8 @@ type consumerPart struct {
 }
 
 // Consume pulls from every partition, each on its own delivery goroutine,
-// splitting prefetch between them (at least one each). A partition's
+// splitting prefetch between the N partitions (at least one each) and giving
+// a removed partition a quarter share. A partition's
 // delivery that the client ends on its own — the durable deleted, the
 // connection closed for good — is reported on failed; a removed partition's
 // is only logged.
@@ -783,7 +784,13 @@ func (c *externalConsumer) Consume(handler func(msg *Message), prefetch int) (fu
 			}),
 		}
 		if prefetch > 0 {
-			opts = append(opts, jetstream.PullMaxMessages(max(1, prefetch/len(c.parts))))
+			// Split among the N partitions only, so a drained removed partition
+			// does not keep the others' fetch-ahead cut until a restart.
+			share := max(1, prefetch/c.e.topo.Partitions)
+			if part.extra {
+				share = max(1, share/4)
+			}
+			opts = append(opts, jetstream.PullMaxMessages(share))
 		}
 		cc, err := part.h.Consume(func(m jetstream.Msg) { handler(c.e.wrapMsg(c.ctx, m, true)) }, opts...)
 		if err != nil {

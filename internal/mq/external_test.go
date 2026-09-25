@@ -612,22 +612,21 @@ func tenantIn(t *testing.T, p, n int) tenant.ID {
 }
 
 // Lowering N from 2 to 1 the way deployment.md says — apply the regenerated
-// manifests, restart with the smaller N — loses none of partition 1's rows:
-// the worker drains them through wh-ingest, and the operator deleting the
-// emptied stream afterwards is not a failure.
-func TestExternalNATS_LoweringNDrainsTheRemovedPartition(t *testing.T) {
-	t.Parallel()
+// manifests, roll out the smaller N while an old-N process keeps publishing —
+// loses none of partition 1's rows: the new worker drains them through
+// wh-ingest, and the operator deleting the emptied stream ends only that
+// stream's delivery.
+func TestExternalNATS_LoweringNDrainsTheRemovedPartition(t *testing.T) { //nolint:paralleltest // captures the default logger
 	f := newNATSFixture(t)
 	f.apply(t, generatedTopology(t, 2))
 	const removed = "WH_INGEST_1"
 	topic := Topic{Tenant: tenantIn(t, 1, 2), Table: "t"}
 	old := f.broker(t, func(c *NATSConfig) { c.Topology.Partitions = 2 })
-	want := []string{"a", "b", "c", "d", "e"}
-	for _, row := range want {
+	before := []string{"a", "b", "c", "d", "e"}
+	for _, row := range before {
 		require.NoError(t, old.Publish(t.Context(), topic, []byte(row)))
 	}
-	require.NoError(t, old.Close())
-	require.Equal(t, uint64(len(want)), f.streamMsgs(t, removed))
+	require.Equal(t, uint64(len(before)), f.streamMsgs(t, removed))
 
 	require.NoError(t, generatedTopology(t, 1).Apply(t.Context(), f.admin))
 	e := f.broker(t, func(c *NATSConfig) { c.Topology.Partitions = 1 })
@@ -637,6 +636,7 @@ func TestExternalNATS_LoweringNDrainsTheRemovedPartition(t *testing.T) {
 		return got.Severity == FindingRecommended && got.Object == "stream "+removed && strings.Contains(got.Problem, "drains its 5 rows")
 	}), "no finding names the removed partition's rows among %v", findings)
 
+	logs := logtest.Capture(t, slog.LevelInfo)
 	cons, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable})
 	require.NoError(t, err)
 	got := make(chan string, 16)
@@ -646,21 +646,29 @@ func TestExternalNATS_LoweringNDrainsTheRemovedPartition(t *testing.T) {
 	}, 16)
 	require.NoError(t, err)
 	t.Cleanup(stop)
-	drained := make([]string, 0, len(want))
-	for range want {
+	drained := make([]string, 0, len(before))
+	for range before {
 		drained = append(drained, receive(t, got))
 	}
-	assert.Equal(t, want, drained)
-	require.Eventually(t, func() bool { return f.streamMsgs(t, removed) == 0 }, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, before, drained)
 
+	// The old-N process is still up during the rollout, publishing to the
+	// removed partition.
+	require.NoError(t, old.Publish(t.Context(), topic, []byte("during")))
+	require.Equal(t, "during", receive(t, got))
+	require.NoError(t, old.Close())
+	require.Eventually(t, func() bool { return f.streamMsgs(t, removed) == 0 }, 5*time.Second, 10*time.Millisecond)
 	require.NoError(t, e.Publish(t.Context(), topic, []byte("moved")))
 	require.Equal(t, "moved", receive(t, got))
 
 	require.NoError(t, f.admin.DeleteStream(t.Context(), removed))
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "mq: stopped draining a stream outside the configured partitions")
+	}, 15*time.Second, 50*time.Millisecond, "the removed partition's delivery never ended")
 	select {
 	case err := <-failed:
 		t.Fatalf("deleting a drained removed partition reported failed: %v", err)
-	case <-time.After(time.Second):
+	default:
 	}
 	require.NoError(t, e.Publish(t.Context(), topic, []byte("still")))
 	require.Equal(t, "still", receive(t, got))
