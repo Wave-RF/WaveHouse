@@ -505,7 +505,7 @@ func writeMaxBytesError(w http.ResponseWriter, err error, limit int64) bool {
 //
 // Evaluated here rather than per record because the condition is a property of
 // (table, role, policy) and is identical for every record in the request — the
-// same reasoning as the !resolved abort in processRecord. Doing it per record
+// same reasoning as the !resolved abort in prepareRecord. Doing it per record
 // would emit one ERROR line per record for a single mis-wired policy, which on
 // a 16 MiB body of small records is ~1.2M lines. The reject is still returned
 // per record, so a batch reports each record's own cause: one that SUPPLIES the
@@ -518,7 +518,7 @@ func (h *IngestHandler) policyCheckGuard(
 ) *recordReject {
 	checks, resolved := perms.CheckClauses()
 	if !resolved {
-		return nil // the !resolved abort in processRecord owns this case
+		return nil // the !resolved abort in prepareRecord owns this case
 	}
 
 	// Sorted, and every offender — not the first one a map range happens to
