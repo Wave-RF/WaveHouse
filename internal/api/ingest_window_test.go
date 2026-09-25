@@ -64,6 +64,7 @@ func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 	t.Parallel()
 	const n = 600
 	refused := fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull)
+	unavailable := fmt.Errorf("%w: nats: timeout", mq.ErrUnavailable)
 	tests := []struct {
 		name   string
 		k      int
@@ -77,6 +78,10 @@ func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 		{"refused mid last window", 590, refused, http.StatusServiceUnavailable},
 		{"uncertain mid first window", 100, context.DeadlineExceeded, http.StatusInternalServerError},
 		{"uncertain mid second window", 400, context.DeadlineExceeded, http.StatusInternalServerError},
+		// An unreachable broker is uncertain too (the store may have landed
+		// before the timeout), answered 503 so the client retries soon.
+		{"unavailable mid first window", 100, unavailable, http.StatusServiceUnavailable},
+		{"unavailable mid second window", 400, unavailable, http.StatusServiceUnavailable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -89,6 +94,9 @@ func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 			w := httptest.NewRecorder()
 			h.Handle(w, withTenant(ndjsonRequest(t, "clicks", lines...)))
 			require.Equal(t, tt.status, w.Code)
+			if errors.Is(tt.err, mq.ErrUnavailable) {
+				assert.Equal(t, "5", w.Header().Get("Retry-After"))
+			}
 			assert.Len(t, pub.Published(), tt.k-1)
 
 			windowEnd := min((tt.k-1)/ingestWindow*ingestWindow+ingestWindow, n)
