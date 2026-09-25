@@ -7,10 +7,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
+	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
@@ -510,4 +515,119 @@ func TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed(t *testing.T) {
 	assert.NotEqual(t, http.StatusForbidden, w.Code,
 		"admin bypasses the allowlist on a pipe with no allowed_roles")
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
+}
+
+// writeConn counts Exec and Query calls. With gate set, every Exec reports
+// itself on entered and holds until gate is closed, so a test can hold
+// requests in flight together.
+type writeConn struct {
+	driver.Conn
+	execs, queries atomic.Int32
+	entered, gate  chan struct{}
+}
+
+func (c *writeConn) Exec(context.Context, string, ...any) error {
+	c.execs.Add(1)
+	if c.gate != nil {
+		c.entered <- struct{}{}
+		<-c.gate
+	}
+	return nil
+}
+
+func (c *writeConn) Query(context.Context, string, ...any) (driver.Rows, error) {
+	c.queries.Add(1)
+	return &chainEmptyRows{}, nil
+}
+
+// pipeCallAs runs the pipe name as the writer role and returns the recorder.
+func pipeCallAs(t *testing.T, h *PipesHandler, name string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/"+name, name, map[string]any{"msg": "hello"})
+	h.Execute(w, withTenant(r.WithContext(auth.WithRole(r.Context(), "writer"))))
+	return w
+}
+
+func writerPipesHandler(t *testing.T, conn driver.Conn, c cache.Cache, queries ...*pipes.NamedQuery) *PipesHandler {
+	t.Helper()
+	for _, q := range queries {
+		q.AllowedRoles = []string{"writer"}
+	}
+	timeout := func(*settings.Store) time.Duration { return 5 * time.Second }
+	return NewPipesHandler(staticPipes(queries...), staticPolicy(&policy.Policy{}), fixedConn(conn), c, timeout)
+}
+
+// #386: a pipe that writes executes on every call. Served from the cache, a
+// repeat would answer 200 with the first call's `[]` and never reach
+// ClickHouse — the write silently dropped.
+func TestPipesHandler_Execute_MutationRunsEveryCall(t *testing.T) {
+	t.Parallel()
+	for name, sql := range map[string]string{
+		"insert":           "INSERT INTO audit_log VALUES ({{msg}}, now())",
+		"insert after cte": "WITH m AS (SELECT {{msg}} AS msg) INSERT INTO audit_log SELECT msg, now() FROM m",
+		"alter delete":     "ALTER TABLE audit_log DELETE WHERE msg = {{msg}}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			l1, err := cache.NewLocal(1 << 20)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = l1.Close() })
+			conn := &writeConn{}
+			h := writerPipesHandler(t, conn, l1, &pipes.NamedQuery{Name: "log", SQL: sql})
+
+			for range 3 {
+				w := pipeCallAs(t, h, "log")
+				require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+				assert.Equal(t, "BYPASS", w.Header().Get("X-Cache"))
+				assert.JSONEq(t, `[]`, w.Body.String())
+				l1.Wait()
+			}
+			assert.Equal(t, int32(3), conn.execs.Load(), "every call must reach ClickHouse")
+			assert.Zero(t, conn.queries.Load())
+		})
+	}
+}
+
+// Identical mutation calls in flight together are each executed: coalescing
+// them would run one write for all of them. Under synctest, Wait returns once
+// every request is inside Exec or parked on another's flight.
+func TestPipesHandler_Execute_ConcurrentMutationsNotCoalesced(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const calls = 3
+		conn := &writeConn{entered: make(chan struct{}, calls), gate: make(chan struct{})}
+		h := writerPipesHandler(t, conn, nil, &pipes.NamedQuery{Name: "log", SQL: "INSERT INTO audit_log VALUES ({{msg}}, now())"})
+		var wg sync.WaitGroup
+		for range calls {
+			wg.Go(func() {
+				w := pipeCallAs(t, h, "log")
+				assert.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+			})
+		}
+		synctest.Wait()
+		assert.Len(t, conn.entered, calls, "writes in flight once every request is blocked")
+		close(conn.gate)
+		wg.Wait()
+		assert.Equal(t, int32(calls), conn.execs.Load())
+	})
+}
+
+// A read pipe keeps its cache, including one whose table name starts with a
+// write verb: the classifier reads the statement, not the words in it.
+func TestPipesHandler_Execute_ReadPipeStaysCached(t *testing.T) {
+	t.Parallel()
+	l1, err := cache.NewLocal(1 << 20)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l1.Close() })
+	conn := &writeConn{}
+	h := writerPipesHandler(t, conn, l1, &pipes.NamedQuery{Name: "recent", SQL: "SELECT * FROM insert_log WHERE msg = {{msg}}"})
+
+	for _, want := range []string{"MISS", "HIT", "HIT"} {
+		w := pipeCallAs(t, h, "recent")
+		require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+		assert.Equal(t, want, w.Header().Get("X-Cache"))
+		l1.Wait()
+	}
+	assert.Equal(t, int32(1), conn.queries.Load())
+	assert.Zero(t, conn.execs.Load())
 }

@@ -575,7 +575,7 @@ Executes a pre-defined named query (pipe) with parameter binding. Parameters can
 
 **Response:**
 
-JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whether the row came from the in-process L1.
+JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whether the row came from the in-process L1. A pipe whose SQL is a write (`INSERT`, `ALTER`, `WITH … INSERT`, …) bypasses the cache and singleflight: it executes on every call, identical calls in flight are not coalesced, and the response is `[]` with `X-Cache: BYPASS` — see [Pipes that write](/pipes#pipes-that-write).
 
 The POST parameter body is capped at 1 MiB; a body over the cap is rejected with `413` (the same 1 MiB parameter/AST-body cap as [`POST /v1/query`](#post-v1querytabletable--structured-query) — see [reverse proxy → body limits](/reverse-proxy#request-body-size-limits)). A malformed-but-within-cap body is ignored rather than rejected, since parameters may legitimately come from the query string alone.
 
