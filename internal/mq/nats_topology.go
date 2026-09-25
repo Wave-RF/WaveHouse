@@ -410,6 +410,9 @@ func (v *topologyVerifier) partition(ctx context.Context, p int) (string, error)
 	if !cfg.DenyPurge || !cfg.DenyDelete {
 		rec("deny_purge", "set deny_purge and deny_delete; nothing should remove unwritten rows")
 	}
+	if cfg.PersistMode == jetstream.AsyncPersistMode {
+		req("persist_mode", "is async; must be default, or an ack precedes the write and a crash of the server process loses unwritten rows")
+	}
 	v.replicas(obj, cfg.Replicas)
 	gotP, hasP := cfg.Metadata["wavehouse.dev/partition"]
 	gotN, hasN := cfg.Metadata["wavehouse.dev/partitions"]
@@ -587,6 +590,9 @@ func (v *topologyVerifier) dlq(ctx context.Context) error {
 	}
 	if cfg.MaxMsgsPerSubject <= 0 {
 		v.add(FindingRecommended, obj, "max_msgs_per_subject", "set it, so one topic's parked rows evict only its own")
+	}
+	if cfg.PersistMode == jetstream.AsyncPersistMode {
+		v.add(FindingRecommended, obj, "persist_mode", "is async; a crash of the server process loses parked rows it acked")
 	}
 	v.replicas(obj, cfg.Replicas)
 	return nil

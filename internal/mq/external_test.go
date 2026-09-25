@@ -182,13 +182,14 @@ func TestExternalNATS_TopicAtItsCapIsFull(t *testing.T) {
 	require.NoError(t, e.Publish(t.Context(), Topic{Tenant: "acme", Table: "other"}, []byte("x")))
 }
 
-// Under nats, WaveHouse does not require sync_always: a server run from the
-// shipped values leaves it off, and a publish to a one-replica partition is
-// acked and stored. Boot reports the replica count as recommended only.
+// Under nats, WaveHouse does not require sync_always: against a server with
+// it off, a publish to a one-replica partition is acked and stored, and boot
+// reports the replica count as recommended only. TestShippedValues_SetNoSync
+// covers the shipped values.
 func TestExternalNATS_PublishesWithoutSyncAlways(t *testing.T) {
 	t.Parallel()
 	f := shippedFixture(t)
-	require.False(t, f.server.JetStreamConfig().SyncAlways, "the shipped values must not set sync_always")
+	require.False(t, f.server.JetStreamConfig().SyncAlways)
 
 	e := f.broker(t, nil)
 	topic := Topic{Tenant: "acme", Table: "t"}

@@ -182,7 +182,7 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 
 ### Message Queue (NATS)
 
-This section describes the `embedded` [backend](#backends), the only one today.
+This section describes the `embedded` [backend](#backends). `mq.backend: nats` takes its settings from [`mq.nats`](#external-nats-mqnats) instead.
 
 Each tenant's queue has its own disk budget, `mq.max_bytes_gb`, a hot-reloadable key in the [Settings Directory](/settings-directory#message-queue) — there is no boot-config knob for it.
 

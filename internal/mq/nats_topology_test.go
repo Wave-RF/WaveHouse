@@ -113,6 +113,7 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		}, shippedSpec, req(p0, "subjects")},
 		{"partition deny_purge", stream(p0, func(s *jetstream.StreamConfig) { s.DenyPurge = false }), shippedSpec, rec(p0, "deny_purge")},
 		{"partition at one replica", nil, shippedSpec, want{FindingRecommended, p0, "num_replicas", "sync_interval"}},
+		{"partition persist_mode async", stream(p0, func(s *jetstream.StreamConfig) { s.PersistMode = jetstream.AsyncPersistMode }), shippedSpec, req(p0, "persist_mode")},
 		{"partition metadata missing", stream(p0, func(s *jetstream.StreamConfig) { s.Metadata = nil }), shippedSpec, rec(p0, "metadata")},
 		{"partition metadata mismatch", stream(p0, func(s *jetstream.StreamConfig) {
 			s.Metadata = map[string]string{"wavehouse.dev/partition": "3", "wavehouse.dev/partitions": "4"}
@@ -166,6 +167,7 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		{"dlq storage", stream(dlq, func(s *jetstream.StreamConfig) { s.Storage = jetstream.MemoryStorage }), shippedSpec, req(dlq, "storage")},
 		{"dlq max_bytes", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), shippedSpec, req(dlq, "max_bytes")},
 		{"dlq at one replica", nil, shippedSpec, want{FindingRecommended, dlq, "num_replicas", "sync_interval"}},
+		{"dlq persist_mode async", stream(dlq, func(s *jetstream.StreamConfig) { s.PersistMode = jetstream.AsyncPersistMode }), shippedSpec, rec(dlq, "persist_mode")},
 		{"dlq per-subject cap", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxMsgsPerSubject = 0 }), shippedSpec, rec(dlq, "max_msgs_per_subject")},
 	}
 	// One server for every case, emptied between them: a server per case
@@ -216,6 +218,32 @@ func TestReplicasProblem(t *testing.T) {
 		_, ok := replicasProblem(n)
 		assert.False(t, ok, "replicas %d", n)
 	}
+}
+
+// WaveHouse does not require sync_always under nats, so the shipped Helm
+// values set no sync option anywhere. natstest.ServerConfig reads only
+// config.merge, so this reads the file itself.
+func TestShippedValues_SetNoSync(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(natstest.ShippedValues())
+	require.NoError(t, err)
+	var values any
+	require.NoError(t, yaml.Unmarshal(raw, &values))
+	var walk func(path string, v any)
+	walk = func(path string, v any) {
+		switch v := v.(type) {
+		case map[string]any:
+			for k, child := range v {
+				assert.NotContains(t, strings.ToLower(k), "sync", "values.yaml sets %s.%s", path, k)
+				walk(path+"."+k, child)
+			}
+		case []any:
+			for _, child := range v {
+				walk(path, child)
+			}
+		}
+	}
+	walk("", values)
 }
 
 // Boot waits for the operator's resources, which on Kubernetes roll out with
