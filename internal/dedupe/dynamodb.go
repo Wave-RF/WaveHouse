@@ -462,8 +462,6 @@ func (s *dynamoStore) Release(ctx context.Context, claims []Claim) error {
 // Close is a no-op: the client is the Dynamo's, shared by every tenant.
 func (s *dynamoStore) Close() error { return nil }
 
-// expiresAt is t+d in epoch seconds rounded up, so a claim or commit never
-// ends before it was asked to: TTL attributes are whole seconds.
 // forEach runs do for every index, at most limit at once, and joins the
 // errors: one failure never stops the rest.
 func forEach(n, limit int, do func(i int) error) error {
@@ -477,6 +475,8 @@ func forEach(n, limit int, do func(i int) error) error {
 	return errors.Join(errs...)
 }
 
+// expiresAt is t+d in epoch seconds rounded up, so a claim or commit never
+// ends before it was asked to: TTL attributes are whole seconds.
 func expiresAt(t time.Time, d time.Duration) int64 {
 	end := t.Add(d)
 	sec := end.Unix()

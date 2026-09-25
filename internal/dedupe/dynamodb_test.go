@@ -25,8 +25,8 @@ import (
 // produce.
 type fakeDynamo struct {
 	put      func(context.Context, *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error)
-	batch    func(*dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error)
-	del      func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error)
+	batch    func(context.Context, *dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error)
+	del      func(context.Context, *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error)
 	describe func() (*dynamodb.DescribeTableOutput, error)
 	ttl      func() (*dynamodb.DescribeTimeToLiveOutput, error)
 }
@@ -38,18 +38,24 @@ func (f *fakeDynamo) PutItem(ctx context.Context, in *dynamodb.PutItemInput, _ .
 	return f.put(ctx, in)
 }
 
-func (f *fakeDynamo) BatchWriteItem(_ context.Context, in *dynamodb.BatchWriteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+func (f *fakeDynamo) BatchWriteItem(ctx context.Context, in *dynamodb.BatchWriteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if f.batch == nil {
 		return &dynamodb.BatchWriteItemOutput{}, nil
 	}
-	return f.batch(in)
+	return f.batch(ctx, in)
 }
 
-func (f *fakeDynamo) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+func (f *fakeDynamo) DeleteItem(ctx context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if f.del == nil {
 		return &dynamodb.DeleteItemOutput{}, nil
 	}
-	return f.del(in)
+	return f.del(ctx, in)
 }
 
 func (f *fakeDynamo) DescribeTable(context.Context, *dynamodb.DescribeTableInput, ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error) {
@@ -168,7 +174,7 @@ func TestDynamo_FailedReserveReleasesEveryPutThatMayHaveLanded(t *testing.T) {
 			}
 			return &dynamodb.PutItemOutput{}, nil
 		},
-		del: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+		del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
 			id := string(in.Key[attrKey].(*types.AttributeValueMemberB).Value)
 			mu.Lock()
 			defer mu.Unlock()
@@ -179,7 +185,14 @@ func TestDynamo_FailedReserveReleasesEveryPutThatMayHaveLanded(t *testing.T) {
 	})
 	_, err := m.Reserve(t.Context(), keys("ok1", "dup", "bad", "ok2"), time.Minute)
 	require.ErrorIs(t, err, ErrUnavailable)
-	assert.ElementsMatch(t, []string{"ok1", "bad", "ok2"}, released, "the failed put may have landed; the duplicate was never ours")
+	var sent []string
+	for id := range putTokens {
+		if id[len(id)-3:] != "dup" {
+			sent = append(sent, id[len(id)-3:])
+		}
+	}
+	assert.ElementsMatch(t, sent, released, "every sent put but the duplicate, which was never ours")
+	assert.Contains(t, released, "bad", "the failed put may have landed")
 }
 
 func TestDynamo_CommitRetriesUnprocessedItems(t *testing.T) {
@@ -188,7 +201,7 @@ func TestDynamo_CommitRetriesUnprocessedItems(t *testing.T) {
 	var mu sync.Mutex
 	written := map[string]int{}
 	heldBack := map[string]bool{}
-	_, m := openFake(t, &fakeDynamo{batch: func(in *dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error) {
+	_, m := openFake(t, &fakeDynamo{batch: func(_ context.Context, in *dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error) {
 		calls.Add(1)
 		reqs := in.RequestItems["dedupe"]
 		assert.LessOrEqual(t, len(reqs), batchWriteMax)
@@ -228,7 +241,7 @@ func TestDynamo_CommitRetriesUnprocessedItems(t *testing.T) {
 
 func TestDynamo_CommitGivesUpOnItemsThatStayUnprocessed(t *testing.T) {
 	t.Parallel()
-	_, m := openFake(t, &fakeDynamo{batch: func(in *dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error) {
+	_, m := openFake(t, &fakeDynamo{batch: func(_ context.Context, in *dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error) {
 		return &dynamodb.BatchWriteItemOutput{UnprocessedItems: in.RequestItems}, nil
 	}})
 	err := m.Commit(t.Context(), []Claim{{Key: keys("a")[0], Status: Claimed, Token: "t"}}, 0)
@@ -237,7 +250,7 @@ func TestDynamo_CommitGivesUpOnItemsThatStayUnprocessed(t *testing.T) {
 
 func TestDynamo_ReleaseTreatsAFailedConditionAsDone(t *testing.T) {
 	t.Parallel()
-	_, m := openFake(t, &fakeDynamo{del: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+	_, m := openFake(t, &fakeDynamo{del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
 		assert.Equal(t, condRelease, aws.ToString(in.ConditionExpression))
 		id := string(in.Key[attrKey].(*types.AttributeValueMemberB).Value)
 		if id[len(id)-1] == 'x' {
@@ -370,7 +383,7 @@ func TestDynamo_CommitAttemptsEveryChunk(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
 	written := 0
-	_, m := openFake(t, &fakeDynamo{batch: func(in *dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error) {
+	_, m := openFakeWith(t, &fakeDynamo{batch: func(_ context.Context, in *dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error) {
 		reqs := in.RequestItems["dedupe"]
 		if idOf(reqs[0].PutRequest.Item[attrKey]) == "00" {
 			return nil, &types.InternalServerError{}
@@ -379,7 +392,7 @@ func TestDynamo_CommitAttemptsEveryChunk(t *testing.T) {
 		written += len(reqs)
 		mu.Unlock()
 		return &dynamodb.BatchWriteItemOutput{}, nil
-	}})
+	}}, DynamoConfig{Table: "dedupe", ReserveConcurrency: 1})
 	var claims []Claim
 	for i := range 3 * batchWriteMax {
 		claims = append(claims, Claim{Key: keys(fmt.Sprintf("%02d", i))[0], Status: Claimed, Token: "t"})
@@ -391,7 +404,7 @@ func TestDynamo_CommitAttemptsEveryChunk(t *testing.T) {
 func TestDynamo_ReleaseAttemptsEveryClaim(t *testing.T) {
 	t.Parallel()
 	var deletes atomic.Int64
-	_, m := openFakeWith(t, &fakeDynamo{del: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+	_, m := openFakeWith(t, &fakeDynamo{del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
 		deletes.Add(1)
 		if idOf(in.Key[attrKey]) == "k0" {
 			return nil, &types.ProvisionedThroughputExceededException{}
@@ -424,7 +437,7 @@ func TestDynamo_FailedMultiKeyReserve(t *testing.T) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
-		del: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+		del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
 			mu.Lock()
 			released = append(released, idOf(in.Key[attrKey]))
 			mu.Unlock()
