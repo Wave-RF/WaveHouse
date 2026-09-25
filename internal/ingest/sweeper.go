@@ -30,7 +30,7 @@ type Sweeper struct {
 }
 
 // NewSweeper creates the Active Sweeper. gapWindows is resolved per sweep.
-// TODO: (future) need leader election or shared lock to only run one instance of the sweeper in clustered mode
+// One runs per queue: internal/app starts it under the coord sweeper lease.
 func NewSweeper(purger mq.Purger, gapWindows func() map[tenant.ID]time.Duration) *Sweeper {
 	return &Sweeper{
 		purger:     purger,
