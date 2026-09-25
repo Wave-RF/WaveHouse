@@ -344,7 +344,8 @@ func TestValidate_ContentRules(t *testing.T) {
 }
 
 // A table name with odd bytes — NUL included — is any other table name to
-// the override maps: dedupe keys carry the table's length, not a separator.
+// the override maps: dedupe keys escape the table (internal/keyenc), so any
+// bytes are just another table name.
 func TestValidate_OverrideTableNamesAnyBytes(t *testing.T) {
 	t.Parallel()
 	files := validFiles()
