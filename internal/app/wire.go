@@ -540,97 +540,6 @@ var tableCheckRetry = time.Second
 // errDynamoUnchecked is a store's open before the first table check has run.
 var errDynamoUnchecked = errors.New("dedupe: dynamodb table not checked yet")
 
-// wireDynamoDedupe builds the dedupe stores over one DynamoDB table that
-// every tenant and every process shares (dedupe.Dynamo), so a tenant's store
-// opens for free once the table has passed its check. Boot checks it (after
-// creating it, with create_table on dynamodb-local) whether or not any tenant
-// has dedupe on, and never creates it otherwise. A table that fails the check
-// follows the registry's rule for the shape, as Pebble's instance does: a
-// flat directory refuses boot; a nested one boots with every switched-on
-// store closed, so its ingest fails closed. Unlike a local disk, a remote
-// table's failure is usually brief (a throttle, credentials not yet issued
-// mid-rollout), and a nested directory has no watcher to reload it, so the
-// check is also retried in the background, with backoff, until it passes.
-func (a *App) wireDynamoDedupe(ctx context.Context) error {
-	c := a.cfg.Dedupe.DynamoDB
-	d, err := dedupe.NewDynamo(ctx, dedupe.DynamoConfig{
-		Table: c.Table, Region: c.Region, Endpoint: c.Endpoint,
-		Timeout: c.Timeout, MaxAttempts: c.MaxAttempts, RetryMode: c.RetryMode,
-		ReserveConcurrency: a.cfg.Dedupe.ReserveConcurrency,
-	})
-	if err != nil {
-		return err
-	}
-	var mu sync.Mutex
-	state := errDynamoUnchecked // nil once the table has passed
-	check := func(ctx context.Context) error {
-		mu.Lock()
-		defer mu.Unlock()
-		if state == nil {
-			return nil
-		}
-		if c.CreateTable {
-			if state = d.CreateTable(ctx); state != nil {
-				return state
-			}
-		}
-		state = d.Check(ctx)
-		return state
-	}
-	ready := func() error {
-		mu.Lock()
-		defer mu.Unlock()
-		return state
-	}
-	stores := dedupe.NewStores(dedupe.Factory(d.Tenant).Gated(ready))
-	a.dedup = stores
-	a.add(component{name: "dedupe", close: withoutContext(stores.Close)})
-	var reconciling sync.Mutex // the hook and the retry loop both reconcile
-	reconcile := func(ctx context.Context) error {
-		reconciling.Lock()
-		defer reconciling.Unlock()
-		if err := stores.Retain(a.served); err != nil {
-			slog.Error("dedupe store close failed", "error", err)
-		}
-		checkErr := check(ctx)
-		if checkErr != nil {
-			slog.Error("dedupe: dynamodb table check failed; ingest with dedupe on fails closed until a reload passes it",
-				"table", c.Table, "error", checkErr)
-		}
-		for id, store := range a.tenants.All() {
-			m := stores.For(id)
-			enabled := store.DedupeEnabled()
-			wasOpen := m.Open()
-			// The one failure an open has is the check's, logged above.
-			_ = m.Apply(enabled)
-			if m.Open() != wasOpen {
-				slog.Info("dedupe store reconciled with settings", "tenant", id, "enabled", enabled)
-			}
-		}
-		return checkErr
-	}
-	a.tenants.AfterAdopt(func([]tenant.ID) { _ = reconcile(a.stopCtx) })
-	if err := reconcile(ctx); err != nil {
-		if !a.tenants.Nested() {
-			return fmt.Errorf("dedupe open: %w", err)
-		}
-		a.add(component{name: "dedupe table check", run: func(ctx context.Context) error {
-			for wait := tableCheckRetry; ready() != nil; wait = min(2*wait, 30*time.Second) {
-				select {
-				case <-ctx.Done():
-					return nil
-				case <-time.After(wait):
-				}
-				if reconcile(ctx) == nil {
-					slog.Info("dedupe: dynamodb table check passed", "table", c.Table)
-				}
-			}
-			return nil
-		}})
-	}
-	return nil
-}
-
 // wireMQ starts the MQ — the one place the implementation is chosen;
 // everything after it sees mq.Broker.
 func (a *App) wireMQ(ctx context.Context) error {
@@ -641,85 +550,6 @@ func (a *App) wireMQ(ctx context.Context) error {
 		return a.wireNATSMQ(ctx)
 	default:
 		return unreachableBackend("mq.backend", b)
-	}
-}
-
-// wireNATSMQ connects to the operator's NATS (mq.backend: nats) and waits,
-// up to mq.nats.topology_wait, for the streams and durables it needs; a
-// topology still wrong then refuses boot with every finding. The operator
-// owns every limit, so a tenant's mq.max_bytes_gb is not handed over
-// (config.Warnings says so at boot).
-func (a *App) wireNATSMQ(ctx context.Context) error {
-	n := a.cfg.MQ.NATS
-	broker, err := mq.NewNATS(ctx, mq.NATSConfig{
-		URLs:         n.URLs,
-		Name:         n.Name,
-		CredsFile:    n.CredsFile,
-		NKeySeedFile: n.NKeySeedFile,
-		User:         n.User,
-		PasswordFile: n.PasswordFile,
-		TLS: mq.NATSTLS{
-			CAFile: n.TLS.CAFile, CertFile: n.TLS.CertFile, KeyFile: n.TLS.KeyFile,
-			ServerName: n.TLS.ServerName, HandshakeFirst: n.TLS.HandshakeFirst,
-		},
-		JSDomain: n.JSDomain,
-		// AckWait, MaxAckPending and Prefetch are left to mq's defaults,
-		// which are the ingest worker's own.
-		Topology: mq.NATSTopology{
-			Prefix:         n.SubjectPrefix,
-			Partitions:     n.Partitions,
-			IngestConsumer: n.IngestConsumer,
-			HistoryStream:  n.HistoryStream,
-			PublishTimeout: n.PublishTimeout,
-			DedupeLease:    a.dedupeLease(),
-			// Boot waits for the lease bucket with the rest of the topology.
-			CoordBucket: a.coordBucket(),
-		},
-		ConnectTimeout: n.ConnectTimeout,
-		TopologyWait:   n.TopologyWait,
-	})
-	if err != nil {
-		return fmt.Errorf("mq open: %w", err)
-	}
-	a.adoptMQ(broker)
-	if !a.cfg.Has(config.RoleAPI) {
-		return nil // dedupe runs on the API path only
-	}
-	window, err := broker.DuplicateWindow(ctx)
-	if err != nil {
-		slog.Warn("mq: could not read the partitions' duplicate window; dedupe retention is not checked against it", "error", err)
-		return nil
-	}
-	a.warnShortRetention(window)
-	a.tenants.AfterAdopt(func([]tenant.ID) { a.warnShortRetention(window) })
-	return nil
-}
-
-// dedupeLease is the lease ingest runs with: dedupe.lease, or the default for 0.
-func (a *App) dedupeLease() time.Duration {
-	if l := a.cfg.Dedupe.Lease; l > 0 {
-		return l
-	}
-	return dedupe.DefaultLease
-}
-
-// warnShortRetention logs each served tenant with dedupe on whose finite
-// retention, default or per table, is under the operator's duplicate window.
-// settings refuses one under the embedded window; a longer operator window
-// can't be seen there. Such an id re-sent after it expires but inside the
-// window is claimed again, then dropped by the queue while the client hears
-// it was accepted.
-func (a *App) warnShortRetention(window time.Duration) {
-	for id, store := range a.tenants.All() {
-		if !store.DedupeEnabled() {
-			continue
-		}
-		for table, r := range store.DedupeRetentions() {
-			if r > 0 && r < window {
-				slog.Warn("dedupe retention is shorter than the nats partitions' duplicate_window: an id re-sent between the two is dropped by the queue while the client is told it was accepted; use a retention of at least the window, or \"0\"",
-					"tenant", id, "table", table, "retention", r, "duplicate_window", window)
-			}
-		}
 	}
 }
 
@@ -901,17 +731,6 @@ func (a *App) wireCoord(ctx context.Context) error {
 	default:
 		return unreachableBackend("coord.backend", b)
 	}
-}
-
-// coordBucket is the lease bucket under coord.backend=nats, "" otherwise.
-func (a *App) coordBucket() string {
-	if a.cfg.Coord.Backend != config.CoordNATS {
-		return ""
-	}
-	if b := a.cfg.Coord.NATS.Bucket; b != "" {
-		return b
-	}
-	return mq.DefaultNATSCoordBucket(a.cfg.MQ.NATS.SubjectPrefix)
 }
 
 // sweeperLease is the lease the sweeper runs under, one sweeper per queue.
@@ -1100,19 +919,6 @@ func (a *App) wireAuth() func(http.Handler) http.Handler {
 	return authn.Middleware()
 }
 
-// wireOpsAuth is the authentication of a process without the api role: the
-// operator key and nothing else. Token verifiers — and the JWKS fetches that
-// keep them — are per API process, so no token validates here and the reload
-// route admits the operator alone (api.NewOpsRouter).
-func (a *App) wireOpsAuth() func(http.Handler) http.Handler {
-	operatorKey := strings.TrimSpace(a.cfg.Auth.OperatorKey)
-	if operatorKey == "" {
-		slog.Warn("no auth.operator_key set: a process without the api role takes only the operator key on POST /v1/ops/settings/reload, so its settings can only be reloaded by SIGHUP or the directory watcher")
-	}
-	authn := auth.NewAuthenticator(auth.Config{OperatorKey: operatorKey}, nil, nil)
-	return authn.Middleware()
-}
-
 // wireReloadTriggers adds SIGHUP and the directory watcher. All three
 // triggers (these two and POST /v1/ops/settings/reload) funnel into the same
 // serialized Registry.Reload, and a rejected reload keeps the previous good
@@ -1226,26 +1032,6 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	deps.MetricsHandler, deps.MetricsPath = a.inlineMetrics()
 	a.handler = api.NewRouter(deps)
 	a.wireServers(func() { close(closing) })
-}
-
-// wireOpsHTTP serves the ops-only router of a process without the api role:
-// the probes, /version, the metrics endpoint, and the settings reload.
-// Readiness pings the ClickHouse pools when the process has them (the ingest
-// role); a sweeper-only process is ready once booted.
-func (a *App) wireOpsHTTP(authMW func(http.Handler) http.Handler) {
-	health := api.NewHealthHandler(nil)
-	if a.pools != nil {
-		health.Ping = a.pools.Ping
-	}
-	deps := api.OpsDependencies{
-		Health:   health,
-		Version:  api.NewVersionHandler(a.build.Version, a.build.GitCommit, a.build.BuildTime),
-		Settings: api.NewSettingsHandler(a.tenants),
-		AuthMW:   authMW,
-	}
-	deps.MetricsHandler, deps.MetricsPath = a.inlineMetrics()
-	a.handler = api.NewOpsRouter(deps)
-	a.wireServers(nil)
 }
 
 // inlineMetrics is the metrics endpoint to mount on the main router: with

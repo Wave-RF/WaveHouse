@@ -103,6 +103,12 @@ exclude:
       # (fake API) and integration (dynamodb-local) suites cover it, and the
       # merged total still counts it.
       - ^internal/dedupe/dynamodb\.go$
+      # Their wiring, moved out of wire.go for this: the NATS queue and lease
+      # wiring and the retention warning under it, the DynamoDB dedupe
+      # wiring, and the ops-only listener of a process without the api role
+      # (the e2e binary runs every role). Integration and unit suites cover
+      # them; the merged total still counts them.
+      - ^internal/app/wire_(nats|dynamodb|ops)\.go$
     unit:
       # The external NATS broker's tests start a server per case, which the
       # unit suite's 15s per package cannot hold: they are integration-tagged
