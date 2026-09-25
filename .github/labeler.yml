@@ -34,6 +34,11 @@
     - any-glob-to-any-file:
       - "internal/cache/**"
 
+"area/coord":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "internal/coord/**"
+
 "area/dedupe":
   - changed-files:
     - any-glob-to-any-file:

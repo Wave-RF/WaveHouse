@@ -204,7 +204,7 @@ Messages still sitting in `msgChan` or the consumer's prefetch buffer at shutdow
 
 Delivery can end underneath a running worker: the durable consumer is deleted, the MQ connection closes, or a tenant's queue opened while the server runs cannot be joined. The broker client reports the first two only through an asynchronous error callback and then stops delivering, and `internal/mq` reports the third when it opens the queue — no message ever arrives to say so, so a loop that only watches `msgChan` would wait forever while the API kept accepting events nothing writes. `mq.Consumer.Consume` therefore returns a `failed` channel next to `stop` (`mq.ErrDeliveryEnded`, wrapping the broker's reason), and `dispatchLoop` selects on it beside `ctx.Done()` and `msgChan`. On a failure it runs the same bottom-up drain as a shutdown — the rows already in hand are flushed and acked, not abandoned — and then reports the error on the worker's own `failed` channel. A consumer that cannot start at all takes the same path.
 
-The worker does not try to revive the consumer. The app's ingest-worker component returns the error from `app.Run`, which stops every other component and exits non-zero, the same way any failed component does; the supervisor's restart recreates the durable consumer at boot, and everything unacked is redelivered (at-least-once). Passing conditions the client also reports through that callback (a missed heartbeat, a leadership change) are logged at `WARN` and do not end the worker. With the embedded broker (`DontListen`, no external client that could delete a durable) this path is hard to reach; the likeliest way in is a tenant's queue, opened at runtime, that the consumer cannot join. It matters more once a remote broker exists.
+The worker does not try to revive the consumer. The app's ingest-worker component returns the error from `app.Run`, which stops every other component and exits non-zero, the same way any failed component does; with the embedded broker the supervisor's restart recreates the durable consumer at boot, and everything unacked is redelivered (at-least-once). Under `mq.backend: nats` WaveHouse never creates the durable: the restarted process waits `mq.nats.topology_wait` for the operator to recreate it, then refuses to boot naming it. Passing conditions the client also reports through that callback (a missed heartbeat, a leadership change) are logged at `WARN` and do not end the worker. With the embedded broker (`DontListen`, no external client that could delete a durable) this path is hard to reach; the likeliest way in is a tenant's queue, opened at runtime, that the consumer cannot join. Under `nats` it is reachable: an operator deleting `wh-ingest`, or a connection closed for good.
 
 ## Backpressure and durability knobs
 
@@ -239,39 +239,41 @@ flowchart TD
     Purge -->|"deletes msgs that are BOTH<br/>written to ClickHouse AND past the gap window"| Stream[("INGEST_TENANT stream")]
 ```
 
-`MIN(ackFloor+1, gapSeq)` is the safety argument: never purge past what is in ClickHouse, and never past the SSE replay window. If ClickHouse is down the `AckFloor` stops advancing, purging freezes, and the stream fills toward `MaxBytes` — backpressure by construction. The sweeper is one of `app.Run`'s components (`Sweeper.Start` blocks until the run context is canceled), but an interrupted sweep is harmless and idempotent, so it returns on `ctx.Done()` with no drain of its own — unlike the worker's bounded `stopFunc`.
+`MIN(ackFloor+1, gapSeq)` is the safety argument: never purge past what is in ClickHouse, and never past the SSE replay window. If ClickHouse is down the `AckFloor` stops advancing, purging freezes, and the stream fills toward `MaxBytes` — backpressure by construction. The sweeper is one of `app.Run`'s components (`Sweeper.Start` blocks until the run context is canceled), but an interrupted sweep is harmless and idempotent, so it returns on `ctx.Done()` with no drain of its own — unlike the worker's bounded `stopFunc`. It runs under the `sweeper` lease (`coord.RunElected`), so only the process holding the lease sweeps; with the in-process coordinator that is always the one process. Under [`mq.backend: nats`](/deployment#external-nats) `PurgeAcked` removes nothing: the partition streams use interest retention, so the server deletes each row once the worker acks it, and the replay history is a separate stream the server expires by its `max_age`. It only warns, once per tenant, about a gap window longer than that `max_age`.
 
 ## Scaling to multiple instances
 
-Today this is a **single-process** design (embedded, in-process NATS — the "connection" cannot blip independently of the process, so there is intentionally no reconnect logic). Running multiple instances against a real/clustered NATS changes several things:
+The embedded broker is single-process by construction: it listens on no port, so its "connection" cannot blip independently of the process. [`mq.backend: nats`](/deployment#external-nats) is how several processes share one queue:
 
 ```mermaid
 flowchart TD
-    subgraph Cluster["Clustered NATS (Replicas: 3)"]
-        S["one shared ingest stream"]
+    subgraph NATS["Operator's NATS JetStream"]
+        P0[("ingest partition 0<br/>interest retention")]
+        P1[("ingest partition N-1")]
+        H[("history stream<br/>limits, max_age")]
+        D[("dead-letter stream")]
     end
-    S --> P0["partition 0"]
-    S --> P1["partition 1"]
-    S --> P2["partition 2"]
-    P0 --> IA["instance A (pinned owner)"]
-    P1 --> IB["instance B (pinned owner)"]
-    P2 --> IA
-    IA --> CH[("ClickHouse<br/>idempotent inserts")]
-    IB --> CH
+    API["API processes"] -->|"publish: fnv32a(tenant) mod N"| P0
+    API --> P1
+    P0 -->|"wh-ingest durable, shared"| W["ingest workers (competing)"]
+    P1 --> W
+    P0 -. source .-> H
+    P1 -. source .-> H
+    H -->|"per-process consumer"| Hub["each API process's SSE hub + replay"]
+    W --> CH[("ClickHouse")]
+    W --> D
 ```
 
-What will need to change, and the trade-offs (discussed at length on the batching work):
-
-- **Work distribution.** Either a *shared* durable pull consumer (competing consumers — coordination-free, but a hot table's rows spread across instances, shrinking per-instance batches), or **partitioned consumer groups** that hash by the tenant and table subject tokens so a tenant's table always lands on one owner (pinned consumer → per-table affinity + automatic failover, at the cost of an assignment layer).
-- **Idempotent inserts become mandatory.** At-least-once + redelivery-on-crash means another instance can re-insert a batch the dead one had written but not acked. Use `ReplacingMergeTree` (or a dedup key). The single-instance design hides this today.
-- **NATS resilience.** Remote NATS needs explicit reconnect/backoff for the connection itself — the embedded path never dials out, so there is nothing to reconnect. The `Consume` error handler that detects a dead consumer already lives in `embedded.go` and needs no change for a remote broker.
-- **The sweeper.** Its single-`AckFloor` model assumes one consumer. With per-table/partition consumers you either rework it to purge below the *minimum* AckFloor across consumers, or — cleaner — **split the dual-use stream**: a `WorkQueuePolicy` work stream (auto-deletes on ack, no sweeper) plus a `MaxAge` replay stream (server-expired by time, no sweeper), joined by stream sourcing. That deletes the sweeper and its leader-election problem entirely, at the cost of duplicating the in-flight overlap on disk.
+- **Work distribution.** Every ingest process consumes the shared `wh-ingest` durable on every partition, competing for its messages. That needs no coordination, but a hot table's rows spread across processes, which shrinks each process's batches, and a tenant's rows written by different processes do not reach ClickHouse in publish order. Claiming partitions per worker through leases, for per-table affinity, is a later change.
+- **Idempotent inserts matter more.** At-least-once delivery plus redelivery after a crash means another process can re-insert a batch the dead one had written but not acked. Use `ReplacingMergeTree` (or a dedup key).
+- **NATS resilience.** The external broker reconnects on its own, with backoff; while it is disconnected a publish answers `503` with `Retry-After: 5`, and consumption resumes after the reconnect. A consumer whose delivery ends for good (its durable deleted, or the connection closed) ends the worker and the process, as the embedded one does.
+- **The sweeper.** Interest retention deletes each row once it is acked, one row at a time, so one tenant's unwritten rows never hold back another's reclaim, which a shared ack floor would. SSE replay reads the history stream, which sources the partitions and expires by `max_age`. So there is nothing for the sweeper to purge.
 
 ## Deferred / not yet implemented
 
 Tracked under [#191](https://github.com/Wave-RF/WaveHouse/issues/191):
 
 - **Pipelining beyond coalescing** — more than one insert in flight per tenant table (with a documented bound), once benchmarks justify the added concurrency.
-- **`tableLoop` reaping** — loops are spawned per distinct tenant table and never reaped; safe while tenants and table names are bounded (a settings folder per tenant, schema-validated tables, in-process publishers only). Needs idle-reaping before untrusted/remote publishers can create unbounded cardinality. Tracked in [#263](https://github.com/Wave-RF/WaveHouse/issues/263).
-- **Per-table / partitioned consumers** and the **two-stream retention redesign**.
+- **`tableLoop` reaping** — loops are spawned per distinct tenant table and never reaped; safe while tenants and table names are bounded (a settings folder per tenant, schema-validated tables, only WaveHouse publishing). Needs idle-reaping before untrusted publishers can create unbounded cardinality. Under `mq.backend: nats`, keep publish rights on `<prefix>.ingest.>` to the `wavehouse` user alone: any other publisher bypasses schema validation. Tracked in [#263](https://github.com/Wave-RF/WaveHouse/issues/263).
+- **Per-table / partitioned consumers**: workers claiming partitions for per-table affinity (the two-stream retention design ships under `mq.backend: nats`; the embedded broker keeps one stream per tenant and the sweeper).
 - **Parallel e2e test files.** The e2e suite now isolates tables **per file** (`tests/e2e/sdk/tables.ts` — each file gets its own `clicks_<suite>`/`events_<suite>`/`users_<suite>`), so cross-file *data* contamination is structurally impossible. Running the files in parallel (dropping `maxWorkers: 1` in `vitest.config.ts`) is still deferred: several files do read-modify-write on the **single global policy document** and `streaming.test.ts` flips the global `default_role`, so concurrent files would race those writes. Parallelism needs per-table policy storage with atomic per-table updates first — tracked in [#214](https://github.com/Wave-RF/WaveHouse/issues/214).

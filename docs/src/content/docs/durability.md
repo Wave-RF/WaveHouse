@@ -28,6 +28,10 @@ This is the strongest mode JetStream offers. It is stronger than the default, wh
 
 WaveHouse does not currently expose a knob to relax this — `SyncAlways` is always on. Exposing a configurable group-commit interval (`mq.sync_interval`) is tracked in [#139](https://github.com/Wave-RF/WaveHouse/issues/139).
 
+## With an external NATS cluster
+
+Under [`mq.backend: nats`](/deployment#external-nats) the buffer is your NATS cluster, not `<data_dir>/nats`, and the `200` means the partition stream has stored the event under its own storage settings: WaveHouse does not choose them, and the rest of this page describes the embedded server. What does not change is that no event is dropped before it is written: the partition streams have no age limit, and a full one refuses new events with `503` rather than dropping old ones. A full partition refuses every tenant whose events it holds, not one tenant. The replay history is a separate stream whose `max_age` you set, and every tenant's parked rows share one dead-letter stream.
+
 ## Why the fsync tail is your ingest floor
 
 Because the publish blocks on `fsync`, **your typical ingest latency is your storage's typical `fsync` latency, and your worst-case publish is your storage's worst-case `fsync`.** When that tail is healthy (sub-millisecond to single-digit milliseconds) the guarantee is essentially free. When it is not, the same code path that handles every production message stalls:
