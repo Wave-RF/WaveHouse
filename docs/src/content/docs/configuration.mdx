@@ -48,7 +48,7 @@ Each layer's implementation is chosen once, at boot. Today every layer has one b
 | `dedupe.backend` | `WH_DEDUPE_BACKEND` | `pebble` | Where ingest dedupe keeps the event ids it has seen. `pebble`: in this process, under `<data_dir>/pebble`, open while any tenant has dedupe on. |
 | `coord.backend` | `WH_COORD_BACKEND` | `local` | Reserved for the leases that will elect work only one process may do at a time, such as the sweeper. Nothing is elected yet: every process runs its own sweeper, and `local`, the only value, changes nothing. |
 
-Settings for one backend go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. A sub-block for a backend this build does not have is an unknown key and refuses boot. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
+Settings for one backend will go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. No backend has settings yet, so today any such sub-block, `mq.embedded` included, is an unknown key and refuses boot. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
 
 ### Server
 
