@@ -421,6 +421,78 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 
 The dedupe key now carries the table as well as the tenant ([#222](https://github.com/Wave-RF/WaveHouse/issues/222)), so **an id deduped before the upgrade is not recognized after it**: a record carrying it is accepted once more. Nothing is migrated, and the old keys stay in `<data_dir>/pebble`, unread; nothing removes them yet ([#220](https://github.com/Wave-RF/WaveHouse/issues/220) tracks the sweep that will). Only a tenant with `dedupe.enabled` on is affected, and only by a record sent both before and after the upgrade — typically a producer retrying across the restart. To avoid duplicate rows, let retrying producers finish, or pause them, before upgrading.
 
+## A shared dedupe table on DynamoDB
+
+:::note[Not selectable yet]
+The DynamoDB dedupe backend is built and tested (`internal/dedupe/dynamodb.go`), but no boot key chooses it yet: every deployment still uses the embedded Pebble store. The `dedupe.backend` boot key lands with [#613](https://github.com/Wave-RF/WaveHouse/issues/613)'s boot-config work. This section describes the table that backend expects, so the infrastructure can be ready first.
+:::
+
+Pebble is per process, so two pods on it do not share seen ids. The DynamoDB backend keeps every tenant's ids in **one shared table**, and a conditional write makes a claim atomic across every pod that uses the table. WaveHouse **never creates this table in production**: the table belongs to your infrastructure code. The backend's `create_table` switch is refused unless an `endpoint` override is set, so it only works against [dynamodb-local](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html).
+
+What the backend requires of the table:
+
+| Attribute | Type | Role |
+|---|---|---|
+| `pk` | Binary | Partition key, and the only key: tenant, table and id. No sort key. |
+| `st` | Number | `1` = pending claim, `2` = committed. |
+| `ex` | Number | Epoch seconds: the lease end while pending, the retention end once committed; absent = never expires. |
+| `tk` | Binary | The claim token that `Release` matches. |
+
+Only `pk` is declared in the table definition. Turn TTL on for `ex`. Correctness never depends on TTL, because a claim whose `ex` has passed counts as absent whether or not DynamoDB has deleted it yet. Without TTL, though, expired items are never removed and storage keeps growing. The backend's table check, which boot will run once the backend is selectable, refuses a table whose key schema does not match and logs a warning if TTL is off.
+
+An example in Terraform. Its tags are the five that Wave RF's own deployments put on every AWS resource (`Name`, `Project`, `Environment`, `ManagedBy`, `CostCenter`, with lowercase-kebab values); use your own conventions in their place:
+
+```hcl
+resource "aws_dynamodb_table" "wavehouse_dedupe" {
+  name                        = "wavehouse-dedupe-${var.environment}"
+  billing_mode                = "PAY_PER_REQUEST" # provisioned + auto scaling once traffic is steady
+  hash_key                    = "pk"
+  deletion_protection_enabled = true
+
+  attribute {
+    name = "pk"
+    type = "B"
+  }
+
+  ttl {
+    attribute_name = "ex"
+    enabled        = true
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  tags = {
+    Name        = "wavehouse-dedupe-${var.environment}"
+    Project     = "wavehouse-cloud"
+    Environment = var.environment # prod | dev | ci | demo | benchmark
+    ManagedBy   = "wavehouse-cloud/infra/stacks/prod-platform"
+    CostCenter  = "data-plane"
+  }
+}
+
+# The pods' role (EKS Pod Identity or IRSA). No Scan, no CreateTable.
+data "aws_iam_policy_document" "wavehouse_dedupe" {
+  statement {
+    actions = [
+      "dynamodb:PutItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:BatchWriteItem",
+      "dynamodb:DescribeTable",
+      "dynamodb:DescribeTimeToLive",
+    ]
+    resources = [aws_dynamodb_table.wavehouse_dedupe.arn]
+  }
+}
+```
+
+- **Credentials** come from the AWS SDK's default chain (EKS Pod Identity or IRSA in a pod; the environment or a profile locally), never from WaveHouse configuration.
+- **Point-in-time recovery** is not needed. The table records which ids have been seen, so losing it produces duplicate rows, not lost events.
+- **Cost:** every new event is two writes (the claim, then the commit), and a duplicate is one. On-demand, that is about $1.25 per million new events in us-east-1. Provisioned capacity with auto scaling is cheaper once traffic is steady.
+- **One table serves every tenant,** so one tenant's burst can throttle the rest. A throttled or unreachable table fails the ingest request closed rather than publishing un-deduped. After five failed claims within one second, the backend stops calling the table for a second and fails requests immediately (`wavehouse_dedupe_dynamodb_short_circuits_total`).
+- **Metrics:** `wavehouse_dedupe_dynamodb_requests_total{op,outcome}`, `wavehouse_dedupe_dynamodb_request_duration_seconds{op}`, `wavehouse_dedupe_dynamodb_unprocessed_items_total`. The table's own CloudWatch metrics `ThrottledRequests`, `SystemErrors` and `ConsumedWriteCapacityUnits` are worth alerting on too.
+
 ## Upgrading across the v2 ingest envelope
 
 The NATS envelope changed shape in this release: the row now travels positionally, with `format`, `columns` and `row` replacing `data` — and the queue changed layout with it: boot deletes the earlier build's queue (below), so nothing an older version published reaches the new worker, which could not read it anyway (it carries no `format`, so there is no way to say which value belongs to which column). **Drain first** to keep what the old build had not yet inserted.
