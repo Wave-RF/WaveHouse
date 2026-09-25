@@ -419,7 +419,7 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 
 ## Upgrading across the dedupe key change
 
-The dedupe key now carries the table as well as the tenant ([#222](https://github.com/Wave-RF/WaveHouse/issues/222)), so **an id deduped before the upgrade is not recognized after it**: a record carrying it is accepted once more. Nothing is migrated, and the old keys stay in `<data_dir>/pebble`, unread, until a later sweep removes them. Only a tenant with `dedupe.enabled` on is affected, and only by a record sent both before and after the upgrade — typically a producer retrying across the restart. To avoid duplicate rows, let retrying producers finish, or pause them, before upgrading.
+The dedupe key now carries the table as well as the tenant ([#222](https://github.com/Wave-RF/WaveHouse/issues/222)), so **an id deduped before the upgrade is not recognized after it**: a record carrying it is accepted once more. Nothing is migrated, and the old keys stay in `<data_dir>/pebble`, unread; nothing removes them yet ([#220](https://github.com/Wave-RF/WaveHouse/issues/220) tracks the sweep that will). Only a tenant with `dedupe.enabled` on is affected, and only by a record sent both before and after the upgrade — typically a producer retrying across the restart. To avoid duplicate rows, let retrying producers finish, or pause them, before upgrading.
 
 ## Upgrading across the v2 ingest envelope
 
