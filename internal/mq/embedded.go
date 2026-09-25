@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -146,6 +147,11 @@ var errNoQueue = errors.New("no queue is open for it yet")
 // applied, or by a publish or park that finds it missing, at the budget last
 // asked for it. The server logs through slog's default logger.
 func NewEmbedded(storeDir string) (*EmbeddedNATS, error) {
+	// A store the server cannot create fails JetStream in the background, and
+	// ReadyForConnections would only give up on it after its whole wait.
+	if err := os.MkdirAll(storeDir, 0o750); err != nil {
+		return nil, fmt.Errorf("nats store: %w", err)
+	}
 	opts := &natsserver.Options{
 		DontListen: true,
 		JetStream:  true,
