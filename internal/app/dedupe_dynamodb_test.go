@@ -99,7 +99,7 @@ func dynamoConfig(t *testing.T, cfg *config.Config, exists bool) *fakeDynamo {
 	return fake
 }
 
-var dedupeOn = map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
+var dedupeOn = map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}}
 
 func TestNew_DynamoDBDedupe(t *testing.T) {
 	cfg := testConfig(t, writeSettings(t, dedupeOn))

@@ -179,7 +179,7 @@ func defaults() Config {
 		Server:  Server{Port: 8080, ShutdownTimeout: 10},
 		MQ:      MQ{Backend: MQEmbedded, NATS: defaultMQNATS()},
 		Cache:   Cache{Backend: CacheLocal, L1MaxCost: 64 << 20, Redis: defaultCacheRedis()},
-		Dedupe:  Dedupe{Backend: DedupePebble},
+		Dedupe:  defaultDedupe(),
 		Coord:   Coord{Backend: CoordLocal},
 		OTel: OTel{
 			Traces:  OTelTraces{Enabled: true, SampleRate: 1.0},

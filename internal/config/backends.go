@@ -213,10 +213,10 @@ type Dedupe struct {
 	Backend DedupeBackend `yaml:"backend" env:"WH_DEDUPE_BACKEND"`
 	// Lease is how long a claimed id stays pending while its record is
 	// published; a claim its request never settles lapses after it.
-	Lease time.Duration `yaml:"lease" env:"WH_DEDUPE_LEASE" env-default:"30s"`
+	Lease time.Duration `yaml:"lease" env:"WH_DEDUPE_LEASE"`
 	// ReserveConcurrency bounds the parallel calls one Reserve, Commit or
 	// Release makes to a remote backend. Pebble ignores it.
-	ReserveConcurrency int                  `yaml:"reserve_concurrency" env:"WH_DEDUPE_RESERVE_CONCURRENCY" env-default:"64"`
+	ReserveConcurrency int                  `yaml:"reserve_concurrency" env:"WH_DEDUPE_RESERVE_CONCURRENCY"`
 	DynamoDB           DedupeDynamoDBConfig `yaml:"dynamodb"`
 }
 
@@ -231,12 +231,21 @@ type DedupeDynamoDBConfig struct {
 	Region string `yaml:"region" env:"WH_DEDUPE_DYNAMODB_REGION"`
 	// Endpoint points the client at dynamodb-local.
 	Endpoint    string        `yaml:"endpoint" env:"WH_DEDUPE_DYNAMODB_ENDPOINT"`
-	Timeout     time.Duration `yaml:"timeout" env:"WH_DEDUPE_DYNAMODB_TIMEOUT" env-default:"250ms"`
-	MaxAttempts int           `yaml:"max_attempts" env:"WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS" env-default:"3"`
-	RetryMode   string        `yaml:"retry_mode" env:"WH_DEDUPE_DYNAMODB_RETRY_MODE" env-default:"standard"`
+	Timeout     time.Duration `yaml:"timeout" env:"WH_DEDUPE_DYNAMODB_TIMEOUT"`
+	MaxAttempts int           `yaml:"max_attempts" env:"WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS"`
+	RetryMode   string        `yaml:"retry_mode" env:"WH_DEDUPE_DYNAMODB_RETRY_MODE"`
 	// CreateTable creates the table at boot if it is missing. Development
 	// only: refused unless Endpoint is set.
-	CreateTable bool `yaml:"create_table" env:"WH_DEDUPE_DYNAMODB_CREATE_TABLE" env-default:"false"`
+	CreateTable bool `yaml:"create_table" env:"WH_DEDUPE_DYNAMODB_CREATE_TABLE"`
+}
+
+// defaultDedupe is the dedupe part of defaults(). A zero lease, count or
+// timeout still reads as the default downstream (ingest, dedupe.DynamoConfig).
+func defaultDedupe() Dedupe {
+	return Dedupe{
+		Backend: DedupePebble, Lease: 30 * time.Second, ReserveConcurrency: 64,
+		DynamoDB: DedupeDynamoDBConfig{Timeout: 250 * time.Millisecond, MaxAttempts: 3, RetryMode: "standard"},
+	}
 }
 
 func (d Dedupe) validate() error {
@@ -304,8 +313,9 @@ func checkBackend[T ~string](key, env string, got T, valid []T) error {
 }
 
 // embeddedDuplicateWindow mirrors mq.EmbeddedDuplicateWindow, the embedded
-// ingest stream's duplicate window (#613 F2). A lease longer than it would let
-// the republish of a publish whose outcome was unknown land twice.
+// ingest stream's duplicate window (#613 F2); config stays a leaf, so
+// TestEmbeddedDuplicateWindow_MatchesMQ pins the two. A lease longer than it
+// would let the republish of a publish whose outcome was unknown land twice.
 const embeddedDuplicateWindow = 2 * time.Minute
 
 // validateBackends checks every layer's backend and its sub-block, then the

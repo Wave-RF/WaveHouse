@@ -54,7 +54,7 @@ func TestDynamoDBDedupe_TwoInstancesShareSeenIDs(t *testing.T) {
 		require.NoError(t, err)
 		var doc map[string]json.RawMessage
 		require.NoError(t, json.Unmarshal(files[settings.FileConfig], &doc))
-		doc["dedupe"] = json.RawMessage(`{"enabled": true, "id_field": "event_id", "require_id": true, "tables": {}}`)
+		doc["dedupe"] = json.RawMessage(`{"enabled": true, "id_field": "event_id", "require_id": true, "retention": "0", "tables": {}}`)
 		files[settings.FileConfig], err = json.Marshal(doc)
 		require.NoError(t, err)
 		dir := filepath.Join(t.TempDir(), name)
