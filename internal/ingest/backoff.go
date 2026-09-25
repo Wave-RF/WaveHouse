@@ -20,15 +20,18 @@ const (
 )
 
 // poolKey names what one backoff covers: the ClickHouse a batch is inserted
-// into and the identity it goes in as — a chconn tuple's HTTP half. Every
-// table of every tenant on it backs off together, so an outage costs one
-// probe per backoff, not one per table loop.
+// into and the identity it goes in as — a chconn tuple's HTTP half. With no
+// table, every table of every tenant on it backs off together, so an outage
+// costs one probe per backoff, not one per table loop. With a table, it is
+// that table's own backoff, for the failures of one table
+// (chconn.TableScoped) — a read-only table must not hold back, or be
+// reopened by, the healthy tables beside it.
 type poolKey struct {
-	url, user, database string
+	url, user, database, table string
 }
 
-func keyOf(t chconn.Target) poolKey {
-	return poolKey{url: t.URL, user: t.Username, database: t.Database}
+func keyOf(t chconn.Target, table string) poolKey {
+	return poolKey{url: t.URL, user: t.Username, database: t.Database, table: table}
 }
 
 // backoffs holds one backoff per pool, created on first use and kept for
@@ -42,22 +45,31 @@ type backoffs struct {
 	open atomic.Int32
 }
 
-// waiting reports whether t's pool is inside a backoff window, and for how
-// long, without claiming the probe that allow hands out once it elapses.
-func (b *backoffs) waiting(t chconn.Target, now time.Time) (time.Duration, bool) {
+// waiting reports whether table's rows on t's pool should stay away — the
+// pool or the table backing off — and for how long, without claiming the
+// probe that allow hands out once a window elapses.
+func (b *backoffs) waiting(t chconn.Target, table string, now time.Time) (time.Duration, bool) {
 	if b.open.Load() == 0 {
 		return 0, false
 	}
-	return b.forTarget(t).waiting(now)
+	if wait, ok := b.forTarget(t).waiting(now); ok {
+		return wait, true
+	}
+	return b.forTable(t, table).waiting(now)
 }
 
-func (b *backoffs) forTarget(t chconn.Target) *backoff {
+func (b *backoffs) forTarget(t chconn.Target) *backoff { return b.get(keyOf(t, "")) }
+
+func (b *backoffs) forTable(t chconn.Target, table string) *backoff {
+	return b.get(keyOf(t, table))
+}
+
+func (b *backoffs) get(k poolKey) *backoff {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.m == nil {
 		b.m = make(map[poolKey]*backoff)
 	}
-	k := keyOf(t)
 	bo, ok := b.m[k]
 	if !ok {
 		bo = &backoff{jitter: rand.Int64N, open: &b.open}
@@ -94,21 +106,38 @@ func (b *backoff) allow(now time.Time) (wait time.Duration, ok bool) {
 		return b.until.Sub(now) + b.spread(retryBase), false
 	}
 	if b.probing {
-		return b.spread(retryBase), false
+		return b.probeOut(), false
 	}
 	b.probing = true
 	return 0, true
 }
 
-// waiting reports whether the backoff window is still running, and how long
-// is left of it.
+// release hands back a probe allow gave out but the caller did not use.
+func (b *backoff) release() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.probing = false
+}
+
+// probeOut is how long rows stay away while a probe is out: floored, since a
+// probe to a server dropping packets can take the whole client timeout, and a
+// near-zero delay would cycle the backlog through the worker meanwhile.
+func (b *backoff) probeOut() time.Duration { return retryBase/2 + b.spread(retryBase/2) }
+
+// waiting reports whether the backoff window is still running, or its probe
+// is still out, and how long rows should stay away.
 func (b *backoff) waiting(now time.Time) (time.Duration, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.failures == 0 || !now.Before(b.until) {
+	switch {
+	case b.failures == 0:
 		return 0, false
+	case now.Before(b.until):
+		return b.until.Sub(now) + b.spread(retryBase), true
+	case b.probing:
+		return b.probeOut(), true
 	}
-	return b.until.Sub(now) + b.spread(retryBase), true
+	return 0, false
 }
 
 // fail records an availability failure and returns how long the failed rows

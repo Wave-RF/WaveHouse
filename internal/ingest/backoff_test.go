@@ -79,7 +79,10 @@ func TestBackoff_OpenTurnsFlushesAwayUntilItElapses(t *testing.T) {
 	assert.True(t, ok, "first flush after the window is the probe")
 	got, ok = b.allow(after)
 	assert.False(t, ok, "a second flush waits while the probe is out")
-	assert.Zero(t, got, "with no jitter the wait is the spread alone")
+	assert.Equal(t, retryBase/2, got, "floored, so rows do not cycle while a slow probe is out")
+	got, ok = b.waiting(after)
+	assert.True(t, ok, "arriving rows are handed back while the probe is out too")
+	assert.Equal(t, retryBase/2, got)
 
 	// The probe succeeds: closed, every flush tries again.
 	recovered, lasted := b.succeed(after.Add(time.Second))
@@ -103,6 +106,32 @@ func TestBackoff_LogsAnOngoingOutageAtABoundedRate(t *testing.T) {
 	}
 	assert.Greater(t, logged, 1, "an ongoing outage keeps logging")
 	assert.Less(t, logged, 10, "but not once per probe")
+}
+
+func TestBackoff_ReleaseReturnsAnUnusedProbe(t *testing.T) {
+	t.Parallel()
+	b := &backoff{jitter: noJitter}
+	wait, _, _ := b.fail(time.Unix(0, 0))
+	after := time.Unix(0, 0).Add(wait)
+	_, ok := b.allow(after)
+	require.True(t, ok)
+	b.release()
+	_, ok = b.allow(after)
+	assert.True(t, ok, "the released probe can be claimed again")
+}
+
+func TestBackoffs_TableAndPoolAreSeparate(t *testing.T) {
+	t.Parallel()
+	var bs backoffs
+	tgt := chconn.Target{URL: "http://a:8123", Username: "u", Database: "d"}
+	now := time.Unix(0, 0)
+	bs.forTable(tgt, "ro").fail(now)
+
+	_, ok := bs.waiting(tgt, "ro", now)
+	assert.True(t, ok, "the failing table waits")
+	_, ok = bs.waiting(tgt, "healthy", now)
+	assert.False(t, ok, "its neighbour on the pool does not")
+	assert.NotSame(t, bs.forTarget(tgt), bs.forTable(tgt, "ro"))
 }
 
 func TestBackoffs_OnePerPool(t *testing.T) {

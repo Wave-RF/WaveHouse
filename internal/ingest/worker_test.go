@@ -2270,3 +2270,58 @@ func TestTableBatcher_Add_HandsRowsBackWhileThePoolBacksOff(t *testing.T) {
 	assert.Len(t, b.batch, 1, "after the window rows batch again")
 	assert.False(t, late.Naked.Load())
 }
+
+// TestFlushTable_ReadOnlyTable_BacksOffAlone: a table ClickHouse reports as
+// read-only backs off on its own. Its healthy neighbour on the same pool keeps
+// inserting, and that neighbour's success does not reopen the read-only table.
+// Before, the two shared one breaker, which flapped open/closed on every flush.
+func TestFlushTable_ReadOnlyTable_BacksOffAlone(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{Fn: func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("param_target_table") == "ro" {
+			return chAnswer(500, 774, "Table is permanently read-only"), nil
+		}
+		return okAnswer(), nil
+	}}
+	w, pub, _, wait := newTestWorker(rt)
+	clock := time.Unix(1_000, 0)
+	w.now = func() time.Time { return clock }
+
+	ro := newIngestMsg(t, "ro", "", map[string]any{"id": 1})
+	w.flushTable(context.Background(), "ro", parseAll(t, w, ro))
+	require.True(t, ro.Naked.Load())
+	require.Equal(t, int32(1), rt.Hits())
+
+	healthy := newIngestMsg(t, "ok", "", map[string]any{"id": 2})
+	w.flushTable(context.Background(), "ok", parseAll(t, w, healthy))
+	wait()
+	assert.True(t, healthy.DoubleAcked.Load(), "a read-only neighbour does not hold back the pool")
+	assert.Equal(t, int32(2), rt.Hits())
+
+	again := newIngestMsg(t, "ro", "", map[string]any{"id": 3})
+	w.flushTable(context.Background(), "ro", parseAll(t, w, again))
+	assert.Equal(t, int32(2), rt.Hits(), "the healthy table's success did not reopen the read-only one")
+	assert.True(t, again.Naked.Load())
+	assert.Empty(t, pub.Published())
+}
+
+// TestTableBatcher_Add_HandsRowsBackWhileTheProbeIsOut: once the window has
+// elapsed and one flush is probing, arriving rows are still handed back, with
+// a floored delay, rather than batched for a flush that would bounce them.
+func TestTableBatcher_Add_HandsRowsBackWhileTheProbeIsOut(t *testing.T) {
+	t.Parallel()
+	b, w, _ := newTestBatcher(t, okRoundTripper())
+	clock := time.Unix(1_000, 0)
+	w.now = func() time.Time { return clock }
+	pool := w.backoffs.forTarget(w.target(tenant.Default))
+	wait, _, _ := pool.fail(clock)
+	clock = clock.Add(wait)
+	_, ok := pool.allow(clock)
+	require.True(t, ok, "the probe is claimed")
+
+	m := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	b.add(context.Background(), parseAll(t, w, m)[0])
+	assert.Empty(t, b.batch)
+	assert.True(t, m.Naked.Load())
+	assert.GreaterOrEqual(t, time.Duration(m.NakDelay.Load()), retryBase/2)
+}

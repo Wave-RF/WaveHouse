@@ -384,7 +384,7 @@ func newTableBatcher(w *IngestWorker, table string) *tableBatcher {
 // it here would only pin it in memory until a flush that is certain to hand
 // it back, so the backlog of an outage stays in the queue, not in the worker.
 func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
-	if wait, ok := b.w.backoffs.waiting(b.w.target(pm.tenant), b.w.clock()); ok {
+	if wait, ok := b.w.backoffs.waiting(b.w.target(pm.tenant), b.table, b.w.clock()); ok {
 		b.w.retryLater(ctx, b.table, []parsedMsg{pm}, wait, "backoff")
 		return
 	}
@@ -588,8 +588,16 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 		return
 	}
 
-	bo := w.backoffs.forTarget(t)
-	if wait, ok := bo.allow(w.clock()); !ok {
+	// The table's own backoff first, so a table turned away never claims
+	// the pool's probe; a pool that turns it away returns the table's.
+	pool, table := w.backoffs.forTarget(t), w.backoffs.forTable(t, tableName)
+	wait, ok := table.allow(w.clock())
+	if ok {
+		if wait, ok = pool.allow(w.clock()); !ok {
+			table.release()
+		}
+	}
+	if !ok {
 		w.retryLater(ctx, tableName, msgs, wait, "backoff")
 		return
 	}
@@ -608,11 +616,19 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 			unsettled = append(unsettled, later...)
 		}
 		class := chconn.Classify(err)
-		wait, first, log := bo.fail(w.clock())
+		failed, scope := pool, "ClickHouse"
+		if chconn.TableScoped(err) {
+			// The server answered for the table alone: the pool is up.
+			failed, scope = table, "the table"
+			w.closeBackoff(ctx, pool, id, tableName, t.URL, "ClickHouse")
+		} else {
+			table.release()
+		}
+		wait, first, log := failed.fail(w.clock())
 		if log {
-			msg := "ClickHouse cannot take inserts, retrying with backoff; no row goes to the DLQ"
+			msg := scope + " cannot take inserts, retrying with backoff; no row goes to the DLQ"
 			if !first {
-				msg = "ClickHouse still cannot take inserts, retrying with backoff"
+				msg = scope + " still cannot take inserts, retrying with backoff"
 			}
 			slog.WarnContext(ctx, msg, "tenant", id, "table", tableName, "clickhouse", t.URL,
 				"class", class.String(), "retry_in", wait, "error", err)
@@ -620,9 +636,16 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 		w.retryLater(ctx, tableName, unsettled, wait, class.String())
 		return
 	}
+	w.closeBackoff(ctx, pool, id, tableName, t.URL, "ClickHouse")
+	w.closeBackoff(ctx, table, id, tableName, t.URL, "the table")
+}
+
+// closeBackoff closes bo after an answer that was not an outage, logging the
+// recovery when it was open.
+func (w *IngestWorker) closeBackoff(ctx context.Context, bo *backoff, id tenant.ID, tableName, url, scope string) {
 	if recovered, lasted := bo.succeed(w.clock()); recovered {
-		slog.InfoContext(ctx, "ClickHouse is taking inserts again", "tenant", id, "table", tableName,
-			"clickhouse", t.URL, "outage", lasted)
+		slog.InfoContext(ctx, scope+" is taking inserts again", "tenant", id, "table", tableName,
+			"clickhouse", url, "outage", lasted)
 	}
 }
 

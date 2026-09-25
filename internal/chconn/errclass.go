@@ -119,6 +119,28 @@ var deniedCodes = map[int32]struct{}{
 	720: {}, // USER_EXPIRED
 }
 
+// tableScopedCodes are the Unavailable codes that describe one table rather
+// than the server: a read-only table or one with too many parts or mutations
+// leaves every other table on the same server writable.
+var tableScopedCodes = map[int32]struct{}{
+	242: {}, // TABLE_IS_READ_ONLY
+	252: {}, // TOO_MANY_PARTS
+	692: {}, // TOO_MANY_MUTATIONS
+	774: {}, // TABLE_IS_PERMANENTLY_READ_ONLY
+}
+
+// TableScoped reports whether err is an availability failure of the one table
+// the request wrote to, not of the server — so a caller backing off can hold
+// back that table alone.
+func TableScoped(err error) bool {
+	code, ok := ExceptionCode(err)
+	if !ok {
+		return false
+	}
+	_, scoped := tableScopedCodes[code]
+	return scoped
+}
+
 // ClassOfCode classes a ClickHouse exception code. A code on neither list is
 // Rejected: an exception code means the server was up and read the request,
 // and most of ClickHouse's several hundred codes are about what it read. The
