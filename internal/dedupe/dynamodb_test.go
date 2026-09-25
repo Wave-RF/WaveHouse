@@ -401,6 +401,36 @@ func TestDynamo_CommitAttemptsEveryChunk(t *testing.T) {
 	assert.Equal(t, 2*batchWriteMax, written, "a failed chunk does not cancel the others: their records are published")
 }
 
+// A put cancelled by its caller is not an answer from the table: it does
+// not reset the breaker's count of throttled puts.
+func TestDynamo_CallerCancelDoesNotResetBreaker(t *testing.T) {
+	t.Parallel()
+	var hang atomic.Bool
+	started := make(chan struct{}, 1)
+	_, m := openFake(t, &fakeDynamo{put: func(ctx context.Context, _ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+		if hang.Load() {
+			started <- struct{}{}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return nil, &types.ProvisionedThroughputExceededException{}
+	}})
+	for range breakerTrips - 1 {
+		_, err := m.Reserve(t.Context(), keys("a"), time.Minute)
+		require.ErrorIs(t, err, ErrUnavailable)
+	}
+	hang.Store(true)
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() { <-started; cancel() }()
+	_, err := m.Reserve(ctx, keys("a"), time.Minute)
+	require.ErrorIs(t, err, context.Canceled)
+	hang.Store(false)
+	_, err = m.Reserve(t.Context(), keys("a"), time.Minute)
+	require.ErrorIs(t, err, ErrUnavailable)
+	_, err = m.Reserve(t.Context(), keys("a"), time.Minute)
+	require.ErrorIs(t, err, errBreakerOpen, "the cancelled put did not reset the count")
+}
+
 func TestDynamo_ReleaseAttemptsEveryClaim(t *testing.T) {
 	t.Parallel()
 	var deletes atomic.Int64
@@ -419,12 +449,14 @@ func TestDynamo_ReleaseAttemptsEveryClaim(t *testing.T) {
 	assert.Equal(t, int64(4), deletes.Load())
 }
 
-// One throttled put in a multi-key Reserve: the unsent puts are neither sent
-// nor released, and the cancelled siblings do not reset the breaker.
+// One throttled put in a multi-key Reserve: the unsent puts are never sent,
+// and a sibling already sent runs to its answer before the undo releases it,
+// so a put cannot land after its own release.
 func TestDynamo_FailedMultiKeyReserve(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
 	var put, released []string
+	landed := map[string]bool{}
 	_, m := openFakeWith(t, &fakeDynamo{
 		put: func(ctx context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
 			id := idOf(in.Item[attrKey])
@@ -434,26 +466,31 @@ func TestDynamo_FailedMultiKeyReserve(t *testing.T) {
 			if id == "k0" {
 				return nil, &types.ProvisionedThroughputExceededException{}
 			}
-			<-ctx.Done()
-			return nil, ctx.Err()
+			time.Sleep(20 * time.Millisecond)
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			landed[id] = true
+			mu.Unlock()
+			return &dynamodb.PutItemOutput{}, nil
 		},
 		del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+			id := idOf(in.Key[attrKey])
 			mu.Lock()
-			released = append(released, idOf(in.Key[attrKey]))
-			mu.Unlock()
-			return nil, &types.ConditionalCheckFailedException{}
+			defer mu.Unlock()
+			released = append(released, id)
+			if id != "k0" && !landed[id] {
+				t.Errorf("%s released before its put answered", id)
+			}
+			return &dynamodb.DeleteItemOutput{}, nil
 		},
 	}, DynamoConfig{Table: "dedupe", ReserveConcurrency: 2})
 	ks := keys("k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7")
-	for range breakerTrips {
-		_, err := m.Reserve(t.Context(), ks, time.Minute)
-		require.ErrorIs(t, err, ErrUnavailable)
-		require.NotErrorIs(t, err, errBreakerOpen)
-	}
 	_, err := m.Reserve(t.Context(), ks, time.Minute)
-	require.ErrorIs(t, err, errBreakerOpen, "the cancelled siblings did not reset the count")
+	require.ErrorIs(t, err, ErrUnavailable)
 	mu.Lock()
 	defer mu.Unlock()
 	assert.ElementsMatch(t, put, released, "exactly the sent puts are released")
-	assert.Less(t, len(put), breakerTrips*len(ks), "unsent puts were never sent")
+	assert.Less(t, len(put), len(ks), "unsent puts were never sent")
 }
