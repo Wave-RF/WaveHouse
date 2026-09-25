@@ -440,7 +440,7 @@ What the backend requires of the table:
 
 Only `pk` is declared in the table definition. Turn TTL on for `ex`. Correctness never depends on TTL, because a claim whose `ex` has passed counts as absent whether or not DynamoDB has deleted it yet; TTL only reclaims the storage. **Today TTL removes only lapsed claims:** ingest commits every id with no retention, so a committed item carries no `ex` and is kept forever, and the table grows by one item (about 200 bytes) per distinct id. Per-tenant retention is [#220](https://github.com/Wave-RF/WaveHouse/issues/220). The backend's table check, which boot will run once the backend is selectable, refuses a table whose key schema does not match and logs a warning if TTL is off.
 
-An example in Terraform. Its tags are the five that Wave RF's own deployments put on every AWS resource (`Name`, `Project`, `Environment`, `ManagedBy`, `CostCenter`, with lowercase-kebab values); use your own conventions in their place:
+An example in Terraform. Replace the tags with your own conventions:
 
 ```hcl
 resource "aws_dynamodb_table" "wavehouse_dedupe" {
@@ -465,10 +465,9 @@ resource "aws_dynamodb_table" "wavehouse_dedupe" {
 
   tags = {
     Name        = "wavehouse-dedupe-${var.environment}"
-    Project     = "wavehouse-cloud"
-    Environment = var.environment # prod | dev | ci | demo | benchmark
-    ManagedBy   = "wavehouse-cloud/infra/stacks/prod-platform"
-    CostCenter  = "data-plane"
+    Project     = "wavehouse"
+    Environment = var.environment
+    ManagedBy   = "terraform"
   }
 }
 
