@@ -479,6 +479,12 @@ func TestEmbeddedNATS_PacesTheRetriesOfAQueueThatCannotOpen(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	acme := Topic{Tenant: "acme", Table: "t"}
+	// Another tenant's streams keep the streams directory occupied: after a
+	// failed open the server, on a goroutine of its own, removes that
+	// directory and the account's once they are empty, and the obstacle put
+	// back below would race it — a file written into a directory being
+	// removed.
+	require.NoError(t, e.SetMaxBytes(ctx, "globex", testBudget))
 
 	require.Error(t, e.SetMaxBytes(ctx, "acme", testBudget))
 	obstruct()
