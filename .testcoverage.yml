@@ -79,8 +79,15 @@ exclude:
       # The external-NATS topology spec, verifier and manifest generator
       # (and the `mq manifests` CLI) run against an operator's NATS, which
       # the e2e stack (embedded broker) never has: unit territory, covered
-      # there by a fixture server. Excluding them keeps e2e at ~61%.
+      # there by a fixture server. Excluding them keeps e2e at ~61%. The
+      # external broker is the same, covered by the integration suite.
       - ^internal/mq/nats_topology\.go$
       - ^internal/mq/nats_manifests\.go$
       - ^internal/mq/subject_nats\.go$
+      - ^internal/mq/external\.go$
       - ^cmd/wavehouse/mq\.go$
+    unit:
+      # The external NATS broker's tests start a server per case, which the
+      # unit suite's 15s per package cannot hold: they are integration-tagged
+      # (make test-integration), and the merged total counts them.
+      - ^internal/mq/external\.go$

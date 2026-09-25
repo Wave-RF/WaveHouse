@@ -130,6 +130,11 @@ type Finding struct {
 	Field string
 	// Problem says what is wrong and what is needed.
 	Problem string
+	// transient marks a finding that clears on its own, such as a history
+	// source re-attaching after a NATS restart (~10s): boot waits it out, and
+	// the periodic re-check reports it on its own gauge rather than as a
+	// topology fault.
+	transient bool
 }
 
 func (f Finding) String() string {
@@ -500,6 +505,7 @@ func (v *topologyVerifier) history(ctx context.Context, partitions []string) err
 		j := slices.IndexFunc(info.Sources, func(si *jetstream.StreamSourceInfo) bool { return si.Name == name })
 		if j < 0 || info.Sources[j].Active < 0 {
 			req("sources", "%s is not attached yet", name)
+			v.findings[len(v.findings)-1].transient = true
 		}
 	}
 	if cfg.Retention != jetstream.LimitsPolicy {

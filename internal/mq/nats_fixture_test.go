@@ -36,6 +36,9 @@ func fixturePassword(user string) string { return "pw-" + user }
 
 type natsFixture struct {
 	server *natsserver.Server
+	// opts is what server was started with, for a restart on the same port
+	// and store.
+	opts *natsserver.Options
 	// admin is nack's stand-in: the operator's user, with full access.
 	admin jetstream.JetStream
 }
@@ -96,7 +99,7 @@ func newNATSFixture(t *testing.T) *natsFixture {
 	s.Start()
 	require.True(t, s.ReadyForConnections(10*time.Second), "nats server not ready")
 	t.Cleanup(s.Shutdown)
-	f := &natsFixture{server: s}
+	f := &natsFixture{server: s, opts: opts}
 	f.admin = f.connect(t, "nack")
 	return f
 }

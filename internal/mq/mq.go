@@ -5,7 +5,8 @@
 // ingest queue, park a message on the dead-letter queue, replay since a time,
 // drop what is both written and expired — in the types below. How that maps to
 // subjects, streams, sequences, and consumers is the implementation's
-// (EmbeddedNATS), so a broker change lands here once. The behavior below is
+// (EmbeddedNATS, or ExternalNATS over an operator-owned cluster), so a broker
+// change lands here once. The behavior below is
 // what mqtest checks: every implementation passes its suite.
 package mq
 
@@ -319,8 +320,8 @@ type Replayer interface {
 }
 
 // Broker is everything the process wiring needs from the MQ: every interface
-// above plus the lifecycle and the byte budgets. EmbeddedNATS is the one
-// implementation; internal/app depends on this, not on it.
+// above plus the lifecycle and the byte budgets. EmbeddedNATS and
+// ExternalNATS implement it; internal/app depends on this, not on either.
 type Broker interface {
 	Publisher
 	Subscriber

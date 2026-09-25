@@ -105,7 +105,7 @@ type tenantQueue struct {
 	ingestCap int64
 }
 
-// EmbeddedNATS is the one implementation of every mq interface.
+// EmbeddedNATS implements every mq interface.
 var _ Broker = (*EmbeddedNATS)(nil)
 
 const (
