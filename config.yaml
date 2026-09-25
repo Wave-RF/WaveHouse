@@ -9,8 +9,9 @@
 data_dir: ./data
 
 # The work this process runs; every role by default. A split (one Deployment
-# per role) needs a shared mq.backend and cache.backend, and boot refuses one
-# on the in-process backends.
+# per role) needs mq.backend: nats and, wherever the sweeper runs,
+# coord.backend: nats; separate api and ingest processes also need
+# cache.backend: redis. Boot refuses a split the backends cannot serve.
 roles: [api, ingest, sweeper]
 # Names this process: logged at boot, and a lease's holder under
 # coord.backend: nats. Empty means <hostname>-<8 hex>, fresh at every boot.

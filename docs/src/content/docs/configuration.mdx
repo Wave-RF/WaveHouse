@@ -48,7 +48,7 @@ Each layer's implementation is chosen once, at boot. Every layer's default is it
 | `dedupe.backend` | `WH_DEDUPE_BACKEND` | `pebble` | Where ingest dedupe keeps the event ids it has seen. `pebble`: in this process, under `<data_dir>/pebble`, open while any tenant has dedupe on; two processes do not share seen ids. `dynamodb`: one DynamoDB table that every tenant and every process shares, configured by [`dedupe.dynamodb`](#dynamodb-dedupe). |
 | `coord.backend` | `WH_COORD_BACKEND` | `local` | Where the leases for work only one process may do at a time, such as the sweeper, are held. `local`: in this process, so the one process always holds them. It shares nothing with another process, so it serves one process on `mq.backend=embedded`, or a process without the `sweeper` role. `nats`: a KV bucket you create on the `mq.nats` cluster, reached over the same connection and credentials, so every process contends for the same leases and one sweeps at a time; configured by [`coord.nats`](#nats-leases-coordnats). It needs `mq.backend=nats`. |
 
-Settings for one backend go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. `mq.nats`, `coord.nats`, `cache.redis` and `dedupe.dynamodb` are the only ones so far; any other, `mq.embedded` included, is an unknown key and refuses boot. A sub-block written while its layer runs another backend (for the cache, a `cache.redis.addrs`) is not read, and boot logs a warning saying so. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
+Settings for one backend go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. `mq.nats`, `coord.nats`, `cache.redis` and `dedupe.dynamodb` are the only ones so far; any other, `mq.embedded` included, is an unknown key and refuses boot. A sub-block written while its layer runs another backend is not read. Boot warns about an ignored `mq.nats`, `coord.nats` or `cache.redis.addrs`; a `dedupe.dynamodb` block under `pebble` is ignored silently. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
 
 ### External NATS (`mq.nats`)
 
@@ -120,7 +120,7 @@ Some valid combinations are right for a single replica only, and one process can
 - **`mq.backend=nats` with `cache.backend=local`**, in a process running `api`: an event ingested on another replica never invalidates this one's cache, so its reads stay stale until the cached entry expires.
 - **`mq.backend=nats` with `dedupe.backend=pebble`**, in a process running `api`: an id seen by another replica is not seen by this one.
 - **`mq.backend=nats`**: `mq.max_bytes_gb` is not applied (above).
-- **`mq.nats` set with `mq.backend=embedded`**, or **`coord.nats` set with `coord.backend=local`**: the block is ignored.
+- **`mq.nats` set with `mq.backend=embedded`**, **`coord.nats` set with `coord.backend=local`**, or **`cache.redis.addrs` set with `cache.backend=local`**: the block is ignored.
 - **`mq.backend=nats` and a tenant with dedupe on whose finite `dedupe.retention` is under the partitions' `duplicate_window`**, in a process running `api`, at boot and after every reload: see [Deployment → External NATS](/deployment#external-nats).
 
 ### Process roles
@@ -209,7 +209,7 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 
 ### Message Queue (NATS)
 
-This section describes the `embedded` [backend](#backends), the only one today.
+This section describes the `embedded` [backend](#backends); for `nats` see [External NATS](#external-nats-mqnats) above.
 
 Each tenant's queue has its own disk budget, `mq.max_bytes_gb`, a hot-reloadable key in the [Settings Directory](/settings-directory#message-queue) — there is no boot-config knob for it.
 
