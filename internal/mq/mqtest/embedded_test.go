@@ -23,8 +23,8 @@ func TestEmbeddedNATS_Conformance(t *testing.T) {
 			return e
 		},
 		// Closing the broker ends every tenant's delivery at once, the
-		// connection-closed half of the #587 path; the durable-deleted half
-		// is internal/mq's own test.
+		// connection-closed half of the #587 path; internal/mq's own tests
+		// delete the durable, one tenant's queue and then another's.
 		EndDelivery: func(t *testing.T, b mq.Broker) {
 			require.NoError(t, b.Close())
 		},

@@ -29,6 +29,8 @@ const (
 	wait = 5 * time.Second
 	// quiet is how long a case watches for something that must not happen.
 	quiet = 300 * time.Millisecond
+	// retryPause spaces the polls of a backend whose replay store trails.
+	retryPause = 20 * time.Millisecond
 )
 
 // Harness is what a backend gives the suite.

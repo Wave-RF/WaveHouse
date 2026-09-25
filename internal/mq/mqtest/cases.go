@@ -105,6 +105,7 @@ func replayEventually(t *testing.T, b mq.Broker, topic mq.Topic, since time.Time
 			assert.Equal(t, want, got, "replay of %+v since %v", topic, since)
 			return
 		}
+		time.Sleep(retryPause)
 	}
 }
 
@@ -124,6 +125,7 @@ func replayReaches(t *testing.T, b mq.Broker, topic mq.Topic, n int) {
 			return
 		}
 		require.False(t, time.Now().After(deadline), "a replay of %+v never reached %d events", topic, n)
+		time.Sleep(retryPause)
 	}
 }
 
@@ -429,7 +431,7 @@ func replaySincePullFailureIsAnError(t *testing.T, h Harness) {
 }
 
 // Delivery ended underneath a running Consume is reported on failed exactly
-// once, however many queues the durable was held on.
+// once.
 func failedOnceWhenDeliveryEnds(t *testing.T, h Harness) {
 	b := h.New(t)
 	_, _, failed := consume(ctx(t), t, b, mq.ConsumerConfig{MaxAckPending: 100}, nil)

@@ -1,7 +1,6 @@
 package mq
 
 import (
-	"errors"
 	"testing"
 	"time"
 
@@ -12,16 +11,24 @@ import (
 // that drained the first report must not see the next.
 func TestEmbeddedNATS_Consume_ReportsOnceHoweverManyDeliveriesEnd(t *testing.T) {
 	e := newTestEmbedded(t, "acme", "globex")
-	cons, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: "once", MaxAckPending: 10})
+	ctx := t.Context()
+	cons, err := e.CreateConsumer(ctx, ConsumerConfig{Durable: "doomed", MaxAckPending: 10})
 	require.NoError(t, err)
-	c := cons.(*workerConsumer)
+	stop, failed, err := cons.Consume(func(*Message) {}, 4)
+	require.NoError(t, err)
+	t.Cleanup(stop)
 
-	c.fail(errors.New("acme ended"))
-	require.EqualError(t, <-c.failed, "acme ended")
-	c.fail(errors.New("globex ended"))
+	require.NoError(t, e.js.DeleteConsumer(ctx, "INGEST_globex", "doomed"))
 	select {
-	case err := <-c.failed:
+	case err := <-failed:
+		require.ErrorIs(t, err, ErrDeliveryEnded)
+	case <-time.After(5 * time.Second):
+		t.Fatal("delivery ended underneath the consumer and nothing was reported")
+	}
+	require.NoError(t, e.js.DeleteConsumer(ctx, "INGEST_acme", "doomed"))
+	select {
+	case err := <-failed:
 		t.Fatalf("a second failure was reported: %v", err)
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(300 * time.Millisecond):
 	}
 }
