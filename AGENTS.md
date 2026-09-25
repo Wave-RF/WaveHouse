@@ -399,9 +399,9 @@ Internal-only backend changes (middleware refactors, observability internals, de
 
 ### Adding a new config option
 
-1. Add the field to the appropriate struct in `internal/config/config.go` with `yaml`, `env`, and `env-default` tags.
+1. Add the field to the appropriate struct in `internal/config/config.go` with `yaml` and `env` tags, and put a non-zero default in `defaults()` there. Never use cleanenv's `env-default` tag: it is applied after the YAML decode, so an explicit `false`/`0`/`""` in the file would be replaced by it (#631); `TestConfig_NoEnvDefaultTags` refuses it.
 2. Use the new config value in `internal/app/wire.go` or the relevant internal package.
-3. Document in `docs/src/content/docs/configuration.mdx`.
+3. Document in `docs/src/content/docs/configuration.mdx`, with a table row whose default matches `defaults()`; `TestDocs_DefaultsMatchCode` checks every field has one.
 
 ### Adding a new internal package
 
