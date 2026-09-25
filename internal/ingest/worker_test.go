@@ -2277,9 +2277,25 @@ func TestTableBatcher_Add_HandsRowsBackWhileThePoolBacksOff(t *testing.T) {
 // Before, the two shared one breaker, which flapped open/closed on every flush.
 func TestFlushTable_ReadOnlyTable_BacksOffAlone(t *testing.T) {
 	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		code int
+	}{
+		{"TABLE_IS_PERMANENTLY_READ_ONLY", 774},
+		{"ACCESS_DENIED on one table", 497},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tableBacksOffAlone(t, tc.code)
+		})
+	}
+}
+
+func tableBacksOffAlone(t *testing.T, code int) {
+	t.Helper()
 	rt := &testutil.MockRoundTripper{Fn: func(req *http.Request) (*http.Response, error) {
 		if req.URL.Query().Get("param_target_table") == "ro" {
-			return chAnswer(500, 774, "Table is permanently read-only"), nil
+			return chAnswer(500, code, "this table cannot take inserts"), nil
 		}
 		return okAnswer(), nil
 	}}

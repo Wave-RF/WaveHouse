@@ -173,12 +173,12 @@ func TestClassOfCode(t *testing.T) {
 
 func TestTableScoped(t *testing.T) {
 	t.Parallel()
-	for _, code := range []int32{242, 252, 692, 774} {
+	for _, code := range []int32{242, 252, 497, 692, 774} {
 		err := &clickhouse.Exception{Code: code}
 		assert.True(t, TableScoped(err), "code %d", code)
-		assert.Equal(t, Unavailable, Classify(err), "a table-scoped code is still an availability failure: %d", code)
+		assert.NotEqual(t, Rejected, Classify(err), "a table-scoped code is still retried: %d", code)
 	}
-	for _, err := range []error{&clickhouse.Exception{Code: 241}, &clickhouse.Exception{Code: 60}, context.DeadlineExceeded, nil} {
+	for _, err := range []error{&clickhouse.Exception{Code: 241}, &clickhouse.Exception{Code: 516}, &clickhouse.Exception{Code: 60}, context.DeadlineExceeded, nil} {
 		assert.False(t, TableScoped(err), "%v", err)
 	}
 }

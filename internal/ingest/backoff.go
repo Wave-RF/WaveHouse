@@ -34,9 +34,11 @@ func keyOf(t chconn.Target, table string) poolKey {
 	return poolKey{url: t.URL, user: t.Username, database: t.Database, table: table}
 }
 
-// backoffs holds one backoff per pool, created on first use and kept for
-// the process: a key is a (URL, user, database) the settings named, so the
-// set is bounded by the tuples ever configured.
+// backoffs holds one backoff per pool and per (pool, table), created on
+// first use and kept for the process: a key is a (URL, user, database) the
+// settings named, with a table name that passed the ingest handler's schema
+// check, so the set is bounded by the tuples ever configured times the tables
+// ever flushed.
 type backoffs struct {
 	mu sync.Mutex
 	m  map[poolKey]*backoff
