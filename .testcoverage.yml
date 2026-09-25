@@ -91,9 +91,12 @@ exclude:
       - ^internal/mq/nats_manifests\.go$
       - ^internal/mq/subject_nats\.go$
       - ^internal/mq/external\.go$
+      - ^internal/mq/lease\.go$
       - ^cmd/wavehouse/mq\.go$
     unit:
       # The external NATS broker's tests start a server per case, which the
       # unit suite's 15s per package cannot hold: they are integration-tagged
       # (make test-integration), and the merged total counts them.
       - ^internal/mq/external\.go$
+      # The NATS KV leases, the same way.
+      - ^internal/mq/lease\.go$

@@ -16,8 +16,12 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq/natstest"
 )
 
-// shippedSpec is the topology the shipped manifests are generated for.
-var shippedSpec = NATSTopology{Partitions: 4}
+// shippedSpec is the topology the shipped manifests are generated for, and
+// coordSpec the same for a process holding its leases there.
+var (
+	shippedSpec = NATSTopology{Partitions: 4}
+	coordSpec   = NATSTopology{Partitions: 4, CoordBucket: natstest.CoordBucket}
+)
 
 // replicaWarnings are what the shipped manifests at one replica leave: one
 // num_replicas recommendation per partition.
@@ -36,9 +40,18 @@ func TestVerifyNATSTopology_ShippedManifestsPass(t *testing.T) {
 	t.Parallel()
 	f := newNATSFixture(t)
 	f.apply(t, shippedTopology(t))
-	findings, err := verifyNATSTopology(t.Context(), f.connect(t, "wavehouse"), shippedSpec)
+	js := f.connect(t, "wavehouse")
+	findings, err := verifyNATSTopology(t.Context(), js, shippedSpec)
 	require.NoError(t, err)
 	assert.True(t, replicaWarnings(findings), "findings: %v", findings)
+
+	// With the lease bucket checked too: one more replica warning, its own.
+	findings, err = verifyNATSTopology(t.Context(), js, coordSpec)
+	require.NoError(t, err)
+	require.Len(t, findings, shippedSpec.Partitions+1, "findings: %v", findings)
+	last := findings[len(findings)-1]
+	assert.Equal(t, "kv bucket wh_coord", last.Object)
+	assert.Equal(t, "num_replicas", last.Field)
 }
 
 // Every rule the verifier holds the operator to, one mutation each.
@@ -65,6 +78,26 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 	durable := func(mut func(*jetstream.ConsumerConfig)) func(*testing.T, *fixtureTopology) {
 		return func(t *testing.T, tp *fixtureTopology) { mut(tp.consumer(t, p0)) }
 	}
+	bucket := func(mut func(*jetstream.KeyValueConfig)) func(*testing.T, *fixtureTopology) {
+		return func(t *testing.T, tp *fixtureTopology) {
+			require.Len(t, tp.KeyValues, 1)
+			mut(&tp.KeyValues[0])
+		}
+	}
+	// rawBucket stands a bucket's stream up by hand, for what CreateKeyValue
+	// would not create.
+	rawBucket := func(mut func(*jetstream.StreamConfig)) func(*testing.T, *fixtureTopology) {
+		return func(_ *testing.T, tp *fixtureTopology) {
+			tp.KeyValues = nil
+			cfg := jetstream.StreamConfig{
+				Name: "KV_wh_coord", Subjects: []string{"$KV.wh_coord.>"}, MaxMsgsPerSubject: 1,
+				AllowDirect: true, Storage: jetstream.FileStorage, Discard: jetstream.DiscardNew,
+			}
+			mut(&cfg)
+			tp.Streams = append(tp.Streams, cfg)
+		}
+	}
+	const kvObj = "kv bucket wh_coord"
 
 	cases := []struct {
 		name   string
@@ -151,6 +184,14 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		{"dlq storage", stream(dlq, func(s *jetstream.StreamConfig) { s.Storage = jetstream.MemoryStorage }), shippedSpec, req(dlq, "storage")},
 		{"dlq max_bytes", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), shippedSpec, req(dlq, "max_bytes")},
 		{"dlq per-subject cap", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxMsgsPerSubject = 0 }), shippedSpec, rec(dlq, "max_msgs_per_subject")},
+
+		// The lease bucket, checked only when the process holds leases there.
+		{"bucket missing", func(_ *testing.T, tp *fixtureTopology) { tp.KeyValues = nil }, coordSpec, req(kvObj, "bucket")},
+		{"bucket named elsewhere", nil, NATSTopology{Partitions: 4, CoordBucket: "other"}, req("kv bucket other", "bucket")},
+		{"bucket ttl", bucket(func(kv *jetstream.KeyValueConfig) { kv.TTL = time.Hour }), coordSpec, req(kvObj, "ttl")},
+		{"bucket without direct get", rawBucket(func(s *jetstream.StreamConfig) { s.AllowDirect = false }), coordSpec, req(kvObj, "allow_direct")},
+		{"bucket keeps no value", rawBucket(func(s *jetstream.StreamConfig) { s.MaxMsgsPerSubject = 0 }), coordSpec, req(kvObj, "history")},
+		{"bucket storage", bucket(func(kv *jetstream.KeyValueConfig) { kv.Storage = jetstream.MemoryStorage }), coordSpec, rec(kvObj, "storage")},
 	}
 	// One server for every case, emptied between them: a server per case
 	// costs more than the unit suite's per-package timeout can spare.
@@ -329,6 +370,7 @@ func TestWriteNATSManifests_RoundTrip(t *testing.T) {
 
 	f := newNATSFixture(t)
 	f.apply(t, loadNATSManifests(t, path))
+	spec.CoordBucket = DefaultNATSCoordBucket(spec.Prefix)
 	findings, err := verifyNATSTopology(t.Context(), f.admin, spec)
 	require.NoError(t, err)
 	for _, got := range findings {
@@ -341,4 +383,5 @@ func TestWriteNATSManifests_RefusesAnImpossibleSpec(t *testing.T) {
 	var b strings.Builder
 	require.Error(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: NATSTopology{Prefix: "a.b"}}))
 	require.Error(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: NATSTopology{Partitions: -2}}))
+	require.Error(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: NATSTopology{CoordBucket: "a.b"}}))
 }

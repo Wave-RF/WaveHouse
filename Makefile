@@ -770,7 +770,7 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 	@# alone: its untagged tests are the unit suite's.
 	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
 		-tags="integration $(TAGS)" -timeout 240s -coverpkg=./... -race -count=1 \
-		-run '^Test(ExternalNATS|NewNATS|NATSPermissions_Refuse)' ./internal/mq $(ARGS) \
+		-run '^Test(ExternalNATS|NewNATS|NATSPermissions_Refuse|Leases)' ./internal/mq $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
 	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render integration; fi
 

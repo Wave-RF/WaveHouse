@@ -216,6 +216,14 @@ func (c *Config) validateTopology() error {
 	if c.MQ.Backend == MQEmbedded && len(c.Roles) != len(allRoles) {
 		return fmt.Errorf("roles %s with mq.backend=embedded: the embedded MQ lives inside this process, and a process without it cannot reach its queue — run every role (%s), or set a shared mq.backend", joinRoles(c.Roles), joinRoles(allRoles))
 	}
+	if c.Coord.Backend == CoordNATS && c.MQ.Backend != MQNATS {
+		return fmt.Errorf("coord.backend=nats with mq.backend=%s: the NATS leases ride mq.nats's connection — set mq.backend=nats, or coord.backend=local", c.MQ.Backend)
+	}
+	// Only the sweeper runs under a lease today, so only a process running it
+	// needs a shared one.
+	if c.MQ.Backend == MQNATS && c.Coord.Backend == CoordLocal && c.Has(RoleSweeper) {
+		return fmt.Errorf("coord.backend=local with mq.backend=nats in a process running the sweeper: a shared queue needs a shared lease, or every replica sweeps it — set coord.backend=nats")
+	}
 	if c.splitsCache() && c.Cache.Backend == CacheLocal {
 		return fmt.Errorf("roles %s with cache.backend=local: api and ingest run in different processes, and the ingest worker's cache invalidation would never reach the API's cache — run api and ingest together, or set a shared cache.backend", joinRoles(c.Roles))
 	}
