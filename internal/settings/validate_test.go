@@ -285,7 +285,6 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"keepalive as a duration string", FileConfig, `{"stream": {"keepalive_interval": "30s"}}`, "keepalive_interval"},
 		{"missing dedupe.require_id", FileConfig, `{"dedupe": {"id_field": "event_id"}}`, "dedupe.require_id: required"},
 		{"missing dedupe.enabled", FileConfig, `{"dedupe": {"id_field": "event_id", "require_id": false, "retention": "0"}}`, "dedupe.enabled: required"},
-		{"missing dedupe.retention", FileConfig, `{"dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}}`, "dedupe.retention: required"},
 		{"dedupe.retention not a duration", FileConfig, configJSON(`{"dedupe": {"retention": "30d"}}`), `dedupe.retention: must be a duration such as "720h"`},
 		{"dedupe.retention a number", FileConfig, configJSON(`{"dedupe": {"retention": 3600}}`), "retention"},
 		{"dedupe.retention negative", FileConfig, configJSON(`{"dedupe": {"retention": "-1h"}}`), "dedupe.retention: must not be negative"},
@@ -371,6 +370,30 @@ func TestValidate_DedupeRetentionAccepted(t *testing.T) {
 			assert.False(t, HasErrors(findings))
 		})
 	}
+}
+
+// configJSONWithout is the seed config.json less dedupe.retention.
+func configJSONWithout(t *testing.T) string {
+	t.Helper()
+	var doc map[string]map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(configJSON(`{}`)), &doc))
+	delete(doc["dedupe"], "retention")
+	out, err := json.Marshal(doc)
+	require.NoError(t, err)
+	return string(out)
+}
+
+// dedupe.retention may be left out: the tenant keeps ids forever, and a
+// table override may still set one.
+func TestValidate_DedupeRetentionOptional(t *testing.T) {
+	t.Parallel()
+	files := validFiles()
+	files[FileConfig] = configJSONWithout(t)
+	require.NotContains(t, files[FileConfig], "retention")
+	doc, findings := ValidateDir(writeDir(t, files))
+	require.NotNil(t, doc, "findings: %s", findingStrings(findings))
+	assert.False(t, HasErrors(findings), "findings: %s", findingStrings(findings))
+	assert.Nil(t, doc.Config.Dedupe.Retention)
 }
 
 // TestValidate_ClickHouseTLSPathsAreNotOpened pins that the tls block is

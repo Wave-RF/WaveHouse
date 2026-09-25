@@ -143,8 +143,9 @@ type AuthConfig struct {
 // (dedupe.Managed, one per tenant, each a share of the one embedded Pebble
 // instance), so the whole block is tenant-owned.
 //
-// id_field, require_id and retention are required here and optional per
-// table: a table override inherits whichever field it doesn't name. An empty,
+// id_field and require_id are required here; retention is optional, and
+// missing means "0" (forever). Every field is optional per table: a table
+// override inherits whichever field it doesn't name. An empty,
 // whitespace-only, or whitespace-padded id_field is rejected at every level,
 // so the effective id_field can never be empty or silently unmatchable.
 type DedupeConfig struct {
@@ -152,9 +153,9 @@ type DedupeConfig struct {
 	IDField   *string `json:"id_field"`
 	RequireID *bool   `json:"require_id"`
 	// Retention is how long a committed id stays a duplicate, as a Go
-	// duration ("720h"); "0" keeps it forever. A change applies to ids
-	// committed after it.
-	Retention *string `json:"retention"`
+	// duration ("720h"); "0", or leaving it out, keeps it forever. A change
+	// applies to ids committed after it.
+	Retention *string `json:"retention,omitempty"`
 	// Tables holds per-table overrides keyed by ClickHouse table name (#222).
 	// Names are format-checked only — existence is schema discovery's runtime
 	// concern, same as policies.json table keys.

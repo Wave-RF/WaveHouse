@@ -93,7 +93,10 @@ type Dedupe struct {
 func (s *Store) DedupeFor(table string) Dedupe {
 	d := s.doc().Config.Dedupe
 	out := Dedupe{Enabled: *d.Enabled, IDField: *d.IDField, RequireID: *d.RequireID}
-	retention := *d.Retention
+	retention := "0"
+	if d.Retention != nil {
+		retention = *d.Retention
+	}
 	if td, ok := d.Tables[table]; ok {
 		if td.IDField != nil {
 			out.IDField = *td.IDField

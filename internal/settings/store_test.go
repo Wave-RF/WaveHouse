@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -64,6 +65,22 @@ func TestStore_DedupeFor_Cascade(t *testing.T) {
 			assert.Equal(t, tt.want, s.DedupeFor(tt.table))
 		})
 	}
+}
+
+// A config.json without dedupe.retention keeps ids forever, and its table
+// overrides inherit that or set their own.
+func TestStore_DedupeFor_RetentionMissing(t *testing.T) {
+	t.Parallel()
+	var doc map[string]map[string]any
+	require.NoError(t, json.Unmarshal([]byte(configJSON(`{"dedupe": {"tables": {"clicks": {"id_field": "click_id"}, "views": {"retention": "24h"}}}}`)), &doc))
+	delete(doc["dedupe"], "retention")
+	body, err := json.Marshal(doc)
+	require.NoError(t, err)
+	s := newLoadedStore(t, map[string]string{FileConfig: string(body)})
+
+	assert.Equal(t, Dedupe{IDField: "event_id"}, s.DedupeFor("other"), "forever")
+	assert.Equal(t, Dedupe{IDField: "click_id"}, s.DedupeFor("clicks"), "inherits forever")
+	assert.Equal(t, Dedupe{IDField: "event_id", Retention: 24 * time.Hour}, s.DedupeFor("views"))
 }
 
 // TestStore_SeedIsValid pins that the shipped starter directory passes its

@@ -454,8 +454,8 @@ func (v *validator) checkIDField(path string, val *string) {
 // checkRetention rejects a dedupe retention that is not a duration, is
 // negative, or is finite but shorter than MinDedupeRetention. The short one
 // is refused rather than raised to the minimum, so the file never means
-// something other than what it says. nil is the caller's concern, as for
-// id_field.
+// something other than what it says. nil is valid: forever at the tenant
+// level, inherited at the table level.
 func (v *validator) checkRetention(path string, val *string) {
 	if val == nil {
 		return
@@ -693,9 +693,6 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		}
 		if d.RequireID == nil {
 			v.required("dedupe.require_id")
-		}
-		if d.Retention == nil {
-			v.required("dedupe.retention")
 		}
 		v.checkIDField("dedupe.id_field", d.IDField)
 		v.checkRetention("dedupe.retention", d.Retention)

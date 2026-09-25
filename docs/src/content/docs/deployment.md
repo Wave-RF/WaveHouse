@@ -421,7 +421,7 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 
 The dedupe key now carries the table as well as the tenant ([#222](https://github.com/Wave-RF/WaveHouse/issues/222)), so **an id deduped before the upgrade is not recognized after it**: a record carrying it is accepted once more. Nothing is migrated. The old keys are never read, and the dedupe sweep deletes them: its first pass runs about a minute after the instance opens, and `wavehouse_dedupe_swept_keys_total{reason="version_0"}` counts them ([#220](https://github.com/Wave-RF/WaveHouse/issues/220)). Pebble returns their disk space as it compacts, not at once. Only a tenant with `dedupe.enabled` on is affected, and only by a record sent both before and after the upgrade — typically a producer retrying across the restart. To avoid duplicate rows, let retrying producers finish, or pause them, before upgrading.
 
-The same release adds **`dedupe.retention`, a required key**: every `config.json`, each tenant's folder included, must state it or the directory is refused (at boot) or not adopted (on reload). `"retention": "0"` keeps every id forever, as before; see [Deduplication](/settings-directory#deduplication) for a finite one.
+The same release adds an optional **`dedupe.retention`** key. No upgrade step is needed: a `config.json` without it keeps every id forever, as before. See [Deduplication](/settings-directory#deduplication) for a finite one.
 
 ## Upgrading across the v2 ingest envelope
 
