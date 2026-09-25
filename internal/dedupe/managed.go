@@ -12,9 +12,10 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// ErrDisabled is returned by Managed's calls while dedupe is switched off. The ingest handler consults the settings snapshot before calling, so
-// it only sees this in the window of a reload that flips dedupe.enabled:
-// the snapshot and the store transition at different instants, and a record
+// ErrDisabled is returned by Managed's calls while dedupe is switched off.
+// The ingest handler consults the settings snapshot before calling, so it
+// only sees this in the window of a reload that flips dedupe.enabled: the
+// snapshot and the store transition at different instants, and a record
 // caught between them is published un-deduped rather than failed.
 var ErrDisabled = errors.New("dedupe is disabled")
 
@@ -33,9 +34,9 @@ var hashedIDCounter, _ = otel.Meter("wavehouse-dedupe").Int64Counter(
 
 // Managed is a Deduplicator whose backing store follows the hot-reloadable
 // dedupe.enabled setting: Apply(true) opens it through the function
-// NewManaged was given, Apply(false) closes it, and in-flight Reserve, Commit
-// and Release calls are serialized against that swap so a reload can never close the
-// store under a lookup. Which store that is — a tenant's share of the
+// NewManaged was given, Apply(false) closes it, and in-flight Reserve,
+// Commit and Release calls are serialized against that swap so a reload can
+// never close the store under a lookup. Which store that is — a tenant's share of the
 // embedded Pebble instance (Embedded.Tenant), a remote backend's view later —
 // is the opener's business, so every backend gets the same switch semantics.
 type Managed struct {
@@ -85,8 +86,9 @@ func (m *Managed) Open() bool {
 
 // Reserve checks every key is storable, collapses a key repeated inside keys
 // to one backend claim — later occurrences answer Duplicate — reads a lease
-// <= 0 as DefaultLease, and delegates the rest to the open store; ErrDisabled while switched off, ErrUnavailable
-// while switched on but not open.
+// <= 0 as DefaultLease, and delegates the rest to the open store;
+// ErrDisabled while switched off, ErrUnavailable while switched on but not
+// open.
 func (m *Managed) Reserve(ctx context.Context, keys []Key, lease time.Duration) ([]Claim, error) {
 	for _, k := range keys {
 		if err := k.Validate(); err != nil {
@@ -117,7 +119,9 @@ func (m *Managed) Reserve(ctx context.Context, keys []Key, lease time.Duration) 
 		return nil, err
 	}
 	if len(got) != len(unique) {
-		_ = m.db.Release(context.WithoutCancel(ctx), got)
+		if claimed := claimedOnly(got); len(claimed) > 0 {
+			_ = m.db.Release(context.WithoutCancel(ctx), claimed)
+		}
 		return nil, fmt.Errorf("dedupe backend answered %d claims for %d keys", len(got), len(unique))
 	}
 	if len(unique) == len(keys) {
@@ -154,12 +158,7 @@ func (m *Managed) Release(ctx context.Context, claims []Claim) error {
 }
 
 func (m *Managed) withClaimed(claims []Claim, do func(Deduplicator, []Claim) error) error {
-	claimed := make([]Claim, 0, len(claims))
-	for _, c := range claims {
-		if c.Status == Claimed {
-			claimed = append(claimed, c)
-		}
-	}
+	claimed := claimedOnly(claims)
 	if len(claimed) == 0 {
 		return nil
 	}
@@ -169,6 +168,17 @@ func (m *Managed) withClaimed(claims []Claim, do func(Deduplicator, []Claim) err
 		return err
 	}
 	return do(m.db, claimed)
+}
+
+// claimedOnly is the claims a backend's Commit and Release may be handed.
+func claimedOnly(claims []Claim) []Claim {
+	out := make([]Claim, 0, len(claims))
+	for _, c := range claims {
+		if c.Status == Claimed {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // usable is the switch's answer: nil when the store may be called. Callers

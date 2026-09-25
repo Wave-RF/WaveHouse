@@ -460,7 +460,8 @@ func (v *validator) checkTableName(mapPath, table string) {
 	case strings.TrimSpace(table) != table:
 		v.errorf(FileConfig, mapPath+"."+table, "table name %q has surrounding whitespace", table)
 	case strings.ContainsRune(table, 0):
-		// The dedupe key ends the table with NUL (dedupe.KeyPrefix).
+		// A NUL separates the dedupe key's fields (dedupe.AppendKey), so a
+		// table holding one could never be deduped.
 		v.errorf(FileConfig, mapPath+"."+table, "table name %q holds a NUL byte", table)
 	}
 }

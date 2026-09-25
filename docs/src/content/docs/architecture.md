@@ -226,11 +226,15 @@ Client POST /v1/ingest?table={table}
   → Canonicalize top-level DateTime/DateTime64 column values to RFC 3339 UTC
     (rewrites the payload so every consumer shares one spelling; fail-open —
     an unparseable value passes through verbatim for ClickHouse's parser to judge)
-  → Optional deduplication check (configurable ID field; a row missing that
-    field is published un-deduped + logged/counted, or rejected under require_id)
+  → Optional dedupe: resolve the id (configurable ID field; a row missing it or
+    setting it to null is published un-deduped + logged/counted, or rejected
+    under require_id); once the record is encoded, reserve (tenant, table, id):
+    a duplicate is skipped, an id another request holds → 503 + Retry-After
+    (the 30s lease)
   → Publish to NATS JetStream (ingest.{tenant}.{table})
+  → Commit the reserved id; on a failed publish, release it instead
   → 200 OK returned immediately
-  → (If NATS stream is full: 503 + Retry-After header)
+  → (If NATS stream is full: 503 + Retry-After header, the id released)
 
 Ingest worker pipeline (StartIngestWorker):
   ← JetStream pull consumer (buffer-consumer) on ingest.>

@@ -50,6 +50,7 @@ type memDedup struct {
 	closed   bool
 	reserved [][]Key // every Reserve's keys, as the backend saw them
 	leases   []time.Duration
+	released []Claim
 	short    bool // answer one claim too few
 }
 
@@ -77,8 +78,11 @@ func (m *memDedup) Commit(_ context.Context, claims []Claim, _ time.Duration) er
 	return nil
 }
 
-func (m *memDedup) Release(context.Context, []Claim) error { return nil }
-func (m *memDedup) Close() error                           { m.closed = true; return nil }
+func (m *memDedup) Release(_ context.Context, claims []Claim) error {
+	m.released = append(m.released, claims...)
+	return nil
+}
+func (m *memDedup) Close() error { m.closed = true; return nil }
 
 // The switch semantics belong to Managed, not to Pebble: any Deduplicator
 // an opener returns gets them, and a failing opener reads as unavailable.
@@ -140,8 +144,11 @@ func TestManaged_CollapsesRepeats(t *testing.T) {
 	assert.Equal(t, []time.Duration{time.Second, DefaultLease}, backend.leases, "no lease is the default, never an already-lapsed claim")
 
 	backend.short = true
-	_, err = m.Reserve(ctx, []Key{a}, time.Second)
-	require.ErrorContains(t, err, "answered 0 claims for 1 keys", "a backend answering the wrong count is refused, not indexed past")
+	backend.seen[b] = true
+	_, err = m.Reserve(ctx, []Key{{Table: "t", ID: "d"}, b, {Table: "t", ID: "e"}}, time.Second)
+	require.ErrorContains(t, err, "answered 2 claims for 3 keys", "a backend answering the wrong count is refused, not indexed past")
+	assert.Equal(t, []Claim{{Key: Key{Table: "t", ID: "e"}, Status: Claimed, Token: "t"}}, backend.released,
+		"and gets back only the claims it made, never its Duplicate")
 }
 
 // Commit and Release follow the switch like Reserve, and a call with no
