@@ -357,7 +357,7 @@ The generated manifests satisfy every required finding. Some you may meet when y
 - A partition's `duplicate_window` must cover every attempt of one publish: three times `mq.nats.publish_timeout`, plus half a second. A publish that got no answer is retried with the same message id, so the partition stores it once.
 - `wh-ingest` needs `max_deliver: -1`. With a limit, a row that failed that many times would stay on its partition and never be delivered again.
 
-WaveHouse checks the topology again every five minutes and never repairs it. If you delete a partition, its publishes answer `503` with `Retry-After: 5`. If you delete `wh-ingest`, or the connection is closed for good (for example, its credentials are revoked), the ingest worker ends and the process exits, so that the orchestrator restarts it and the next boot names what is missing. An ingest worker that stayed up without its queue would leave the API accepting events that nothing writes.
+WaveHouse checks the topology again every five minutes and never repairs it. If you delete a partition, its publishes answer `503` with `Retry-After: 5`. If you delete `wh-ingest` on one of the N partitions, or the connection is closed for good (for example, its credentials are revoked), the ingest worker ends and the process exits, so that the orchestrator restarts it and the next boot names what is missing. An ingest worker that stayed up without its queue would leave the API accepting events that nothing writes.
 
 ### Permissions
 
@@ -388,12 +388,12 @@ WaveHouse's replies arrive under `_INBOX_<prefix>.>`, which is why the subscribe
 
 ### Choosing and changing N
 
-A tenant lives in one partition, so one tenant's ingest rate is bounded by what one stream can take. More partitions spread tenants, and so the damage one tenant can do, more thinly. N must match `mq.nats.partitions` in every process. Changing it moves most tenants to another partition, and their events are no longer in order across the move. WaveHouse consumes only partitions `0` to `N−1`:
+A tenant lives in one partition, so one tenant's ingest rate is bounded by what one stream can take. More partitions spread tenants, and so the damage one tenant can do, more thinly. N must match `mq.nats.partitions` in every process. Changing it moves most tenants to another partition, and their events are no longer in order across the move. WaveHouse publishes only to partitions `0` to `N−1`, and its ingest worker also drains any stream still holding ingest subjects outside them, so lowering N loses no rows:
 
 Every generated partition records its index and N in its metadata (`wavehouse.dev/partition`, `wavehouse.dev/partitions`), and a process configured for another N refuses them. So change N by regenerating: `wavehouse mq manifests --partitions <new N>`, and apply the whole output, which updates every partition's metadata and the history's sources. From then until every process runs the new N, the processes still on the old N report `wavehouse_mq_topology_ok` `0` at their next check and cannot restart, so roll out promptly.
 
 - **To raise N,** apply the regenerated manifests, then roll WaveHouse out with the new N. The old partitions keep being consumed.
-- **To lower N,** stop ingest traffic and wait until the partitions you are removing are empty, then apply the regenerated manifests and roll WaveHouse out with the smaller N. Rows left in the removed partitions are not consumed after that. Boot warns about each stream that still holds ingest subjects outside the N partitions; delete it once it is empty.
+- **To lower N,** apply the regenerated manifests, then roll WaveHouse out with the smaller N. Ingest does not need to stop. The regenerated manifests leave the removed partitions out, and the generated resources set `preventDelete`, so each removed partition's stream and its `wh-ingest` durable stay, with their rows. The ingest worker of a process on the new N consumes each such stream through `wh-ingest` beside its own partitions, and processes still on the old N keep publishing to it until they are replaced. Boot warns about each one with the rows it still holds. Once a removed partition holds no rows and no process runs the old N, delete its stream; that ends delivery from that stream only, not the worker. Deleting it while it still holds rows loses them, as deleting any partition does. The history no longer sources a removed partition, so rows the old processes publish to it after you apply reach ClickHouse but not live SSE or replay.
 
 ### Monitoring
 

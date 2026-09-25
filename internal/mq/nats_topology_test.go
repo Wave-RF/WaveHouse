@@ -104,7 +104,16 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 			s.Metadata = map[string]string{"wavehouse.dev/partition": "3", "wavehouse.dev/partitions": "4"}
 		}), shippedSpec, req(p0, "metadata")},
 		{"partition count mismatch caught by metadata", nil, NATSTopology{Partitions: 2}, req(p0, "metadata")},
-		{"partitions beyond N", nil, NATSTopology{Partitions: 2}, rec("WH_INGEST_3", "subjects")},
+		{
+			"partitions beyond N are drained", nil,
+			NATSTopology{Partitions: 2},
+			want{FindingRecommended, "WH_INGEST_3", "subjects", "the ingest worker drains its 0 rows through wh-ingest"},
+		},
+		{
+			"partitions beyond N without the durable", func(_ *testing.T, tp *fixtureTopology) { delete(tp.Consumers, "WH_INGEST_3") },
+			NATSTopology{Partitions: 2},
+			want{FindingRecommended, "WH_INGEST_3", "subjects", "has no pull durable wh-ingest, so nothing drains"},
+		},
 
 		// The wh-ingest durable.
 		{"durable missing", func(_ *testing.T, tp *fixtureTopology) { delete(tp.Consumers, p0) }, shippedSpec, req(p0+"/wh-ingest", "durable_name")},

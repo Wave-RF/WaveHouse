@@ -3,19 +3,23 @@
 package mq
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -561,4 +565,103 @@ func TestExternalNATS_SlowReplayArrivesWhole(t *testing.T) {
 	for i, d := range got {
 		require.Equal(t, strconv.Itoa(i), d)
 	}
+}
+
+// Closing the broker is not a disconnect worth a warning; losing the server
+// still is.
+func TestExternalNATS_CloseLogsNoWarning(t *testing.T) { //nolint:paralleltest // captures the default logger
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	other := f.broker(t, nil)
+	cons, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable})
+	require.NoError(t, err)
+	_, _, err = cons.Consume(func(*Message) {}, 16)
+	require.NoError(t, err)
+	require.NoError(t, e.Subscribe(t.Context(), "hub", func(*Message) error { return nil }))
+
+	logs := logtest.Capture(t, slog.LevelWarn)
+	require.NoError(t, e.Close())
+	assert.Empty(t, logs.String(), "a deliberate close logged at WARN or above")
+
+	f.stop()
+	require.Eventually(t, func() bool { return !other.connected.Load() }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return strings.Contains(logs.String(), "mq: disconnected from nats; reconnecting") },
+		5*time.Second, 10*time.Millisecond, "a lost server must still warn")
+}
+
+// generatedTopology is `wavehouse mq manifests --partitions n` at one replica.
+func generatedTopology(t *testing.T, n int) *fixtureTopology {
+	t.Helper()
+	var buf bytes.Buffer
+	require.NoError(t, WriteNATSManifests(&buf, NATSManifestOptions{Topology: NATSTopology{Partitions: n}, Replicas: 1}))
+	path := filepath.Join(t.TempDir(), "manifests.yaml")
+	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o600))
+	return loadNATSManifests(t, path)
+}
+
+// tenantIn is a tenant whose events go to partition p of n.
+func tenantIn(t *testing.T, p, n int) tenant.ID {
+	t.Helper()
+	for i := range 1000 {
+		if id := tenant.ID("t" + strconv.Itoa(i)); partitionOf(id, n) == p {
+			return id
+		}
+	}
+	t.Fatalf("no tenant in partition %d of %d", p, n)
+	return ""
+}
+
+// Lowering N from 2 to 1 the way deployment.md says — apply the regenerated
+// manifests, restart with the smaller N — loses none of partition 1's rows:
+// the worker drains them through wh-ingest, and the operator deleting the
+// emptied stream afterwards is not a failure.
+func TestExternalNATS_LoweringNDrainsTheRemovedPartition(t *testing.T) {
+	t.Parallel()
+	f := newNATSFixture(t)
+	f.apply(t, generatedTopology(t, 2))
+	const removed = "WH_INGEST_1"
+	topic := Topic{Tenant: tenantIn(t, 1, 2), Table: "t"}
+	old := f.broker(t, func(c *NATSConfig) { c.Topology.Partitions = 2 })
+	want := []string{"a", "b", "c", "d", "e"}
+	for _, row := range want {
+		require.NoError(t, old.Publish(t.Context(), topic, []byte(row)))
+	}
+	require.NoError(t, old.Close())
+	require.Equal(t, uint64(len(want)), f.streamMsgs(t, removed))
+
+	require.NoError(t, generatedTopology(t, 1).Apply(t.Context(), f.admin))
+	e := f.broker(t, func(c *NATSConfig) { c.Topology.Partitions = 1 })
+	findings, err := verifyNATSTopology(t.Context(), e.js, e.topo)
+	require.NoError(t, err)
+	assert.True(t, slices.ContainsFunc(findings, func(got Finding) bool {
+		return got.Severity == FindingRecommended && got.Object == "stream "+removed && strings.Contains(got.Problem, "drains its 5 rows")
+	}), "no finding names the removed partition's rows among %v", findings)
+
+	cons, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable})
+	require.NoError(t, err)
+	got := make(chan string, 16)
+	stop, failed, err := cons.Consume(func(m *Message) {
+		assert.NoError(t, m.DoubleAck(m.Ctx))
+		got <- string(m.Data)
+	}, 16)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	drained := make([]string, 0, len(want))
+	for range want {
+		drained = append(drained, receive(t, got))
+	}
+	assert.Equal(t, want, drained)
+	require.Eventually(t, func() bool { return f.streamMsgs(t, removed) == 0 }, 5*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, e.Publish(t.Context(), topic, []byte("moved")))
+	require.Equal(t, "moved", receive(t, got))
+
+	require.NoError(t, f.admin.DeleteStream(t.Context(), removed))
+	select {
+	case err := <-failed:
+		t.Fatalf("deleting a drained removed partition reported failed: %v", err)
+	case <-time.After(time.Second):
+	}
+	require.NoError(t, e.Publish(t.Context(), topic, []byte("still")))
+	require.Equal(t, "still", receive(t, got))
 }
