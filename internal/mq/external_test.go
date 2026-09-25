@@ -472,3 +472,64 @@ func TestExternalNATS_MeasurePublishThroughput(t *testing.T) {
 	elapsed := time.Since(start)
 	t.Logf("%d publishes of %d bytes by %d callers in %s: %.0f/s", workers*each, len(payload), workers, elapsed, float64(workers*each)/elapsed.Seconds())
 }
+
+// A source that never attached reads -1 on its gauge: the server reports it
+// as -1ns, which Seconds() would pass on as -1e-9.
+func TestExternalNATS_ActiveSeconds(t *testing.T) {
+	t.Parallel()
+	assert.InDelta(t, -1.0, activeSeconds(-1), 0)
+	assert.InDelta(t, 0.5, activeSeconds(500*time.Millisecond), 1e-9)
+}
+
+// The duplicate window must cover every attempt of a retried publish, not
+// just two publish timeouts: a window of exactly 2 × PublishTimeout is too
+// short for the last retry.
+func TestExternalNATS_DuplicateWindowCoversEveryRetry(t *testing.T) {
+	t.Parallel()
+	f := newNATSFixture(t)
+	tp := shippedTopology(t)
+	topo := NATSTopology{Partitions: 4, PublishTimeout: 30 * time.Second}
+	for i := range 4 {
+		tp.stream(t, shippedPartition(i)).Duplicates = 2 * topo.PublishTimeout
+	}
+	f.apply(t, tp)
+	findings, err := verifyNATSTopology(t.Context(), f.connect(t, "wavehouse"), topo)
+	require.NoError(t, err)
+	n := 0
+	for _, fd := range findings {
+		if fd.Field == "duplicate_window" {
+			n++
+			assert.Equal(t, FindingRequired, fd.Severity)
+		}
+	}
+	assert.Equal(t, 4, n)
+}
+
+// A replay sends the events counted when it began and stops: events that
+// arrive during it reach an SSE client through its live subscription.
+func TestExternalNATS_ReplayDoesNotChaseTheTail(t *testing.T) {
+	t.Parallel()
+	e := shippedFixture(t).broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "r"}
+	for _, d := range []string{"a", "b", "c"} {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(d)))
+	}
+	require.Eventually(t, func() bool {
+		n := 0
+		require.NoError(t, e.ReplaySince(t.Context(), topic, time.Time{}, func([]byte) bool { n++; return true }))
+		return n == 3
+	}, 5*time.Second, 20*time.Millisecond)
+
+	var got []string
+	require.NoError(t, e.ReplaySince(t.Context(), topic, time.Time{}, func(data []byte) bool {
+		if len(got) == 0 {
+			for range 5 {
+				assert.NoError(t, e.Publish(t.Context(), topic, []byte("late")))
+			}
+			time.Sleep(200 * time.Millisecond) // let the history copy them
+		}
+		got = append(got, string(data))
+		return true
+	}))
+	assert.Equal(t, []string{"a", "b", "c"}, got)
+}

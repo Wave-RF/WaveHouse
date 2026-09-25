@@ -82,8 +82,10 @@ const (
 	hubInactiveThreshold    = time.Minute
 	replayInactiveThreshold = 5 * time.Second
 	// replayPullWait bounds one pull of a replay whose remaining events the
-	// server has already counted.
+	// server has already counted, and replayBatch is how many one pull asks
+	// for: a replay is a round trip per batch, not per event.
 	replayPullWait = 2 * time.Second
+	replayBatch    = 256
 	// workerDurable is the ingest worker's durable name
 	// (ingest.BufferConsumerName), which maps to the operator's durable.
 	workerDurable = "buffer-consumer"
@@ -457,12 +459,21 @@ func (e *ExternalNATS) registerGauges() (metric.Registration, error) {
 		if states := e.sources.Load(); states != nil {
 			for _, s := range *states {
 				set := metric.WithAttributes(attribute.String("source", s.name))
-				o.ObserveFloat64(active, max(-1, s.active.Seconds()), set)
+				o.ObserveFloat64(active, activeSeconds(s.active), set)
 				o.ObserveInt64(lag, int64(min(s.lag, uint64(1<<62))), set) //nolint:gosec // capped
 			}
 		}
 		return nil
 	}, connected, topologyOK, active, lag)
+}
+
+// activeSeconds is a source's time since last contact as the gauge reports
+// it: -1 for a source that never attached, which the server reports as -1ns.
+func activeSeconds(d time.Duration) float64 {
+	if d < 0 {
+		return -1
+	}
+	return d.Seconds()
 }
 
 func boolGauge(b bool) int64 {
@@ -819,8 +830,8 @@ func (e *ExternalNATS) PurgeAcked(_ context.Context, consumer string, olderThan 
 
 // ReplaySince reads topic's events from the history stream, stored at or
 // after since, through an ack-less consumer of its own that expires once
-// idle, until send returns false or the events the server counted when the
-// replay began are sent. Anything older than the history's max_age is gone.
+// idle, in batches, until send returns false or the events the server
+// counted when the replay began are sent. Anything older than the history's max_age is gone.
 // A pull that fails before then is an error; a done ctx returns ctx's error.
 func (e *ExternalNATS) ReplaySince(ctx context.Context, topic Topic, since time.Time, send func(data []byte) bool) error {
 	subj, err := natsIngestSubject(e.topo.Prefix, e.topo.Partitions, topic)
@@ -841,28 +852,43 @@ func (e *ExternalNATS) ReplaySince(ctx context.Context, topic Topic, since time.
 	}
 	defer e.dropConsumer(cons.CachedInfo().Name)
 
-	pending := cons.CachedInfo().NumPending
-	for pending > 0 {
+	// Counted once: events published during the replay reach the SSE client
+	// through the live subscription it registered first, so chasing them here
+	// would only send duplicates.
+	remaining := cons.CachedInfo().NumPending
+	for remaining > 0 {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		msg, err := cons.Next(jetstream.FetchMaxWait(replayPullWait))
+		batch, err := cons.Fetch(int(min(remaining, replayBatch)), jetstream.FetchMaxWait(replayPullWait)) //nolint:gosec // capped
 		if err != nil {
-			// The history dropped what was left (max_age) while connected:
-			// that is caught up. A pull that raced the connection closing can
-			// end in the same answers, and that is not.
-			if (errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout)) && e.nc.IsConnected() {
+			return fmt.Errorf("replay fetch: %w", err)
+		}
+		got := 0
+		for msg := range batch.Messages() {
+			got++
+			remaining--
+			if !send(msg.Data()) {
 				return nil
 			}
-			return fmt.Errorf("replay next: %w", err)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if e.nc.IsClosed() || e.nc.IsDraining() {
+				return fmt.Errorf("replay: %w", nats.ErrConnectionClosed)
+			}
 		}
-		meta, err := msg.Metadata()
-		if err != nil {
-			return fmt.Errorf("replay metadata: %w", err)
+		if err := batch.Error(); err != nil && !errors.Is(err, nats.ErrTimeout) {
+			return fmt.Errorf("replay fetch: %w", err)
 		}
-		pending = meta.NumPending
-		if !send(msg.Data()) {
-			return nil
+		if got == 0 {
+			// The history dropped what was left (max_age) while connected:
+			// that is caught up. A pull that raced the connection closing
+			// can end the same way, and that is not.
+			if e.nc.IsConnected() {
+				return nil
+			}
+			return fmt.Errorf("replay fetch: %w", nats.ErrConnectionClosed)
 		}
 	}
 	return nil

@@ -30,8 +30,9 @@ type NATSTopology struct {
 	// so unlike the partitions and the dead-letter stream it cannot be found
 	// by subject.
 	HistoryStream string
-	// PublishTimeout bounds one publish; a partition's duplicate window must
-	// cover two of them, so a retried publish is not stored twice.
+	// PublishTimeout bounds one publish attempt; a partition's duplicate
+	// window must cover every attempt (minDuplicateWindow), so a retried
+	// publish is not stored twice.
 	PublishTimeout time.Duration
 	// AckWait, MaxAckPending and Prefetch are what the ingest worker asks of
 	// the durable (internal/ingest/worker.go, which imports this package).
@@ -95,6 +96,13 @@ func (t NATSTopology) validate() error {
 // the history's is binding; the others are found by subject.
 func (t NATSTopology) streamName(kind string) string {
 	return strings.ToUpper(t.Prefix) + "_" + kind
+}
+
+// minDuplicateWindow is the shortest duplicate window that stores a publish
+// once however many of its attempts were stored: ExternalNATS sends the last
+// retry this long after the first attempt.
+func (t NATSTopology) minDuplicateWindow() time.Duration {
+	return (publishRetries+1)*t.PublishTimeout + publishRetries*publishRetryWait
 }
 
 // partitionShare is the worker's prefetch share of one partition, at least one.
@@ -351,8 +359,8 @@ func (v *topologyVerifier) partition(ctx context.Context, p int) (string, error)
 	if cfg.Storage != jetstream.FileStorage {
 		req("storage", "is %s; must be file", cfg.Storage)
 	}
-	if cfg.Duplicates < 2*t.PublishTimeout {
-		req("duplicate_window", "is %s; must be at least %s (twice the publish timeout), so a retried publish is stored once", cfg.Duplicates, 2*t.PublishTimeout)
+	if cfg.Duplicates < t.minDuplicateWindow() {
+		req("duplicate_window", "is %s; must be at least %s (every attempt of a retried publish), so it is stored once", cfg.Duplicates, t.minDuplicateWindow())
 	}
 	if cfg.NoAck {
 		req("no_ack", "is set; publishes must be acknowledged")
