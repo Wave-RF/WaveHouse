@@ -3,12 +3,15 @@ package ingest
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,6 +63,30 @@ func TestSweep_ErrorsDoNotPanic(t *testing.T) {
 		s := NewSweeper(purger, func() map[tenant.ID]time.Duration { return map[tenant.ID]time.Duration{"acme": time.Minute} })
 		s.sweep(context.Background())
 		assert.Len(t, purger.Calls, 1)
+	}
+}
+
+// A missing buffer consumer is the expected failure, before the worker has
+// created it, and only a warning; any other tenant's failure in the same
+// sweep — the purger joins one per tenant — keeps the report at ERROR.
+func TestSweep_OnlyAMissingConsumerIsAWarning(t *testing.T) {
+	missing := fmt.Errorf("tenant acme: %w", mq.ErrConsumerNotFound)
+	for _, tt := range []struct {
+		name      string
+		err       error
+		want, not string
+	}{
+		{"a missing consumer", errors.Join(missing), "WARN", "ERROR"},
+		{"a missing consumer beside another failure", errors.Join(missing, errors.New("tenant globex: get stream: stream not found")), "ERROR", "WARN"},
+		{"another failure", errors.New("broker unavailable"), "ERROR", "WARN"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			logs := logtest.Capture(t, slog.LevelDebug)
+			s := NewSweeper(&testutil.MockPurger{Err: tt.err}, func() map[tenant.ID]time.Duration { return nil })
+			s.sweep(context.Background())
+			assert.Contains(t, logs.String(), `"level":"`+tt.want+`"`)
+			assert.NotContains(t, logs.String(), `"level":"`+tt.not+`"`)
+		})
 	}
 }
 

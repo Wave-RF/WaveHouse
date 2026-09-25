@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -307,18 +306,45 @@ func TestRegistry_HooksRunOnAReloadThatAdoptsNothing(t *testing.T) {
 }
 
 // Known is every tenant the registry holds, rejected ones included, in id
-// order: what a resource a rejected tenant comes back to is kept current for.
+// order, each with the store of its last adopted settings: what a resource a
+// rejected tenant comes back to is kept current from.
 func TestRegistry_Known(t *testing.T) {
 	t.Parallel()
 	root := writeTree(t, map[string]map[string]string{"globex": maxRowsFiles(222), "acme": maxRowsFiles(111), "broken": brokenFiles()})
 	reg, _ := Open(root)
 	require.NotNil(t, reg)
-	assert.Equal(t, []tenant.ID{"acme", "broken", "globex"}, slices.Collect(reg.Known()))
+	known := func() ([]tenant.ID, map[tenant.ID]*Store) {
+		var ids []tenant.ID
+		stores := map[tenant.ID]*Store{}
+		for id, store := range reg.Known() {
+			ids = append(ids, id)
+			stores[id] = store
+		}
+		return ids, stores
+	}
+	ids, stores := known()
+	assert.Equal(t, []tenant.ID{"acme", "broken", "globex"}, ids)
+	assert.Nil(t, stores["broken"], "a folder that has not validated since boot has no settings to hand out")
+	acme, _ := reg.For("acme")
+	assert.Same(t, acme, stores["acme"])
 	var served []tenant.ID
 	for id := range reg.All() {
 		served = append(served, id)
 	}
 	assert.Equal(t, []tenant.ID{"acme", "globex"}, served, "All leaves the rejected tenant out; Known does not")
+
+	// A tenant rejected after an adoption still comes with that adoption's
+	// settings: the store keeps its last document.
+	for name, content := range brokenFiles() {
+		require.NoError(t, os.WriteFile(filepath.Join(root, "acme", name), []byte(content), 0o600))
+	}
+	reg.Reload("test")
+	_, ok := reg.For("acme")
+	require.False(t, ok)
+	_, stores = known()
+	require.Same(t, acme, stores["acme"])
+	assert.Equal(t, 111, stores["acme"].DefaultMaxRows())
+
 	// Stopping early is the iterator's contract, not the caller's problem.
 	for id := range reg.Known() {
 		assert.Equal(t, tenant.ID("acme"), id)
