@@ -863,7 +863,6 @@ func TestNew_VerifierPerTenant(t *testing.T) {
 		a.Handler().ServeHTTP(rec, req)
 		return rec
 	}
-	pipe := func(id, token string) int { return serve(id, token).Code }
 	// verified reports whether the token passed the pipe's role gate: the
 	// query then runs and fails against the closed ClickHouse with a
 	// ClickHouse error code — a 503 too, so the body, not the status, tells
@@ -905,7 +904,9 @@ func TestNew_VerifierPerTenant(t *testing.T) {
 	req.Header.Set("X-Operator-Key", cfg.Auth.OperatorKey)
 	a.Handler().ServeHTTP(rec, req)
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
-	assert.Equal(t, http.StatusServiceUnavailable, pipe("globex", globexToken), "a rejected tenant is not served")
+	rejected := serve("globex", globexToken)
+	assert.Equal(t, http.StatusServiceUnavailable, rejected.Code)
+	assert.Contains(t, rejected.Body.String(), "tenant settings are invalid", "a rejected tenant is not served")
 	before := globexFetches.Load()
 	rewriteSettings(t, filepath.Join(root, "globex"), authPatch(globex.URL))
 	rec = httptest.NewRecorder()
