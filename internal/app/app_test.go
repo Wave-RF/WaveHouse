@@ -593,14 +593,18 @@ func TestNew_QueueOpenFailure(t *testing.T) {
 		require.ErrorContains(t, err, "mq open")
 	})
 	t.Run("nested costs the tenant alone", func(t *testing.T) {
+		// globex, not acme: opened first, acme's streams keep the streams
+		// directory occupied through globex's failed open, which the server
+		// would otherwise remove on a goroutine of its own while the next
+		// open writes there (mq's TestEmbeddedNATS_PacesTheRetriesOfAQueueThatCannotOpen).
 		cfg := testConfig(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil}))
-		block(t, cfg.DataDir, "DLQ_acme")
+		block(t, cfg.DataDir, "DLQ_globex")
 		a := newApp(t, cfg, Options{})
-		assert.Zero(t, a.mq.MaxBytes("acme"), "acme's queue did not open")
-		assert.Equal(t, int64(50<<30), a.mq.MaxBytes("globex"), "and costs globex nothing")
+		assert.Zero(t, a.mq.MaxBytes("globex"), "globex's queue did not open")
+		assert.Equal(t, int64(50<<30), a.mq.MaxBytes("acme"), "and costs acme nothing")
 
-		require.NoError(t, a.MQ().Publish(t.Context(), mq.Topic{Tenant: "acme", Table: "t"}, []byte("x")))
-		assert.Equal(t, int64(50<<30), a.mq.MaxBytes("acme"), "a publish opened it at acme's budget")
+		require.NoError(t, a.MQ().Publish(t.Context(), mq.Topic{Tenant: "globex", Table: "t"}, []byte("x")))
+		assert.Equal(t, int64(50<<30), a.mq.MaxBytes("globex"), "a publish opened it at globex's budget")
 	})
 }
 
