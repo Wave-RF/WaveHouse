@@ -2,24 +2,23 @@ package dedupe
 
 import (
 	"crypto/sha256"
-	"errors"
-	"fmt"
-	"strings"
+	"encoding/binary"
 
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // The key layout every backend stores, byte for byte:
 //
-//	keyVersion ‖ tenant ‖ keySeparator ‖ table ‖ keySeparator ‖ id
+//	keyVersion ‖ uvarint(len(tenant)) ‖ tenant ‖ uvarint(len(table)) ‖ table ‖ id
 //
-// A tenant id is letters, digits, '_' and '-', so it never holds the
-// separator and never starts with keyVersion — the version-0 keys before
-// #222 (tenant ‖ 0x00 ‖ id) never meet these. The id is last, so it may hold
-// anything.
+// Each field before the id carries its length, so a table name may hold any
+// byte — NUL included — and no two (tenant, table, id) triples share a key.
+// The id is last, so it needs no length and may hold anything too. A tenant
+// id never starts with keyVersion (tenant.Parse admits letters, digits, '_'
+// and '-'), so the version-0 keys before #222 (tenant ‖ 0x00 ‖ id) never meet
+// these.
 const (
-	keyVersion   byte = 0x01
-	keySeparator byte = 0x00
+	keyVersion byte = 0x01
 	// hashedID leads an id stored as its SHA-256 rather than verbatim. Ids
 	// that start with it are hashed too, so a verbatim id never reads as a
 	// hashed one.
@@ -29,25 +28,12 @@ const (
 	MaxIDBytes = 1024
 )
 
-// ErrInvalidKey is returned for a key no backend can store: a table name
-// holding the separator byte.
-var ErrInvalidKey = errors.New("invalid dedupe key")
-
 // KeyPrefix is the part of every key that names tenant id, so a backend
 // computes it once per tenant store.
 func KeyPrefix(id tenant.ID) []byte {
-	p := make([]byte, 0, len(id)+2)
+	p := make([]byte, 0, len(id)+1+binary.MaxVarintLen64)
 	p = append(p, keyVersion)
-	p = append(p, id...)
-	return append(p, keySeparator)
-}
-
-// Validate reports whether k can be stored.
-func (k Key) Validate() error {
-	if strings.IndexByte(k.Table, keySeparator) >= 0 {
-		return fmt.Errorf("%w: table name %q holds a NUL byte", ErrInvalidKey, k.Table)
-	}
-	return nil
+	return appendField(p, string(id))
 }
 
 // Hashed reports whether k's id is stored as its SHA-256 rather than
@@ -57,15 +43,19 @@ func (k Key) Hashed() bool {
 }
 
 // AppendKey appends k's stored form, under the tenant prefix from KeyPrefix,
-// to dst. k must be valid.
+// to dst.
 func AppendKey(dst, prefix []byte, k Key) []byte {
 	dst = append(dst, prefix...)
-	dst = append(dst, k.Table...)
-	dst = append(dst, keySeparator)
+	dst = appendField(dst, k.Table)
 	if k.Hashed() {
 		sum := sha256.Sum256([]byte(k.ID))
 		dst = append(dst, hashedID)
 		return append(dst, sum[:]...)
 	}
 	return append(dst, k.ID...)
+}
+
+func appendField(dst []byte, s string) []byte {
+	dst = binary.AppendUvarint(dst, uint64(len(s)))
+	return append(dst, s...)
 }

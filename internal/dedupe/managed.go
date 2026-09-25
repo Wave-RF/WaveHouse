@@ -84,16 +84,12 @@ func (m *Managed) Open() bool {
 	return m.db != nil
 }
 
-// Reserve checks every key is storable, collapses a key repeated inside keys
-// to one backend claim — later occurrences answer Duplicate — reads a lease
-// <= 0 as DefaultLease, and delegates the rest to the open store;
-// ErrDisabled while switched off, ErrUnavailable while switched on but not
-// open.
+// Reserve collapses a key repeated inside keys to one backend claim — later
+// occurrences answer Duplicate — reads a lease <= 0 as DefaultLease, and
+// delegates the rest to the open store; ErrDisabled while switched off,
+// ErrUnavailable while switched on but not open.
 func (m *Managed) Reserve(ctx context.Context, keys []Key, lease time.Duration) ([]Claim, error) {
 	for _, k := range keys {
-		if err := k.Validate(); err != nil {
-			return nil, err
-		}
 		if k.Hashed() {
 			hashedIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", k.Table)))
 		}
