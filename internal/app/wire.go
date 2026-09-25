@@ -471,7 +471,18 @@ func (a *App) wireDiscovery(ctx context.Context) {
 	a.add(component{name: "schema discovery", close: d.close})
 }
 
-// wireDedupe builds the dedupe stores: one per tenant (#583 story 7), each
+// wireDedupe builds the dedupe stores — the one place the implementation is
+// chosen.
+func (a *App) wireDedupe() error {
+	switch b := a.cfg.Dedupe.Backend; b {
+	case config.DedupePebble:
+		return a.wirePebbleDedupe()
+	default:
+		return unreachableBackend("dedupe.backend", b)
+	}
+}
+
+// wirePebbleDedupe builds the dedupe stores: one per tenant (#583 story 7), each
 // following its own tenant's hot-reloadable dedupe.enabled, over the
 // embedded Pebble implementation, which is handed data_dir and decides the
 // rest: every tenant's seen ids in one instance there, open while any
@@ -488,7 +499,7 @@ func (a *App) wireDiscovery(ctx context.Context) {
 // than silently publishing un-deduped, since the files asked for dedupe;
 // nested fails closed the same way at boot too, for every tenant with
 // dedupe on, the next reload retrying, so it never costs the process.
-func (a *App) wireDedupe() error {
+func (a *App) wirePebbleDedupe() error {
 	nested := a.tenants.Nested()
 	embedded := dedupe.NewEmbedded(a.cfg.DataDir)
 	stores := dedupe.NewStores(embedded.Tenant)
@@ -530,10 +541,20 @@ func (a *App) wireDedupe() error {
 	return nil
 }
 
-// wireMQ starts the MQ — the embedded NATS under data_dir/nats, the one
-// place the implementation is chosen; everything after it sees mq.Broker —
-// and hands it each served tenant's mq.max_bytes_gb, which opens that
-// tenant's queue the first time. The budget is hot-reloadable: after every
+// wireMQ starts the MQ — the one place the implementation is chosen;
+// everything after it sees mq.Broker.
+func (a *App) wireMQ() error {
+	switch b := a.cfg.MQ.Backend; b {
+	case config.MQEmbedded:
+		return a.wireEmbeddedMQ()
+	default:
+		return unreachableBackend("mq.backend", b)
+	}
+}
+
+// wireEmbeddedMQ starts the embedded NATS under data_dir/nats and hands it
+// each served tenant's mq.max_bytes_gb, which opens that tenant's queue the
+// first time. The budget is hot-reloadable: after every
 // reload the registry applies, each served tenant's is handed over again,
 // and the MQ owns how it is split across the tenant's queues and keeps them
 // consistent (see mq.Broker.SetMaxBytes). A tenant no longer served keeps
@@ -543,7 +564,7 @@ func (a *App) wireDedupe() error {
 // previous budget; a nested directory logs it at boot too, so it never costs
 // the process — the tenant's ingest answers 503 until a reload opens its
 // queue. The hook is registered before the boot apply, as the dedupe one is.
-func (a *App) wireMQ() error {
+func (a *App) wireEmbeddedMQ() error {
 	dir := filepath.Join(a.cfg.DataDir, "nats")
 	config.WarnIfFreshDataDir("nats", dir)
 	var broker mq.Broker
@@ -591,16 +612,28 @@ func (a *App) wireMQ() error {
 	return nil
 }
 
-// wireCache opens the L1 cache — the only tier in standalone mode.
+// wireCache opens the query-result cache — the one place the implementation
+// is chosen.
 func (a *App) wireCache() error {
-	l1, err := cache.NewLocal(a.cfg.Cache.L1MaxCost)
-	if err != nil {
-		return fmt.Errorf("cache init: %w", err)
+	switch b := a.cfg.Cache.Backend; b {
+	case config.CacheLocal:
+		l1, err := cache.NewLocal(a.cfg.Cache.L1MaxCost)
+		if err != nil {
+			return fmt.Errorf("cache init: %w", err)
+		}
+		a.cache = l1
+		a.add(component{name: "cache", close: withoutContext(l1.Close)})
+		return nil
+	default:
+		return unreachableBackend("cache.backend", b)
 	}
-	// TODO: eventually this is where we can switch between ristretto, redis, tiered (both), etc
-	a.cache = l1
-	a.add(component{name: "cache", close: withoutContext(l1.Close)})
-	return nil
+}
+
+// unreachableBackend is each layer switch's default case. config.Validate
+// refuses a backend with no case, so reaching it means a Config built by hand
+// without one (the zero value is not the default), or a case missing here.
+func unreachableBackend[T ~string](key string, got T) error {
+	return fmt.Errorf("%s %q has no wiring: a Config built without config.Load must name every backend", key, got)
 }
 
 // wireSweeper adds the active sweeper — purges messages that are both
