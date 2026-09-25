@@ -106,7 +106,7 @@ func TestUnescape(t *testing.T) {
 		"plain":            "plain",
 		"default%2Eclicks": "default.clicks",
 		"lower%2ecase":     "lower.case",
-		"evt%2D123":        "evt-123", // v0.1.0's form
+		"evt%2D123":        "evt-123", // an earlier build's form
 		"%00%FF":           "\x00\xff",
 		"a+b":              "a+b",
 	} {

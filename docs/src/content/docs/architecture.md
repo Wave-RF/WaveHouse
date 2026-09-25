@@ -204,7 +204,7 @@ The hot-reloadable half of configuration: a directory of four JSON files (`confi
 
 ### `keyenc/` — Key Escaping
 
-- **keyenc.go** — The one escaping composite keys are built from, so a name can never be mistaken for a separator: `Escape` keeps ASCII letters, digits, `_` and `-` — exactly the tenant-id grammar, so a tenant id is its own escaped form — and writes every other byte as `%XX` (uppercase hex); `Unescape` is `url.PathUnescape`, which decodes `%XX` in either case and takes any other byte as itself, so v0.1.0's `%2D` for `-` still reads. `Join`/`AppendJoin` escape each field and put a separator between them, panicking on no fields and on a separator the escaping could write or one outside ASCII, and `Split` reverses them. NATS subject tokens (`internal/mq`) and the cache's namespace tokens (`query.SafeEncodeToken`) both use it. Keys built from it are stored, so changing what it keeps orphans them.
+- **keyenc.go** — The one escaping composite keys are built from, so a name can never be mistaken for a separator: `Escape` keeps ASCII letters, digits, `_` and `-` — exactly the tenant-id grammar, so a tenant id is its own escaped form — and writes every other byte as `%XX` (uppercase hex); `Unescape` is `url.PathUnescape`, which decodes `%XX` in either case and takes any other byte as itself, so a `%2D` for `-` that an earlier build wrote still reads. `Join`/`AppendJoin` escape each field and put a separator between them, panicking on no fields and on a separator the escaping could write or one outside ASCII, and `Split` reverses them. NATS subject tokens (`internal/mq`) and the cache's namespace tokens (`query.SafeEncodeToken`) both use it. Keys built from it are stored, so changing what it keeps orphans them.
 
 ## Data Flows
 
