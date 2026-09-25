@@ -154,7 +154,7 @@ var errNoQueue = errors.New("no queue is open for it yet")
 func NewEmbedded(storeDir string) (*EmbeddedNATS, error) {
 	// A store the server cannot create fails JetStream in the background, and
 	// ReadyForConnections would only give up on it after its whole wait.
-	if err := os.MkdirAll(storeDir, 0o750); err != nil {
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
 		return nil, fmt.Errorf("nats store: %w", err)
 	}
 	opts := &natsserver.Options{
