@@ -424,7 +424,8 @@ func TestEmbeddedNATS_SetMaxBytes_IngestFailureChangesNothing(t *testing.T) {
 // errors and applies no budget, and a publish is refused as a full queue,
 // while every other tenant's queue opens after it (which a store limit at
 // the very top of the int64 range would refuse: see NewEmbedded). Once the
-// cause is gone, a publish opens the queue at the budget last asked for it.
+// cause is gone, a reload opens the queue at the budget last asked for it,
+// however recently a publish tried.
 func TestEmbeddedNATS_SetMaxBytes_AQueueThatCannotOpen(t *testing.T) {
 	dir := t.TempDir()
 	// The dead-letter stream is the first of the pair to open. A failed open
@@ -454,7 +455,64 @@ func TestEmbeddedNATS_SetMaxBytes_AQueueThatCannotOpen(t *testing.T) {
 	if err := os.Remove(block); err != nil {
 		require.ErrorIs(t, err, os.ErrNotExist)
 	}
+	require.NoError(t, e.SetMaxBytes(ctx, "acme", testBudget))
 	require.NoError(t, e.Publish(ctx, Topic{Tenant: "acme", Table: "t"}, []byte("x")))
+	assert.Equal(t, int64(testBudget), e.MaxBytes("acme"))
+}
+
+// After a publish fails to open its tenant's queue, the tenant's publishes
+// are refused at once, without waiting on the broker's lock, until
+// publishRetry has passed: under clients retrying, one tenant's broken queue
+// would otherwise hold the lock that every other tenant's open, resize and
+// reload takes. Once the window has passed, a publish tries again.
+func TestEmbeddedNATS_Publish_PacesTheRetriesOfAQueueThatCannotOpen(t *testing.T) {
+	dir := t.TempDir()
+	block := filepath.Join(dir, "jetstream", "$G", "streams", dlqStreamName("acme"))
+	obstruct := func() {
+		t.Helper()
+		require.NoError(t, os.MkdirAll(filepath.Dir(block), 0o750))
+		require.NoError(t, os.WriteFile(block, nil, 0o600))
+	}
+	obstruct()
+	e := openEmbedded(t, dir)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	acme := Topic{Tenant: "acme", Table: "t"}
+
+	require.Error(t, e.SetMaxBytes(ctx, "acme", testBudget))
+	obstruct()
+	require.ErrorIs(t, e.Publish(ctx, acme, []byte("x")), ErrQueueFull, "the publish's own attempt fails")
+	if err := os.Remove(block); err != nil {
+		require.ErrorIs(t, err, os.ErrNotExist)
+	}
+
+	// The queue could open now, but within the window a publish tries
+	// nothing: it is refused while the lock is held elsewhere.
+	e.mu.Lock()
+	var paced error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		paced = e.Publish(ctx, acme, []byte("x"))
+	}()
+	var returned bool
+	select {
+	case <-done:
+		returned = true
+	case <-time.After(2 * time.Second):
+	}
+	e.mu.Unlock()
+	<-done
+	require.True(t, returned, "a paced publish waited on the broker's lock")
+	require.ErrorIs(t, paced, ErrQueueFull)
+	assert.Zero(t, e.MaxBytes("acme"))
+
+	v, ok := e.failedOpen.Load(tenant.ID("acme"))
+	require.True(t, ok)
+	failed := v.(openFailure)
+	failed.until = time.Now()
+	e.failedOpen.Store(tenant.ID("acme"), failed)
+	require.NoError(t, e.Publish(ctx, acme, []byte("x")), "once the window has passed")
 	assert.Equal(t, int64(testBudget), e.MaxBytes("acme"))
 }
 

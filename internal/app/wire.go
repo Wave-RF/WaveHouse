@@ -530,9 +530,10 @@ func (a *App) wireDedupe() error {
 // refuses boot, like every other store, and on a reload logs it, keeping the
 // previous budget; a nested directory logs it at boot too, so it never costs
 // the process — the tenant's ingest answers 503 until its queue opens, each
-// publish and each reload trying again. The hook is registered before the
-// boot apply, as the dedupe one is. The boot apply runs on ctx, New's, so a
-// stop signaled during a boot that opens many queues is not held up by them.
+// reload trying again, and publishes too at the pace the MQ allows. The hook
+// is registered before the boot apply, as the dedupe one is. The boot apply
+// runs on ctx, New's, so a stop signaled during a boot that opens many queues
+// is not held up by them.
 func (a *App) wireMQ(ctx context.Context) error {
 	dir := filepath.Join(a.cfg.DataDir, "nats")
 	config.WarnIfFreshDataDir("nats", dir)

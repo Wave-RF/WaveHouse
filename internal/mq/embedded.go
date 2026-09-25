@@ -18,6 +18,7 @@ import (
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"golang.org/x/sync/singleflight"
 )
 
 // slogNATSLogger adapts the default slog logger to the natsserver.Logger
@@ -72,6 +73,20 @@ type EmbeddedNATS struct {
 	// leave behind a stream JetStream goes on to create, which no consumer
 	// holds. Written under mu, read without it.
 	opened sync.Map // tenant.ID → struct{}
+	// reopening merges into one attempt the publishes that find the same
+	// tenant's queue not open, and failedOpen holds, for a tenant whose last
+	// such attempt failed, its error and until when its publishes take that
+	// as their answer (openForPublish).
+	reopening  singleflight.Group
+	failedOpen sync.Map // tenant.ID → openFailure
+}
+
+// openFailure is a publish's failed attempt to open a tenant's queue, and
+// until when the tenant's publishes are refused with its error rather than
+// trying again.
+type openFailure struct {
+	until time.Time
+	err   error
 }
 
 // tenantQueue is what the broker knows of one tenant's queue.
@@ -111,6 +126,9 @@ const (
 	// resizeTimeouts when it opens a queue: the consumers join on a budget of
 	// their own (apply).
 	rollbackTimeout = 5 * time.Second
+	// publishRetry is how long a tenant's publishes are refused at once after
+	// one failed to open its queue (openForPublish).
+	publishRetry = 5 * time.Second
 )
 
 // errNoQueue is why a publish or park finds no queue it can open: no budget
@@ -282,6 +300,7 @@ func (e *EmbeddedNATS) ingestTenants() []tenant.ID {
 func (e *EmbeddedNATS) record(id tenant.ID, q *tenantQueue) {
 	if q.ingest && q.dlq {
 		e.opened.Store(id, struct{}{})
+		e.failedOpen.Delete(id)
 	} else {
 		e.opened.Delete(id)
 	}
@@ -492,23 +511,24 @@ func (e *EmbeddedNATS) reopen(ctx context.Context, id tenant.ID) error {
 // subject). A tenant with no queue has one opened at the budget last asked
 // for it (see SetMaxBytes) — and so does one whose stream exists but whose
 // queue the broker has not recorded open, since no consumer may hold that
-// stream. A queue that cannot be opened — none asked for yet, or JetStream
-// refused it — and a queue at its byte budget (DiscardNew) are reported as
-// ErrQueueFull: either way the tenant's queue takes nothing now, and a retry
-// is the caller's answer.
+// stream (see openForPublish for how often a publish tries). A queue that
+// cannot be opened — none asked for yet, or JetStream refused it — and a
+// queue at its byte budget (DiscardNew) are reported as ErrQueueFull: either
+// way the tenant's queue takes nothing now, and a retry is the caller's
+// answer.
 func (e *EmbeddedNATS) Publish(ctx context.Context, topic Topic, data []byte, opts ...PublishOpt) error {
 	subj, err := subject(ingestPrefix, topic)
 	if err != nil {
 		return err
 	}
 	if _, ok := e.opened.Load(topic.Tenant); !ok {
-		if openErr := e.reopen(ctx, topic.Tenant); openErr != nil {
+		if openErr := e.openForPublish(ctx, topic.Tenant); openErr != nil {
 			return fmt.Errorf("%w: %w", ErrQueueFull, openErr)
 		}
 	}
 	err = e.publish(ctx, subj, data, opts)
 	if errors.Is(err, jetstream.ErrNoStreamResponse) {
-		if openErr := e.reopen(ctx, topic.Tenant); openErr != nil {
+		if openErr := e.openForPublish(ctx, topic.Tenant); openErr != nil {
 			return fmt.Errorf("%w: %w", ErrQueueFull, openErr)
 		}
 		err = e.publish(ctx, subj, data, opts)
@@ -518,6 +538,30 @@ func (e *EmbeddedNATS) Publish(ctx context.Context, topic Topic, data []byte, op
 		// text is the only thing that names the cause.
 		return fmt.Errorf("%w: %w", ErrQueueFull, err)
 	}
+	return err
+}
+
+// openForPublish opens tenant id's queue for a publish that found it not open
+// (reopen). The publishes that find it so at the same time share one
+// attempt, and after an attempt fails the tenant's publishes get its error at
+// once, without taking mu, until publishRetry has passed: under clients
+// retrying, a queue that cannot open would otherwise hold mu for attempt
+// after attempt, and every other tenant's open, resize and reload waits on
+// mu. A reload that applies the tenant's budget retries it regardless
+// (SetMaxBytes).
+func (e *EmbeddedNATS) openForPublish(ctx context.Context, id tenant.ID) error {
+	if v, ok := e.failedOpen.Load(id); ok {
+		if f := v.(openFailure); time.Now().Before(f.until) {
+			return f.err
+		}
+	}
+	_, err, _ := e.reopening.Do(string(id), func() (any, error) {
+		err := e.reopen(ctx, id)
+		if err != nil {
+			e.failedOpen.Store(id, openFailure{until: time.Now().Add(publishRetry), err: err})
+		}
+		return nil, err
+	})
 	return err
 }
 
