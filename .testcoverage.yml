@@ -97,6 +97,11 @@ exclude:
       # never reaches them. The unit suite and the integration suite's main
       # app (cache.backend=local) cover them; the merged total still counts them.
       - ^internal/cache/(local|version_manager)\.go$
+      # The DynamoDB dedupe backend: the e2e binary runs Pebble dedupe, so
+      # this file measured 0% there and pulled e2e to 58.6%. The unit
+      # (fake API) and integration (dynamodb-local) suites cover it, and the
+      # merged total still counts it.
+      - ^internal/dedupe/dynamodb\.go$
     unit:
       # The external NATS broker's tests start a server per case, which the
       # unit suite's 15s per package cannot hold: they are integration-tagged

@@ -53,6 +53,9 @@ type testEnv struct {
 	embeddedMQ mq.Broker
 	baseURL    string // the wired API server, e.g. http://127.0.0.1:41234
 	registry   *discovery.SchemaRegistry
+	// dynamoEndpoint is dynamodb-local, for the DynamoDB dedupe backend's
+	// tests; the wired app does not use it.
+	dynamoEndpoint string
 }
 
 var sharedEnv *testEnv
@@ -139,6 +142,13 @@ func setup() (int, func()) {
 		_ = ch.container.Terminate(context.Background())
 	})
 
+	ddb, endpoint, err := startDynamoDBLocal(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration setup: dynamodb-local: %v\n", err)
+		return 1, cleanup
+	}
+	cleanups.push(func() { _ = ddb.Terminate(context.Background()) })
+
 	settingsDir, err := writeTestSettings(ch)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: settings: %v\n", err)
@@ -205,6 +215,8 @@ func setup() (int, func()) {
 		embeddedMQ: a.MQ(),
 		baseURL:    baseURL,
 		registry:   a.Registry(),
+
+		dynamoEndpoint: endpoint,
 	}
 	return 0, cleanup
 }
@@ -427,6 +439,28 @@ func startNATS(t *testing.T) string {
 		t.Fatalf("nats endpoint: %v", err)
 	}
 	return endpoint
+}
+
+// startDynamoDBLocal starts dynamodb-local in memory (no volume) and
+// returns it with its endpoint URL.
+func startDynamoDBLocal(ctx context.Context) (testcontainers.Container, string, error) {
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        "amazon/dynamodb-local:3.3.1",
+			Cmd:          []string{"-jar", "DynamoDBLocal.jar", "-inMemory"},
+			ExposedPorts: []string{"8000/tcp"},
+			WaitingFor:   wait.ForListeningPort("8000/tcp").WithStartupTimeout(60 * time.Second),
+		},
+		Started: true,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("start container: %w", err)
+	}
+	endpoint, err := container.PortEndpoint(ctx, "8000/tcp", "http")
+	if err != nil {
+		return container, "", fmt.Errorf("endpoint: %w", err)
+	}
+	return container, endpoint, nil
 }
 
 func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Duration) error {

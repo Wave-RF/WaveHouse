@@ -175,7 +175,7 @@ WH_SETTINGS_DIR=/etc/wavehouse/settings
 WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
 
 - `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `stream.gap_window_minutes` window (settings directory) of history that powers SSE gap-fill across restarts.
-- `<data_dir>/pebble` — the Pebble dedup KV: one instance shared by every tenant, each key led by its tenant and table. Only used while some tenant's `dedupe.enabled` is `true` in its `config.json` (opened and closed on reload). It grows with every id kept: with `dedupe.retention` at `"0"` (forever) nothing is ever removed, so size the volume for it or set a [retention](/settings-directory#deduplication), whose expired ids an hourly sweep deletes.
+- `<data_dir>/pebble` — the Pebble dedup KV (with `dedupe.backend: pebble`, the default): one instance shared by every tenant, each key led by its tenant and table. Only used while some tenant's `dedupe.enabled` is `true` in its `config.json` (opened and closed on reload). It grows with every id kept: with `dedupe.retention` at `"0"` (forever) nothing is ever removed, so size the volume for it or set a [retention](/settings-directory#deduplication), whose expired ids an hourly sweep deletes.
 
 In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data` and `/app/settings` owned by the nonroot user (UID 65532); the binary creates the `nats/` and `pebble/` subdirectories under `/app/data` itself on first run.
 
@@ -183,7 +183,7 @@ If `data_dir` resolves into the container's writable overlay layer instead, **Je
 
 Beyond persistence, the *speed* of that volume matters: JetStream `fsync`s every event to `<data_dir>/nats` before the ingest endpoint returns `200`, so the volume's `fsync` latency is your ingest latency floor. Managed cloud block storage handles this without thinking; commodity or virtualized substrates (ZFS without a SLOG, qcow2-on-`ext4`, spinning disks) can stall ingest with multi-second `fsync` tails. See [Durability & Storage](/durability) to measure yours before going live.
 
-WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble`, when dedupe is on) is missing or empty:
+WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble`, when dedupe is on with the `pebble` backend) is missing or empty:
 
 ```text wrap=false
 WARN  data directory does not exist — starting with no prior state.
@@ -558,6 +558,88 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 The dedupe key now carries the table as well as the tenant ([#222](https://github.com/Wave-RF/WaveHouse/issues/222)), so **an id deduped before the upgrade is not recognized after it**: a record carrying it is accepted once more. Nothing is migrated. The old keys are never read, and the dedupe sweep deletes them: its first pass runs about a minute after the instance opens, and `wavehouse_dedupe_swept_keys_total{reason="version_0"}` counts them ([#220](https://github.com/Wave-RF/WaveHouse/issues/220)). Pebble returns their disk space as it compacts, not at once. Only a tenant with `dedupe.enabled` on is affected, and only by a record sent both before and after the upgrade — typically a producer retrying across the restart. To avoid duplicate rows, let retrying producers finish, or pause them, before upgrading.
 
 The same release adds **`dedupe.retention`, a required key**: every `config.json`, each tenant's folder included, must state it or the directory is refused (at boot) or not adopted (on reload). `"retention": "0"` keeps every id forever, as before; see [Deduplication](/settings-directory#deduplication) for a finite one.
+
+## A shared dedupe table on DynamoDB
+
+Pebble is per process, so two pods on it do not share seen ids. The DynamoDB backend keeps every tenant's ids in **one shared table**, and a conditional write makes a claim atomic across every pod that uses the table. WaveHouse **never creates this table in production**: the table belongs to your infrastructure code. The backend refuses to create a table unless it is pointed at a custom endpoint, so table creation only works against [dynamodb-local](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html).
+
+What the backend requires of the table:
+
+| Attribute | Type | Role |
+|---|---|---|
+| `pk` | Binary | Partition key, and the only key: tenant, table and id. No sort key. |
+| `st` | Number | `1` = pending claim, `2` = committed. |
+| `ex` | Number | Epoch seconds: the lease end while pending, the retention end once committed; absent = never expires. |
+| `tk` | Binary | The claim token that `Release` matches. |
+
+Only `pk` is declared in the table definition. Turn TTL on for `ex`. Correctness never depends on TTL, because a claim whose `ex` has passed counts as absent whether or not DynamoDB has deleted it yet; TTL only reclaims the storage. **Today TTL removes only lapsed claims:** ingest commits every id with no retention, so a committed item carries no `ex` and is kept forever, and the table grows by one item (about 200 bytes) per distinct id. Per-tenant retention is [#220](https://github.com/Wave-RF/WaveHouse/issues/220). Boot checks the table: it refuses one whose key schema does not match, and logs a warning if TTL is off.
+
+An example in Terraform. Its tags are the five that Wave RF's own deployments put on every AWS resource (`Name`, `Project`, `Environment`, `ManagedBy`, `CostCenter`, with lowercase-kebab values); use your own conventions in their place:
+
+```hcl
+resource "aws_dynamodb_table" "wavehouse_dedupe" {
+  name                        = "wavehouse-dedupe-${var.environment}"
+  billing_mode                = "PAY_PER_REQUEST" # provisioned + auto scaling once traffic is steady
+  hash_key                    = "pk"
+  deletion_protection_enabled = true
+
+  attribute {
+    name = "pk"
+    type = "B"
+  }
+
+  ttl {
+    attribute_name = "ex"
+    enabled        = true
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  tags = {
+    Name        = "wavehouse-dedupe-${var.environment}"
+    Project     = "wavehouse-cloud"
+    Environment = var.environment # prod | dev | ci | demo | benchmark
+    ManagedBy   = "wavehouse-cloud/infra/stacks/prod-platform"
+    CostCenter  = "data-plane"
+  }
+}
+
+# The pods' role (EKS Pod Identity or IRSA). No Scan, no CreateTable.
+data "aws_iam_policy_document" "wavehouse_dedupe" {
+  statement {
+    actions = [
+      "dynamodb:PutItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:BatchWriteItem",
+      "dynamodb:DescribeTable",
+      "dynamodb:DescribeTimeToLive",
+    ]
+    resources = [aws_dynamodb_table.wavehouse_dedupe.arn]
+  }
+}
+```
+
+Select it in the boot config, on every pod that should share seen ids (all the keys are in the [Configuration Reference](/configuration#dynamodb-dedupe)):
+
+```yaml
+dedupe:
+  backend: dynamodb
+  dynamodb:
+    table: wavehouse-dedupe-prod
+    region: us-east-1 # or leave empty for AWS_REGION
+```
+
+or `WH_DEDUPE_BACKEND=dynamodb`, `WH_DEDUPE_DYNAMODB_TABLE=wavehouse-dedupe-prod`. A table that is missing, has the wrong key schema, or cannot be reached with the pod's credentials refuses boot over a flat settings directory; over a nested one the pod boots, every tenant with dedupe on fails its ingest closed, and the check is retried in the background (backing off from one second to thirty) and on every reload. No region at all (neither `region` nor one from the SDK chain: `AWS_REGION`, `AWS_DEFAULT_REGION` or a profile) refuses boot in both shapes. The check runs whether or not any tenant has `dedupe.enabled` on. The per-tenant switch stays in each tenant's `config.json`.
+
+For development against dynamodb-local, set `dedupe.dynamodb.endpoint` (for example `http://localhost:8000`) and `create_table: true`, and give the SDK any static credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) and a region. `create_table` without an `endpoint` refuses boot.
+
+- **Credentials** come from the AWS SDK's default chain (EKS Pod Identity or IRSA in a pod; the environment or a profile locally), never from WaveHouse configuration.
+- **Point-in-time recovery** is not needed. The table records which ids have been seen, so losing it produces duplicate rows, not lost events.
+- **Cost:** every new event is two writes (the claim, then the commit), and a duplicate is one. On-demand, that is about $1.25 per million new events in us-east-1. Provisioned capacity with auto scaling is cheaper once traffic is steady. Storage is the other line: every distinct id stays in the table (see TTL above), at DynamoDB's per-GB-month rate.
+- **One table serves every tenant,** so one tenant's burst can throttle the rest. A throttled or unreachable table fails the ingest request closed rather than publishing un-deduped. After five throttled or unreachable claims in a row within one second, the backend stops calling the table for a second and fails every tenant's dedupe requests immediately (`wavehouse_dedupe_dynamodb_short_circuits_total`). A duplicate or in-flight answer is not a failure and resets the count.
+- **Metrics:** `wavehouse_dedupe_dynamodb_requests_total{op,outcome}`, `wavehouse_dedupe_dynamodb_request_duration_seconds{op}`, `wavehouse_dedupe_dynamodb_unprocessed_items_total`. The table's own CloudWatch metrics `ThrottledRequests`, `SystemErrors` and `ConsumedWriteCapacityUnits` are worth alerting on too.
 
 ## Upgrading across the v2 ingest envelope
 
