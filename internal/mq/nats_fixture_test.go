@@ -267,6 +267,20 @@ func (f *natsFixture) apply(t *testing.T, tp *fixtureTopology) {
 	}
 }
 
+// reset deletes every stream, and with them their consumers.
+func (f *natsFixture) reset(t *testing.T) {
+	t.Helper()
+	names := f.admin.StreamNames(t.Context())
+	var all []string
+	for name := range names.Name() {
+		all = append(all, name)
+	}
+	require.NoError(t, names.Err())
+	for _, name := range all {
+		require.NoError(t, f.admin.DeleteStream(t.Context(), name))
+	}
+}
+
 // create creates tp's streams and consumers without waiting for anything, so
 // a goroutine can call it.
 func (f *natsFixture) create(ctx context.Context, tp *fixtureTopology) error {

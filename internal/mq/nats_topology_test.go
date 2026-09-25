@@ -31,6 +31,7 @@ func replicaWarnings(findings []Finding) bool {
 // The shipped manifests pass the verifier, run as the wavehouse user with
 // exactly the shipped permissions.
 func TestVerifyNATSTopology_ShippedManifestsPass(t *testing.T) {
+	t.Parallel()
 	f := newNATSFixture(t)
 	f.apply(t, shippedTopology(t))
 	findings, err := verifyNATSTopology(t.Context(), f.connect(t, "wavehouse"), shippedSpec)
@@ -39,7 +40,7 @@ func TestVerifyNATSTopology_ShippedManifestsPass(t *testing.T) {
 }
 
 // Every rule the verifier holds the operator to, one mutation each.
-func TestVerifyNATSTopology_Findings(t *testing.T) {
+func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its cases share one server, so they run in turn
 	t.Parallel()
 	const (
 		p0      = "WH_INGEST_0"
@@ -50,9 +51,12 @@ func TestVerifyNATSTopology_Findings(t *testing.T) {
 		sev    FindingSeverity
 		object string // a substring of Finding.Object
 		field  string
+		// problem, when set, is a substring of Finding.Problem: the history
+		// cases share the "sources" field with a source still attaching.
+		problem string
 	}
-	req := func(object, field string) want { return want{FindingRequired, object, field} }
-	rec := func(object, field string) want { return want{FindingRecommended, object, field} }
+	req := func(object, field string) want { return want{FindingRequired, object, field, ""} }
+	rec := func(object, field string) want { return want{FindingRecommended, object, field, ""} }
 	stream := func(name string, mut func(*jetstream.StreamConfig)) func(*testing.T, *fixtureTopology) {
 		return func(t *testing.T, tp *fixtureTopology) { mut(tp.stream(t, name)) }
 	}
@@ -126,11 +130,11 @@ func TestVerifyNATSTopology_Findings(t *testing.T) {
 		// The history.
 		{"history missing", func(_ *testing.T, tp *fixtureTopology) { tp.drop(history) }, shippedSpec, req(history, "name")},
 		{"history has subjects", stream(history, func(s *jetstream.StreamConfig) { s.Subjects = []string{"history.>"} }), shippedSpec, req(history, "subjects")},
-		{"history misses a partition", stream(history, func(s *jetstream.StreamConfig) { s.Sources = s.Sources[1:] }), shippedSpec, req(history, "sources")},
+		{"history misses a partition", stream(history, func(s *jetstream.StreamConfig) { s.Sources = s.Sources[1:] }), shippedSpec, want{FindingRequired, history, "sources", "do not include WH_INGEST_0"}},
 		{"history filters a partition", stream(history, func(s *jetstream.StreamConfig) {
 			s.Sources[0].FilterSubject = "wh.ingest.0.acme.>"
-		}), shippedSpec, req(history, "sources")},
-		{"history source cannot attach", stream(p0, func(s *jetstream.StreamConfig) { s.MaxConsumers = 1 }), shippedSpec, req(history, "sources")},
+		}), shippedSpec, want{FindingRequired, history, "sources", "filter WH_INGEST_0"}},
+		{"history source cannot attach", stream(p0, func(s *jetstream.StreamConfig) { s.MaxConsumers = 1 }), shippedSpec, want{FindingRequired, history, "sources", "WH_INGEST_0 is not attached"}},
 		{"history retention", stream(history, func(s *jetstream.StreamConfig) { s.Retention = jetstream.InterestPolicy }), shippedSpec, req(history, "retention")},
 		{"history discard", stream(history, func(s *jetstream.StreamConfig) { s.Discard = jetstream.DiscardNew }), shippedSpec, req(history, "discard")},
 		{"history max_age", stream(history, func(s *jetstream.StreamConfig) { s.MaxAge = 0 }), shippedSpec, req(history, "max_age")},
@@ -146,20 +150,26 @@ func TestVerifyNATSTopology_Findings(t *testing.T) {
 		{"dlq max_bytes", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), shippedSpec, req(dlq, "max_bytes")},
 		{"dlq per-subject cap", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxMsgsPerSubject = 0 }), shippedSpec, rec(dlq, "max_msgs_per_subject")},
 	}
+	// One server for every case, emptied between them: a server per case
+	// costs more than the unit suite's per-package timeout can spare.
+	f := newNATSFixture(t)
+	js := f.connect(t, "wavehouse")
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			f := newNATSFixture(t)
+			f.reset(t)
 			tp := shippedTopology(t)
 			if tc.mutate != nil {
 				tc.mutate(t, tp)
 			}
-			f.apply(t, tp)
-			findings, err := verifyNATSTopology(t.Context(), f.connect(t, "wavehouse"), tc.spec)
+			// No wait for the sources: an unattached one is one more finding, and the
+			// case only looks for its own.
+			require.NoError(t, f.create(t.Context(), tp))
+			findings, err := verifyNATSTopology(t.Context(), js, tc.spec)
 			require.NoError(t, err)
 			found := false
 			for _, got := range findings {
-				if got.Severity == tc.want.sev && got.Field == tc.want.field && strings.Contains(got.Object, tc.want.object) {
+				if got.Severity == tc.want.sev && got.Field == tc.want.field && strings.Contains(got.Object, tc.want.object) &&
+					strings.Contains(got.Problem, tc.want.problem) {
 					found = true
 				}
 			}
@@ -174,6 +184,7 @@ func TestVerifyNATSTopology_Findings(t *testing.T) {
 // Boot waits for the operator's resources, which on Kubernetes roll out with
 // the pods, and passes once they are there.
 func TestAwaitNATSTopology_WaitsForTheOperator(t *testing.T) {
+	t.Parallel()
 	f := newNATSFixture(t)
 	js := f.connect(t, "wavehouse")
 	tp := shippedTopology(t)
@@ -192,6 +203,7 @@ func TestAwaitNATSTopology_WaitsForTheOperator(t *testing.T) {
 
 // When the wait runs out, one error lists every finding at once.
 func TestAwaitNATSTopology_ListsEveryFinding(t *testing.T) {
+	t.Parallel()
 	f := newNATSFixture(t)
 	tp := shippedTopology(t)
 	tp.drop("WH_DLQ")
@@ -223,6 +235,7 @@ func countRequired(findings []Finding) int {
 // A check that cannot run is an error, not a finding, and await gives up on
 // its context.
 func TestAwaitNATSTopology_ContextEnds(t *testing.T) {
+	t.Parallel()
 	f := newNATSFixture(t)
 	js := f.connect(t, "wavehouse")
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
@@ -232,6 +245,7 @@ func TestAwaitNATSTopology_ContextEnds(t *testing.T) {
 }
 
 func TestVerifyNATSTopology_ServerVersion(t *testing.T) {
+	t.Parallel()
 	cases := map[string]*FindingSeverity{
 		"2.14.6":       nil,
 		"v2.14.0-beta": nil,
@@ -254,6 +268,7 @@ func TestVerifyNATSTopology_ServerVersion(t *testing.T) {
 }
 
 func TestVerifyNATSTopology_RefusesAnImpossibleSpec(t *testing.T) {
+	t.Parallel()
 	f := newNATSFixture(t)
 	js := f.connect(t, "wavehouse")
 	_, err := verifyNATSTopology(t.Context(), js, NATSTopology{Prefix: "Bad.Prefix"})
@@ -264,6 +279,7 @@ func TestVerifyNATSTopology_RefusesAnImpossibleSpec(t *testing.T) {
 
 // The shipped Helm values give the wavehouse user exactly natsPermissions.
 func TestNATSPermissions_MatchShippedValues(t *testing.T) {
+	t.Parallel()
 	raw, err := os.ReadFile(shippedValues)
 	require.NoError(t, err)
 	var values struct {
@@ -301,6 +317,7 @@ func TestNATSPermissions_MatchShippedValues(t *testing.T) {
 // The generated manifests round-trip through the fixture's parser into the
 // configs the verifier accepts, at any N and prefix.
 func TestWriteNATSManifests_RoundTrip(t *testing.T) {
+	t.Parallel()
 	spec := NATSTopology{Prefix: "acme-wh", Partitions: 3}
 	path := t.TempDir() + "/m.yaml"
 	out, err := os.Create(path) //nolint:gosec // G304: path is rooted in t.TempDir()
@@ -318,6 +335,7 @@ func TestWriteNATSManifests_RoundTrip(t *testing.T) {
 }
 
 func TestWriteNATSManifests_RefusesAnImpossibleSpec(t *testing.T) {
+	t.Parallel()
 	var b strings.Builder
 	require.Error(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: NATSTopology{Prefix: "a.b"}}))
 	require.Error(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: NATSTopology{Partitions: -2}}))

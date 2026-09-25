@@ -444,7 +444,7 @@ internal/stream/        → SSE fan-out (event Hub: project once per role, Subsc
 internal/tenant/        → Tenant id (type, grammar, reserved default, request header name)
 internal/testutil/      → Shared test helpers (mocks, JWT + schema helpers; logtest/ captures or silences the default logger)
 tests/                  → Integration & E2E tests
-tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer)
+tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer); `make test-integration` also runs `internal/mq` with the tag (the nats-server semantics tests)
 tests/e2e/              → E2E test stack (scripts/orchestrator boots a ClickHouse testcontainer + the wavehouse-cov binary)
 tests/e2e/fixtures/     → Idempotent ClickHouse DDL scripts for test tables
 tests/e2e/sdk/          → E2E integration tests via TypeScript SDK (Vitest)

@@ -1,3 +1,9 @@
+//go:build integration
+
+// The S1 tests run in `make test-integration`: they pin nats-server's own
+// behavior and take seconds each, which the unit suite's per-package
+// timeout cannot absorb beside the embedded broker's tests.
+
 package mq
 
 import (
@@ -168,6 +174,7 @@ func ackEvery(string) bool { return true }
 // history has copied it; the ack then deletes it from the partition and leaves
 // the history's copy alone.
 func TestS1_AckDeletesFromPartitionOnly(t *testing.T) {
+	t.Parallel()
 	js := s1Connect(t, s1Server(t, t.TempDir()))
 	s1Topology(t, js, 64<<20, time.Hour)
 
@@ -187,10 +194,11 @@ func TestS1_AckDeletesFromPartitionOnly(t *testing.T) {
 // wh-ingest acking each row the moment it arrives, as fast as it can, never
 // deletes a row the history has not copied yet.
 func TestS1_FastAckNeverOutrunsHistory(t *testing.T) {
+	t.Parallel()
 	js := s1Connect(t, s1Server(t, t.TempDir()))
 	s1Topology(t, js, 256<<20, time.Hour)
 
-	const n = 5000
+	const n = 2000
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	cons, err := js.Consumer(ctx, "WH_INGEST_0", "wh-ingest")
@@ -199,7 +207,16 @@ func TestS1_FastAckNeverOutrunsHistory(t *testing.T) {
 	require.NoError(t, err)
 	defer cc.Stop()
 
-	s1Publish(t, js, "wh.ingest.0.acme.events", n, 64)
+	body := make([]byte, 64)
+	for i := range n {
+		_, err := js.PublishAsync("wh.ingest.0.acme.events", body, jetstream.WithMsgID(fmt.Sprint(i)))
+		require.NoError(t, err)
+	}
+	select {
+	case <-js.PublishAsyncComplete():
+	case <-time.After(10 * time.Second):
+		t.Fatal("async publishes never completed")
+	}
 	s1Eventually(t, js, "WH_INGEST_0", 0)
 	s1Eventually(t, js, "WH_HISTORY", n)
 }
@@ -208,6 +225,7 @@ func TestS1_FastAckNeverOutrunsHistory(t *testing.T) {
 // them, still receives them: the source consumer's interest starts at the
 // partition's first row, not at the time it was created.
 func TestS1_LateHistoryStillCopies(t *testing.T) {
+	t.Parallel()
 	js := s1Connect(t, s1Server(t, t.TempDir()))
 	ctx := t.Context()
 	_, err := js.CreateStream(ctx, jetstream.StreamConfig{
@@ -235,6 +253,7 @@ func TestS1_LateHistoryStillCopies(t *testing.T) {
 // (not held behind X's at a shared ack floor), and the partition's max_bytes
 // headroom comes back, so a full partition takes publishes again.
 func TestS1_UnackedTenantDoesNotHoldOthers(t *testing.T) {
+	t.Parallel()
 	js := s1Connect(t, s1Server(t, t.TempDir()))
 	const size = 1024
 	s1Topology(t, js, 256<<10, time.Hour) // ~256 KiB
@@ -276,45 +295,57 @@ func TestS1_UnackedTenantDoesNotHoldOthers(t *testing.T) {
 // The history keeps what it copied for its own max_age, independent of the
 // partition, and then drops it.
 func TestS1_HistoryKeepsForItsMaxAge(t *testing.T) {
+	t.Parallel()
 	js := s1Connect(t, s1Server(t, t.TempDir()))
-	s1Topology(t, js, 64<<20, 2*time.Second)
+	s1Topology(t, js, 64<<20, 3*time.Second)
 
 	s1Publish(t, js, "wh.ingest.0.acme.events", 10, 64)
+	s1Eventually(t, js, "WH_HISTORY", 10)
 	acked, _ := s1Pull(t, js, 10, ackEvery)
 	require.Equal(t, 10, acked)
 	s1Eventually(t, js, "WH_INGEST_0", 0)
-	assert.EqualValues(t, 10, s1Msgs(t, js, "WH_HISTORY"))
 	s1Eventually(t, js, "WH_HISTORY", 0)
 }
 
 // The source consumer holds interest on the partition until the history has
-// stored the row: rows wh-ingest acks while the source is not flowing (here,
-// in the ~10s after a restart before the history re-attaches its source) stay
-// in the partition and reach the history once it does.
+// stored the row: while the history refuses rows (here, full with discard:
+// new, which the verifier therefore forbids), rows wh-ingest acks stay in the
+// partition, and they reach the history once it takes them again.
 func TestS1_SourceHoldsRowsUntilCopied(t *testing.T) {
-	dir := t.TempDir()
-	s := s1Server(t, dir)
-	js := s1Connect(t, s)
+	t.Parallel()
+	js := s1Connect(t, s1Server(t, t.TempDir()))
 	s1Topology(t, js, 64<<20, time.Hour)
-	s.Shutdown()
-	s.WaitForShutdown()
+	full := jetstream.StreamConfig{
+		Name: "WH_HISTORY", Retention: jetstream.LimitsPolicy, Discard: jetstream.DiscardNew,
+		MaxMsgs: 5, MaxAge: time.Hour, Storage: jetstream.FileStorage,
+		Sources: []*jetstream.StreamSource{{Name: "WH_INGEST_0"}},
+	}
+	_, err := js.UpdateStream(t.Context(), full)
+	require.NoError(t, err)
 
-	js = s1Connect(t, s1Server(t, dir))
 	s1Publish(t, js, "wh.ingest.0.acme.events", 10, 64)
 	acked, _ := s1Pull(t, js, 10, ackEvery)
 	require.Equal(t, 10, acked)
-	time.Sleep(200 * time.Millisecond)
-	if s1Msgs(t, js, "WH_HISTORY") == 0 {
-		assert.EqualValues(t, 10, s1Msgs(t, js, "WH_INGEST_0"), "acked rows left the partition before the history copied them")
-	}
-	s1EventuallyWithin(t, js, "WH_HISTORY", 10, 60*time.Second)
+	s1Eventually(t, js, "WH_HISTORY", 5)
+	time.Sleep(300 * time.Millisecond)
+	// At least the five uncopied rows; the source acks what it copied in
+	// batches, so it may hold those too.
+	assert.GreaterOrEqual(t, s1Msgs(t, js, "WH_INGEST_0"), uint64(5), "acked rows the history had not copied left the partition")
+
+	full.Discard, full.MaxMsgs = jetstream.DiscardOld, -1
+	_, err = js.UpdateStream(t.Context(), full)
+	require.NoError(t, err)
+	s1Eventually(t, js, "WH_HISTORY", 10)
 	s1Eventually(t, js, "WH_INGEST_0", 0)
+	time.Sleep(300 * time.Millisecond)
+	assert.EqualValues(t, 10, s1Msgs(t, js, "WH_HISTORY"), "the history copied a row twice")
 }
 
 // Deleting the history (or dropping a source from it) removes its source
 // consumer, so the partition is never left holding rows for a reader that is
 // gone.
 func TestS1_HistoryGoneReleasesPartition(t *testing.T) {
+	t.Parallel()
 	js := s1Connect(t, s1Server(t, t.TempDir()))
 	s1Topology(t, js, 64<<20, time.Hour)
 	require.NoError(t, js.DeleteStream(t.Context(), "WH_HISTORY"))

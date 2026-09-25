@@ -17,6 +17,7 @@ import (
 // partitionOf agrees with the server's own {{partition(n,…)}} mapping, so a
 // later move to a server-side mapping keeps every tenant in its partition.
 func TestPartitionOf_MatchesServerMapping(t *testing.T) {
+	t.Parallel()
 	const n, tenants = 8, 10_000
 	s, err := natsserver.NewServer(&natsserver.Options{Host: "127.0.0.1", Port: -1, NoSigs: true, NoLog: true})
 	require.NoError(t, err)
@@ -58,6 +59,7 @@ func TestPartitionOf_MatchesServerMapping(t *testing.T) {
 }
 
 func TestNATSSubjects_RoundTrip(t *testing.T) {
+	t.Parallel()
 	topics := []Topic{
 		{Tenant: "acme", Table: "events"},
 		{Tenant: "globex", Table: "a.b *>% c", Scope: "s.1"},
@@ -80,6 +82,7 @@ func TestNATSSubjects_RoundTrip(t *testing.T) {
 }
 
 func TestNATSSubjects_RefuseATopicWithoutATenant(t *testing.T) {
+	t.Parallel()
 	_, err := natsIngestSubject("wh", 4, Topic{Table: "events"})
 	require.Error(t, err)
 	_, err = natsDLQSubject("wh", Topic{Tenant: "a.b", Table: "events"})
@@ -87,6 +90,7 @@ func TestNATSSubjects_RefuseATopicWithoutATenant(t *testing.T) {
 }
 
 func TestNATSTopicKey_OtherSubjects(t *testing.T) {
+	t.Parallel()
 	for _, subj := range []string{
 		"other.ingest.0.acme.events", "wh.ingest.acme.events", "wh.ingest.x.acme.events",
 		"wh.ingest.0.", "wh.ingest.0", "wh.dlq.", "wh.history.acme.events", "wh", "",
@@ -97,6 +101,7 @@ func TestNATSTopicKey_OtherSubjects(t *testing.T) {
 }
 
 func TestValidSubjectPrefix(t *testing.T) {
+	t.Parallel()
 	for _, ok := range []string{"wh", "acme-wh", "wh_2"} {
 		require.NoError(t, validSubjectPrefix(ok), ok)
 	}
