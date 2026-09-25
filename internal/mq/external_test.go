@@ -182,6 +182,34 @@ func TestExternalNATS_TopicAtItsCapIsFull(t *testing.T) {
 	require.NoError(t, e.Publish(t.Context(), Topic{Tenant: "acme", Table: "other"}, []byte("x")))
 }
 
+// Under nats, WaveHouse does not require sync_always: a server run from the
+// shipped values leaves it off, and a publish to a one-replica partition is
+// acked and stored. Boot reports the replica count as recommended only.
+func TestExternalNATS_PublishesWithoutSyncAlways(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	require.False(t, f.server.JetStreamConfig().SyncAlways, "the shipped values must not set sync_always")
+
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "t"}
+	stream := shippedPartition(partitionOf(topic.Tenant, 4))
+	s, err := f.admin.Stream(t.Context(), stream)
+	require.NoError(t, err)
+	require.Equal(t, 1, s.CachedInfo().Config.Replicas)
+
+	require.NoError(t, e.Publish(t.Context(), topic, []byte("x")))
+	assert.Equal(t, uint64(1), f.streamMsgs(t, stream))
+
+	findings, err := verifyNATSTopology(t.Context(), e.js, e.topo)
+	require.NoError(t, err)
+	for _, got := range findings {
+		assert.Equal(t, FindingRecommended, got.Severity, "unexpected finding %v", got)
+	}
+	assert.True(t, slices.ContainsFunc(findings, func(got Finding) bool {
+		return got.Object == "stream "+stream && got.Field == "num_replicas"
+	}), "findings: %v", findings)
+}
+
 // A partition stream the operator deleted is ErrUnavailable, and the
 // topology gauge drops at once; the broker creates nothing.
 func TestExternalNATS_MissingPartitionIsUnavailable(t *testing.T) {

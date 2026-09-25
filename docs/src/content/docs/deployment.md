@@ -175,7 +175,7 @@ In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a hos
 
 If `data_dir` resolves into the container's writable overlay layer instead, **JetStream state is wiped on every restart**: in-flight events are lost, gap-fill stops bridging restarts, and disk usage accumulates inside `/var/lib/docker` instead of the volume the operator chose.
 
-Beyond persistence, the *speed* of that volume matters: JetStream `fsync`s every event to `<data_dir>/nats` before the ingest endpoint returns `200`, so the volume's `fsync` latency is your ingest latency floor. Managed cloud block storage handles this without thinking; commodity or virtualized substrates (ZFS without a SLOG, qcow2-on-`ext4`, spinning disks) can stall ingest with multi-second `fsync` tails. See [Durability & Storage](/durability) to measure yours before going live.
+Beyond persistence, the *speed* of that volume matters: the embedded broker (`mq.backend: embedded`, the default) `fsync`s every event to `<data_dir>/nats` before the ingest endpoint returns `200`, so the volume's `fsync` latency is your ingest latency floor. Managed cloud block storage handles this without thinking; commodity or virtualized substrates (ZFS without a SLOG, qcow2-on-`ext4`, spinning disks) can stall ingest with multi-second `fsync` tails. See [Durability & Storage](/durability) to measure yours before going live. Under [`mq.backend: nats`](#external-nats) the events are not under `data_dir`, and WaveHouse does not require an `fsync` per event: see [Durability](#durability) there.
 
 WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble`, when dedupe is on) is missing or empty:
 
@@ -359,6 +359,14 @@ The generated manifests satisfy every required finding. Some you may meet when y
 - `wh-ingest` needs `max_deliver: -1`. With a limit, a row that failed that many times would stay on its partition and never be delivered again.
 
 WaveHouse checks the topology again every five minutes and never repairs it. If you delete a partition, its publishes answer `503` with `Retry-After: 5`. If you delete `wh-ingest`, or the connection is closed for good (for example, its credentials are revoked), the ingest worker ends and the process exits, so that the orchestrator restarts it and the next boot names what is missing. An ingest worker that stayed up without its queue would leave the API accepting events that nothing writes.
+
+### Durability
+
+The two backends make a `200` from `POST /v1/ingest` durable in different ways:
+
+- **Embedded** (`mq.backend: embedded`): the one JetStream server `fsync`s every event to `<data_dir>/nats` before the `200`. There is one copy, so only the disk stands behind it.
+- **External NATS** (`mq.backend: nats`): the `200` comes after the partition stream acks the publish, and a stream with 3 or more replicas acks only once a Raft quorum of its servers has stored the event. WaveHouse does not require `sync_always` on your servers, and [`values.yaml`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/nats/values.yaml) does not set it: an acked event survives the loss of any server short of a quorum, so its durability comes from placing the replicas in separate failure domains (zones, racks or hosts), not from each server's disk. Losing a quorum's servers at once, before they sync, can lose events they acked.
+- **External NATS at one replica:** no second copy exists, so the server's `sync_interval` (2 minutes unless you set it) governs. Events stored since the last sync can be lost if that server crashes. Boot logs a `recommended` finding for every partition, history or dead-letter stream with fewer than 3 replicas, and still starts, so a one-server development cluster works. For production, generate the manifests with `--replicas 3` (the default) on a cluster whose servers do not share a failure domain, or set `sync_always` on a one-server cluster and accept the per-event `fsync` cost that [Durability & Storage](/durability) describes.
 
 ### Permissions
 
