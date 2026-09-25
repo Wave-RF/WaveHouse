@@ -82,6 +82,16 @@ func TestVerifyNATSTopology_Findings(t *testing.T) {
 		{"partition per-subject cap", stream(p0, func(s *jetstream.StreamConfig) {
 			s.MaxMsgsPerSubject, s.DiscardNewPerSubject = 0, false
 		}), shippedSpec, rec(p0, "max_msgs_per_subject")},
+		{"partition per-subject cap evicting", stream(p0, func(s *jetstream.StreamConfig) {
+			s.MaxMsgsPerSubject, s.DiscardNewPerSubject = 1000, false
+		}), shippedSpec, req(p0, "discard_new_per_subject")},
+		{"one stream for two partitions", func(t *testing.T, tp *fixtureTopology) {
+			tp.drop("WH_INGEST_1")
+			s := tp.stream(t, p0)
+			s.Subjects = append(s.Subjects, "wh.ingest.1.>")
+			s.Metadata = nil
+			tp.consumer(t, p0).FilterSubject = ""
+		}, shippedSpec, req(p0, "subjects")},
 		{"partition deny_purge", stream(p0, func(s *jetstream.StreamConfig) { s.DenyPurge = false }), shippedSpec, rec(p0, "deny_purge")},
 		{"partition metadata missing", stream(p0, func(s *jetstream.StreamConfig) { s.Metadata = nil }), shippedSpec, rec(p0, "metadata")},
 		{"partition metadata mismatch", stream(p0, func(s *jetstream.StreamConfig) {
@@ -105,6 +115,8 @@ func TestVerifyNATSTopology_Findings(t *testing.T) {
 		{"durable max_ack_pending low", durable(func(c *jetstream.ConsumerConfig) { c.MaxAckPending = 100 }), shippedSpec, rec(p0+"/wh-ingest", "max_ack_pending")},
 		{"durable deliver_policy", durable(func(c *jetstream.ConsumerConfig) { c.DeliverPolicy = jetstream.DeliverNewPolicy }), shippedSpec, req(p0+"/wh-ingest", "deliver_policy")},
 		{"durable filter", durable(func(c *jetstream.ConsumerConfig) { c.FilterSubject = "wh.ingest.0.acme.>" }), shippedSpec, req(p0+"/wh-ingest", "filter_subject")},
+		{"durable headers_only", durable(func(c *jetstream.ConsumerConfig) { c.HeadersOnly = true }), shippedSpec, req(p0+"/wh-ingest", "headers_only")},
+		{"durable replay_policy", durable(func(c *jetstream.ConsumerConfig) { c.ReplayPolicy = jetstream.ReplayOriginalPolicy }), shippedSpec, req(p0+"/wh-ingest", "replay_policy")},
 		{"durable inactive_threshold", durable(func(c *jetstream.ConsumerConfig) { c.InactiveThreshold = time.Hour }), shippedSpec, req(p0+"/wh-ingest", "inactive_threshold")},
 		{"durable max_request_batch", durable(func(c *jetstream.ConsumerConfig) { c.MaxRequestBatch = 10 }), shippedSpec, req(p0+"/wh-ingest", "max_request_batch")},
 		{"durable priority_policy", durable(func(c *jetstream.ConsumerConfig) {
@@ -118,6 +130,7 @@ func TestVerifyNATSTopology_Findings(t *testing.T) {
 		{"history filters a partition", stream(history, func(s *jetstream.StreamConfig) {
 			s.Sources[0].FilterSubject = "wh.ingest.0.acme.>"
 		}), shippedSpec, req(history, "sources")},
+		{"history source cannot attach", stream(p0, func(s *jetstream.StreamConfig) { s.MaxConsumers = 1 }), shippedSpec, req(history, "sources")},
 		{"history retention", stream(history, func(s *jetstream.StreamConfig) { s.Retention = jetstream.InterestPolicy }), shippedSpec, req(history, "retention")},
 		{"history discard", stream(history, func(s *jetstream.StreamConfig) { s.Discard = jetstream.DiscardNew }), shippedSpec, req(history, "discard")},
 		{"history max_age", stream(history, func(s *jetstream.StreamConfig) { s.MaxAge = 0 }), shippedSpec, req(history, "max_age")},
@@ -163,12 +176,15 @@ func TestVerifyNATSTopology_Findings(t *testing.T) {
 func TestAwaitNATSTopology_WaitsForTheOperator(t *testing.T) {
 	f := newNATSFixture(t)
 	js := f.connect(t, "wavehouse")
+	tp := shippedTopology(t)
+	created := make(chan error, 1)
 	go func() {
 		time.Sleep(time.Second)
-		f.apply(t, shippedTopology(t))
+		created <- f.create(t.Context(), tp)
 	}()
 	start := time.Now()
 	findings, err := awaitNATSTopology(t.Context(), js, shippedSpec, 20*time.Second)
+	require.NoError(t, <-created)
 	require.NoError(t, err)
 	assert.True(t, replicaWarnings(findings), "findings: %v", findings)
 	assert.GreaterOrEqual(t, time.Since(start), time.Second)

@@ -197,6 +197,9 @@ func verifyNATSTopology(ctx context.Context, js jetstream.JetStream, t NATSTopol
 		if err != nil {
 			return nil, err
 		}
+		if q := slices.Index(partitions[:p], name); name != "" && q >= 0 {
+			v.add(FindingRequired, "stream "+name, "subjects", "holds partitions %d and %d; each partition needs a stream of its own", q, p)
+		}
 		partitions[p] = name
 	}
 	if err := v.extraPartitions(ctx, partitions); err != nil {
@@ -355,7 +358,11 @@ func (v *topologyVerifier) partition(ctx context.Context, p int) (string, error)
 	if cfg.Mirror != nil {
 		req("mirror", "is set; a partition must not be a mirror")
 	}
-	if cfg.MaxMsgsPerSubject <= 0 || !cfg.DiscardNewPerSubject {
+	switch {
+	case cfg.MaxMsgsPerSubject > 0 && !cfg.DiscardNewPerSubject:
+		// Without it the server keeps the cap by evicting the topic's oldest rows.
+		req("discard_new_per_subject", "is unset while max_msgs_per_subject is %d; must be set, or a topic at its cap loses its oldest unwritten rows", cfg.MaxMsgsPerSubject)
+	case cfg.MaxMsgsPerSubject <= 0:
 		rec("max_msgs_per_subject", "set it with discard_new_per_subject, so one topic cannot fill the partition for every tenant in it")
 	}
 	if !cfg.DenyPurge || !cfg.DenyDelete {
@@ -420,6 +427,12 @@ func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, filt
 	if len(filters) > 0 && !slices.Equal(filters, []string{filter}) {
 		req("filter_subject", "is %q; must be empty or %q", filters, filter)
 	}
+	if cfg.HeadersOnly {
+		req("headers_only", "is set; the worker needs the bodies, and acking an empty one deletes the row")
+	}
+	if cfg.ReplayPolicy != jetstream.ReplayInstantPolicy {
+		req("replay_policy", "is %s; must be instant, or a backlog drains at the rate it arrived", cfg.ReplayPolicy)
+	}
 	if cfg.InactiveThreshold != 0 {
 		req("inactive_threshold", "is %s; a durable must not expire", cfg.InactiveThreshold)
 	}
@@ -456,7 +469,8 @@ func (v *topologyVerifier) history(ctx context.Context, partitions []string) err
 	if s == nil || err != nil {
 		return err
 	}
-	cfg := s.CachedInfo().Config
+	info := s.CachedInfo()
+	cfg := info.Config
 	req := func(field, format string, args ...any) { v.add(FindingRequired, obj, field, format, args...) }
 
 	if len(cfg.Subjects) > 0 {
@@ -480,6 +494,12 @@ func (v *topologyVerifier) history(ctx context.Context, partitions []string) err
 		}
 		if src.External != nil {
 			req("sources", "take %s from another domain or account; it must be local", name)
+		}
+		// A row wh-ingest acks before the source attaches never reaches the
+		// history; the server reports active -1 until then.
+		j := slices.IndexFunc(info.Sources, func(si *jetstream.StreamSourceInfo) bool { return si.Name == name })
+		if j < 0 || info.Sources[j].Active < 0 {
+			req("sources", "%s is not attached yet", name)
 		}
 	}
 	if cfg.Retention != jetstream.LimitsPolicy {

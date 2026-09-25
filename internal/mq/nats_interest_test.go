@@ -17,9 +17,10 @@ import (
 // rests on (risk S1 of the external-NATS design): an interest-retention
 // partition stream, a durable explicit-ack consumer on it, and a
 // limits-retention history stream that sources the partition. The server
-// builds the history's source consumer itself (ack-none), so whether it holds
-// rows on the partition, and whether it copies them before the durable's ack
-// deletes them, is the server's behaviour and not ours.
+// builds the history's source consumer itself, with AckFlowControl (not
+// ack-none, as the design assumed): it holds a row on the partition until the
+// history has stored it, so the durable's ack never deletes an uncopied row
+// once the source is attached.
 
 // s1Server runs an in-process JetStream server listening on a random TCP port
 // over dir, shut down by the test framework.

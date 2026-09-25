@@ -2,8 +2,10 @@ package mq
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -257,20 +259,29 @@ func (tp *fixtureTopology) drop(name string) {
 // reaches the history.
 func (f *natsFixture) apply(t *testing.T, tp *fixtureTopology) {
 	t.Helper()
-	ctx := t.Context()
-	for _, cfg := range tp.streams {
-		s, err := f.admin.CreateStream(ctx, cfg)
-		require.NoError(t, err, "create stream %s", cfg.Name)
-		for _, c := range tp.consumers[cfg.Name] {
-			_, err := s.CreateConsumer(ctx, c)
-			require.NoError(t, err, "create consumer %s/%s", cfg.Name, c.Durable)
-		}
-	}
+	require.NoError(t, f.create(t.Context(), tp))
 	for _, cfg := range tp.streams {
 		for _, src := range cfg.Sources {
 			f.awaitSource(t, cfg.Name, src.Name, tp.consumers[src.Name])
 		}
 	}
+}
+
+// create creates tp's streams and consumers without waiting for anything, so
+// a goroutine can call it.
+func (f *natsFixture) create(ctx context.Context, tp *fixtureTopology) error {
+	for _, cfg := range tp.streams {
+		s, err := f.admin.CreateStream(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("create stream %s: %w", cfg.Name, err)
+		}
+		for _, c := range tp.consumers[cfg.Name] {
+			if _, err := s.CreateConsumer(ctx, c); err != nil {
+				return fmt.Errorf("create consumer %s/%s: %w", cfg.Name, c.Durable, err)
+			}
+		}
+	}
+	return nil
 }
 
 // awaitSource waits for stream's source consumer on origin to appear beside
@@ -284,8 +295,12 @@ func (f *natsFixture) awaitSource(t *testing.T, stream, origin string, own []jet
 		return // a source the fixture left out on purpose
 	}
 	require.NoError(t, err)
-	if s.CachedInfo().Config.Retention != jetstream.InterestPolicy {
+	cfg := s.CachedInfo().Config
+	if cfg.Retention != jetstream.InterestPolicy {
 		return
+	}
+	if cfg.MaxConsumers > 0 && cfg.MaxConsumers <= len(own) {
+		return // a source the fixture keeps out on purpose
 	}
 	require.Eventually(t, func() bool {
 		n := 0
