@@ -65,8 +65,9 @@ type PipesFile struct {
 // `cache.l1_max_cost`), listeners, the observability
 // exporters — and the secrets (`clickhouse.password`, `auth.jwt_secret`,
 // `auth.operator_key`), which never belong in a tracked JSON file. Every
-// block and every top-level key inside it is REQUIRED: the binary carries no
-// compiled defaults, so the adopted snapshot is exactly what the files say.
+// block and every top-level key inside it is REQUIRED, but dedupe.retention
+// (missing means "0", forever): the binary carries no other compiled default,
+// so the adopted snapshot is exactly what the files say.
 // Defaults live in the seed directory (see Seed) that `wavehouse
 // bootstrap` writes. The fields are pointers only so Validate can tell
 // "absent" from the zero value and report it by path.

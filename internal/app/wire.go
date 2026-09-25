@@ -52,7 +52,8 @@ func withoutContext(release func() error) func(context.Context) error {
 // configuration (dedupe, dlq, query, schema, stream, cors — see
 // settings.TenantConfig). Required: config.Validate already rejected an
 // empty settings.dir, and an invalid directory refuses boot. The binary
-// carries no compiled defaults; `wavehouse bootstrap` writes the seed. A
+// carries no compiled defaults but a missing dedupe.retention ("0");
+// `wavehouse bootstrap` writes the seed. A
 // *reload* of an invalid directory merely keeps the previous snapshot. A
 // nested directory (one folder per tenant, #583) fails closed per tenant
 // instead, at boot and on reload alike: see settings.Registry.

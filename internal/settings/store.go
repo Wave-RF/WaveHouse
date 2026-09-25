@@ -16,9 +16,9 @@ import (
 // accessors below each resolve from a single snapshot load, so a reload lands
 // between lookups, never inside one.
 //
-// There are no compiled defaults here on purpose: every key is required by
-// Validate, so the snapshot is exactly what the files said when they were
-// adopted. Defaults live in the seed directory (Seed / WriteSeed).
+// There are no compiled defaults here on purpose, but one: every key but
+// dedupe.retention (missing means "0", forever) is required by Validate, so
+// the snapshot is exactly what the files said when they were adopted. Defaults live in the seed directory (Seed / WriteSeed).
 type Store struct {
 	// tenant is the id the Registry created the store for; the zero value
 	// only for a Store built outside a Registry (tests).

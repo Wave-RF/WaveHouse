@@ -67,8 +67,8 @@ auth:
 # query.default_max_rows / timestamp_bucket_seconds,
 # schema.refresh_interval, stream keepalive_interval / keepalive_buckets /
 # gap_window_minutes, mq.max_bytes_gb, cors.allowed_origins — and every key
-# is required: the
-# binary has no compiled defaults, so what's adopted is exactly what the
+# is required except dedupe.retention (missing = "0", forever): the binary
+# has no other compiled default, so what's adopted is exactly what the
 # files say. The server validates the directory at boot (invalid or missing
 # refuses to start) and reloads it on SIGHUP, on file change, or via
 # POST /v1/ops/settings/reload; a reload that fails validation keeps the
