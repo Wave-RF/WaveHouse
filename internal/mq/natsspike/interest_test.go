@@ -1,10 +1,10 @@
 //go:build integration
 
-// The S1 tests run in `make test-integration`: they pin nats-server's own
-// behavior and take seconds each, which the unit suite's per-package
-// timeout cannot absorb beside the embedded broker's tests.
-
-package mq
+// Package natsspike pins the nats-server behavior the external-NATS topology
+// rests on. It runs in `make test-integration` (seconds per test, more than
+// the unit suite's per-package timeout spares), and lives under internal/mq
+// because only internal/mq may import NATS.
+package natsspike
 
 import (
 	"context"

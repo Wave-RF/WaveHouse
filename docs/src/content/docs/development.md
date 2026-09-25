@@ -341,11 +341,11 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 | -------- | -------- | ------- | ------- |
 | Unit tests | `internal/*/_test.go` | No | `make test` |
 | SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-ts` (always includes coverage + gate) |
-| Integration tests (Go) | `tests/integration/*_test.go`, plus `integration`-tagged files under `internal/mq` | Yes | `make test-integration` |
+| Integration tests (Go) | `tests/integration/*_test.go`, plus `internal/mq/natsspike` | Yes | `make test-integration` |
 | E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
 
 - **Unit tests** live beside the code they test (e.g., `internal/discovery/discovery_test.go`). They use mocks or embedded NATS (in-process, no Docker needed).
-- **Integration tests** use the `//go:build integration` build tag. `TestMain` starts one ClickHouse testcontainer and boots the production wiring against it through `app.New` (embedded NATS, ingest worker, sweeper, hub, the API server on a random loopback port); tests reach it via `env(t)` and create their own tables. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second ingest worker batch window. The same target also runs `internal/mq` with the tag. There, `nats_interest_test.go` pins the nats-server behavior that the external-NATS topology depends on, against an in-process server with no Docker. Each test takes seconds, so it cannot run in the unit suite, which has a 15-second limit per package.
+- **Integration tests** use the `//go:build integration` build tag. `TestMain` starts one ClickHouse testcontainer and boots the production wiring against it through `app.New` (embedded NATS, ingest worker, sweeper, hub, the API server on a random loopback port); tests reach it via `env(t)` and create their own tables. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second ingest worker batch window. The same target also runs `internal/mq/natsspike`. That package pins the nats-server behavior the external-NATS topology depends on, against an in-process server with no Docker. It lives under `internal/mq` because only that tree may import NATS, and it runs here rather than in the unit suite because each test takes seconds and the unit suite has a 15-second limit per package.
 
 Shared test utilities live in `internal/testutil/`. The packages log through `slog.Default()`, so tests reach log output through `internal/testutil/logtest`: `logtest.Silence()` in a package's `TestMain` discards it, and `logtest.Capture(t, level)` routes it to a buffer for a test that asserts on log lines — such a test must not call `t.Parallel()`, because the default logger is process-wide.
 
