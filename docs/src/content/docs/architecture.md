@@ -26,7 +26,7 @@ flowchart TD
         SR --> DD["Dedupe (optional)"]
         DD --> MQ["MQ (NATS)"]
         MQ --> BC["Buffer Consumer<br/>(batch flush)"]
-        BC -.->|failed inserts| DLQ["DLQ"]:::fail
+        BC -.->|rejected rows| DLQ["DLQ"]:::fail
 
         QH["Query Handler"] --> Cache["Cache<br/>(Ristretto + singleflight)"]
 
