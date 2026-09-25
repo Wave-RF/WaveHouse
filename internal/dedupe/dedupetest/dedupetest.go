@@ -6,7 +6,6 @@ package dedupetest
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -308,11 +307,31 @@ var cases = []struct {
 		require.NoError(t, d.Commit(t.Context(), dup, 0), "only Claimed claims commit")
 		assert.Equal(t, dedupe.Claimed, reserve(t, d, long, key("e1"))[0].Status)
 	}},
-	{"a table holding NUL is refused", func(t *testing.T, s *suite) {
+	{"any table name is its own keyspace", func(t *testing.T, s *suite) {
 		d := s.store(t, "acme")
-		_, err := d.Reserve(t.Context(), []dedupe.Key{key("ok"), {Table: "a\x00b", ID: "e1"}}, long)
-		require.ErrorIs(t, err, dedupe.ErrInvalidKey)
-		assert.False(t, errors.Is(err, dedupe.ErrUnavailable), "a bad key is not worth retrying")
-		assert.Equal(t, dedupe.Claimed, reserve(t, d, long, key("ok"))[0].Status, "and nothing was claimed")
+		// seen[i] and fresh[i] differ only in where table ends and id
+		// begins; the first two pairs would share one key under a
+		// NUL-separated layout.
+		seen := []dedupe.Key{
+			{Table: "a", ID: "b\x00c"},
+			{Table: "a\x00", ID: "b"},
+			{Table: "", ID: "\x01a"},
+			{Table: "\xff\xfe", ID: "e1"},
+			{Table: "tab\tle \n", ID: "e1"},
+		}
+		fresh := []dedupe.Key{
+			{Table: "a\x00b", ID: "c"},
+			{Table: "a", ID: "\x00b"},
+			{Table: "\x01", ID: "a"},
+			{Table: "\xff", ID: "\xfee1"},
+			{Table: "tab\tle", ID: " \ne1"},
+		}
+		require.NoError(t, d.Commit(t.Context(), reserve(t, d, long, seen...), 0))
+		for _, c := range reserve(t, d, long, fresh...) {
+			assert.Equal(t, dedupe.Claimed, c.Status, "%q", c.Key)
+		}
+		for _, c := range reserve(t, d, long, seen...) {
+			assert.Equal(t, dedupe.Duplicate, c.Status, "%q", c.Key)
+		}
 	}},
 }
