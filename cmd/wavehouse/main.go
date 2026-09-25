@@ -97,6 +97,8 @@ func main() {
 			os.Exit(runValidate(os.Args[2:]))
 		case "bootstrap":
 			os.Exit(runBootstrap(os.Args[2:]))
+		case "mq":
+			os.Exit(runMQ(os.Args[2:], os.Stdout, os.Stderr))
 		case "version", "--version", "-v":
 			fmt.Printf("wavehouse %s (commit %s, built %s)\n", Version, GitCommit, BuildTime)
 			os.Exit(0)
@@ -138,6 +140,7 @@ func printUsage(w io.Writer) {
   wavehouse                 start the server
   wavehouse validate [dir]  validate a settings directory (dir falls back to %[1]s)
   wavehouse bootstrap [dir] write a starter settings directory, every key at its default (dir falls back to %[1]s)
+  wavehouse mq manifests    print the nack resources for an external NATS JetStream
   wavehouse health          liveness self-probe against the local server (container HEALTHCHECK)
   wavehouse version         print version, commit, and build time
   wavehouse help            show this help
