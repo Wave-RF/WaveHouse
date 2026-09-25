@@ -57,15 +57,15 @@ By default one process does all the work. `roles` splits it, so that the API and
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `roles` | `WH_ROLES` | `api,ingest,sweeper` | The roles this process runs: a YAML list, or a comma-separated variable. Order does not matter. An empty list, an empty entry, an unknown role, or a role named twice refuses boot. |
-| `instance_id` | `WH_INSTANCE_ID` | `<hostname>-<8 hex>` | Names this process to the others sharing its queue, for example as the holder a lease records. An empty value gets a fresh random suffix at every boot, so a restarted process is a new instance. |
+| `instance_id` | `WH_INSTANCE_ID` | `<hostname>-<8 hex>` | Names this process. Today it is only logged at boot (the `process roles` line); once a shared `coord.backend` exists, it names this process as the holder of a lease. An empty value gets a fresh random suffix at every boot, so a restarted process is a new instance. |
 
 | Role | Runs |
 | --- | --- |
 | `api` | The HTTP API, and what answers it: schema discovery, the token verifiers and their JWKS refresh, the dedupe stores, and the SSE hub with its bridge off the queue and its keepalive wheel. Every API process runs its own set of these, and each API process receives every event for its own SSE clients. |
 | `ingest` | The ingest worker, which writes the queue to ClickHouse. Every ingest process consumes the same shared durable consumer and competes for its messages. |
-| `sweeper` | The sweeper, which purges messages that are written and older than their tenant's gap window. It runs under the `sweeper` lease (see [`coord.backend`](#backends)), so only one process sweeps at a time, however many run the role. |
+| `sweeper` | The sweeper, which purges messages that are written and older than their tenant's gap window. It runs under the `sweeper` lease. With a shared [`coord.backend`](#backends), only one process sweeps at a time, however many run the role; with `local`, each process holds its own lease. |
 
-Every process, whatever its roles, reads the settings directory and reloads it (SIGHUP, the directory watcher, and the reload route), and serves `server.port`. A process without the `api` role serves only an ops listener there: `/livez`, `/readyz`, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404. The reload route on that listener accepts only the [operator key](#authentication), because no token verifier runs without the `api` role. `/readyz` is ready when a ClickHouse pool answers in an `ingest` process, and as soon as the process has booted in a `sweeper`-only one.
+Every process, whatever its roles, reads the settings directory and reloads it (SIGHUP, the directory watcher, and the reload route), and serves `server.port`. A process without the `api` role serves only an ops listener there: `/livez`, `/readyz` and their `/healthz`, `/health`, `/ready` aliases, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404; under `/v1/ops`, only once the operator-key check has passed (403 without it). The reload route on that listener accepts only the [operator key](#authentication), because no token verifier runs without the `api` role. `/readyz` is ready when a ClickHouse pool answers in an `ingest` process, and as soon as the process has booted in a `sweeper`-only one.
 
 Boot refuses a role set the selected backends cannot serve:
 
@@ -220,7 +220,7 @@ Every key, with its default. Save the YAML as `config.yaml` next to the binary (
 data_dir: ./data         # nats → ./data/nats, pebble → ./data/pebble
 
 roles: [api, ingest, sweeper]   # the work this process runs; a split needs shared backends
-instance_id: ""          # empty = <hostname>-<8 hex>, fresh at every boot
+instance_id: ""          # logged at boot; empty = <hostname>-<8 hex>, fresh at every boot
 
 server:
   port: 8080

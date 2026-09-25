@@ -122,6 +122,8 @@ func TestNew_OpsOnlyRouter(t *testing.T) {
 		"no verifier runs without the api role, so the token is invalid here")
 	assert.Equal(t, http.StatusForbidden, do(a, http.MethodPost, reload, "", "").Code)
 	assert.Equal(t, http.StatusForbidden, do(a, http.MethodPost, reload, "X-Operator-Key", "wrong").Code)
+	assert.Equal(t, http.StatusForbidden, do(a, http.MethodGet, "/v1/ops/schema", "", "").Code,
+		"under /v1/ops the operator-key gate answers before the 404")
 
 	for _, route := range []struct{ method, path string }{
 		{http.MethodPost, "/v1/ingest"},

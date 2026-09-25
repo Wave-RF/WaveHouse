@@ -56,12 +56,12 @@ func TestLoad_RolesFromYAML(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
-roles: [api, ingest, sweeper]
+roles: [sweeper, api, ingest]
 instance_id: pod-b
 `), 0o600))
 	cfg, err := Load(path)
 	require.NoError(t, err)
-	assert.Equal(t, AllRoles(), cfg.Roles)
+	assert.Equal(t, []Role{RoleSweeper, RoleAPI, RoleIngest}, cfg.Roles, "the file's list, not the env default")
 	assert.Equal(t, "pod-b", cfg.InstanceID)
 }
 

@@ -23,8 +23,9 @@ type Config struct {
 	// Roles are the components this process runs (every role by default);
 	// a Deployment per role differs only in this. See Role.
 	Roles []Role `yaml:"roles" env:"WH_ROLES" env-default:"api,ingest,sweeper"`
-	// InstanceID names this process to the others sharing its queue — the
-	// holder a lease records. Empty resolves to <hostname>-<8 hex> at Load.
+	// InstanceID names this process: logged at boot, and the holder a
+	// distributed coordinator will record. Empty resolves to <hostname>-<8 hex>
+	// at Load.
 	InstanceID string     `yaml:"instance_id" env:"WH_INSTANCE_ID"`
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
@@ -230,8 +231,7 @@ func joinRoles(roles []Role) string {
 }
 
 // defaultInstanceID is <hostname>-<8 hex>: the hostname for a reader (a
-// pod's name), the random suffix so a restarted process never resumes the
-// lease its predecessor held.
+// pod's name), the random suffix so a restarted process is a new instance.
 func defaultInstanceID() string {
 	host, err := os.Hostname()
 	if err != nil || host == "" {
