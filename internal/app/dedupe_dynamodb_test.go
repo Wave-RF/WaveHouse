@@ -3,12 +3,14 @@ package app
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -161,4 +163,43 @@ func TestNew_DynamoDBDedupeTableMissing(t *testing.T) {
 		_, err = dedupetest.Mark(context.Background(), acme, eventKey)
 		require.NoError(t, err)
 	})
+}
+
+// A nested directory has no watcher, so a table that comes good is picked up
+// by the background retry, not only by a reload someone has to send.
+func TestRun_DynamoDBDedupeRetriesTheTableCheck(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn})
+	cfg := testConfig(t, root)
+	fake := dynamoConfig(t, cfg, false)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	a := newApp(t, cfg, Options{Listener: ln})
+	acme := a.dedup.For("acme")
+	require.False(t, acme.Open())
+
+	_, stop := runApp(t, a, ln)
+	fake.setExists(true)
+	require.Eventually(t, acme.Open, 10*time.Second, 50*time.Millisecond, "the retry opened the store without a reload")
+	require.NoError(t, stop())
+}
+
+// No region anywhere is a certain config error: refused at boot in either
+// shape rather than failing every check afterwards.
+func TestNew_DynamoDBDedupeRefusesNoRegion(t *testing.T) {
+	for name, dir := range map[string]func(*testing.T) string{
+		"flat":   func(t *testing.T) string { return writeSettings(t, dedupeOn) },
+		"nested": func(t *testing.T) string { return writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			guardGlobals(t)
+			cfg := testConfig(t, dir(t))
+			dynamoConfig(t, cfg, true)
+			cfg.Dedupe.DynamoDB.Region = ""
+			t.Setenv("AWS_REGION", "")
+			t.Setenv("AWS_DEFAULT_REGION", "")
+			_, err := New(t.Context(), Options{Config: cfg})
+			require.ErrorContains(t, err, "dynamodb region is not set")
+		})
+	}
 }

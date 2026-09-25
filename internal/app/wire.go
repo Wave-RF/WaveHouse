@@ -541,7 +541,10 @@ var errDynamoUnchecked = errors.New("dedupe: dynamodb table not checked yet")
 // has dedupe on, and never creates it otherwise. A table that fails the check
 // follows the registry's rule for the shape, as Pebble's instance does: a
 // flat directory refuses boot; a nested one boots with every switched-on
-// store closed, so its ingest fails closed, and each reload checks again.
+// store closed, so its ingest fails closed. Unlike a local disk, a remote
+// table's failure is usually brief (a throttle, credentials not yet issued
+// mid-rollout), and a nested directory has no watcher to reload it, so the
+// check is also retried in the background, with backoff, until it passes.
 func (a *App) wireDynamoDedupe(ctx context.Context) error {
 	c := a.cfg.Dedupe.DynamoDB
 	d, err := dedupe.NewDynamo(ctx, dedupe.DynamoConfig{
@@ -576,7 +579,10 @@ func (a *App) wireDynamoDedupe(ctx context.Context) error {
 	stores := dedupe.NewStores(dedupe.Factory(d.Tenant).Gated(ready))
 	a.dedup = stores
 	a.add(component{name: "dedupe", close: withoutContext(stores.Close)})
+	var reconciling sync.Mutex // the hook and the retry loop both reconcile
 	reconcile := func(ctx context.Context) error {
+		reconciling.Lock()
+		defer reconciling.Unlock()
 		if err := stores.Retain(a.served); err != nil {
 			slog.Error("dedupe store close failed", "error", err)
 		}
@@ -598,8 +604,23 @@ func (a *App) wireDynamoDedupe(ctx context.Context) error {
 		return checkErr
 	}
 	a.tenants.AfterAdopt(func([]tenant.ID) { _ = reconcile(a.stopCtx) })
-	if err := reconcile(ctx); err != nil && !a.tenants.Nested() {
-		return fmt.Errorf("dedupe open: %w", err)
+	if err := reconcile(ctx); err != nil {
+		if !a.tenants.Nested() {
+			return fmt.Errorf("dedupe open: %w", err)
+		}
+		a.add(component{name: "dedupe table check", run: func(ctx context.Context) error {
+			for wait := time.Second; ready() != nil; wait = min(2*wait, 30*time.Second) {
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(wait):
+				}
+				if reconcile(ctx) == nil {
+					slog.Info("dedupe: dynamodb table check passed", "table", c.Table)
+				}
+			}
+			return nil
+		}})
 	}
 	return nil
 }

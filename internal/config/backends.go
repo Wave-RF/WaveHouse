@@ -76,8 +76,8 @@ type Dedupe struct {
 	// Lease is how long a claimed id stays pending while its record is
 	// published; a claim its request never settles lapses after it.
 	Lease time.Duration `yaml:"lease" env:"WH_DEDUPE_LEASE" env-default:"30s"`
-	// ReserveConcurrency bounds the parallel calls one request makes to a
-	// remote backend. Pebble ignores it.
+	// ReserveConcurrency bounds the parallel calls one Reserve, Commit or
+	// Release makes to a remote backend. Pebble ignores it.
 	ReserveConcurrency int                  `yaml:"reserve_concurrency" env:"WH_DEDUPE_RESERVE_CONCURRENCY" env-default:"64"`
 	DynamoDB           DedupeDynamoDBConfig `yaml:"dynamodb"`
 }

@@ -169,7 +169,7 @@ WH_SETTINGS_DIR=/etc/wavehouse/settings
 WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
 
 - `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `stream.gap_window_minutes` window (settings directory) of history that powers SSE gap-fill across restarts.
-- `<data_dir>/pebble` — the Pebble dedup KV: one instance shared by every tenant, each key led by its tenant and table. Only used while some tenant's `dedupe.enabled` is `true` in its `config.json` (opened and closed on reload).
+- `<data_dir>/pebble` — the Pebble dedup KV (with `dedupe.backend: pebble`, the default): one instance shared by every tenant, each key led by its tenant and table. Only used while some tenant's `dedupe.enabled` is `true` in its `config.json` (opened and closed on reload).
 
 In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data` and `/app/settings` owned by the nonroot user (UID 65532); the binary creates the `nats/` and `pebble/` subdirectories under `/app/data` itself on first run.
 
@@ -177,7 +177,7 @@ If `data_dir` resolves into the container's writable overlay layer instead, **Je
 
 Beyond persistence, the *speed* of that volume matters: JetStream `fsync`s every event to `<data_dir>/nats` before the ingest endpoint returns `200`, so the volume's `fsync` latency is your ingest latency floor. Managed cloud block storage handles this without thinking; commodity or virtualized substrates (ZFS without a SLOG, qcow2-on-`ext4`, spinning disks) can stall ingest with multi-second `fsync` tails. See [Durability & Storage](/durability) to measure yours before going live.
 
-WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble`, when dedupe is on) is missing or empty:
+WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble`, when dedupe is on with the `pebble` backend) is missing or empty:
 
 ```text wrap=false
 WARN  data directory does not exist — starting with no prior state.
@@ -493,7 +493,7 @@ dedupe:
     region: us-east-1 # or leave empty for AWS_REGION
 ```
 
-or `WH_DEDUPE_BACKEND=dynamodb`, `WH_DEDUPE_DYNAMODB_TABLE=wavehouse-dedupe-prod`. A table that is missing, has the wrong key schema, or cannot be reached with the pod's credentials refuses boot over a flat settings directory; over a nested one the pod boots, every tenant with dedupe on fails its ingest closed, and each reload checks the table again. The check runs whether or not any tenant has `dedupe.enabled` on. The per-tenant switch stays in each tenant's `config.json`.
+or `WH_DEDUPE_BACKEND=dynamodb`, `WH_DEDUPE_DYNAMODB_TABLE=wavehouse-dedupe-prod`. A table that is missing, has the wrong key schema, or cannot be reached with the pod's credentials refuses boot over a flat settings directory; over a nested one the pod boots, every tenant with dedupe on fails its ingest closed, and the check is retried in the background (backing off from one second to thirty) and on every reload. No region at all (neither `region` nor `AWS_REGION`) refuses boot in both shapes. The check runs whether or not any tenant has `dedupe.enabled` on. The per-tenant switch stays in each tenant's `config.json`.
 
 For development against dynamodb-local, set `dedupe.dynamodb.endpoint` (for example `http://localhost:8000`) and `create_table: true`, and give the SDK any static credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) and a region. `create_table` without an `endpoint` refuses boot.
 

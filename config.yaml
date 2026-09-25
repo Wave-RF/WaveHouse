@@ -50,7 +50,7 @@ mq:
 dedupe:
   backend: pebble # Pebble under <data_dir>/pebble; or dynamodb (below)
   lease: 30s # how long a claimed id stays pending; at most 2m with the embedded mq
-  reserve_concurrency: 64 # parallel calls per request to a remote backend
+  reserve_concurrency: 64 # parallel calls per Reserve/Commit/Release to a remote backend; no effect yet (ingest sends one id per call)
   # dynamodb: # read only when backend is dynamodb; credentials from the AWS SDK chain
   #   table: wavehouse-dedupe-prod
   #   region: "" # empty = AWS_REGION

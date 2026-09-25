@@ -139,6 +139,9 @@ func NewDynamo(ctx context.Context, cfg DynamoConfig, extra ...func(*config.Load
 	if err != nil {
 		return nil, fmt.Errorf("dedupe: aws config: %w", err)
 	}
+	if awsCfg.Region == "" {
+		return nil, errors.New("dedupe: dynamodb region is not set: set dedupe.dynamodb.region or AWS_REGION")
+	}
 	client := dynamodb.NewFromConfig(awsCfg, func(o *dynamodb.Options) {
 		if cfg.Endpoint != "" {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)

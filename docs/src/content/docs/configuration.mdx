@@ -35,7 +35,7 @@ This page is boot config only — what the platform operator owns (wiring, lifec
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; Pebble, holding every tenant's dedupe store while any tenant has dedupe enabled, at `<data_dir>/pebble`. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
+| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; Pebble (with `dedupe.backend: pebble`), holding every tenant's dedupe store while any tenant has dedupe enabled, at `<data_dir>/pebble`. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
 
 ### Backends
 
@@ -56,20 +56,20 @@ Whether a tenant dedupes, and on which field, are settings-directory keys ([Dedu
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `dedupe.lease` | `WH_DEDUPE_LEASE` | `30s` | How long a record's id stays claimed while the record is published. Another request carrying the same id meanwhile gets `503` with this as `Retry-After`, in whole seconds; a claim that is neither committed nor released, because its process died mid-publish, lapses after it. At most `2m` with `mq.backend: embedded`, the embedded queue's duplicate window: a longer lease refuses boot. A Go duration (`30s`, `1m`). |
-| `dedupe.reserve_concurrency` | `WH_DEDUPE_RESERVE_CONCURRENCY` | `64` | The most calls one request makes to a remote dedupe backend at once. `pebble` ignores it. |
+| `dedupe.lease` | `WH_DEDUPE_LEASE` | `30s` | How long a record's id stays claimed while the record is published. Another request carrying the same id meanwhile gets `503` with this as `Retry-After`, in whole seconds; a claim that is neither committed nor released, because its process died mid-publish, lapses after it. At most `2m` with `mq.backend: embedded`, the embedded queue's duplicate window: a longer lease refuses boot. A Go duration (`30s`, `1m`); `0` = the default. |
+| `dedupe.reserve_concurrency` | `WH_DEDUPE_RESERVE_CONCURRENCY` | `64` | The most parallel calls one Reserve, Commit or Release makes to a remote dedupe backend. Ingest sends one id per call today, so it has no effect yet; `pebble` ignores it. `0` = the default. |
 
 #### DynamoDB dedupe
 
-Read only when `dedupe.backend` is `dynamodb`. Credentials come from the AWS SDK's default chain (EKS Pod Identity or IRSA in a pod; `AWS_*` variables or a profile locally), never from this file; the table and its IAM policy are described in [Deployment](/deployment#a-shared-dedupe-table-on-dynamodb). At boot WaveHouse checks the table: its key schema must be `pk` (Binary) alone, and TTL off on `ex` is logged as a warning. A table that fails the check, or cannot be reached, refuses boot with a flat settings directory. With a nested one, the process boots, every tenant with dedupe on answers ingest with an error until the check passes, and every reload checks again. The check runs whether or not any tenant has dedupe on.
+Read only when `dedupe.backend` is `dynamodb`. Credentials come from the AWS SDK's default chain (EKS Pod Identity or IRSA in a pod; `AWS_*` variables or a profile locally), never from this file; the table and its IAM policy are described in [Deployment](/deployment#a-shared-dedupe-table-on-dynamodb). At boot WaveHouse checks the table: its key schema must be `pk` (Binary) alone, and TTL off on `ex` is logged as a warning. A table that fails the check, or cannot be reached, refuses boot with a flat settings directory. With a nested one, the process boots, every tenant with dedupe on answers ingest with an error until the check passes, and the check is retried in the background (backing off from one second to thirty) and on every reload, so a table that comes good is picked up without a restart. The check runs whether or not any tenant has dedupe on.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `dedupe.dynamodb.table` | `WH_DEDUPE_DYNAMODB_TABLE` | *(none)* | The shared table. Required. |
-| `dedupe.dynamodb.region` | `WH_DEDUPE_DYNAMODB_REGION` | *(empty)* | The table's region. Empty uses the SDK chain's (`AWS_REGION`). |
+| `dedupe.dynamodb.region` | `WH_DEDUPE_DYNAMODB_REGION` | *(empty)* | The table's region. Empty uses the SDK chain's (`AWS_REGION`); no region from either refuses boot. |
 | `dedupe.dynamodb.endpoint` | `WH_DEDUPE_DYNAMODB_ENDPOINT` | *(empty)* | A custom endpoint, for [dynamodb-local](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html) in development and tests. Leave it empty against AWS. |
-| `dedupe.dynamodb.timeout` | `WH_DEDUPE_DYNAMODB_TIMEOUT` | `250ms` | Deadline for each DynamoDB call, the SDK's retries included. |
-| `dedupe.dynamodb.max_attempts` | `WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS` | `3` | Attempts per call, the first included. |
+| `dedupe.dynamodb.timeout` | `WH_DEDUPE_DYNAMODB_TIMEOUT` | `250ms` | Deadline for each DynamoDB call, the SDK's retries included. `0` = the default. |
+| `dedupe.dynamodb.max_attempts` | `WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS` | `3` | Attempts per call, the first included. `0` = the default. |
 | `dedupe.dynamodb.retry_mode` | `WH_DEDUPE_DYNAMODB_RETRY_MODE` | `standard` | `standard`, or `adaptive`, which also slows the client down after throttling. |
 | `dedupe.dynamodb.create_table` | `WH_DEDUPE_DYNAMODB_CREATE_TABLE` | `false` | Development only: create the table at boot if it is missing, with TTL on `ex`. Refused unless `endpoint` is set, so it never creates a table in AWS; the production table belongs to your infrastructure code. |
 
