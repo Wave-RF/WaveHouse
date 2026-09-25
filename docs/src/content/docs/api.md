@@ -275,7 +275,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 503 | `{"error":"schema not loaded yet"}` | The tenant's first schema discovery has not succeeded yet (its ClickHouse unreachable, or [no pool for it](/settings-directory#clickhouse)), so whether the table exists is not known; `Retry-After: 5`. Decided before the body is read |
 | 500 | `{"error":"publish failed"}` | Message queue error |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Response includes `Retry-After: 30` header. |
-| 503 | `{"error":"service unavailable"}` | The message queue could not be reached or did not answer in time (a transient broker failure, not a full queue). Response includes `Retry-After: 5` header. |
+| 503 | `{"error":"service unavailable"}` | The message queue could not be reached or did not answer in time (a transient broker failure, not a full queue). Response includes `Retry-After: 5` header. Reserved for an external broker ([#613](https://github.com/Wave-RF/WaveHouse/issues/613)): the embedded broker never reports this, and its publish failures are the `500` above. |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 **curl example:**
@@ -387,7 +387,7 @@ A `200` is returned whenever the body was read and the records were processed �
 | 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …` — see the note above on how declarations are echoed; conflicting variant: `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of …`) | The request declared no `Content-Type`, one whose media type is unsupported or does not parse, a comma-bearing value that does not parse as a single media type, or repeated header lines that disagree — different formats, or one supported and one not. Checked before the body is parsed |
 | 500 | `{"error":"publish failed"}` / `{"error":"dedupe failed"}` | Message-queue or dedup-backend failure mid-batch |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream full (backpressure) mid-batch; includes `Retry-After: 30` |
-| 503 | `{"error":"service unavailable"}` | The message queue could not be reached or did not answer in time, mid-batch; includes `Retry-After: 5` |
+| 503 | `{"error":"service unavailable"}` | The message queue could not be reached or did not answer in time, mid-batch; includes `Retry-After: 5`. Reserved for an external broker ([#613](https://github.com/Wave-RF/WaveHouse/issues/613)): the embedded broker never reports this, and its publish failures are the `500` above |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 :::caution[At-least-once on retry]

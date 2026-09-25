@@ -38,9 +38,10 @@ type Harness struct {
 	// would. Its cleanup is registered on t and must tolerate the broker
 	// having been closed already.
 	New func(t *testing.T) mq.Broker
-	// DeleteIngestDurable deletes the durable behind CreateConsumer while it
-	// is consuming, as an operator could (the #587 failure path).
-	DeleteIngestDurable func(t *testing.T, b mq.Broker, durable string)
+	// EndDelivery ends delivery underneath a running consumer of Durable, as
+	// the broker's operator or the network could (the #587 failure path):
+	// deleting the durable, or closing the connection for good.
+	EndDelivery func(t *testing.T, b mq.Broker)
 	// Fill makes the next Publish for id refuse with mq.ErrQueueFull. nil
 	// skips the cases that need it.
 	Fill func(t *testing.T, b mq.Broker, id tenant.ID)
@@ -91,7 +92,7 @@ func Run(t *testing.T, h Harness) {
 		{"ReplaySince", true, replaySince},
 		{"ReplaySinceStopsWhenContextIsDone", true, replaySinceStopsWhenContextIsDone},
 		{"ReplaySincePullFailureIsAnError", true, replaySincePullFailureIsAnError},
-		{"FailedOnceWhenTheDurableIsDeleted", true, failedOnceWhenTheDurableIsDeleted},
+		{"FailedOnceWhenDeliveryEnds", true, failedOnceWhenDeliveryEnds},
 		{"FailedNeverAfterStop", true, failedNeverAfterStop},
 		{"MaxBytesReportsTheBudget", true, maxBytesReportsTheBudget},
 		{"Stats", true, stats},

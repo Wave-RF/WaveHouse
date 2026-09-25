@@ -428,12 +428,12 @@ func replaySincePullFailureIsAnError(t *testing.T, h Harness) {
 	assert.Equal(t, []string{"one"}, got)
 }
 
-// Deleting the durable under a running Consume ends delivery, and that is
-// reported on failed exactly once, however many queues it was held on.
-func failedOnceWhenTheDurableIsDeleted(t *testing.T, h Harness) {
+// Delivery ended underneath a running Consume is reported on failed exactly
+// once, however many queues the durable was held on.
+func failedOnceWhenDeliveryEnds(t *testing.T, h Harness) {
 	b := h.New(t)
 	_, _, failed := consume(ctx(t), t, b, mq.ConsumerConfig{MaxAckPending: 100}, nil)
-	h.DeleteIngestDurable(t, b, Durable)
+	h.EndDelivery(t, b)
 	select {
 	case err := <-failed:
 		require.ErrorIs(t, err, mq.ErrDeliveryEnded)
@@ -443,13 +443,13 @@ func failedOnceWhenTheDurableIsDeleted(t *testing.T, h Harness) {
 	none(t, failed, "a second failure was reported")
 }
 
-// A delivery the caller stopped is not a failure, even if the durable goes
-// afterwards.
+// A delivery the caller stopped is not a failure, even if delivery would
+// have ended afterwards.
 func failedNeverAfterStop(t *testing.T, h Harness) {
 	b := h.New(t)
 	_, stop, failed := consume(ctx(t), t, b, mq.ConsumerConfig{MaxAckPending: 100}, nil)
 	stop()
-	h.DeleteIngestDurable(t, b, Durable)
+	h.EndDelivery(t, b)
 	none(t, failed, "a stopped consumer reported a failure")
 }
 

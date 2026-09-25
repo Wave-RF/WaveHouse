@@ -1,4 +1,6 @@
-package mq_test
+// The embedded broker's run lives here rather than in internal/mq so it is a
+// test binary of its own, clear of that package's 15s budget.
+package mqtest_test
 
 import (
 	"testing"
@@ -20,8 +22,11 @@ func TestEmbeddedNATS_Conformance(t *testing.T) {
 			}
 			return e
 		},
-		DeleteIngestDurable: func(t *testing.T, b mq.Broker, durable string) {
-			require.NoError(t, mq.DeleteDurable(t.Context(), b.(*mq.EmbeddedNATS), durable))
+		// Closing the broker ends every tenant's delivery at once, the
+		// connection-closed half of the #587 path; the durable-deleted half
+		// is internal/mq's own test.
+		EndDelivery: func(t *testing.T, b mq.Broker) {
+			require.NoError(t, b.Close())
 		},
 		// A tiny budget, then publishes until the tenant's own stream refuses
 		// even the smallest event, so no later one fits.
