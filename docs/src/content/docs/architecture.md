@@ -246,8 +246,9 @@ Ingest worker pipeline (StartIngestWorker):
 
   (Insert-only pipeline. The wire format `EventMessage` carries only
   {table_name, scope, received_timestamp, format, columns, row}; non-insert mutations
-  DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/ops/query — the
-  /v1/ops/* RequireAdmin gate rejects non-admin callers at the API layer, so
+  DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/ops/query (or an
+  admin-authored write pipe) — the /v1/ops/* RequireAdmin gate rejects
+  non-admin callers at the API layer, so
   a no/invalid-token request (resolved to default_role, not admin in a
   production config) cannot reach the proxy.)
 

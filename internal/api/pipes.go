@@ -165,7 +165,8 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	// would answer a repeat without executing it, silently dropping the write
 	// (#386) — on every instance once the cache is shared. isMutation is the
 	// classifier executeCHQuery routes Exec by, so what bypasses here is
-	// exactly what runs as a write.
+	// exactly what runs as a write. no-store keeps an HTTP cache in front of
+	// a GET from answering a repeat the same way.
 	if isMutation(sql) {
 		data, _, err := h.run(r.Context(), store, conn, sql, params)
 		if err != nil {
@@ -174,6 +175,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Cache", "BYPASS")
+		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(data) //nolint:gosec // G705: JSON the handler marshalled from the exec result
 		return
 	}

@@ -580,6 +580,7 @@ func TestPipesHandler_Execute_MutationRunsEveryCall(t *testing.T) {
 				w := pipeCallAs(t, h, "log")
 				require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 				assert.Equal(t, "BYPASS", w.Header().Get("X-Cache"))
+				assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
 				assert.JSONEq(t, `[]`, w.Body.String())
 				l1.Wait()
 			}
