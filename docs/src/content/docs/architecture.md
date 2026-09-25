@@ -61,7 +61,7 @@ internal/
 ├── dedupe/      Optional deduplication (Reserve/Commit/Release; Pebble)
 ├── discovery/   ClickHouse schema introspection and validation
 ├── ingest/      Batch buffering, DLQ, and Active Sweeper
-├── keyenc/      The one escaping composite keys are built from (NATS subject tokens, cache namespace tokens)
+├── keyenc/      The one escaping composite keys are built from (NATS subject tokens, cache namespace tokens, dedupe keys)
 ├── mq/          MQ boundary: the only NATS/JetStream importer (owned message/consumer/stream types + embedded server)
 ├── observability/ OpenTelemetry pipeline (traces/metrics/logs + Prometheus exposition)
 ├── pipes/       Named query pipes (NamedQuery type, parameter binding, Source)
@@ -205,7 +205,7 @@ The hot-reloadable half of configuration: a directory of four JSON files (`confi
 
 ### `keyenc/` — Key Escaping
 
-- **keyenc.go** — The one escaping composite keys are built from, so a name can never be mistaken for a separator: `Escape` keeps ASCII letters, digits and `_` and writes every other byte as `%XX` (uppercase hex), `Unescape` decodes `%XX` in either case and takes any other byte as itself, and `Join`/`Split` join escaped fields with a separator the escaping never emits (`Join` panics on one it could). NATS subject tokens (`internal/mq`) and the cache's namespace tokens (`query.SafeEncodeToken`) both use it; its output is byte-identical to the subject-token encoding v0.1.0 shipped, which queued messages depend on.
+- **keyenc.go** — The one escaping composite keys are built from, so a name can never be mistaken for a separator: `Escape` keeps ASCII letters, digits and `_` and writes every other byte as `%XX` (uppercase hex), `Unescape` decodes `%XX` in either case and takes any other byte as itself, and `Join`/`Split` join escaped fields with a separator the escaping never emits (`Join` panics on one it could). NATS subject tokens (`internal/mq`), the cache's namespace tokens (`query.SafeEncodeToken`) and the dedupe keys (`internal/dedupe`, `/`-separated) use it; its output is byte-identical to the subject-token encoding v0.1.0 shipped, which queued messages depend on.
 
 ## Data Flows
 
