@@ -151,6 +151,12 @@ WH_AUTH_JWT_SECRET=<strong-random-secret>
 # as an admin secret — inject from your secret store, serve only over TLS.
 WH_AUTH_OPERATOR_KEY=<strong-random-operator-key>
 
+# Optional shared query cache for several instances (see Multiple instances
+# and the shared cache below); the password is a secret like the ones above.
+# WH_CACHE_BACKEND=redis
+# WH_CACHE_REDIS_ADDRS=redis:6379
+# WH_CACHE_REDIS_PASSWORD=<redis-password>
+
 # Settings directory (required): roles.json, policies.json, pipes.json,
 # config.json — the hot-reloadable configuration: the access-control policy
 # and its roles, the named pipes, and the tunables including the ClickHouse
@@ -407,9 +413,13 @@ The query-result cache is the layer that can be shared today. With the default `
 
 - **The server is unreachable from the inserting instance.** The invalidation is kept and retried until it lands (`wavehouse_cache_invalidations_pending` counts what is owed). Meanwhile other instances that can still reach the server keep serving the older results, for as long as the outage lasts and at most until each entry's TTL. An instance that stops while invalidations are still owed loses them, with the same bound. The same thing happens today when a process stops between an insert and its invalidation.
 - **A failover to a replica that had not yet received the latest token writes** can bring back entries filed under the older tokens, bounded by the replication lag at the moment of failover and those entries' TTL. WaveHouse never reads from replicas.
+- **The server is full and `maxmemory-policy` is `noeviction`.** It refuses the token writes, so invalidations are kept and retried, and until one lands every instance serves the results from before the insert, up to their TTL.
+- **A pipe that writes** (an `INSERT` in `pipes.json`) has its result cached like a read, so a repeated identical call is answered from the cache and the write does not run again ([#386](https://github.com/Wave-RF/WaveHouse/issues/386)). With a shared cache that holds on every instance, until the entry's TTL.
 - **Admin writes through `POST /v1/ops/query`** do not invalidate the cache ([#394](https://github.com/Wave-RF/WaveHouse/issues/394)). With a shared cache, the stale results they leave are served by every instance, not only one.
 
-**Sizing the server.** Every key WaveHouse writes has a TTL, and a version token lost to eviction, expiry, `FLUSHALL` or a restart can only cause misses, never bring back an entry it had invalidated. So set `maxmemory` and let the server evict: `maxmemory-policy allkeys-lru` (or `allkeys-lfu`, `volatile-lru`, `volatile-lfu`). Under `noeviction`, a full server refuses the writes. Fills then fail (counted by `wavehouse_cache_set_failures_total{reason="oom"}`), lookups keep working, and invalidations are kept and retried. A stored result is capped at `cache.redis.max_value_bytes` (1 MiB compressed). A tenant's version tokens share one hash tag, so each lookup reads them in one `MGET` in cluster mode as well. The results themselves carry no hash tag and spread across shards. Persistence is not needed: an empty server after a restart is a cold cache, not a wrong one.
+**Sizing the server.** Every key WaveHouse writes has a TTL, and a version token lost to eviction, expiry, `FLUSHALL` or a restart can only cause misses, never bring back an entry it had invalidated. So set `maxmemory` and let the server evict: `maxmemory-policy allkeys-lru` (or `allkeys-lfu`, `volatile-lru`, `volatile-lfu`). Under `noeviction`, a full server refuses the writes. Fills then fail (counted by `wavehouse_cache_set_failures_total{reason="oom"}`), only lookups whose version tokens already exist keep working, and invalidations are kept and retried, so the pre-insert results above stay served: avoid `noeviction`. A stored result is capped at `cache.redis.max_value_bytes` (1 MiB compressed). A tenant's version tokens share one hash tag, so each lookup reads them in one `MGET` in cluster mode as well. The results themselves carry no hash tag and spread across shards. Persistence is not needed: an empty server after a restart is a cold cache, not a wrong one.
+
+**The server is inside the trust boundary.** A cached result is served after the access policy has filtered it, so whoever can write to the server can change what any caller reads. Keep it on a private network, require a password or ACL user (`WH_CACHE_REDIS_PASSWORD`), use TLS across links you do not trust, and share it only with deployments you trust as much as this one.
 
 **Coalescing stays per instance.** `singleflight` collapses identical concurrent queries within each instance, so a cold hot query costs at most one ClickHouse query per instance, not one per request.
 

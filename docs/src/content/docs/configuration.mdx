@@ -122,11 +122,11 @@ Each tenant's queue has its own disk budget, `mq.max_bytes_gb`, a hot-reloadable
 | --- | --- | ------- | ----------- |
 | `cache.l1_max_cost` | `WH_CACHE_L1_MAX_COST` | `67108864` | Maximum size in bytes (~64 MB) of the `local` backend's in-process cache. The time-range bucket structured queries normalize to is `query.timestamp_bucket_seconds` in the [Settings Directory](/settings-directory#configjson-keys). |
 
-The `redis` backend's settings, read only when `cache.backend` is `redis`. It runs on Redis, Valkey, Dragonfly, ElastiCache (including Serverless) and MemoryDB: it sends only `GET`, `SET`, `MGET` and `PING`. [Deployment](/deployment#multiple-instances-and-the-shared-cache) covers sizing, `maxmemory-policy` and what a reader on another instance can see.
+The `redis` backend's settings, read only when `cache.backend` is `redis`. It is tested on Redis, Valkey, Dragonfly and a Redis Cluster node, and its data commands are only `GET`, `SET`, `MGET` and `PING` (no scripts, no client tracking), which ElastiCache and MemoryDB also serve. An ACL user also needs the connection commands the client sends when it dials: `HELLO`, `CLIENT`, `SELECT`, and `CLUSTER` in cluster mode; without them it is refused (`NOPERM`) and the cache stays bypassed. Whoever can write to the server can replace cached query results, which are served after the access policy has already been applied, so treat the server as part of WaveHouse's trust boundary (see [Deployment](/deployment#multiple-instances-and-the-shared-cache)). [Deployment](/deployment#multiple-instances-and-the-shared-cache) covers sizing, `maxmemory-policy` and what a reader on another instance can see.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `cache.redis.addrs` | `WH_CACHE_REDIS_ADDRS` | — | **Required** with `backend: redis.` `host:port` of the server; several are a cluster's seed nodes or the sentinels. Comma-separated in the env var. |
+| `cache.redis.addrs` | `WH_CACHE_REDIS_ADDRS` | — | **Required** with `backend: redis`. `host:port` of the server; several are a cluster's seed nodes or the sentinels. Comma-separated in the env var. |
 | `cache.redis.mode` | `WH_CACHE_REDIS_MODE` | `standalone` | `standalone`, `cluster` or `sentinel`. |
 | `cache.redis.sentinel_master` | `WH_CACHE_REDIS_SENTINEL_MASTER` | — | The master set name. Required with `mode: sentinel`. |
 | `cache.redis.username` | `WH_CACHE_REDIS_USERNAME` | — | ACL user. Empty uses the server's `default` user. |
@@ -138,7 +138,7 @@ The `redis` backend's settings, read only when `cache.backend` is `redis`. It ru
 | `cache.redis.tls.key_file` | `WH_CACHE_REDIS_TLS_KEY_FILE` | — | The client certificate's private key (PEM). |
 | `cache.redis.tls.server_name` | `WH_CACHE_REDIS_TLS_SERVER_NAME` | — | Name to verify the server's certificate against, when it differs from the address. |
 | `cache.redis.tls.insecure_skip_verify` | `WH_CACHE_REDIS_TLS_INSECURE_SKIP_VERIFY` | `false` | Accept any server certificate. Logged at `WARN` at boot: whoever can intercept the connection can read and replace cached results. |
-| `cache.redis.key_prefix` | `WH_CACHE_REDIS_KEY_PREFIX` | `wh` | Leads every key, so several deployments can share one server. No `{` or `}`. |
+| `cache.redis.key_prefix` | `WH_CACHE_REDIS_KEY_PREFIX` | `wh` | Leads every key, so several deployments can share one server, provided you trust each as much as the others: any of them can overwrite what the rest serve. No `{` or `}`. |
 | `cache.redis.timeout` | `WH_CACHE_REDIS_TIMEOUT` | `100ms` | Per operation. A lookup or fill that takes longer is a miss or a skipped fill, never a failed query. |
 | `cache.redis.dial_timeout` | `WH_CACHE_REDIS_DIAL_TIMEOUT` | `1s` | Per connection attempt. |
 | `cache.redis.max_value_bytes` | `WH_CACHE_REDIS_MAX_VALUE_BYTES` | `1048576` | Largest result stored, after compression (1 MiB). A larger one is returned to the caller but not cached. |

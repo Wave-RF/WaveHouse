@@ -73,3 +73,8 @@ exclude:
       - ^internal/settings/
       - ^cmd/wavehouse/validate\.go$
       - ^cmd/wavehouse/bootstrap\.go$
+      # The in-process cache backend: the e2e stack runs cache.backend=redis
+      # (#613), so the binary carries LocalCache and its version index but e2e
+      # never reaches them. The unit suite and the integration suite's main
+      # app (cache.backend=local) cover them; the merged total still counts them.
+      - ^internal/cache/(local|version_manager)\.go$

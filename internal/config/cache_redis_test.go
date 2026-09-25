@@ -189,6 +189,7 @@ func TestValidate_CacheRedis(t *testing.T) {
 	}{
 		{"defaults", func(*CacheRedisConfig) {}, ""},
 		{"no addrs", func(r *CacheRedisConfig) { r.Addrs = nil }, "cache.backend=redis needs cache.redis.addrs (WH_CACHE_REDIS_ADDRS)"},
+		{"addr with space", func(r *CacheRedisConfig) { r.Addrs = []string{"a:6379", " b:6379"} }, "no spaces around an address"},
 		{"addr without port", func(r *CacheRedisConfig) { r.Addrs = []string{"redis"} }, `cache.redis.addrs (WH_CACHE_REDIS_ADDRS) "redis": want host:port`},
 		{"mode", func(r *CacheRedisConfig) { r.Mode = "replica" }, `cache.redis.mode (WH_CACHE_REDIS_MODE) "replica": valid: standalone, cluster, sentinel`},
 		{"sentinel without master", func(r *CacheRedisConfig) { r.Mode = RedisSentinel }, "needs cache.redis.sentinel_master"},

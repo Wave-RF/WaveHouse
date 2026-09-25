@@ -55,8 +55,7 @@ type CacheRedisTLS struct {
 	InsecureSkipVerify bool   `yaml:"insecure_skip_verify" env:"WH_CACHE_REDIS_TLS_INSECURE_SKIP_VERIFY"`
 }
 
-// hasAddrs reports whether any address is set. An env file's blank
-// `WH_CACHE_REDIS_ADDRS=` loads as one empty address, which is none.
+// hasAddrs reports whether any address is set; a YAML `addrs: [""]` is none.
 func (r CacheRedisConfig) hasAddrs() bool {
 	return len(r.Addrs) > 1 || len(r.Addrs) == 1 && r.Addrs[0] != ""
 }
@@ -66,6 +65,9 @@ func (r CacheRedisConfig) validate() error {
 		return errors.New("cache.backend=redis needs cache.redis.addrs (WH_CACHE_REDIS_ADDRS): the server's host:port, or a cluster's seeds, or the sentinels")
 	}
 	for _, a := range r.Addrs {
+		if strings.TrimSpace(a) != a {
+			return fmt.Errorf("cache.redis.addrs (WH_CACHE_REDIS_ADDRS) %q: no spaces around an address", a)
+		}
 		if _, _, err := net.SplitHostPort(a); err != nil {
 			return fmt.Errorf("cache.redis.addrs (WH_CACHE_REDIS_ADDRS) %q: want host:port: %w", a, err)
 		}
