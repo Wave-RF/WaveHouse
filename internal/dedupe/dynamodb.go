@@ -190,7 +190,7 @@ func (d *Dynamo) Tenant(id tenant.ID) *Managed {
 }
 
 // Check verifies the table exists with the key schema this backend writes:
-// pk, binary, as the only key. TTL not enabled on ex is logged, not refused:
+// pk, a string, as the only key. TTL not enabled on ex is logged, not refused:
 // expiry never depends on it, only storage does.
 func (d *Dynamo) Check(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*d.cfg.Timeout)
@@ -204,8 +204,8 @@ func (d *Dynamo) Check(ctx context.Context) error {
 		return fmt.Errorf("dedupe: dynamodb table %s: key schema must be %s (HASH) alone", d.cfg.Table, attrKey)
 	}
 	for _, a := range t.AttributeDefinitions {
-		if aws.ToString(a.AttributeName) == attrKey && a.AttributeType != types.ScalarAttributeTypeB {
-			return fmt.Errorf("dedupe: dynamodb table %s: %s must be binary (B), is %s", d.cfg.Table, attrKey, a.AttributeType)
+		if aws.ToString(a.AttributeName) == attrKey && a.AttributeType != types.ScalarAttributeTypeS {
+			return fmt.Errorf("dedupe: dynamodb table %s: %s must be a string (S), is %s", d.cfg.Table, attrKey, a.AttributeType)
 		}
 	}
 	ttl, err := d.api.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: &d.cfg.Table})
@@ -232,7 +232,7 @@ func (d *Dynamo) CreateTable(ctx context.Context) error {
 	_, err := d.api.CreateTable(ctx, &dynamodb.CreateTableInput{
 		TableName:            &d.cfg.Table,
 		BillingMode:          types.BillingModePayPerRequest,
-		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String(attrKey), AttributeType: types.ScalarAttributeTypeB}},
+		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String(attrKey), AttributeType: types.ScalarAttributeTypeS}},
 		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String(attrKey), KeyType: types.KeyTypeHash}},
 	})
 	var inUse *types.ResourceInUseException
@@ -335,7 +335,7 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 
 func (s *dynamoStore) reserve(ctx context.Context, k Key, token, nowSec string, exp int64) (Status, error) {
 	item := map[string]types.AttributeValue{
-		attrKey:    &types.AttributeValueMemberB{Value: AppendKey(nil, s.prefix, k)},
+		attrKey:    &types.AttributeValueMemberS{Value: string(AppendKey(nil, s.prefix, k))},
 		attrState:  &types.AttributeValueMemberN{Value: statePending},
 		attrExpiry: &types.AttributeValueMemberN{Value: strconv.FormatInt(exp, 10)},
 		attrToken:  &types.AttributeValueMemberB{Value: []byte(token)},
@@ -378,13 +378,13 @@ func (s *dynamoStore) Commit(ctx context.Context, claims []Claim, retention time
 	seen := make(map[string]bool, len(claims))
 	writes := make([]types.WriteRequest, 0, len(claims))
 	for _, c := range claims {
-		pk := AppendKey(nil, s.prefix, c.Key)
-		if seen[string(pk)] {
+		pk := string(AppendKey(nil, s.prefix, c.Key))
+		if seen[pk] {
 			continue
 		}
-		seen[string(pk)] = true
+		seen[pk] = true
 		item := map[string]types.AttributeValue{
-			attrKey:   &types.AttributeValueMemberB{Value: pk},
+			attrKey:   &types.AttributeValueMemberS{Value: pk},
 			attrState: &types.AttributeValueMemberN{Value: stateCommitted},
 			attrToken: &types.AttributeValueMemberB{Value: []byte(c.Token)},
 		}
@@ -445,7 +445,7 @@ func (s *dynamoStore) Release(ctx context.Context, claims []Claim) error {
 		err := s.d.call(ctx, "delete_item", func(ctx context.Context) error {
 			_, err := s.d.api.DeleteItem(ctx, &dynamodb.DeleteItemInput{
 				TableName:           &s.d.cfg.Table,
-				Key:                 map[string]types.AttributeValue{attrKey: &types.AttributeValueMemberB{Value: AppendKey(nil, s.prefix, c.Key)}},
+				Key:                 map[string]types.AttributeValue{attrKey: &types.AttributeValueMemberS{Value: string(AppendKey(nil, s.prefix, c.Key))}},
 				ConditionExpression: aws.String(condRelease),
 				ExpressionAttributeValues: map[string]types.AttributeValue{
 					":tk":      &types.AttributeValueMemberB{Value: []byte(c.Token)},

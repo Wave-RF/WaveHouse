@@ -310,14 +310,18 @@ var cases = []struct {
 	{"any table name is its own keyspace", func(t *testing.T, s *suite) {
 		d := s.store(t, "acme")
 		// seen[i] and fresh[i] differ only in where table ends and id
-		// begins; the first two pairs would share one key under a
-		// NUL-separated layout.
+		// begins, or in a byte an escaped key could confuse with its
+		// escape: each pair would share one key under a layout that
+		// separated the fields without escaping them.
 		seen := []dedupe.Key{
 			{Table: "a", ID: "b\x00c"},
 			{Table: "a\x00", ID: "b"},
 			{Table: "", ID: "\x01a"},
 			{Table: "\xff\xfe", ID: "e1"},
 			{Table: "tab\tle \n", ID: "e1"},
+			{Table: "a/b", ID: "c"},
+			{Table: "a%2Fb", ID: "c"},
+			{Table: "t", ID: "%23x"},
 		}
 		fresh := []dedupe.Key{
 			{Table: "a\x00b", ID: "c"},
@@ -325,6 +329,9 @@ var cases = []struct {
 			{Table: "\x01", ID: "a"},
 			{Table: "\xff", ID: "\xfee1"},
 			{Table: "tab\tle", ID: " \ne1"},
+			{Table: "a", ID: "b/c"},
+			{Table: "a/b", ID: "c%"},
+			{Table: "t", ID: "#x"},
 		}
 		require.NoError(t, d.Commit(t.Context(), reserve(t, d, long, seen...), 0))
 		for _, c := range reserve(t, d, long, fresh...) {

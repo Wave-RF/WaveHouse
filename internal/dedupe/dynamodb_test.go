@@ -137,7 +137,7 @@ func TestClassify(t *testing.T) {
 func TestDynamo_ReserveReadsTheHeldItem(t *testing.T) {
 	t.Parallel()
 	_, m := openFake(t, &fakeDynamo{put: func(_ context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
-		id := string(in.Item[attrKey].(*types.AttributeValueMemberB).Value)
+		id := in.Item[attrKey].(*types.AttributeValueMemberS).Value
 		switch id[len(id)-1] {
 		case 'd':
 			return nil, &types.ConditionalCheckFailedException{Item: map[string]types.AttributeValue{attrState: &types.AttributeValueMemberN{Value: stateCommitted}}}
@@ -162,7 +162,7 @@ func TestDynamo_FailedReserveReleasesEveryPutThatMayHaveLanded(t *testing.T) {
 	var released []string
 	_, m := openFake(t, &fakeDynamo{
 		put: func(_ context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
-			id := string(in.Item[attrKey].(*types.AttributeValueMemberB).Value)
+			id := in.Item[attrKey].(*types.AttributeValueMemberS).Value
 			mu.Lock()
 			putTokens[id] = string(in.Item[attrToken].(*types.AttributeValueMemberB).Value)
 			mu.Unlock()
@@ -175,7 +175,7 @@ func TestDynamo_FailedReserveReleasesEveryPutThatMayHaveLanded(t *testing.T) {
 			return &dynamodb.PutItemOutput{}, nil
 		},
 		del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
-			id := string(in.Key[attrKey].(*types.AttributeValueMemberB).Value)
+			id := in.Key[attrKey].(*types.AttributeValueMemberS).Value
 			mu.Lock()
 			defer mu.Unlock()
 			assert.Equal(t, putTokens[id], string(in.ExpressionAttributeValues[":tk"].(*types.AttributeValueMemberB).Value), "released by the token it was put with")
@@ -210,7 +210,7 @@ func TestDynamo_CommitRetriesUnprocessedItems(t *testing.T) {
 		defer mu.Unlock()
 		var left []types.WriteRequest
 		for i, r := range reqs {
-			pk := string(r.PutRequest.Item[attrKey].(*types.AttributeValueMemberB).Value)
+			pk := r.PutRequest.Item[attrKey].(*types.AttributeValueMemberS).Value
 			assert.Equal(t, stateCommitted, r.PutRequest.Item[attrState].(*types.AttributeValueMemberN).Value)
 			assert.Contains(t, r.PutRequest.Item, attrExpiry)
 			if i == len(reqs)-1 && !heldBack[pk] && len(reqs) > 1 {
@@ -252,7 +252,7 @@ func TestDynamo_ReleaseTreatsAFailedConditionAsDone(t *testing.T) {
 	t.Parallel()
 	_, m := openFake(t, &fakeDynamo{del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
 		assert.Equal(t, condRelease, aws.ToString(in.ConditionExpression))
-		id := string(in.Key[attrKey].(*types.AttributeValueMemberB).Value)
+		id := in.Key[attrKey].(*types.AttributeValueMemberS).Value
 		if id[len(id)-1] == 'x' {
 			return nil, &types.ResourceNotFoundException{}
 		}
@@ -320,7 +320,7 @@ func TestDynamo_Check(t *testing.T) {
 	t.Parallel()
 	good := &dynamodb.DescribeTableOutput{Table: &types.TableDescription{
 		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
-		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeB}},
+		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
 	}}
 	ttlOn := &dynamodb.DescribeTimeToLiveOutput{TimeToLiveDescription: &types.TimeToLiveDescription{
 		AttributeName: aws.String("ex"), TimeToLiveStatus: types.TimeToLiveStatusEnabled,
@@ -375,8 +375,8 @@ func TestExpiresAt(t *testing.T) {
 }
 
 func idOf(av types.AttributeValue) string {
-	b := av.(*types.AttributeValueMemberB).Value
-	return string(b[len(b)-2:])
+	s := av.(*types.AttributeValueMemberS).Value
+	return s[len(s)-2:]
 }
 
 func TestDynamo_CommitAttemptsEveryChunk(t *testing.T) {

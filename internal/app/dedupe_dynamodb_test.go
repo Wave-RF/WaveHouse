@@ -68,7 +68,7 @@ func (f *fakeDynamo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "DescribeTable", "CreateTable":
 		body = `{"Table":{"TableName":"dedupe","TableStatus":"ACTIVE",` +
 			`"KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],` +
-			`"AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"B"}]}}`
+			`"AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}]}}`
 	case "DescribeTimeToLive":
 		body = `{"TimeToLiveDescription":{"AttributeName":"ex","TimeToLiveStatus":"ENABLED"}}`
 	case "BatchWriteItem":
