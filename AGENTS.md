@@ -450,6 +450,7 @@ tests/e2e/fixtures/     → Idempotent ClickHouse DDL scripts for test tables
 tests/e2e/sdk/          → E2E integration tests via TypeScript SDK (Vitest)
 deployments/compose/    → Docker Compose files (standalone.yaml, dependencies.yaml)
 deployments/Dockerfile  → Runtime image (+ Dockerfile.goreleaser for release builds)
+deployments/nats/       → External NATS JetStream: nack CRs (`wavehouse mq manifests` output, golden-tested) + Helm values with WaveHouse's user permissions (test-pinned)
 docs/                   → Project documentation
 .vscode/                → Workspace settings (gopls build flags, recommended extensions)
 ```

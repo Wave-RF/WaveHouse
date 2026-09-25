@@ -161,7 +161,7 @@ func s1Pull(t *testing.T, js jetstream.JetStream, n int, ack func(subject string
 	return acked, held
 }
 
-func all(string) bool { return true }
+func ackEvery(string) bool { return true }
 
 // A row stays in the partition until wh-ingest acks it, however long after the
 // history has copied it; the ack then deletes it from the partition and leaves
@@ -177,7 +177,7 @@ func TestS1_AckDeletesFromPartitionOnly(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	assert.EqualValues(t, 100, s1Msgs(t, js, "WH_INGEST_0"), "rows left the partition before wh-ingest acked them")
 
-	acked, _ := s1Pull(t, js, 100, all)
+	acked, _ := s1Pull(t, js, 100, ackEvery)
 	require.Equal(t, 100, acked)
 	s1Eventually(t, js, "WH_INGEST_0", 0)
 	assert.EqualValues(t, 100, s1Msgs(t, js, "WH_HISTORY"))
@@ -224,7 +224,7 @@ func TestS1_LateHistoryStillCopies(t *testing.T) {
 	s1Publish(t, js, "wh.ingest.0.acme.events", 50, 64)
 	s1History(t, js, time.Hour)
 	s1Eventually(t, js, "WH_HISTORY", 50)
-	acked, _ := s1Pull(t, js, 50, all)
+	acked, _ := s1Pull(t, js, 50, ackEvery)
 	require.Equal(t, 50, acked)
 	s1Eventually(t, js, "WH_INGEST_0", 0)
 	assert.EqualValues(t, 50, s1Msgs(t, js, "WH_HISTORY"))
@@ -279,7 +279,7 @@ func TestS1_HistoryKeepsForItsMaxAge(t *testing.T) {
 	s1Topology(t, js, 64<<20, 2*time.Second)
 
 	s1Publish(t, js, "wh.ingest.0.acme.events", 10, 64)
-	acked, _ := s1Pull(t, js, 10, all)
+	acked, _ := s1Pull(t, js, 10, ackEvery)
 	require.Equal(t, 10, acked)
 	s1Eventually(t, js, "WH_INGEST_0", 0)
 	assert.EqualValues(t, 10, s1Msgs(t, js, "WH_HISTORY"))
@@ -300,7 +300,7 @@ func TestS1_SourceHoldsRowsUntilCopied(t *testing.T) {
 
 	js = s1Connect(t, s1Server(t, dir))
 	s1Publish(t, js, "wh.ingest.0.acme.events", 10, 64)
-	acked, _ := s1Pull(t, js, 10, all)
+	acked, _ := s1Pull(t, js, 10, ackEvery)
 	require.Equal(t, 10, acked)
 	time.Sleep(200 * time.Millisecond)
 	if s1Msgs(t, js, "WH_HISTORY") == 0 {
@@ -320,7 +320,7 @@ func TestS1_HistoryGoneReleasesPartition(t *testing.T) {
 	require.Eventually(t, func() bool { return s1Consumers(t, js) == 1 }, 10*time.Second, 10*time.Millisecond)
 
 	s1Publish(t, js, "wh.ingest.0.acme.events", 10, 64)
-	acked, _ := s1Pull(t, js, 10, all)
+	acked, _ := s1Pull(t, js, 10, ackEvery)
 	require.Equal(t, 10, acked)
 	s1Eventually(t, js, "WH_INGEST_0", 0)
 }
