@@ -13,6 +13,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/Wave-RF/WaveHouse/internal/keyenc"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
@@ -44,17 +45,20 @@ func newToken() []byte {
 
 // tenantTokenKey is the key of tenant id's token. Every token key carries
 // the tenant as a hash tag, so all of a tenant's tokens share one cluster
-// slot and a lookup reads them with one MGET.
+// slot and a lookup reads them with one MGET. The tenant goes in verbatim:
+// its grammar is keyenc's kept bytes, so it is its own escaped form.
 func tenantTokenKey(prefix string, id tenant.ID) string {
 	return prefix + ":{" + string(id) + "}:T"
 }
 
+// tableTokenKey and scopeTokenKey take raw names and escape them after the
+// fixed prefix (keyenc), so no ':' in a name reads as the separator.
 func tableTokenKey(prefix string, id tenant.ID, table string) string {
-	return prefix + ":{" + string(id) + "}:B:" + table
+	return string(keyenc.AppendJoin([]byte(prefix+":{"+string(id)+"}:B:"), ':', table))
 }
 
 func scopeTokenKey(prefix string, id tenant.ID, table, scope string) string {
-	return prefix + ":{" + string(id) + "}:S:" + table + ":" + scope
+	return string(keyenc.AppendJoin([]byte(prefix+":{"+string(id)+"}:S:"), ':', table, scope))
 }
 
 // sortedDeps returns deps in canonical order without duplicates.
@@ -91,16 +95,16 @@ func bumpKeys(prefix string, ns Namespace) []string {
 
 // valueKey names the entry for sha over deps. It carries no versions, so a
 // refill overwrites in place, and no hash tag, so one tenant's values spread
-// across a cluster's shards.
+// across a cluster's shards. It hashes the escaped sha and each dep's
+// escaped, joined table and scope, each ended by a NUL, which escaping never
+// writes, so no two sets of names hash the same input.
 func valueKey(prefix string, id tenant.ID, sha string, deps []Namespace) string {
 	h := sha256.New()
-	h.Write([]byte(sha))
-	h.Write([]byte{0})
+	b := keyenc.AppendEscape(nil, sha)
+	h.Write(append(b, 0))
 	for _, d := range sortedDeps(deps) {
-		h.Write([]byte(d.Table))
-		h.Write([]byte{0})
-		h.Write([]byte(d.Scope))
-		h.Write([]byte{0})
+		b = keyenc.AppendJoin(b[:0], ':', d.Table, d.Scope)
+		h.Write(append(b, 0))
 	}
 	return prefix + ":q:" + string(id) + ":" + hex.EncodeToString(h.Sum(nil))
 }
