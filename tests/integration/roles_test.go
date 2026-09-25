@@ -32,16 +32,43 @@ import (
 
 // The binary under test is built once per run, with coverage when the suite
 // collects it: a child inherits GOCOVERDIR and writes its counters there.
-// binaryDir is removed by TestMain after the run (removeRolesBinary).
+// TestMain starts the build alongside the containers, so it overlaps their
+// startup and stays outside -timeout, which counts from m.Run; a cold cover
+// build is most of a minute on a CI runner. binaryDir is removed by TestMain
+// after the run (removeRolesBinary).
 var (
-	binaryOnce sync.Once
-	binaryDir  string
-	binaryPath string
-	errBinary  error
+	binaryBuilt = make(chan struct{})
+	binaryDir   string
+	binaryPath  string
+	errBinary   error
 )
 
-// removeRolesBinary deletes the binary wavehouseBinary built, if it built one.
+// buildWavehouseBinary builds the binary and closes binaryBuilt. TestMain
+// calls it once.
+func buildWavehouseBinary() {
+	defer close(binaryBuilt)
+	dir, err := os.MkdirTemp("", "wh-roles-bin-")
+	if err != nil {
+		errBinary = err
+		return
+	}
+	binaryDir = dir
+	binaryPath = filepath.Join(dir, "wavehouse")
+	args := []string{"build", "-o", binaryPath}
+	if os.Getenv("GOCOVERDIR") != "" {
+		args = append(args, "-cover", "-coverpkg=./...")
+	}
+	_, file, _, _ := runtime.Caller(0)
+	cmd := exec.Command("go", append(args, "./cmd/wavehouse")...) //nolint:gosec // G204: fixed arguments
+	cmd.Dir = filepath.Join(filepath.Dir(file), "..", "..")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		errBinary = fmt.Errorf("go build: %w\n%s", err, out)
+	}
+}
+
+// removeRolesBinary deletes the binary buildWavehouseBinary built, if any.
 func removeRolesBinary() {
+	<-binaryBuilt
 	if binaryDir != "" {
 		_ = os.RemoveAll(binaryDir)
 	}
@@ -49,25 +76,7 @@ func removeRolesBinary() {
 
 func wavehouseBinary(t *testing.T) string {
 	t.Helper()
-	binaryOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "wh-roles-bin-")
-		if err != nil {
-			errBinary = err
-			return
-		}
-		binaryDir = dir
-		binaryPath = filepath.Join(dir, "wavehouse")
-		args := []string{"build", "-o", binaryPath}
-		if os.Getenv("GOCOVERDIR") != "" {
-			args = append(args, "-cover", "-coverpkg=./...")
-		}
-		_, file, _, _ := runtime.Caller(0)
-		cmd := exec.Command("go", append(args, "./cmd/wavehouse")...) //nolint:gosec // G204: fixed arguments
-		cmd.Dir = filepath.Join(filepath.Dir(file), "..", "..")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			errBinary = fmt.Errorf("go build: %w\n%s", err, out)
-		}
-	})
+	<-binaryBuilt
 	require.NoError(t, errBinary)
 	return binaryPath
 }
@@ -287,6 +296,7 @@ func (l *lockedWriter) String() string {
 // accepted once, and that killing D moves the sweeper lease to its
 // replacement within about the lease duration.
 func TestRoles_SeparateProcesses(t *testing.T) {
+	t.Parallel()
 	e := env(t)
 	ctx := context.Background()
 	natsURL := startNATS(t)

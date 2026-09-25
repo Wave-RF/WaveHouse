@@ -167,6 +167,7 @@ func awaitEvent(t *testing.T, lines <-chan string, want string) {
 // the operator deleting the ingest durable ending every worker, and so every
 // process.
 func TestNATSBackend_EndToEnd(t *testing.T) {
+	t.Parallel()
 	e := env(t)
 	ctx := context.Background()
 	natsURL := startNATS(t)

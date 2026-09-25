@@ -146,6 +146,7 @@ func ingestRow(t *testing.T, baseURL, table, user string) {
 // invalidates what the other cached: the other's next query is a miss that
 // returns the new row, well inside the TTL the stale entry was filed with.
 func TestSharedCache_IngestOnOneInstanceInvalidatesAnother(t *testing.T) {
+	t.Parallel()
 	table := createTable(t, "user_id String, value Float64", "ORDER BY user_id")
 	_, redisAddr := startRedis(t)
 	prefix := fmt.Sprintf("it%d", cachePrefixes.Add(1))
@@ -220,6 +221,7 @@ func TestSharedCache_IngestOnOneInstanceInvalidatesAnother(t *testing.T) {
 // keep succeeding, straight from ClickHouse, each a miss; an ingest made
 // meanwhile is visible at once. Once it answers again, the cache serves hits.
 func TestSharedCache_RedisDownQueriesBypass(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	table := createTable(t, "user_id String, value Float64", "ORDER BY user_id")
 	ctr, redisAddr := startRedis(t)

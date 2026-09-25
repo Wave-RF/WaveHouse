@@ -26,6 +26,7 @@ import (
 // Its own container and broker, like the boot-resilience test: the shared env
 // assumes ClickHouse stays up.
 func TestIngest_ClickHouseOutage_RetriedNotDeadLettered(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	ch, err := startClickHouse(ctx)

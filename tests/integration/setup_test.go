@@ -7,6 +7,11 @@
 // env(). Each test creates its own ClickHouse table for data
 // isolation; the shared infra avoids the per-test container churn that drove
 // flakes and slow runs in the previous monolithic file.
+//
+// A test that brings up its own ClickHouse, processes or backends calls
+// t.Parallel: in series they do not fit the suite's -timeout on a CI runner.
+// One that changes shared state (the shared app, the process environment)
+// stays sequential; Go starts the parallel tests only after those finish.
 package tests
 
 import (
@@ -110,11 +115,14 @@ func createTable(t *testing.T, columns, tableOpts string) string {
 }
 
 func TestMain(m *testing.M) {
+	go buildWavehouseBinary()
 	code, cleanup := setup()
 	if code != 0 {
 		cleanup()
+		removeRolesBinary()
 		os.Exit(code)
 	}
+	<-binaryBuilt
 
 	exit := m.Run()
 	cleanup()

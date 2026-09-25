@@ -22,6 +22,7 @@ import (
 // through the shipped lease bucket, as the restricted wavehouse user, and the
 // lease moves to the other replica when the holder stops.
 func TestCoordNATS_OneSweeperAcrossReplicas(t *testing.T) {
+	t.Parallel()
 	e := env(t)
 	ctx := context.Background()
 	natsURL := startNATS(t)
@@ -63,6 +64,7 @@ func TestCoordNATS_OneSweeperAcrossReplicas(t *testing.T) {
 // The lease bucket is the operator's: boot waits for it with the rest of the
 // topology and then refuses, naming it.
 func TestCoordNATS_MissingBucketRefusesBoot(t *testing.T) {
+	t.Parallel()
 	srv := natstest.Start(t)
 	require.NoError(t, srv.Operator.DeleteBucket(t.Context(), natstest.CoordBucket))
 	pw := filepath.Join(t.TempDir(), "nats-password")
