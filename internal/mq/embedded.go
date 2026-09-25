@@ -272,6 +272,7 @@ func wrapMsg(ctx context.Context, m jetstream.Msg) *Message {
 		func() error {
 			return m.Nak()
 		},
+		WithNakDelay(m.NakWithDelay),
 	)
 }
 

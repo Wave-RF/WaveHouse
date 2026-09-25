@@ -78,6 +78,13 @@ type IngestWorker struct {
 	// reload applies to the next poison row without a restart.
 	dlqEnabled func(id tenant.ID, table string) bool
 
+	// backoffs holds one retry backoff per ClickHouse pool: a batch that
+	// meets an unavailable ClickHouse is handed back to the MQ for a delayed
+	// redelivery, and every table on that pool waits out the same backoff.
+	backoffs backoffs
+	// now reads the clock for the backoffs; nil is time.Now (tests set it).
+	now func() time.Time
+
 	// wg tracks the dispatch loop; ackWg tracks backgrounded DoubleAck goroutines.
 	// Separate so shutdown can drain inserts (wg → tableWg) before waiting on the
 	// fsync-bound acks, without an ackWg.Add racing its Wait — see dispatchLoop.
@@ -103,6 +110,16 @@ type IngestWorker struct {
 var poisonCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 	"wavehouse_ingest_poison_total",
 	metric.WithDescription("Ingest envelopes the worker could not read, by disposition: parked on the DLQ, or acked and dropped where the DLQ is disabled for the table"),
+)
+
+// retryCounter counts rows handed back to the MQ for a delayed retry because
+// ClickHouse could not take them, by reason: the chconn.Class of the failure
+// (unavailable, denied, unknown), or backoff for rows turned away without a
+// try while their pool was backing off. A sustained rate is an outage that
+// is holding rows in the queue — none of them reach the DLQ.
+var retryCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
+	"wavehouse_ingest_retries_total",
+	metric.WithDescription("Rows handed back to the ingest queue for a delayed retry because ClickHouse could not take them, by reason"),
 )
 
 // Batching defaults; overridable on the struct for tests.
@@ -362,8 +379,15 @@ func newTableBatcher(w *IngestWorker, table string) *tableBatcher {
 }
 
 // add appends a row, arming the deadline timer on the first row of a batch and
-// requesting a flush once the batch is full.
+// requesting a flush once the batch is full. A row whose ClickHouse pool is
+// inside a backoff window is handed straight back to the MQ instead: holding
+// it here would only pin it in memory until a flush that is certain to hand
+// it back, so the backlog of an outage stays in the queue, not in the worker.
 func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
+	if wait, ok := b.w.backoffs.waiting(b.w.target(pm.tenant), b.w.clock()); ok {
+		b.w.retryLater(ctx, b.table, []parsedMsg{pm}, wait, "backoff")
+		return
+	}
 	if len(b.batch) == 0 {
 		b.timer.Reset(b.w.maxWait)
 	}
@@ -533,20 +557,40 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 
 // flushTable inserts one table's batch into ClickHouse, then (on success) kicks
 // off cache invalidation + backgrounded acks via handleSuccess. On bulk failure
-// it falls back to 1-by-1 isolation: each row that re-inserts cleanly is acked,
-// each that fails again is sent to the DLQ — or, with the DLQ switched off for
-// the table, left unacked so NATS redelivers it (the row is never dropped, it
-// retries until it inserts or the DLQ is switched on). A batch whose tenant has
-// no ClickHouse connection is not tried at all: it meets its DLQ switch once,
-// whole, whatever its column lists (parkBatch). tableLoop guarantees at most
-// one concurrent flushTable per tenant table; different tables — two tenants'
-// tables of one name included — may flush concurrently.
+// it asks what the failure was (chconn.Classify):
+//
+//   - ClickHouse REJECTED the batch — it read it and refused something in it:
+//     row-by-row isolation. Each row that re-inserts cleanly is acked, each
+//     that is rejected again goes to the DLQ — or, with the DLQ switched off for
+//     the table, is left unacked so NATS redelivers it.
+//   - Anything else — ClickHouse down, unreachable, overloaded, read-only,
+//     refusing the credentials, or a failure with no verdict at all: nothing
+//     in the batch was judged, so isolating it would only multiply the
+//     requests, and dead-lettering it would park good rows. The batch is
+//     handed back to the MQ with a delayed redelivery (retryLater), and the
+//     pool backs off (backoff), so every table on a down ClickHouse waits
+//     together. The same applies to a failure that lands mid-isolation: the
+//     rows not yet settled go back, none to the DLQ.
+//
+// A batch whose tenant has no ClickHouse connection is not tried at all: it
+// meets its DLQ switch once, whole, whatever its column lists (parkBatch).
+// tableLoop guarantees at most one concurrent flushTable per tenant table;
+// different tables — two tenants' tables of one name included — may flush
+// concurrently.
 func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg) {
 	if len(msgs) == 0 {
 		return
 	}
-	if id := msgs[0].tenant; w.target(id).URL == "" {
+	id := msgs[0].tenant
+	t := w.target(id)
+	if t.URL == "" {
 		w.parkBatch(ctx, tableName, msgs, noTargetError(id))
+		return
+	}
+
+	bo := w.backoffs.forTarget(t)
+	if wait, ok := bo.allow(w.clock()); !ok {
+		w.retryLater(ctx, tableName, msgs, wait, "backoff")
 		return
 	}
 
@@ -554,8 +598,31 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 	// written under different column lists — a schema change mid-stream —
 	// cannot share a statement. In steady state a table has exactly one
 	// signature and this is a single group.
-	for _, group := range groupByColumns(msgs) {
-		w.flushGroup(ctx, tableName, group)
+	groups := groupByColumns(msgs)
+	for i, group := range groups {
+		unsettled, err := w.flushGroup(ctx, tableName, group)
+		if err == nil {
+			continue
+		}
+		for _, later := range groups[i+1:] {
+			unsettled = append(unsettled, later...)
+		}
+		class := chconn.Classify(err)
+		wait, first, log := bo.fail(w.clock())
+		if log {
+			msg := "ClickHouse cannot take inserts, retrying with backoff; no row goes to the DLQ"
+			if !first {
+				msg = "ClickHouse still cannot take inserts, retrying with backoff"
+			}
+			slog.WarnContext(ctx, msg, "tenant", id, "table", tableName, "clickhouse", t.URL,
+				"class", class.String(), "retry_in", wait, "error", err)
+		}
+		w.retryLater(ctx, tableName, unsettled, wait, class.String())
+		return
+	}
+	if recovered, lasted := bo.succeed(w.clock()); recovered {
+		slog.InfoContext(ctx, "ClickHouse is taking inserts again", "tenant", id, "table", tableName,
+			"clickhouse", t.URL, "outage", lasted)
 	}
 }
 
@@ -581,35 +648,70 @@ func groupByColumns(msgs []parsedMsg) [][]parsedMsg {
 }
 
 // flushGroup inserts one (table, column list) batch, falling back to row-by-row
-// isolation on failure. Every message in group shares a column signature, so the
-// first one's columns describe them all.
-func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group []parsedMsg) {
+// isolation when ClickHouse rejects it. Every message in group shares a column
+// signature, so the first one's columns describe them all.
+//
+// err is non-nil when ClickHouse could not take a request — the bulk insert or
+// any isolated row (see flushTable) — and unsettled is then every row not yet
+// acked, dead-lettered or left for redelivery: the whole group, or what
+// isolation had not reached. A rejected row is settled; it never makes err.
+func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group []parsedMsg) (unsettled []parsedMsg, err error) {
 	cols := group[0].columns
 
-	err := w.insertToClickHouse(ctx, tableName, cols, group)
+	err = w.insertToClickHouse(ctx, tableName, cols, group)
 	if err == nil {
 		w.handleSuccess(ctx, tableName, group)
-		return
+		return nil, nil
+	}
+	if chconn.Classify(err) != chconn.Rejected {
+		return group, err
 	}
 
-	slog.WarnContext(ctx, "bulk insert failed, falling back to 1-by-1 isolation", "tenant", group[0].tenant, "table", tableName, "error", err)
+	slog.WarnContext(ctx, "bulk insert rejected, falling back to 1-by-1 isolation", "tenant", group[0].tenant, "table", tableName, "error", err)
 
 	// ISOLATE & DLQ: re-insert one row at a time so a single poison row can't
 	// sink the whole batch.
 	// TODO: potentially could try a binary search or something eventually maybe? unclear if faster...
-	for _, pm := range group {
+	for i, pm := range group {
 		singleErr := w.insertToClickHouse(ctx, tableName, cols, []parsedMsg{pm})
-		if singleErr != nil {
-			if w.dlqEnabled != nil && !w.dlqEnabled(pm.tenant, tableName) {
-				slog.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "tenant", pm.tenant, "table", tableName, "error", singleErr)
-				continue
-			}
+		switch {
+		case singleErr == nil:
+			w.handleSuccess(ctx, tableName, []parsedMsg{pm})
+		case chconn.Classify(singleErr) != chconn.Rejected:
+			// ClickHouse stopped answering mid-isolation: this row and the
+			// rest were never judged, so none of them is dead-lettered.
+			return group[i:], singleErr
+		case w.dlqEnabled != nil && !w.dlqEnabled(pm.tenant, tableName):
+			slog.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "tenant", pm.tenant, "table", tableName, "error", singleErr)
+		default:
 			slog.ErrorContext(ctx, "isolated bad row, sending to DLQ", "tenant", pm.tenant, "table", tableName, "error", singleErr)
 			w.sendToDLQ(ctx, tableName, pm, singleErr.Error())
-		} else {
-			w.handleSuccess(ctx, tableName, []parsedMsg{pm})
 		}
 	}
+	return nil, nil
+}
+
+func (w *IngestWorker) clock() time.Time {
+	if w.now != nil {
+		return w.now()
+	}
+	return time.Now()
+}
+
+// retryLater hands rows ClickHouse could not take back to the MQ, to be
+// redelivered no sooner than wait. They are never dead-lettered: nothing in
+// them was judged. A nak that fails leaves the row unacked, so the MQ
+// redelivers it after the ack wait anyway. reason labels the retry counter.
+func (w *IngestWorker) retryLater(ctx context.Context, tableName string, msgs []parsedMsg, wait time.Duration, reason string) {
+	for _, pm := range msgs {
+		if err := pm.msg.NakWithDelay(wait); err != nil {
+			slog.ErrorContext(ctx, "delayed nak failed; the row is redelivered after the ack wait instead", "tenant", pm.tenant, "table", tableName, "error", err)
+		}
+	}
+	retryCounter.Add(ctx, int64(len(msgs)), metric.WithAttributes(
+		attribute.String("table", tableName),
+		attribute.String("reason", reason),
+	))
 }
 
 // insertToClickHouse writes one group as a single INSERT naming columns
@@ -682,8 +784,7 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	}()
 
 	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return chconn.NewHTTPError(resp)
 	}
 	return nil
 }
