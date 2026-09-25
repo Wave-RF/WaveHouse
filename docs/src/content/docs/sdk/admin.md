@@ -72,7 +72,7 @@ const { data } = await wh.dlq.list({ tenant: 'acme' });
 const { data: clicks } = await wh.dlq.table('clicks', { tenant: 'acme' });
 ```
 
-`wh.dlq.stream()` exists in the API but is **not yet functional**: there is no server-side DLQ stream today (the SSE bridge only carries `ingest.>` subjects), so it connects and receives no events rather than failing. Live DLQ streaming is tracked in [#197](https://github.com/Wave-RF/WaveHouse/issues/197).
+`wh.dlq.stream()` exists in the API but is **not yet functional**: there is no server-side SSE route for dead-lettered events today (the SSE bridge only carries `ingest.>` subjects), so it connects and receives no events rather than failing. Live DLQ streaming is tracked in [#197](https://github.com/Wave-RF/WaveHouse/issues/197).
 
 ---
 

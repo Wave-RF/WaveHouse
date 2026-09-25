@@ -596,6 +596,54 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 	})
 }
 
+// A tenant's queue the MQ cannot open follows the registry's rule for the
+// shape, as the dedupe store does: a flat directory refuses boot, and a nested
+// one boots with that tenant's queue closed and every other tenant's open.
+// The obstacle is a regular file where the embedded server keeps a stream's
+// store — the embedded implementation's layout, which this test takes on to
+// force the failure, as TestNew_DedupeOpenFailure does Pebble's. The failed
+// open clears it, so the next publish opens the queue: each one tries again.
+func TestNew_QueueOpenFailure(t *testing.T) {
+	block := func(t *testing.T, dataDir, stream string) {
+		t.Helper()
+		p := filepath.Join(dataDir, "nats", "jetstream", "$G", "streams", stream)
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o750))
+		require.NoError(t, os.WriteFile(p, nil, 0o600))
+	}
+	t.Run("flat refuses boot", func(t *testing.T) {
+		guardGlobals(t)
+		cfg := testConfig(t, writeSettings(t, nil))
+		block(t, cfg.DataDir, "DLQ_0")
+		_, err := New(t.Context(), Options{Config: cfg})
+		require.ErrorContains(t, err, "mq open")
+	})
+	t.Run("nested costs the tenant alone", func(t *testing.T) {
+		// globex, not acme: opened first, acme's streams keep the streams
+		// directory occupied through globex's failed open, which the server
+		// would otherwise remove on a goroutine of its own while the next
+		// open writes there (mq's TestEmbeddedNATS_PacesTheRetriesOfAQueueThatCannotOpen).
+		cfg := testConfig(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil}))
+		block(t, cfg.DataDir, "DLQ_globex")
+		a := newApp(t, cfg, Options{})
+		assert.Zero(t, a.mq.MaxBytes("globex"), "globex's queue did not open")
+		assert.Equal(t, int64(50<<30), a.mq.MaxBytes("acme"), "and costs acme nothing")
+
+		require.NoError(t, a.MQ().Publish(t.Context(), mq.Topic{Tenant: "globex", Table: "t"}, []byte("x")))
+		assert.Equal(t, int64(50<<30), a.mq.MaxBytes("globex"), "a publish opened it at globex's budget")
+	})
+}
+
+// Boot opens each served tenant's queue under New's context, as New's doc
+// says: a stop signaled during boot is not held up by one open per tenant.
+func TestNew_QueueSetupHonorsTheBootContext(t *testing.T) {
+	guardGlobals(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := New(ctx, Options{Config: testConfig(t, writeSettings(t, nil))})
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorContains(t, err, "mq open")
+}
+
 // The tenants on the writer's ClickHouse address and database read the same
 // tables, so an insert invalidates a table's cached results under every one
 // of them — whatever their user, so across pools — and under no tenant on
@@ -711,10 +759,12 @@ func gapWindow(minutes int) map[string]any {
 	return map[string]any{"stream": map[string]any{"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": minutes}}
 }
 
-// Each tenant being served keeps its own stream.gap_window_minutes, since
-// each has a queue of its own; a rejected tenant is not served, so it is not
-// named and keeps no history (mq.Purger.PurgeAcked). A flat directory's single
-// tenant gets exactly its own window.
+// Each tenant keeps its own stream.gap_window_minutes, since each has a queue
+// of its own — a rejected tenant the window its folder last had, so its
+// clients resume once the folder is fixed, and everything while that window
+// is unknown. A removed tenant is not named and keeps no history
+// (mq.Purger.PurgeAcked). A flat directory's single tenant gets exactly its
+// own window.
 func TestGapWindows(t *testing.T) {
 	open := func(t *testing.T, dir string) *settings.Registry {
 		t.Helper()
@@ -735,11 +785,24 @@ func TestGapWindows(t *testing.T) {
 
 		rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
 		tenants.Reload("test")
-		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants))
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "globex": 60 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants),
+			"a rejected tenant keeps the window its folder last had")
+
+		require.NoError(t, os.RemoveAll(filepath.Join(root, "globex")))
+		tenants.Reload("test")
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants),
+			"a removed tenant keeps none")
 	})
 
-	t.Run("no tenant served names none", func(t *testing.T) {
-		assert.Empty(t, gapWindows(open(t, writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery}))))
+	t.Run("a folder rejected since boot keeps everything", func(t *testing.T) {
+		root := writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery})
+		tenants := open(t, root)
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": keepEverything}, gapWindows(tenants))
+
+		rewriteSettings(t, filepath.Join(root, "acme"), gapWindow(15))
+		tenants.Reload("test")
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute}, gapWindows(tenants),
+			"its own window once its folder validates")
 	})
 }
 

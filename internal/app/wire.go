@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -65,50 +66,24 @@ func (a *App) wireSettings() error {
 		return fmt.Errorf("settings directory %s invalid, refusing to start — findings above; `wavehouse validate` reproduces them, `wavehouse bootstrap` writes a starter directory", a.cfg.Settings.Dir)
 	}
 	a.tenants = tenants
-	// Registered first: hooks run in registration order, so every reload
-	// updates the tracked store before any other hook runs.
-	a.trackDefaultStore()
-	a.onDefaultAdopt(a.trackDefaultStore)
-	a.policies = func() *policy.Policy { return defaultSetting(a, (*settings.Store).Policy) }
+	a.policies = func() *policy.Policy { return defaultPolicy(tenants) }
 	if !tenants.Nested() && a.policies() == nil {
 		slog.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
 	}
 	return nil
 }
 
-// trackDefaultStore remembers tenant 0's store as of its last adoption. The
-// registry stops handing out a rejected tenant's store and forgets a removed
-// one, but the store keeps its last adopted document either way — and that is
-// what defaultSetting goes on reading.
-func (a *App) trackDefaultStore() {
-	if store, ok := a.tenants.For(tenant.Default); ok {
-		a.defaultStore.Store(store)
+// defaultPolicy is the default tenant's access-control policy, which the ops
+// gate of a flat directory reads its admin role from per request. There
+// tenant 0 is the whole directory, always served: a reload that fails keeps
+// the previous document. A nested directory's ops gate reads no policy at all
+// (api.NewRouter).
+func defaultPolicy(tenants *settings.Registry) *policy.Policy {
+	store, ok := tenants.For(tenant.Default)
+	if !ok {
+		return nil
 	}
-}
-
-// defaultSetting reads one setting of the default tenant: the admin role the
-// ops gate of a flat directory reads per request. It reads tenant 0's last
-// adopted document, so a 0 folder a reload rejected or removed leaves its
-// reader as it was. A nested directory that has never served a tenant 0 reads
-// T's zero value, and its ops gate reads no policy at all.
-func defaultSetting[T any](a *App, get func(*settings.Store) T) T {
-	store := a.defaultStore.Load()
-	if store == nil {
-		var zero T
-		return zero
-	}
-	return get(store)
-}
-
-// onDefaultAdopt registers fn to run after each reload that adopts the
-// default tenant, so a nested directory's other tenants never move what
-// follows it, and a rejected 0 folder leaves that as it was.
-func (a *App) onDefaultAdopt(fn func()) {
-	a.tenants.AfterAdopt(func(adopted []tenant.ID) {
-		if slices.Contains(adopted, tenant.Default) {
-			fn()
-		}
-	})
+	return store.Policy()
 }
 
 // shortestKeepalive is the shape of the one keepalive wheel every tenant's
@@ -130,17 +105,30 @@ func shortestKeepalive(tenants *settings.Registry) (period time.Duration, bucket
 	return period, buckets
 }
 
-// gapWindows is the history the sweeper keeps for each tenant being served:
-// its own stream.gap_window_minutes, since each tenant's events have a queue
-// of their own. A tenant it does not name — removed or rejected — keeps no
-// history (mq.Purger.PurgeAcked).
+// gapWindows is the history the sweeper keeps for each tenant: its own
+// stream.gap_window_minutes, since each tenant's events have a queue of their
+// own — for a rejected tenant, the window its folder last had, because a
+// rejection is the common reload failure (a typo, fixed minutes later) and
+// its clients resume from Last-Event-ID once it is served again. A removed
+// tenant is not named, so it keeps no history (mq.Purger.PurgeAcked).
 func gapWindows(tenants *settings.Registry) map[tenant.ID]time.Duration {
 	windows := map[tenant.ID]time.Duration{}
-	for id, store := range tenants.All() {
+	for id, store := range tenants.Known() {
+		if store == nil {
+			windows[id] = keepEverything
+			continue
+		}
 		windows[id] = store.GapWindow()
 	}
 	return windows
 }
+
+// keepEverything is the window of a tenant whose folder has been rejected
+// since boot: this process has never read its stream.gap_window_minutes, so
+// none of the history its queue holds is known to be past it. A rejected
+// tenant is sent no new events, so what it keeps is what its queue held at
+// boot.
+const keepEverything = time.Duration(math.MaxInt64)
 
 // served reports whether the registry is serving tenant id: what the
 // per-tenant resources — verifiers, dedupe stores, open streams — are pruned
@@ -543,10 +531,10 @@ func (a *App) wirePebbleDedupe() error {
 
 // wireMQ starts the MQ — the one place the implementation is chosen;
 // everything after it sees mq.Broker.
-func (a *App) wireMQ() error {
+func (a *App) wireMQ(ctx context.Context) error {
 	switch b := a.cfg.MQ.Backend; b {
 	case config.MQEmbedded:
-		return a.wireEmbeddedMQ()
+		return a.wireEmbeddedMQ(ctx)
 	default:
 		return unreachableBackend("mq.backend", b)
 	}
@@ -562,9 +550,12 @@ func (a *App) wireMQ() error {
 // resized follows the registry's rule for the shape: a flat directory
 // refuses boot, like every other store, and on a reload logs it, keeping the
 // previous budget; a nested directory logs it at boot too, so it never costs
-// the process — the tenant's ingest answers 503 until a reload opens its
-// queue. The hook is registered before the boot apply, as the dedupe one is.
-func (a *App) wireEmbeddedMQ() error {
+// the process — the tenant's ingest answers 503 until its queue opens, each
+// reload trying again, and publishes too at the pace the MQ allows. The hook
+// is registered before the boot apply, as the dedupe one is. The boot apply
+// runs on ctx, New's, so a stop signaled during a boot that opens many queues
+// is not held up by them.
+func (a *App) wireEmbeddedMQ(ctx context.Context) error {
 	dir := filepath.Join(a.cfg.DataDir, "nats")
 	config.WarnIfFreshDataDir("nats", dir)
 	var broker mq.Broker
@@ -586,17 +577,21 @@ func (a *App) wireEmbeddedMQ() error {
 		}
 	}
 
-	// Rooted in the App's stop context, so a reload caught mid-hook by
-	// SIGTERM gives up rather than holding the drain past
-	// server.shutdown_timeout.
-	reconcile := func() error {
+	// The hook's apply is rooted in the App's stop context, so a reload
+	// caught mid-hook by SIGTERM gives up rather than holding the drain past
+	// server.shutdown_timeout; a done ctx ends the pass over the tenants.
+	reconcile := func(ctx context.Context) error {
 		var errs []error
 		for id, store := range a.tenants.All() {
+			if err := ctx.Err(); err != nil {
+				errs = append(errs, err)
+				break
+			}
 			mb := store.MQMaxBytes()
 			if mb == broker.MaxBytes(id) {
 				continue
 			}
-			if err := broker.SetMaxBytes(a.stopCtx, id, mb); err != nil {
+			if err := broker.SetMaxBytes(ctx, id, mb); err != nil {
 				slog.Error("mq queue not reconciled with settings; the next reload retries", "tenant", id, "error", err)
 				errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
 				continue
@@ -605,8 +600,8 @@ func (a *App) wireEmbeddedMQ() error {
 		}
 		return errors.Join(errs...)
 	}
-	a.tenants.AfterAdopt(func([]tenant.ID) { _ = reconcile() })
-	if err := reconcile(); err != nil && !a.tenants.Nested() {
+	a.tenants.AfterAdopt(func([]tenant.ID) { _ = reconcile(a.stopCtx) })
+	if err := reconcile(ctx); err != nil && !a.tenants.Nested() {
 		return fmt.Errorf("mq open: %w", err)
 	}
 	return nil
