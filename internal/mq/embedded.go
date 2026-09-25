@@ -132,6 +132,11 @@ const (
 	reopenRetry = 5 * time.Second
 )
 
+// EmbeddedSyncAlways is NewEmbedded's SyncAlways. Only a TestMain may turn it
+// off, before any broker starts: unit tests assert nothing across a crash, and
+// on macOS an fsync per write is most of their run time (#617).
+var EmbeddedSyncAlways = true
+
 // errNoQueue is why a publish or park finds no queue it can open: no budget
 // has been asked for the tenant yet (see SetMaxBytes). Publish reports it as
 // ErrQueueFull.
@@ -156,7 +161,7 @@ func NewEmbedded(storeDir string) (*EmbeddedNATS, error) {
 		DontListen: true,
 		JetStream:  true,
 		StoreDir:   storeDir,
-		SyncAlways: true, // fsync every JetStream write — publish ACKs only after data is on disk
+		SyncAlways: EmbeddedSyncAlways, // fsync every JetStream write — publish ACKs only after data is on disk
 		// Without NoSigs, Start() installs a process-wide SIGINT handler that
 		// races the app's graceful shutdown (double Shutdown → "close of nil
 		// channel" panic) and os.Exit(0)s past its cleanup. WaveHouse owns
