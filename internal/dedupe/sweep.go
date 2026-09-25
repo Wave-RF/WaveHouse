@@ -135,6 +135,9 @@ func (e *Embedded) sweepChunk(ctx context.Context, db *pebble.DB, from []byte, r
 	if err := it.Close(); err != nil {
 		return nil, fmt.Errorf("dedupe sweep: %w", err)
 	}
+	if e.sweepHook != nil {
+		e.sweepHook()
+	}
 	// NoSync: a delete lost to a crash is redone by the next pass.
 	if err := b.Commit(pebble.NoSync); err != nil {
 		return nil, fmt.Errorf("dedupe sweep: %w", err)

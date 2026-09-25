@@ -97,6 +97,41 @@ func TestEmbedded_SweepDeletesExpiredAndVersionZeroKeys(t *testing.T) {
 	assert.Equal(t, sweepResult{}, res, "a second pass finds nothing")
 }
 
+// A Commit that arrives while a sweep chunk has read an expired key but not
+// yet deleted it waits for the chunk, so the new commit is never deleted with
+// the old value. Without the lock the Commit lands in the gap and the sweep
+// then deletes it; the wait below only ever lets that pass, never fail.
+func TestEmbedded_SweepNeverDeletesACommitLandingMidChunk(t *testing.T) {
+	t.Parallel()
+	e := NewEmbedded(t.TempDir())
+	clock := newStepClock()
+	SetClock(e, clock.now)
+	m := switchedOn(t, e, "acme")
+	commitIDs(t, m, time.Hour, "e1")
+	clock.advance(2 * time.Hour)
+
+	claims, err := m.Reserve(context.Background(), []Key{{Table: "events", ID: "e1"}}, DefaultLease)
+	require.NoError(t, err)
+	require.Equal(t, Claimed, claims[0].Status, "expired: claimable again")
+	done := make(chan error, 1)
+	e.sweepHook = func() {
+		go func() { done <- m.Commit(context.Background(), claims, time.Hour) }()
+		select {
+		case <-done:
+			done <- nil
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	res, err := e.sweep(context.Background(), e.db)
+	require.NoError(t, err)
+	assert.Equal(t, sweepResult{Expired: 1}, res)
+	require.NoError(t, <-done)
+
+	dup, err := mark(context.Background(), m, "e1")
+	require.NoError(t, err)
+	assert.True(t, dup, "the commit made mid-chunk survived the sweep")
+}
+
 // A retention is honoured on read before any sweep has run: the key is a
 // duplicate until the retention ends and claimable from that instant.
 func TestEmbedded_RetentionHonouredOnRead(t *testing.T) {

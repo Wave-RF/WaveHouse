@@ -47,6 +47,9 @@ type Embedded struct {
 	// readHook, when set, runs before each Pebble read in Reserve; a test
 	// makes it fail to exercise Reserve's all-or-nothing error path.
 	readHook func() error
+	// sweepHook, when set, runs in a sweep chunk between reading its keys and
+	// deleting them; a test races a Commit into that gap.
+	sweepHook func()
 }
 
 // NewEmbedded returns the embedded implementation under dataDir. Nothing is
