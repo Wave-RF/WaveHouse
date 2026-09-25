@@ -73,17 +73,17 @@ type EmbeddedNATS struct {
 	// leave behind a stream JetStream goes on to create, which no consumer
 	// holds. Written under mu, read without it.
 	opened sync.Map // tenant.ID → struct{}
-	// reopening merges into one attempt the publishes that find the same
-	// tenant's queue not open, and failedOpen holds, for a tenant whose last
-	// such attempt failed, its error and until when its publishes take that
-	// as their answer (openForPublish).
+	// reopening merges into one attempt the publishes and parks that find
+	// the same tenant's queue not open, and failedOpen holds, for a tenant
+	// whose last such attempt failed, its error and until when its publishes
+	// and parks take that as their answer (reopenPaced).
 	reopening  singleflight.Group
 	failedOpen sync.Map // tenant.ID → openFailure
 }
 
-// openFailure is a publish's failed attempt to open a tenant's queue, and
-// until when the tenant's publishes are refused with its error rather than
-// trying again.
+// openFailure is a publish's or park's failed attempt to open a tenant's
+// queue, and until when the tenant's publishes and parks are refused with its
+// error rather than trying again.
 type openFailure struct {
 	until time.Time
 	err   error
@@ -126,9 +126,9 @@ const (
 	// resizeTimeouts when it opens a queue: the consumers join on a budget of
 	// their own (apply).
 	rollbackTimeout = 5 * time.Second
-	// publishRetry is how long a tenant's publishes are refused at once after
-	// one failed to open its queue (openForPublish).
-	publishRetry = 5 * time.Second
+	// reopenRetry is how long a tenant's publishes and parks are refused at
+	// once after one failed to open its queue (reopenPaced).
+	reopenRetry = 5 * time.Second
 )
 
 // errNoQueue is why a publish or park finds no queue it can open: no budget
@@ -511,7 +511,7 @@ func (e *EmbeddedNATS) reopen(ctx context.Context, id tenant.ID) error {
 // subject). A tenant with no queue has one opened at the budget last asked
 // for it (see SetMaxBytes) — and so does one whose stream exists but whose
 // queue the broker has not recorded open, since no consumer may hold that
-// stream (see openForPublish for how often a publish tries). A queue that
+// stream (see reopenPaced for how often a publish tries). A queue that
 // cannot be opened — none asked for yet, or JetStream refused it — and a
 // queue at its byte budget (DiscardNew) are reported as ErrQueueFull: either
 // way the tenant's queue takes nothing now, and a retry is the caller's
@@ -522,13 +522,13 @@ func (e *EmbeddedNATS) Publish(ctx context.Context, topic Topic, data []byte, op
 		return err
 	}
 	if _, ok := e.opened.Load(topic.Tenant); !ok {
-		if openErr := e.openForPublish(ctx, topic.Tenant); openErr != nil {
+		if openErr := e.reopenPaced(ctx, topic.Tenant); openErr != nil {
 			return fmt.Errorf("%w: %w", ErrQueueFull, openErr)
 		}
 	}
 	err = e.publish(ctx, subj, data, opts)
 	if errors.Is(err, jetstream.ErrNoStreamResponse) {
-		if openErr := e.openForPublish(ctx, topic.Tenant); openErr != nil {
+		if openErr := e.reopenPaced(ctx, topic.Tenant); openErr != nil {
 			return fmt.Errorf("%w: %w", ErrQueueFull, openErr)
 		}
 		err = e.publish(ctx, subj, data, opts)
@@ -541,15 +541,15 @@ func (e *EmbeddedNATS) Publish(ctx context.Context, topic Topic, data []byte, op
 	return err
 }
 
-// openForPublish opens tenant id's queue for a publish that found it not open
-// (reopen). The publishes that find it so at the same time share one
-// attempt, and after an attempt fails the tenant's publishes get its error at
-// once, without taking mu, until publishRetry has passed: under clients
-// retrying, a queue that cannot open would otherwise hold mu for attempt
-// after attempt, and every other tenant's open, resize and reload waits on
-// mu. A reload that applies the tenant's budget retries it regardless
-// (SetMaxBytes).
-func (e *EmbeddedNATS) openForPublish(ctx context.Context, id tenant.ID) error {
+// reopenPaced opens tenant id's queue for a publish or park that found it not
+// open (reopen). The callers that find it so at the same time share one
+// attempt, and after an attempt fails the tenant's publishes and parks get
+// its error at once, without taking mu, until reopenRetry has passed: under
+// clients retrying, or the worker parking row after row, a queue that cannot
+// open would otherwise hold mu for attempt after attempt, and every other
+// tenant's open, resize and reload waits on mu. A reload that applies the
+// tenant's budget retries it regardless (SetMaxBytes).
+func (e *EmbeddedNATS) reopenPaced(ctx context.Context, id tenant.ID) error {
 	if v, ok := e.failedOpen.Load(id); ok {
 		if f := v.(openFailure); time.Now().Before(f.until) {
 			return f.err
@@ -558,7 +558,7 @@ func (e *EmbeddedNATS) openForPublish(ctx context.Context, id tenant.ID) error {
 	_, err, _ := e.reopening.Do(string(id), func() (any, error) {
 		err := e.reopen(ctx, id)
 		if err != nil {
-			e.failedOpen.Store(id, openFailure{until: time.Now().Add(publishRetry), err: err})
+			e.failedOpen.Store(id, openFailure{until: time.Now().Add(reopenRetry), err: err})
 		}
 		return nil, err
 	})
@@ -570,13 +570,14 @@ func (e *EmbeddedNATS) openForPublish(ctx context.Context, id tenant.ID) error {
 // for the dead-letter one, nothing decoded or re-encoded. The dead-letter
 // stream is DiscardOld, so a full one drops its oldest parked rows rather than
 // refusing. A dead-letter stream found missing is opened again with its
-// tenant's queue, as Publish does.
+// tenant's queue, paced as Publish's is (reopenPaced); a park refused leaves
+// its row unacked, to be redelivered.
 func (e *EmbeddedNATS) DeadLetter(ctx context.Context, msg *Message, opts ...PublishOpt) error {
 	subj := dlqPrefix + msg.topicKey
 	err := e.publish(ctx, subj, msg.Data, opts)
 	if errors.Is(err, jetstream.ErrNoStreamResponse) {
 		if id, ok := keyTenant(msg.topicKey); ok {
-			if err = e.reopen(ctx, id); err == nil {
+			if err = e.reopenPaced(ctx, id); err == nil {
 				err = e.publish(ctx, subj, msg.Data, opts)
 			}
 		}

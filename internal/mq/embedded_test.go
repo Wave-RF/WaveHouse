@@ -460,12 +460,13 @@ func TestEmbeddedNATS_SetMaxBytes_AQueueThatCannotOpen(t *testing.T) {
 	assert.Equal(t, int64(testBudget), e.MaxBytes("acme"))
 }
 
-// After a publish fails to open its tenant's queue, the tenant's publishes
-// are refused at once, without waiting on the broker's lock, until
-// publishRetry has passed: under clients retrying, one tenant's broken queue
-// would otherwise hold the lock that every other tenant's open, resize and
-// reload takes. Once the window has passed, a publish tries again.
-func TestEmbeddedNATS_Publish_PacesTheRetriesOfAQueueThatCannotOpen(t *testing.T) {
+// After a publish fails to open its tenant's queue, the tenant's publishes —
+// and its parks, which find the dead-letter stream missing — are refused at
+// once, without waiting on the broker's lock, until reopenRetry has passed:
+// under clients retrying, or the worker parking row after row, one tenant's
+// broken queue would otherwise hold the lock that every other tenant's open,
+// resize and reload takes. Once the window has passed, a publish tries again.
+func TestEmbeddedNATS_PacesTheRetriesOfAQueueThatCannotOpen(t *testing.T) {
 	dir := t.TempDir()
 	block := filepath.Join(dir, "jetstream", "$G", "streams", dlqStreamName("acme"))
 	obstruct := func() {
@@ -486,14 +487,15 @@ func TestEmbeddedNATS_Publish_PacesTheRetriesOfAQueueThatCannotOpen(t *testing.T
 		require.ErrorIs(t, err, os.ErrNotExist)
 	}
 
-	// The queue could open now, but within the window a publish tries
-	// nothing: it is refused while the lock is held elsewhere.
+	// The queue could open now, but within the window a publish or park
+	// tries nothing: each is refused while the lock is held elsewhere.
 	e.mu.Lock()
-	var paced error
+	var paced, parked error
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		paced = e.Publish(ctx, acme, []byte("x"))
+		parked = e.DeadLetter(ctx, NewMessage(ctx, acme, []byte("x"), time.Now(), nil, nil, nil))
 	}()
 	var returned bool
 	select {
@@ -503,8 +505,9 @@ func TestEmbeddedNATS_Publish_PacesTheRetriesOfAQueueThatCannotOpen(t *testing.T
 	}
 	e.mu.Unlock()
 	<-done
-	require.True(t, returned, "a paced publish waited on the broker's lock")
+	require.True(t, returned, "a paced publish or park waited on the broker's lock")
 	require.ErrorIs(t, paced, ErrQueueFull)
+	require.Error(t, parked)
 	assert.Zero(t, e.MaxBytes("acme"))
 
 	v, ok := e.failedOpen.Load(tenant.ID("acme"))

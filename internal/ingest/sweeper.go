@@ -61,11 +61,27 @@ func (s *Sweeper) sweep(ctx context.Context) {
 	}
 	_, err := s.purger.PurgeAcked(ctx, BufferConsumerName, cutoffs)
 	if err != nil {
-		if errors.Is(err, mq.ErrConsumerNotFound) {
+		if onlyConsumerNotFound(err) {
 			// Consumer may not exist yet if no messages have been ingested.
 			slog.WarnContext(ctx, "sweeper: buffer consumer not found (may not exist yet)", "error", err)
 			return
 		}
 		slog.ErrorContext(ctx, "sweeper: purge", "error", err)
 	}
+}
+
+// onlyConsumerNotFound reports whether every tenant's failure err joins is a
+// missing buffer consumer — the one failure expected before the worker has
+// created it. Any other failure among them keeps the sweep's report at
+// ERROR: a tenant whose purge keeps failing fills toward its budget.
+func onlyConsumerNotFound(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, e := range joined.Unwrap() {
+			if !onlyConsumerNotFound(e) {
+				return false
+			}
+		}
+		return true
+	}
+	return errors.Is(err, mq.ErrConsumerNotFound)
 }
