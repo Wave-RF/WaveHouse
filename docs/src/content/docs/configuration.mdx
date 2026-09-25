@@ -17,7 +17,7 @@ WaveHouse is configured via a YAML file with environment variable overrides. All
 2. Environment variables override any values from the YAML file.
 3. If no config file exists, all values are read from environment variables. Every key has a default except `settings.dir` (`WH_SETTINGS_DIR`), which must be set either way.
 4. Both sources are **strict**. A YAML key this page doesn't list — a typo, or a tunable that has moved to the settings directory (`dlq.enabled`, `clickhouse.addr`, `stream.*`, a leftover `policy:` or `pipes:` block, …) — refuses to boot and names every offending key, so nothing is read, ignored, and believed. A `WH_*` environment variable that binds to no key on this page (`WH_DEDUPE_ENABLED`, `WH_CH_ADDR`, a misspelling) refuses to boot the same way. Two variables have no YAML key and are exempt because they are not config keys at all but process-level settings `main` reads directly: `WH_CONFIG` (below), which locates the file, and `WH_LOG_LEVEL`. Only the `WH_` prefix is checked, since the environment always carries names that aren't WaveHouse's. One outside source does share the prefix. Kubernetes injects `{SERVICE}_SERVICE_HOST`, `{SERVICE}_PORT`, and similar link variables into every pod in a Service's own namespace, for each Service with a cluster IP that existed before the pod started (a headless Service injects nothing, and a Service in another namespace is harmless). The name is uppercased with `-` mapped to `_`, so a Service named `wh` produces `WH_SERVICE_HOST` and `WH_PORT`, one named `wh-foo` produces `WH_FOO_SERVICE_HOST` and `WH_FOO_PORT`, and either way the pod refuses to boot on its next restart. Set `enableServiceLinks: false` on the pod spec, or name the Service something else. The error says so.
-5. Before anything dials out, `data_dir` is probed, and boot refuses on any of these: the value is empty; the path exists but is not a directory; the path, or any component above it, is a dangling symlink (a mount that never came up); the directory exists but the process cannot write to it; the directory is absent and its nearest existing ancestor is not writable, so it could not be created. The probe runs before ClickHouse discovery, so the refusal lands at the top of the log, and a permission denial — on the write probe, or on reaching the path at all through a parent without search permission — carries the UID-65532 remediation, since a bind mount owned by root is the typical cause.
+5. Before anything dials out, `data_dir` is probed — when a selected [backend](#backends) keeps state there, as the in-process `mq` and `dedupe` backends do — and boot refuses on any of these: the value is empty; the path exists but is not a directory; the path, or any component above it, is a dangling symlink (a mount that never came up); the directory exists but the process cannot write to it; the directory is absent and its nearest existing ancestor is not writable, so it could not be created. The probe runs before ClickHouse discovery, so the refusal lands at the top of the log, and a permission denial — on the write probe, or on reaching the path at all through a parent without search permission — carries the UID-65532 remediation, since a bind mount owned by root is the typical cause.
 
 Boot is the validator for this half of configuration: there is no dry run, and a refused boot with the offending key, variable, or path named in the error is the loud signal. The hot-reloadable half has a dry run — `wavehouse validate` — because it is edited under a running server; boot config only ever takes effect through a restart, so the restart is where it is checked.
 
@@ -36,6 +36,19 @@ This page is boot config only — what the platform operator owns (wiring, lifec
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; Pebble, holding every tenant's dedupe store while any tenant has dedupe enabled, at `<data_dir>/pebble`. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
+
+### Backends
+
+Each layer's implementation is chosen once, at boot. Today every layer has one backend, the in-process one, and it is the default, so a config that sets none of these keys runs as it always has. A value this build has no backend for refuses boot and names the valid ones.
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `mq.backend` | `WH_MQ_BACKEND` | `embedded` | The message queue. `embedded`: NATS JetStream inside this process, under `<data_dir>/nats`. It listens on no port, so no other process can reach its queue. |
+| `cache.backend` | `WH_CACHE_BACKEND` | `local` | The query-result cache. `local`: in this process, sized by `cache.l1_max_cost`. |
+| `dedupe.backend` | `WH_DEDUPE_BACKEND` | `pebble` | Where ingest dedupe keeps the event ids it has seen. `pebble`: in this process, under `<data_dir>/pebble`, open while any tenant has dedupe on. |
+| `coord.backend` | `WH_COORD_BACKEND` | `local` | Reserved for the leases that will elect work only one process may do at a time, such as the sweeper. Nothing is elected yet: every process runs its own sweeper, and `local`, the only value, changes nothing. |
+
+Settings for one backend will go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. No backend has settings yet, so today any such sub-block, `mq.embedded` included, is an unknown key and refuses boot. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
 
 ### Server
 
@@ -96,6 +109,8 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 :::
 
 ### Message Queue (NATS)
+
+This section describes the `embedded` [backend](#backends), the only one today.
 
 Each tenant's queue has its own disk budget, `mq.max_bytes_gb`, a hot-reloadable key in the [Settings Directory](/settings-directory#message-queue) — there is no boot-config knob for it.
 
@@ -191,8 +206,18 @@ clickhouse:
                          # headers and pool sizes are settings (config.json)
   max_total_conns: 0     # ceiling on open native connections; 0 = none
 
+mq:
+  backend: embedded      # in-process NATS JetStream under <data_dir>/nats
+
 cache:
+  backend: local
   l1_max_cost: 67108864
+
+dedupe:
+  backend: pebble        # in-process Pebble under <data_dir>/pebble
+
+coord:
+  backend: local        # reserved: nothing is elected yet
 
 auth:
   jwt_secret: change-me-in-production   # jwks_url and role_claim are settings (config.json)
@@ -239,7 +264,11 @@ WH_SERVER_SHUTDOWN_TIMEOUT=10
 WH_CH_PASSWORD=
 WH_CH_MAX_TOTAL_CONNS=0
 
+WH_MQ_BACKEND=embedded
+WH_CACHE_BACKEND=local
 WH_CACHE_L1_MAX_COST=67108864
+WH_DEDUPE_BACKEND=pebble
+WH_COORD_BACKEND=local
 
 WH_AUTH_JWT_SECRET=change-me-in-production
 WH_AUTH_OPERATOR_KEY=
