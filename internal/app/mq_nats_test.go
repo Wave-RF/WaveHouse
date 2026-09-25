@@ -70,7 +70,7 @@ func TestNew_NATSBackend(t *testing.T) {
 func TestNew_NATSUnreachable(t *testing.T) {
 	guardGlobals(t)
 	cfg := natsConfig(t, "nats://"+closedAddr(t))
-	cfg.MQ.NATS.TopologyWait = 300 * time.Millisecond
+	cfg.MQ.NATS.TopologyWait = time.Millisecond
 	_, err := New(t.Context(), Options{Config: cfg})
 	require.ErrorIs(t, err, mq.ErrUnavailable)
 	assert.ErrorContains(t, err, "mq open")
@@ -82,7 +82,7 @@ func TestNew_NATSTopologyMissing(t *testing.T) {
 	require.NoError(t, srv.Operator.JetStream().DeleteStream(t.Context(), "WH_DLQ"))
 	guardGlobals(t)
 	cfg := natsConfig(t, srv.URL())
-	cfg.MQ.NATS.TopologyWait = 300 * time.Millisecond
+	cfg.MQ.NATS.TopologyWait = time.Millisecond
 	_, err := New(t.Context(), Options{Config: cfg})
 	require.ErrorIs(t, err, mq.ErrTopology)
 	assert.ErrorContains(t, err, "dead-letter stream")
