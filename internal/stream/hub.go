@@ -43,8 +43,9 @@ type Hub struct {
 	// the default implementation, which delegates to ResolvedPermissions.RowVisible
 	// — today's behavior unchanged. Wired once before the Hub serves traffic and
 	// not safe to mutate afterwards: rowAdmitted reads it from the consumer
-	// goroutine and from SSE handler goroutines without holding h.mu. Every
-	// delivery path reaches it through rowAdmitted, never directly.
+	// goroutines (one per tenant) and from SSE handler goroutines without
+	// holding h.mu. Every delivery path reaches it through rowAdmitted, never
+	// directly.
 	RowEvaluator RowEvaluator
 }
 
@@ -393,9 +394,8 @@ func newEventView(raw []byte) *eventView {
 	// The hub is a second consumer of the same events as the ingest worker, and
 	// acks independently of it, so a format only the worker refuses would stream
 	// to clients while the worker parks it on the DLQ. Refusing it here keeps the
-	// two readers agreeing on what the bytes mean. Today only a pre-v2 envelope
-	// declares anything else, and it would fail pairing anyway on its empty
-	// column list — this is what holds once a second format exists.
+	// two readers agreeing on what the bytes mean. Today every envelope
+	// declares that one format — this is what holds once a second exists.
 	if ev.evt.Format != ingest.FormatJSONCompactEachRow {
 		return ev
 	}

@@ -104,8 +104,8 @@ createClient<DB>(config) → WaveHouseClient
 ├── .settings (admin)
 │   └── .reload(opts?) → Promise<Result<SettingsReloadResult>>
 ├── .dlq (admin)
-│   ├── .list() → Promise<Result<DLQStats>>
-│   ├── .table(name) → Promise<Result<DLQStats>>
+│   ├── .list(opts?) → Promise<Result<DLQStats>>
+│   ├── .table(name, opts?) → Promise<Result<DLQStats>>
 │   └── .stream() → StreamController  // not yet functional server-side — #197
 └── .sys
     └── .health() → Promise<Result<void>>

@@ -15,7 +15,6 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
-	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
@@ -332,9 +331,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	hub := stream.NewHub(nil, nil, nil)
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = emb.Close() })
+	emb := testutil.NewEmbeddedMQ(t, 1024*1024)
 
 	deps := Dependencies{
 		Tenants:      testTenants(),
