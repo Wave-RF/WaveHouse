@@ -57,15 +57,20 @@ type EmbeddedNATS struct {
 	conn   *nats.Conn
 	js     jetstream.JetStream
 
-	// mu guards queues and consumers, and serializes opening or resizing a
-	// tenant's queue with registering a consumer, so a queue opened while a
-	// consumer registers is never missed by it. It is held across the
-	// JetStream calls that open or resize a queue.
+	// mu guards queues, consumers and writes to opened, and serializes
+	// opening or resizing a tenant's queue with registering a consumer, so a
+	// queue opened while a consumer registers is never missed by it. It is
+	// held across the JetStream calls that open or resize a queue.
 	mu     sync.Mutex
 	queues map[tenant.ID]*tenantQueue
 	// consumers are the durable consumers held on every tenant's queue, each
 	// joined to a queue as it opens.
 	consumers []*fanIn
+	// opened holds the tenants whose queue has both streams and every
+	// registered consumer joined — what Publish trusts, rather than a stream
+	// answering: an open that gave up can leave behind a stream JetStream goes
+	// on to create, which no consumer holds. Written under mu, read without it.
+	opened sync.Map // tenant.ID → struct{}
 }
 
 // tenantQueue is what the broker knows of one tenant's queue.
@@ -219,6 +224,7 @@ func (e *EmbeddedNATS) takeStock(ctx context.Context) error {
 		if q.ingest && ok && (d.limit == tenth || guarded) {
 			q.maxBytes = q.asked
 		}
+		e.record(id, q)
 	}
 	return nil
 }
@@ -265,6 +271,19 @@ func (e *EmbeddedNATS) ingestTenants() []tenant.ID {
 	}
 	slices.Sort(ids)
 	return ids
+}
+
+// record brings opened in line with what the broker knows of tenant id's
+// queue. Both streams known means every consumer holds the queue too: apply
+// joins the consumers to a queue it opens before this records it, and a
+// consumer registered later joins every ingest stream there is. Under e.mu
+// (or before e is shared).
+func (e *EmbeddedNATS) record(id tenant.ID, q *tenantQueue) {
+	if q.ingest && q.dlq {
+		e.opened.Store(id, struct{}{})
+	} else {
+		e.opened.Delete(id)
+	}
 }
 
 // ingestStreamConfig is tenant id's ingest stream. LimitsPolicy: standard
@@ -353,6 +372,7 @@ func (e *EmbeddedNATS) SetMaxBytes(ctx context.Context, id tenant.ID, maxBytes i
 // apply brings tenant id's queue to maxBytes: opening it when its ingest
 // stream is missing, resizing it otherwise (see SetMaxBytes). Under e.mu.
 func (e *EmbeddedNATS) apply(ctx context.Context, id tenant.ID, q *tenantQueue, maxBytes int64) error {
+	defer e.record(id, q)
 	resizeCtx, cancel := context.WithTimeout(ctx, resizeTimeout)
 	defer cancel()
 	if !q.ingest {
@@ -426,9 +446,10 @@ func (e *EmbeddedNATS) applyDLQ(ctx context.Context, id tenant.ID, q *tenantQueu
 }
 
 // reopen opens tenant id's queue at the budget last asked for it, for a
-// publish or park that found one of its streams missing. errNoQueue when no
-// budget has been asked for the tenant yet: a reload can make a tenant
-// resolvable an instant before its budget arrives.
+// publish that finds the queue not recorded open, or a publish or park that
+// found one of its streams missing. errNoQueue when no budget has been asked
+// for the tenant yet: a reload can make a tenant resolvable an instant before
+// its budget arrives.
 //
 // It runs detached from ctx's cancellation, bounded by its own timeouts:
 // ctx is one caller's — an ingest request — while the queue is every
@@ -442,6 +463,7 @@ func (e *EmbeddedNATS) reopen(ctx context.Context, id tenant.ID) error {
 	if q == nil || q.asked == 0 {
 		return fmt.Errorf("tenant %s: %w", id, errNoQueue)
 	}
+	defer e.record(id, q)
 	// What is missing is asked of JetStream rather than read off the flags,
 	// which may still say the stream the publish just missed exists — or it
 	// may be back already, opened by a caller that held mu first.
@@ -467,14 +489,21 @@ func (e *EmbeddedNATS) reopen(ctx context.Context, id tenant.ID) error {
 // Publish stores data on topic's ingest subject, in its tenant's queue. A
 // topic without a valid tenant is refused before anything is sent (see
 // subject). A tenant with no queue has one opened at the budget last asked
-// for it (see SetMaxBytes). A queue that cannot be opened — none asked for
-// yet, or JetStream refused it — and a queue at its byte budget (DiscardNew)
-// are reported as ErrQueueFull: either way the tenant's queue takes nothing
-// now, and a retry is the caller's answer.
+// for it (see SetMaxBytes) — and so does one whose stream exists but whose
+// queue the broker has not recorded open, since no consumer may hold that
+// stream. A queue that cannot be opened — none asked for yet, or JetStream
+// refused it — and a queue at its byte budget (DiscardNew) are reported as
+// ErrQueueFull: either way the tenant's queue takes nothing now, and a retry
+// is the caller's answer.
 func (e *EmbeddedNATS) Publish(ctx context.Context, topic Topic, data []byte, opts ...PublishOpt) error {
 	subj, err := subject(ingestPrefix, topic)
 	if err != nil {
 		return err
+	}
+	if _, ok := e.opened.Load(topic.Tenant); !ok {
+		if openErr := e.reopen(ctx, topic.Tenant); openErr != nil {
+			return fmt.Errorf("%w: %w", ErrQueueFull, openErr)
+		}
 	}
 	err = e.publish(ctx, subj, data, opts)
 	if errors.Is(err, jetstream.ErrNoStreamResponse) {

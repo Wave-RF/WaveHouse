@@ -66,50 +66,24 @@ func (a *App) wireSettings() error {
 		return fmt.Errorf("settings directory %s invalid, refusing to start — findings above; `wavehouse validate` reproduces them, `wavehouse bootstrap` writes a starter directory", a.cfg.Settings.Dir)
 	}
 	a.tenants = tenants
-	// Registered first: hooks run in registration order, so every reload
-	// updates the tracked store before any other hook runs.
-	a.trackDefaultStore()
-	a.onDefaultAdopt(a.trackDefaultStore)
-	a.policies = func() *policy.Policy { return defaultSetting(a, (*settings.Store).Policy) }
+	a.policies = func() *policy.Policy { return defaultPolicy(tenants) }
 	if !tenants.Nested() && a.policies() == nil {
 		slog.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
 	}
 	return nil
 }
 
-// trackDefaultStore remembers tenant 0's store as of its last adoption. The
-// registry stops handing out a rejected tenant's store and forgets a removed
-// one, but the store keeps its last adopted document either way — and that is
-// what defaultSetting goes on reading.
-func (a *App) trackDefaultStore() {
-	if store, ok := a.tenants.For(tenant.Default); ok {
-		a.defaultStore.Store(store)
+// defaultPolicy is the default tenant's access-control policy, which the ops
+// gate of a flat directory reads its admin role from per request. There
+// tenant 0 is the whole directory, always served: a reload that fails keeps
+// the previous document. A nested directory's ops gate reads no policy at all
+// (api.NewRouter).
+func defaultPolicy(tenants *settings.Registry) *policy.Policy {
+	store, ok := tenants.For(tenant.Default)
+	if !ok {
+		return nil
 	}
-}
-
-// defaultSetting reads one setting of the default tenant: the admin role the
-// ops gate of a flat directory reads per request. It reads tenant 0's last
-// adopted document, so a 0 folder a reload rejected or removed leaves its
-// reader as it was. A nested directory that has never served a tenant 0 reads
-// T's zero value, and its ops gate reads no policy at all.
-func defaultSetting[T any](a *App, get func(*settings.Store) T) T {
-	store := a.defaultStore.Load()
-	if store == nil {
-		var zero T
-		return zero
-	}
-	return get(store)
-}
-
-// onDefaultAdopt registers fn to run after each reload that adopts the
-// default tenant, so a nested directory's other tenants never move what
-// follows it, and a rejected 0 folder leaves that as it was.
-func (a *App) onDefaultAdopt(fn func()) {
-	a.tenants.AfterAdopt(func(adopted []tenant.ID) {
-		if slices.Contains(adopted, tenant.Default) {
-			fn()
-		}
-	})
+	return store.Policy()
 }
 
 // shortestKeepalive is the shape of the one keepalive wheel every tenant's

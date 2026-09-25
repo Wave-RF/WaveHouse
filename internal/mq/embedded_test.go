@@ -458,6 +458,48 @@ func TestEmbeddedNATS_SetMaxBytes_AQueueThatCannotOpen(t *testing.T) {
 	assert.Equal(t, int64(testBudget), e.MaxBytes("acme"))
 }
 
+// An open that gives up on the ingest stream can leave one behind that
+// JetStream goes on to create — in-process, a call fails by timing out — and
+// no consumer holds it. A publish goes by the broker's record of the queue,
+// not by the stream answering: it opens the queue properly first, consumers
+// joined, so its row reaches them rather than a stream nobody reads.
+func TestEmbeddedNATS_Publish_OpensAQueueItsOpenGaveUpOn(t *testing.T) {
+	dir := t.TempDir()
+	block := filepath.Join(dir, "jetstream", "$G", "streams", ingestStreamName("acme"))
+	require.NoError(t, os.MkdirAll(filepath.Dir(block), 0o750))
+	require.NoError(t, os.WriteFile(block, nil, 0o600))
+	e := openEmbedded(t, dir)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	cons, err := e.CreateConsumer(ctx, ConsumerConfig{Durable: "buffer"})
+	require.NoError(t, err)
+	got := make(chan string, 1)
+	stop, _, err := cons.Consume(func(msg *Message) {
+		got <- string(msg.Data)
+		_ = msg.Ack()
+	}, 10)
+	require.NoError(t, err)
+	defer stop()
+
+	require.Error(t, e.SetMaxBytes(ctx, "acme", testBudget), "the ingest stream cannot open")
+	if err := os.Remove(block); err != nil {
+		require.ErrorIs(t, err, os.ErrNotExist)
+	}
+	// JetStream creates it after all, behind the broker's back.
+	_, err = e.js.CreateStream(ctx, ingestStreamConfig("acme", testBudget))
+	require.NoError(t, err)
+
+	require.NoError(t, e.Publish(ctx, Topic{Tenant: "acme", Table: "t"}, []byte("x")))
+	select {
+	case data := <-got:
+		assert.Equal(t, "x", data)
+	case <-ctx.Done():
+		t.Fatal("the row reached no consumer")
+	}
+	assert.Equal(t, int64(testBudget), e.MaxBytes("acme"))
+}
+
 // A resize whose dead-letter update fails undoes the ingest one, back to the
 // cap the ingest stream had. That is not the budget applied in full: a boot
 // that found the pair split applied none, and a cap of 0 would leave the

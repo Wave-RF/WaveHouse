@@ -18,7 +18,7 @@
 // handed whole to each component's wiring function, which derives the
 // per-call getters the internal packages take: keyed by the request's store
 // for the handlers, by tenant id for the async paths (perTenant), and fixed
-// to the default tenant for the ops gate of a flat directory (defaultSetting).
+// to the default tenant for the ops gate of a flat directory (defaultPolicy).
 package app
 
 import (
@@ -30,7 +30,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -89,11 +88,8 @@ type App struct {
 	listener net.Listener
 
 	// tenants is the registry every tenant-aware path resolves through, and
-	// the owner of every reload. defaultStore is tenant 0's store as of its
-	// last adoption, which the ops gate of a flat directory reads its admin
-	// role from (defaultSetting).
-	tenants      *settings.Registry
-	defaultStore atomic.Pointer[settings.Store]
+	// the owner of every reload.
+	tenants *settings.Registry
 	// policies is the default tenant's policy, for the ops gate of a flat
 	// directory.
 	policies    policy.Source
