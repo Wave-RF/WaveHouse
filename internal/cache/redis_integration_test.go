@@ -342,10 +342,9 @@ func TestRedis_LostTokensAreMisses(t *testing.T) {
 	fill(t, "q", deps)
 }
 
-// A token key holding something that is not a token — another program
-// under the prefix, a different token size mid-upgrade — is a reply, not a
-// failure: it is replaced, which can only cause misses, and the breaker
-// stays closed.
+// A token or value key holding something else — another program under the
+// prefix, a different token size mid-upgrade — is a reply, not a failure:
+// it is replaced, which can only cause misses, and the breaker stays closed.
 func TestRedis_ForeignTokenIsReplaced(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -357,16 +356,33 @@ func TestRedis_ForeignTokenIsReplaced(t *testing.T) {
 	_, snap, err := c.Lookup(ctx, "acme", "q", deps)
 	require.NoError(t, err)
 	require.NoError(t, c.Set(ctx, snap, []byte("rows"), time.Minute))
-	require.NoError(t, r.Do(ctx, r.B().Set().Key(prefix+":{acme}:B:events").Value("abc").Build()).Error())
+	valueKeys, err := r.Do(ctx, r.B().Keys().Pattern(prefix+":q:*").Build()).AsStrSlice()
+	require.NoError(t, err)
+	require.Len(t, valueKeys, 1)
 
-	e, snap, err := c.Lookup(ctx, "acme", "q", deps)
-	require.NoError(t, err)
-	assert.Nil(t, e.Value)
-	assert.False(t, cache.Bypassed(c))
-	require.NoError(t, c.Set(ctx, snap, []byte("new rows"), time.Minute))
-	e, _, err = c.Lookup(ctx, "acme", "q", deps)
-	require.NoError(t, err)
-	assert.Equal(t, "new rows", string(e.Value))
+	for _, plant := range []struct {
+		name string
+		cmd  rueidis.Completed
+	}{
+		{"a short string under the table token", r.B().Set().Key(prefix + ":{acme}:B:events").Value("abc").Build()},
+		{"", r.B().Del().Key(prefix + ":{acme}:T").Build()},
+		{"a list under the tenant token", r.B().Rpush().Key(prefix + ":{acme}:T").Element("x").Build()},
+		{"", r.B().Del().Key(valueKeys[0]).Build()},
+		{"a hash under the value key", r.B().Hset().Key(valueKeys[0]).FieldValue().FieldValue("f", "v").Build()},
+	} {
+		require.NoError(t, r.Do(ctx, plant.cmd).Error())
+		if plant.name == "" { // the first half of a two-step plant
+			continue
+		}
+		e, snap, err := c.Lookup(ctx, "acme", "q", deps)
+		require.NoError(t, err, plant.name)
+		assert.Nil(t, e.Value, plant.name)
+		assert.False(t, cache.Bypassed(c), plant.name)
+		require.NoError(t, c.Set(ctx, snap, []byte("new rows"), time.Minute), plant.name)
+		e, _, err = c.Lookup(ctx, "acme", "q", deps)
+		require.NoError(t, err, plant.name)
+		assert.Equal(t, "new rows", string(e.Value), plant.name)
+	}
 }
 
 func dockerClient(t *testing.T) *testcontainers.DockerClient {

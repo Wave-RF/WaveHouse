@@ -70,7 +70,7 @@ type RedisConfig struct {
 	DialTimeout      time.Duration
 	MaxValueBytes    int           // largest value stored, after compression
 	CompressMinBytes int           // zstd-compress values at least this large
-	VersionTTL       time.Duration // idle lifetime of a version token, jittered ±10%
+	VersionTTL       time.Duration // a token's lifetime from its last bump, jittered ±10%; reads do not extend it
 	PendingMax       int           // undelivered bumps kept before collapsing to tenant bumps
 
 	BreakerThreshold int           // consecutive failures that open the breaker
@@ -349,19 +349,26 @@ func (r *RedisCache) Lookup(ctx context.Context, id tenant.ID, sha string, deps 
 
 	vkey := valueKey(r.cfg.KeyPrefix, id, sha, deps)
 	res := c.DoMulti(opCtx, c.B().Mget().Key(keys...).Build(), c.B().Get().Key(vkey).Build())
-	for _, rr := range res {
-		if err := rr.Error(); err != nil && !rueidis.IsRedisNil(err) {
-			return r.lookupFailed(ctx, err)
-		}
+	if err := res[0].Error(); err != nil {
+		return r.lookupFailed(ctx, err)
+	}
+	// An error reply such as WRONGTYPE: the value key holds something else,
+	// which the fill's plain SET replaces, so it is a miss to fill.
+	valErr := res[1].Error()
+	_, valReplied := rueidis.IsRedisErr(valErr)
+	if valErr != nil && !rueidis.IsRedisNil(valErr) && !valReplied {
+		return r.lookupFailed(ctx, valErr)
 	}
 	r.record(ctx, nil)
 	tokens, missing, foreign, err := readTokens(res[0])
 	if err != nil {
 		return r.lookupFailed(ctx, err)
 	}
-	val, err := res[1].AsBytes()
-	if err != nil && !rueidis.IsRedisNil(err) {
-		return r.lookupFailed(ctx, fmt.Errorf("%w: %w", errMalformedReply, err))
+	var val []byte
+	if valErr == nil {
+		if val, err = res[1].AsBytes(); err != nil {
+			return r.lookupFailed(ctx, fmt.Errorf("%w: %w", errMalformedReply, err))
+		}
 	}
 
 	if len(missing) > 0 || len(foreign) > 0 {
@@ -423,8 +430,9 @@ func readTokens(res rueidis.RedisResult) (tokens []byte, missing, foreign []int,
 }
 
 // createTokens sets each missing token — only if still missing, as another
-// process may create it first — replaces each foreign one, and reads them
-// all back, in one round trip: the tokens share a slot, so the pipeline runs
+// process may create it first — replaces each foreign one (a string that is
+// not a token, or, on a second round trip, a key of another type), and reads
+// them all back, in one round trip: the tokens share a slot, so the pipeline runs
 // in order on one node. A fresh token can only cause misses, so replacing
 // whatever held a token key is safe.
 func (r *RedisCache) createTokens(ctx context.Context, c rueidis.Client, keys []string, missing, foreign []int) ([]byte, error) {
@@ -451,10 +459,15 @@ func (r *RedisCache) createTokens(ctx context.Context, c rueidis.Client, keys []
 	if err != nil {
 		return nil, err
 	}
-	if len(still) > 0 || len(bad) > 0 {
-		return nil, fmt.Errorf("%w: version token gone or replaced as it was written", errMalformedReply)
+	if len(still) == 0 && len(bad) == 0 {
+		return tokens, nil
 	}
-	return tokens, nil
+	// Still nil after SET NX: the key holds a list, hash or other non-string,
+	// which MGET reads as nil and NX will not overwrite. Replace it too.
+	if len(foreign) == 0 && len(still) > 0 {
+		return r.createTokens(ctx, c, keys, nil, still)
+	}
+	return nil, fmt.Errorf("%w: version token gone or replaced as it was written", errMalformedReply)
 }
 
 // Set stores value with the tokens snap read, for ttl. A value over the size
