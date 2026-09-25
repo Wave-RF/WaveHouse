@@ -401,6 +401,36 @@ func TestDynamo_CommitAttemptsEveryChunk(t *testing.T) {
 	assert.Equal(t, 2*batchWriteMax, written, "a failed chunk does not cancel the others: their records are published")
 }
 
+// A put cancelled by its caller is not an answer from the table: it does
+// not reset the breaker's count of throttled puts.
+func TestDynamo_CallerCancelDoesNotResetBreaker(t *testing.T) {
+	t.Parallel()
+	var hang atomic.Bool
+	started := make(chan struct{}, 1)
+	_, m := openFake(t, &fakeDynamo{put: func(ctx context.Context, _ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+		if hang.Load() {
+			started <- struct{}{}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return nil, &types.ProvisionedThroughputExceededException{}
+	}})
+	for range breakerTrips - 1 {
+		_, err := m.Reserve(t.Context(), keys("a"), time.Minute)
+		require.ErrorIs(t, err, ErrUnavailable)
+	}
+	hang.Store(true)
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() { <-started; cancel() }()
+	_, err := m.Reserve(ctx, keys("a"), time.Minute)
+	require.ErrorIs(t, err, context.Canceled)
+	hang.Store(false)
+	_, err = m.Reserve(t.Context(), keys("a"), time.Minute)
+	require.ErrorIs(t, err, ErrUnavailable)
+	_, err = m.Reserve(t.Context(), keys("a"), time.Minute)
+	require.ErrorIs(t, err, errBreakerOpen, "the cancelled put did not reset the count")
+}
+
 func TestDynamo_ReleaseAttemptsEveryClaim(t *testing.T) {
 	t.Parallel()
 	var deletes atomic.Int64

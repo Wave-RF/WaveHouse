@@ -260,8 +260,9 @@ func (d *Dynamo) call(ctx context.Context, op string, do func(context.Context) e
 	start := time.Now()
 	err := classify(op, do(ctx))
 	d.metrics.record(ctx, op, time.Since(start), err)
-	// A request cancelled because a sibling failed says nothing about the
-	// table, and must not reset the breaker's count.
+	// A request cancelled because its caller went away (a client
+	// disconnecting mid-Reserve) says nothing about the table, and must not
+	// reset the breaker's count.
 	if op == opReserve && !errors.Is(err, context.Canceled) {
 		d.breaker.record(err)
 	}
