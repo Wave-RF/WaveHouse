@@ -7,7 +7,7 @@ sidebar:
 
 A **named pipe** is a saved SQL query, registered under a name, that callers run by name with parameters — without ever sending raw SQL. They turn an ad-hoc query into a stable, cached, access-controlled endpoint: you write the SQL once as an operator in the settings directory's [`pipes.json`](/settings-directory#pipesjson), expose it at `GET/POST /v1/pipes/{name}`, and clients supply only the declared parameters.
 
-Pipes are the right tool when a query is reusable and shouldn't live in client code — dashboards, reports, public APIs over curated slices of data. They sit on the **cached read path** (shared L1 + singleflight, same as structured queries), and authorize through a simple per-pipe allowlist rather than the full [policy engine](/access-control).
+Pipes are the right tool when a query is reusable and shouldn't live in client code — dashboards, reports, public APIs over curated slices of data. They sit on the **cached read path** (shared L1 + singleflight, same as structured queries; a [pipe that writes](#pipes-that-write) bypasses both), and authorize through a simple per-pipe allowlist rather than the full [policy engine](/access-control).
 
 ## Anatomy of a pipe
 
@@ -169,7 +169,7 @@ curl -X POST http://localhost:8080/v1/pipes/top_pages \
   -d '{"start_date": "2024-01-01", "limit": 20}'
 ```
 
-The response is a JSON array of rows. Results flow through the query cache (in-process by default, or a Redis shared by every instance with [`cache.backend: redis`](/configuration#cache)) with singleflight coalescing, so concurrent identical calls hit ClickHouse once; an `X-Cache: HIT` or `X-Cache: MISS` header tells you which path served the response.
+The response is a JSON array of rows. Results flow through the query cache (in-process by default, or a Redis shared by every instance with [`cache.backend: redis`](/configuration#cache)) with singleflight coalescing, so concurrent identical calls hit ClickHouse once; an `X-Cache: HIT` or `X-Cache: MISS` header tells you which path served the response. A [pipe that writes](#pipes-that-write) skips both and answers `X-Cache: BYPASS`.
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
@@ -177,6 +177,14 @@ The response is a JSON array of rows. Results flow through the query cache (in-p
 | 403 | `{"error":"forbidden"}` | Caller's role isn't in `allowed_roles` (and isn't admin) |
 | 400 | `{"error":"missing required parameter: x"}` | A required parameter wasn't supplied |
 | 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL form — a JSON object (directly, or nested in an array). An empty array is likewise rejected (`array parameter must not be empty`). |
+
+### Pipes that write
+
+A pipe's SQL may be a write — `INSERT`, `ALTER … DELETE`, `CREATE`, and the rest of ClickHouse's statements that return no rows, including a `WITH … INSERT`. Such a pipe runs on **every** call: it never reads or fills the cache and is never coalesced with an identical call in flight, so ten identical calls are ten writes. The response is `[]` with `X-Cache: BYPASS` and `Cache-Control: no-store`, so an HTTP cache in front of a `GET` does not answer a repeat either. WaveHouse classifies the statement from its leading keyword (after any `WITH` list), with the same classifier that sends it to ClickHouse as a write, so no pipe property marks it.
+
+`allowed_roles` is a write pipe's only gate: the [policy engine](/access-control)'s insert rules do not apply to it, so any role you list — including a [`default_role`](/access-control#default_role--public-unauthenticated-access) that anonymous callers resolve to — can run the write. The operator fixes the statement and its predicate when authoring the pipe; callers supply only literal values.
+
+Two things a write pipe does not do yet: it does not invalidate cached reads of the table it writes — a structured query or read pipe over that table can serve pre-write rows until its TTL ([#394](https://github.com/Wave-RF/WaveHouse/issues/394)) — and its rows do not reach [`/v1/stream`](/api#get-v1stream--server-sent-events-stream) subscribers, which only the [ingest pipeline](/ingest-pipeline) feeds ([#362](https://github.com/Wave-RF/WaveHouse/issues/362)). For writes that should be seen at once, use [`POST /v1/ingest`](/api#post-v1ingesttabletable--ingest-data).
 
 ## End-to-end example
 

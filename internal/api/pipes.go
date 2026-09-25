@@ -161,6 +161,25 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A pipe that writes runs on every call: a cached or coalesced response
+	// would answer a repeat without executing it, silently dropping the write
+	// (#386) — on every instance once the cache is shared. isMutation is the
+	// classifier executeCHQuery routes Exec by, so what bypasses here is
+	// exactly what runs as a write. no-store keeps an HTTP cache in front of
+	// a GET from answering a repeat the same way.
+	if isMutation(sql) {
+		data, _, err := h.run(r.Context(), store, conn, sql, params)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "BYPASS")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(data) //nolint:gosec // G705: JSON the handler marshalled from the exec result
+		return
+	}
+
 	// Cache. A pipe can read several tables, but the current pipe impl doesn't
 	// expose its table/scope dependencies, so we pass no deps: the result folds
 	// the tenant's version alone, so InvalidateTenant orphans it but no insert
@@ -182,28 +201,12 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		queryCtx, cancel := context.WithTimeout(r.Context(), timeoutOf(h.queryTimeout, store))
-		defer cancel()
-
-		start := time.Now()
-
-		rows, err := executeCHQuery(queryCtx, conn, sql, params)
-		queryDuration := time.Since(start)
+		data, queryDuration, err := h.run(r.Context(), store, conn, sql, params)
 		if err != nil {
-			// TODO: depending on the error, we may actually want to cache it
 			return nil, err
 		}
-
-		data, err := json.Marshal(rows)
-		if err != nil {
-			// TODO: eventually we want CSV support etc
-			return nil, err
-		}
-
-		ttl := cache.QueryTimeToTTL(queryDuration)
-
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), snap, data, ttl)
+			_ = h.Cache.Set(r.Context(), snap, data, cache.QueryTimeToTTL(queryDuration))
 		}
 		return data, nil
 	})
@@ -215,4 +218,19 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
 	_, _ = w.Write(v.([]byte)) //nolint:gosec // G705: the tenant id on the key only selects the entry; the bytes are JSON the handler marshalled from ClickHouse rows
+}
+
+// run executes a pipe's bound SQL under the tenant's query timeout and
+// returns the rows as JSON with how long ClickHouse took.
+func (h *PipesHandler) run(ctx context.Context, store *settings.Store, conn driver.Conn, sql string, params []any) ([]byte, time.Duration, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, timeoutOf(h.queryTimeout, store))
+	defer cancel()
+	start := time.Now()
+	rows, err := executeCHQuery(queryCtx, conn, sql, params)
+	queryDuration := time.Since(start)
+	if err != nil {
+		return nil, 0, err
+	}
+	data, err := json.Marshal(rows)
+	return data, queryDuration, err
 }
