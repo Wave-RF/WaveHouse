@@ -3,9 +3,11 @@ package cache
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/Wave-RF/WaveHouse/internal/keyenc"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
@@ -34,7 +36,10 @@ func NewVersionManager() *VersionManager {
 
 // Namespace is one (tenant, table, scope) a cached result depends on. The
 // tenant leads every key built from it, so the same table under two tenants
-// is two namespaces, versioned and bumped apart (#583 story 8).
+// is two namespaces, versioned and bumped apart (#583 story 8). Table and
+// Scope are raw names: the cache escapes them where it builds a key
+// (keyenc), so no caller escapes and no separator in a name can run two
+// fields together.
 type Namespace struct {
 	Tenant tenant.ID
 	Table  string
@@ -42,23 +47,24 @@ type Namespace struct {
 }
 
 // tableKeyLocked renders the table-versions key,
-// "<tenant>.<tenant_version>.<table>"; caller must hold vm.mu. A tenant id
-// cannot contain a dot and callers encode the table dot-free, so the tokens
-// can never run together.
+// "<tenant>.<tenant_version>.<table>", its fields joined by keyenc so no
+// dot in a table name can run into the next field; caller must hold vm.mu.
 func (vm *VersionManager) tableKeyLocked(id tenant.ID, table string) string {
-	return fmt.Sprintf("%s.%d.%s", id, vm.tenantVersions[id], table)
+	return keyenc.Join('.', string(id), strconv.FormatUint(vm.tenantVersions[id], 10), table)
 }
 
-// namespaceKeyLocked builds the namespace-table key; caller must hold vm.mu.
+// namespaceKeyLocked builds the namespace-table key: the table key, then
+// the table version and the scope, one more level of the same join; caller
+// must hold vm.mu.
 func (vm *VersionManager) namespaceKeyLocked(ns Namespace) string {
 	tk := vm.tableKeyLocked(ns.Tenant, ns.Table)
-	return fmt.Sprintf("%s.%d.%s", tk, vm.tableVersions[tk], ns.Scope)
+	return string(keyenc.AppendJoin([]byte(tk+"."), '.', strconv.FormatUint(vm.tableVersions[tk], 10), ns.Scope))
 }
 
 // NamespaceKey renders the namespace-table key for ns at its tenant's and
 // table's current versions:
-// "<tenant>.<tenant_version>.<table>.<table_version>.<scope>" (scopeless
-// scope is "", so e.g. "<tenant>.0.<table>.<v>.").
+// "<tenant>.<tenant_version>.<table>.<table_version>.<scope>", each field
+// escaped (scopeless scope is "", so e.g. "<tenant>.0.<table>.<v>.").
 func (vm *VersionManager) NamespaceKey(ns Namespace) string {
 	vm.mu.RLock()
 	defer vm.mu.RUnlock()
@@ -71,7 +77,9 @@ func (vm *VersionManager) NamespaceKey(ns Namespace) string {
 // a bump of the tenant or of any dependency misses the key — a result with no
 // deps (a pipe) is orphaned by BumpTenant too. A structured query passes one
 // Namespace; a pipe passes several. Deps are sorted so their order never
-// changes the key.
+// changes the key. The key nests two levels: the escaped sha and the
+// '.'-joined tenant and dependency segments, separated by '|', which no
+// escaped field or '.' join ever holds.
 func (vm *VersionManager) QueryKey(id tenant.ID, sha string, deps []Namespace) string {
 	segs := make([]string, len(deps))
 	// Lock per dependency rather than across the whole loop: each dep's table +
@@ -90,7 +98,7 @@ func (vm *VersionManager) QueryKey(id tenant.ID, sha string, deps []Namespace) s
 	tv := vm.tenantVersions[id]
 	vm.mu.RUnlock()
 	sort.Strings(segs)
-	return fmt.Sprintf("%s|%s.%d|%s", sha, id, tv, strings.Join(segs, "|"))
+	return keyenc.Escape(sha) + "|" + keyenc.Join('.', string(id), strconv.FormatUint(tv, 10)) + "|" + strings.Join(segs, "|")
 }
 
 // BumpTable advances a tenant's table version, orphaning every namespace — and

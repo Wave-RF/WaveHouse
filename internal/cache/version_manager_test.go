@@ -19,6 +19,11 @@ func TestVersionManager_NamespaceKey(t *testing.T) {
 	assert.Equal(t, "acme.0.users.0.org_1", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "users", Scope: "org_1"}))
 	assert.Equal(t, "0.0.users.0.", vm.NamespaceKey(Namespace{Tenant: tenant.Default, Table: "users"}))
 
+	// Names arrive raw and are escaped into the key, so a dot or a space in
+	// one is never read as the separator.
+	assert.Equal(t, "acme.0.default%2Eclicks.0.org%2E1", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "default.clicks", Scope: "org.1"}))
+	assert.Equal(t, "acme.0.my%20table.0.", vm.NamespaceKey(Namespace{Tenant: "acme", Table: "my table"}))
+
 	// The table version is embedded in every namespace key for that tenant's
 	// table, so a BumpTable is reflected across all its scopes at once — and
 	// nowhere else: the same table under another tenant keeps its version.
@@ -47,6 +52,11 @@ func TestVersionManager_QueryKey(t *testing.T) {
 
 	// No deps (a pipe) still folds the tenant version.
 	assert.Equal(t, "hash123|acme.0|", vm.QueryKey("acme", "hash123", nil))
+
+	// The sha is a field like any other: escaped, so no '|' in it can pass
+	// for the separator.
+	assert.Equal(t, "acme%3Aquery%3Aab|acme.0|acme.0.my%20table.0..0",
+		vm.QueryKey("acme", "acme:query:ab", []Namespace{{Tenant: "acme", Table: "my table"}}))
 
 	// Dependency order must not change the key (segments are sorted).
 	deps1 := []Namespace{{Tenant: "acme", Table: "a"}, {Tenant: "acme", Table: "b"}}

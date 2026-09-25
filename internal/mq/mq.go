@@ -13,6 +13,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/keyenc"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
@@ -33,16 +34,16 @@ type Topic struct {
 
 // key is the injective string form of the topic that a subject's tail
 // carries: the tenant first, verbatim — its grammar makes it one token — then
-// the table and scope as encoded tokens. A topic without a tenant has no
-// subject, and its key parses back to a topic of no tenant with the whole key
-// as its table (parseTopicKey's fallback). Callers key their own maps by the
-// Topic value itself.
+// the table and scope joined as escaped tokens (keyenc.AppendJoin). A topic
+// without a tenant has no subject, and its key parses back to a topic of no
+// tenant with the whole key as its table (parseTopicKey's fallback). Callers
+// key their own maps by the Topic value itself.
 func (t Topic) key() string {
-	key := string(t.Tenant) + "." + encodeToken(t.Table)
-	if t.Scope != "" {
-		key += "." + encodeToken(t.Scope)
+	key := append([]byte(t.Tenant), '.')
+	if t.Scope == "" {
+		return string(keyenc.AppendJoin(key, '.', t.Table))
 	}
-	return key
+	return string(keyenc.AppendJoin(key, '.', t.Table, t.Scope))
 }
 
 // Message represents a message received from the queue.
@@ -164,7 +165,9 @@ type Subscriber interface {
 	// consumer named consumerName, held on every tenant's queue — those
 	// opened after Subscribe included. The handler runs on one delivery
 	// goroutine per tenant, one message at a time, so it must be safe to
-	// call concurrently for different tenants.
+	// call concurrently for different tenants. The messages fetched ahead of
+	// it are a fixed number split across the tenants, as Consumer.Consume's
+	// prefetch is, so they do not grow with the number of tenants.
 	//
 	// CONTRACT: If the handler intends to return an error to trigger automatic
 	// redelivery, it MUST NOT manually call msg.Ack() or msg.Nak() beforehand.
@@ -195,17 +198,19 @@ type ConsumerConfig struct {
 
 // Consumer is a live durable consumer created by ConsumerManager.
 type Consumer interface {
-	// Consume delivers each message to handler on a delivery goroutine of
-	// its tenant's: one per tenant, so a tenant's messages arrive in order,
-	// one at a time, while different tenants' arrive concurrently — handler
-	// must be safe for that. A handler that blocks holds back its tenant's
-	// delivery — that is the backpressure the ingest worker relies on. About
-	// prefetch messages are fetched ahead across the tenants together, at
-	// least one per tenant (0 = the client default, per tenant). The returned
-	// stop asks delivery to end and returns without waiting: a handler
-	// invocation already in flight, or one for a message already queued
-	// client-side, may still run after stop returns, so a handler must not
-	// write to anything the caller tears down right after stopping.
+	// Consume delivers each message to handler on a delivery goroutine of its
+	// tenant's: one per tenant, so a tenant's messages arrive in order, one at
+	// a time, while different tenants' arrive concurrently — handler must be
+	// safe for that. A handler that blocks holds back its tenant's delivery —
+	// that is the backpressure the ingest worker relies on. About prefetch
+	// messages are fetched ahead across the tenants together: the tenants'
+	// queues when delivery starts split it, and a queue joined later fetches
+	// ahead its share of it at that point, at least one message each (0 = the
+	// client default, per tenant). The returned stop asks delivery to end and
+	// returns without waiting: a handler invocation already in flight, or one
+	// for a message already queued client-side, may still run after stop
+	// returns, so a handler must not write to anything the caller tears down
+	// right after stopping.
 	//
 	// Delivery can also end on its own after Consume has returned: the broker
 	// or the client gives up on the consumer (it was deleted, the connection
@@ -242,8 +247,8 @@ type DeadLetterer interface {
 // DeadLetterCounts is what is parked on one tenant's dead-letter queue.
 type DeadLetterCounts struct {
 	// Tables maps table name → parked messages, for the tables asked about.
-	// Scope is not broken out yet (it is inert until #235): a message parked
-	// under a scoped topic counts under "table.scope", not under its table.
+	// Every scope of a table counts under the table; scope is not broken out
+	// yet (it is inert until #235).
 	Tables map[string]uint64
 	// Total is every parked message of the tenant, whatever the filter.
 	Total uint64
@@ -258,8 +263,8 @@ var ErrNoDeadLetterQueue = errors.New("dead-letter queue not found")
 type DeadLetterStats interface {
 	// DeadLetterCounts counts tenant id's parked messages per table — a
 	// tenant served, rejected, or removed alike, for as long as its queue is
-	// kept. A non-empty table narrows Tables to that one (its unscoped
-	// messages).
+	// kept. A non-empty table narrows Tables to that one (all of its
+	// scopes).
 	DeadLetterCounts(ctx context.Context, id tenant.ID, table string) (DeadLetterCounts, error)
 }
 
@@ -274,10 +279,11 @@ type Purger interface {
 	// its first unacked event) AND stored before that tenant's cutoff in
 	// olderThan. Either bound alone keeps the event: unacked events are not
 	// yet written, and recent ones are still needed for replay. A tenant
-	// olderThan does not name — one no longer served — keeps no history:
-	// everything it has acknowledged goes. Reports whether anything was
-	// removed. ErrConsumerNotFound when the consumer has not been created on
-	// some tenant's queue; the other tenants' are purged all the same.
+	// olderThan does not name keeps no history: everything it has
+	// acknowledged goes. Reports whether anything was removed, and joins
+	// each failed tenant's error — ErrConsumerNotFound for one whose queue the
+	// consumer has not been created on; the other tenants' are purged all the
+	// same.
 	PurgeAcked(ctx context.Context, consumer string, olderThan map[tenant.ID]time.Time) (purged bool, err error)
 }
 

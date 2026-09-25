@@ -82,9 +82,10 @@ func collectEnvTags(t reflect.Type, into map[string]bool) {
 // search permission — carries the UID-65532 hint, since a bind mount owned
 // by root is the typical cause. Writability is probed by creating and
 // removing one temp file: the only portable test that exercises the mount's
-// ownership and mode. A blank dir — reachable through `WH_DATA_DIR=` — is
-// refused outright: the ancestor walk would otherwise probe the working
-// directory and pass, and NATS and Pebble state would land under it.
+// ownership and mode. A blank dir — reachable through `WH_DATA_DIR=` or
+// `data_dir: ""` — is refused outright: the ancestor walk would otherwise
+// probe the working directory and pass, and NATS and Pebble state would land
+// under it.
 func CheckDataDir(dir string) error {
 	if strings.TrimSpace(dir) == "" {
 		return errors.New("data_dir (WH_DATA_DIR) is required: an empty value would scatter NATS and Pebble state under the working directory")

@@ -174,13 +174,10 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 	// TODO: impl scope
 	scope := ""
-	safeTableName := query.SafeEncodeToken(table)
 	// A structured query reads one table, so it depends on a single namespace:
-	// the request's tenant, the table, the scope. Encode the scope the way the
-	// ingest worker does (worker.go invalidate) so the read and invalidation
-	// sides build identical namespace keys once scope is implemented;
-	// SafeEncodeToken("") is "", so this is a no-op while scope is empty.
-	deps := []cache.Namespace{{Tenant: store.Tenant(), Table: safeTableName, Scope: query.SafeEncodeToken(scope)}}
+	// the request's tenant, the table, the scope — raw names, as the ingest
+	// worker's invalidation passes them; the cache escapes both sides alike.
+	deps := []cache.Namespace{{Tenant: store.Tenant(), Table: table, Scope: scope}}
 
 	// Try cache. The snapshot is of the versions before the query runs, so a
 	// write landing mid-query orphans the fill (#382).
