@@ -154,13 +154,17 @@ func (r *Registry) All() iter.Seq2[tenant.ID, *Store] {
 }
 
 // Known iterates over every tenant the registry holds, served or rejected,
-// in id order — for a consumer that must keep a rejected tenant's resources
-// current too: the tenant comes back into service with them, and a rejection
-// is the common reload failure (a typo, fixed and reloaded minutes later).
-func (r *Registry) Known() iter.Seq[tenant.ID] {
-	return func(yield func(tenant.ID) bool) {
-		for _, id := range slices.Sorted(maps.Keys(*r.tenants.Load())) {
-			if !yield(id) {
+// in id order, each with the store holding its last adopted settings — nil
+// for a tenant whose folder has not validated since boot — for a consumer
+// that must keep a rejected tenant's resources current too: the tenant comes
+// back into service with them, and a rejection is the common reload failure
+// (a typo, fixed and reloaded minutes later). A rejected tenant's store
+// serves no request; it is handed out for what those resources read of it.
+func (r *Registry) Known() iter.Seq2[tenant.ID, *Store] {
+	return func(yield func(tenant.ID, *Store) bool) {
+		tenants := *r.tenants.Load()
+		for _, id := range slices.Sorted(maps.Keys(tenants)) {
+			if !yield(id, tenants[id].store) {
 				return
 			}
 		}
