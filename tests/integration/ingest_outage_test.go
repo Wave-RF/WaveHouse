@@ -39,9 +39,10 @@ func TestIngest_ClickHouseOutage_RetriedNotDeadLettered(t *testing.T) {
 	const table = "outage_events"
 	require.NoError(t, ch.conn.Exec(ctx, "CREATE TABLE "+table+" (id UInt32) ENGINE = MergeTree ORDER BY id"))
 
-	broker, err := mq.NewEmbedded(t.TempDir(), 64<<20)
+	broker, err := mq.NewEmbedded(t.TempDir())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = broker.Close() })
+	require.NoError(t, broker.SetMaxBytes(ctx, tenant.Default, 64<<20))
 
 	// The worker resolves its target per flush, so a restart that moves the
 	// mapped HTTP port is followed the way a settings reload would be.
@@ -76,7 +77,7 @@ func TestIngest_ClickHouseOutage_RetriedNotDeadLettered(t *testing.T) {
 	}
 
 	parked := func() uint64 {
-		c, err := broker.DeadLetterCounts(ctx, "")
+		c, err := broker.DeadLetterCounts(ctx, tenant.Default, "")
 		require.NoError(t, err)
 		return c.Total
 	}

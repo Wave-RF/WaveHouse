@@ -40,20 +40,25 @@ func keyOf(t chconn.Target, table string) poolKey {
 // check, so the set is bounded by the tuples ever configured times the tables
 // ever flushed.
 type backoffs struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 	m  map[poolKey]*backoff
-	// open counts the pools in an outage, so the per-row check (waiting) costs
-	// one atomic load while every pool is healthy.
+	// open counts the pools and tables with a failure not yet followed by a
+	// success, so the per-row check (waiting) costs one atomic load, and no
+	// target resolution, while none has failed. A table that fails and is
+	// never written again keeps it above zero; past that, a row costs two
+	// read-locked lookups.
 	open atomic.Int32
 }
 
-// waiting reports whether table's rows on t's pool should stay away — the
+// waiting reports whether table's rows on its pool should stay away — the
 // pool or the table backing off — and for how long, without claiming the
-// probe that allow hands out once a window elapses.
-func (b *backoffs) waiting(t chconn.Target, table string, now time.Time) (time.Duration, bool) {
+// probe that allow hands out once a window elapses. target is called only
+// when some backoff is open.
+func (b *backoffs) waiting(target func() chconn.Target, table string, now time.Time) (time.Duration, bool) {
 	if b.open.Load() == 0 {
 		return 0, false
 	}
+	t := target()
 	if wait, ok := b.forTarget(t).waiting(now); ok {
 		return wait, true
 	}
@@ -67,12 +72,18 @@ func (b *backoffs) forTable(t chconn.Target, table string) *backoff {
 }
 
 func (b *backoffs) get(k poolKey) *backoff {
+	b.mu.RLock()
+	bo, ok := b.m[k]
+	b.mu.RUnlock()
+	if ok {
+		return bo
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.m == nil {
 		b.m = make(map[poolKey]*backoff)
 	}
-	bo, ok := b.m[k]
+	bo, ok = b.m[k]
 	if !ok {
 		bo = &backoff{jitter: rand.Int64N, open: &b.open}
 		b.m[k] = bo

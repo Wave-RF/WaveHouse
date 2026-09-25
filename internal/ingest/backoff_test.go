@@ -127,9 +127,9 @@ func TestBackoffs_TableAndPoolAreSeparate(t *testing.T) {
 	now := time.Unix(0, 0)
 	bs.forTable(tgt, "ro").fail(now)
 
-	_, ok := bs.waiting(tgt, "ro", now)
+	_, ok := bs.waiting(func() chconn.Target { return tgt }, "ro", now)
 	assert.True(t, ok, "the failing table waits")
-	_, ok = bs.waiting(tgt, "healthy", now)
+	_, ok = bs.waiting(func() chconn.Target { return tgt }, "healthy", now)
 	assert.False(t, ok, "its neighbour on the pool does not")
 	assert.NotSame(t, bs.forTarget(tgt), bs.forTable(tgt, "ro"))
 }

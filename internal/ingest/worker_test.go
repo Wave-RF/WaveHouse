@@ -124,9 +124,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 		{
 			name: "nil cache",
 			setup: func(t *testing.T) (Queue, cache.Cache) {
-				emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024)
-				require.NoError(t, err)
-				t.Cleanup(func() { _ = emb.Close() })
+				emb := testutil.NewEmbeddedMQ(t, 1024*1024)
 				return emb, nil
 			},
 			wantErrSub: "cache is nil",
@@ -156,9 +154,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 	t.Parallel()
 
 	// ── Embedded MQ ──
-	emb, err := mq.NewEmbedded(t.TempDir(), 4*1024*1024)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = emb.Close() })
+	emb := testutil.NewEmbeddedMQ(t, 4*1024*1024)
 
 	// ── ClickHouse stub: capture each request body, return 200 ──
 	var (
@@ -249,9 +245,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	t.Parallel()
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = emb.Close() })
+	emb := testutil.NewEmbeddedMQ(t, 1024*1024)
 
 	// ClickHouse stub that blocks until we say go — keeps the worker's
 	// flush goroutine alive past the stop call.
@@ -300,9 +294,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 	t.Parallel()
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = emb.Close() })
+	emb := testutil.NewEmbeddedMQ(t, 1024*1024)
 
 	// chURL is never dialed: with no messages there is no flush, so a dummy
 	// host/port is fine.
@@ -1096,9 +1088,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		batchB = maxBatch
 	)
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = emb.Close() })
+	emb := testutil.NewEmbeddedMQ(t, 8*1024*1024)
 
 	// CH stub: count rows (newlines in the JSONCompactEachRow body) per target table.
 	var (
@@ -1189,9 +1179,7 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 		total    = 4                // 3 → one full batch on the size trigger; 1 leftover
 	)
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = emb.Close() })
+	emb := testutil.NewEmbeddedMQ(t, 8*1024*1024)
 
 	// CH stub counts rows and sleeps briefly, so the 4th row is reliably buffered
 	// before the first (3-row) flush completes — that's when the old code would
@@ -1279,10 +1267,10 @@ func v1Envelope(t *testing.T, table string, data map[string]any) []byte {
 }
 
 // TestParseMsg_PoisonEnvelope_ParkedOnDLQ: an envelope the worker can never
-// insert — a pre-v2 message left in the queue across an upgrade, malformed
+// insert — one of an unknown format (the pre-v2 shape carries none), malformed
 // JSON, or columns and a row that can't be paired — is preserved on the DLQ
-// rather than dropped, so a missed pre-deploy drain costs an operator a replay
-// rather than the rows themselves.
+// rather than dropped, so it costs an operator a replay rather than the rows
+// themselves.
 func TestParseMsg_PoisonEnvelope_ParkedOnDLQ(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1793,9 +1781,7 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 	t.Parallel()
 	const maxBatch = 2
 
-	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = emb.Close() })
+	emb := testutil.NewEmbeddedMQ(t, 8*1024*1024, "acme", "globex")
 
 	// CH stub: record each INSERT's body under the database it named.
 	var (
@@ -2269,6 +2255,25 @@ func TestTableBatcher_Add_HandsRowsBackWhileThePoolBacksOff(t *testing.T) {
 	b.add(context.Background(), parseAll(t, w, late)[0])
 	assert.Len(t, b.batch, 1, "after the window rows batch again")
 	assert.False(t, late.Naked.Load())
+}
+
+// TestTableBatcher_Add_ResolvesNoTargetWhileNothingBacksOff: the per-row
+// backoff check is one atomic load while no pool or table has failed — the
+// target, which formats a URL, is resolved only once some backoff is open.
+func TestTableBatcher_Add_ResolvesNoTargetWhileNothingBacksOff(t *testing.T) {
+	t.Parallel()
+	b, w, _ := newTestBatcher(t, okRoundTripper())
+	var resolved atomic.Int32
+	target := w.target
+	w.target = func(id tenant.ID) chconn.Target { resolved.Add(1); return target(id) }
+
+	b.add(context.Background(), parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1}))[0])
+	assert.Zero(t, resolved.Load(), "no target is resolved while every backoff is closed")
+
+	w.backoffs.forTable(target(tenant.Default), "other").fail(w.clock())
+	b.add(context.Background(), parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 2}))[0])
+	assert.Equal(t, int32(1), resolved.Load(), "an open backoff anywhere makes the check resolve the target")
+	assert.Len(t, b.batch, 2, "another table's backoff does not hold this one's rows")
 }
 
 // TestFlushTable_ReadOnlyTable_BacksOffAlone: a table ClickHouse reports as
