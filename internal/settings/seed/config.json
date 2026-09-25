@@ -26,6 +26,7 @@
     "enabled": false,
     "id_field": "event_id",
     "require_id": false,
+    "retention": "0",
     "tables": {}
   },
   "dlq": {

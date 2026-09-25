@@ -141,6 +141,36 @@ func TestEmbeddedNATS_PublishHeaders(t *testing.T) {
 	assert.Equal(t, []byte("x"), raw.Data)
 }
 
+// A repeated idempotency key inside the duplicate window is dropped as a
+// success, so an uncertain publish can be republished safely; a queue made
+// with another window gets this one on its next budget apply.
+func TestEmbeddedNATS_Publish_IdempotencyKeyDropsARepeat(t *testing.T) {
+	e := openEmbedded(t, t.TempDir())
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	// Explicit rather than the server's default, which happens to match today.
+	require.Equal(t, EmbeddedDuplicateWindow, ingestStreamConfig(tenant.Default, testBudget).Duplicates)
+	old := ingestStreamConfig(tenant.Default, testBudget)
+	old.Duplicates = 10 * time.Second
+	_, err := e.js.CreateStream(ctx, old)
+	require.NoError(t, err)
+	require.NoError(t, e.SetMaxBytes(ctx, tenant.Default, testBudget))
+	require.Equal(t, EmbeddedDuplicateWindow, streamConfig(t, e, "INGEST_0").Duplicates)
+
+	topic := Topic{Tenant: tenant.Default, Table: "t"}
+	require.NoError(t, e.Publish(ctx, topic, []byte("a"), WithIdempotencyKey("k1")))
+	require.NoError(t, e.Publish(ctx, topic, []byte("a again"), WithIdempotencyKey("k1")), "a repeat is a success")
+	require.NoError(t, e.Publish(ctx, topic, []byte("b"), WithIdempotencyKey("k2")))
+	require.NoError(t, e.Publish(ctx, topic, []byte("c")))
+
+	var got []string
+	require.NoError(t, e.ReplaySince(ctx, topic, time.Time{}, func(data []byte) bool {
+		got = append(got, string(data))
+		return true
+	}))
+	assert.Equal(t, []string{"a", "b", "c"}, got)
+}
+
 // A tenant's first budget opens its queue: an ingest stream holding its
 // subjects alone at the budget, refusing when full, and a dead-letter stream
 // at a tenth of it, dropping its oldest when full. No other tenant gets one.
@@ -155,6 +185,7 @@ func TestEmbeddedNATS_SetMaxBytes_OpensTheTenantsQueue(t *testing.T) {
 	assert.Equal(t, []string{"ingest.acme.>"}, ingest.Subjects)
 	assert.Equal(t, int64(testBudget), ingest.MaxBytes)
 	assert.Equal(t, jetstream.DiscardNew, ingest.Discard)
+	assert.Equal(t, EmbeddedDuplicateWindow, ingest.Duplicates)
 	dlq := streamConfig(t, e, "DLQ_acme")
 	assert.Equal(t, []string{"dlq.acme.>"}, dlq.Subjects)
 	assert.Equal(t, int64(testBudget)/10, dlq.MaxBytes)
