@@ -1,8 +1,11 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/ilyakaznacheev/cleanenv"
@@ -16,10 +19,20 @@ type Config struct {
 	// Subdirectory names are conventions, not config — one knob, one mount.
 	// In a container this MUST resolve to a host-backed volume; the relative
 	// `./data` default is fine for local binary use only.
-	DataDir    string     `yaml:"data_dir" env:"WH_DATA_DIR" env-default:"./data"`
+	DataDir string `yaml:"data_dir" env:"WH_DATA_DIR" env-default:"./data"`
+	// Roles are the components this process runs (every role by default);
+	// a Deployment per role differs only in this. See Role.
+	Roles []Role `yaml:"roles" env:"WH_ROLES" env-default:"api,ingest,sweeper"`
+	// InstanceID names this process: logged at boot, and the holder a
+	// distributed coordinator will record. Empty resolves to <hostname>-<8 hex>
+	// at Load.
+	InstanceID string     `yaml:"instance_id" env:"WH_INSTANCE_ID"`
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
+	MQ         MQ         `yaml:"mq"`
 	Cache      Cache      `yaml:"cache"`
+	Dedupe     Dedupe     `yaml:"dedupe"`
+	Coord      Coord      `yaml:"coord"`
 	Auth       Auth       `yaml:"auth"`
 	OTel       OTel       `yaml:"otel"`
 	Prometheus Prometheus `yaml:"prometheus"`
@@ -132,13 +145,6 @@ type ClickHouse struct {
 	MaxTotalConns int `yaml:"max_total_conns" env:"WH_CH_MAX_TOTAL_CONNS" env-default:"0"`
 }
 
-// Cache sizes the in-process L1 cache. The time-range bucket structured
-// queries normalize to is a settings-directory key
-// (query.timestamp_bucket_seconds) — query shaping, not process memory.
-type Cache struct {
-	L1MaxCost int64 `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
-}
-
 // Auth holds the authentication secrets. The verifier wiring — `jwks_url`,
 // `role_claim` — is the settings directory's `auth` block (hot-reloadable:
 // a change rebuilds the verifier). There is no on/off switch: the middleware always runs. A request
@@ -157,6 +163,83 @@ type Cache struct {
 type Auth struct {
 	JWTSecret   string `yaml:"jwt_secret" env:"WH_AUTH_JWT_SECRET"`
 	OperatorKey string `yaml:"operator_key" env:"WH_AUTH_OPERATOR_KEY"`
+}
+
+// Role is one part of the work a process can run.
+type Role string
+
+const (
+	// RoleAPI serves the HTTP API and everything that answers it: schema
+	// discovery, the auth verifiers, the dedupe stores, and the SSE hub with
+	// its bridge off the queue and its keepalive wheel. Per process: every
+	// API process runs its own.
+	RoleAPI Role = "api"
+	// RoleIngest runs the ingest worker, queue to ClickHouse. Every ingest
+	// process consumes the one shared durable, competing for messages.
+	RoleIngest Role = "ingest"
+	// RoleSweeper runs the sweeper, one per queue, under the sweeper lease.
+	RoleSweeper Role = "sweeper"
+)
+
+var allRoles = []Role{RoleAPI, RoleIngest, RoleSweeper}
+
+// AllRoles is every role, the default: one process runs all the work.
+func AllRoles() []Role { return slices.Clone(allRoles) }
+
+// Has reports whether this process runs role r.
+func (c *Config) Has(r Role) bool { return slices.Contains(c.Roles, r) }
+
+// splitsCache reports whether this process runs exactly one of api and
+// ingest: the ingest worker invalidates the cache the API reads, so that
+// pair must reach one cache. A process running neither holds no cache.
+func (c *Config) splitsCache() bool { return c.Has(RoleAPI) != c.Has(RoleIngest) }
+
+func (c *Config) validateRoles() error {
+	if len(c.Roles) == 0 {
+		return fmt.Errorf("roles (WH_ROLES) is empty: name at least one of %s", joinRoles(allRoles))
+	}
+	for i, r := range c.Roles {
+		switch {
+		case r == "":
+			return fmt.Errorf("roles (WH_ROLES) %s has an empty entry", joinRoles(c.Roles))
+		case !slices.Contains(allRoles, r):
+			return fmt.Errorf("roles (WH_ROLES) %q is not a role; valid: %s", r, joinRoles(allRoles))
+		case slices.Contains(c.Roles[:i], r):
+			return fmt.Errorf("roles (WH_ROLES) names %q twice", r)
+		}
+	}
+	return nil
+}
+
+// validateTopology refuses a role set the selected backends cannot serve.
+func (c *Config) validateTopology() error {
+	if c.MQ.Backend == MQEmbedded && len(c.Roles) != len(allRoles) {
+		return fmt.Errorf("roles %s with mq.backend=embedded: the embedded MQ lives inside this process, and a process without it cannot reach its queue — run every role (%s), or set a shared mq.backend", joinRoles(c.Roles), joinRoles(allRoles))
+	}
+	if c.splitsCache() && c.Cache.Backend == CacheLocal {
+		return fmt.Errorf("roles %s with cache.backend=local: api and ingest run in different processes, and the ingest worker's cache invalidation would never reach the API's cache — run api and ingest together, or set a shared cache.backend", joinRoles(c.Roles))
+	}
+	return nil
+}
+
+func joinRoles(roles []Role) string {
+	names := make([]string, len(roles))
+	for i, r := range roles {
+		names[i] = string(r)
+	}
+	return strings.Join(names, ",")
+}
+
+// defaultInstanceID is <hostname>-<8 hex>: the hostname for a reader (a
+// pod's name), the random suffix so a restarted process is a new instance.
+func defaultInstanceID() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "wavehouse"
+	}
+	var suffix [4]byte
+	_, _ = rand.Read(suffix[:]) // never fails (crypto/rand)
+	return host + "-" + hex.EncodeToString(suffix[:])
 }
 
 // Validate checks the loaded configuration for logical consistency.
@@ -224,7 +307,13 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	return nil
+	if err := c.validateRoles(); err != nil {
+		return err
+	}
+	if err := c.validateBackends(); err != nil {
+		return err
+	}
+	return c.validateTopology()
 }
 
 // Load reads config from a YAML file (if it exists) with env var overrides.
@@ -253,6 +342,12 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
+	for i, r := range cfg.Roles {
+		cfg.Roles[i] = Role(strings.TrimSpace(string(r)))
+	}
+	if cfg.InstanceID = strings.TrimSpace(cfg.InstanceID); cfg.InstanceID == "" {
+		cfg.InstanceID = defaultInstanceID()
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
