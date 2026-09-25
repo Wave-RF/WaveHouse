@@ -247,7 +247,7 @@ Ingest worker pipeline (StartIngestWorker):
   (Insert-only pipeline. The wire format `EventMessage` carries only
   {table_name, scope, received_timestamp, format, columns, row}; non-insert mutations
   DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/ops/query (or an
-  admin-authored write pipe) — the /v1/ops/* RequireAdmin gate rejects
+  operator-authored write pipe) — the /v1/ops/* RequireAdmin gate rejects
   non-admin callers at the API layer, so
   a no/invalid-token request (resolved to default_role, not admin in a
   production config) cannot reach the proxy.)
@@ -276,10 +276,11 @@ Client POST /v1/ops/query
     401 when a stashed error shows the caller presented an invalid token,
     else 403. Raw SQL has no per-statement scope check (a full SQL parser
     would be needed to authorize predicates), so the role gate is the
-    entire authorization story. /v1/ops/query is the only sanctioned
-    surface for non-SELECT statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…);
-    non-admin callers use `POST /v1/ingest?table={table}` for writes and
-    the structured query endpoint or named pipes for reads.
+    entire authorization story. /v1/ops/query is the only surface for
+    ad-hoc non-SELECT statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…);
+    non-admin callers use `POST /v1/ingest?table={table}` or a write pipe
+    that lists their role for writes, and the structured query endpoint or
+    named pipes for reads.
   → Decode {"sql": "..."} from the request body.
   → POST the SQL verbatim to ClickHouse's HTTP interface at
     <scheme>://<host>:<httpport>/?default_format=JSON
