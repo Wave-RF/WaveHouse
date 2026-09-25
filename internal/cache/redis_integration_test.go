@@ -195,9 +195,8 @@ func open(t *testing.T, s *server, prefix string, tune ...func(*cache.RedisConfi
 }
 
 // seedFill caches a result for q under prefix through a client with the
-// default timeout: a test's setup must not ride on the 100ms budget it
-// tunes for the failure it provokes, where one slow round trip on a busy
-// runner opens the breaker before the test begins.
+// default timeout: on the client tuned to 100ms, one slow setup round trip
+// on a busy runner fails the setup before the outage is provoked.
 func seedFill(t *testing.T, s *server, prefix string, deps []cache.Namespace) {
 	t.Helper()
 	c := open(t, s, prefix)
