@@ -1,0 +1,70 @@
+# Values for the NATS Helm chart (https://github.com/nats-io/k8s, chart
+# nats/nats 1.x) that WaveHouse's mq.backend: nats runs against: JetStream on
+# file storage, and an account holding two users —
+#   nack       the JetStream controller that applies jetstream.yaml (full access)
+#   wavehouse  WaveHouse itself, with exactly the permissions it needs: it can
+#              publish, read and consume, and cannot create, change, purge or
+#              delete a stream, nor create a durable on an ingest partition.
+# Passwords come from Secrets through the container env; `<< $VAR >>` is the
+# chart's syntax for an unquoted NATS config variable.
+#
+# The wavehouse user's permissions are for the default subject prefix (wh),
+# history stream (WH_HISTORY) and ingest durable (wh-ingest). A test keeps them
+# in step with WaveHouse, and the conformance tests connect with them verbatim.
+config:
+  cluster:
+    enabled: true
+    replicas: 3
+  jetstream:
+    enabled: true
+    fileStore:
+      enabled: true
+      pvc:
+        size: 100Gi
+  merge:
+    accounts:
+      WAVEHOUSE:
+        jetstream: enabled
+        users:
+          - user: nack
+            password: << $NACK_PASSWORD >>
+          - user: wavehouse
+            password: << $WAVEHOUSE_PASSWORD >>
+            permissions:
+              publish:
+                allow:
+                  - wh.ingest.>
+                  - wh.dlq.>
+                  - $JS.API.INFO
+                  - $JS.API.STREAM.NAMES
+                  - $JS.API.STREAM.INFO.*
+                  - $JS.API.CONSUMER.INFO.*.*
+                  - $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest
+                  - $JS.ACK.>
+                  - $JS.API.CONSUMER.CREATE.WH_HISTORY.>
+                  - $JS.API.CONSUMER.MSG.NEXT.WH_HISTORY.>
+                  - $JS.API.CONSUMER.DELETE.WH_HISTORY.>
+                deny:
+                  - $JS.API.STREAM.CREATE.>
+                  - $JS.API.STREAM.UPDATE.>
+                  - $JS.API.STREAM.DELETE.>
+                  - $JS.API.STREAM.PURGE.>
+                  - $JS.API.CONSUMER.DURABLE.CREATE.>
+              subscribe:
+                allow:
+                  - _INBOX_wh.>
+
+container:
+  image:
+    tag: 2.14.6-alpine # the server line WaveHouse embeds and tests against
+  env:
+    NACK_PASSWORD:
+      valueFrom:
+        secretKeyRef:
+          name: nats-users
+          key: nack
+    WAVEHOUSE_PASSWORD:
+      valueFrom:
+        secretKeyRef:
+          name: nats-users
+          key: wavehouse

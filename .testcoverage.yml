@@ -48,6 +48,15 @@ exclude:
     # HTTP assertions). It is imported only from *_test.go files, never from
     # production code, so there's nothing meaningful to cover.
     - ^internal/testutil/
+    # internal/mq/mqtest/ is the Broker conformance suite: test code that
+    # lives outside *_test.go only so each backend's tests can import it.
+    - ^internal/mq/mqtest/
+    # internal/mq/natstest/ stands up NATS as an operator deploys it, for
+    # tests outside internal/mq; test code, like mqtest.
+    - ^internal/mq/natstest/
+    # The coord conformance suite: test helpers every Coordinator's tests
+    # run, imported only from *_test.go like testutil.
+    - ^internal/coord/coordtest/
     - ^tests/
     # scripts/ holds Go helpers (cov, orchestrator) that drive the build but
     # aren't part of the shipped binary; they show up in `-coverpkg=./...`
@@ -73,3 +82,18 @@ exclude:
       - ^internal/settings/
       - ^cmd/wavehouse/validate\.go$
       - ^cmd/wavehouse/bootstrap\.go$
+      # The external-NATS topology spec, verifier and manifest generator
+      # (and the `mq manifests` CLI) run against an operator's NATS, which
+      # the e2e stack (embedded broker) never has: unit territory, covered
+      # there by a fixture server. Excluding them keeps e2e at ~61%. The
+      # external broker is the same, covered by the integration suite.
+      - ^internal/mq/nats_topology\.go$
+      - ^internal/mq/nats_manifests\.go$
+      - ^internal/mq/subject_nats\.go$
+      - ^internal/mq/external\.go$
+      - ^cmd/wavehouse/mq\.go$
+    unit:
+      # The external NATS broker's tests start a server per case, which the
+      # unit suite's 15s per package cannot hold: they are integration-tagged
+      # (make test-integration), and the merged total counts them.
+      - ^internal/mq/external\.go$
