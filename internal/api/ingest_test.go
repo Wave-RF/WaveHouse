@@ -660,7 +660,7 @@ func TestIngest_Policy_CheckIn_Absent_FailsClosed(t *testing.T) {
 
 // TestIngest_Policy_CheckIn_AbsentClaim_FailsClosed locks the typed-nil []any
 // path behind an _in check: when the claim itself is absent, resolveInValues
-// returns a typed-nil []any, which must still assert as []any in processRecord
+// returns a typed-nil []any, which must still assert as []any in prepareRecord
 // (entering the membership branch) so the column is rejected — never treated as a
 // scalar _eq value and auto-injected. The sibling _Absent test omits the column
 // with the claim present; this one drops the claim too. Guards #224 fail-closed.
@@ -1825,8 +1825,8 @@ func TestIngest_JSONArray_SyntaxError_Fatal(t *testing.T) {
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 
 	// A structural syntax error desyncs the decoder — the whole request fails
-	// (400), unlike a per-element type error. The leading good element may have
-	// already published (at-least-once on retry).
+	// (400), unlike a per-element type error. The leading good element is still
+	// in the open window, which is dropped unpublished.
 	req := rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"}, {bad]`)
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(req))
@@ -1834,7 +1834,7 @@ func TestIngest_JSONArray_SyntaxError_Fatal(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
 	testutil.AssertJSONErrorResponse(t, w)
-	assert.Len(t, pub.Messages, 1) // the leading record published before the abort
+	assert.Empty(t, pub.Messages)
 }
 
 func TestIngest_JSONArray_Truncated_Fatal(t *testing.T) {
@@ -2347,7 +2347,7 @@ func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
 // discovery.Validate accepts `{}` here because every column is nullable or
 // defaulted. I previously asserted this path was unreachable, having tested only
 // against a schema with a required column; it is not.
-func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
+func TestPrepareRecord_UnresolvedInsertSideAborts(t *testing.T) {
 	t.Parallel()
 	schema := &discovery.TableSchema{
 		Name: "loose",
@@ -2371,11 +2371,10 @@ func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
 	require.NoError(t, discovery.Validate(schema, map[string]any{}),
 		"all-nullable/defaulted columns accept an empty record — this is what makes the read reachable")
 
-	dup, reject, abort := h.processRecord(
+	rec, abort := h.prepareRecord(
 		context.Background(), testStore, "loose", "", schema, selectResolved, "viewer", map[string]any{}, time.Now(), nil)
 
-	assert.False(t, dup)
-	assert.Nil(t, reject, "a request-scoped condition must not be reported per record")
+	assert.Nil(t, rec.reject, "a request-scoped condition must not be reported per record")
 	require.NotNil(t, abort, "an unresolved insert side must abort the request")
 	assert.Equal(t, http.StatusForbidden, abort.Status)
 	assert.Empty(t, abort.RetryAfter, "not a transient condition — retrying cannot help")
@@ -2749,43 +2748,79 @@ func dedupHandler(t *testing.T, pub *testutil.MockPublisher, dedup dedupe.Dedupl
 	return h
 }
 
-// #384: a publish that fails gives the id back, so the retry the 503 asks for
-// is published rather than skipped as a duplicate of a record that never
-// reached the queue.
+// #384: a publish the queue refused gives the id back, so the retry the 503
+// asks for is published rather than skipped as a duplicate of a record that
+// never reached the queue.
 func TestIngest_Dedup_FailedPublishReleasesTheID(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name   string
-		err    error
-		status int
-	}{
-		{"backpressure", fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), http.StatusServiceUnavailable},
-		{"other failure", errors.New("connection reset"), http.StatusInternalServerError},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			pub := &testutil.MockPublisher{Err: tt.err}
-			dedup := testutil.NewMockDeduplicator()
-			h := dedupHandler(t, pub, dedup, false)
-			body := map[string]any{"page": "/home", "event_id": "e1"}
+	pub := &testutil.MockPublisher{Err: fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull)}
+	dedup := testutil.NewMockDeduplicator()
+	h := dedupHandler(t, pub, dedup, false)
+	body := map[string]any{"page": "/home", "event_id": "e1"}
 
-			w := httptest.NewRecorder()
-			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
-			require.Equal(t, tt.status, w.Code)
-			assert.False(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "released, not left to lapse")
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "30", w.Header().Get("Retry-After"))
+	assert.False(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "released, not left to lapse")
 
-			pub.Err = nil
-			w = httptest.NewRecorder()
-			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
-			require.Equal(t, http.StatusOK, w.Code)
-			assert.Contains(t, w.Body.String(), `"ok":true`, "the retry is published, not a duplicate")
-			assert.Len(t, pub.Published(), 1)
+	pub.Err = nil
+	w = httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"ok":true`, "the retry is published, not a duplicate")
+	assert.Len(t, pub.Published(), 1)
 
-			w = httptest.NewRecorder()
-			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
-			assert.Contains(t, w.Body.String(), `"duplicate":true`, "and committed once published")
-		})
+	w = httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+	assert.Contains(t, w.Body.String(), `"duplicate":true`, "and committed once published")
+}
+
+// A publish whose outcome is unknown may have stored the event, so its claim
+// is neither released nor committed: it lapses with the lease, a retry before
+// then answers in-flight, and the idempotency key covers one after.
+func TestIngest_Dedup_UncertainPublishLeavesTheClaim(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{Err: context.DeadlineExceeded}
+	dedup := testutil.NewMockDeduplicator()
+	h := dedupHandler(t, pub, dedup, false)
+	body := map[string]any{"page": "/home", "event_id": "e1"}
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "publish failed")
+	assert.True(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "left to lapse")
+	assert.Empty(t, dedup.Released)
+
+	pub.Err = nil
+	w = httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "30", w.Header().Get("Retry-After"))
+	assert.Empty(t, pub.Published())
+}
+
+// A claimed record is published under its idempotency key; an un-deduped one
+// carries none, so a producer's repeated ids are not dropped by the queue.
+func TestIngest_Dedup_PublishCarriesTheIdempotencyKey(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := dedupHandler(t, pub, testutil.NewMockDeduplicator(), false)
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(ndjsonRequest(t, "clicks",
+		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
+		jsonLine(t, map[string]any{"page": "/b"}),
+	)))
+	require.Equal(t, http.StatusOK, w.Code)
+	msgs := pub.Published()
+	require.Len(t, msgs, 2)
+
+	want := mq.Headers{}
+	mq.WithIdempotencyKey(dedupe.IdempotencyKey(testStore.Tenant(), dedupe.Key{Table: "clicks", ID: "e1"}))(want)
+	for k, v := range want {
+		assert.Equal(t, v, msgs[0].Headers[k])
+		assert.NotContains(t, msgs[1].Headers, k)
 	}
 }
 
@@ -2808,8 +2843,9 @@ func TestIngest_NDJSON_Dedup_PublishFailureMidBatch(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(batch()))
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
-	require.Len(t, dedup.Released, 1)
+	require.Len(t, dedup.Released, 2, "the failing record and the rest of its window")
 	assert.Equal(t, dedupe.Key{Table: "clicks", ID: "e2"}, dedup.Released[0].Key)
+	assert.Equal(t, dedupe.Key{Table: "clicks", ID: "e3"}, dedup.Released[1].Key)
 
 	pub.Err = nil
 	w = httptest.NewRecorder()

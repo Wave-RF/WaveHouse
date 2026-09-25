@@ -141,6 +141,20 @@ func WithHeader(key, value string) PublishOpt {
 	}
 }
 
+// idempotencyHeader carries WithIdempotencyKey's key: JetStream's own
+// message-id header, which the stream deduplicates on.
+const idempotencyHeader = "Nats-Msg-Id"
+
+// WithIdempotencyKey marks a publish with key: a second publish carrying the
+// same key within the queue's duplicate window is dropped by the broker and
+// reported as success, so republishing an event whose first publish had an
+// unknown outcome stores it once.
+func WithIdempotencyKey(key string) PublishOpt {
+	return func(h Headers) {
+		h.Set(idempotencyHeader, key)
+	}
+}
+
 // ErrQueueFull is returned by Publisher.Publish when the topic's tenant's
 // ingest queue refuses new events — it is at its byte budget, or the tenant
 // has no queue open yet — the backpressure signal the API turns into a 503

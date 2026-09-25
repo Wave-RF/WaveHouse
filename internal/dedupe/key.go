@@ -2,6 +2,7 @@ package dedupe
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -68,4 +69,12 @@ func AppendKey(dst, prefix []byte, k Key) []byte {
 		return append(dst, sum[:]...)
 	}
 	return append(dst, k.ID...)
+}
+
+// IdempotencyKey is k's message id for the queue under tenant id: the first
+// 128 bits of the stored key's SHA-256, in hex, so a republished record is
+// recognised without its id riding in a header verbatim.
+func IdempotencyKey(id tenant.ID, k Key) string {
+	sum := sha256.Sum256(AppendKey(nil, KeyPrefix(id), k))
+	return hex.EncodeToString(sum[:16])
 }

@@ -306,17 +306,24 @@ func (e *EmbeddedNATS) record(id tenant.ID, q *tenantQueue) {
 	}
 }
 
+// EmbeddedDuplicateWindow is how long an ingest queue remembers a
+// WithIdempotencyKey key. A dedupe lease must not exceed it: a claim left to
+// lapse after an uncertain publish is republished once the lease ends, and
+// only this window drops that second copy.
+const EmbeddedDuplicateWindow = 2 * time.Minute
+
 // ingestStreamConfig is tenant id's ingest stream. LimitsPolicy: standard
 // append-only log; the Active Sweeper handles message purging. MaxBytes caps
 // the tenant's share of the disk. DiscardNew rejects new messages when full,
 // propagating backpressure to the upstream API — for this tenant alone.
 func ingestStreamConfig(id tenant.ID, maxBytes int64) jetstream.StreamConfig {
 	return jetstream.StreamConfig{
-		Name:      ingestStreamName(id),
-		Subjects:  []string{tenantSubjects(ingestPrefix, id)},
-		Retention: jetstream.LimitsPolicy,
-		MaxBytes:  maxBytes,
-		Discard:   jetstream.DiscardNew,
+		Name:       ingestStreamName(id),
+		Subjects:   []string{tenantSubjects(ingestPrefix, id)},
+		Retention:  jetstream.LimitsPolicy,
+		MaxBytes:   maxBytes,
+		Discard:    jetstream.DiscardNew,
+		Duplicates: EmbeddedDuplicateWindow,
 	}
 }
 

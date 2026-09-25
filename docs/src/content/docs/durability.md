@@ -58,6 +58,12 @@ The strict guarantee translates well to managed cloud infrastructure — the pre
 
 The tell for a commit-cadence problem (ZFS-without-SLOG, noisy-neighbor VM host) is that a single-threaded benchmark looks fine while a concurrent one is far worse — so always benchmark with multiple writers, and benchmark the guest **and** the host if virtualized.
 
+## Deduplication: one more fsync per window
+
+With [deduplication](/settings-directory#deduplication) on, a `200` also means the records' ids are committed to the dedupe store, and on the embedded Pebble store that commit is an `fsync` of its own. It is taken once per window of up to 256 records of a request, after the window's publishes, rather than once per record: a 1,000-record batch costs four dedupe syncs, not a thousand. Measured with `BenchmarkIngest_DedupBatchOnPebble` on an Apple M4 Pro under a load average near 30, that batch took 24 ms windowed against 5.7 s one record at a time. A single-record request still pays one sync for its publish and one for its commit.
+
+A publish can also fail after JetStream stored the event (a timeout on the ack). The record's id is then left to lapse with its 30-second dedupe lease rather than given back, and every deduped record is published under an idempotency key derived from its tenant, table and id, which each tenant's ingest stream remembers for two minutes. The retry that follows the lease therefore stores no second copy. That holds only while the lease is shorter than the stream's duplicate window.
+
 ## Check your storage before you trust it
 
 Replicate JetStream's exact pattern — a 4 KiB write followed by a flush, in a tight loop — and report the percentiles. The numbers that matter are **p99** and **max**: those are your worst-case publish latency.
