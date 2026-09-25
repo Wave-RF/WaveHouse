@@ -13,6 +13,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/keyenc"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
@@ -33,16 +34,16 @@ type Topic struct {
 
 // key is the injective string form of the topic that a subject's tail
 // carries: the tenant first, verbatim — its grammar makes it one token — then
-// the table and scope as encoded tokens. A topic without a tenant has no
-// subject, and its key parses back to a topic of no tenant with the whole key
-// as its table (parseTopicKey's fallback). Callers key their own maps by the
-// Topic value itself.
+// the table and scope joined as escaped tokens (keyenc.AppendJoin). A topic
+// without a tenant has no subject, and its key parses back to a topic of no
+// tenant with the whole key as its table (parseTopicKey's fallback). Callers
+// key their own maps by the Topic value itself.
 func (t Topic) key() string {
-	key := string(t.Tenant) + "." + encodeToken(t.Table)
-	if t.Scope != "" {
-		key += "." + encodeToken(t.Scope)
+	key := append([]byte(t.Tenant), '.')
+	if t.Scope == "" {
+		return string(keyenc.AppendJoin(key, '.', t.Table))
 	}
-	return key
+	return string(keyenc.AppendJoin(key, '.', t.Table, t.Scope))
 }
 
 // Message represents a message received from the queue.
@@ -246,8 +247,8 @@ type DeadLetterer interface {
 // DeadLetterCounts is what is parked on one tenant's dead-letter queue.
 type DeadLetterCounts struct {
 	// Tables maps table name → parked messages, for the tables asked about.
-	// Scope is not broken out yet (it is inert until #235): a message parked
-	// under a scoped topic counts under "table.scope", not under its table.
+	// Every scope of a table counts under the table; scope is not broken out
+	// yet (it is inert until #235).
 	Tables map[string]uint64
 	// Total is every parked message of the tenant, whatever the filter.
 	Total uint64
@@ -262,8 +263,8 @@ var ErrNoDeadLetterQueue = errors.New("dead-letter queue not found")
 type DeadLetterStats interface {
 	// DeadLetterCounts counts tenant id's parked messages per table — a
 	// tenant served, rejected, or removed alike, for as long as its queue is
-	// kept. A non-empty table narrows Tables to that one (its unscoped
-	// messages).
+	// kept. A non-empty table narrows Tables to that one (all of its
+	// scopes).
 	DeadLetterCounts(ctx context.Context, id tenant.ID, table string) (DeadLetterCounts, error)
 }
 

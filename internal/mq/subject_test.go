@@ -9,56 +9,42 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEncodeToken(t *testing.T) {
+// The subjects are pinned byte for byte: an embedded broker holds messages
+// under them across an upgrade.
+func TestSubject_Golden(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name     string
-		raw      string
-		expected string
+	for _, tt := range []struct {
+		topic Topic
+		want  string
 	}{
-		{"safe string", "my_table123", "my_table123"},
-		{"with dots", "default.clicks", "default%2Eclicks"},
-		{"with spaces", "my table", "my%20table"},
-		{"with dashes and slashes", "a-b/c", "a%2Db%2Fc"},
-		{"wildcards cannot survive", "a.*.>", "a%2E%2A%2E%3E"},
-		{"empty string", "", ""},
-		{"only safe characters", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.expected, encodeToken(tt.raw))
-		})
+		{Topic{Tenant: "0", Table: "events"}, "0.events"},
+		{Topic{Tenant: "acme-co", Table: "default.clicks", Scope: "org_1"}, "acme-co.default%2Eclicks.org_1"},
+		{Topic{Tenant: "a", Table: "a.*.>", Scope: "*"}, "a.a%2E%2A%2E%3E.%2A"},
+		{Topic{Tenant: "a", Table: "my table", Scope: "tab\there"}, "a.my%20table.tab%09here"},
+		{Topic{Tenant: "a", Table: "table-with-dashes", Scope: "org-1"}, "a.table-with-dashes.org-1"},
+		{Topic{Tenant: "a", Table: "100%", Scope: "a/b"}, "a.100%25.a%2Fb"},
+		{Topic{Tenant: "a", Table: "{acme}:x"}, "a.%7Bacme%7D%3Ax"},
+		{Topic{Tenant: "a", Table: "nul\x00", Scope: "\xff"}, "a.nul%00.%FF"},
+		{Topic{Tenant: "a", Table: "caf\u00e9", Scope: "\u65e5"}, "a.caf%C3%A9.%E6%97%A5"},
+		{Topic{Tenant: "a", Table: ""}, "a."},
+		{Topic{Tenant: "a", Table: "t", Scope: ""}, "a.t"},
+	} {
+		assert.Equal(t, tt.want, tt.topic.key(), "%+v", tt.topic)
+		for _, prefix := range []string{ingestPrefix, dlqPrefix} {
+			subj, err := subject(prefix, tt.topic)
+			require.NoError(t, err)
+			assert.Equal(t, prefix+tt.want, subj)
+		}
 	}
 }
 
-func TestDecodeToken(t *testing.T) {
+// A token another writer left partly unescaped, or escaped in lowercase,
+// still reads as it always did — and so does v0.1.0's %2D for '-', so a
+// message queued before '-' was kept reads as the same topic.
+func TestParseTopicKey_LenientTokens(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name     string
-		safe     string
-		expected string
-		wantErr  bool
-	}{
-		{"safe string", "my_table123", "my_table123", false},
-		{"encoded dots", "default%2Eclicks", "default.clicks", false},
-		{"encoded spaces", "my%20table", "my table", false},
-		{"invalid percent encoding", "default%2Gclicks", "", true}, // %2G is not valid hex
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := decodeToken(tt.safe)
-			if tt.wantErr {
-				assert.Error(t, err)
-			} else {
-				require.NoError(t, err)
-				assert.Equal(t, tt.expected, got)
-			}
-		})
-	}
+	assert.Equal(t, Topic{Tenant: "a", Table: "b-c", Scope: "d.e"}, parseTopicKey("a.b-c.d%2ee"))
+	assert.Equal(t, parseTopicKey("a.table-with-dashes.org-1"), parseTopicKey("a.table%2Dwith%2Ddashes.org%2D1"))
 }
 
 func TestSubject_RoundTripsEveryTopic(t *testing.T) {
@@ -136,6 +122,7 @@ func TestParseTopicKey_ForeignTailKeepsItself(t *testing.T) {
 		"a.b.c.d",       // more tokens than any topic renders
 		"0.bad%2Gtoken", // a token that does not decode
 		"a%2Eb.events",  // a tenant outside the grammar
+		"a%2Db.events",  // a tenant token is read verbatim, never decoded
 		".events",       // a topic whose tenant was never set
 		"events",        // one token: no tenant leads it
 		"bad%2G",        // one token that does not decode
