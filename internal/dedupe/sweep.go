@@ -75,9 +75,11 @@ func (e *Embedded) startSweep(db *pebble.DB) (stop func()) {
 }
 
 // sweep makes one pass over the whole instance, deleting keys whose
-// retention has ended and version-0 keys (tenant ‖ 0x00 ‖ id, from before
-// ids were keyed by table), which nothing reads. It stops early, without
-// error, when ctx ends.
+// retention has ended and version-0 keys, which nothing reads: those from
+// before ids were keyed by table (tenant ‖ 0x00 ‖ id, or the bare id before
+// that). They are told apart by value, since a bare id may be any bytes, a
+// current key's included: only commits are stored, and every commit has the
+// committedMark layout. It stops early, without error, when ctx ends.
 func (e *Embedded) sweep(ctx context.Context, db *pebble.DB) (sweepResult, error) {
 	var res sweepResult
 	var from []byte
@@ -119,10 +121,11 @@ func (e *Embedded) sweepChunk(ctx context.Context, db *pebble.DB, from []byte, r
 		}
 		seen++
 		k := it.Key()
+		val := it.Value()
 		switch {
-		case len(k) == 0 || k[0] != keyVersion:
+		case !isCommit(val):
 			v0++
-		case committedExpired(it.Value(), now):
+		case committedExpired(val, now):
 			expired++
 		default:
 			continue

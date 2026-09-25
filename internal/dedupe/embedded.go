@@ -143,8 +143,8 @@ type tenantStore struct {
 }
 
 // Committed values are committedMark ‖ expiry (big-endian UnixNano, 0 =
-// never). Version-0 values were a bare 8-byte timestamp under version-0
-// keys, which no version-1 key reads.
+// never). Values written before #222 were a bare 8-byte timestamp, so one
+// under a key that happens to equal a current one reads as absent.
 const (
 	committedMark = 2
 	valueLen      = 9
@@ -209,6 +209,12 @@ func committedLive(val []byte, now time.Time) bool {
 func committedExpired(val []byte, now time.Time) bool {
 	exp, ok := committedExpiry(val)
 	return ok && exp != 0 && now.UnixNano() >= exp
+}
+
+// isCommit reports whether val is a commit this layout wrote.
+func isCommit(val []byte) bool {
+	_, ok := committedExpiry(val)
+	return ok
 }
 
 // committedExpiry reads a commit's expiry (UnixNano, 0 = never); ok is false

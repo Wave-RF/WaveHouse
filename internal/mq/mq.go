@@ -13,6 +13,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/keyenc"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
@@ -38,9 +39,9 @@ type Topic struct {
 // as its table (parseTopicKey's fallback). Callers key their own maps by the
 // Topic value itself.
 func (t Topic) key() string {
-	key := string(t.Tenant) + "." + encodeToken(t.Table)
+	key := string(t.Tenant) + "." + keyenc.Escape(t.Table)
 	if t.Scope != "" {
-		key += "." + encodeToken(t.Scope)
+		key += "." + keyenc.Escape(t.Scope)
 	}
 	return key
 }

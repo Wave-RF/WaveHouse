@@ -68,7 +68,9 @@ func TestEmbedded_SweepDeletesExpiredAndVersionZeroKeys(t *testing.T) {
 	commitIDs(t, acme, 3*time.Hour, live...)
 	commitIDs(t, globex, 0, "forever")
 	commitIDs(t, globex, time.Hour, "recommitted")
-	for _, k := range []string{"acme\x00e1", "acme\x00e2", "globex\x00e1"} {
+	// A bare id from before tenants led the key may spell a current key;
+	// its value tells it apart.
+	for _, k := range []string{"acme\x00e1", "acme\x00e2", "globex\x00e1", "acme/events/stale"} {
 		require.NoError(t, e.db.Set([]byte(k), make([]byte, 8), pebble.Sync))
 	}
 
@@ -76,7 +78,7 @@ func TestEmbedded_SweepDeletesExpiredAndVersionZeroKeys(t *testing.T) {
 	commitIDs(t, globex, time.Hour, "recommitted")
 	res, err := e.sweep(context.Background(), e.db)
 	require.NoError(t, err)
-	assert.Equal(t, sweepResult{Expired: len(expired), Version0: 3}, res)
+	assert.Equal(t, sweepResult{Expired: len(expired), Version0: 4}, res)
 
 	for _, id := range expired {
 		require.False(t, present(t, e, AppendKey(nil, KeyPrefix("acme"), Key{Table: "events", ID: id})), id)
@@ -88,6 +90,7 @@ func TestEmbedded_SweepDeletesExpiredAndVersionZeroKeys(t *testing.T) {
 	assert.True(t, present(t, e, AppendKey(nil, KeyPrefix("globex"), Key{Table: "events", ID: "recommitted"})))
 	assert.False(t, present(t, e, []byte("acme\x00e1")))
 	assert.False(t, present(t, e, []byte("globex\x00e1")))
+	assert.False(t, present(t, e, []byte("acme/events/stale")))
 
 	dup, err := mark(context.Background(), globex, "recommitted")
 	require.NoError(t, err)

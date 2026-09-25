@@ -2,58 +2,60 @@ package dedupe
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 
+	"github.com/Wave-RF/WaveHouse/internal/keyenc"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
-// The key layout every backend stores, byte for byte:
+// The key every backend stores is text:
 //
-//	keyVersion ‖ uvarint(len(tenant)) ‖ tenant ‖ uvarint(len(table)) ‖ table ‖ id
+//	<tenant>/<table>/<id>        acme/clicks/evt%2D123
+//	<tenant>/<table>/#<sha256>   an id too long to store verbatim
 //
-// Each field before the id carries its length, so a table name may hold any
-// byte — NUL included — and no two (tenant, table, id) triples share a key.
-// The id is last, so it needs no length and may hold anything too. A tenant
-// id never starts with keyVersion (tenant.Parse admits letters, digits, '_'
-// and '-'), so the version-0 keys before #222 (tenant ‖ 0x00 ‖ id) never meet
-// these.
+// The table and id are escaped by internal/keyenc, which never writes '/' or
+// '#', and a tenant id holds neither (tenant.Parse), so the fields split back
+// apart, a table name may hold any byte, and no two (tenant, table, id)
+// triples share a key. A key is ASCII, so it is a valid DynamoDB String, and
+// holds no NUL, so it never meets a tenant ‖ NUL ‖ id key written before #222.
 const (
-	keyVersion byte = 0x01
-	// hashedID leads an id stored as its SHA-256 rather than verbatim. Ids
-	// that start with it are hashed too, so a verbatim id never reads as a
-	// hashed one.
-	hashedID byte = 0xFF
-	// MaxIDBytes is the longest id stored verbatim: a DynamoDB partition key
-	// holds at most 2,048 bytes, and the tenant and table share them.
+	keySep     = '/'
+	hashedMark = '#'
+	// MaxIDBytes is the longest escaped id stored verbatim: a DynamoDB
+	// partition key holds at most 2,048 bytes, and the tenant and table share
+	// them.
 	MaxIDBytes = 1024
 )
 
 // KeyPrefix is the part of every key that names tenant id, so a backend
 // computes it once per tenant store.
 func KeyPrefix(id tenant.ID) []byte {
-	p := make([]byte, 0, len(id)+1+binary.MaxVarintLen64)
-	p = append(p, keyVersion)
-	return appendField(p, string(id))
+	return append([]byte(id), keySep)
 }
 
 // Hashed reports whether k's id is stored as its SHA-256 rather than
-// verbatim.
+// verbatim: whether its escaped form is longer than MaxIDBytes.
 func (k Key) Hashed() bool {
-	return len(k.ID) > MaxIDBytes || (k.ID != "" && k.ID[0] == hashedID)
+	switch {
+	case len(k.ID) > MaxIDBytes:
+		return true
+	case 3*len(k.ID) <= MaxIDBytes: // escaping at most triples a byte
+		return false
+	}
+	return len(keyenc.Escape(k.ID)) > MaxIDBytes
 }
 
 // AppendKey appends k's stored form, under the tenant prefix from KeyPrefix,
 // to dst.
 func AppendKey(dst, prefix []byte, k Key) []byte {
 	dst = append(dst, prefix...)
-	dst = appendField(dst, k.Table)
+	dst = keyenc.AppendEscape(dst, k.Table)
+	dst = append(dst, keySep)
 	if k.Hashed() {
 		sum := sha256.Sum256([]byte(k.ID))
-		dst = append(dst, hashedID)
-		return append(dst, sum[:]...)
+		return hex.AppendEncode(append(dst, hashedMark), sum[:])
 	}
-	return append(dst, k.ID...)
+	return keyenc.AppendEscape(dst, k.ID)
 }
 
 // IdempotencyKey is k's message id for the queue under tenant id: the first
@@ -62,9 +64,4 @@ func AppendKey(dst, prefix []byte, k Key) []byte {
 func IdempotencyKey(id tenant.ID, k Key) string {
 	sum := sha256.Sum256(AppendKey(nil, KeyPrefix(id), k))
 	return hex.EncodeToString(sum[:16])
-}
-
-func appendField(dst []byte, s string) []byte {
-	dst = binary.AppendUvarint(dst, uint64(len(s)))
-	return append(dst, s...)
 }
