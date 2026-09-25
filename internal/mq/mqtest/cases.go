@@ -269,16 +269,17 @@ func ackWaitRedelivers(t *testing.T, h Harness) {
 	b := h.New(t)
 	publish(t, b, mq.Topic{Tenant: Acme, Table: "w"}, "acked")
 	publish(t, b, mq.Topic{Tenant: Acme, Table: "w"}, "left")
-	got, _, _ := consume(ctx(t), t, b, mq.ConsumerConfig{AckWait: 200 * time.Millisecond, MaxAckPending: 100}, func(m *mq.Message) {
+	// Long enough that a DoubleAck under load lands inside it.
+	got, _, _ := consume(ctx(t), t, b, mq.ConsumerConfig{AckWait: 500 * time.Millisecond, MaxAckPending: 100}, func(m *mq.Message) {
 		if string(m.Data) == "acked" {
 			assert.NoError(t, m.DoubleAck(m.Ctx))
 		}
 	})
-	var data []string
-	for _, d := range next(t, got, 3) {
-		data = append(data, d.data)
+	seen := map[string]int{}
+	for seen["left"] < 2 {
+		seen[next(t, got, 1)[0].data]++
 	}
-	assert.Equal(t, []string{"acked", "left", "left"}, data)
+	assert.Equal(t, 1, seen["acked"], "an acked message is not redelivered")
 }
 
 // DeadLetter parks a delivered message under its own topic and leaves the

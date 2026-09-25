@@ -1058,7 +1058,9 @@ func (e *EmbeddedNATS) ReplaySince(ctx context.Context, topic Topic, since time.
 		}
 		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
 		if err != nil {
-			if errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout) {
+			// A pull that raced the connection closing can end in either
+			// answer too, and that is not caught up.
+			if (errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout)) && !e.conn.IsClosed() {
 				return nil // caught up
 			}
 			return fmt.Errorf("replay next: %w", err)
