@@ -580,7 +580,7 @@ What the backend requires of the table:
 
 Only `pk` is declared in the table definition. Turn TTL on for `ex`. Correctness never depends on TTL, because a claim whose `ex` has passed counts as absent whether or not DynamoDB has deleted it yet; TTL only reclaims the storage. **TTL removes lapsed claims, and committed ids once their retention ends.** A committed item carries `ex` when its tenant's or table's [`dedupe.retention`](/settings-directory#deduplication) is finite, and none under `"0"`, the seed value, which keeps it forever; under `"0"` the table grows by one item (about 200 bytes) per distinct id. Boot checks the table: it refuses one whose key schema does not match, and logs a warning if TTL is off.
 
-An example in Terraform. Its tags are the five that Wave RF's own deployments put on every AWS resource (`Name`, `Project`, `Environment`, `ManagedBy`, `CostCenter`, with lowercase-kebab values); use your own conventions in their place:
+An example in Terraform. Replace the tags with your own conventions:
 
 ```hcl
 resource "aws_dynamodb_table" "wavehouse_dedupe" {
@@ -605,10 +605,9 @@ resource "aws_dynamodb_table" "wavehouse_dedupe" {
 
   tags = {
     Name        = "wavehouse-dedupe-${var.environment}"
-    Project     = "wavehouse-cloud"
-    Environment = var.environment # prod | dev | ci | demo | benchmark
-    ManagedBy   = "wavehouse-cloud/infra/stacks/prod-platform"
-    CostCenter  = "data-plane"
+    Project     = "wavehouse"
+    Environment = var.environment
+    ManagedBy   = "terraform"
   }
 }
 
