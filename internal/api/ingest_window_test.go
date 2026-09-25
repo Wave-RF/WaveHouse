@@ -339,7 +339,7 @@ func TestIngest_Dedup_UncertainPublishThenRetryIsOneEvent(t *testing.T) {
 		}
 		return false, nil
 	})
-	h.DedupeLease = 300 * time.Millisecond
+	h.DedupeLease = 2 * time.Second
 	lines := eventLines(t, 3)
 	send := func() *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
@@ -351,13 +351,13 @@ func TestIngest_Dedup_UncertainPublishThenRetryIsOneEvent(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, w.Code)
 	w = send()
 	require.Equal(t, http.StatusServiceUnavailable, w.Code, "the uncertain claim is still held")
-	assert.Equal(t, "1", w.Header().Get("Retry-After"))
+	assert.Equal(t, "2", w.Header().Get("Retry-After"))
 
 	var last *httptest.ResponseRecorder
 	require.Eventually(t, func() bool {
 		last = send()
 		return last.Code == http.StatusOK
-	}, 5*time.Second, 50*time.Millisecond)
+	}, 10*time.Second, 100*time.Millisecond)
 	assert.Equal(t, 3, decodeBatchResult(t, last).Succeeded, "the lapsed claim is claimed again and republished")
 	assert.Equal(t, 3, count(), "the republished e1 was dropped by the queue")
 

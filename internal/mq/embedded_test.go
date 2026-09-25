@@ -143,13 +143,15 @@ func TestEmbeddedNATS_PublishHeaders(t *testing.T) {
 
 // A repeated idempotency key inside the duplicate window is dropped as a
 // success, so an uncertain publish can be republished safely; a queue made
-// before the window was set gets it on its next budget apply.
+// with another window gets this one on its next budget apply.
 func TestEmbeddedNATS_Publish_IdempotencyKeyDropsARepeat(t *testing.T) {
 	e := openEmbedded(t, t.TempDir())
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
+	// Explicit rather than the server's default, which happens to match today.
+	require.Equal(t, EmbeddedDuplicateWindow, ingestStreamConfig(tenant.Default, testBudget).Duplicates)
 	old := ingestStreamConfig(tenant.Default, testBudget)
-	old.Duplicates = 0
+	old.Duplicates = 10 * time.Second
 	_, err := e.js.CreateStream(ctx, old)
 	require.NoError(t, err)
 	require.NoError(t, e.SetMaxBytes(ctx, tenant.Default, testBudget))
