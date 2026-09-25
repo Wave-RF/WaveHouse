@@ -165,8 +165,8 @@ type TableDedupe struct {
 // DLQConfig gates the Dead Letter Queue: whether a row that still fails
 // after the row-by-row isolation retry is parked on the tenant's dead-letter
 // queue (and its original acked) or left unacked to be redelivered
-// indefinitely. The queue exists from the moment the tenant is first served —
-// empty until something lands on it — so the switch is purely behavioral and
+// indefinitely. The queue is opened when the tenant is first served — empty
+// until something lands on it — so the switch is purely behavioral and
 // resolves per table through the same override cascade as dedupe.
 type DLQConfig struct {
 	Enabled *bool `json:"enabled"`

@@ -745,7 +745,7 @@ Triggers an immediate re-discovery of the `?tenant=`'s ClickHouse table schemas 
 
 #### `GET /v1/ops/dlq/stats` — DLQ Statistics
 
-Returns per-table message counts in one tenant's Dead Letter Queue: the [tenant](/deployment#the-nested-settings-directory) an optional `?tenant=<id>` names, the default tenant `0` without it, which is the whole settings directory unless it is nested. The queue is read from the message queue rather than the settings, so a tenant whose folder was rejected or removed is read like one being served, since its queue is kept (nothing deletes it). The query string is parsed strictly, as on the other admin reads. Admin-only, like the rest of this section. Whether a poison row lands here is the settings directory's [`dlq.enabled`](/settings-directory#dead-letter-queue) switch (global or per table); a tenant's dead-letter stream exists from the moment the tenant is first served, and this endpoint always exists. Before any failure has ever occurred, the endpoint returns `200` with `{"tables":{},"total":0}`.
+Returns per-table message counts in one tenant's Dead Letter Queue: the [tenant](/deployment#the-nested-settings-directory) an optional `?tenant=<id>` names, the default tenant `0` without it, which is the whole settings directory unless it is nested. The queue is read from the message queue rather than the settings, so a tenant whose folder was rejected or removed is read like one being served, since its queue is kept (nothing deletes it). The query string is parsed strictly, as on the other admin reads. Admin-only, like the rest of this section. Whether a poison row lands here is the settings directory's [`dlq.enabled`](/settings-directory#dead-letter-queue) switch (global or per table); a tenant's dead-letter stream is opened when the tenant is first served, and this endpoint always exists. Before any failure has ever occurred, the endpoint returns `200` with `{"tables":{},"total":0}`.
 
 **Error responses:**
 
@@ -754,7 +754,7 @@ Returns per-table message counts in one tenant's Dead Letter Queue: the [tenant]
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
 | 400 | `{"error":"invalid query string: …"}` / `{"error":"invalid ?tenant: …"}` | The query string does not parse (`?tenant=acme;x=1`, a bad `%` escape), or `tenant` is empty, repeated, or not a tenant id |
 | 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
-| 404 | `{"error":"no dead-letter queue for tenant: <id>"}` | The tenant has no dead-letter queue: it has never been served on this data directory, or the id names no tenant |
+| 404 | `{"error":"no dead-letter queue for tenant: <id>"}` | The tenant has no dead-letter queue: it has never been served on this data directory, its queue could not be opened (see [Message Queue](/settings-directory#message-queue)), or the id names no tenant |
 | 500 | `{"error":"stream info failed"}` | NATS JetStream stream-info lookup failed |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 

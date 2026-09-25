@@ -1070,6 +1070,22 @@ func TestFanIn_SharesThePrefetch(t *testing.T) {
 	assert.Zero(t, (&fanIn{handles: handles(3)}).share(), "0 leaves the client default")
 }
 
+// The hub bridge's fetch-ahead is the client default split across the
+// tenants' queues, like the worker's prefetch, so what it holds client-side
+// does not grow with the number of tenants.
+func TestEmbeddedNATS_Subscribe_SharesTheClientDefault(t *testing.T) {
+	e := newTestEmbedded(t, "acme", "globex")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	require.NoError(t, e.Subscribe(ctx, "hub-bridge", func(*Message) error { return nil }))
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	require.Len(t, e.consumers, 1)
+	assert.Equal(t, jetstream.DefaultMaxMessages, e.consumers[0].prefetch)
+	assert.Equal(t, jetstream.DefaultMaxMessages/2, e.consumers[0].share())
+}
+
 // Nothing lands on the default tenant by omission (#583): the tenant is a
 // required token, checked against its grammar before anything is sent.
 func TestEmbeddedNATS_Publish_RefusesATopicWithoutATenant(t *testing.T) {

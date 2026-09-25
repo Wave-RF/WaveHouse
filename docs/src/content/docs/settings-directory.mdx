@@ -217,7 +217,7 @@ A failed batch insert is retried row by row; a row that fails again on its own i
 
 For a tenant no longer served — its folder removed or rejected — there is no switch to read: its rows are always parked, so none of them sits unacked in its ingest queue, redelivered for as long as the tenant is away and stopping the [Active Sweeper](/ingest-pipeline#the-active-sweeper) purging that queue.
 
-A tenant's dead-letter stream exists from the moment the tenant is first served (an empty stream costs nothing) and the stats endpoint is always registered — the switch is purely behavioral, which is what makes it safe to reload.
+A tenant's dead-letter stream is opened when the tenant is first served (an empty stream costs nothing) and the stats endpoint is always registered — the switch is purely behavioral, which is what makes it safe to reload.
 
 ## Message Queue
 

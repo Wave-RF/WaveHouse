@@ -164,7 +164,9 @@ type Subscriber interface {
 	// consumer named consumerName, held on every tenant's queue — those
 	// opened after Subscribe included. The handler runs on one delivery
 	// goroutine per tenant, one message at a time, so it must be safe to
-	// call concurrently for different tenants.
+	// call concurrently for different tenants. The messages fetched ahead of
+	// it are a fixed number split across the tenants, as Consumer.Consume's
+	// prefetch is, so they do not grow with the number of tenants.
 	//
 	// CONTRACT: If the handler intends to return an error to trigger automatic
 	// redelivery, it MUST NOT manually call msg.Ack() or msg.Nak() beforehand.

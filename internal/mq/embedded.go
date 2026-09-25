@@ -547,9 +547,11 @@ func wrapMsg(ctx context.Context, m jetstream.Msg) *Message {
 
 // Subscribe holds a durable explicit-ack consumer named consumerName on every
 // tenant's queue, those opened later included, and delivers each message to
-// handler with the trace context its headers carry, until ctx is done. A
-// tenant's queue that cannot be joined when it opens is logged: its events
-// reach handler from the next boot.
+// handler with the trace context its headers carry, until ctx is done. It
+// fetches the client's default number of messages ahead across the tenants
+// together (see fanIn.share), so what sits client-side does not grow with
+// the tenants. A tenant's queue that cannot be joined when it opens is
+// logged: its events reach handler from the next boot.
 func (e *EmbeddedNATS) Subscribe(ctx context.Context, consumerName string, handler func(msg *Message) error) error {
 	f := e.newFanIn(ctx, jetstream.ConsumerConfig{Durable: consumerName, AckPolicy: jetstream.AckExplicitPolicy})
 	f.fail = func(err error) {
@@ -563,7 +565,7 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, consumerName string, handl
 		if err := handler(msg); err != nil {
 			_ = msg.Nak()
 		}
-	}, 0, false)
+	}, jetstream.DefaultMaxMessages, false)
 	if err != nil {
 		return fmt.Errorf("consume: %w", err)
 	}
