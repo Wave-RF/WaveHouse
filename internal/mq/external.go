@@ -78,9 +78,11 @@ const (
 	publishRetryWait = 250 * time.Millisecond
 	natsDrainTimeout = 5 * time.Second
 	// hubInactiveThreshold and replayInactiveThreshold are how long the
-	// server keeps the history consumers of a pod that went away.
+	// server keeps the history consumers of a pod that went away. A replay's
+	// also has to outlast sending one fetched batch to a slow SSE client,
+	// since no pull is waiting meanwhile; a finished replay deletes its own.
 	hubInactiveThreshold    = time.Minute
-	replayInactiveThreshold = 5 * time.Second
+	replayInactiveThreshold = time.Minute
 	// replayPullWait bounds one pull of a replay whose remaining events the
 	// server has already counted, and replayBatch is how many one pull asks
 	// for: a replay is a round trip per batch, not per event.

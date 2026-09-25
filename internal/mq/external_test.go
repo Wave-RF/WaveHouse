@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -532,4 +533,32 @@ func TestExternalNATS_ReplayDoesNotChaseTheTail(t *testing.T) {
 		return true
 	}))
 	assert.Equal(t, []string{"a", "b", "c"}, got)
+}
+
+// A replay longer than one fetched batch, sent to a slow client, arrives
+// whole: its consumer outlives the time a batch takes to send.
+func TestExternalNATS_SlowReplayArrivesWhole(t *testing.T) {
+	t.Parallel()
+	e := shippedFixture(t).broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "slow"}
+	const n = replayBatch + 44
+	for i := range n {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(strconv.Itoa(i))))
+	}
+	require.Eventually(t, func() bool {
+		got := 0
+		require.NoError(t, e.ReplaySince(t.Context(), topic, time.Time{}, func([]byte) bool { got++; return got < n }))
+		return got == n
+	}, 5*time.Second, 20*time.Millisecond)
+
+	var got []string
+	require.NoError(t, e.ReplaySince(t.Context(), topic, time.Time{}, func(data []byte) bool {
+		time.Sleep(25 * time.Millisecond) // 256 of these outlast the old 5s threshold
+		got = append(got, string(data))
+		return true
+	}))
+	require.Len(t, got, n)
+	for i, d := range got {
+		require.Equal(t, strconv.Itoa(i), d)
+	}
 }
