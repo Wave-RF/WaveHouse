@@ -168,6 +168,9 @@ func TestNew_DynamoDBDedupeTableMissing(t *testing.T) {
 // A nested directory has no watcher, so a table that comes good is picked up
 // by the background retry, not only by a reload someone has to send.
 func TestRun_DynamoDBDedupeRetriesTheTableCheck(t *testing.T) {
+	saved := tableCheckRetry
+	t.Cleanup(func() { tableCheckRetry = saved })
+	tableCheckRetry = 10 * time.Millisecond
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn})
 	cfg := testConfig(t, root)
 	fake := dynamoConfig(t, cfg, false)

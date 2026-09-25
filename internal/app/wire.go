@@ -533,6 +533,10 @@ func (a *App) wirePebbleDedupe() error {
 	return nil
 }
 
+// tableCheckRetry is the first wait of a nested directory's background
+// DynamoDB table check, which doubles from there; a var for the tests.
+var tableCheckRetry = time.Second
+
 // errDynamoUnchecked is a store's open before the first table check has run.
 var errDynamoUnchecked = errors.New("dedupe: dynamodb table not checked yet")
 
@@ -611,7 +615,7 @@ func (a *App) wireDynamoDedupe(ctx context.Context) error {
 			return fmt.Errorf("dedupe open: %w", err)
 		}
 		a.add(component{name: "dedupe table check", run: func(ctx context.Context) error {
-			for wait := time.Second; ready() != nil; wait = min(2*wait, 30*time.Second) {
+			for wait := tableCheckRetry; ready() != nil; wait = min(2*wait, 30*time.Second) {
 				select {
 				case <-ctx.Done():
 					return nil
