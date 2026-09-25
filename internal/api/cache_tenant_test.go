@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
@@ -228,7 +229,7 @@ func (c *bumpingConn) Query(context.Context, string, ...any) (driver.Rows, error
 func TestCachedRoutes_BumpDuringQueryOrphansTheFill(t *testing.T) {
 	bumps := map[string]func(ctx context.Context, c cache.Cache) error{
 		"structured query": func(ctx context.Context, c cache.Cache) error {
-			_, err := c.Invalidate(ctx, []cache.Namespace{{Tenant: tenant.Default, Table: query.SafeEncodeToken("clicks")}})
+			_, err := c.Invalidate(ctx, []cache.Namespace{{Tenant: tenant.Default, Table: "clicks"}})
 			return err
 		},
 		"pipe execute": func(ctx context.Context, c cache.Cache) error { return c.InvalidateTenant(ctx, tenant.Default) },
@@ -251,5 +252,42 @@ func TestCachedRoutes_BumpDuringQueryOrphansTheFill(t *testing.T) {
 			assert.Equal(t, "HIT", xcache())
 			assert.Equal(t, int32(2), conn.queries.Load())
 		})
+	}
+}
+
+// A structured query files its result under the table as the request names
+// it, raw — the namespace the ingest worker bumps after an insert into that
+// table (ingest's TestFlushTable_BumpsWhatTheReadFiles) — and the cache
+// escapes both, so a name holding a dot or a space is served from the cache
+// and orphaned by an insert like any other.
+func TestStructuredQuery_RawTableNameMeetsTheInsertsBump(t *testing.T) {
+	t.Parallel()
+	tables := []string{"default.clicks", "my table"}
+	schemas := make([]*discovery.TableSchema, 0, len(tables))
+	grants := make(map[string]policy.TablePolicy, len(tables))
+	for _, name := range tables {
+		schemas = append(schemas, &discovery.TableSchema{Name: name, Columns: []discovery.Column{{Name: "page", Type: "String"}}})
+		grants[name] = policy.TablePolicy{"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}}
+	}
+	l1, err := cache.NewLocal(1 << 20)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l1.Close() })
+	h := NewStructuredQueryHandler(fixedConn(&countingConn{}), l1, fixedRegistry(testutil.NewTestSchemaRegistry(t, schemas)),
+		staticPolicy(&policy.Policy{DefaultRole: "viewer", Tables: grants}), func(*settings.Store) int { return 60 },
+		func(*settings.Store) time.Duration { return 5 * time.Second }, nil)
+
+	for _, table := range tables {
+		xcache := func() string {
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(structuredQueryRequest(t, table, query.StructuredQuery{SelectAll: true})))
+			require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+			l1.Wait()
+			return w.Header().Get("X-Cache")
+		}
+		assert.Equal(t, "MISS", xcache(), table)
+		assert.Equal(t, "HIT", xcache(), table)
+		_, err := l1.Invalidate(t.Context(), []cache.Namespace{{Tenant: tenant.Default, Table: table}})
+		require.NoError(t, err)
+		assert.Equal(t, "MISS", xcache(), "%s: the insert's bump orphans the cached result", table)
 	}
 }

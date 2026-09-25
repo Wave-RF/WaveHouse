@@ -46,6 +46,8 @@ func Run(t *testing.T, newCache func(t *testing.T) cache.Cache, opts Options) {
 		{"tenant isolation", testTenantIsolation},
 		{"foreign dependency refused", testForeignDependency},
 		{"scope lattice", testScopeLattice},
+		{"raw names read and bump alike", testRawNames},
+		{"names never run together", testNamesApart},
 		{"invalidate counts namespaces", testInvalidateCount},
 		{"invalidate tenant orphans queries and pipes", testInvalidateTenant},
 		{"bump during the query orphans the fill", testBumpDuringQuery},
@@ -238,6 +240,54 @@ func testScopeLattice(t *testing.T, c cache.Cache) {
 	invalidate(t, c, whole)
 	assertMiss(t, c, acme, "q", org2)
 	requireHit(t, c, "orders/", acme, "q", orders)
+}
+
+// Namespaces carry raw names, and the cache escapes them where it builds a
+// key: a table or scope holding a dot, a space or a '%' is read and bumped
+// under the one namespace both sides pass.
+func testRawNames(t *testing.T, c cache.Cache) {
+	for _, table := range []string{"default.clicks", "my table", "100%"} {
+		whole, scoped := ns(acme, table, ""), ns(acme, table, "org.1")
+		fill(t, c, acme, "q", table, whole)
+		fill(t, c, acme, "q", table+"/org.1", scoped)
+
+		invalidate(t, c, scoped)
+		assertMiss(t, c, acme, "q", scoped)
+		assertMiss(t, c, acme, "q", whole)
+
+		fill(t, c, acme, "q", table, whole)
+		fill(t, c, acme, "q", table+"/org.1", scoped)
+		invalidate(t, c, whole)
+		assertMiss(t, c, acme, "q", whole)
+		assertMiss(t, c, acme, "q", scoped)
+	}
+}
+
+// Two dependency sets whose names would run together under an unescaped
+// join — at a '.', a ':', a '|' or a NUL, whichever a backend's key layout
+// separates on — are two entries, and a bump of one leaves the other.
+func testNamesApart(t *testing.T, c cache.Cache) {
+	pairs := []struct{ a, b []cache.Namespace }{
+		{[]cache.Namespace{ns(acme, "a.0.b", "")}, []cache.Namespace{ns(acme, "a", "b.0.")}},
+		{[]cache.Namespace{ns(acme, "a:b", "c")}, []cache.Namespace{ns(acme, "a", "b:c")}},
+		{[]cache.Namespace{ns(acme, "a\x00b", "")}, []cache.Namespace{ns(acme, "a", "b\x00")}},
+		{[]cache.Namespace{ns(acme, "x", ""), ns(acme, "y", "")}, []cache.Namespace{ns(acme, "x.0..0|acme.0.y", "")}},
+	}
+	for i, p := range pairs {
+		sha := fmt.Sprintf("q%d", i)
+		fill(t, c, acme, sha, "a", p.a...)
+		fill(t, c, acme, sha, "b", p.b...)
+		requireHit(t, c, "a", acme, sha, p.a...)
+
+		invalidate(t, c, p.a...)
+		assertMiss(t, c, acme, sha, p.a...)
+		requireHit(t, c, "b", acme, sha, p.b...)
+
+		fill(t, c, acme, sha, "a", p.a...)
+		invalidate(t, c, p.b...)
+		assertMiss(t, c, acme, sha, p.b...)
+		requireHit(t, c, "a", acme, sha, p.a...)
+	}
 }
 
 func testInvalidateCount(t *testing.T, c cache.Cache) {
