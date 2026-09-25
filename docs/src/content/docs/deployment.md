@@ -327,6 +327,26 @@ A second `SIGTERM`/`SIGINT` while the stop is running abandons it and exits non-
 
 Size the orchestrator's kill grace at `server.shutdown_timeout` plus 8s: at the default a stop needs up to 18s before it should be `SIGKILL`ed, and raising the timeout raises that total by the same amount. Docker's default `stop_grace_period` is 10s, so the [compose file](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/compose/standalone.yaml) sets `stop_grace_period: 25s`, that bound plus headroom; on Kubernetes the equivalent is `terminationGracePeriodSeconds`, whose 30s default already covers it — raise it if you raise `server.shutdown_timeout`. A stop with nothing in flight takes well under a second either way, unless OTLP export is on and the collector is unreachable: the flush then waits out its 3s.
 
+## One Deployment per role
+
+By default one process runs all of WaveHouse. [`roles`](/configuration#process-roles) (`WH_ROLES`) lets the API and the background workers run as separate processes, so that each scales on its own. On Kubernetes that is one Deployment per role, from the same image, differing only in `WH_ROLES`:
+
+| Deployment | `WH_ROLES` | Replicas | Serves on `:8080` |
+| --- | --- | --- | --- |
+| API | `api` | as many as your request load needs | the full API |
+| Ingest | `ingest` | as many as your write load needs | the ops listener |
+| Sweeper | `sweeper` | 1, or 2 for a warm standby | the ops listener |
+
+- **API.** Each API pod runs its own schema discovery, token verifiers, dedupe handle and SSE hub, and receives every event so that it can serve its own SSE clients. Put your Service and ingress in front of these pods only.
+- **Ingest.** Every ingest pod consumes the same shared durable consumer and competes for its messages, so throughput scales with the pod count. The rows of one table are then split across pods: each pod writes smaller batches, and rows written by different pods do not reach ClickHouse in publish order.
+- **Sweeper.** The sweeper runs under a lease, so only one pod sweeps at a time. A second replica waits and takes over when the first stops.
+
+A split needs backends that every process can reach: a shared `mq.backend`, so that every process reaches the same queue, and a shared `cache.backend`, so that the ingest pods' invalidations reach the API pods' cache. **This build has only the in-process backends, so boot refuses any split** and names the backend to change. Until shared backends ship, run every role in one process, the default.
+
+A pod without the `api` role serves an ops listener on `:8080`: `/livez`, `/readyz`, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404. Point the same probes at it as at an API pod. `/livez` does not wait for schema discovery there, because only the API runs it. `/readyz` checks ClickHouse in an ingest pod, and is ready once a sweeper pod has booted. Every pod reads the settings directory, so mount it in every Deployment. The reload route on the ops listener accepts only the operator key, so whatever reloads your API pods over HTTP must send the operator key to the worker pods too, or rely on `SIGHUP` (or, over a flat directory, the directory watcher) instead.
+
+Give each pod a stable `WH_INSTANCE_ID` only if you need one in the logs. The default, the pod's hostname with a random suffix, already names each pod uniquely.
+
 ## Behind a reverse proxy
 
 WaveHouse serves plain HTTP on `:8080` and does **not** terminate TLS, manage a server certificate, or rate-limit — put a reverse proxy, CDN, or tunnel (nginx, Caddy, Cloudflare Tunnel) in front for any internet-facing deployment. A few behaviors only matter behind a proxy: TLS termination, the request-body size limits, Server-Sent Events buffering (WaveHouse now sends keepalive comments so quiet streams survive proxy idle timeouts, [#226](https://github.com/Wave-RF/WaveHouse/issues/226)), header/auth forwarding, and which health paths to expose. See **[Behind a reverse proxy](/reverse-proxy)** for the full guide and example nginx/Caddy/Cloudflare configs.

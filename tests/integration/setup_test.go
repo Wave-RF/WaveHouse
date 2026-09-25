@@ -165,6 +165,7 @@ func setup() (int, func()) {
 		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 30}, // 1 GB
 		Dedupe:     config.Dedupe{Backend: config.DedupePebble},
 		Coord:      config.Coord{Backend: config.CoordLocal},
+		Roles:      config.AllRoles(),
 		Settings:   config.Settings{Dir: settingsDir},
 	}
 	a, err := app.New(ctx, app.Options{Config: cfg, Listener: ln})

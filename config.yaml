@@ -8,6 +8,14 @@
 # the relative default is for local binary use only.
 data_dir: ./data
 
+# The work this process runs; every role by default. A split (one Deployment
+# per role) needs a shared mq.backend and cache.backend, and boot refuses one
+# on the in-process backends.
+roles: [api, ingest, sweeper]
+# Names this process to the others sharing its queue; empty means
+# <hostname>-<8 hex>, fresh at every boot.
+instance_id: ""
+
 server:
   port: 8080
   # Drain budget for a stop (in-flight requests and ingest batches). The
