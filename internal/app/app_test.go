@@ -29,6 +29,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
+	"github.com/Wave-RF/WaveHouse/internal/dedupe/dedupetest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
@@ -490,14 +491,14 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	for _, id := range []string{"acme", "globex", "broken"} {
 		assert.NoDirExists(t, filepath.Join(cfg.DataDir, id), "and no directory of a tenant's own")
 	}
-	dup, err := acme.CheckAndMark(ctx, "e1")
+	dup, err := dedupetest.Mark(ctx, acme, eventKey)
 	require.NoError(t, err)
 	assert.False(t, dup)
 
 	rewriteSettings(t, filepath.Join(root, "globex"), dedupeOn)
 	a.tenants.Reload("test")
 	assert.True(t, globex.Open(), "globex's reload opens globex's store")
-	dup, err = globex.CheckAndMark(ctx, "e1")
+	dup, err = dedupetest.Mark(ctx, globex, eventKey)
 	require.NoError(t, err)
 	assert.False(t, dup, "an id acme has seen is new to globex")
 
@@ -527,7 +528,7 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	a.tenants.Reload("test")
 	restored := a.dedup.For("acme")
 	assert.True(t, restored.Open())
-	dup, err = restored.CheckAndMark(ctx, "e1")
+	dup, err = dedupetest.Mark(ctx, restored, eventKey)
 	require.NoError(t, err)
 	assert.True(t, dup, "an id seen before the folder was removed is still a duplicate")
 
@@ -563,10 +564,10 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 		for _, id := range []tenant.ID{"acme", "globex"} {
 			store := a.dedup.For(id)
 			assert.False(t, store.Open())
-			_, err := store.CheckAndMark(t.Context(), "e1")
+			_, err := dedupetest.Mark(t.Context(), store, eventKey)
 			require.ErrorIs(t, err, dedupe.ErrUnavailable, "%s: switched on but not open, so its ingest fails closed", id)
 		}
-		_, err := a.dedup.For("initech").CheckAndMark(t.Context(), "e1")
+		_, err := dedupetest.Mark(t.Context(), a.dedup.For("initech"), eventKey)
 		require.ErrorIs(t, err, dedupe.ErrDisabled, "a tenant with dedupe off is as it would be anyway")
 	})
 }
@@ -1421,7 +1422,7 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 		a.Handler().ServeHTTP(rec, req)
 		return fmt.Sprintf("%d %s", rec.Code, rec.Body.String())
 	}
-	dup, err := acmeDedup.CheckAndMark(t.Context(), "e1")
+	dup, err := dedupetest.Mark(t.Context(), acmeDedup, eventKey)
 	require.NoError(t, err)
 	require.False(t, dup)
 	require.Eventually(t, func() bool { return fetches.Load() > 0 }, 5*time.Second, 10*time.Millisecond, "acme's key set is fetched off the boot path")
@@ -1465,7 +1466,7 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 	assert.NotNil(t, a.discoveries.For("acme"))
 	assert.NotSame(t, acmeRegistry, a.discoveries.For("acme"), "and a fresh registry")
 	assert.Eventually(t, func() bool { return fetches.Load() > fetched }, 5*time.Second, 10*time.Millisecond, "and a fresh verifier, fetching the key set again")
-	dup, err = a.dedup.For("acme").CheckAndMark(t.Context(), "e1")
+	dup, err = dedupetest.Mark(t.Context(), a.dedup.For("acme"), eventKey)
 	require.NoError(t, err)
 	assert.True(t, dup, "an id acme sent before the removal is still a duplicate")
 }
@@ -1557,3 +1558,6 @@ func TestClose_StopsTheDiscoveryLoops(t *testing.T) {
 	assert.Nil(t, a.discoveries.For("acme"))
 	assert.Nil(t, a.pools.For("acme"))
 }
+
+// eventKey is the one dedupe key the tenant-lifecycle tests mark.
+var eventKey = dedupe.Key{Table: "events", ID: "e1"}

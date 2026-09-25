@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,8 +51,11 @@ type IngestHandler struct {
 	// record boundary — one record never mixes two documents' values. Dedup is
 	// skipped when nil.
 	DedupeSettings func(store *settings.Store, table string) (enabled bool, idField string, requireID bool)
-	Publisher      mq.Publisher
-	PolicySource   PolicySource
+	// DedupeLease is how long a record's claimed id stays pending while it is
+	// published; 0 means dedupe.DefaultLease.
+	DedupeLease  time.Duration
+	Publisher    mq.Publisher
+	PolicySource PolicySource
 
 	// Validator and Checker are the per-record seams a native type layer will
 	// take over (see ingest_seams.go). Both are optional: nil means the default
@@ -72,6 +77,13 @@ func NewIngestHandler(registry RegistrySource, pub mq.Publisher) *IngestHandler 
 var dedupeMissingIDCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 	"wavehouse_ingest_dedupe_missing_id_total",
 	metric.WithDescription("Ingested records missing the configured dedupe id_field (idempotency skipped)"),
+)
+
+// dedupeCommitFailedCounter counts records published whose id could not be
+// committed afterwards: a retry after the lease lapses publishes them again.
+var dedupeCommitFailedCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
+	"wavehouse_dedupe_commit_failed_total",
+	metric.WithDescription("Published records whose dedupe id failed to commit afterwards (the claim lapses with its lease)"),
 )
 
 // dedupeDisabledCounter counts records published un-deduped because the
@@ -125,7 +137,7 @@ type recordReject struct {
 //
 // Most causes are TRANSIENT system conditions, where abandoning the tail is what
 // makes the batch safe to retry: publish backpressure (503), a publish/marshal
-// failure (500), a dedup backend error (500).
+// failure (500), a dedup backend error (500), an id another request holds (503).
 //
 // One is not. An insert grant that resolved for the other operation is a 403 and
 // a caller/config bug — retrying cannot help. It aborts rather than rejecting
@@ -639,41 +651,26 @@ func (h *IngestHandler) processRecord(
 	// from one snapshot (table override → global; the settings directory
 	// always states them, so no compiled fallback is needed), so a reload
 	// lands at a record boundary. A Deduplicator without a settings source is
-	// a wiring bug, not a mode — main wires both or neither.
+	// a wiring bug, not a mode — main wires both or neither. The id is claimed
+	// only once the record is encoded, so nothing but the publish can fail
+	// while the claim is held.
+	var dedupKey *dedupe.Key
 	if h.Dedup != nil && h.DedupeSettings != nil {
 		if enabled, idField, requireID := h.DedupeSettings(store, table); enabled {
-			idVal, ok := data[idField]
-			if !ok {
+			// An explicit null is as missing as an absent key (#370): fmt.Sprint
+			// would make every null "<nil>", one id for every such record.
+			if idVal, ok := data[idField]; ok && idVal != nil {
+				dedupKey = &dedupe.Key{Table: table, ID: fmt.Sprint(idVal)}
+			} else {
 				dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
 				if requireID {
-					slog.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", idField, "table", table)
+					slog.WarnContext(ctx, "dedupe id_field missing or null; rejecting", "id_field", idField, "table", table)
 					return false, &recordReject{
 						Status:  http.StatusBadRequest,
 						Message: fmt.Sprintf("missing dedupe id field %q", idField),
 					}, nil
 				}
-				slog.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", idField, "table", table)
-			} else {
-				eventID := fmt.Sprint(idVal)
-				dup, err := h.Dedup(store).CheckAndMark(ctx, eventID)
-				switch {
-				case errors.Is(err, dedupe.ErrDisabled):
-					// A reload flipped dedupe.enabled between the snapshot
-					// read above and this call (the two transition at
-					// different instants). Publish un-deduped, as a record
-					// under the other setting would have been. The counter
-					// carries the signal (a burst is a reload; a steady rate
-					// is the store and settings out of step), so the line is
-					// Debug rather than a WARN per record.
-					dedupeDisabledCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
-					slog.DebugContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "event_id", eventID, "table", table)
-				case err != nil:
-					slog.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
-					return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
-				case dup:
-					slog.InfoContext(ctx, "duplicate event skipped", "event_id", eventID)
-					return true, nil, nil
-				}
+				slog.WarnContext(ctx, "dedupe id_field missing or null; publishing without idempotency", "id_field", idField, "table", table)
 			}
 		}
 	}
@@ -704,8 +701,23 @@ func (h *IngestHandler) processRecord(
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
 	}
 
+	var dd dedupe.Deduplicator
+	var claims []dedupe.Claim
+	if dedupKey != nil {
+		dd = h.Dedup(store)
+		var duplicate bool
+		var abort *requestAbort
+		claims, duplicate, abort = h.reserve(ctx, dd, *dedupKey)
+		if duplicate || abort != nil {
+			return duplicate, nil, abort
+		}
+	}
+
 	slog.DebugContext(ctx, "publishing event to the ingest queue", "table", table, "scope", scope)
 	if err := h.Publisher.Publish(ctx, mq.Topic{Tenant: store.Tenant(), Table: table, Scope: scope}, payload); err != nil {
+		// The record is not in the queue, so its id goes back: the client's
+		// retry must not read as a duplicate of it (#384).
+		releaseClaims(ctx, dd, claims)
 		if errors.Is(err, mq.ErrQueueFull) {
 			slog.WarnContext(ctx, "ingest queue is full", "error", err, "table", table, "scope", scope)
 			return false, nil, &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30"}
@@ -713,8 +725,75 @@ func (h *IngestHandler) processRecord(
 		slog.ErrorContext(ctx, "failed to publish to the ingest queue", "error", err, "table", table, "scope", scope)
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed"}
 	}
-
+	commitClaims(ctx, dd, claims, table)
 	return false, nil, nil
+}
+
+// reserve claims key for one record. A duplicate skips the record; a key
+// another request holds aborts with 503 and the lease as Retry-After, since
+// that request's outcome decides this one's. ErrDisabled — a reload switched
+// the store off after the settings snapshot was read — publishes un-deduped,
+// as a record under the other setting would have been.
+func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, key dedupe.Key) (claims []dedupe.Claim, duplicate bool, abort *requestAbort) {
+	lease := h.DedupeLease
+	if lease <= 0 {
+		lease = dedupe.DefaultLease
+	}
+	claims, err := dd.Reserve(ctx, []dedupe.Key{key}, lease)
+	switch {
+	case errors.Is(err, dedupe.ErrDisabled):
+		// The counter carries the signal (a burst is a reload; a steady rate
+		// is the store and settings out of step), so the line is Debug rather
+		// than a WARN per record.
+		dedupeDisabledCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", key.Table)))
+		slog.DebugContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "event_id", key.ID, "table", key.Table)
+		return nil, false, nil
+	case err != nil:
+		slog.ErrorContext(ctx, "dedupe reserve failed", "error", err, "event_id", key.ID, "table", key.Table)
+		return nil, false, &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
+	}
+	switch claims[0].Status {
+	case dedupe.Duplicate:
+		slog.InfoContext(ctx, "duplicate event skipped", "event_id", key.ID, "table", key.Table)
+		return nil, true, nil
+	case dedupe.InFlight:
+		slog.InfoContext(ctx, "event id in flight in another request", "event_id", key.ID, "table", key.Table)
+		return nil, false, &requestAbort{
+			Status:     http.StatusServiceUnavailable,
+			Message:    "a request with the same dedupe id is in flight",
+			RetryAfter: strconv.Itoa(int(math.Ceil(lease.Seconds()))),
+		}
+	case dedupe.Claimed:
+	}
+	return claims, false, nil
+}
+
+// commitClaims makes a published record's id a duplicate. A failure does not
+// fail the record — it is in the queue — so it is logged and counted, and
+// the claim lapses after its lease.
+func commitClaims(ctx context.Context, dd dedupe.Deduplicator, claims []dedupe.Claim, table string) {
+	if len(claims) == 0 {
+		return
+	}
+	// The record is queued whatever the request's context does next.
+	err := dd.Commit(context.WithoutCancel(ctx), claims, 0)
+	switch {
+	case err == nil, errors.Is(err, dedupe.ErrDisabled):
+	default:
+		dedupeCommitFailedCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
+		slog.ErrorContext(ctx, "dedupe commit failed after publish; the id lapses with its lease", "error", err, "table", table)
+	}
+}
+
+// releaseClaims gives claims back after a failed publish. A failure is only
+// logged: the claim lapses with its lease either way.
+func releaseClaims(ctx context.Context, dd dedupe.Deduplicator, claims []dedupe.Claim) {
+	if len(claims) == 0 {
+		return
+	}
+	if err := dd.Release(context.WithoutCancel(ctx), claims); err != nil && !errors.Is(err, dedupe.ErrDisabled) {
+		slog.WarnContext(ctx, "dedupe release failed; the id lapses with its lease", "error", err)
+	}
 }
 
 // checkValueMatches decides insert-check equality: the payload value must

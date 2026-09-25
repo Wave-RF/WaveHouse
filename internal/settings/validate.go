@@ -451,14 +451,17 @@ func (v *validator) checkIDField(path string, val *string) {
 }
 
 // checkTableName rejects a per-table override key that could never match a
-// table: empty, or carrying surrounding whitespace. Shared by the dedupe and
-// dlq override maps.
+// table: empty, carrying surrounding whitespace, or holding NUL. Shared by
+// the dedupe and dlq override maps.
 func (v *validator) checkTableName(mapPath, table string) {
 	switch {
 	case table == "":
 		v.errorf(FileConfig, mapPath, "table name must not be empty")
 	case strings.TrimSpace(table) != table:
 		v.errorf(FileConfig, mapPath+"."+table, "table name %q has surrounding whitespace", table)
+	case strings.ContainsRune(table, 0):
+		// The dedupe key ends the table with NUL (dedupe.KeyPrefix).
+		v.errorf(FileConfig, mapPath+"."+table, "table name %q holds a NUL byte", table)
 	}
 }
 

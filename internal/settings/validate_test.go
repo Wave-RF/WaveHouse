@@ -264,6 +264,7 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"padded override id_field", FileConfig, `{"dedupe": {"tables": {"clicks": {"id_field": "click_id "}}}}`, "dedupe.tables.clicks.id_field"},
 		{"empty override table name", FileConfig, `{"dedupe": {"tables": {"": {"id_field": "x"}}}}`, "table name must not be empty"},
 		{"override table whitespace", FileConfig, `{"dedupe": {"tables": {" clicks": {"require_id": true}}}}`, "surrounding whitespace"},
+		{"override table NUL", FileConfig, `{"dedupe": {"tables": {"cli\u0000cks": {"require_id": true}}}}`, "holds a NUL byte"},
 		{"empty override id_field", FileConfig, `{"dedupe": {"tables": {"clicks": {"id_field": ""}}}}`, "dedupe.tables.clicks.id_field: must not be empty"},
 		{"negative max rows", FileConfig, `{"query": {"default_max_rows": -1}}`, "must be >= 1"},
 		{"zero max rows", FileConfig, `{"query": {"default_max_rows": 0}}`, "must be >= 1"},

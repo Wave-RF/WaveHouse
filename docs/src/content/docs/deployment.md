@@ -169,7 +169,7 @@ WH_SETTINGS_DIR=/etc/wavehouse/settings
 WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
 
 - `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `stream.gap_window_minutes` window (settings directory) of history that powers SSE gap-fill across restarts.
-- `<data_dir>/pebble` — the Pebble dedup KV: one instance shared by every tenant, each key led by its tenant. Only used while some tenant's `dedupe.enabled` is `true` in its `config.json` (opened and closed on reload).
+- `<data_dir>/pebble` — the Pebble dedup KV: one instance shared by every tenant, each key led by its tenant and table. Only used while some tenant's `dedupe.enabled` is `true` in its `config.json` (opened and closed on reload).
 
 In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data` and `/app/settings` owned by the nonroot user (UID 65532); the binary creates the `nats/` and `pebble/` subdirectories under `/app/data` itself on first run.
 

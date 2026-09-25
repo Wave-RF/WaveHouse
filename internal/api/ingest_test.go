@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -2736,4 +2737,222 @@ func TestIngest_CheckOnEphemeralColumn_Rejected(t *testing.T) {
 	testutil.AssertJSONErrorResponse(t, w)
 	assert.Contains(t, jsonErrorMessage(t, w), "is ephemeral and is never stored")
 	assert.Empty(t, pub.Messages, "an unenforceable check must publish nothing")
+}
+
+// dedupHandler is a handler over the clicks registry with dedupe on for
+// event_id and dedup as the store.
+func dedupHandler(t *testing.T, pub *testutil.MockPublisher, dedup dedupe.Deduplicator, requireID bool) *IngestHandler {
+	t.Helper()
+	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
+	h.Dedup = staticDedup(dedup)
+	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", requireID }
+	return h
+}
+
+// #384: a publish that fails gives the id back, so the retry the 503 asks for
+// is published rather than skipped as a duplicate of a record that never
+// reached the queue.
+func TestIngest_Dedup_FailedPublishReleasesTheID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{"backpressure", fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), http.StatusServiceUnavailable},
+		{"other failure", errors.New("connection reset"), http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{Err: tt.err}
+			dedup := testutil.NewMockDeduplicator()
+			h := dedupHandler(t, pub, dedup, false)
+			body := map[string]any{"page": "/home", "event_id": "e1"}
+
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+			require.Equal(t, tt.status, w.Code)
+			assert.False(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "released, not left to lapse")
+
+			pub.Err = nil
+			w = httptest.NewRecorder()
+			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+			require.Equal(t, http.StatusOK, w.Code)
+			assert.Contains(t, w.Body.String(), `"ok":true`, "the retry is published, not a duplicate")
+			assert.Len(t, pub.Published(), 1)
+
+			w = httptest.NewRecorder()
+			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+			assert.Contains(t, w.Body.String(), `"duplicate":true`, "and committed once published")
+		})
+	}
+}
+
+// A batch whose publish fails part-way keeps what it published: the records
+// before the failure are committed, the failing one is released, and a
+// whole-batch retry reports the first as duplicates and publishes the rest.
+func TestIngest_NDJSON_Dedup_PublishFailureMidBatch(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{Err: fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), ErrAfter: 1}
+	dedup := testutil.NewMockDeduplicator()
+	h := dedupHandler(t, pub, dedup, false)
+	batch := func() *http.Request {
+		return ndjsonRequest(t, "clicks",
+			jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
+			jsonLine(t, map[string]any{"page": "/b", "event_id": "e2"}),
+			jsonLine(t, map[string]any{"page": "/c", "event_id": "e3"}),
+		)
+	}
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(batch()))
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	require.Len(t, dedup.Released, 1)
+	assert.Equal(t, dedupe.Key{Table: "clicks", ID: "e2"}, dedup.Released[0].Key)
+
+	pub.Err = nil
+	w = httptest.NewRecorder()
+	h.Handle(w, withTenant(batch()))
+	require.Equal(t, http.StatusOK, w.Code)
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 1, resp.Duplicates, "e1 was published by the first attempt")
+	assert.Equal(t, 2, resp.Succeeded)
+	assert.Len(t, pub.Published(), 3, "every record exactly once")
+}
+
+// An id another request holds answers 503 with the lease as Retry-After:
+// that request's publish decides whether this record is a duplicate.
+func TestIngest_Dedup_InFlight(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		lease      time.Duration
+		retryAfter string
+	}{
+		{"default lease", 0, "30"},
+		{"configured lease rounds up", 4500 * time.Millisecond, "5"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			dedup := testutil.NewMockDeduplicator()
+			dedup.Hold(dedupe.Key{Table: "clicks", ID: "e1"})
+			h := dedupHandler(t, pub, dedup, false)
+			h.DedupeLease = tt.lease
+
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"})))
+			assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+			assert.Equal(t, tt.retryAfter, w.Header().Get("Retry-After"))
+			assert.Contains(t, w.Body.String(), "in flight")
+			assert.Empty(t, pub.Published())
+		})
+	}
+}
+
+// A commit that fails after the publish does not fail the record: it is in
+// the queue, and answering an error would invite a second copy.
+func TestIngest_Dedup_CommitFailureStillSucceeds(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	dedup := testutil.NewMockDeduplicator()
+	dedup.CommitErr = errors.New("disk full")
+	h := dedupHandler(t, pub, dedup, false)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"})))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Len(t, pub.Published(), 1)
+}
+
+// A dedupe backend error before the publish publishes nothing and fails the
+// request, as before.
+func TestIngest_Dedup_ReserveError(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	dedup := testutil.NewMockDeduplicator()
+	dedup.Err = errors.New("backend down")
+	h := dedupHandler(t, pub, dedup, false)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"})))
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "dedupe failed")
+	assert.Empty(t, pub.Published())
+}
+
+// #370: an explicit null id is a missing id — rejected under require_id,
+// published un-deduped otherwise — never the one id "<nil>" that made every
+// null record after the first a duplicate.
+func TestIngest_Dedup_NullIDIsMissing(t *testing.T) {
+	t.Parallel()
+	nullID := func() string { return jsonLine(t, map[string]any{"page": "/a", "event_id": nil}) }
+	t.Run("require_id rejects", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := dedupHandler(t, pub, testutil.NewMockDeduplicator(), true)
+		w := httptest.NewRecorder()
+		h.Handle(w, withTenant(ndjsonRequest(t, "clicks", nullID())))
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, resultAt(t, decodeBatchResult(t, w), 1).Error, "missing dedupe id field")
+		assert.Empty(t, pub.Published())
+	})
+	t.Run("otherwise publishes every one", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := dedupHandler(t, pub, testutil.NewMockDeduplicator(), false)
+		w := httptest.NewRecorder()
+		h.Handle(w, withTenant(ndjsonRequest(t, "clicks", nullID(), nullID())))
+		require.Equal(t, http.StatusOK, w.Code)
+		resp := decodeBatchResult(t, w)
+		assert.Equal(t, 2, resp.Succeeded)
+		assert.Equal(t, 0, resp.Duplicates)
+		assert.Len(t, pub.Published(), 2)
+	})
+}
+
+// #222: the key carries the table, so one id value in two tables is two ids.
+func TestIngest_Dedup_KeyedByTable(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	dedup := testutil.NewMockDeduplicator()
+	h := dedupHandler(t, pub, dedup, false)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"})))
+	require.Equal(t, http.StatusOK, w.Code)
+	claims, err := dedup.Reserve(t.Context(), []dedupe.Key{{Table: "clicks", ID: "e1"}, {Table: "views", ID: "e1"}}, time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, dedupe.Duplicate, claims[0].Status)
+	assert.Equal(t, dedupe.Claimed, claims[1].Status)
+}
+
+// #390: concurrent requests carrying one id publish it once, over the real
+// embedded store — the rest answer duplicate, or 503 while the winner is
+// still publishing.
+func TestIngest_Dedup_ConcurrentSameIDPublishesOnce(t *testing.T) {
+	t.Parallel()
+	store := dedupe.NewEmbedded(t.TempDir()).Tenant("acme")
+	require.NoError(t, store.Apply(true))
+	t.Cleanup(func() { _ = store.Close() })
+	pub := &testutil.MockPublisher{}
+	h := dedupHandler(t, pub, store, false)
+
+	const n = 32
+	codes := make([]int, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"})))
+			codes[i] = w.Code
+		})
+	}
+	wg.Wait()
+	assert.Len(t, pub.Published(), 1)
+	for _, c := range codes {
+		assert.Contains(t, []int{http.StatusOK, http.StatusServiceUnavailable}, c)
+	}
 }
