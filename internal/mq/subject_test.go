@@ -1,8 +1,10 @@
 package mq
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -126,15 +128,6 @@ func TestTopicKey_IsInjective(t *testing.T) {
 	assert.Equal(t, Topic{Tenant: "0", Table: "a", Scope: "b"}.key(), Topic{Tenant: "0", Table: "a", Scope: "b"}.key())
 }
 
-// The form written before the tenant led the subject (#583 story 5) is the
-// default tenant's: it is what the durable consumers deliver across the
-// upgrade, and what the dead-letter queue keeps holding after it.
-func TestParseTopicKey_PreTenantTailIsTheDefaultTenants(t *testing.T) {
-	t.Parallel()
-	assert.Equal(t, Topic{Tenant: "0", Table: "events"}, parseTopicKey("events"))
-	assert.Equal(t, Topic{Tenant: "0", Table: "default.clicks"}, parseTopicKey("default%2Eclicks"))
-}
-
 func TestParseTopicKey_ForeignTailKeepsItself(t *testing.T) {
 	t.Parallel()
 	// Subjects this package did not write still yield one usable topic, of
@@ -144,9 +137,50 @@ func TestParseTopicKey_ForeignTailKeepsItself(t *testing.T) {
 		"0.bad%2Gtoken", // a token that does not decode
 		"a%2Eb.events",  // a tenant outside the grammar
 		".events",       // a topic whose tenant was never set
+		"events",        // one token: no tenant leads it
 		"bad%2G",        // one token that does not decode
 	} {
 		assert.Equal(t, Topic{Table: tail}, parseTopicKey(tail), tail)
 	}
 	assert.Equal(t, Topic{}, parseTopicKey(""))
+}
+
+// The tenant a key leads with picks the stream its subject lands in, so it
+// is read off the first token whatever the rest of the key holds.
+func TestKeyTenant(t *testing.T) {
+	t.Parallel()
+	for key, want := range map[string]tenant.ID{"acme.t": "acme", "a.b.c.d": "a", "0.bad%2G": "0"} {
+		id, ok := keyTenant(key)
+		assert.True(t, ok, key)
+		assert.Equal(t, want, id, key)
+	}
+	for _, key := range []string{"", ".events", "a%2Eb.events"} {
+		_, ok := keyTenant(key)
+		assert.False(t, ok, key)
+	}
+}
+
+// Every tenant's two streams have names of their own: no id makes one
+// kind's name another stream's, none is a stream an earlier build shared,
+// and each name gives its tenant back.
+func TestStreamNames_NeverCollide(t *testing.T) {
+	t.Parallel()
+	ids := []tenant.ID{"0", "acme", "DLQ", "DLQ_acme", "INGEST", "INGEST_acme", "_", "-", "WAVEHOUSE", tenant.ID(strings.Repeat("a", tenant.MaxLen))}
+	seen := map[string]tenant.ID{legacyIngestStream: "", legacyDLQStream: ""}
+	for _, id := range ids {
+		for prefix, name := range map[string]string{ingestStreamPrefix: ingestStreamName(id), dlqStreamPrefix: dlqStreamName(id)} {
+			other, dup := seen[name]
+			assert.False(t, dup, "%s names a stream of %q's too", name, other)
+			seen[name] = id
+			back, ok := streamTenant(prefix, name)
+			assert.True(t, ok, name)
+			assert.Equal(t, id, back, name)
+		}
+	}
+	for _, name := range []string{legacyIngestStream, legacyDLQStream, "INGEST_a.b", "DLQ_"} {
+		for _, prefix := range []string{ingestStreamPrefix, dlqStreamPrefix} {
+			_, ok := streamTenant(prefix, name)
+			assert.False(t, ok, "%s is no tenant's %s stream", name, prefix)
+		}
+	}
 }

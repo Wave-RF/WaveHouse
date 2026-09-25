@@ -53,7 +53,7 @@ Even if you remember to batch client-side, a naive ingest path has no safe way t
 - **No backpressure channel.** If the merger falls behind, ClickHouse raises an error at the *next* insert. The client has already left.
 - **No DLQ.** Bad events that fail to insert are either lost or logged into ClickHouse's error log. Good luck replaying yesterday's dropped rows.
 
-WaveHouse fixes all three at the gateway: validates every payload against the real `system.columns` schema before accepting, returns `503 Service Unavailable` with a `Retry-After` header when the NATS WAL fills, and routes failed batch inserts to a dedicated `WAVEHOUSE_DLQ` stream you can inspect via `GET /v1/ops/dlq/stats`.
+WaveHouse fixes all three at the gateway: validates every payload against the real `system.columns` schema before accepting, returns `503 Service Unavailable` with a `Retry-After` header when the NATS WAL fills, and routes failed batch inserts to a dedicated dead-letter stream, one per tenant, you can inspect via `GET /v1/ops/dlq/stats`.
 
 ### No real-time push
 
@@ -156,7 +156,7 @@ flowchart TB
 | Real-time push | WebSocket service + bridge from Kafka | Built in (`/v1/stream`) |
 | Schema validation | Custom code in ingest API | Built in (discovers `system.columns`) |
 | Row/column access control | Custom middleware or a dedicated service | Built in (Hasura-style, JWT-driven) |
-| Dead letter queue | Custom retry + dead topic on Kafka | Built in (`WAVEHOUSE_DLQ`) |
+| Dead letter queue | Custom retry + dead topic on Kafka | Built in (a dead-letter stream per tenant) |
 | Client SDK | Each team writes one | `@wavehouse/sdk` (TypeScript, one dependency, codegen) |
 
 The DIY path works — big teams run it — but the ops cost is not small. You're paying for a Kafka cluster (or Confluent bill), a second service you wrote from scratch, and all the debugging hours when the batching consumer stalls at 3 a.m.
@@ -190,7 +190,7 @@ Tinybird wins on "zero ops to start." WaveHouse wins on "own your data plane and
 | Self-hosted | ✓ | ✓ | ✗ | ✓ |
 | Handles N-row inserts safely | ✗ merge blowup | ✓ via Kafka | ✓ | ✓ native |
 | Schema validation at the edge | ✗ | Custom | ✓ | ✓ (discovers schema) |
-| Dead letter queue | ✗ | Custom | Partial | ✓ `WAVEHOUSE_DLQ` |
+| Dead letter queue | ✗ | Custom | Partial | ✓ dead-letter stream per tenant |
 | Backpressure (503 + Retry-After) | ✗ | Custom | ✓ | ✓ |
 | Idempotent ingest (dedup by ID) | ✗ | Custom | ✓ | ✓ optional |
 | Real-time push (SSE) | ✗ | Custom service | ✗ | ✓ native, gap-fill |
@@ -221,7 +221,7 @@ flowchart TB
 
     NATS --> BC["Buffer consumer<br/>5-second batches"]:::wh
     BC --> CH[("ClickHouse")]:::store
-    BC -. "on failure" .-> DLQ["WAVEHOUSE_DLQ"]:::fail
+    BC -. "on failure" .-> DLQ["dead-letter stream"]:::fail
 ```
 
 **Query path with tiered cache:**

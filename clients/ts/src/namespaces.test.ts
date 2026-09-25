@@ -146,6 +146,25 @@ describe("DLQNamespace", () => {
     expect(fetchSpy.mock.calls[0][0]).toContain("table=clicks");
   });
 
+  it("list() and table() send opts.tenant as ?tenant=, and nothing without it", async () => {
+    fetchSpy.mockImplementation(
+      async () => new Response(JSON.stringify({ tables: {}, total: 0 }), { status: 200 }),
+    );
+    const ns = new DLQNamespace(makeCtx(), mockStream);
+
+    await ns.list({ tenant: "acme" });
+    await ns.table("clicks", { tenant: "acme" });
+    await ns.list();
+    await ns.table("clicks");
+
+    const urls = fetchSpy.mock.calls.map((call) => new URL(call[0]));
+    expect(urls[0].pathname + urls[0].search).toBe("/v1/ops/dlq/stats?tenant=acme");
+    expect(urls[1].searchParams.get("table")).toBe("clicks");
+    expect(urls[1].searchParams.get("tenant")).toBe("acme");
+    expect(urls[2].search).toBe("");
+    expect(urls[3].search).toBe("?table=clicks");
+  });
+
   it("stream() delegates to createStream", () => {
     const ctrl = {} as any;
     mockStream.mockReturnValue(ctrl);
