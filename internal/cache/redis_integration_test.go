@@ -194,6 +194,18 @@ func open(t *testing.T, s *server, prefix string, tune ...func(*cache.RedisConfi
 	return c
 }
 
+// seedFill caches a result for q under prefix through a client with the
+// default timeout: a test's setup must not ride on the 100ms budget it
+// tunes for the failure it provokes, where one slow round trip on a busy
+// runner opens the breaker before the test begins.
+func seedFill(t *testing.T, s *server, prefix string, deps []cache.Namespace) {
+	t.Helper()
+	c := open(t, s, prefix)
+	_, snap, err := c.Lookup(context.Background(), "acme", "q", deps)
+	require.NoError(t, err)
+	require.NoError(t, c.Set(context.Background(), snap, []byte("pre-write rows"), time.Minute))
+}
+
 func TestRedis_Conformance(t *testing.T) {
 	t.Parallel()
 	servers := []struct {
@@ -408,11 +420,9 @@ func TestRedis_ServerStopsAnswering(t *testing.T) {
 		c.Timeout, c.BreakerThreshold, c.BreakerOpenFor = timeout, 3, 300*time.Millisecond
 	})
 	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
-	_, snap, err := a.Lookup(ctx, "acme", "q", deps)
-	require.NoError(t, err)
-	require.NoError(t, a.Set(ctx, snap, []byte("pre-write rows"), time.Minute))
+	seedFill(t, s, prefix, deps)
 
-	_, err = d.ContainerPause(ctx, s.ctr.GetContainerID(), client.ContainerPauseOptions{})
+	_, err := d.ContainerPause(ctx, s.ctr.GetContainerID(), client.ContainerPauseOptions{})
 	require.NoError(t, err)
 	paused := true
 	unpause := func() {
@@ -472,11 +482,9 @@ func TestRedis_CloseDeliversPastAnOpenBreaker(t *testing.T) {
 		c.Timeout, c.BreakerThreshold, c.BreakerOpenFor = 100*time.Millisecond, 1, time.Hour
 	})
 	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
-	_, snap, err := a.Lookup(ctx, "acme", "q", deps)
-	require.NoError(t, err)
-	require.NoError(t, a.Set(ctx, snap, []byte("pre-write rows"), time.Minute))
+	seedFill(t, s, prefix, deps)
 
-	_, err = d.ContainerPause(ctx, s.ctr.GetContainerID(), client.ContainerPauseOptions{})
+	_, err := d.ContainerPause(ctx, s.ctr.GetContainerID(), client.ContainerPauseOptions{})
 	require.NoError(t, err)
 	_, _, err = a.Lookup(ctx, "acme", "q", deps)
 	require.Error(t, err)
