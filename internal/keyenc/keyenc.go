@@ -1,9 +1,9 @@
-// Package keyenc is the one escaping every composite WaveHouse key is built
-// from: NATS subject tokens, cache namespace tokens and dedupe keys. A field
-// keeps ASCII letters, digits and '_' as they are and writes every other byte
-// as %XX (uppercase hex), so no separator, wildcard, whitespace, brace or
-// non-ASCII byte ever appears in it unescaped, and any table name ClickHouse
-// accepts encodes.
+// Package keyenc is the one escaping composite WaveHouse keys are built
+// from: NATS subject tokens and cache namespace tokens. A field keeps ASCII
+// letters, digits and '_' as they are and writes every other byte as %XX
+// (uppercase hex), so no separator, wildcard, whitespace, brace or non-ASCII
+// byte ever appears in it unescaped, and any table name ClickHouse accepts
+// encodes.
 //
 // The output is pinned byte for byte: NATS subjects have carried it since
 // v0.1.0, and queued messages outlive the binary that wrote them.

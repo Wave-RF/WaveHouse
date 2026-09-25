@@ -205,7 +205,7 @@ The hot-reloadable half of configuration: a directory of four JSON files (`confi
 
 ### `keyenc/` — Key Escaping
 
-- **keyenc.go** — The one escaping every composite key is built from, so a name can never be mistaken for a separator: `Escape` keeps ASCII letters, digits and `_` and writes every other byte as `%XX` (uppercase hex), `Unescape` decodes `%XX` in either case and takes any other byte as itself, and `Join`/`Split` join escaped fields with a separator the escaping never emits (`Join` panics on one it could). NATS subject tokens (`internal/mq`) and the cache's namespace tokens (`query.SafeEncodeToken`) both use it; its output is byte-identical to the subject-token encoding v0.1.0 shipped, which queued messages depend on.
+- **keyenc.go** — The one escaping composite keys are built from, so a name can never be mistaken for a separator: `Escape` keeps ASCII letters, digits and `_` and writes every other byte as `%XX` (uppercase hex), `Unescape` decodes `%XX` in either case and takes any other byte as itself, and `Join`/`Split` join escaped fields with a separator the escaping never emits (`Join` panics on one it could). NATS subject tokens (`internal/mq`) and the cache's namespace tokens (`query.SafeEncodeToken`) both use it; its output is byte-identical to the subject-token encoding v0.1.0 shipped, which queued messages depend on.
 
 ## Data Flows
 
