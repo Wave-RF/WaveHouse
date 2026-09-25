@@ -173,6 +173,7 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		t.Run(tc.name, func(t *testing.T) {
 			f.reset(t)
 			tp := shippedTopology(t)
+			tp.KeyValues = nil // no case here checks the lease bucket
 			if tc.mutate != nil {
 				tc.mutate(t, tp)
 			}
