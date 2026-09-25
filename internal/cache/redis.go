@@ -47,7 +47,12 @@ const (
 	closeDrainBudget = time.Second
 )
 
-var errBypassed = errors.New("cache: redis unavailable")
+var (
+	errBypassed = errors.New("cache: redis unavailable")
+	// errMalformedReply is a reply the server sent that this code cannot
+	// use: the server is up, so it never counts against the breaker.
+	errMalformedReply = errors.New("cache: malformed reply")
+)
 
 // RedisConfig configures a RedisCache. A zero field takes its Default*
 // value, except CompressMinBytes, where 0 means never compress.
@@ -117,6 +122,9 @@ func (c RedisConfig) withDefaults() (RedisConfig, error) {
 			return c, fmt.Errorf("cache: redis %s is negative", v.name)
 		}
 	}
+	if c.VersionTTL != 0 && c.VersionTTL < 2*time.Second {
+		return c, fmt.Errorf("cache: redis version ttl %s is under 2s: jittered, it would round to EX 0", c.VersionTTL)
+	}
 	c.KeyPrefix = cmpOr(c.KeyPrefix, DefaultRedisKeyPrefix)
 	c.Timeout = cmpOr(c.Timeout, DefaultRedisTimeout)
 	c.DialTimeout = cmpOr(c.DialTimeout, DefaultRedisDialTimeout)
@@ -155,8 +163,8 @@ func (c RedisConfig) clientOption() rueidis.ClientOption {
 }
 
 // RedisCache is a Cache shared by every process pointed at one Redis —
-// or Valkey, Dragonfly, ElastiCache, MemoryDB: it uses only GET, SET and
-// MGET, no scripts and no client tracking.
+// or Valkey, Dragonfly, ElastiCache, MemoryDB: it uses only GET, SET, MGET
+// and PING, no scripts and no client tracking.
 //
 // Versions are random tokens, one per tenant, per table and per scope,
 // under the tenant's hash tag; a bump sets a fresh one. A value carries the
@@ -274,7 +282,7 @@ func (r *RedisCache) conn() rueidis.Client {
 		return nil
 	}
 	ok, probe := r.breaker.allow()
-	if probe {
+	if probe && r.ctx.Err() == nil {
 		go r.probe(*cp)
 	}
 	if !ok {
@@ -286,11 +294,10 @@ func (r *RedisCache) conn() rueidis.Client {
 func (r *RedisCache) probe(c rueidis.Client) {
 	ctx, cancel := context.WithTimeout(r.ctx, r.cfg.Timeout)
 	defer cancel()
-	if err := c.Do(ctx, c.B().Ping().Build()).Error(); err != nil {
-		r.breaker.failure()
+	r.record(r.ctx, c.Do(ctx, c.B().Ping().Build()).Error())
+	if r.breaker.isOpen() {
 		return
 	}
-	r.breaker.success()
 	slog.InfoContext(ctx, "cache: redis reachable again; cache back in use")
 	r.nudge()
 }
@@ -301,14 +308,14 @@ func (r *RedisCache) bypassed() bool {
 }
 
 // record feeds an operation's outcome to the breaker. A reply from the
-// server, even an error reply, shows it is up; a caller that gave up first
+// server, even an error reply or one this code cannot use, shows it is up; a caller that gave up first
 // shows nothing about it.
 func (r *RedisCache) record(parent context.Context, err error) {
 	if err == nil || rueidis.IsRedisNil(err) {
 		r.breaker.success()
 		return
 	}
-	if _, ok := rueidis.IsRedisErr(err); ok {
+	if _, ok := rueidis.IsRedisErr(err); ok || errors.Is(err, errMalformedReply) {
 		r.breaker.success()
 		return
 	}
@@ -342,18 +349,23 @@ func (r *RedisCache) Lookup(ctx context.Context, id tenant.ID, sha string, deps 
 
 	vkey := valueKey(r.cfg.KeyPrefix, id, sha, deps)
 	res := c.DoMulti(opCtx, c.B().Mget().Key(keys...).Build(), c.B().Get().Key(vkey).Build())
-	tokens, missing, err := readTokens(res[0])
+	for _, rr := range res {
+		if err := rr.Error(); err != nil && !rueidis.IsRedisNil(err) {
+			return r.lookupFailed(ctx, err)
+		}
+	}
+	r.record(ctx, nil)
+	tokens, missing, foreign, err := readTokens(res[0])
 	if err != nil {
 		return r.lookupFailed(ctx, err)
 	}
 	val, err := res[1].AsBytes()
 	if err != nil && !rueidis.IsRedisNil(err) {
-		return r.lookupFailed(ctx, err)
+		return r.lookupFailed(ctx, fmt.Errorf("%w: %w", errMalformedReply, err))
 	}
-	r.record(ctx, nil)
 
-	if len(missing) > 0 {
-		if tokens, err = r.createTokens(opCtx, c, keys, missing); err != nil {
+	if len(missing) > 0 || len(foreign) > 0 {
+		if tokens, err = r.createTokens(opCtx, c, keys, missing, foreign); err != nil {
 			return r.lookupFailed(ctx, err)
 		}
 		r.metrics.lookup(resultMiss)
@@ -386,11 +398,11 @@ func (r *RedisCache) lookupFailed(ctx context.Context, err error) (Entry, Snapsh
 }
 
 // readTokens concatenates an MGET reply's tokens, listing the indexes of the
-// keys that do not exist.
-func readTokens(res rueidis.RedisResult) (tokens []byte, missing []int, err error) {
+// keys that do not exist and of those holding something that is not a token.
+func readTokens(res rueidis.RedisResult) (tokens []byte, missing, foreign []int, err error) {
 	msgs, err := res.ToArray()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, fmt.Errorf("%w: %w", errMalformedReply, err)
 	}
 	tokens = make([]byte, 0, len(msgs)*tokenLen)
 	for i := range msgs {
@@ -400,39 +412,47 @@ func readTokens(res rueidis.RedisResult) (tokens []byte, missing []int, err erro
 			continue
 		}
 		s, err := msgs[i].ToString()
-		if err != nil {
-			return nil, nil, err
-		}
-		if len(s) != tokenLen {
-			return nil, nil, fmt.Errorf("version token is %d bytes, not %d: is another program writing under this key prefix?", len(s), tokenLen)
+		if err != nil || len(s) != tokenLen {
+			foreign = append(foreign, i)
+			tokens = append(tokens, make([]byte, tokenLen)...)
+			continue
 		}
 		tokens = append(tokens, s...)
 	}
-	return tokens, missing, nil
+	return tokens, missing, foreign, nil
 }
 
 // createTokens sets each missing token — only if still missing, as another
-// process may create it first — and reads them all back, in one round trip:
-// the tokens share a slot, so the pipeline runs in order on one node.
-func (r *RedisCache) createTokens(ctx context.Context, c rueidis.Client, keys []string, missing []int) ([]byte, error) {
-	cmds := make(rueidis.Commands, 0, len(missing)+1)
+// process may create it first — replaces each foreign one, and reads them
+// all back, in one round trip: the tokens share a slot, so the pipeline runs
+// in order on one node. A fresh token can only cause misses, so replacing
+// whatever held a token key is safe.
+func (r *RedisCache) createTokens(ctx context.Context, c rueidis.Client, keys []string, missing, foreign []int) ([]byte, error) {
+	if len(foreign) > 0 {
+		slog.WarnContext(ctx, "cache: replacing values that are not version tokens; is another program writing under this key prefix?",
+			"keys", len(foreign), "prefix", r.cfg.KeyPrefix)
+	}
+	cmds := make(rueidis.Commands, 0, len(missing)+len(foreign)+1)
 	for _, i := range missing {
 		tok := newToken()
 		cmds = append(cmds, c.B().Set().Key(keys[i]).Value(rueidis.BinaryString(tok)).Nx().Ex(jitter(r.cfg.VersionTTL, tok)).Build())
 	}
+	for _, i := range foreign {
+		cmds = append(cmds, r.bumpCmd(c, keys[i]))
+	}
 	cmds = append(cmds, c.B().Mget().Key(keys...).Build())
 	res := c.DoMulti(ctx, cmds...)
-	for _, rr := range res[:len(missing)] {
+	for _, rr := range res {
 		if err := rr.Error(); err != nil && !rueidis.IsRedisNil(err) {
 			return nil, err
 		}
 	}
-	tokens, still, err := readTokens(res[len(missing)])
+	tokens, still, bad, err := readTokens(res[len(res)-1])
 	if err != nil {
 		return nil, err
 	}
-	if len(still) > 0 {
-		return nil, errors.New("version token vanished as it was created: is the server evicting everything?")
+	if len(still) > 0 || len(bad) > 0 {
+		return nil, fmt.Errorf("%w: version token gone or replaced as it was written", errMalformedReply)
 	}
 	return tokens, nil
 }
@@ -570,7 +590,7 @@ func (r *RedisCache) drainLoop() {
 			r.conn() // starts the probe when due, so an idle process recovers too
 		}
 		if r.pending.len() > 0 {
-			if r.drain(r.ctx) {
+			if r.drain(r.ctx, r.conn) {
 				backoff = drainMinBackoff
 			} else {
 				wait, backoff = backoff, min(backoff*2, drainMaxBackoff)
@@ -580,8 +600,9 @@ func (r *RedisCache) drainLoop() {
 	}
 }
 
-// drain delivers the pending bumps, reporting whether none remain.
-func (r *RedisCache) drain(ctx context.Context) bool {
+// drain delivers the pending bumps through the client conn returns,
+// reporting whether none remain.
+func (r *RedisCache) drain(ctx context.Context, conn func() rueidis.Client) bool {
 	owed := r.pending.snapshot()
 	keys := make([]string, 0, len(owed))
 	for k := range owed {
@@ -590,7 +611,7 @@ func (r *RedisCache) drain(ctx context.Context) bool {
 	for len(keys) > 0 {
 		batch := keys[:min(drainBatch, len(keys))]
 		keys = keys[len(batch):]
-		c := r.conn()
+		c := conn()
 		if c == nil {
 			return false
 		}
@@ -628,7 +649,14 @@ func (r *RedisCache) Close() error {
 		r.wg.Wait()
 		if r.pending.len() > 0 {
 			ctx, cancel := context.WithTimeout(context.Background(), closeDrainBudget)
-			r.drain(ctx)
+			// Past the breaker: an open one is why bumps are pending, and this
+			// is the last chance to deliver them.
+			r.drain(ctx, func() rueidis.Client {
+				if cp := r.client.Load(); cp != nil {
+					return *cp
+				}
+				return nil
+			})
 			cancel()
 			if n := r.pending.len(); n > 0 {
 				slog.Warn("cache: closing with undelivered invalidations; entries they orphan stay cached until their TTL", "pending", n)

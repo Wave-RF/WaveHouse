@@ -342,6 +342,33 @@ func TestRedis_LostTokensAreMisses(t *testing.T) {
 	fill(t, "q", deps)
 }
 
+// A token key holding something that is not a token — another program
+// under the prefix, a different token size mid-upgrade — is a reply, not a
+// failure: it is replaced, which can only cause misses, and the breaker
+// stays closed.
+func TestRedis_ForeignTokenIsReplaced(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := startRedis(t)
+	r := raw(t, s)
+	prefix := uniquePrefix()
+	c := open(t, s, prefix, func(c *cache.RedisConfig) { c.BreakerThreshold = 1 })
+	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
+	_, snap, err := c.Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+	require.NoError(t, c.Set(ctx, snap, []byte("rows"), time.Minute))
+	require.NoError(t, r.Do(ctx, r.B().Set().Key(prefix+":{acme}:B:events").Value("abc").Build()).Error())
+
+	e, snap, err := c.Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+	assert.Nil(t, e.Value)
+	assert.False(t, cache.Bypassed(c))
+	require.NoError(t, c.Set(ctx, snap, []byte("new rows"), time.Minute))
+	e, _, err = c.Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+	assert.Equal(t, "new rows", string(e.Value))
+}
+
 func dockerClient(t *testing.T) *testcontainers.DockerClient {
 	t.Helper()
 	d, err := testcontainers.NewDockerClientWithOpts(context.Background())
@@ -415,4 +442,40 @@ func TestRedis_ServerStopsAnswering(t *testing.T) {
 	e, _, err = b.Lookup(ctx, "acme", "q", deps)
 	require.NoError(t, err)
 	assert.Nil(t, e.Value, "the fill from before the deferred bump is orphaned for every process")
+}
+
+// Close makes its last attempt at the pending bumps past the breaker: an
+// open one is why they are pending, and the server may be back by now.
+func TestRedis_CloseDeliversPastAnOpenBreaker(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := startRedis(t)
+	d := dockerClient(t)
+	prefix := uniquePrefix()
+	a := open(t, s, prefix, func(c *cache.RedisConfig) {
+		c.Timeout, c.BreakerThreshold, c.BreakerOpenFor = 100*time.Millisecond, 1, time.Hour
+	})
+	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
+	_, snap, err := a.Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+	require.NoError(t, a.Set(ctx, snap, []byte("pre-write rows"), time.Minute))
+
+	_, err = d.ContainerPause(ctx, s.ctr.GetContainerID(), client.ContainerPauseOptions{})
+	require.NoError(t, err)
+	_, _, err = a.Lookup(ctx, "acme", "q", deps)
+	require.Error(t, err)
+	require.True(t, cache.Bypassed(a))
+	_, err = a.Invalidate(ctx, deps)
+	require.Error(t, err)
+	_, err = d.ContainerUnpause(ctx, s.ctr.GetContainerID(), client.ContainerUnpauseOptions{})
+	require.NoError(t, err)
+
+	require.True(t, cache.Bypassed(a), "the breaker stays open for its hour")
+	require.Equal(t, 1, cache.Pending(a))
+	require.NoError(t, a.Close())
+	assert.Zero(t, cache.Pending(a))
+
+	e, _, err := open(t, s, prefix).Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+	assert.Nil(t, e.Value, "the bump Close delivered orphans the fill")
 }

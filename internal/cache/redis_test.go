@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -33,6 +34,7 @@ func TestRedisConfig_Validation(t *testing.T) {
 		{"hash tag in the prefix", func(c *RedisConfig) { c.KeyPrefix = "{wh}" }, "brace"},
 		{"negative timeout", func(c *RedisConfig) { c.Timeout = -time.Second }, "timeout is negative"},
 		{"negative size", func(c *RedisConfig) { c.MaxValueBytes = -1 }, "max value bytes is negative"},
+		{"version ttl under EX's resolution", func(c *RedisConfig) { c.VersionTTL = 1500 * time.Millisecond }, "under 2s"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -140,6 +142,7 @@ func TestRedis_Record(t *testing.T) {
 	r.record(live, rueidis.Nil)
 	r.record(live, &rueidis.RedisError{})
 	r.record(cancelled, context.Canceled)
+	r.record(live, fmt.Errorf("%w: token is 3 bytes", errMalformedReply))
 	assert.False(t, r.breaker.isOpen(), "a reply, even an error reply, or the caller giving up says nothing against the server")
 
 	r.record(live, context.DeadlineExceeded)
@@ -165,10 +168,10 @@ func TestIsAuthError(t *testing.T) {
 	assert.False(t, isAuthError(errors.New("dial tcp: connection refused")))
 }
 
-func TestReadTokens_RefusesForeignValues(t *testing.T) {
+func TestReadTokens_NotAnArrayIsMalformed(t *testing.T) {
 	t.Parallel()
-	_, _, err := readTokens(rueidis.RedisResult{})
-	require.Error(t, err)
+	_, _, _, err := readTokens(rueidis.RedisResult{})
+	require.ErrorIs(t, err, errMalformedReply)
 }
 
 func TestRedisMetrics(t *testing.T) {
