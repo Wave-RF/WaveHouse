@@ -855,20 +855,21 @@ func TestNew_VerifierPerTenant(t *testing.T) {
 	cfg.Auth.OperatorKey = "unit-test-operator-key"
 	a := newApp(t, cfg, Options{})
 
-	pipe := func(id, token string) int {
+	serve := func(id, token string) *httptest.ResponseRecorder {
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/p", nil)
 		req.Header.Set(tenant.Header, id)
 		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
 		a.Handler().ServeHTTP(rec, req)
-		return rec.Code
+		return rec
 	}
+	pipe := func(id, token string) int { return serve(id, token).Code }
 	// verified reports whether the token passed the pipe's role gate: the
-	// query then runs and fails against the closed ClickHouse, never the
-	// 401 of a refused token or the 503 of a verifier still fetching.
+	// query then runs and fails against the closed ClickHouse with a
+	// ClickHouse error code — a 503 too, so the body, not the status, tells
+	// it from the 503 of a verifier still fetching or the 401 of a refusal.
 	verified := func(id, token string) bool {
-		code := pipe(id, token)
-		return code != http.StatusUnauthorized && code != http.StatusServiceUnavailable
+		return strings.Contains(serve(id, token).Body.String(), `"code":"clickhouse.`)
 	}
 	eventuallyVerified := func(id, token string) {
 		t.Helper()
