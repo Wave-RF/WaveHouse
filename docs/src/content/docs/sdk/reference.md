@@ -25,13 +25,21 @@ if (error?.code === 'ABORTED') {
 
 The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no global `fetch` and no `options.fetch` (see [Runtime support](/sdk#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and on a stream is reported as a retryable `SSE_AUTH_ERROR`. One more exception escapes an SDK call synchronously, though it is yours rather than ours: your own `status` handler throwing on the first `.subscribe()` or `.liveQuery()`, described under *If your own callback throws* below.
 
+`code` and `retryable` are the server's own when its error body carries them — a failed ClickHouse query does, with codes like `clickhouse.rejected` and `clickhouse.unavailable` ([the full list](/api#clickhouse-errors-on-the-query-paths)). Otherwise `code` is `HTTP_<status>` and a `5xx` is retryable.
+
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
 | 400 | `HTTP_400` | No | Bad request (validation, missing fields) |
 | 401 | `HTTP_401` | No | On REST, a present-but-invalid or expired JWT that a gate then denied. **WaveHouse itself** never returns `401` for a *missing* token — that resolves to `default_role`, and a denial is `403`. On a stream it is always from something in front, since `/v1/stream` is ungated |
 | 403 | `HTTP_403` | No | Insufficient permissions |
 | 404 | `HTTP_404` | No | Table, pipe, or tenant not found |
+| 400 | `clickhouse.rejected` / `clickhouse.limit_exceeded` | No | ClickHouse refused the query (bad SQL, an unknown column, a type mismatch) or it outran a limit — including the role's own caps |
+| 403 | `clickhouse.access_denied` | No | ClickHouse's user lacks a grant the statement needs |
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
+| 500 / 502 | `clickhouse.unknown` | Yes | ClickHouse failed with no verdict (no exception code, no recognizable transport error); `502` on `wh.sql` |
+| 502 | `clickhouse.misconfigured` | No | ClickHouse refused WaveHouse's own credentials or database — an operator fix |
+| 502 | `clickhouse.response_too_large` | No | A raw-SQL (`wh.sql`) response over the 64 MiB cap |
+| 503 | `clickhouse.unavailable` | Yes | ClickHouse is down, unreachable or overloaded; `Retry-After: 5`, honored between attempts |
 | 503 | `HTTP_503` | Yes | Service unavailable, a tenant whose settings folder was rejected, a schema not discovered yet, a tenant on no ClickHouse pool, or a token sent while that tenant's JWKS has not been fetched yet (`token verifier not ready`, `Retry-After: 30`). REST calls auto-retry, honoring `Retry-After` when the response carries one — so each attempt on that last cause waits the 30 s; a stream re-dials on its own jittered backoff instead |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `AbortSignal` |

@@ -205,6 +205,16 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		}
 
 		queryCtx, cancel := context.WithTimeout(r.Context(), timeout)
+		if perms.Select.MaxExecutionTime > 0 {
+			// ClickHouse enforces the role's cap (max_execution_time below)
+			// and answers an overrun with TIMEOUT_EXCEEDED. A context
+			// deadline would let the driver raise that setting to
+			// deadline+5s and turn every overrun into a bare
+			// DeadlineExceeded — indistinguishable from a pool wait or a
+			// dial timeout, which are outages, not the caller's cost.
+			cancel()
+			queryCtx, cancel = cancelAfter(r.Context(), timeout+capBackstop)
+		}
 		defer cancel()
 
 		// Enforce the role's resource caps server-side, not just via the client
@@ -249,7 +259,8 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		return data, nil
 	})
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		caps := queryCaps{time: perms.Select.MaxExecutionTime > 0, memory: perms.Select.MaxMemoryUsage > 0}
+		writeCHError(w, r, err, err.Error(), http.StatusInternalServerError, caps)
 		return
 	}
 
