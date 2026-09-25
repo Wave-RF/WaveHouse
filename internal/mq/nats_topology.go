@@ -410,9 +410,10 @@ func (v *topologyVerifier) partition(ctx context.Context, p int) (string, error)
 	if !cfg.DenyPurge || !cfg.DenyDelete {
 		rec("deny_purge", "set deny_purge and deny_delete; nothing should remove unwritten rows")
 	}
-	if cfg.Replicas < 3 {
-		rec("num_replicas", "is %d; 3 survives losing a server", cfg.Replicas)
+	if cfg.PersistMode == jetstream.AsyncPersistMode {
+		req("persist_mode", "is async; must be default, or an ack precedes the write and a crash of the server process loses unwritten rows")
 	}
+	v.replicas(obj, cfg.Replicas)
 	gotP, hasP := cfg.Metadata["wavehouse.dev/partition"]
 	gotN, hasN := cfg.Metadata["wavehouse.dev/partitions"]
 	switch {
@@ -559,6 +560,7 @@ func (v *topologyVerifier) history(ctx context.Context, partitions []string) err
 	if cfg.MaxBytes <= 0 {
 		v.add(FindingRecommended, obj, "max_bytes", "is unlimited; set it to bound the disk")
 	}
+	v.replicas(obj, cfg.Replicas)
 	return nil
 }
 
@@ -589,7 +591,30 @@ func (v *topologyVerifier) dlq(ctx context.Context) error {
 	if cfg.MaxMsgsPerSubject <= 0 {
 		v.add(FindingRecommended, obj, "max_msgs_per_subject", "set it, so one topic's parked rows evict only its own")
 	}
+	if cfg.PersistMode == jetstream.AsyncPersistMode {
+		v.add(FindingRecommended, obj, "persist_mode", "is async; a crash of the server process loses parked rows it acked")
+	}
+	v.replicas(obj, cfg.Replicas)
 	return nil
+}
+
+// replicas recommends 3 replicas for a stream holding rows. WaveHouse does
+// not require sync_always under nats: an R3 publish is acked once a quorum
+// has stored it, so with one replica an ack rests on one server's disk.
+func (v *topologyVerifier) replicas(obj string, n int) {
+	if problem, ok := replicasProblem(n); ok {
+		v.add(FindingRecommended, obj, "num_replicas", "%s", problem)
+	}
+}
+
+func replicasProblem(n int) (string, bool) {
+	switch {
+	case n <= 1:
+		return fmt.Sprintf("is %d; an ack then rests on one server's disk, and a crash loses what it stored since its last sync (sync_interval); 3 across failure domains survives losing a server", n), true
+	case n < 3:
+		return fmt.Sprintf("is %d; 3 across failure domains survives losing a server", n), true
+	}
+	return "", false
 }
 
 // coordBucket checks the KV bucket the leases live in (Leases). Its stream

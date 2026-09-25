@@ -24,14 +24,14 @@ var (
 )
 
 // replicaWarnings are what the shipped manifests at one replica leave: one
-// num_replicas recommendation per partition.
+// num_replicas recommendation per partition, the history and the DLQ.
 func replicaWarnings(findings []Finding) bool {
 	for _, f := range findings {
 		if f.Severity != FindingRecommended || f.Field != "num_replicas" {
 			return false
 		}
 	}
-	return len(findings) == shippedSpec.Partitions
+	return len(findings) == shippedSpec.Partitions+2
 }
 
 // The shipped manifests pass the verifier, run as the wavehouse user with
@@ -48,7 +48,7 @@ func TestVerifyNATSTopology_ShippedManifestsPass(t *testing.T) {
 	// With the lease bucket checked too: one more replica warning, its own.
 	findings, err = verifyNATSTopology(t.Context(), js, coordSpec)
 	require.NoError(t, err)
-	require.Len(t, findings, shippedSpec.Partitions+1, "findings: %v", findings)
+	require.Len(t, findings, shippedSpec.Partitions+3, "findings: %v", findings)
 	last := findings[len(findings)-1]
 	assert.Equal(t, "kv bucket wh_coord", last.Object)
 	assert.Equal(t, "num_replicas", last.Field)
@@ -112,6 +112,8 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 			tp.consumer(t, p0).FilterSubject = ""
 		}, shippedSpec, req(p0, "subjects")},
 		{"partition deny_purge", stream(p0, func(s *jetstream.StreamConfig) { s.DenyPurge = false }), shippedSpec, rec(p0, "deny_purge")},
+		{"partition at one replica", nil, shippedSpec, want{FindingRecommended, p0, "num_replicas", "sync_interval"}},
+		{"partition persist_mode async", stream(p0, func(s *jetstream.StreamConfig) { s.PersistMode = jetstream.AsyncPersistMode }), shippedSpec, req(p0, "persist_mode")},
 		{"partition metadata missing", stream(p0, func(s *jetstream.StreamConfig) { s.Metadata = nil }), shippedSpec, rec(p0, "metadata")},
 		{"partition metadata mismatch", stream(p0, func(s *jetstream.StreamConfig) {
 			s.Metadata = map[string]string{"wavehouse.dev/partition": "3", "wavehouse.dev/partitions": "4"}
@@ -154,6 +156,7 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		{"history discard", stream(history, func(s *jetstream.StreamConfig) { s.Discard = jetstream.DiscardNew }), shippedSpec, req(history, "discard")},
 		{"history max_age", stream(history, func(s *jetstream.StreamConfig) { s.MaxAge = 0 }), shippedSpec, req(history, "max_age")},
 		{"history max_bytes", stream(history, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), shippedSpec, rec(history, "max_bytes")},
+		{"history at one replica", nil, shippedSpec, want{FindingRecommended, history, "num_replicas", "sync_interval"}},
 		{"history named elsewhere", nil, NATSTopology{Partitions: 4, HistoryStream: "OTHER"}, req("OTHER", "name")},
 
 		// The dead-letter stream.
@@ -163,6 +166,8 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		{"dlq discard", stream(dlq, func(s *jetstream.StreamConfig) { s.Discard = jetstream.DiscardNew }), shippedSpec, req(dlq, "discard")},
 		{"dlq storage", stream(dlq, func(s *jetstream.StreamConfig) { s.Storage = jetstream.MemoryStorage }), shippedSpec, req(dlq, "storage")},
 		{"dlq max_bytes", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), shippedSpec, req(dlq, "max_bytes")},
+		{"dlq at one replica", nil, shippedSpec, want{FindingRecommended, dlq, "num_replicas", "sync_interval"}},
+		{"dlq persist_mode async", stream(dlq, func(s *jetstream.StreamConfig) { s.PersistMode = jetstream.AsyncPersistMode }), shippedSpec, rec(dlq, "persist_mode")},
 		{"dlq per-subject cap", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxMsgsPerSubject = 0 }), shippedSpec, rec(dlq, "max_msgs_per_subject")},
 	}
 	// One server for every case, emptied between them: a server per case
@@ -195,6 +200,50 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 			}
 		})
 	}
+}
+
+// Fewer than 3 replicas is recommended against, never required: a one-server
+// dev cluster boots. At one replica nothing but the server's sync interval
+// stands behind an ack, since WaveHouse does not require sync_always.
+func TestReplicasProblem(t *testing.T) {
+	t.Parallel()
+	for n, want := range map[int]string{0: "sync_interval", 1: "sync_interval", 2: "3 across failure domains"} {
+		got, ok := replicasProblem(n)
+		assert.True(t, ok, "replicas %d", n)
+		assert.Contains(t, got, want, "replicas %d", n)
+	}
+	got, _ := replicasProblem(2)
+	assert.NotContains(t, got, "sync_interval", "a quorum of two does not rest on one disk")
+	for _, n := range []int{3, 5} {
+		_, ok := replicasProblem(n)
+		assert.False(t, ok, "replicas %d", n)
+	}
+}
+
+// WaveHouse does not require sync_always under nats, so the shipped Helm
+// values set no sync option anywhere. natstest.ServerConfig reads only
+// config.merge, so this reads the file itself.
+func TestShippedValues_SetNoSync(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(natstest.ShippedValues())
+	require.NoError(t, err)
+	var values any
+	require.NoError(t, yaml.Unmarshal(raw, &values))
+	var walk func(path string, v any)
+	walk = func(path string, v any) {
+		switch v := v.(type) {
+		case map[string]any:
+			for k, child := range v {
+				assert.NotContains(t, strings.ToLower(k), "sync", "values.yaml sets %s.%s", path, k)
+				walk(path+"."+k, child)
+			}
+		case []any:
+			for _, child := range v {
+				walk(path, child)
+			}
+		}
+	}
+	walk("", values)
 }
 
 // Boot waits for the operator's resources, which on Kubernetes roll out with

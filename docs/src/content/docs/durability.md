@@ -1,13 +1,13 @@
 ---
 title: "Durability & Storage"
-description: "What a WaveHouse ingest ack guarantees, why embedded JetStream fsyncs every publish, and how to tell whether your storage substrate can sustain it."
+description: "What a WaveHouse ingest ack guarantees, why embedded JetStream fsyncs every publish while an external NATS cluster relies on replicas, and how to tell whether your storage substrate can sustain it."
 cloudCta:
   body: "Finding out your disk cannot sustain an fsync per publish is the kind of lesson that arrives at peak traffic. WaveHouse Cloud runs on storage already benchmarked against this page, with the WAL sizing and retention handled for you."
 sidebar:
   order: 11
 ---
 
-WaveHouse buffers every ingested event in embedded NATS JetStream before the [ingest worker](/ingest-pipeline) drains it into ClickHouse. That buffer lives on disk at `<data_dir>/nats`, and **WaveHouse runs JetStream in its strictest durability mode**: every publish is `fsync`'d to non-volatile storage before the producer is acknowledged.
+By default (`mq.backend: embedded`), WaveHouse buffers every ingested event in embedded NATS JetStream before the [ingest worker](/ingest-pipeline) drains it into ClickHouse. That buffer lives on disk at `<data_dir>/nats`, and **WaveHouse runs the embedded JetStream in its strictest durability mode**: every publish is `fsync`'d to non-volatile storage before the producer is acknowledged. An [external NATS cluster](#with-an-external-nats-cluster) is durable through its replicas instead, and WaveHouse does not require it to `fsync` every publish.
 
 This is a deliberate, strong guarantee — but it makes your ingest latency a direct function of your storage's `fsync` latency. On managed cloud block storage that is effectively free; on some commodity or virtualized substrates the `fsync` tail balloons into seconds and ingest visibly suffers. This page explains the contract, where it is cheap versus expensive, and how to measure your storage before you trust it.
 
@@ -23,14 +23,19 @@ This is the strongest mode JetStream offers. It is stronger than the default, wh
 
 | Mode | Ack means | Crash exposure | Throughput |
 | --- | --- | --- | --- |
-| **`SyncAlways` (WaveHouse today)** | data is `fsync`'d to disk | none for acked events | bounded by `fsync` latency |
+| **`SyncAlways` (the embedded broker)** | data is `fsync`'d to disk | none for acked events | bounded by `fsync` latency |
 | Periodic group commit (default JetStream) | data is in the OS page cache | up to one sync interval of acked-but-unflushed events | bounded by memory/CPU |
 
-WaveHouse does not currently expose a knob to relax this — `SyncAlways` is always on. Exposing a configurable group-commit interval (`mq.sync_interval`) is tracked in [#139](https://github.com/Wave-RF/WaveHouse/issues/139).
+WaveHouse does not currently expose a knob to relax this — `SyncAlways` is always on for the embedded broker. Exposing a configurable group-commit interval (`mq.sync_interval`) is tracked in [#139](https://github.com/Wave-RF/WaveHouse/issues/139).
 
 ## With an external NATS cluster
 
-Under [`mq.backend: nats`](/deployment#external-nats) the buffer is your NATS cluster, not `<data_dir>/nats`, and the `200` means the partition stream has stored the event under its own storage settings: WaveHouse does not choose them, and the rest of this page describes the embedded server. What does not change is that no event is dropped before it is written: the partition streams have no age limit, and a full one refuses new events with `503` rather than dropping old ones. A full partition refuses every tenant whose events it holds, not one tenant. The replay history is a separate stream whose `max_age` you set, and every tenant's parked rows share one dead-letter stream.
+Under [`mq.backend: nats`](/deployment#external-nats) the buffer is your NATS cluster, not `<data_dir>/nats`, and the `200` means the partition stream has acked the publish:
+
+- **At 3 or more replicas,** the stream acks only once a Raft quorum of its servers has stored the event. WaveHouse does not require `sync_always` there, and the shipped Helm values do not set it: a quorum spread across failure domains (zones, racks or hosts) survives losing any one of them, which is the durability WaveHouse relies on. What can lose an acked event is losing a quorum's servers at once, before they sync.
+- **At one replica,** the server's `sync_interval` (2 minutes unless you set it) governs: this is the periodic group-commit row in the table above, and a crash of that server loses what it stored since its last sync. Boot reports a stream with fewer than 3 replicas as a `recommended` finding and still starts, so a one-server development cluster works. In production, run 3 replicas, or set `sync_always` on a one-server cluster and the rest of this page applies to its disk. A stream with `persist_mode: async` (one replica only) flushes in the background even under `sync_always`, so a crash of the server process alone can lose acked events; boot refuses it on an ingest partition.
+
+WaveHouse does not choose the cluster's storage settings; the rest of this page describes the embedded server. What does not change is that no limit drops an event before it is written: the partition streams have no age limit, and a full one refuses new events with `503` rather than dropping old ones. A full partition refuses every tenant whose events it holds, not one tenant. The replay history is a separate stream whose `max_age` you set, and every tenant's parked rows share one dead-letter stream.
 
 ## Why the fsync tail is your ingest floor
 

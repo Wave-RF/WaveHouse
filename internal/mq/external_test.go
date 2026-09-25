@@ -182,6 +182,35 @@ func TestExternalNATS_TopicAtItsCapIsFull(t *testing.T) {
 	require.NoError(t, e.Publish(t.Context(), Topic{Tenant: "acme", Table: "other"}, []byte("x")))
 }
 
+// Under nats, WaveHouse does not require sync_always: against a server with
+// it off, a publish to a one-replica partition is acked and stored, and boot
+// reports the replica count as recommended only. TestShippedValues_SetNoSync
+// covers the shipped values.
+func TestExternalNATS_PublishesWithoutSyncAlways(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	require.False(t, f.server.JetStreamConfig().SyncAlways)
+
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "t"}
+	stream := shippedPartition(partitionOf(topic.Tenant, 4))
+	s, err := f.admin.Stream(t.Context(), stream)
+	require.NoError(t, err)
+	require.Equal(t, 1, s.CachedInfo().Config.Replicas)
+
+	require.NoError(t, e.Publish(t.Context(), topic, []byte("x")))
+	assert.Equal(t, uint64(1), f.streamMsgs(t, stream))
+
+	findings, err := verifyNATSTopology(t.Context(), e.js, e.topo)
+	require.NoError(t, err)
+	for _, got := range findings {
+		assert.Equal(t, FindingRecommended, got.Severity, "unexpected finding %v", got)
+	}
+	assert.True(t, slices.ContainsFunc(findings, func(got Finding) bool {
+		return got.Object == "stream "+stream && got.Field == "num_replicas"
+	}), "findings: %v", findings)
+}
+
 // A partition stream the operator deleted is ErrUnavailable, and the
 // topology gauge drops at once; the broker creates nothing.
 func TestExternalNATS_MissingPartitionIsUnavailable(t *testing.T) {
@@ -331,13 +360,16 @@ func TestExternalNATS_PurgeAckedWarnsOnAShortHistory(t *testing.T) {
 	require.Positive(t, maxAge, "the shipped history has a max_age")
 
 	purged, err := e.PurgeAcked(t.Context(), workerDurable, map[tenant.ID]time.Time{
-		"acme":   time.Now().Add(-2 * maxAge),
-		"globex": time.Now().Add(-time.Minute),
+		"acme":    time.Now().Add(-2 * maxAge),
+		"globex":  time.Now().Add(-time.Minute),
+		"initech": time.Now().Add(-maxAge), // a window equal to max_age, as the sweeper computes it
 	})
 	require.NoError(t, err)
 	assert.False(t, purged)
 	_, acme := e.warnedGap.Load(tenant.ID("acme"))
 	_, globex := e.warnedGap.Load(tenant.ID("globex"))
+	_, initech := e.warnedGap.Load(tenant.ID("initech"))
+	assert.False(t, initech, "a history exactly as long as the window holds it")
 	assert.True(t, acme)
 	assert.False(t, globex)
 }
