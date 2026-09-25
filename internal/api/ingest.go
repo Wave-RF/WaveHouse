@@ -50,12 +50,11 @@ type IngestHandler struct {
 	// store, picked off the store the handler already holds (#583 story 7;
 	// dedupe.Stores in production). nil when no dedupe store is wired (tests).
 	Dedup func(store *settings.Store) dedupe.Deduplicator
-	// DedupeSettings resolves the effective dedupe id_field/require_id for a
-	// table of the request's tenant ((*settings.Store).DedupeFor in
-	// production). Called once per record so a settings reload lands at a
-	// record boundary — one record never mixes two documents' values. Dedup is
-	// skipped when nil.
-	DedupeSettings func(store *settings.Store, table string) (enabled bool, idField string, requireID bool)
+	// DedupeSettings resolves the effective dedupe settings for a table of the
+	// request's tenant ((*settings.Store).DedupeFor in production). Called
+	// once per record so a settings reload lands at a record boundary — one
+	// record never mixes two documents' values. Dedup is skipped when nil.
+	DedupeSettings func(store *settings.Store, table string) settings.Dedupe
 	// DedupeLease is how long a record's claimed id stays pending while it is
 	// published; 0 means dedupe.DefaultLease.
 	DedupeLease  time.Duration
@@ -572,8 +571,10 @@ type pendingRecord struct {
 	reject  *recordReject // non-nil: the record is bad and is not published
 	payload []byte        // the encoded envelope to publish
 	// key is the record's dedupe identity, nil when it is published
-	// un-deduped; claim is Reserve's answer for it.
+	// un-deduped; retention is how long its id stays a duplicate once
+	// committed; claim is Reserve's answer for it.
 	key       *dedupe.Key
+	retention time.Duration
 	claim     dedupe.Claim
 	duplicate bool
 }
@@ -701,7 +702,7 @@ func (h *IngestHandler) prepareRecord(
 	// enforces) after the permission checks: check clauses keep pre-#372 semantics.
 	h.validator().CanonicalizeTimestamps(schema, data)
 
-	// Optional deduplication. enabled/id_field/require_id resolve per record
+	// Optional deduplication. The dedupe settings resolve per record
 	// from one snapshot (table override → global; the settings directory
 	// always states them, so no compiled fallback is needed), so a reload
 	// lands at a record boundary. A Deduplicator without a settings source is
@@ -709,14 +710,16 @@ func (h *IngestHandler) prepareRecord(
 	// in ingestWindow, once every record of the window is encoded, so nothing
 	// but the publish can fail while the claim is held.
 	if h.Dedup != nil && h.DedupeSettings != nil {
-		if enabled, idField, requireID := h.DedupeSettings(store, table); enabled {
+		if dd := h.DedupeSettings(store, table); dd.Enabled {
+			idField := dd.IDField
 			// An explicit null is as missing as an absent key (#370): fmt.Sprint
 			// would make every null "<nil>", one id for every such record.
 			if idVal, ok := data[idField]; ok && idVal != nil {
 				rec.key = &dedupe.Key{Table: table, ID: fmt.Sprint(idVal)}
+				rec.retention = dd.Retention
 			} else {
 				dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
-				if requireID {
+				if dd.RequireID {
 					slog.WarnContext(ctx, "dedupe id_field missing or null; rejecting", "id_field", idField, "table", table)
 					return pendingRecord{reject: &recordReject{
 						Status:  http.StatusBadRequest,
@@ -793,7 +796,7 @@ func (h *IngestHandler) ingestWindow(ctx context.Context, store *settings.Store,
 			return h.publishFailed(ctx, dd, topic, recs, i, err)
 		}
 	}
-	commitClaims(ctx, dd, claimedIn(recs), table)
+	commitClaims(ctx, dd, recs, table)
 	return nil
 }
 
@@ -865,7 +868,7 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 // the first copy landed. The records after k were never sent and are released.
 func (h *IngestHandler) publishFailed(ctx context.Context, dd dedupe.Deduplicator, topic mq.Topic, recs []pendingRecord, k int, err error) *requestAbort {
 	definite := errors.Is(err, mq.ErrQueueFull)
-	commitClaims(ctx, dd, claimedIn(recs[:k]), topic.Table)
+	commitClaims(ctx, dd, recs[:k], topic.Table)
 	after := k + 1
 	if definite {
 		after = k
@@ -890,20 +893,33 @@ func claimedIn(recs []pendingRecord) []dedupe.Claim {
 	return out
 }
 
-// commitClaims makes published records' ids duplicates. A failure does not
-// fail the records — they are in the queue — so it is logged and counted, and
-// the claims lapse after their lease.
-func commitClaims(ctx context.Context, dd dedupe.Deduplicator, claims []dedupe.Claim, table string) {
-	if len(claims) == 0 {
-		return
+// commitClaims makes the ids of recs' Claimed claims duplicates, one Commit
+// per retention — one in practice, unless a reload changed it mid-window. A
+// failure does not fail the records — they are in the queue — so it is logged
+// and counted, and the claims lapse after their lease.
+func commitClaims(ctx context.Context, dd dedupe.Deduplicator, recs []pendingRecord, table string) {
+	var retentions []time.Duration
+	byRetention := map[time.Duration][]dedupe.Claim{}
+	for i := range recs {
+		if recs[i].claim.Status != dedupe.Claimed {
+			continue
+		}
+		r := recs[i].retention
+		if _, ok := byRetention[r]; !ok {
+			retentions = append(retentions, r)
+		}
+		byRetention[r] = append(byRetention[r], recs[i].claim)
 	}
-	// The records are queued whatever the request's context does next.
-	err := dd.Commit(context.WithoutCancel(ctx), claims, 0)
-	switch {
-	case err == nil, errors.Is(err, dedupe.ErrDisabled):
-	default:
-		dedupeCommitFailedCounter.Add(ctx, int64(len(claims)), metric.WithAttributes(attribute.String("table", table)))
-		slog.ErrorContext(ctx, "dedupe commit failed after publish; the ids lapse with their lease", "error", err, "table", table, "records", len(claims))
+	for _, r := range retentions {
+		claims := byRetention[r]
+		// The records are queued whatever the request's context does next.
+		err := dd.Commit(context.WithoutCancel(ctx), claims, r)
+		switch {
+		case err == nil, errors.Is(err, dedupe.ErrDisabled):
+		default:
+			dedupeCommitFailedCounter.Add(ctx, int64(len(claims)), metric.WithAttributes(attribute.String("table", table)))
+			slog.ErrorContext(ctx, "dedupe commit failed after publish; the ids lapse with their lease", "error", err, "table", table, "records", len(claims))
+		}
 	}
 }
 

@@ -30,9 +30,16 @@ import (
 type Embedded struct {
 	dir string
 
-	mu   sync.Mutex // guards db and open
-	db   *pebble.DB
-	open int // tenant stores open over db
+	mu        sync.Mutex // guards db, open and stopSweep
+	db        *pebble.DB
+	open      int    // tenant stores open over db
+	stopSweep func() // stops db's sweep
+
+	// commitMu is read-held by Commit and held by a sweep chunk, so a sweep
+	// never deletes a key a Commit rewrote after the sweep read it.
+	commitMu   sync.RWMutex
+	sweepFirst time.Duration
+	sweepEvery time.Duration
 
 	pending *pendingSet
 	tokens  atomic.Uint64
@@ -45,7 +52,13 @@ type Embedded struct {
 // NewEmbedded returns the embedded implementation under dataDir. Nothing is
 // opened until a tenant's store is.
 func NewEmbedded(dataDir string) *Embedded {
-	return &Embedded{dir: filepath.Join(dataDir, "pebble"), pending: newPendingSet(), now: time.Now}
+	return &Embedded{
+		dir:        filepath.Join(dataDir, "pebble"),
+		pending:    newPendingSet(),
+		now:        time.Now,
+		sweepFirst: sweepFirstDelay,
+		sweepEvery: sweepInterval,
+	}
 }
 
 // Dir is where the instance lives.
@@ -76,6 +89,7 @@ func (e *Embedded) acquire(prefix []byte) (Deduplicator, error) {
 			return nil, err
 		}
 		e.db = db
+		e.stopSweep = e.startSweep(db)
 	}
 	e.open++
 	return &tenantStore{e: e, db: e.db, prefix: prefix}, nil
@@ -90,6 +104,7 @@ func (e *Embedded) release() error {
 	if e.open > 0 {
 		return nil
 	}
+	e.stopSweep()
 	err := e.db.Close()
 	e.db = nil
 	return err
@@ -182,24 +197,36 @@ func (s *tenantStore) reserve(key []byte, k Key, now time.Time, lease time.Durat
 // committedLive reports whether a stored value is a commit that has not
 // expired.
 func committedLive(val []byte, now time.Time) bool {
+	exp, ok := committedExpiry(val)
+	return ok && (exp == 0 || now.UnixNano() < exp)
+}
+
+// committedExpired reports whether a stored value is a commit whose
+// retention has ended — what the sweep deletes.
+func committedExpired(val []byte, now time.Time) bool {
+	exp, ok := committedExpiry(val)
+	return ok && exp != 0 && now.UnixNano() >= exp
+}
+
+// committedExpiry reads a commit's expiry (UnixNano, 0 = never); ok is false
+// for a value that is not a commit.
+func committedExpiry(val []byte) (exp int64, ok bool) {
 	if len(val) != valueLen || val[0] != committedMark {
-		return false
+		return 0, false
 	}
-	exp := int64(binary.BigEndian.Uint64(val[1:])) //nolint:gosec // written from an int64 below
-	return exp == 0 || now.UnixNano() < exp
+	return int64(binary.BigEndian.Uint64(val[1:])), true //nolint:gosec // written from an int64 below
 }
 
 // Commit writes every claim in one batch and one fsync, then drops the
 // pending entries it still owns — in that order, so no Reserve in between
 // finds the key neither pending nor committed.
 func (s *tenantStore) Commit(_ context.Context, claims []Claim, retention time.Duration) error {
-	var exp int64
-	if retention > 0 {
-		exp = s.e.now().Add(retention).UnixNano()
-	}
+	s.e.commitMu.RLock()
+	defer s.e.commitMu.RUnlock()
+	exp := expiry(s.e.now(), retention)
 	val := make([]byte, valueLen)
 	val[0] = committedMark
-	binary.BigEndian.PutUint64(val[1:], uint64(exp))
+	binary.BigEndian.PutUint64(val[1:], uint64(exp)) //nolint:gosec // expiry is never negative
 	b := s.db.NewBatch()
 	defer func() { _ = b.Close() }()
 	for _, c := range claims {
@@ -212,6 +239,20 @@ func (s *tenantStore) Commit(_ context.Context, claims []Claim, retention time.D
 	}
 	s.release(claims)
 	return nil
+}
+
+// expiry is the stored expiry of a commit at now kept for retention: 0 for
+// none, and the latest representable instant for a retention reaching past
+// it, rather than a wrapped-around one in the past.
+func expiry(now time.Time, retention time.Duration) int64 {
+	if retention <= 0 {
+		return 0
+	}
+	n := now.UnixNano()
+	if retention > time.Duration(math.MaxInt64-n) {
+		return math.MaxInt64
+	}
+	return n + int64(retention)
 }
 
 // Release drops the pending entries the claims still own.

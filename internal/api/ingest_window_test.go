@@ -391,7 +391,9 @@ func pebbleBatchHandler(tb testing.TB, window int) (*IngestHandler, *countingDed
 	counted := &countingDedup{Deduplicator: store}
 	h := NewIngestHandler(fixedRegistry(testRegistry(tb)), &testutil.MockPublisher{})
 	h.Dedup = staticDedup(counted)
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id"}
+	}
 	h.window = window
 	return h, counted
 }

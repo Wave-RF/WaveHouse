@@ -208,7 +208,7 @@ func TestNew_DedupeFollowsSettings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := writeSettings(t, map[string]any{"dedupe": map[string]any{
-				"enabled": tt.enabled, "id_field": "event_id", "require_id": false, "tables": map[string]any{},
+				"enabled": tt.enabled, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{},
 			}})
 			cfg := testConfig(t, dir)
 			a := newApp(t, cfg, Options{})
@@ -241,7 +241,7 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	require.Equal(t, int64(1<<30), a.mq.MaxBytes(tenant.Default))
 
 	rewriteSettings(t, dir, map[string]any{
-		"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}},
+		"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}},
 		"mq":     map[string]any{"max_bytes_gb": 2},
 	})
 	_, adopted := a.tenants.Reload("test")
@@ -405,7 +405,7 @@ func TestNew_NestedWithoutAnOperatorKeyWarnsTheOpsTreeIsClosed(t *testing.T) {
 // request, so a lost 0 folder is felt at once on the routes that read tenant
 // 0's list.
 func TestReload_NestedHooksFollowEachTenant(t *testing.T) {
-	dedupeOn := map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}
+	dedupeOn := map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}
 	grown := map[string]any{"dedupe": dedupeOn, "mq": map[string]any{"max_bytes_gb": 2}}
 	root := writeNestedSettings(t, map[string]map[string]any{
 		"0":    {"mq": map[string]any{"max_bytes_gb": 1}},
@@ -478,7 +478,7 @@ func TestReload_NestedHooksFollowEachTenant(t *testing.T) {
 // reopened over the same seen ids when the folder is back. The instance is
 // open while some tenant's store is, and Close releases it.
 func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
-	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
+	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}}
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": nil, "broken": invalidQuery})
 	cfg := testConfig(t, root)
 	a := newApp(t, cfg, Options{})
@@ -542,7 +542,7 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 // instance — their ingest answers 500 until a reload or a restart opens it —
 // while the process, and every tenant with dedupe off, carries on.
 func TestNew_DedupeOpenFailure(t *testing.T) {
-	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
+	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}}
 	// A regular file where the instance's directory should be is what Pebble
 	// refuses to open.
 	block := func(t *testing.T, dataDir string) {
@@ -852,7 +852,7 @@ func analystPipe(t *testing.T, dir string) {
 func TestNew_LateBootFailureReleasesEverything(t *testing.T) {
 	guardGlobals(t)
 	dir := writeSettings(t, map[string]any{"dedupe": map[string]any{
-		"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{},
+		"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{},
 	}})
 	cfg := testConfig(t, dir)
 	natsDir := filepath.Join(cfg.DataDir, "nats")
@@ -1458,7 +1458,7 @@ func TestReload_CeilingRefusesAThirdTupleThenOpensIt(t *testing.T) {
 func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 	jwks, _, fetches := jwksServer(t, "acme-1")
 	acmeSettings := authPatch(jwks.URL)
-	acmeSettings["dedupe"] = map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}
+	acmeSettings["dedupe"] = map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": acmeSettings, "globex": nil})
 	a := newApp(t, testConfig(t, root), Options{})
 	acme, acmeRegistry, acmeDedup := a.pools.For("acme"), a.discoveries.For("acme"), a.dedup.For("acme")

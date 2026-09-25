@@ -201,7 +201,9 @@ func TestIngest_Dedup_FirstTime(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(dedup)
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id"}
+	}
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "evt-1"})
 	w := httptest.NewRecorder()
@@ -217,7 +219,9 @@ func TestIngest_Dedup_Duplicate(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(dedup)
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id"}
+	}
 
 	// First call.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "dup-1"})
@@ -703,7 +707,9 @@ func TestIngest_DedupIsTheTenants(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = func(s *settings.Store) dedupe.Deduplicator { return stores.For(s.Tenant()) }
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id"}
+	}
 
 	ingest := func(id tenant.ID) string {
 		store, ok := tenants.For(id)
@@ -726,7 +732,9 @@ func TestIngest_Dedup_MissingIDField(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(dedup)
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id"}
+	}
 
 	// Payload omits event_id and require_id is off: the row skips
 	// dedup and is still published — the warn+counter path, not a rejection (#219).
@@ -745,7 +753,9 @@ func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(testutil.NewMockDeduplicator())
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", true }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id", RequireID: true}
+	}
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home"})))
@@ -767,7 +777,9 @@ func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(testutil.NewMockDeduplicator())
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", true }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id", RequireID: true}
+	}
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
@@ -1015,7 +1027,9 @@ func TestIngest_NDJSON_Dedup(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(dedup)
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id"}
+	}
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
@@ -2306,7 +2320,9 @@ func TestIngest_Dedup_DisabledBySettings(t *testing.T) {
 			dedup.Err = errors.New("must not be called while disabled")
 			h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 			h.Dedup = staticDedup(dedup)
-			h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return false, "event_id", true }
+			h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+				return settings.Dedupe{IDField: "event_id", RequireID: true}
+			}
 
 			w := httptest.NewRecorder()
 			h.Handle(w, withTenant(ingestRequest(t, "clicks", tt.body)))
@@ -2326,7 +2342,9 @@ func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
 	dedup.Err = dedupe.ErrDisabled
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(dedup)
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", true }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id", RequireID: true}
+	}
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"event_id": "e1", "page": "/home"})))
@@ -2744,7 +2762,9 @@ func dedupHandler(t *testing.T, pub *testutil.MockPublisher, dedup dedupe.Dedupl
 	t.Helper()
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(dedup)
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", requireID }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id", RequireID: requireID}
+	}
 	return h
 }
 
