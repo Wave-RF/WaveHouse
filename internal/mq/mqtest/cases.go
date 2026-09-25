@@ -434,7 +434,12 @@ func replaySincePullFailureIsAnError(t *testing.T, h Harness) {
 // once.
 func failedOnceWhenDeliveryEnds(t *testing.T, h Harness) {
 	b := h.New(t)
-	_, _, failed := consume(ctx(t), t, b, mq.ConsumerConfig{MaxAckPending: 100}, nil)
+	got, _, failed := consume(ctx(t), t, b, mq.ConsumerConfig{MaxAckPending: 100}, nil)
+	// A delivery on each tenant proves the pulls are live before delivery is
+	// ended underneath them.
+	publish(t, b, mq.Topic{Tenant: Acme, Table: "t"}, "x")
+	publish(t, b, mq.Topic{Tenant: Globex, Table: "t"}, "x")
+	next(t, got, 2)
 	h.EndDelivery(t, b)
 	select {
 	case err := <-failed:

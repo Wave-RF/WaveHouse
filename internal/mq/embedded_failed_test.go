@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/stretchr/testify/require"
 )
 
@@ -14,9 +15,22 @@ func TestEmbeddedNATS_Consume_ReportsOnceHoweverManyDeliveriesEnd(t *testing.T) 
 	ctx := t.Context()
 	cons, err := e.CreateConsumer(ctx, ConsumerConfig{Durable: "doomed", MaxAckPending: 10})
 	require.NoError(t, err)
-	stop, failed, err := cons.Consume(func(*Message) {}, 4)
+	delivered := make(chan struct{}, 2)
+	stop, failed, err := cons.Consume(func(*Message) { delivered <- struct{}{} }, 4)
 	require.NoError(t, err)
 	t.Cleanup(stop)
+	// A delivery on each tenant proves both pulls are live: a durable deleted
+	// before its pull reaches the server ends nothing the client sees.
+	for _, id := range []tenant.ID{"acme", "globex"} {
+		require.NoError(t, e.Publish(ctx, Topic{Tenant: id, Table: "t"}, []byte("x")))
+	}
+	for range 2 {
+		select {
+		case <-delivered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for a delivery on each tenant")
+		}
+	}
 
 	require.NoError(t, e.js.DeleteConsumer(ctx, "INGEST_globex", "doomed"))
 	select {
