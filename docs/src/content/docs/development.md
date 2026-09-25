@@ -82,7 +82,7 @@ make dev
 WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 - **Embedded NATS** (JetStream) — no external MQ needed
-- **L1 cache only** (Ristretto) — no external cache needed
+- **In-process cache** (Ristretto, `cache.backend: local`) — no external cache needed; to try the shared one, start Redis with `docker compose -f deployments/compose/dependencies.yaml --profile redis up -d` and set `WH_CACHE_BACKEND=redis WH_CACHE_REDIS_ADDRS=localhost:6379`
 - **Trial policy** — the dev settings directory `./settings` is seeded on first run with the compose stack's permissive `public` policy, so tokenless requests to the demo tables work (see [Test the API](#test-the-api))
 - **Dedup disabled** by default — no Pebble needed
 - **Schema discovery** — automatically finds your ClickHouse tables
@@ -341,7 +341,7 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 | -------- | -------- | ------- | ------- |
 | Unit tests | `internal/*/_test.go` | No | `make test` |
 | SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-ts` (always includes coverage + gate) |
-| Integration tests (Go) | `tests/integration/*_test.go`, plus `internal/mq/natsspike` and `internal/mq`'s integration-tagged tests | Yes | `make test-integration` |
+| Integration tests (Go) | `tests/integration/*_test.go`, `internal/cache/*_integration_test.go`, plus `internal/mq/natsspike` and `internal/mq`'s integration-tagged tests | Yes | `make test-integration` |
 | E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
 
 - **Unit tests** live beside the code they test (e.g., `internal/discovery/discovery_test.go`). They use mocks or embedded NATS (in-process, no Docker needed).
@@ -352,7 +352,7 @@ Shared test utilities live in `internal/testutil/`. The packages log through `sl
 ### Adding New Tests
 
 - **Unit test for `internal/foo/`** → create `internal/foo/foo_test.go` (same package).
-- **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`).
+- **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`). A test of one package against its own external server — the shared cache backend against Redis, Valkey and Dragonfly containers — lives beside the package instead (`internal/cache/redis_integration_test.go`, same build tag), and the package is listed in the `test-integration` target.
 - **E2E test via SDK** → add a `tests/e2e/sdk/*.test.ts` file. These tests exercise the full pipeline (ingest → ClickHouse → query) through the TypeScript SDK. Run with `make test-e2e`.
 - **Test helpers** → add to `internal/testutil/` (Go) or `tests/e2e/sdk/helpers.ts` (E2E).
 
@@ -454,7 +454,7 @@ WaveHouse/
 │   ├── api/                # HTTP handlers, router, middleware
 │   ├── app/                # Process wiring (build every component, run under one errgroup, release in reverse)
 │   ├── auth/               # JWT/JWKS authentication middleware
-│   ├── cache/              # L1 (Ristretto) + L2 caching
+│   ├── cache/              # Query cache: in-process (Ristretto) or shared (Redis-compatible)
 │   ├── chconn/             # ClickHouse pools, one per connection tuple (reconciled on settings reload)
 │   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration

@@ -162,21 +162,34 @@ func (n MQNATSConfig) isSet() bool {
 // CacheBackend names the query-result cache implementation.
 type CacheBackend string
 
-// CacheLocal is the in-process Ristretto cache, sized by cache.l1_max_cost.
-const CacheLocal CacheBackend = "local"
+const (
+	// CacheLocal is the in-process Ristretto cache, sized by
+	// cache.l1_max_cost.
+	CacheLocal CacheBackend = "local"
+	// CacheRedis is one Redis-compatible server shared by every process,
+	// configured by cache.redis.
+	CacheRedis CacheBackend = "redis"
+)
 
-var cacheBackends = []CacheBackend{CacheLocal}
+var cacheBackends = []CacheBackend{CacheLocal, CacheRedis}
 
 // Cache selects and sizes the query-result cache. The time-range bucket
 // structured queries normalize to is a settings-directory key
 // (query.timestamp_bucket_seconds) — query shaping, not process memory.
 type Cache struct {
-	Backend   CacheBackend `yaml:"backend" env:"WH_CACHE_BACKEND"`
-	L1MaxCost int64        `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST"`
+	Backend   CacheBackend     `yaml:"backend" env:"WH_CACHE_BACKEND"`
+	L1MaxCost int64            `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST"`
+	Redis     CacheRedisConfig `yaml:"redis"`
 }
 
 func (c Cache) validate() error {
-	return checkBackend("cache.backend", "WH_CACHE_BACKEND", c.Backend, cacheBackends)
+	if err := checkBackend("cache.backend", "WH_CACHE_BACKEND", c.Backend, cacheBackends); err != nil {
+		return err
+	}
+	if c.Backend == CacheRedis {
+		return c.Redis.validate()
+	}
+	return nil
 }
 
 // DedupeBackend names where ingest dedupe keeps the ids it has seen.
@@ -272,6 +285,12 @@ func (c *Config) Warnings() []string {
 		if c.Coord.Backend == CoordLocal && c.Has(RoleSweeper) {
 			out = append(out, "coord.backend=local with mq.backend=nats: every replica running the sweeper holds its own sweeper lease; harmless while the sweeper removes nothing from NATS, and a shared coord.backend will be required once this build has one")
 		}
+	}
+	if c.Cache.Backend == CacheRedis && c.Cache.Redis.TLS.InsecureSkipVerify {
+		out = append(out, "cache.redis.tls.insecure_skip_verify is on: the cache accepts any certificate, so whoever can intercept the connection can read and replace cached query results")
+	}
+	if c.Cache.Backend != CacheRedis && c.Cache.Redis.hasAddrs() {
+		out = append(out, "cache.redis.addrs is set but cache.backend is "+string(c.Cache.Backend)+": the redis block is not read; set cache.backend=redis to share the cache")
 	}
 	if !c.Distributed() {
 		return out

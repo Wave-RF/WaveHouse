@@ -579,18 +579,23 @@ func TestInvalidate_ReachesOneTenantsEntries(t *testing.T) {
 	ctx := context.Background()
 	acme := []cache.Namespace{{Tenant: "acme", Table: "events", Scope: "org_1"}}
 	globex := []cache.Namespace{{Tenant: "globex", Table: "events", Scope: "org_1"}}
-	require.NoError(t, l1.Set(ctx, "q", acme, []byte("acme rows"), time.Minute))
-	require.NoError(t, l1.Set(ctx, "q", globex, []byte("globex rows"), time.Minute))
+	get := func(id tenant.ID, deps []cache.Namespace) (cache.Entry, cache.Snapshot) {
+		e, snap, err := l1.Lookup(ctx, id, "q", deps)
+		require.NoError(t, err)
+		return e, snap
+	}
+	_, snap := get("acme", acme)
+	require.NoError(t, l1.Set(ctx, snap, []byte("acme rows"), time.Minute))
+	_, snap = get("globex", globex)
+	require.NoError(t, l1.Set(ctx, snap, []byte("globex rows"), time.Minute))
 	l1.Wait()
 
 	w.invalidate(ctx, "acme", "events", []parsedMsg{{scope: "org_1"}})
 
-	val, _, err := l1.Get(ctx, "q", acme)
-	require.NoError(t, err)
-	assert.Nil(t, val, "acme's entry is orphaned by acme's insert")
-	val, _, err = l1.Get(ctx, "q", globex)
-	require.NoError(t, err)
-	assert.Equal(t, []byte("globex rows"), val, "globex's entry survives acme's insert")
+	e, _ := get("acme", acme)
+	assert.Nil(t, e.Value, "acme's entry is orphaned by acme's insert")
+	e, _ = get("globex", globex)
+	assert.Equal(t, []byte("globex rows"), e.Value, "globex's entry survives acme's insert")
 }
 
 // ---------------------------------------------------------------------------

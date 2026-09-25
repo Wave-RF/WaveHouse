@@ -18,6 +18,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
@@ -201,5 +202,54 @@ func TestCachedRoutes_SingleflightIsPerTenant(t *testing.T) {
 				})
 			})
 		}
+	}
+}
+
+// bumpingConn runs bump inside the first query only, as an insert that lands
+// while ClickHouse is still reading would.
+type bumpingConn struct {
+	driver.Conn
+	bump    func()
+	queries atomic.Int32
+}
+
+func (c *bumpingConn) Query(context.Context, string, ...any) (driver.Rows, error) {
+	if c.queries.Add(1) == 1 {
+		c.bump()
+	}
+	return &chainEmptyRows{}, nil
+}
+
+// #382: a result is filed under the versions read before its query ran, so
+// a bump landing mid-query orphans the fill — the next request misses and
+// reads the post-write rows — rather than serving pre-write rows until TTL.
+// The structured query is bumped the way the ingest worker bumps it; a pipe,
+// which names no table yet, by InvalidateTenant.
+func TestCachedRoutes_BumpDuringQueryOrphansTheFill(t *testing.T) {
+	bumps := map[string]func(ctx context.Context, c cache.Cache) error{
+		"structured query": func(ctx context.Context, c cache.Cache) error {
+			_, err := c.Invalidate(ctx, []cache.Namespace{{Tenant: tenant.Default, Table: query.SafeEncodeToken("clicks")}})
+			return err
+		},
+		"pipe execute": func(ctx context.Context, c cache.Cache) error { return c.InvalidateTenant(ctx, tenant.Default) },
+	}
+	for _, route := range cachedRoutes {
+		t.Run(route.name, func(t *testing.T) {
+			l1, err := cache.NewLocal(1 << 20)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = l1.Close() })
+			conn := &bumpingConn{bump: func() { require.NoError(t, bumps[route.name](t.Context(), l1)) }}
+			router := cachedRouter(t, testTenants(), conn, l1)
+			xcache := func() string {
+				w := serveAs(t, router, route.path, route.body, "")
+				require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+				l1.Wait()
+				return w.Header().Get("X-Cache")
+			}
+			assert.Equal(t, "MISS", xcache())
+			assert.Equal(t, "MISS", xcache(), "the fill of a query a bump overtook is orphaned")
+			assert.Equal(t, "HIT", xcache())
+			assert.Equal(t, int32(2), conn.queries.Load())
+		})
 	}
 }

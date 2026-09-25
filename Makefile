@@ -764,7 +764,7 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 	@rm -rf $(COV_INT)/data && mkdir -p $(COV_INT)/data
 	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
 		-tags="integration $(TAGS)" -timeout 240s -coverpkg=./... -race -count=1 \
-		./tests/integration/... ./internal/mq/natsspike/... $(ARGS) \
+		./tests/integration/... ./internal/mq/natsspike/... ./internal/cache/... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
 	@# internal/mq's integration-tagged tests (the external NATS broker) run
 	@# alone: its untagged tests are the unit suite's.

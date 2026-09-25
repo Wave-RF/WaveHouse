@@ -51,8 +51,8 @@ clickhouse:
   password: ""
   max_total_conns: 0 # ceiling on open native connections across pools; 0 = none
 
-# Each layer's implementation, chosen at boot. Only the in-process backend
-# exists for each today, and it is the default.
+# Each layer's implementation, chosen at boot. The in-process backend is the
+# default for each, and the only one for these three.
 mq:
   backend: embedded # NATS JetStream under <data_dir>/nats
   # backend: nats reads this block instead: the operator's NATS JetStream
@@ -67,11 +67,18 @@ dedupe:
 coord:
   backend: local # leases (the sweeper's) held in this process
 
-# In-process L1 cache size. The query time-bucket
+# The query-result cache: local (in-process, sized by l1_max_cost) or redis
+# (one Redis-compatible server shared by every instance; see the redis block
+# below and the Configuration page for every key). The query time-bucket
 # (query.timestamp_bucket_seconds) is a settings key.
 cache:
   backend: local
   l1_max_cost: 67108864
+  # redis:                     # read only with backend: redis
+  #   addrs: ["localhost:6379"] # `docker compose -f deployments/compose/dependencies.yaml --profile redis up -d`
+  #   key_prefix: wh
+  #   timeout: 100ms           # per operation; slower is a miss, never a failed query
+  # The password is a secret: WH_CACHE_REDIS_PASSWORD, not this file.
 
 # Auth has no on/off switch — the JWT middleware always runs. A request with no
 # token, or an invalid/expired one, falls back to the policy default_role;
