@@ -302,6 +302,24 @@ func (m *Manifests) Create(ctx context.Context, js jetstream.JetStream) error {
 	return nil
 }
 
+// Apply creates or updates m's streams and each one's consumers, in order,
+// as nack applying changed manifests would. What m leaves out is kept: the
+// generated resources set preventDelete.
+func (m *Manifests) Apply(ctx context.Context, js jetstream.JetStream) error {
+	for _, cfg := range m.Streams {
+		s, err := js.CreateOrUpdateStream(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("apply stream %s: %w", cfg.Name, err)
+		}
+		for _, c := range m.Consumers[cfg.Name] {
+			if _, err := s.CreateOrUpdateConsumer(ctx, c); err != nil {
+				return fmt.Errorf("apply consumer %s/%s: %w", cfg.Name, c.Durable, err)
+			}
+		}
+	}
+	return nil
+}
+
 // AwaitSources waits for every sourcing stream's source consumer to appear
 // beside its origin's own consumers, until ctx ends. The server creates it
 // asynchronously, and a row acked on an interest partition before it exists

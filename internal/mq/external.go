@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -121,8 +122,10 @@ type ExternalNATS struct {
 
 	connected  atomic.Bool
 	topologyOK atomic.Bool
-	sources    atomic.Pointer[[]sourceState]
-	gauges     metric.Registration
+	// closing is set by Close, whose own disconnect is not worth a warning.
+	closing atomic.Bool
+	sources atomic.Pointer[[]sourceState]
+	gauges  metric.Registration
 
 	mu       sync.Mutex
 	nextID   int
@@ -269,7 +272,9 @@ func (e *ExternalNATS) connectOptions(cfg NATSConfig) ([]nats.Option, error) {
 		nats.ConnectHandler(func(*nats.Conn) { e.connected.Store(true) }),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			e.connected.Store(false)
-			slog.Warn("mq: disconnected from nats; reconnecting", "component", "nats", "error", err)
+			if !e.closing.Load() {
+				slog.Warn("mq: disconnected from nats; reconnecting", "component", "nats", "error", err)
+			}
 		}),
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			e.connected.Store(true)
@@ -668,20 +673,35 @@ func (e *ExternalNATS) durable(name string) (string, bool) {
 // CreateConsumer finds the operator's durable on every partition — it never
 // creates one — and checks it against cfg: its ack_wait must cover
 // cfg.AckWait and its max_ack_pending must be set. A durable name that does
-// not map to the operator's is ErrConsumerNotFound.
+// not map to the operator's is ErrConsumerNotFound. It also drains, through
+// the same durable, every stream left holding ingest subjects outside the N
+// partitions, which lowering N leaves behind with rows still in it.
 func (e *ExternalNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (Consumer, error) {
 	name, ok := e.durable(cfg.Durable)
 	if !ok {
 		return nil, fmt.Errorf("consumer %q: %w: the ingest durable is %q", cfg.Durable, ErrConsumerNotFound, e.topo.IngestConsumer)
 	}
 	c := &externalConsumer{e: e, ctx: ctx, failed: make(chan error, 1)}
-	for p, stream := range e.partitions {
-		h, err := e.js.Consumer(ctx, stream, name)
-		if errors.Is(err, jetstream.ErrConsumerNotFound) {
-			return nil, fmt.Errorf("partition %d: consumer %s/%s: %w", p, stream, name, ErrConsumerNotFound)
+	extras, err := e.extraPartitions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i, stream := range append(slices.Clone(e.partitions), extras...) {
+		extra := i >= len(e.partitions)
+		what := fmt.Sprintf("partition %d", i)
+		if extra {
+			what = "removed partition " + stream
 		}
-		if err != nil {
-			return nil, fmt.Errorf("partition %d: consumer %s/%s: %w", p, stream, name, e.apiError(err))
+		h, err := e.js.Consumer(ctx, stream, name)
+		switch {
+		case extra && (errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrStreamNotFound) ||
+			errors.Is(err, jetstream.ErrNotPullConsumer)):
+			// Nothing to drain: the verifier's finding names it.
+			continue
+		case errors.Is(err, jetstream.ErrConsumerNotFound):
+			return nil, fmt.Errorf("%s: consumer %s/%s: %w", what, stream, name, ErrConsumerNotFound)
+		case err != nil:
+			return nil, fmt.Errorf("%s: consumer %s/%s: %w", what, stream, name, e.apiError(err))
 		}
 		have := h.CachedInfo().Config
 		if have.AckWait < cfg.AckWait {
@@ -690,25 +710,50 @@ func (e *ExternalNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (
 		if have.MaxAckPending <= 0 {
 			return nil, fmt.Errorf("consumer %s/%s: max_ack_pending must be set", stream, name)
 		}
-		c.handles = append(c.handles, h)
+		if extra {
+			slog.Info("mq: draining a stream outside the configured partitions", "component", "nats", "stream", stream, "pending", h.CachedInfo().NumPending)
+		}
+		c.parts = append(c.parts, consumerPart{what: what, stream: stream, extra: extra, h: h})
 	}
 	return c, nil
 }
 
-// externalConsumer is the operator's durable on every partition.
+// extraPartitions lists the streams holding ingest subjects that are not one
+// of the N partitions.
+func (e *ExternalNATS) extraPartitions(ctx context.Context) ([]string, error) {
+	v := &topologyVerifier{js: e.js, t: e.topo}
+	names, err := v.streamsHolding(ctx, e.topo.Prefix+".ingest.>")
+	if err != nil {
+		return nil, e.apiError(err)
+	}
+	return slices.DeleteFunc(names, func(n string) bool { return slices.Contains(e.partitions, n) }), nil
+}
+
+// externalConsumer is the operator's durable on every partition, and on every
+// removed partition still draining.
 type externalConsumer struct {
-	e       *ExternalNATS
-	ctx     context.Context
-	handles []jetstream.Consumer
-	failed  chan error
+	e      *ExternalNATS
+	ctx    context.Context
+	parts  []consumerPart
+	failed chan error
 	// reported and stopped keep failed to one error, none after stop.
 	reported, stopped atomic.Bool
 }
 
+type consumerPart struct {
+	what, stream string
+	// extra is a removed partition: its delivery ending is the operator
+	// deleting it once drained, not a failure.
+	extra bool
+	h     jetstream.Consumer
+}
+
 // Consume pulls from every partition, each on its own delivery goroutine,
-// splitting prefetch between them (at least one each). A partition's
+// splitting prefetch between the N partitions (at least one each) and giving
+// a removed partition a quarter share. A partition's
 // delivery that the client ends on its own — the durable deleted, the
-// connection closed for good — is reported on failed.
+// connection closed for good — is reported on failed; a removed partition's
+// is only logged.
 func (c *externalConsumer) Consume(handler func(msg *Message), prefetch int) (func(), <-chan error, error) {
 	var (
 		mu      sync.Mutex
@@ -722,7 +767,7 @@ func (c *externalConsumer) Consume(handler func(msg *Message), prefetch int) (fu
 			cc.Stop()
 		}
 	}
-	for p, h := range c.handles {
+	for _, part := range c.parts {
 		// The client calls this for passing conditions too, and stops the
 		// subscription itself on a terminal one: closing without our stop is
 		// what terminal means (see fanIn.run).
@@ -730,16 +775,27 @@ func (c *externalConsumer) Consume(handler func(msg *Message), prefetch int) (fu
 		opts := []jetstream.PullConsumeOpt{
 			jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
 				lastErr.Store(&err)
-				slog.Warn("mq: consumer reported an error", "component", "nats", "partition", p, "error", err)
+				level := slog.LevelWarn
+				if part.extra {
+					// Expected once the operator deletes it.
+					level = slog.LevelInfo
+				}
+				slog.Log(context.Background(), level, "mq: consumer reported an error", "component", "nats", "partition", part.what, "error", err)
 			}),
 		}
 		if prefetch > 0 {
-			opts = append(opts, jetstream.PullMaxMessages(max(1, prefetch/len(c.handles))))
+			// Split among the N partitions only, so a drained removed partition
+			// does not keep the others' fetch-ahead cut until a restart.
+			share := max(1, prefetch/c.e.topo.Partitions)
+			if part.extra {
+				share = max(1, share/4)
+			}
+			opts = append(opts, jetstream.PullMaxMessages(share))
 		}
-		cc, err := h.Consume(func(m jetstream.Msg) { handler(c.e.wrapMsg(c.ctx, m, true)) }, opts...)
+		cc, err := part.h.Consume(func(m jetstream.Msg) { handler(c.e.wrapMsg(c.ctx, m, true)) }, opts...)
 		if err != nil {
 			stopAll()
-			return nil, nil, fmt.Errorf("consume partition %d: %w", p, err)
+			return nil, nil, fmt.Errorf("consume %s: %w", part.what, err)
 		}
 		mu.Lock()
 		running = append(running, cc)
@@ -753,7 +809,11 @@ func (c *externalConsumer) Consume(handler func(msg *Message), prefetch int) (fu
 			if r := lastErr.Load(); r != nil {
 				reason = fmt.Errorf("%w: %w", ErrDeliveryEnded, *r)
 			}
-			c.fail(fmt.Errorf("partition %d: %w", p, reason))
+			if part.extra {
+				slog.Info("mq: stopped draining a stream outside the configured partitions", "component", "nats", "stream", part.stream, "reason", reason)
+				return
+			}
+			c.fail(fmt.Errorf("%s: %w", part.what, reason))
 		}()
 	}
 	untrack := c.e.track(stopAll)
@@ -943,6 +1003,7 @@ func (e *ExternalNATS) Stats() (observability.MQStats, error) {
 // connection so pending acks are flushed. Safe to call more than once.
 func (e *ExternalNATS) Close() error {
 	e.closeOnce.Do(func() {
+		e.closing.Store(true)
 		e.stop()
 		<-e.loopDone
 		e.mu.Lock()

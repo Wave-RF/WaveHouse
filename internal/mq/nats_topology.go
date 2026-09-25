@@ -459,17 +459,37 @@ func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, filt
 }
 
 // extraPartitions warns about streams holding ingest subjects beyond the N
-// partitions — left over from a smaller or larger N, and drained until the
-// operator deletes them.
+// partitions, which lowering N leaves behind. The ingest worker drains each
+// one through its durable (ExternalNATS.CreateConsumer) until the operator
+// deletes it; one without the durable has nothing to drain it.
 func (v *topologyVerifier) extraPartitions(ctx context.Context, partitions []string) error {
 	names, err := v.streamsHolding(ctx, v.t.Prefix+".ingest.>")
 	if err != nil {
 		return err
 	}
 	for _, name := range names {
-		if !slices.Contains(partitions, name) {
+		if slices.Contains(partitions, name) {
+			continue
+		}
+		s, err := v.js.Stream(ctx, name)
+		if errors.Is(err, jetstream.ErrStreamNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("stream %s: %w", name, err)
+		}
+		rows := s.CachedInfo().State.Msgs
+		outside := fmt.Sprintf("holds %s.ingest subjects outside partitions 0-%d", v.t.Prefix, v.t.Partitions-1)
+		_, err = s.Consumer(ctx, v.t.IngestConsumer)
+		switch {
+		case errors.Is(err, jetstream.ErrConsumerNotFound), errors.Is(err, jetstream.ErrNotPullConsumer):
 			v.add(FindingRecommended, "stream "+name, "subjects",
-				"holds %s.ingest subjects outside partitions 0-%d; delete it once it is empty if the partition count changed", v.t.Prefix, v.t.Partitions-1)
+				"%s and has no pull durable %s, so nothing drains its %d rows; delete it", outside, v.t.IngestConsumer, rows)
+		case err != nil:
+			return fmt.Errorf("consumer %s/%s: %w", name, v.t.IngestConsumer, err)
+		default:
+			v.add(FindingRecommended, "stream "+name, "subjects",
+				"%s; the ingest worker drains its %d rows through %s: delete it once it is empty and no process runs the old partition count", outside, rows, v.t.IngestConsumer)
 		}
 	}
 	return nil
