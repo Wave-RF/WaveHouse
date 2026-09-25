@@ -283,7 +283,7 @@ func (l *lockedWriter) String() string {
 	return l.w.String()
 }
 
-// TestRoles_SeparateProcesses runs the split core.md's C2 describes, as
+// TestRoles_SeparateProcesses runs the split #613's workstream C2 describes, as
 // separate OS processes of the real binary that share nothing but the
 // backends: A and E serve the API (roles=api), B and C write the queue to
 // ClickHouse (roles=ingest), D sweeps (roles=sweeper). The queue is an
@@ -368,7 +368,7 @@ func TestRoles_SeparateProcesses(t *testing.T) {
 	}
 	apiE := procs[0]
 
-	// Every API process sees every event: the hub is per process (#613 core §0.4).
+	// Every API process sees every event: the hub is per process (#613).
 	liveA, liveE := a.sse(t, table), apiE.sse(t, table)
 
 	// A fills the cache, then a batch through A is written by B or C, the
@@ -471,8 +471,8 @@ func TestRoles_SeparateProcesses(t *testing.T) {
 	assert.Less(t, took, sweeperLeaseDuration+15*time.Second)
 }
 
-// TestRoles_BootRefusesWhatTheBackendsCannotServe drives core.md's G.3
-// boot rules through the real binary and its environment: each
+// TestRoles_BootRefusesWhatTheBackendsCannotServe drives the boot rules 1–5
+// through the real binary and its environment: each
 // combination exits non-zero before dialing anything, naming the fix.
 func TestRoles_BootRefusesWhatTheBackendsCannotServe(t *testing.T) {
 	t.Parallel()
