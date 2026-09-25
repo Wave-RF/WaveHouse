@@ -424,10 +424,10 @@ The dedupe key now carries the table as well as the tenant ([#222](https://githu
 ## A shared dedupe table on DynamoDB
 
 :::note[Not selectable yet]
-The DynamoDB dedupe backend is built and tested (`internal/dedupe/dynamodb.go`), but no boot key chooses it yet: every deployment still uses the embedded Pebble store. The `dedupe.backend` boot key lands with [#613](https://github.com/Wave-RF/WaveHouse/issues/613)'s boot-config work. This section describes the table that backend expects, so the infrastructure can be ready first.
+The DynamoDB dedupe backend is built and tested (`internal/dedupe/dynamodb.go`), but no boot key chooses it yet: every deployment still uses the embedded Pebble store. A boot key to select it lands with [#613](https://github.com/Wave-RF/WaveHouse/issues/613)'s boot-config work. This section describes the table that backend expects, so the infrastructure can be ready first.
 :::
 
-Pebble is per process, so two pods on it do not share seen ids. The DynamoDB backend keeps every tenant's ids in **one shared table**, and a conditional write makes a claim atomic across every pod that uses the table. WaveHouse **never creates this table in production**: the table belongs to your infrastructure code. The backend's `create_table` switch is refused unless an `endpoint` override is set, so it only works against [dynamodb-local](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html).
+Pebble is per process, so two pods on it do not share seen ids. The DynamoDB backend keeps every tenant's ids in **one shared table**, and a conditional write makes a claim atomic across every pod that uses the table. WaveHouse **never creates this table in production**: the table belongs to your infrastructure code. The backend refuses to create a table unless it is pointed at a custom endpoint, so table creation only works against [dynamodb-local](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html).
 
 What the backend requires of the table:
 
@@ -438,7 +438,7 @@ What the backend requires of the table:
 | `ex` | Number | Epoch seconds: the lease end while pending, the retention end once committed; absent = never expires. |
 | `tk` | Binary | The claim token that `Release` matches. |
 
-Only `pk` is declared in the table definition. Turn TTL on for `ex`. Correctness never depends on TTL, because a claim whose `ex` has passed counts as absent whether or not DynamoDB has deleted it yet. Without TTL, though, expired items are never removed and storage keeps growing. The backend's table check, which boot will run once the backend is selectable, refuses a table whose key schema does not match and logs a warning if TTL is off.
+Only `pk` is declared in the table definition. Turn TTL on for `ex`. Correctness never depends on TTL, because a claim whose `ex` has passed counts as absent whether or not DynamoDB has deleted it yet; TTL only reclaims the storage. **Today TTL removes only lapsed claims:** ingest commits every id with no retention, so a committed item carries no `ex` and is kept forever, and the table grows by one item (about 200 bytes) per distinct id. Per-tenant retention is [#220](https://github.com/Wave-RF/WaveHouse/issues/220). The backend's table check, which boot will run once the backend is selectable, refuses a table whose key schema does not match and logs a warning if TTL is off.
 
 An example in Terraform. Its tags are the five that Wave RF's own deployments put on every AWS resource (`Name`, `Project`, `Environment`, `ManagedBy`, `CostCenter`, with lowercase-kebab values); use your own conventions in their place:
 
@@ -489,8 +489,8 @@ data "aws_iam_policy_document" "wavehouse_dedupe" {
 
 - **Credentials** come from the AWS SDK's default chain (EKS Pod Identity or IRSA in a pod; the environment or a profile locally), never from WaveHouse configuration.
 - **Point-in-time recovery** is not needed. The table records which ids have been seen, so losing it produces duplicate rows, not lost events.
-- **Cost:** every new event is two writes (the claim, then the commit), and a duplicate is one. On-demand, that is about $1.25 per million new events in us-east-1. Provisioned capacity with auto scaling is cheaper once traffic is steady.
-- **One table serves every tenant,** so one tenant's burst can throttle the rest. A throttled or unreachable table fails the ingest request closed rather than publishing un-deduped. After five failed claims within one second, the backend stops calling the table for a second and fails requests immediately (`wavehouse_dedupe_dynamodb_short_circuits_total`).
+- **Cost:** every new event is two writes (the claim, then the commit), and a duplicate is one. On-demand, that is about $1.25 per million new events in us-east-1. Provisioned capacity with auto scaling is cheaper once traffic is steady. Storage is the other line: every distinct id stays in the table (see TTL above), at DynamoDB's per-GB-month rate.
+- **One table serves every tenant,** so one tenant's burst can throttle the rest. A throttled or unreachable table fails the ingest request closed rather than publishing un-deduped. After five throttled or unreachable claims in a row within one second, the backend stops calling the table for a second and fails every tenant's dedupe requests immediately (`wavehouse_dedupe_dynamodb_short_circuits_total`). A duplicate or in-flight answer is not a failure and resets the count.
 - **Metrics:** `wavehouse_dedupe_dynamodb_requests_total{op,outcome}`, `wavehouse_dedupe_dynamodb_request_duration_seconds{op}`, `wavehouse_dedupe_dynamodb_unprocessed_items_total`. The table's own CloudWatch metrics `ThrottledRequests`, `SystemErrors` and `ConsumedWriteCapacityUnits` are worth alerting on too.
 
 ## Upgrading across the v2 ingest envelope

@@ -260,7 +260,9 @@ func (d *Dynamo) call(ctx context.Context, op string, do func(context.Context) e
 	start := time.Now()
 	err := classify(op, do(ctx))
 	d.metrics.record(ctx, op, time.Since(start), err)
-	if op == opReserve {
+	// A request cancelled because a sibling failed says nothing about the
+	// table, and must not reset the breaker's count.
+	if op == opReserve && !errors.Is(err, context.Canceled) {
 		d.breaker.record(err)
 	}
 	return err
@@ -289,12 +291,19 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 	exp := expiresAt(now, lease)
 	claims := make([]Claim, len(keys))
 	tried := make([]Claim, len(keys))
+	sent := make([]bool, len(keys))
+	// The first failure cancels the puts not yet sent: the Reserve fails
+	// either way, and a throttled table should not take the rest.
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(s.d.cfg.ReserveConcurrency)
 	for i, k := range keys {
 		token := newToken()
 		tried[i] = Claim{Key: k, Status: Claimed, Token: token}
 		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return err
+			}
+			sent[i] = true
 			status, err := s.reserve(gctx, k, token, nowSec, exp)
 			if err != nil {
 				return err
@@ -307,11 +316,11 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 		})
 	}
 	if err := g.Wait(); err != nil {
-		// A put that errored or never answered may still have landed; its
-		// token is known, and releasing a key it does not hold is a no-op.
+		// A put that was sent and errored may still have landed; its token
+		// is known, and releasing a key it does not hold is a no-op.
 		var undo []Claim
 		for i, c := range claims {
-			if c.Status == Claimed || c.Status == 0 {
+			if sent[i] && (c.Status == Claimed || c.Status == 0) {
 				undo = append(undo, tried[i])
 			}
 		}
@@ -381,13 +390,12 @@ func (s *dynamoStore) Commit(ctx context.Context, claims []Claim, retention time
 		}
 		writes = append(writes, types.WriteRequest{PutRequest: &types.PutRequest{Item: item}})
 	}
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(s.d.cfg.ReserveConcurrency)
-	for start := 0; start < len(writes); start += batchWriteMax {
-		chunk := writes[start:min(start+batchWriteMax, len(writes))]
-		g.Go(func() error { return s.commitChunk(gctx, chunk) })
-	}
-	return g.Wait()
+	// Every chunk is attempted whatever another's fate: these records are
+	// already published, and an uncommitted id lets a retry publish again.
+	chunks := (len(writes) + batchWriteMax - 1) / batchWriteMax
+	return forEach(chunks, s.d.cfg.ReserveConcurrency, func(i int) error {
+		return s.commitChunk(ctx, writes[i*batchWriteMax:min((i+1)*batchWriteMax, len(writes))])
+	})
 }
 
 func (s *dynamoStore) commitChunk(ctx context.Context, writes []types.WriteRequest) error {
@@ -428,30 +436,27 @@ func (s *dynamoStore) Release(ctx context.Context, claims []Claim) error {
 	if len(claims) == 0 {
 		return nil
 	}
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(s.d.cfg.ReserveConcurrency)
-	for _, c := range claims {
-		g.Go(func() error {
-			err := s.d.call(gctx, "delete_item", func(ctx context.Context) error {
-				_, err := s.d.api.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-					TableName:           &s.d.cfg.Table,
-					Key:                 map[string]types.AttributeValue{attrKey: &types.AttributeValueMemberB{Value: AppendKey(nil, s.prefix, c.Key)}},
-					ConditionExpression: aws.String(condRelease),
-					ExpressionAttributeValues: map[string]types.AttributeValue{
-						":tk":      &types.AttributeValueMemberB{Value: []byte(c.Token)},
-						":pending": &types.AttributeValueMemberN{Value: statePending},
-					},
-				})
-				return err
+	// Every claim is attempted: one left behind holds its id for a lease.
+	return forEach(len(claims), s.d.cfg.ReserveConcurrency, func(i int) error {
+		c := claims[i]
+		err := s.d.call(ctx, "delete_item", func(ctx context.Context) error {
+			_, err := s.d.api.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+				TableName:           &s.d.cfg.Table,
+				Key:                 map[string]types.AttributeValue{attrKey: &types.AttributeValueMemberB{Value: AppendKey(nil, s.prefix, c.Key)}},
+				ConditionExpression: aws.String(condRelease),
+				ExpressionAttributeValues: map[string]types.AttributeValue{
+					":tk":      &types.AttributeValueMemberB{Value: []byte(c.Token)},
+					":pending": &types.AttributeValueMemberN{Value: statePending},
+				},
 			})
-			var gone *types.ConditionalCheckFailedException
-			if errors.As(err, &gone) {
-				return nil
-			}
 			return err
 		})
-	}
-	return g.Wait()
+		var gone *types.ConditionalCheckFailedException
+		if errors.As(err, &gone) {
+			return nil
+		}
+		return err
+	})
 }
 
 // Close is a no-op: the client is the Dynamo's, shared by every tenant.
@@ -459,6 +464,19 @@ func (s *dynamoStore) Close() error { return nil }
 
 // expiresAt is t+d in epoch seconds rounded up, so a claim or commit never
 // ends before it was asked to: TTL attributes are whole seconds.
+// forEach runs do for every index, at most limit at once, and joins the
+// errors: one failure never stops the rest.
+func forEach(n, limit int, do func(i int) error) error {
+	errs := make([]error, n)
+	var g errgroup.Group
+	g.SetLimit(limit)
+	for i := range n {
+		g.Go(func() error { errs[i] = do(i); return nil })
+	}
+	_ = g.Wait()
+	return errors.Join(errs...)
+}
+
 func expiresAt(t time.Time, d time.Duration) int64 {
 	end := t.Add(d)
 	sec := end.Unix()
@@ -575,7 +593,7 @@ type dynamoMetrics struct {
 func newDynamoMetrics() dynamoMetrics {
 	meter := otel.Meter("wavehouse-dedupe")
 	requests, _ := meter.Int64Counter("wavehouse_dedupe_dynamodb_requests_total",
-		metric.WithDescription("DynamoDB dedupe requests by operation and outcome (ok, condition_failed, unavailable, error)"))
+		metric.WithDescription("DynamoDB dedupe requests by operation and outcome (ok, condition_failed, unavailable, canceled, error)"))
 	duration, _ := meter.Float64Histogram("wavehouse_dedupe_dynamodb_request_duration_seconds",
 		metric.WithDescription("DynamoDB dedupe request latency, SDK retries included"), metric.WithUnit("s"))
 	unprocessed, _ := meter.Int64Counter("wavehouse_dedupe_dynamodb_unprocessed_items_total",
@@ -592,6 +610,8 @@ func (m dynamoMetrics) record(ctx context.Context, op string, took time.Duration
 	case err == nil:
 	case errors.As(err, &cond):
 		outcome = "condition_failed"
+	case errors.Is(err, context.Canceled):
+		outcome = "canceled"
 	case errors.Is(err, ErrUnavailable):
 		outcome = "unavailable"
 	default:

@@ -73,3 +73,8 @@ exclude:
       - ^internal/settings/
       - ^cmd/wavehouse/validate\.go$
       - ^cmd/wavehouse/bootstrap\.go$
+      # The DynamoDB dedupe backend: the e2e binary runs Pebble dedupe, so
+      # this file measured 0% there and pulled e2e to 58.6%. The unit
+      # (fake API) and integration (dynamodb-local) suites cover it, and the
+      # merged total still counts it.
+      - ^internal/dedupe/dynamodb\.go$

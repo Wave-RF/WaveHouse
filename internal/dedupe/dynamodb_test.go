@@ -24,18 +24,18 @@ import (
 // dynamodb-local (tests/integration); this is for the error paths it cannot
 // produce.
 type fakeDynamo struct {
-	put      func(*dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error)
+	put      func(context.Context, *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error)
 	batch    func(*dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error)
 	del      func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error)
 	describe func() (*dynamodb.DescribeTableOutput, error)
 	ttl      func() (*dynamodb.DescribeTimeToLiveOutput, error)
 }
 
-func (f *fakeDynamo) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+func (f *fakeDynamo) PutItem(ctx context.Context, in *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
 	if f.put == nil {
 		return &dynamodb.PutItemOutput{}, nil
 	}
-	return f.put(in)
+	return f.put(ctx, in)
 }
 
 func (f *fakeDynamo) BatchWriteItem(_ context.Context, in *dynamodb.BatchWriteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
@@ -74,7 +74,12 @@ func apiErr(code string, fault smithy.ErrorFault) error {
 
 func openFake(t *testing.T, f *fakeDynamo) (*Dynamo, Deduplicator) {
 	t.Helper()
-	d := newDynamo(f, DynamoConfig{Table: "dedupe"})
+	return openFakeWith(t, f, DynamoConfig{Table: "dedupe"})
+}
+
+func openFakeWith(t *testing.T, f *fakeDynamo, cfg DynamoConfig) (*Dynamo, Deduplicator) {
+	t.Helper()
+	d := newDynamo(f, cfg)
 	d.commitBackoff = func(int) time.Duration { return 0 }
 	m := d.Tenant("acme")
 	require.NoError(t, m.Apply(true))
@@ -125,7 +130,7 @@ func TestClassify(t *testing.T) {
 
 func TestDynamo_ReserveReadsTheHeldItem(t *testing.T) {
 	t.Parallel()
-	_, m := openFake(t, &fakeDynamo{put: func(in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+	_, m := openFake(t, &fakeDynamo{put: func(_ context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
 		id := string(in.Item[attrKey].(*types.AttributeValueMemberB).Value)
 		switch id[len(id)-1] {
 		case 'd':
@@ -150,7 +155,7 @@ func TestDynamo_FailedReserveReleasesEveryPutThatMayHaveLanded(t *testing.T) {
 	putTokens := map[string]string{}
 	var released []string
 	_, m := openFake(t, &fakeDynamo{
-		put: func(in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+		put: func(_ context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
 			id := string(in.Item[attrKey].(*types.AttributeValueMemberB).Value)
 			mu.Lock()
 			putTokens[id] = string(in.Item[attrToken].(*types.AttributeValueMemberB).Value)
@@ -252,7 +257,7 @@ func TestDynamo_BreakerShortCircuitsReserve(t *testing.T) {
 	var puts atomic.Int64
 	var down atomic.Bool
 	down.Store(true)
-	d, m := openFake(t, &fakeDynamo{put: func(*dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+	d, m := openFake(t, &fakeDynamo{put: func(context.Context, *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
 		puts.Add(1)
 		if down.Load() {
 			return nil, &types.ProvisionedThroughputExceededException{}
@@ -354,4 +359,88 @@ func TestExpiresAt(t *testing.T) {
 	assert.Equal(t, int64(101), expiresAt(base, time.Second))
 	assert.Equal(t, int64(102), expiresAt(base, 1500*time.Millisecond), "rounded up: never ends early")
 	assert.Equal(t, int64(102), expiresAt(base.Add(time.Nanosecond), time.Second))
+}
+
+func idOf(av types.AttributeValue) string {
+	b := av.(*types.AttributeValueMemberB).Value
+	return string(b[len(b)-2:])
+}
+
+func TestDynamo_CommitAttemptsEveryChunk(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	written := 0
+	_, m := openFake(t, &fakeDynamo{batch: func(in *dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error) {
+		reqs := in.RequestItems["dedupe"]
+		if idOf(reqs[0].PutRequest.Item[attrKey]) == "00" {
+			return nil, &types.InternalServerError{}
+		}
+		mu.Lock()
+		written += len(reqs)
+		mu.Unlock()
+		return &dynamodb.BatchWriteItemOutput{}, nil
+	}})
+	var claims []Claim
+	for i := range 3 * batchWriteMax {
+		claims = append(claims, Claim{Key: keys(fmt.Sprintf("%02d", i))[0], Status: Claimed, Token: "t"})
+	}
+	require.ErrorIs(t, m.Commit(t.Context(), claims, 0), ErrUnavailable)
+	assert.Equal(t, 2*batchWriteMax, written, "a failed chunk does not cancel the others: their records are published")
+}
+
+func TestDynamo_ReleaseAttemptsEveryClaim(t *testing.T) {
+	t.Parallel()
+	var deletes atomic.Int64
+	_, m := openFakeWith(t, &fakeDynamo{del: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+		deletes.Add(1)
+		if idOf(in.Key[attrKey]) == "k0" {
+			return nil, &types.ProvisionedThroughputExceededException{}
+		}
+		return &dynamodb.DeleteItemOutput{}, nil
+	}}, DynamoConfig{Table: "dedupe", ReserveConcurrency: 1})
+	var claims []Claim
+	for _, k := range keys("k0", "k1", "k2", "k3") {
+		claims = append(claims, Claim{Key: k, Status: Claimed, Token: "t"})
+	}
+	require.ErrorIs(t, m.Release(t.Context(), claims), ErrUnavailable)
+	assert.Equal(t, int64(4), deletes.Load())
+}
+
+// One throttled put in a multi-key Reserve: the unsent puts are neither sent
+// nor released, and the cancelled siblings do not reset the breaker.
+func TestDynamo_FailedMultiKeyReserve(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var put, released []string
+	_, m := openFakeWith(t, &fakeDynamo{
+		put: func(ctx context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+			id := idOf(in.Item[attrKey])
+			mu.Lock()
+			put = append(put, id)
+			mu.Unlock()
+			if id == "k0" {
+				return nil, &types.ProvisionedThroughputExceededException{}
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		del: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+			mu.Lock()
+			released = append(released, idOf(in.Key[attrKey]))
+			mu.Unlock()
+			return nil, &types.ConditionalCheckFailedException{}
+		},
+	}, DynamoConfig{Table: "dedupe", ReserveConcurrency: 2})
+	ks := keys("k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7")
+	for range breakerTrips {
+		_, err := m.Reserve(t.Context(), ks, time.Minute)
+		require.ErrorIs(t, err, ErrUnavailable)
+		require.NotErrorIs(t, err, errBreakerOpen)
+	}
+	_, err := m.Reserve(t.Context(), ks, time.Minute)
+	require.ErrorIs(t, err, errBreakerOpen, "the cancelled siblings did not reset the count")
+	mu.Lock()
+	defer mu.Unlock()
+	assert.ElementsMatch(t, put, released, "exactly the sent puts are released")
+	assert.Less(t, len(put), breakerTrips*len(ks), "unsent puts were never sent")
 }
