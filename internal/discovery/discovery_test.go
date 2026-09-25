@@ -582,31 +582,63 @@ func TestRetryRefresh_DoesNotFireOnAttemptDuringCancel(t *testing.T) {
 	assert.Equal(t, int32(1), conn.calls.Load(), "Refresh should have been called exactly once before the select caught ctx.Done()")
 }
 
-// TestRetryRefresh_BackoffIsBounded verifies that maxBackoff caps the
-// exponential growth. We use small bounds so the test stays fast.
+// TestRetryRefresh_BackoffIsBounded verifies that the backoff each sleep is
+// drawn within doubles from initialBackoff and is capped at maxBackoff.
 func TestRetryRefresh_BackoffIsBounded(t *testing.T) {
 	t.Parallel()
-	// Five failures then success; with initial 1ms and max 4ms backoff,
-	// sleeps are 1, 2, 4, 4, 4 = 15ms total. The unbounded-doubling worst
-	// case would be 1+2+4+8+16 = 31ms. We leave generous headroom on the
-	// upper bound because shared CI runners can stall the scheduler enough
-	// to drag a 15ms sleep budget past 100ms; 250ms still catches a real
-	// unbounded backoff regression (which would balloon by orders of
-	// magnitude) without flaking on noisy hosts.
 	errs := make([]error, 5)
 	for i := range errs {
 		errs[i] = errors.New("transient")
 	}
-	sr, _ := newFakeRegistry(t, errs)
+	sr, conn := newFakeRegistry(t, errs)
+	var asked []time.Duration
+	sr.retryDelay = func(backoff time.Duration) time.Duration {
+		asked = append(asked, backoff)
+		return 0
+	}
 
-	start := time.Now()
 	err := sr.RetryRefresh(context.Background(), time.Millisecond, 4*time.Millisecond, nil)
 	require.NoError(t, err)
 
-	elapsed := time.Since(start)
-	// Lower bound proves we actually slept; upper bound proves capping.
-	assert.GreaterOrEqual(t, elapsed, 10*time.Millisecond)
-	assert.Less(t, elapsed, 250*time.Millisecond)
+	ms := time.Millisecond
+	assert.Equal(t, []time.Duration{ms, 2 * ms, 4 * ms, 4 * ms, 4 * ms}, asked)
+	assert.Equal(t, int32(6), conn.calls.Load())
+}
+
+// TestRetryRefresh_SleepsTheJitteredDelay pins that the loop sleeps what
+// retryDelay picks, not the backoff it was handed: a backoff of an hour with
+// a 1ms delay still retries at once.
+func TestRetryRefresh_SleepsTheJitteredDelay(t *testing.T) {
+	t.Parallel()
+	sr, conn := newFakeRegistry(t, []error{errors.New("once")})
+	sr.retryDelay = func(time.Duration) time.Duration { return time.Millisecond }
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	require.NoError(t, sr.RetryRefresh(ctx, time.Hour, time.Hour, nil))
+	assert.Equal(t, int32(2), conn.calls.Load())
+}
+
+// TestRetryRefresh_DelayIsSpreadOverTheBackoff: the production retryDelay
+// draws within [0, backoff) and spreads across it, so instances capped at
+// the same maxBackoff do not retry on the same tick (#141).
+func TestRetryRefresh_DelayIsSpreadOverTheBackoff(t *testing.T) {
+	t.Parallel()
+	sr, _ := newFakeRegistry(t, nil)
+	const backoff = time.Minute
+	seen := make(map[time.Duration]struct{})
+	lo, hi := backoff, time.Duration(0)
+	for range 200 {
+		d := sr.retryDelay(backoff)
+		require.GreaterOrEqual(t, d, time.Duration(0))
+		require.Less(t, d, backoff)
+		seen[d] = struct{}{}
+		lo, hi = min(lo, d), max(hi, d)
+	}
+	// Each bound fails with probability 0.75^200 for a uniform draw.
+	assert.Less(t, lo, backoff/4, "draws reach the bottom quarter")
+	assert.Greater(t, hi, backoff*3/4, "draws reach the top quarter")
+	assert.Greater(t, len(seen), 190, "draws are not clustered on a few values")
 }
 
 // TestRetryRefresh_NilOnAttemptIsSafe verifies the loop tolerates a nil
