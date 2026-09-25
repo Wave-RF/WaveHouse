@@ -221,7 +221,7 @@ flowchart TB
 
     NATS --> BC["Buffer consumer<br/>5-second batches"]:::wh
     BC --> CH[("ClickHouse")]:::store
-    BC -. "on failure" .-> DLQ["dead-letter stream"]:::fail
+    BC -. "rejected rows" .-> DLQ["dead-letter stream"]:::fail
 ```
 
 **Query path with tiered cache:**
