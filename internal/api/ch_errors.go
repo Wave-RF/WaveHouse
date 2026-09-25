@@ -2,9 +2,9 @@ package api
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 )
@@ -50,6 +50,19 @@ const (
 	chAccessDenied      int32 = 497
 )
 
+// capBackstop is how long past a role's time cap the client waits for
+// ClickHouse's own TIMEOUT_EXCEEDED before giving up on the query.
+const capBackstop = 2 * time.Second
+
+// cancelAfter is parent cancelled after d, with no deadline on it: the
+// driver derives max_execution_time from a deadline, overriding the one
+// the role's cap sends.
+func cancelAfter(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	t := time.AfterFunc(d, cancel)
+	return ctx, func() { t.Stop(); cancel() }
+}
+
 // queryCaps says which of the role's own resource caps a query ran under,
 // so exceeding one reads as the query's cost rather than an outage.
 type queryCaps struct {
@@ -71,7 +84,7 @@ func chFailureOf(err error, unknownStatus int, caps queryCaps) chFailure {
 	code, hasCode := chconn.ExceptionCode(err)
 	switch {
 	case hasCode && (code == chTooManyRows || code == chTooManyBytes || code == chTooManyRowsOrByte),
-		caps.time && (hasCode && (code == chTimeoutExceeded || code == chTooSlow) || errors.Is(err, context.DeadlineExceeded)),
+		caps.time && hasCode && (code == chTimeoutExceeded || code == chTooSlow),
 		caps.memory && hasCode && code == chMemoryLimit:
 		return chFailure{http.StatusBadRequest, codeCHLimitExceeded, false}
 	}

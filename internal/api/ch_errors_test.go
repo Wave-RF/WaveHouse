@@ -74,7 +74,10 @@ func chErrorCases(t *testing.T) []chErrorCase {
 		{name: "unknown table", err: chException(60, "DB::Exception", "Table default.gone does not exist"), wantStatus: 400, wantCode: codeCHRejected},
 		{name: "rows read cap", err: chException(158, "DB::Exception", "Limit for rows exceeded"), wantStatus: 400, wantCode: codeCHLimitExceeded},
 		{name: "time cap of the role", err: chException(159, "DB::Exception", "Timeout exceeded"), caps: policy.SelectPermissions{MaxExecutionTime: 1}, wantStatus: 400, wantCode: codeCHLimitExceeded},
-		{name: "deadline of the role's time cap", err: fmt.Errorf("clickhouse query: %w", context.DeadlineExceeded), caps: policy.SelectPermissions{MaxExecutionTime: 1}, wantStatus: 400, wantCode: codeCHLimitExceeded},
+		// A bare deadline is a pool wait or a dial timeout under a capped
+		// role, not the cap: ClickHouse reports the cap itself as 159.
+		{name: "pool wait under a time cap", err: fmt.Errorf("clickhouse query: %w", context.DeadlineExceeded), caps: policy.SelectPermissions{MaxExecutionTime: 1}, wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
+		{name: "backstop cancel under a time cap", err: fmt.Errorf("clickhouse query: %w", context.Canceled), caps: policy.SelectPermissions{MaxExecutionTime: 1}, wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
 		{name: "memory cap of the role", err: chException(241, "DB::Exception", "Memory limit (for query) exceeded"), caps: policy.SelectPermissions{MaxMemoryUsage: 1}, wantStatus: 400, wantCode: codeCHLimitExceeded},
 		{name: "server timeout, no role cap", err: chException(159, "DB::Exception", "Timeout exceeded"), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
 		{name: "server memory, no role cap", err: chException(241, "DB::Exception", "Memory limit (total) exceeded"), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
@@ -165,4 +168,56 @@ func TestSchemaRefresh_ClickHouseDown(t *testing.T) {
 	assertUnavailable(t, refresh(refusedDial(t)), "refresh failed", retryAfterClickHouse)
 	w := refresh(chException(62, "DB::Exception", "Syntax error"))
 	require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+}
+
+// deadlineConn records whether the query context carried a deadline.
+type deadlineConn struct {
+	driver.Conn
+	hasDeadline bool
+}
+
+func (c *deadlineConn) Query(ctx context.Context, _ string, _ ...any) (driver.Rows, error) {
+	_, c.hasDeadline = ctx.Deadline()
+	return &chainEmptyRows{}, nil
+}
+
+// TestStructuredQuery_TimeCapLeavesNoDeadline: under a role's time cap the
+// query context has no deadline, so clickhouse-go keeps the cap's
+// max_execution_time and an overrun comes back as TIMEOUT_EXCEEDED rather
+// than a bare DeadlineExceeded. Without a cap, the query timeout is a
+// deadline as before.
+func TestStructuredQuery_TimeCapLeavesNoDeadline(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		perms        policy.SelectPermissions
+		wantDeadline bool
+	}{
+		{"time cap", policy.SelectPermissions{AllowColumns: []string{"*"}, MaxExecutionTime: 5000}, false},
+		{"no time cap", policy.SelectPermissions{AllowColumns: []string{"*"}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			conn := &deadlineConn{}
+			h := newCapturingHandler(t, conn, policyWithViewer(tc.perms))
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{Columns: []string{"page"}})))
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.Equal(t, tc.wantDeadline, conn.hasDeadline)
+		})
+	}
+}
+
+func TestCancelAfter(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := cancelAfter(t.Context(), 10*time.Millisecond)
+	defer cancel()
+	_, has := ctx.Deadline()
+	assert.False(t, has)
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelAfter never cancelled")
+	}
+	assert.ErrorIs(t, ctx.Err(), context.Canceled)
 }

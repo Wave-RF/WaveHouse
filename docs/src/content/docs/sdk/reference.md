@@ -36,6 +36,7 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 400 | `clickhouse.rejected` / `clickhouse.limit_exceeded` | No | ClickHouse refused the query (bad SQL, an unknown column, a type mismatch) or it outran a limit — including the role's own caps |
 | 403 | `clickhouse.access_denied` | No | ClickHouse's user lacks a grant the statement needs |
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
+| 500 / 502 | `clickhouse.unknown` | Yes | ClickHouse failed with no verdict (no exception code, no recognizable transport error); `502` on `wh.sql` |
 | 502 | `clickhouse.misconfigured` | No | ClickHouse refused WaveHouse's own credentials or database — an operator fix |
 | 502 | `clickhouse.response_too_large` | No | A raw-SQL (`wh.sql`) response over the 64 MiB cap |
 | 503 | `clickhouse.unavailable` | Yes | ClickHouse is down, unreachable or overloaded; `Retry-After: 5`, honored between attempts |

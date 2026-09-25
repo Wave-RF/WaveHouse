@@ -15,10 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/app"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/config"
 )
 
@@ -153,4 +155,29 @@ func TestQueryErrors_ClickHouseDown(t *testing.T) {
 			assert.Equal(t, "5", got.retryAfter)
 		})
 	}
+}
+
+// TestQueryErrors_TimeCapReachesClickHouse pins the driver behaviour the
+// role time cap depends on: with a context deadline over 1s, clickhouse-go
+// overwrites max_execution_time with deadline+5s, so an overrun ends as a
+// bare DeadlineExceeded; with no deadline the cap reaches ClickHouse, which
+// reports TIMEOUT_EXCEEDED — the code /v1/query answers as the caller's.
+func TestQueryErrors_TimeCapReachesClickHouse(t *testing.T) {
+	e := env(t)
+	capped := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{"max_execution_time": 1}))
+	const slow = "SELECT sleep(2) SETTINGS function_sleep_max_microseconds_per_block = 3000000"
+
+	withDeadline, cancel := context.WithTimeout(capped, 1500*time.Millisecond)
+	defer cancel()
+	err := e.chConn.Exec(withDeadline, slow)
+	require.Error(t, err)
+	_, hasCode := chconn.ExceptionCode(err)
+	assert.False(t, hasCode, "a deadline over 1s must still override the cap: %v", err)
+
+	noDeadline, cancel2 := context.WithCancel(capped)
+	defer cancel2()
+	err = e.chConn.Exec(noDeadline, slow)
+	require.Error(t, err)
+	code, _ := chconn.ExceptionCode(err)
+	assert.Equal(t, int32(159), code, "%v", err)
 }
