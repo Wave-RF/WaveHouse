@@ -18,7 +18,7 @@
 // handed whole to each component's wiring function, which derives the
 // per-call getters the internal packages take: keyed by the request's store
 // for the handlers, by tenant id for the async paths (perTenant), and fixed
-// to the default tenant for the ops gate of a flat directory (defaultSetting).
+// to the default tenant for the ops gate of a flat directory (defaultPolicy).
 package app
 
 import (
@@ -30,7 +30,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -90,11 +89,8 @@ type App struct {
 	listener net.Listener
 
 	// tenants is the registry every tenant-aware path resolves through, and
-	// the owner of every reload. defaultStore is tenant 0's store as of its
-	// last adoption, which the ops gate of a flat directory reads its admin
-	// role from (defaultSetting).
-	tenants      *settings.Registry
-	defaultStore atomic.Pointer[settings.Store]
+	// the owner of every reload.
+	tenants *settings.Registry
 	// policies is the default tenant's policy, for the ops gate of a flat
 	// directory.
 	policies    policy.Source
@@ -146,9 +142,9 @@ const (
 )
 
 // New wires every component. ctx bounds construction only — the boot-time
-// schema refresh and the JetStream stream setup; the loops start in Run. A
-// failure releases whatever was already opened and returns the error, so
-// the caller never holds a half-built App.
+// schema refresh and the opening of each served tenant's queue; the loops
+// start in Run. A failure releases whatever was already opened and returns the
+// error, so the caller never holds a half-built App.
 func New(ctx context.Context, opts Options) (app *App, err error) {
 	a := &App{cfg: opts.Config, build: opts.Build, logLevel: opts.LogLevel, listener: opts.Listener}
 	if a.logLevel == nil {
@@ -183,7 +179,7 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	if err := a.wireDedupe(); err != nil {
 		return nil, err
 	}
-	if err := a.wireMQ(); err != nil {
+	if err := a.wireMQ(ctx); err != nil {
 		return nil, err
 	}
 	if err := a.wireCache(); err != nil {
