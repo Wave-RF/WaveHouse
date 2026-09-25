@@ -39,11 +39,11 @@ func TestSubject_Golden(t *testing.T) {
 }
 
 // A token another writer left partly unescaped, or escaped in lowercase,
-// still reads as it always did — and so does v0.1.0's %2D for '-', so a
-// message queued before '-' was kept reads as the same topic.
+// still reads as it always did — and so does an earlier build's %2D for '-',
+// so a message it queued reads as the same topic.
 func TestParseTopicKey_LenientTokens(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, Topic{Tenant: "a", Table: "b-c", Scope: "d.e"}, parseTopicKey("a.b-c.d%2ee"))
+	assert.Equal(t, Topic{Tenant: "a", Table: "b~c", Scope: "d.e"}, parseTopicKey("a.b~c.d%2ee"))
 	assert.Equal(t, parseTopicKey("a.table-with-dashes.org-1"), parseTopicKey("a.table%2Dwith%2Ddashes.org%2D1"))
 }
 
