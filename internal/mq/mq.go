@@ -146,12 +146,14 @@ func WithHeader(key, value string) PublishOpt {
 // topic's tenant refuses new events because it is at a byte limit — the
 // backpressure signal the API turns into a 503 with Retry-After. Which limits
 // there are, and which tenants share one, is the implementation's (see
-// Broker.SetMaxBytes).
+// Broker.SetMaxBytes). An implementation that opens a queue per tenant also
+// returns it for a tenant whose queue it cannot open yet.
 var ErrQueueFull = errors.New("ingest queue is full")
 
 // ErrUnavailable is returned when the broker cannot be reached or does not
 // answer in time — a transient failure, not a refusal, that the API turns
-// into a 503 with a short Retry-After.
+// into a 503 with a short Retry-After. Only a backend whose broker is out of
+// process returns it; the embedded one's publish failures are plain errors.
 var ErrUnavailable = errors.New("message queue unavailable")
 
 // Publisher appends events to the ingest queue.
@@ -159,7 +161,8 @@ type Publisher interface {
 	// Publish stores data as one event on topic, in the ingest queue that
 	// holds the topic's tenant. A topic without a valid tenant is refused
 	// before anything is sent. ErrQueueFull when that queue refuses the event
-	// at a byte limit, ErrUnavailable when the broker cannot take it now.
+	// at a byte limit (or, per tenant, cannot be opened yet), ErrUnavailable
+	// when the broker cannot take it now.
 	Publish(ctx context.Context, topic Topic, data []byte, opts ...PublishOpt) error
 	Close() error
 }
