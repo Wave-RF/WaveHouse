@@ -11,6 +11,7 @@ import (
 // A durable deleted on several tenants' queues ends each delivery; a caller
 // that drained the first report must not see the next.
 func TestEmbeddedNATS_Consume_ReportsOnceHoweverManyDeliveriesEnd(t *testing.T) {
+	t.Parallel()
 	e := newTestEmbedded(t, "acme", "globex")
 	ctx := t.Context()
 	cons, err := e.CreateConsumer(ctx, ConsumerConfig{Durable: "doomed", MaxAckPending: 10})

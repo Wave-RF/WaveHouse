@@ -39,16 +39,16 @@ This page is boot config only — what the platform operator owns (wiring, lifec
 
 ### Backends
 
-Each layer's implementation is chosen once, at boot. Every layer's default is its in-process backend, so a config that sets none of these keys runs as it always has. The message queue also has a shared backend, `nats`; every other layer has only its in-process one so far. A value this build has no backend for refuses boot and names the valid ones.
+Each layer's implementation is chosen once, at boot. Every layer's default is its in-process backend, so a config that sets none of these keys runs as it always has. The message queue and the coordination layer also have a shared backend, `nats`; the cache and dedupe have only their in-process ones so far. A value this build has no backend for refuses boot and names the valid ones.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `mq.backend` | `WH_MQ_BACKEND` | `embedded` | The message queue. `embedded`: NATS JetStream inside this process, under `<data_dir>/nats`. It listens on no port, so no other process can reach its queue. `nats`: a NATS JetStream cluster you run, shared by every WaveHouse process that names it, configured by [`mq.nats`](#external-nats-mqnats); nothing is kept under `data_dir/nats`. |
 | `cache.backend` | `WH_CACHE_BACKEND` | `local` | The query-result cache. `local`: in this process, sized by `cache.l1_max_cost`. |
 | `dedupe.backend` | `WH_DEDUPE_BACKEND` | `pebble` | Where ingest dedupe keeps the event ids it has seen. `pebble`: in this process, under `<data_dir>/pebble`, open while any tenant has dedupe on. |
-| `coord.backend` | `WH_COORD_BACKEND` | `local` | Where the leases for work only one process may do at a time, such as the sweeper, are held. `local`: in this process, so the one process always holds them. It shares nothing with another process, so every process runs its own sweeper. |
+| `coord.backend` | `WH_COORD_BACKEND` | `local` | Where the leases for work only one process may do at a time, such as the sweeper, are held. `local`: in this process, so the one process always holds them. It shares nothing with another process, so it serves one process on `mq.backend=embedded`, or a process without the `sweeper` role. `nats`: a KV bucket you create on the `mq.nats` cluster, reached over the same connection and credentials, so every process contends for the same leases and one sweeps at a time; configured by [`coord.nats`](#nats-leases-coordnats). It needs `mq.backend=nats`. |
 
-Settings for one backend go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. `mq.nats` is the only one so far; any other, `mq.embedded` included, is an unknown key and refuses boot. `mq.nats` written while `mq.backend` is `embedded` is not read, and boot logs a warning saying so. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
+Settings for one backend go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. `mq.nats` and `coord.nats` are the only ones so far; any other, `mq.embedded` included, is an unknown key and refuses boot. A sub-block written while its layer runs another backend is not read, and boot logs a warning saying so. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
 
 ### External NATS (`mq.nats`)
 
@@ -79,15 +79,24 @@ Boot refuses a `nats` block with no URLs, a URL with credentials in it, more tha
 
 A tenant's [`mq.max_bytes_gb`](/settings-directory#message-queue) is not applied under `nats`: its events share a partition stream with other tenants, and that stream's limits, which you set, bound them. Boot logs a warning saying so.
 
+### NATS leases (`coord.nats`)
+
+Read only with `coord.backend: nats`. It has no connection settings: the leases ride the [`mq.nats`](#external-nats-mqnats) connection, which is why `coord.backend=nats` refuses boot without `mq.backend=nats`. WaveHouse never creates the bucket. Boot waits for it with the rest of your topology (`mq.nats.topology_wait`) and then refuses, naming it; [Deployment → External NATS](/deployment#external-nats) shows how to create it.
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `coord.nats.bucket` | `WH_COORD_NATS_BUCKET` | `<prefix>_coord` | The KV bucket the leases live in, one key per lease (`lease.sweeper`). The default follows `mq.nats.subject_prefix` (`wh_coord` for `wh`), as `wavehouse mq manifests` names it, so two deployments sharing one NATS account under different prefixes never contend for one lease. To use another name, generate the bucket with `wavehouse mq manifests --coord-bucket <name>` and change the `wavehouse` user's permissions in `values.yaml` to match. A name outside `[a-zA-Z0-9_-]` refuses boot. |
+
+A lease is taken over only after its holder has stopped renewing it: a process that wants it must see the same revision unchanged for 15 seconds on its own clock, so no two servers' clocks are compared. The holder renews every 2 seconds and steps down after 10 seconds without a successful renewal, before anyone can take over. A process that stops cleanly deletes its lease, so the next holder takes over at its next attempt (within 2 seconds). The bucket must not expire keys (`ttl` unset), because a lease that expires on the server's clock can end under a live holder.
+
 ### Boot warnings
 
 Some valid combinations are right for a single replica only, and one process cannot count its replicas, so boot logs each at `WARN` rather than refusing:
 
 - **`mq.backend=nats` with `cache.backend=local`**, in a process running `api`: an event ingested on another replica never invalidates this one's cache, so its reads stay stale until the cached entry expires.
 - **`mq.backend=nats` with `dedupe.backend=pebble`**, in a process running `api`: an id seen by another replica is not seen by this one.
-- **`mq.backend=nats` with `coord.backend=local`**, in a process running `sweeper`: every such process holds its own sweeper lease. This is harmless for now, because under `nats` the sweeper removes nothing: retention is your streams'. A later release will require a shared `coord.backend` here once this build has one.
 - **`mq.backend=nats`**: `mq.max_bytes_gb` is not applied (above).
-- **`mq.nats` set with `mq.backend=embedded`**: the block is ignored.
+- **`mq.nats` set with `mq.backend=embedded`**, or **`coord.nats` set with `coord.backend=local`**: the block is ignored.
 
 ### Process roles
 
@@ -96,19 +105,21 @@ By default one process does all the work. `roles` splits it, so that the API and
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `roles` | `WH_ROLES` | `api,ingest,sweeper` | The roles this process runs: a YAML list, or a comma-separated variable. Order does not matter. An empty list, an empty entry, an unknown role, or a role named twice refuses boot. |
-| `instance_id` | `WH_INSTANCE_ID` | `<hostname>-<8 hex>` | Names this process. Today it is only logged at boot (the `process roles` line); once a shared `coord.backend` exists, it names this process as the holder of a lease. An empty value gets a fresh random suffix at every boot, so a restarted process is a new instance. |
+| `instance_id` | `WH_INSTANCE_ID` | `<hostname>-<8 hex>` | Names this process: it is logged at boot (the `process roles` line), and under `coord.backend=nats` it is the `holder` a lease's value names, so you can see which process sweeps. An empty value gets a fresh random suffix at every boot, so a restarted process is a new instance. |
 
 | Role | Runs |
 | --- | --- |
 | `api` | The HTTP API, and what answers it: schema discovery, the token verifiers and their JWKS refresh, the dedupe stores, and the SSE hub with its bridge off the queue and its keepalive wheel. Every API process runs its own set of these, and each API process receives every event for its own SSE clients. |
 | `ingest` | The ingest worker, which writes the queue to ClickHouse. Every ingest process consumes the same shared durable consumer and competes for its messages. |
-| `sweeper` | The sweeper, which purges messages that are written and older than their tenant's gap window. Under `mq.backend=nats` it removes nothing, because your streams' retention does that; it only warns about a tenant whose gap window is longer than the history stream keeps. It runs under the `sweeper` lease. With a shared [`coord.backend`](#backends), only one process sweeps at a time, however many run the role; with `local`, each process holds its own lease. |
+| `sweeper` | The sweeper, which purges messages that are written and older than their tenant's gap window. Under `mq.backend=nats` it removes nothing, because your streams' retention does that; it only warns about a tenant whose gap window is longer than the history stream keeps. It runs under the `sweeper` lease. With `coord.backend=nats`, only one process sweeps at a time, however many run the role. `mq.backend=nats` requires it wherever the role runs (below). |
 
 Every process, whatever its roles, reads the settings directory and reloads it (SIGHUP, the directory watcher, and the reload route), and serves `server.port`. A process without the `api` role serves only an ops listener there: `/livez`, `/readyz` and their `/healthz`, `/health`, `/ready` aliases, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404; under `/v1/ops`, only once the operator-key check has passed (403 without it). The reload route on that listener accepts only the [operator key](#authentication), because no token verifier runs without the `api` role. `/readyz` is ready when a ClickHouse pool answers in an `ingest` process, and as soon as the process has booted in a `sweeper`-only one.
 
 Boot refuses a role set the selected backends cannot serve:
 
 - **Any split with `mq.backend=embedded`.** The embedded queue lives inside its process and listens on no port, so a process without every role could not reach it. Choose `mq.backend=nats` to split.
+- **`sweeper` with `mq.backend=nats` and `coord.backend=local`.** A shared queue needs a shared lease, or every replica sweeps it. Set `coord.backend=nats`. A process without the `sweeper` role holds no lease, so it may keep `local`.
+- **`coord.backend=nats` without `mq.backend=nats`.** The leases ride the NATS connection.
 - **`api` without `ingest`, or `ingest` without `api`, with `cache.backend=local`.** The ingest worker invalidates the cache the API reads, and a local cache in another process never sees that invalidation. Run `api` and `ingest` together, or choose a shared `cache.backend`. A `sweeper`-only process holds no cache, so this rule does not apply to it.
 
 ### Server
@@ -288,6 +299,9 @@ dedupe:
 
 coord:
   backend: local        # in-process leases (the sweeper's)
+  # With backend: nats (needs mq.backend: nats; read only then):
+  # nats:
+  #   bucket: ""         # empty = <mq.nats.subject_prefix>_coord
 
 auth:
   jwt_secret: change-me-in-production   # jwks_url and role_claim are settings (config.json)
@@ -348,6 +362,8 @@ WH_CACHE_BACKEND=local
 WH_CACHE_L1_MAX_COST=67108864
 WH_DEDUPE_BACKEND=pebble
 WH_COORD_BACKEND=local
+# With WH_COORD_BACKEND=nats (read only then; empty = <prefix>_coord):
+# WH_COORD_NATS_BUCKET=
 
 WH_AUTH_JWT_SECRET=change-me-in-production
 WH_AUTH_OPERATOR_KEY=

@@ -17,6 +17,7 @@ func natsBackends() Config {
 	c.MQ.Backend = MQNATS
 	c.MQ.NATS = defaultMQNATS()
 	c.MQ.NATS.URLs = []string{"nats://nats:4222"}
+	c.Coord.Backend = CoordNATS
 	return c
 }
 
@@ -32,6 +33,7 @@ func TestLoad_MQNATSDefaults(t *testing.T) {
 func TestLoad_MQNATSFromEnv(t *testing.T) {
 	for k, v := range map[string]string{ //nolint:gosec // G101: a secret's file path, not the secret
 		"WH_MQ_BACKEND":                  "nats",
+		"WH_COORD_BACKEND":               "nats",
 		"WH_MQ_NATS_URLS":                "nats://a:4222, nats://b:4222",
 		"WH_MQ_NATS_NAME":                "wh-api-0",
 		"WH_MQ_NATS_USER":                "wavehouse",
@@ -78,6 +80,8 @@ mq:
       ca_file: /ca.pem
     partitions: 4
     publish_timeout: 2s
+coord:
+  backend: nats
 `), 0o600))
 	cfg, err := Load(path)
 	require.NoError(t, err)
@@ -184,8 +188,7 @@ func TestValidate_MQNATSIgnoredUnderEmbedded(t *testing.T) {
 }
 
 // On a shared queue every role split boots except the one the local cache
-// cannot serve (rule 5, until a shared cache exists). There is no rule 4 yet:
-// coord.backend=local is a warning.
+// cannot serve (rule 5, until a shared cache exists).
 func TestValidate_SplitsBootOnNATS(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -214,7 +217,6 @@ func TestWarnings_MQNATS(t *testing.T) {
 	t.Parallel()
 	const (
 		maxBytes = "mq.max_bytes_gb (settings directory) is not applied with mq.backend=nats"
-		coord    = "coord.backend=local with mq.backend=nats"
 		cache    = "cache.backend=local"
 		dedupe   = "dedupe.backend=pebble"
 	)
@@ -224,7 +226,7 @@ func TestWarnings_MQNATS(t *testing.T) {
 		require.NoError(t, cfg.Validate())
 		var got []string
 		for _, w := range cfg.Warnings() {
-			for _, key := range []string{maxBytes, coord, cache, dedupe} {
+			for _, key := range []string{maxBytes, cache, dedupe} {
 				if strings.HasPrefix(w, key) {
 					got = append(got, key)
 				}
@@ -233,7 +235,6 @@ func TestWarnings_MQNATS(t *testing.T) {
 		require.Len(t, got, len(cfg.Warnings()), "every warning is one of the known ones")
 		return got
 	}
-	assert.Equal(t, []string{maxBytes, coord, cache, dedupe}, warnings(AllRoles()...))
-	assert.Equal(t, []string{maxBytes, cache, dedupe}, warnings(RoleAPI, RoleIngest), "no sweeper, no lease to share")
-	assert.Equal(t, []string{maxBytes, coord}, warnings(RoleSweeper), "no api, no cache or dedupe store")
+	assert.Equal(t, []string{maxBytes, cache, dedupe}, warnings(AllRoles()...))
+	assert.Equal(t, []string{maxBytes}, warnings(RoleSweeper), "no api, no cache or dedupe store")
 }

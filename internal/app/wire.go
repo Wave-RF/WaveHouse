@@ -570,6 +570,8 @@ func (a *App) wireNATSMQ(ctx context.Context) error {
 			IngestConsumer: n.IngestConsumer,
 			HistoryStream:  n.HistoryStream,
 			PublishTimeout: n.PublishTimeout,
+			// Boot waits for the lease bucket with the rest of the topology.
+			CoordBucket: a.coordBucket(),
 		},
 		ConnectTimeout: n.ConnectTimeout,
 		TopologyWait:   n.TopologyWait,
@@ -677,17 +679,44 @@ func unreachableBackend[T ~string](key string, got T) error {
 	return fmt.Errorf("%s %q has no wiring: a Config built without config.Load must name the backend of every layer it wires", key, got)
 }
 
-// wireCoord opens the lease coordinator the singleton loops campaign on.
-func (a *App) wireCoord() error {
+// wireCoord opens the lease coordinator the singleton loops campaign on:
+// in-process, or the operator's KV bucket on the external broker's
+// connection (config refuses coord.backend=nats without mq.backend=nats). It
+// is added after the MQ, so it closes first and its terms are resigned while
+// the connection is still up.
+func (a *App) wireCoord(ctx context.Context) error {
 	switch b := a.cfg.Coord.Backend; b {
 	case config.CoordLocal:
 		c := coord.NewLocal()
 		a.coord = c
 		a.add(component{name: "coord", close: c.Close})
 		return nil
+	case config.CoordNATS:
+		broker, ok := a.mq.(*mq.ExternalNATS)
+		if !ok {
+			return fmt.Errorf("coord.backend=nats needs mq.backend=nats, got %T", a.mq)
+		}
+		c, err := broker.Leases(ctx, a.coordBucket(), a.cfg.InstanceID)
+		if err != nil {
+			return fmt.Errorf("coord open: %w", err)
+		}
+		a.coord = c
+		a.add(component{name: "coord", close: c.Close})
+		return nil
 	default:
 		return unreachableBackend("coord.backend", b)
 	}
+}
+
+// coordBucket is the lease bucket under coord.backend=nats, "" otherwise.
+func (a *App) coordBucket() string {
+	if a.cfg.Coord.Backend != config.CoordNATS {
+		return ""
+	}
+	if b := a.cfg.Coord.NATS.Bucket; b != "" {
+		return b
+	}
+	return mq.DefaultNATSCoordBucket(a.cfg.MQ.NATS.SubjectPrefix)
 }
 
 // sweeperLease is the lease the sweeper runs under, one sweeper per queue.
