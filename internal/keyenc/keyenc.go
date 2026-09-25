@@ -7,8 +7,8 @@
 // tenant id is its own escaped form.
 //
 // Keys built from it are stored — queued under NATS subjects, held in caches
-// — so a change to what it keeps orphans them. v0.1.0 escaped '-' as %2D;
-// Unescape still reads that form.
+// — so a change to what it keeps orphans them. Earlier builds escaped '-' as
+// %2D; Unescape still reads that form.
 package keyenc
 
 import (
@@ -49,7 +49,7 @@ func AppendEscape(dst []byte, s string) []byte {
 
 // Unescape reverses Escape. It is url.PathUnescape: %XX in either hex case
 // decodes, and any other byte reads as itself, so a field another writer
-// left partly unescaped — v0.1.0's %2D included — still reads.
+// left partly unescaped — an earlier build's %2D included — still reads.
 func Unescape(s string) (string, error) {
 	return url.PathUnescape(s)
 }
