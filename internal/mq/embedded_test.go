@@ -438,6 +438,15 @@ func TestEmbeddedNATS_SetMaxBytes_AQueueThatCannotOpen(t *testing.T) {
 		require.NoError(t, os.WriteFile(block, nil, 0o600))
 	}
 	obstruct()
+	// A directory JetStream ignores (no metafile, so recovery skips it)
+	// keeps the streams directory occupied through acme's failed open,
+	// which would otherwise leave it empty: the server then removes it on a
+	// goroutine of its own, and globex's open right after would race that
+	// inside its own MkdirAll (see
+	// TestEmbeddedNATS_PacesTheRetriesOfAQueueThatCannotOpen). Not another
+	// tenant's streams: those reserve bytes, and the refusal guarded
+	// against below needs the reserved count to have gone negative.
+	require.NoError(t, os.Mkdir(filepath.Join(filepath.Dir(block), "occupied"), 0o750))
 	e := openEmbedded(t, dir)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
