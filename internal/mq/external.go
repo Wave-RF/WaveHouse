@@ -817,9 +817,10 @@ func (e *ExternalNATS) PurgeAcked(_ context.Context, consumer string, olderThan 
 	if maxAge <= 0 {
 		return false, nil
 	}
-	floor := time.Now().Add(-maxAge)
 	for id, cutoff := range olderThan {
-		if !cutoff.Before(floor) {
+		// The caller took its now before this call, so a window equal to
+		// max_age reads a little longer here; a second's slack keeps it quiet.
+		if time.Since(cutoff) <= maxAge+time.Second {
 			continue
 		}
 		if _, warned := e.warnedGap.LoadOrStore(id, struct{}{}); !warned {

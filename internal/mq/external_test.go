@@ -360,13 +360,16 @@ func TestExternalNATS_PurgeAckedWarnsOnAShortHistory(t *testing.T) {
 	require.Positive(t, maxAge, "the shipped history has a max_age")
 
 	purged, err := e.PurgeAcked(t.Context(), workerDurable, map[tenant.ID]time.Time{
-		"acme":   time.Now().Add(-2 * maxAge),
-		"globex": time.Now().Add(-time.Minute),
+		"acme":    time.Now().Add(-2 * maxAge),
+		"globex":  time.Now().Add(-time.Minute),
+		"initech": time.Now().Add(-maxAge), // a window equal to max_age, as the sweeper computes it
 	})
 	require.NoError(t, err)
 	assert.False(t, purged)
 	_, acme := e.warnedGap.Load(tenant.ID("acme"))
 	_, globex := e.warnedGap.Load(tenant.ID("globex"))
+	_, initech := e.warnedGap.Load(tenant.ID("initech"))
+	assert.False(t, initech, "a history exactly as long as the window holds it")
 	assert.True(t, acme)
 	assert.False(t, globex)
 }
