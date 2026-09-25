@@ -94,6 +94,7 @@ func TestQueryErrors_CallerFault(t *testing.T) {
 // container and app, like the outage tests: the shared env assumes
 // ClickHouse stays up.
 func TestQueryErrors_ClickHouseDown(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	ch, err := startClickHouse(ctx)

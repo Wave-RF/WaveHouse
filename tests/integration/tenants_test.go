@@ -31,6 +31,7 @@ import (
 // finds a pool that answers, and that a tenant's structured query runs
 // against its own database.
 func TestNestedDirectory_PerTenantPoolsAndDiscovery(t *testing.T) {
+	t.Parallel()
 	e := env(t)
 	ctx := context.Background()
 	const operatorKey = "it-operator-key"
