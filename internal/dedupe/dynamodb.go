@@ -292,8 +292,11 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 	claims := make([]Claim, len(keys))
 	tried := make([]Claim, len(keys))
 	sent := make([]bool, len(keys))
-	// The first failure cancels the puts not yet sent: the Reserve fails
-	// either way, and a throttled table should not take the rest.
+	// The first failure skips the puts not yet sent: the Reserve fails
+	// either way, and a throttled table should not take the rest. A put
+	// already sent runs on ctx, not gctx, so it finishes and its outcome is
+	// known before the undo below; cancelled mid-flight, it could land after
+	// its release and hold the key for the lease.
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(s.d.cfg.ReserveConcurrency)
 	for i, k := range keys {
@@ -304,7 +307,7 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 				return err
 			}
 			sent[i] = true
-			status, err := s.reserve(gctx, k, token, nowSec, exp)
+			status, err := s.reserve(ctx, k, token, nowSec, exp)
 			if err != nil {
 				return err
 			}
