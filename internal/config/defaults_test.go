@@ -28,7 +28,8 @@ type zeroCase struct {
 }
 
 // Keys whose zero Validate refuses are in refusedZeros instead. The mq.nats
-// keys load as zero because the block is read only under mq.backend=nats.
+// and cache.redis keys load as zero because a backend's block is validated
+// only when that backend is selected.
 var zeroCases = []zeroCase{
 	{"otel.traces.enabled", "WH_OTEL_TRACES_ENABLED", false, true, "false", false, func(c *Config) any { return c.OTel.Traces.Enabled }},
 	{"otel.metrics.enabled", "WH_OTEL_METRICS_ENABLED", false, true, "false", false, func(c *Config) any { return c.OTel.Metrics.Enabled }},
@@ -44,6 +45,13 @@ var zeroCases = []zeroCase{
 	{"mq.nats.ingest_consumer", "WH_MQ_NATS_INGEST_CONSUMER", "", "wh-ingest", "ingest", "ingest", func(c *Config) any { return c.MQ.NATS.IngestConsumer }},
 	{"mq.nats.connect_timeout", "WH_MQ_NATS_CONNECT_TIMEOUT", time.Duration(0), 5 * time.Second, "2s", 2 * time.Second, func(c *Config) any { return c.MQ.NATS.ConnectTimeout }},
 	{"mq.nats.publish_timeout", "WH_MQ_NATS_PUBLISH_TIMEOUT", time.Duration(0), 5 * time.Second, "2s", 2 * time.Second, func(c *Config) any { return c.MQ.NATS.PublishTimeout }},
+	{"cache.redis.mode", "WH_CACHE_REDIS_MODE", "", "standalone", "cluster", "cluster", func(c *Config) any { return c.Cache.Redis.Mode }},
+	{"cache.redis.key_prefix", "WH_CACHE_REDIS_KEY_PREFIX", "", "wh", "acme", "acme", func(c *Config) any { return c.Cache.Redis.KeyPrefix }},
+	{"cache.redis.timeout", "WH_CACHE_REDIS_TIMEOUT", time.Duration(0), 100 * time.Millisecond, "2s", 2 * time.Second, func(c *Config) any { return c.Cache.Redis.Timeout }},
+	{"cache.redis.dial_timeout", "WH_CACHE_REDIS_DIAL_TIMEOUT", time.Duration(0), time.Second, "2s", 2 * time.Second, func(c *Config) any { return c.Cache.Redis.DialTimeout }},
+	{"cache.redis.max_value_bytes", "WH_CACHE_REDIS_MAX_VALUE_BYTES", 0, 1 << 20, "2048", 2048, func(c *Config) any { return c.Cache.Redis.MaxValueBytes }},
+	{"cache.redis.compress_min_bytes", "WH_CACHE_REDIS_COMPRESS_MIN_BYTES", 0, 1 << 10, "4096", 4096, func(c *Config) any { return c.Cache.Redis.CompressMinBytes }},
+	{"cache.redis.version_ttl", "WH_CACHE_REDIS_VERSION_TTL", time.Duration(0), 168 * time.Hour, "2h", 2 * time.Hour, func(c *Config) any { return c.Cache.Redis.VersionTTL }},
 	{"mq.nats.topology_wait", "WH_MQ_NATS_TOPOLOGY_WAIT", time.Duration(0), time.Minute, "2s", 2 * time.Second, func(c *Config) any { return c.MQ.NATS.TopologyWait }},
 }
 

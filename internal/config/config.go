@@ -178,7 +178,7 @@ func defaults() Config {
 		Roles:   AllRoles(),
 		Server:  Server{Port: 8080, ShutdownTimeout: 10},
 		MQ:      MQ{Backend: MQEmbedded, NATS: defaultMQNATS()},
-		Cache:   Cache{Backend: CacheLocal, L1MaxCost: 64 << 20},
+		Cache:   Cache{Backend: CacheLocal, L1MaxCost: 64 << 20, Redis: defaultCacheRedis()},
 		Dedupe:  Dedupe{Backend: DedupePebble},
 		Coord:   Coord{Backend: CoordLocal},
 		OTel: OTel{

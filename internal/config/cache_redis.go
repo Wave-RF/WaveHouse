@@ -25,24 +25,33 @@ type CacheRedisConfig struct {
 	// Addrs are host:port pairs: the server, or seeds for a cluster, or the
 	// sentinels.
 	Addrs          []string      `yaml:"addrs" env:"WH_CACHE_REDIS_ADDRS"`
-	Mode           string        `yaml:"mode" env:"WH_CACHE_REDIS_MODE" env-default:"standalone"`
+	Mode           string        `yaml:"mode" env:"WH_CACHE_REDIS_MODE"`
 	SentinelMaster string        `yaml:"sentinel_master" env:"WH_CACHE_REDIS_SENTINEL_MASTER"`
 	Username       string        `yaml:"username" env:"WH_CACHE_REDIS_USERNAME"`
 	Password       string        `yaml:"password" env:"WH_CACHE_REDIS_PASSWORD"`
 	DB             int           `yaml:"db" env:"WH_CACHE_REDIS_DB"`
 	TLS            CacheRedisTLS `yaml:"tls"`
 	// KeyPrefix leads every key, so deployments can share one server.
-	KeyPrefix   string        `yaml:"key_prefix" env:"WH_CACHE_REDIS_KEY_PREFIX" env-default:"wh"`
-	Timeout     time.Duration `yaml:"timeout" env:"WH_CACHE_REDIS_TIMEOUT" env-default:"100ms"`
-	DialTimeout time.Duration `yaml:"dial_timeout" env:"WH_CACHE_REDIS_DIAL_TIMEOUT" env-default:"1s"`
+	KeyPrefix   string        `yaml:"key_prefix" env:"WH_CACHE_REDIS_KEY_PREFIX"`
+	Timeout     time.Duration `yaml:"timeout" env:"WH_CACHE_REDIS_TIMEOUT"`
+	DialTimeout time.Duration `yaml:"dial_timeout" env:"WH_CACHE_REDIS_DIAL_TIMEOUT"`
 	// MaxValueBytes is the largest value stored, after compression.
-	MaxValueBytes int `yaml:"max_value_bytes" env:"WH_CACHE_REDIS_MAX_VALUE_BYTES" env-default:"1048576"`
-	// CompressMinBytes is the smallest value zstd-compressed; -1 never
-	// compresses. Not 0: the loader reads a 0 in the file as unset and
-	// applies the default, so 0 cannot mean off.
-	CompressMinBytes int `yaml:"compress_min_bytes" env:"WH_CACHE_REDIS_COMPRESS_MIN_BYTES" env-default:"1024"`
+	MaxValueBytes int `yaml:"max_value_bytes" env:"WH_CACHE_REDIS_MAX_VALUE_BYTES"`
+	// CompressMinBytes is the smallest value zstd-compressed; 0 never
+	// compresses.
+	CompressMinBytes int `yaml:"compress_min_bytes" env:"WH_CACHE_REDIS_COMPRESS_MIN_BYTES"`
 	// VersionTTL is how long a version token outlives its last bump.
-	VersionTTL time.Duration `yaml:"version_ttl" env:"WH_CACHE_REDIS_VERSION_TTL" env-default:"168h"`
+	VersionTTL time.Duration `yaml:"version_ttl" env:"WH_CACHE_REDIS_VERSION_TTL"`
+}
+
+// defaultCacheRedis is the cache.redis part of defaults(). internal/app's
+// TestRedisConfig_FromLoadedDefaults pins it to the backend's own defaults.
+func defaultCacheRedis() CacheRedisConfig {
+	return CacheRedisConfig{
+		Mode: RedisStandalone, KeyPrefix: "wh",
+		Timeout: 100 * time.Millisecond, DialTimeout: time.Second,
+		MaxValueBytes: 1 << 20, CompressMinBytes: 1 << 10, VersionTTL: 168 * time.Hour,
+	}
 }
 
 // CacheRedisTLS is cache.redis.tls. The files are paths, read at boot.
@@ -106,8 +115,8 @@ func (r CacheRedisConfig) validate() error {
 	if r.MaxValueBytes <= 0 {
 		return fmt.Errorf("cache.redis.max_value_bytes (WH_CACHE_REDIS_MAX_VALUE_BYTES) %d must be positive", r.MaxValueBytes)
 	}
-	if r.CompressMinBytes == 0 || r.CompressMinBytes < -1 {
-		return fmt.Errorf("cache.redis.compress_min_bytes (WH_CACHE_REDIS_COMPRESS_MIN_BYTES) %d: want a positive size, or -1 to never compress", r.CompressMinBytes)
+	if r.CompressMinBytes < 0 {
+		return fmt.Errorf("cache.redis.compress_min_bytes (WH_CACHE_REDIS_COMPRESS_MIN_BYTES) %d: want a size in bytes, or 0 to never compress", r.CompressMinBytes)
 	}
 	if _, err := r.TLS.Config(); err != nil {
 		return err

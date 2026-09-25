@@ -815,7 +815,7 @@ func TestRedisConfig_FromLoadedDefaults(t *testing.T) {
 		CompressMinBytes: cache.DefaultRedisCompressMinBytes, VersionTTL: cache.DefaultRedisVersionTTL,
 	}, got)
 
-	loaded.Cache.Redis.CompressMinBytes = -1
+	loaded.Cache.Redis.CompressMinBytes = 0
 	loaded.Cache.Redis.Mode = config.RedisCluster
 	got, err = redisConfig(loaded.Cache.Redis)
 	require.NoError(t, err)

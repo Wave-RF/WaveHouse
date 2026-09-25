@@ -22,11 +22,8 @@ import (
 func redisBackend() Config {
 	c := defaultBackends()
 	c.Cache.Backend = CacheRedis
-	c.Cache.Redis = CacheRedisConfig{
-		Addrs: []string{"redis:6379"}, Mode: RedisStandalone, KeyPrefix: "wh",
-		Timeout: 100 * time.Millisecond, DialTimeout: time.Second,
-		MaxValueBytes: 1 << 20, CompressMinBytes: 1 << 10, VersionTTL: 168 * time.Hour,
-	}
+	c.Cache.Redis = defaultCacheRedis()
+	c.Cache.Redis.Addrs = []string{"redis:6379"}
 	return c
 }
 
@@ -60,7 +57,7 @@ func TestLoad_CacheRedisFromEnv(t *testing.T) {
 		"WH_CACHE_REDIS_TIMEOUT":                  "250ms",
 		"WH_CACHE_REDIS_DIAL_TIMEOUT":             "3s",
 		"WH_CACHE_REDIS_MAX_VALUE_BYTES":          "2048",
-		"WH_CACHE_REDIS_COMPRESS_MIN_BYTES":       "-1",
+		"WH_CACHE_REDIS_COMPRESS_MIN_BYTES":       "0",
 		"WH_CACHE_REDIS_VERSION_TTL":              "24h",
 		"WH_CACHE_REDIS_TLS_INSECURE_SKIP_VERIFY": "false",
 	} {
@@ -75,7 +72,7 @@ func TestLoad_CacheRedisFromEnv(t *testing.T) {
 			Enabled: true, CAFile: caFile, CertFile: certFile, KeyFile: keyFile, ServerName: "redis.internal",
 		},
 		KeyPrefix: "staging", Timeout: 250 * time.Millisecond, DialTimeout: 3 * time.Second,
-		MaxValueBytes: 2048, CompressMinBytes: -1, VersionTTL: 24 * time.Hour,
+		MaxValueBytes: 2048, CompressMinBytes: 0, VersionTTL: 24 * time.Hour,
 	}, cfg.Cache.Redis)
 	tc, err := cfg.Cache.Redis.TLS.Config()
 	require.NoError(t, err)
@@ -112,10 +109,9 @@ cache:
 	assert.Equal(t, 1024, r.CompressMinBytes)
 }
 
-// A 0 in the file is read as unset, so it takes the default instead of
-// switching compression off: why "never" is -1. Pinned so a loader that
-// starts honoring the 0 is noticed.
-func TestLoad_CacheRedisCompressZeroInYAMLIsTheDefault(t *testing.T) {
+// A 0 in the file switches compression off; before #632 the loader read it
+// as unset and applied the default.
+func TestLoad_CacheRedisCompressZeroInYAMLIsNever(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
@@ -129,7 +125,7 @@ cache:
 `), 0o600))
 	cfg, err := Load(path)
 	require.NoError(t, err)
-	assert.Equal(t, 1024, cfg.Cache.Redis.CompressMinBytes)
+	assert.Zero(t, cfg.Cache.Redis.CompressMinBytes)
 }
 
 func TestLoad_CacheRedisRefusesUnknownKeys(t *testing.T) {
@@ -171,7 +167,7 @@ func TestUnboundEnv_KnowsTheCacheRedisVariables(t *testing.T) {
 	t.Parallel()
 	assert.Empty(t, unboundEnv([]string{
 		"WH_CACHE_REDIS_ADDRS=r:6379", "WH_CACHE_REDIS_PASSWORD=x", "WH_CACHE_REDIS_TLS_CA_FILE=/ca.pem",
-		"WH_CACHE_REDIS_VERSION_TTL=1h", "WH_CACHE_REDIS_COMPRESS_MIN_BYTES=-1",
+		"WH_CACHE_REDIS_VERSION_TTL=1h", "WH_CACHE_REDIS_COMPRESS_MIN_BYTES=0",
 	}))
 	assert.Equal(t, []string{"WH_CACHE_REDIS_ADDR"}, unboundEnv([]string{"WH_CACHE_REDIS_ADDR=r:6379"}))
 }
@@ -203,9 +199,8 @@ func TestValidate_CacheRedis(t *testing.T) {
 		{"negative dial timeout", func(r *CacheRedisConfig) { r.DialTimeout = -time.Second }, "cache.redis.dial_timeout"},
 		{"short version ttl", func(r *CacheRedisConfig) { r.VersionTTL = time.Second }, "cache.redis.version_ttl (WH_CACHE_REDIS_VERSION_TTL) 1s is under 2s"},
 		{"zero max value", func(r *CacheRedisConfig) { r.MaxValueBytes = 0 }, "cache.redis.max_value_bytes"},
-		{"compress 0", func(r *CacheRedisConfig) { r.CompressMinBytes = 0 }, "or -1 to never compress"},
-		{"compress -2", func(r *CacheRedisConfig) { r.CompressMinBytes = -2 }, "or -1 to never compress"},
-		{"compress never", func(r *CacheRedisConfig) { r.CompressMinBytes = -1 }, ""},
+		{"compress -1", func(r *CacheRedisConfig) { r.CompressMinBytes = -1 }, "or 0 to never compress"},
+		{"compress never", func(r *CacheRedisConfig) { r.CompressMinBytes = 0 }, ""},
 		{"tls files while off", func(r *CacheRedisConfig) { r.TLS.CAFile = caFile }, "cache.redis.tls.enabled (WH_CACHE_REDIS_TLS_ENABLED) is off"},
 		{"tls system roots", func(r *CacheRedisConfig) { r.TLS.Enabled = true }, ""},
 		{"tls full", func(r *CacheRedisConfig) {
