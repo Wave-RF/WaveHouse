@@ -483,8 +483,7 @@ func TestRetryRefresh_SucceedsOnFirstAttempt(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Same 250ms headroom as TestRetryRefresh_BackoffIsBounded — the
-	// expected wall-clock budget here is ~0 (no sleep at all), but a
+	// The expected wall-clock budget here is ~0 (no sleep at all), but a
 	// scheduler stall on a contended CI runner can drag a no-sleep test
 	// past 100ms. 250ms is still orders of magnitude under any real-sleep
 	// regression (the misbehaviour would sleep `initialBackoff` = 1h).
