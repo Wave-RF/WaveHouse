@@ -245,6 +245,28 @@ func eachTenantInOrder(t *testing.T, h Harness) {
 	assert.Equal(t, want, order[Globex])
 }
 
+// A publish repeating an earlier one's idempotency key inside the duplicate
+// window is reported as success and stored once: ingest republishes an event
+// whose first publish had an unknown outcome under the same key. Distinct
+// keys, and no key, are each stored.
+func idempotencyKeyStoresOnce(t *testing.T, h Harness) {
+	b := h.New(t)
+	topic := mq.Topic{Tenant: Acme, Table: "events"}
+	publish(t, b, topic, "first", mq.WithIdempotencyKey("k1"))
+	publish(t, b, topic, "repeat", mq.WithIdempotencyKey("k1"))
+	publish(t, b, topic, "other", mq.WithIdempotencyKey("k2"))
+	publish(t, b, topic, "unkeyed")
+	publish(t, b, topic, "unkeyed")
+	got, _, _ := consume(ctx(t), t, b, mq.ConsumerConfig{MaxAckPending: 100}, ackEach(t))
+	var data []string
+	for _, d := range next(t, got, 4) {
+		data = append(data, d.data)
+	}
+	assert.Equal(t, []string{"first", "other", "unkeyed", "unkeyed"}, data)
+	none(t, got, "a repeated idempotency key was stored twice")
+	replayEventually(t, b, topic, time.Time{}, data)
+}
+
 // A Nak'd message comes back; a DoubleAck is confirmed.
 func nakRedelivers(t *testing.T, h Harness) {
 	b := h.New(t)

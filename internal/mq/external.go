@@ -533,8 +533,14 @@ func (e *ExternalNATS) publish(ctx context.Context, subj, stream string, data []
 	}
 	observability.InjectHeaders(ctx, headers)
 	msg.Header = nats.Header(headers)
+	// WithMsgID overwrites the header, so a caller's idempotency key must be
+	// the id itself; otherwise a fresh one keeps this publish's retries one.
+	id := headers.Get(idempotencyHeader)
+	if id == "" {
+		id = nuid.Next()
+	}
 	pubOpts := []jetstream.PublishOpt{
-		jetstream.WithMsgID(nuid.Next()),
+		jetstream.WithMsgID(id),
 		jetstream.WithExpectStream(stream),
 		jetstream.WithRetryAttempts(0),
 	}

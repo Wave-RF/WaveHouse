@@ -87,6 +87,7 @@ func Run(t *testing.T, h Harness) {
 		{"SubscribeCarriesTheTraceContext", true, subscribeCarriesTheTraceContext},
 		{"SubscribeSeesEveryTenant", true, subscribeSeesEveryTenant},
 		{"EachTenantInOrder", true, eachTenantInOrder},
+		{"IdempotencyKeyStoresOnce", true, idempotencyKeyStoresOnce},
 		{"NakRedelivers", true, nakRedelivers},
 		{"AckWaitRedelivers", h.Caps.ConfiguresDurables, ackWaitRedelivers},
 		{"DeadLetterKeepsTheTopicAndDoesNotAck", true, deadLetterKeepsTheTopicAndDoesNotAck},
