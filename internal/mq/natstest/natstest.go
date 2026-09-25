@@ -105,11 +105,12 @@ func ServerConfig(valuesPath, storeDir string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Manifests is a set of nack Stream and Consumer resources as the JetStream
-// configs nack would create from them, in manifest order.
+// Manifests is a set of nack Stream, Consumer and KeyValue resources as the
+// JetStream configs nack would create from them, in manifest order.
 type Manifests struct {
 	Streams   []jetstream.StreamConfig
 	Consumers map[string][]jetstream.ConsumerConfig // by stream name
+	KeyValues []jetstream.KeyValueConfig
 }
 
 // The nack (jetstream.nats.io/v1beta2) fields the shipped manifests use.
@@ -144,6 +145,13 @@ type nackConsumer struct {
 	MaxAckPending int    `yaml:"maxAckPending"`
 	FilterSubject string `yaml:"filterSubject"`
 	PreventDelete bool   `yaml:"preventDelete"`
+}
+
+type nackKeyValue struct {
+	Bucket   string `yaml:"bucket"`
+	History  int    `yaml:"history"`
+	Storage  string `yaml:"storage"`
+	Replicas int    `yaml:"replicas"`
 }
 
 // LoadManifests parses the nack resources at path.
@@ -187,6 +195,20 @@ func LoadManifests(path string) (*Manifests, error) {
 				return nil, fmt.Errorf("%s: consumer %s/%s: %w", path, c.StreamName, c.DurableName, err)
 			}
 			m.Consumers[c.StreamName] = append(m.Consumers[c.StreamName], cfg)
+		case "KeyValue":
+			var kv nackKeyValue
+			if err := decodeStrict(&doc.Spec, &kv); err != nil {
+				return nil, fmt.Errorf("%s: keyvalue: %w", path, err)
+			}
+			storage, err := enum("storage", kv.Storage, map[string]jetstream.StorageType{
+				"file": jetstream.FileStorage, "memory": jetstream.MemoryStorage,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("%s: keyvalue %s: %w", path, kv.Bucket, err)
+			}
+			m.KeyValues = append(m.KeyValues, jetstream.KeyValueConfig{
+				Bucket: kv.Bucket, History: uint8(min(kv.History, 64)), Storage: storage, Replicas: kv.Replicas, //nolint:gosec // G115: clamped to JetStream's own cap
+			})
 		default:
 			return nil, fmt.Errorf("%s: unexpected kind %q", path, doc.Kind)
 		}
@@ -283,10 +305,13 @@ func (m *Manifests) SingleReplica() {
 	for i := range m.Streams {
 		m.Streams[i].Replicas = 1
 	}
+	for i := range m.KeyValues {
+		m.KeyValues[i].Replicas = 1
+	}
 }
 
-// Create creates m's streams and each one's consumers, in order, without
-// waiting for anything.
+// Create creates m's streams and each one's consumers, in order, then its
+// KV buckets the way nack does (CreateKeyValue), without waiting for anything.
 func (m *Manifests) Create(ctx context.Context, js jetstream.JetStream) error {
 	for _, cfg := range m.Streams {
 		s, err := js.CreateStream(ctx, cfg)
@@ -297,6 +322,11 @@ func (m *Manifests) Create(ctx context.Context, js jetstream.JetStream) error {
 			if _, err := s.CreateConsumer(ctx, c); err != nil {
 				return fmt.Errorf("create consumer %s/%s: %w", cfg.Name, c.Durable, err)
 			}
+		}
+	}
+	for _, cfg := range m.KeyValues {
+		if _, err := js.CreateKeyValue(ctx, cfg); err != nil {
+			return fmt.Errorf("create kv bucket %s: %w", cfg.Bucket, err)
 		}
 	}
 	return nil
@@ -424,6 +454,37 @@ func (o *Operator) DeleteDurable(ctx context.Context, durable string) error {
 		}
 	}
 	return nil
+}
+
+// CoordBucket is the lease bucket in the shipped manifests.
+const CoordBucket = "wh_coord"
+
+// DeleteBucket deletes a KV bucket, as an operator could.
+func (o *Operator) DeleteBucket(ctx context.Context, bucket string) error {
+	return o.js.DeleteKeyValue(ctx, bucket)
+}
+
+// LeaseHolder is the holder the named lease's key in bucket names, "" when
+// nobody holds it.
+func (o *Operator) LeaseHolder(ctx context.Context, bucket, name string) (string, error) {
+	kv, err := o.js.KeyValue(ctx, bucket)
+	if err != nil {
+		return "", err
+	}
+	e, err := kv.Get(ctx, "lease."+name)
+	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	var v struct {
+		Holder string `json:"holder"`
+	}
+	if err := json.Unmarshal(e.Value(), &v); err != nil {
+		return "", err
+	}
+	return v.Holder, nil
 }
 
 // StreamMsgs is how many messages the named stream holds.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,7 +16,8 @@ import (
 // NATSTopology is what WaveHouse needs of an operator-owned JetStream: N
 // ingest partition streams with interest retention, each with a durable pull
 // consumer; a history stream with limits retention that sources every
-// partition, for SSE replay and the live hub; and one dead-letter stream. The
+// partition, for SSE replay and the live hub; one dead-letter stream; and,
+// for coord.backend=nats, a KV bucket holding the leases (Leases). The
 // operator creates all of it (WriteNATSManifests renders it as nack CRs);
 // WaveHouse only checks it (verifyNATSTopology) and never repairs it.
 type NATSTopology struct {
@@ -39,6 +41,9 @@ type NATSTopology struct {
 	// retry is published under the same idempotency key, so a partition's
 	// duplicate window must still hold the first copy by then.
 	DedupeLease time.Duration
+	// CoordBucket is the KV bucket this process holds its leases in; empty
+	// when it holds none there, and then the bucket is not checked.
+	CoordBucket string
 	// AckWait, MaxAckPending and Prefetch are what the ingest worker asks of
 	// the durable (internal/ingest/worker.go, which imports this package).
 	AckWait       time.Duration
@@ -94,7 +99,26 @@ func (t NATSTopology) validate() error {
 	if t.Partitions < 1 {
 		return fmt.Errorf("partitions must be at least 1, got %d", t.Partitions)
 	}
+	if !natsBucketName.MatchString(t.coordBucket()) {
+		return fmt.Errorf("coord bucket %q must be a KV bucket name of [a-zA-Z0-9_-]", t.coordBucket())
+	}
 	return nil
+}
+
+// natsBucketName is JetStream's grammar for a KV bucket name.
+var natsBucketName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// DefaultNATSCoordBucket is the lease bucket's name for a subject prefix, as
+// the generated manifests name it: one per prefix, so deployments sharing a
+// NATS account under different prefixes never contend for one lease.
+func DefaultNATSCoordBucket(prefix string) string { return prefix + "_coord" }
+
+// coordBucket is the lease bucket: the configured one, or the prefix's.
+func (t NATSTopology) coordBucket() string {
+	if t.CoordBucket != "" {
+		return t.CoordBucket
+	}
+	return DefaultNATSCoordBucket(t.Prefix)
 }
 
 // streamName is the name the generated manifests give a stream of kind. Only
@@ -228,6 +252,11 @@ func verifyNATSTopology(ctx context.Context, js jetstream.JetStream, t NATSTopol
 	}
 	if err := v.dlq(ctx); err != nil {
 		return nil, err
+	}
+	if t.CoordBucket != "" {
+		if err := v.coordBucket(ctx); err != nil {
+			return nil, err
+		}
 	}
 	slices.SortStableFunc(v.findings, func(a, b Finding) int { return int(a.Severity) - int(b.Severity) })
 	return v.findings, nil
@@ -587,6 +616,43 @@ func (v *topologyVerifier) dlq(ctx context.Context) error {
 	}
 	if cfg.MaxMsgsPerSubject <= 0 {
 		v.add(FindingRecommended, obj, "max_msgs_per_subject", "set it, so one topic's parked rows evict only its own")
+	}
+	return nil
+}
+
+// coordBucket checks the KV bucket the leases live in (Leases). Its stream
+// is KV_<bucket>, which is how JetStream stores a bucket.
+func (v *topologyVerifier) coordBucket(ctx context.Context) error {
+	name := v.t.CoordBucket
+	obj := "kv bucket " + name
+	s, err := v.js.Stream(ctx, "KV_"+name)
+	if errors.Is(err, jetstream.ErrStreamNotFound) {
+		v.add(FindingRequired, obj, "bucket", "does not exist; coord.backend=nats holds its leases there")
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("kv bucket %s: %w", name, err)
+	}
+	cfg := s.CachedInfo().Config
+	req := func(field, format string, args ...any) { v.add(FindingRequired, obj, field, format, args...) }
+
+	if cfg.MaxMsgsPerSubject < 1 {
+		req("history", "is unset; a KV bucket keeps at least one value per key")
+	}
+	// The wavehouse user may read a key only by direct get.
+	if !cfg.AllowDirect {
+		req("allow_direct", "is unset; WaveHouse reads leases by direct get (a bucket nack or `nats kv add` creates has it)")
+	}
+	// A candidate judges expiry on its own clock; a key the server expires
+	// would end a live lease early.
+	if cfg.MaxAge != 0 {
+		req("ttl", "is %s; must be unset, or a live lease expires under its holder", cfg.MaxAge)
+	}
+	if cfg.Storage != jetstream.FileStorage {
+		v.add(FindingRecommended, obj, "storage", "is %s; file survives a server restart without every lease starting over", cfg.Storage)
+	}
+	if cfg.Replicas < 3 {
+		v.add(FindingRecommended, obj, "num_replicas", "is %d; 3 survives losing a server", cfg.Replicas)
 	}
 	return nil
 }

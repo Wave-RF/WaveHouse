@@ -12,8 +12,8 @@ data_dir: ./data
 # per role) needs a shared mq.backend and cache.backend, and boot refuses one
 # on the in-process backends.
 roles: [api, ingest, sweeper]
-# Names this process: logged at boot today, a lease's holder once a shared
-# coord.backend exists. Empty means <hostname>-<8 hex>, fresh at every boot.
+# Names this process: logged at boot, and a lease's holder under
+# coord.backend: nats. Empty means <hostname>-<8 hex>, fresh at every boot.
 instance_id: ""
 
 server:
@@ -51,8 +51,8 @@ clickhouse:
   password: ""
   max_total_conns: 0 # ceiling on open native connections across pools; 0 = none
 
-# Each layer's implementation, chosen at boot. The in-process backend is
-# each layer's default.
+# Each layer's implementation, chosen at boot. Every layer defaults to its
+# in-process backend; mq and coord also take nats, cache redis, dedupe dynamodb.
 mq:
   backend: embedded # NATS JetStream under <data_dir>/nats
   # backend: nats reads this block instead: the operator's NATS JetStream
@@ -76,6 +76,10 @@ dedupe:
   #   create_table: false # dynamodb-local only; refused without endpoint
 coord:
   backend: local # leases (the sweeper's) held in this process
+  # backend: nats holds them in a KV bucket on mq.nats's connection instead,
+  # and mq.backend: nats requires it in a process running the sweeper.
+  # nats:
+  #   bucket: wh_coord # empty = <mq.nats.subject_prefix>_coord
 
 # The query-result cache: local (in-process, sized by l1_max_cost) or redis
 # (one Redis-compatible server shared by every instance; see the redis block

@@ -33,6 +33,7 @@ func TestRunMQ_ExitCodes(t *testing.T) {
 		"zero replicas":     {[]string{"manifests", "--replicas", "0"}, 2},
 		"bad prefix":        {[]string{"manifests", "--prefix", "a.b"}, 1},
 		"bad partitions":    {[]string{"manifests", "--partitions", "-1"}, 1},
+		"bad coord bucket":  {[]string{"manifests", "--coord-bucket", "a.b"}, 1},
 		"defaults generate": {[]string{"manifests"}, 0},
 	}
 	for name, tc := range cases {
@@ -41,4 +42,10 @@ func TestRunMQ_ExitCodes(t *testing.T) {
 			assert.Equal(t, tc.code, runMQ(tc.args, &out, &errOut), errOut.String())
 		})
 	}
+}
+
+func TestRunMQManifests_NamesTheLeaseBucket(t *testing.T) {
+	var out, errOut bytes.Buffer
+	require.Equal(t, 0, runMQ([]string{"manifests", "--prefix", "acme", "--coord-bucket", "acme_leases"}, &out, &errOut), errOut.String())
+	assert.Contains(t, out.String(), "kind: KeyValue\nmetadata:\n  name: acme-coord\nspec:\n  bucket: acme_leases\n")
 }

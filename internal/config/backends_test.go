@@ -119,7 +119,7 @@ func TestValidate_UnknownBackend(t *testing.T) {
 		{"mq", func(c *Config) { c.MQ.Backend = "kafka" }, `mq.backend (WH_MQ_BACKEND) "kafka" is not a backend this build has; valid: embedded, nats`},
 		{"cache", func(c *Config) { c.Cache.Backend = "memcached" }, `cache.backend (WH_CACHE_BACKEND) "memcached" is not a backend this build has; valid: local, redis`},
 		{"dedupe", func(c *Config) { c.Dedupe.Backend = "redis" }, `dedupe.backend (WH_DEDUPE_BACKEND) "redis" is not a backend this build has; valid: pebble, dynamodb`},
-		{"coord", func(c *Config) { c.Coord.Backend = "nats" }, `coord.backend (WH_COORD_BACKEND) "nats" is not a backend this build has; valid: local`},
+		{"coord", func(c *Config) { c.Coord.Backend = "kubernetes" }, `coord.backend (WH_COORD_BACKEND) "kubernetes" is not a backend this build has; valid: local, nats`},
 		// The zero value, which a Config built without Load carries.
 		{"empty", func(c *Config) { c.MQ.Backend = "" }, `mq.backend (WH_MQ_BACKEND) "" is not a backend`},
 	}

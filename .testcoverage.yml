@@ -91,6 +91,7 @@ exclude:
       - ^internal/mq/nats_manifests\.go$
       - ^internal/mq/subject_nats\.go$
       - ^internal/mq/external\.go$
+      - ^internal/mq/lease\.go$
       - ^cmd/wavehouse/mq\.go$
       # The in-process cache backend: the e2e stack runs cache.backend=redis
       # (#613), so the binary carries LocalCache and its version index but e2e
@@ -107,3 +108,5 @@ exclude:
       # unit suite's 15s per package cannot hold: they are integration-tagged
       # (make test-integration), and the merged total counts them.
       - ^internal/mq/external\.go$
+      # The NATS KV leases, the same way.
+      - ^internal/mq/lease\.go$

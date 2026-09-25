@@ -335,7 +335,7 @@ Size the orchestrator's kill grace at `server.shutdown_timeout` plus 8s: at the 
 
 ## External NATS
 
-With `mq.backend: nats`, WaveHouse's message queue is a NATS JetStream cluster you run, shared by every WaveHouse process that points at it. This is what makes more than one replica, or a [split by role](#one-deployment-per-role), possible. **WaveHouse never creates, changes, purges or deletes a stream or a durable consumer there.** You create them, WaveHouse checks them at boot, and it refuses to start until they are right. The only objects WaveHouse creates are short-lived consumers on the history stream, one per API process for its live SSE events and one per SSE replay, which the server removes on its own when they are idle.
+With `mq.backend: nats`, WaveHouse's message queue is a NATS JetStream cluster you run, shared by every WaveHouse process that points at it. This is what makes more than one replica, or a [split by role](#one-deployment-per-role), possible. **WaveHouse never creates, changes, purges or deletes a stream, a durable consumer or a KV bucket there.** You create them, WaveHouse checks them at boot, and it refuses to start until they are right. The only objects WaveHouse creates are short-lived consumers on the history stream, one per API process for its live SSE events and one per SSE replay, which the server removes on its own when they are idle.
 
 ### What WaveHouse needs
 
@@ -343,19 +343,20 @@ With `mq.backend: nats`, WaveHouse's message queue is a NATS JetStream cluster y
 - **The `wh-ingest` durable consumer on every partition,** which the ingest worker consumes. Every ingest process consumes all of them and competes for their messages.
 - **The history stream,** which sources every partition. SSE replay (`Last-Event-ID`) and every API process's live events read from it. Its `max_age` is how far back a replay can reach, so make it at least the longest [gap window](/settings-directory#streaming) of any tenant; the sweeper warns once for each tenant whose window is longer.
 - **One dead-letter stream** holding `<prefix>.dlq.>`, shared by every tenant.
+- **The lease bucket,** a KV bucket named `<prefix>_coord` (`wh_coord`; [`coord.nats.bucket`](/configuration#nats-leases-coordnats) names another), where [`coord.backend: nats`](/configuration#backends) holds the sweeper's lease so that one process sweeps at a time. Every process running the `sweeper` role needs it, because `mq.backend: nats` refuses `coord.backend: local` there. Keep one value per key (`history: 1`), allow direct gets (`allow_direct`, which nack and `nats kv add` always set, because the `wavehouse` user reads leases only that way), and set no `ttl`: a lease expires on its candidates' clocks, and a key the server expires would end a live holder's lease. Boot checks it only in a process with `coord.backend: nats`, and refuses while it is missing.
 
 ### Create the topology
 
 1. **Run NATS 2.10 or later** with JetStream on file storage. 2.14.x, the line WaveHouse embeds, is recommended; boot warns on another. [`deployments/nats/values.yaml`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/nats/values.yaml) is a values file for the [NATS Helm chart](https://github.com/nats-io/k8s): a three-node cluster with one account and two users, `nack` for the JetStream controller and `wavehouse` for WaveHouse, whose passwords come from a `nats-users` Secret.
-2. **Generate the streams and consumers** as [nack](https://github.com/nats-io/nack) resources:
+2. **Generate the streams, consumers and lease bucket** as [nack](https://github.com/nats-io/nack) resources (nack's `KeyValue` needs its control-loop mode):
 
    ```bash
    wavehouse mq manifests --partitions 4 --prefix wh --replicas 3 > jetstream.yaml
    ```
 
-   [`deployments/nats/jetstream.yaml`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/nats/jetstream.yaml) is its output for four partitions. Its sizes (`maxBytes`, the history's `maxAge`, `maxMsgsPerSubject`) are starting points: tune them before you apply.
+   [`deployments/nats/jetstream.yaml`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/nats/jetstream.yaml) is its output for four partitions. `--coord-bucket <name>` names the lease bucket when `coord.nats.bucket` does. Its sizes (`maxBytes`, the history's `maxAge`, `maxMsgsPerSubject`) are starting points: tune them before you apply.
 3. **Apply them, and let the history stream exist before WaveHouse starts publishing.** The server attaches the history's source to a partition a moment after the history is created. A row written and acked on a partition before that is never copied into the history, so SSE replay and live events miss it, though ClickHouse does not. Never let a partition take publishes without its `wh-ingest` durable either: with only the history's source on it, a row leaves the partition as soon as the history has it, unwritten. WaveHouse's boot check guarantees this for its own publishes.
-4. **Start WaveHouse** with `mq.backend: nats` and the [`mq.nats`](/configuration#external-nats-mqnats) block: the server URLs, the `wavehouse` user and a mounted password file, and `partitions` equal to the N you generated. Boot waits up to `mq.nats.topology_wait` (60s) for the cluster and your resources, because on Kubernetes they may roll out together, then refuses to start and logs every finding at once. A finding marked `recommended` is logged and does not stop boot.
+4. **Start WaveHouse** with `mq.backend: nats`, `coord.backend: nats` and the [`mq.nats`](/configuration#external-nats-mqnats) block: the server URLs, the `wavehouse` user and a mounted password file, and `partitions` equal to the N you generated. Boot waits up to `mq.nats.topology_wait` (60s) for the cluster and your resources, because on Kubernetes they may roll out together, then refuses to start and logs every finding at once. A finding marked `recommended` is logged and does not stop boot.
 
 The generated manifests satisfy every required finding. Some you may meet when you write your own:
 
@@ -369,14 +370,15 @@ WaveHouse checks the topology again every five minutes and never repairs it. If 
 
 ### Permissions
 
-The `wavehouse` user in `values.yaml` has exactly what WaveHouse needs: it can publish to its subjects, read stream and consumer info, pull from `wh-ingest`, and create, pull from and delete consumers on the history stream. It cannot create, change, purge or delete a stream, nor create a durable on a partition. The permissions are written for the default prefix `wh`, history stream `WH_HISTORY` and durable `wh-ingest`; change them together with those settings.
+The `wavehouse` user in `values.yaml` has exactly what WaveHouse needs: it can publish to its subjects, read stream and consumer info, pull from `wh-ingest`, create, pull from and delete consumers on the history stream, and read and write the `lease.` keys in the lease bucket (a KV write is a publish to the key's subject, and a read is a direct get). It cannot create, change, purge or delete a stream or a bucket, nor create a durable on a partition, nor touch another key. The permissions are written for the default prefix `wh`, history stream `WH_HISTORY`, durable `wh-ingest` and bucket `wh_coord`; change them together with those settings.
 
 ```yaml
 publish:
   allow: [wh.ingest.>, wh.dlq.>, $JS.API.INFO, $JS.API.STREAM.NAMES, $JS.API.STREAM.INFO.*,
           $JS.API.CONSUMER.INFO.*.*, $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest, $JS.ACK.>,
           $JS.API.CONSUMER.CREATE.WH_HISTORY.>, $JS.API.CONSUMER.MSG.NEXT.WH_HISTORY.>,
-          $JS.API.CONSUMER.DELETE.WH_HISTORY.>]
+          $JS.API.CONSUMER.DELETE.WH_HISTORY.>, $KV.wh_coord.lease.>,
+          $JS.API.DIRECT.GET.KV_wh_coord.$KV.wh_coord.lease.>]
   deny:  [$JS.API.STREAM.CREATE.>, $JS.API.STREAM.UPDATE.>, $JS.API.STREAM.DELETE.>,
           $JS.API.STREAM.PURGE.>, $JS.API.CONSUMER.DURABLE.CREATE.>]
 subscribe:
@@ -410,9 +412,11 @@ These gauges are exported through [OpenTelemetry or Prometheus](#observability) 
 | Gauge | Meaning |
 | --- | --- |
 | `wavehouse_mq_connected` | `1` while this process is connected to the cluster, else `0`. |
-| `wavehouse_mq_topology_ok` | `1` while the last check found every required stream and consumer, else `0`. It drops at once when a publish finds a partition deleted. |
+| `wavehouse_mq_topology_ok` | `1` while the last check found every required stream, consumer and (under `coord.backend: nats`) the lease bucket, else `0`. It drops at once when a publish finds a partition deleted. |
 | `wavehouse_mq_history_source_lag{source}` | Messages on each partition that the history has not copied yet. A lag that keeps growing means the history is not taking rows, which holds written rows on every partition. |
 | `wavehouse_mq_history_source_last_active_seconds{source}` | Seconds since the history last heard from each partition; `-1` if it has never attached. It climbs for about ten seconds after a NATS restart; a value that keeps climbing is a source that is not re-attaching. |
+
+To see which process sweeps, read the lease: `nats kv get wh_coord lease.sweeper` shows the holder's `instance_id`.
 
 `wavehouse_nats_connections` and `wavehouse_nats_in_msgs_total` describe this process's client connection under `nats` (`1` or `0`, and the messages it has received), where under `embedded` they describe the embedded server.
 
@@ -428,19 +432,19 @@ By default one process runs all of WaveHouse. [`roles`](/configuration#process-r
 
 - **API.** Each API pod runs its own schema discovery, token verifiers, dedupe handle and SSE hub, and receives every event so that it can serve its own SSE clients. Put your Service and ingress in front of these pods only.
 - **Ingest.** Every ingest pod consumes the same shared durable consumer and competes for its messages, so throughput scales with the pod count. The rows of one table are then split across pods: each pod writes smaller batches, and rows written by different pods do not reach ClickHouse in publish order.
-- **Sweeper.** The sweeper runs under a lease held in the shared `coord.backend`, so only one pod sweeps at a time. A second replica waits and takes over when the first stops.
+- **Sweeper.** The sweeper runs under a lease in the shared [lease bucket](#what-wavehouse-needs) (`coord.backend: nats`), so only one pod sweeps at a time. A second replica waits, and takes over within 2 seconds when the first stops cleanly, or about 15 to 20 seconds after the first stops renewing its lease.
 
-A split needs backends that every process can reach: a shared `mq.backend`, so that every process reaches the same queue; a shared `cache.backend`, so that the ingest pods' invalidations reach the API pods' cache; and a shared `coord.backend`, so that the sweeper lease spans pods. This build has one shared backend, [`mq.backend: nats`](#external-nats), and boot refuses any split without it, naming the backend to change. With it:
+A split needs backends that every process can reach: a shared `mq.backend`, so that every process reaches the same queue; a shared `cache.backend`, so that the ingest pods' invalidations reach the API pods' cache; and a shared `coord.backend`, so that the sweeper lease spans pods. This build has two shared backends, [`mq.backend: nats`](#external-nats) and `coord.backend: nats` on the same cluster, and boot refuses any split without the first, naming the backend to change. With them:
 
 - **`api` and `ingest` still run together.** Without a shared `cache.backend`, boot refuses a process that runs one of them without the other. Run them as one Deployment (`WH_ROLES=api,ingest`) with as many replicas as you need; each replica's cache serves reads that may be stale until an entry expires (boot warns).
 - **Dedupe holds per replica.** With `dedupe.backend: pebble` each replica dedupes only the event ids it has seen itself, so a retry that lands on another replica is written twice (boot warns).
-- **The sweeper can run on its own** (`WH_ROLES=sweeper`), or in every replica. Without a shared `coord.backend` each process holds its own sweeper lease, so several may sweep at once. Under `nats` that is harmless, because the sweeper removes nothing there (boot warns).
+- **The sweeper can run on its own** (`WH_ROLES=sweeper`), or in every replica. Either way it needs `coord.backend: nats`: boot refuses `coord.backend: local` in a process running the sweeper on a shared queue.
 
 Run every role in one process, the default, until you need more than one.
 
 A pod without the `api` role serves an ops listener on `:8080`: `/livez`, `/readyz` and their aliases, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404 (under `/v1/ops`, 403 without the operator key). Point the same probes at it as at an API pod. `/livez` does not wait for schema discovery there, because only the API runs it. `/readyz` checks ClickHouse in an ingest pod, and is ready once a sweeper pod has booted. Every pod reads the settings directory, so mount it in every Deployment. The reload route on the ops listener accepts only the operator key, so whatever reloads your API pods over HTTP must send the operator key to the worker pods too, or rely on `SIGHUP` (or, over a flat directory, the directory watcher) instead.
 
-Give each pod a stable `WH_INSTANCE_ID` only if you need one in the logs. The default, the pod's hostname with a random suffix, already names each pod uniquely.
+Give each pod a stable `WH_INSTANCE_ID` only if you need one in the logs or in the lease's `holder`. The default, the pod's hostname with a random suffix, already names each pod uniquely.
 
 ## Behind a reverse proxy
 

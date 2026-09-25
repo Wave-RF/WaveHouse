@@ -287,15 +287,39 @@ type CoordBackend string
 // process shares its queue.
 const CoordLocal CoordBackend = "local"
 
-var coordBackends = []CoordBackend{CoordLocal}
+// CoordNATS holds leases in a KV bucket on mq.nats's connection, so every
+// process on the shared queue contends for the same ones. It needs
+// mq.backend=nats; its settings are the coord.nats block.
+const CoordNATS CoordBackend = "nats"
+
+var coordBackends = []CoordBackend{CoordLocal, CoordNATS}
 
 // Coord selects the coordination layer.
 type Coord struct {
 	Backend CoordBackend `yaml:"backend" env:"WH_COORD_BACKEND"`
+	// NATS is read only when Backend is nats.
+	NATS CoordNATSConfig `yaml:"nats"`
 }
 
+// CoordNATSConfig names the operator's KV bucket. There is no connection
+// block: coord.backend=nats rides mq.nats's connection and credentials.
+type CoordNATSConfig struct {
+	// Bucket is the KV bucket the leases live in; empty is
+	// <mq.nats.subject_prefix>_coord, the name the generated manifests give it.
+	Bucket string `yaml:"bucket" env:"WH_COORD_NATS_BUCKET"`
+}
+
+// natsBucketName is JetStream's grammar for a KV bucket name.
+var natsBucketName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
 func (c Coord) validate() error {
-	return checkBackend("coord.backend", "WH_COORD_BACKEND", c.Backend, coordBackends)
+	if err := checkBackend("coord.backend", "WH_COORD_BACKEND", c.Backend, coordBackends); err != nil {
+		return err
+	}
+	if c.Backend == CoordNATS && c.NATS.Bucket != "" && !natsBucketName.MatchString(c.NATS.Bucket) {
+		return fmt.Errorf("coord.nats.bucket (WH_COORD_NATS_BUCKET) %q must be a KV bucket name of [a-zA-Z0-9_-]", c.NATS.Bucket)
+	}
+	return nil
 }
 
 // checkBackend refuses a backend this build has no implementation for,
@@ -358,12 +382,9 @@ func (c *Config) Warnings() []string {
 		// key is required in every tenant's config.json, so an operator
 		// setting a budget there must hear it does nothing (#613 core G.3).
 		out = append(out, "mq.max_bytes_gb (settings directory) is not applied with mq.backend=nats: a tenant's queue is bounded by its partition stream's limits, which are the operator's")
-		// Harmless until the sweeper has something to do under nats: its
-		// PurgeAcked removes nothing (retention is the operator's), so two
-		// replicas sweeping at once cost two no-op calls a minute.
-		if c.Coord.Backend == CoordLocal && c.Has(RoleSweeper) {
-			out = append(out, "coord.backend=local with mq.backend=nats: every replica running the sweeper holds its own sweeper lease; harmless while the sweeper removes nothing from NATS, and a shared coord.backend will be required once this build has one")
-		}
+	}
+	if c.Coord.Backend != CoordNATS && c.Coord.NATS != (CoordNATSConfig{}) {
+		out = append(out, fmt.Sprintf("coord.nats is set but coord.backend=%s: the block is ignored", c.Coord.Backend))
 	}
 	if c.Cache.Backend == CacheRedis && c.Cache.Redis.TLS.InsecureSkipVerify {
 		out = append(out, "cache.redis.tls.insecure_skip_verify is on: the cache accepts any certificate, so whoever can intercept the connection can read and replace cached query results")

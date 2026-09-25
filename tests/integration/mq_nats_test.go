@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,13 +34,19 @@ const natsOperatorKey = "it-nats-operator-key"
 // natsProcess is one WaveHouse process booted on mq.backend: nats.
 type natsProcess struct {
 	app     *app.App
+	id      string // its instance_id, the holder its leases name
 	baseURL string
 	runDone chan error
+	stop    context.CancelFunc // ends Run; runDone then says how
 }
 
+// natsProcesses numbers the processes the tests boot, for their instance_id.
+var natsProcesses atomic.Int32
+
 // bootNATSProcess boots the real wiring with roles over the nested settings
-// directory root, on the NATS at natsURL as the shipped wavehouse user, and
-// runs it until the test ends (or until it fails on its own: runDone).
+// directory root, on the NATS at natsURL as the shipped wavehouse user with
+// its leases in the shipped bucket, and runs it until the test ends (or until
+// it fails on its own: runDone).
 func bootNATSProcess(t *testing.T, natsURL, root string, roles ...config.Role) *natsProcess {
 	t.Helper()
 	ctx := context.Background()
@@ -58,17 +65,18 @@ func bootNATSProcess(t *testing.T, natsURL, root string, roles ...config.Role) *
 			SubjectPrefix: "wh", Partitions: 4, IngestConsumer: "wh-ingest",
 			ConnectTimeout: 5 * time.Second, PublishTimeout: 5 * time.Second, TopologyWait: 30 * time.Second,
 		}},
-		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
-		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
-		Coord:    config.Coord{Backend: config.CoordLocal},
-		Roles:    roles,
-		Settings: config.Settings{Dir: root},
+		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
+		Dedupe:     config.Dedupe{Backend: config.DedupePebble},
+		Coord:      config.Coord{Backend: config.CoordNATS},
+		Roles:      roles,
+		InstanceID: fmt.Sprintf("proc-%d", natsProcesses.Add(1)),
+		Settings:   config.Settings{Dir: root},
 	}
 	require.NoError(t, cfg.Validate(), "the split boots on a shared queue")
 	a, err := app.New(ctx, app.Options{Config: cfg, Listener: ln})
 	require.NoError(t, err)
 	runCtx, stop := context.WithCancel(ctx)
-	p := &natsProcess{app: a, baseURL: "http://" + ln.Addr().String(), runDone: make(chan error, 1)}
+	p := &natsProcess{app: a, id: cfg.InstanceID, baseURL: "http://" + ln.Addr().String(), runDone: make(chan error, 1), stop: stop}
 	go func() { p.runDone <- a.Run(runCtx) }()
 	t.Cleanup(func() {
 		stop()

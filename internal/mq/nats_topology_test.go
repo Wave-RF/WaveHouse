@@ -16,8 +16,12 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq/natstest"
 )
 
-// shippedSpec is the topology the shipped manifests are generated for.
-var shippedSpec = NATSTopology{Partitions: 4, DedupeLease: 30 * time.Second}
+// shippedSpec is the topology the shipped manifests are generated for, and
+// coordSpec the same for a process holding its leases there.
+var (
+	shippedSpec = NATSTopology{Partitions: 4, DedupeLease: 30 * time.Second}
+	coordSpec   = NATSTopology{Partitions: 4, CoordBucket: natstest.CoordBucket}
+)
 
 // replicaWarnings are what the shipped manifests at one replica leave: one
 // num_replicas recommendation per partition.
@@ -36,9 +40,18 @@ func TestVerifyNATSTopology_ShippedManifestsPass(t *testing.T) {
 	t.Parallel()
 	f := newNATSFixture(t)
 	f.apply(t, shippedTopology(t))
-	findings, err := verifyNATSTopology(t.Context(), f.connect(t, "wavehouse"), shippedSpec)
+	js := f.connect(t, "wavehouse")
+	findings, err := verifyNATSTopology(t.Context(), js, shippedSpec)
 	require.NoError(t, err)
 	assert.True(t, replicaWarnings(findings), "findings: %v", findings)
+
+	// With the lease bucket checked too: one more replica warning, its own.
+	findings, err = verifyNATSTopology(t.Context(), js, coordSpec)
+	require.NoError(t, err)
+	require.Len(t, findings, shippedSpec.Partitions+1, "findings: %v", findings)
+	last := findings[len(findings)-1]
+	assert.Equal(t, "kv bucket wh_coord", last.Object)
+	assert.Equal(t, "num_replicas", last.Field)
 }
 
 // Every rule the verifier holds the operator to, one mutation each.
@@ -170,6 +183,7 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		t.Run(tc.name, func(t *testing.T) {
 			f.reset(t)
 			tp := shippedTopology(t)
+			tp.KeyValues = nil // no case here checks the lease bucket
 			if tc.mutate != nil {
 				tc.mutate(t, tp)
 			}
@@ -339,6 +353,7 @@ func TestWriteNATSManifests_RoundTrip(t *testing.T) {
 
 	f := newNATSFixture(t)
 	f.apply(t, loadNATSManifests(t, path))
+	spec.CoordBucket = DefaultNATSCoordBucket(spec.Prefix)
 	findings, err := verifyNATSTopology(t.Context(), f.admin, spec)
 	require.NoError(t, err)
 	for _, got := range findings {
@@ -351,4 +366,5 @@ func TestWriteNATSManifests_RefusesAnImpossibleSpec(t *testing.T) {
 	var b strings.Builder
 	require.Error(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: NATSTopology{Prefix: "a.b"}}))
 	require.Error(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: NATSTopology{Partitions: -2}}))
+	require.Error(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: NATSTopology{CoordBucket: "a.b"}}))
 }

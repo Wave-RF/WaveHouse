@@ -199,7 +199,7 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 			return nil, err
 		}
 	}
-	if err := a.wireCoord(); err != nil {
+	if err := a.wireCoord(ctx); err != nil {
 		return nil, err
 	}
 	if a.cfg.Has(config.RoleSweeper) {
