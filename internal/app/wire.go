@@ -143,8 +143,9 @@ func gapWindows(tenants *settings.Registry) map[tenant.ID]time.Duration {
 }
 
 // served reports whether the registry is serving tenant id: what the
-// per-tenant resources — verifiers, dedupe stores, open streams — are pruned
-// by once a reload removes or rejects their tenant.
+// per-tenant resources — verifiers, dedupe stores, open streams, the cache
+// version index — are pruned by once a reload removes or rejects their
+// tenant.
 func (a *App) served(id tenant.ID) bool {
 	_, ok := a.tenants.For(id)
 	return ok
@@ -596,6 +597,10 @@ func (a *App) wireMQ() error {
 type pruner interface {
 	Prune(served func(tenant.ID) bool)
 }
+
+// The hook below asserts pruner at run time; this keeps LocalCache from
+// silently dropping out of it.
+var _ pruner = (*cache.LocalCache)(nil)
 
 // wireCache opens the L1 cache — the only tier in standalone mode. After
 // every reload a tenant no longer served, removed or rejected alike, has its
