@@ -85,6 +85,7 @@ func bootRedisApp(t *testing.T, redisAddr, prefix string, timeout time.Duration)
 		}},
 		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
 		Coord:    config.Coord{Backend: config.CoordLocal},
+		Roles:    config.AllRoles(),
 		Settings: config.Settings{Dir: settingsDir},
 	}
 	a, err := app.New(ctx, app.Options{Config: cfg, Listener: ln})
