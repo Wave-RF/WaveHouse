@@ -22,7 +22,7 @@ type Config struct {
 	DataDir string `yaml:"data_dir" env:"WH_DATA_DIR"`
 	// Roles are the components this process runs (every role by default);
 	// a Deployment per role differs only in this. See Role.
-	Roles []Role `yaml:"roles" env:"WH_ROLES" env-default:"api,ingest,sweeper"`
+	Roles []Role `yaml:"roles" env:"WH_ROLES"`
 	// InstanceID names this process: logged at boot, and the holder a
 	// distributed coordinator will record. Empty resolves to <hostname>-<8 hex>
 	// at Load.
@@ -175,8 +175,12 @@ type Auth struct {
 func defaults() Config {
 	return Config{
 		DataDir: "./data",
+		Roles:   AllRoles(),
 		Server:  Server{Port: 8080, ShutdownTimeout: 10},
-		Cache:   Cache{L1MaxCost: 64 << 20},
+		MQ:      MQ{Backend: MQEmbedded, NATS: defaultMQNATS()},
+		Cache:   Cache{Backend: CacheLocal, L1MaxCost: 64 << 20},
+		Dedupe:  Dedupe{Backend: DedupePebble},
+		Coord:   Coord{Backend: CoordLocal},
 		OTel: OTel{
 			Traces:  OTelTraces{Enabled: true, SampleRate: 1.0},
 			Metrics: OTelMetrics{Enabled: true},

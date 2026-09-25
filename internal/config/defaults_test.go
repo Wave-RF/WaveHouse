@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,7 +27,8 @@ type zeroCase struct {
 	get     func(*Config) any
 }
 
-// server.port is not here: 0 fails Validate, pinned by TestLoad_YAMLZeroPortIsRefused.
+// Keys whose zero Validate refuses are in refusedZeros instead. The mq.nats
+// keys load as zero because the block is read only under mq.backend=nats.
 var zeroCases = []zeroCase{
 	{"otel.traces.enabled", "WH_OTEL_TRACES_ENABLED", false, true, "false", false, func(c *Config) any { return c.OTel.Traces.Enabled }},
 	{"otel.metrics.enabled", "WH_OTEL_METRICS_ENABLED", false, true, "false", false, func(c *Config) any { return c.OTel.Metrics.Enabled }},
@@ -37,6 +39,27 @@ var zeroCases = []zeroCase{
 	{"cache.l1_max_cost", "WH_CACHE_L1_MAX_COST", int64(0), int64(64 << 20), "1024", int64(1024), func(c *Config) any { return c.Cache.L1MaxCost }},
 	{"prometheus.path", "WH_PROMETHEUS_PATH", "", "/metrics", "/prom", "/prom", func(c *Config) any { return c.Prometheus.Path }},
 	{"data_dir", "WH_DATA_DIR", "", "./data", "/var/lib/wh", "/var/lib/wh", func(c *Config) any { return c.DataDir }},
+	{"mq.nats.subject_prefix", "WH_MQ_NATS_SUBJECT_PREFIX", "", "wh", "acme", "acme", func(c *Config) any { return c.MQ.NATS.SubjectPrefix }},
+	{"mq.nats.partitions", "WH_MQ_NATS_PARTITIONS", 0, 1, "4", 4, func(c *Config) any { return c.MQ.NATS.Partitions }},
+	{"mq.nats.ingest_consumer", "WH_MQ_NATS_INGEST_CONSUMER", "", "wh-ingest", "ingest", "ingest", func(c *Config) any { return c.MQ.NATS.IngestConsumer }},
+	{"mq.nats.connect_timeout", "WH_MQ_NATS_CONNECT_TIMEOUT", time.Duration(0), 5 * time.Second, "2s", 2 * time.Second, func(c *Config) any { return c.MQ.NATS.ConnectTimeout }},
+	{"mq.nats.publish_timeout", "WH_MQ_NATS_PUBLISH_TIMEOUT", time.Duration(0), 5 * time.Second, "2s", 2 * time.Second, func(c *Config) any { return c.MQ.NATS.PublishTimeout }},
+	{"mq.nats.topology_wait", "WH_MQ_NATS_TOPOLOGY_WAIT", time.Duration(0), time.Minute, "2s", 2 * time.Second, func(c *Config) any { return c.MQ.NATS.TopologyWait }},
+}
+
+// refusedZeros are the non-zero defaults whose zero Validate refuses: written
+// in the file, the zero must reach Validate rather than become the default.
+var refusedZeros = []struct {
+	key  string
+	zero any
+	err  string
+}{
+	{"server.port", 0, "server.port 0 out of range"},
+	{"roles", []string{}, "roles (WH_ROLES) is empty"},
+	{"mq.backend", "", `mq.backend (WH_MQ_BACKEND) ""`},
+	{"cache.backend", "", `cache.backend (WH_CACHE_BACKEND) ""`},
+	{"dedupe.backend", "", `dedupe.backend (WH_DEDUPE_BACKEND) ""`},
+	{"coord.backend", "", `coord.backend (WH_COORD_BACKEND) ""`},
 }
 
 // yamlAt renders a file setting key to value, plus otel.enabled: true so
@@ -116,10 +139,15 @@ data_dir: ""
 	assert.Equal(t, 8080, cfg.Server.Port, "a key the file leaves out still gets its default")
 }
 
-func TestLoad_YAMLZeroPortIsRefused(t *testing.T) {
+func TestLoad_YAMLZeroIsRefused(t *testing.T) {
 	t.Parallel()
-	_, err := Load(writeYAML(t, "server:\n  port: 0\n"))
-	require.ErrorContains(t, err, "server.port 0 out of range", "0 reaches Validate instead of becoming 8080")
+	for _, tc := range refusedZeros {
+		t.Run(tc.key, func(t *testing.T) {
+			t.Parallel()
+			_, err := Load(writeYAML(t, yamlAt(t, tc.key, tc.zero)))
+			require.ErrorContains(t, err, tc.err, "the zero reaches Validate instead of becoming the default")
+		})
+	}
 }
 
 // A file that exists but leaves a key out gets the default, like no file.
@@ -166,8 +194,11 @@ func TestLoad_EnvWinsOverYAMLZeroAndDefault(t *testing.T) {
 // regression coverage above rather than silently skipping it.
 func TestZeroCases_CoverEveryNonZeroDefault(t *testing.T) {
 	t.Parallel()
-	covered := map[string]bool{"server.port": true}
+	covered := map[string]bool{}
 	for _, tc := range zeroCases {
+		covered[tc.key] = true
+	}
+	for _, tc := range refusedZeros {
 		covered[tc.key] = true
 	}
 	for _, f := range configFields(t) {
@@ -206,7 +237,7 @@ func configFields(t *testing.T) []configField {
 			if prefix != "" {
 				key = prefix + "." + key
 			}
-			if f.Type.Kind() == reflect.Struct {
+			if f.Type.Kind() == reflect.Struct && f.Type != reflect.TypeFor[time.Duration]() {
 				walk(key, v.Field(i))
 				continue
 			}
@@ -247,30 +278,46 @@ func TestDocs_DefaultsMatchCode(t *testing.T) {
 	}
 }
 
-// parseDocDefault reads a table cell as the type of like.
+// parseDocDefault reads a table cell as the type of like. An italic
+// parenthetical (*(empty)*, *(none)*, *(required)*) and a placeholder such as
+// `<hostname>-<8 hex>` both mean the field is empty and resolved at runtime.
 func parseDocDefault(t *testing.T, key, cell string, like any) any {
 	t.Helper()
 	cell = strings.TrimSpace(cell)
-	if cell == "*(empty)*" || cell == "*(required)*" {
+	if strings.HasPrefix(cell, "*(") && strings.HasSuffix(cell, ")*") || strings.Contains(cell, "<") {
 		cell = ""
 	} else {
 		cell = strings.Trim(cell, "`")
 	}
+	rt := reflect.TypeOf(like)
 	var (
 		v   any
 		err error
 	)
-	switch like.(type) {
-	case string:
-		v = cell
-	case bool:
+	switch {
+	case rt == reflect.TypeFor[time.Duration]():
+		v, err = time.ParseDuration(cell)
+	case rt.Kind() == reflect.String:
+		v = reflect.ValueOf(cell).Convert(rt).Interface()
+	case rt.Kind() == reflect.Bool:
 		v, err = strconv.ParseBool(cell)
-	case int:
+	case rt.Kind() == reflect.Int:
 		v, err = strconv.Atoi(cell)
-	case int64:
+	case rt.Kind() == reflect.Int64:
 		v, err = strconv.ParseInt(cell, 10, 64)
-	case float64:
+	case rt.Kind() == reflect.Float64:
 		v, err = strconv.ParseFloat(cell, 64)
+	case rt.Kind() == reflect.Slice && rt.Elem().Kind() == reflect.String:
+		out := reflect.MakeSlice(rt, 0, 0)
+		if cell != "" {
+			for _, e := range strings.Split(cell, ",") {
+				out = reflect.Append(out, reflect.ValueOf(strings.TrimSpace(e)).Convert(rt.Elem()))
+			}
+		}
+		if out.Len() == 0 {
+			out = reflect.Zero(rt)
+		}
+		v = out.Interface()
 	default:
 		t.Fatalf("%s: no doc parser for %T", key, like)
 	}

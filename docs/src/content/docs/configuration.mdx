@@ -63,7 +63,8 @@ Read only with `mq.backend: nats`. WaveHouse connects to NATS you run and uses s
 | `mq.nats.user` | `WH_MQ_NATS_USER` | *(empty)* | A user name, with `password_file`. |
 | `mq.nats.password_file` | `WH_MQ_NATS_PASSWORD_FILE` | *(empty)* | The file holding `user`'s password; a trailing newline is dropped. Refused without `user`. |
 | `mq.nats.tls.ca_file` | `WH_MQ_NATS_TLS_CA_FILE` | *(empty)* | CA bundle for the servers' certificates. |
-| `mq.nats.tls.cert_file`, `mq.nats.tls.key_file` | `WH_MQ_NATS_TLS_CERT_FILE`, `WH_MQ_NATS_TLS_KEY_FILE` | *(empty)* | A client certificate and its key, for mutual TLS. They come as a pair. |
+| `mq.nats.tls.cert_file` | `WH_MQ_NATS_TLS_CERT_FILE` | *(empty)* | A client certificate, for mutual TLS. It comes as a pair with `key_file`. |
+| `mq.nats.tls.key_file` | `WH_MQ_NATS_TLS_KEY_FILE` | *(empty)* | The client certificate's private key. It comes as a pair with `cert_file`. |
 | `mq.nats.tls.server_name` | `WH_MQ_NATS_TLS_SERVER_NAME` | *(empty)* | The name to verify the servers' certificates against, when it is not the host dialed. |
 | `mq.nats.tls.handshake_first` | `WH_MQ_NATS_TLS_HANDSHAKE_FIRST` | `false` | Start TLS before the NATS protocol, for servers that require it. |
 | `mq.nats.js_domain` | `WH_MQ_NATS_JS_DOMAIN` | *(empty)* | The JetStream domain, for a leafnode or hub-and-spoke deployment. |
