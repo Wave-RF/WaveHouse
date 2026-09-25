@@ -222,11 +222,11 @@ func TestDedupeDynamo_Check(t *testing.T) {
 	_, err := raw.CreateTable(t.Context(), &dynamodb.CreateTableInput{
 		TableName:            aws.String(table),
 		BillingMode:          types.BillingModePayPerRequest,
-		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
+		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeB}},
 		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
 	})
 	require.NoError(t, err)
-	assert.ErrorContains(t, dynamoClient(t, table, dedupe.DynamoConfig{}).Check(t.Context()), "must be binary")
+	assert.ErrorContains(t, dynamoClient(t, table, dedupe.DynamoConfig{}).Check(t.Context()), "must be a string")
 
 	fresh := newDynamoTable()
 	d := dynamoClient(t, fresh, dedupe.DynamoConfig{})
@@ -248,13 +248,13 @@ func TestDedupeDynamo_Expiry(t *testing.T) {
 	require.NoError(t, d.CreateTable(t.Context()))
 	m := d.Tenant("acme")
 	require.NoError(t, m.Apply(true))
-	pk := func(id string) []byte {
-		return dedupe.AppendKey(nil, dedupe.KeyPrefix("acme"), dedupe.Key{Table: "events", ID: id})
+	pk := func(id string) string {
+		return string(dedupe.AppendKey(nil, dedupe.KeyPrefix("acme"), dedupe.Key{Table: "events", ID: id}))
 	}
 	item := func(id string) map[string]types.AttributeValue {
 		out, err := raw.GetItem(t.Context(), &dynamodb.GetItemInput{
 			TableName: aws.String(table), ConsistentRead: aws.Bool(true),
-			Key: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberB{Value: pk(id)}},
+			Key: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: pk(id)}},
 		})
 		require.NoError(t, err)
 		return out.Item
@@ -280,7 +280,7 @@ func TestDedupeDynamo_Expiry(t *testing.T) {
 	// TTL deletes lazily; an item whose ex has passed is absent all the same.
 	for _, st := range []string{"1", "2"} {
 		_, err = raw.PutItem(t.Context(), &dynamodb.PutItemInput{TableName: aws.String(table), Item: map[string]types.AttributeValue{
-			"pk": &types.AttributeValueMemberB{Value: pk("stale-" + st)},
+			"pk": &types.AttributeValueMemberS{Value: pk("stale-" + st)},
 			"st": &types.AttributeValueMemberN{Value: st},
 			"ex": &types.AttributeValueMemberN{Value: strconv.FormatInt(time.Now().Add(-time.Minute).Unix(), 10)},
 			"tk": &types.AttributeValueMemberB{Value: []byte("old")},

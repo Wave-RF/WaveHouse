@@ -433,7 +433,7 @@ What the backend requires of the table:
 
 | Attribute | Type | Role |
 |---|---|---|
-| `pk` | Binary | Partition key, and the only key: tenant, table and id. No sort key. |
+| `pk` | String | Partition key, and the only key: tenant, table and id as readable text, for example `acme/clicks/evt%2D123` (the table and id escaped the way NATS subject tokens are). No sort key. |
 | `st` | Number | `1` = pending claim, `2` = committed. |
 | `ex` | Number | Epoch seconds: the lease end while pending, the retention end once committed; absent = never expires. |
 | `tk` | Binary | The claim token that `Release` matches. |
@@ -451,7 +451,7 @@ resource "aws_dynamodb_table" "wavehouse_dedupe" {
 
   attribute {
     name = "pk"
-    type = "B"
+    type = "S"
   }
 
   ttl {
