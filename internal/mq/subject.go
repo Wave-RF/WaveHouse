@@ -84,24 +84,27 @@ func keyTenant(key string) (tenant.ID, bool) {
 	return id, err == nil
 }
 
-// parseTopicKey recovers the Topic from a subject tail. Three tokens are
-// tenant, table and scope; two are tenant and table. A tail this package
-// could not have written — one token, more than three, a token that does not
-// decode, a tenant outside the grammar — cannot be split reliably, so the
-// whole of it becomes the table of no tenant rather than being dropped.
+// parseTopicKey recovers the Topic from a subject tail: the tenant token,
+// read verbatim as keyTenant reads it, then one or two escaped tokens, table
+// and scope (keyenc.Split). A tail this package could not have written — one
+// token, more than three, a token that does not decode, a tenant outside the
+// grammar — cannot be split reliably, so the whole of it becomes the table of
+// no tenant rather than being dropped.
 func parseTopicKey(tail string) Topic {
-	parts := strings.Split(tail, ".")
-	switch len(parts) {
-	case 2, 3:
-		id, idErr := tenant.Parse(parts[0])
-		table, tableErr := keyenc.Unescape(parts[1])
-		scope, scopeErr := "", error(nil)
-		if len(parts) == 3 {
-			scope, scopeErr = keyenc.Unescape(parts[2])
-		}
-		if idErr == nil && tableErr == nil && scopeErr == nil {
-			return Topic{Tenant: id, Table: table, Scope: scope}
-		}
+	first, rest, ok := strings.Cut(tail, ".")
+	if !ok {
+		return Topic{Table: tail}
+	}
+	id, idErr := tenant.Parse(first)
+	fields, fieldsErr := keyenc.Split(rest, '.')
+	if idErr != nil || fieldsErr != nil {
+		return Topic{Table: tail}
+	}
+	switch len(fields) {
+	case 1:
+		return Topic{Tenant: id, Table: fields[0]}
+	case 2:
+		return Topic{Tenant: id, Table: fields[0], Scope: fields[1]}
 	}
 	return Topic{Table: tail}
 }

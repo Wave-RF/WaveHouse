@@ -1003,9 +1003,9 @@ func (e *EmbeddedNATS) PurgeAcked(ctx context.Context, consumer string, olderTha
 }
 
 // DeadLetterCounts reads tenant id's dead-letter stream's per-subject counts
-// and keys them by table. The table filter matches that table's unscoped
-// subject, so it is applied to the parsed topic rather than as a subject
-// filter; a scoped topic counts under "table.scope".
+// and keys them by table (deadLetterTables). The table filter matches every
+// scope of that table, so it is applied to the parsed topic rather than as a
+// subject filter.
 func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table string) (DeadLetterCounts, error) {
 	if _, err := tenant.Parse(string(id)); err != nil {
 		return DeadLetterCounts{}, fmt.Errorf("tenant: %w", err)
@@ -1023,20 +1023,7 @@ func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table
 		return DeadLetterCounts{}, fmt.Errorf("dlq stream info: %w", err)
 	}
 
-	counts := DeadLetterCounts{Tables: make(map[string]uint64, len(state.Subjects)), Total: state.Msgs}
-	for subj, n := range state.Subjects {
-		t := parseTopicKey(topicKey(dlqPrefix, subj))
-		if table != "" && (t.Table != table || t.Scope != "") {
-			continue
-		}
-		name := t.Table
-		if t.Scope != "" {
-			// TODO(#235): break scopes out rather than fold them into the name.
-			name += "." + t.Scope
-		}
-		counts.Tables[name] += n
-	}
-	return counts, nil
+	return DeadLetterCounts{Tables: deadLetterTables(state.Subjects, dlqPrefix, table), Total: state.Msgs}, nil
 }
 
 // ReplaySince creates an ephemeral consumer on topic's ingest subject, in its

@@ -1,17 +1,19 @@
 // Package keyenc is the one escaping composite WaveHouse keys are built
 // from: NATS subject tokens and cache namespace tokens. A field keeps ASCII
-// letters, digits and '_' as they are and writes every other byte as %XX
+// letters, digits, '_' and '-' as they are and writes every other byte as %XX
 // (uppercase hex), so no separator, wildcard, whitespace, brace or non-ASCII
 // byte ever appears in it unescaped, and any table name ClickHouse accepts
-// encodes.
+// encodes. The bytes it keeps are exactly a tenant id's (tenant.Parse), so a
+// tenant id is its own escaped form.
 //
-// The output is pinned byte for byte: NATS subjects have carried it since
-// v0.1.0, and queued messages outlive the binary that wrote them.
+// Keys built from it are stored — queued under NATS subjects, held in caches
+// — so a change to what it keeps orphans them. v0.1.0 escaped '-' as %2D;
+// Unescape still reads that form.
 package keyenc
 
 import (
-	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -19,7 +21,7 @@ const upperHex = "0123456789ABCDEF"
 
 // kept reports whether b is written as itself.
 func kept(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
 }
 
 // Escape encodes s as one field.
@@ -45,60 +47,33 @@ func AppendEscape(dst []byte, s string) []byte {
 	return dst
 }
 
-// ErrBadEscape is a '%' not followed by two hex digits.
-var ErrBadEscape = errors.New("keyenc: malformed escape")
-
-// Unescape reverses Escape. It decodes %XX in either hex case and takes any
-// other byte as itself — what url.PathUnescape accepts — so a field some
-// other writer left partly unescaped still reads.
+// Unescape reverses Escape. It is url.PathUnescape: %XX in either hex case
+// decodes, and any other byte reads as itself, so a field another writer
+// left partly unescaped — v0.1.0's %2D included — still reads.
 func Unescape(s string) (string, error) {
-	i := strings.IndexByte(s, '%')
-	if i < 0 {
-		return s, nil
-	}
-	out := make([]byte, 0, len(s))
-	out = append(out, s[:i]...)
-	for ; i < len(s); i++ {
-		if s[i] != '%' {
-			out = append(out, s[i])
-			continue
-		}
-		if i+2 >= len(s) {
-			return "", fmt.Errorf("%w in %q", ErrBadEscape, s)
-		}
-		hi, ok1 := unhex(s[i+1])
-		lo, ok2 := unhex(s[i+2])
-		if !ok1 || !ok2 {
-			return "", fmt.Errorf("%w in %q", ErrBadEscape, s)
-		}
-		out = append(out, hi<<4|lo)
-		i += 2
-	}
-	return string(out), nil
+	return url.PathUnescape(s)
 }
 
-func unhex(c byte) (byte, bool) {
-	switch {
-	case c >= '0' && c <= '9':
-		return c - '0', true
-	case c >= 'a' && c <= 'f':
-		return c - 'a' + 10, true
-	case c >= 'A' && c <= 'F':
-		return c - 'A' + 10, true
+// checkSep panics unless sep can separate escaped fields: a byte Escape never
+// writes, and ASCII, so the key stays valid UTF-8.
+func checkSep(sep byte) {
+	if kept(sep) || sep == '%' || sep >= 0x80 {
+		panic(fmt.Sprintf("keyenc: %q cannot separate fields", sep))
 	}
-	return 0, false
 }
 
-// Join escapes each field and joins them with sep. It panics if sep is a
-// byte Escape keeps, since a key split on it could then not be told apart.
+// Join escapes each field and joins them with sep. It panics on no fields,
+// whose key would be one empty field's, and on a separator Escape could
+// write.
 func Join(sep byte, fields ...string) string {
 	return string(AppendJoin(nil, sep, fields...))
 }
 
 // AppendJoin appends Join(sep, fields...) to dst.
 func AppendJoin(dst []byte, sep byte, fields ...string) []byte {
-	if kept(sep) || sep == '%' {
-		panic(fmt.Sprintf("keyenc: %q cannot separate fields", sep))
+	checkSep(sep)
+	if len(fields) == 0 {
+		panic("keyenc: Join needs at least one field")
 	}
 	for i, f := range fields {
 		if i > 0 {
@@ -109,9 +84,11 @@ func AppendJoin(dst []byte, sep byte, fields ...string) []byte {
 	return dst
 }
 
-// Split reverses Join: the fields of key, each unescaped.
+// Split reverses Join: the fields of key, each unescaped. It panics on a
+// separator Join would refuse.
 func Split(key string, sep byte) ([]string, error) {
-	parts := strings.Split(key, string(sep))
+	checkSep(sep)
+	parts := strings.Split(key, string([]byte{sep}))
 	for i, p := range parts {
 		f, err := Unescape(p)
 		if err != nil {
