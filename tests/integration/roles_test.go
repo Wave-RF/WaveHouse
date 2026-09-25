@@ -32,11 +32,20 @@ import (
 
 // The binary under test is built once per run, with coverage when the suite
 // collects it: a child inherits GOCOVERDIR and writes its counters there.
+// binaryDir is removed by TestMain after the run (removeRolesBinary).
 var (
 	binaryOnce sync.Once
+	binaryDir  string
 	binaryPath string
 	errBinary  error
 )
+
+// removeRolesBinary deletes the binary wavehouseBinary built, if it built one.
+func removeRolesBinary() {
+	if binaryDir != "" {
+		_ = os.RemoveAll(binaryDir)
+	}
+}
 
 func wavehouseBinary(t *testing.T) string {
 	t.Helper()
@@ -46,6 +55,7 @@ func wavehouseBinary(t *testing.T) string {
 			errBinary = err
 			return
 		}
+		binaryDir = dir
 		binaryPath = filepath.Join(dir, "wavehouse")
 		args := []string{"build", "-o", binaryPath}
 		if os.Getenv("GOCOVERDIR") != "" {

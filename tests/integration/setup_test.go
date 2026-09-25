@@ -118,6 +118,7 @@ func TestMain(m *testing.M) {
 
 	exit := m.Run()
 	cleanup()
+	removeRolesBinary()
 	os.Exit(exit)
 }
 
