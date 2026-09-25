@@ -264,7 +264,6 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"padded override id_field", FileConfig, `{"dedupe": {"tables": {"clicks": {"id_field": "click_id "}}}}`, "dedupe.tables.clicks.id_field"},
 		{"empty override table name", FileConfig, `{"dedupe": {"tables": {"": {"id_field": "x"}}}}`, "table name must not be empty"},
 		{"override table whitespace", FileConfig, `{"dedupe": {"tables": {" clicks": {"require_id": true}}}}`, "surrounding whitespace"},
-		{"override table NUL", FileConfig, `{"dedupe": {"tables": {"cli\u0000cks": {"require_id": true}}}}`, "holds a NUL byte"},
 		{"empty override id_field", FileConfig, `{"dedupe": {"tables": {"clicks": {"id_field": ""}}}}`, "dedupe.tables.clicks.id_field: must not be empty"},
 		{"negative max rows", FileConfig, `{"query": {"default_max_rows": -1}}`, "must be >= 1"},
 		{"zero max rows", FileConfig, `{"query": {"default_max_rows": 0}}`, "must be >= 1"},
@@ -394,6 +393,20 @@ func TestValidate_DedupeRetentionOptional(t *testing.T) {
 	require.NotNil(t, doc, "findings: %s", findingStrings(findings))
 	assert.False(t, HasErrors(findings), "findings: %s", findingStrings(findings))
 	assert.Nil(t, doc.Config.Dedupe.Retention)
+}
+
+// A table name with odd bytes — NUL included — is any other table name to
+// the override maps: dedupe keys carry the table's length, not a separator.
+func TestValidate_OverrideTableNamesAnyBytes(t *testing.T) {
+	t.Parallel()
+	files := validFiles()
+	files[FileConfig] = configJSON(`{"dedupe": {"tables": {"cli\u0000cks": {"require_id": true}, "a\u0001b\tc": {"id_field": "x"}}}, "dlq": {"tables": {"cli\u0000cks": {"enabled": false}}}}`)
+	doc, findings := ValidateDir(writeDir(t, files))
+	require.Empty(t, findings, "findings: %s", findingStrings(findings))
+	require.NotNil(t, doc)
+	assert.Contains(t, doc.Config.Dedupe.Tables, "cli\x00cks")
+	assert.Contains(t, doc.Config.Dedupe.Tables, "a\x01b\tc")
+	assert.Contains(t, doc.Config.DLQ.Tables, "cli\x00cks")
 }
 
 // TestValidate_ClickHouseTLSPathsAreNotOpened pins that the tls block is
