@@ -249,7 +249,8 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		return data, nil
 	})
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		caps := queryCaps{time: perms.Select.MaxExecutionTime > 0, memory: perms.Select.MaxMemoryUsage > 0}
+		writeCHError(w, r, err, err.Error(), http.StatusInternalServerError, caps)
 		return
 	}
 

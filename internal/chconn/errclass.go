@@ -18,7 +18,7 @@ import (
 // Class is what a failed ClickHouse request says about the request itself:
 // whether sending it again, unchanged, can succeed. The ingest worker retries
 // every class but Rejected and dead-letters only Rejected; the query handlers
-// can map the same classes onto HTTP statuses (#403, #271).
+// map the same classes onto HTTP statuses (api/ch_errors.go).
 type Class int
 
 const (

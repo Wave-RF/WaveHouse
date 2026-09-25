@@ -507,7 +507,7 @@ type Result<T> =
 
 interface WaveHouseError {
   status: number;     // HTTP status (0 for network errors)
-  code: string;       // e.g. 'HTTP_400', 'NETWORK_ERROR', 'ABORTED'
+  code: string;       // e.g. 'HTTP_400', 'clickhouse.rejected', 'NETWORK_ERROR', 'ABORTED'
   message: string;    // Human-readable error message
   details?: unknown;  // Raw response body
   retryable: boolean; // Whether SDK would retry this error

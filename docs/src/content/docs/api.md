@@ -84,6 +84,27 @@ The per-endpoint error tables below list the bodies you can expect for each stat
 For SSE, streaming endpoints, or any handler that has already started writing the response, a later panic is recovered and logged server-side but no JSON 500 body is written — once headers are flushed, replacing them would corrupt the stream. Clients consuming streams should treat connection termination or truncated output as the failure signal in those cases.
 :::
 
+### ClickHouse errors on the query paths
+
+When ClickHouse fails a query on [`POST /v1/query`](#post-v1querytabletable--structured-query), [`/v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe) or [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse), the status comes from **what kind of failure it was**, not from ClickHouse's HTTP status: ClickHouse answers a syntax error, a missing grant and an overloaded server alike with HTTP `500`. WaveHouse reads the ClickHouse exception code (the `X-ClickHouse-Exception-Code` header or the `Code: NNN.` in the message, or the native driver's exception) and answers with two extra fields alongside `error`:
+
+```json
+{"error": "Code: 62. DB::Exception: Syntax error: …", "code": "clickhouse.rejected", "retryable": false}
+```
+
+| Status | `code` | `retryable` | When |
+| ------ | ------ | ----------- | ---- |
+| 400 | `clickhouse.rejected` | `false` | ClickHouse read the statement and refused it: bad SQL, an unknown table, column or identifier, a type mismatch — any exception code not listed below. Sent again unchanged, it fails the same way |
+| 400 | `clickhouse.limit_exceeded` | `false` | The query outran a limit it ran under: rows read or returned, bytes (`TOO_MANY_ROWS`, `TOO_MANY_BYTES`, `TOO_MANY_ROWS_OR_BYTES`), or, on `/v1/query`, the role's own `max_execution_time` or `max_memory_usage` cap (`TIMEOUT_EXCEEDED`, `TOO_SLOW`, `MEMORY_LIMIT_EXCEEDED`). Narrow the query |
+| 403 | `clickhouse.access_denied` | `false` | The ClickHouse user WaveHouse connects as lacks a grant the statement needs (`ACCESS_DENIED`). Grant it, or run something it may. Logged at `WARN` too |
+| 502 | `clickhouse.misconfigured` | `false` | ClickHouse refused the credentials or database WaveHouse connects with: a wrong password, an unknown or expired user, a refused address, the database denied, or a `401`/`403` from a proxy in front of it. Every query fails until the operator fixes the tenant's `clickhouse` settings or `WH_CH_PASSWORD`, so retrying does not help. Logged at `WARN` |
+| 503 | `clickhouse.unavailable` | `true` | ClickHouse, or the way to it, could not take the query now: connection refused or dropped, a timeout, too many queries, memory pressure, lost replicas or Keeper, or a `502`/`503`/`504`/`429`/`408` from a proxy. `Retry-After: 5` |
+| 500 (`/v1/query`, pipes) / 502 (`/v1/ops/query`) | `clickhouse.unknown` | `true` | A failure with no verdict: no exception code and no recognizable transport error |
+
+A timeout or memory limit is `clickhouse.unavailable` unless the role set the cap it hit: `/v1/ops/query` and pipes run under no role caps, so there it can be the server's state as much as the query's. The classes are the ones the ingest worker uses to decide between retrying a batch and dead-lettering it ([ingest pipeline](/ingest-pipeline#when-clickhouse-cannot-take-an-insert)); the lists of exception codes live in `internal/chconn/errclass.go`.
+
+**Why a missing grant is a `403`.** A query path runs as the ClickHouse user in the tenant's settings, not as the caller, so `ACCESS_DENIED` is in one sense WaveHouse's configuration. It is still a verdict on *this statement*: ClickHouse understood it and refused it, the same statement is refused every time, and other statements from the same caller succeed. That is a `403`, and it matters most on `/v1/ops/query`, where the admin wrote the statement — a `CREATE USER` through a user without the grant is the admin asking for something this deployment does not allow. A `5xx` would tell clients and monitors that ClickHouse is down and invite retries of a request that can never pass. Denials that refuse every query, not one statement — the credentials, the user, the database — are the operator's to fix, so they are `502 clickhouse.misconfigured`, still not retryable.
+
 ## Endpoints
 
 ### `GET /livez` — Liveness Probe
@@ -470,12 +491,12 @@ The earlier handler accepted a `params` array bound to `?` placeholders; the HTT
 | 503 | `{"error":"tenant settings are invalid"}` | The tenant's settings folder was rejected |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"missing sql"}` | Missing `sql` field |
-| 400 | `{"error":"<ClickHouse error message>"}` | ClickHouse rejected the statement with a 4xx (bad SQL, missing table, type error, …). The body carries ClickHouse's own error text verbatim, e.g. `Code: 60. DB::Exception: Table default.x doesn't exist.`. The proxy maps any ClickHouse 4xx to HTTP 400 — caller-fault, the request itself is what's wrong. |
+| 400 / 403 / 502 / 503 | `{"error":"<ClickHouse error message>","code":"clickhouse.…","retryable":…}` | ClickHouse failed the statement. The status and `code` come from the exception code, not ClickHouse's HTTP status — see [ClickHouse errors on the query paths](#clickhouse-errors-on-the-query-paths). The `error` is ClickHouse's own text verbatim, e.g. `Code: 60. DB::Exception: Table default.x does not exist. (UNKNOWN_TABLE)` |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | The request carried a present-but-invalid/expired token and was denied for lacking permission (the gate surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
-| 502 | `{"error":"<ClickHouse error message>"}` | ClickHouse returned a 5xx (internal error, overloaded, etc.). The proxy maps any ClickHouse 5xx to HTTP 502 — gateway-fault, the upstream service had a problem. Same body convention: ClickHouse's text is forwarded as-is. |
-| 502 | `{"error":"clickhouse request failed: ..."}` | Transport-level failure reaching ClickHouse (connection refused, timeout, the upstream went away mid-request) |
-| 502 | `{"error":"clickhouse response exceeded N bytes; ..."}` | Response body exceeded the 64 MiB memory-safety cap. Narrow the query, add a `LIMIT`, or use `FORMAT JSONEachRow` with a streaming client outside WaveHouse. |
+| 502 | `{"error":"<message>","code":"clickhouse.unknown","retryable":true}` | An answer with no ClickHouse exception code that is not an outage — a `500` or a redirect from something in front of ClickHouse |
+| 503 | `{"error":"clickhouse request failed: ...","code":"clickhouse.unavailable","retryable":true}` | ClickHouse could not be reached, or the query timed out (connection refused, the upstream went away mid-request); `Retry-After: 5`. A TLS failure, such as an untrusted certificate, is `502 clickhouse.unknown` |
+| 502 | `{"error":"clickhouse response exceeded N bytes; ...","code":"clickhouse.response_too_large","retryable":false}` | Response body exceeded the 64 MiB memory-safety cap. Narrow the query, add a `LIMIT`, or use `FORMAT JSONEachRow` with a streaming client outside WaveHouse. |
 | 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused — so the SQL cannot run; `Retry-After: 30`, a settings reload retries the pool |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
@@ -552,6 +573,8 @@ The inbound request body is capped at 1 MiB; a body over the cap is rejected wit
 | 403 | `{"error":"aggregation \"x\" not allowed"}` | Aggregation fn denied by policy |
 | 404 | `{"error":"unknown table: x"}` | Table not found in the tenant's discovered schema |
 | 413 | `{"error":"request body exceeded 1048576 bytes"}` | Request body over the 1 MiB cap |
+| 400 / 403 / 502 / 503 | `{"error":"clickhouse query: …","code":"clickhouse.…","retryable":…}` | ClickHouse failed the query: a column dropped since the schema was discovered (`400 clickhouse.rejected`), the role's `max_rows_to_read`/`max_execution_time`/`max_memory_usage` cap (`400 clickhouse.limit_exceeded`), ClickHouse down (`503 clickhouse.unavailable`, `Retry-After: 5`), … — see [ClickHouse errors on the query paths](#clickhouse-errors-on-the-query-paths) |
+| 500 | `{"error":"…","code":"clickhouse.unknown","retryable":true}` | A failure with no verdict |
 | 503 | `{"error":"schema not loaded yet"}` | The tenant's first schema discovery has not succeeded yet, so whether the table exists is not known; `Retry-After: 5` |
 | 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused — so the query cannot run; decided ahead of the cache, so nothing cached before is served either; `Retry-After: 30`, a settings reload retries the pool |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
@@ -590,6 +613,7 @@ The POST parameter body is capped at 1 MiB; a body over the cap is rejected with
 | 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL literal form — a JSON object, whether supplied directly or nested as an array element. A JSON **array** is valid and renders as an `IN`-style `(…)` list. |
 | 400 | `{"error":"parameter \"x\": array parameter must not be empty"}` | An empty array — it would render as the invalid `IN ()`. |
 | 413 | `{"error":"request body exceeded 1048576 bytes"}` | POST body over the 1 MiB cap |
+| 400 / 403 / 500 / 502 / 503 | `{"error":"clickhouse query: …","code":"clickhouse.…","retryable":…}` | ClickHouse failed the pipe's query — for instance a parameter value it cannot use (`400 clickhouse.rejected`), or ClickHouse down (`503 clickhouse.unavailable`, `Retry-After: 5`); see [ClickHouse errors on the query paths](#clickhouse-errors-on-the-query-paths) |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 ---
@@ -725,7 +749,8 @@ Triggers an immediate re-discovery of the `?tenant=`'s ClickHouse table schemas 
 | 401 / 403 | as above | Not the admin role |
 | 400 / 404 / 503 | as on `GET /v1/ops/schema` | The `?tenant=` could not be resolved |
 | 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused — so nothing can be discovered; `Retry-After: 30`, a settings reload retries the pool |
-| 500 | `{"error":"refresh failed"}` | ClickHouse discovery query failed |
+| 503 | `{"error":"refresh failed: clickhouse unavailable"}` | ClickHouse could not be reached (connection refused, a timeout, overload); `Retry-After: 5` |
+| 500 | `{"error":"refresh failed"}` | ClickHouse discovery query failed any other way |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 **Response:**
