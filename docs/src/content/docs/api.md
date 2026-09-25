@@ -186,6 +186,22 @@ Where those values come from depends on how the binary was built:
 
 ---
 
+### A process without the `api` role — the ops listener
+
+A process whose [`roles`](/configuration#process-roles) leave out `api` (an ingest or sweeper worker, possible with [`mq.backend: nats`](/deployment#external-nats)) serves only these routes on `server.port`:
+
+| Route | Notes |
+| ----- | ----- |
+| `GET /livez` (and `/healthz`, `/health`) | `200` once booted. It does not wait for schema discovery, which only the API runs. |
+| `GET /readyz` (and `/ready`) | In a process running `ingest`, `200` when a ClickHouse pool answers, as above. In a `sweeper`-only process, `200` once booted. |
+| `GET /version` | As above. |
+| The metrics path | When `prometheus.port` is `0`. |
+| `POST /v1/ops/settings/reload` | As [below](#post-v1opssettingsreload--reload-settings-directory), but it accepts only the [operator key](#authentication): no token verifier runs without the `api` role, so an admin token is `401`. |
+
+Every other route answers `404`, including every tenant route. Under `/v1/ops`, the operator-key check comes first, so a request without the key gets `403` there instead.
+
+---
+
 ### `POST /v1/ingest?table={table}` — Ingest Data
 
 Accepts a single flat JSON object, a JSON array of objects, or a newline-delimited JSON (NDJSON) batch, validates each record against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.
@@ -274,8 +290,8 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
 | 503 | `{"error":"schema not loaded yet"}` | The tenant's first schema discovery has not succeeded yet (its ClickHouse unreachable, or [no pool for it](/settings-directory#clickhouse)), so whether the table exists is not known; `Retry-After: 5`. Decided before the body is read |
 | 500 | `{"error":"publish failed"}` | Message queue error |
-| 503 | `{"error":"service unavailable"}` | The tenant's ingest queue is full (backpressure, for that tenant alone) or not open (see [Message Queue](/settings-directory#message-queue)). Response includes `Retry-After: 30` header. |
-| 503 | `{"error":"service unavailable"}` | The message queue could not be reached or did not answer in time (a transient broker failure, not a full queue). Response includes `Retry-After: 5` header. Reserved for an external broker ([#613](https://github.com/Wave-RF/WaveHouse/issues/613)): the embedded broker never reports this, and its publish failures are the `500` above. |
+| 503 | `{"error":"service unavailable"}` | The tenant's ingest queue is full (backpressure, for that tenant alone) or not open (see [Message Queue](/settings-directory#message-queue)). Under [`mq.backend: nats`](/deployment#external-nats), the tenant's partition stream is full, which refuses every tenant in it, or the tenant's table holds as many unwritten rows as the stream allows one subject. Response includes `Retry-After: 30` header. |
+| 503 | `{"error":"service unavailable"}` | The message queue could not be reached or did not answer in time (a transient broker failure, not a full queue). Response includes `Retry-After: 5` header. Only under [`mq.backend: nats`](/deployment#external-nats), including a partition stream the operator deleted; the embedded broker never reports this, and its publish failures are the `500` above. |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 **curl example:**
@@ -387,7 +403,7 @@ A `200` is returned whenever the body was read and the records were processed �
 | 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, …"}` (declared variant: `Content-Type "text/plain": ingest requires one of …` — see the note above on how declarations are echoed; conflicting variant: `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of …`) | The request declared no `Content-Type`, one whose media type is unsupported or does not parse, a comma-bearing value that does not parse as a single media type, or repeated header lines that disagree — different formats, or one supported and one not. Checked before the body is parsed |
 | 500 | `{"error":"publish failed"}` / `{"error":"dedupe failed"}` | Message-queue or dedup-backend failure mid-batch |
 | 503 | `{"error":"service unavailable"}` | The tenant's ingest queue is full (backpressure) or not open, mid-batch; includes `Retry-After: 30` |
-| 503 | `{"error":"service unavailable"}` | The message queue could not be reached or did not answer in time, mid-batch; includes `Retry-After: 5`. Reserved for an external broker ([#613](https://github.com/Wave-RF/WaveHouse/issues/613)): the embedded broker never reports this, and its publish failures are the `500` above |
+| 503 | `{"error":"service unavailable"}` | The message queue could not be reached or did not answer in time, mid-batch; includes `Retry-After: 5`. Only under [`mq.backend: nats`](/deployment#external-nats); the embedded broker never reports this, and its publish failures are the `500` above |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 :::caution[At-least-once on retry]
@@ -747,7 +763,7 @@ Triggers an immediate re-discovery of the `?tenant=`'s ClickHouse table schemas 
 
 #### `GET /v1/ops/dlq/stats` — DLQ Statistics
 
-Returns per-table message counts in one tenant's Dead Letter Queue: the [tenant](/deployment#the-nested-settings-directory) an optional `?tenant=<id>` names, the default tenant `0` without it, which is the whole settings directory unless it is nested. The tenant is looked up in the message queue, not the settings, so a tenant whose folder was rejected or removed is read like one being served, since its queue is kept (nothing deletes it). The query string is parsed strictly, as on the other admin reads. Admin-only, like the rest of this section. Whether a poison row lands here is the settings directory's [`dlq.enabled`](/settings-directory#dead-letter-queue) switch (global or per table); a tenant's dead-letter stream is opened when the tenant is first served, and this endpoint always exists. Before any failure has ever occurred, the endpoint returns `200` with `{"tables":{},"total":0}`.
+Returns per-table message counts in one tenant's Dead Letter Queue: the [tenant](/deployment#the-nested-settings-directory) an optional `?tenant=<id>` names, the default tenant `0` without it, which is the whole settings directory unless it is nested. The tenant is looked up in the message queue, not the settings, so a tenant whose folder was rejected or removed is read like one being served, since its queue is kept (nothing deletes it). The query string is parsed strictly, as on the other admin reads. Admin-only, like the rest of this section. Whether a poison row lands here is the settings directory's [`dlq.enabled`](/settings-directory#dead-letter-queue) switch (global or per table); a tenant's dead-letter stream is opened when the tenant is first served, and this endpoint always exists. Before any failure has ever occurred, the endpoint returns `200` with `{"tables":{},"total":0}`. Under [`mq.backend: nats`](/deployment#external-nats) every tenant's rows are counted on one shared dead-letter stream, so any tenant id reads `200`, with zeros when it has never parked a row, and the `404` below does not occur.
 
 **Error responses:**
 
@@ -756,7 +772,7 @@ Returns per-table message counts in one tenant's Dead Letter Queue: the [tenant]
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
 | 400 | `{"error":"invalid query string: …"}` / `{"error":"invalid ?tenant: …"}` | The query string does not parse (`?tenant=acme;x=1`, a bad `%` escape), or `tenant` is empty, repeated, or not a tenant id |
 | 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
-| 404 | `{"error":"no dead-letter queue for tenant: <id>"}` | The tenant has no dead-letter queue: it has never been served on this data directory, its queue could not be opened (see [Message Queue](/settings-directory#message-queue)), or the id names no tenant |
+| 404 | `{"error":"no dead-letter queue for tenant: <id>"}` | Embedded queue only. The tenant has no dead-letter queue: it has never been served on this data directory, its queue could not be opened (see [Message Queue](/settings-directory#message-queue)), or the id names no tenant |
 | 500 | `{"error":"stream info failed"}` | NATS JetStream stream-info lookup failed |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`); refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
@@ -879,6 +895,8 @@ Three values, where the envelope above has four: this is the frame a role restri
 ## Dead Letter Queue (DLQ)
 
 When a batch insert to ClickHouse fails (e.g., type errors, connection issues), the worker re-inserts the batch row by row: rows that succeed are acked, and only the rows that fail again are published to the tenant's own DLQ NATS stream (`DLQ_{tenant}`) under subjects `dlq.{tenant}.{table}` (the tenant the row was ingested under; `0` for a settings directory that holds the four files). This prevents infinite retry loops — those messages are ACKed from the main stream and moved to the DLQ for inspection. A batch whose tenant has no ClickHouse connection — one no longer served, or one no pool could be opened for (such as by the connection ceiling) — skips that retry, which no row of it could pass, and is parked whole; only a served tenant whose DLQ is off for the table leaves it for redelivery, since a tenant no longer served has no switch to read. A second class lands here too: an envelope the worker cannot *read* at all — malformed JSON, an unknown **or absent** `format`, or `columns` and `row` that do not pair — is parked without ever reaching a table batch. **Two different body shapes land here, and a consumer must not assume one decoder.** A row that failed its INSERT is parked as the `EventMessage` envelope above. An envelope the worker could not *read* is parked as **its original bytes, verbatim** — `parkOnDLQ` republishes what arrived — so it is whatever the producer sent: malformed JSON, an envelope of an unknown `format`, or a v2 envelope whose `columns` and `row` do not pair. Being undecodable as an `EventMessage` is precisely why it was parked, so decode defensively and fall back on the `X-DLQ-Error` header, which names the reason. For the first shape the body is the published `EventMessage` envelope (`{"table_name":…,"scope":"","received_timestamp":…,"format":…,"columns":[…],"row":[…]}` — the failed row is the `row` array, read against `columns`, its `DateTime`/`DateTime64` values as published: canonicalized where WaveHouse could parse them, otherwise the producer's original spelling — see [timestamp canonicalization](#timestamp-canonicalization)); the failure reason, table, and time travel in the `X-DLQ-Table` / `X-DLQ-Error` / `X-DLQ-Timestamp` message headers.
+
+Under [`mq.backend: nats`](/deployment#external-nats) the parked rows of every tenant go to one shared dead-letter stream instead, under `<prefix>.dlq.{tenant}.{table}`; the bodies and headers are the same.
 
 Use `GET /v1/ops/dlq/stats` to monitor DLQ depth, per tenant (`?tenant=`).
 

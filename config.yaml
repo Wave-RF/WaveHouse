@@ -55,6 +55,13 @@ clickhouse:
 # exists for each today, and it is the default.
 mq:
   backend: embedded # NATS JetStream under <data_dir>/nats
+  # backend: nats reads this block instead: the operator's NATS JetStream
+  # (see the deployment guide's "External NATS" section).
+  # nats:
+  #   urls: ["nats://localhost:4222"]
+  #   user: wavehouse
+  #   password_file: ./nats-password
+  #   partitions: 4
 dedupe:
   backend: pebble # Pebble under <data_dir>/pebble
 coord:

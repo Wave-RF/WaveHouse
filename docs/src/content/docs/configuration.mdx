@@ -39,16 +39,55 @@ This page is boot config only — what the platform operator owns (wiring, lifec
 
 ### Backends
 
-Each layer's implementation is chosen once, at boot. Today every layer has one backend, the in-process one, and it is the default, so a config that sets none of these keys runs as it always has. A value this build has no backend for refuses boot and names the valid ones.
+Each layer's implementation is chosen once, at boot. Every layer's default is its in-process backend, so a config that sets none of these keys runs as it always has. The message queue also has a shared backend, `nats`; every other layer has only its in-process one so far. A value this build has no backend for refuses boot and names the valid ones.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `mq.backend` | `WH_MQ_BACKEND` | `embedded` | The message queue. `embedded`: NATS JetStream inside this process, under `<data_dir>/nats`. It listens on no port, so no other process can reach its queue. |
+| `mq.backend` | `WH_MQ_BACKEND` | `embedded` | The message queue. `embedded`: NATS JetStream inside this process, under `<data_dir>/nats`. It listens on no port, so no other process can reach its queue. `nats`: a NATS JetStream cluster you run, shared by every WaveHouse process that names it, configured by [`mq.nats`](#external-nats-mqnats); nothing is kept under `data_dir/nats`. |
 | `cache.backend` | `WH_CACHE_BACKEND` | `local` | The query-result cache. `local`: in this process, sized by `cache.l1_max_cost`. |
 | `dedupe.backend` | `WH_DEDUPE_BACKEND` | `pebble` | Where ingest dedupe keeps the event ids it has seen. `pebble`: in this process, under `<data_dir>/pebble`, open while any tenant has dedupe on. |
 | `coord.backend` | `WH_COORD_BACKEND` | `local` | Where the leases for work only one process may do at a time, such as the sweeper, are held. `local`: in this process, so the one process always holds them. It shares nothing with another process, so every process runs its own sweeper. |
 
-Settings for one backend will go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. No backend has settings yet, so today any such sub-block, `mq.embedded` included, is an unknown key and refuses boot. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
+Settings for one backend go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. `mq.nats` is the only one so far; any other, `mq.embedded` included, is an unknown key and refuses boot. `mq.nats` written while `mq.backend` is `embedded` is not read, and boot logs a warning saying so. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
+
+### External NATS (`mq.nats`)
+
+Read only with `mq.backend: nats`. WaveHouse connects to NATS you run and uses streams and durable consumers you create: it never creates, changes, purges or deletes one. [Deployment → External NATS](/deployment#external-nats) covers the cluster, the streams, the user's permissions and the gauges. Secrets are file paths only, such as a mounted Kubernetes Secret; no key takes a secret inline, and `mq.nats.password` or `WH_MQ_NATS_PASSWORD` refuses boot as an unknown key.
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `mq.nats.urls` | `WH_MQ_NATS_URLS` | *(none)* | Required. The servers to dial: a YAML list, or a comma-separated variable. |
+| `mq.nats.name` | `WH_MQ_NATS_NAME` | `wavehouse-<hostname>` | The connection name the server reports. |
+| `mq.nats.creds_file` | `WH_MQ_NATS_CREDS_FILE` | *(empty)* | A `.creds` file (user JWT and nkey seed), for decentralized auth. |
+| `mq.nats.nkey_seed_file` | `WH_MQ_NATS_NKEY_SEED_FILE` | *(empty)* | An nkey seed file. |
+| `mq.nats.user` | `WH_MQ_NATS_USER` | *(empty)* | A user name, with `password_file`. |
+| `mq.nats.password_file` | `WH_MQ_NATS_PASSWORD_FILE` | *(empty)* | The file holding `user`'s password; a trailing newline is dropped. Refused without `user`. |
+| `mq.nats.tls.ca_file` | `WH_MQ_NATS_TLS_CA_FILE` | *(empty)* | CA bundle for the servers' certificates. |
+| `mq.nats.tls.cert_file`, `mq.nats.tls.key_file` | `WH_MQ_NATS_TLS_CERT_FILE`, `WH_MQ_NATS_TLS_KEY_FILE` | *(empty)* | A client certificate and its key, for mutual TLS. They come as a pair. |
+| `mq.nats.tls.server_name` | `WH_MQ_NATS_TLS_SERVER_NAME` | *(empty)* | The name to verify the servers' certificates against, when it is not the host dialed. |
+| `mq.nats.tls.handshake_first` | `WH_MQ_NATS_TLS_HANDSHAKE_FIRST` | `false` | Start TLS before the NATS protocol, for servers that require it. |
+| `mq.nats.js_domain` | `WH_MQ_NATS_JS_DOMAIN` | *(empty)* | The JetStream domain, for a leafnode or hub-and-spoke deployment. |
+| `mq.nats.subject_prefix` | `WH_MQ_NATS_SUBJECT_PREFIX` | `wh` | Leads every subject WaveHouse publishes (`<prefix>.ingest.…`, `<prefix>.dlq.…`). One token of `[a-z0-9_-]`. |
+| `mq.nats.partitions` | `WH_MQ_NATS_PARTITIONS` | `1` | How many ingest partition streams there are. It must equal the number you created; boot finds each one by its subject. |
+| `mq.nats.ingest_consumer` | `WH_MQ_NATS_INGEST_CONSUMER` | `wh-ingest` | The durable consumer on every partition that the ingest worker consumes. |
+| `mq.nats.history_stream` | `WH_MQ_NATS_HISTORY_STREAM` | `<PREFIX>_HISTORY` | The history stream, which SSE replay and the live hub read. It has no subjects of its own, so it is named here; the partition and dead-letter streams are found by subject and can have any name. The default is the upper-cased prefix, `WH_HISTORY` for `wh`, as `wavehouse mq manifests` names it. |
+| `mq.nats.connect_timeout` | `WH_MQ_NATS_CONNECT_TIMEOUT` | `5s` | Bounds one dial. |
+| `mq.nats.publish_timeout` | `WH_MQ_NATS_PUBLISH_TIMEOUT` | `5s` | Bounds one publish attempt. A publish is tried at most three times; a partition's `duplicate_window` must cover all three, or boot refuses. |
+| `mq.nats.topology_wait` | `WH_MQ_NATS_TOPOLOGY_WAIT` | `60s` | How long boot waits for the cluster and for your streams and consumers to be right. Boot then refuses with every finding at once. |
+
+Boot refuses a `nats` block with no URLs, more than one of `creds_file`, `nkey_seed_file` and `user`, half a certificate pair, a prefix outside the grammar, fewer than one partition, or a timeout that is not positive. Durations take Go syntax (`5s`, `2m`).
+
+A tenant's [`mq.max_bytes_gb`](/settings-directory#message-queue) is not applied under `nats`: its events share a partition stream with other tenants, and that stream's limits, which you set, bound them. Boot logs a warning saying so.
+
+### Boot warnings
+
+Some valid combinations are right for a single replica only, and one process cannot count its replicas, so boot logs each at `WARN` rather than refusing:
+
+- **`mq.backend=nats` with `cache.backend=local`**, in a process running `api`: an event ingested on another replica never invalidates this one's cache, so its reads stay stale until the cached entry expires.
+- **`mq.backend=nats` with `dedupe.backend=pebble`**, in a process running `api`: an id seen by another replica is not seen by this one.
+- **`mq.backend=nats` with `coord.backend=local`**, in a process running `sweeper`: every such process holds its own sweeper lease. This is harmless for now, because under `nats` the sweeper removes nothing: retention is your streams'. A later release will require a shared `coord.backend` here once this build has one.
+- **`mq.backend=nats`**: `mq.max_bytes_gb` is not applied (above).
+- **`mq.nats` set with `mq.backend=embedded`**: the block is ignored.
 
 ### Process roles
 
@@ -63,13 +102,13 @@ By default one process does all the work. `roles` splits it, so that the API and
 | --- | --- |
 | `api` | The HTTP API, and what answers it: schema discovery, the token verifiers and their JWKS refresh, the dedupe stores, and the SSE hub with its bridge off the queue and its keepalive wheel. Every API process runs its own set of these, and each API process receives every event for its own SSE clients. |
 | `ingest` | The ingest worker, which writes the queue to ClickHouse. Every ingest process consumes the same shared durable consumer and competes for its messages. |
-| `sweeper` | The sweeper, which purges messages that are written and older than their tenant's gap window. It runs under the `sweeper` lease. With a shared [`coord.backend`](#backends), only one process sweeps at a time, however many run the role; with `local`, each process holds its own lease. |
+| `sweeper` | The sweeper, which purges messages that are written and older than their tenant's gap window. Under `mq.backend=nats` it removes nothing, because your streams' retention does that; it only warns about a tenant whose gap window is longer than the history stream keeps. It runs under the `sweeper` lease. With a shared [`coord.backend`](#backends), only one process sweeps at a time, however many run the role; with `local`, each process holds its own lease. |
 
 Every process, whatever its roles, reads the settings directory and reloads it (SIGHUP, the directory watcher, and the reload route), and serves `server.port`. A process without the `api` role serves only an ops listener there: `/livez`, `/readyz` and their `/healthz`, `/health`, `/ready` aliases, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404; under `/v1/ops`, only once the operator-key check has passed (403 without it). The reload route on that listener accepts only the [operator key](#authentication), because no token verifier runs without the `api` role. `/readyz` is ready when a ClickHouse pool answers in an `ingest` process, and as soon as the process has booted in a `sweeper`-only one.
 
 Boot refuses a role set the selected backends cannot serve:
 
-- **Any split with `mq.backend=embedded`.** The embedded queue lives inside its process and listens on no port, so a process without every role could not reach it. Until a shared `mq.backend` exists, every process runs every role.
+- **Any split with `mq.backend=embedded`.** The embedded queue lives inside its process and listens on no port, so a process without every role could not reach it. Choose `mq.backend=nats` to split.
 - **`api` without `ingest`, or `ingest` without `api`, with `cache.backend=local`.** The ingest worker invalidates the cache the API reads, and a local cache in another process never sees that invalidation. Run `api` and `ingest` together, or choose a shared `cache.backend`. A `sweeper`-only process holds no cache, so this rule does not apply to it.
 
 ### Server
@@ -233,6 +272,12 @@ clickhouse:
 
 mq:
   backend: embedded      # in-process NATS JetStream under <data_dir>/nats
+  # With backend: nats, the operator's cluster instead (read only then):
+  # nats:
+  #   urls: ["nats://nats.nats.svc:4222"]
+  #   user: wavehouse
+  #   password_file: /var/run/secrets/nats/password
+  #   partitions: 4        # the number of ingest partition streams
 
 cache:
   backend: local
@@ -294,6 +339,11 @@ WH_CH_PASSWORD=
 WH_CH_MAX_TOTAL_CONNS=0
 
 WH_MQ_BACKEND=embedded
+# With WH_MQ_BACKEND=nats (read only then):
+# WH_MQ_NATS_URLS=nats://nats.nats.svc:4222
+# WH_MQ_NATS_USER=wavehouse
+# WH_MQ_NATS_PASSWORD_FILE=/var/run/secrets/nats/password
+# WH_MQ_NATS_PARTITIONS=4
 WH_CACHE_BACKEND=local
 WH_CACHE_L1_MAX_COST=67108864
 WH_DEDUPE_BACKEND=pebble

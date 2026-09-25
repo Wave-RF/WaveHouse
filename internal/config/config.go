@@ -345,6 +345,9 @@ func Load(path string) (*Config, error) {
 	for i, r := range cfg.Roles {
 		cfg.Roles[i] = Role(strings.TrimSpace(string(r)))
 	}
+	for i, u := range cfg.MQ.NATS.URLs {
+		cfg.MQ.NATS.URLs[i] = strings.TrimSpace(u)
+	}
 	if cfg.InstanceID = strings.TrimSpace(cfg.InstanceID); cfg.InstanceID == "" {
 		cfg.InstanceID = defaultInstanceID()
 	}

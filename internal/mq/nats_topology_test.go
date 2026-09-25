@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+
+	"github.com/Wave-RF/WaveHouse/internal/mq/natstest"
 )
 
 // shippedSpec is the topology the shipped manifests are generated for.
@@ -105,7 +107,7 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		{"partitions beyond N", nil, NATSTopology{Partitions: 2}, rec("WH_INGEST_3", "subjects")},
 
 		// The wh-ingest durable.
-		{"durable missing", func(_ *testing.T, tp *fixtureTopology) { delete(tp.consumers, p0) }, shippedSpec, req(p0+"/wh-ingest", "durable_name")},
+		{"durable missing", func(_ *testing.T, tp *fixtureTopology) { delete(tp.Consumers, p0) }, shippedSpec, req(p0+"/wh-ingest", "durable_name")},
 		{"durable is push", durable(func(c *jetstream.ConsumerConfig) {
 			c.DeliverSubject = "deliver.here"
 			c.MaxAckPending = 0
@@ -208,7 +210,7 @@ func TestAwaitNATSTopology_ListsEveryFinding(t *testing.T) {
 	tp := shippedTopology(t)
 	tp.drop("WH_DLQ")
 	tp.stream(t, "WH_INGEST_1").Retention = jetstream.LimitsPolicy
-	delete(tp.consumers, "WH_INGEST_2")
+	delete(tp.Consumers, "WH_INGEST_2")
 	f.apply(t, tp)
 
 	_, err := awaitNATSTopology(t.Context(), f.connect(t, "wavehouse"), shippedSpec, 300*time.Millisecond)
@@ -280,7 +282,7 @@ func TestVerifyNATSTopology_RefusesAnImpossibleSpec(t *testing.T) {
 // The shipped Helm values give the wavehouse user exactly natsPermissions.
 func TestNATSPermissions_MatchShippedValues(t *testing.T) {
 	t.Parallel()
-	raw, err := os.ReadFile(shippedValues)
+	raw, err := os.ReadFile(natstest.ShippedValues())
 	require.NoError(t, err)
 	var values struct {
 		Config struct {
@@ -311,7 +313,7 @@ func TestNATSPermissions_MatchShippedValues(t *testing.T) {
 			assert.Equal(t, want.SubscribeAllow, u.Permissions.Subscribe.Allow)
 		}
 	}
-	assert.True(t, found, "no wavehouse user in %s", shippedValues)
+	assert.True(t, found, "no wavehouse user in %s", natstest.ShippedValues())
 }
 
 // The generated manifests round-trip through the fixture's parser into the

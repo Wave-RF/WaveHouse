@@ -39,7 +39,7 @@ func TestLoad_RolesFromEnv(t *testing.T) {
 }
 
 // One role parses to one entry — refused here only because the embedded MQ
-// cannot be split, which is the message a split gets until a shared MQ lands.
+// cannot be split; mq.backend=nats can (mq_nats_test.go).
 func TestLoad_OneRoleFromEnvIsRefusedOnTheEmbeddedMQ(t *testing.T) {
 	t.Setenv("WH_ROLES", "ingest")
 	_, err := Load("nonexistent.yaml")
@@ -92,7 +92,7 @@ func TestValidate_Roles(t *testing.T) {
 }
 
 // Rules 2 and 5 of the #613 design. The embedded MQ refuses every split. A
-// shared queue, which no backend offers yet and so is set directly, lets a
+// shared queue, set directly as a stand-in for any shared backend, lets a
 // process run any subset — except api without ingest or ingest without api
 // over a local cache: the worker's invalidation would miss the API's cache. A
 // sweeper-only process holds no cache, so it passes.

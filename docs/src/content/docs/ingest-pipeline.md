@@ -239,33 +239,35 @@ flowchart TD
     Purge -->|"deletes msgs that are BOTH<br/>written to ClickHouse AND past the gap window"| Stream[("INGEST_TENANT stream")]
 ```
 
-`MIN(ackFloor+1, gapSeq)` is the safety argument: never purge past what is in ClickHouse, and never past the SSE replay window. If ClickHouse is down the `AckFloor` stops advancing, purging freezes, and the stream fills toward `MaxBytes` — backpressure by construction. The sweeper is one of `app.Run`'s components (`Sweeper.Start` blocks until the run context is canceled), but an interrupted sweep is harmless and idempotent, so it returns on `ctx.Done()` with no drain of its own — unlike the worker's bounded `stopFunc`. It runs under the `sweeper` lease (`coord.RunElected`), so only the process holding the lease sweeps; with the in-process coordinator that is always the one process.
+`MIN(ackFloor+1, gapSeq)` is the safety argument: never purge past what is in ClickHouse, and never past the SSE replay window. If ClickHouse is down the `AckFloor` stops advancing, purging freezes, and the stream fills toward `MaxBytes` — backpressure by construction. The sweeper is one of `app.Run`'s components (`Sweeper.Start` blocks until the run context is canceled), but an interrupted sweep is harmless and idempotent, so it returns on `ctx.Done()` with no drain of its own — unlike the worker's bounded `stopFunc`. It runs under the `sweeper` lease (`coord.RunElected`), so only the process holding the lease sweeps; with the in-process coordinator that is always the one process. Under [`mq.backend: nats`](/deployment#external-nats) `PurgeAcked` removes nothing: the partition streams use interest retention, so the server deletes each row once the worker acks it, and the replay history is a separate stream the server expires by its `max_age`. It only warns, once per tenant, about a gap window longer than that `max_age`.
 
 ## Scaling to multiple instances
 
-Today this is a **single-process** design (embedded, in-process NATS — the "connection" cannot blip independently of the process, so there is intentionally no reconnect logic). Running multiple instances against a real/clustered NATS changes several things:
+The embedded broker is single-process by construction: it listens on no port, so its "connection" cannot blip independently of the process. [`mq.backend: nats`](/deployment#external-nats) is how several processes share one queue:
 
 ```mermaid
 flowchart TD
-    subgraph Cluster["Clustered NATS (Replicas: 3)"]
-        S["one shared ingest stream"]
+    subgraph NATS["Operator's NATS JetStream"]
+        P0[("ingest partition 0<br/>interest retention")]
+        P1[("ingest partition N-1")]
+        H[("history stream<br/>limits, max_age")]
+        D[("dead-letter stream")]
     end
-    S --> P0["partition 0"]
-    S --> P1["partition 1"]
-    S --> P2["partition 2"]
-    P0 --> IA["instance A (pinned owner)"]
-    P1 --> IB["instance B (pinned owner)"]
-    P2 --> IA
-    IA --> CH[("ClickHouse<br/>idempotent inserts")]
-    IB --> CH
+    API["API processes"] -->|"publish: fnv32a(tenant) mod N"| P0
+    API --> P1
+    P0 -->|"wh-ingest durable, shared"| W["ingest workers (competing)"]
+    P1 --> W
+    P0 -. source .-> H
+    P1 -. source .-> H
+    H -->|"per-process consumer"| Hub["each API process's SSE hub + replay"]
+    W --> CH[("ClickHouse")]
+    W --> D
 ```
 
-What will need to change, and the trade-offs (discussed at length on the batching work):
-
-- **Work distribution.** Either a *shared* durable pull consumer (competing consumers — coordination-free, but a hot table's rows spread across instances, shrinking per-instance batches), or **partitioned consumer groups** that hash by the tenant and table subject tokens so a tenant's table always lands on one owner (pinned consumer → per-table affinity + automatic failover, at the cost of an assignment layer).
-- **Idempotent inserts become mandatory.** At-least-once + redelivery-on-crash means another instance can re-insert a batch the dead one had written but not acked. Use `ReplacingMergeTree` (or a dedup key). The single-instance design hides this today.
-- **NATS resilience.** Remote NATS needs explicit reconnect/backoff for the connection itself — the embedded path never dials out, so there is nothing to reconnect. The `Consume` error handler that detects a dead consumer already lives in `embedded.go` and needs no change for a remote broker.
-- **The sweeper.** Its single-`AckFloor` model assumes one consumer. With per-table/partition consumers you either rework it to purge below the *minimum* AckFloor across consumers, or — cleaner — **split the dual-use stream**: a `WorkQueuePolicy` work stream (auto-deletes on ack, no sweeper) plus a `MaxAge` replay stream (server-expired by time, no sweeper), joined by stream sourcing. That deletes the sweeper entirely, at the cost of duplicating the in-flight overlap on disk. Keeping the sweeper instead needs one sweeper per shared stream: it already campaigns for a lease (`internal/coord`), so this is a shared coordinator backend rather than new election code — and a brief overlap during a handoff is tolerable: an overlap cannot lose ClickHouse data, since every sweep stops at the consumer's ack floor; it can only trim SSE replay history, and only when the two holders' settings views differ (one still reading a shorter `stream.gap_window_minutes`, or missing a tenant, after a reload the other has applied) — which fencing would not prevent either.
+- **Work distribution.** Every ingest process consumes the shared `wh-ingest` durable on every partition, competing for its messages. That needs no coordination, but a hot table's rows spread across processes, which shrinks each process's batches, and a tenant's rows written by different processes do not reach ClickHouse in publish order. Claiming partitions per worker through leases, for per-table affinity, is a later change.
+- **Idempotent inserts matter more.** At-least-once delivery plus redelivery after a crash means another process can re-insert a batch the dead one had written but not acked. Use `ReplacingMergeTree` (or a dedup key).
+- **NATS resilience.** The external broker reconnects on its own, with backoff; while it is disconnected a publish answers `503` with `Retry-After: 5`, and consumption resumes after the reconnect. A consumer whose delivery ends for good (its durable deleted, or the connection closed) ends the worker and the process, as the embedded one does.
+- **The sweeper.** Interest retention deletes each row once it is acked, one row at a time, so one tenant's unwritten rows never hold back another's reclaim, which a shared ack floor would. SSE replay reads the history stream, which sources the partitions and expires by `max_age`. So there is nothing for the sweeper to purge.
 
 ## Deferred / not yet implemented
 

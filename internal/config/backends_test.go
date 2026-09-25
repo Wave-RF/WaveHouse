@@ -47,10 +47,10 @@ func TestLoad_BackendsFromEnv(t *testing.T) {
 }
 
 func TestLoad_BackendFromEnvRefusesAnUnknownValue(t *testing.T) {
-	t.Setenv("WH_MQ_BACKEND", "nats")
+	t.Setenv("WH_MQ_BACKEND", "kafka")
 	_, err := Load("nonexistent.yaml")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `mq.backend (WH_MQ_BACKEND) "nats" is not a backend this build has; valid: embedded`)
+	assert.Contains(t, err.Error(), `mq.backend (WH_MQ_BACKEND) "kafka" is not a backend this build has; valid: embedded, nats`)
 }
 
 func TestLoad_BackendsFromYAML(t *testing.T) {
@@ -85,14 +85,14 @@ func TestLoad_BackendBlocksRefuseUnknownKeys(t *testing.T) {
 mq:
   backend: embedded
   max_bytes_gb: 5
-  nats:
-    urls: nats://localhost:4222
+  redis:
+    addr: localhost:6379
 dedupe:
   enabled: true
 `), 0o600))
 	_, err := Load(path)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "dedupe.enabled, mq.max_bytes_gb, mq.nats")
+	assert.Contains(t, err.Error(), "dedupe.enabled, mq.max_bytes_gb, mq.redis")
 	assert.Contains(t, err.Error(), EnvSettingsDir)
 }
 
@@ -111,7 +111,7 @@ func TestValidate_UnknownBackend(t *testing.T) {
 		set  func(*Config)
 		want string
 	}{
-		{"mq", func(c *Config) { c.MQ.Backend = "kafka" }, `mq.backend (WH_MQ_BACKEND) "kafka" is not a backend this build has; valid: embedded`},
+		{"mq", func(c *Config) { c.MQ.Backend = "kafka" }, `mq.backend (WH_MQ_BACKEND) "kafka" is not a backend this build has; valid: embedded, nats`},
 		{"cache", func(c *Config) { c.Cache.Backend = "redis" }, `cache.backend (WH_CACHE_BACKEND) "redis" is not a backend this build has; valid: local`},
 		{"dedupe", func(c *Config) { c.Dedupe.Backend = "dynamodb" }, `dedupe.backend (WH_DEDUPE_BACKEND) "dynamodb" is not a backend this build has; valid: pebble`},
 		{"coord", func(c *Config) { c.Coord.Backend = "nats" }, `coord.backend (WH_COORD_BACKEND) "nats" is not a backend this build has; valid: local`},
@@ -131,7 +131,7 @@ func TestValidate_UnknownBackend(t *testing.T) {
 	}
 }
 
-// Every warning keys on a shared queue, which no backend offers yet, so the
+// These warnings key on any shared queue, not on nats alone, so a stand-in
 // value is set directly: Warnings reads the choice, it doesn't validate it.
 func TestWarnings_SharedQueue(t *testing.T) {
 	t.Parallel()

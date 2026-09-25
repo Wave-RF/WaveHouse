@@ -327,6 +327,83 @@ A second `SIGTERM`/`SIGINT` while the stop is running abandons it and exits non-
 
 Size the orchestrator's kill grace at `server.shutdown_timeout` plus 8s: at the default a stop needs up to 18s before it should be `SIGKILL`ed, and raising the timeout raises that total by the same amount. Docker's default `stop_grace_period` is 10s, so the [compose file](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/compose/standalone.yaml) sets `stop_grace_period: 25s`, that bound plus headroom; on Kubernetes the equivalent is `terminationGracePeriodSeconds`, whose 30s default already covers it — raise it if you raise `server.shutdown_timeout`. A stop with nothing in flight takes well under a second either way, unless OTLP export is on and the collector is unreachable: the flush then waits out its 3s.
 
+## External NATS
+
+With `mq.backend: nats`, WaveHouse's message queue is a NATS JetStream cluster you run, shared by every WaveHouse process that points at it. This is what makes more than one replica, or a [split by role](#one-deployment-per-role), possible. **WaveHouse never creates, changes, purges or deletes a stream or a durable consumer there.** You create them, WaveHouse checks them at boot, and it refuses to start until they are right. The only objects WaveHouse creates are short-lived consumers on the history stream, one per API process for its live SSE events and one per SSE replay, which the server removes on its own when they are idle.
+
+### What WaveHouse needs
+
+- **N ingest partition streams.** Partition `p` holds `<prefix>.ingest.<p>.>` with interest retention: a row is deleted once the ingest worker has written it and acked it, so one tenant whose ClickHouse is down keeps only its own rows on disk. A tenant's events always go to the same partition: FNV-1a of the tenant id, mod N. Each partition has no age limit (an age limit would drop rows not yet written), and `discard: new` with a byte limit: a full partition refuses new events with `503` and `Retry-After: 30`, for every tenant in it.
+- **The `wh-ingest` durable consumer on every partition,** which the ingest worker consumes. Every ingest process consumes all of them and competes for their messages.
+- **The history stream,** which sources every partition. SSE replay (`Last-Event-ID`) and every API process's live events read from it. Its `max_age` is how far back a replay can reach, so make it at least the longest [gap window](/settings-directory#streaming) of any tenant; the sweeper warns once for each tenant whose window is longer.
+- **One dead-letter stream** holding `<prefix>.dlq.>`, shared by every tenant.
+
+### Create the topology
+
+1. **Run NATS 2.10 or later** with JetStream on file storage. 2.14.x, the line WaveHouse embeds, is recommended; boot warns on another. [`deployments/nats/values.yaml`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/nats/values.yaml) is a values file for the [NATS Helm chart](https://github.com/nats-io/k8s): a three-node cluster with one account and two users, `nack` for the JetStream controller and `wavehouse` for WaveHouse, whose passwords come from a `nats-users` Secret.
+2. **Generate the streams and consumers** as [nack](https://github.com/nats-io/nack) resources:
+
+   ```bash
+   wavehouse mq manifests --partitions 4 --prefix wh --replicas 3 > jetstream.yaml
+   ```
+
+   [`deployments/nats/jetstream.yaml`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/nats/jetstream.yaml) is its output for four partitions. Its sizes (`maxBytes`, the history's `maxAge`, `maxMsgsPerSubject`) are starting points: tune them before you apply.
+3. **Apply them, and let the history stream exist before WaveHouse starts publishing.** The server attaches the history's source to a partition a moment after the history is created. A row written and acked on a partition before that is never copied into the history, so SSE replay and live events miss it, though ClickHouse does not. Never let a partition take publishes without its `wh-ingest` durable either: with only the history's source on it, a row leaves the partition as soon as the history has it, unwritten. WaveHouse's boot check guarantees this for its own publishes.
+4. **Start WaveHouse** with `mq.backend: nats` and the [`mq.nats`](/configuration#external-nats-mqnats) block: the server URLs, the `wavehouse` user and a mounted password file, and `partitions` equal to the N you generated. Boot waits up to `mq.nats.topology_wait` (60s) for the cluster and your resources, because on Kubernetes they may roll out together, then refuses to start and logs every finding at once. A finding marked `recommended` is logged and does not stop boot.
+
+The generated manifests satisfy every required finding. Some you may meet when you write your own:
+
+- The history must use `discard: old`. Its source keeps each row on its partition until the history has stored it, so a history that refuses new rows would keep written rows on every partition until they fill, and every tenant's ingest would then answer `503`.
+- A partition's `duplicate_window` must cover every attempt of one publish: three times `mq.nats.publish_timeout`, plus half a second. A publish that got no answer is retried with the same message id, so the partition stores it once.
+- `wh-ingest` needs `max_deliver: -1`. With a limit, a row that failed that many times would stay on its partition and never be delivered again.
+
+WaveHouse checks the topology again every five minutes and never repairs it. If you delete a partition, its publishes answer `503` with `Retry-After: 5`. If you delete `wh-ingest`, or the connection is closed for good (for example, its credentials are revoked), the ingest worker ends and the process exits, so that the orchestrator restarts it and the next boot names what is missing. An ingest worker that stayed up without its queue would leave the API accepting events that nothing writes.
+
+### Permissions
+
+The `wavehouse` user in `values.yaml` has exactly what WaveHouse needs: it can publish to its subjects, read stream and consumer info, pull from `wh-ingest`, and create, pull from and delete consumers on the history stream. It cannot create, change, purge or delete a stream, nor create a durable on a partition. The permissions are written for the default prefix `wh`, history stream `WH_HISTORY` and durable `wh-ingest`; change them together with those settings.
+
+```yaml
+publish:
+  allow: [wh.ingest.>, wh.dlq.>, $JS.API.INFO, $JS.API.STREAM.NAMES, $JS.API.STREAM.INFO.*,
+          $JS.API.CONSUMER.INFO.*.*, $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest, $JS.ACK.>,
+          $JS.API.CONSUMER.CREATE.WH_HISTORY.>, $JS.API.CONSUMER.MSG.NEXT.WH_HISTORY.>,
+          $JS.API.CONSUMER.DELETE.WH_HISTORY.>]
+  deny:  [$JS.API.STREAM.CREATE.>, $JS.API.STREAM.UPDATE.>, $JS.API.STREAM.DELETE.>,
+          $JS.API.STREAM.PURGE.>, $JS.API.CONSUMER.DURABLE.CREATE.>]
+subscribe:
+  allow: [_INBOX_wh.>]
+```
+
+WaveHouse's replies arrive under `_INBOX_<prefix>.>`, which is why the subscribe permission can be that narrow.
+
+### Limits that differ from the embedded queue
+
+- **Per-tenant budgets are not enforced.** A tenant's [`mq.max_bytes_gb`](/settings-directory#message-queue) is not applied; a partition's byte limit is shared by the tenants in it. `maxMsgsPerSubject` with `discardPerSubject: true`, which the generated manifests set, refuses one tenant's table once it holds that many unwritten rows, before it fills the partition.
+- **A partition's delivery can stall on one tenant.** If one tenant's ClickHouse is down, its unwritten rows can take up the durable's `max_ack_pending`, and then delivery pauses for the whole partition, about 1/N of tenants. More partitions shrink that share.
+- **Dead-lettered rows share one stream.** Its `discard: old` evicts the oldest rows when it is full; with `maxMsgsPerSubject` set, it evicts per table, so one tenant's flood evicts only its own rows. `GET /v1/ops/dlq/stats?tenant=` answers `200` with zeros for a tenant that has never parked a row, where the embedded queue answers `404`.
+- **After a NATS restart,** the history's sources take about ten seconds to re-attach. Live SSE events and replays lag by that much; nothing is lost.
+
+### Choosing and changing N
+
+A tenant lives in one partition, so one tenant's ingest rate is bounded by what one stream can take. More partitions spread tenants, and so the damage one tenant can do, more thinly. N must match `mq.nats.partitions` in every process. Changing it moves most tenants to another partition, and their events are no longer in order across the move. WaveHouse consumes only partitions `0` to `N−1`:
+
+- **To raise N,** create the new partitions and their durables, add them to the history's sources, then roll WaveHouse out with the new N. The old partitions keep being consumed.
+- **To lower N,** stop ingest traffic and wait until the partitions you are removing are empty before you roll WaveHouse out with the smaller N. Rows left in them are not consumed after that. Boot warns about each stream that still holds ingest subjects outside the N partitions; delete it once it is empty.
+
+### Monitoring
+
+These gauges are exported through [OpenTelemetry or Prometheus](#observability) under `mq.backend: nats`:
+
+| Gauge | Meaning |
+| --- | --- |
+| `wavehouse_mq_connected` | `1` while this process is connected to the cluster, else `0`. |
+| `wavehouse_mq_topology_ok` | `1` while the last check found every required stream and consumer, else `0`. It drops at once when a publish finds a partition deleted. |
+| `wavehouse_mq_history_source_lag{source}` | Messages on each partition that the history has not copied yet. A lag that keeps growing means the history is not taking rows, which holds written rows on every partition. |
+| `wavehouse_mq_history_source_last_active_seconds{source}` | Seconds since the history last heard from each partition; `-1` if it has never attached. It climbs for about ten seconds after a NATS restart; a value that keeps climbing is a source that is not re-attaching. |
+
+`wavehouse_nats_connections` and `wavehouse_nats_in_msgs_total` describe this process's client connection under `nats` (`1` or `0`, and the messages it has received), where under `embedded` they describe the embedded server.
+
 ## One Deployment per role
 
 By default one process runs all of WaveHouse. [`roles`](/configuration#process-roles) (`WH_ROLES`) lets the API and the background workers run as separate processes, so that each scales on its own. On Kubernetes that is one Deployment per role, from the same image, differing only in `WH_ROLES`:
@@ -341,7 +418,12 @@ By default one process runs all of WaveHouse. [`roles`](/configuration#process-r
 - **Ingest.** Every ingest pod consumes the same shared durable consumer and competes for its messages, so throughput scales with the pod count. The rows of one table are then split across pods: each pod writes smaller batches, and rows written by different pods do not reach ClickHouse in publish order.
 - **Sweeper.** The sweeper runs under a lease held in the shared `coord.backend`, so only one pod sweeps at a time. A second replica waits and takes over when the first stops.
 
-A split needs backends that every process can reach: a shared `mq.backend`, so that every process reaches the same queue; a shared `cache.backend`, so that the ingest pods' invalidations reach the API pods' cache; and a shared `coord.backend`, so that the sweeper lease spans pods. **This build has only the in-process backends, so boot refuses any split** and names the backend to change. Until shared backends ship, run every role in one process, the default.
+A split needs backends that every process can reach: a shared `mq.backend`, so that every process reaches the same queue; a shared `cache.backend`, so that the ingest pods' invalidations reach the API pods' cache; and a shared `coord.backend`, so that the sweeper lease spans pods. This build has one shared backend, [`mq.backend: nats`](#external-nats), and boot refuses any split without it, naming the backend to change. With it:
+
+- **`api` and `ingest` still run together.** Without a shared `cache.backend`, boot refuses a process that runs one of them without the other. Run them as one Deployment (`WH_ROLES=api,ingest`) with as many replicas as you need; each replica's cache serves reads that may be stale until an entry expires (boot warns).
+- **The sweeper can run on its own** (`WH_ROLES=sweeper`), or in every replica. Without a shared `coord.backend` each process holds its own sweeper lease, so several may sweep at once. Under `nats` that is harmless, because the sweeper removes nothing there (boot warns).
+
+Run every role in one process, the default, until you need more than one.
 
 A pod without the `api` role serves an ops listener on `:8080`: `/livez`, `/readyz` and their aliases, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404 (under `/v1/ops`, 403 without the operator key). Point the same probes at it as at an API pod. `/livez` does not wait for schema discovery there, because only the API runs it. `/readyz` checks ClickHouse in an ingest pod, and is ready once a sweeper pod has booted. Every pod reads the settings directory, so mount it in every Deployment. The reload route on the ops listener accepts only the operator key, so whatever reloads your API pods over HTTP must send the operator key to the worker pods too, or rely on `SIGHUP` (or, over a flat directory, the directory watcher) instead.
 
@@ -462,7 +544,7 @@ If you skipped the drain, the boot's `WARN` line for each deleted stream (`delet
 
 ## Dead Letter Queue (DLQ)
 
-A failed batch insert is retried row by row; while the tenant's `dlq.enabled` is `true` for the table (the seed default — a hot-reloadable [settings directory](/settings-directory#dead-letter-queue) key, overridable per table), the rows that fail again are published to the tenant's own dead-letter stream (`DLQ_{tenant}`) under subjects `dlq.{tenant}.{table}` (`0` for a directory that holds the four files) instead of retrying forever. A batch whose tenant has no ClickHouse connection — one no longer served, or one no pool could be opened for, such as by the connection ceiling — skips the row-by-row retry, which no row of it could pass: its tenant's switch is read once for the whole batch, and a tenant no longer served has no switch to read, so its batch is always parked. Monitor DLQ depth via `GET /v1/ops/dlq/stats`, per tenant (`?tenant=`; tenant `0` without it).
+Under [`mq.backend: nats`](#external-nats) every tenant's parked rows go to the one shared dead-letter stream, under `<prefix>.dlq.{tenant}.{table}`, and everything else in this section holds. A failed batch insert is retried row by row; while the tenant's `dlq.enabled` is `true` for the table (the seed default — a hot-reloadable [settings directory](/settings-directory#dead-letter-queue) key, overridable per table), the rows that fail again are published to the tenant's own dead-letter stream (`DLQ_{tenant}`) under subjects `dlq.{tenant}.{table}` (`0` for a directory that holds the four files) instead of retrying forever. A batch whose tenant has no ClickHouse connection — one no longer served, or one no pool could be opened for, such as by the connection ceiling — skips the row-by-row retry, which no row of it could pass: its tenant's switch is read once for the whole batch, and a tenant no longer served has no switch to read, so its batch is always parked. Monitor DLQ depth via `GET /v1/ops/dlq/stats`, per tenant (`?tenant=`; tenant `0` without it).
 
 ## Observability
 

@@ -536,8 +536,64 @@ func (a *App) wireMQ(ctx context.Context) error {
 	switch b := a.cfg.MQ.Backend; b {
 	case config.MQEmbedded:
 		return a.wireEmbeddedMQ(ctx)
+	case config.MQNATS:
+		return a.wireNATSMQ(ctx)
 	default:
 		return unreachableBackend("mq.backend", b)
+	}
+}
+
+// wireNATSMQ connects to the operator's NATS (mq.backend: nats) and waits,
+// up to mq.nats.topology_wait, for the streams and durables it needs; a
+// topology still wrong then refuses boot with every finding. The operator
+// owns every limit, so a tenant's mq.max_bytes_gb is not handed over
+// (config.Warnings says so at boot).
+func (a *App) wireNATSMQ(ctx context.Context) error {
+	n := a.cfg.MQ.NATS
+	broker, err := mq.NewNATS(ctx, mq.NATSConfig{
+		URLs:         n.URLs,
+		Name:         n.Name,
+		CredsFile:    n.CredsFile,
+		NKeySeedFile: n.NKeySeedFile,
+		User:         n.User,
+		PasswordFile: n.PasswordFile,
+		TLS: mq.NATSTLS{
+			CAFile: n.TLS.CAFile, CertFile: n.TLS.CertFile, KeyFile: n.TLS.KeyFile,
+			ServerName: n.TLS.ServerName, HandshakeFirst: n.TLS.HandshakeFirst,
+		},
+		JSDomain: n.JSDomain,
+		// AckWait, MaxAckPending and Prefetch are left to mq's defaults,
+		// which are the ingest worker's own.
+		Topology: mq.NATSTopology{
+			Prefix:         n.SubjectPrefix,
+			Partitions:     n.Partitions,
+			IngestConsumer: n.IngestConsumer,
+			HistoryStream:  n.HistoryStream,
+			PublishTimeout: n.PublishTimeout,
+		},
+		ConnectTimeout: n.ConnectTimeout,
+		TopologyWait:   n.TopologyWait,
+	})
+	if err != nil {
+		return fmt.Errorf("mq open: %w", err)
+	}
+	a.adoptMQ(broker)
+	return nil
+}
+
+// adoptMQ makes broker the process's MQ, closed with it.
+func (a *App) adoptMQ(broker mq.Broker) {
+	a.mq = broker
+	a.add(component{name: "mq", close: withoutContext(broker.Close)})
+
+	// Only register system metric gauges when a real MeterProvider is in
+	// place — otherwise `otel.GetMeterProvider()` returns the no-op SDK
+	// provider and RegisterCallback silently no-ops, making this look
+	// authoritative when it's actually doing nothing.
+	if a.cfg.OTel.Enabled || a.cfg.Prometheus.Enabled {
+		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedupeStats); err != nil {
+			slog.Error("failed to register system metrics", "error", err)
+		}
 	}
 }
 
@@ -565,18 +621,7 @@ func (a *App) wireEmbeddedMQ(ctx context.Context) error {
 		config.LogStorageInitError("mq", dir, err)
 		return fmt.Errorf("mq open: %w", err)
 	}
-	a.mq = broker
-	a.add(component{name: "mq", close: withoutContext(broker.Close)})
-
-	// Only register system metric gauges when a real MeterProvider is in
-	// place — otherwise `otel.GetMeterProvider()` returns the no-op SDK
-	// provider and RegisterCallback silently no-ops, making this look
-	// authoritative when it's actually doing nothing.
-	if a.cfg.OTel.Enabled || a.cfg.Prometheus.Enabled {
-		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedupeStats); err != nil {
-			slog.Error("failed to register system metrics", "error", err)
-		}
-	}
+	a.adoptMQ(broker)
 
 	// The hook's apply is rooted in the App's stop context, so a reload
 	// caught mid-hook by SIGTERM gives up rather than holding the drain past
