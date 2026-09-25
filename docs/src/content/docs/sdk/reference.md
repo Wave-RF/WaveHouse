@@ -32,7 +32,7 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 403 | `HTTP_403` | No | Insufficient permissions |
 | 404 | `HTTP_404` | No | Table, pipe, or tenant not found |
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
-| 503 | `HTTP_503` | Yes | Service unavailable, a tenant whose settings folder was rejected, a schema not discovered yet, a tenant on no ClickHouse pool, or a token sent while that tenant's JWKS has not been fetched yet (`token verifier not ready`, `Retry-After: 30`). REST calls auto-retry, honoring `Retry-After` when the response carries one — so each attempt on that last cause waits the 30 s; a stream re-dials on its own jittered backoff instead |
+| 503 | `HTTP_503` | Yes | Service unavailable, a tenant whose settings folder was rejected, a schema not discovered yet, a tenant on no ClickHouse pool, a token sent while that tenant's JWKS has not been fetched yet (`token verifier not ready`, `Retry-After: 30`), or a record whose dedupe id another request is still publishing (`a request with the same dedupe id is in flight`, `Retry-After`: the 30 s dedupe lease). REST calls auto-retry, honoring `Retry-After` when the response carries one — so each attempt on those last two causes waits the 30 s; a stream re-dials on its own jittered backoff instead |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `AbortSignal` |
 | 0 | `SSE_CONNECT_ERROR` | No | Stream could not be started (e.g. a non-absolute `baseURL`) |

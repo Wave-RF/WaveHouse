@@ -84,8 +84,8 @@ func (m *Managed) Open() bool {
 }
 
 // Reserve checks every key is storable, collapses a key repeated inside keys
-// to one backend claim — later occurrences answer Duplicate — and delegates
-// the rest to the open store; ErrDisabled while switched off, ErrUnavailable
+// to one backend claim — later occurrences answer Duplicate — reads a lease
+// <= 0 as DefaultLease, and delegates the rest to the open store; ErrDisabled while switched off, ErrUnavailable
 // while switched on but not open.
 func (m *Managed) Reserve(ctx context.Context, keys []Key, lease time.Duration) ([]Claim, error) {
 	for _, k := range keys {
@@ -95,6 +95,9 @@ func (m *Managed) Reserve(ctx context.Context, keys []Key, lease time.Duration) 
 		if k.Hashed() {
 			hashedIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", k.Table)))
 		}
+	}
+	if lease <= 0 {
+		lease = DefaultLease
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()

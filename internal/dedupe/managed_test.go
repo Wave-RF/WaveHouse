@@ -49,11 +49,13 @@ type memDedup struct {
 	seen     map[Key]bool
 	closed   bool
 	reserved [][]Key // every Reserve's keys, as the backend saw them
-	short    bool    // answer one claim too few
+	leases   []time.Duration
+	short    bool // answer one claim too few
 }
 
-func (m *memDedup) Reserve(_ context.Context, keys []Key, _ time.Duration) ([]Claim, error) {
+func (m *memDedup) Reserve(_ context.Context, keys []Key, lease time.Duration) ([]Claim, error) {
 	m.reserved = append(m.reserved, keys)
+	m.leases = append(m.leases, lease)
 	claims := make([]Claim, 0, len(keys))
 	for _, k := range keys {
 		st := Claimed
@@ -132,6 +134,10 @@ func TestManaged_CollapsesRepeats(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, [][]Key{{a, b}}, backend.reserved, "the backend sees each key once")
 	assert.Equal(t, []Claim{{Key: a, Status: Claimed, Token: "t"}, {Key: b, Status: Claimed, Token: "t"}, {Key: a, Status: Duplicate}}, claims)
+
+	_, err = m.Reserve(ctx, []Key{{Table: "t", ID: "c"}}, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []time.Duration{time.Second, DefaultLease}, backend.leases, "no lease is the default, never an already-lapsed claim")
 
 	backend.short = true
 	_, err = m.Reserve(ctx, []Key{a}, time.Second)

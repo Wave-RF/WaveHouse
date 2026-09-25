@@ -27,8 +27,8 @@ const (
 	// after the lease.
 	Claimed Status = iota + 1
 	// Duplicate means the key was committed earlier and has not expired: skip
-	// the record. Also returned for a key repeated inside one Reserve call,
-	// after its first occurrence.
+	// the record. Managed also answers it for a key repeated inside one
+	// Reserve call, after its first occurrence, whatever the first answered.
 	Duplicate
 	// InFlight means another request holds a live claim on the key. Its
 	// outcome is not known yet, so the caller answers 503 and the client
@@ -57,7 +57,10 @@ type Claim struct {
 	Token  string
 }
 
-// Deduplicator is a tenant's store of seen ids.
+// Deduplicator is a tenant's store of seen ids. Callers reach every backend
+// through Managed, which hands a backend distinct, valid keys, a lease > 0,
+// and only Claimed claims to Commit and Release — a backend may assume all
+// three, and Managed's callers get the behaviour below either way.
 //
 // Reserve is atomic per key: of any number of concurrent Reserves for the
 // same key — in this process or any other sharing the backend — at most one
