@@ -96,7 +96,10 @@ func testConfig(t *testing.T, settingsDir string) *config.Config {
 	return &config.Config{
 		DataDir:  t.TempDir(),
 		Server:   config.Server{Port: closedPort(t), ShutdownTimeout: 2},
-		Cache:    config.Cache{L1MaxCost: 1 << 20},
+		MQ:       config.MQ{Backend: config.MQEmbedded},
+		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
+		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
+		Coord:    config.Coord{Backend: config.CoordLocal},
 		Auth:     config.Auth{JWTSecret: "unit-test-secret"},
 		Settings: config.Settings{Dir: settingsDir},
 	}
@@ -534,6 +537,28 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 
 	require.NoError(t, a.Close(context.Background()))
 	assert.False(t, restored.Open(), "Close releases every open store")
+}
+
+// Validate refuses a backend no layer has a case for, so the switch's default
+// is reached only by a Config built by hand; it must refuse boot, not wire
+// nothing.
+func TestNew_RefusesALayerWithoutABackend(t *testing.T) {
+	for _, tc := range []struct {
+		key   string
+		unset func(*config.Config)
+	}{
+		{"dedupe.backend", func(c *config.Config) { c.Dedupe.Backend = "" }},
+		{"mq.backend", func(c *config.Config) { c.MQ.Backend = "" }},
+		{"cache.backend", func(c *config.Config) { c.Cache.Backend = "" }},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			guardGlobals(t)
+			cfg := testConfig(t, writeSettings(t, nil))
+			tc.unset(cfg)
+			_, err := New(t.Context(), Options{Config: cfg})
+			require.ErrorContains(t, err, tc.key+` "" has no wiring`)
+		})
+	}
 }
 
 // A Pebble instance that cannot open follows the registry's own rule for the

@@ -172,6 +172,10 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 		return nil, err
 	}
 	a.wireObservability(ctx)
+	// After observability, so an OTLP log pipeline carries them too.
+	for _, w := range a.cfg.Warnings() {
+		slog.Warn(w)
+	}
 	if err := a.wireClickHouse(); err != nil {
 		return nil, err
 	}
