@@ -221,10 +221,10 @@ type MockPurger struct {
 // PurgeCall records one PurgeAcked call.
 type PurgeCall struct {
 	Consumer  string
-	OlderThan time.Time
+	OlderThan map[tenant.ID]time.Time
 }
 
-func (m *MockPurger) PurgeAcked(_ context.Context, consumer string, olderThan time.Time) (bool, error) {
+func (m *MockPurger) PurgeAcked(_ context.Context, consumer string, olderThan map[tenant.ID]time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Calls = append(m.Calls, PurgeCall{Consumer: consumer, OlderThan: olderThan})
@@ -233,13 +233,21 @@ func (m *MockPurger) PurgeAcked(_ context.Context, consumer string, olderThan ti
 
 // ── Mock mq.DeadLetterStats ──────────────────────────────────────
 
-// MockDeadLetterStats implements mq.DeadLetterStats with a canned answer.
+// MockDeadLetterStats implements mq.DeadLetterStats with a canned answer,
+// recording the tenant and table each call asked about.
 type MockDeadLetterStats struct {
 	Counts mq.DeadLetterCounts
 	Err    error
+
+	mu     sync.Mutex
+	Tenant tenant.ID
+	Table  string
 }
 
-func (m *MockDeadLetterStats) DeadLetterCounts(context.Context, string) (mq.DeadLetterCounts, error) {
+func (m *MockDeadLetterStats) DeadLetterCounts(_ context.Context, id tenant.ID, table string) (mq.DeadLetterCounts, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Tenant, m.Table = id, table
 	return m.Counts, m.Err
 }
 

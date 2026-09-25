@@ -16,7 +16,7 @@ type Config struct {
 	// Subdirectory names are conventions, not config — one knob, one mount.
 	// In a container this MUST resolve to a host-backed volume; the relative
 	// `./data` default is fine for local binary use only.
-	DataDir    string     `yaml:"data_dir" env:"WH_DATA_DIR" env-default:"./data"`
+	DataDir    string     `yaml:"data_dir" env:"WH_DATA_DIR"`
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
 	Cache      Cache      `yaml:"cache"`
@@ -63,19 +63,19 @@ type Settings struct {
 // variables read by the OpenTelemetry SDK, not WaveHouse config. See
 // docs/src/content/docs/configuration.mdx.
 type OTel struct {
-	Enabled bool        `yaml:"enabled" env:"WH_OTEL_ENABLED" env-default:"false"`
+	Enabled bool        `yaml:"enabled" env:"WH_OTEL_ENABLED"`
 	Traces  OTelTraces  `yaml:"traces"`
 	Metrics OTelMetrics `yaml:"metrics"`
 	Logs    OTelLogs    `yaml:"logs"`
 }
 
 type OTelTraces struct {
-	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_TRACES_ENABLED" env-default:"true"`
-	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_TRACES_SAMPLE_RATE" env-default:"1.0"`
+	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_TRACES_ENABLED"`
+	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_TRACES_SAMPLE_RATE"`
 }
 
 type OTelMetrics struct {
-	Enabled bool `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
+	Enabled bool `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED"`
 }
 
 // Prometheus controls a Prometheus exposition endpoint served alongside (or
@@ -94,9 +94,9 @@ type OTelMetrics struct {
 // port spins up a dedicated HTTP listener — useful for firewalling metrics
 // off the public API surface in production.
 type Prometheus struct {
-	Enabled bool   `yaml:"enabled" env:"WH_PROMETHEUS_ENABLED" env-default:"false"`
-	Path    string `yaml:"path" env:"WH_PROMETHEUS_PATH" env-default:"/metrics"`
-	Port    int    `yaml:"port" env:"WH_PROMETHEUS_PORT" env-default:"0"`
+	Enabled bool   `yaml:"enabled" env:"WH_PROMETHEUS_ENABLED"`
+	Path    string `yaml:"path" env:"WH_PROMETHEUS_PATH"`
+	Port    int    `yaml:"port" env:"WH_PROMETHEUS_PORT"`
 }
 
 // OTelLogs sample rate applies to OTLP export of DEBUG/INFO only.
@@ -105,16 +105,16 @@ type Prometheus struct {
 // records regardless of this rate (sampling for scraped-log pipelines like
 // Loki/Promtail belongs at the scraper, not the application).
 type OTelLogs struct {
-	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_LOGS_ENABLED" env-default:"true"`
-	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_LOGS_SAMPLE_RATE" env-default:"1.0"`
+	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_LOGS_ENABLED"`
+	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_LOGS_SAMPLE_RATE"`
 }
 
 // Server holds listener wiring. The CORS allowlist is a tenant tunable and
 // lives in the settings directory's config.json (internal/settings), as do
 // the SSE keepalive and gap-window knobs (stream.*).
 type Server struct {
-	Port            int `yaml:"port" env:"WH_SERVER_PORT" env-default:"8080"`
-	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT" env-default:"10"`
+	Port            int `yaml:"port" env:"WH_SERVER_PORT"`
+	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT"`
 }
 
 // ClickHouse holds the password and the connection ceiling. The wiring —
@@ -129,14 +129,14 @@ type ClickHouse struct {
 	// MaxTotalConns caps the native connections the process may hold open
 	// across its pools: the settings directory's clickhouse.max_open_conns
 	// must not exceed it. 0, the default, is no ceiling.
-	MaxTotalConns int `yaml:"max_total_conns" env:"WH_CH_MAX_TOTAL_CONNS" env-default:"0"`
+	MaxTotalConns int `yaml:"max_total_conns" env:"WH_CH_MAX_TOTAL_CONNS"`
 }
 
 // Cache sizes the in-process L1 cache. The time-range bucket structured
 // queries normalize to is a settings-directory key
 // (query.timestamp_bucket_seconds) — query shaping, not process memory.
 type Cache struct {
-	L1MaxCost int64 `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
+	L1MaxCost int64 `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST"`
 }
 
 // Auth holds the authentication secrets. The verifier wiring — `jwks_url`,
@@ -157,6 +157,27 @@ type Cache struct {
 type Auth struct {
 	JWTSecret   string `yaml:"jwt_secret" env:"WH_AUTH_JWT_SECRET"`
 	OperatorKey string `yaml:"operator_key" env:"WH_AUTH_OPERATOR_KEY"`
+}
+
+// defaults is the one definition of every boot-config default: Load starts
+// from it, then decodes the YAML over it, then applies WH_* variables over
+// that. A key the file sets — to false, 0 or "" too — therefore wins over its
+// default, which an `env-default` tag cannot do: cleanenv applies those after
+// the decode, to any field still zero, so it can't tell an explicit zero from
+// an absent key (#631). A key absent here defaults to its zero value.
+// configuration.mdx documents these; a config test pins the two together.
+func defaults() Config {
+	return Config{
+		DataDir: "./data",
+		Server:  Server{Port: 8080, ShutdownTimeout: 10},
+		Cache:   Cache{L1MaxCost: 64 << 20},
+		OTel: OTel{
+			Traces:  OTelTraces{Enabled: true, SampleRate: 1.0},
+			Metrics: OTelMetrics{Enabled: true},
+			Logs:    OTelLogs{Enabled: true, SampleRate: 1.0},
+		},
+		Prometheus: Prometheus{Path: "/metrics"},
+	}
 }
 
 // Validate checks the loaded configuration for logical consistency.
@@ -239,7 +260,7 @@ func Load(path string) (*Config, error) {
 	if err := rejectUnboundEnv(os.Environ()); err != nil {
 		return nil, err
 	}
-	var cfg Config
+	cfg := defaults()
 	if _, err := os.Stat(path); err == nil {
 		if err := cleanenv.ReadConfig(path, &cfg); err != nil {
 			return nil, fmt.Errorf("read config: %w", err)

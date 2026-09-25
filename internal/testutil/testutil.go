@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
@@ -38,6 +39,24 @@ func NewTestSchemaRegistry(t testing.TB, tables []*discovery.TableSchema) *disco
 // connection reports, so a test can assert against ServerVersion() without
 // hardcoding the same literal twice.
 const TestServerVersion = "24.8.1.1"
+
+// NewEmbeddedMQ starts the embedded broker over a temporary directory, closed
+// by the test framework, with a queue open for each of tenants —
+// tenant.Default when none is named — at maxBytes: a tenant has a queue once
+// its budget is applied, as the wiring does for every tenant it serves.
+func NewEmbeddedMQ(t testing.TB, maxBytes int64, tenants ...tenant.ID) *mq.EmbeddedNATS {
+	t.Helper()
+	emb, err := mq.NewEmbedded(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = emb.Close() })
+	if len(tenants) == 0 {
+		tenants = []tenant.ID{tenant.Default}
+	}
+	for _, id := range tenants {
+		require.NoError(t, emb.SetMaxBytes(context.Background(), id, maxBytes))
+	}
+	return emb
+}
 
 // schemaConn is a mock driver.Conn serving exactly the queries Refresh issues:
 // the SELECT timezone() (always "UTC") and SELECT version() probes, the
