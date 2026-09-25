@@ -117,7 +117,10 @@ const (
 // messages are redelivered mid-processing → duplicate inserts).
 const (
 	// Server-side cap on a tenant's unacked messages; suspends that tenant's
-	// delivery when hit (backpressure), and no other tenant's.
+	// delivery when hit (backpressure), and no other tenant's. The worker holds
+	// every delivered row until its batch is acked, so while ClickHouse stalls
+	// it can hold up to maxAckPending rows per tenant: the in-memory bound
+	// grows with the tenants served.
 	maxAckPending = 10_000 // TODO: raise if NATS delivery becomes the bottleneck
 
 	// Client prefetch buffer in front of msgChan (was the implicit jetstream
@@ -223,11 +226,10 @@ func waitOrDeadline(ctx context.Context, wg *sync.WaitGroup) error {
 
 // dispatchLoop owns the one consumer — held on every tenant's queue — and fans
 // every message out to a tableLoop per tenant table (lazily spawned on first
-// sight of one). It does
-// no batching itself — it parses just enough to route — so a low-volume table
-// can never strand another table's rows behind a shared timer. It is the ONLY
-// goroutine that watches ctx; tableLoops stop via channel-close, which gives a
-// deterministic drain with no abandoned messages.
+// sight of one). It does no batching itself — it parses just enough to route —
+// so a low-volume table can never strand another table's rows behind a shared
+// timer. It is the ONLY goroutine that watches ctx; tableLoops stop via
+// channel-close, which gives a deterministic drain with no abandoned messages.
 func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 	defer w.wg.Done()
 
@@ -471,13 +473,12 @@ func firstDuplicate(cols []string) (string, bool) {
 }
 
 // parseMsg unmarshals one envelope into a parsedMsg. An envelope the worker can
-// never insert is poison — malformed JSON, a row format it doesn't know (which
-// is what a pre-v2 envelope looks like: it carries no `format` at all), or
+// never insert is poison — malformed JSON, a row format it doesn't know, or
 // columns and a row it can't pair. Poison is parked on the DLQ rather than
-// dropped, so an operator who skipped the documented pre-deploy drain finds
-// those rows waiting instead of gone; when the DLQ is off for the table it is
-// acked-and-dropped with a counted error, because a message that can never
-// insert must not redeliver forever. ok is false either way so the caller skips it.
+// dropped, so an operator finds those rows waiting instead of gone; when the
+// DLQ is off for the table it is acked-and-dropped with a counted error,
+// because a message that can never insert must not redeliver forever. ok is
+// false either way so the caller skips it.
 func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, bool) {
 	var envelope EventMessage
 
@@ -493,7 +494,7 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 		slog.ErrorContext(ctx, "event envelope declares an unknown row format",
 			"format", envelope.Format, "tenant", id, "table", envelope.TableName)
 		w.rejectPoison(ctx, m, id, envelope.TableName, "unknown_format",
-			fmt.Sprintf("unknown row format %q (a pre-v2 envelope carries none); drain the ingest queue before upgrading", envelope.Format))
+			fmt.Sprintf("unknown row format %q", envelope.Format))
 		return parsedMsg{}, false
 	}
 	if len(envelope.Columns) == 0 || len(envelope.Row) == 0 {
@@ -794,10 +795,9 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, id tenan
 	if w.dlqEnabled == nil || w.dlqEnabled(id, tableName) {
 		// Backgrounded on ackWg for the same reason handleSuccess backgrounds its
 		// acks: parkOnDLQ does a DLQ publish AND an fsync-bound DoubleAck,
-		// and parseMsg runs on the dispatchLoop goroutine. The scenario this whole
-		// change targets is an operator who skipped the drain, where EVERY backlog
-		// message is poison — done inline that is one publish plus one fsync per
-		// message in series, with intake stalled behind it. dispatchLoop adds and
+		// and parseMsg runs on the dispatchLoop goroutine. When a whole backlog
+		// is poison, done inline that is one publish plus one fsync per message
+		// in series, with intake stalled behind it. dispatchLoop adds and
 		// waits on the same goroutine, so each Add still happens-before the Wait.
 		w.ackWg.Go(func() {
 			if w.parkOnDLQ(ctx, m, tableName, detail) {

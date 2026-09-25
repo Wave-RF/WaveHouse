@@ -719,10 +719,10 @@ func (h *IngestHandler) processRecord(
 		// retry must not read as a duplicate of it (#384).
 		releaseClaims(ctx, dd, claims)
 		if errors.Is(err, mq.ErrQueueFull) {
-			slog.WarnContext(ctx, "ingest queue is full", "error", err, "table", table, "scope", scope)
+			slog.WarnContext(ctx, "ingest queue is full", "tenant", store.Tenant(), "error", err, "table", table, "scope", scope)
 			return false, nil, &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30"}
 		}
-		slog.ErrorContext(ctx, "failed to publish to the ingest queue", "error", err, "table", table, "scope", scope)
+		slog.ErrorContext(ctx, "failed to publish to the ingest queue", "tenant", store.Tenant(), "error", err, "table", table, "scope", scope)
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed"}
 	}
 	commitClaims(ctx, dd, claims, table)
