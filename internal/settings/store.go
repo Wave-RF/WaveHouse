@@ -18,7 +18,8 @@ import (
 //
 // There are no compiled defaults here on purpose, but one: every key but
 // dedupe.retention (missing means "0", forever) is required by Validate, so
-// the snapshot is exactly what the files said when they were adopted. Defaults live in the seed directory (Seed / WriteSeed).
+// the snapshot is exactly what the files said when they were adopted.
+// Defaults live in the seed directory (Seed / WriteSeed).
 type Store struct {
 	// tenant is the id the Registry created the store for; the zero value
 	// only for a Store built outside a Registry (tests).

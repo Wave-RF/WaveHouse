@@ -33,8 +33,9 @@ func validFiles() map[string]string {
 
 // configJSON returns the seed config.json with patch merged over it, one
 // level deep (a patched block's keys replace the seed's, the rest of the
-// block is kept). Every key is required, so tests that care about one key
-// build a complete document from the seed rather than repeating all of them.
+// block is kept). Every key but dedupe.retention is required, so tests that
+// care about one key build a complete document from the seed rather than
+// repeating all of them.
 func configJSON(patch string) string {
 	seed, err := Seed()
 	if err != nil {
