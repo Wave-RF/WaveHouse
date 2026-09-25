@@ -189,7 +189,9 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	if err := a.wireCache(); err != nil {
 		return nil, err
 	}
-	a.wireCoord()
+	if err := a.wireCoord(); err != nil {
+		return nil, err
+	}
 	a.wireSweeper()
 	a.wireStreaming()
 	a.wireIngestWorker()

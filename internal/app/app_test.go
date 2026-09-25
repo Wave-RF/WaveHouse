@@ -550,6 +550,7 @@ func TestNew_RefusesALayerWithoutABackend(t *testing.T) {
 		{"dedupe.backend", func(c *config.Config) { c.Dedupe.Backend = "" }},
 		{"mq.backend", func(c *config.Config) { c.MQ.Backend = "" }},
 		{"cache.backend", func(c *config.Config) { c.Cache.Backend = "" }},
+		{"coord.backend", func(c *config.Config) { c.Coord.Backend = "" }},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
 			guardGlobals(t)

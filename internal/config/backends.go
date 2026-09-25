@@ -72,7 +72,6 @@ func (d Dedupe) validate() error {
 }
 
 // CoordBackend names where leases for singleton work (the sweeper) are held.
-// Nothing reads it yet: the lease layer (#613) wires it.
 type CoordBackend string
 
 // CoordLocal holds leases in this process, which is enough while no other

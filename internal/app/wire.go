@@ -638,11 +638,16 @@ func unreachableBackend[T ~string](key string, got T) error {
 }
 
 // wireCoord opens the lease coordinator the singleton loops campaign on.
-// In-process until coord.backend selects a shared one.
-func (a *App) wireCoord() {
-	c := coord.NewLocal()
-	a.coord = c
-	a.add(component{name: "coord", close: c.Close})
+func (a *App) wireCoord() error {
+	switch b := a.cfg.Coord.Backend; b {
+	case config.CoordLocal:
+		c := coord.NewLocal()
+		a.coord = c
+		a.add(component{name: "coord", close: c.Close})
+		return nil
+	default:
+		return unreachableBackend("coord.backend", b)
+	}
 }
 
 // sweeperLease is the lease the sweeper runs under, one sweeper per queue.
