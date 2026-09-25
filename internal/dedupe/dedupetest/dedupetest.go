@@ -320,7 +320,7 @@ var cases = []struct {
 			{Table: "\xff\xfe", ID: "e1"},
 			{Table: "tab\tle \n", ID: "e1"},
 			{Table: "a/b", ID: "c"},
-			{Table: "a%2Fb", ID: "c"},
+			{Table: "a/b", ID: "d"},
 			{Table: "t", ID: "%23x"},
 		}
 		fresh := []dedupe.Key{
@@ -329,11 +329,15 @@ var cases = []struct {
 			{Table: "\x01", ID: "a"},
 			{Table: "\xff", ID: "\xfee1"},
 			{Table: "tab\tle", ID: " \ne1"},
-			{Table: "a", ID: "b/c"},
-			{Table: "a/b", ID: "c%"},
+			{Table: "a%2Fb", ID: "c"},
+			{Table: "a", ID: "b/d"},
 			{Table: "t", ID: "#x"},
 		}
-		require.NoError(t, d.Commit(t.Context(), reserve(t, d, long, seen...), 0))
+		first := reserve(t, d, long, seen...)
+		for _, c := range first {
+			require.Equal(t, dedupe.Claimed, c.Status, "%q shares a key with another seen key", c.Key)
+		}
+		require.NoError(t, d.Commit(t.Context(), first, 0))
 		for _, c := range reserve(t, d, long, fresh...) {
 			assert.Equal(t, dedupe.Claimed, c.Status, "%q", c.Key)
 		}
