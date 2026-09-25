@@ -1,11 +1,10 @@
 package mq
 
 import (
-	"bytes"
 	"fmt"
-	"net/url"
 	"strings"
 
+	"github.com/Wave-RF/WaveHouse/internal/keyenc"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
@@ -59,29 +58,6 @@ func streamTenant(prefix, name string) (tenant.ID, bool) {
 	return id, err == nil
 }
 
-// encodeToken converts any table or scope name into a safe, single NATS
-// subject token. It preserves alphanumerics and underscores, but
-// percent-encodes everything else (so '.', ' ', '*' and '>' can never split
-// or wildcard a subject).
-func encodeToken(raw string) string {
-	var buf bytes.Buffer
-	for i := 0; i < len(raw); i++ {
-		b := raw[i]
-		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' {
-			buf.WriteByte(b)
-		} else {
-			fmt.Fprintf(&buf, "%%%02X", b)
-		}
-	}
-	return buf.String()
-}
-
-// decodeToken reverses encodeToken. url.PathUnescape handles exactly the %XX
-// form encodeToken writes.
-func decodeToken(safe string) (string, error) {
-	return url.PathUnescape(safe)
-}
-
 // subject renders a caller's topic under prefix. The tenant is checked
 // against its grammar here, on the way to the wire: an empty one — a caller
 // that never set it — must not become a subject of some other tenant's, and
@@ -118,10 +94,10 @@ func parseTopicKey(tail string) Topic {
 	switch len(parts) {
 	case 2, 3:
 		id, idErr := tenant.Parse(parts[0])
-		table, tableErr := decodeToken(parts[1])
+		table, tableErr := keyenc.Unescape(parts[1])
 		scope, scopeErr := "", error(nil)
 		if len(parts) == 3 {
-			scope, scopeErr = decodeToken(parts[2])
+			scope, scopeErr = keyenc.Unescape(parts[2])
 		}
 		if idErr == nil && tableErr == nil && scopeErr == nil {
 			return Topic{Tenant: id, Table: table, Scope: scope}
