@@ -727,6 +727,7 @@ func TestRedis_FailoverBehindAStableAddress(t *testing.T) {
 	a := open(t, stable, prefix, func(c *cache.RedisConfig) {
 		c.BreakerThreshold, c.BreakerOpenFor = 1000, 200*time.Millisecond
 		cache.SetConnLifetime(c, time.Second)
+		cache.SetOnePipe(c) // every operation uses the connection dialed before the failover
 	})
 	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
 	_, snap, err := a.Lookup(ctx, "acme", "q", deps)

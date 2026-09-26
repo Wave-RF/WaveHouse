@@ -80,6 +80,7 @@ type RedisConfig struct {
 	BreakerOpenFor   time.Duration // how long it stays open before a probe
 
 	connLifetime time.Duration // defaultConnLifetime; tests shorten it
+	onePipe      bool          // one connection per node, whatever GOMAXPROCS; tests only
 }
 
 func (c RedisConfig) withDefaults() (RedisConfig, error) {
@@ -174,6 +175,9 @@ func (c RedisConfig) clientOption() rueidis.ClientOption {
 	// bypass reaches the new primary, and delivers its owed bumps, within
 	// about this long.
 	opt.ConnLifetime = c.connLifetime
+	if c.onePipe {
+		opt.PipelineMultiplex = -1
+	}
 	if c.Mode == RedisSentinel {
 		opt.Sentinel = rueidis.SentinelOption{MasterSet: c.SentinelMaster, TLSConfig: c.TLS, Dialer: opt.Dialer}
 	}
