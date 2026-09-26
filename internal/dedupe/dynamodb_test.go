@@ -585,7 +585,7 @@ func TestDynamo_ThrottledCallEndsOnItsLastAttempt(t *testing.T) {
 // extra (TestDynamo_ThrottledCallEndsOnItsLastAttempt's) replaces it.
 func TestNewDynamo_SizesTheIdlePool(t *testing.T) {
 	t.Parallel()
-	for _, n := range []int{0, 8, 200} {
+	for _, n := range []int{0, 4, 8, 200} {
 		d, err := NewDynamo(t.Context(), DynamoConfig{Table: "dedupe", Region: "us-east-1", ReserveConcurrency: n})
 		require.NoError(t, err)
 		client, ok := d.api.(*dynamodb.Client).Options().HTTPClient.(*awshttp.BuildableClient)
@@ -593,6 +593,8 @@ func TestNewDynamo_SizesTheIdlePool(t *testing.T) {
 		tr := client.GetTransport()
 		assert.GreaterOrEqual(t, tr.MaxIdleConnsPerHost, d.cfg.ReserveConcurrency, "ReserveConcurrency %d", n)
 		assert.GreaterOrEqual(t, tr.MaxIdleConns, d.cfg.ReserveConcurrency, "ReserveConcurrency %d", n)
+		assert.GreaterOrEqual(t, tr.MaxIdleConnsPerHost, awshttp.DefaultHTTPTransportMaxIdleConnsPerHost, "never below the SDK's default: ReserveConcurrency %d", n)
+		assert.GreaterOrEqual(t, tr.MaxIdleConns, awshttp.DefaultHTTPTransportMaxIdleConns, "ReserveConcurrency %d", n)
 	}
 }
 
