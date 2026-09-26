@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	mathrand "math/rand/v2"
 	"strconv"
 	"sync"
 	"time"
@@ -45,7 +46,12 @@ const (
 	// commitRounds bounds the BatchWriteItem rounds one chunk gets before
 	// its still-unprocessed items fail the Commit.
 	commitRounds = 8
-	tokenBytes   = 16
+	// commitBase and commitCeiling bound the jittered wait between Commit
+	// rounds; retryBase is the one the SDK retryer's backoff doubles from.
+	commitBase    = 25 * time.Millisecond
+	commitCeiling = 200 * time.Millisecond
+	retryBase     = 25 * time.Millisecond
+	tokenBytes    = 16
 
 	// opReserve is the operation the breaker watches: Release and Commit
 	// answers say nothing about whether a new Reserve would get through.
@@ -64,7 +70,8 @@ type DynamoConfig struct {
 	// only; it is also what unlocks CreateTable.
 	Endpoint string
 	// Timeout bounds each DynamoDB call, its SDK retries included.
-	// 0 = 250ms.
+	// 0 = 250ms. The retries' jittered backoff is capped so that together
+	// it waits at most half of Timeout (retryBackoff).
 	Timeout time.Duration
 	// MaxAttempts is the SDK retryer's attempts per call. 0 = 3.
 	MaxAttempts int
@@ -150,7 +157,7 @@ func NewDynamo(ctx context.Context, cfg DynamoConfig, extra ...func(*config.Load
 func newRetryer(cfg DynamoConfig) (func() aws.Retryer, error) {
 	standard := func(o *retry.StandardOptions) {
 		o.MaxAttempts = cfg.MaxAttempts
-		o.MaxBackoff = 200 * time.Millisecond
+		o.Backoff = retryBackoff(cfg)
 	}
 	switch cfg.RetryMode {
 	case "standard":
@@ -165,6 +172,28 @@ func newRetryer(cfg DynamoConfig) (func() aws.Retryer, error) {
 	return nil, fmt.Errorf("dedupe: dynamodb retry_mode %q: want standard or adaptive", cfg.RetryMode)
 }
 
+// retryBackoff is the SDK retryer's wait before a retry: full jitter, so
+// puts throttled together do not retry in lockstep, under a ceiling that
+// doubles from retryBase up to Timeout/(2·(MaxAttempts-1)). A call's retries
+// then wait at most half its Timeout in all, so a throttled call ends on its
+// last attempt's answer (ErrUnavailable, the throttle as its cause) unless
+// the attempts themselves take the other half.
+func retryBackoff(cfg DynamoConfig) retry.BackoffDelayerFunc {
+	ceiling := cfg.Timeout / time.Duration(2*max(cfg.MaxAttempts-1, 1))
+	return func(attempt int, _ error) (time.Duration, error) {
+		return fullJitter(retryBase, ceiling, attempt), nil
+	}
+}
+
+// fullJitter is uniform over [0, min(base·2^attempt, ceiling)].
+func fullJitter(base, ceiling time.Duration, attempt int) time.Duration {
+	d := min(base<<min(max(attempt, 0), 30), ceiling)
+	if d <= 0 {
+		return 0
+	}
+	return mathrand.N(d + 1) //nolint:gosec // G404: backoff jitter, not a secret
+}
+
 func newDynamo(api dynamoAPI, cfg DynamoConfig) *Dynamo {
 	now := time.Now
 	return &Dynamo{
@@ -174,7 +203,7 @@ func newDynamo(api dynamoAPI, cfg DynamoConfig) *Dynamo {
 		breaker: newBreaker(now),
 		metrics: newDynamoMetrics(),
 		commitBackoff: func(attempt int) time.Duration {
-			return min(25*time.Millisecond<<attempt, 200*time.Millisecond)
+			return fullJitter(commitBase, commitCeiling, attempt)
 		},
 	}
 }

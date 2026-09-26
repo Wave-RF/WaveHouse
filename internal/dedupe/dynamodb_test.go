@@ -4,14 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net"
+	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
@@ -412,6 +418,121 @@ func TestDynamo_Config(t *testing.T) {
 	d, err := NewDynamo(t.Context(), DynamoConfig{Table: "t", Region: "us-east-1"})
 	require.NoError(t, err)
 	require.ErrorIs(t, d.CreateTable(t.Context()), ErrCreateTableNeedsEndpoint, "never against real AWS")
+}
+
+func TestFullJitter(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		attempt int
+		most    time.Duration
+	}{
+		{-1, 10 * time.Millisecond},
+		{0, 10 * time.Millisecond},
+		{2, 40 * time.Millisecond},
+		{3, 50 * time.Millisecond},
+		{1 << 20, 50 * time.Millisecond},
+	} {
+		seen := map[time.Duration]bool{}
+		for range 200 {
+			d := fullJitter(10*time.Millisecond, 50*time.Millisecond, tc.attempt)
+			assert.GreaterOrEqual(t, d, time.Duration(0))
+			assert.LessOrEqual(t, d, tc.most, "attempt %d", tc.attempt)
+			seen[d] = true
+		}
+		assert.Greater(t, len(seen), 1, "attempt %d: jittered, not a fixed wait", tc.attempt)
+	}
+	assert.Zero(t, fullJitter(10*time.Millisecond, 0, 3))
+}
+
+// Whatever the Timeout and MaxAttempts, the SDK's retries of one call wait
+// at most half the Timeout between them.
+func TestRetryBackoff_FitsTheTimeout(t *testing.T) {
+	t.Parallel()
+	for _, cfg := range []DynamoConfig{
+		{},
+		{MaxAttempts: 10},
+		{Timeout: 5 * time.Second, MaxAttempts: 2},
+		{Timeout: 40 * time.Millisecond, MaxAttempts: 5},
+	} {
+		cfg = cfg.withDefaults()
+		r, err := newRetryer(cfg)
+		require.NoError(t, err)
+		retryer := r()
+		var worst time.Duration
+		// The SDK numbers a call's retries from 1 (from 0 under its 2026
+		// retry behaviour); the later ones are the longer.
+		for attempt := 1; attempt < cfg.MaxAttempts; attempt++ {
+			var most time.Duration
+			seen := map[time.Duration]bool{}
+			for range 500 {
+				d, err := retryer.RetryDelay(attempt, nil)
+				require.NoError(t, err)
+				most = max(most, d)
+				seen[d] = true
+			}
+			assert.Greater(t, len(seen), 1, "retries are jittered, not in lockstep")
+			worst += most
+		}
+		assert.LessOrEqual(t, worst, cfg.Timeout/2, "%+v", cfg)
+	}
+}
+
+func TestDynamo_CommitBackoffIsJittered(t *testing.T) {
+	t.Parallel()
+	d := newDynamo(&fakeDynamo{}, DynamoConfig{Table: "dedupe"})
+	for attempt := range commitRounds {
+		seen := map[time.Duration]bool{}
+		for range 200 {
+			w := d.commitBackoff(attempt)
+			assert.LessOrEqual(t, w, commitCeiling)
+			seen[w] = true
+		}
+		assert.Greater(t, len(seen), 1, "round %d", attempt)
+	}
+}
+
+// throttledHTTP answers every request with a DynamoDB throttle, counting
+// the PutItems.
+type throttledHTTP struct{ puts atomic.Int64 }
+
+func (h *throttledHTTP) Do(r *http.Request) (*http.Response, error) {
+	if r.Header.Get("X-Amz-Target") == "DynamoDB_20120810.PutItem" {
+		h.puts.Add(1)
+	}
+	body := `{"__type":"com.amazonaws.dynamodb.v20120810#ProvisionedThroughputExceededException","message":"injected"}`
+	return &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Header:     http.Header{"Content-Type": {"application/x-amz-json-1.0"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}, nil
+}
+
+// Through the real SDK stack at the default Timeout and MaxAttempts: a
+// throttled put is retried until its attempts run out, inside the call's
+// deadline, so the Reserve fails with the throttle as its cause.
+func TestDynamo_ThrottledCallEndsOnItsLastAttempt(t *testing.T) {
+	t.Parallel()
+	h := &throttledHTTP{}
+	d, err := NewDynamo(t.Context(), DynamoConfig{Table: "dedupe", Region: "us-east-1", Endpoint: "http://dynamodb.invalid"},
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("k", "s", "")),
+		config.WithHTTPClient(h))
+	require.NoError(t, err)
+	m := d.Tenant("acme")
+	require.NoError(t, m.Apply(true))
+	calls := breakerTrips - 1
+	for range calls {
+		start := time.Now()
+		_, err := m.Reserve(t.Context(), keys("a"), time.Minute)
+		took := time.Since(start)
+		require.ErrorIs(t, err, ErrUnavailable)
+		var maxed *retry.MaxAttemptsError
+		require.ErrorAs(t, err, &maxed, "the attempts ran out, not the deadline")
+		var throttled *types.ProvisionedThroughputExceededException
+		require.ErrorAs(t, err, &throttled)
+		require.NotErrorIs(t, err, context.DeadlineExceeded)
+		assert.Less(t, took, d.cfg.Timeout)
+	}
+	assert.Equal(t, int64(calls*d.cfg.MaxAttempts), h.puts.Load())
 }
 
 func TestExpiresAt(t *testing.T) {
