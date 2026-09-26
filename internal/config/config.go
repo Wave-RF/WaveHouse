@@ -218,7 +218,7 @@ func (c *Config) validateTopology() error {
 		return fmt.Errorf("roles %s with mq.backend=embedded: the embedded MQ lives inside this process, and a process without it cannot reach its queue — run every role (%s), or set a shared mq.backend", joinRoles(c.Roles), joinRoles(allRoles))
 	}
 	if c.splitsCache() && c.Cache.Backend == CacheLocal {
-		return fmt.Errorf("roles %s with cache.backend=local: api and ingest run in different processes, and the ingest worker's cache invalidation would never reach the API's cache — run api and ingest together, or set a shared cache.backend", joinRoles(c.Roles))
+		return fmt.Errorf("roles %s with cache.backend=local: api and ingest run in different processes, and the ingest worker's cache invalidation would never reach the API's cache — run api and ingest together, or set cache.backend=redis, one cache every process shares", joinRoles(c.Roles))
 	}
 	return nil
 }

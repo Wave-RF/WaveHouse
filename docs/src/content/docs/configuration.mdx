@@ -70,7 +70,7 @@ Every process, whatever its roles, reads the settings directory and reloads it (
 Boot refuses a role set the selected backends cannot serve:
 
 - **Any split with `mq.backend=embedded`.** The embedded queue lives inside its process and listens on no port, so a process without every role could not reach it. Until a shared `mq.backend` exists, every process runs every role.
-- **`api` without `ingest`, or `ingest` without `api`, with `cache.backend=local`.** The ingest worker invalidates the cache the API reads, and a local cache in another process never sees that invalidation. Run `api` and `ingest` together, or choose a shared `cache.backend`. A `sweeper`-only process holds no cache, so this rule does not apply to it.
+- **`api` without `ingest`, or `ingest` without `api`, with `cache.backend=local`.** The ingest worker invalidates the cache the API reads, and a local cache in another process never sees that invalidation. Run `api` and `ingest` together, or set [`cache.backend: redis`](#backends), one cache every process shares. A `sweeper`-only process holds no cache, so this rule does not apply to it.
 
 ### Server
 
