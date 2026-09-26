@@ -434,7 +434,7 @@ internal/chconn/        → ClickHouse pools, one per connection tuple among the
 internal/chsql/         → Shared ClickHouse SQL helpers (identifier quoting + bind-safety)
 internal/config/        → Configuration structs + loader
 internal/coord/         → Leases with fencing tokens (interface, in-process Local, RunElected, coordtest conformance suite)
-internal/dedupe/        → Optional deduplication (interface + embedded/distributed)
+internal/dedupe/        → Optional deduplication (Reserve/Commit/Release interface + embedded Pebble)
 internal/discovery/     → ClickHouse schema introspection + ingest validation
 internal/ingest/        → Batch buffer with DLQ + Active Sweeper (NATS message lifecycle)
 internal/keyenc/        → One escaping for composite keys (NATS subject tokens, cache namespace tokens, dedupe keys)
