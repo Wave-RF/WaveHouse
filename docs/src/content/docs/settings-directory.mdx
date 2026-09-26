@@ -108,7 +108,7 @@ The tenant tunables. Every key is required (a missing one is a validation error)
 | `clickhouse.http_scheme` | `http` | `http` or `https` for that HTTP hop — one of the two *outbound* TLS switches, with `tls.enabled` for the native hop; unrelated to your clients' TLS. |
 | `clickhouse.database` | `default` | Database tables are discovered from. |
 | `clickhouse.username` | `default` | Connection user; the password is boot config (`WH_CH_PASSWORD`). |
-| `clickhouse.query_timeout` | `30` | Seconds (`>= 1`) a read may take; bounds the client deadline, from which the driver derives a server-side `max_execution_time`. |
+| `clickhouse.query_timeout` | `30` | Seconds (`>= 1`) a read may take. On `/v1/query` under a role's `max_execution_time`, the smaller of the two is sent to ClickHouse as `max_execution_time`; otherwise it bounds the client deadline, from which the driver derives a server-side `max_execution_time`. |
 | `clickhouse.tls.enabled` | `false` | Switches the native-protocol hop (`addr`) to TLS. The HTTP hop's switch stays `http_scheme`; the rest of the `tls` block applies to whichever hop uses TLS. See [ClickHouse](#clickhouse). |
 | `clickhouse.tls.ca_file` | `""` | PEM bundle the server certificate is verified against; empty uses the system roots. A path, read when the connection is built and re-read when the `tls` block changes — validation does not open it. |
 | `clickhouse.tls.cert_file` | `""` | Client certificate for mutual TLS, PEM; set together with `key_file` or not at all. |
