@@ -434,7 +434,7 @@ internal/chconn/        → ClickHouse pools, one per connection tuple among the
 internal/chsql/         → Shared ClickHouse SQL helpers (identifier quoting + bind-safety)
 internal/config/        → Configuration structs + loader
 internal/coord/         → Leases with fencing tokens (interface, in-process Local, RunElected, coordtest conformance suite)
-internal/dedupe/        → Optional deduplication (interface + embedded/distributed)
+internal/dedupe/        → Optional deduplication (Reserve/Commit/Release interface; Pebble, DynamoDB)
 internal/discovery/     → ClickHouse schema introspection + ingest validation
 internal/ingest/        → Batch buffer with DLQ + Active Sweeper (NATS message lifecycle)
 internal/keyenc/        → One escaping for composite keys (NATS subject tokens, cache namespace tokens, dedupe keys)
@@ -446,7 +446,7 @@ internal/query/         → Structured query AST + SQL builder
 internal/settings/      → Settings directory (validate, adopted snapshot + reload, watcher, embedded seed)
 internal/stream/        → SSE fan-out (event Hub: project once per role, Subscriber outbound queue, Bucket fan-out, keepalive Heartbeater wheel)
 internal/tenant/        → Tenant id (type, grammar, reserved default, request header name)
-internal/testutil/      → Shared test helpers (mocks, JWT + schema helpers; logtest/ captures or silences the default logger)
+internal/testutil/      → Shared test helpers (mocks, JWT + schema helpers; logtest/ captures or silences the default logger; storedir/ is the embedded broker's store directory in tests, removed once late consumer-state writes land)
 tests/                  → Integration & E2E tests
 tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer)
 tests/e2e/              → E2E test stack (scripts/orchestrator boots a ClickHouse testcontainer + the wavehouse-cov binary)
