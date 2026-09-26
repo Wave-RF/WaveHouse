@@ -159,55 +159,75 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// The tenant's pool, ahead of the cache: a tenant on none — its tuple
-	// could not be opened, such as by the connection ceiling — fails
-	// closed rather than serve what it cached before (#583 story 6).
-	conn := connOf(h.CHConn, store)
-	if conn == nil {
-		writeUnavailable(w, noConnectionMessage, retryAfterPool)
-		return
-	}
-
 	// Cache key, led by the tenant the store was resolved for (#583 story 8);
 	// the singleflight key too.
 	cacheKey := queryCacheKey(store.Tenant(), result.SQL, result.Params)
 
 	// TODO: impl scope
 	scope := ""
-	safeTableName := query.SafeEncodeToken(table)
 	// A structured query reads one table, so it depends on a single namespace:
-	// the request's tenant, the table, the scope. Encode the scope the way the
-	// ingest worker does (worker.go invalidate) so the read and invalidation
-	// sides build identical namespace keys once scope is implemented;
-	// SafeEncodeToken("") is "", so this is a no-op while scope is empty.
-	deps := []cache.Namespace{{Tenant: store.Tenant(), Table: safeTableName, Scope: query.SafeEncodeToken(scope)}}
+	// the request's tenant, the table, the scope — raw names, as the ingest
+	// worker's invalidation passes them; the cache escapes both sides alike.
+	deps := []cache.Namespace{{Tenant: store.Tenant(), Table: table, Scope: scope}}
 
-	// Try cache. The snapshot is of the versions before the query runs, so a
-	// write landing mid-query orphans the fill (#382).
+	// The snapshot is of the versions before anything the query reads is
+	// chosen, so a bump landing after — an insert mid-query (#382), or a
+	// reload moving the tenant to another address or database once its pool
+	// below is taken — orphans the fill.
+	var entry cache.Entry
 	var snap cache.Snapshot
 	if h.Cache != nil {
-		var entry cache.Entry
-		if entry, snap, _ = h.Cache.Lookup(r.Context(), store.Tenant(), cacheKey, deps); entry.Value != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Cache", "HIT")
-			_, _ = w.Write(entry.Value)
-			return
-		}
+		entry, snap, _ = h.Cache.Lookup(r.Context(), store.Tenant(), cacheKey, deps)
+	}
+
+	// The tenant's pool, ahead of serving a hit: a tenant on none — its
+	// tuple could not be opened, such as by the connection ceiling — fails
+	// closed rather than serve what it cached before (#583 story 6).
+	conn := connOf(h.CHConn, store)
+	if conn == nil {
+		writeUnavailable(w, noConnectionMessage, retryAfterPool)
+		return
+	}
+	if entry.Value != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "HIT")
+		_, _ = w.Write(entry.Value)
+		return
+	}
+
+	// Bare Select reads: this handler resolved the grant for "select" (above),
+	// so Select is non-nil, and query.Build has already rejected a mis-resolved
+	// grant by now. If that changed, these would panic rather than silently
+	// apply no caps — do not add a nil guard, which would drop the limits
+	// instead.
+	timeout := timeoutOf(h.queryTimeout, store)
+	timeCap := perms.Select.MaxExecutionTime.Duration()
+	caps := queryCaps{
+		// An overrun is the role's cap only when the cap is the tighter
+		// budget; under a shorter query_timeout it reads as it does for a
+		// role with no cap (#620).
+		time:   timeCap > 0 && timeCap <= timeout,
+		memory: perms.Select.MaxMemoryUsage > 0,
+	}
+	if timeCap > 0 {
+		timeout = min(timeCap, timeout)
 	}
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		timeout := timeoutOf(h.queryTimeout, store)
-		// Bare Select reads: this handler resolved the grant for "select" (above),
-		// so Select is non-nil, and query.Build has already rejected a mis-resolved
-		// grant before this closure runs. If that changed, these would panic rather
-		// than silently apply no caps — do not add a nil guard, which would drop the
-		// limits instead.
-		if perms.Select.MaxExecutionTime > 0 {
-			timeout = min(perms.Select.MaxExecutionTime.Duration(), timeout)
+		var queryCtx context.Context
+		var cancel context.CancelFunc
+		if timeCap > 0 {
+			// ClickHouse enforces the budget (max_execution_time below) and
+			// answers an overrun with TIMEOUT_EXCEEDED. A context deadline
+			// would let the driver raise that setting to deadline+5s and turn
+			// every overrun into a bare DeadlineExceeded — indistinguishable
+			// from a pool wait or a dial timeout, which are outages, not the
+			// caller's cost.
+			queryCtx, cancel = cancelAfter(r.Context(), timeout+capBackstop)
+		} else {
+			queryCtx, cancel = context.WithTimeout(r.Context(), timeout)
 		}
-
-		queryCtx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 
 		// Enforce the role's resource caps server-side, not just via the client
@@ -222,7 +242,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 			MaxRowsToRead:  perms.Select.MaxRowsToRead,
 			MaxMemoryBytes: perms.Select.MaxMemoryUsage.Bytes(),
 		}
-		if perms.Select.MaxExecutionTime > 0 {
+		if timeCap > 0 {
 			limits.ExecutionTime = timeout
 		}
 		if settings := chReadSettings(limits); settings != nil {
@@ -252,7 +272,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		return data, nil
 	})
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		writeCHError(w, r, err, err.Error(), http.StatusInternalServerError, caps)
 		return
 	}
 

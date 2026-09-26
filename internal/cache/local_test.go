@@ -24,7 +24,10 @@ func newLocal(t *testing.T) cache.Cache {
 
 func TestLocalCache_Conformance(t *testing.T) {
 	t.Parallel()
-	cachetest.Run(t, newLocal, cachetest.Options{MaxValueBytes: localMaxCost})
+	cachetest.Run(t, newLocal, cachetest.Options{
+		MaxValueBytes: localMaxCost,
+		Entries:       func(c cache.Cache) int { return c.(*cache.LocalCache).Len() },
+	})
 }
 
 // A tenant that stops being served has its index dropped: what it cached is

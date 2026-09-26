@@ -20,6 +20,16 @@ func TestVersionManager_QueryKey(t *testing.T) {
 	// No deps (a pipe) still folds the tenant version.
 	assert.Equal(t, "hash123|acme.1|", vm.QueryKey("acme", "hash123", nil))
 
+	// The sha is a field like any other: escaped, so no '|' in it can pass
+	// for the separator.
+	assert.Equal(t, "acme%3Aquery%3Aab|acme.1|acme.1.my%20table.0..0",
+		vm.QueryKey("acme", "acme:query:ab", []Namespace{{Tenant: "acme", Table: "my table"}}))
+
+	// Names arrive raw and are escaped into the key, so a dot or a space in
+	// one is never read as the separator.
+	assert.Equal(t, "h2|acme.1|acme.1.default%2Eclicks.0.org%2E1.0",
+		vm.QueryKey("acme", "h2", []Namespace{{Tenant: "acme", Table: "default.clicks", Scope: "org.1"}}))
+
 	// Dependency order must not change the key (segments are sorted).
 	deps1 := []Namespace{{Tenant: "acme", Table: "a"}, {Tenant: "acme", Table: "b"}}
 	deps2 := []Namespace{{Tenant: "acme", Table: "b"}, {Tenant: "acme", Table: "a"}}

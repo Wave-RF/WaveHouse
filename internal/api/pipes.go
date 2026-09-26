@@ -152,32 +152,35 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The tenant's pool, ahead of the cache: a tenant on none — its tuple
-	// could not be opened, such as by the connection ceiling — fails
+	// Cache. A pipe can read several tables, but the current pipe impl doesn't
+	// expose its table/scope dependencies, so we pass no deps: the result folds
+	// the tenant's version alone, so InvalidateTenant orphans it but no insert
+	// does (TTL-bound until #343). The snapshot is of the versions before
+	// anything the query reads is chosen, so a bump landing after — mid-query
+	// (#382), or a reload moving the tenant to another address or database
+	// once its pool below is taken — orphans the fill.
+	// TODO: once pipes expose their tables/scopes, pass them as deps here so writes
+	// invalidate cached pipe results.
+	cacheKey := queryCacheKey(store.Tenant(), sql, params)
+	var entry cache.Entry
+	var snap cache.Snapshot
+	if h.Cache != nil {
+		entry, snap, _ = h.Cache.Lookup(r.Context(), store.Tenant(), cacheKey, nil)
+	}
+
+	// The tenant's pool, ahead of serving a hit: a tenant on none — its
+	// tuple could not be opened, such as by the connection ceiling — fails
 	// closed rather than serve what it cached before (#583 story 6).
 	conn := connOf(h.CHConn, store)
 	if conn == nil {
 		writeUnavailable(w, noConnectionMessage, retryAfterPool)
 		return
 	}
-
-	// Cache. A pipe can read several tables, but the current pipe impl doesn't
-	// expose its table/scope dependencies, so we pass no deps: the result folds
-	// the tenant's version alone, so InvalidateTenant orphans it but no insert
-	// does (TTL-bound until #343). The snapshot is of the versions before the
-	// query runs, so a bump landing mid-query orphans the fill (#382).
-	// TODO: once pipes expose their tables/scopes, pass them as deps here so writes
-	// invalidate cached pipe results.
-	cacheKey := queryCacheKey(store.Tenant(), sql, params)
-	var snap cache.Snapshot
-	if h.Cache != nil {
-		var entry cache.Entry
-		if entry, snap, _ = h.Cache.Lookup(r.Context(), store.Tenant(), cacheKey, nil); entry.Value != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Cache", "HIT")
-			_, _ = w.Write(entry.Value)
-			return
-		}
+	if entry.Value != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "HIT")
+		_, _ = w.Write(entry.Value)
+		return
 	}
 
 	// Execute with singleflight.
@@ -208,7 +211,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return data, nil
 	})
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		writeCHError(w, r, err, err.Error(), http.StatusInternalServerError, queryCaps{})
 		return
 	}
 
