@@ -303,6 +303,50 @@ func TestDynamo_CommitGivesUpOnItemsThatStayUnprocessed(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnavailable)
 }
 
+// DynamoDB answers a BatchWriteItem it processed none of with a throttle,
+// not with every item unprocessed: the chunk gets the same rounds either way.
+func TestDynamo_CommitRetriesAFailedBatch(t *testing.T) {
+	t.Parallel()
+	throttle := &types.ProvisionedThroughputExceededException{}
+	for _, tc := range []struct {
+		name        string
+		fails       int
+		err         error
+		calls       int64
+		committed   bool
+		unavailable bool
+	}{
+		{"throttled, then through", 3, throttle, 4, true, false},
+		{"throttled every round", 1 << 10, throttle, commitRounds, false, true},
+		{"timed out, then through", 1, fmt.Errorf("op: %w", context.DeadlineExceeded), 2, true, false},
+		{"a configuration bug is final", 1 << 10, &types.ResourceNotFoundException{}, 1, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int64
+			_, m := openFake(t, &fakeDynamo{batch: func(_ context.Context, in *dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error) {
+				assert.Len(t, in.RequestItems["dedupe"], 2, "the whole batch, every round")
+				if calls.Add(1) <= int64(tc.fails) {
+					return nil, tc.err
+				}
+				return &dynamodb.BatchWriteItemOutput{}, nil
+			}})
+			var claims []Claim
+			for _, k := range keys("a", "b") {
+				claims = append(claims, Claim{Key: k, Status: Claimed, Token: "t"})
+			}
+			err := m.Commit(t.Context(), claims, 0)
+			assert.Equal(t, tc.calls, calls.Load())
+			if tc.committed {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, tc.err, "the last round's cause is kept")
+			assert.Equal(t, tc.unavailable, errors.Is(err, ErrUnavailable))
+		})
+	}
+}
+
 func TestDynamo_ReleaseTreatsAFailedConditionAsDone(t *testing.T) {
 	t.Parallel()
 	_, m := openFake(t, &fakeDynamo{del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {

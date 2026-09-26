@@ -46,7 +46,7 @@ const (
 	// batchWriteMax is BatchWriteItem's per-call item limit.
 	batchWriteMax = 25
 	// commitRounds bounds the BatchWriteItem rounds one chunk gets before
-	// its still-unprocessed items fail the Commit.
+	// its still-unprocessed (or still-throttled) items fail the Commit.
 	commitRounds = 8
 	// commitBase and commitCeiling bound the jittered wait between Commit
 	// rounds; retryBase is the one the SDK retryer's backoff doubles from.
@@ -125,7 +125,7 @@ type Dynamo struct {
 	breaker *breaker
 	metrics dynamoMetrics
 	// commitBackoff is the wait before retrying the attempt'th round of
-	// unprocessed items.
+	// unprocessed or throttled items.
 	commitBackoff func(attempt int) time.Duration
 }
 
@@ -419,7 +419,8 @@ func heldBy(item map[string]types.AttributeValue, token string) bool {
 }
 
 // Commit overwrites every claim's item as committed, unconditionally, 25 to a
-// BatchWriteItem, retrying the items DynamoDB leaves unprocessed.
+// BatchWriteItem, retrying the items DynamoDB leaves unprocessed and a batch
+// that failed transiently.
 func (s *dynamoStore) Commit(ctx context.Context, claims []Claim, retention time.Duration) error {
 	if len(claims) == 0 {
 		return nil
@@ -468,16 +469,28 @@ func (s *dynamoStore) commitChunk(ctx context.Context, writes []types.WriteReque
 			}
 			return err
 		})
-		if err != nil {
+		switch {
+		case err == nil:
+		case errors.Is(err, ErrUnavailable):
+			// DynamoDB throttles a batch whole only when it processed none of
+			// it, and a timeout leaves its fate unknown: retry it whole, as a
+			// round that left every item unprocessed. The puts are idempotent.
+			unprocessed = writes
+		default:
 			return err
 		}
 		if len(unprocessed) == 0 {
 			return nil
 		}
 		if attempt+1 >= commitRounds {
+			if err != nil {
+				return err
+			}
 			return fmt.Errorf("%w: dynamodb batch_write_item: %d items still unprocessed", ErrUnavailable, len(unprocessed))
 		}
-		s.d.metrics.unprocessed.Add(ctx, int64(len(unprocessed)))
+		if err == nil {
+			s.d.metrics.unprocessed.Add(ctx, int64(len(unprocessed)))
+		}
 		writes = unprocessed
 		select {
 		case <-ctx.Done():
