@@ -105,7 +105,7 @@ type tenantQueue struct {
 	ingestCap int64
 }
 
-// EmbeddedNATS is the one implementation of every mq interface.
+// EmbeddedNATS implements every mq interface.
 var _ Broker = (*EmbeddedNATS)(nil)
 
 const (
@@ -668,14 +668,13 @@ func (e *EmbeddedNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (
 		failed: make(chan error, 1),
 	}
 	c.fail = func(err error) {
-		// Exactly one error, and nothing once stop has been called.
-		if c.stopped.Load() {
+		// Exactly one error, and nothing once stop has been called: a durable
+		// deleted on several tenants' queues ends each delivery, and a caller
+		// that already drained the first must not see the next.
+		if c.stopped.Load() || !c.reported.CompareAndSwap(false, true) {
 			return
 		}
-		select {
-		case c.failed <- err:
-		default:
-		}
+		c.failed <- err
 	}
 	if err := e.register(ctx, c.fanIn); err != nil {
 		return nil, fmt.Errorf("create consumer: %w", err)
@@ -861,7 +860,8 @@ func (f *fanIn) start(deliver func(jetstream.Msg), prefetch int, watch bool) (st
 // failed channel its contract promises.
 type workerConsumer struct {
 	*fanIn
-	failed chan error
+	failed   chan error
+	reported atomic.Bool
 }
 
 func (c *workerConsumer) Consume(handler func(msg *Message), prefetch int) (func(), <-chan error, error) {
@@ -992,9 +992,9 @@ func (e *EmbeddedNATS) PurgeAcked(ctx context.Context, consumer string, olderTha
 }
 
 // DeadLetterCounts reads tenant id's dead-letter stream's per-subject counts
-// and keys them by table. The table filter matches that table's unscoped
-// subject, so it is applied to the parsed topic rather than as a subject
-// filter; a scoped topic counts under "table.scope".
+// and keys them by table (deadLetterTables). The table filter matches every
+// scope of that table, so it is applied to the parsed topic rather than as a
+// subject filter.
 func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table string) (DeadLetterCounts, error) {
 	if _, err := tenant.Parse(string(id)); err != nil {
 		return DeadLetterCounts{}, fmt.Errorf("tenant: %w", err)
@@ -1012,20 +1012,7 @@ func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table
 		return DeadLetterCounts{}, fmt.Errorf("dlq stream info: %w", err)
 	}
 
-	counts := DeadLetterCounts{Tables: make(map[string]uint64, len(state.Subjects)), Total: state.Msgs}
-	for subj, n := range state.Subjects {
-		t := parseTopicKey(topicKey(dlqPrefix, subj))
-		if table != "" && (t.Table != table || t.Scope != "") {
-			continue
-		}
-		name := t.Table
-		if t.Scope != "" {
-			// TODO(#235): break scopes out rather than fold them into the name.
-			name += "." + t.Scope
-		}
-		counts.Tables[name] += n
-	}
-	return counts, nil
+	return DeadLetterCounts{Tables: deadLetterTables(state.Subjects, dlqPrefix, table), Total: state.Msgs}, nil
 }
 
 // ReplaySince creates an ephemeral consumer on topic's ingest subject, in its
@@ -1058,7 +1045,9 @@ func (e *EmbeddedNATS) ReplaySince(ctx context.Context, topic Topic, since time.
 		}
 		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
 		if err != nil {
-			if errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout) {
+			// A pull that raced the connection closing can end in either
+			// answer too, and that is not caught up.
+			if (errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout)) && !e.conn.IsClosed() {
 				return nil // caught up
 			}
 			return fmt.Errorf("replay next: %w", err)

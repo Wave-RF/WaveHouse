@@ -39,7 +39,7 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
 
    The pre-push hook (installed by `make tools`) blocks a push until the tree has been validated locally: a code change needs `make ci`, a docs/prose-only change needs only `make verify` (the same split CI makes). `make lint` / `make test` / `make build` are fast inner-loop subsets.
 
-2. Write tests for new functionality. Unit tests go alongside the code in `internal/`. Integration tests go in `tests/` with the `//go:build integration` tag. The exception is a test that must import NATS, which only `internal/mq` may do; such tests go in `internal/mq/natsspike`.
+2. Write tests for new functionality. Unit tests go alongside the code in `internal/`. Integration tests go in `tests/` with the `//go:build integration` tag. The exception is a test that must import NATS, which only `internal/mq` may do; such tests go in `internal/mq/natsspike`, or in `internal/mq` itself with the `integration` tag when they need its internals (the external NATS broker's tests, which `make test-integration` selects by name).
 
 3. Update documentation if your change affects:
    - API endpoints → update `docs/src/content/docs/api.md`

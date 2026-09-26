@@ -766,6 +766,12 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 		-tags="integration $(TAGS)" -timeout 240s -coverpkg=./... -race -count=1 \
 		./tests/integration/... ./internal/mq/natsspike/... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
+	@# internal/mq's integration-tagged tests (the external NATS broker) run
+	@# alone: its untagged tests are the unit suite's.
+	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
+		-tags="integration $(TAGS)" -timeout 240s -coverpkg=./... -race -count=1 \
+		-run '^Test(ExternalNATS|NewNATS|NATSPermissions_Refuse)' ./internal/mq $(ARGS) \
+		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
 	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render integration; fi
 
 # test-e2e starts ClickHouse + bin/wavehouse-cov via the orchestrator under
