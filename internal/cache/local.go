@@ -69,10 +69,11 @@ func (l *LocalCache) Set(_ context.Context, snap Snapshot, value []byte, ttl tim
 // view. Returns the number of namespaces processed.
 //
 // This bumps exactly what it's given. A whole-table bump already subsumes every
-// per-scope bump for the same table (the table version is embedded in every
-// namespace key), so a caller that knows a whole-table bump is coming should drop
-// the now-redundant scope entries itself — the ingest worker does this as it
-// builds the batch, where it already loops once and knows it's a single table.
+// per-scope bump for the same table (every key that folds a scope version
+// folds the table version too), so a caller that knows a whole-table bump is
+// coming should drop the now-redundant scope entries itself — the ingest
+// worker does this as it builds the batch, where it already loops once and
+// knows it's a single table.
 func (l *LocalCache) Invalidate(_ context.Context, namespaces []Namespace) (uint64, error) {
 	for _, ns := range namespaces {
 		if ns.Scope == "" {
@@ -85,11 +86,19 @@ func (l *LocalCache) Invalidate(_ context.Context, namespaces []Namespace) (uint
 }
 
 // InvalidateTenant orphans every cached result of tenant id, pipe results
-// included: one version bump, nothing enumerated (see
+// included: its version index is dropped, nothing enumerated (see
 // VersionManager.BumpTenant).
 func (l *LocalCache) InvalidateTenant(_ context.Context, id tenant.ID) error {
 	l.versionManager.BumpTenant(id)
 	return nil
+}
+
+// Prune drops the version index of every tenant served rejects, orphaning
+// its entries as InvalidateTenant would, so a tenant removed or rejected at
+// a reload stops holding memory (#262). The entries themselves go with
+// their TTL or Ristretto's eviction.
+func (l *LocalCache) Prune(served func(tenant.ID) bool) {
+	l.versionManager.Prune(served)
 }
 
 // Wait blocks until all buffered writes have been applied.
