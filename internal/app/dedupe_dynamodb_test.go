@@ -23,10 +23,11 @@ import (
 
 // fakeDynamo answers the DynamoDB JSON protocol for one table, enough for
 // boot's check, the dev create path, and a claim and its commit. Whether the
-// table exists is the test's to switch.
+// table exists, and whether the endpoint hangs, are the test's to switch.
 type fakeDynamo struct {
 	mu     sync.Mutex
 	exists bool
+	hangs  bool
 	calls  []string
 }
 
@@ -36,15 +37,24 @@ func (f *fakeDynamo) setExists(v bool) {
 	f.exists = v
 }
 
-func (f *fakeDynamo) called(op string) bool {
+func (f *fakeDynamo) setHangs(v bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.hangs = v
+}
+
+func (f *fakeDynamo) called(op string) bool { return f.count(op) > 0 }
+
+func (f *fakeDynamo) count(op string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
 	for _, c := range f.calls {
 		if c == op {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
 }
 
 func (f *fakeDynamo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -55,8 +65,12 @@ func (f *fakeDynamo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if op == "CreateTable" {
 		f.exists = true
 	}
-	exists := f.exists
+	exists, hangs := f.exists, f.hangs
 	f.mu.Unlock()
+	if hangs {
+		<-r.Context().Done()
+		return
+	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	if !exists {
 		w.WriteHeader(http.StatusBadRequest)
@@ -144,10 +158,10 @@ func TestNew_DynamoDBDedupeTableMissing(t *testing.T) {
 			})
 		}
 	})
-	t.Run("nested fails closed until a reload passes the check", func(t *testing.T) {
+	t.Run("nested fails closed", func(t *testing.T) {
 		root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": nil})
 		cfg := testConfig(t, root)
-		fake := dynamoConfig(t, cfg, false)
+		dynamoConfig(t, cfg, false)
 		a := newApp(t, cfg, Options{})
 
 		acme := a.dedup.For("acme")
@@ -156,13 +170,55 @@ func TestNew_DynamoDBDedupeTableMissing(t *testing.T) {
 		require.ErrorIs(t, err, dedupe.ErrUnavailable, "switched on, table missing: ingest fails closed")
 		_, err = dedupetest.Mark(t.Context(), a.dedup.For("globex"), eventKey)
 		require.ErrorIs(t, err, dedupe.ErrDisabled)
-
-		fake.setExists(true)
-		a.tenants.Reload("test")
-		assert.True(t, acme.Open(), "the reload checked again and opened the store")
-		_, err = dedupetest.Mark(context.Background(), acme, eventKey)
-		require.NoError(t, err)
 	})
+}
+
+// The reload hook runs under the lock that serializes reloads, so it never
+// calls DynamoDB: against a table that hangs, a reload returns at once, and a
+// tenant it switches on fails closed rather than publishing un-deduped.
+func TestReload_DynamoDBDedupeMakesNoTableCall(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil})
+	cfg := testConfig(t, root)
+	fake := dynamoConfig(t, cfg, false)
+	a := newApp(t, cfg, Options{})
+	fake.setHangs(true)
+	before := fake.count("DescribeTable")
+
+	rewriteSettings(t, filepath.Join(root, "acme"), dedupeOn)
+	start := time.Now()
+	a.tenants.Reload("test")
+	assert.Less(t, time.Since(start), time.Second, "a check would wait out its 2.5s deadline")
+	assert.Equal(t, before, fake.count("DescribeTable"), "the reload made no table call")
+
+	acme := a.dedup.For("acme")
+	assert.False(t, acme.Open())
+	_, err := dedupetest.Mark(t.Context(), acme, eventKey)
+	require.ErrorIs(t, err, dedupe.ErrUnavailable, "switched on while the table fails: closed, not ErrDisabled")
+}
+
+// A reload wakes the background retry rather than running the check itself.
+// The retry's first timed attempt is a second after it starts, and a timer
+// never fires early, so an open sooner than that is the reload's doing.
+func TestRun_DynamoDBDedupeReloadWakesTheRetry(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn})
+	cfg := testConfig(t, root)
+	fake := dynamoConfig(t, cfg, false)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	a := newApp(t, cfg, Options{Listener: ln})
+	acme := a.dedup.For("acme")
+	require.False(t, acme.Open())
+
+	start := time.Now()
+	_, stop := runApp(t, a, ln)
+	fake.setExists(true)
+	a.tenants.Reload("test")
+	require.Eventually(t, acme.Open, 5*time.Second, 5*time.Millisecond)
+	assert.Less(t, time.Since(start), time.Second, "opened before the first timed retry")
+	_, err = dedupetest.Mark(context.Background(), acme, eventKey)
+	require.NoError(t, err)
+	require.NoError(t, stop())
 }
 
 // A nested directory has no watcher, so a table that comes good is picked up
