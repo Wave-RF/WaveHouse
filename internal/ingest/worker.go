@@ -70,9 +70,9 @@ type IngestWorker struct {
 	target   func(tenant.ID) chconn.Target
 	maxBatch int
 	maxWait  time.Duration
-	// dlqEnabled reports, per tenant table, whether a row that still fails
-	// after row-by-row isolation — or every row of a batch with no ClickHouse
-	// connection — is parked on the DLQ (settings.Store.DLQFor in production;
+	// dlqEnabled reports, per tenant table, whether a row ClickHouse still
+	// rejects after row-by-row isolation — or every row of a batch with no
+	// ClickHouse connection — is parked on the DLQ (settings.Store.DLQFor in production;
 	// nil means always). Resolved at the moment of the failure
 	// under the row's own tenant — the one its topic names — so a settings
 	// reload applies to the next poison row without a restart.
