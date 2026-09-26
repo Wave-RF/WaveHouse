@@ -80,7 +80,7 @@ func bootRedisApp(t *testing.T, redisAddr, prefix string, timeout time.Duration)
 		MQ:         config.MQ{Backend: config.MQEmbedded},
 		Cache: config.Cache{Backend: config.CacheRedis, Redis: config.CacheRedisConfig{
 			Addrs: []string{redisAddr}, Mode: config.RedisStandalone, KeyPrefix: prefix,
-			Timeout: timeout, DialTimeout: 2 * time.Second,
+			Timeout: timeout, DialTimeout: time.Second,
 			MaxValueBytes: 1 << 20, CompressMinBytes: 1 << 10, VersionTTL: time.Hour,
 		}},
 		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
@@ -149,8 +149,8 @@ func TestSharedCache_IngestOnOneInstanceInvalidatesAnother(t *testing.T) {
 	table := createTable(t, "user_id String, value Float64", "ORDER BY user_id")
 	_, redisAddr := startRedis(t)
 	prefix := fmt.Sprintf("it%d", cachePrefixes.Add(1))
-	a := bootRedisApp(t, redisAddr, prefix, 2*time.Second)
-	b := bootRedisApp(t, redisAddr, prefix, 2*time.Second)
+	a := bootRedisApp(t, redisAddr, prefix, time.Second)
+	b := bootRedisApp(t, redisAddr, prefix, time.Second)
 
 	rc, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{redisAddr}, DisableCache: true, ForceSingleClient: true})
 	require.NoError(t, err)
