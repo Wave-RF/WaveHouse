@@ -158,6 +158,8 @@ func TestEmbedded_VersionZeroKeysAreNotRead(t *testing.T) {
 // tenant "0", table "events", id "e1" join to "0/events/e1", which a v0.1.0
 // record could have used as its own id — must not read as a live duplicate:
 // only a value of exactly valueLen bytes leading with committedMark is ours.
+// The planted value leads with committedMark, so only the length check can
+// refuse it (and keeps a short value from being decoded as an expiry).
 // The reserve below claims the key despite the stale value, and only the
 // commit it makes turns a second reserve of the same id into a duplicate.
 func TestEmbedded_PreJoinValueUnderACollidingKeyIsNotLive(t *testing.T) {
@@ -165,7 +167,9 @@ func TestEmbedded_PreJoinValueUnderACollidingKeyIsNotLive(t *testing.T) {
 	e := NewEmbedded(t.TempDir())
 	m := switchedOn(t, e, "0")
 	key := AppendKey(nil, KeyPrefix("0"), Key{Table: "events", ID: "e1"})
-	require.NoError(t, e.db.Set(key, make([]byte, 8), pebble.Sync))
+	stale := make([]byte, 8)
+	stale[0] = committedMark
+	require.NoError(t, e.db.Set(key, stale, pebble.Sync))
 
 	dup, err := mark(context.Background(), m, "e1")
 	require.NoError(t, err)
