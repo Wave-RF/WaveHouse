@@ -259,8 +259,8 @@ func TestValidate_Dedupe(t *testing.T) {
 			c.Dedupe.DynamoDB.Endpoint, c.Dedupe.DynamoDB.CreateTable = "http://localhost:8000", true
 		}, ""},
 		{"the block is not read under pebble", func(c *Config) { c.Dedupe.DynamoDB = DedupeDynamoDBConfig{CreateTable: true} }, ""},
-		{"lease just under a minute", func(c *Config) { c.Dedupe.Lease = 59 * time.Second }, ""},
-		{"lease at the cap", func(c *Config) { c.Dedupe.Lease = 59*time.Second + 500*time.Millisecond }, ""},
+		{"lease at the cap", func(c *Config) { c.Dedupe.Lease = 59 * time.Second }, ""},
+		{"lease just past the cap", func(c *Config) { c.Dedupe.Lease = 59*time.Second + 100*time.Millisecond }, "is over 59s with the embedded mq"},
 		{"create_table without an endpoint", func(c *Config) {
 			dynamo(c)
 			c.Dedupe.DynamoDB.CreateTable = true
@@ -276,9 +276,9 @@ func TestValidate_Dedupe(t *testing.T) {
 		{"negative lease", func(c *Config) { c.Dedupe.Lease = -time.Second }, "dedupe.lease (WH_DEDUPE_LEASE) must be > 0"},
 		{"zero concurrency", func(c *Config) { c.Dedupe.ReserveConcurrency = 0 }, "dedupe.reserve_concurrency (WH_DEDUPE_RESERVE_CONCURRENCY) must be > 0"},
 		{"negative concurrency", func(c *Config) { c.Dedupe.ReserveConcurrency = -1 }, "dedupe.reserve_concurrency"},
-		{"lease of a minute", func(c *Config) { c.Dedupe.Lease = time.Minute }, "dedupe.lease (WH_DEDUPE_LEASE) 1m0s is over 59.5s with the embedded mq: twice the lease plus 1s must fit its 2m0s duplicate window"},
-		{"lease just past the cap", func(c *Config) { c.Dedupe.Lease = 59*time.Second + 500*time.Millisecond + 1 }, "is over 59.5s with the embedded mq"},
-		{"lease at the duplicate window", func(c *Config) { c.Dedupe.Lease = 2 * time.Minute }, "is over 59.5s with the embedded mq"},
+		{"lease of a minute", func(c *Config) { c.Dedupe.Lease = time.Minute }, "dedupe.lease (WH_DEDUPE_LEASE) 1m0s is over 59s with the embedded mq: lease + ceil(lease) + 1s (2m1s) must fit its 2m0s duplicate window"},
+		{"lease at the old 59.5s cap", func(c *Config) { c.Dedupe.Lease = 59*time.Second + 500*time.Millisecond }, "is over 59s with the embedded mq"},
+		{"lease at the duplicate window", func(c *Config) { c.Dedupe.Lease = 2 * time.Minute }, "is over 59s with the embedded mq"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

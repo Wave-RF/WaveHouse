@@ -170,11 +170,22 @@ func checkBackend[T ~string](key, env string, got T, valid []T) error {
 // counted from the stored publish.
 const embeddedDuplicateWindow = 2 * time.Minute
 
-// maxEmbeddedLease is the longest dedupe.lease that window covers: a client
-// that obeys the in-flight 503's Retry-After (the whole lease) after a
-// publish whose outcome it never learned republishes up to twice the lease
-// after the claim, and DynamoDB rounds a claim's expiry up to the second.
-const maxEmbeddedLease = (embeddedDuplicateWindow - time.Second) / 2
+// maxEmbeddedLease is the longest dedupe.lease the duplicate window covers —
+// the largest whole second satisfying the rule below. It is informational
+// only: validateBackends checks the rule itself, not this constant, since
+// the rule's ceiling steps at each whole second rather than moving linearly
+// with the lease.
+const maxEmbeddedLease = 59 * time.Second
+
+// ceilSecond rounds d up to the next whole second, as a DynamoDB claim's
+// expiry does (epoch seconds, rounded up) — so a claim taken out just before
+// the tick it is stamped with can stay live up to a second past the lease.
+func ceilSecond(d time.Duration) time.Duration {
+	if r := d % time.Second; r != 0 {
+		d += time.Second - r
+	}
+	return d
+}
 
 // validateBackends checks every layer's backend and its sub-block, then the
 // rules that span two layers.
@@ -184,8 +195,14 @@ func (c *Config) validateBackends() error {
 			return err
 		}
 	}
-	if c.MQ.Backend == MQEmbedded && c.Dedupe.Lease > maxEmbeddedLease {
-		return fmt.Errorf("dedupe.lease (WH_DEDUPE_LEASE) %s is over %s with the embedded mq: twice the lease plus 1s must fit its %s duplicate window, since a client obeying the in-flight 503's Retry-After republishes up to twice the lease after the claim", c.Dedupe.Lease, maxEmbeddedLease, embeddedDuplicateWindow)
+	// A client obeying the in-flight 503's Retry-After (the whole lease)
+	// republishes at t0+lease at the earliest. But a claim can outlive its
+	// own lease by up to a second (DynamoDB rounds expiry up to the second),
+	// so the last such 503 can go out at t0+lease+1s, and the republish it
+	// asks for lands at t0+lease+1s+ceil(lease). That must still fall inside
+	// the embedded duplicate window: lease + ceil(lease) + 1s <= 2m.
+	if worst := c.Dedupe.Lease + ceilSecond(c.Dedupe.Lease) + time.Second; c.MQ.Backend == MQEmbedded && worst > embeddedDuplicateWindow {
+		return fmt.Errorf("dedupe.lease (WH_DEDUPE_LEASE) %s is over %s with the embedded mq: lease + ceil(lease) + 1s (%s) must fit its %s duplicate window, since a client obeying the in-flight 503's Retry-After can republish that late", c.Dedupe.Lease, maxEmbeddedLease, worst, embeddedDuplicateWindow)
 	}
 	return nil
 }
