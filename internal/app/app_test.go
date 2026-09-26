@@ -28,6 +28,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
@@ -95,7 +96,11 @@ func testConfig(t *testing.T, settingsDir string) *config.Config {
 	return &config.Config{
 		DataDir:  t.TempDir(),
 		Server:   config.Server{Port: closedPort(t), ShutdownTimeout: 2},
-		Cache:    config.Cache{L1MaxCost: 1 << 20},
+		MQ:       config.MQ{Backend: config.MQEmbedded},
+		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
+		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
+		Coord:    config.Coord{Backend: config.CoordLocal},
+		Roles:    config.AllRoles(),
 		Auth:     config.Auth{JWTSecret: "unit-test-secret"},
 		Settings: config.Settings{Dir: settingsDir},
 	}
@@ -535,6 +540,29 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	assert.False(t, restored.Open(), "Close releases every open store")
 }
 
+// Validate refuses a backend no layer has a case for, so the switch's default
+// is reached only by a Config built by hand; it must refuse boot, not wire
+// nothing.
+func TestNew_RefusesALayerWithoutABackend(t *testing.T) {
+	for _, tc := range []struct {
+		key   string
+		unset func(*config.Config)
+	}{
+		{"dedupe.backend", func(c *config.Config) { c.Dedupe.Backend = "" }},
+		{"mq.backend", func(c *config.Config) { c.MQ.Backend = "" }},
+		{"cache.backend", func(c *config.Config) { c.Cache.Backend = "" }},
+		{"coord.backend", func(c *config.Config) { c.Coord.Backend = "" }},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			guardGlobals(t)
+			cfg := testConfig(t, writeSettings(t, nil))
+			tc.unset(cfg)
+			_, err := New(t.Context(), Options{Config: cfg})
+			require.ErrorContains(t, err, tc.key+` "" has no wiring`)
+		})
+	}
+}
+
 // A Pebble instance that cannot open follows the registry's own rule for the
 // shape: a flat directory refuses boot, like every other store, and a nested
 // one fails closed for every tenant with dedupe on, since they share the
@@ -569,6 +597,54 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 		_, err := a.dedup.For("initech").CheckAndMark(t.Context(), "e1")
 		require.ErrorIs(t, err, dedupe.ErrDisabled, "a tenant with dedupe off is as it would be anyway")
 	})
+}
+
+// A tenant's queue the MQ cannot open follows the registry's rule for the
+// shape, as the dedupe store does: a flat directory refuses boot, and a nested
+// one boots with that tenant's queue closed and every other tenant's open.
+// The obstacle is a regular file where the embedded server keeps a stream's
+// store — the embedded implementation's layout, which this test takes on to
+// force the failure, as TestNew_DedupeOpenFailure does Pebble's. The failed
+// open clears it, so the next publish opens the queue: each one tries again.
+func TestNew_QueueOpenFailure(t *testing.T) {
+	block := func(t *testing.T, dataDir, stream string) {
+		t.Helper()
+		p := filepath.Join(dataDir, "nats", "jetstream", "$G", "streams", stream)
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o750))
+		require.NoError(t, os.WriteFile(p, nil, 0o600))
+	}
+	t.Run("flat refuses boot", func(t *testing.T) {
+		guardGlobals(t)
+		cfg := testConfig(t, writeSettings(t, nil))
+		block(t, cfg.DataDir, "DLQ_0")
+		_, err := New(t.Context(), Options{Config: cfg})
+		require.ErrorContains(t, err, "mq open")
+	})
+	t.Run("nested costs the tenant alone", func(t *testing.T) {
+		// globex, not acme: opened first, acme's streams keep the streams
+		// directory occupied through globex's failed open, which the server
+		// would otherwise remove on a goroutine of its own while the next
+		// open writes there (mq's TestEmbeddedNATS_PacesTheRetriesOfAQueueThatCannotOpen).
+		cfg := testConfig(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil}))
+		block(t, cfg.DataDir, "DLQ_globex")
+		a := newApp(t, cfg, Options{})
+		assert.Zero(t, a.mq.MaxBytes("globex"), "globex's queue did not open")
+		assert.Equal(t, int64(50<<30), a.mq.MaxBytes("acme"), "and costs acme nothing")
+
+		require.NoError(t, a.MQ().Publish(t.Context(), mq.Topic{Tenant: "globex", Table: "t"}, []byte("x")))
+		assert.Equal(t, int64(50<<30), a.mq.MaxBytes("globex"), "a publish opened it at globex's budget")
+	})
+}
+
+// Boot opens each served tenant's queue under New's context, as New's doc
+// says: a stop signaled during boot is not held up by one open per tenant.
+func TestNew_QueueSetupHonorsTheBootContext(t *testing.T) {
+	guardGlobals(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := New(ctx, Options{Config: testConfig(t, writeSettings(t, nil))})
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorContains(t, err, "mq open")
 }
 
 // The tenants on the writer's ClickHouse address and database read the same
@@ -607,8 +683,8 @@ func TestSharedTables_InvalidatesTheTenantsSharingTheTables(t *testing.T) {
 
 // A tenant back on a pool after an absence — its folder rejected, then
 // repaired; removed, then restored — was out of the fan-out while away, so
-// the wiring orphans its table-keyed cache as it comes back; a tenant that stayed
-// is never touched, and a reload that changes nothing bumps nobody.
+// the wiring orphans its cache as it comes back; a tenant that stayed is
+// never touched, and a reload that changes nothing bumps nobody.
 func TestReload_ReadmittedTenantCacheIsOrphaned(t *testing.T) {
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
 	a := newApp(t, testConfig(t, root), Options{})
@@ -686,10 +762,12 @@ func gapWindow(minutes int) map[string]any {
 	return map[string]any{"stream": map[string]any{"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": minutes}}
 }
 
-// Each tenant being served keeps its own stream.gap_window_minutes, since
-// each has a queue of its own; a rejected tenant is not served, so it is not
-// named and keeps no history (mq.Purger.PurgeAcked). A flat directory's single
-// tenant gets exactly its own window.
+// Each tenant keeps its own stream.gap_window_minutes, since each has a queue
+// of its own — a rejected tenant the window its folder last had, so its
+// clients resume once the folder is fixed, and everything while that window
+// is unknown. A removed tenant is not named and keeps no history
+// (mq.Purger.PurgeAcked). A flat directory's single tenant gets exactly its
+// own window.
 func TestGapWindows(t *testing.T) {
 	open := func(t *testing.T, dir string) *settings.Registry {
 		t.Helper()
@@ -710,11 +788,24 @@ func TestGapWindows(t *testing.T) {
 
 		rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
 		tenants.Reload("test")
-		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants))
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "globex": 60 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants),
+			"a rejected tenant keeps the window its folder last had")
+
+		require.NoError(t, os.RemoveAll(filepath.Join(root, "globex")))
+		tenants.Reload("test")
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants),
+			"a removed tenant keeps none")
 	})
 
-	t.Run("no tenant served names none", func(t *testing.T) {
-		assert.Empty(t, gapWindows(open(t, writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery}))))
+	t.Run("a folder rejected since boot keeps everything", func(t *testing.T) {
+		root := writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery})
+		tenants := open(t, root)
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": keepEverything}, gapWindows(tenants))
+
+		rewriteSettings(t, filepath.Join(root, "acme"), gapWindow(15))
+		tenants.Reload("test")
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute}, gapWindows(tenants),
+			"its own window once its folder validates")
 	})
 }
 
@@ -857,20 +948,20 @@ func TestNew_VerifierPerTenant(t *testing.T) {
 	cfg.Auth.OperatorKey = "unit-test-operator-key"
 	a := newApp(t, cfg, Options{})
 
-	pipe := func(id, token string) int {
+	serve := func(id, token string) *httptest.ResponseRecorder {
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/p", nil)
 		req.Header.Set(tenant.Header, id)
 		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
 		a.Handler().ServeHTTP(rec, req)
-		return rec.Code
+		return rec
 	}
 	// verified reports whether the token passed the pipe's role gate: the
-	// query then runs and fails against the closed ClickHouse, never the
-	// 401 of a refused token or the 503 of a verifier still fetching.
+	// query then runs and fails against the closed ClickHouse with a
+	// ClickHouse error code — a 503 too, so the body, not the status, tells
+	// it from the 503 of a verifier still fetching or the 401 of a refusal.
 	verified := func(id, token string) bool {
-		code := pipe(id, token)
-		return code != http.StatusUnauthorized && code != http.StatusServiceUnavailable
+		return strings.Contains(serve(id, token).Body.String(), `"code":"clickhouse.`)
 	}
 	eventuallyVerified := func(id, token string) {
 		t.Helper()
@@ -906,7 +997,9 @@ func TestNew_VerifierPerTenant(t *testing.T) {
 	req.Header.Set("X-Operator-Key", cfg.Auth.OperatorKey)
 	a.Handler().ServeHTTP(rec, req)
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
-	assert.Equal(t, http.StatusServiceUnavailable, pipe("globex", globexToken), "a rejected tenant is not served")
+	rejected := serve("globex", globexToken)
+	assert.Equal(t, http.StatusServiceUnavailable, rejected.Code)
+	assert.Contains(t, rejected.Body.String(), "tenant settings are invalid", "a rejected tenant is not served")
 	before := globexFetches.Load()
 	rewriteSettings(t, filepath.Join(root, "globex"), authPatch(globex.URL))
 	rec = httptest.NewRecorder()
@@ -988,6 +1081,28 @@ func TestRun_ServesUntilCancelled(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 	assert.Error(t, err, "the listener is closed after Run returns")
+}
+
+func TestRun_SweeperRunsUnderItsLease(t *testing.T) {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{Listener: ln})
+	rival := a.coord.(*coord.Local).Peer()
+
+	_, stop := runApp(t, a, ln)
+	require.Eventually(t, func() bool {
+		term, err := rival.TryAcquire(t.Context(), sweeperLease)
+		if err == nil { // the sweeper has not campaigned yet: give it back
+			require.NoError(t, term.Resign(t.Context()))
+		}
+		return errors.Is(err, coord.ErrHeld)
+	}, 5*time.Second, 5*time.Millisecond, "the sweeper campaigns for its lease and keeps it while it runs")
+	require.NoError(t, stop())
+
+	term, err := rival.TryAcquire(t.Context(), sweeperLease)
+	require.NoError(t, err, "a stopped sweeper hands its lease on")
+	require.NoError(t, term.Resign(t.Context()))
 }
 
 func TestRun_PrometheusSidecar(t *testing.T) {

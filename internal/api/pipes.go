@@ -152,51 +152,40 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The tenant's pool, ahead of the cache: a tenant on none — its tuple
-	// could not be opened, such as by the connection ceiling — fails
-	// closed rather than serve what it cached before (#583 story 6).
-	conn := connOf(h.CHConn, store)
-	if conn == nil {
-		writeUnavailable(w, noConnectionMessage, retryAfterPool)
-		return
-	}
-
-	// A pipe that writes runs on every call: a cached or coalesced response
-	// would answer a repeat without executing it, silently dropping the write
-	// (#386) — on every instance once the cache is shared. isMutation is the
-	// classifier executeCHQuery routes Exec by, so what bypasses here is
-	// exactly what runs as a write. no-store keeps an HTTP cache in front of
-	// a GET from answering a repeat the same way.
 	if isMutation(sql) {
-		data, _, err := h.run(r.Context(), store, conn, sql, params)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Cache", "BYPASS")
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write(data) //nolint:gosec // G705: JSON the handler marshalled from the exec result
+		h.executeWrite(w, r, store, sql, params)
 		return
 	}
 
 	// Cache. A pipe can read several tables, but the current pipe impl doesn't
 	// expose its table/scope dependencies, so we pass no deps: the result folds
 	// the tenant's version alone, so InvalidateTenant orphans it but no insert
-	// does (TTL-bound until #343). The snapshot is of the versions before the
-	// query runs, so a bump landing mid-query orphans the fill (#382).
+	// does (TTL-bound until #343). The snapshot is of the versions before
+	// anything the query reads is chosen, so a bump landing after — mid-query
+	// (#382), or a reload moving the tenant to another address or database
+	// once its pool below is taken — orphans the fill.
 	// TODO: once pipes expose their tables/scopes, pass them as deps here so writes
 	// invalidate cached pipe results.
 	cacheKey := queryCacheKey(store.Tenant(), sql, params)
+	var entry cache.Entry
 	var snap cache.Snapshot
 	if h.Cache != nil {
-		var entry cache.Entry
-		if entry, snap, _ = h.Cache.Lookup(r.Context(), store.Tenant(), cacheKey, nil); entry.Value != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Cache", "HIT")
-			_, _ = w.Write(entry.Value)
-			return
-		}
+		entry, snap, _ = h.Cache.Lookup(r.Context(), store.Tenant(), cacheKey, nil)
+	}
+
+	// The tenant's pool, ahead of serving a hit: a tenant on none — its
+	// tuple could not be opened, such as by the connection ceiling — fails
+	// closed rather than serve what it cached before (#583 story 6).
+	conn := connOf(h.CHConn, store)
+	if conn == nil {
+		writeUnavailable(w, noConnectionMessage, retryAfterPool)
+		return
+	}
+	if entry.Value != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "HIT")
+		_, _ = w.Write(entry.Value)
+		return
 	}
 
 	// Execute with singleflight.
@@ -211,13 +200,36 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return data, nil
 	})
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		writeCHError(w, r, err, err.Error(), http.StatusInternalServerError, queryCaps{})
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
 	_, _ = w.Write(v.([]byte)) //nolint:gosec // G705: the tenant id on the key only selects the entry; the bytes are JSON the handler marshalled from ClickHouse rows
+}
+
+// executeWrite runs a pipe that writes, on every call: a cached or coalesced
+// response would answer a repeat without executing it, silently dropping the
+// write (#386) — on every instance once the cache is shared. isMutation is the
+// classifier executeCHQuery routes Exec by, so what bypasses here is exactly
+// what runs as a write. no-store keeps an HTTP cache in front of a GET from
+// answering a repeat the same way.
+func (h *PipesHandler) executeWrite(w http.ResponseWriter, r *http.Request, store *settings.Store, sql string, params []any) {
+	conn := connOf(h.CHConn, store)
+	if conn == nil {
+		writeUnavailable(w, noConnectionMessage, retryAfterPool)
+		return
+	}
+	data, _, err := h.run(r.Context(), store, conn, sql, params)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Cache", "BYPASS")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(data) //nolint:gosec // G705: JSON the handler marshalled from the exec result
 }
 
 // run executes a pipe's bound SQL under the tenant's query timeout and

@@ -59,9 +59,11 @@ type PipesFile struct {
 
 // TenantConfig is the shape of config.json: the behavioral tunables that
 // migrate out of boot config. Boot config (config.yaml/env) keeps only what
-// cannot change under a running process — resource sizing (`data_dir`,
-// `cache.l1_max_cost`), listeners, the observability
-// exporters — and the secrets (`clickhouse.password`, `auth.jwt_secret`,
+// cannot change under a running process — the implementation each layer
+// runs on (`mq.backend`, `cache.backend`, `dedupe.backend`,
+// `coord.backend`), resource sizing (`data_dir`, `cache.l1_max_cost`,
+// `clickhouse.max_total_conns`), listeners, the observability exporters —
+// and the secrets (`clickhouse.password`, `auth.jwt_secret`,
 // `auth.operator_key`), which never belong in a tracked JSON file. Every
 // block and every top-level key inside it is REQUIRED: the binary carries no
 // compiled defaults, so the adopted snapshot is exactly what the files say.
@@ -162,11 +164,11 @@ type TableDedupe struct {
 	RequireID *bool   `json:"require_id,omitempty"`
 }
 
-// DLQConfig gates the Dead Letter Queue: whether a row that still fails
-// after the row-by-row isolation retry is parked on the tenant's dead-letter
+// DLQConfig gates the Dead Letter Queue: whether a row ClickHouse still
+// rejects after the row-by-row isolation retry is parked on the tenant's dead-letter
 // queue (and its original acked) or left unacked to be redelivered
-// indefinitely. The queue exists from the moment the tenant is first served —
-// empty until something lands on it — so the switch is purely behavioral and
+// indefinitely. The queue is opened when the tenant is first served — empty
+// until something lands on it — so the switch is purely behavioral and
 // resolves per table through the same override cascade as dedupe.
 type DLQConfig struct {
 	Enabled *bool `json:"enabled"`
@@ -225,9 +227,10 @@ type MQConfig struct {
 	// tenth of it). Must be >= 1. A reload updates the live queues in place:
 	// growing takes effect immediately; shrinking below what is currently
 	// buffered makes the ingest queue refuse new publishes (DiscardNew → 503
-	// backpressure) until the worker drains it — nothing already buffered is
-	// dropped — and a dead-letter queue holding more than a tenth of the new
-	// budget keeps what it holds rather than dropping its oldest rows.
+	// backpressure) until the sweeper purges it back under the limit —
+	// nothing already buffered is dropped — and a dead-letter queue holding
+	// more than a tenth of the new budget keeps what it holds rather than
+	// dropping its oldest rows.
 	MaxBytesGB *int `json:"max_bytes_gb"`
 }
 

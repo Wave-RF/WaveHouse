@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
@@ -65,50 +67,24 @@ func (a *App) wireSettings() error {
 		return fmt.Errorf("settings directory %s invalid, refusing to start — findings above; `wavehouse validate` reproduces them, `wavehouse bootstrap` writes a starter directory", a.cfg.Settings.Dir)
 	}
 	a.tenants = tenants
-	// Registered first: hooks run in registration order, so every reload
-	// updates the tracked store before any other hook runs.
-	a.trackDefaultStore()
-	a.onDefaultAdopt(a.trackDefaultStore)
-	a.policies = func() *policy.Policy { return defaultSetting(a, (*settings.Store).Policy) }
+	a.policies = func() *policy.Policy { return defaultPolicy(tenants) }
 	if !tenants.Nested() && a.policies() == nil {
 		slog.Warn("no policy adopted — every token-based request is denied until policies.json defines one (fail closed)")
 	}
 	return nil
 }
 
-// trackDefaultStore remembers tenant 0's store as of its last adoption. The
-// registry stops handing out a rejected tenant's store and forgets a removed
-// one, but the store keeps its last adopted document either way — and that is
-// what defaultSetting goes on reading.
-func (a *App) trackDefaultStore() {
-	if store, ok := a.tenants.For(tenant.Default); ok {
-		a.defaultStore.Store(store)
+// defaultPolicy is the default tenant's access-control policy, which the ops
+// gate of a flat directory reads its admin role from per request. There
+// tenant 0 is the whole directory, always served: a reload that fails keeps
+// the previous document. A nested directory's ops gate reads no policy at all
+// (api.NewRouter).
+func defaultPolicy(tenants *settings.Registry) *policy.Policy {
+	store, ok := tenants.For(tenant.Default)
+	if !ok {
+		return nil
 	}
-}
-
-// defaultSetting reads one setting of the default tenant: the admin role the
-// ops gate of a flat directory reads per request. It reads tenant 0's last
-// adopted document, so a 0 folder a reload rejected or removed leaves its
-// reader as it was. A nested directory that has never served a tenant 0 reads
-// T's zero value, and its ops gate reads no policy at all.
-func defaultSetting[T any](a *App, get func(*settings.Store) T) T {
-	store := a.defaultStore.Load()
-	if store == nil {
-		var zero T
-		return zero
-	}
-	return get(store)
-}
-
-// onDefaultAdopt registers fn to run after each reload that adopts the
-// default tenant, so a nested directory's other tenants never move what
-// follows it, and a rejected 0 folder leaves that as it was.
-func (a *App) onDefaultAdopt(fn func()) {
-	a.tenants.AfterAdopt(func(adopted []tenant.ID) {
-		if slices.Contains(adopted, tenant.Default) {
-			fn()
-		}
-	})
+	return store.Policy()
 }
 
 // shortestKeepalive is the shape of the one keepalive wheel every tenant's
@@ -130,17 +106,30 @@ func shortestKeepalive(tenants *settings.Registry) (period time.Duration, bucket
 	return period, buckets
 }
 
-// gapWindows is the history the sweeper keeps for each tenant being served:
-// its own stream.gap_window_minutes, since each tenant's events have a queue
-// of their own. A tenant it does not name — removed or rejected — keeps no
-// history (mq.Purger.PurgeAcked).
+// gapWindows is the history the sweeper keeps for each tenant: its own
+// stream.gap_window_minutes, since each tenant's events have a queue of their
+// own — for a rejected tenant, the window its folder last had, because a
+// rejection is the common reload failure (a typo, fixed minutes later) and
+// its clients resume from Last-Event-ID once it is served again. A removed
+// tenant is not named, so it keeps no history (mq.Purger.PurgeAcked).
 func gapWindows(tenants *settings.Registry) map[tenant.ID]time.Duration {
 	windows := map[tenant.ID]time.Duration{}
-	for id, store := range tenants.All() {
+	for id, store := range tenants.Known() {
+		if store == nil {
+			windows[id] = keepEverything
+			continue
+		}
 		windows[id] = store.GapWindow()
 	}
 	return windows
 }
+
+// keepEverything is the window of a tenant whose folder has been rejected
+// since boot: this process has never read its stream.gap_window_minutes, so
+// none of the history its queue holds is known to be past it. A rejected
+// tenant is sent no new events, so what it keeps is what its queue held at
+// boot.
+const keepEverything = time.Duration(math.MaxInt64)
 
 // served reports whether the registry is serving tenant id: what the
 // per-tenant resources — verifiers, dedupe stores, open streams — are pruned
@@ -201,9 +190,10 @@ func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 // rejected, removed, or one no pool could be opened for, such as by the
 // connection ceiling — is out of the fan-out, and its cache is orphaned
 // when it gets one (wireClickHouse, Cache.InvalidateTenant), so a folder
-// repaired or restored inside a TTL never serves pre-insert rows; a pipe
-// result names no table, so no insert invalidates it and between those it
-// stays until its TTL expires (#343).
+// repaired or restored inside a TTL never serves pre-insert rows. That also
+// drops the tenant's cached pipe results; apart from it a pipe result stays
+// until its TTL expires, since a pipe names no table and no insert
+// invalidates it (#343).
 type sharedTables struct {
 	cache.Cache
 	sharing func(tenant.ID) []tenant.ID
@@ -390,7 +380,7 @@ func queryTimeout(s *settings.Store) time.Duration { return s.ClickHouse().Query
 // again. Non-fatal either way. A flat
 // directory's tenant 0 is refreshed synchronously here, as before, so the
 // port binds with the state known; a failure marks the binary degraded and
-// leaves the retry (backoff 2s → 60s) to its loop. A nested directory's
+// leaves the retry (jittered backoff 2s → 60s) to its loop. A nested directory's
 // tenants refresh in their loops from the start, so boot never waits on a
 // tenant's ClickHouse, and a nested directory serving no tenant stays
 // degraded until a reload adopts one that loads. The process still binds its
@@ -471,7 +461,18 @@ func (a *App) wireDiscovery(ctx context.Context) {
 	a.add(component{name: "schema discovery", close: d.close})
 }
 
-// wireDedupe builds the dedupe stores: one per tenant (#583 story 7), each
+// wireDedupe builds the dedupe stores — the one place the implementation is
+// chosen.
+func (a *App) wireDedupe() error {
+	switch b := a.cfg.Dedupe.Backend; b {
+	case config.DedupePebble:
+		return a.wirePebbleDedupe()
+	default:
+		return unreachableBackend("dedupe.backend", b)
+	}
+}
+
+// wirePebbleDedupe builds the dedupe stores: one per tenant (#583 story 7), each
 // following its own tenant's hot-reloadable dedupe.enabled, over the
 // embedded Pebble implementation, which is handed data_dir and decides the
 // rest: every tenant's seen ids in one instance there, open while any
@@ -488,7 +489,7 @@ func (a *App) wireDiscovery(ctx context.Context) {
 // than silently publishing un-deduped, since the files asked for dedupe;
 // nested fails closed the same way at boot too, for every tenant with
 // dedupe on, the next reload retrying, so it never costs the process.
-func (a *App) wireDedupe() error {
+func (a *App) wirePebbleDedupe() error {
 	nested := a.tenants.Nested()
 	embedded := dedupe.NewEmbedded(a.cfg.DataDir)
 	stores := dedupe.NewStores(embedded.Tenant)
@@ -530,10 +531,20 @@ func (a *App) wireDedupe() error {
 	return nil
 }
 
-// wireMQ starts the MQ — the embedded NATS under data_dir/nats, the one
-// place the implementation is chosen; everything after it sees mq.Broker —
-// and hands it each served tenant's mq.max_bytes_gb, which opens that
-// tenant's queue the first time. The budget is hot-reloadable: after every
+// wireMQ starts the MQ — the one place the implementation is chosen;
+// everything after it sees mq.Broker.
+func (a *App) wireMQ(ctx context.Context) error {
+	switch b := a.cfg.MQ.Backend; b {
+	case config.MQEmbedded:
+		return a.wireEmbeddedMQ(ctx)
+	default:
+		return unreachableBackend("mq.backend", b)
+	}
+}
+
+// wireEmbeddedMQ starts the embedded NATS under data_dir/nats and hands it
+// each served tenant's mq.max_bytes_gb, which opens that tenant's queue the
+// first time. The budget is hot-reloadable: after every
 // reload the registry applies, each served tenant's is handed over again,
 // and the MQ owns how it is split across the tenant's queues and keeps them
 // consistent (see mq.Broker.SetMaxBytes). A tenant no longer served keeps
@@ -541,9 +552,12 @@ func (a *App) wireDedupe() error {
 // resized follows the registry's rule for the shape: a flat directory
 // refuses boot, like every other store, and on a reload logs it, keeping the
 // previous budget; a nested directory logs it at boot too, so it never costs
-// the process — the tenant's ingest answers 503 until a reload opens its
-// queue. The hook is registered before the boot apply, as the dedupe one is.
-func (a *App) wireMQ() error {
+// the process — the tenant's ingest answers 503 until its queue opens, each
+// reload trying again, and publishes too at the pace the MQ allows. The hook
+// is registered before the boot apply, as the dedupe one is. The boot apply
+// runs on ctx, New's, so a stop signaled during a boot that opens many queues
+// is not held up by them.
+func (a *App) wireEmbeddedMQ(ctx context.Context) error {
 	dir := filepath.Join(a.cfg.DataDir, "nats")
 	config.WarnIfFreshDataDir("nats", dir)
 	var broker mq.Broker
@@ -565,17 +579,21 @@ func (a *App) wireMQ() error {
 		}
 	}
 
-	// Rooted in the App's stop context, so a reload caught mid-hook by
-	// SIGTERM gives up rather than holding the drain past
-	// server.shutdown_timeout.
-	reconcile := func() error {
+	// The hook's apply is rooted in the App's stop context, so a reload
+	// caught mid-hook by SIGTERM gives up rather than holding the drain past
+	// server.shutdown_timeout; a done ctx ends the pass over the tenants.
+	reconcile := func(ctx context.Context) error {
 		var errs []error
 		for id, store := range a.tenants.All() {
+			if err := ctx.Err(); err != nil {
+				errs = append(errs, err)
+				break
+			}
 			mb := store.MQMaxBytes()
 			if mb == broker.MaxBytes(id) {
 				continue
 			}
-			if err := broker.SetMaxBytes(a.stopCtx, id, mb); err != nil {
+			if err := broker.SetMaxBytes(ctx, id, mb); err != nil {
 				slog.Error("mq queue not reconciled with settings; the next reload retries", "tenant", id, "error", err)
 				errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
 				continue
@@ -584,35 +602,74 @@ func (a *App) wireMQ() error {
 		}
 		return errors.Join(errs...)
 	}
-	a.tenants.AfterAdopt(func([]tenant.ID) { _ = reconcile() })
-	if err := reconcile(); err != nil && !a.tenants.Nested() {
+	a.tenants.AfterAdopt(func([]tenant.ID) { _ = reconcile(a.stopCtx) })
+	if err := reconcile(ctx); err != nil && !a.tenants.Nested() {
 		return fmt.Errorf("mq open: %w", err)
 	}
 	return nil
 }
 
-// wireCache opens the L1 cache — the only tier in standalone mode.
+// wireCache opens the query-result cache — the one place the implementation
+// is chosen.
 func (a *App) wireCache() error {
-	l1, err := cache.NewLocal(a.cfg.Cache.L1MaxCost)
-	if err != nil {
-		return fmt.Errorf("cache init: %w", err)
+	switch b := a.cfg.Cache.Backend; b {
+	case config.CacheLocal:
+		l1, err := cache.NewLocal(a.cfg.Cache.L1MaxCost)
+		if err != nil {
+			return fmt.Errorf("cache init: %w", err)
+		}
+		a.cache = l1
+		a.add(component{name: "cache", close: withoutContext(l1.Close)})
+		return nil
+	default:
+		return unreachableBackend("cache.backend", b)
 	}
-	// TODO: eventually this is where we can switch between ristretto, redis, tiered (both), etc
-	a.cache = l1
-	a.add(component{name: "cache", close: withoutContext(l1.Close)})
-	return nil
+}
+
+// unreachableBackend is each layer switch's default case. config.Validate
+// refuses a backend with no case, so reaching it means a Config built by hand
+// without one (the zero value is not the default), or a case missing here.
+func unreachableBackend[T ~string](key string, got T) error {
+	return fmt.Errorf("%s %q has no wiring: a Config built without config.Load must name the backend of every layer it wires", key, got)
+}
+
+// wireCoord opens the lease coordinator the singleton loops campaign on.
+func (a *App) wireCoord() error {
+	switch b := a.cfg.Coord.Backend; b {
+	case config.CoordLocal:
+		c := coord.NewLocal()
+		a.coord = c
+		a.add(component{name: "coord", close: c.Close})
+		return nil
+	default:
+		return unreachableBackend("coord.backend", b)
+	}
+}
+
+// sweeperLease is the lease the sweeper runs under, one sweeper per queue.
+const sweeperLease = "sweeper"
+
+// elected runs fn only while this process holds lease, campaigning again
+// whenever the term ends (coord.RunElected): the loop of a role that must
+// run in one process at a time, however many processes run the role.
+func (a *App) elected(lease string, fn func(ctx context.Context) error) func(ctx context.Context) error {
+	return func(ctx context.Context) error {
+		return coord.RunElected(ctx, a.coord, lease, coord.RetryPeriod, func(ctx context.Context, _ coord.Term) error {
+			return fn(ctx)
+		})
+	}
 }
 
 // wireSweeper adds the active sweeper — purges messages that are both
 // written to ClickHouse and older than their tenant's SSE gap window (its own
 // stream.gap_window_minutes, re-read every sweep — see gapWindows). Runs
-// every minute.
+// every minute, while this process holds the sweeper lease.
 func (a *App) wireSweeper() {
 	sweeper := ingest.NewSweeper(a.mq, func() map[tenant.ID]time.Duration { return gapWindows(a.tenants) })
-	a.add(component{name: "sweeper", run: func(ctx context.Context) error {
+	a.add(component{name: "sweeper", run: a.elected(sweeperLease, func(ctx context.Context) error {
 		sweeper.Start(ctx)
 		return nil
-	}})
+	})})
 }
 
 // wireStreaming builds the SSE fan-out: one metric set shared by the Hub
@@ -775,6 +832,22 @@ func (a *App) wireAuth() func(http.Handler) http.Handler {
 	return authn.Middleware()
 }
 
+// wireOpsAuth is the authentication of a process without the api role: the
+// operator key and nothing else. Token verifiers — and the JWKS fetches that
+// keep them — are per API process, so no token validates here and the reload
+// route admits the operator alone (api.NewOpsRouter).
+func (a *App) wireOpsAuth() func(http.Handler) http.Handler {
+	operatorKey := strings.TrimSpace(a.cfg.Auth.OperatorKey)
+	switch {
+	case operatorKey == "" && a.tenants.Nested():
+		slog.Warn("no auth.operator_key set: a process without the api role takes only the operator key on POST /v1/ops/settings/reload, and a nested settings directory has no watcher, so its settings can only be reloaded by SIGHUP")
+	case operatorKey == "":
+		slog.Warn("no auth.operator_key set: a process without the api role takes only the operator key on POST /v1/ops/settings/reload, so its settings can only be reloaded by SIGHUP or the directory watcher")
+	}
+	authn := auth.NewAuthenticator(auth.Config{OperatorKey: operatorKey}, nil, nil)
+	return authn.Middleware()
+}
+
 // wireReloadTriggers adds SIGHUP and the directory watcher. All three
 // triggers (these two and POST /v1/ops/settings/reload) funnel into the same
 // serialized Registry.Reload, and a rejected reload keeps the previous good
@@ -884,13 +957,44 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Settings:     api.NewSettingsHandler(a.tenants),
 	}
 
-	prom := a.cfg.Prometheus
-	if a.promHandler != nil && prom.Port == 0 {
-		deps.MetricsHandler = a.promHandler
-		deps.MetricsPath = prom.Path
-	}
+	deps.MetricsHandler, deps.MetricsPath = a.inlineMetrics()
 	a.handler = api.NewRouter(deps)
+	a.wireServers(func() { close(closing) })
+}
 
+// wireOpsHTTP serves the ops-only router of a process without the api role:
+// the probes, /version, the metrics endpoint, and the settings reload.
+// Readiness pings the ClickHouse pools when the process has them (the ingest
+// role); a sweeper-only process is ready once booted.
+func (a *App) wireOpsHTTP(authMW func(http.Handler) http.Handler) {
+	health := api.NewHealthHandler(nil)
+	if a.pools != nil {
+		health.Ping = a.pools.Ping
+	}
+	deps := api.OpsDependencies{
+		Health:   health,
+		Version:  api.NewVersionHandler(a.build.Version, a.build.GitCommit, a.build.BuildTime),
+		Settings: api.NewSettingsHandler(a.tenants),
+		AuthMW:   authMW,
+	}
+	deps.MetricsHandler, deps.MetricsPath = a.inlineMetrics()
+	a.handler = api.NewOpsRouter(deps)
+	a.wireServers(nil)
+}
+
+// inlineMetrics is the metrics endpoint to mount on the main router: with
+// prometheus.port 0 only, since a non-zero port gets its own listener.
+func (a *App) inlineMetrics() (http.Handler, string) {
+	if a.promHandler == nil || a.cfg.Prometheus.Port != 0 {
+		return nil, ""
+	}
+	return a.promHandler, a.cfg.Prometheus.Path
+}
+
+// wireServers adds the server of a.handler on server.port and, with
+// prometheus.port set, the metrics sidecar. onShutdown, when set, runs as the
+// main server begins its drain.
+func (a *App) wireServers(onShutdown func()) {
 	// ReadHeaderTimeout only, deliberately: net/http leaves ReadTimeout's
 	// deadline on the connection while the handler runs, so its background
 	// read would time out and cancel the request context — ending every
@@ -901,12 +1005,14 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Handler:           a.handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
-	srv.RegisterOnShutdown(sync.OnceFunc(func() { close(closing) }))
+	if onShutdown != nil {
+		srv.RegisterOnShutdown(sync.OnceFunc(onShutdown))
+	}
 	a.add(component{name: "http server", run: func(ctx context.Context) error {
 		return a.serve(ctx, "server", srv, a.listener)
 	}})
 
-	if a.promHandler != nil && prom.Port != 0 {
+	if prom := a.cfg.Prometheus; a.promHandler != nil && prom.Port != 0 {
 		mux := http.NewServeMux()
 		mux.Handle(prom.Path, a.promHandler)
 		promSrv := &http.Server{
