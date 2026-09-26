@@ -569,6 +569,10 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 //     row-by-row isolation. Each row that re-inserts cleanly is acked, each
 //     that is rejected again goes to the DLQ — or, with the DLQ switched off for
 //     the table, is left unacked so NATS redelivers it.
+//   - The batch failed in a way a smaller insert may avoid (chconn.Splittable:
+//     too many partitions for one INSERT, the memory limit): the same
+//     isolation. If the first row fails the same way, the server was the
+//     problem after all, and isolation stops there as below.
 //   - Anything else — ClickHouse down, unreachable, overloaded, read-only,
 //     refusing the credentials, or a failure with no verdict at all: nothing
 //     in the batch was judged, so isolating it would only multiply the
@@ -677,7 +681,8 @@ func groupByColumns(msgs []parsedMsg) [][]parsedMsg {
 }
 
 // flushGroup inserts one (table, column list) batch, falling back to row-by-row
-// isolation when ClickHouse rejects it. Every message in group shares a column
+// isolation when ClickHouse rejects it, or refuses it in a way a smaller insert
+// may avoid (chconn.Splittable). Every message in group shares a column
 // signature, so the first one's columns describe them all.
 //
 // err is non-nil when ClickHouse could not take a request — the bulk insert or
@@ -692,11 +697,11 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 		w.handleSuccess(ctx, tableName, group)
 		return nil, nil
 	}
-	if chconn.Classify(err) != chconn.Rejected {
+	if chconn.Classify(err) != chconn.Rejected && (len(group) == 1 || !chconn.Splittable(err)) {
 		return group, err
 	}
 
-	slog.WarnContext(ctx, "bulk insert rejected, falling back to 1-by-1 isolation", "tenant", group[0].tenant, "table", tableName, "error", err)
+	slog.WarnContext(ctx, "bulk insert failed, falling back to 1-by-1 isolation", "tenant", group[0].tenant, "table", tableName, "error", err)
 
 	// ISOLATE & DLQ: re-insert one row at a time so a single poison row can't
 	// sink the whole batch.
@@ -707,8 +712,9 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 		case singleErr == nil:
 			w.handleSuccess(ctx, tableName, []parsedMsg{pm})
 		case chconn.Classify(singleErr) != chconn.Rejected:
-			// ClickHouse stopped answering mid-isolation: this row and the
-			// rest were never judged, so none of them is dead-lettered.
+			// ClickHouse cannot take this row now — it went away mid-isolation,
+			// or a split batch's failure was the server's after all: this row
+			// and the rest were never judged, so none of them is dead-lettered.
 			return group[i:], singleErr
 		case w.dlqEnabled != nil && !w.dlqEnabled(pm.tenant, tableName):
 			slog.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "tenant", pm.tenant, "table", tableName, "error", singleErr)

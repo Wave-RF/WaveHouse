@@ -2014,29 +2014,32 @@ func isBulk(req *http.Request) (bool, string) {
 // TestFlushTable_ClickHouseUnavailable_RetriedNeverDeadLettered: whatever
 // shape the outage takes, the batch is handed back for a delayed redelivery
 // in one piece — one request, no row-by-row isolation, nothing acked, nothing
-// on the DLQ.
+// on the DLQ. A splittable failure costs one more request: the batch is split,
+// and its first row fails the same way.
 func TestFlushTable_ClickHouseUnavailable_RetriedNeverDeadLettered(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name   string
 		answer func() (*http.Response, error)
+		split  bool
 	}{
 		{"connection refused", func() (*http.Response, error) {
 			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}
-		}},
-		{"timeout", func() (*http.Response, error) { return nil, context.DeadlineExceeded }},
-		{"TOO_MANY_SIMULTANEOUS_QUERIES", func() (*http.Response, error) { return chAnswer(500, 202, "Too many simultaneous queries"), nil }},
-		{"MEMORY_LIMIT_EXCEEDED", func() (*http.Response, error) { return chAnswer(500, 241, "Memory limit exceeded"), nil }},
-		{"READONLY", func() (*http.Response, error) { return chAnswer(500, 164, "readonly"), nil }},
-		{"TOO_MANY_PARTS", func() (*http.Response, error) { return chAnswer(500, 252, "Too many parts"), nil }},
-		{"KEEPER_EXCEPTION", func() (*http.Response, error) { return chAnswer(500, 999, "Coordination error"), nil }},
-		{"AUTHENTICATION_FAILED", func() (*http.Response, error) { return chAnswer(403, 516, "Authentication failed"), nil }},
+		}, false},
+		{"timeout", func() (*http.Response, error) { return nil, context.DeadlineExceeded }, false},
+		{"TOO_MANY_SIMULTANEOUS_QUERIES", func() (*http.Response, error) { return chAnswer(500, 202, "Too many simultaneous queries"), nil }, false},
+		{"SERVER_OVERLOADED", func() (*http.Response, error) { return chAnswer(500, 745, "CPU is overloaded"), nil }, false},
+		{"MEMORY_LIMIT_EXCEEDED", func() (*http.Response, error) { return chAnswer(500, 241, "Memory limit exceeded"), nil }, true},
+		{"READONLY", func() (*http.Response, error) { return chAnswer(500, 164, "readonly"), nil }, false},
+		{"TOO_MANY_PARTS", func() (*http.Response, error) { return chAnswer(500, 252, "Too many parts"), nil }, true},
+		{"KEEPER_EXCEPTION", func() (*http.Response, error) { return chAnswer(500, 999, "Coordination error"), nil }, false},
+		{"AUTHENTICATION_FAILED", func() (*http.Response, error) { return chAnswer(403, 516, "Authentication failed"), nil }, false},
 		{"proxy 502", func() (*http.Response, error) {
 			return &http.Response{StatusCode: 502, Body: io.NopCloser(bytes.NewBufferString("Bad Gateway"))}, nil
-		}},
+		}, false},
 		{"500 with no code", func() (*http.Response, error) {
 			return &http.Response{StatusCode: 500, Body: io.NopCloser(bytes.NewBufferString("internal error"))}, nil
-		}},
+		}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2052,7 +2055,11 @@ func TestFlushTable_ClickHouseUnavailable_RetriedNeverDeadLettered(t *testing.T)
 			w.flushTable(context.Background(), "events", parseAll(t, w, msgs...))
 			wait()
 
-			assert.Equal(t, int32(1), rt.Hits(), "one bulk attempt, no row-by-row isolation")
+			wantHits := int32(1)
+			if tt.split {
+				wantHits = 2
+			}
+			assert.Equal(t, wantHits, rt.Hits(), "one bulk attempt, and isolation only to split a splittable failure")
 			assert.Empty(t, pub.Published(), "an unavailable ClickHouse never dead-letters a row")
 			assert.Empty(t, mc.GetNamespaces(), "nothing was written, so nothing is invalidated")
 			for i, m := range msgs {
@@ -2091,6 +2098,70 @@ func TestFlushTable_RejectedRow_StillDeadLettered(t *testing.T) {
 	published := pub.Published()
 	require.Len(t, published, 1)
 	assert.Contains(t, published[0].Headers.Get("X-DLQ-Error"), "Code: 72")
+}
+
+// TestFlushTable_SplittableBatch_InsertsRowByRow: a batch refused for its size
+// alone — too many partitions for one INSERT, the memory limit — is split, and
+// every row inserts. Nothing is handed back, nothing is parked, and no backoff
+// opens.
+func TestFlushTable_SplittableBatch_InsertsRowByRow(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		code int
+		text string
+	}{
+		{"TOO_MANY_PARTS", 252, "Too many partitions for single INSERT block (more than 100)"},
+		{"MEMORY_LIMIT_EXCEEDED", 241, "Memory limit (total) exceeded"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rt := &testutil.MockRoundTripper{Fn: func(req *http.Request) (*http.Response, error) {
+				if bulk, _ := isBulk(req); bulk {
+					return chAnswer(500, tt.code, tt.text), nil
+				}
+				return okAnswer(), nil
+			}}
+			w, pub, _, wait := newTestWorker(rt)
+
+			msgs := []*testutil.MockMessage{
+				newIngestMsg(t, "events", "", map[string]any{"id": 1}),
+				newIngestMsg(t, "events", "", map[string]any{"id": 2}),
+				newIngestMsg(t, "events", "", map[string]any{"id": 3}),
+			}
+			w.flushTable(context.Background(), "events", parseAll(t, w, msgs...))
+			wait()
+
+			assert.Equal(t, int32(4), rt.Hits(), "bulk + one insert per row")
+			assert.Empty(t, pub.Published())
+			for i, m := range msgs {
+				assert.True(t, m.DoubleAcked.Load(), "row %d inserted", i)
+				assert.False(t, m.Naked.Load(), "row %d is not handed back", i)
+			}
+			assert.Zero(t, w.backoffs.open.Load(), "a batch that split cleanly opens no backoff")
+		})
+	}
+}
+
+// TestFlushTable_SplittableLoneRow_Retried: a one-row batch that fails a
+// splittable way has nothing left to split, so it is retried after a backoff.
+func TestFlushTable_SplittableLoneRow_Retried(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{Fn: func(*http.Request) (*http.Response, error) {
+		return chAnswer(500, 252, "Too many parts"), nil
+	}}
+	w, pub, _, wait := newTestWorker(rt)
+
+	m := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	w.flushTable(context.Background(), "events", parseAll(t, w, m))
+	wait()
+
+	assert.Equal(t, int32(1), rt.Hits(), "a lone row is not split again")
+	assert.Empty(t, pub.Published())
+	assert.False(t, m.DoubleAcked.Load())
+	assert.True(t, m.Naked.Load())
+	assert.Positive(t, m.NakDelay.Load())
 }
 
 // TestFlushTable_ClickHouseDownMidIsolation_StopsAndRetries: the bulk insert
