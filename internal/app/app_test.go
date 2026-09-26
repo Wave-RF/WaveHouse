@@ -36,6 +36,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 )
 
 // None of these tests run in parallel: New installs a process-wide default
@@ -95,7 +96,7 @@ func writeSettings(t *testing.T, patch map[string]any) string {
 func testConfig(t *testing.T, settingsDir string) *config.Config {
 	t.Helper()
 	return &config.Config{
-		DataDir:  t.TempDir(),
+		DataDir:  storedir.New(t),
 		Server:   config.Server{Port: closedPort(t), ShutdownTimeout: 2},
 		MQ:       config.MQ{Backend: config.MQEmbedded},
 		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},

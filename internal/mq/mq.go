@@ -192,8 +192,11 @@ var ErrQueueFull = errors.New("ingest queue is full")
 
 // ErrUnavailable is returned when the broker cannot be reached or does not
 // answer in time — a transient failure, not a refusal, that the API turns
-// into a 503 with a short Retry-After. Only a backend whose broker is out of
-// process returns it; the embedded one's publish failures are plain errors.
+// into a 503. Retry-After is the dedupe lease, rounded up to whole seconds,
+// when the record held a claim (so an obedient client waits out the window
+// instead of retrying straight into it), else a flat few seconds. Only a
+// backend whose broker is out of process returns it; the embedded one's
+// publish failures are plain errors.
 var ErrUnavailable = errors.New("message queue unavailable")
 
 // Publisher appends events to the ingest queue.

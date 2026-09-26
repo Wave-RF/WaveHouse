@@ -3007,29 +3007,55 @@ func TestIngest_Dedup_ReserveError(t *testing.T) {
 	assert.Empty(t, pub.Published())
 }
 
-// A Reserve error caused by the request's own context ending (the client
-// gone, or its deadline past) is not a backend failure and must not log at
-// ERROR — an operator paging on ERROR logs would otherwise be woken by
-// clients that simply went away. TestIngest_Dedup_ReserveError above pins the
-// real-backend-failure case, which stays ERROR.
-func TestIngest_Dedup_ReserveError_ContextEnded_NotLoggedAsError(t *testing.T) {
-	buf := logtest.Capture(t, slog.LevelDebug)
-	pub := &testutil.MockPublisher{}
-	dedup := testutil.NewMockDeduplicator()
-	dedup.Err = errors.New("backend down")
-	h := dedupHandler(t, pub, dedup, false)
+// A Reserve error's log level depends on why it failed. A real backend
+// failure (a live request context) stays ERROR, so an operator is paged. One
+// caused by the request's own context ending (the client gone, or its
+// deadline past) is not a backend problem and must log at DEBUG instead — an
+// operator paging on ERROR logs would otherwise be woken by clients that
+// simply went away. Not t.Parallel: it captures the process-wide default
+// logger (logtest.Capture). Matched on the exact "level":"…","msg":"…" pair
+// slog's JSON handler emits adjacently, not on the level alone — the package
+// also logs an unrelated "debug: span started for ingest" line per request,
+// which satisfies a bare `"level":"DEBUG"` check whether or not the Reserve
+// line itself is DEBUG.
+func TestIngest_Dedup_ReserveError_LogLevel(t *testing.T) {
+	tests := []struct {
+		name          string
+		cancelContext bool
+		wantLine      string
+	}{
+		{
+			"live context: a real backend failure pages at ERROR", false,
+			`"level":"ERROR","msg":"dedupe reserve failed"`,
+		},
+		{
+			"context ended: a client gone must not page, logs at DEBUG", true,
+			`"level":"DEBUG","msg":"dedupe reserve failed: request context ended"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := logtest.Capture(t, slog.LevelDebug)
+			pub := &testutil.MockPublisher{}
+			dedup := testutil.NewMockDeduplicator()
+			dedup.Err = errors.New("backend down")
+			h := dedupHandler(t, pub, dedup, false)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"}).WithContext(ctx)
+			ctx := context.Background()
+			if tt.cancelContext {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"}).WithContext(ctx)
 
-	w := httptest.NewRecorder()
-	h.Handle(w, withTenant(req))
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(req))
 
-	assert.Contains(t, buf.String(), "dedupe reserve failed", "still logged, just not at ERROR")
-	assert.NotContains(t, buf.String(), `"level":"ERROR"`, "a client-gone Reserve error must not page an operator")
-	assert.Contains(t, buf.String(), `"level":"DEBUG"`)
-	assert.Empty(t, pub.Published())
+			assert.Contains(t, buf.String(), tt.wantLine)
+			assert.Empty(t, pub.Published())
+		})
+	}
 }
 
 // #370: an explicit null id is a missing id — rejected under require_id,

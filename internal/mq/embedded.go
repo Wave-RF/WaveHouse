@@ -1107,7 +1107,10 @@ func (e *EmbeddedNATS) Close() error {
 	// Owning the lifecycle (NoSigs, #287) means waiting it out: without this,
 	// run()'s remaining defers unwind while JetStream is still tearing down
 	// and the process can exit mid-shutdown (as-if-crashed stream state).
-	// Milliseconds for an in-process server.
+	// Milliseconds for an in-process server. It does not join a durable's
+	// state flusher: a write under way can land after Close returns, or never
+	// if the process exits first, leaving the durable's previous ack state on
+	// disk (#665).
 	e.server.WaitForShutdown()
 	return nil
 }
