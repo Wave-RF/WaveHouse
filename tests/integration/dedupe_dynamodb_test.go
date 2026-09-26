@@ -194,7 +194,7 @@ func TestDedupeDynamo_Throttled(t *testing.T) {
 			m := d.Tenant("acme")
 			require.NoError(t, m.Apply(true))
 			_, err := m.Reserve(t.Context(), []dedupe.Key{{Table: "events", ID: "e1"}}, time.Minute)
-			require.ErrorIs(t, err, dedupe.ErrUnavailable, "a throttle is worth retrying: 503")
+			require.ErrorIs(t, err, dedupe.ErrUnavailable, "a throttle is worth retrying")
 			assert.Equal(t, int64(2), sent.Load(), "the SDK retried it once first")
 		})
 	}
@@ -257,7 +257,7 @@ func TestDedupeDynamo_ConfigErrorsAreNotUnavailable(t *testing.T) {
 	require.Error(t, err)
 	var missing *types.ResourceNotFoundException
 	assert.ErrorAs(t, err, &missing)
-	assert.False(t, errors.Is(err, dedupe.ErrUnavailable), "a missing table is a config bug: 500, not 503")
+	assert.False(t, errors.Is(err, dedupe.ErrUnavailable), "a missing table is a config bug, not worth retrying")
 	require.Error(t, d.Check(t.Context()))
 }
 

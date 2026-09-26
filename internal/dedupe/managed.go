@@ -23,7 +23,7 @@ var ErrDisabled = errors.New("dedupe is disabled")
 // but the store failed to open, and wrapped by a backend's error when a
 // retry later can succeed. Ingest fails closed on it — the settings asked
 // for dedupe, so publishing un-deduped is not a fallback.
-var ErrUnavailable = errors.New("dedupe store is not open")
+var ErrUnavailable = errors.New("dedupe store unavailable")
 
 // hashedIDCounter counts ids stored as their SHA-256 (Key.Hashed): an id
 // longer than MaxIDBytes is a producer sending something other than an id.
