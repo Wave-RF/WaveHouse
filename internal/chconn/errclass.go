@@ -189,7 +189,7 @@ func Classify(err error) Class {
 	if code, ok := ExceptionCode(err); ok {
 		return ClassOfCode(code)
 	}
-	if status, ok := httpStatus(err); ok {
+	if status, ok := HTTPStatus(err); ok {
 		return classOfStatus(status)
 	}
 	if transportFailure(err) {
@@ -211,7 +211,8 @@ func ExceptionCode(err error) (int32, bool) {
 	return 0, false
 }
 
-func httpStatus(err error) (int, bool) {
+// HTTPStatus is the status of the non-2xx HTTP answer err carries, if any.
+func HTTPStatus(err error) (int, bool) {
 	var he *HTTPError
 	if errors.As(err, &he) {
 		return he.StatusCode, true

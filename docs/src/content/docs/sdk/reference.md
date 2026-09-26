@@ -37,7 +37,7 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 403 | `clickhouse.access_denied` | No | ClickHouse's user lacks a grant the statement needs |
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
 | 500 / 502 | `clickhouse.unknown` | Yes | ClickHouse failed with no verdict (no exception code, no recognizable transport error); `502` on `wh.sql` |
-| 502 | `clickhouse.misconfigured` | No | ClickHouse refused WaveHouse's own credentials or database — an operator fix |
+| 502 | `clickhouse.misconfigured` | No | ClickHouse refused WaveHouse's own credentials or database, or the route to it is wrong (a redirect or `4xx` with no exception code) — an operator fix |
 | 502 | `clickhouse.response_too_large` | No | A raw-SQL (`wh.sql`) response over the 64 MiB cap |
 | 503 | `clickhouse.unavailable` | Yes | ClickHouse is down, unreachable or overloaded; `Retry-After: 5`, honored between attempts |
 | 503 | `HTTP_503` | Yes | Service unavailable, a tenant whose settings folder was rejected, a schema not discovered yet, a tenant on no ClickHouse pool, or a token sent while that tenant's JWKS has not been fetched yet (`token verifier not ready`, `Retry-After: 30`). REST calls auto-retry, honoring `Retry-After` when the response carries one — so each attempt on that last cause waits the 30 s; a stream re-dials on its own jittered backoff instead |

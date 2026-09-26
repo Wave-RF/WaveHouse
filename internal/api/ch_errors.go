@@ -23,7 +23,9 @@ const (
 	// needs (ACCESS_DENIED). 403.
 	codeCHAccessDenied = "clickhouse.access_denied"
 	// codeCHMisconfigured: ClickHouse refused the credentials or database
-	// WaveHouse connects with — an operator fix, not a caller's. 502.
+	// WaveHouse connects with, or whatever sits in front of it answered a
+	// redirect or a 4xx with no exception code — an operator fix, not a
+	// caller's. 502.
 	codeCHMisconfigured = "clickhouse.misconfigured"
 	// codeCHUnavailable: ClickHouse, or the way to it, could not take the
 	// query now. 503 with Retry-After.
@@ -102,14 +104,20 @@ func chFailureOf(err error, unknownStatus int, caps queryCaps) chFailure {
 	case chconn.Unavailable:
 		return chFailure{http.StatusServiceUnavailable, codeCHUnavailable, true}
 	case chconn.Unknown:
+		// A codeless 3xx or 4xx is not ClickHouse's answer but that of
+		// whatever sits on the way to it — a wrong path, a proxy's rule —
+		// and it answers the same on a retry.
+		if status, ok := chconn.HTTPStatus(err); ok && status >= 300 && status < 500 {
+			return chFailure{http.StatusBadGateway, codeCHMisconfigured, false}
+		}
 	}
 	return chFailure{unknownStatus, codeCHUnknown, true}
 }
 
 // writeCHError answers a failed ClickHouse call with message, at the status
-// and code its class maps to. A denial is also logged: it is ClickHouse's
-// configuration refusing WaveHouse, which an operator should hear about
-// even when the caller only sees a 403.
+// and code its class maps to. A denial or misconfiguration is also logged:
+// it is WaveHouse's configuration being refused, which an operator should
+// hear about even when the caller only sees a 403.
 func writeCHError(w http.ResponseWriter, r *http.Request, err error, message string, unknownStatus int, caps queryCaps) {
 	f := chFailureOf(err, unknownStatus, caps)
 	switch f.code {
@@ -117,7 +125,7 @@ func writeCHError(w http.ResponseWriter, r *http.Request, err error, message str
 		w.Header().Set("Retry-After", retryAfterClickHouse)
 	case codeCHAccessDenied, codeCHMisconfigured:
 		exCode, _ := chconn.ExceptionCode(err)
-		slog.WarnContext(r.Context(), "clickhouse refused WaveHouse's user",
+		slog.WarnContext(r.Context(), "clickhouse refused WaveHouse's configuration",
 			slog.String("code", f.code), slog.Int("exception_code", int(exCode)),
 			slog.String("path", r.URL.Path), slog.String("error", err.Error()))
 	}

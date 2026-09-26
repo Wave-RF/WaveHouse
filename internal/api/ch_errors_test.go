@@ -78,6 +78,9 @@ func chErrorCases(t *testing.T) []chErrorCase {
 		// role, not the cap: ClickHouse reports the cap itself as 159.
 		{name: "pool wait under a time cap", err: fmt.Errorf("clickhouse query: %w", context.DeadlineExceeded), caps: policy.SelectPermissions{MaxExecutionTime: 1}, wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
 		{name: "backstop cancel under a time cap", err: fmt.Errorf("clickhouse query: %w", context.Canceled), caps: policy.SelectPermissions{MaxExecutionTime: 1}, wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
+		// A cap longer than the handler's 5s query_timeout is not what
+		// stopped the query: the timeout reads as it does with no cap.
+		{name: "query_timeout under a longer time cap", err: chException(159, "DB::Exception", "Timeout exceeded"), caps: policy.SelectPermissions{MaxExecutionTime: 10000}, wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
 		{name: "memory cap of the role", err: chException(241, "DB::Exception", "Memory limit (for query) exceeded"), caps: policy.SelectPermissions{MaxMemoryUsage: 1}, wantStatus: 400, wantCode: codeCHLimitExceeded},
 		{name: "server timeout, no role cap", err: chException(159, "DB::Exception", "Timeout exceeded"), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
 		{name: "server memory, no role cap", err: chException(241, "DB::Exception", "Memory limit (total) exceeded"), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
@@ -86,6 +89,8 @@ func chErrorCases(t *testing.T) []chErrorCase {
 		{name: "overloaded", err: chException(202, "DB::Exception", "Too many simultaneous queries"), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
 		{name: "connection refused", err: fmt.Errorf("clickhouse query: %w", refusedDial(t)), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
 		{name: "pool exhausted", err: fmt.Errorf("clickhouse query: %w", clickhouse.ErrAcquireConnTimeout), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
+		{name: "codeless 404 on the way", err: fmt.Errorf("clickhouse query: %w", &clickhouse.HTTPError{StatusCode: 404, Err: errors.New("There is no handle /nope")}), wantStatus: 502, wantCode: codeCHMisconfigured},
+		{name: "codeless 500 on the way", err: fmt.Errorf("clickhouse query: %w", &clickhouse.HTTPError{StatusCode: 500, Err: errors.New("upstream exploded")}), wantStatus: 500, wantCode: codeCHUnknown, wantRetryable: true},
 		{name: "no verdict", err: errors.New("scan clickhouse row: something odd"), wantStatus: 500, wantCode: codeCHUnknown, wantRetryable: true},
 	}
 }

@@ -293,6 +293,8 @@ func TestQueryHandler_ForwardsCHError(t *testing.T) {
 		{"server timeout", 500, "159", "Code: 159. DB::Exception: Timeout exceeded. (TIMEOUT_EXCEEDED)", 503, codeCHUnavailable, true},
 		{"proxy 503 with no code", 503, "", "Server is overloaded.", 503, codeCHUnavailable, true},
 		{"proxy 500 with no code", 500, "", "upstream exploded", 502, codeCHUnknown, true},
+		{"wrong path, no code", 404, "", "There is no handle /nope", 502, codeCHMisconfigured, false},
+		{"redirect, not chased", 302, "", "Found", 502, codeCHMisconfigured, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
