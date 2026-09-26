@@ -222,6 +222,7 @@ func TestRedis_Conformance(t *testing.T) {
 						p := uniquePrefix()
 						return open(t, s, p), open(t, s, p)
 					},
+					Entries: valueCount(raw(t, s)),
 				})
 			t.Run("cross-tenant invalidation spans slots", func(t *testing.T) {
 				t.Parallel()
@@ -232,6 +233,33 @@ func TestRedis_Conformance(t *testing.T) {
 				testCompression(t, s)
 			})
 		})
+	}
+}
+
+// valueCount counts the values under a cache's own key prefix, scanning
+// every node r knows (the test cluster's one node has no replica), and the
+// empty key, where a fill under the zero snapshot's empty key would land;
+// -1 is a failed read.
+func valueCount(r rueidis.Client) func(cache.Cache) int {
+	return func(c cache.Cache) int {
+		match := cache.KeyPrefix(c.(*cache.RedisCache)) + ":q:*"
+		n, err := r.Do(context.Background(), r.B().Exists().Key("").Build()).AsInt64()
+		if err != nil {
+			return -1
+		}
+		for _, node := range r.Nodes() {
+			for cursor := uint64(0); ; {
+				e, err := node.Do(context.Background(), node.B().Scan().Cursor(cursor).Match(match).Count(1000).Build()).AsScanEntry()
+				if err != nil {
+					return -1
+				}
+				if n += int64(len(e.Elements)); e.Cursor == 0 {
+					break
+				}
+				cursor = e.Cursor
+			}
+		}
+		return int(n)
 	}
 }
 

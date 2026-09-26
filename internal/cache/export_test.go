@@ -16,6 +16,9 @@ func Pending(r *RedisCache) int { return r.pending.len() }
 // Bypassed reports whether r is skipping the server.
 func Bypassed(r *RedisCache) bool { return r.bypassed() }
 
+// KeyPrefix is the prefix every key r writes leads with.
+func KeyPrefix(r *RedisCache) string { return r.cfg.KeyPrefix }
+
 // ZeroSnapshot reports whether s files nothing.
 func ZeroSnapshot(s Snapshot) bool { return s.key == "" && s.tokens == nil }
 
