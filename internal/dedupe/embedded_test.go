@@ -153,6 +153,45 @@ func TestEmbedded_VersionZeroKeysAreNotRead(t *testing.T) {
 	assert.False(t, dup)
 }
 
+// v0.1.0 stored a bare id as the key with an 8-byte value, so a v0.1.0 id
+// that happens to spell a key the current layout would also write —
+// tenant "0", table "events", id "e1" join to "0/events/e1", which a v0.1.0
+// record could have used as its own id — must not read as a live duplicate:
+// only a value of exactly valueLen bytes leading with committedMark is ours.
+// The reserve below claims the key despite the stale value, and only the
+// commit it makes turns a second reserve of the same id into a duplicate.
+func TestEmbedded_PreJoinValueUnderACollidingKeyIsNotLive(t *testing.T) {
+	t.Parallel()
+	e := NewEmbedded(t.TempDir())
+	m := switchedOn(t, e, "0")
+	key := AppendKey(nil, KeyPrefix("0"), Key{Table: "events", ID: "e1"})
+	require.NoError(t, e.db.Set(key, make([]byte, 8), pebble.Sync))
+
+	dup, err := mark(context.Background(), m, "e1")
+	require.NoError(t, err)
+	assert.False(t, dup, "an 8-byte v0.1.0 value is not this layout's commit")
+
+	dup, err = mark(context.Background(), m, "e1")
+	require.NoError(t, err)
+	assert.True(t, dup, "the mark above overwrote it with a real commit")
+}
+
+// Same colliding key, a 9-byte value that committedMark did not write: the
+// mark byte, not just the length, is what says a value is ours.
+func TestEmbedded_WrongMarkByteIsNotLive(t *testing.T) {
+	t.Parallel()
+	e := NewEmbedded(t.TempDir())
+	m := switchedOn(t, e, "0")
+	key := AppendKey(nil, KeyPrefix("0"), Key{Table: "events", ID: "e1"})
+	val := make([]byte, valueLen)
+	val[0] = committedMark + 1
+	require.NoError(t, e.db.Set(key, val, pebble.Sync))
+
+	dup, err := mark(context.Background(), m, "e1")
+	require.NoError(t, err)
+	assert.False(t, dup, "a value not led by committedMark is not a live commit")
+}
+
 // A claim nobody commits, releases or reserves again leaves memory at the
 // next sweep past its lease, not never.
 func TestPendingShard_SweepDropsLapsedClaims(t *testing.T) {

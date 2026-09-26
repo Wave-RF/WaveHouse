@@ -6,6 +6,8 @@ package dedupetest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -260,8 +262,15 @@ var cases = []struct {
 		d := s.store(t, "acme")
 		base := strings.Repeat("x", 2*dedupe.MaxIDBytes)
 		longA, longB := key(base+"a"), key(base+"b")
-		hashLike := key("\xff" + strings.Repeat("0", 32))
-		require.NoError(t, d.Commit(t.Context(), reserve(t, d, long, longA, hashLike), 0))
+		// hashLike spells longA's own stored hashed form, escaped: it fits
+		// verbatim and stays distinct only if the '#' the hashed form writes
+		// raw never gets escaped like an ordinary field.
+		sum := sha256.Sum256([]byte(base + "a"))
+		hashLike := key("#" + hex.EncodeToString(sum[:]))
+		first := reserve(t, d, long, longA, hashLike)
+		assert.Equal(t, []dedupe.Status{dedupe.Claimed, dedupe.Claimed}, statuses(first),
+			"both fresh — a collision would answer the second InFlight")
+		require.NoError(t, d.Commit(t.Context(), first, 0))
 		assert.Equal(t, []dedupe.Status{dedupe.Duplicate, dedupe.Claimed, dedupe.Duplicate},
 			statuses(reserve(t, d, long, longA, longB, hashLike)))
 	}},

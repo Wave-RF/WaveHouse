@@ -82,7 +82,7 @@ var dedupeMissingIDCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 // dedupeCommitFailedCounter counts records published whose id could not be
 // committed afterwards: a retry after the lease lapses publishes them again.
 var dedupeCommitFailedCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
-	"wavehouse_dedupe_commit_failed_total",
+	"wavehouse_ingest_dedupe_commit_failed_total",
 	metric.WithDescription("Published records whose dedupe id failed to commit afterwards (the claim lapses with its lease)"),
 )
 
