@@ -18,7 +18,7 @@
 // handed whole to each component's wiring function, which derives the
 // per-call getters the internal packages take: keyed by the request's store
 // for the handlers, by tenant id for the async paths (perTenant), and fixed
-// to the default tenant for the ops gate of a flat directory (defaultSetting).
+// to the default tenant for the ops gate of a flat directory (defaultPolicy).
 package app
 
 import (
@@ -30,7 +30,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -39,6 +38,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
@@ -89,11 +89,8 @@ type App struct {
 	listener net.Listener
 
 	// tenants is the registry every tenant-aware path resolves through, and
-	// the owner of every reload. defaultStore is tenant 0's store as of its
-	// last adoption, which the ops gate of a flat directory reads its admin
-	// role from (defaultSetting).
-	tenants      *settings.Registry
-	defaultStore atomic.Pointer[settings.Store]
+	// the owner of every reload.
+	tenants *settings.Registry
 	// policies is the default tenant's policy, for the ops gate of a flat
 	// directory.
 	policies    policy.Source
@@ -110,6 +107,7 @@ type App struct {
 	dedupeStats func() map[string]int64
 	mq          mq.Broker
 	cache       cache.Cache
+	coord       coord.Coordinator
 	sseMetrics  *stream.Metrics
 	hub         *stream.Hub
 	heartbeater *stream.Heartbeater
@@ -144,9 +142,9 @@ const (
 )
 
 // New wires every component. ctx bounds construction only — the boot-time
-// schema refresh and the JetStream stream setup; the loops start in Run. A
-// failure releases whatever was already opened and returns the error, so
-// the caller never holds a half-built App.
+// schema refresh and the opening of each served tenant's queue; the loops
+// start in Run. A failure releases whatever was already opened and returns the
+// error, so the caller never holds a half-built App.
 func New(ctx context.Context, opts Options) (app *App, err error) {
 	a := &App{cfg: opts.Config, build: opts.Build, logLevel: opts.LogLevel, listener: opts.Listener}
 	if a.logLevel == nil {
@@ -166,6 +164,9 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 		}
 	}()
 
+	if len(a.cfg.Roles) == 0 {
+		return nil, errors.New("roles is empty: a Config built without config.Load must name the roles it runs (config.AllRoles for one process running all of them)")
+	}
 	if err := a.wireSettings(); err != nil {
 		return nil, err
 	}
@@ -174,25 +175,51 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	for _, w := range a.cfg.Warnings() {
 		slog.Warn(w)
 	}
-	if err := a.wireClickHouse(); err != nil {
+	slog.Info("process roles", "roles", a.cfg.Roles, "instance_id", a.cfg.InstanceID)
+	// What each role wires; config.Validate refused a set these cannot serve.
+	// The API's discovery, dedupe, auth verifiers, hub bridge and keepalive
+	// wheel are per process: every API process runs its own.
+	apiRole, ingestRole := a.cfg.Has(config.RoleAPI), a.cfg.Has(config.RoleIngest)
+	if apiRole || ingestRole {
+		if err := a.wireClickHouse(); err != nil {
+			return nil, err
+		}
+	}
+	if apiRole {
+		a.wireDiscovery(ctx)
+		if err := a.wireDedupe(); err != nil {
+			return nil, err
+		}
+	}
+	if err := a.wireMQ(ctx); err != nil {
 		return nil, err
 	}
-	a.wireDiscovery(ctx)
-	if err := a.wireDedupe(); err != nil {
+	if apiRole || ingestRole {
+		if err := a.wireCache(); err != nil {
+			return nil, err
+		}
+	}
+	if err := a.wireCoord(); err != nil {
 		return nil, err
 	}
-	if err := a.wireMQ(); err != nil {
-		return nil, err
+	if a.cfg.Has(config.RoleSweeper) {
+		a.wireSweeper()
 	}
-	if err := a.wireCache(); err != nil {
-		return nil, err
+	if apiRole {
+		a.wireStreaming()
 	}
-	a.wireSweeper()
-	a.wireStreaming()
-	a.wireIngestWorker()
-	authMW := a.wireAuth()
-	a.wireReloadTriggers()
-	a.wireHTTP(authMW)
+	if ingestRole {
+		a.wireIngestWorker()
+	}
+	if apiRole {
+		authMW := a.wireAuth()
+		a.wireReloadTriggers()
+		a.wireHTTP(authMW)
+	} else {
+		authMW := a.wireOpsAuth()
+		a.wireReloadTriggers()
+		a.wireOpsHTTP(authMW)
+	}
 	return a, nil
 }
 
@@ -299,13 +326,19 @@ func closeWithin(ctx context.Context, name string, release func(context.Context)
 	}
 }
 
-// Handler is the API router, for a harness that serves it itself.
+// Handler is the router this process serves — the API's, or the ops-only
+// one without the api role — for a harness that serves it itself.
 func (a *App) Handler() http.Handler { return a.handler }
 
 // Registry is the default tenant's schema registry, for a harness that
 // refreshes it after creating tables; nil over a nested directory serving
-// no tenant 0.
-func (a *App) Registry() *discovery.SchemaRegistry { return a.discoveries.For(tenant.Default) }
+// no tenant 0, and in a process without the api role.
+func (a *App) Registry() *discovery.SchemaRegistry {
+	if a.discoveries == nil {
+		return nil
+	}
+	return a.discoveries.For(tenant.Default)
+}
 
 // MQ is the broker, for a harness that publishes straight onto the ingest
 // queue.

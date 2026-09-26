@@ -66,6 +66,7 @@ func TestNestedDirectory_PerTenantPoolsAndDiscovery(t *testing.T) {
 		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
 		Dedupe:     config.Dedupe{Backend: config.DedupePebble},
 		Coord:      config.Coord{Backend: config.CoordLocal},
+		Roles:      config.AllRoles(),
 		Settings:   config.Settings{Dir: root},
 	}
 	a, err := app.New(ctx, app.Options{Config: cfg, Listener: ln})

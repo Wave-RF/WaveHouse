@@ -195,19 +195,39 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Bare Select reads: this handler resolved the grant for "select" (above),
+	// so Select is non-nil, and query.Build has already rejected a mis-resolved
+	// grant by now. If that changed, these would panic rather than silently
+	// apply no caps — do not add a nil guard, which would drop the limits
+	// instead.
+	timeout := timeoutOf(h.queryTimeout, store)
+	timeCap := perms.Select.MaxExecutionTime.Duration()
+	caps := queryCaps{
+		// An overrun is the role's cap only when the cap is the tighter
+		// budget; under a shorter query_timeout it reads as it does for a
+		// role with no cap (#620).
+		time:   timeCap > 0 && timeCap <= timeout,
+		memory: perms.Select.MaxMemoryUsage > 0,
+	}
+	if timeCap > 0 {
+		timeout = min(timeCap, timeout)
+	}
+
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		timeout := timeoutOf(h.queryTimeout, store)
-		// Bare Select reads: this handler resolved the grant for "select" (above),
-		// so Select is non-nil, and query.Build has already rejected a mis-resolved
-		// grant before this closure runs. If that changed, these would panic rather
-		// than silently apply no caps — do not add a nil guard, which would drop the
-		// limits instead.
-		if perms.Select.MaxExecutionTime > 0 {
-			timeout = min(perms.Select.MaxExecutionTime.Duration(), timeout)
+		var queryCtx context.Context
+		var cancel context.CancelFunc
+		if timeCap > 0 {
+			// ClickHouse enforces the budget (max_execution_time below) and
+			// answers an overrun with TIMEOUT_EXCEEDED. A context deadline
+			// would let the driver raise that setting to deadline+5s and turn
+			// every overrun into a bare DeadlineExceeded — indistinguishable
+			// from a pool wait or a dial timeout, which are outages, not the
+			// caller's cost.
+			queryCtx, cancel = cancelAfter(r.Context(), timeout+capBackstop)
+		} else {
+			queryCtx, cancel = context.WithTimeout(r.Context(), timeout)
 		}
-
-		queryCtx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 
 		// Enforce the role's resource caps server-side, not just via the client
@@ -222,7 +242,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 			MaxRowsToRead:  perms.Select.MaxRowsToRead,
 			MaxMemoryBytes: perms.Select.MaxMemoryUsage.Bytes(),
 		}
-		if perms.Select.MaxExecutionTime > 0 {
+		if timeCap > 0 {
 			limits.ExecutionTime = timeout
 		}
 		if settings := chReadSettings(limits); settings != nil {
@@ -252,7 +272,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		return data, nil
 	})
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		writeCHError(w, r, err, err.Error(), http.StatusInternalServerError, caps)
 		return
 	}
 

@@ -262,71 +262,99 @@ func TestQueryHandler_EmptyBodyMutationReturnsArray(t *testing.T) {
 	assert.JSONEq(t, "[]", w.Body.String())
 }
 
-// TestQueryHandler_ForwardsCHError covers the "ClickHouse rejected the
-// statement" path. ClickHouse returns 4xx/5xx with a plain-text error
-// message in the body (e.g. "Code: 60. DB::Exception: Unknown table x").
-// The proxy must surface that message AND classify the status: 4xx →
-// 400 (caller-fault, the SQL was bad), 5xx → 502 (gateway-fault, the
-// upstream had a problem). Admin tooling that retries on 5xx-but-not-4xx
-// depends on this distinction.
+// TestQueryHandler_ForwardsCHError: ClickHouse answers most errors with
+// HTTP 500, caller-fault or not, so the proxy classes them by the exception
+// code (the X-ClickHouse-Exception-Code header, or the body's "Code: NNN.")
+// rather than by status (#403). ClickHouse's message reaches the admin
+// verbatim either way.
 func TestQueryHandler_ForwardsCHError(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name           string
 		upstreamStatus int
+		headerCode     string
 		upstreamBody   string
 		wantStatus     int
-		wantMsg        string
+		wantCode       string
+		wantRetryable  bool
 	}{
-		{
-			name:           "caller fault — bad SQL → 400",
-			upstreamStatus: http.StatusBadRequest,
-			upstreamBody:   "Code: 60. DB::Exception: Table default.no_such_table doesn't exist.\n",
-			wantStatus:     http.StatusBadRequest,
-			wantMsg:        "Table default.no_such_table doesn't exist",
-		},
-		{
-			name:           "caller fault — type error → 400",
-			upstreamStatus: http.StatusUnprocessableEntity,
-			upstreamBody:   "Code: 53. DB::Exception: Type mismatch.\n",
-			wantStatus:     http.StatusBadRequest,
-			wantMsg:        "Type mismatch",
-		},
-		{
-			name:           "upstream fault — ClickHouse 500 → 502",
-			upstreamStatus: http.StatusInternalServerError,
-			upstreamBody:   "Code: 999. DB::Exception: Internal error.\n",
-			wantStatus:     http.StatusBadGateway,
-			wantMsg:        "Internal error",
-		},
-		{
-			name:           "upstream fault — ClickHouse 503 → 502",
-			upstreamStatus: http.StatusServiceUnavailable,
-			upstreamBody:   "Server is overloaded.\n",
-			wantStatus:     http.StatusBadGateway,
-			wantMsg:        "Server is overloaded",
-		},
+		{"syntax error, header code", 500, "62", "Code: 62. DB::Exception: Syntax error: failed at position 1 (SELEC). (SYNTAX_ERROR)", 400, codeCHRejected, false},
+		{"unknown table, body code only", 500, "", "Code: 60. DB::Exception: Table default.no_such_table does not exist. (UNKNOWN_TABLE)", 400, codeCHRejected, false},
+		{"unknown identifier", 500, "47", "Code: 47. DB::Exception: Unknown expression identifier `nope`. (UNKNOWN_IDENTIFIER)", 400, codeCHRejected, false},
+		{"type mismatch on a 4xx", 400, "53", "Code: 53. DB::Exception: Type mismatch. (TYPE_MISMATCH)", 400, codeCHRejected, false},
+		{"rows limit", 500, "158", "Code: 158. DB::Exception: Limit for rows (controlled by 'max_rows_to_read' setting) exceeded. (TOO_MANY_ROWS)", 400, codeCHLimitExceeded, false},
+		{"missing grant (the #403 repro)", 500, "497", "Code: 497. DB::Exception: default: Not enough privileges. To execute this query, it's necessary to have the grant CREATE USER ON x. (ACCESS_DENIED)", 403, codeCHAccessDenied, false},
+		{"wrong password", 401, "516", "Code: 516. DB::Exception: default: Authentication failed. (AUTHENTICATION_FAILED)", 502, codeCHMisconfigured, false},
+		{"database denied", 500, "291", "Code: 291. DB::Exception: Database x is not accessible. (DATABASE_ACCESS_DENIED)", 502, codeCHMisconfigured, false},
+		{"proxy refuses the credentials", 401, "", "Unauthorized", 502, codeCHMisconfigured, false},
+		{"overloaded", 500, "202", "Code: 202. DB::Exception: Too many simultaneous queries. (TOO_MANY_SIMULTANEOUS_QUERIES)", 503, codeCHUnavailable, true},
+		{"keeper down", 500, "999", "Code: 999. DB::Exception: Keeper error. (KEEPER_EXCEPTION)", 503, codeCHUnavailable, true},
+		{"server timeout", 500, "159", "Code: 159. DB::Exception: Timeout exceeded. (TIMEOUT_EXCEEDED)", 503, codeCHUnavailable, true},
+		{"proxy 503 with no code", 503, "", "Server is overloaded.", 503, codeCHUnavailable, true},
+		{"proxy 500 with no code", 500, "", "upstream exploded", 502, codeCHUnknown, true},
+		{"wrong path, no code", 404, "", "There is no handle /nope", 502, codeCHMisconfigured, false},
+		{"redirect, not chased", 302, "", "Found", 502, codeCHMisconfigured, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			fake := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "text/plain; charset=UTF-8")
+				if tt.headerCode != "" {
+					w.Header().Set("X-ClickHouse-Exception-Code", tt.headerCode)
+				}
 				w.WriteHeader(tt.upstreamStatus)
-				_, _ = w.Write([]byte(tt.upstreamBody))
+				_, _ = w.Write([]byte(tt.upstreamBody + "\n"))
 			})
 			h := newProxyHandler(t, fake)
 
 			body, _ := json.Marshal(queryRequest{SQL: "SELECT * FROM no_such_table"})
 			w := postQuery(h, body)
 
-			require.Equal(t, tt.wantStatus, w.Code)
-			assert.Contains(t, w.Body.String(), tt.wantMsg, "ClickHouse's error message must reach the admin verbatim")
+			require.Equal(t, tt.wantStatus, w.Code, w.Body.String())
+			var got errorBody
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+			assert.Equal(t, tt.upstreamBody, got.Error, "ClickHouse's error message must reach the admin verbatim")
+			assert.Equal(t, tt.wantCode, got.Code)
+			require.NotNil(t, got.Retryable)
+			assert.Equal(t, tt.wantRetryable, *got.Retryable)
+			if tt.wantStatus == http.StatusServiceUnavailable {
+				assert.Equal(t, retryAfterClickHouse, w.Header().Get("Retry-After"))
+			} else {
+				assert.Empty(t, w.Header().Get("Retry-After"))
+			}
 			assertSecurityHeaders(t, w)
 			testutil.AssertJSONErrorResponse(t, w)
 		})
 	}
+}
+
+// TestQueryHandler_ClickHouseDown: a refused connection is an outage — 503,
+// retryable, with Retry-After — not the caller's fault.
+func TestQueryHandler_ClickHouseDown(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	addr := srv.URL
+	srv.Close()
+	h := newTestQueryHandler(staticTarget(addr, "", "", ""), func(*settings.Store) time.Duration { return 30 * time.Second })
+
+	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
+	w := postQuery(h, body)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	assert.Equal(t, retryAfterClickHouse, w.Header().Get("Retry-After"))
+	assert.JSONEq(t, `true`, jsonField(t, w, "retryable"))
+	assert.JSONEq(t, `"`+codeCHUnavailable+`"`, jsonField(t, w, "code"))
+	assert.Contains(t, w.Body.String(), "clickhouse request failed")
+}
+
+// jsonField is one top-level field of a JSON response body, raw.
+func jsonField(t *testing.T, w *httptest.ResponseRecorder, name string) string {
+	t.Helper()
+	var m map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &m))
+	return string(m[name])
 }
 
 // TestQueryHandler_SetsSecurityHeadersOn200 pins Cache-Control: no-store
@@ -434,6 +462,7 @@ func TestQueryHandler_ResponseSizeCap(t *testing.T) {
 	w := postQuery(h, body)
 
 	require.Equal(t, http.StatusBadGateway, w.Code, "oversized response must 502, not OOM")
+	assert.JSONEq(t, `false`, jsonField(t, w, "retryable"), "the same query overflows again")
 	assert.Contains(t, w.Body.String(), "exceeded")
 	testutil.AssertJSONErrorResponse(t, w)
 	assertSecurityHeaders(t, w)
@@ -521,8 +550,7 @@ func TestQueryHandler_ContextCancelPropagates(t *testing.T) {
 		t.Fatal("handler did not return after request cancellation — context propagation likely broken")
 	}
 
-	// Either 502 (proxy reported the upstream cancellation as a transport
-	// failure) or 500 (cancellation surfaced from the read path) is fine —
+	// Whatever status the cancellation surfaces as is fine —
 	// what we're pinning is that the handler returned promptly after
 	// cancel(), proving the request context made it to the upstream call.
 	assert.NotEqual(t, http.StatusOK, w.Code, "cancelled request must not return 200")

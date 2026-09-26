@@ -8,6 +8,14 @@
 # the relative default is for local binary use only.
 data_dir: ./data
 
+# The work this process runs; every role by default. A split (one Deployment
+# per role) needs a shared mq.backend and cache.backend, and boot refuses one
+# on the in-process backends.
+roles: [api, ingest, sweeper]
+# Names this process: logged at boot today, a lease's holder once a shared
+# coord.backend exists. Empty means <hostname>-<8 hex>, fresh at every boot.
+instance_id: ""
+
 server:
   port: 8080
   # Drain budget for a stop (in-flight requests and ingest batches). The
@@ -50,7 +58,7 @@ mq:
 dedupe:
   backend: pebble # Pebble under <data_dir>/pebble
 coord:
-  backend: local # reserved: nothing is elected yet
+  backend: local # leases (the sweeper's) held in this process
 
 # The query-result cache: local (in-process, sized by l1_max_cost) or redis
 # (one Redis-compatible server shared by every instance; see the redis block

@@ -14,10 +14,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1270,10 +1272,10 @@ func v1Envelope(t *testing.T, table string, data map[string]any) []byte {
 }
 
 // TestParseMsg_PoisonEnvelope_ParkedOnDLQ: an envelope the worker can never
-// insert — a pre-v2 message left in the queue across an upgrade, malformed
+// insert — one of an unknown format (the pre-v2 shape carries none), malformed
 // JSON, or columns and a row that can't be paired — is preserved on the DLQ
-// rather than dropped, so a missed pre-deploy drain costs an operator a replay
-// rather than the rows themselves.
+// rather than dropped, so it costs an operator a replay rather than the rows
+// themselves.
 func TestParseMsg_PoisonEnvelope_ParkedOnDLQ(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1987,4 +1989,436 @@ func TestFlushTable_NoTargetParksTheBatchInOnePass(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// ClickHouse availability vs a rejected row (#613 workstream A)
+// ---------------------------------------------------------------------------
+
+// chAnswer is a ClickHouse HTTP-interface answer carrying an exception code
+// in both places the server puts it.
+func chAnswer(status int, code int, text string) *http.Response {
+	h := http.Header{}
+	h.Set("X-ClickHouse-Exception-Code", fmt.Sprint(code))
+	return &http.Response{
+		StatusCode: status,
+		Header:     h,
+		Body:       io.NopCloser(bytes.NewBufferString(fmt.Sprintf("Code: %d. DB::Exception: %s", code, text))),
+	}
+}
+
+func okAnswer() *http.Response {
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString(""))}
+}
+
+func isBulk(req *http.Request) (bool, string) {
+	body, _ := io.ReadAll(req.Body)
+	return strings.Count(string(body), "\n") > 1, string(body)
+}
+
+// TestFlushTable_ClickHouseUnavailable_RetriedNeverDeadLettered: whatever
+// shape the outage takes, the batch is handed back for a delayed redelivery
+// in one piece — one request, no row-by-row isolation, nothing acked, nothing
+// on the DLQ. A splittable failure costs one more request: the batch is split,
+// and its first row fails the same way.
+func TestFlushTable_ClickHouseUnavailable_RetriedNeverDeadLettered(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		answer func() (*http.Response, error)
+		split  bool
+	}{
+		{"connection refused", func() (*http.Response, error) {
+			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}
+		}, false},
+		{"timeout", func() (*http.Response, error) { return nil, context.DeadlineExceeded }, false},
+		{"TOO_MANY_SIMULTANEOUS_QUERIES", func() (*http.Response, error) { return chAnswer(500, 202, "Too many simultaneous queries"), nil }, false},
+		{"SERVER_OVERLOADED", func() (*http.Response, error) { return chAnswer(500, 745, "CPU is overloaded"), nil }, false},
+		{"MEMORY_LIMIT_EXCEEDED", func() (*http.Response, error) { return chAnswer(500, 241, "Memory limit exceeded"), nil }, true},
+		{"READONLY", func() (*http.Response, error) { return chAnswer(500, 164, "readonly"), nil }, false},
+		{"TOO_MANY_PARTS", func() (*http.Response, error) { return chAnswer(500, 252, "Too many parts"), nil }, true},
+		{"KEEPER_EXCEPTION", func() (*http.Response, error) { return chAnswer(500, 999, "Coordination error"), nil }, false},
+		{"AUTHENTICATION_FAILED", func() (*http.Response, error) { return chAnswer(403, 516, "Authentication failed"), nil }, false},
+		{"proxy 502", func() (*http.Response, error) {
+			return &http.Response{StatusCode: 502, Body: io.NopCloser(bytes.NewBufferString("Bad Gateway"))}, nil
+		}, false},
+		{"500 with no code", func() (*http.Response, error) {
+			return &http.Response{StatusCode: 500, Body: io.NopCloser(bytes.NewBufferString("internal error"))}, nil
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rt := &testutil.MockRoundTripper{Fn: func(*http.Request) (*http.Response, error) { return tt.answer() }}
+			w, pub, mc, wait := newTestWorker(rt)
+
+			msgs := []*testutil.MockMessage{
+				newIngestMsg(t, "events", "", map[string]any{"id": 1}),
+				newIngestMsg(t, "events", "", map[string]any{"id": 2}),
+				newIngestMsg(t, "events", "", map[string]any{"id": 3}),
+			}
+			w.flushTable(context.Background(), "events", parseAll(t, w, msgs...))
+			wait()
+
+			wantHits := int32(1)
+			if tt.split {
+				wantHits = 2
+			}
+			assert.Equal(t, wantHits, rt.Hits(), "one bulk attempt, and isolation only to split a splittable failure")
+			assert.Empty(t, pub.Published(), "an unavailable ClickHouse never dead-letters a row")
+			assert.Empty(t, mc.GetNamespaces(), "nothing was written, so nothing is invalidated")
+			for i, m := range msgs {
+				assert.False(t, m.DoubleAcked.Load(), "row %d must stay in the queue", i)
+				assert.True(t, m.Naked.Load(), "row %d is handed back for redelivery", i)
+				assert.Positive(t, m.NakDelay.Load(), "row %d comes back after a backoff, not at once", i)
+			}
+		})
+	}
+}
+
+// TestFlushTable_RejectedRow_StillDeadLettered: a row ClickHouse refuses to
+// parse still takes today's path — isolated and parked — and the rows around
+// it still insert.
+func TestFlushTable_RejectedRow_StillDeadLettered(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{Fn: func(req *http.Request) (*http.Response, error) {
+		bulk, body := isBulk(req)
+		if bulk || strings.Contains(body, `"bad"`) {
+			return chAnswer(400, 72, `Cannot parse input: expected number, got "bad" (CANNOT_PARSE_NUMBER)`), nil
+		}
+		return okAnswer(), nil
+	}}
+	w, pub, _, wait := newTestWorker(rt)
+
+	good := newIngestMsg(t, "events", "", map[string]any{"n": 1})
+	bad := newIngestMsg(t, "events", "", map[string]any{"n": "bad"})
+	w.flushTable(context.Background(), "events", parseAll(t, w, good, bad))
+	wait()
+
+	assert.Equal(t, int32(3), rt.Hits(), "bulk + one isolated try per row")
+	assert.True(t, good.DoubleAcked.Load())
+	assert.False(t, good.Naked.Load())
+	assert.True(t, bad.DoubleAcked.Load(), "parked, then acked")
+	assert.False(t, bad.Naked.Load(), "a rejected row is not retried")
+	published := pub.Published()
+	require.Len(t, published, 1)
+	assert.Contains(t, published[0].Headers.Get("X-DLQ-Error"), "Code: 72")
+}
+
+// TestFlushTable_SplittableBatch_InsertsRowByRow: a batch refused for its size
+// alone — too many partitions for one INSERT, the memory limit — is split, and
+// every row inserts. Nothing is handed back, nothing is parked, and no backoff
+// opens.
+func TestFlushTable_SplittableBatch_InsertsRowByRow(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		code int
+		text string
+	}{
+		{"TOO_MANY_PARTS", 252, "Too many partitions for single INSERT block (more than 100)"},
+		{"MEMORY_LIMIT_EXCEEDED", 241, "Memory limit (total) exceeded"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rt := &testutil.MockRoundTripper{Fn: func(req *http.Request) (*http.Response, error) {
+				if bulk, _ := isBulk(req); bulk {
+					return chAnswer(500, tt.code, tt.text), nil
+				}
+				return okAnswer(), nil
+			}}
+			w, pub, _, wait := newTestWorker(rt)
+
+			msgs := []*testutil.MockMessage{
+				newIngestMsg(t, "events", "", map[string]any{"id": 1}),
+				newIngestMsg(t, "events", "", map[string]any{"id": 2}),
+				newIngestMsg(t, "events", "", map[string]any{"id": 3}),
+			}
+			w.flushTable(context.Background(), "events", parseAll(t, w, msgs...))
+			wait()
+
+			assert.Equal(t, int32(4), rt.Hits(), "bulk + one insert per row")
+			assert.Empty(t, pub.Published())
+			for i, m := range msgs {
+				assert.True(t, m.DoubleAcked.Load(), "row %d inserted", i)
+				assert.False(t, m.Naked.Load(), "row %d is not handed back", i)
+			}
+			assert.Zero(t, w.backoffs.open.Load(), "a batch that split cleanly opens no backoff")
+		})
+	}
+}
+
+// TestFlushTable_SplittableLoneRow_Retried: a one-row batch that fails a
+// splittable way has nothing left to split, so it is retried after a backoff.
+func TestFlushTable_SplittableLoneRow_Retried(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{Fn: func(*http.Request) (*http.Response, error) {
+		return chAnswer(500, 252, "Too many parts"), nil
+	}}
+	w, pub, _, wait := newTestWorker(rt)
+
+	m := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	w.flushTable(context.Background(), "events", parseAll(t, w, m))
+	wait()
+
+	assert.Equal(t, int32(1), rt.Hits(), "a lone row is not split again")
+	assert.Empty(t, pub.Published())
+	assert.False(t, m.DoubleAcked.Load())
+	assert.True(t, m.Naked.Load())
+	assert.Positive(t, m.NakDelay.Load())
+}
+
+// TestFlushTable_ClickHouseDownMidIsolation_StopsAndRetries: the bulk insert
+// is rejected, isolation starts, then ClickHouse goes away. The row already
+// inserted stays acked, the rejected one before the outage stays parked, and
+// the row the outage hit — plus every row after it, never tried — goes back
+// for redelivery rather than to the DLQ.
+func TestFlushTable_ClickHouseDownMidIsolation_StopsAndRetries(t *testing.T) {
+	t.Parallel()
+	var singles atomic.Int32
+	rt := &testutil.MockRoundTripper{Fn: func(req *http.Request) (*http.Response, error) {
+		if bulk, _ := isBulk(req); bulk {
+			return chAnswer(400, 117, "bulk rejected"), nil
+		}
+		switch singles.Add(1) {
+		case 1:
+			return okAnswer(), nil
+		case 2:
+			return chAnswer(400, 117, "this row is bad"), nil
+		default:
+			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+		}
+	}}
+	w, pub, _, wait := newTestWorker(rt)
+
+	inserted := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	rejected := newIngestMsg(t, "events", "", map[string]any{"id": 2})
+	hitByOutage := newIngestMsg(t, "events", "", map[string]any{"id": 3})
+	neverTried := newIngestMsg(t, "events", "", map[string]any{"id": 4})
+	w.flushTable(context.Background(), "events", parseAll(t, w, inserted, rejected, hitByOutage, neverTried))
+	wait()
+
+	assert.Equal(t, int32(4), rt.Hits(), "bulk + three singles; isolation stops at the outage")
+	assert.True(t, inserted.DoubleAcked.Load())
+	assert.True(t, rejected.DoubleAcked.Load())
+	require.Len(t, pub.Published(), 1, "only the row ClickHouse rejected is parked")
+	for _, m := range []*testutil.MockMessage{hitByOutage, neverTried} {
+		assert.False(t, m.DoubleAcked.Load(), "an unjudged row stays in the queue")
+		assert.True(t, m.Naked.Load())
+		assert.Positive(t, m.NakDelay.Load())
+	}
+}
+
+// TestFlushTable_OutageStopsLaterColumnGroups: a batch split by column list
+// stops at the first group ClickHouse cannot take; the later group is handed
+// back untried.
+func TestFlushTable_OutageStopsLaterColumnGroups(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{Fn: func(*http.Request) (*http.Response, error) {
+		return chAnswer(500, 209, "Timeout exceeded while reading from socket"), nil
+	}}
+	w, pub, _, wait := newTestWorker(rt)
+	narrow := &testutil.MockMessage{
+		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
+		MsgData:  makeEnvelopeCols(t, "events", "", []string{"id"}, map[string]any{"id": 1}),
+	}
+	wide := &testutil.MockMessage{
+		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
+		MsgData:  makeEnvelopeCols(t, "events", "", []string{"id", "v"}, map[string]any{"id": 2, "v": "x"}),
+	}
+	w.flushTable(context.Background(), "events", parseAll(t, w, narrow, wide))
+	wait()
+
+	assert.Equal(t, int32(1), rt.Hits(), "the second column group is not tried against a down ClickHouse")
+	assert.Empty(t, pub.Published())
+	assert.True(t, narrow.Naked.Load())
+	assert.True(t, wide.Naked.Load())
+}
+
+// TestFlushTable_PoolBacksOffTogether: once one table meets a down ClickHouse,
+// another table on the same pool is turned away without a request until the
+// backoff elapses; then one probe goes, and its success reopens the pool.
+func TestFlushTable_PoolBacksOffTogether(t *testing.T) {
+	t.Parallel()
+	var down atomic.Bool
+	down.Store(true)
+	rt := &testutil.MockRoundTripper{Fn: func(*http.Request) (*http.Response, error) {
+		if down.Load() {
+			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+		}
+		return okAnswer(), nil
+	}}
+	w, pub, _, wait := newTestWorker(rt)
+	clock := time.Unix(1_000, 0)
+	w.now = func() time.Time { return clock }
+
+	a := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	w.flushTable(context.Background(), "events", parseAll(t, w, a))
+	require.Equal(t, int32(1), rt.Hits())
+	require.True(t, a.Naked.Load())
+
+	// Another table on the same pool, inside the backoff: no request at all.
+	b := newIngestMsg(t, "clicks", "", map[string]any{"id": 2})
+	w.flushTable(context.Background(), "clicks", parseAll(t, w, b))
+	assert.Equal(t, int32(1), rt.Hits(), "a backing-off pool is not asked again")
+	assert.True(t, b.Naked.Load())
+	assert.Positive(t, b.NakDelay.Load())
+
+	// The backoff elapses and ClickHouse is back: the next flush probes,
+	// succeeds, and the pool is open again for everyone.
+	clock = clock.Add(retryCap)
+	down.Store(false)
+	c := newIngestMsg(t, "clicks", "", map[string]any{"id": 3})
+	w.flushTable(context.Background(), "clicks", parseAll(t, w, c))
+	d := newIngestMsg(t, "events", "", map[string]any{"id": 4})
+	w.flushTable(context.Background(), "events", parseAll(t, w, d))
+	wait()
+
+	assert.Equal(t, int32(3), rt.Hits())
+	assert.True(t, c.DoubleAcked.Load())
+	assert.True(t, d.DoubleAcked.Load())
+	assert.Empty(t, pub.Published())
+}
+
+// TestFlushTable_OtherPoolUnaffected: a pool's backoff is its own; a tenant on
+// another ClickHouse keeps inserting.
+func TestFlushTable_OtherPoolUnaffected(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{Fn: func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == "down:8123" {
+			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+		}
+		return okAnswer(), nil
+	}}
+	w, _, _, wait := newTestWorker(rt)
+	w.target = func(id tenant.ID) chconn.Target {
+		if id == "down" {
+			return chconn.Target{URL: "http://down:8123", Username: "u", Database: "d"}
+		}
+		return chconn.Target{URL: "http://up:8123", Username: "u", Database: "d"}
+	}
+	onDown := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: "down", Table: "events"}, MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 1})}
+	onUp := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: "up", Table: "events"}, MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 2})}
+
+	w.flushTable(context.Background(), "events", parseAll(t, w, onDown))
+	w.flushTable(context.Background(), "events", parseAll(t, w, onUp))
+	wait()
+
+	assert.True(t, onDown.Naked.Load())
+	assert.True(t, onUp.DoubleAcked.Load())
+}
+
+// TestTableBatcher_Add_HandsRowsBackWhileThePoolBacksOff: during a backoff the
+// batcher holds nothing — a row that arrives is handed straight back to the
+// MQ, so an outage's backlog waits in the queue rather than in the worker —
+// and once the window elapses rows batch again, for the probe to carry.
+func TestTableBatcher_Add_HandsRowsBackWhileThePoolBacksOff(t *testing.T) {
+	t.Parallel()
+	b, w, _ := newTestBatcher(t, okRoundTripper())
+	clock := time.Unix(1_000, 0)
+	w.now = func() time.Time { return clock }
+	wait, _, _ := w.backoffs.forTarget(w.target(tenant.Default)).fail(clock)
+
+	early := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	b.add(context.Background(), parseAll(t, w, early)[0])
+	assert.Empty(t, b.batch, "nothing is buffered for a pool that is backing off")
+	assert.True(t, early.Naked.Load())
+	assert.Positive(t, early.NakDelay.Load())
+
+	clock = clock.Add(wait)
+	late := newIngestMsg(t, "events", "", map[string]any{"id": 2})
+	b.add(context.Background(), parseAll(t, w, late)[0])
+	assert.Len(t, b.batch, 1, "after the window rows batch again")
+	assert.False(t, late.Naked.Load())
+}
+
+// TestTableBatcher_Add_ResolvesNoTargetWhileNothingBacksOff: the per-row
+// backoff check is one atomic load while no pool or table has failed — the
+// target, which formats a URL, is resolved only once some backoff is open.
+func TestTableBatcher_Add_ResolvesNoTargetWhileNothingBacksOff(t *testing.T) {
+	t.Parallel()
+	b, w, _ := newTestBatcher(t, okRoundTripper())
+	var resolved atomic.Int32
+	target := w.target
+	w.target = func(id tenant.ID) chconn.Target { resolved.Add(1); return target(id) }
+
+	b.add(context.Background(), parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1}))[0])
+	assert.Zero(t, resolved.Load(), "no target is resolved while every backoff is closed")
+
+	w.backoffs.forTable(target(tenant.Default), "other").fail(w.clock())
+	b.add(context.Background(), parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 2}))[0])
+	assert.Equal(t, int32(1), resolved.Load(), "an open backoff anywhere makes the check resolve the target")
+	assert.Len(t, b.batch, 2, "another table's backoff does not hold this one's rows")
+}
+
+// TestFlushTable_ReadOnlyTable_BacksOffAlone: a table ClickHouse reports as
+// read-only backs off on its own. Its healthy neighbour on the same pool keeps
+// inserting, and that neighbour's success does not reopen the read-only table.
+// Before, the two shared one breaker, which flapped open/closed on every flush.
+func TestFlushTable_ReadOnlyTable_BacksOffAlone(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		code int
+	}{
+		{"TABLE_IS_PERMANENTLY_READ_ONLY", 774},
+		{"ACCESS_DENIED on one table", 497},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tableBacksOffAlone(t, tc.code)
+		})
+	}
+}
+
+func tableBacksOffAlone(t *testing.T, code int) {
+	t.Helper()
+	rt := &testutil.MockRoundTripper{Fn: func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("param_target_table") == "ro" {
+			return chAnswer(500, code, "this table cannot take inserts"), nil
+		}
+		return okAnswer(), nil
+	}}
+	w, pub, _, wait := newTestWorker(rt)
+	clock := time.Unix(1_000, 0)
+	w.now = func() time.Time { return clock }
+
+	ro := newIngestMsg(t, "ro", "", map[string]any{"id": 1})
+	w.flushTable(context.Background(), "ro", parseAll(t, w, ro))
+	require.True(t, ro.Naked.Load())
+	require.Equal(t, int32(1), rt.Hits())
+
+	healthy := newIngestMsg(t, "ok", "", map[string]any{"id": 2})
+	w.flushTable(context.Background(), "ok", parseAll(t, w, healthy))
+	wait()
+	assert.True(t, healthy.DoubleAcked.Load(), "a read-only neighbour does not hold back the pool")
+	assert.Equal(t, int32(2), rt.Hits())
+
+	again := newIngestMsg(t, "ro", "", map[string]any{"id": 3})
+	w.flushTable(context.Background(), "ro", parseAll(t, w, again))
+	assert.Equal(t, int32(2), rt.Hits(), "the healthy table's success did not reopen the read-only one")
+	assert.True(t, again.Naked.Load())
+	assert.Empty(t, pub.Published())
+}
+
+// TestTableBatcher_Add_HandsRowsBackWhileTheProbeIsOut: once the window has
+// elapsed and one flush is probing, arriving rows are still handed back, with
+// a floored delay, rather than batched for a flush that would bounce them.
+func TestTableBatcher_Add_HandsRowsBackWhileTheProbeIsOut(t *testing.T) {
+	t.Parallel()
+	b, w, _ := newTestBatcher(t, okRoundTripper())
+	clock := time.Unix(1_000, 0)
+	w.now = func() time.Time { return clock }
+	pool := w.backoffs.forTarget(w.target(tenant.Default))
+	wait, _, _ := pool.fail(clock)
+	clock = clock.Add(wait)
+	_, ok := pool.allow(clock)
+	require.True(t, ok, "the probe is claimed")
+
+	m := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	b.add(context.Background(), parseAll(t, w, m)[0])
+	assert.Empty(t, b.batch)
+	assert.True(t, m.Naked.Load())
+	assert.GreaterOrEqual(t, time.Duration(m.NakDelay.Load()), retryBase/2)
 }

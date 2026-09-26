@@ -124,8 +124,9 @@ type recordReject struct {
 // abandons the remaining records rather than silently losing the tail.
 //
 // Most causes are TRANSIENT system conditions, where abandoning the tail is what
-// makes the batch safe to retry: publish backpressure (503), a publish/marshal
-// failure (500), a dedup backend error (500).
+// makes the batch safe to retry: publish backpressure (503), an unreachable
+// broker (503, mq.ErrUnavailable), a publish/marshal failure (500), a dedup
+// backend error (500).
 //
 // One is not. An insert grant that resolved for the other operation is a 403 and
 // a caller/config bug — retrying cannot help. It aborts rather than rejecting
@@ -135,7 +136,7 @@ type recordReject struct {
 type requestAbort struct {
 	Status     int
 	Message    string
-	RetryAfter string // non-empty → emit a Retry-After header (503 backpressure)
+	RetryAfter string // non-empty → emit a Retry-After header (503: backpressure or an unavailable broker)
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -707,10 +708,15 @@ func (h *IngestHandler) processRecord(
 	slog.DebugContext(ctx, "publishing event to the ingest queue", "table", table, "scope", scope)
 	if err := h.Publisher.Publish(ctx, mq.Topic{Tenant: store.Tenant(), Table: table, Scope: scope}, payload); err != nil {
 		if errors.Is(err, mq.ErrQueueFull) {
-			slog.WarnContext(ctx, "ingest queue is full", "error", err, "table", table, "scope", scope)
+			slog.WarnContext(ctx, "ingest queue is full", "tenant", store.Tenant(), "error", err, "table", table, "scope", scope)
 			return false, nil, &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30"}
 		}
-		slog.ErrorContext(ctx, "failed to publish to the ingest queue", "error", err, "table", table, "scope", scope)
+		if errors.Is(err, mq.ErrUnavailable) {
+			// A broker blip, not a full queue: a sooner retry is likely to land.
+			slog.WarnContext(ctx, "ingest queue unavailable", "tenant", store.Tenant(), "error", err, "table", table, "scope", scope)
+			return false, nil, &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "5"}
+		}
+		slog.ErrorContext(ctx, "failed to publish to the ingest queue", "tenant", store.Tenant(), "error", err, "table", table, "scope", scope)
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed"}
 	}
 

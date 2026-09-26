@@ -454,13 +454,15 @@ WaveHouse/
 │   ├── api/                # HTTP handlers, router, middleware
 │   ├── app/                # Process wiring (build every component, run under one errgroup, release in reverse)
 │   ├── auth/               # JWT/JWKS authentication middleware
-│   ├── cache/              # Query cache: in-process (Ristretto) or shared (Redis-compatible)
+│   ├── cache/              # Query cache: Ristretto L1 + the tenant-led version index, or shared (Redis-compatible)
 │   ├── chconn/             # ClickHouse pools, one per connection tuple (reconciled on settings reload)
 │   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration
+│   ├── coord/              # Leases with fencing tokens (in-process Local, RunElected, coordtest suite)
 │   ├── dedupe/             # Optional deduplication (Pebble)
 │   ├── discovery/          # ClickHouse schema introspection + validation
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
+│   ├── keyenc/             # One escaping for composite keys (NATS subject tokens, cache namespace tokens)
 │   ├── mq/                 # MQ boundary: the only NATS/JetStream importer
 │   ├── observability/      # OpenTelemetry pipeline (traces/metrics/logs + Prometheus)
 │   ├── pipes/              # Named query pipes (types + parameter binding)

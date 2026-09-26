@@ -9,9 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// withDefaultBackends sets what Load's env-defaults would: a literal Config
-// names no backend, and Validate refuses that.
+// withDefaultBackends sets what defaults() would: a literal Config
+// names no backend and no role, and Validate refuses that.
 func withDefaultBackends(c Config) *Config {
+	c.Roles = AllRoles()
 	c.MQ.Backend, c.Cache.Backend = MQEmbedded, CacheLocal
 	c.Dedupe.Backend, c.Coord.Backend = DedupePebble, CoordLocal
 	return &c
