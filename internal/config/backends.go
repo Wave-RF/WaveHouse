@@ -25,7 +25,7 @@ var mqBackends = []MQBackend{MQEmbedded}
 // MQ selects the message queue. The per-tenant byte budget, mq.max_bytes_gb,
 // is a settings-directory key, not this block's.
 type MQ struct {
-	Backend MQBackend `yaml:"backend" env:"WH_MQ_BACKEND" env-default:"embedded"`
+	Backend MQBackend `yaml:"backend" env:"WH_MQ_BACKEND"`
 }
 
 func (m MQ) validate() error {
@@ -44,8 +44,8 @@ var cacheBackends = []CacheBackend{CacheLocal}
 // structured queries normalize to is a settings-directory key
 // (query.timestamp_bucket_seconds) — query shaping, not process memory.
 type Cache struct {
-	Backend   CacheBackend `yaml:"backend" env:"WH_CACHE_BACKEND" env-default:"local"`
-	L1MaxCost int64        `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
+	Backend   CacheBackend `yaml:"backend" env:"WH_CACHE_BACKEND"`
+	L1MaxCost int64        `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST"`
 }
 
 func (c Cache) validate() error {
@@ -64,7 +64,7 @@ var dedupeBackends = []DedupeBackend{DedupePebble}
 // Dedupe selects the dedupe store. Whether a tenant dedupes, and on which
 // field, are settings-directory keys, not this block's.
 type Dedupe struct {
-	Backend DedupeBackend `yaml:"backend" env:"WH_DEDUPE_BACKEND" env-default:"pebble"`
+	Backend DedupeBackend `yaml:"backend" env:"WH_DEDUPE_BACKEND"`
 }
 
 func (d Dedupe) validate() error {
@@ -83,7 +83,7 @@ var coordBackends = []CoordBackend{CoordLocal}
 
 // Coord selects the coordination layer.
 type Coord struct {
-	Backend CoordBackend `yaml:"backend" env:"WH_COORD_BACKEND" env-default:"local"`
+	Backend CoordBackend `yaml:"backend" env:"WH_COORD_BACKEND"`
 }
 
 func (c Coord) validate() error {

@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// withDefaultBackends sets what Load's env-defaults would: a literal Config
+// withDefaultBackends sets what defaults() would: a literal Config
 // names no backend, and Validate refuses that.
 func withDefaultBackends(c Config) *Config {
 	c.MQ.Backend, c.Cache.Backend = MQEmbedded, CacheLocal
