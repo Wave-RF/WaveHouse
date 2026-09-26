@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,35 +42,53 @@ var zeroCases = []zeroCase{
 
 // refusedZeros are the non-zero defaults whose zero Validate refuses: written
 // in the file, the zero must reach Validate rather than become the default.
+// also holds the keys a sub-block's zero needs to be read at all.
 var refusedZeros = []struct {
 	key  string
 	zero any
 	err  string
+	also map[string]any
 }{
-	{"server.port", 0, "server.port 0 out of range"},
-	{"mq.backend", "", `mq.backend (WH_MQ_BACKEND) ""`},
-	{"cache.backend", "", `cache.backend (WH_CACHE_BACKEND) ""`},
-	{"dedupe.backend", "", `dedupe.backend (WH_DEDUPE_BACKEND) ""`},
-	{"coord.backend", "", `coord.backend (WH_COORD_BACKEND) ""`},
-	{"roles", []string{}, "roles (WH_ROLES) is empty"},
+	{"server.port", 0, "server.port 0 out of range", nil},
+	{"mq.backend", "", `mq.backend (WH_MQ_BACKEND) ""`, nil},
+	{"cache.backend", "", `cache.backend (WH_CACHE_BACKEND) ""`, nil},
+	{"dedupe.backend", "", `dedupe.backend (WH_DEDUPE_BACKEND) ""`, nil},
+	{"coord.backend", "", `coord.backend (WH_COORD_BACKEND) ""`, nil},
+	{"roles", []string{}, "roles (WH_ROLES) is empty", nil},
+	{"dedupe.lease", "0s", "dedupe.lease (WH_DEDUPE_LEASE) must be > 0", nil},
+	{"dedupe.reserve_concurrency", 0, "dedupe.reserve_concurrency (WH_DEDUPE_RESERVE_CONCURRENCY) must be > 0", nil},
+	{"dedupe.dynamodb.timeout", "0s", "dedupe.dynamodb.timeout (WH_DEDUPE_DYNAMODB_TIMEOUT) must be > 0", dynamoSelected},
+	{"dedupe.dynamodb.max_attempts", 0, "dedupe.dynamodb.max_attempts (WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS) must be > 0", dynamoSelected},
+	{"dedupe.dynamodb.retry_mode", "", `dedupe.dynamodb.retry_mode (WH_DEDUPE_DYNAMODB_RETRY_MODE) ""`, dynamoSelected},
 }
 
-// yamlAt renders a file setting key to value, plus otel.enabled: true so
-// the test can tell the file was read.
-func yamlAt(t *testing.T, key string, value any) string {
+// dynamoSelected is what the dedupe.dynamodb block needs to be read.
+var dynamoSelected = map[string]any{"dedupe.backend": "dynamodb", "dedupe.dynamodb.table": "t"}
+
+// yamlAt renders a file setting key to value, and each dotted key of also to
+// its value, plus otel.enabled: true so the test can tell the file was read.
+func yamlAt(t *testing.T, key string, value any, also ...map[string]any) string {
 	t.Helper()
 	tree := map[string]any{"otel": map[string]any{"enabled": true}}
-	node := tree
-	parts := strings.Split(key, ".")
-	for _, p := range parts[:len(parts)-1] {
-		sub, ok := node[p].(map[string]any)
-		if !ok {
-			sub = map[string]any{}
-			node[p] = sub
+	set := func(key string, value any) {
+		node := tree
+		parts := strings.Split(key, ".")
+		for _, p := range parts[:len(parts)-1] {
+			sub, ok := node[p].(map[string]any)
+			if !ok {
+				sub = map[string]any{}
+				node[p] = sub
+			}
+			node = sub
 		}
-		node = sub
+		node[parts[len(parts)-1]] = value
 	}
-	node[parts[len(parts)-1]] = value
+	for _, m := range also {
+		for k, v := range m {
+			set(k, v)
+		}
+	}
+	set(key, value)
 	out, err := yaml.Marshal(tree)
 	require.NoError(t, err)
 	return string(out)
@@ -136,7 +155,7 @@ func TestLoad_YAMLZeroIsRefused(t *testing.T) {
 	for _, tc := range refusedZeros {
 		t.Run(tc.key, func(t *testing.T) {
 			t.Parallel()
-			_, err := Load(writeYAML(t, yamlAt(t, tc.key, tc.zero)))
+			_, err := Load(writeYAML(t, yamlAt(t, tc.key, tc.zero, tc.also)))
 			require.ErrorContains(t, err, tc.err, "the zero reaches Validate instead of becoming the default")
 		})
 	}
@@ -296,6 +315,8 @@ func parseDocDefault(t *testing.T, key, cell string, like any) any {
 		v, err = strconv.ParseInt(cell, 10, 64)
 	case float64:
 		v, err = strconv.ParseFloat(cell, 64)
+	case time.Duration:
+		v, err = time.ParseDuration(cell)
 	default:
 		rt := reflect.TypeOf(like)
 		switch {

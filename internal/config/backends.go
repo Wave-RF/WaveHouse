@@ -1,9 +1,11 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Each layer's implementation is chosen here, once, at boot: `<layer>.backend`
@@ -55,20 +57,81 @@ func (c Cache) validate() error {
 // DedupeBackend names where ingest dedupe keeps the ids it has seen.
 type DedupeBackend string
 
-// DedupePebble is the Pebble instance inside this process, under
-// <data_dir>/pebble, opened while any tenant has dedupe on.
-const DedupePebble DedupeBackend = "pebble"
+const (
+	// DedupePebble is the Pebble instance inside this process, under
+	// <data_dir>/pebble, opened while any tenant has dedupe on. Seen ids are
+	// per process.
+	DedupePebble DedupeBackend = "pebble"
+	// DedupeDynamoDB is one DynamoDB table every tenant and every process
+	// shares, configured by dedupe.dynamodb.
+	DedupeDynamoDB DedupeBackend = "dynamodb"
+)
 
-var dedupeBackends = []DedupeBackend{DedupePebble}
+var dedupeBackends = []DedupeBackend{DedupePebble, DedupeDynamoDB}
 
-// Dedupe selects the dedupe store. Whether a tenant dedupes, and on which
-// field, are settings-directory keys, not this block's.
+// Dedupe selects the dedupe store. Whether a tenant dedupes, on which field,
+// and for how long are settings-directory keys, not this block's.
 type Dedupe struct {
 	Backend DedupeBackend `yaml:"backend" env:"WH_DEDUPE_BACKEND"`
+	// Lease is how long a claimed id stays pending while its record is
+	// published; a claim its request never settles lapses after it.
+	Lease time.Duration `yaml:"lease" env:"WH_DEDUPE_LEASE"`
+	// ReserveConcurrency bounds the parallel calls one Reserve, Commit or
+	// Release makes to a remote backend, and sizes its idle connection pool
+	// to match. Pebble ignores it.
+	ReserveConcurrency int                  `yaml:"reserve_concurrency" env:"WH_DEDUPE_RESERVE_CONCURRENCY"`
+	DynamoDB           DedupeDynamoDBConfig `yaml:"dynamodb"`
+}
+
+// DedupeDynamoDBConfig is the dynamodb backend's block, read only when it is
+// selected. Credentials are the AWS SDK's default chain (EKS Pod Identity,
+// IRSA, AWS_* variables), never keys here.
+type DedupeDynamoDBConfig struct {
+	// Table is the shared table; WaveHouse never creates it outside
+	// dynamodb-local. Required.
+	Table string `yaml:"table" env:"WH_DEDUPE_DYNAMODB_TABLE"`
+	// Region overrides the SDK chain's (AWS_REGION).
+	Region string `yaml:"region" env:"WH_DEDUPE_DYNAMODB_REGION"`
+	// Endpoint points the client at dynamodb-local.
+	Endpoint    string        `yaml:"endpoint" env:"WH_DEDUPE_DYNAMODB_ENDPOINT"`
+	Timeout     time.Duration `yaml:"timeout" env:"WH_DEDUPE_DYNAMODB_TIMEOUT"`
+	MaxAttempts int           `yaml:"max_attempts" env:"WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS"`
+	RetryMode   string        `yaml:"retry_mode" env:"WH_DEDUPE_DYNAMODB_RETRY_MODE"`
+	// CreateTable creates the table at boot if it is missing. Development
+	// only: refused unless Endpoint is set.
+	CreateTable bool `yaml:"create_table" env:"WH_DEDUPE_DYNAMODB_CREATE_TABLE"`
 }
 
 func (d Dedupe) validate() error {
-	return checkBackend("dedupe.backend", "WH_DEDUPE_BACKEND", d.Backend, dedupeBackends)
+	if err := checkBackend("dedupe.backend", "WH_DEDUPE_BACKEND", d.Backend, dedupeBackends); err != nil {
+		return err
+	}
+	if d.Lease <= 0 {
+		return fmt.Errorf("dedupe.lease (WH_DEDUPE_LEASE) must be > 0, got %s", d.Lease)
+	}
+	if d.ReserveConcurrency <= 0 {
+		return fmt.Errorf("dedupe.reserve_concurrency (WH_DEDUPE_RESERVE_CONCURRENCY) must be > 0, got %d", d.ReserveConcurrency)
+	}
+	if d.Backend == DedupeDynamoDB {
+		return d.DynamoDB.validate()
+	}
+	return nil
+}
+
+func (d DedupeDynamoDBConfig) validate() error {
+	switch {
+	case strings.TrimSpace(d.Table) == "":
+		return errors.New("dedupe.dynamodb.table (WH_DEDUPE_DYNAMODB_TABLE) is required when dedupe.backend is dynamodb")
+	case d.Timeout <= 0:
+		return fmt.Errorf("dedupe.dynamodb.timeout (WH_DEDUPE_DYNAMODB_TIMEOUT) must be > 0, got %s", d.Timeout)
+	case d.MaxAttempts <= 0:
+		return fmt.Errorf("dedupe.dynamodb.max_attempts (WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS) must be > 0, got %d", d.MaxAttempts)
+	case d.RetryMode != "standard" && d.RetryMode != "adaptive":
+		return fmt.Errorf("dedupe.dynamodb.retry_mode (WH_DEDUPE_DYNAMODB_RETRY_MODE) %q: want standard or adaptive", d.RetryMode)
+	case d.CreateTable && d.Endpoint == "":
+		return errors.New("dedupe.dynamodb.create_table (WH_DEDUPE_DYNAMODB_CREATE_TABLE) is for dynamodb-local only: set dedupe.dynamodb.endpoint, or create the table with your infrastructure code")
+	}
+	return nil
 }
 
 // CoordBackend names where leases for singleton work (the sweeper) are held.
@@ -103,12 +166,44 @@ func checkBackend[T ~string](key, env string, got T, valid []T) error {
 	return fmt.Errorf("%s (%s) %q is not a backend this build has; valid: %s", key, env, got, strings.Join(names, ", "))
 }
 
-// validateBackends checks every layer's backend and its sub-block.
+// embeddedDuplicateWindow is the embedded ingest stream's duplicate window,
+// counted from the stored publish. It mirrors mq.EmbeddedDuplicateWindow,
+// which config must not import; window_test.go pins the two.
+const embeddedDuplicateWindow = 2 * time.Minute
+
+// maxEmbeddedLease is the longest dedupe.lease the duplicate window covers —
+// the largest whole second satisfying the rule below. It is informational
+// only: validateBackends checks the rule itself, not this constant, since
+// the rule's ceiling steps at each whole second rather than moving linearly
+// with the lease.
+const maxEmbeddedLease = 59 * time.Second
+
+// ceilSecond rounds d up to the next whole second, as a DynamoDB claim's
+// expiry does (epoch seconds, rounded up) — so a claim taken out just before
+// the tick it is stamped with can stay live up to a second past the lease.
+func ceilSecond(d time.Duration) time.Duration {
+	if r := d % time.Second; r != 0 {
+		d += time.Second - r
+	}
+	return d
+}
+
+// validateBackends checks every layer's backend and its sub-block, then the
+// rules that span two layers.
 func (c *Config) validateBackends() error {
 	for _, check := range []func() error{c.MQ.validate, c.Cache.validate, c.Dedupe.validate, c.Coord.validate} {
 		if err := check(); err != nil {
 			return err
 		}
+	}
+	// A client obeying the in-flight 503's Retry-After (the whole lease)
+	// republishes at t0+lease at the earliest. But a claim can outlive its
+	// own lease by up to a second (DynamoDB rounds expiry up to the second),
+	// so the last such 503 can go out at t0+lease+1s, and the republish it
+	// asks for lands at t0+lease+1s+ceil(lease). That must still fall inside
+	// the embedded duplicate window: lease + ceil(lease) + 1s <= 2m.
+	if worst := c.Dedupe.Lease + ceilSecond(c.Dedupe.Lease) + time.Second; c.MQ.Backend == MQEmbedded && worst > embeddedDuplicateWindow {
+		return fmt.Errorf("dedupe.lease (WH_DEDUPE_LEASE) %s is over %s with the embedded mq: lease + ceil(lease) + 1s (%s) must fit its %s duplicate window, since a client obeying the in-flight 503's Retry-After can republish that late", c.Dedupe.Lease, maxEmbeddedLease, worst, embeddedDuplicateWindow)
 	}
 	return nil
 }

@@ -347,7 +347,7 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 - **Unit tests** live beside the code they test (e.g., `internal/discovery/discovery_test.go`). They use mocks or embedded NATS (in-process, no Docker needed).
 - **Integration tests** use the `//go:build integration` build tag. `TestMain` starts one ClickHouse testcontainer and boots the production wiring against it through `app.New` (embedded NATS, ingest worker, sweeper, hub, the API server on a random loopback port); tests reach it via `env(t)` and create their own tables. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second ingest worker batch window.
 
-Shared test utilities live in `internal/testutil/`. The packages log through `slog.Default()`, so tests reach log output through `internal/testutil/logtest`: `logtest.Silence()` in a package's `TestMain` discards it, and `logtest.Capture(t, level)` routes it to a buffer for a test that asserts on log lines — such a test must not call `t.Parallel()`, because the default logger is process-wide.
+Shared test utilities live in `internal/testutil/`. The packages log through `slog.Default()`, so tests reach log output through `internal/testutil/logtest`: `logtest.Silence()` in a package's `TestMain` discards it, and `logtest.Capture(t, level)` routes it to a buffer for a test that asserts on log lines — such a test must not call `t.Parallel()`, because the default logger is process-wide. A test that starts the embedded broker keeps its store in `internal/testutil/storedir`'s `storedir.New(t)` rather than a bare `t.TempDir()` (`testutil.NewEmbeddedMQ` does): the NATS server can finish writing a consumer's state after `Close` returns, which fails `t.TempDir`'s one-shot removal, and `storedir` removes the store again until those writes have landed ([#442](https://github.com/Wave-RF/WaveHouse/issues/442)).
 
 ### Adding New Tests
 
@@ -459,10 +459,10 @@ WaveHouse/
 │   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration
 │   ├── coord/              # Leases with fencing tokens (in-process Local, RunElected, coordtest suite)
-│   ├── dedupe/             # Optional deduplication (Pebble)
+│   ├── dedupe/             # Optional deduplication (Reserve/Commit/Release; Pebble or DynamoDB)
 │   ├── discovery/          # ClickHouse schema introspection + validation
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
-│   ├── keyenc/             # One escaping for composite keys (NATS subject tokens, cache namespace tokens)
+│   ├── keyenc/             # One escaping for composite keys (NATS subject tokens, cache namespace tokens, dedupe keys)
 │   ├── mq/                 # MQ boundary: the only NATS/JetStream importer
 │   ├── observability/      # OpenTelemetry pipeline (traces/metrics/logs + Prometheus)
 │   ├── pipes/              # Named query pipes (types + parameter binding)

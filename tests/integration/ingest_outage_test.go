@@ -18,6 +18,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 )
 
 // TestIngest_ClickHouseOutage_RetriedNotDeadLettered stops a real ClickHouse
@@ -39,7 +40,7 @@ func TestIngest_ClickHouseOutage_RetriedNotDeadLettered(t *testing.T) {
 	const table = "outage_events"
 	require.NoError(t, ch.conn.Exec(ctx, "CREATE TABLE "+table+" (id UInt32) ENGINE = MergeTree ORDER BY id"))
 
-	broker, err := mq.NewEmbedded(t.TempDir())
+	broker, err := mq.NewEmbedded(storedir.New(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = broker.Close() })
 	require.NoError(t, broker.SetMaxBytes(ctx, tenant.Default, 64<<20))

@@ -30,11 +30,13 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
+	"github.com/Wave-RF/WaveHouse/internal/dedupe/dedupetest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 )
 
 // None of these tests run in parallel: New installs a process-wide default
@@ -94,7 +96,7 @@ func writeSettings(t *testing.T, patch map[string]any) string {
 func testConfig(t *testing.T, settingsDir string) *config.Config {
 	t.Helper()
 	return &config.Config{
-		DataDir:  t.TempDir(),
+		DataDir:  storedir.New(t),
 		Server:   config.Server{Port: closedPort(t), ShutdownTimeout: 2},
 		MQ:       config.MQ{Backend: config.MQEmbedded},
 		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
@@ -212,7 +214,7 @@ func TestNew_DedupeFollowsSettings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := writeSettings(t, map[string]any{"dedupe": map[string]any{
-				"enabled": tt.enabled, "id_field": "event_id", "require_id": false, "tables": map[string]any{},
+				"enabled": tt.enabled, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{},
 			}})
 			cfg := testConfig(t, dir)
 			a := newApp(t, cfg, Options{})
@@ -245,7 +247,7 @@ func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
 	require.Equal(t, int64(1<<30), a.mq.MaxBytes(tenant.Default))
 
 	rewriteSettings(t, dir, map[string]any{
-		"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}},
+		"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}},
 		"mq":     map[string]any{"max_bytes_gb": 2},
 	})
 	_, adopted := a.tenants.Reload("test")
@@ -409,7 +411,7 @@ func TestNew_NestedWithoutAnOperatorKeyWarnsTheOpsTreeIsClosed(t *testing.T) {
 // request, so a lost 0 folder is felt at once on the routes that read tenant
 // 0's list.
 func TestReload_NestedHooksFollowEachTenant(t *testing.T) {
-	dedupeOn := map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}
+	dedupeOn := map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}
 	grown := map[string]any{"dedupe": dedupeOn, "mq": map[string]any{"max_bytes_gb": 2}}
 	root := writeNestedSettings(t, map[string]map[string]any{
 		"0":    {"mq": map[string]any{"max_bytes_gb": 1}},
@@ -482,7 +484,7 @@ func TestReload_NestedHooksFollowEachTenant(t *testing.T) {
 // reopened over the same seen ids when the folder is back. The instance is
 // open while some tenant's store is, and Close releases it.
 func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
-	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
+	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}}
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": nil, "broken": invalidQuery})
 	cfg := testConfig(t, root)
 	a := newApp(t, cfg, Options{})
@@ -495,14 +497,14 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	for _, id := range []string{"acme", "globex", "broken"} {
 		assert.NoDirExists(t, filepath.Join(cfg.DataDir, id), "and no directory of a tenant's own")
 	}
-	dup, err := acme.CheckAndMark(ctx, "e1")
+	dup, err := dedupetest.Mark(ctx, acme, eventKey)
 	require.NoError(t, err)
 	assert.False(t, dup)
 
 	rewriteSettings(t, filepath.Join(root, "globex"), dedupeOn)
 	a.tenants.Reload("test")
 	assert.True(t, globex.Open(), "globex's reload opens globex's store")
-	dup, err = globex.CheckAndMark(ctx, "e1")
+	dup, err = dedupetest.Mark(ctx, globex, eventKey)
 	require.NoError(t, err)
 	assert.False(t, dup, "an id acme has seen is new to globex")
 
@@ -532,7 +534,7 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	a.tenants.Reload("test")
 	restored := a.dedup.For("acme")
 	assert.True(t, restored.Open())
-	dup, err = restored.CheckAndMark(ctx, "e1")
+	dup, err = dedupetest.Mark(ctx, restored, eventKey)
 	require.NoError(t, err)
 	assert.True(t, dup, "an id seen before the folder was removed is still a duplicate")
 
@@ -566,10 +568,10 @@ func TestNew_RefusesALayerWithoutABackend(t *testing.T) {
 // A Pebble instance that cannot open follows the registry's own rule for the
 // shape: a flat directory refuses boot, like every other store, and a nested
 // one fails closed for every tenant with dedupe on, since they share the
-// instance — their ingest answers 500 until a reload or a restart opens it —
+// instance — their ingest answers 503 until a reload or a restart opens it —
 // while the process, and every tenant with dedupe off, carries on.
 func TestNew_DedupeOpenFailure(t *testing.T) {
-	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}}
+	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}}
 	// A regular file where the instance's directory should be is what Pebble
 	// refuses to open.
 	block := func(t *testing.T, dataDir string) {
@@ -591,10 +593,10 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 		for _, id := range []tenant.ID{"acme", "globex"} {
 			store := a.dedup.For(id)
 			assert.False(t, store.Open())
-			_, err := store.CheckAndMark(t.Context(), "e1")
+			_, err := dedupetest.Mark(t.Context(), store, eventKey)
 			require.ErrorIs(t, err, dedupe.ErrUnavailable, "%s: switched on but not open, so its ingest fails closed", id)
 		}
-		_, err := a.dedup.For("initech").CheckAndMark(t.Context(), "e1")
+		_, err := dedupetest.Mark(t.Context(), a.dedup.For("initech"), eventKey)
 		require.ErrorIs(t, err, dedupe.ErrDisabled, "a tenant with dedupe off is as it would be anyway")
 	})
 }
@@ -883,7 +885,7 @@ func analystPipe(t *testing.T, dir string) {
 func TestNew_LateBootFailureReleasesEverything(t *testing.T) {
 	guardGlobals(t)
 	dir := writeSettings(t, map[string]any{"dedupe": map[string]any{
-		"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{},
+		"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{},
 	}})
 	cfg := testConfig(t, dir)
 	natsDir := filepath.Join(cfg.DataDir, "nats")
@@ -1513,7 +1515,7 @@ func TestReload_CeilingRefusesAThirdTupleThenOpensIt(t *testing.T) {
 func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 	jwks, _, fetches := jwksServer(t, "acme-1")
 	acmeSettings := authPatch(jwks.URL)
-	acmeSettings["dedupe"] = map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "tables": map[string]any{}}
+	acmeSettings["dedupe"] = map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": acmeSettings, "globex": nil})
 	a := newApp(t, testConfig(t, root), Options{})
 	acme, acmeRegistry, acmeDedup := a.pools.For("acme"), a.discoveries.For("acme"), a.dedup.For("acme")
@@ -1536,7 +1538,7 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 		a.Handler().ServeHTTP(rec, req)
 		return fmt.Sprintf("%d %s", rec.Code, rec.Body.String())
 	}
-	dup, err := acmeDedup.CheckAndMark(t.Context(), "e1")
+	dup, err := dedupetest.Mark(t.Context(), acmeDedup, eventKey)
 	require.NoError(t, err)
 	require.False(t, dup)
 	require.Eventually(t, func() bool { return fetches.Load() > 0 }, 5*time.Second, 10*time.Millisecond, "acme's key set is fetched off the boot path")
@@ -1580,7 +1582,7 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 	assert.NotNil(t, a.discoveries.For("acme"))
 	assert.NotSame(t, acmeRegistry, a.discoveries.For("acme"), "and a fresh registry")
 	assert.Eventually(t, func() bool { return fetches.Load() > fetched }, 5*time.Second, 10*time.Millisecond, "and a fresh verifier, fetching the key set again")
-	dup, err = a.dedup.For("acme").CheckAndMark(t.Context(), "e1")
+	dup, err = dedupetest.Mark(t.Context(), a.dedup.For("acme"), eventKey)
 	require.NoError(t, err)
 	assert.True(t, dup, "an id acme sent before the removal is still a duplicate")
 }
@@ -1672,3 +1674,6 @@ func TestClose_StopsTheDiscoveryLoops(t *testing.T) {
 	assert.Nil(t, a.discoveries.For("acme"))
 	assert.Nil(t, a.pools.For("acme"))
 }
+
+// eventKey is the one dedupe key the tenant-lifecycle tests mark.
+var eventKey = dedupe.Key{Table: "events", ID: "e1"}

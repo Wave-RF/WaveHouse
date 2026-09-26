@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ilyakaznacheev/cleanenv"
 )
@@ -256,8 +257,11 @@ func defaults() Config {
 		Server:  Server{Port: 8080, ShutdownTimeout: 10},
 		MQ:      MQ{Backend: MQEmbedded},
 		Cache:   Cache{Backend: CacheLocal, L1MaxCost: 64 << 20},
-		Dedupe:  Dedupe{Backend: DedupePebble},
-		Coord:   Coord{Backend: CoordLocal},
+		Dedupe: Dedupe{
+			Backend: DedupePebble, Lease: 30 * time.Second, ReserveConcurrency: 64,
+			DynamoDB: DedupeDynamoDBConfig{Timeout: 250 * time.Millisecond, MaxAttempts: 3, RetryMode: "standard"},
+		},
+		Coord: Coord{Backend: CoordLocal},
 		OTel: OTel{
 			Traces:  OTelTraces{Enabled: true, SampleRate: 1.0},
 			Metrics: OTelMetrics{Enabled: true},

@@ -20,6 +20,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 )
 
 // run reads the whole boot config from the environment here (no config
@@ -78,7 +79,7 @@ func seedSettings(t *testing.T) string {
 func TestRun_BootsAndStopsOnCancel(t *testing.T) {
 	hermeticEnv(t)
 	t.Setenv(config.EnvSettingsDir, seedSettings(t))
-	t.Setenv("WH_DATA_DIR", t.TempDir())
+	t.Setenv("WH_DATA_DIR", storedir.New(t))
 	_, port, err := net.SplitHostPort(closedAddr(t))
 	require.NoError(t, err)
 	t.Setenv("WH_SERVER_PORT", port)

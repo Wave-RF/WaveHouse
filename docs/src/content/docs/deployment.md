@@ -169,7 +169,7 @@ WH_SETTINGS_DIR=/etc/wavehouse/settings
 WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
 
 - `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `stream.gap_window_minutes` window (settings directory) of history that powers SSE gap-fill across restarts.
-- `<data_dir>/pebble` — the Pebble dedup KV: one instance shared by every tenant, each key led by its tenant. Only used while some tenant's `dedupe.enabled` is `true` in its `config.json` (opened and closed on reload).
+- `<data_dir>/pebble` — the Pebble dedup KV (with `dedupe.backend: pebble`, the default): one instance shared by every tenant, each key led by its tenant and table. Only used while some tenant's `dedupe.enabled` is `true` in its `config.json` (opened and closed on reload). It grows with every id kept: with `dedupe.retention` at `"0"` (forever) nothing is ever removed, so size the volume for it or set a [retention](/settings-directory#deduplication), whose expired ids an hourly sweep deletes.
 
 In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data` and `/app/settings` owned by the nonroot user (UID 65532); the binary creates the `nats/` and `pebble/` subdirectories under `/app/data` itself on first run.
 
@@ -177,7 +177,7 @@ If `data_dir` resolves into the container's writable overlay layer instead, **Je
 
 Beyond persistence, the *speed* of that volume matters: JetStream `fsync`s every event to `<data_dir>/nats` before the ingest endpoint returns `200`, so the volume's `fsync` latency is your ingest latency floor. Managed cloud block storage handles this without thinking; commodity or virtualized substrates (ZFS without a SLOG, qcow2-on-`ext4`, spinning disks) can stall ingest with multi-second `fsync` tails. See [Durability & Storage](/durability) to measure yours before going live.
 
-WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble`, when dedupe is on) is missing or empty:
+WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble`, when dedupe is on with the `pebble` backend) is missing or empty:
 
 ```text wrap=false
 WARN  data directory does not exist — starting with no prior state.
@@ -409,7 +409,7 @@ The folder name is the tenant id, and each folder is a complete settings directo
 
 **The admin routes take the operator key only.** `/v1/ops/*` reaches every tenant, so over a nested directory no tenant's admin role opens it: the [operator key](/api#authentication) alone does, and a token carrying an admin role gets `403`. Boot a nested directory without `auth.operator_key` and no caller can reach these routes at all, which leaves `SIGHUP` as the only reload; the server warns about it at boot. `GET /v1/ops/pipes`, `GET /v1/ops/pipes/{name}`, `GET /v1/ops/schema`, `POST /v1/ops/schema/refresh` and `POST /v1/ops/query` take the same `?tenant=`, and address tenant `0` without it; `GET /v1/ops/dlq/stats` takes it too, and reads a rejected or removed tenant's dead-letter queue like a served one's, since the queue is kept; a tenant that has none is a `404`. On the routes that take it the parameter is parsed strictly — a query string that does not parse, an empty or repeated `tenant`, or a malformed id is a `400`, never a silent read of the default tenant or, on the reload route, a reload of every tenant. The SDK sends it as the [`tenant` option](/sdk/admin#settings--whsettings).
 
-**What a tenant's folder decides.** A request is evaluated against its own tenant's `policies.json` and `pipes.json` (ingest, structured queries, pipes), its `query.*` keys, its `cors.allowed_origins`, and its `dedupe` block: whether its records are deduplicated, by which id, against the tenant's own store, which that folder's `dedupe.enabled` opens and closes on reload exactly as [the single-tenant one](/settings-directory#deduplication) does (every tenant's store is a share of the one Pebble instance at `<data_dir>/pebble`, each key led by its tenant), so `wavehouse_ingest_dedupe_disabled_total` ticks only across a tenant's own reload, whatever the other tenants' switches say. A tenant's seen ids are its own: the same event id is first seen under each tenant that sends it. Its `auth` block is its own too: each tenant's folder wires that tenant's token verifier (`jwks_url`, `role_claim`), built when the folder is adopted and rebuilt when its wiring changes, so a JWKS-issued token verifies only under the tenants whose `jwks_url` names its provider's key set. Under another tenant's header a token is treated as invalid, and the request falls back to that tenant's `default_role` like any other unverifiable token, possibly after a rate-limited key refetch (see [Authentication](/settings-directory#authentication)). Keep `X-Tenant-ID` pinned at the proxy so a token is never presented under the wrong tenant. Tenants can still accept each other's tokens: those that leave `jwks_url` empty share the boot HMAC secret when `auth.jwt_secret` is set, so a token verifies under any of them (with no secret they validate no token at all), and those whose `jwks_url` names the same key set accept each other's tokens; isolate them by provider, or scope rows by a signed claim ([row-level security](/access-control#row-level-security)). A tenant whose `jwks_url` has not been fetched yet answers `503` with `Retry-After` to its token-bearing requests alone. A tenant that stops being served — its folder rejected or removed — loses its verifier and the JWKS refresh with it, and gets a fresh one when its folder is adopted again. The HMAC secret and the operator key stay boot config, shared by every tenant; the operator key is stamped with the request tenant's `admin_role`. A tenant's `clickhouse` and `schema` blocks are its own as well: each tenant reads and writes its own ClickHouse — one native pool per distinct address, database, user, password and `tls` tuple, shared by the tenants naming it, under the process-wide [connection ceiling](/settings-directory#clickhouse) — and discovers its own tables from its own database on its own `schema.refresh_interval`. Its message queue is its own as well: its events are queued on a stream of their own, capped at its own `mq.max_bytes_gb` — at that budget its ingest answers `503` while every other tenant's keeps publishing — beside a dead-letter stream of its own at a tenth of it, and the history that gap-fill replays from it is kept for its own `stream.gap_window_minutes`. Nothing checks what the tenants' budgets add up to against the disk, so size them together ([Message Queue](/settings-directory#message-queue)). An event is published on its tenant's subject (`ingest.{tenant}.{table}`), so a `GET /v1/stream` connection is authorized by its own tenant's `policies.json` and receives its own tenant's rows alone, the ingest worker inserts a row into its own tenant's ClickHouse, a rejected row is parked under its own tenant's `dlq.enabled` and subject (`dlq.{tenant}.{table}`), and two tenants' tables of one name never share a batch. The query cache is one pool, but its entries are keyed by tenant: identical `POST /v1/query` and pipe requests from two tenants are two entries and two queries to ClickHouse, and a tenant is never served another's cached rows. An insert invalidates the table's cached results under every tenant on the same ClickHouse address and database as the tenant it was ingested for, whatever their user or `tls` block, since they read the same tables; a tenant on no pool — its folder rejected or removed, or no pool could be opened for it, such as by the ceiling — is out of that fan-out while it is, and has its cached `POST /v1/query` results dropped the moment it is back on one, so a repaired or restored folder never serves query rows cached before the inserts it missed, and so does a tenant whose folder moves it to another address or database, whose cached rows came from other tables; a cached pipe result is left alone by all of this — no insert invalidates one, since it names no table — and stays until its TTL expires. One setting weighs every tenant: the SSE keepalive, where the wheel runs at the shortest `stream.keepalive_interval` among the tenants being served, with that tenant's `stream.keepalive_buckets`.
+**What a tenant's folder decides.** A request is evaluated against its own tenant's `policies.json` and `pipes.json` (ingest, structured queries, pipes), its `query.*` keys, its `cors.allowed_origins`, and its `dedupe` block: whether its records are deduplicated, by which id, against the tenant's own store, which that folder's `dedupe.enabled` opens and closes on reload exactly as [the single-tenant one](/settings-directory#deduplication) does (every tenant's store is a share of the one Pebble instance at `<data_dir>/pebble`, each key led by its tenant and table), so `wavehouse_ingest_dedupe_disabled_total` ticks only across a tenant's own reload, whatever the other tenants' switches say. A tenant's seen ids are its own: the same event id is first seen under each tenant that sends it, and in each table. Its `auth` block is its own too: each tenant's folder wires that tenant's token verifier (`jwks_url`, `role_claim`), built when the folder is adopted and rebuilt when its wiring changes, so a JWKS-issued token verifies only under the tenants whose `jwks_url` names its provider's key set. Under another tenant's header a token is treated as invalid, and the request falls back to that tenant's `default_role` like any other unverifiable token, possibly after a rate-limited key refetch (see [Authentication](/settings-directory#authentication)). Keep `X-Tenant-ID` pinned at the proxy so a token is never presented under the wrong tenant. Tenants can still accept each other's tokens: those that leave `jwks_url` empty share the boot HMAC secret when `auth.jwt_secret` is set, so a token verifies under any of them (with no secret they validate no token at all), and those whose `jwks_url` names the same key set accept each other's tokens; isolate them by provider, or scope rows by a signed claim ([row-level security](/access-control#row-level-security)). A tenant whose `jwks_url` has not been fetched yet answers `503` with `Retry-After` to its token-bearing requests alone. A tenant that stops being served — its folder rejected or removed — loses its verifier and the JWKS refresh with it, and gets a fresh one when its folder is adopted again. The HMAC secret and the operator key stay boot config, shared by every tenant; the operator key is stamped with the request tenant's `admin_role`. A tenant's `clickhouse` and `schema` blocks are its own as well: each tenant reads and writes its own ClickHouse — one native pool per distinct address, database, user, password and `tls` tuple, shared by the tenants naming it, under the process-wide [connection ceiling](/settings-directory#clickhouse) — and discovers its own tables from its own database on its own `schema.refresh_interval`. Its message queue is its own as well: its events are queued on a stream of their own, capped at its own `mq.max_bytes_gb` — at that budget its ingest answers `503` while every other tenant's keeps publishing — beside a dead-letter stream of its own at a tenth of it, and the history that gap-fill replays from it is kept for its own `stream.gap_window_minutes`. Nothing checks what the tenants' budgets add up to against the disk, so size them together ([Message Queue](/settings-directory#message-queue)). An event is published on its tenant's subject (`ingest.{tenant}.{table}`), so a `GET /v1/stream` connection is authorized by its own tenant's `policies.json` and receives its own tenant's rows alone, the ingest worker inserts a row into its own tenant's ClickHouse, a rejected row is parked under its own tenant's `dlq.enabled` and subject (`dlq.{tenant}.{table}`), and two tenants' tables of one name never share a batch. The query cache is one pool, but its entries are keyed by tenant: identical `POST /v1/query` and pipe requests from two tenants are two entries and two queries to ClickHouse, and a tenant is never served another's cached rows. An insert invalidates the table's cached results under every tenant on the same ClickHouse address and database as the tenant it was ingested for, whatever their user or `tls` block, since they read the same tables; a tenant on no pool — its folder rejected or removed, or no pool could be opened for it, such as by the ceiling — is out of that fan-out while it is, and has its cached `POST /v1/query` results dropped the moment it is back on one, so a repaired or restored folder never serves query rows cached before the inserts it missed, and so does a tenant whose folder moves it to another address or database, whose cached rows came from other tables; a cached pipe result is left alone by all of this — no insert invalidates one, since it names no table — and stays until its TTL expires. One setting weighs every tenant: the SSE keepalive, where the wheel runs at the shortest `stream.keepalive_interval` among the tenants being served, with that tenant's `stream.keepalive_buckets`.
 
 **What a lost tenant `0` costs.** A `0` folder that a reload rejects or removes stops tenant `0` being served like any other, and what becomes of the shared settings depends on how they are read. Tenant `0` leaves its ClickHouse pool (closed only once no served tenant names its tuple), and its schema registry and verifier are released with the folder, like any other tenant's; the `/v1/ops/*` routes, which resolve no tenant, verify against it, so a token there reads as invalid (`401`) rather than merely non-admin (`403`) until tenant `0` is served again — the operator key, which never consults a verifier, is unaffected. CORS does not stay either: the responses that read tenant `0`'s list — the tenant-exempt routes, the refusals, a preflight naming no tenant — carry no CORS headers until the folder is served again, while every other tenant's routes keep their own list. Tenant `0`'s own dedupe store closes, as any rejected or removed tenant's does, its seen ids kept for the folder that restores it. What is read per event follows the event's tenant, so tenant `0`'s events are the ones affected: with no ClickHouse to insert into, its rows fail and are parked on the DLQ whatever its switch said, and its open `GET /v1/stream` connections are ended, as any tenant's are when it stops being served — the other tenants' events are untouched. A nested directory that has never served a tenant `0` — no `0` folder, or one rejected at boot — serves every other tenant from its own ClickHouse. Outside `/v1/ops/*`, a `/v1` request that sends no `X-Tenant-ID` resolves to tenant `0`, so with no `0` folder it answers `404 unknown tenant: 0` (`503` with a rejected one) — the SDK's `/v1/health` reachability ping included.
 
@@ -436,6 +436,93 @@ ORDER BY (page);
 ```
 
 WaveHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (settings directory; seed default 60). You can also trigger an immediate refresh via `POST /v1/ops/schema/refresh` (admin-only).
+
+## Upgrading across the dedupe key change
+
+The dedupe key now carries the table as well as the tenant ([#222](https://github.com/Wave-RF/WaveHouse/issues/222)), so **an id deduped before the upgrade is not recognized after it**: a record carrying it is accepted once more. Nothing is migrated. The old keys never count as seen, and the dedupe sweep deletes them: its first pass runs about a minute after the instance opens, and `wavehouse_dedupe_swept_keys_total{reason="version_0"}` counts them ([#220](https://github.com/Wave-RF/WaveHouse/issues/220)). Pebble returns their disk space as it compacts, not at once. Only a tenant with `dedupe.enabled` on is affected, and only by a record sent both before and after the upgrade — typically a producer retrying across the restart. To avoid duplicate rows, let retrying producers finish, or pause them, before upgrading.
+
+The same release adds an optional **`dedupe.retention`** key. No upgrade step is needed: a `config.json` without it keeps every id forever, as before. See [Deduplication](/settings-directory#deduplication) for a finite one.
+
+## A shared dedupe table on DynamoDB
+
+Pebble is per process, so two pods on it do not share seen ids. The DynamoDB backend keeps every tenant's ids in **one shared table**, and a conditional write makes a claim atomic across every pod that uses the table. WaveHouse **never creates this table in production**: the table belongs to your infrastructure code. The backend refuses to create a table unless it is pointed at a custom endpoint, so table creation only works against [dynamodb-local](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html).
+
+What the backend requires of the table:
+
+| Attribute | Type | Role |
+|---|---|---|
+| `pk` | String | Partition key, and the only key: tenant, table and id as readable text, for example `acme/clicks/evt-123` (the table and id escaped the way NATS subject tokens are: letters, digits, `_` and `-` kept, every other byte written as `%XX`). No sort key. |
+| `st` | Number | `1` = pending claim, `2` = committed. |
+| `ex` | Number | Epoch seconds: the lease end while pending, the retention end once committed; absent = never expires. |
+| `tk` | Binary | The claim token that `Release` matches. |
+
+Only `pk` is declared in the table definition. Turn TTL on for `ex`. Correctness never depends on TTL, because a claim whose `ex` has passed counts as absent whether or not DynamoDB has deleted it yet; TTL only reclaims the storage. TTL removes lapsed claims, and a committed id once its [`dedupe.retention`](/settings-directory#deduplication) ends. With the default retention `"0"` (forever) a committed item carries no `ex` and is kept, so the table grows by one item (about 200 bytes) per distinct id. Boot checks the table and logs a warning if TTL is off; a key schema that does not match is a misconfigured table, handled as described below.
+
+An example in Terraform. Replace the tags with your own conventions:
+
+```hcl
+resource "aws_dynamodb_table" "wavehouse_dedupe" {
+  name                        = "wavehouse-dedupe-${var.environment}"
+  billing_mode                = "PAY_PER_REQUEST" # provisioned + auto scaling once traffic is steady
+  hash_key                    = "pk"
+  deletion_protection_enabled = true
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "ex"
+    enabled        = true
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  tags = {
+    Name        = "wavehouse-dedupe-${var.environment}"
+    Project     = "wavehouse"
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+}
+
+# The pods' role (EKS Pod Identity or IRSA). No Scan, no CreateTable.
+data "aws_iam_policy_document" "wavehouse_dedupe" {
+  statement {
+    actions = [
+      "dynamodb:PutItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:BatchWriteItem",
+      "dynamodb:DescribeTable",
+      "dynamodb:DescribeTimeToLive",
+    ]
+    resources = [aws_dynamodb_table.wavehouse_dedupe.arn]
+  }
+}
+```
+
+Select it in the boot config, on every pod that should share seen ids (all the keys are in the [Configuration Reference](/configuration#dynamodb-dedupe)):
+
+```yaml
+dedupe:
+  backend: dynamodb
+  dynamodb:
+    table: wavehouse-dedupe-prod
+    region: us-east-1 # or leave empty for AWS_REGION
+```
+
+or `WH_DEDUPE_BACKEND=dynamodb`, `WH_DEDUPE_DYNAMODB_TABLE=wavehouse-dedupe-prod`. A table that is missing, has the wrong key schema, or refuses the pod's credentials refuses boot over a flat settings directory whose tenant has dedupe on, and is logged at `ERROR` otherwise. In every other case — a throttle or network failure, a nested directory, or no tenant with dedupe on — the pod boots, every tenant with dedupe on (now or after a reload) fails its ingest closed, and the check is retried in the background (backing off from one second to thirty, and at once after every reload). A reload makes no table call itself, and does not wait on a tenant whose dedupe setting is unchanged; it waits only for a tenant whose store it closes — dedupe switched off, or the tenant removed or rejected — and then only for that tenant's in-flight calls, before its store closes. No region at all (neither `region` nor one from the SDK chain: `AWS_REGION`, `AWS_DEFAULT_REGION` or a profile) refuses boot in both shapes. The check runs in every pod running the `api` [role](/configuration#process-roles), whether or not any tenant has `dedupe.enabled` on; a pod without it opens no dedupe store. The per-tenant switch stays in each tenant's `config.json`.
+
+For development against dynamodb-local, set `dedupe.dynamodb.endpoint` (for example `http://localhost:8000`) and `create_table: true`, and give the SDK any static credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) and a region. `create_table` without an `endpoint` refuses boot.
+
+- **Credentials** come from the AWS SDK's default chain (EKS Pod Identity or IRSA in a pod; the environment or a profile locally), never from WaveHouse configuration.
+- **Point-in-time recovery** is not needed. The table records which ids have been seen, so losing it produces duplicate rows, not lost events.
+- **Cost:** every new event is two writes (the claim, then the commit), and a duplicate is one. On-demand, that is about $1.25 per million new events in us-east-1. Provisioned capacity with auto scaling is cheaper once traffic is steady. Storage is the other line: every distinct id stays in the table until its retention ends, forever at the default (see TTL above), at DynamoDB's per-GB-month rate.
+- **One table serves every tenant,** so one tenant's burst can throttle the rest. A throttled or unreachable table fails the ingest request closed rather than publishing un-deduped. After five throttled or unreachable claims in a row within one second, the backend stops calling the table for a second and fails every tenant's dedupe requests immediately (`wavehouse_dedupe_dynamodb_short_circuits_total`). A duplicate or in-flight answer is not a failure and resets the count.
+- **Metrics:** `wavehouse_dedupe_dynamodb_requests_total{op,outcome}`, `wavehouse_dedupe_dynamodb_request_duration_seconds{op}`, `wavehouse_dedupe_dynamodb_unprocessed_items_total`, `wavehouse_dedupe_dynamodb_short_circuits_total`. The table's own CloudWatch metrics `ThrottledRequests`, `SystemErrors` and `ConsumedWriteCapacityUnits` are worth alerting on too.
 
 ## Upgrading across the v2 ingest envelope
 

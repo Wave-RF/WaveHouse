@@ -1,14 +1,15 @@
 // Package keyenc is the one escaping composite WaveHouse keys are built
-// from: NATS subject tokens and cache namespace tokens. A field keeps ASCII
-// letters, digits, '_' and '-' as they are and writes every other byte as %XX
-// (uppercase hex), so no separator, wildcard, whitespace, brace or non-ASCII
-// byte ever appears in it unescaped, and any table name ClickHouse accepts
-// encodes. The bytes it keeps are exactly a tenant id's (tenant.Parse), so a
-// tenant id is its own escaped form.
+// from: NATS subject tokens, cache namespace tokens and dedupe keys. A field
+// keeps ASCII letters, digits, '_' and '-' as they are and writes every other
+// byte as %XX (uppercase hex), so no separator, wildcard, whitespace, brace
+// or non-ASCII byte ever appears in it unescaped, and any table name
+// ClickHouse accepts encodes. The bytes it keeps are exactly a tenant id's
+// (tenant.Parse), so a tenant id is its own escaped form.
 //
-// Keys built from it are stored — queued under NATS subjects, held in caches
-// — so a change to what it keeps orphans them. Earlier builds escaped '-' as
-// %2D; Unescape still reads that form.
+// Keys built from it are stored — queued under NATS subjects, held in caches,
+// kept as dedupe keys — so a change to what it keeps orphans them; an
+// orphaned dedupe key lets a seen id through again. Earlier builds escaped
+// '-' as %2D; Unescape still reads that form.
 package keyenc
 
 import (

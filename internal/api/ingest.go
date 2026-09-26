@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +37,11 @@ import (
 // with the admin query handler — see internal/api/query.go.
 const maxReportedResults = 10000
 
+// ingestWindow is how many records a batch prepares before reserving,
+// publishing and committing them together: one dedupe call per phase per
+// window rather than per record, and at most one window of encoded rows held.
+const ingestWindow = 256
+
 // IngestHandler handles POST /v1/ingest?table={table}
 type IngestHandler struct {
 	// Registry yields the request tenant's schema registry.
@@ -43,14 +50,16 @@ type IngestHandler struct {
 	// store, picked off the store the handler already holds (#583 story 7;
 	// dedupe.Stores in production). nil when no dedupe store is wired (tests).
 	Dedup func(store *settings.Store) dedupe.Deduplicator
-	// DedupeSettings resolves the effective dedupe id_field/require_id for a
-	// table of the request's tenant ((*settings.Store).DedupeFor in
-	// production). Called once per record so a settings reload lands at a
-	// record boundary — one record never mixes two documents' values. Dedup is
-	// skipped when nil.
-	DedupeSettings func(store *settings.Store, table string) (enabled bool, idField string, requireID bool)
-	Publisher      mq.Publisher
-	PolicySource   PolicySource
+	// DedupeSettings resolves the effective dedupe settings for a table of the
+	// request's tenant ((*settings.Store).DedupeFor in production). Called
+	// once per record so a settings reload lands at a record boundary — one
+	// record never mixes two documents' values. Dedup is skipped when nil.
+	DedupeSettings func(store *settings.Store, table string) settings.Dedupe
+	// DedupeLease is how long a record's claimed id stays pending while it is
+	// published; 0 means dedupe.DefaultLease.
+	DedupeLease  time.Duration
+	Publisher    mq.Publisher
+	PolicySource PolicySource
 
 	// Validator and Checker are the per-record seams a native type layer will
 	// take over (see ingest_seams.go). Both are optional: nil means the default
@@ -63,6 +72,8 @@ type IngestHandler struct {
 	// tests can pin the cap-overflow path without allocating 16 MiB per run; not
 	// a production tuning knob, hence unexported. Mirrors QueryHandler.
 	maxRequestBytes int64
+	// window overrides ingestWindow when > 0, for tests and benchmarks.
+	window int
 }
 
 func NewIngestHandler(registry RegistrySource, pub mq.Publisher) *IngestHandler {
@@ -72,6 +83,13 @@ func NewIngestHandler(registry RegistrySource, pub mq.Publisher) *IngestHandler 
 var dedupeMissingIDCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 	"wavehouse_ingest_dedupe_missing_id_total",
 	metric.WithDescription("Ingested records missing the configured dedupe id_field (idempotency skipped)"),
+)
+
+// dedupeCommitFailedCounter counts records published whose id could not be
+// committed afterwards: a retry after the lease lapses publishes them again.
+var dedupeCommitFailedCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
+	"wavehouse_ingest_dedupe_commit_failed_total",
+	metric.WithDescription("Published records whose dedupe id failed to commit afterwards (the claim lapses with its lease)"),
 )
 
 // dedupeDisabledCounter counts records published un-deduped because the
@@ -121,12 +139,15 @@ type recordReject struct {
 
 // requestAbort is a whole-request failure: this record and every one that
 // follows is refused. Both paths stop and return the status; the batch path
-// abandons the remaining records rather than silently losing the tail.
+// abandons the remaining records rather than silently losing the tail. What
+// earlier windows published stays published, and with dedupe on stays
+// committed, so a whole-batch retry reports those records as duplicates.
 //
 // Most causes are TRANSIENT system conditions, where abandoning the tail is what
 // makes the batch safe to retry: publish backpressure (503), an unreachable
-// broker (503, mq.ErrUnavailable), a publish/marshal failure (500), a dedup
-// backend error (500).
+// broker (503, mq.ErrUnavailable), a publish/marshal failure (500), a dedupe
+// store that cannot answer (503) or fails (500), an id another request holds
+// (503).
 //
 // One is not. An insert grant that resolved for the other operation is a 403 and
 // a caller/config bug — retrying cannot help. It aborts rather than rejecting
@@ -136,7 +157,7 @@ type recordReject struct {
 type requestAbort struct {
 	Status     int
 	Message    string
-	RetryAfter string // non-empty → emit a Retry-After header (503: backpressure or an unavailable broker)
+	RetryAfter string // non-empty → emit a Retry-After header
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -311,16 +332,21 @@ func (h *IngestHandler) handleSingle(
 		return
 	}
 
-	dup, reject, abort := h.processRecord(ctx, store, table, scope, schema, perms, role, data, now, checkGuard)
+	rec, abort := h.prepareRecord(ctx, store, table, scope, schema, perms, role, data, now, checkGuard)
+	if abort == nil && rec.reject == nil {
+		window := []pendingRecord{rec}
+		abort = h.ingestWindow(ctx, store, table, scope, window)
+		rec = window[0]
+	}
 	if abort != nil {
 		writeAbort(w, abort)
 		return
 	}
-	if reject != nil {
-		writeJSONError(w, reject.Status, reject.Message)
+	if rec.reject != nil {
+		writeJSONError(w, rec.reject.Status, rec.reject.Message)
 		return
 	}
-	if dup {
+	if rec.duplicate {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]bool{"duplicate": true})
 		return
@@ -352,6 +378,24 @@ func (h *IngestHandler) handleBatch(
 	checkGuard *recordReject,
 ) {
 	result := batchResult{Results: []recordResult{}}
+	size := h.window
+	if size <= 0 {
+		size = ingestWindow
+	}
+	window := make([]pendingRecord, 0, min(size, 16))
+	// flush runs the window's records through reserve → publish → commit and
+	// reports them in order; false when it aborted the request.
+	flush := func() bool {
+		if abort := h.ingestWindow(ctx, store, table, scope, window); abort != nil {
+			writeAbort(w, abort)
+			return false
+		}
+		for i := range window {
+			result.add(&window[i])
+		}
+		window = window[:0]
+		return true
+	}
 
 	for {
 		data, err := rr.Next()
@@ -361,8 +405,10 @@ func (h *IngestHandler) handleBatch(
 		if err != nil {
 			if rse, ok := errors.AsType[*recordSyntaxError](err); ok {
 				result.Total++
-				result.Failed++
-				appendResult(&result, recordResult{Index: result.Total, Error: rse.Error()})
+				window = append(window, pendingRecord{index: result.Total, reject: &recordReject{Message: rse.Error()}})
+				if len(window) == size && !flush() {
+					return
+				}
 				continue
 			}
 			// Unreachable while the body is buffered — a bytes.Reader cannot produce
@@ -381,26 +427,22 @@ func (h *IngestHandler) handleBatch(
 		}
 
 		result.Total++
-		idx := result.Total
-		dup, reject, abort := h.processRecord(ctx, store, table, scope, schema, perms, role, data, now, checkGuard)
+		rec, abort := h.prepareRecord(ctx, store, table, scope, schema, perms, role, data, now, checkGuard)
 		if abort != nil {
 			// Whole-request failure: surface the status rather than recording a
 			// request-scoped condition as per-record loss (see requestAbort).
+			// Nothing in the open window has been published.
 			writeAbort(w, abort)
 			return
 		}
-		if reject != nil {
-			result.Failed++
-			appendResult(&result, recordResult{Index: idx, Error: reject.Message})
-			continue
+		rec.index = result.Total
+		window = append(window, rec)
+		if len(window) == size && !flush() {
+			return
 		}
-		if dup {
-			result.Duplicates++
-			appendResult(&result, recordResult{Index: idx, Duplicate: true})
-			continue
-		}
-		result.Succeeded++
-		appendResult(&result, recordResult{Index: idx, Ok: true})
+	}
+	if len(window) > 0 && !flush() {
+		return
 	}
 
 	slog.InfoContext(ctx, "batch ingested", "table", table,
@@ -410,12 +452,24 @@ func (h *IngestHandler) handleBatch(
 	_ = json.NewEncoder(w).Encode(result)
 }
 
-// appendResult records a per-record outcome up to maxReportedResults. The
-// batchResult counts are incremented by the caller and stay authoritative even
-// when the Results slice is truncated.
-func appendResult(result *batchResult, entry recordResult) {
-	if len(result.Results) < maxReportedResults {
-		result.Results = append(result.Results, entry)
+// add counts rec's outcome and records it up to maxReportedResults; the counts
+// stay authoritative when Results is truncated. Total is counted as records
+// are read.
+func (r *batchResult) add(rec *pendingRecord) {
+	entry := recordResult{Index: rec.index}
+	switch {
+	case rec.reject != nil:
+		r.Failed++
+		entry.Error = rec.reject.Message
+	case rec.duplicate:
+		r.Duplicates++
+		entry.Duplicate = true
+	default:
+		r.Succeeded++
+		entry.Ok = true
+	}
+	if len(r.Results) < maxReportedResults {
+		r.Results = append(r.Results, entry)
 	}
 }
 
@@ -451,7 +505,7 @@ func writeMaxBytesError(w http.ResponseWriter, err error, limit int64) bool {
 //
 // Evaluated here rather than per record because the condition is a property of
 // (table, role, policy) and is identical for every record in the request — the
-// same reasoning as the !resolved abort in processRecord. Doing it per record
+// same reasoning as the !resolved abort in prepareRecord. Doing it per record
 // would emit one ERROR line per record for a single mis-wired policy, which on
 // a 16 MiB body of small records is ~1.2M lines. The reject is still returned
 // per record, so a batch reports each record's own cause: one that SUPPLIES the
@@ -464,7 +518,7 @@ func (h *IngestHandler) policyCheckGuard(
 ) *recordReject {
 	checks, resolved := perms.CheckClauses()
 	if !resolved {
-		return nil // the !resolved abort in processRecord owns this case
+		return nil // the !resolved abort in prepareRecord owns this case
 	}
 
 	// Sorted, and every offender — not the first one a map range happens to
@@ -512,19 +566,32 @@ func (h *IngestHandler) policyCheckGuard(
 	}
 }
 
-// processRecord runs the per-record pipeline shared by the single-object and
-// batch ingest paths: schema validation → column/check permission enforcement
-// (with claim-derived auto-injection) → optional dedup → publish. The
-// table-level insert grant is checked once by the caller before any record is
-// processed, so perms here drives only the per-column and per-row checks (it is
-// nil when no policy store is configured). data may be mutated to auto-inject
-// check-clause values.
+// pendingRecord is one record between prepareRecord and its outcome.
+type pendingRecord struct {
+	index   int           // 1-based position in a batch
+	reject  *recordReject // non-nil: the record is bad and is not published
+	payload []byte        // the encoded envelope to publish
+	// key is the record's dedupe identity, nil when it is published
+	// un-deduped; retention is how long its id stays a duplicate once
+	// committed; claim is Reserve's answer for it.
+	key       *dedupe.Key
+	retention time.Duration
+	claim     dedupe.Claim
+	duplicate bool
+}
+
+// prepareRecord runs the per-record half of the pipeline shared by the
+// single-object and batch ingest paths: schema validation → column/check
+// permission enforcement (with claim-derived auto-injection) → timestamp
+// canonicalization → dedupe id resolution → encoding. Reserving, publishing
+// and committing happen per window, in ingestWindow. The table-level insert
+// grant is checked once by the caller before any record is processed, so perms
+// here drives only the per-column and per-row checks (it is nil when no policy
+// store is configured). data may be mutated to auto-inject check-clause values.
 //
-// Exactly one of the outcomes is meaningful per call:
-//   - duplicate true: the record was skipped by dedup (reject/abort nil).
-//   - reject non-nil: the record is bad; the rest of a batch may still proceed.
-//   - abort non-nil: a whole-request failure; the caller stops and returns it.
-func (h *IngestHandler) processRecord(
+// A record the rest of a batch may proceed past comes back with reject set;
+// abort non-nil is a whole-request failure the caller stops and returns.
+func (h *IngestHandler) prepareRecord(
 	ctx context.Context,
 	store *settings.Store,
 	table, scope string,
@@ -534,10 +601,10 @@ func (h *IngestHandler) processRecord(
 	data map[string]any,
 	now time.Time,
 	checkGuard *recordReject,
-) (duplicate bool, reject *recordReject, abort *requestAbort) {
+) (rec pendingRecord, abort *requestAbort) {
 	if err := h.validator().Validate(schema, data); err != nil {
 		slog.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
-		return false, &recordReject{Status: http.StatusBadRequest, Message: err.Error()}, nil
+		return pendingRecord{reject: &recordReject{Status: http.StatusBadRequest, Message: err.Error()}}, nil
 	}
 
 	// DEEP AUTH: column-level allow/deny + check clauses.
@@ -545,10 +612,10 @@ func (h *IngestHandler) processRecord(
 		for col := range data {
 			if !perms.IsColumnAllowed(col, true) {
 				slog.WarnContext(ctx, "column insertion forbidden", "column", col, "role", role)
-				return false, &recordReject{
+				return pendingRecord{reject: &recordReject{
 					Status:  http.StatusForbidden,
 					Message: fmt.Sprintf("column %q not allowed for insert", col),
-				}, nil
+				}}, nil
 			}
 		}
 		// Through the accessor, not a bare read. The check loop iterates a side's
@@ -569,7 +636,7 @@ func (h *IngestHandler) processRecord(
 			// permission failures for one mis-wired grant.
 			slog.ErrorContext(ctx, "insert checks consulted on a grant resolved for another operation",
 				"table", table, "role", role)
-			return false, nil, &requestAbort{
+			return pendingRecord{}, &requestAbort{
 				Status:  http.StatusForbidden,
 				Message: "insert permissions were not resolved for this request",
 			}
@@ -584,7 +651,7 @@ func (h *IngestHandler) processRecord(
 			// a record that supplies the column fails schema validation first with
 			// a different message, and a batch should report each its own cause.
 			if checkGuard != nil {
-				return false, checkGuard, nil
+				return pendingRecord{reject: checkGuard}, nil
 			}
 			// A []any value is an _in check: the inserted value must be present and
 			// one of the allowed set. Unlike the scalar _eq case there is no single
@@ -593,10 +660,10 @@ func (h *IngestHandler) processRecord(
 				actual, ok := data[col]
 				if !ok || !h.checker().InSet(actual, set) {
 					slog.WarnContext(ctx, "check clause failed", "column", col, "allowed", set, "actual", actual, "present", ok)
-					return false, &recordReject{
+					return pendingRecord{reject: &recordReject{
 						Status:  http.StatusForbidden,
 						Message: fmt.Sprintf("check failed for column %q", col),
-					}, nil
+					}}, nil
 				}
 				continue
 			}
@@ -613,10 +680,10 @@ func (h *IngestHandler) processRecord(
 				// reading the token's own JSON type didn't give it.
 				if !h.checker().Matches(actual, requiredVal) {
 					slog.WarnContext(ctx, "check clause failed", "column", col, "expected", requiredVal, "actual", actual)
-					return false, &recordReject{
+					return pendingRecord{reject: &recordReject{
 						Status:  http.StatusForbidden,
 						Message: fmt.Sprintf("check failed for column %q", col),
-					}, nil
+					}}, nil
 				}
 			} else {
 				// Auto-inject the required value if not provided — as a plain
@@ -636,45 +703,31 @@ func (h *IngestHandler) processRecord(
 	// enforces) after the permission checks: check clauses keep pre-#372 semantics.
 	h.validator().CanonicalizeTimestamps(schema, data)
 
-	// Optional deduplication. enabled/id_field/require_id resolve per record
+	// Optional deduplication. The dedupe settings resolve per record
 	// from one snapshot (table override → global; the settings directory
-	// always states them, so no compiled fallback is needed), so a reload
-	// lands at a record boundary. A Deduplicator without a settings source is
-	// a wiring bug, not a mode — main wires both or neither.
+	// states them all but dedupe.retention, whose absence means "0"), so a
+	// reload lands at a record boundary. A Deduplicator without a settings source is
+	// a wiring bug, not a mode — main wires both or neither. The id is claimed
+	// in ingestWindow, once every record of the window is encoded, so nothing
+	// but the publish can fail while the claim is held.
 	if h.Dedup != nil && h.DedupeSettings != nil {
-		if enabled, idField, requireID := h.DedupeSettings(store, table); enabled {
-			idVal, ok := data[idField]
-			if !ok {
+		if dd := h.DedupeSettings(store, table); dd.Enabled {
+			idField := dd.IDField
+			// An explicit null is as missing as an absent key (#370): fmt.Sprint
+			// would make every null "<nil>", one id for every such record.
+			if idVal, ok := data[idField]; ok && idVal != nil {
+				rec.key = &dedupe.Key{Table: table, ID: fmt.Sprint(idVal)}
+				rec.retention = dd.Retention
+			} else {
 				dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
-				if requireID {
-					slog.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", idField, "table", table)
-					return false, &recordReject{
+				if dd.RequireID {
+					slog.WarnContext(ctx, "dedupe id_field missing or null; rejecting", "id_field", idField, "table", table)
+					return pendingRecord{reject: &recordReject{
 						Status:  http.StatusBadRequest,
 						Message: fmt.Sprintf("missing dedupe id field %q", idField),
-					}, nil
+					}}, nil
 				}
-				slog.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", idField, "table", table)
-			} else {
-				eventID := fmt.Sprint(idVal)
-				dup, err := h.Dedup(store).CheckAndMark(ctx, eventID)
-				switch {
-				case errors.Is(err, dedupe.ErrDisabled):
-					// A reload flipped dedupe.enabled between the snapshot
-					// read above and this call (the two transition at
-					// different instants). Publish un-deduped, as a record
-					// under the other setting would have been. The counter
-					// carries the signal (a burst is a reload; a steady rate
-					// is the store and settings out of step), so the line is
-					// Debug rather than a WARN per record.
-					dedupeDisabledCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
-					slog.DebugContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "event_id", eventID, "table", table)
-				case err != nil:
-					slog.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
-					return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
-				case dup:
-					slog.InfoContext(ctx, "duplicate event skipped", "event_id", eventID)
-					return true, nil, nil
-				}
+				slog.WarnContext(ctx, "dedupe id_field missing or null; publishing without idempotency", "id_field", idField, "table", table)
 			}
 		}
 	}
@@ -687,7 +740,7 @@ func (h *IngestHandler) processRecord(
 	row, err := ingest.EncodeCompactRow(cols, data)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to encode compact row", "error", err, "table", table)
-		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
+		return pendingRecord{}, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
 	}
 
 	evt := ingest.EventMessage{
@@ -699,28 +752,221 @@ func (h *IngestHandler) processRecord(
 		Row:               row,
 	}
 
-	payload, err := json.Marshal(evt)
+	rec.payload, err = json.Marshal(evt)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to marshal event message", "error", err)
-		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
+		return pendingRecord{}, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
+	}
+	return rec, nil
+}
+
+// ingestWindow reserves, publishes and commits one window of prepared
+// records, in three phases: one Reserve for every keyed record, the publishes
+// in record order, one Commit for every claim published. Rejected and
+// duplicate records are skipped. It sets each record's outcome and returns an
+// abort when the request must stop; what the window published before a failure
+// is committed first, so the retry reports it as duplicates (see publishFailed).
+func (h *IngestHandler) ingestWindow(ctx context.Context, store *settings.Store, table, scope string, recs []pendingRecord) *requestAbort {
+	var dd dedupe.Deduplicator
+	var keyed []int
+	for i := range recs {
+		if recs[i].reject == nil && recs[i].key != nil {
+			keyed = append(keyed, i)
+		}
+	}
+	if len(keyed) > 0 {
+		dd = h.Dedup(store)
+		if abort := h.reserve(ctx, dd, table, recs, keyed); abort != nil {
+			return abort
+		}
 	}
 
-	slog.DebugContext(ctx, "publishing event to the ingest queue", "table", table, "scope", scope)
-	if err := h.Publisher.Publish(ctx, mq.Topic{Tenant: store.Tenant(), Table: table, Scope: scope}, payload); err != nil {
-		if errors.Is(err, mq.ErrQueueFull) {
-			slog.WarnContext(ctx, "ingest queue is full", "tenant", store.Tenant(), "error", err, "table", table, "scope", scope)
-			return false, nil, &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30"}
+	topic := mq.Topic{Tenant: store.Tenant(), Table: table, Scope: scope}
+	for i := range recs {
+		rec := &recs[i]
+		if rec.reject != nil || rec.duplicate {
+			continue
 		}
-		if errors.Is(err, mq.ErrUnavailable) {
-			// A broker blip, not a full queue: a sooner retry is likely to land.
-			slog.WarnContext(ctx, "ingest queue unavailable", "tenant", store.Tenant(), "error", err, "table", table, "scope", scope)
-			return false, nil, &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "5"}
+		var opts []mq.PublishOpt
+		if rec.claim.Status == dedupe.Claimed {
+			// The retry of an uncertain publish carries the same id, so the
+			// queue drops its copy if the first one landed.
+			opts = append(opts, mq.WithIdempotencyKey(dedupe.IdempotencyKey(store.Tenant(), rec.claim.Key)))
 		}
-		slog.ErrorContext(ctx, "failed to publish to the ingest queue", "tenant", store.Tenant(), "error", err, "table", table, "scope", scope)
-		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed"}
+		if err := h.Publisher.Publish(ctx, topic, rec.payload, opts...); err != nil {
+			return h.publishFailed(ctx, dd, topic, recs, i, err)
+		}
 	}
+	commitClaims(ctx, dd, recs, table)
+	return nil
+}
 
-	return false, nil, nil
+// lease is the dedupe lease in effect: h.DedupeLease when set, else
+// dedupe.DefaultLease. Shared by reserve (Reserve's argument) and
+// publishFailed (the Retry-After of a claim left to lapse), so both name the
+// same window a client is told to wait out.
+func (h *IngestHandler) lease() time.Duration {
+	if h.DedupeLease > 0 {
+		return h.DedupeLease
+	}
+	return dedupe.DefaultLease
+}
+
+// reserve claims the keys of recs[keyed] in one call and records each answer.
+// A duplicate is skipped. A key another request holds releases the window's
+// claims and aborts with 503 and the lease as Retry-After, since that
+// request's outcome decides this one's. A store that cannot answer now is a
+// 503 too; nothing in the window has been published. ErrDisabled — a reload
+// switched the store off after the settings snapshot was read — publishes the
+// window un-deduped, as records under the other setting would have been.
+func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, table string, recs []pendingRecord, keyed []int) *requestAbort {
+	lease := h.lease()
+	keys := make([]dedupe.Key, len(keyed))
+	for j, i := range keyed {
+		keys[j] = *recs[i].key
+	}
+	claims, err := dd.Reserve(ctx, keys, lease)
+	switch {
+	case errors.Is(err, dedupe.ErrDisabled):
+		// The counter carries the signal (a burst is a reload; a steady rate
+		// is the store and settings out of step), so the line is Debug rather
+		// than a WARN per record.
+		dedupeDisabledCounter.Add(ctx, int64(len(keys)), metric.WithAttributes(attribute.String("table", table)))
+		slog.DebugContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "records", len(keys), "table", table)
+		return nil
+	case errors.Is(err, dedupe.ErrUnavailable):
+		slog.WarnContext(ctx, "dedupe store unavailable", "error", err, "table", table)
+		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "dedupe store unavailable", RetryAfter: "5"}
+	case err != nil:
+		if ctx.Err() != nil {
+			// The request's own context ended — the client is gone, or its
+			// deadline passed — while Reserve was in flight. Reserve wraps
+			// that as an ordinary error, but it is not a backend problem
+			// worth an operator's attention, and the response status below
+			// is moot: nothing is listening for it.
+			slog.DebugContext(ctx, "dedupe reserve failed: request context ended", "error", err, "table", table)
+		} else {
+			slog.ErrorContext(ctx, "dedupe reserve failed", "error", err, "table", table)
+		}
+		return &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
+	}
+	var held *dedupe.Key
+	for j, i := range keyed {
+		recs[i].claim = claims[j]
+		switch claims[j].Status {
+		case dedupe.Duplicate:
+			recs[i].duplicate = true
+			slog.InfoContext(ctx, "duplicate event skipped", "event_id", keys[j].ID, "table", table)
+		case dedupe.InFlight:
+			if held == nil {
+				held = &keys[j]
+			}
+		case dedupe.Claimed:
+		}
+	}
+	if held != nil {
+		releaseClaims(ctx, dd, claimedIn(recs))
+		slog.InfoContext(ctx, "event id in flight in another request", "event_id", held.ID, "table", table)
+		return &requestAbort{
+			Status:     http.StatusServiceUnavailable,
+			Message:    "a request with the same dedupe id is in flight",
+			RetryAfter: strconv.Itoa(int(math.Ceil(lease.Seconds()))),
+		}
+	}
+	return nil
+}
+
+// publishFailed settles a window whose publish failed at recs[k] and returns
+// the abort. The records before k are queued, so their ids are committed. A
+// definite failure — ErrQueueFull, the broker refused the event — releases k's
+// id and the rest, so the client's retry publishes them (#384). Any other
+// failure may have stored the event before failing, so k's claim is left to
+// lapse with its lease instead: a retry before then answers in-flight, and one
+// after republishes under the same idempotency key, which the queue drops if
+// the first copy landed. The records after k were never sent and are
+// released.
+//
+// mq.ErrUnavailable — a broker blip, not a refusal — is one such uncertain
+// failure, but still answers 503 rather than the plain 500 below: when k held
+// a Claimed claim (left to lapse, as above), Retry-After is that lease
+// rounded up to whole seconds, so an obedient client waits out the in-flight
+// window instead of retrying straight into it and getting the 503 reserve
+// already answers for that; when k was never keyed there is no lapse to wait
+// out, so Retry-After is the flat 5 seconds main's per-record path used.
+func (h *IngestHandler) publishFailed(ctx context.Context, dd dedupe.Deduplicator, topic mq.Topic, recs []pendingRecord, k int, err error) *requestAbort {
+	definite := errors.Is(err, mq.ErrQueueFull)
+	commitClaims(ctx, dd, recs[:k], topic.Table)
+	after := k + 1
+	if definite {
+		after = k
+	}
+	releaseClaims(ctx, dd, claimedIn(recs[after:]))
+	switch {
+	case definite:
+		slog.WarnContext(ctx, "ingest queue is full", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
+		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30"}
+	case errors.Is(err, mq.ErrUnavailable):
+		retryAfter := "5"
+		if recs[k].claim.Status == dedupe.Claimed {
+			retryAfter = strconv.Itoa(int(math.Ceil(h.lease().Seconds())))
+		}
+		slog.WarnContext(ctx, "ingest queue unavailable", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
+		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: retryAfter}
+	}
+	slog.ErrorContext(ctx, "failed to publish to the ingest queue", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
+	return &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed"}
+}
+
+// claimedIn is the Claimed claims among recs.
+func claimedIn(recs []pendingRecord) []dedupe.Claim {
+	var out []dedupe.Claim
+	for i := range recs {
+		if recs[i].claim.Status == dedupe.Claimed {
+			out = append(out, recs[i].claim)
+		}
+	}
+	return out
+}
+
+// commitClaims makes the ids of recs' Claimed claims duplicates, one Commit
+// per retention — one in practice, unless a reload changed it mid-window. A
+// failure does not fail the records — they are in the queue — so it is logged
+// and counted, and the claims lapse after their lease.
+func commitClaims(ctx context.Context, dd dedupe.Deduplicator, recs []pendingRecord, table string) {
+	var retentions []time.Duration
+	byRetention := map[time.Duration][]dedupe.Claim{}
+	for i := range recs {
+		if recs[i].claim.Status != dedupe.Claimed {
+			continue
+		}
+		r := recs[i].retention
+		if _, ok := byRetention[r]; !ok {
+			retentions = append(retentions, r)
+		}
+		byRetention[r] = append(byRetention[r], recs[i].claim)
+	}
+	for _, r := range retentions {
+		claims := byRetention[r]
+		// The records are queued whatever the request's context does next.
+		err := dd.Commit(context.WithoutCancel(ctx), claims, r)
+		switch {
+		case err == nil, errors.Is(err, dedupe.ErrDisabled):
+		default:
+			dedupeCommitFailedCounter.Add(ctx, int64(len(claims)), metric.WithAttributes(attribute.String("table", table)))
+			slog.ErrorContext(ctx, "dedupe commit failed after publish; the ids lapse with their lease", "error", err, "table", table, "records", len(claims))
+		}
+	}
+}
+
+// releaseClaims gives back claims whose records were not published. A failure
+// is only logged: the claims lapse with their lease either way.
+func releaseClaims(ctx context.Context, dd dedupe.Deduplicator, claims []dedupe.Claim) {
+	if len(claims) == 0 {
+		return
+	}
+	if err := dd.Release(context.WithoutCancel(ctx), claims); err != nil && !errors.Is(err, dedupe.ErrDisabled) {
+		slog.WarnContext(ctx, "dedupe release failed; the ids lapse with their lease", "error", err)
+	}
 }
 
 // checkValueMatches decides insert-check equality: the payload value must

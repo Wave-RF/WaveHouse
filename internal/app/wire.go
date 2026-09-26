@@ -53,7 +53,8 @@ func withoutContext(release func() error) func(context.Context) error {
 // configuration (dedupe, dlq, query, schema, stream, cors — see
 // settings.TenantConfig). Required: config.Validate already rejected an
 // empty settings.dir, and an invalid directory refuses boot. The binary
-// carries no compiled defaults; `wavehouse bootstrap` writes the seed. A
+// carries no compiled defaults but a missing dedupe.retention ("0");
+// `wavehouse bootstrap` writes the seed. A
 // *reload* of an invalid directory merely keeps the previous snapshot. A
 // nested directory (one folder per tenant, #583) fails closed per tenant
 // instead, at boot and on reload alike: see settings.Registry.
@@ -462,10 +463,12 @@ func (a *App) wireDiscovery(ctx context.Context) {
 
 // wireDedupe builds the dedupe stores — the one place the implementation is
 // chosen.
-func (a *App) wireDedupe() error {
+func (a *App) wireDedupe(ctx context.Context) error {
 	switch b := a.cfg.Dedupe.Backend; b {
 	case config.DedupePebble:
 		return a.wirePebbleDedupe()
+	case config.DedupeDynamoDB:
+		return a.wireDynamoDedupe(ctx)
 	default:
 		return unreachableBackend("dedupe.backend", b)
 	}
@@ -484,8 +487,9 @@ func (a *App) wireDedupe() error {
 // still closed — either the hook sees it or the boot apply reads it. An
 // instance that cannot open follows the registry's own rule for the shape:
 // flat refuses boot, like every other store, and on reload logs and leaves
-// the store closed — ingest then fails closed (500 "dedupe failed") rather
-// than silently publishing un-deduped, since the files asked for dedupe;
+// the store closed — ingest then fails closed (503 "dedupe store
+// unavailable", Retry-After: 5) rather than silently publishing un-deduped,
+// since the files asked for dedupe;
 // nested fails closed the same way at boot too, for every tenant with
 // dedupe on, the next reload retrying, so it never costs the process.
 func (a *App) wirePebbleDedupe() error {
@@ -529,6 +533,11 @@ func (a *App) wirePebbleDedupe() error {
 	}
 	return nil
 }
+
+// wireDynamoDedupe (dedupe.backend: dynamodb) lives in wire_dynamodb.go,
+// excluded from the e2e coverage gate alongside internal/dedupe/dynamodb.go
+// (see .testcoverage.yml): the e2e binary always runs Pebble dedupe, so
+// nothing there exercises it. wireDedupe above still switches on it.
 
 // wireMQ starts the MQ — the one place the implementation is chosen;
 // everything after it sees mq.Broker.
@@ -911,6 +920,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	ingestHandler.PolicySource = (*settings.Store).Policy
 	ingestHandler.Dedup = func(s *settings.Store) dedupe.Deduplicator { return a.dedup.For(s.Tenant()) }
 	ingestHandler.DedupeSettings = (*settings.Store).DedupeFor
+	ingestHandler.DedupeLease = a.cfg.Dedupe.Lease
 
 	// Readiness pings every open pool at once and is ready at the first
 	// answer: one tenant's ClickHouse outage is not the process's.

@@ -13,6 +13,8 @@
 package settings
 
 import (
+	"time"
+
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
@@ -65,8 +67,9 @@ type PipesFile struct {
 // `clickhouse.max_total_conns`), listeners, the observability exporters —
 // and the secrets (`clickhouse.password`, `auth.jwt_secret`,
 // `auth.operator_key`), which never belong in a tracked JSON file. Every
-// block and every top-level key inside it is REQUIRED: the binary carries no
-// compiled defaults, so the adopted snapshot is exactly what the files say.
+// block and every top-level key inside it is REQUIRED, but dedupe.retention
+// (missing means "0", forever): the binary carries no other compiled default,
+// so the adopted snapshot is exactly what the files say.
 // Defaults live in the seed directory (see Seed) that `wavehouse
 // bootstrap` writes. The fields are pointers only so Validate can tell
 // "absent" from the zero value and report it by path.
@@ -143,7 +146,8 @@ type AuthConfig struct {
 // (dedupe.Managed, one per tenant, each a share of the one embedded Pebble
 // instance), so the whole block is tenant-owned.
 //
-// id_field and require_id are required here and optional per table: a table
+// id_field and require_id are required here; retention is optional, and
+// missing means "0" (forever). Every field is optional per table: a table
 // override inherits whichever field it doesn't name. An empty,
 // whitespace-only, or whitespace-padded id_field is rejected at every level,
 // so the effective id_field can never be empty or silently unmatchable.
@@ -151,6 +155,10 @@ type DedupeConfig struct {
 	Enabled   *bool   `json:"enabled"`
 	IDField   *string `json:"id_field"`
 	RequireID *bool   `json:"require_id"`
+	// Retention is how long a committed id stays a duplicate, as a Go
+	// duration ("720h"); "0", or leaving it out, keeps it forever. A change
+	// applies to ids committed after it.
+	Retention *string `json:"retention,omitempty"`
 	// Tables holds per-table overrides keyed by ClickHouse table name (#222).
 	// Names are format-checked only — existence is schema discovery's runtime
 	// concern, same as policies.json table keys.
@@ -162,7 +170,15 @@ type DedupeConfig struct {
 type TableDedupe struct {
 	IDField   *string `json:"id_field,omitempty"`
 	RequireID *bool   `json:"require_id,omitempty"`
+	Retention *string `json:"retention,omitempty"`
 }
+
+// MinDedupeRetention is the shortest finite dedupe retention: the embedded
+// queue's duplicate window (mq.EmbeddedDuplicateWindow). A record is
+// published under an idempotency key derived from its id, so an id re-sent
+// after a shorter retention but inside the window is claimed again and then
+// dropped by the queue as a copy, while the client is told it was accepted.
+const MinDedupeRetention = 2 * time.Minute
 
 // DLQConfig gates the Dead Letter Queue: whether a row ClickHouse still
 // rejects after the row-by-row isolation retry is parked on the tenant's dead-letter
