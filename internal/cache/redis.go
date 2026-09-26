@@ -370,28 +370,33 @@ func (r *RedisCache) record(parent context.Context, err error) {
 	if parent.Err() != nil {
 		return
 	}
-	if r.breaker.failure() {
-		slog.WarnContext(parent, "cache: redis not answering; bypassing the cache",
-			"addrs", r.cfg.Addrs, "error", err)
-	}
+	logOpening(parent, r.breaker.failure(), slog.LevelWarn, "cache: redis not answering; bypassing the cache",
+		"addrs", r.cfg.Addrs, "error", err)
 }
 
-// recordReply is record for an error reply. The breaker opening is logged
-// once, not once per operation in flight.
+// recordReply is record for an error reply.
 func (r *RedisCache) recordReply(parent context.Context, msg string) {
 	switch {
 	case rejectsCredentials(msg):
-		if r.breaker.trip() {
-			slog.ErrorContext(parent, "cache: redis rejected the credentials; bypassing the cache until they work",
-				"addrs", r.cfg.Addrs, "error", msg)
-		}
+		logOpening(parent, r.breaker.trip(), slog.LevelError, "cache: redis rejected the credentials; bypassing the cache until they work",
+			"addrs", r.cfg.Addrs, "error", msg)
 	case refusesWork(msg):
-		if r.breaker.trip() {
-			slog.WarnContext(parent, "cache: redis refusing writes; bypassing the cache",
-				"addrs", r.cfg.Addrs, "reply", msg)
-		}
+		logOpening(parent, r.breaker.trip(), slog.LevelWarn, "cache: redis refusing writes; bypassing the cache",
+			"addrs", r.cfg.Addrs, "reply", msg)
 	default:
 		r.breaker.success()
+	}
+}
+
+// logOpening logs a closed breaker opening at level, and a failed probe
+// reopening it at DEBUG: a long outage is one line, not one per probe.
+func logOpening(ctx context.Context, o opening, level slog.Level, msg string, args ...any) {
+	switch o {
+	case opened:
+		slog.Log(ctx, level, msg, args...)
+	case reopened:
+		slog.Log(ctx, slog.LevelDebug, msg, args...)
+	case unchanged:
 	}
 }
 

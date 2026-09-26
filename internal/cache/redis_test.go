@@ -163,15 +163,16 @@ func TestRedis_Record(t *testing.T) {
 	assert.True(t, r.breaker.isOpen())
 }
 
-// Each opening of the breaker logs one WARN naming why; the operations that
-// fail while it is open log nothing. Not parallel: it captures the default
-// logger.
+// A closed breaker opening logs one WARN naming why; the operations that
+// fail while it is open log nothing, and a failed probe reopening it logs at
+// DEBUG. Not parallel: it captures the default logger.
 func TestRedis_BreakerOpeningLogsOnce(t *testing.T) {
-	buf := logtest.Capture(t, slog.LevelWarn)
+	buf := logtest.Capture(t, slog.LevelDebug)
 	clock := &fakeClock{t: time.Unix(0, 0)}
 	r := &RedisCache{breaker: newBreaker(2, time.Second, clock.now)}
 	live := context.Background()
 	warns := func() int { return strings.Count(buf.String(), `"level":"WARN"`) }
+	debugs := func() int { return strings.Count(buf.String(), `"level":"DEBUG"`) }
 
 	r.recordReply(live, "READONLY You can't write against a read only replica.")
 	r.recordReply(live, "READONLY You can't write against a read only replica.")
@@ -197,7 +198,16 @@ func TestRedis_BreakerOpeningLogsOnce(t *testing.T) {
 	_, probe = r.breaker.allow()
 	require.True(t, probe)
 	r.record(live, context.DeadlineExceeded)
-	assert.Equal(t, 3, warns(), "a failed probe opens it again")
+	assert.True(t, r.breaker.isOpen(), "a failed probe opens it again")
+	assert.Equal(t, 2, warns(), "not at WARN")
+	assert.Equal(t, 1, debugs(), buf.String())
+
+	clock.t = clock.t.Add(time.Second)
+	_, probe = r.breaker.allow()
+	require.True(t, probe)
+	r.recordReply(live, "READONLY You can't write against a read only replica.")
+	assert.Equal(t, 2, warns(), "a refused probe is a reopening too")
+	assert.Equal(t, 2, debugs(), buf.String())
 }
 
 func TestRejectsCredentials(t *testing.T) {

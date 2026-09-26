@@ -26,11 +26,11 @@ func TestBreaker(t *testing.T) {
 	b.failure()
 	b.success() // a success resets the run
 	b.failure()
-	assert.False(t, b.failure())
+	assert.Equal(t, unchanged, b.failure())
 	assert.False(t, b.isOpen(), "two in a row is below the threshold")
-	assert.True(t, b.failure(), "it opened")
+	assert.Equal(t, opened, b.failure())
 	assert.True(t, b.isOpen())
-	assert.False(t, b.failure(), "already open")
+	assert.Equal(t, unchanged, b.failure(), "already open")
 
 	ok, probe = allow()
 	assert.False(t, ok, "open: skip the server")
@@ -44,7 +44,7 @@ func TestBreaker(t *testing.T) {
 	assert.False(t, ok)
 	assert.False(t, probe, "one probe at a time")
 
-	assert.True(t, b.failure(), "the probe failed: open for another period")
+	assert.Equal(t, reopened, b.failure(), "the probe failed: open for another period")
 	assert.True(t, b.isOpen())
 	clock.t = clock.t.Add(4 * time.Second)
 	_, probe = allow()
@@ -69,9 +69,9 @@ func TestBreaker_TripAndProbeSchedule(t *testing.T) {
 	_, open := b.untilProbe()
 	assert.False(t, open)
 
-	assert.True(t, b.trip(), "it opened")
+	assert.Equal(t, opened, b.trip())
 	assert.True(t, b.isOpen(), "no threshold for a refusal")
-	assert.False(t, b.trip(), "already open")
+	assert.Equal(t, unchanged, b.trip(), "already open")
 	b.success()
 	assert.True(t, b.isOpen(), "a success that is not the probe's leaves it open")
 	d, open := b.untilProbe()
@@ -87,7 +87,7 @@ func TestBreaker_TripAndProbeSchedule(t *testing.T) {
 	require.True(t, probe)
 	d, _ = b.untilProbe()
 	assert.Equal(t, 5*time.Second, d, "while the probe runs, wait out a whole period")
-	assert.True(t, b.trip(), "the probe was refused too")
+	assert.Equal(t, reopened, b.trip(), "the probe was refused too")
 	d, _ = b.untilProbe()
 	assert.Equal(t, 5*time.Second, d)
 

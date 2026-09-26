@@ -53,31 +53,47 @@ func (b *breaker) success() {
 	b.failures, b.open, b.probing = 0, false, false
 }
 
+// opening is what a failure or trip did to the breaker, so a caller logs an
+// outage once rather than once per operation in flight or per failed probe.
+type opening int
+
+const (
+	unchanged opening = iota // still closed, or already open
+	opened                   // a closed breaker opened
+	reopened                 // a failed probe opened it for another period
+)
+
+// openLocked opens the breaker and reports which opening that was.
+func (b *breaker) openLocked() opening {
+	o := unchanged
+	switch {
+	case !b.open:
+		o = opened
+	case b.probing:
+		o = reopened
+	}
+	b.open, b.openedAt, b.probing = true, b.now(), false
+	return o
+}
+
 // failure records a call the server did not answer in time, and opens the
-// breaker at the threshold — or at once, for a failed probe. It reports
-// whether that opened a closed or probing breaker, as trip does.
-func (b *breaker) failure() bool {
+// breaker at the threshold — or at once, for a failed probe.
+func (b *breaker) failure() opening {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.failures++
 	if b.probing || b.failures >= b.threshold {
-		opened := !b.open || b.probing
-		b.open, b.openedAt, b.probing = true, b.now(), false
-		return opened
+		return b.openLocked()
 	}
-	return false
+	return unchanged
 }
 
 // trip opens the breaker at once, for a reply that says the server cannot
-// do the work: one is as conclusive as any number. It reports whether the
-// breaker was closed or probing, so a caller logs once per opening and once
-// per refused probe rather than once per operation in flight.
-func (b *breaker) trip() bool {
+// do the work: one is as conclusive as any number.
+func (b *breaker) trip() opening {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	opened := !b.open || b.probing
-	b.open, b.openedAt, b.probing = true, b.now(), false
-	return opened
+	return b.openLocked()
 }
 
 func (b *breaker) isOpen() bool {
