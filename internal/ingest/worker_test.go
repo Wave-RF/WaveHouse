@@ -254,10 +254,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 		<-release
 		w.WriteHeader(http.StatusOK)
 	}))
-	t.Cleanup(func() {
-		close(release)
-		chSrv.Close()
-	})
+	t.Cleanup(chSrv.Close)
 	u, _ := url.Parse(chSrv.URL)
 	host, port, _ := net.SplitHostPort(u.Host)
 
@@ -269,6 +266,12 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		}, nil)
 	require.NoError(t, err)
+	// The deadline below abandons the worker, not its insert: finish the insert
+	// and join the worker before the broker closes under its ack.
+	t.Cleanup(func() {
+		close(release)
+		assert.NoError(t, stopFn(context.Background()))
+	})
 
 	// Publish so there's an in-flight insert blocking on `release`.
 	err = emb.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: "events"}, makeEnvelope(t, "events", "", map[string]any{"id": 1}))

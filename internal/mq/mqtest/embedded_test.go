@@ -3,21 +3,19 @@
 package mqtest_test
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/mq/mqtest"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 	"github.com/stretchr/testify/require"
 )
 
 func TestEmbeddedNATS_Conformance(t *testing.T) {
 	mqtest.Run(t, mqtest.Harness{
 		New: func(t *testing.T) mq.Broker {
-			e, err := mq.NewEmbedded(storeDir(t))
+			e, err := mq.NewEmbedded(storedir.New(t))
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = e.Close() })
 			for _, id := range []tenant.ID{mqtest.Acme, mqtest.Globex} {
@@ -54,23 +52,4 @@ func TestEmbeddedNATS_Conformance(t *testing.T) {
 			ConfiguresDurables: true,
 		},
 	})
-}
-
-// storeDir is a temporary store directory whose removal retries briefly: under
-// parallel load a consumer's state file can land after Close has returned,
-// which fails t.TempDir's one-shot RemoveAll. The retrying cleanup runs first
-// (cleanups are LIFO), leaving t.TempDir an empty directory to remove.
-func storeDir(t *testing.T) string {
-	dir := filepath.Join(t.TempDir(), "store")
-	var err error
-	t.Cleanup(func() {
-		for range 50 {
-			if err = os.RemoveAll(dir); err == nil {
-				return
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		t.Errorf("remove %s: %v", dir, err)
-	})
-	return dir
 }

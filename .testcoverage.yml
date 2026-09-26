@@ -79,6 +79,17 @@ exclude:
       - ^internal/settings/
       - ^cmd/wavehouse/validate\.go$
       - ^cmd/wavehouse/bootstrap\.go$
+      # The DynamoDB dedupe backend: the e2e binary runs Pebble dedupe, so
+      # this file measured 0% there and pulled e2e to 58.6%. The unit
+      # (fake API) and integration (dynamodb-local) suites cover it, and the
+      # merged total still counts it.
+      - ^internal/dedupe/dynamodb\.go$
+      # wireDynamoDedupe and its retry component (internal/app/wire_dynamodb.go):
+      # same reason as dynamodb.go above — the e2e binary never selects
+      # dedupe.backend: dynamodb, so this file measured 0% there and pulled
+      # e2e to 59.7%. The unit and integration suites cover it, and the
+      # merged total still counts it.
+      - ^internal/app/wire_dynamodb\.go$
       # The in-process cache backend: the e2e stack runs cache.backend=redis
       # (#613), so the binary carries LocalCache and its version index but e2e
       # never reaches them. The unit suite and the integration suite's main

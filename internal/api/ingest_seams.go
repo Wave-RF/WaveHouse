@@ -20,7 +20,7 @@ import (
 // return would invite a caller to change that.
 //
 // The two are one interface because they are one contract — "what this schema
-// says about this record" — evaluated at two points in processRecord that must
+// says about this record" — evaluated at two points in prepareRecord that must
 // stay apart: the insert-check block sits between them deliberately, so checks
 // keep pre-#372 semantics.
 type RecordValidator interface {
@@ -55,7 +55,7 @@ func (h *IngestHandler) validator() RecordValidator {
 // InsertChecker decides whether a record's value satisfies a policy check
 // clause. Matches answers the scalar `_eq` form (the required value), InSet the
 // `_in` form (set membership). It never sees a record as a whole: the
-// auto-injection of a missing check value stays in processRecord, where the
+// auto-injection of a missing check value stays in prepareRecord, where the
 // ordering against validation and canonicalization is load-bearing.
 type InsertChecker interface {
 	Matches(actual, required any) bool

@@ -10,7 +10,8 @@ import (
 
 // seedFS holds the starter settings directory: every file present, every
 // key set to its default. The checked-in seed/ directory is the ONE place
-// defaults live — the binary has no compiled fallbacks. Its one consumer is
+// defaults live — the binary's one compiled fallback is dedupe.retention
+// (missing means "0", forever). Its one consumer is
 // this embed, so `wavehouse bootstrap` can write the directory anywhere
 // without a source tree; the container images ship no settings (the operator
 // mounts or seeds /app/settings), same as they ship no policy file.

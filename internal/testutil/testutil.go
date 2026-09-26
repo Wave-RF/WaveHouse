@@ -16,6 +16,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 )
 
 // NewTestSchemaRegistry creates a SchemaRegistry pre-loaded with the given
@@ -40,13 +41,13 @@ func NewTestSchemaRegistry(t testing.TB, tables []*discovery.TableSchema) *disco
 // hardcoding the same literal twice.
 const TestServerVersion = "24.8.1.1"
 
-// NewEmbeddedMQ starts the embedded broker over a temporary directory, closed
-// by the test framework, with a queue open for each of tenants —
+// NewEmbeddedMQ starts the embedded broker over a storedir.New directory,
+// closed by the test framework, with a queue open for each of tenants —
 // tenant.Default when none is named — at maxBytes: a tenant has a queue once
 // its budget is applied, as the wiring does for every tenant it serves.
 func NewEmbeddedMQ(t testing.TB, maxBytes int64, tenants ...tenant.ID) *mq.EmbeddedNATS {
 	t.Helper()
-	emb, err := mq.NewEmbedded(t.TempDir())
+	emb, err := mq.NewEmbedded(storedir.New(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 	if len(tenants) == 0 {

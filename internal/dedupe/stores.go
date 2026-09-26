@@ -16,6 +16,25 @@ import (
 // nothing that holds the Stores changes with it.
 type Factory func(id tenant.ID) *Managed
 
+// Gated returns a Factory whose stores open only once ready returns nil, its
+// error being the open's: a store switched on meanwhile stays closed and
+// fails closed (ErrUnavailable) until an Apply finds the backend ready. For a
+// backend whose tenant opens are free but whose shared resource (a remote
+// table) is checked once.
+func (f Factory) Gated(ready func() error) Factory {
+	return func(id tenant.ID) *Managed {
+		m := f(id)
+		open := m.open
+		m.open = func() (Deduplicator, error) {
+			if err := ready(); err != nil {
+				return nil, err
+			}
+			return open()
+		}
+		return m
+	}
+}
+
 // Stores is one Managed store per tenant (#583 story 7), each following its
 // own tenant's dedupe.enabled through Apply. A store is built on first use
 // and forgotten by Retain once its tenant is no longer served; its seen ids

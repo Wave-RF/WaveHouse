@@ -22,6 +22,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/app"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 )
 
 // queryError is the error envelope a failed ClickHouse query answers with.
@@ -115,7 +116,7 @@ func TestQueryErrors_ClickHouseDown(t *testing.T) {
 	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	cfg := &config.Config{
-		DataDir:    t.TempDir(),
+		DataDir:    storedir.New(t),
 		Server:     config.Server{ShutdownTimeout: 10},
 		ClickHouse: config.ClickHouse{Password: testCHPassword},
 		MQ:         config.MQ{Backend: config.MQEmbedded},

@@ -264,8 +264,11 @@ func defaults() Config {
 				MaxValueBytes: 1 << 20, CompressMinBytes: 1 << 10, VersionTTL: 168 * time.Hour,
 			},
 		},
-		Dedupe: Dedupe{Backend: DedupePebble},
-		Coord:  Coord{Backend: CoordLocal},
+		Dedupe: Dedupe{
+			Backend: DedupePebble, Lease: 30 * time.Second, ReserveConcurrency: 64,
+			DynamoDB: DedupeDynamoDBConfig{Timeout: 250 * time.Millisecond, MaxAttempts: 3, RetryMode: "standard"},
+		},
+		Coord: Coord{Backend: CoordLocal},
 		OTel: OTel{
 			Traces:  OTelTraces{Enabled: true, SampleRate: 1.0},
 			Metrics: OTelMetrics{Enabled: true},

@@ -187,7 +187,7 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	}
 	if apiRole {
 		a.wireDiscovery(ctx)
-		if err := a.wireDedupe(); err != nil {
+		if err := a.wireDedupe(ctx); err != nil {
 			return nil, err
 		}
 	}
