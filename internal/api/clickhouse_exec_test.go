@@ -128,7 +128,10 @@ func TestIsMutation(t *testing.T) {
 		{"with tagged heredoc holding a paren and a verb then select", "WITH $x$ ) INSERT $x$ AS s SELECT s", false},
 		{"with CTE alias set$ (read)", "WITH set$ AS (SELECT 1 AS v) SELECT * FROM set$", false},
 
-		// A word led by `_` is one bareword, never a keyword's tail.
+		// A word led by `_` is one bareword, never a keyword's tail, and a
+		// leading bareword is matched whole, never by its first letters.
+		{"leading bareword insert_log", "insert_log VALUES (1)", false},
+		{"leading bareword insert2", "insert2 INTO t VALUES (1)", false},
 		{"with alias _delete (read)", "WITH 1 AS _delete SELECT _delete", false},
 		{"with alias _set (read)", "WITH [1,2] AS _set SELECT has(_set, 1)", false},
 

@@ -117,7 +117,7 @@ var mutationVerbs = map[string]struct{}{
 // isMutation reports whether sql's leading statement is a non-SELECT — i.e.
 // one that returns no result set and must go through Exec, not Query.
 // Leading whitespace and comments are skipped as ClickHouse's lexer skips
-// them, then the first alphabetic token is matched case-insensitively against
+// them, then the first bareword is matched whole, case-insensitively, against
 // mutationVerbs. A leading WITH clause (CTE) routes through a paren-aware scan
 // because ClickHouse accepts `WITH cte AS (...) INSERT INTO t SELECT * FROM
 // cte` as equivalent to `INSERT INTO t WITH cte AS (...) SELECT * FROM cte`
@@ -126,14 +126,7 @@ var mutationVerbs = map[string]struct{}{
 // fails the call, so a client that retries the error writes again.
 func isMutation(sql string) bool {
 	s := stripLeadingSQLComments(sql)
-	end := 0
-	for end < len(s) {
-		c := s[end]
-		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') {
-			break
-		}
-		end++
-	}
+	end := skipWord(s, 0)
 	if end == 0 {
 		return false
 	}
