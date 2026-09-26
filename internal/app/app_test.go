@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -698,7 +699,7 @@ func TestReload_ReadmittedTenantCacheIsOrphaned(t *testing.T) {
 
 	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
 	a.tenants.Reload("test")
-	assert.Empty(t, mock.GetTenants(), "a rejection releases; it orphans nothing yet")
+	assert.Empty(t, mock.GetTenants(), "a rejection calls no InvalidateTenant (Prune drops its index)")
 	rewriteSettings(t, filepath.Join(root, "globex"), nil)
 	_, adopted = a.tenants.Reload("test")
 	require.True(t, adopted)
@@ -709,6 +710,50 @@ func TestReload_ReadmittedTenantCacheIsOrphaned(t *testing.T) {
 	require.NoError(t, os.Rename(writeSettings(t, nil), filepath.Join(root, "acme")))
 	a.tenants.Reload("test")
 	assert.Equal(t, []tenant.ID{"globex", "acme"}, mock.GetTenants(), "restored: the same")
+}
+
+// pruneRecorder is a cache that records, at each Prune, which of the tenants
+// it is asked about are still served.
+type pruneRecorder struct {
+	testutil.MockCache
+	mu     sync.Mutex
+	served []map[tenant.ID]bool
+}
+
+func (p *pruneRecorder) Prune(served func(tenant.ID) bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.served = append(p.served, map[tenant.ID]bool{"acme": served("acme"), "globex": served("globex")})
+}
+
+func (p *pruneRecorder) last() map[tenant.ID]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.served) == 0 {
+		return nil
+	}
+	return p.served[len(p.served)-1]
+}
+
+// Every reload prunes the cache's version index down to the tenants served,
+// so a tenant rejected or removed stops holding it (#262).
+func TestReload_PrunesCacheIndexToServedTenants(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
+	a := newApp(t, testConfig(t, root), Options{})
+	_, ok := a.cache.(pruner)
+	require.True(t, ok, "the wired cache prunes")
+
+	rec := &pruneRecorder{}
+	a.cache = rec
+
+	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
+	a.tenants.Reload("test")
+	assert.Equal(t, map[tenant.ID]bool{"acme": true, "globex": false}, rec.last(), "rejected")
+
+	rewriteSettings(t, filepath.Join(root, "globex"), nil)
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	assert.Equal(t, map[tenant.ID]bool{"acme": false, "globex": true}, rec.last(), "removed; the repaired one served again")
 }
 
 // keepalive is a config.json patch setting the stream block's keepalive pair.

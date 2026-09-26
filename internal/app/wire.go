@@ -132,8 +132,9 @@ func gapWindows(tenants *settings.Registry) map[tenant.ID]time.Duration {
 const keepEverything = time.Duration(math.MaxInt64)
 
 // served reports whether the registry is serving tenant id: what the
-// per-tenant resources — verifiers, dedupe stores, open streams — are pruned
-// by once a reload removes or rejects their tenant.
+// per-tenant resources — verifiers, dedupe stores, open streams, the cache
+// version index — are pruned by once a reload removes or rejects their
+// tenant.
 func (a *App) served(id tenant.ID) bool {
 	_, ok := a.tenants.For(id)
 	return ok
@@ -609,8 +610,20 @@ func (a *App) wireEmbeddedMQ(ctx context.Context) error {
 	return nil
 }
 
+// pruner is a cache whose version index lives in the process and would
+// otherwise keep a tenant that stopped being served (cache.LocalCache).
+type pruner interface {
+	Prune(served func(tenant.ID) bool)
+}
+
+// The hook below asserts pruner at run time; this keeps LocalCache from
+// silently dropping out of it.
+var _ pruner = (*cache.LocalCache)(nil)
+
 // wireCache opens the query-result cache — the one place the implementation
-// is chosen.
+// is chosen. After every reload a tenant no longer served, removed or
+// rejected alike, has its version index dropped (#262); its cache is
+// orphaned with it, as it would be anyway when it came back (wireClickHouse).
 func (a *App) wireCache() error {
 	switch b := a.cfg.Cache.Backend; b {
 	case config.CacheLocal:
@@ -620,6 +633,11 @@ func (a *App) wireCache() error {
 		}
 		a.cache = l1
 		a.add(component{name: "cache", close: withoutContext(l1.Close)})
+		a.tenants.AfterAdopt(func([]tenant.ID) {
+			if p, ok := a.cache.(pruner); ok {
+				p.Prune(a.served)
+			}
+		})
 		return nil
 	default:
 		return unreachableBackend("cache.backend", b)
