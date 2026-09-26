@@ -484,8 +484,9 @@ func (a *App) wireDedupe() error {
 // still closed — either the hook sees it or the boot apply reads it. An
 // instance that cannot open follows the registry's own rule for the shape:
 // flat refuses boot, like every other store, and on reload logs and leaves
-// the store closed — ingest then fails closed (500 "dedupe failed") rather
-// than silently publishing un-deduped, since the files asked for dedupe;
+// the store closed — ingest then fails closed (503 "dedupe store
+// unavailable", Retry-After: 5) rather than silently publishing un-deduped,
+// since the files asked for dedupe;
 // nested fails closed the same way at boot too, for every tenant with
 // dedupe on, the next reload retrying, so it never costs the process.
 func (a *App) wirePebbleDedupe() error {

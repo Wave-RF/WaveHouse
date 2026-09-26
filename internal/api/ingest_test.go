@@ -2968,6 +2968,31 @@ func TestIngest_Dedup_ReserveError(t *testing.T) {
 	assert.Empty(t, pub.Published())
 }
 
+// A Reserve error caused by the request's own context ending (the client
+// gone, or its deadline past) is not a backend failure and must not log at
+// ERROR — an operator paging on ERROR logs would otherwise be woken by
+// clients that simply went away. TestIngest_Dedup_ReserveError above pins the
+// real-backend-failure case, which stays ERROR.
+func TestIngest_Dedup_ReserveError_ContextEnded_NotLoggedAsError(t *testing.T) {
+	buf := logtest.Capture(t, slog.LevelDebug)
+	pub := &testutil.MockPublisher{}
+	dedup := testutil.NewMockDeduplicator()
+	dedup.Err = errors.New("backend down")
+	h := dedupHandler(t, pub, dedup, false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"}).WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(req))
+
+	assert.Contains(t, buf.String(), "dedupe reserve failed", "still logged, just not at ERROR")
+	assert.NotContains(t, buf.String(), `"level":"ERROR"`, "a client-gone Reserve error must not page an operator")
+	assert.Contains(t, buf.String(), `"level":"DEBUG"`)
+	assert.Empty(t, pub.Published())
+}
+
 // #370: an explicit null id is a missing id — rejected under require_id,
 // published un-deduped otherwise — never the one id "<nil>" that made every
 // null record after the first a duplicate.

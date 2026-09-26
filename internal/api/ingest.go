@@ -835,7 +835,16 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 		slog.WarnContext(ctx, "dedupe store unavailable", "error", err, "table", table)
 		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "dedupe store unavailable", RetryAfter: "5"}
 	case err != nil:
-		slog.ErrorContext(ctx, "dedupe reserve failed", "error", err, "table", table)
+		if ctx.Err() != nil {
+			// The request's own context ended — the client is gone, or its
+			// deadline passed — while Reserve was in flight. Reserve wraps
+			// that as an ordinary error, but it is not a backend problem
+			// worth an operator's attention, and the response status below
+			// is moot: nothing is listening for it.
+			slog.DebugContext(ctx, "dedupe reserve failed: request context ended", "error", err, "table", table)
+		} else {
+			slog.ErrorContext(ctx, "dedupe reserve failed", "error", err, "table", table)
+		}
 		return &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
 	}
 	var held *dedupe.Key
