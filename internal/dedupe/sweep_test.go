@@ -173,14 +173,11 @@ func TestEmbedded_SweepReadRunsUnlocked(t *testing.T) {
 	require.NoError(t, b.Commit(pebble.NoSync))
 	require.NoError(t, e.db.Flush())
 
+	var visits int
 	var sawLocked bool
 	e.sweepReadHook = func() {
-		// TryLock from inside the still-running read needs no racing
-		// goroutine and no clock: on the same goroutine doing the read, it
-		// fails instead of blocking if commitMu is already held, so a
-		// regression that reads under the lock is caught while the read is
-		// still in progress — not inferred from a race won in time, and not
-		// missable by a lock released just before some later checkpoint.
+		visits++
+		// Non-blocking, on the reading goroutine: fails if the read holds commitMu.
 		if e.commitMu.TryLock() {
 			e.commitMu.Unlock()
 		} else {
@@ -191,6 +188,7 @@ func TestEmbedded_SweepReadRunsUnlocked(t *testing.T) {
 	res, err := e.sweep(context.Background(), e.db)
 	require.NoError(t, err)
 	assert.Equal(t, sweepResult{Version0: 1}, res)
+	assert.Positive(t, visits, "the read hook ran")
 	assert.False(t, sawLocked, "commitMu must be free while sweepCandidates' read is running")
 }
 
