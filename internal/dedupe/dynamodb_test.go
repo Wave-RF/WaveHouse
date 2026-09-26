@@ -16,6 +16,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -533,6 +534,22 @@ func TestDynamo_ThrottledCallEndsOnItsLastAttempt(t *testing.T) {
 		assert.Less(t, took, d.cfg.Timeout)
 	}
 	assert.Equal(t, int64(calls*d.cfg.MaxAttempts), h.puts.Load())
+}
+
+// The idle pool holds a connection for every call one Reserve can have in
+// flight, so a wide Reserve reuses them rather than dial; an HTTP client in
+// extra (TestDynamo_ThrottledCallEndsOnItsLastAttempt's) replaces it.
+func TestNewDynamo_SizesTheIdlePool(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int{0, 8, 200} {
+		d, err := NewDynamo(t.Context(), DynamoConfig{Table: "dedupe", Region: "us-east-1", ReserveConcurrency: n})
+		require.NoError(t, err)
+		client, ok := d.api.(*dynamodb.Client).Options().HTTPClient.(*awshttp.BuildableClient)
+		require.True(t, ok)
+		tr := client.GetTransport()
+		assert.GreaterOrEqual(t, tr.MaxIdleConnsPerHost, d.cfg.ReserveConcurrency, "ReserveConcurrency %d", n)
+		assert.GreaterOrEqual(t, tr.MaxIdleConns, d.cfg.ReserveConcurrency, "ReserveConcurrency %d", n)
+	}
 }
 
 func TestExpiresAt(t *testing.T) {

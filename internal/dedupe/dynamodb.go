@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"log/slog"
 	mathrand "math/rand/v2"
+	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -79,7 +81,8 @@ type DynamoConfig struct {
 	// the client after throttles.
 	RetryMode string
 	// ReserveConcurrency bounds the parallel calls one Reserve, Commit or
-	// Release makes. 0 = 64.
+	// Release makes, and sizes the client's idle connection pool to match.
+	// 0 = 64.
 	ReserveConcurrency int
 }
 
@@ -128,7 +131,7 @@ type Dynamo struct {
 
 // NewDynamo builds the backend over a client from the SDK's default config
 // chain. extra is appended to the chain's options (a test's static
-// credentials, say). It dials nothing: Check does.
+// credentials or HTTP client, say). It dials nothing: Check does.
 func NewDynamo(ctx context.Context, cfg DynamoConfig, extra ...func(*config.LoadOptions) error) (*Dynamo, error) {
 	if cfg.Table == "" {
 		return nil, errors.New("dedupe: dynamodb table is required")
@@ -138,7 +141,7 @@ func NewDynamo(ctx context.Context, cfg DynamoConfig, extra ...func(*config.Load
 	if err != nil {
 		return nil, err
 	}
-	opts := []func(*config.LoadOptions) error{config.WithRetryer(retryer)}
+	opts := []func(*config.LoadOptions) error{config.WithRetryer(retryer), config.WithHTTPClient(newHTTPClient(cfg))}
 	if cfg.Region != "" {
 		opts = append(opts, config.WithRegion(cfg.Region))
 	}
@@ -152,6 +155,16 @@ func NewDynamo(ctx context.Context, cfg DynamoConfig, extra ...func(*config.Load
 		}
 	})
 	return newDynamo(client, cfg), nil
+}
+
+// newHTTPClient keeps an idle connection for every call one Reserve can have
+// in flight: with the SDK's default of 10 per host, a wide Reserve would dial
+// most of its puts afresh.
+func newHTTPClient(cfg DynamoConfig) *awshttp.BuildableClient {
+	return awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+		tr.MaxIdleConnsPerHost = cfg.ReserveConcurrency
+		tr.MaxIdleConns = max(tr.MaxIdleConns, cfg.ReserveConcurrency)
+	})
 }
 
 func newRetryer(cfg DynamoConfig) (func() aws.Retryer, error) {
