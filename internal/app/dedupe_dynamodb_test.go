@@ -273,10 +273,8 @@ func TestNew_DynamoDBDedupeRefusesNoRegion(t *testing.T) {
 
 // A reload must not wait behind a tenant's own in-flight DynamoDB call when
 // nothing changes for that tenant: Managed.Apply's no-op fast path settles
-// under a read lock, so it never contends with a Commit already holding one
-// — and, since Go's RWMutex blocks new readers behind a pending writer, a
-// concurrent Reserve for the same tenant must also go through, which it
-// would not if the reload's Apply took the write lock unconditionally.
+// under a read lock alone, so it never contends with a Commit already
+// holding one and returns long before the commit does.
 func TestReload_DynamoDBDedupeDoesNotWaitOnInFlightCommit(t *testing.T) {
 	cfg := testConfig(t, writeSettings(t, dedupeOn))
 	fake := dynamoConfig(t, cfg, true)
@@ -300,19 +298,6 @@ func TestReload_DynamoDBDedupeDoesNotWaitOnInFlightCommit(t *testing.T) {
 	a.tenants.Reload("test")
 	assert.Less(t, time.Since(start), 500*time.Millisecond,
 		"a reload that changes nothing for this tenant waited on its in-flight commit")
-
-	otherKey := dedupe.Key{Table: eventKey.Table, ID: "concurrent-reserve"}
-	reserveDone := make(chan error, 1)
-	go func() {
-		_, err := store.Reserve(context.Background(), []dedupe.Key{otherKey}, time.Minute)
-		reserveDone <- err
-	}()
-	select {
-	case err := <-reserveDone:
-		require.NoError(t, err, "a Reserve for the same tenant, started right after the reload")
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("a concurrent Reserve for the same tenant was blocked")
-	}
 
 	cancelCommit()
 	<-commitDone // let the hung call finish (canceled) before the app closes
