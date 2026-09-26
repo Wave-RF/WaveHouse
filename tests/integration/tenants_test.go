@@ -20,6 +20,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/app"
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 )
 
 // TestNestedDirectory_PerTenantPoolsAndDiscovery boots the real wiring over
@@ -58,7 +59,7 @@ func TestNestedDirectory_PerTenantPoolsAndDiscovery(t *testing.T) {
 	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	cfg := &config.Config{
-		DataDir:    t.TempDir(),
+		DataDir:    storedir.New(t),
 		Server:     config.Server{ShutdownTimeout: 10},
 		ClickHouse: config.ClickHouse{Password: testCHPassword},
 		Auth:       config.Auth{OperatorKey: operatorKey},
