@@ -164,12 +164,12 @@ var nonMutationVerbs = map[string]struct{}{
 
 // containsMutationVerbAtTopLevel scans s for the statement-introducing
 // keyword at paren-depth 0, stepping over string literals and quoted
-// identifiers (skipQuoted), heredocs (skipHeredoc), parenthesized CTE
-// subqueries, and comments (skipComment). The CTE list contains ordinary
-// identifiers (CTE names, table/database names) that must not be matched as
-// mutation verbs — `system` would otherwise pattern-match `SYSTEM` and route a
-// `WITH … SELECT * FROM system.tables` read through `Exec` (silent empty-
-// array result instead of the actual rows). Two-part fix:
+// identifiers (skipQuoted, skipCurlyQuoted), heredocs (skipHeredoc),
+// parenthesized CTE subqueries, and comments (skipComment). The CTE list
+// contains ordinary identifiers (CTE names, table/database names) that must
+// not be matched as mutation verbs — `system` would otherwise pattern-match
+// `SYSTEM` and route a `WITH … SELECT * FROM system.tables` read through
+// `Exec` (silent empty-array result instead of the actual rows). Two-part fix:
 //
 //  1. Skip identifiers whose next non-whitespace, non-comment token is
 //     `AS` (case-insensitive) or `(` — those are CTE definition names
@@ -203,6 +203,14 @@ func containsMutationVerbAtTopLevel(s string) bool {
 			i++
 		case c == '\'' || c == '"' || c == '`':
 			i = skipQuoted(s, i)
+		case c == 0xE2:
+			// ‘…’ or “…”; any other character led by this byte is stepped
+			// over a byte at a time, like the default.
+			if j := skipCurlyQuoted(s, i); j > i {
+				i = j
+			} else {
+				i++
+			}
 		case c == '$':
 			// A heredoc, else a bareword led by `$` (never a keyword) or a
 			// lone `$`.
@@ -211,7 +219,9 @@ func containsMutationVerbAtTopLevel(s string) bool {
 			} else {
 				i = skipWord(s, i+1)
 			}
-		case (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'):
+		case isWordByte(c):
+			// A word led by a digit or `_` is read whole, so its tail is
+			// never taken for a keyword (`_delete`).
 			start := i
 			i = skipWord(s, i)
 			if depth == 0 {
@@ -238,7 +248,7 @@ func containsMutationVerbAtTopLevel(s string) bool {
 					return true
 				}
 			}
-		case c == '-' && i+1 < len(s) && s[i+1] == '-', c == '#', c == '/' && i+1 < len(s) && s[i+1] == '*':
+		case c == '-' && i+1 < len(s) && s[i+1] == '-', c == '#', c == '/' && i+1 < len(s) && (s[i+1] == '*' || s[i+1] == '/'):
 			i = skipComment(s, i)
 		default:
 			i++
@@ -341,12 +351,12 @@ func sqlSpaceLen(s string, i int) int {
 }
 
 // skipComment returns the index just past the comment starting at s[i], or i
-// if none starts there: `--` and MySQL-compat `#` to end of line, `/* … */`
-// nesting as ClickHouse's do. An unclosed block comment runs to the end, as
-// it does for ClickHouse, which then rejects the statement.
+// if none starts there: `--`, `//` and MySQL-compat `#` to end of line,
+// `/* … */` nesting as ClickHouse's do. An unclosed block comment runs to the
+// end, as it does for ClickHouse, which then rejects the statement.
 func skipComment(s string, i int) int {
 	switch {
-	case strings.HasPrefix(s[i:], "--"), s[i] == '#':
+	case strings.HasPrefix(s[i:], "--"), strings.HasPrefix(s[i:], "//"), s[i] == '#':
 		if j := strings.IndexByte(s[i:], '\n'); j >= 0 {
 			return i + j + 1
 		}
@@ -371,6 +381,27 @@ func skipComment(s string, i int) int {
 		return len(s)
 	}
 	return i
+}
+
+// skipCurlyQuoted returns the index just past a string literal in ‘…’ or a
+// quoted identifier in “…”, which ClickHouse reads so that SQL pasted from a
+// word processor parses, or i if none opens at s[i]. Nothing escapes inside
+// them; an unclosed one runs to the end.
+func skipCurlyQuoted(s string, i int) int {
+	var closer string
+	switch {
+	case strings.HasPrefix(s[i:], "\u2018"):
+		closer = "\u2019"
+	case strings.HasPrefix(s[i:], "\u201c"):
+		closer = "\u201d"
+	default:
+		return i
+	}
+	start := i + len(closer) // the opener is as long as its closer
+	if k := strings.Index(s[start:], closer); k >= 0 {
+		return start + k + len(closer)
+	}
+	return len(s)
 }
 
 // skipQuoted returns the index just past the string literal or quoted

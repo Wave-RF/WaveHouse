@@ -128,6 +128,21 @@ func TestIsMutation(t *testing.T) {
 		{"with tagged heredoc holding a paren and a verb then select", "WITH $x$ ) INSERT $x$ AS s SELECT s", false},
 		{"with CTE alias set$ (read)", "WITH set$ AS (SELECT 1 AS v) SELECT * FROM set$", false},
 
+		// A word led by `_` is one bareword, never a keyword's tail.
+		{"with alias _delete (read)", "WITH 1 AS _delete SELECT _delete", false},
+		{"with alias _set (read)", "WITH [1,2] AS _set SELECT has(_set, 1)", false},
+
+		// `//` starts a line comment.
+		{"slash comment then insert", "// note\nINSERT INTO t VALUES (1)", true},
+		{"slash comment hiding insert then select", "// INSERT\nSELECT 1", false},
+		{"with slash comment holding a paren then insert", "WITH x AS (SELECT 'a' AS s) // (\nINSERT INTO t SELECT * FROM x", true},
+
+		// ‘…’ is a string literal and “…” a quoted identifier; nothing escapes
+		// inside them.
+		{"with curly-quoted literal holding a paren then insert", "WITH x AS (SELECT \u2018(\u2019 AS s) INSERT INTO t SELECT s FROM x", true},
+		{"with curly-quoted literal holding a verb then select", "WITH x AS (SELECT \u2018) INSERT\u2019 AS s) SELECT s FROM x", false},
+		{"with curly-quoted identifier holding a paren then insert", "WITH x AS (SELECT 'q' AS \u201cc(d\u201d) INSERT INTO t SELECT * FROM x", true},
+
 		// ClickHouse's lexer skips \v, \f and Unicode spaces as whitespace
 		// (TestIsMutation_ClickHouseWhitespace covers the whole set).
 		{"leading form feed then insert", "\fINSERT INTO t VALUES (1)", true},

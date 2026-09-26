@@ -17,7 +17,7 @@ const { data } = await wh.pipe('top_pages', { start_date: '2026-01-01', limit: 5
 
 ### `.fetch(opts?)`
 
-Execute and return results. A [pipe that writes](/pipes#pipes-that-write) returns `[]`, and a failed one comes back `retryable: false`, which the SDK does not retry. Takes `PipeRequestOptions` — `{ signal }` only, narrower than the `.fetch(opts?)` on a [query builder](/sdk/queries), which also accepts `limit`. Passing a `limit` is a compile error rather than a silent no-op.
+Execute and return results. A [pipe that writes](/pipes#pipes-that-write) returns `[]`. A ClickHouse failure on one comes back `retryable: false`, and the SDK does not retry it; it does still retry a request whose answer never arrives, such as one on a dropped connection, so a write can run twice. If that matters, give the client that runs write pipes [`options.maxRetries`](/sdk#clientconfigdb) `0`. Takes `PipeRequestOptions` — `{ signal }` only, narrower than the `.fetch(opts?)` on a [query builder](/sdk/queries), which also accepts `limit`. Passing a `limit` is a compile error rather than a silent no-op.
 
 `limit` is typed `never` rather than left out, so the rejection also catches a value passed in a variable — leaving it out would only reject an inline object. That cuts both ways: a value *declared* as `RequestOptions` is rejected whether or not it actually carries a limit, since the type permits one. If you share one options object across calls, type it as `PipeRequestOptions` — the table and query-builder `.fetch()` accept that too — or inline `{ signal }` at the pipe call.
 
@@ -31,7 +31,7 @@ Open a live stream (see [Streaming](/sdk/streaming)).
 
 ## Pipes Admin — `wh.pipes`
 
-Inspect the adopted named query pipes. Requires the admin gate — the admin role (`policy.admin_role`) or the [operator key](/api#authentication). Pipes are defined in the server's settings directory `pipes.json` — files are the only write path, so there is no `set` or `delete`: edit the file and let the server pick it up, or call [`wh.settings.reload()`](/sdk/admin#settings--whsettings).
+Inspect the adopted named query pipes. Requires the admin gate — the admin role (`policy.admin_role`) or the [operator key](/api#authentication). Pipes are defined in the server's settings directory `pipes.json` — the files are the only way to define or change a pipe, so there is no `set` or `delete`: edit the file and let the server pick it up, or call [`wh.settings.reload()`](/sdk/admin#settings--whsettings).
 
 ```ts
 // List all pipes
