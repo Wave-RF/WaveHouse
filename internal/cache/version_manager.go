@@ -76,8 +76,8 @@ func (vm *VersionManager) NamespaceKey(ns Namespace) string {
 // version and every dependency's namespace key AND its namespace version, so
 // a bump of the tenant or of any dependency misses the key — a result with no
 // deps (a pipe) is orphaned by BumpTenant too. A structured query passes one
-// Namespace; a pipe passes several. Deps are sorted so their order never
-// changes the key. The key nests two levels: the escaped sha and the
+// Namespace; a pipe passes none yet (#343). Deps are sorted so their order
+// never changes the key. The key nests two levels: the escaped sha and the
 // '.'-joined tenant and dependency segments, separated by '|', which no
 // escaped field or '.' join ever holds.
 func (vm *VersionManager) QueryKey(id tenant.ID, sha string, deps []Namespace) string {
