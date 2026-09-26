@@ -119,10 +119,24 @@ func chFailureOf(err error, unknownStatus int, caps queryCaps) chFailure {
 // it is WaveHouse's configuration being refused, which an operator should
 // hear about even when the caller only sees a 403.
 func writeCHError(w http.ResponseWriter, r *http.Request, err error, message string, unknownStatus int, caps queryCaps) {
-	f := chFailureOf(err, unknownStatus, caps)
+	writeCHFailure(w, r, err, message, chFailureOf(err, unknownStatus, caps))
+}
+
+// writeCHWriteError answers a failed write pipe as writeCHError does, but
+// never as retryable and with no Retry-After: the statement may have reached
+// ClickHouse and run, so a client retrying would run it again.
+func writeCHWriteError(w http.ResponseWriter, r *http.Request, err error, message string) {
+	f := chFailureOf(err, http.StatusInternalServerError, queryCaps{})
+	f.retryable = false
+	writeCHFailure(w, r, err, message, f)
+}
+
+func writeCHFailure(w http.ResponseWriter, r *http.Request, err error, message string, f chFailure) {
 	switch f.code {
 	case codeCHUnavailable:
-		w.Header().Set("Retry-After", retryAfterClickHouse)
+		if f.retryable {
+			w.Header().Set("Retry-After", retryAfterClickHouse)
+		}
 	case codeCHAccessDenied, codeCHMisconfigured:
 		exCode, _ := chconn.ExceptionCode(err)
 		slog.WarnContext(r.Context(), "clickhouse refused WaveHouse's configuration",

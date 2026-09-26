@@ -135,6 +135,15 @@ func TestClickHouseRoutes_NoPoolIs503(t *testing.T) {
 		h.Execute(w, withTenant(pipesRequest(t, http.MethodGet, "/v1/pipes/top_pages", "top_pages", nil)))
 		assertUnavailable(t, w, noConnectionMessage, retryAfterPool)
 	})
+	// A write that never reached ClickHouse cannot have run, so this 503
+	// keeps its Retry-After where a failed write's answer drops it.
+	t.Run("write pipe execute", func(t *testing.T) {
+		t.Parallel()
+		h := NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "log", SQL: "INSERT INTO audit_log VALUES (1)", AllowedRoles: []string{"viewer"}}), allowAll, noConn, nil, noTimeout)
+		w := httptest.NewRecorder()
+		h.Execute(w, withTenant(pipesRequest(t, http.MethodGet, "/v1/pipes/log", "log", nil)))
+		assertUnavailable(t, w, noConnectionMessage, retryAfterPool)
+	})
 	t.Run("raw-SQL proxy", func(t *testing.T) {
 		t.Parallel()
 		h := newTestQueryHandler(func(*settings.Store) chconn.Target { return chconn.Target{} }, noTimeout)

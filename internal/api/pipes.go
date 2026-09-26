@@ -223,7 +223,7 @@ func (h *PipesHandler) executeWrite(w http.ResponseWriter, r *http.Request, stor
 	}
 	data, _, err := h.run(r.Context(), store, conn, sql, params)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		writeCHWriteError(w, r, err, err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

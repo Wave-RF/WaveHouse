@@ -517,13 +517,14 @@ func TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed(t *testing.T) {
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }
 
-// writeConn counts Exec and Query calls. With gate set, every Exec reports
-// itself on entered and holds until gate is closed, so a test can hold
-// requests in flight together.
+// writeConn counts Exec and Query calls, and every Exec returns err. With
+// gate set, every Exec reports itself on entered and holds until gate is
+// closed, so a test can hold requests in flight together.
 type writeConn struct {
 	driver.Conn
 	execs, queries atomic.Int32
 	entered, gate  chan struct{}
+	err            error
 }
 
 func (c *writeConn) Exec(context.Context, string, ...any) error {
@@ -532,7 +533,7 @@ func (c *writeConn) Exec(context.Context, string, ...any) error {
 		c.entered <- struct{}{}
 		<-c.gate
 	}
-	return nil
+	return c.err
 }
 
 func (c *writeConn) Query(context.Context, string, ...any) (driver.Rows, error) {
