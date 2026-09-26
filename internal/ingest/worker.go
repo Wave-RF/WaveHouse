@@ -910,7 +910,9 @@ func (w *IngestWorker) invalidate(ctx context.Context, id tenant.ID, tableName s
 	}
 	invCtx := trace.ContextWithSpanContext(context.WithoutCancel(ctx), trace.SpanContextFromContext(ctx))
 	if _, err := w.cache.Invalidate(invCtx, namespaces); err != nil {
-		slog.ErrorContext(invCtx, "failed to invalidate cache after insert - your cache is holding stale data now!", "tenant", id, "table", tableName, "error", err)
+		// WARN, not ERROR: a shared backend defers and retries the bump, and
+		// an outage would otherwise log an ERROR for every batch.
+		slog.WarnContext(invCtx, "cache invalidation after insert did not land; the table's cached results may be stale until it does", "tenant", id, "table", tableName, "error", err)
 	}
 }
 
