@@ -191,9 +191,10 @@ func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 // rejected, removed, or one no pool could be opened for, such as by the
 // connection ceiling — is out of the fan-out, and its cache is orphaned
 // when it gets one (wireClickHouse, Cache.InvalidateTenant), so a folder
-// repaired or restored inside a TTL never serves pre-insert rows; a pipe
-// result names no table, so no insert invalidates it and between those it
-// stays until its TTL expires (#343).
+// repaired or restored inside a TTL never serves pre-insert rows. That also
+// drops the tenant's cached pipe results; apart from it a pipe result stays
+// until its TTL expires, since a pipe names no table and no insert
+// invalidates it (#343).
 type sharedTables struct {
 	cache.Cache
 	sharing func(tenant.ID) []tenant.ID

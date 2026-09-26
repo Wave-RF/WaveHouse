@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type fakeClock struct{ t time.Time }
@@ -56,4 +57,41 @@ func TestBreaker(t *testing.T) {
 	ok, probe = allow()
 	assert.True(t, ok)
 	assert.False(t, probe)
+}
+
+// A reply refusing the work opens the breaker at once, and only the probe's
+// success closes it: a call that set out before it opened proves nothing.
+func TestBreaker_TripAndProbeSchedule(t *testing.T) {
+	t.Parallel()
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	b := newBreaker(100, 5*time.Second, clock.now)
+	_, open := b.untilProbe()
+	assert.False(t, open)
+
+	b.trip()
+	assert.True(t, b.isOpen(), "no threshold for a refusal")
+	b.success()
+	assert.True(t, b.isOpen(), "a success that is not the probe's leaves it open")
+	d, open := b.untilProbe()
+	assert.True(t, open)
+	assert.Equal(t, 5*time.Second, d)
+
+	clock.t = clock.t.Add(2 * time.Second)
+	d, _ = b.untilProbe()
+	assert.Equal(t, 3*time.Second, d)
+
+	clock.t = clock.t.Add(3 * time.Second)
+	_, probe := b.allow()
+	require.True(t, probe)
+	d, _ = b.untilProbe()
+	assert.Equal(t, 5*time.Second, d, "while the probe runs, wait out a whole period")
+	b.trip() // the probe was refused too
+	d, _ = b.untilProbe()
+	assert.Equal(t, 5*time.Second, d)
+
+	clock.t = clock.t.Add(5 * time.Second)
+	_, probe = b.allow()
+	require.True(t, probe)
+	b.success()
+	assert.False(t, b.isOpen())
 }

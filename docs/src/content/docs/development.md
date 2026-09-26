@@ -16,7 +16,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **Go** | 1.26+ (matches `go.mod`) | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
 | **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
-| **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse via testcontainers (no compose file) | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
+| **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse via testcontainers (no compose file), and the integration suite also starts Redis, Valkey, Dragonfly (pulled from `docker.dragonflydb.io`) and a one-node Redis Cluster for the shared cache backend | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
 | **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
@@ -345,7 +345,7 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 | E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
 
 - **Unit tests** live beside the code they test (e.g., `internal/discovery/discovery_test.go`). They use mocks or embedded NATS (in-process, no Docker needed).
-- **Integration tests** use the `//go:build integration` build tag. `TestMain` starts one ClickHouse testcontainer and boots the production wiring against it through `app.New` (embedded NATS, ingest worker, sweeper, hub, the API server on a random loopback port); tests reach it via `env(t)` and create their own tables. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second ingest worker batch window.
+- **Integration tests** use the `//go:build integration` build tag. In `tests/integration`, `TestMain` starts one ClickHouse testcontainer and boots the production wiring against it through `app.New` (embedded NATS, ingest worker, sweeper, hub, the API server on a random loopback port); tests reach it via `env(t)` and create their own tables. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second ingest worker batch window. `internal/cache`'s integration tests start their own containers instead — Redis, Valkey, Dragonfly and a one-node Redis Cluster — for the shared backend.
 
 Shared test utilities live in `internal/testutil/`. The packages log through `slog.Default()`, so tests reach log output through `internal/testutil/logtest`: `logtest.Silence()` in a package's `TestMain` discards it, and `logtest.Capture(t, level)` routes it to a buffer for a test that asserts on log lines — such a test must not call `t.Parallel()`, because the default logger is process-wide.
 
@@ -454,7 +454,7 @@ WaveHouse/
 │   ├── api/                # HTTP handlers, router, middleware
 │   ├── app/                # Process wiring (build every component, run under one errgroup, release in reverse)
 │   ├── auth/               # JWT/JWKS authentication middleware
-│   ├── cache/              # Query cache: Ristretto L1 + the tenant-led version index, or shared (Redis-compatible)
+│   ├── cache/              # Query cache: Ristretto L1 + the tenant-led version index; the Redis-compatible shared backend
 │   ├── chconn/             # ClickHouse pools, one per connection tuple (reconciled on settings reload)
 │   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration
@@ -462,7 +462,7 @@ WaveHouse/
 │   ├── dedupe/             # Optional deduplication (Pebble)
 │   ├── discovery/          # ClickHouse schema introspection + validation
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
-│   ├── keyenc/             # One escaping for composite keys (NATS subject tokens, cache namespace tokens)
+│   ├── keyenc/             # One escaping for composite keys (NATS subject tokens, cache keys)
 │   ├── mq/                 # MQ boundary: the only NATS/JetStream importer
 │   ├── observability/      # OpenTelemetry pipeline (traces/metrics/logs + Prometheus)
 │   ├── pipes/              # Named query pipes (types + parameter binding)

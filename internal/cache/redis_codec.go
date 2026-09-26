@@ -13,6 +13,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/Wave-RF/WaveHouse/internal/keyenc"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
@@ -24,6 +25,8 @@ const tokenLen = 8
 // decodedFactor bounds a value's decompressed size at this multiple of the
 // stored-size limit, refusing a zip bomb planted in a shared server.
 const decodedFactor = 8
+
+const encoderWindow = 1 << 20
 
 // Value layout: format, flags, expires-at (unix ms), token count, tokens,
 // payload. Big-endian.
@@ -44,17 +47,31 @@ func newToken() []byte {
 
 // tenantTokenKey is the key of tenant id's token. Every token key carries
 // the tenant as a hash tag, so all of a tenant's tokens share one cluster
-// slot and a lookup reads them with one MGET.
+// slot and a lookup reads them with one MGET. The tenant goes in verbatim:
+// its grammar is keyenc's kept bytes, so it is its own escaped form.
 func tenantTokenKey(prefix string, id tenant.ID) string {
 	return prefix + ":{" + string(id) + "}:T"
 }
 
+// tableTokenKey and scopeTokenKey take raw names and escape them after the
+// fixed prefix (keyenc), so no ':' in a name reads as the separator.
+//
+// Their layout is a protocol between builds: every process on the server
+// reads and bumps these keys for itself, so two builds that lay them out
+// differently — a change here, or to what keyenc keeps — split them, and one
+// build's bumps miss the entries the other filed, which are served until
+// their TTL for the whole rolling deploy. Such a change needs the new build
+// to read and bump both layouts (fold the old tokens into what it files)
+// until no old build is left, a later build dropping the old; or an upgrade
+// that never runs two builds against the server at once. The tenant token,
+// placed verbatim, stays shared; a valueKey change only orphans values,
+// which is safe to roll.
 func tableTokenKey(prefix string, id tenant.ID, table string) string {
-	return prefix + ":{" + string(id) + "}:B:" + table
+	return string(keyenc.AppendJoin([]byte(prefix+":{"+string(id)+"}:B:"), ':', table))
 }
 
 func scopeTokenKey(prefix string, id tenant.ID, table, scope string) string {
-	return prefix + ":{" + string(id) + "}:S:" + table + ":" + scope
+	return string(keyenc.AppendJoin([]byte(prefix+":{"+string(id)+"}:S:"), ':', table, scope))
 }
 
 // sortedDeps returns deps in canonical order without duplicates.
@@ -91,22 +108,28 @@ func bumpKeys(prefix string, ns Namespace) []string {
 
 // valueKey names the entry for sha over deps. It carries no versions, so a
 // refill overwrites in place, and no hash tag, so one tenant's values spread
-// across a cluster's shards.
+// across a cluster's shards. It hashes the escaped sha and each dep's
+// escaped, joined table and scope, each ended by a NUL, which escaping never
+// writes, so no two sets of names hash the same input.
 func valueKey(prefix string, id tenant.ID, sha string, deps []Namespace) string {
 	h := sha256.New()
-	h.Write([]byte(sha))
-	h.Write([]byte{0})
+	b := keyenc.AppendEscape(nil, sha)
+	h.Write(append(b, 0))
 	for _, d := range sortedDeps(deps) {
-		h.Write([]byte(d.Table))
-		h.Write([]byte{0})
-		h.Write([]byte(d.Scope))
-		h.Write([]byte{0})
+		b = keyenc.AppendJoin(b[:0], ':', d.Table, d.Scope)
+		h.Write(append(b, 0))
 	}
 	return prefix + ":q:" + string(id) + ":" + hex.EncodeToString(h.Sum(nil))
 }
 
 // codec compresses and frames values. Its zstd encoder and decoder are safe
 // for concurrent EncodeAll/DecodeAll.
+//
+// The encoder keeps one window-sized history per concurrent caller for the
+// life of the process; 1 MiB, not SpeedFastest's 4, cuts that about
+// threefold at no measurable cost in speed or ratio on row payloads. The
+// decoder takes any window up to maxDecoded, so a value written with a
+// larger one still reads.
 type codec struct {
 	enc         *zstd.Encoder
 	dec         *zstd.Decoder
@@ -115,7 +138,7 @@ type codec struct {
 }
 
 func newCodec(compressMin, maxDecoded int) (*codec, error) {
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithWindowSize(encoderWindow))
 	if err != nil {
 		return nil, err
 	}

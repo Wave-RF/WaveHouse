@@ -1,11 +1,12 @@
 package cache
 
 import (
-	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/Wave-RF/WaveHouse/internal/keyenc"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
@@ -51,7 +52,10 @@ type tableVersions struct {
 
 // Namespace is one (tenant, table, scope) a cached result depends on. The
 // tenant leads every key built from it, so the same table under two tenants
-// is two namespaces, versioned and bumped apart (#583 story 8).
+// is two namespaces, versioned and bumped apart (#583 story 8). Table and
+// Scope are raw names: the cache escapes them where it builds a key
+// (keyenc), so no caller escapes and no separator in a name can run two
+// fields together.
 type Namespace struct {
 	Tenant tenant.ID
 	Table  string
@@ -69,8 +73,10 @@ func NewVersionManager() *VersionManager {
 // versions, so a bump of the tenant or of any dependency misses the key — a
 // result with no deps (a pipe) is orphaned by BumpTenant too. A structured
 // query passes one Namespace, a pipe none yet (#343). Deps are sorted so
-// their order never changes the key. Every version is read under one lock,
-// so the key is one consistent snapshot.
+// their order never changes the key, and every version is read under one
+// lock, so the key is one consistent snapshot. The key nests two levels:
+// the escaped sha and the '.'-joined tenant and dependency segments,
+// separated by '|', which no escaped field or '.' join ever holds.
 //
 // The first key built for a tenant creates its index at a fresh generation.
 func (vm *VersionManager) QueryKey(id tenant.ID, sha string, deps []Namespace) string {
@@ -111,10 +117,10 @@ func (vm *VersionManager) queryKeyLocked(id tenant.ID, sha string, deps []Namesp
 		if t := tv.tables[d.Table]; t != nil {
 			table, scope = t.version, t.scopes[d.Scope]
 		}
-		segs[i] = fmt.Sprintf("%s.%d.%s.%d.%s.%d", d.Tenant, tv.gen, d.Table, table, d.Scope, scope)
+		segs[i] = keyenc.Join('.', string(d.Tenant), strconv.FormatUint(tv.gen, 10), d.Table, strconv.FormatUint(table, 10), d.Scope, strconv.FormatUint(scope, 10))
 	}
 	sort.Strings(segs)
-	return fmt.Sprintf("%s|%s.%d|%s", sha, id, own.gen, strings.Join(segs, "|")), true
+	return keyenc.Escape(sha) + "|" + keyenc.Join('.', string(id), strconv.FormatUint(own.gen, 10)) + "|" + strings.Join(segs, "|"), true
 }
 
 func (vm *VersionManager) newTenantLocked(id tenant.ID) *tenantVersions {

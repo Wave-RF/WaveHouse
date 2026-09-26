@@ -684,8 +684,8 @@ func TestSharedTables_InvalidatesTheTenantsSharingTheTables(t *testing.T) {
 
 // A tenant back on a pool after an absence — its folder rejected, then
 // repaired; removed, then restored — was out of the fan-out while away, so
-// the wiring orphans its table-keyed cache as it comes back; a tenant that stayed
-// is never touched, and a reload that changes nothing bumps nobody.
+// the wiring orphans its cache as it comes back; a tenant that stayed is
+// never touched, and a reload that changes nothing bumps nobody.
 func TestReload_ReadmittedTenantCacheIsOrphaned(t *testing.T) {
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
 	a := newApp(t, testConfig(t, root), Options{})
@@ -699,7 +699,7 @@ func TestReload_ReadmittedTenantCacheIsOrphaned(t *testing.T) {
 
 	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
 	a.tenants.Reload("test")
-	assert.Empty(t, mock.GetTenants(), "a rejection releases; it orphans nothing yet")
+	assert.Empty(t, mock.GetTenants(), "a rejection calls no InvalidateTenant (Prune drops its index)")
 	rewriteSettings(t, filepath.Join(root, "globex"), nil)
 	_, adopted = a.tenants.Reload("test")
 	require.True(t, adopted)
@@ -740,6 +740,9 @@ func (p *pruneRecorder) last() map[tenant.ID]bool {
 func TestReload_PrunesCacheIndexToServedTenants(t *testing.T) {
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
 	a := newApp(t, testConfig(t, root), Options{})
+	_, ok := a.cache.(pruner)
+	require.True(t, ok, "the wired cache prunes")
+
 	rec := &pruneRecorder{}
 	a.cache = rec
 

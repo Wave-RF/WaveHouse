@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
@@ -64,6 +65,13 @@ var cachedRoutes = []struct{ name, path, body string }{
 // clicks.page and run top_pages.
 func cachedRouter(t *testing.T, tenants *settings.Registry, conn driver.Conn, c cache.Cache) http.Handler {
 	t.Helper()
+	return cachedRouterOver(t, tenants, fixedConn(conn), c)
+}
+
+// cachedRouterOver is cachedRouter with the tenant's connection chosen per
+// request by connFor.
+func cachedRouterOver(t *testing.T, tenants *settings.Registry, connFor func(*settings.Store) driver.Conn, c cache.Cache) http.Handler {
+	t.Helper()
 	reg := testRegistry(t)
 	viewer := staticPolicy(&policy.Policy{
 		DefaultRole: "viewer",
@@ -73,8 +81,8 @@ func cachedRouter(t *testing.T, tenants *settings.Registry, conn driver.Conn, c 
 	return NewRouter(Dependencies{
 		Tenants:         tenants,
 		Ingest:          NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
-		StructuredQuery: NewStructuredQueryHandler(fixedConn(conn), c, fixedRegistry(reg), viewer, func(*settings.Store) int { return 60 }, timeout, nil),
-		Pipes:           NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), viewer, fixedConn(conn), c, timeout),
+		StructuredQuery: NewStructuredQueryHandler(connFor, c, fixedRegistry(reg), viewer, func(*settings.Store) int { return 60 }, timeout, nil),
+		Pipes:           NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), viewer, connFor, c, timeout),
 		Query:           &QueryHandler{},
 		SSE:             NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:          &HealthHandler{},
@@ -228,7 +236,7 @@ func (c *bumpingConn) Query(context.Context, string, ...any) (driver.Rows, error
 func TestCachedRoutes_BumpDuringQueryOrphansTheFill(t *testing.T) {
 	bumps := map[string]func(ctx context.Context, c cache.Cache) error{
 		"structured query": func(ctx context.Context, c cache.Cache) error {
-			_, err := c.Invalidate(ctx, []cache.Namespace{{Tenant: tenant.Default, Table: query.SafeEncodeToken("clicks")}})
+			_, err := c.Invalidate(ctx, []cache.Namespace{{Tenant: tenant.Default, Table: "clicks"}})
 			return err
 		},
 		"pipe execute": func(ctx context.Context, c cache.Cache) error { return c.InvalidateTenant(ctx, tenant.Default) },
@@ -251,5 +259,85 @@ func TestCachedRoutes_BumpDuringQueryOrphansTheFill(t *testing.T) {
 			assert.Equal(t, "HIT", xcache())
 			assert.Equal(t, int32(2), conn.queries.Load())
 		})
+	}
+}
+
+// The snapshot is taken before the tenant's pool is chosen. A reload that
+// moves the tenant to another address or database — Pools.Reconcile, then
+// InvalidateTenant — landing between the two leaves the request on the old
+// pool: its fill, read from the old database, is orphaned by the bump rather
+// than filed as fresh under the new tenant version. And a tenant on no pool is a 503 even when its
+// Lookup hit (#583 story 6).
+func TestCachedRoutes_ReloadAsThePoolIsTakenOrphansTheFill(t *testing.T) {
+	for _, route := range cachedRoutes {
+		t.Run(route.name, func(t *testing.T) {
+			l1, err := cache.NewLocal(1 << 20)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = l1.Close() })
+			conn := &countingConn{}
+			var taken atomic.Int32
+			var noPool atomic.Bool
+			connFor := func(*settings.Store) driver.Conn {
+				if noPool.Load() {
+					return nil
+				}
+				if taken.Add(1) == 1 {
+					require.NoError(t, l1.InvalidateTenant(t.Context(), tenant.Default))
+				}
+				return conn
+			}
+			router := cachedRouterOver(t, testTenants(), connFor, l1)
+			xcache := func() string {
+				w := serveAs(t, router, route.path, route.body, "")
+				require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+				l1.Wait()
+				return w.Header().Get("X-Cache")
+			}
+			assert.Equal(t, "MISS", xcache())
+			assert.Equal(t, "MISS", xcache(), "the fill of a query on the pool a reload replaced is orphaned")
+			assert.Equal(t, "HIT", xcache())
+			assert.Equal(t, int32(2), conn.queries.Load())
+
+			noPool.Store(true)
+			w := serveAs(t, router, route.path, route.body, "")
+			assertUnavailable(t, w, noConnectionMessage, retryAfterPool)
+		})
+	}
+}
+
+// A structured query files its result under the table as the request names
+// it, raw — the namespace the ingest worker bumps after an insert into that
+// table (ingest's TestFlushTable_BumpsWhatTheReadFiles) — and the cache
+// escapes both, so a name holding a dot or a space is served from the cache
+// and orphaned by an insert like any other.
+func TestStructuredQuery_RawTableNameMeetsTheInsertsBump(t *testing.T) {
+	t.Parallel()
+	tables := []string{"default.clicks", "my table"}
+	schemas := make([]*discovery.TableSchema, 0, len(tables))
+	grants := make(map[string]policy.TablePolicy, len(tables))
+	for _, name := range tables {
+		schemas = append(schemas, &discovery.TableSchema{Name: name, Columns: []discovery.Column{{Name: "page", Type: "String"}}})
+		grants[name] = policy.TablePolicy{"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}}
+	}
+	l1, err := cache.NewLocal(1 << 20)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l1.Close() })
+	h := NewStructuredQueryHandler(fixedConn(&countingConn{}), l1, fixedRegistry(testutil.NewTestSchemaRegistry(t, schemas)),
+		staticPolicy(&policy.Policy{DefaultRole: "viewer", Tables: grants}), func(*settings.Store) int { return 60 },
+		func(*settings.Store) time.Duration { return 5 * time.Second }, nil)
+
+	for _, table := range tables {
+		xcache := func() string {
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(structuredQueryRequest(t, table, query.StructuredQuery{SelectAll: true})))
+			require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+			l1.Wait()
+			return w.Header().Get("X-Cache")
+		}
+		assert.Equal(t, "MISS", xcache(), table)
+		assert.Equal(t, "HIT", xcache(), table)
+		_, err := l1.Invalidate(t.Context(), []cache.Namespace{{Tenant: tenant.Default, Table: table}})
+		require.NoError(t, err)
+		assert.Equal(t, "MISS", xcache(), "%s: the insert's bump orphans the cached result", table)
 	}
 }

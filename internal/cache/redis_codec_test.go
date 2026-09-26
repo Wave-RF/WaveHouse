@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,6 +28,11 @@ func TestTokenKeys(t *testing.T) {
 			"a scopeless dep reads the whole-table view",
 			[]Namespace{{Tenant: "acme", Table: "events"}},
 			[]string{"wh:{acme}:T", "wh:{acme}:B:events", "wh:{acme}:S:events:"},
+		},
+		{
+			"names arrive raw and are escaped after the hash tag",
+			[]Namespace{{Tenant: "acme", Table: "default.clicks", Scope: "org:1"}},
+			[]string{"wh:{acme}:T", "wh:{acme}:B:default%2Eclicks", "wh:{acme}:S:default%2Eclicks:org%3A1"},
 		},
 		{
 			"shared table tokens and duplicate deps appear once, sorted",
@@ -55,13 +61,26 @@ func TestBumpKeys(t *testing.T) {
 	assert.Equal(t, []string{"p:{acme}:B:events"}, bumpKeys("p", Namespace{Tenant: "acme", Table: "events"}))
 	assert.Equal(t, []string{"p:{acme}:S:events:org_1", "p:{acme}:S:events:"},
 		bumpKeys("p", Namespace{Tenant: "acme", Table: "events", Scope: "org_1"}))
+	assert.Equal(t, []string{"p:{acme}:S:my%20table:a%3Ab", "p:{acme}:S:my%20table:"},
+		bumpKeys("p", Namespace{Tenant: "acme", Table: "my table", Scope: "a:b"}))
+
+	// A ':' in a name never reads as the separator: table "a:b" with scope
+	// "c" and table "a" with scope "b:c" bump two tokens.
+	assert.NotEqual(t,
+		bumpKeys("p", Namespace{Tenant: "acme", Table: "a:b", Scope: "c"}),
+		bumpKeys("p", Namespace{Tenant: "acme", Table: "a", Scope: "b:c"}))
 }
 
 // Every key a bump writes is one some lookup reads: otherwise the bump
 // orphans nothing.
 func TestBumpKeysAreReadByLookups(t *testing.T) {
 	t.Parallel()
-	for _, ns := range []Namespace{{Tenant: "acme", Table: "events"}, {Tenant: "acme", Table: "events", Scope: "org_1"}} {
+	for _, ns := range []Namespace{
+		{Tenant: "acme", Table: "events"},
+		{Tenant: "acme", Table: "events", Scope: "org_1"},
+		{Tenant: "acme", Table: "default.clicks"},
+		{Tenant: "acme", Table: "my table", Scope: "org:1"},
+	} {
 		read := map[string]bool{}
 		for _, scope := range []string{"", ns.Scope} {
 			for _, k := range tokenKeys("wh", "acme", []Namespace{{Tenant: "acme", Table: ns.Table, Scope: scope}}) {
@@ -83,9 +102,16 @@ func TestValueKey(t *testing.T) {
 	assert.Equal(t, k, valueKey("wh", "acme", "acme:query:abc", []Namespace{b, a, b}), "order and duplicates do not matter")
 	assert.NotEqual(t, k, valueKey("wh", "acme", "acme:query:abc", []Namespace{a}))
 	assert.NotEqual(t, k, valueKey("wh", "acme", "acme:query:abd", []Namespace{a, b}))
-	assert.NotEqual(t,
-		valueKey("wh", "acme", "q", []Namespace{{Tenant: "acme", Table: "ab", Scope: "c"}}),
-		valueKey("wh", "acme", "q", []Namespace{{Tenant: "acme", Table: "a", Scope: "bc"}}))
+	// Names that would run together unescaped hash apart: at the table and
+	// scope boundary, at a NUL, and across dependencies.
+	for _, pair := range [][2][]Namespace{
+		{{{Tenant: "acme", Table: "ab", Scope: "c"}}, {{Tenant: "acme", Table: "a", Scope: "bc"}}},
+		{{{Tenant: "acme", Table: "a\x00b"}}, {{Tenant: "acme", Table: "a", Scope: "b\x00"}}},
+		{{{Tenant: "acme", Table: "a:b"}}, {{Tenant: "acme", Table: "a", Scope: "b"}}},
+		{{{Tenant: "acme", Table: "a"}, {Tenant: "acme", Table: "b"}}, {{Tenant: "acme", Table: "a", Scope: "\x00b\x00"}}},
+	} {
+		assert.NotEqual(t, valueKey("wh", "acme", "q", pair[0]), valueKey("wh", "acme", "q", pair[1]), "%q", pair)
+	}
 }
 
 func newTestCodec(t *testing.T, compressMin, maxDecoded int) *codec {
@@ -164,6 +190,40 @@ func TestCodec_RefusesBadValues(t *testing.T) {
 			_, _, _, err := c.decode(tt.b)
 			require.ErrorIs(t, err, errCorruptValue)
 		})
+	}
+}
+
+// The encoder's window bounds the history it keeps per concurrent caller,
+// and a value an encoder with a wider one wrote (an earlier build's) still
+// decodes.
+func TestCodec_EncoderWindow(t *testing.T) {
+	t.Parallel()
+	window := func(t *testing.T, b []byte) uint64 {
+		t.Helper()
+		var h zstd.Header
+		require.NoError(t, h.Decode(b[headerLen:]))
+		if h.SingleSegment {
+			return h.FrameContentSize
+		}
+		return h.WindowSize
+	}
+	c := newTestCodec(t, 1, 8<<20)
+	wide, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = wide.Close() })
+	earlier := &codec{enc: wide, compressMin: 1}
+
+	for _, n := range []int{2 << 20, 6 << 20} {
+		payload := bytes.Repeat([]byte(`{"user_id":"u-1","event":"click","value":42.5},`), n/48)
+		b := c.encode(nil, time.Now(), payload)
+		require.Equal(t, byte(flagZstd), b[1])
+		assert.LessOrEqual(t, window(t, b), uint64(encoderWindow), n)
+
+		b = earlier.encode(nil, time.Now(), payload)
+		require.Greater(t, window(t, b), uint64(encoderWindow), n)
+		_, _, got, err := c.decode(b)
+		require.NoError(t, err, n)
+		assert.Equal(t, payload, got, n)
 	}
 }
 

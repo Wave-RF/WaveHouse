@@ -26,6 +26,11 @@ type Options struct {
 	// NewPair returns two instances over one shared store, as two processes
 	// see it; nil skips the cross-instance cases.
 	NewPair func(t *testing.T) (a, b cache.Cache)
+
+	// Entries counts the entries a cache from the factory holds. No Lookup
+	// reads the key a zero Snapshot would land under, so only a count shows
+	// that one stored nothing; nil skips that case.
+	Entries func(c cache.Cache) int
 }
 
 // Run runs the suite, each case on a fresh cache from newCache.
@@ -40,12 +45,14 @@ func Run(t *testing.T, newCache func(t *testing.T) cache.Cache, opts Options) {
 		{"overwrite", testOverwrite},
 		{"ttl expiry", testTTLExpiry},
 		{"non-positive ttl stores nothing", testNonPositiveTTL},
-		{"zero snapshot stores nothing", testZeroSnapshot},
+		{"zero snapshot stores nothing", func(t *testing.T, c cache.Cache) { testZeroSnapshot(t, c, opts.Entries) }},
 		{"deps order does not matter", testDepsOrder},
 		{"deps are part of the key", testDepsKeyed},
 		{"tenant isolation", testTenantIsolation},
 		{"foreign dependency refused", testForeignDependency},
 		{"scope lattice", testScopeLattice},
+		{"raw names read and bump alike", testRawNames},
+		{"names never run together", testNamesApart},
 		{"invalidate counts namespaces", testInvalidateCount},
 		{"invalidate tenant orphans queries and pipes", testInvalidateTenant},
 		{"bump during the query orphans the fill", testBumpDuringQuery},
@@ -167,10 +174,17 @@ func testNonPositiveTTL(t *testing.T, c cache.Cache) {
 	}
 }
 
-func testZeroSnapshot(t *testing.T, c cache.Cache) {
+// A zero Snapshot — what a failed Lookup returns — stores nothing, and is not
+// an error. The fill after it proves the count sees what Set stores.
+func testZeroSnapshot(t *testing.T, c cache.Cache, entries func(cache.Cache) int) {
 	require.NoError(t, c.Set(context.Background(), cache.Snapshot{}, []byte("rows"), ttl))
 	settle(c)
-	assertMiss(t, c, acme, "")
+	if entries == nil {
+		t.Skip("the backend has no Options.Entries")
+	}
+	assert.Zero(t, entries(c))
+	fill(t, c, acme, "q", "rows")
+	assert.Equal(t, 1, entries(c))
 }
 
 func testDepsOrder(t *testing.T, c cache.Cache) {
@@ -208,16 +222,14 @@ func testTenantIsolation(t *testing.T, c cache.Cache) {
 }
 
 // Every version an entry is filed under is its own tenant's, so a Lookup
-// naming another tenant's namespace is refused, and its snapshot stores
-// nothing.
+// naming another tenant's namespace is refused with a zero snapshot, which
+// stores nothing (testZeroSnapshot): a handler Sets whatever a Lookup
+// returned, error or not.
 func testForeignDependency(t *testing.T, c cache.Cache) {
 	e, snap, err := c.Lookup(context.Background(), acme, "q", []cache.Namespace{ns(globex, "events", "")})
 	require.ErrorIs(t, err, cache.ErrForeignDependency)
 	assert.Nil(t, e.Value)
-	require.NoError(t, c.Set(context.Background(), snap, []byte("rows"), ttl))
-	settle(c)
-	assertMiss(t, c, acme, "q", ns(acme, "events", ""))
-	assertMiss(t, c, globex, "q", ns(globex, "events", ""))
+	assert.Zero(t, snap, "a refused Lookup returns the zero Snapshot")
 }
 
 // A scoped bump orphans that scope and the whole-table view; a scopeless
@@ -238,6 +250,54 @@ func testScopeLattice(t *testing.T, c cache.Cache) {
 	invalidate(t, c, whole)
 	assertMiss(t, c, acme, "q", org2)
 	requireHit(t, c, "orders/", acme, "q", orders)
+}
+
+// Namespaces carry raw names, and the cache escapes them where it builds a
+// key: a table or scope holding a dot, a space or a '%' is read and bumped
+// under the one namespace both sides pass.
+func testRawNames(t *testing.T, c cache.Cache) {
+	for _, table := range []string{"default.clicks", "my table", "100%"} {
+		whole, scoped := ns(acme, table, ""), ns(acme, table, "org.1")
+		fill(t, c, acme, "q", table, whole)
+		fill(t, c, acme, "q", table+"/org.1", scoped)
+
+		invalidate(t, c, scoped)
+		assertMiss(t, c, acme, "q", scoped)
+		assertMiss(t, c, acme, "q", whole)
+
+		fill(t, c, acme, "q", table, whole)
+		fill(t, c, acme, "q", table+"/org.1", scoped)
+		invalidate(t, c, whole)
+		assertMiss(t, c, acme, "q", whole)
+		assertMiss(t, c, acme, "q", scoped)
+	}
+}
+
+// Two dependency sets whose names would run together under an unescaped
+// join — at a '.', a ':', a '|' or a NUL, whichever a backend's key layout
+// separates on — are two entries, and a bump of one leaves the other.
+func testNamesApart(t *testing.T, c cache.Cache) {
+	pairs := []struct{ a, b []cache.Namespace }{
+		{[]cache.Namespace{ns(acme, "a.0.b", "")}, []cache.Namespace{ns(acme, "a", "b.0.")}},
+		{[]cache.Namespace{ns(acme, "a:b", "c")}, []cache.Namespace{ns(acme, "a", "b:c")}},
+		{[]cache.Namespace{ns(acme, "a\x00b", "")}, []cache.Namespace{ns(acme, "a", "b\x00")}},
+		{[]cache.Namespace{ns(acme, "x", ""), ns(acme, "y", "")}, []cache.Namespace{ns(acme, "x.0..0|acme.0.y", "")}},
+	}
+	for i, p := range pairs {
+		sha := fmt.Sprintf("q%d", i)
+		fill(t, c, acme, sha, "a", p.a...)
+		fill(t, c, acme, sha, "b", p.b...)
+		requireHit(t, c, "a", acme, sha, p.a...)
+
+		invalidate(t, c, p.a...)
+		assertMiss(t, c, acme, sha, p.a...)
+		requireHit(t, c, "b", acme, sha, p.b...)
+
+		fill(t, c, acme, sha, "a", p.a...)
+		invalidate(t, c, p.b...)
+		assertMiss(t, c, acme, sha, p.b...)
+		requireHit(t, c, "a", acme, sha, p.a...)
+	}
 }
 
 func testInvalidateCount(t *testing.T, c cache.Cache) {

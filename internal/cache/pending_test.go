@@ -43,3 +43,29 @@ func TestPendingBumps_OverflowCollapsesToTenants(t *testing.T) {
 	assert.Contains(t, got, "wh:{acme}:T")
 	assert.Contains(t, got, "wh:{globex}:T")
 }
+
+// A lookup is held by a bump owed on any of its token keys, including the
+// tenant token a set past its maximum collapses to.
+func TestPendingBumps_OwesAny(t *testing.T) {
+	t.Parallel()
+	events := tokenKeys("wh", "acme", []Namespace{{Tenant: "acme", Table: "events", Scope: "org_1"}})
+	orders := tokenKeys("wh", "acme", []Namespace{{Tenant: "acme", Table: "orders"}})
+	globex := tokenKeys("wh", "globex", []Namespace{{Tenant: "globex", Table: "events"}})
+	p := newPendingBumps("wh", 3)
+	assert.False(t, p.owesAny(events))
+
+	p.add("acme", bumpKeys("wh", Namespace{Tenant: "acme", Table: "events", Scope: "org_1"})...)
+	assert.True(t, p.owesAny(events))
+	assert.False(t, p.owesAny(orders), "another table's lookups are not held")
+	assert.False(t, p.owesAny(globex))
+
+	p.add("acme", "wh:{acme}:B:a", "wh:{acme}:B:b") // past the maximum
+	assert.Equal(t, map[string]uint64{"wh:{acme}:T": 2}, p.snapshot())
+	assert.True(t, p.owesAny(orders), "collapsed to the tenant token, which every lookup of the tenant reads")
+	assert.True(t, p.owesAny(tokenKeys("wh", "acme", nil)))
+	assert.False(t, p.owesAny(globex))
+
+	p.done(p.snapshot())
+	assert.False(t, p.owesAny(events))
+	assert.Zero(t, p.len())
+}

@@ -5,8 +5,11 @@ package cache_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -220,6 +223,7 @@ func TestRedis_Conformance(t *testing.T) {
 						p := uniquePrefix()
 						return open(t, s, p), open(t, s, p)
 					},
+					Entries: valueCount(raw(t, s)),
 				})
 			t.Run("cross-tenant invalidation spans slots", func(t *testing.T) {
 				t.Parallel()
@@ -230,6 +234,33 @@ func TestRedis_Conformance(t *testing.T) {
 				testCompression(t, s)
 			})
 		})
+	}
+}
+
+// valueCount counts the values under a cache's own key prefix, scanning
+// every node r knows (the test cluster's one node has no replica), and the
+// empty key, where a fill under the zero snapshot's empty key would land;
+// -1 is a failed read.
+func valueCount(r rueidis.Client) func(cache.Cache) int {
+	return func(c cache.Cache) int {
+		match := cache.KeyPrefix(c.(*cache.RedisCache)) + ":q:*"
+		n, err := r.Do(context.Background(), r.B().Exists().Key("").Build()).AsInt64()
+		if err != nil {
+			return -1
+		}
+		for _, node := range r.Nodes() {
+			for cursor := uint64(0); ; {
+				e, err := node.Do(context.Background(), node.B().Scan().Cursor(cursor).Match(match).Count(1000).Build()).AsScanEntry()
+				if err != nil {
+					return -1
+				}
+				if n += int64(len(e.Elements)); e.Cursor == 0 {
+					break
+				}
+				cursor = e.Cursor
+			}
+		}
+		return int(n)
 	}
 }
 
@@ -494,4 +525,292 @@ func TestRedis_CloseDeliversPastAnOpenBreaker(t *testing.T) {
 	e, _, err := open(t, s, prefix).Lookup(ctx, "acme", "q", deps)
 	require.NoError(t, err)
 	assert.Nil(t, e.Value, "the bump Close delivered orphans the fill")
+}
+
+// A cluster client reads the topology after the handshake; a node that
+// answers the handshake and then goes quiet held that read, and so boot and
+// Close, for rueidis's 10 s default. It is bounded like a dial now. Any
+// server serves: what matters is that the read goes unanswered.
+func TestRedis_ClusterTopologyReadIsBounded(t *testing.T) {
+	t.Parallel()
+	s := startRedis(t)
+	opt, err := cache.ClientOption(cache.RedisConfig{Addrs: []string{s.addr}, Mode: cache.RedisCluster, DialTimeout: 300 * time.Millisecond})
+	require.NoError(t, err)
+	opt.DialCtxFn = func(ctx context.Context, addr string, d *net.Dialer, _ *tls.Config) (net.Conn, error) {
+		c, err := d.DialContext(ctx, "tcp", addr)
+		return unanswered{c}, err
+	}
+	start := time.Now()
+	c, err := rueidis.NewClient(opt)
+	if err == nil {
+		c.Close()
+	}
+	require.Error(t, err, "nothing answered the topology read")
+	assert.Less(t, time.Since(start), 3*time.Second)
+}
+
+// unanswered drops CLUSTER commands unsent, as a node gone quiet would
+// leave them unanswered.
+type unanswered struct{ net.Conn }
+
+func (c unanswered) Write(b []byte) (int, error) {
+	if bytes.Contains(b, []byte("CLUSTER")) {
+		return len(b), nil
+	}
+	return c.Conn.Write(b)
+}
+
+// forward proxies each connection it accepts to the address target holds
+// at that moment, so a switch moves new connections only, as a stable DNS
+// name or a proxy does after a failover. It returns the address to dial.
+func forward(t *testing.T, target *atomic.Pointer[string]) string {
+	t.Helper()
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				var d net.Dialer
+				u, err := d.DialContext(context.Background(), "tcp", *target.Load())
+				if err != nil {
+					return
+				}
+				defer func() { _ = u.Close() }()
+				go func() { _, _ = io.Copy(u, c); _ = u.Close() }()
+				_, _ = io.Copy(c, u)
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// A failover behind a stable address: the connections the process holds
+// stay on the demoted node, which answers but refuses writes, while new ones
+// reach the node promoted in its place. The refusals bypass the cache, and
+// replacing connections carries it to the new primary, where the owed bump
+// lands before anything it would orphan is served.
+func TestRedis_FailoverBehindAStableAddress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	start := func() *server { // no delay before a full sync
+		return startStandalone(t, redisImage, "redis-server", "--save", "", "--appendonly", "no", "--repl-diskless-sync-delay", "0")
+	}
+	primary, replica := start(), start()
+	rPrimary, rReplica := raw(t, primary), raw(t, replica)
+	ip := func(s *server) string {
+		t.Helper()
+		ip, err := s.ctr.ContainerIP(ctx)
+		require.NoError(t, err)
+		return ip
+	}
+	command(t, rReplica, "REPLICAOF", ip(primary), "6379")
+	require.Eventually(t, func() bool {
+		info, err := rReplica.Do(ctx, rReplica.B().Info().Section("replication").Build()).ToString()
+		return err == nil && strings.Contains(info, "master_link_status:up")
+	}, 30*time.Second, 50*time.Millisecond, "the replica syncs")
+
+	var target atomic.Pointer[string]
+	target.Store(&primary.addr)
+	stable := &server{addr: forward(t, &target), mode: cache.RedisStandalone}
+	prefix := uniquePrefix()
+	a := open(t, stable, prefix, func(c *cache.RedisConfig) {
+		c.BreakerThreshold, c.BreakerOpenFor = 1000, 200*time.Millisecond
+		cache.SetConnLifetime(c, time.Second)
+	})
+	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
+	_, snap, err := a.Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+	require.NoError(t, a.Set(ctx, snap, []byte("pre-write rows"), time.Minute))
+	acked, err := rPrimary.Do(ctx, rPrimary.B().Wait().Numreplicas(1).Timeout(5000).Build()).AsInt64()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), acked, "the replica holds the fill")
+
+	command(t, rReplica, "REPLICAOF", "NO", "ONE")
+	command(t, rPrimary, "REPLICAOF", ip(replica), "6379")
+	_, err = a.Invalidate(ctx, deps)
+	require.ErrorContains(t, err, "READONLY")
+	require.True(t, cache.Bypassed(a))
+	target.Store(&replica.addr)
+
+	deadline := time.Now().Add(15 * time.Second)
+	for cache.Pending(a) > 0 {
+		require.True(t, time.Now().Before(deadline), "the owed bump reaches the new primary")
+		e, _, err := a.Lookup(ctx, "acme", "q", deps)
+		require.NoError(t, err)
+		require.NotEqual(t, "pre-write rows", string(e.Value), "served before the owed bump landed")
+		time.Sleep(10 * time.Millisecond)
+	}
+	e, _, err := open(t, stable, prefix).Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+	assert.Nil(t, e.Value, "the bump landed where every process now reads")
+}
+
+// command runs cmd on s through c, for the test to reconfigure the server.
+func command(t *testing.T, c rueidis.Client, cmd ...string) {
+	t.Helper()
+	require.NoError(t, c.Do(context.Background(), c.B().Arbitrary(cmd[0]).Args(cmd[1:]...).Build()).Error(), "%q", cmd)
+}
+
+// A bump this process owes holds the lookups it would orphan — a bypass
+// that files nothing — until it lands, with the breaker closed and every
+// other lookup served. The ACL lets the process read the tokens but not
+// replace them, so the bump stays owed until the test grants the write.
+func TestRedis_OwedBumpHoldsItsLookups(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := startRedis(t)
+	r := raw(t, s)
+	prefix := uniquePrefix()
+	command(t, r, "ACL", "SETUSER", "limited", "on", ">pw", "+@all", "%R~*", "%W~"+prefix+":q:*")
+
+	events := []cache.Namespace{{Tenant: "acme", Table: "events"}}
+	orders := []cache.Namespace{{Tenant: "acme", Table: "orders"}}
+	seed := open(t, s, prefix)
+	for _, deps := range [][]cache.Namespace{events, orders, nil} {
+		_, snap, err := seed.Lookup(ctx, "acme", "q", deps)
+		require.NoError(t, err)
+		require.NoError(t, seed.Set(ctx, snap, []byte("pre-write rows"), time.Minute))
+	}
+	a := open(t, s, prefix, func(c *cache.RedisConfig) { c.Username, c.Password, c.BreakerThreshold = "limited", "pw", 1000 })
+	lookup := func(deps []cache.Namespace) (string, cache.Snapshot) {
+		t.Helper()
+		e, snap, err := a.Lookup(ctx, "acme", "q", deps)
+		require.NoError(t, err)
+		return string(e.Value), snap
+	}
+	got, _ := lookup(events)
+	require.Equal(t, "pre-write rows", got)
+
+	_, err := a.Invalidate(ctx, events)
+	require.ErrorContains(t, err, "NOPERM")
+	require.Equal(t, 1, cache.Pending(a))
+	require.False(t, cache.Bypassed(a), "a refused key is not a refusing server")
+
+	got, snap := lookup(events)
+	assert.Empty(t, got, "the owed bump would orphan it")
+	assert.True(t, cache.ZeroSnapshot(snap), "and a fill under the token it replaces would be orphaned too")
+	for _, deps := range [][]cache.Namespace{orders, nil} {
+		got, _ = lookup(deps)
+		assert.Equal(t, "pre-write rows", got, "%v: lookups the bump does not orphan are served", deps)
+	}
+
+	command(t, r, "ACL", "SETUSER", "limited", "~*")
+	deadline := time.Now().Add(10 * time.Second)
+	for cache.Pending(a) > 0 {
+		require.True(t, time.Now().Before(deadline), "the bump lands once the server takes it")
+		got, _ = lookup(events)
+		require.NotEqual(t, "pre-write rows", got, "served before the owed bump landed")
+		time.Sleep(time.Millisecond)
+	}
+	got, _ = lookup(events)
+	assert.Empty(t, got, "the landed bump orphaned the pre-write rows")
+}
+
+// A server that answers but refuses writes — a primary demoted to a replica
+// (READONLY), memory full under noeviction (OOM) — takes no bump, so its
+// first refusal opens the breaker whatever the threshold, and the bump stays
+// owed. The probe writes, so it keeps the breaker open until the server
+// takes writes again; then the owed bump lands before anything it would
+// orphan is served, and a process that only invalidates, whose drain loop
+// is all that probes for it, recovers at the probe's cadence too.
+func TestRedis_RefusedWrites(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name            string
+		refuse, restore [][]string
+		reply           string
+	}{
+		{
+			"demoted to a replica",
+			[][]string{{"REPLICAOF", "127.0.0.1", "1"}}, // nothing listens: it stays a replica, serving reads
+			[][]string{{"REPLICAOF", "NO", "ONE"}},
+			"READONLY",
+		},
+		{
+			"full under noeviction",
+			[][]string{{"CONFIG", "SET", "maxmemory-policy", "noeviction"}, {"CONFIG", "SET", "maxmemory", "1"}},
+			[][]string{{"CONFIG", "SET", "maxmemory", "0"}},
+			"OOM",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			s := startRedis(t)
+			r := raw(t, s)
+			prefix := uniquePrefix()
+			const openFor = 200 * time.Millisecond
+			tune := func(c *cache.RedisConfig) { c.BreakerThreshold, c.BreakerOpenFor = 1000, openFor }
+			a := open(t, s, prefix, tune)
+			ingest := open(t, s, prefix, tune)
+			reader := open(t, s, prefix, tune)
+			events := []cache.Namespace{{Tenant: "acme", Table: "events"}}
+			orders := []cache.Namespace{{Tenant: "acme", Table: "orders"}}
+			for _, deps := range [][]cache.Namespace{events, orders} {
+				_, snap, err := a.Lookup(ctx, "acme", "q", deps)
+				require.NoError(t, err)
+				require.NoError(t, a.Set(ctx, snap, []byte("pre-write rows"), time.Minute))
+			}
+			lookup := func(c *cache.RedisCache, deps []cache.Namespace) string {
+				t.Helper()
+				e, _, err := c.Lookup(ctx, "acme", "q", deps)
+				require.NoError(t, err)
+				return string(e.Value)
+			}
+
+			for _, cmd := range tt.refuse {
+				command(t, r, cmd...)
+			}
+			_, err := a.Invalidate(ctx, events)
+			require.ErrorContains(t, err, tt.reply)
+			assert.Equal(t, 1, cache.Pending(a))
+			assert.True(t, cache.Bypassed(a), "the first refusal opens the breaker")
+			wide := slices.Clone(orders) // past one batch: the rest go unsent after the refusal, and drain in two
+			for i := range 1500 {
+				wide = append(wide, cache.Namespace{Tenant: "acme", Table: fmt.Sprintf("t%d", i)})
+			}
+			_, err = ingest.Invalidate(ctx, wide)
+			require.ErrorContains(t, err, tt.reply)
+			assert.True(t, cache.Bypassed(ingest))
+			assert.Equal(t, len(wide), cache.Pending(ingest))
+			_, snap, err := reader.Lookup(ctx, "acme", "another query", orders)
+			require.NoError(t, err)
+			require.ErrorContains(t, reader.Set(ctx, snap, []byte("rows"), time.Minute), tt.reply)
+			assert.True(t, cache.Bypassed(reader), "a refused fill opens the breaker too")
+
+			// Long enough for many probes to be refused, and for a drain
+			// backing off unchecked to be at its 10 s cap.
+			time.Sleep(7 * time.Second)
+			assert.True(t, cache.Bypassed(reader), "owing nothing, it is held open by probes that write and are refused")
+			assert.True(t, cache.Bypassed(a))
+			assert.Empty(t, lookup(a, events))
+			assert.Equal(t, 1, cache.Pending(a))
+			assert.Equal(t, len(wide), cache.Pending(ingest))
+
+			for _, cmd := range tt.restore {
+				command(t, r, cmd...)
+			}
+			restored := time.Now()
+			for cache.Pending(a) > 0 {
+				require.Less(t, time.Since(restored), 10*time.Second, "the bump lands once the server takes writes")
+				require.NotEqual(t, "pre-write rows", lookup(a, events), "served before the owed bump landed")
+				time.Sleep(time.Millisecond)
+			}
+			require.Eventually(t, func() bool { return cache.Pending(ingest) == 0 }, 10*time.Second, 5*time.Millisecond)
+			assert.Less(t, time.Since(restored), openFor+3*time.Second, "an ingest-only process probes when due, not at the drain's backoff")
+			require.Eventually(t, func() bool { return !cache.Bypassed(reader) }, 10*time.Second, 5*time.Millisecond)
+
+			fresh := open(t, s, prefix)
+			for _, deps := range [][]cache.Namespace{events, orders} {
+				assert.Empty(t, lookup(fresh, deps), "%v: the landed bumps orphaned the pre-write rows", deps)
+			}
+		})
+	}
 }
