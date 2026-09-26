@@ -2,6 +2,7 @@ package cache
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
@@ -18,6 +19,7 @@ type pendingBumps struct {
 	mu   sync.Mutex
 	keys map[string]pendingKey
 	gen  uint64
+	n    atomic.Int64 // len(keys), read without mu on every lookup
 }
 
 type pendingKey struct {
@@ -37,14 +39,14 @@ func (p *pendingBumps) add(id tenant.ID, keys ...string) {
 	for _, k := range keys {
 		p.keys[k] = pendingKey{tenant: id, gen: p.gen}
 	}
-	if len(p.keys) <= p.max {
-		return
+	if len(p.keys) > p.max {
+		collapsed := make(map[string]pendingKey, len(p.keys))
+		for _, pk := range p.keys {
+			collapsed[tenantTokenKey(p.prefix, pk.tenant)] = pendingKey{tenant: pk.tenant, gen: p.gen}
+		}
+		p.keys = collapsed
 	}
-	collapsed := make(map[string]pendingKey, len(p.keys))
-	for _, pk := range p.keys {
-		collapsed[tenantTokenKey(p.prefix, pk.tenant)] = pendingKey{tenant: pk.tenant, gen: p.gen}
-	}
-	p.keys = collapsed
+	p.n.Store(int64(len(p.keys)))
 }
 
 // snapshot returns the keys owed a bump with the generation each was added
@@ -69,10 +71,22 @@ func (p *pendingBumps) done(landed map[string]uint64) {
 			delete(p.keys, k)
 		}
 	}
+	p.n.Store(int64(len(p.keys)))
 }
 
-func (p *pendingBumps) len() int {
+// owesAny reports whether any of keys is owed a bump.
+func (p *pendingBumps) owesAny(keys []string) bool {
+	if p.n.Load() == 0 {
+		return false
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return len(p.keys)
+	for _, k := range keys {
+		if _, ok := p.keys[k]; ok {
+			return true
+		}
+	}
+	return false
 }
+
+func (p *pendingBumps) len() int { return int(p.n.Load()) }

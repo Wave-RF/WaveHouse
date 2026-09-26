@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -163,8 +165,8 @@ func (c RedisConfig) clientOption() rueidis.ClientOption {
 }
 
 // RedisCache is a Cache shared by every process pointed at one Redis —
-// or Valkey, Dragonfly, ElastiCache, MemoryDB: it uses only GET, SET, MGET
-// and PING, no scripts and no client tracking.
+// or Valkey, Dragonfly, ElastiCache, MemoryDB: it uses only GET, SET and
+// MGET, no scripts and no client tracking.
 //
 // Versions are random tokens, one per tenant, per table and per scope,
 // under the tenant's hash tag; a bump sets a fresh one. A value carries the
@@ -291,10 +293,12 @@ func (r *RedisCache) conn() rueidis.Client {
 	return *cp
 }
 
+// probe decides whether an open breaker closes. It writes: a server that
+// answers but refuses writes (refusesWork) would take no bump either.
 func (r *RedisCache) probe(c rueidis.Client) {
 	ctx, cancel := context.WithTimeout(r.ctx, r.cfg.Timeout)
 	defer cancel()
-	r.record(r.ctx, c.Do(ctx, c.B().Ping().Build()).Error())
+	r.record(r.ctx, c.Do(ctx, c.B().Set().Key(r.cfg.KeyPrefix+":probe").Value("1").Ex(time.Minute).Build()).Error())
 	if r.breaker.isOpen() {
 		return
 	}
@@ -308,14 +312,23 @@ func (r *RedisCache) bypassed() bool {
 }
 
 // record feeds an operation's outcome to the breaker. A reply from the
-// server, even an error reply or one this code cannot use, shows it is up; a caller that gave up first
-// shows nothing about it.
+// server, even an error reply or one this code cannot use, shows it is up —
+// unless it refuses the work outright, which opens the breaker at once. A
+// caller that gave up first shows nothing about it.
 func (r *RedisCache) record(parent context.Context, err error) {
 	if err == nil || rueidis.IsRedisNil(err) {
 		r.breaker.success()
 		return
 	}
-	if _, ok := rueidis.IsRedisErr(err); ok || errors.Is(err, errMalformedReply) {
+	if re, ok := rueidis.IsRedisErr(err); ok {
+		if refusesWork(re.Error()) {
+			r.breaker.trip()
+		} else {
+			r.breaker.success()
+		}
+		return
+	}
+	if errors.Is(err, errMalformedReply) {
 		r.breaker.success()
 		return
 	}
@@ -323,6 +336,23 @@ func (r *RedisCache) record(parent context.Context, err error) {
 		return
 	}
 	r.breaker.failure()
+}
+
+// refusesWork reports whether an error reply says the server takes no
+// writes from anyone right now, so no bump can land: a replica (READONLY,
+// or MASTERDOWN, which refuses reads too), memory full under noeviction
+// (OOM), writes stopped by min-replicas-to-write (NOREPLICAS) or a failed
+// snapshot (MISCONF), a dataset still loading (LOADING), a script holding
+// the server (BUSY), a cluster not serving the slot (CLUSTERDOWN). Replies
+// about one key or one moment — WRONGTYPE, NOPERM, TRYAGAIN during a slot
+// migration — are not.
+func refusesWork(msg string) bool {
+	code, _, _ := strings.Cut(msg, " ")
+	switch code {
+	case "READONLY", "MASTERDOWN", "OOM", "NOREPLICAS", "MISCONF", "LOADING", "BUSY", "CLUSTERDOWN":
+		return true
+	}
+	return false
 }
 
 // Lookup reads the tokens deps fold and the entry for sha in one pipelined
@@ -337,6 +367,16 @@ func (r *RedisCache) Lookup(ctx context.Context, id tenant.ID, sha string, deps 
 	keys := tokenKeys(r.cfg.KeyPrefix, id, deps)
 	if len(keys) > maxTokenKeys {
 		return Entry{}, Snapshot{}, fmt.Errorf("cache: %d dependencies is more than a value can record", len(deps))
+	}
+	// A bump this process owes would orphan what a lookup reading its key
+	// finds, so that lookup is a bypass: no hit, and a zero snapshot, so no
+	// fill either. A lookup's token keys are exactly those whose bumps orphan
+	// its entry, and include the tenant token a set past PendingMax collapses
+	// to. Other processes cannot know what this one owes, and serve those
+	// entries until the bump lands.
+	if r.pending.owesAny(keys) {
+		r.metrics.lookup(resultBypass)
+		return Entry{}, Snapshot{}, nil
 	}
 	c := r.conn()
 	if c == nil {
@@ -540,20 +580,19 @@ func (r *RedisCache) bump(ctx context.Context, owner map[string]tenant.ID) error
 		return fmt.Errorf("%w: %d invalidations deferred", errBypassed, len(owner))
 	}
 	defer r.metrics.op("invalidate", time.Now())
-	opCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
-	defer cancel()
-	keys := make([]string, 0, len(owner))
-	cmds := make(rueidis.Commands, 0, len(owner))
-	for k := range owner {
-		keys = append(keys, k)
-		cmds = append(cmds, r.bumpCmd(c, k))
-	}
 	failed := map[string]tenant.ID{}
 	var firstErr error
-	for i, rr := range c.DoMulti(opCtx, cmds...) {
-		if err := rr.Error(); err != nil {
-			failed[keys[i]] = owner[keys[i]]
-			firstErr = cmpOr(firstErr, err)
+	// In batches, so a wide fan-out is several round trips each within the
+	// timeout; past a failure the rest are deferred unsent.
+	for batch := range slices.Chunk(slices.Collect(maps.Keys(owner)), drainBatch) {
+		var landed []bool
+		if firstErr == nil {
+			landed, firstErr = r.sendBumps(ctx, c, batch)
+		}
+		for i, k := range batch {
+			if landed == nil || !landed[i] {
+				failed[k] = owner[k]
+			}
 		}
 	}
 	r.record(ctx, firstErr)
@@ -570,11 +609,36 @@ func (r *RedisCache) bumpCmd(c rueidis.Client, key string) rueidis.Completed {
 	return c.B().Set().Key(key).Value(rueidis.BinaryString(tok)).Ex(jitter(r.cfg.VersionTTL, tok)).Build()
 }
 
+// sendBumps sets a fresh token under each key in one pipeline, within the
+// op timeout, reporting which landed and the first error.
+func (r *RedisCache) sendBumps(ctx context.Context, c rueidis.Client, keys []string) (landed []bool, firstErr error) {
+	cmds := make(rueidis.Commands, 0, len(keys))
+	for _, k := range keys {
+		cmds = append(cmds, r.bumpCmd(c, k))
+	}
+	opCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
+	defer cancel()
+	landed = make([]bool, len(keys))
+	for i, rr := range c.DoMulti(opCtx, cmds...) {
+		err := rr.Error()
+		landed[i] = err == nil
+		firstErr = cmpOr(firstErr, err)
+	}
+	return landed, firstErr
+}
+
 func (r *RedisCache) deferBumps(owner map[string]tenant.ID) {
+	first := r.pending.len() == 0
 	for k, id := range owner {
 		r.pending.add(id, k)
 	}
 	r.metrics.invalidated("deferred", len(owner))
+	// The first bump owed wakes the drain now, not at its next tick: it is
+	// retried at once, or, past an open breaker, when the probe is due.
+	// Later ones join the retry already backing off.
+	if first {
+		r.nudge()
+	}
 }
 
 // nudge wakes the drain loop now, rather than at its next tick.
@@ -600,7 +664,7 @@ func (r *RedisCache) drainLoop() {
 		}
 		wait := drainIdle
 		if r.breaker.isOpen() {
-			r.conn() // starts the probe when due, so an idle process recovers too
+			r.conn() // starts the probe when due
 		}
 		if r.pending.len() > 0 {
 			if r.drain(r.ctx, r.conn) {
@@ -608,6 +672,12 @@ func (r *RedisCache) drainLoop() {
 			} else {
 				wait, backoff = backoff, min(backoff*2, drainMaxBackoff)
 			}
+		}
+		// Lookups start the probe that closes an open breaker; a process
+		// with none (ingest only) has this loop, which wakes when the probe
+		// is due rather than at the drain's backoff, so it recovers as soon.
+		if d, open := r.breaker.untilProbe(); open {
+			wait = min(wait, d)
 		}
 		timer.Reset(wait)
 	}
@@ -621,32 +691,22 @@ func (r *RedisCache) drain(ctx context.Context, conn func() rueidis.Client) bool
 	for k := range owed {
 		keys = append(keys, k)
 	}
-	for len(keys) > 0 {
-		batch := keys[:min(drainBatch, len(keys))]
-		keys = keys[len(batch):]
+	for batch := range slices.Chunk(keys, drainBatch) {
 		c := conn()
 		if c == nil {
 			return false
 		}
-		cmds := make(rueidis.Commands, 0, len(batch))
-		for _, k := range batch {
-			cmds = append(cmds, r.bumpCmd(c, k))
-		}
-		opCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
+		sent, err := r.sendBumps(ctx, c, batch)
 		landed := map[string]uint64{}
-		var firstErr error
-		for i, rr := range c.DoMulti(opCtx, cmds...) {
-			if err := rr.Error(); err != nil {
-				firstErr = cmpOr(firstErr, err)
-				continue
+		for i, k := range batch {
+			if sent[i] {
+				landed[k] = owed[k]
 			}
-			landed[batch[i]] = owed[batch[i]]
 		}
-		cancel()
-		r.record(ctx, firstErr)
+		r.record(ctx, err)
 		r.pending.done(landed)
 		r.metrics.invalidated("ok", len(landed))
-		if firstErr != nil {
+		if err != nil {
 			return false
 		}
 	}

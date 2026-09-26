@@ -15,7 +15,7 @@ const (
 	resultHit    = "hit"
 	resultMiss   = "miss"   // nothing stored
 	resultStale  = "stale"  // stored under versions since bumped
-	resultBypass = "bypass" // server skipped: breaker open or not yet connected
+	resultBypass = "bypass" // server skipped: breaker open, not yet connected, or a bump this process owes would orphan the entry
 	resultError  = "error"  // server failed or timed out
 )
 
@@ -40,7 +40,7 @@ func newMetrics(backend string, breakerOpen func() bool, pending func() int) (*m
 	m := &metrics{backend: attribute.String("backend", backend)}
 	var errs [9]error
 	m.lookups, errs[0] = meter.Int64Counter("wavehouse_cache_lookups_total",
-		metric.WithDescription("Shared-cache lookups by result: hit, miss, stale (stored under since-bumped versions), bypass (server skipped), error"))
+		metric.WithDescription("Shared-cache lookups by result: hit, miss, stale (stored under since-bumped versions), bypass (server skipped, or held by an invalidation this process has yet to deliver), error"))
 	m.duration, errs[1] = meter.Float64Histogram("wavehouse_cache_op_duration_seconds",
 		metric.WithDescription("Shared-cache round-trip time by op: lookup, set, invalidate"), metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(.0001, .00025, .0005, .001, .0025, .005, .01, .025, .05, .1, .25))

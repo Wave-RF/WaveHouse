@@ -8,5 +8,8 @@ func Pending(r *RedisCache) int { return r.pending.len() }
 // Bypassed reports whether r is skipping the server.
 func Bypassed(r *RedisCache) bool { return r.bypassed() }
 
+// ZeroSnapshot reports whether s files nothing.
+func ZeroSnapshot(s Snapshot) bool { return s.key == "" && s.tokens == nil }
+
 // DecodedFactor is how many times MaxValueBytes a value may decompress to.
 const DecodedFactor = decodedFactor

@@ -15,6 +15,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 func TestRedisConfig_Validation(t *testing.T) {
@@ -147,6 +149,49 @@ func TestRedis_Record(t *testing.T) {
 
 	r.record(live, context.DeadlineExceeded)
 	assert.True(t, r.breaker.isOpen())
+}
+
+func TestRefusesWork(t *testing.T) {
+	t.Parallel()
+	for _, msg := range []string{
+		"READONLY You can't write against a read only replica.",
+		"OOM command not allowed when used memory > 'maxmemory'.",
+		"MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'.",
+		"NOREPLICAS Not enough good replicas to write.",
+		"MISCONF Errors writing to the AOF file: No space left on device",
+		"LOADING Redis is loading the dataset in memory",
+		"BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.",
+		"CLUSTERDOWN The cluster is down",
+	} {
+		assert.True(t, refusesWork(msg), msg)
+	}
+	for _, msg := range []string{
+		"WRONGTYPE Operation against a key holding the wrong kind of value",
+		"NOPERM this user has no permissions to access one of the keys used as arguments",
+		"TRYAGAIN Multiple keys request during rehashing of slot",
+		"BUSYKEY Target key name already exists.",
+		"ERR unknown command",
+		"",
+	} {
+		assert.False(t, refusesWork(msg), msg)
+	}
+}
+
+// The first bump owed wakes the drain at once; later ones ride the retry
+// already under way rather than resetting its backoff.
+func TestRedis_FirstDeferralWakesTheDrain(t *testing.T) {
+	t.Parallel()
+	r := &RedisCache{breaker: newBreaker(1, time.Hour, time.Now), pending: newPendingBumps("wh", 10), wake: make(chan struct{}, 1)}
+	var err error
+	r.metrics, err = newMetrics("redis", r.bypassed, r.pending.len)
+	require.NoError(t, err)
+	t.Cleanup(r.metrics.close)
+
+	r.deferBumps(map[string]tenant.ID{"wh:{acme}:B:events": "acme"})
+	assert.Len(t, r.wake, 1)
+	<-r.wake
+	r.deferBumps(map[string]tenant.ID{"wh:{acme}:B:orders": "acme"})
+	assert.Empty(t, r.wake)
 }
 
 func cancelledCtx() context.Context {
