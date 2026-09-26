@@ -123,7 +123,7 @@ func (c RedisConfig) withDefaults() (RedisConfig, error) {
 		}
 	}
 	if c.VersionTTL != 0 && c.VersionTTL < 2*time.Second {
-		return c, fmt.Errorf("cache: redis version ttl %s is under 2s: jittered, it would round to EX 0", c.VersionTTL)
+		return c, fmt.Errorf("cache: redis version ttl %s is under 2s: EX has one-second resolution, and jittered below ~1.1s it could be EX 0", c.VersionTTL)
 	}
 	c.KeyPrefix = cmpOr(c.KeyPrefix, DefaultRedisKeyPrefix)
 	c.Timeout = cmpOr(c.Timeout, DefaultRedisTimeout)

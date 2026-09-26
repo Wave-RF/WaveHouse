@@ -58,10 +58,12 @@ func tenantTokenKey(prefix string, id tenant.ID) string {
 // reads and bumps these keys for itself, so two builds that lay them out
 // differently — a change here, or to what keyenc keeps — split them, and one
 // build's bumps miss the entries the other filed, which are served until
-// their TTL for the whole rolling deploy. Such a change needs a
-// compatibility step (bump both layouts through the transition) or a
-// documented flush. The tenant token, placed verbatim, stays shared; a
-// valueKey change only orphans values, which is safe to roll.
+// their TTL for the whole rolling deploy. Such a change needs the new build
+// to read and bump both layouts (fold the old tokens into what it files)
+// until no old build is left, a later build dropping the old; or an upgrade
+// that never runs two builds against the server at once. The tenant token,
+// placed verbatim, stays shared; a valueKey change only orphans values,
+// which is safe to roll.
 func tableTokenKey(prefix string, id tenant.ID, table string) string {
 	return string(keyenc.AppendJoin([]byte(prefix+":{"+string(id)+"}:B:"), ':', table))
 }
