@@ -18,10 +18,22 @@ import (
 // match the success-path handlers and RFC 8259 (which does not define a
 // charset for application/json — JSON is required to be UTF-8 already).
 func writeJSONError(w http.ResponseWriter, status int, message string) {
+	writeJSONErrorBody(w, status, errorBody{Error: message})
+}
+
+// errorBody is the error envelope. Code and Retryable are set where the
+// handler knows them (writeCHError); a bare {"error": …} otherwise.
+type errorBody struct {
+	Error     string `json:"error"`
+	Code      string `json:"code,omitempty"`
+	Retryable *bool  `json:"retryable,omitempty"`
+}
+
+func writeJSONErrorBody(w http.ResponseWriter, status int, body errorBody) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // The Retry-After hints of the two 503s a tenant's ClickHouse side answers
