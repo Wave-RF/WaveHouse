@@ -459,7 +459,7 @@ WaveHouse/
 │   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration
 │   ├── coord/              # Leases with fencing tokens (in-process Local, RunElected, coordtest suite)
-│   ├── dedupe/             # Optional deduplication (Pebble)
+│   ├── dedupe/             # Optional deduplication (Reserve/Commit/Release; Pebble)
 │   ├── discovery/          # ClickHouse schema introspection + validation
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
 │   ├── keyenc/             # One escaping for composite keys (NATS subject tokens, cache namespace tokens, dedupe keys)

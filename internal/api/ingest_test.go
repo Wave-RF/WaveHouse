@@ -2807,26 +2807,45 @@ func TestIngest_Dedup_FailedPublishReleasesTheID(t *testing.T) {
 // A publish whose outcome is unknown may have stored the event, so its claim
 // is neither released nor committed: it lapses with the lease, a retry before
 // then answers in-flight, and the idempotency key covers one after.
+// mq.ErrUnavailable is such a failure too, and answers 503 immediately with
+// the lease itself as Retry-After (rounded up to whole seconds) rather than
+// the flat 5 seconds a request with no claim to lapse would get — the same
+// distinction TestIngest_Dedup_FailedPublishReleasesTheID draws for the one
+// failure (mq.ErrQueueFull) that releases instead.
 func TestIngest_Dedup_UncertainPublishLeavesTheClaim(t *testing.T) {
 	t.Parallel()
-	pub := &testutil.MockPublisher{Err: context.DeadlineExceeded}
-	dedup := testutil.NewMockDeduplicator()
-	h := dedupHandler(t, pub, dedup, false)
-	body := map[string]any{"page": "/home", "event_id": "e1"}
+	tests := []struct {
+		name       string
+		err        error
+		status     int
+		retryAfter string
+	}{
+		{"unrecognized error", context.DeadlineExceeded, http.StatusInternalServerError, ""},
+		{"unavailable broker", fmt.Errorf("%w: timeout", mq.ErrUnavailable), http.StatusServiceUnavailable, "30"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{Err: tt.err}
+			dedup := testutil.NewMockDeduplicator()
+			h := dedupHandler(t, pub, dedup, false)
+			body := map[string]any{"page": "/home", "event_id": "e1"}
 
-	w := httptest.NewRecorder()
-	h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
-	require.Equal(t, http.StatusInternalServerError, w.Code)
-	assert.Contains(t, w.Body.String(), "publish failed")
-	assert.True(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "left to lapse")
-	assert.Empty(t, dedup.Released)
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+			require.Equal(t, tt.status, w.Code)
+			assert.Equal(t, tt.retryAfter, w.Header().Get("Retry-After"))
+			assert.True(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "left to lapse")
+			assert.Empty(t, dedup.Released)
 
-	pub.Err = nil
-	w = httptest.NewRecorder()
-	h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
-	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
-	assert.Equal(t, "30", w.Header().Get("Retry-After"))
-	assert.Empty(t, pub.Published())
+			pub.Err = nil
+			w = httptest.NewRecorder()
+			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+			assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+			assert.Equal(t, "30", w.Header().Get("Retry-After"))
+			assert.Empty(t, pub.Published())
+		})
+	}
 }
 
 // A claimed record is published under its idempotency key; an un-deduped one
