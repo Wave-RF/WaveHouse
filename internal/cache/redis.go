@@ -188,10 +188,12 @@ func (c RedisConfig) clientOption() rueidis.ClientOption {
 // under the tenant's hash tag; a bump sets a fresh one. A value carries the
 // tokens it was computed under and is a hit only while they are all still
 // current, so a lost token (eviction, expiry, a restart without persistence)
-// can only cause misses. Restoring a snapshot is not a loss but a rollback:
-// the old tokens return with their values. A lookup is one round trip. The
-// server failing or timing out is a miss, a skipped fill and a deferred
-// invalidation — never a failed query.
+// can only cause misses. Restoring a snapshot is not a loss but a rollback —
+// a restart after a crash that reloads the server's last save included,
+// which stock Redis and Valkey make by default: the old tokens return with
+// their values. A lookup is one round trip. The server failing or timing
+// out is a miss, a skipped fill and a deferred invalidation — never a
+// failed query.
 type RedisCache struct {
 	cfg        RedisConfig
 	opt        rueidis.ClientOption
@@ -312,18 +314,30 @@ func (r *RedisCache) conn() rueidis.Client {
 }
 
 // probe decides whether an open breaker closes. It writes: a server that
-// answers but refuses writes (refusesWork) would take no bump either. rueidis
-// redials under the calling operation's context, so the probe's budget is
-// DialTimeout for a reconnect plus Timeout for the write: a reconnect slower
-// than Timeout fails the operations waiting on it, but not the probe.
+// answers but refuses writes (refusesWork) would take no bump either.
+// rueidis redials under the calling operation's context, bounding the dial
+// (TLS included) by DialTimeout and then the handshake by DialTimeout again,
+// so the first write has twice DialTimeout for a reconnect on top of
+// Timeout: a reconnect slower than Timeout fails the operations waiting on
+// it, but not the probe. The allowance is for a reconnect only: a first
+// write slower than Timeout is repeated under Timeout, and the repeat
+// decides, so a server answering slower than Timeout stays bypassed.
 func (r *RedisCache) probe(c rueidis.Client) {
-	ctx, cancel := context.WithTimeout(r.ctx, r.cfg.DialTimeout+r.cfg.Timeout)
-	defer cancel()
-	r.record(r.ctx, c.Do(ctx, c.B().Set().Key(r.cfg.KeyPrefix+":probe").Value("1").Ex(time.Minute).Build()).Error())
+	set := func(budget time.Duration) error {
+		ctx, cancel := context.WithTimeout(r.ctx, budget)
+		defer cancel()
+		return c.Do(ctx, c.B().Set().Key(r.cfg.KeyPrefix+":probe").Value("1").Ex(time.Minute).Build()).Error()
+	}
+	start := time.Now()
+	err := set(2*r.cfg.DialTimeout + r.cfg.Timeout)
+	if time.Since(start) > r.cfg.Timeout {
+		err = set(r.cfg.Timeout)
+	}
+	r.record(r.ctx, err)
 	if r.breaker.isOpen() {
 		return
 	}
-	slog.InfoContext(ctx, "cache: redis reachable again; cache back in use")
+	slog.InfoContext(r.ctx, "cache: redis reachable again; cache back in use")
 	r.nudge()
 }
 
