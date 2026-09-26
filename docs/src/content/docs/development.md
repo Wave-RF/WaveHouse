@@ -16,7 +16,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **Go** | 1.26+ (matches `go.mod`) | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
 | **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
-| **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse via testcontainers (no compose file) | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
+| **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse and a Redis via testcontainers (no compose file), and the integration suite also runs the shared cache backend against Redis, Valkey, Dragonfly (pulled from `docker.dragonflydb.io`) and a one-node Redis Cluster | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
 | **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
@@ -82,7 +82,7 @@ make dev
 WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 - **Embedded NATS** (JetStream) — no external MQ needed
-- **L1 cache only** (Ristretto) — no external cache needed
+- **In-process cache** (Ristretto, `cache.backend: local`) — no external cache needed; to try the shared one, start Redis with `docker compose -f deployments/compose/dependencies.yaml --profile redis up -d` and set `WH_CACHE_BACKEND=redis WH_CACHE_REDIS_ADDRS=localhost:6379`
 - **Trial policy** — the dev settings directory `./settings` is seeded on first run with the compose stack's permissive `public` policy, so tokenless requests to the demo tables work (see [Test the API](#test-the-api))
 - **Dedup disabled** by default — no Pebble needed
 - **Schema discovery** — automatically finds your ClickHouse tables
@@ -341,18 +341,18 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 | -------- | -------- | ------- | ------- |
 | Unit tests | `internal/*/_test.go` | No | `make test` |
 | SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-ts` (always includes coverage + gate) |
-| Integration tests (Go) | `tests/integration/*_test.go` | Yes | `make test-integration` |
+| Integration tests (Go) | `tests/integration/*_test.go`, `internal/cache/*_integration_test.go` | Yes | `make test-integration` |
 | E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
 
 - **Unit tests** live beside the code they test (e.g., `internal/discovery/discovery_test.go`). They use mocks or embedded NATS (in-process, no Docker needed).
-- **Integration tests** use the `//go:build integration` build tag. `TestMain` starts one ClickHouse testcontainer and boots the production wiring against it through `app.New` (embedded NATS, ingest worker, sweeper, hub, the API server on a random loopback port); tests reach it via `env(t)` and create their own tables. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second ingest worker batch window.
+- **Integration tests** use the `//go:build integration` build tag. In `tests/integration`, `TestMain` starts one ClickHouse testcontainer and boots the production wiring against it through `app.New` (embedded NATS, ingest worker, sweeper, hub, the API server on a random loopback port); tests reach it via `env(t)` and create their own tables. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second ingest worker batch window. `internal/cache`'s integration tests start their own containers instead — Redis, Valkey, Dragonfly and a one-node Redis Cluster — for the shared backend. `shared_cache_test.go` starts its own Redis testcontainer per test (`startRedis`) and boots extra, independent `cache.backend: redis` instances over that same ClickHouse (`bootRedisApp`), to exercise the cache shared across processes rather than one package in isolation.
 
 Shared test utilities live in `internal/testutil/`. The packages log through `slog.Default()`, so tests reach log output through `internal/testutil/logtest`: `logtest.Silence()` in a package's `TestMain` discards it, and `logtest.Capture(t, level)` routes it to a buffer for a test that asserts on log lines — such a test must not call `t.Parallel()`, because the default logger is process-wide.
 
 ### Adding New Tests
 
 - **Unit test for `internal/foo/`** → create `internal/foo/foo_test.go` (same package).
-- **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`).
+- **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`). A test of one package against its own external server — the shared cache backend against Redis, Valkey and Dragonfly containers — lives beside the package instead (`internal/cache/redis_integration_test.go`, same build tag), and the package is listed in the `test-integration` target.
 - **E2E test via SDK** → add a `tests/e2e/sdk/*.test.ts` file. These tests exercise the full pipeline (ingest → ClickHouse → query) through the TypeScript SDK. Run with `make test-e2e`.
 - **Test helpers** → add to `internal/testutil/` (Go) or `tests/e2e/sdk/helpers.ts` (E2E).
 
@@ -362,7 +362,7 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 
 **Architecture**:
 
-- `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved. CI runs the exact same path.
+- `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** and a Redis one (the fixture's shared cache, `cache.backend: redis`) per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved. CI runs the exact same path.
 - `tests/e2e/sdk/setup.ts` — `globalSetup`. Probes the `CLICKHOUSE_URL` / `WAVEHOUSE_URL` the orchestrator injects, creates the per-suite tables, refreshes the schema, and writes the baseline policy into the run's settings directory (adopted via `POST /v1/ops/settings/reload` — files are the only write path). It starts nothing itself and fails fast if either URL isn't up. It also prints the active Node/undici version, warning when the local Node major differs from `.nvmrc` — a runtime-specific transport bug is otherwise indistinguishable from a code failure (see [#440](https://github.com/Wave-RF/WaveHouse/issues/440)).
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
 
@@ -375,10 +375,11 @@ make test-e2e
 
 `make test-e2e` builds `bin/wavehouse-cov` (coverage-instrumented) and runs the orchestrator under `scripts/orchestrator/` to wire ClickHouse + the cover binary into the suite. covdata flushes on SIGINT into `tmp/coverage/e2e/data/`.
 
-The orchestrator always provisions its own stack — a fresh ClickHouse testcontainer plus `wavehouse-cov` on a random free port — so a running `make dev` on `:8080` is neither detected nor reused, and the two don't collide. To run vitest against a stack you manage yourself, start the server from the **repo root** with the E2E fixture config:
+The orchestrator always provisions its own stack — fresh ClickHouse and Redis testcontainers plus `wavehouse-cov` on a random free port — so a running `make dev` on `:8080` is neither detected nor reused, and the two don't collide. To run vitest against a stack you manage yourself, start a Redis for the fixture's `cache.backend: redis`, then the server from the **repo root** with the E2E fixture config:
 
 ```bash
-WH_CONFIG=tests/e2e/fixtures/config.yaml go run ./cmd/wavehouse
+docker compose -f deployments/compose/dependencies.yaml --profile redis up -d
+WH_CONFIG=tests/e2e/fixtures/config.yaml WH_CACHE_REDIS_ADDRS=localhost:6379 go run ./cmd/wavehouse
 ```
 
 The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `settings.dir` is relative to the working directory. The fixture's settings directory (policy, pipes, and tunables) points at ClickHouse on `localhost:9000`; if yours isn't there, edit `clickhouse.addr` / `http_port` in `tests/e2e/fixtures/settings/config.json` (the orchestrator patches them itself for its testcontainer).
@@ -454,7 +455,7 @@ WaveHouse/
 │   ├── api/                # HTTP handlers, router, middleware
 │   ├── app/                # Process wiring (build every component, run under one errgroup, release in reverse)
 │   ├── auth/               # JWT/JWKS authentication middleware
-│   ├── cache/              # Query cache: Ristretto L1 + the tenant-led version index
+│   ├── cache/              # Query cache: Ristretto L1 + the tenant-led version index; the Redis-compatible shared backend
 │   ├── chconn/             # ClickHouse pools, one per connection tuple (reconciled on settings reload)
 │   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration
@@ -474,7 +475,7 @@ WaveHouse/
 │   └── testutil/           # Shared test helpers and mocks (cachetest suite)
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)
-│   └── e2e/                # E2E suite (orchestrator + ClickHouse testcontainer)
+│   └── e2e/                # E2E suite (orchestrator + ClickHouse and Redis testcontainers)
 │       ├── fixtures/       # ClickHouse DDL + config and settings-directory fixtures
 │       └── sdk/            # E2E specs driven through the TypeScript SDK (Vitest)
 ├── clients/                # Client SDKs

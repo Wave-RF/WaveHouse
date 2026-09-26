@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ilyakaznacheev/cleanenv"
 )
@@ -217,7 +218,7 @@ func (c *Config) validateTopology() error {
 		return fmt.Errorf("roles %s with mq.backend=embedded: the embedded MQ lives inside this process, and a process without it cannot reach its queue — run every role (%s), or set a shared mq.backend", joinRoles(c.Roles), joinRoles(allRoles))
 	}
 	if c.splitsCache() && c.Cache.Backend == CacheLocal {
-		return fmt.Errorf("roles %s with cache.backend=local: api and ingest run in different processes, and the ingest worker's cache invalidation would never reach the API's cache — run api and ingest together, or set a shared cache.backend", joinRoles(c.Roles))
+		return fmt.Errorf("roles %s with cache.backend=local: api and ingest run in different processes, and the ingest worker's cache invalidation would never reach the API's cache — run api and ingest together, or set cache.backend=redis, one cache every process shares", joinRoles(c.Roles))
 	}
 	return nil
 }
@@ -255,9 +256,16 @@ func defaults() Config {
 		Roles:   AllRoles(),
 		Server:  Server{Port: 8080, ShutdownTimeout: 10},
 		MQ:      MQ{Backend: MQEmbedded},
-		Cache:   Cache{Backend: CacheLocal, L1MaxCost: 64 << 20},
-		Dedupe:  Dedupe{Backend: DedupePebble},
-		Coord:   Coord{Backend: CoordLocal},
+		Cache: Cache{
+			Backend: CacheLocal, L1MaxCost: 64 << 20,
+			Redis: CacheRedisConfig{
+				Mode: RedisStandalone, KeyPrefix: "wh",
+				Timeout: 100 * time.Millisecond, DialTimeout: time.Second,
+				MaxValueBytes: 1 << 20, CompressMinBytes: 1 << 10, VersionTTL: 168 * time.Hour,
+			},
+		},
+		Dedupe: Dedupe{Backend: DedupePebble},
+		Coord:  Coord{Backend: CoordLocal},
 		OTel: OTel{
 			Traces:  OTelTraces{Enabled: true, SampleRate: 1.0},
 			Metrics: OTelMetrics{Enabled: true},

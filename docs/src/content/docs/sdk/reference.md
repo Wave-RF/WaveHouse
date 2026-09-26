@@ -184,8 +184,8 @@ export interface ClicksRow {
 The SDK doubles as the E2E integration test harness. Tests in `tests/e2e/sdk/` exercise the full pipeline (ingest → ClickHouse → query) through the SDK, validating both the backend and the client library in one pass.
 
 ```bash
-# Run all E2E tests: the orchestrator boots a ClickHouse testcontainer +
-# the wavehouse-cov binary, then runs the SDK suite
+# Run all E2E tests: the orchestrator boots ClickHouse and Redis
+# testcontainers + the wavehouse-cov binary, then runs the SDK suite
 make test-e2e
 ```
 

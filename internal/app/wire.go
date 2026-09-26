@@ -322,7 +322,7 @@ func (a *App) wireClickHouse() error {
 		// cached is stale, so all of it is orphaned at once.
 		for _, id := range stale {
 			if err := a.cache.InvalidateTenant(a.stopCtx, id); err != nil {
-				slog.Error("cache invalidation of a stale tenant failed; it may serve stale rows until they expire", "tenant", id, "error", err)
+				slog.Warn("cache invalidation of a stale tenant did not land; it may serve stale rows until it does", "tenant", id, "error", err)
 			}
 		}
 	})
@@ -622,26 +622,63 @@ var _ pruner = (*cache.LocalCache)(nil)
 
 // wireCache opens the query-result cache — the one place the implementation
 // is chosen. After every reload a tenant no longer served, removed or
-// rejected alike, has its version index dropped (#262); its cache is
-// orphaned with it, as it would be anyway when it came back (wireClickHouse).
+// rejected alike, has its in-process version index dropped (#262); its cache
+// is orphaned with it, as it would be anyway when it came back
+// (wireClickHouse). A shared backend keeps no such index and is skipped.
 func (a *App) wireCache() error {
+	var c cache.Cache
 	switch b := a.cfg.Cache.Backend; b {
 	case config.CacheLocal:
 		l1, err := cache.NewLocal(a.cfg.Cache.L1MaxCost)
 		if err != nil {
 			return fmt.Errorf("cache init: %w", err)
 		}
-		a.cache = l1
-		a.add(component{name: "cache", close: withoutContext(l1.Close)})
-		a.tenants.AfterAdopt(func([]tenant.ID) {
-			if p, ok := a.cache.(pruner); ok {
-				p.Prune(a.served)
-			}
-		})
-		return nil
+		c = l1
+	case config.CacheRedis:
+		rc, err := redisConfig(a.cfg.Cache.Redis)
+		if err != nil {
+			return fmt.Errorf("cache init: %w", err)
+		}
+		r, err := cache.NewRedis(rc)
+		if err != nil {
+			return fmt.Errorf("cache init: %w", err)
+		}
+		c = r
 	default:
 		return unreachableBackend("cache.backend", b)
 	}
+	a.cache = c
+	a.add(component{name: "cache", close: withoutContext(c.Close)})
+	a.tenants.AfterAdopt(func([]tenant.ID) {
+		if p, ok := a.cache.(pruner); ok {
+			p.Prune(a.served)
+		}
+	})
+	return nil
+}
+
+// redisConfig maps the boot config's cache.redis block onto the backend's
+// config. Load has applied every default and validated the block; the TLS
+// files are read again here, so the connection uses what is on disk now.
+func redisConfig(r config.CacheRedisConfig) (cache.RedisConfig, error) {
+	t, err := r.TLS.Config()
+	if err != nil {
+		return cache.RedisConfig{}, err
+	}
+	return cache.RedisConfig{
+		Addrs:            r.Addrs,
+		Mode:             r.Mode,
+		Username:         r.Username,
+		Password:         r.Password,
+		DB:               r.DB,
+		TLS:              t,
+		KeyPrefix:        r.KeyPrefix,
+		Timeout:          r.Timeout,
+		DialTimeout:      r.DialTimeout,
+		MaxValueBytes:    r.MaxValueBytes,
+		CompressMinBytes: r.CompressMinBytes,
+		VersionTTL:       r.VersionTTL,
+	}, nil
 }
 
 // unreachableBackend is each layer switch's default case. config.Validate

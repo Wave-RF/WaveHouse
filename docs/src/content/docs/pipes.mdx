@@ -7,7 +7,7 @@ sidebar:
 
 A **named pipe** is a saved SQL query, registered under a name, that callers run by name with parameters — without ever sending raw SQL. They turn an ad-hoc query into a stable, cached, access-controlled endpoint: you write the SQL once as an operator in the settings directory's [`pipes.json`](/settings-directory#pipesjson), expose it at `GET/POST /v1/pipes/{name}`, and clients supply only the declared parameters.
 
-Pipes are the right tool when a query is reusable and shouldn't live in client code — dashboards, reports, public APIs over curated slices of data. They sit on the **cached read path** (shared L1 + singleflight, same as structured queries; a [pipe that writes](#pipes-that-write) bypasses both), and authorize through a simple per-pipe allowlist rather than the full [policy engine](/access-control).
+Pipes are the right tool when a query is reusable and shouldn't live in client code — dashboards, reports, public APIs over curated slices of data. They sit on the **cached read path** (the query cache + singleflight, same as structured queries; a [pipe that writes](#pipes-that-write) bypasses both), and authorize through a simple per-pipe allowlist rather than the full [policy engine](/access-control).
 
 ## Anatomy of a pipe
 
@@ -169,7 +169,7 @@ curl -X POST http://localhost:8080/v1/pipes/top_pages \
   -d '{"start_date": "2024-01-01", "limit": 20}'
 ```
 
-The response is a JSON array of rows. Results flow through the shared in-process L1 cache (Ristretto) with singleflight coalescing, so concurrent identical calls hit ClickHouse once; an `X-Cache: HIT` or `X-Cache: MISS` header tells you which path served the response. A [pipe that writes](#pipes-that-write) skips both and answers `X-Cache: BYPASS`.
+The response is a JSON array of rows. Results flow through the query cache (in-process by default, or a Redis shared by every instance with [`cache.backend: redis`](/configuration#cache)) with singleflight coalescing, so concurrent identical calls hit ClickHouse once; an `X-Cache: HIT` or `X-Cache: MISS` header tells you which path served the response. A [pipe that writes](#pipes-that-write) skips both and answers `X-Cache: BYPASS`.
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |

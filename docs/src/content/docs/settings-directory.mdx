@@ -179,7 +179,7 @@ The tenant tunables. Every key is required (a missing one is a validation error)
 }
 ```
 
-What stays in boot config is only what cannot change under a running process — the implementation each layer runs on (`mq.backend`, `cache.backend`, `dedupe.backend`, `coord.backend`), the process's `roles`, resource sizing (`data_dir`, `cache.l1_max_cost`, `clickhouse.max_total_conns`), the listeners, the observability exporters — and the **secrets**: `clickhouse.password`, `auth.jwt_secret`, `auth.operator_key`. Secrets never belong in a tracked JSON file, so they stay in the environment and are combined with the wiring here on every (re)connect; rotating one is a restart. See [Configuration](/configuration). Everything else lives here and reloads.
+What stays in boot config is only what cannot change under a running process — the implementation each layer runs on (`mq.backend`, `cache.backend`, `dedupe.backend`, `coord.backend`) and a shared backend's connection (`cache.redis`), the process's `roles`, resource sizing (`data_dir`, `cache.l1_max_cost`, `clickhouse.max_total_conns`), the listeners, the observability exporters — and the **secrets**: `clickhouse.password`, `cache.redis.password`, `auth.jwt_secret`, `auth.operator_key`. Secrets never belong in a tracked JSON file, so they stay in the environment and are combined with the wiring here on every (re)connect; rotating one is a restart. See [Configuration](/configuration). Everything else lives here and reloads.
 
 ## Deduplication
 

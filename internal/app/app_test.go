@@ -756,6 +756,104 @@ func TestReload_PrunesCacheIndexToServedTenants(t *testing.T) {
 	assert.Equal(t, map[tenant.ID]bool{"acme": false, "globex": true}, rec.last(), "removed; the repaired one served again")
 }
 
+// redisTestConfig is testConfig with cache.backend=redis at addr, carrying
+// the defaults Load would apply.
+func redisTestConfig(t *testing.T, settingsDir, addr string) *config.Config {
+	t.Helper()
+	cfg := testConfig(t, settingsDir)
+	cfg.Cache = config.Cache{Backend: config.CacheRedis, Redis: config.CacheRedisConfig{
+		Addrs: []string{addr}, Mode: config.RedisStandalone, KeyPrefix: "wh",
+		Timeout: 100 * time.Millisecond, DialTimeout: 200 * time.Millisecond,
+		MaxValueBytes: 1 << 20, CompressMinBytes: 1 << 10, VersionTTL: time.Hour,
+	}}
+	require.NoError(t, cfg.Validate())
+	return cfg
+}
+
+// cache.backend=redis wires the shared backend. A server that cannot be
+// reached does not refuse boot: the cache starts bypassed, and the reload
+// hook that prunes an in-process index leaves it alone.
+func TestNew_RedisCacheBootsBypassedWhenUnreachable(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
+	a := newApp(t, redisTestConfig(t, root, closedAddr(t)), Options{})
+	_, ok := a.cache.(*cache.RedisCache)
+	require.True(t, ok, "cache is %T", a.cache)
+	assert.Contains(t, componentNames(a), "cache")
+
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	a.tenants.Reload("test") // the prune hook must not trip on a non-pruner
+
+	entry, snap, err := a.cache.Lookup(t.Context(), "globex", "sha", nil)
+	require.NoError(t, err)
+	assert.Nil(t, entry.Value, "bypassed: a miss")
+	assert.NoError(t, a.cache.Set(t.Context(), snap, []byte("v"), time.Minute), "and the fill a no-op")
+}
+
+// A TLS file that went missing between validation and wiring refuses boot,
+// naming the key.
+func TestNew_RedisCacheRefusesAnUnreadableTLSFile(t *testing.T) {
+	guardGlobals(t)
+	cfg := redisTestConfig(t, writeSettings(t, nil), closedAddr(t))
+	cfg.Cache.Redis.TLS = config.CacheRedisTLS{Enabled: true, CAFile: filepath.Join(t.TempDir(), "gone.pem")}
+	_, err := New(t.Context(), Options{Config: cfg})
+	require.ErrorContains(t, err, "cache init: cache.redis.tls.ca_file")
+}
+
+// The boot config's defaults are the backend's, and a compress_min_bytes of
+// 0 reaches the backend as its "never compress" rather than its default.
+// Driven from Load, not a literal, so a default changed on one side only
+// fails here.
+func TestRedisConfig_FromLoadedDefaults(t *testing.T) {
+	t.Setenv("WH_SETTINGS_DIR", t.TempDir())
+	t.Setenv("WH_CACHE_BACKEND", "redis")
+	t.Setenv("WH_CACHE_REDIS_ADDRS", "a:6379")
+	t.Setenv("WH_CACHE_REDIS_PASSWORD", "pw")
+	loaded, err := config.Load(filepath.Join(t.TempDir(), "none.yaml"))
+	require.NoError(t, err)
+	got, err := redisConfig(loaded.Cache.Redis)
+	require.NoError(t, err)
+	assert.Equal(t, cache.RedisConfig{
+		Addrs: []string{"a:6379"}, Mode: cache.RedisStandalone, Password: "pw",
+		KeyPrefix: cache.DefaultRedisKeyPrefix, Timeout: cache.DefaultRedisTimeout,
+		DialTimeout: cache.DefaultRedisDialTimeout, MaxValueBytes: cache.DefaultRedisMaxValueBytes,
+		CompressMinBytes: cache.DefaultRedisCompressMinBytes, VersionTTL: cache.DefaultRedisVersionTTL,
+	}, got)
+
+	t.Setenv("WH_CACHE_REDIS_COMPRESS_MIN_BYTES", "0")
+	t.Setenv("WH_CACHE_REDIS_MODE", "cluster")
+	t.Setenv("WH_CACHE_REDIS_ADDRS", "a:6379,b:6379")
+	loaded, err = config.Load(filepath.Join(t.TempDir(), "none.yaml"))
+	require.NoError(t, err)
+	got, err = redisConfig(loaded.Cache.Redis)
+	require.NoError(t, err)
+	assert.Zero(t, got.CompressMinBytes, "the backend's never, not its default")
+	assert.Equal(t, cache.RedisCluster, got.Mode)
+	assert.Equal(t, []string{"a:6379", "b:6379"}, got.Addrs, "a cluster's seeds")
+	assert.Equal(t, cache.RedisSentinel, config.RedisSentinel)
+}
+
+// Username, DB and TLS are zero on both sides of TestRedisConfig_FromLoadedDefaults'
+// assert.Equal, so deleting any of their three mapping lines in redisConfig
+// would pass it anyway. Drive all three through config.Load to a non-zero
+// value and assert on them directly.
+func TestRedisConfig_UsernameDBTLSMapped(t *testing.T) {
+	t.Setenv("WH_SETTINGS_DIR", t.TempDir())
+	t.Setenv("WH_CACHE_BACKEND", "redis")
+	t.Setenv("WH_CACHE_REDIS_ADDRS", "a:6379")
+	t.Setenv("WH_CACHE_REDIS_USERNAME", "u")
+	t.Setenv("WH_CACHE_REDIS_DB", "2")
+	t.Setenv("WH_CACHE_REDIS_TLS_ENABLED", "true")
+	t.Setenv("WH_CACHE_REDIS_TLS_SERVER_NAME", "r.internal")
+	loaded, err := config.Load(filepath.Join(t.TempDir(), "none.yaml"))
+	require.NoError(t, err)
+	got, err := redisConfig(loaded.Cache.Redis)
+	require.NoError(t, err)
+	assert.Equal(t, "u", got.Username)
+	assert.Equal(t, 2, got.DB)
+	require.NotNil(t, got.TLS)
+	assert.Equal(t, "r.internal", got.TLS.ServerName)
+}
+
 // keepalive is a config.json patch setting the stream block's keepalive pair.
 func keepalive(interval, buckets int) map[string]any {
 	return map[string]any{"stream": map[string]any{"keepalive_interval": interval, "keepalive_buckets": buckets, "gap_window_minutes": 15}}
