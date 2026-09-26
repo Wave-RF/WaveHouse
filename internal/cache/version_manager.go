@@ -23,8 +23,8 @@ import (
 type VersionManager struct {
 	mu sync.RWMutex
 
-	// tenants holds each tenant's index from the first query key built for
-	// it until the tenant is bumped or pruned.
+	// tenants holds each tenant's index from the first entry key (`QueryKey`)
+	// built for it until the tenant is bumped or pruned.
 	tenants map[tenant.ID]*tenantVersions
 
 	// lastGen is the last generation handed to a tenant; see tenantVersions.gen.
