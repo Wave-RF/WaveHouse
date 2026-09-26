@@ -25,7 +25,7 @@ if (error?.code === 'ABORTED') {
 
 The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no global `fetch` and no `options.fetch` (see [Runtime support](/sdk#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and on a stream is reported as a retryable `SSE_AUTH_ERROR`. One more exception escapes an SDK call synchronously, though it is yours rather than ours: your own `status` handler throwing on the first `.subscribe()` or `.liveQuery()`, described under *If your own callback throws* below.
 
-`code` and `retryable` are the server's own when its error body carries them — a failed ClickHouse query does, with codes like `clickhouse.rejected` and `clickhouse.unavailable` ([the full list](/api#clickhouse-errors-on-the-query-paths)). Otherwise `code` is `HTTP_<status>` and a `5xx` is retryable.
+`code` and `retryable` are the server's own when its error body carries them — a failed ClickHouse query does, with codes like `clickhouse.rejected` and `clickhouse.unavailable` ([the full list](/api#clickhouse-errors-on-the-query-paths)). Otherwise `code` is `HTTP_<status>` and a `5xx` is retryable. One exception to the table below: a [pipe that writes](/pipes#pipes-that-write) answers every ClickHouse failure `retryable: false` with no `Retry-After`, `clickhouse.unavailable` and `clickhouse.unknown` included, so the SDK returns it on the first attempt.
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
@@ -184,8 +184,8 @@ export interface ClicksRow {
 The SDK doubles as the E2E integration test harness. Tests in `tests/e2e/sdk/` exercise the full pipeline (ingest → ClickHouse → query) through the SDK, validating both the backend and the client library in one pass.
 
 ```bash
-# Run all E2E tests: the orchestrator boots a ClickHouse testcontainer +
-# the wavehouse-cov binary, then runs the SDK suite
+# Run all E2E tests: the orchestrator boots ClickHouse and Redis
+# testcontainers + the wavehouse-cov binary, then runs the SDK suite
 make test-e2e
 ```
 

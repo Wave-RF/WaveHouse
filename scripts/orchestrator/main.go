@@ -1,10 +1,12 @@
 // E2E orchestrator — drives a clean, isolated E2E test session against
-// one ClickHouse + one WaveHouse, then runs the vitest suite once.
+// one ClickHouse + one Redis + one WaveHouse, then runs the vitest suite
+// once.
 //
 // Lifecycle:
 //
-//  1. Start ClickHouse via testcontainers-go (random host ports — no
-//     conflict with `make dev` or other compose stacks).
+//  1. Start ClickHouse and Redis (the fixture's shared cache) via
+//     testcontainers-go (random host ports — no conflict with `make dev` or
+//     other compose stacks).
 //  2. Pick a random free TCP port on 127.0.0.1 and start bin/wavehouse-cov
 //     bound to it (WH_SERVER_PORT) with auth enabled. Random port avoids
 //     conflicts with `make dev`, dev servers, and previous runs that may
@@ -44,6 +46,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/moby/moby/api/types/container"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -181,6 +184,43 @@ func run() error {
 		return fmt.Errorf("settings dir: %w", err)
 	}
 
+	// The shared cache the fixture's cache.backend=redis names: the suite
+	// runs the backend a multi-instance deployment runs. No persistence, and
+	// /data on tmpfs so the image's VOLUME leaves no anonymous volume behind.
+	log.Println("→ starting Redis testcontainer...")
+	redis, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			// Pinned to match internal/cache's integration suite.
+			Image:        "redis:8.10.2-alpine",
+			Cmd:          []string{"redis-server", "--save", "", "--appendonly", "no"},
+			ExposedPorts: []string{"6379/tcp"},
+			HostConfigModifier: func(hc *container.HostConfig) {
+				hc.Tmpfs = map[string]string{"/data": ""}
+			},
+			WaitingFor: wait.ForLog("Ready to accept connections").WithStartupTimeout(60 * time.Second),
+		},
+		Started: true,
+	})
+	if err != nil {
+		return fmt.Errorf("redis start: %w", err)
+	}
+	defer func() {
+		log.Println("→ terminating Redis testcontainer...")
+		if err := redis.Terminate(context.Background()); err != nil {
+			log.Printf("  redis terminate: %v", err)
+		}
+	}()
+	redisHost, err := redis.Host(ctx)
+	if err != nil {
+		return fmt.Errorf("redis host: %w", err)
+	}
+	redisPort, err := redis.MappedPort(ctx, "6379")
+	if err != nil {
+		return fmt.Errorf("redis port: %w", err)
+	}
+	redisAddr := net.JoinHostPort(redisHost, redisPort.Port())
+	log.Printf("✓ Redis ready: %s", redisAddr)
+
 	whPort, err := pickFreePort(ctx)
 	if err != nil {
 		return fmt.Errorf("pick free port: %w", err)
@@ -198,14 +238,15 @@ func run() error {
 	// tests/e2e/fixtures/config.yaml and the tunables, policy, roles, and
 	// pipes in tests/e2e/fixtures/settings — edit them there, not here. The
 	// vars below are the per-run dynamic overrides (port, scratch paths, the
-	// patched settings copy) plus GOCOVERDIR and WH_CONFIG, which can't live
-	// in YAML.
+	// patched settings copy, the Redis address) plus GOCOVERDIR and
+	// WH_CONFIG, which can't live in YAML.
 	whCmd.Env = append(os.Environ(),
 		"GOCOVERDIR="+coverDir,
 		"WH_CONFIG="+filepath.Join(repoRoot, "tests", "e2e", "fixtures", "config.yaml"),
 		"WH_SERVER_PORT="+strconv.Itoa(whPort),
 		"WH_SETTINGS_DIR="+settingsDir,
 		"WH_DATA_DIR="+dataDir,
+		"WH_CACHE_REDIS_ADDRS="+redisAddr,
 	)
 
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" {

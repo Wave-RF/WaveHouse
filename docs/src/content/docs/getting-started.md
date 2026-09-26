@@ -75,7 +75,7 @@ curl -s -X POST "http://localhost:8080/v1/query?table=clicks" \
   -d '{"columns": ["page", "button", "score"], "limit": 10}'
 ```
 
-`POST /v1/query?table={table}` and `GET/POST /v1/pipes/{name}` are cached in-process (L1 Ristretto) with singleflight coalescing — duplicate concurrent queries hit ClickHouse once. For raw SQL there's `POST /v1/ops/query` (an admin escape hatch that never caches, emitting `Cache-Control: no-store`), but it's **admin-only** — the trial `public` role can't reach it. To use it, swap the public default for real auth: configure a JWT secret and present a token whose role is the policy [`admin_role`](/access-control#admin_role--the-privileged-role).
+`POST /v1/query?table={table}` and `GET/POST /v1/pipes/{name}` are cached — in-process by default, or in a Redis shared by every instance with [`cache.backend: redis`](/configuration#cache) — with singleflight coalescing, so duplicate concurrent queries hit ClickHouse once. For raw SQL there's `POST /v1/ops/query` (an admin escape hatch that never caches, emitting `Cache-Control: no-store`), but it's **admin-only** — the trial `public` role can't reach it. To use it, swap the public default for real auth: configure a JWT secret and present a token whose role is the policy [`admin_role`](/access-control#admin_role--the-privileged-role).
 
 :::tip[Prefer a type-safe client?]
 The [TypeScript SDK](/sdk) wraps this endpoint in a chainable query builder with autocomplete on your table names and row types — plus live queries and streaming. The raw shapes are in the [structured query reference](/api#post-v1querytabletable--structured-query).

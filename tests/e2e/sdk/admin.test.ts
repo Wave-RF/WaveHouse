@@ -231,6 +231,54 @@ describe("Admin", () => {
       }
     });
 
+    // A write pipe is never answered from the cache (#386): with the shared
+    // cache this stack runs, a cached [] would skip every repeat's insert.
+    it("runs a write pipe on every call", async () => {
+      const writePipe = `test_pipe_write_${Date.now()}`;
+      const uid = `e2e-write-${Date.now()}`;
+      await setPipes([
+        ...readPipesFile(),
+        {
+          name: writePipe,
+          sql: `INSERT INTO default.${T.users} (user_id, name, email) VALUES ({{uid}}, 'e2e', 'e2e@example.com')`,
+          parameters: [{ name: "uid", type: "string", required: true }],
+          description: "E2E test pipe (write)",
+          allowed_roles: ["admin"],
+        },
+      ]);
+
+      for (let i = 0; i < 2; i++) {
+        const result = await wh.pipe(writePipe, { uid });
+        expect(result.error).toBeNull();
+        expect(result.data ?? []).toEqual([]);
+      }
+
+      const count = await wh.sql(
+        `SELECT count() AS cnt FROM default.${T.users} WHERE user_id = '${uid}'`,
+      );
+      expect(count.error).toBeNull();
+      expect(Number((count.data as { cnt: number | string }[])[0].cnt)).toBe(2);
+    });
+
+    // A failed write may have run, so it is never answered as retryable.
+    it("answers a failed write pipe as not retryable", async () => {
+      const badWrite = `test_pipe_bad_write_${Date.now()}`;
+      await setPipes([
+        ...readPipesFile(),
+        {
+          name: badWrite,
+          sql: `WITH 1 AS x INSERT INTO default.${T.users} (no_such_column) SELECT x`,
+          description: "E2E test pipe (failing write)",
+          allowed_roles: ["admin"],
+        },
+      ]);
+
+      const result = await wh.pipe(badWrite);
+      expect(result.error?.status).toBe(400);
+      expect(result.error?.code).toBe("clickhouse.rejected");
+      expect(result.error?.retryable).toBe(false);
+    });
+
     it("drops a pipe removed from pipes.json", async () => {
       await setPipes(readPipesFile().filter((p) => p.name !== pipeName));
 

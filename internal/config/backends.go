@@ -35,21 +35,34 @@ func (m MQ) validate() error {
 // CacheBackend names the query-result cache implementation.
 type CacheBackend string
 
-// CacheLocal is the in-process Ristretto cache, sized by cache.l1_max_cost.
-const CacheLocal CacheBackend = "local"
+const (
+	// CacheLocal is the in-process Ristretto cache, sized by
+	// cache.l1_max_cost.
+	CacheLocal CacheBackend = "local"
+	// CacheRedis is one Redis-compatible server shared by every process,
+	// configured by cache.redis.
+	CacheRedis CacheBackend = "redis"
+)
 
-var cacheBackends = []CacheBackend{CacheLocal}
+var cacheBackends = []CacheBackend{CacheLocal, CacheRedis}
 
 // Cache selects and sizes the query-result cache. The time-range bucket
 // structured queries normalize to is a settings-directory key
 // (query.timestamp_bucket_seconds) — query shaping, not process memory.
 type Cache struct {
-	Backend   CacheBackend `yaml:"backend" env:"WH_CACHE_BACKEND"`
-	L1MaxCost int64        `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST"`
+	Backend   CacheBackend     `yaml:"backend" env:"WH_CACHE_BACKEND"`
+	L1MaxCost int64            `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST"`
+	Redis     CacheRedisConfig `yaml:"redis"`
 }
 
 func (c Cache) validate() error {
-	return checkBackend("cache.backend", "WH_CACHE_BACKEND", c.Backend, cacheBackends)
+	if err := checkBackend("cache.backend", "WH_CACHE_BACKEND", c.Backend, cacheBackends); err != nil {
+		return err
+	}
+	if c.Backend == CacheRedis {
+		return c.Redis.validate()
+	}
+	return nil
 }
 
 // DedupeBackend names where ingest dedupe keeps the ids it has seen.
@@ -126,19 +139,26 @@ func (c *Config) NeedsDataDir() bool {
 }
 
 // Warnings returns what a valid configuration is still likely to get wrong,
-// one line each, for boot to log at WARN. They are not errors because each is
-// correct for a single replica, and one process cannot count its replicas.
+// one line each, for boot to log at WARN. The shared-queue ones are not
+// errors because each is correct for a single replica, and one process
+// cannot count its replicas.
 func (c *Config) Warnings() []string {
-	if !c.Distributed() {
-		return nil
-	}
-	// Both are the api role's: a process without it opens neither a cache it
-	// reads nor a dedupe store (a split that would need the cache shared is
-	// refused, validateTopology).
+	// All are the api role's: a process without it opens no cache it reads
+	// and no dedupe store, and a split's Deployments differ only in roles, so
+	// the API's warnings cover the others'.
 	if !c.Has(RoleAPI) {
 		return nil
 	}
 	var out []string
+	if c.Cache.Backend == CacheRedis && c.Cache.Redis.TLS.InsecureSkipVerify {
+		out = append(out, "cache.redis.tls.insecure_skip_verify is on: the cache accepts any certificate, so whoever can intercept the connection can read and replace cached query results")
+	}
+	if c.Cache.Backend != CacheRedis && c.Cache.Redis.hasAddrs() {
+		out = append(out, "cache.redis.addrs is set but cache.backend is "+string(c.Cache.Backend)+": the redis block is not read; set cache.backend=redis to share the cache")
+	}
+	if !c.Distributed() {
+		return out
+	}
 	if c.Cache.Backend == CacheLocal {
 		out = append(out, "cache.backend=local with a shared mq.backend is correct for one replica only: an event ingested on another replica never invalidates this one's cache, so its reads stay stale until the cached entry expires")
 	}

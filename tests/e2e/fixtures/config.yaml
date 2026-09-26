@@ -1,8 +1,9 @@
 # WaveHouse config for the e2e harness (scripts/orchestrator + tests/e2e).
 #
-# Dynamic values — ClickHouse addr/HTTP port (testcontainer), WaveHouse
-# server port (free port), WH_DATA_DIR (per-run scratch) — are injected by
-# the orchestrator via env vars. Everything below is pinned here so the
+# Dynamic values — ClickHouse addr/HTTP port (testcontainer), the Redis
+# address (testcontainer, WH_CACHE_REDIS_ADDRS), WaveHouse server port (free
+# port), WH_DATA_DIR (per-run scratch) — are injected by the orchestrator via
+# env vars. Everything below is pinned here so the
 # rig config is visible and editable without recompiling Go.
 
 # JWT validation. The suite signs test tokens with this fixed dev secret;
@@ -12,6 +13,15 @@ auth:
   jwt_secret: sdk-dev-secret
   # operator_key: "" # non-JWT full-access operator credential (Authorization: Operator, or X-Operator-Key); unset in the rig
 
+
+# The shared cache, as a multi-instance deployment runs it; the in-process
+# backend is covered by the unit and integration suites. The timeout is ten
+# times the default so a loaded runner's slow round trip is not a bypassed
+# lookup that a HIT assertion reads as a failure.
+cache:
+  backend: redis
+  redis:
+    timeout: 1s
 
 # Tenant tunables (schema refresh_interval 5s so schema-discovery tests don't
 # wait a minute; dedupe enabled + id_field; DLQ on; CORS "*"; a 1 GiB NATS

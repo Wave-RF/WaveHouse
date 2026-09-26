@@ -109,8 +109,9 @@ func selectAllQuery() query.StructuredQuery { return query.StructuredQuery{Selec
 
 // A tenant on no pool — its tuple could not be opened, such as by the
 // connection ceiling — fails closed on every route that reaches its
-// ClickHouse: a 503 with Retry-After ahead of the cache, so nothing it
-// cached before is served either, and on the refresh, which cannot run.
+// ClickHouse: a 503 with Retry-After before a cached result is served or a
+// query runs, so nothing it cached before is served either (TestCachedRoutes_ReloadAsThePoolIsTakenOrphansTheFill
+// pins that with a hit), and on the refresh, which cannot run.
 func TestClickHouseRoutes_NoPoolIs503(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t)
@@ -132,6 +133,15 @@ func TestClickHouseRoutes_NoPoolIs503(t *testing.T) {
 		h := NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), allowAll, noConn, nil, noTimeout)
 		w := httptest.NewRecorder()
 		h.Execute(w, withTenant(pipesRequest(t, http.MethodGet, "/v1/pipes/top_pages", "top_pages", nil)))
+		assertUnavailable(t, w, noConnectionMessage, retryAfterPool)
+	})
+	// A write that never reached ClickHouse cannot have run, so this 503
+	// keeps its Retry-After where a failed write's answer drops it.
+	t.Run("write pipe execute", func(t *testing.T) {
+		t.Parallel()
+		h := NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "log", SQL: "INSERT INTO audit_log VALUES (1)", AllowedRoles: []string{"viewer"}}), allowAll, noConn, nil, noTimeout)
+		w := httptest.NewRecorder()
+		h.Execute(w, withTenant(pipesRequest(t, http.MethodGet, "/v1/pipes/log", "log", nil)))
 		assertUnavailable(t, w, noConnectionMessage, retryAfterPool)
 	})
 	t.Run("raw-SQL proxy", func(t *testing.T) {

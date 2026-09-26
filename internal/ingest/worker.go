@@ -19,7 +19,6 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -877,7 +876,9 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 // invalidate bumps the cache namespaces a batch of inserts into tableName
 // changed, for tenant id: the namespaces lead with the tenant (#583 story 8),
 // so the same table under another tenant keeps its cached results. id is the
-// batch's tenant, read off each message's topic (story 5).
+// batch's tenant, read off each message's topic (story 5). The table and
+// scope go to the cache raw, as the structured-query read passes them; the
+// cache escapes both sides alike.
 //
 // The set is the minimal one. Every msg here is for tableName, so a single
 // scopeless write bumps the whole table — which subsumes every scope — and
@@ -885,24 +886,19 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 // Doing this here (we already loop the batch once, and know it's one table)
 // keeps Cache.Invalidate a simple one-pass bump.
 func (w *IngestWorker) invalidate(ctx context.Context, id tenant.ID, tableName string, msgs []parsedMsg) {
-	encodedTable := query.SafeEncodeToken(tableName)
 	seenScopes := make(map[string]struct{}, len(msgs))
 	namespaces := make([]cache.Namespace, 0, len(msgs))
 
 	for _, pm := range msgs {
 		if pm.scope == "" {
-			namespaces = []cache.Namespace{{Tenant: id, Table: encodedTable}}
+			namespaces = []cache.Namespace{{Tenant: id, Table: tableName}}
 			break
 		}
 		if _, exists := seenScopes[pm.scope]; exists {
 			continue
 		}
 		seenScopes[pm.scope] = struct{}{}
-		namespaces = append(namespaces, cache.Namespace{
-			Tenant: id,
-			Table:  encodedTable,
-			Scope:  query.SafeEncodeToken(pm.scope),
-		})
+		namespaces = append(namespaces, cache.Namespace{Tenant: id, Table: tableName, Scope: pm.scope})
 	}
 
 	if len(namespaces) == 0 {
@@ -910,7 +906,9 @@ func (w *IngestWorker) invalidate(ctx context.Context, id tenant.ID, tableName s
 	}
 	invCtx := trace.ContextWithSpanContext(context.WithoutCancel(ctx), trace.SpanContextFromContext(ctx))
 	if _, err := w.cache.Invalidate(invCtx, namespaces); err != nil {
-		slog.ErrorContext(invCtx, "failed to invalidate cache after insert - your cache is holding stale data now!", "tenant", id, "table", tableName, "error", err)
+		// WARN, not ERROR: a shared backend defers and retries the bump, and
+		// an outage would otherwise log an ERROR for every batch.
+		slog.WarnContext(invCtx, "cache invalidation after insert did not land; the table's cached results may be stale until it does", "tenant", id, "table", tableName, "error", err)
 	}
 }
 
