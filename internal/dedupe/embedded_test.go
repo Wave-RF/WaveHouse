@@ -140,17 +140,25 @@ func TestEmbedded_OpenFailure(t *testing.T) {
 	assert.True(t, e.Open())
 }
 
-// Keys from before the table joined the key (#222) are never read: an id
-// seen then is accepted once more after the upgrade, the documented cost of
-// the new layout.
-func TestEmbedded_VersionZeroKeysAreNotRead(t *testing.T) {
+// Keys from before the table joined the key (#222) never count: an id seen
+// then is accepted once more after the upgrade, the documented cost of the
+// new layout. A tenant ‖ NUL ‖ id key is never looked up; a bare v0.1.0 id
+// that spells a current key is, and its 8-byte value reads as absent.
+func TestEmbedded_VersionZeroKeysDoNotCount(t *testing.T) {
 	t.Parallel()
 	e := NewEmbedded(t.TempDir())
 	m := switchedOn(t, e, "acme")
 	require.NoError(t, e.db.Set([]byte("acme\x00e1"), make([]byte, 8), pebble.Sync))
-	dup, err := mark(context.Background(), m, "e1")
+	stale := AppendKey(nil, KeyPrefix("acme"), Key{Table: "events", ID: "e2"})
+	require.NoError(t, e.db.Set(stale, make([]byte, 8), pebble.Sync))
+	for _, id := range []string{"e1", "e2"} {
+		dup, err := mark(context.Background(), m, id)
+		require.NoError(t, err)
+		assert.False(t, dup, id)
+	}
+	dup, err := mark(context.Background(), m, "e2")
 	require.NoError(t, err)
-	assert.False(t, dup)
+	assert.True(t, dup, "the commit overwrote the stale value")
 }
 
 // v0.1.0 stored a bare id as the key with an 8-byte value, so a v0.1.0 id

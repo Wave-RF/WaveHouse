@@ -33,8 +33,9 @@ func validFiles() map[string]string {
 
 // configJSON returns the seed config.json with patch merged over it, one
 // level deep (a patched block's keys replace the seed's, the rest of the
-// block is kept). Every key is required, so tests that care about one key
-// build a complete document from the seed rather than repeating all of them.
+// block is kept). Every key but dedupe.retention is required, so tests that
+// care about one key build a complete document from the seed rather than
+// repeating all of them.
 func configJSON(patch string) string {
 	seed, err := Seed()
 	if err != nil {
@@ -268,13 +269,13 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"negative max rows", FileConfig, `{"query": {"default_max_rows": -1}}`, "must be >= 1"},
 		{"zero max rows", FileConfig, `{"query": {"default_max_rows": 0}}`, "must be >= 1"},
 		{"missing dedupe block", FileConfig, `{"dlq": {"enabled": true}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 1}, "cors": {"allowed_origins": []}}`, "dedupe: required"},
-		{"missing dlq block", FileConfig, `{"dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 1}, "cors": {"allowed_origins": []}}`, "dlq: required"},
+		{"missing dlq block", FileConfig, `{"dedupe": {"enabled": false, "id_field": "event_id", "require_id": false, "retention": "0"}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 1}, "cors": {"allowed_origins": []}}`, "dlq: required"},
 		{"missing dlq.enabled", FileConfig, `{"dlq": {"tables": {}}}`, "dlq.enabled: required"},
 		{"empty dlq override table name", FileConfig, `{"dlq": {"tables": {"": {"enabled": false}}}}`, "table name must not be empty"},
 		{"dlq override table whitespace", FileConfig, `{"dlq": {"tables": {"clicks ": {"enabled": false}}}}`, "surrounding whitespace"},
 		{"missing query.timestamp_bucket_seconds", FileConfig, `{"query": {"default_max_rows": 1}}`, "query.timestamp_bucket_seconds: required"},
 		{"negative timestamp bucket", FileConfig, `{"query": {"timestamp_bucket_seconds": -1}}`, "must be >= 0"},
-		{"missing stream block", FileConfig, `{"dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}, "dlq": {"enabled": true}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "cors": {"allowed_origins": []}}`, "stream: required"},
+		{"missing stream block", FileConfig, `{"dedupe": {"enabled": false, "id_field": "event_id", "require_id": false, "retention": "0"}, "dlq": {"enabled": true}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "cors": {"allowed_origins": []}}`, "stream: required"},
 		{"missing stream.keepalive_interval", FileConfig, `{"stream": {"keepalive_buckets": 3, "gap_window_minutes": 15}}`, "stream.keepalive_interval: required"},
 		{"missing stream.keepalive_buckets", FileConfig, `{"stream": {"keepalive_interval": 30, "gap_window_minutes": 15}}`, "stream.keepalive_buckets: required"},
 		{"missing stream.gap_window_minutes", FileConfig, `{"stream": {"keepalive_interval": 30, "keepalive_buckets": 3}}`, "stream.gap_window_minutes: required"},
@@ -283,14 +284,20 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"negative gap window", FileConfig, `{"stream": {"gap_window_minutes": -1}}`, "stream.gap_window_minutes: must be >= 0"},
 		{"keepalive as a duration string", FileConfig, `{"stream": {"keepalive_interval": "30s"}}`, "keepalive_interval"},
 		{"missing dedupe.require_id", FileConfig, `{"dedupe": {"id_field": "event_id"}}`, "dedupe.require_id: required"},
-		{"missing dedupe.enabled", FileConfig, `{"dedupe": {"id_field": "event_id", "require_id": false}}`, "dedupe.enabled: required"},
+		{"missing dedupe.enabled", FileConfig, `{"dedupe": {"id_field": "event_id", "require_id": false, "retention": "0"}}`, "dedupe.enabled: required"},
+		{"dedupe.retention not a duration", FileConfig, configJSON(`{"dedupe": {"retention": "30d"}}`), `dedupe.retention: must be a duration such as "720h"`},
+		{"dedupe.retention a number", FileConfig, configJSON(`{"dedupe": {"retention": 3600}}`), "retention"},
+		{"dedupe.retention negative", FileConfig, configJSON(`{"dedupe": {"retention": "-1h"}}`), "dedupe.retention: must not be negative"},
+		{"dedupe.retention under the duplicate window", FileConfig, configJSON(`{"dedupe": {"retention": "1m59s"}}`), `dedupe.retention: "1m59s" is shorter than the ingest queue's 2m0s duplicate window`},
+		{"override retention under the duplicate window", FileConfig, configJSON(`{"dedupe": {"tables": {"clicks": {"retention": "30s"}}}}`), "dedupe.tables.clicks.retention: \"30s\" is shorter"},
+		{"override retention not a duration", FileConfig, configJSON(`{"dedupe": {"tables": {"clicks": {"retention": "forever"}}}}`), "dedupe.tables.clicks.retention: must be a duration"},
 		{"missing query.default_max_rows", FileConfig, `{"query": {}}`, "query.default_max_rows: required"},
 		{"missing schema.refresh_interval", FileConfig, `{"schema": {}}`, "schema.refresh_interval: required"},
 		{"missing cors.allowed_origins", FileConfig, `{"cors": {}}`, "cors.allowed_origins: required"},
 		{"empty config document", FileConfig, `{}`, "cors: required"},
 		{"otel is boot config", FileConfig, `{"otel": {"enabled": true}}`, "unknown field"},
-		{"missing clickhouse block", FileConfig, `{"auth": {"jwks_url": "", "role_claim": "role"}, "dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}, "dlq": {"enabled": true}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 1}, "cors": {"allowed_origins": []}}`, "clickhouse: required"},
-		{"missing auth block", FileConfig, `{"clickhouse": {"addr": "h:9000", "http_port": 8123, "http_scheme": "http", "database": "d", "username": "u", "query_timeout": 1}, "dedupe": {"enabled": false, "id_field": "event_id", "require_id": false}, "dlq": {"enabled": true}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 1}, "cors": {"allowed_origins": []}}`, "auth: required"},
+		{"missing clickhouse block", FileConfig, `{"auth": {"jwks_url": "", "role_claim": "role"}, "dedupe": {"enabled": false, "id_field": "event_id", "require_id": false, "retention": "0"}, "dlq": {"enabled": true}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 1}, "cors": {"allowed_origins": []}}`, "clickhouse: required"},
+		{"missing auth block", FileConfig, `{"clickhouse": {"addr": "h:9000", "http_port": 8123, "http_scheme": "http", "database": "d", "username": "u", "query_timeout": 1}, "dedupe": {"enabled": false, "id_field": "event_id", "require_id": false, "retention": "0"}, "dlq": {"enabled": true}, "query": {"default_max_rows": 1, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 1}, "stream": {"keepalive_interval": 1, "keepalive_buckets": 1, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 1}, "cors": {"allowed_origins": []}}`, "auth: required"},
 		{"missing clickhouse.addr", FileConfig, `{"clickhouse": {"http_port": 8123, "http_scheme": "http", "database": "d", "username": "u", "query_timeout": 1}}`, "clickhouse.addr: required"},
 		{"clickhouse.addr without port", FileConfig, `{"clickhouse": {"addr": "localhost"}}`, "must be host:port"},
 		{"clickhouse.http_port out of range", FileConfig, `{"clickhouse": {"http_port": 70000}}`, "clickhouse.http_port: must be in 1-65535"},
@@ -341,6 +348,52 @@ func TestValidate_ContentRules(t *testing.T) {
 			assert.Contains(t, findingStrings(findings), tt.want)
 		})
 	}
+}
+
+// A finite retention at or above the duplicate window is accepted, "0" (or
+// any zero duration) is forever, and a table may keep ids longer or shorter
+// than the tenant, or forever under a finite tenant retention.
+func TestValidate_DedupeRetentionAccepted(t *testing.T) {
+	t.Parallel()
+	for _, patch := range []string{
+		`{"dedupe": {"retention": "0"}}`,
+		`{"dedupe": {"retention": "0s"}}`,
+		`{"dedupe": {"retention": "2m"}}`,
+		`{"dedupe": {"retention": "720h", "tables": {"clicks": {"retention": "24h"}, "views": {"retention": "0"}}}}`,
+	} {
+		t.Run(patch, func(t *testing.T) {
+			t.Parallel()
+			files := validFiles()
+			files[FileConfig] = configJSON(patch)
+			doc, findings := ValidateDir(writeDir(t, files))
+			require.NotNil(t, doc, "findings: %s", findingStrings(findings))
+			assert.False(t, HasErrors(findings))
+		})
+	}
+}
+
+// configJSONWithout is the seed config.json less dedupe.retention.
+func configJSONWithout(t *testing.T) string {
+	t.Helper()
+	var doc map[string]map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(configJSON(`{}`)), &doc))
+	delete(doc["dedupe"], "retention")
+	out, err := json.Marshal(doc)
+	require.NoError(t, err)
+	return string(out)
+}
+
+// dedupe.retention may be left out: the tenant keeps ids forever, and a
+// table override may still set one.
+func TestValidate_DedupeRetentionOptional(t *testing.T) {
+	t.Parallel()
+	files := validFiles()
+	files[FileConfig] = configJSONWithout(t)
+	require.NotContains(t, files[FileConfig], "retention")
+	doc, findings := ValidateDir(writeDir(t, files))
+	require.NotNil(t, doc, "findings: %s", findingStrings(findings))
+	assert.False(t, HasErrors(findings), "findings: %s", findingStrings(findings))
+	assert.Nil(t, doc.Config.Dedupe.Retention)
 }
 
 // A table name with odd bytes — NUL included — is any other table name to

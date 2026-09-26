@@ -201,7 +201,9 @@ func TestIngest_Dedup_FirstTime(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(dedup)
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id"}
+	}
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "evt-1"})
 	w := httptest.NewRecorder()
@@ -217,7 +219,9 @@ func TestIngest_Dedup_Duplicate(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(dedup)
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id"}
+	}
 
 	// First call.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "dup-1"})
@@ -674,7 +678,7 @@ func TestIngest_Policy_CheckIn_Absent_FailsClosed(t *testing.T) {
 
 // TestIngest_Policy_CheckIn_AbsentClaim_FailsClosed locks the typed-nil []any
 // path behind an _in check: when the claim itself is absent, resolveInValues
-// returns a typed-nil []any, which must still assert as []any in processRecord
+// returns a typed-nil []any, which must still assert as []any in prepareRecord
 // (entering the membership branch) so the column is rejected — never treated as a
 // scalar _eq value and auto-injected. The sibling _Absent test omits the column
 // with the claim present; this one drops the claim too. Guards #224 fail-closed.
@@ -717,7 +721,9 @@ func TestIngest_DedupIsTheTenants(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = func(s *settings.Store) dedupe.Deduplicator { return stores.For(s.Tenant()) }
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id"}
+	}
 
 	ingest := func(id tenant.ID) string {
 		store, ok := tenants.For(id)
@@ -740,7 +746,9 @@ func TestIngest_Dedup_MissingIDField(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(dedup)
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id"}
+	}
 
 	// Payload omits event_id and require_id is off: the row skips
 	// dedup and is still published — the warn+counter path, not a rejection (#219).
@@ -759,7 +767,9 @@ func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(testutil.NewMockDeduplicator())
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", true }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id", RequireID: true}
+	}
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home"})))
@@ -781,7 +791,9 @@ func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(testutil.NewMockDeduplicator())
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", true }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id", RequireID: true}
+	}
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
@@ -1029,7 +1041,9 @@ func TestIngest_NDJSON_Dedup(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(dedup)
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", false }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id"}
+	}
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
@@ -1853,8 +1867,8 @@ func TestIngest_JSONArray_SyntaxError_Fatal(t *testing.T) {
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 
 	// A structural syntax error desyncs the decoder — the whole request fails
-	// (400), unlike a per-element type error. The leading good element may have
-	// already published (at-least-once on retry).
+	// (400), unlike a per-element type error. The leading good element is still
+	// in the open window, which is dropped unpublished.
 	req := rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"}, {bad]`)
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(req))
@@ -1862,7 +1876,7 @@ func TestIngest_JSONArray_SyntaxError_Fatal(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
 	testutil.AssertJSONErrorResponse(t, w)
-	assert.Len(t, pub.Messages, 1) // the leading record published before the abort
+	assert.Empty(t, pub.Messages)
 }
 
 func TestIngest_JSONArray_Truncated_Fatal(t *testing.T) {
@@ -2334,7 +2348,9 @@ func TestIngest_Dedup_DisabledBySettings(t *testing.T) {
 			dedup.Err = errors.New("must not be called while disabled")
 			h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 			h.Dedup = staticDedup(dedup)
-			h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return false, "event_id", true }
+			h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+				return settings.Dedupe{IDField: "event_id", RequireID: true}
+			}
 
 			w := httptest.NewRecorder()
 			h.Handle(w, withTenant(ingestRequest(t, "clicks", tt.body)))
@@ -2354,7 +2370,9 @@ func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
 	dedup.Err = dedupe.ErrDisabled
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(dedup)
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", true }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id", RequireID: true}
+	}
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"event_id": "e1", "page": "/home"})))
@@ -2375,7 +2393,7 @@ func TestIngest_Dedup_DisabledMidReload(t *testing.T) {
 // discovery.Validate accepts `{}` here because every column is nullable or
 // defaulted. I previously asserted this path was unreachable, having tested only
 // against a schema with a required column; it is not.
-func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
+func TestPrepareRecord_UnresolvedInsertSideAborts(t *testing.T) {
 	t.Parallel()
 	schema := &discovery.TableSchema{
 		Name: "loose",
@@ -2399,11 +2417,10 @@ func TestProcessRecord_UnresolvedInsertSideAborts(t *testing.T) {
 	require.NoError(t, discovery.Validate(schema, map[string]any{}),
 		"all-nullable/defaulted columns accept an empty record — this is what makes the read reachable")
 
-	dup, reject, abort := h.processRecord(
+	rec, abort := h.prepareRecord(
 		context.Background(), testStore, "loose", "", schema, selectResolved, "viewer", map[string]any{}, time.Now(), nil)
 
-	assert.False(t, dup)
-	assert.Nil(t, reject, "a request-scoped condition must not be reported per record")
+	assert.Nil(t, rec.reject, "a request-scoped condition must not be reported per record")
 	require.NotNil(t, abort, "an unresolved insert side must abort the request")
 	assert.Equal(t, http.StatusForbidden, abort.Status)
 	assert.Empty(t, abort.RetryAfter, "not a transient condition — retrying cannot help")
@@ -2773,14 +2790,49 @@ func dedupHandler(t *testing.T, pub *testutil.MockPublisher, dedup dedupe.Dedupl
 	t.Helper()
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
 	h.Dedup = staticDedup(dedup)
-	h.DedupeSettings = func(*settings.Store, string) (bool, string, bool) { return true, "event_id", requireID }
+	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+		return settings.Dedupe{Enabled: true, IDField: "event_id", RequireID: requireID}
+	}
 	return h
 }
 
-// #384: a publish that fails gives the id back, so the retry the 503 asks for
-// is published rather than skipped as a duplicate of a record that never
-// reached the queue.
+// #384: a publish the queue refused gives the id back, so the retry the 503
+// asks for is published rather than skipped as a duplicate of a record that
+// never reached the queue.
 func TestIngest_Dedup_FailedPublishReleasesTheID(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{Err: fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull)}
+	dedup := testutil.NewMockDeduplicator()
+	h := dedupHandler(t, pub, dedup, false)
+	body := map[string]any{"page": "/home", "event_id": "e1"}
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "30", w.Header().Get("Retry-After"))
+	assert.False(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "released, not left to lapse")
+
+	pub.Err = nil
+	w = httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"ok":true`, "the retry is published, not a duplicate")
+	assert.Len(t, pub.Published(), 1)
+
+	w = httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+	assert.Contains(t, w.Body.String(), `"duplicate":true`, "and committed once published")
+}
+
+// A publish whose outcome is unknown may have stored the event, so its claim
+// is neither released nor committed: it lapses with the lease, a retry before
+// then answers in-flight, and the idempotency key covers one after.
+// mq.ErrUnavailable is such a failure too, and answers 503 immediately with
+// the lease itself as Retry-After (rounded up to whole seconds) rather than
+// the flat 5 seconds a request with no claim to lapse would get — the same
+// distinction TestIngest_Dedup_FailedPublishReleasesTheID draws for the one
+// failure (mq.ErrQueueFull) that releases instead.
+func TestIngest_Dedup_UncertainPublishLeavesTheClaim(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
@@ -2788,9 +2840,8 @@ func TestIngest_Dedup_FailedPublishReleasesTheID(t *testing.T) {
 		status     int
 		retryAfter string
 	}{
-		{"backpressure", fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), http.StatusServiceUnavailable, "30"},
-		{"unavailable broker", fmt.Errorf("%w: timeout", mq.ErrUnavailable), http.StatusServiceUnavailable, "5"},
-		{"other failure", errors.New("connection reset"), http.StatusInternalServerError, ""},
+		{"unrecognized error", context.DeadlineExceeded, http.StatusInternalServerError, ""},
+		{"unavailable broker", fmt.Errorf("%w: timeout", mq.ErrUnavailable), http.StatusServiceUnavailable, "30"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2804,35 +2855,58 @@ func TestIngest_Dedup_FailedPublishReleasesTheID(t *testing.T) {
 			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
 			require.Equal(t, tt.status, w.Code)
 			assert.Equal(t, tt.retryAfter, w.Header().Get("Retry-After"))
-			assert.False(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "released, not left to lapse")
+			assert.True(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "left to lapse")
+			assert.Empty(t, dedup.Released)
 
 			pub.Err = nil
 			w = httptest.NewRecorder()
 			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
-			require.Equal(t, http.StatusOK, w.Code)
-			assert.Contains(t, w.Body.String(), `"ok":true`, "the retry is published, not a duplicate")
-			assert.Len(t, pub.Published(), 1)
-
-			w = httptest.NewRecorder()
-			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
-			assert.Contains(t, w.Body.String(), `"duplicate":true`, "and committed once published")
+			assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+			assert.Equal(t, "30", w.Header().Get("Retry-After"))
+			assert.Empty(t, pub.Published())
 		})
+	}
+}
+
+// A claimed record is published under its idempotency key; an un-deduped one
+// carries none, so a producer's repeated ids are not dropped by the queue.
+func TestIngest_Dedup_PublishCarriesTheIdempotencyKey(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := dedupHandler(t, pub, testutil.NewMockDeduplicator(), false)
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(ndjsonRequest(t, "clicks",
+		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
+		jsonLine(t, map[string]any{"page": "/b"}),
+	)))
+	require.Equal(t, http.StatusOK, w.Code)
+	msgs := pub.Published()
+	require.Len(t, msgs, 2)
+
+	want := mq.Headers{}
+	mq.WithIdempotencyKey(dedupe.IdempotencyKey(testStore.Tenant(), dedupe.Key{Table: "clicks", ID: "e1"}))(want)
+	for k, v := range want {
+		assert.Equal(t, v, msgs[0].Headers[k])
+		assert.NotContains(t, msgs[1].Headers, k)
 	}
 }
 
 // A release that fails after a failed publish is only logged: the request
 // answers with the publish's own error, and the id is left to lapse with its
-// lease rather than being reported as a dedupe failure.
+// lease rather than being reported as a dedupe failure. The publish error must
+// be definite (mq.ErrQueueFull) for a single-record window: an uncertain
+// failure never releases its own record's claim (it is left to lapse
+// instead), so there would be nothing to release.
 func TestIngest_Dedup_FailedReleaseKeepsThePublishError(t *testing.T) {
 	t.Parallel()
-	pub := &testutil.MockPublisher{Err: errors.New("connection reset")}
+	pub := &testutil.MockPublisher{Err: fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull)}
 	dedup := testutil.NewMockDeduplicator()
 	dedup.ReleaseErr = errors.New("store unavailable")
 	h := dedupHandler(t, pub, dedup, false)
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"})))
-	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.NotContains(t, w.Body.String(), "dedupe", "the publish's error, not the release's")
 	assert.Len(t, dedup.Released, 1, "the release was attempted")
 	assert.True(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "left to lapse with its lease")
@@ -2857,8 +2931,9 @@ func TestIngest_NDJSON_Dedup_PublishFailureMidBatch(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(batch()))
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
-	require.Len(t, dedup.Released, 1)
+	require.Len(t, dedup.Released, 2, "the failing record and the rest of its window")
 	assert.Equal(t, dedupe.Key{Table: "clicks", ID: "e2"}, dedup.Released[0].Key)
+	assert.Equal(t, dedupe.Key{Table: "clicks", ID: "e3"}, dedup.Released[1].Key)
 
 	pub.Err = nil
 	w = httptest.NewRecorder()
@@ -2930,6 +3005,57 @@ func TestIngest_Dedup_ReserveError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Contains(t, w.Body.String(), "dedupe failed")
 	assert.Empty(t, pub.Published())
+}
+
+// A Reserve error's log level depends on why it failed. A real backend
+// failure (a live request context) stays ERROR, so an operator is paged. One
+// caused by the request's own context ending (the client gone, or its
+// deadline past) is not a backend problem and must log at DEBUG instead — an
+// operator paging on ERROR logs would otherwise be woken by clients that
+// simply went away. Not t.Parallel: it captures the process-wide default
+// logger (logtest.Capture). Matched on the exact "level":"…","msg":"…" pair
+// slog's JSON handler emits adjacently, not on the level alone — the package
+// also logs an unrelated "debug: span started for ingest" line per request,
+// which satisfies a bare `"level":"DEBUG"` check whether or not the Reserve
+// line itself is DEBUG.
+func TestIngest_Dedup_ReserveError_LogLevel(t *testing.T) {
+	tests := []struct {
+		name          string
+		cancelContext bool
+		wantLine      string
+	}{
+		{
+			"live context: a real backend failure pages at ERROR", false,
+			`"level":"ERROR","msg":"dedupe reserve failed"`,
+		},
+		{
+			"context ended: a client gone must not page, logs at DEBUG", true,
+			`"level":"DEBUG","msg":"dedupe reserve failed: request context ended"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := logtest.Capture(t, slog.LevelDebug)
+			pub := &testutil.MockPublisher{}
+			dedup := testutil.NewMockDeduplicator()
+			dedup.Err = errors.New("backend down")
+			h := dedupHandler(t, pub, dedup, false)
+
+			ctx := context.Background()
+			if tt.cancelContext {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"}).WithContext(ctx)
+
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(req))
+
+			assert.Contains(t, buf.String(), tt.wantLine)
+			assert.Empty(t, pub.Published())
+		})
+	}
 }
 
 // #370: an explicit null id is a missing id — rejected under require_id,

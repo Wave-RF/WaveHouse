@@ -143,6 +143,40 @@ func TestEmbeddedNATS_PublishHeaders(t *testing.T) {
 	assert.Equal(t, []byte("x"), raw.Data)
 }
 
+// A repeated idempotency key inside the duplicate window is dropped as a
+// success, so an uncertain publish can be republished safely. This stream is
+// created directly, never recorded by takeStock, so SetMaxBytes's next
+// budget apply always runs and picks up the current window;
+// TestNewEmbedded_TakeStockRefreshesAStaleDuplicateWindow covers the boot
+// path, where takeStock itself must not mistake a stale window for one
+// already at budget.
+func TestEmbeddedNATS_Publish_IdempotencyKeyDropsARepeat(t *testing.T) {
+	e := openEmbedded(t, storedir.New(t))
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	// Explicit rather than the server's default, which happens to match today.
+	require.Equal(t, EmbeddedDuplicateWindow, ingestStreamConfig(tenant.Default, testBudget).Duplicates)
+	old := ingestStreamConfig(tenant.Default, testBudget)
+	old.Duplicates = 10 * time.Second
+	_, err := e.js.CreateStream(ctx, old)
+	require.NoError(t, err)
+	require.NoError(t, e.SetMaxBytes(ctx, tenant.Default, testBudget))
+	require.Equal(t, EmbeddedDuplicateWindow, streamConfig(t, e, "INGEST_0").Duplicates)
+
+	topic := Topic{Tenant: tenant.Default, Table: "t"}
+	require.NoError(t, e.Publish(ctx, topic, []byte("a"), WithIdempotencyKey("k1")))
+	require.NoError(t, e.Publish(ctx, topic, []byte("a again"), WithIdempotencyKey("k1")), "a repeat is a success")
+	require.NoError(t, e.Publish(ctx, topic, []byte("b"), WithIdempotencyKey("k2")))
+	require.NoError(t, e.Publish(ctx, topic, []byte("c")))
+
+	var got []string
+	require.NoError(t, e.ReplaySince(ctx, topic, time.Time{}, func(data []byte) bool {
+		got = append(got, string(data))
+		return true
+	}))
+	assert.Equal(t, []string{"a", "b", "c"}, got)
+}
+
 // A tenant's first budget opens its queue: an ingest stream holding its
 // subjects alone at the budget, refusing when full, and a dead-letter stream
 // at a tenth of it, dropping its oldest when full. No other tenant gets one.
@@ -158,6 +192,7 @@ func TestEmbeddedNATS_SetMaxBytes_OpensTheTenantsQueue(t *testing.T) {
 	assert.Equal(t, []string{"ingest.acme.>"}, ingest.Subjects)
 	assert.Equal(t, int64(testBudget), ingest.MaxBytes)
 	assert.Equal(t, jetstream.DiscardNew, ingest.Discard)
+	assert.Equal(t, EmbeddedDuplicateWindow, ingest.Duplicates)
 	dlq := streamConfig(t, e, "DLQ_acme")
 	assert.Equal(t, []string{"dlq.acme.>"}, dlq.Subjects)
 	assert.Equal(t, int64(testBudget)/10, dlq.MaxBytes)
@@ -1448,6 +1483,34 @@ func TestNewEmbedded_TakesStockOfTheQueuesOnDisk(t *testing.T) {
 	// And a publish to it opens nothing new: the queue is there at its budget.
 	require.NoError(t, e.Publish(ctx, Topic{Tenant: "acme", Table: "t"}, []byte("x")))
 	assert.Equal(t, int64(8<<20), streamConfig(t, e, "INGEST_acme").MaxBytes)
+}
+
+// takeStock must not count a stream as at its budget when its Duplicates
+// window is stale (from before EmbeddedDuplicateWindow existed, or changed
+// underneath it): otherwise SetMaxBytes's same-budget early return never lets
+// a later apply bring the window forward, and the stream keeps whatever it
+// had indefinitely.
+func TestNewEmbedded_TakeStockRefreshesAStaleDuplicateWindow(t *testing.T) {
+	t.Parallel()
+	dir := storedir.New(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	first, err := NewEmbedded(dir)
+	require.NoError(t, err)
+	require.NoError(t, first.SetMaxBytes(ctx, "acme", 8<<20))
+	stale := ingestStreamConfig("acme", 8<<20)
+	stale.Duplicates = 10 * time.Second
+	_, err = first.js.UpdateStream(ctx, stale)
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	e := openEmbedded(t, dir)
+	require.Equal(t, 10*time.Second, streamConfig(t, e, "INGEST_acme").Duplicates, "the stale window is still on disk")
+
+	require.NoError(t, e.SetMaxBytes(ctx, "acme", 8<<20), "same budget as before")
+	assert.Equal(t, EmbeddedDuplicateWindow, streamConfig(t, e, "INGEST_acme").Duplicates,
+		"takeStock must not have marked this pair already at budget, or this apply would have no-op'd")
 }
 
 // A durable found on disk is kept as it stands when it holds the settings

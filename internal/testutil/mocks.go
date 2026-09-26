@@ -116,31 +116,41 @@ func (m *MockSubscriber) Close() error { return nil }
 type MockDeduplicator struct {
 	mu        sync.Mutex
 	committed map[dedupe.Key]bool
+	retention map[dedupe.Key]time.Duration // each commit's retention
 	pending   map[dedupe.Key]string
 	tokens    int
-	// Err, if set, fails Reserve; CommitErr and ReleaseErr fail their phase.
+	// Err, if set, fails Reserve — after ErrAfter calls have succeeded;
+	// CommitErr and ReleaseErr fail their phase.
 	Err        error
+	ErrAfter   int
 	CommitErr  error
 	ReleaseErr error
 	Released   []dedupe.Claim // every claim Release was given
+	// Calls to each phase, for tests that count round trips.
+	Reserves, Commits int
 }
 
 var _ dedupe.Deduplicator = (*MockDeduplicator)(nil)
 
 func NewMockDeduplicator() *MockDeduplicator {
-	return &MockDeduplicator{committed: map[dedupe.Key]bool{}, pending: map[dedupe.Key]string{}}
+	return &MockDeduplicator{committed: map[dedupe.Key]bool{}, retention: map[dedupe.Key]time.Duration{}, pending: map[dedupe.Key]string{}}
 }
 
+// Reserve answers Duplicate for a key repeated in one call, as Managed does.
 func (m *MockDeduplicator) Reserve(_ context.Context, keys []dedupe.Key, _ time.Duration) ([]dedupe.Claim, error) {
-	if m.Err != nil {
-		return nil, m.Err
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.Reserves++
+	if m.Err != nil && m.Reserves > m.ErrAfter {
+		return nil, m.Err
+	}
 	claims := make([]dedupe.Claim, 0, len(keys))
+	seen := make(map[dedupe.Key]bool, len(keys))
 	for _, k := range keys {
+		repeat := seen[k]
+		seen[k] = true
 		switch {
-		case m.committed[k]:
+		case repeat, m.committed[k]:
 			claims = append(claims, dedupe.Claim{Key: k, Status: dedupe.Duplicate})
 		case m.pending[k] != "":
 			claims = append(claims, dedupe.Claim{Key: k, Status: dedupe.InFlight})
@@ -154,15 +164,17 @@ func (m *MockDeduplicator) Reserve(_ context.Context, keys []dedupe.Key, _ time.
 	return claims, nil
 }
 
-func (m *MockDeduplicator) Commit(_ context.Context, claims []dedupe.Claim, _ time.Duration) error {
+func (m *MockDeduplicator) Commit(_ context.Context, claims []dedupe.Claim, retention time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Commits++
 	if m.CommitErr != nil {
 		return m.CommitErr
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	for _, c := range claims {
 		if c.Status == dedupe.Claimed {
 			m.committed[c.Key] = true
+			m.retention[c.Key] = retention
 			delete(m.pending, c.Key)
 		}
 	}
@@ -190,6 +202,20 @@ func (m *MockDeduplicator) Hold(k dedupe.Key) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pending[k] = "held"
+}
+
+// Committed reports whether k was committed.
+func (m *MockDeduplicator) Committed(k dedupe.Key) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.committed[k]
+}
+
+// Retention is the retention k was last committed with.
+func (m *MockDeduplicator) Retention(k dedupe.Key) time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.retention[k]
 }
 
 // Pending reports whether k is claimed and neither committed nor released.

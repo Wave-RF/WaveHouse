@@ -227,6 +227,13 @@ func (e *EmbeddedNATS) takeStock(ctx context.Context) error {
 		held  uint64
 	}
 	dlqs := map[tenant.ID]dlqState{}
+	// duplicates is the ingest stream's own Duplicates window as found on
+	// disk, keyed alongside dlqs: a stream from before EmbeddedDuplicateWindow
+	// existed, or reopened under a different value, must not be counted as
+	// already at budget below, or SetMaxBytes(same budget) short-circuits and
+	// the stale window is never brought forward (measured: a stream with
+	// Duplicates=10s kept 10s after NewEmbedded + SetMaxBytes(same budget)).
+	duplicates := map[tenant.ID]time.Duration{}
 	streams := e.js.ListStreams(ctx)
 	for info := range streams.Info() {
 		name := info.Config.Name
@@ -234,6 +241,7 @@ func (e *EmbeddedNATS) takeStock(ctx context.Context) error {
 			q := e.queue(id)
 			q.ingest = true
 			q.asked, q.ingestCap = info.Config.MaxBytes, info.Config.MaxBytes
+			duplicates[id] = info.Config.Duplicates
 		} else if id, ok := streamTenant(dlqStreamPrefix, name); ok {
 			e.queue(id).dlq = true
 			dlqs[id] = dlqState{limit: info.Config.MaxBytes, held: info.State.Bytes}
@@ -244,14 +252,16 @@ func (e *EmbeddedNATS) takeStock(ctx context.Context) error {
 	}
 	// A pair is at its budget when its dead-letter stream is at a tenth of
 	// the ingest cap, or above it holding more than that: the shrink guard's
-	// doing. Anything else is a pair a stop or a failed update left split, or
-	// one missing its dead-letter stream, so its budget stays unapplied and
-	// the boot's SetMaxBytes applies it to both streams again.
+	// doing, AND its ingest stream's duplicate window already matches
+	// EmbeddedDuplicateWindow. Anything else is a pair a stop or a failed
+	// update left split, one missing its dead-letter stream, or one whose
+	// duplicate window is stale, so its budget stays unapplied and the boot's
+	// SetMaxBytes applies it — and the current window — to both streams again.
 	for id, q := range e.queues {
 		d, ok := dlqs[id]
 		tenth := q.asked / dlqShare
 		guarded := d.limit > tenth && d.held <= math.MaxInt64 && int64(d.held) > tenth
-		if q.ingest && ok && (d.limit == tenth || guarded) {
+		if q.ingest && ok && (d.limit == tenth || guarded) && duplicates[id] == EmbeddedDuplicateWindow {
 			q.maxBytes = q.asked
 		}
 		e.record(id, q)
@@ -317,17 +327,28 @@ func (e *EmbeddedNATS) record(id tenant.ID, q *tenantQueue) {
 	}
 }
 
+// EmbeddedDuplicateWindow is how long an ingest queue remembers a
+// WithIdempotencyKey key. It must be at least 2*lease + 1s: a claim left to
+// lapse after an uncertain publish is republished once the lease ends, but
+// the in-flight 503 tells a client to retry only after the FULL lease, so an
+// obedient client's retry can land up to ~2*lease after the original
+// Reserve; the +1s covers a backend (DynamoDB, for one) that rounds a
+// claim's expiry up by as much. Only a window at least that long guarantees
+// this queue still drops the retry's second copy.
+const EmbeddedDuplicateWindow = 2 * time.Minute
+
 // ingestStreamConfig is tenant id's ingest stream. LimitsPolicy: standard
 // append-only log; the Active Sweeper handles message purging. MaxBytes caps
 // the tenant's share of the disk. DiscardNew rejects new messages when full,
 // propagating backpressure to the upstream API — for this tenant alone.
 func ingestStreamConfig(id tenant.ID, maxBytes int64) jetstream.StreamConfig {
 	return jetstream.StreamConfig{
-		Name:      ingestStreamName(id),
-		Subjects:  []string{tenantSubjects(ingestPrefix, id)},
-		Retention: jetstream.LimitsPolicy,
-		MaxBytes:  maxBytes,
-		Discard:   jetstream.DiscardNew,
+		Name:       ingestStreamName(id),
+		Subjects:   []string{tenantSubjects(ingestPrefix, id)},
+		Retention:  jetstream.LimitsPolicy,
+		MaxBytes:   maxBytes,
+		Discard:    jetstream.DiscardNew,
+		Duplicates: EmbeddedDuplicateWindow,
 	}
 }
 

@@ -169,7 +169,7 @@ WH_SETTINGS_DIR=/etc/wavehouse/settings
 WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
 
 - `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `stream.gap_window_minutes` window (settings directory) of history that powers SSE gap-fill across restarts.
-- `<data_dir>/pebble` — the Pebble dedup KV: one instance shared by every tenant, each key led by its tenant and table. Only used while some tenant's `dedupe.enabled` is `true` in its `config.json` (opened and closed on reload).
+- `<data_dir>/pebble` — the Pebble dedup KV: one instance shared by every tenant, each key led by its tenant and table. Only used while some tenant's `dedupe.enabled` is `true` in its `config.json` (opened and closed on reload). It grows with every id kept: with `dedupe.retention` at `"0"` (forever) nothing is ever removed, so size the volume for it or set a [retention](/settings-directory#deduplication), whose expired ids an hourly sweep deletes.
 
 In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data` and `/app/settings` owned by the nonroot user (UID 65532); the binary creates the `nats/` and `pebble/` subdirectories under `/app/data` itself on first run.
 
@@ -439,7 +439,9 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 
 ## Upgrading across the dedupe key change
 
-The dedupe key now carries the table as well as the tenant ([#222](https://github.com/Wave-RF/WaveHouse/issues/222)), so **an id deduped before the upgrade is not recognized after it**: a record carrying it is accepted once more. Nothing is migrated, and the old keys stay in `<data_dir>/pebble`, unread; nothing removes them yet ([#220](https://github.com/Wave-RF/WaveHouse/issues/220) tracks the sweep that will). Only a tenant with `dedupe.enabled` on is affected, and only by a record sent both before and after the upgrade — typically a producer retrying across the restart. To avoid duplicate rows, let retrying producers finish, or pause them, before upgrading.
+The dedupe key now carries the table as well as the tenant ([#222](https://github.com/Wave-RF/WaveHouse/issues/222)), so **an id deduped before the upgrade is not recognized after it**: a record carrying it is accepted once more. Nothing is migrated. The old keys never count as seen, and the dedupe sweep deletes them: its first pass runs about a minute after the instance opens, and `wavehouse_dedupe_swept_keys_total{reason="version_0"}` counts them ([#220](https://github.com/Wave-RF/WaveHouse/issues/220)). Pebble returns their disk space as it compacts, not at once. Only a tenant with `dedupe.enabled` on is affected, and only by a record sent both before and after the upgrade — typically a producer retrying across the restart. To avoid duplicate rows, let retrying producers finish, or pause them, before upgrading.
+
+The same release adds an optional **`dedupe.retention`** key. No upgrade step is needed: a `config.json` without it keeps every id forever, as before. See [Deduplication](/settings-directory#deduplication) for a finite one.
 
 ## Upgrading across the v2 ingest envelope
 
