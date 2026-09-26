@@ -510,7 +510,7 @@ data "aws_iam_policy_document" "wavehouse_dedupe" {
 - **Point-in-time recovery** is not needed. The table records which ids have been seen, so losing it produces duplicate rows, not lost events.
 - **Cost:** every new event is two writes (the claim, then the commit), and a duplicate is one. On-demand, that is about $1.25 per million new events in us-east-1. Provisioned capacity with auto scaling is cheaper once traffic is steady. Storage is the other line: every distinct id stays in the table (see TTL above), at DynamoDB's per-GB-month rate.
 - **One table serves every tenant,** so one tenant's burst can throttle the rest. A throttled or unreachable table fails the ingest request closed rather than publishing un-deduped. After five throttled or unreachable claims in a row within one second, the backend stops calling the table for a second and fails every tenant's dedupe requests immediately (`wavehouse_dedupe_dynamodb_short_circuits_total`). A duplicate or in-flight answer is not a failure and resets the count.
-- **Metrics:** `wavehouse_dedupe_dynamodb_requests_total{op,outcome}`, `wavehouse_dedupe_dynamodb_request_duration_seconds{op}`, `wavehouse_dedupe_dynamodb_unprocessed_items_total`. The table's own CloudWatch metrics `ThrottledRequests`, `SystemErrors` and `ConsumedWriteCapacityUnits` are worth alerting on too.
+- **Metrics:** `wavehouse_dedupe_dynamodb_requests_total{op,outcome}`, `wavehouse_dedupe_dynamodb_request_duration_seconds{op}`, `wavehouse_dedupe_dynamodb_unprocessed_items_total`, `wavehouse_dedupe_dynamodb_short_circuits_total`. The table's own CloudWatch metrics `ThrottledRequests`, `SystemErrors` and `ConsumedWriteCapacityUnits` are worth alerting on too.
 
 ## Upgrading across the v2 ingest envelope
 
