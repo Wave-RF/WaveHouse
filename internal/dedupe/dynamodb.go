@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	mathrand "math/rand/v2"
+	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -43,9 +46,14 @@ const (
 	// batchWriteMax is BatchWriteItem's per-call item limit.
 	batchWriteMax = 25
 	// commitRounds bounds the BatchWriteItem rounds one chunk gets before
-	// its still-unprocessed items fail the Commit.
+	// its still-unprocessed (or still-throttled) items fail the Commit.
 	commitRounds = 8
-	tokenBytes   = 16
+	// commitBase and commitCeiling bound the jittered wait between Commit
+	// rounds; retryBase is the one the SDK retryer's backoff doubles from.
+	commitBase    = 25 * time.Millisecond
+	commitCeiling = 200 * time.Millisecond
+	retryBase     = 25 * time.Millisecond
+	tokenBytes    = 16
 
 	// opReserve is the operation the breaker watches: Release and Commit
 	// answers say nothing about whether a new Reserve would get through.
@@ -64,7 +72,8 @@ type DynamoConfig struct {
 	// only; it is also what unlocks CreateTable.
 	Endpoint string
 	// Timeout bounds each DynamoDB call, its SDK retries included.
-	// 0 = 250ms.
+	// 0 = 250ms. The retries' jittered backoff is capped so that together
+	// it waits at most half of Timeout (retryBackoff).
 	Timeout time.Duration
 	// MaxAttempts is the SDK retryer's attempts per call. 0 = 3.
 	MaxAttempts int
@@ -72,7 +81,8 @@ type DynamoConfig struct {
 	// the client after throttles.
 	RetryMode string
 	// ReserveConcurrency bounds the parallel calls one Reserve, Commit or
-	// Release makes. 0 = 64.
+	// Release makes, and sizes the client's idle connection pool to match.
+	// 0 = 64.
 	ReserveConcurrency int
 }
 
@@ -115,13 +125,13 @@ type Dynamo struct {
 	breaker *breaker
 	metrics dynamoMetrics
 	// commitBackoff is the wait before retrying the attempt'th round of
-	// unprocessed items.
+	// unprocessed or throttled items.
 	commitBackoff func(attempt int) time.Duration
 }
 
 // NewDynamo builds the backend over a client from the SDK's default config
 // chain. extra is appended to the chain's options (a test's static
-// credentials, say). It dials nothing: Check does.
+// credentials or HTTP client, say). It dials nothing: Check does.
 func NewDynamo(ctx context.Context, cfg DynamoConfig, extra ...func(*config.LoadOptions) error) (*Dynamo, error) {
 	if cfg.Table == "" {
 		return nil, errors.New("dedupe: dynamodb table is required")
@@ -131,7 +141,7 @@ func NewDynamo(ctx context.Context, cfg DynamoConfig, extra ...func(*config.Load
 	if err != nil {
 		return nil, err
 	}
-	opts := []func(*config.LoadOptions) error{config.WithRetryer(retryer)}
+	opts := []func(*config.LoadOptions) error{config.WithRetryer(retryer), config.WithHTTPClient(newHTTPClient(cfg))}
 	if cfg.Region != "" {
 		opts = append(opts, config.WithRegion(cfg.Region))
 	}
@@ -150,10 +160,20 @@ func NewDynamo(ctx context.Context, cfg DynamoConfig, extra ...func(*config.Load
 	return newDynamo(client, cfg), nil
 }
 
+// newHTTPClient keeps an idle connection for every call one Reserve can have
+// in flight: with the SDK's default of 10 per host, a wide Reserve would dial
+// most of its puts afresh.
+func newHTTPClient(cfg DynamoConfig) *awshttp.BuildableClient {
+	return awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+		tr.MaxIdleConnsPerHost = cfg.ReserveConcurrency
+		tr.MaxIdleConns = max(tr.MaxIdleConns, cfg.ReserveConcurrency)
+	})
+}
+
 func newRetryer(cfg DynamoConfig) (func() aws.Retryer, error) {
 	standard := func(o *retry.StandardOptions) {
 		o.MaxAttempts = cfg.MaxAttempts
-		o.MaxBackoff = 200 * time.Millisecond
+		o.Backoff = retryBackoff(cfg)
 	}
 	switch cfg.RetryMode {
 	case "standard":
@@ -168,6 +188,28 @@ func newRetryer(cfg DynamoConfig) (func() aws.Retryer, error) {
 	return nil, fmt.Errorf("dedupe: dynamodb retry_mode %q: want standard or adaptive", cfg.RetryMode)
 }
 
+// retryBackoff is the SDK retryer's wait before a retry: full jitter, so
+// puts throttled together do not retry in lockstep, under a ceiling that
+// doubles from retryBase up to Timeout/(2·(MaxAttempts-1)). A call's retries
+// then wait at most half its Timeout in all, so a throttled call ends on its
+// last attempt's answer (ErrUnavailable, the throttle as its cause) unless
+// the attempts themselves take the other half.
+func retryBackoff(cfg DynamoConfig) retry.BackoffDelayerFunc {
+	ceiling := cfg.Timeout / time.Duration(2*max(cfg.MaxAttempts-1, 1))
+	return func(attempt int, _ error) (time.Duration, error) {
+		return fullJitter(retryBase, ceiling, attempt), nil
+	}
+}
+
+// fullJitter is uniform over [0, min(base·2^attempt, ceiling)].
+func fullJitter(base, ceiling time.Duration, attempt int) time.Duration {
+	d := min(base<<min(max(attempt, 0), 30), ceiling)
+	if d <= 0 {
+		return 0
+	}
+	return mathrand.N(d + 1) //nolint:gosec // G404: backoff jitter, not a secret
+}
+
 func newDynamo(api dynamoAPI, cfg DynamoConfig) *Dynamo {
 	now := time.Now
 	return &Dynamo{
@@ -177,7 +219,7 @@ func newDynamo(api dynamoAPI, cfg DynamoConfig) *Dynamo {
 		breaker: newBreaker(now),
 		metrics: newDynamoMetrics(),
 		commitBackoff: func(attempt int) time.Duration {
-			return min(25*time.Millisecond<<attempt, 200*time.Millisecond)
+			return fullJitter(commitBase, commitCeiling, attempt)
 		},
 	}
 }
@@ -280,8 +322,10 @@ type dynamoStore struct {
 
 // Reserve puts every key's pending item in parallel, each conditional on no
 // live item holding the key. A failed condition hands back the live item,
-// whose state says Duplicate or InFlight without a read. On any error every
-// put that may have landed is released by its token.
+// whose state says Duplicate or InFlight without a read, or Claimed when its
+// token is the put's own. On any error it releases, by token, every put that
+// may have landed; what that undo misses (below) holds its key InFlight
+// until the lease ends, as a crashed request's claim does.
 func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Duration) ([]Claim, error) {
 	if len(keys) == 0 {
 		return []Claim{}, nil
@@ -298,9 +342,10 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 	sent := make([]bool, len(keys))
 	// The first failure skips the puts not yet sent: the Reserve fails
 	// either way, and a throttled table should not take the rest. A put
-	// already sent runs on ctx, not gctx, so it finishes and its outcome is
-	// known before the undo below; cancelled mid-flight, it could land after
-	// its release and hold the key for the lease.
+	// already sent runs on ctx, not gctx, so a sibling's failure never cuts
+	// it off: it answers before the undo below. The caller's cancellation or
+	// the put's own deadline can, and DynamoDB may then apply it after its
+	// release.
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(s.d.cfg.ReserveConcurrency)
 	for i, k := range keys {
@@ -323,8 +368,9 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 		})
 	}
 	if err := g.Wait(); err != nil {
-		// A put that was sent and errored may still have landed; its token
-		// is known, and releasing a key it does not hold is a no-op.
+		// A sent put that errored may have landed anyway; releasing a key
+		// its token does not hold is a no-op. Best effort: a put applied
+		// after this, or a release that fails, lapses with the lease.
 		var undo []Claim
 		for i, c := range claims {
 			if sent[i] && (c.Status == Claimed || c.Status == 0) {
@@ -361,14 +407,26 @@ func (s *dynamoStore) reserve(ctx context.Context, k Key, token, nowSec string, 
 		}
 		return Claimed, nil
 	}
-	if st, ok := held.Item[attrState].(*types.AttributeValueMemberN); ok && st.Value == stateCommitted {
+	st, _ := held.Item[attrState].(*types.AttributeValueMemberN)
+	switch {
+	case st != nil && st.Value == stateCommitted:
 		return Duplicate, nil
+	case st != nil && st.Value == statePending && heldBy(held.Item, token):
+		// This put's own item: an SDK retry of an attempt that was applied
+		// but whose answer was lost (a 500, a connection reset).
+		return Claimed, nil
 	}
 	return InFlight, nil
 }
 
+func heldBy(item map[string]types.AttributeValue, token string) bool {
+	tk, ok := item[attrToken].(*types.AttributeValueMemberB)
+	return ok && string(tk.Value) == token
+}
+
 // Commit overwrites every claim's item as committed, unconditionally, 25 to a
-// BatchWriteItem, retrying the items DynamoDB leaves unprocessed.
+// BatchWriteItem, retrying the items DynamoDB leaves unprocessed and a batch
+// that failed transiently.
 func (s *dynamoStore) Commit(ctx context.Context, claims []Claim, retention time.Duration) error {
 	if len(claims) == 0 {
 		return nil
@@ -417,16 +475,28 @@ func (s *dynamoStore) commitChunk(ctx context.Context, writes []types.WriteReque
 			}
 			return err
 		})
-		if err != nil {
+		switch {
+		case err == nil:
+		case errors.Is(err, ErrUnavailable):
+			// DynamoDB throttles a batch whole only when it processed none of
+			// it, and a timeout leaves its fate unknown: retry it whole, as a
+			// round that left every item unprocessed. The puts are idempotent.
+			unprocessed = writes
+		default:
 			return err
 		}
 		if len(unprocessed) == 0 {
 			return nil
 		}
 		if attempt+1 >= commitRounds {
+			if err != nil {
+				return err
+			}
 			return fmt.Errorf("%w: dynamodb batch_write_item: %d items still unprocessed", ErrUnavailable, len(unprocessed))
 		}
-		s.d.metrics.unprocessed.Add(ctx, int64(len(unprocessed)))
+		if err == nil {
+			s.d.metrics.unprocessed.Add(ctx, int64(len(unprocessed)))
+		}
 		writes = unprocessed
 		select {
 		case <-ctx.Done():

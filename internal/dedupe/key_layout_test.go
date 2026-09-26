@@ -63,18 +63,12 @@ func decodeKey(t *testing.T, s string) (tn, table, idPart string) {
 	t.Helper()
 	require.True(t, utf8.ValidString(s), "a key is a valid DynamoDB String")
 	require.NotContains(t, s, "\x00")
-	parts := strings.Split(s, "/")
+	parts, err := keyenc.Split(s, '/')
+	require.NoError(t, err)
 	require.Len(t, parts, 3, s)
-	_, err := tenant.Parse(parts[0])
+	_, err = tenant.Parse(parts[0])
 	require.NoError(t, err)
-	table, err = keyenc.Unescape(parts[1])
-	require.NoError(t, err)
-	if strings.HasPrefix(parts[2], "#") {
-		return parts[0], table, parts[2]
-	}
-	id, err := keyenc.Unescape(parts[2])
-	require.NoError(t, err)
-	return parts[0], table, id
+	return parts[0], parts[1], parts[2]
 }
 
 // Triples a separator could confuse — the separator, the escape and hash

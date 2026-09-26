@@ -437,7 +437,7 @@ internal/coord/         → Leases with fencing tokens (interface, in-process Lo
 internal/dedupe/        → Optional deduplication (interface + embedded/distributed)
 internal/discovery/     → ClickHouse schema introspection + ingest validation
 internal/ingest/        → Batch buffer with DLQ + Active Sweeper (NATS message lifecycle)
-internal/keyenc/        → One escaping for composite keys (NATS subject tokens, cache namespace tokens)
+internal/keyenc/        → One escaping for composite keys (NATS subject tokens, cache namespace tokens, dedupe keys)
 internal/mq/            → MQ boundary (the only NATS/JetStream importer: owned message/consumer/stream types + embedded server; mqtest/ is the Broker conformance suite)
 internal/observability/ → OpenTelemetry pipeline (traces/metrics/logs providers, Prometheus exporter, slog fan-out, message-header trace propagation)
 internal/pipes/         → Named query pipes (types, parameter binding, Source)

@@ -57,7 +57,7 @@ Whether a tenant dedupes, and on which field, are settings-directory keys ([Dedu
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `dedupe.lease` | `WH_DEDUPE_LEASE` | `30s` | How long a record's id stays claimed while the record is published. Another request carrying the same id meanwhile gets `503` with this as `Retry-After`, in whole seconds; a claim that is neither committed nor released, because its process died mid-publish, lapses after it. With `mq.backend: embedded`, twice the lease plus one second must fit the embedded queue's 2-minute duplicate window, so the lease is at most `59.5s`: a client that obeys `Retry-After` after a publish whose outcome it never learned republishes up to twice the lease after the claim, and DynamoDB rounds a claim's expiry up to the second. A longer lease refuses boot. A Go duration (`30s`, `45s`); `0` refuses boot. |
-| `dedupe.reserve_concurrency` | `WH_DEDUPE_RESERVE_CONCURRENCY` | `64` | The most parallel calls one Reserve, Commit or Release makes to a remote dedupe backend. Ingest sends one id per call today, so it has no effect yet; `pebble` ignores it. `0` refuses boot. |
+| `dedupe.reserve_concurrency` | `WH_DEDUPE_RESERVE_CONCURRENCY` | `64` | The most parallel calls one Reserve, Commit or Release makes to a remote dedupe backend, and the idle connections per host the DynamoDB client keeps to match. Ingest sends one id per call today, so the fan-out has no effect yet; `pebble` ignores it. `0` refuses boot. |
 
 #### DynamoDB dedupe
 
@@ -68,8 +68,8 @@ Read only when `dedupe.backend` is `dynamodb`. Credentials come from the AWS SDK
 | `dedupe.dynamodb.table` | `WH_DEDUPE_DYNAMODB_TABLE` | *(required)* | The shared table. |
 | `dedupe.dynamodb.region` | `WH_DEDUPE_DYNAMODB_REGION` | *(empty)* | The table's region. Empty uses the SDK chain's (`AWS_REGION`); no region from either refuses boot. |
 | `dedupe.dynamodb.endpoint` | `WH_DEDUPE_DYNAMODB_ENDPOINT` | *(empty)* | A custom endpoint, for [dynamodb-local](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html) in development and tests. Leave it empty against AWS. |
-| `dedupe.dynamodb.timeout` | `WH_DEDUPE_DYNAMODB_TIMEOUT` | `250ms` | Deadline for each DynamoDB call, the SDK's retries included. `0` refuses boot. |
-| `dedupe.dynamodb.max_attempts` | `WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS` | `3` | Attempts per call, the first included. `0` refuses boot. |
+| `dedupe.dynamodb.timeout` | `WH_DEDUPE_DYNAMODB_TIMEOUT` | `250ms` | Deadline for each DynamoDB call, the SDK's retries included. The retries back off with full jitter, each wait capped at `timeout / (2 × (max_attempts − 1))`, so together they wait at most half of it and a throttled call fails on its last attempt's answer rather than on the deadline. `0` refuses boot. |
+| `dedupe.dynamodb.max_attempts` | `WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS` | `3` | Attempts per call, the first included. More attempts share the same half of `timeout` for their waits, so each retry waits less rather than the call running longer. `0` refuses boot. |
 | `dedupe.dynamodb.retry_mode` | `WH_DEDUPE_DYNAMODB_RETRY_MODE` | `standard` | `standard`, or `adaptive`, which also slows the client down after throttling. Anything else, empty included, refuses boot. |
 | `dedupe.dynamodb.create_table` | `WH_DEDUPE_DYNAMODB_CREATE_TABLE` | `false` | Development only: create the table at boot if it is missing, with TTL on `ex`. Refused unless `endpoint` is set, so it never creates a table in AWS; the production table belongs to your infrastructure code. |
 

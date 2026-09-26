@@ -77,7 +77,8 @@ type Dedupe struct {
 	// published; a claim its request never settles lapses after it.
 	Lease time.Duration `yaml:"lease" env:"WH_DEDUPE_LEASE"`
 	// ReserveConcurrency bounds the parallel calls one Reserve, Commit or
-	// Release makes to a remote backend. Pebble ignores it.
+	// Release makes to a remote backend, and sizes its idle connection pool
+	// to match. Pebble ignores it.
 	ReserveConcurrency int                  `yaml:"reserve_concurrency" env:"WH_DEDUPE_RESERVE_CONCURRENCY"`
 	DynamoDB           DedupeDynamoDBConfig `yaml:"dynamodb"`
 }
