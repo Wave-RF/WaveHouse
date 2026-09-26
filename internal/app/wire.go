@@ -367,8 +367,8 @@ func (a *App) registryFor(s *settings.Store) *discovery.SchemaRegistry {
 	return a.discoveries.For(s.Tenant())
 }
 
-// queryTimeout is the tenant's read deadline, a per-call setting rather
-// than a property of the pool it shares.
+// queryTimeout is the tenant's deadline for a call on the query paths, a
+// per-call setting rather than a property of the pool it shares.
 func queryTimeout(s *settings.Store) time.Duration { return s.ClickHouse().QueryTimeout }
 
 // wireDiscovery builds one schema registry per served tenant, each with a

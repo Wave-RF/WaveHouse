@@ -98,7 +98,8 @@ type ClickHouseConfig struct {
 	HTTPScheme *string `json:"http_scheme"`
 	Database   *string `json:"database"`
 	Username   *string `json:"username"`
-	// QueryTimeout is the read deadline in seconds (>= 1).
+	// QueryTimeout is the deadline in seconds (>= 1) of a call on the query
+	// paths: structured queries, pipes (writes included) and the raw-SQL proxy.
 	QueryTimeout *int `json:"query_timeout"`
 	// TLS is the TLS wiring of both hops: `enabled` switches the native
 	// protocol to TLS, `http_scheme` stays the HTTP hop's switch, and the

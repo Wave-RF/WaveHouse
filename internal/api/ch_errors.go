@@ -28,11 +28,13 @@ const (
 	// caller's. 502.
 	codeCHMisconfigured = "clickhouse.misconfigured"
 	// codeCHUnavailable: ClickHouse, or the way to it, could not take the
-	// query now. 503 with Retry-After.
+	// query now. 503 with Retry-After — without it for a write pipe, which
+	// may have run and is never retryable.
 	codeCHUnavailable = "clickhouse.unavailable"
 	// codeCHResponseTooLarge: the raw-SQL proxy's response cap. 502.
 	codeCHResponseTooLarge = "clickhouse.response_too_large"
-	// codeCHUnknown: a failure with no verdict. 5xx, retryable.
+	// codeCHUnknown: a failure with no verdict. 5xx, retryable unless a
+	// write pipe's.
 	codeCHUnknown = "clickhouse.unknown"
 )
 

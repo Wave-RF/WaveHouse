@@ -587,7 +587,7 @@ The inbound request body is capped at 1 MiB; a body over the cap is rejected wit
 
 ### `GET/POST /v1/pipes/{name}` — Execute Named Pipe
 
-Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached in the shared L1 (Ristretto) with singleflight coalescing — same machinery as the structured query endpoint, keyed by [tenant](/deployment#multi-tenant-deployments) like it, and again, unlike `/v1/ops/query`.
+Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. A read's results are cached in the query cache with singleflight coalescing — same machinery as the structured query endpoint, keyed by [tenant](/deployment#multi-tenant-deployments) like it, and again, unlike `/v1/ops/query`; a [pipe that writes](/pipes#pipes-that-write) is neither cached nor coalesced (see Response).
 
 **Query Parameters:** Any key matching a pipe parameter name.
 
