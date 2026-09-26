@@ -143,7 +143,9 @@ func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
 // comma-separated list of recursively formatted elements — the `(v1, v2, …)`
 // shape ClickHouse expects on the right of `IN`, matching how the
 // structured-query builder renders an IN clause. Because every scalar leaf is
-// escaped, no value — or array element — can break out of its literal.
+// escaped, no value — or array element — can break out of its literal, as long
+// as the template writes the placeholder bare: inside quotes (`'{{id}}'`) the
+// value's own quotes close the template's.
 //
 // Values with no scalar SQL representation are refused rather than emitted as
 // Go's `%v` text: a JSON object has no meaning here, and an empty array would

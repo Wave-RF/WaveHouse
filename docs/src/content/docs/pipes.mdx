@@ -78,7 +78,7 @@ Independently, every `required` declared parameter must be supplied regardless o
 
 ### How a value becomes SQL
 
-Bound values are **inlined directly into the SQL string** (not sent as positional driver parameters — that lets a parameter sit anywhere ClickHouse allows a literal, including `LIMIT`). Inlining is type-aware and escaped:
+Bound values are **inlined directly into the SQL string** (not sent as positional driver parameters — that lets a parameter sit anywhere ClickHouse allows a literal, including `LIMIT`). Inlining is type-aware and escaped, and a string brings its own quotes, so **write each placeholder bare, never inside quotes** — `WHERE id = {{id}}`, not `WHERE id = '{{id}}'`:
 
 | Supplied value | Rendered as | Note |
 | -------------- | ----------- | ---- |
@@ -89,7 +89,7 @@ Bound values are **inlined directly into the SQL string** (not sent as positiona
 | array | `('a', 'b')` | parenthesized list of escaped elements — for `IN` clauses (see below) |
 | null | `NULL` | |
 
-Every leaf value is escaped the same way — including each element of an array — so a parameter value can't break out of its literal and inject SQL. The SQL *structure* still comes only from the operator-authored template. Values with no safe scalar form are **rejected** with a `400`: a JSON object, and an empty array (which would render as the invalid `IN ()`).
+Every leaf value is escaped the same way — including each element of an array — so a value bound to a bare placeholder can't break out of its literal and inject SQL, and the SQL *structure* comes only from the operator-authored template. A quoted placeholder gives that up: the value's own quotes close the template's, so in `WHERE id = '{{id}}'` the body `{"id": " OR 1=1 OR id = "}` binds to `WHERE id = '' OR 1=1 OR id = ''`, which matches every row. Values with no safe scalar form are **rejected** with a `400`: a JSON object, and an empty array (which would render as the invalid `IN ()`).
 
 #### Array parameters and `IN` lists
 
@@ -122,7 +122,7 @@ This is the *only* authorization check on the execute path — pipes deliberatel
 
 ## Creating and managing pipes
 
-Pipes are defined in the settings directory's `pipes.json` — a `{"pipes": [...]}` list of the definitions above — and the files are the only write path: edit the file (standalone: on the host; on WaveHouse Cloud the control plane writes it) and the running server re-validates and adopts it on file change, `SIGHUP`, or `POST /v1/ops/settings/reload`, so a create, update, or delete applies without a restart. Validation (`wavehouse validate`, boot, and every reload) rejects an unknown key, a duplicate or empty name, empty SQL, an unknown parameter `type`, and an `allowed_roles` entry not declared in `roles.json`; a rejected reload keeps the previous pipes in effect. See [Settings Directory — `pipes.json`](/settings-directory#pipesjson) for the full rules.
+Pipes are defined in the settings directory's `pipes.json` — a `{"pipes": [...]}` list of the definitions above — and the files are the only way to define or change one: edit the file (standalone: on the host; on WaveHouse Cloud the control plane writes it) and the running server re-validates and adopts it on file change, `SIGHUP`, or `POST /v1/ops/settings/reload`, so a create, update, or delete applies without a restart. Validation (`wavehouse validate`, boot, and every reload) rejects an unknown key, a duplicate or empty name, empty SQL, an unknown parameter `type`, and an `allowed_roles` entry not declared in `roles.json`; a rejected reload keeps the previous pipes in effect. See [Settings Directory — `pipes.json`](/settings-directory#pipesjson) for the full rules.
 
 ```json
 {
@@ -180,9 +180,9 @@ The response is a JSON array of rows. Results flow through the shared in-process
 
 ### Pipes that write
 
-A pipe's SQL may be a write — `INSERT`, `ALTER … DELETE`, `CREATE`, and the rest of ClickHouse's statements that return no rows, including a `WITH … INSERT`. Such a pipe runs on **every** call: it never reads or fills the cache and is never coalesced with an identical call in flight, so ten identical calls are ten writes. The response is `[]` with `X-Cache: BYPASS` and `Cache-Control: no-store`, so an HTTP cache in front of a `GET` does not answer a repeat either. WaveHouse classifies the statement from its leading keyword (after any `WITH` list), with the same classifier that sends it to ClickHouse as a write, so no pipe property marks it.
+A pipe's SQL may be a write: a statement led by a write verb WaveHouse recognizes — `INSERT`, `UPDATE`, `DELETE`, `ALTER` (so `ALTER … DELETE`), `CREATE`, `DROP`, `TRUNCATE`, `RENAME`, `EXCHANGE`, `REPLACE`, `OPTIMIZE`, `ATTACH`, `DETACH`, `GRANT`, `REVOKE`, `KILL`, `SET`, `USE` or `SYSTEM` — directly or after a `WITH` list, as in `WITH … INSERT`. Such a pipe runs on **every** call: it never reads or fills the cache and is never coalesced with an identical call in flight, so ten identical calls are ten writes. The response is `[]` with `X-Cache: BYPASS` and `Cache-Control: no-store`, so an HTTP cache in front of a `GET` does not answer a repeat either. WaveHouse classifies the statement from its leading keyword (after any `WITH` list), with the same classifier that sends it to ClickHouse as a write, so no pipe property marks it; a statement led by any other keyword runs as a read.
 
-`allowed_roles` is a write pipe's only gate: the [policy engine](/access-control)'s insert rules do not apply to it, so any role you list — including a [`default_role`](/access-control#default_role--public-unauthenticated-access) that anonymous callers resolve to — can run the write. The operator fixes the statement and its predicate when authoring the pipe; callers supply only literal values.
+`allowed_roles` is a write pipe's only gate: the [policy engine](/access-control)'s insert rules do not apply to it, so any role you list — including a [`default_role`](/access-control#default_role--public-unauthenticated-access) that anonymous callers resolve to — can run the write. The operator fixes the statement and its predicate when authoring the pipe; callers supply only literal values, provided every placeholder is written bare ([how a value becomes SQL](#how-a-value-becomes-sql)).
 
 Two things a write pipe does not do yet: it does not invalidate cached reads of the table it writes — a structured query or read pipe over that table can serve pre-write rows until its TTL ([#394](https://github.com/Wave-RF/WaveHouse/issues/394)) — and its rows do not reach [`/v1/stream`](/api#get-v1stream--server-sent-events-stream) subscribers, which only the [ingest pipeline](/ingest-pipeline) feeds ([#362](https://github.com/Wave-RF/WaveHouse/issues/362)). For writes that should be seen at once, use [`POST /v1/ingest`](/api#post-v1ingesttabletable--ingest-data).
 

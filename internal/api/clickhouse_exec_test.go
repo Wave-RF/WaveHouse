@@ -110,6 +110,33 @@ func TestIsMutation(t *testing.T) {
 		{"with parenthesized SELECT then system table (CTE-lookahead ordering regression)", "WITH x AS (SELECT 1) SELECT (1) FROM system.tables", false},
 		{"with tuple-shape SELECT then system table", "WITH x AS (SELECT 1) SELECT (a, b) FROM system.parts", false},
 
+		// A backslash escapes the next byte inside all three quote kinds, so an
+		// escaped quote does not end the literal or identifier.
+		{"with backslash-escaped quote in literal then insert", `WITH m AS (SELECT 'it\'s' AS s) INSERT INTO t SELECT s FROM m`, true},
+		{"with backslash-escaped quote in literal then select", `WITH m AS (SELECT 'a\'b' AS s) SELECT 'x) INSERT' FROM m`, false},
+		{"with backslash-escaped double quote then insert", `WITH m AS (SELECT 'x' AS "a\"(b") INSERT INTO t SELECT * FROM m`, true},
+		{"with backslash-escaped double quote then select", `WITH m AS (SELECT 1 AS "a\"b") SELECT 2 AS "x) INSERT" FROM m`, false},
+		{"with backslash-escaped backtick then insert", "WITH m AS (SELECT 'x' AS `a\\`(b`) INSERT INTO t SELECT * FROM m", true},
+		{"with backslash-escaped backtick then select", "WITH m AS (SELECT 1 AS `a\\`b`) SELECT 2 AS `x) INSERT` FROM m", false},
+
+		// ClickHouse's lexer skips \v, \f and Unicode spaces as whitespace
+		// (TestIsMutation_ClickHouseWhitespace covers the whole set).
+		{"leading form feed then insert", "\fINSERT INTO t VALUES (1)", true},
+		{"leading vertical tab then insert", "\vINSERT INTO t VALUES (1)", true},
+		{"leading NBSP then insert", "\u00a0INSERT INTO t VALUES (1)", true},
+		{"leading BOM then insert", "\ufeffINSERT INTO t VALUES (1)", true},
+		{"leading NBSP then select", "\u00a0SELECT 1", false},
+		{"with CTE alias named set before form feed AS (read)", "WITH set\fAS (SELECT 1) SELECT * FROM set", false},
+		{"with CTE alias named set before NBSP AS (read)", "WITH set\u00a0AS (SELECT 1) SELECT * FROM set", false},
+
+		// ClickHouse block comments nest.
+		{"nested block comment hiding select then insert", "/* a /* b */ SELECT */ INSERT INTO t VALUES (1)", true},
+		{"nested block comment hiding insert then select", "/* a /* b */ INSERT */ SELECT 1", false},
+		{"unclosed nested block comment", "/* a /* b */ INSERT INTO t VALUES (1)", false},
+		{"with nested block comment hiding select then insert", "WITH x AS (SELECT 1) /* a /* b */ SELECT */ INSERT INTO t SELECT * FROM x", true},
+		{"with nested block comment hiding insert then select", "WITH x AS (SELECT 1) /* a /* b */ INSERT */ SELECT * FROM x", false},
+		{"with nested block comment before CTE AS (read)", "WITH set /* a /* b */ c */ AS (SELECT 1) SELECT * FROM set", false},
+
 		{"empty", "", false},
 		{"comment only", "-- just a comment", false},
 		{"unclosed block comment", "/* never closed", false},
@@ -120,6 +147,26 @@ func TestIsMutation(t *testing.T) {
 			assert.Equal(t, tt.want, isMutation(tt.sql))
 		})
 	}
+}
+
+// TestIsMutation_ClickHouseWhitespace pins every character ClickHouse 26.6's
+// lexer accepts as whitespace, each checked against a live server: ahead of a
+// write it must not hide the verb, and ahead of a read it must not make one.
+func TestIsMutation_ClickHouseWhitespace(t *testing.T) {
+	t.Parallel()
+	spaces := []rune{' ', '\t', '\n', '\v', '\f', '\r', 0x85, 0xA0, 0x180E, 0x2028, 0x2029, 0x202F, 0x205F, 0x2060, 0x3000, 0xFEFF}
+	for r := rune(0x2000); r <= 0x200D; r++ {
+		spaces = append(spaces, r)
+	}
+	for _, r := range spaces {
+		ws := string(r)
+		assert.True(t, isMutation(ws+"INSERT INTO t VALUES (1)"), "U+%04X before INSERT", r)
+		assert.False(t, isMutation(ws+"SELECT 1"), "U+%04X before SELECT", r)
+		assert.True(t, isMutation("WITH x AS (SELECT 1)"+ws+"INSERT INTO t SELECT * FROM x"), "U+%04X before a WITH's INSERT", r)
+		assert.False(t, isMutation("WITH set"+ws+"AS (SELECT 1) SELECT * FROM set"), "U+%04X between a CTE name and AS", r)
+	}
+	// Not whitespace to ClickHouse (it rejects the statement), so not skipped.
+	assert.False(t, isMutation("\u1680INSERT INTO t VALUES (1)"))
 }
 
 func TestExecuteCHQuery_MutationRoutesToExec(t *testing.T) {
