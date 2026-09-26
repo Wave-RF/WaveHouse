@@ -26,7 +26,7 @@ type zeroCase struct {
 	get     func(*Config) any
 }
 
-// server.port is not here: 0 fails Validate, pinned by TestLoad_YAMLZeroPortIsRefused.
+// Keys whose zero Validate refuses are in refusedZeros instead.
 var zeroCases = []zeroCase{
 	{"otel.traces.enabled", "WH_OTEL_TRACES_ENABLED", false, true, "false", false, func(c *Config) any { return c.OTel.Traces.Enabled }},
 	{"otel.metrics.enabled", "WH_OTEL_METRICS_ENABLED", false, true, "false", false, func(c *Config) any { return c.OTel.Metrics.Enabled }},
@@ -37,6 +37,20 @@ var zeroCases = []zeroCase{
 	{"cache.l1_max_cost", "WH_CACHE_L1_MAX_COST", int64(0), int64(64 << 20), "1024", int64(1024), func(c *Config) any { return c.Cache.L1MaxCost }},
 	{"prometheus.path", "WH_PROMETHEUS_PATH", "", "/metrics", "/prom", "/prom", func(c *Config) any { return c.Prometheus.Path }},
 	{"data_dir", "WH_DATA_DIR", "", "./data", "/var/lib/wh", "/var/lib/wh", func(c *Config) any { return c.DataDir }},
+}
+
+// refusedZeros are the non-zero defaults whose zero Validate refuses: written
+// in the file, the zero must reach Validate rather than become the default.
+var refusedZeros = []struct {
+	key  string
+	zero any
+	err  string
+}{
+	{"server.port", 0, "server.port 0 out of range"},
+	{"mq.backend", "", `mq.backend (WH_MQ_BACKEND) ""`},
+	{"cache.backend", "", `cache.backend (WH_CACHE_BACKEND) ""`},
+	{"dedupe.backend", "", `dedupe.backend (WH_DEDUPE_BACKEND) ""`},
+	{"coord.backend", "", `coord.backend (WH_COORD_BACKEND) ""`},
 }
 
 // yamlAt renders a file setting key to value, plus otel.enabled: true so
@@ -116,10 +130,15 @@ data_dir: ""
 	assert.Equal(t, 8080, cfg.Server.Port, "a key the file leaves out still gets its default")
 }
 
-func TestLoad_YAMLZeroPortIsRefused(t *testing.T) {
+func TestLoad_YAMLZeroIsRefused(t *testing.T) {
 	t.Parallel()
-	_, err := Load(writeYAML(t, "server:\n  port: 0\n"))
-	require.ErrorContains(t, err, "server.port 0 out of range", "0 reaches Validate instead of becoming 8080")
+	for _, tc := range refusedZeros {
+		t.Run(tc.key, func(t *testing.T) {
+			t.Parallel()
+			_, err := Load(writeYAML(t, yamlAt(t, tc.key, tc.zero)))
+			require.ErrorContains(t, err, tc.err, "the zero reaches Validate instead of becoming the default")
+		})
+	}
 }
 
 // A file that exists but leaves a key out gets the default, like no file.
@@ -166,8 +185,11 @@ func TestLoad_EnvWinsOverYAMLZeroAndDefault(t *testing.T) {
 // regression coverage above rather than silently skipping it.
 func TestZeroCases_CoverEveryNonZeroDefault(t *testing.T) {
 	t.Parallel()
-	covered := map[string]bool{"server.port": true}
+	covered := map[string]bool{}
 	for _, tc := range zeroCases {
+		covered[tc.key] = true
+	}
+	for _, tc := range refusedZeros {
 		covered[tc.key] = true
 	}
 	for _, f := range configFields(t) {
@@ -247,7 +269,8 @@ func TestDocs_DefaultsMatchCode(t *testing.T) {
 	}
 }
 
-// parseDocDefault reads a table cell as the type of like.
+// parseDocDefault reads a table cell as the type of like; a named string
+// type (a backend name) converts to that type.
 func parseDocDefault(t *testing.T, key, cell string, like any) any {
 	t.Helper()
 	cell = strings.TrimSpace(cell)
@@ -272,7 +295,11 @@ func parseDocDefault(t *testing.T, key, cell string, like any) any {
 	case float64:
 		v, err = strconv.ParseFloat(cell, 64)
 	default:
-		t.Fatalf("%s: no doc parser for %T", key, like)
+		rt := reflect.TypeOf(like)
+		if rt.Kind() != reflect.String {
+			t.Fatalf("%s: no doc parser for %T", key, like)
+		}
+		v = reflect.ValueOf(cell).Convert(rt).Interface()
 	}
 	require.NoError(t, err, "%s: documented default %q", key, cell)
 	return v

@@ -19,7 +19,10 @@ type Config struct {
 	DataDir    string     `yaml:"data_dir" env:"WH_DATA_DIR"`
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
+	MQ         MQ         `yaml:"mq"`
 	Cache      Cache      `yaml:"cache"`
+	Dedupe     Dedupe     `yaml:"dedupe"`
+	Coord      Coord      `yaml:"coord"`
 	Auth       Auth       `yaml:"auth"`
 	OTel       OTel       `yaml:"otel"`
 	Prometheus Prometheus `yaml:"prometheus"`
@@ -132,13 +135,6 @@ type ClickHouse struct {
 	MaxTotalConns int `yaml:"max_total_conns" env:"WH_CH_MAX_TOTAL_CONNS"`
 }
 
-// Cache sizes the in-process L1 cache. The time-range bucket structured
-// queries normalize to is a settings-directory key
-// (query.timestamp_bucket_seconds) — query shaping, not process memory.
-type Cache struct {
-	L1MaxCost int64 `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST"`
-}
-
 // Auth holds the authentication secrets. The verifier wiring — `jwks_url`,
 // `role_claim` — is the settings directory's `auth` block (hot-reloadable:
 // a change rebuilds the verifier). There is no on/off switch: the middleware always runs. A request
@@ -170,7 +166,10 @@ func defaults() Config {
 	return Config{
 		DataDir: "./data",
 		Server:  Server{Port: 8080, ShutdownTimeout: 10},
-		Cache:   Cache{L1MaxCost: 64 << 20},
+		MQ:      MQ{Backend: MQEmbedded},
+		Cache:   Cache{Backend: CacheLocal, L1MaxCost: 64 << 20},
+		Dedupe:  Dedupe{Backend: DedupePebble},
+		Coord:   Coord{Backend: CoordLocal},
 		OTel: OTel{
 			Traces:  OTelTraces{Enabled: true, SampleRate: 1.0},
 			Metrics: OTelMetrics{Enabled: true},
@@ -245,7 +244,7 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	return nil
+	return c.validateBackends()
 }
 
 // Load reads config from a YAML file (if it exists) with env var overrides.
