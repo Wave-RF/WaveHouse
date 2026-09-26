@@ -237,6 +237,27 @@ func TestRun_DynamoDBDedupeFlatThrottledRecovers(t *testing.T) {
 	require.NoError(t, stop())
 }
 
+// With create_table on, an endpoint that fails transiently (dynamodb-local
+// still starting) boots too, and the retry creates the table once it answers.
+func TestRun_DynamoDBDedupeFlatCreateTableRetries(t *testing.T) {
+	cfg := testConfig(t, writeSettings(t, dedupeOn))
+	fake := dynamoConfig(t, cfg, false)
+	cfg.Dedupe.DynamoDB.CreateTable = true
+	fake.setThrottles(true)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	a := newApp(t, cfg, Options{Listener: ln})
+	store := a.dedup.For(tenant.Default)
+	require.False(t, store.Open())
+
+	_, stop := runApp(t, a, ln)
+	fake.setThrottles(false)
+	require.Eventually(t, store.Open, 10*time.Second, 50*time.Millisecond, "the retry created the table and opened the store")
+	assert.True(t, fake.called("CreateTable"))
+	require.NoError(t, stop())
+}
+
 // bootLogged sends the default logger to a buffer for the rest of the test,
 // for a boot that logs what it tolerated.
 func bootLogged(t *testing.T) *lockedBuffer {

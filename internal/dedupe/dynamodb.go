@@ -267,7 +267,8 @@ func (d *Dynamo) Check(ctx context.Context) error {
 var ErrCreateTableNeedsEndpoint = errors.New("dedupe: create_table is for dynamodb-local only; set the endpoint")
 
 // CreateTable creates the table on dynamodb-local, with TTL on ex, and waits
-// for it. A table that already exists is left as it is.
+// for it. A table that already exists is left as it is. Its errors are
+// classified as every call's are, so an endpoint not up yet is ErrUnavailable.
 func (d *Dynamo) CreateTable(ctx context.Context) error {
 	if d.cfg.Endpoint == "" {
 		return ErrCreateTableNeedsEndpoint
@@ -283,17 +284,17 @@ func (d *Dynamo) CreateTable(ctx context.Context) error {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("dedupe: create table %s: %w", d.cfg.Table, err)
+		return fmt.Errorf("dedupe: create table %s: %w", d.cfg.Table, classify("create_table", err))
 	}
 	if err := dynamodb.NewTableExistsWaiter(d.api).Wait(ctx, &dynamodb.DescribeTableInput{TableName: &d.cfg.Table}, time.Minute); err != nil {
-		return fmt.Errorf("dedupe: wait for table %s: %w", d.cfg.Table, err)
+		return fmt.Errorf("dedupe: wait for table %s: %w", d.cfg.Table, classify("describe_table", err))
 	}
 	_, err = d.api.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
 		TableName:               &d.cfg.Table,
 		TimeToLiveSpecification: &types.TimeToLiveSpecification{AttributeName: aws.String(attrExpiry), Enabled: aws.Bool(true)},
 	})
 	if err != nil {
-		return fmt.Errorf("dedupe: enable ttl on %s: %w", d.cfg.Table, err)
+		return fmt.Errorf("dedupe: enable ttl on %s: %w", d.cfg.Table, classify("update_time_to_live", err))
 	}
 	return nil
 }
