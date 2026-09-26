@@ -10,14 +10,15 @@ import (
 
 // The key every backend stores is text:
 //
-//	<tenant>/<table>/<id>        acme/clicks/evt%2D123
+//	<tenant>/<table>/<id>        acme/clicks/evt-123
 //	<tenant>/<table>/#<sha256>   an id too long to store verbatim
 //
-// The table and id are escaped by internal/keyenc, which never writes '/' or
-// '#', and a tenant id holds neither (tenant.Parse), so the fields split back
-// apart, a table name may hold any byte, and no two (tenant, table, id)
-// triples share a key. A key is ASCII, so it is a valid DynamoDB String, and
-// holds no NUL, so it never meets a tenant ‖ NUL ‖ id key written before #222.
+// The table and id are escaped and joined by internal/keyenc, which never
+// writes '/' or '#', and a tenant id holds neither (tenant.Parse), so the
+// fields split back apart, a table name may hold any byte, and no two
+// (tenant, table, id) triples share a key. A key is ASCII, so it is a valid
+// DynamoDB String, and holds no NUL, so it never meets a tenant ‖ NUL ‖ id
+// key written before #222.
 const (
 	keySep     = '/'
 	hashedMark = '#'
@@ -49,13 +50,12 @@ func (k Key) Hashed() bool {
 // to dst.
 func AppendKey(dst, prefix []byte, k Key) []byte {
 	dst = append(dst, prefix...)
-	dst = keyenc.AppendEscape(dst, k.Table)
-	dst = append(dst, keySep)
 	if k.Hashed() {
 		sum := sha256.Sum256([]byte(k.ID))
-		return hex.AppendEncode(append(dst, hashedMark), sum[:])
+		dst = keyenc.AppendJoin(dst, keySep, k.Table)
+		return hex.AppendEncode(append(dst, keySep, hashedMark), sum[:])
 	}
-	return keyenc.AppendEscape(dst, k.ID)
+	return keyenc.AppendJoin(dst, keySep, k.Table, k.ID)
 }
 
 // IdempotencyKey is k's message id for the queue under tenant id: the first

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -131,6 +132,11 @@ const (
 	reopenRetry = 5 * time.Second
 )
 
+// EmbeddedSyncAlways is NewEmbedded's SyncAlways. Only a TestMain may turn it
+// off, before any broker starts: unit tests assert nothing across a crash, and
+// on macOS an fsync per write is most of their run time (#617).
+var EmbeddedSyncAlways = true
+
 // errNoQueue is why a publish or park finds no queue it can open: no budget
 // has been asked for the tenant yet (see SetMaxBytes). Publish reports it as
 // ErrQueueFull.
@@ -146,11 +152,16 @@ var errNoQueue = errors.New("no queue is open for it yet")
 // applied, or by a publish or park that finds it missing, at the budget last
 // asked for it. The server logs through slog's default logger.
 func NewEmbedded(storeDir string) (*EmbeddedNATS, error) {
+	// A store the server cannot create fails JetStream in the background, and
+	// ReadyForConnections would only give up on it after its whole wait.
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
+		return nil, fmt.Errorf("nats store: %w", err)
+	}
 	opts := &natsserver.Options{
 		DontListen: true,
 		JetStream:  true,
 		StoreDir:   storeDir,
-		SyncAlways: true, // fsync every JetStream write — publish ACKs only after data is on disk
+		SyncAlways: EmbeddedSyncAlways, // fsync every JetStream write — publish ACKs only after data is on disk
 		// Without NoSigs, Start() installs a process-wide SIGINT handler that
 		// races the app's graceful shutdown (double Shutdown → "close of nil
 		// channel" panic) and os.Exit(0)s past its cleanup. WaveHouse owns
@@ -216,6 +227,13 @@ func (e *EmbeddedNATS) takeStock(ctx context.Context) error {
 		held  uint64
 	}
 	dlqs := map[tenant.ID]dlqState{}
+	// duplicates is the ingest stream's own Duplicates window as found on
+	// disk, keyed alongside dlqs: a stream from before EmbeddedDuplicateWindow
+	// existed, or reopened under a different value, must not be counted as
+	// already at budget below, or SetMaxBytes(same budget) short-circuits and
+	// the stale window is never brought forward (measured: a stream with
+	// Duplicates=10s kept 10s after NewEmbedded + SetMaxBytes(same budget)).
+	duplicates := map[tenant.ID]time.Duration{}
 	streams := e.js.ListStreams(ctx)
 	for info := range streams.Info() {
 		name := info.Config.Name
@@ -223,6 +241,7 @@ func (e *EmbeddedNATS) takeStock(ctx context.Context) error {
 			q := e.queue(id)
 			q.ingest = true
 			q.asked, q.ingestCap = info.Config.MaxBytes, info.Config.MaxBytes
+			duplicates[id] = info.Config.Duplicates
 		} else if id, ok := streamTenant(dlqStreamPrefix, name); ok {
 			e.queue(id).dlq = true
 			dlqs[id] = dlqState{limit: info.Config.MaxBytes, held: info.State.Bytes}
@@ -233,14 +252,16 @@ func (e *EmbeddedNATS) takeStock(ctx context.Context) error {
 	}
 	// A pair is at its budget when its dead-letter stream is at a tenth of
 	// the ingest cap, or above it holding more than that: the shrink guard's
-	// doing. Anything else is a pair a stop or a failed update left split, or
-	// one missing its dead-letter stream, so its budget stays unapplied and
-	// the boot's SetMaxBytes applies it to both streams again.
+	// doing, AND its ingest stream's duplicate window already matches
+	// EmbeddedDuplicateWindow. Anything else is a pair a stop or a failed
+	// update left split, one missing its dead-letter stream, or one whose
+	// duplicate window is stale, so its budget stays unapplied and the boot's
+	// SetMaxBytes applies it — and the current window — to both streams again.
 	for id, q := range e.queues {
 		d, ok := dlqs[id]
 		tenth := q.asked / dlqShare
 		guarded := d.limit > tenth && d.held <= math.MaxInt64 && int64(d.held) > tenth
-		if q.ingest && ok && (d.limit == tenth || guarded) {
+		if q.ingest && ok && (d.limit == tenth || guarded) && duplicates[id] == EmbeddedDuplicateWindow {
 			q.maxBytes = q.asked
 		}
 		e.record(id, q)
@@ -307,9 +328,13 @@ func (e *EmbeddedNATS) record(id tenant.ID, q *tenantQueue) {
 }
 
 // EmbeddedDuplicateWindow is how long an ingest queue remembers a
-// WithIdempotencyKey key. A dedupe lease must not exceed it: a claim left to
-// lapse after an uncertain publish is republished once the lease ends, and
-// only this window drops that second copy.
+// WithIdempotencyKey key. It must be at least 2*lease + 1s: a claim left to
+// lapse after an uncertain publish is republished once the lease ends, but
+// the in-flight 503 tells a client to retry only after the FULL lease, so an
+// obedient client's retry can land up to ~2*lease after the original
+// Reserve; the +1s covers a backend (DynamoDB, for one) that rounds a
+// claim's expiry up by as much. Only a window at least that long guarantees
+// this queue still drops the retry's second copy.
 const EmbeddedDuplicateWindow = 2 * time.Minute
 
 // ingestStreamConfig is tenant id's ingest stream. LimitsPolicy: standard
@@ -624,6 +649,7 @@ func wrapMsg(ctx context.Context, m jetstream.Msg) *Message {
 		func() error {
 			return m.Nak()
 		},
+		WithNakDelay(m.NakWithDelay),
 	)
 }
 
@@ -675,14 +701,13 @@ func (e *EmbeddedNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (
 		failed: make(chan error, 1),
 	}
 	c.fail = func(err error) {
-		// Exactly one error, and nothing once stop has been called.
-		if c.stopped.Load() {
+		// Exactly one error, and nothing once stop has been called: a durable
+		// deleted on several tenants' queues ends each delivery, and a caller
+		// that already drained the first must not see the next.
+		if c.stopped.Load() || !c.reported.CompareAndSwap(false, true) {
 			return
 		}
-		select {
-		case c.failed <- err:
-		default:
-		}
+		c.failed <- err
 	}
 	if err := e.register(ctx, c.fanIn); err != nil {
 		return nil, fmt.Errorf("create consumer: %w", err)
@@ -868,7 +893,8 @@ func (f *fanIn) start(deliver func(jetstream.Msg), prefetch int, watch bool) (st
 // failed channel its contract promises.
 type workerConsumer struct {
 	*fanIn
-	failed chan error
+	failed   chan error
+	reported atomic.Bool
 }
 
 func (c *workerConsumer) Consume(handler func(msg *Message), prefetch int) (func(), <-chan error, error) {
@@ -999,9 +1025,9 @@ func (e *EmbeddedNATS) PurgeAcked(ctx context.Context, consumer string, olderTha
 }
 
 // DeadLetterCounts reads tenant id's dead-letter stream's per-subject counts
-// and keys them by table. The table filter matches that table's unscoped
-// subject, so it is applied to the parsed topic rather than as a subject
-// filter; a scoped topic counts under "table.scope".
+// and keys them by table (deadLetterTables). The table filter matches every
+// scope of that table, so it is applied to the parsed topic rather than as a
+// subject filter.
 func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table string) (DeadLetterCounts, error) {
 	if _, err := tenant.Parse(string(id)); err != nil {
 		return DeadLetterCounts{}, fmt.Errorf("tenant: %w", err)
@@ -1019,20 +1045,7 @@ func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table
 		return DeadLetterCounts{}, fmt.Errorf("dlq stream info: %w", err)
 	}
 
-	counts := DeadLetterCounts{Tables: make(map[string]uint64, len(state.Subjects)), Total: state.Msgs}
-	for subj, n := range state.Subjects {
-		t := parseTopicKey(topicKey(dlqPrefix, subj))
-		if table != "" && (t.Table != table || t.Scope != "") {
-			continue
-		}
-		name := t.Table
-		if t.Scope != "" {
-			// TODO(#235): break scopes out rather than fold them into the name.
-			name += "." + t.Scope
-		}
-		counts.Tables[name] += n
-	}
-	return counts, nil
+	return DeadLetterCounts{Tables: deadLetterTables(state.Subjects, dlqPrefix, table), Total: state.Msgs}, nil
 }
 
 // ReplaySince creates an ephemeral consumer on topic's ingest subject, in its
@@ -1065,7 +1078,9 @@ func (e *EmbeddedNATS) ReplaySince(ctx context.Context, topic Topic, since time.
 		}
 		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
 		if err != nil {
-			if errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout) {
+			// A pull that raced the connection closing can end in either
+			// answer too, and that is not caught up.
+			if (errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout)) && !e.conn.IsClosed() {
 				return nil // caught up
 			}
 			return fmt.Errorf("replay next: %w", err)

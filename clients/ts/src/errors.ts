@@ -16,10 +16,14 @@ export async function parseErrorResponse(res: Response): Promise<WaveHouseError>
         ? body.message
         : res.statusText;
 
-  const retryable = res.status === 503 || res.status >= 500;
+  // The server's own `code` and `retryable` win where it sends them (a
+  // failed ClickHouse query, for one); the status decides otherwise.
+  const code =
+    typeof body?.code === "string" && body.code !== "" ? body.code : `HTTP_${res.status}`;
+  const retryable = typeof body?.retryable === "boolean" ? body.retryable : res.status >= 500;
   return {
     status: res.status,
-    code: `HTTP_${res.status}`,
+    code,
     message,
     details: body,
     retryable,

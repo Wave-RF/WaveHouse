@@ -283,6 +283,8 @@ type MockMessage struct {
 	Acked       atomic.Bool
 	Naked       atomic.Bool
 	DoubleAcked atomic.Bool
+	// NakDelay is the delay of the last NakWithDelay (which also sets Naked).
+	NakDelay atomic.Int64
 }
 
 // Message returns an mq.Message wired to this mock's flags. Every call returns
@@ -301,6 +303,11 @@ func (m *MockMessage) Message() *mq.Message {
 			m.Naked.Store(true)
 			return m.NakErr
 		},
+		mq.WithNakDelay(func(d time.Duration) error {
+			m.NakDelay.Store(int64(d))
+			m.Naked.Store(true)
+			return m.NakErr
+		}),
 	)
 }
 

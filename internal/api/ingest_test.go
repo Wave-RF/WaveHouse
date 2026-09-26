@@ -256,6 +256,20 @@ func TestIngest_PublishError_503(t *testing.T) {
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
+func TestIngest_PublishUnavailable_503(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{Err: fmt.Errorf("%w: nats: timeout", mq.ErrUnavailable)}
+	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
+
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(req))
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "5", w.Header().Get("Retry-After"))
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
 func TestIngest_PublishError_500(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{Err: errors.New("some other error")}
@@ -1067,6 +1081,20 @@ func TestIngest_NDJSON_Backpressure_503(t *testing.T) {
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.Equal(t, "30", w.Header().Get("Retry-After"))
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+func TestIngest_NDJSON_Unavailable_503(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{Err: fmt.Errorf("%w: nats: no responders", mq.ErrUnavailable)}
+	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
+
+	req := ndjsonRequest(t, "clicks", jsonLine(t, map[string]any{"page": "/a"}))
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(req))
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "5", w.Header().Get("Retry-After"))
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
@@ -2799,26 +2827,45 @@ func TestIngest_Dedup_FailedPublishReleasesTheID(t *testing.T) {
 // A publish whose outcome is unknown may have stored the event, so its claim
 // is neither released nor committed: it lapses with the lease, a retry before
 // then answers in-flight, and the idempotency key covers one after.
+// mq.ErrUnavailable is such a failure too, and answers 503 immediately with
+// the lease itself as Retry-After (rounded up to whole seconds) rather than
+// the flat 5 seconds a request with no claim to lapse would get — the same
+// distinction TestIngest_Dedup_FailedPublishReleasesTheID draws for the one
+// failure (mq.ErrQueueFull) that releases instead.
 func TestIngest_Dedup_UncertainPublishLeavesTheClaim(t *testing.T) {
 	t.Parallel()
-	pub := &testutil.MockPublisher{Err: context.DeadlineExceeded}
-	dedup := testutil.NewMockDeduplicator()
-	h := dedupHandler(t, pub, dedup, false)
-	body := map[string]any{"page": "/home", "event_id": "e1"}
+	tests := []struct {
+		name       string
+		err        error
+		status     int
+		retryAfter string
+	}{
+		{"unrecognized error", context.DeadlineExceeded, http.StatusInternalServerError, ""},
+		{"unavailable broker", fmt.Errorf("%w: timeout", mq.ErrUnavailable), http.StatusServiceUnavailable, "30"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{Err: tt.err}
+			dedup := testutil.NewMockDeduplicator()
+			h := dedupHandler(t, pub, dedup, false)
+			body := map[string]any{"page": "/home", "event_id": "e1"}
 
-	w := httptest.NewRecorder()
-	h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
-	require.Equal(t, http.StatusInternalServerError, w.Code)
-	assert.Contains(t, w.Body.String(), "publish failed")
-	assert.True(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "left to lapse")
-	assert.Empty(t, dedup.Released)
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+			require.Equal(t, tt.status, w.Code)
+			assert.Equal(t, tt.retryAfter, w.Header().Get("Retry-After"))
+			assert.True(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "left to lapse")
+			assert.Empty(t, dedup.Released)
 
-	pub.Err = nil
-	w = httptest.NewRecorder()
-	h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
-	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
-	assert.Equal(t, "30", w.Header().Get("Retry-After"))
-	assert.Empty(t, pub.Published())
+			pub.Err = nil
+			w = httptest.NewRecorder()
+			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
+			assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+			assert.Equal(t, "30", w.Header().Get("Retry-After"))
+			assert.Empty(t, pub.Published())
+		})
+	}
 }
 
 // A claimed record is published under its idempotency key; an un-deduped one
@@ -2842,6 +2889,27 @@ func TestIngest_Dedup_PublishCarriesTheIdempotencyKey(t *testing.T) {
 		assert.Equal(t, v, msgs[0].Headers[k])
 		assert.NotContains(t, msgs[1].Headers, k)
 	}
+}
+
+// A release that fails after a failed publish is only logged: the request
+// answers with the publish's own error, and the id is left to lapse with its
+// lease rather than being reported as a dedupe failure. The publish error must
+// be definite (mq.ErrQueueFull) for a single-record window: an uncertain
+// failure never releases its own record's claim (it is left to lapse
+// instead), so there would be nothing to release.
+func TestIngest_Dedup_FailedReleaseKeepsThePublishError(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{Err: fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull)}
+	dedup := testutil.NewMockDeduplicator()
+	dedup.ReleaseErr = errors.New("store unavailable")
+	h := dedupHandler(t, pub, dedup, false)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"})))
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.NotContains(t, w.Body.String(), "dedupe", "the publish's error, not the release's")
+	assert.Len(t, dedup.Released, 1, "the release was attempted")
+	assert.True(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "left to lapse with its lease")
 }
 
 // A batch whose publish fails part-way keeps what it published: the records
@@ -2936,6 +3004,31 @@ func TestIngest_Dedup_ReserveError(t *testing.T) {
 	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"})))
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Contains(t, w.Body.String(), "dedupe failed")
+	assert.Empty(t, pub.Published())
+}
+
+// A Reserve error caused by the request's own context ending (the client
+// gone, or its deadline past) is not a backend failure and must not log at
+// ERROR — an operator paging on ERROR logs would otherwise be woken by
+// clients that simply went away. TestIngest_Dedup_ReserveError above pins the
+// real-backend-failure case, which stays ERROR.
+func TestIngest_Dedup_ReserveError_ContextEnded_NotLoggedAsError(t *testing.T) {
+	buf := logtest.Capture(t, slog.LevelDebug)
+	pub := &testutil.MockPublisher{}
+	dedup := testutil.NewMockDeduplicator()
+	dedup.Err = errors.New("backend down")
+	h := dedupHandler(t, pub, dedup, false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"}).WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(req))
+
+	assert.Contains(t, buf.String(), "dedupe reserve failed", "still logged, just not at ERROR")
+	assert.NotContains(t, buf.String(), `"level":"ERROR"`, "a client-gone Reserve error must not page an operator")
+	assert.Contains(t, buf.String(), `"level":"DEBUG"`)
 	assert.Empty(t, pub.Published())
 }
 

@@ -58,16 +58,18 @@ type Claim struct {
 }
 
 // Deduplicator is a tenant's store of seen ids. Callers reach every backend
-// through Managed, which hands a backend distinct, valid keys, a lease > 0,
-// and only Claimed claims to Commit and Release — a backend may assume all
+// through Managed, which hands a backend distinct keys, a lease > 0, and
+// only Claimed claims to Commit and Release — a backend may assume all
 // three, and Managed's callers get the behaviour below either way.
 //
 // Reserve is atomic per key: of any number of concurrent Reserves for the
 // same key — in this process or any other sharing the backend — at most one
 // returns Claimed. It returns one Claim per key, in input order. On error it
-// has released every claim it made (all-or-nothing from the caller's view),
-// and the error wraps ErrUnavailable when retrying later can succeed
-// (throttled, timed out, backend unreachable).
+// has released every claim it knows it made; a write whose outcome the
+// error left unknown (a timeout, a cancelled call) may still land
+// afterwards, and then holds its key InFlight until the lease ends, like an
+// abandoned claim. The error wraps ErrUnavailable when retrying later can
+// succeed (throttled, timed out, backend unreachable).
 //
 // Commit makes Claimed claims duplicates for retention (0 = no expiry) and
 // ignores claims of any other status. It is unconditional: a commit that

@@ -249,12 +249,16 @@ func TestIngest_Windows_OutcomesStayInOrder(t *testing.T) {
 	}
 }
 
-// The embedded queue must remember an idempotency key for at least a lease:
-// the retry of an uncertain publish lands after the lease, and only the queue's
-// duplicate window drops its second copy.
+// The embedded queue must remember an idempotency key for at least two
+// leases plus a second: the in-flight 503 of an uncertain publish sends the
+// full lease as Retry-After, so a client that obeys it can republish up to
+// ~2*lease after the original Reserve, and a claim's expiry can itself round
+// up by up to a second (a DynamoDB backend, for one). Only the queue's
+// duplicate window running at least that long guarantees it still drops the
+// retry's second copy.
 func TestIngest_DedupeLeaseFitsTheDuplicateWindow(t *testing.T) {
 	t.Parallel()
-	assert.LessOrEqual(t, dedupe.DefaultLease, mq.EmbeddedDuplicateWindow)
+	assert.LessOrEqual(t, 2*dedupe.DefaultLease+time.Second, mq.EmbeddedDuplicateWindow)
 }
 
 // faultyPublisher publishes through a real broker and fails the calls fail
