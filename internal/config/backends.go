@@ -118,10 +118,11 @@ func (c *Config) validateBackends() error {
 // every process is an island: nothing else can reach its queue.
 func (c *Config) Distributed() bool { return c.MQ.Backend != MQEmbedded }
 
-// NeedsDataDir reports whether a selected backend keeps state under data_dir,
-// and so whether boot must probe it (CheckDataDir).
+// NeedsDataDir reports whether a backend this process opens keeps state
+// under data_dir, and so whether boot must probe it (CheckDataDir). Only the
+// api role opens the dedupe stores.
 func (c *Config) NeedsDataDir() bool {
-	return c.MQ.Backend == MQEmbedded || c.Dedupe.Backend == DedupePebble
+	return c.MQ.Backend == MQEmbedded || (c.Has(RoleAPI) && c.Dedupe.Backend == DedupePebble)
 }
 
 // Warnings returns what a valid configuration is still likely to get wrong,
@@ -129,6 +130,12 @@ func (c *Config) NeedsDataDir() bool {
 // correct for a single replica, and one process cannot count its replicas.
 func (c *Config) Warnings() []string {
 	if !c.Distributed() {
+		return nil
+	}
+	// Both are the api role's: a process without it opens neither a cache it
+	// reads nor a dedupe store (a split that would need the cache shared is
+	// refused, validateTopology).
+	if !c.Has(RoleAPI) {
 		return nil
 	}
 	var out []string

@@ -648,18 +648,27 @@ func (a *App) wireCoord() error {
 // sweeperLease is the lease the sweeper runs under, one sweeper per queue.
 const sweeperLease = "sweeper"
 
+// elected runs fn only while this process holds lease, campaigning again
+// whenever the term ends (coord.RunElected): the loop of a role that must
+// run in one process at a time, however many processes run the role.
+func (a *App) elected(lease string, fn func(ctx context.Context) error) func(ctx context.Context) error {
+	return func(ctx context.Context) error {
+		return coord.RunElected(ctx, a.coord, lease, coord.RetryPeriod, func(ctx context.Context, _ coord.Term) error {
+			return fn(ctx)
+		})
+	}
+}
+
 // wireSweeper adds the active sweeper — purges messages that are both
 // written to ClickHouse and older than their tenant's SSE gap window (its own
 // stream.gap_window_minutes, re-read every sweep — see gapWindows). Runs
 // every minute, while this process holds the sweeper lease.
 func (a *App) wireSweeper() {
 	sweeper := ingest.NewSweeper(a.mq, func() map[tenant.ID]time.Duration { return gapWindows(a.tenants) })
-	a.add(component{name: "sweeper", run: func(ctx context.Context) error {
-		return coord.RunElected(ctx, a.coord, sweeperLease, coord.RetryPeriod, func(ctx context.Context, _ coord.Term) error {
-			sweeper.Start(ctx)
-			return nil
-		})
-	}})
+	a.add(component{name: "sweeper", run: a.elected(sweeperLease, func(ctx context.Context) error {
+		sweeper.Start(ctx)
+		return nil
+	})})
 }
 
 // wireStreaming builds the SSE fan-out: one metric set shared by the Hub
@@ -822,6 +831,22 @@ func (a *App) wireAuth() func(http.Handler) http.Handler {
 	return authn.Middleware()
 }
 
+// wireOpsAuth is the authentication of a process without the api role: the
+// operator key and nothing else. Token verifiers — and the JWKS fetches that
+// keep them — are per API process, so no token validates here and the reload
+// route admits the operator alone (api.NewOpsRouter).
+func (a *App) wireOpsAuth() func(http.Handler) http.Handler {
+	operatorKey := strings.TrimSpace(a.cfg.Auth.OperatorKey)
+	switch {
+	case operatorKey == "" && a.tenants.Nested():
+		slog.Warn("no auth.operator_key set: a process without the api role takes only the operator key on POST /v1/ops/settings/reload, and a nested settings directory has no watcher, so its settings can only be reloaded by SIGHUP")
+	case operatorKey == "":
+		slog.Warn("no auth.operator_key set: a process without the api role takes only the operator key on POST /v1/ops/settings/reload, so its settings can only be reloaded by SIGHUP or the directory watcher")
+	}
+	authn := auth.NewAuthenticator(auth.Config{OperatorKey: operatorKey}, nil, nil)
+	return authn.Middleware()
+}
+
 // wireReloadTriggers adds SIGHUP and the directory watcher. All three
 // triggers (these two and POST /v1/ops/settings/reload) funnel into the same
 // serialized Registry.Reload, and a rejected reload keeps the previous good
@@ -931,13 +956,44 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Settings:     api.NewSettingsHandler(a.tenants),
 	}
 
-	prom := a.cfg.Prometheus
-	if a.promHandler != nil && prom.Port == 0 {
-		deps.MetricsHandler = a.promHandler
-		deps.MetricsPath = prom.Path
-	}
+	deps.MetricsHandler, deps.MetricsPath = a.inlineMetrics()
 	a.handler = api.NewRouter(deps)
+	a.wireServers(func() { close(closing) })
+}
 
+// wireOpsHTTP serves the ops-only router of a process without the api role:
+// the probes, /version, the metrics endpoint, and the settings reload.
+// Readiness pings the ClickHouse pools when the process has them (the ingest
+// role); a sweeper-only process is ready once booted.
+func (a *App) wireOpsHTTP(authMW func(http.Handler) http.Handler) {
+	health := api.NewHealthHandler(nil)
+	if a.pools != nil {
+		health.Ping = a.pools.Ping
+	}
+	deps := api.OpsDependencies{
+		Health:   health,
+		Version:  api.NewVersionHandler(a.build.Version, a.build.GitCommit, a.build.BuildTime),
+		Settings: api.NewSettingsHandler(a.tenants),
+		AuthMW:   authMW,
+	}
+	deps.MetricsHandler, deps.MetricsPath = a.inlineMetrics()
+	a.handler = api.NewOpsRouter(deps)
+	a.wireServers(nil)
+}
+
+// inlineMetrics is the metrics endpoint to mount on the main router: with
+// prometheus.port 0 only, since a non-zero port gets its own listener.
+func (a *App) inlineMetrics() (http.Handler, string) {
+	if a.promHandler == nil || a.cfg.Prometheus.Port != 0 {
+		return nil, ""
+	}
+	return a.promHandler, a.cfg.Prometheus.Path
+}
+
+// wireServers adds the server of a.handler on server.port and, with
+// prometheus.port set, the metrics sidecar. onShutdown, when set, runs as the
+// main server begins its drain.
+func (a *App) wireServers(onShutdown func()) {
 	// ReadHeaderTimeout only, deliberately: net/http leaves ReadTimeout's
 	// deadline on the connection while the handler runs, so its background
 	// read would time out and cancel the request context — ending every
@@ -948,12 +1004,14 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Handler:           a.handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
-	srv.RegisterOnShutdown(sync.OnceFunc(func() { close(closing) }))
+	if onShutdown != nil {
+		srv.RegisterOnShutdown(sync.OnceFunc(onShutdown))
+	}
 	a.add(component{name: "http server", run: func(ctx context.Context) error {
 		return a.serve(ctx, "server", srv, a.listener)
 	}})
 
-	if a.promHandler != nil && prom.Port != 0 {
+	if prom := a.cfg.Prometheus; a.promHandler != nil && prom.Port != 0 {
 		mux := http.NewServeMux()
 		mux.Handle(prom.Path, a.promHandler)
 		promSrv := &http.Server{

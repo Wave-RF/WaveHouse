@@ -51,6 +51,7 @@ var refusedZeros = []struct {
 	{"cache.backend", "", `cache.backend (WH_CACHE_BACKEND) ""`},
 	{"dedupe.backend", "", `dedupe.backend (WH_DEDUPE_BACKEND) ""`},
 	{"coord.backend", "", `coord.backend (WH_COORD_BACKEND) ""`},
+	{"roles", []string{}, "roles (WH_ROLES) is empty"},
 }
 
 // yamlAt renders a file setting key to value, plus otel.enabled: true so
@@ -270,7 +271,8 @@ func TestDocs_DefaultsMatchCode(t *testing.T) {
 }
 
 // parseDocDefault reads a table cell as the type of like; a named string
-// type (a backend name) converts to that type.
+// type (a backend name) converts to that type, and a slice of one splits on
+// commas.
 func parseDocDefault(t *testing.T, key, cell string, like any) any {
 	t.Helper()
 	cell = strings.TrimSpace(cell)
@@ -296,10 +298,19 @@ func parseDocDefault(t *testing.T, key, cell string, like any) any {
 		v, err = strconv.ParseFloat(cell, 64)
 	default:
 		rt := reflect.TypeOf(like)
-		if rt.Kind() != reflect.String {
+		switch {
+		case rt.Kind() == reflect.String:
+			v = reflect.ValueOf(cell).Convert(rt).Interface()
+		case rt.Kind() == reflect.Slice && rt.Elem().Kind() == reflect.String: // roles: a comma-separated cell
+			parts := strings.Split(cell, ",")
+			sv := reflect.MakeSlice(rt, len(parts), len(parts))
+			for i, p := range parts {
+				sv.Index(i).Set(reflect.ValueOf(p).Convert(rt.Elem()))
+			}
+			v = sv.Interface()
+		default:
 			t.Fatalf("%s: no doc parser for %T", key, like)
 		}
-		v = reflect.ValueOf(cell).Convert(rt).Interface()
 	}
 	require.NoError(t, err, "%s: documented default %q", key, cell)
 	return v

@@ -100,6 +100,7 @@ func testConfig(t *testing.T, settingsDir string) *config.Config {
 		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
 		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
 		Coord:    config.Coord{Backend: config.CoordLocal},
+		Roles:    config.AllRoles(),
 		Auth:     config.Auth{JWTSecret: "unit-test-secret"},
 		Settings: config.Settings{Dir: settingsDir},
 	}

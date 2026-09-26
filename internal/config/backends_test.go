@@ -10,8 +10,9 @@ import (
 )
 
 // withDefaultBackends sets what defaults() would: a literal Config
-// names no backend, and Validate refuses that.
+// names no backend and no role, and Validate refuses that.
 func withDefaultBackends(c Config) *Config {
+	c.Roles = AllRoles()
 	c.MQ.Backend, c.Cache.Backend = MQEmbedded, CacheLocal
 	c.Dedupe.Backend, c.Coord.Backend = DedupePebble, CoordLocal
 	return &c
