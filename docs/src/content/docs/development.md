@@ -461,7 +461,7 @@ WaveHouse/
 │   ├── dedupe/             # Optional deduplication (Pebble)
 │   ├── discovery/          # ClickHouse schema introspection + validation
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
-│   ├── keyenc/             # One escaping for composite keys (NATS subject tokens, cache namespace tokens)
+│   ├── keyenc/             # One escaping for composite keys (NATS subject tokens, cache namespace tokens, dedupe keys)
 │   ├── mq/                 # MQ boundary: the only NATS/JetStream importer
 │   ├── observability/      # OpenTelemetry pipeline (traces/metrics/logs + Prometheus)
 │   ├── pipes/              # Named query pipes (types + parameter binding)

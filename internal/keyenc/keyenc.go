@@ -6,9 +6,10 @@
 // ClickHouse accepts encodes. The bytes it keeps are exactly a tenant id's
 // (tenant.Parse), so a tenant id is its own escaped form.
 //
-// Keys built from it are stored — queued under NATS subjects, held in caches
-// — so a change to what it keeps orphans them. Earlier builds escaped '-' as
-// %2D; Unescape still reads that form.
+// Keys built from it are stored — queued under NATS subjects, held in caches,
+// kept as dedupe keys — so a change to what it keeps orphans them; an
+// orphaned dedupe key lets a seen id through again. Earlier builds escaped
+// '-' as %2D; Unescape still reads that form.
 package keyenc
 
 import (
