@@ -5,10 +5,14 @@ package cache_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"slices"
 	"strconv"
@@ -588,24 +592,28 @@ func (c unanswered) Write(b []byte) (int, error) {
 
 // proxy forwards each connection it accepts to the address target holds at
 // that moment, so a switch moves new connections only, as a stable DNS name
-// or a proxy does after a failover. It holds a new connection for delay
-// before forwarding it, as a slow dial and handshake would.
+// or a proxy does after a failover. Given a TLS config it terminates TLS.
+// It holds a new connection for delay before its TLS handshake and again
+// before forwarding it, as a slow dial and a slow handshake would, and
+// holds everything the server sends for replyDelay, as a slow server would.
 type proxy struct {
-	addr   string // to dial
-	target atomic.Pointer[string]
-	delay  atomic.Int64 // a time.Duration
+	addr       string // to dial
+	serverTLS  *tls.Config
+	target     atomic.Pointer[string]
+	delay      atomic.Int64 // a time.Duration
+	replyDelay atomic.Int64 // a time.Duration
 
 	mu    sync.Mutex
 	conns []net.Conn
 }
 
-func newProxy(t *testing.T, target string) *proxy {
+func newProxy(t *testing.T, target string, serverTLS *tls.Config) *proxy {
 	t.Helper()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
-	p := &proxy{addr: ln.Addr().String()}
+	p := &proxy{addr: ln.Addr().String(), serverTLS: serverTLS}
 	p.target.Store(&target)
 	go func() {
 		for {
@@ -624,6 +632,14 @@ func newProxy(t *testing.T, target string) *proxy {
 
 func (p *proxy) serve(c net.Conn) {
 	defer func() { _ = c.Close() }()
+	if p.serverTLS != nil {
+		time.Sleep(time.Duration(p.delay.Load()))
+		tc := tls.Server(c, p.serverTLS)
+		if tc.HandshakeContext(context.Background()) != nil {
+			return
+		}
+		c = tc
+	}
 	time.Sleep(time.Duration(p.delay.Load()))
 	var d net.Dialer
 	u, err := d.DialContext(context.Background(), "tcp", *p.target.Load())
@@ -632,7 +648,42 @@ func (p *proxy) serve(c net.Conn) {
 	}
 	defer func() { _ = u.Close() }()
 	go func() { _, _ = io.Copy(u, c); _ = u.Close() }()
-	_, _ = io.Copy(c, u)
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := u.Read(buf)
+		if n > 0 {
+			time.Sleep(time.Duration(p.replyDelay.Load()))
+			if _, err := c.Write(buf[:n]); err != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// selfSigned returns a server TLS config holding a fresh certificate for
+// 127.0.0.1, and a client config that trusts it.
+func selfSigned(t *testing.T) (srv, cli *tls.Config) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	cert, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+	roots := x509.NewCertPool()
+	roots.AddCert(cert)
+	return &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}, MinVersion: tls.VersionTLS12},
+		&tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 }
 
 // drop closes every connection p carries, so the client must reconnect.
@@ -670,7 +721,7 @@ func TestRedis_FailoverBehindAStableAddress(t *testing.T) {
 		return err == nil && strings.Contains(info, "master_link_status:up")
 	}, 30*time.Second, 50*time.Millisecond, "the replica syncs")
 
-	fwd := newProxy(t, primary.addr)
+	fwd := newProxy(t, primary.addr, nil)
 	stable := &server{addr: fwd.addr, mode: cache.RedisStandalone}
 	prefix := uniquePrefix()
 	a := open(t, stable, prefix, func(c *cache.RedisConfig) {
@@ -899,31 +950,66 @@ func TestRedis_RestoredSnapshotIsARollback(t *testing.T) {
 
 // A reconnect slower than the op timeout (a dial and TLS handshake across
 // zones) fails the operations waiting on it, since rueidis dials under their
-// context; they open the breaker, and the probe, whose budget covers a dial,
-// completes the reconnect and closes it. Only the connection the probe
-// lands on: rueidis spreads commands over several, and the rest still
-// reconnect under the op timeout.
+// context; they open the breaker, and the probe, whose budget covers a
+// reconnect, completes it and closes the breaker. rueidis bounds the dial,
+// TLS included, by the dial timeout and then the handshake by it again, so
+// here each takes most of it: together they outlast one dial timeout plus
+// the op timeout. Only the connection the probe lands on reconnects:
+// rueidis spreads commands over several, and the rest still reconnect under
+// the op timeout.
 func TestRedis_ProbeFitsASlowReconnect(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := startRedis(t)
-	p := newProxy(t, s.addr)
-	const timeout = 100 * time.Millisecond
+	srvTLS, cliTLS := selfSigned(t)
+	p := newProxy(t, s.addr, srvTLS)
+	const timeout, dialTimeout = 100 * time.Millisecond, time.Second
 	a := open(t, &server{addr: p.addr, mode: cache.RedisStandalone}, uniquePrefix(), func(c *cache.RedisConfig) {
-		c.Timeout, c.DialTimeout = timeout, 2*time.Second
+		c.Timeout, c.DialTimeout, c.TLS = timeout, dialTimeout, cliTLS
 		c.BreakerThreshold, c.BreakerOpenFor = 1, 200*time.Millisecond
 	})
 	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
 	_, _, err := a.Lookup(ctx, "acme", "q", deps)
 	require.NoError(t, err)
 
-	p.delay.Store(int64(5 * timeout))
+	p.delay.Store(int64(dialTimeout * 7 / 10))
 	p.drop()
 	_, _, err = a.Lookup(ctx, "acme", "q", deps)
 	require.Error(t, err, "the reconnect does not fit in the lookup's timeout")
 	require.True(t, cache.Bypassed(a))
+	require.Eventually(t, func() bool { return !cache.Bypassed(a) }, 20*time.Second, 10*time.Millisecond,
+		"the probe reconnects within twice the dial timeout")
+}
+
+// A server that answers, but slower than the op timeout, fails every
+// operation, so the probe's reconnect allowance must not close the breaker
+// on it: a probe write slower than the op timeout is repeated under it, and
+// only a repeat that lands closes the breaker.
+func TestRedis_ProbeKeepsASlowServerBypassed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := startRedis(t)
+	p := newProxy(t, s.addr, nil)
+	const timeout = 100 * time.Millisecond
+	a := open(t, &server{addr: p.addr, mode: cache.RedisStandalone}, uniquePrefix(), func(c *cache.RedisConfig) {
+		c.Timeout, c.DialTimeout = timeout, time.Second
+		c.BreakerThreshold, c.BreakerOpenFor = 1, 200*time.Millisecond
+	})
+	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
+	_, _, err := a.Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+
+	p.replyDelay.Store(int64(3 * timeout))
+	_, _, err = a.Lookup(ctx, "acme", "q", deps)
+	require.Error(t, err, "a reply slower than the timeout fails the lookup")
+	require.True(t, cache.Bypassed(a))
+	// Several probes, each answered within the reconnect allowance.
+	for end := time.Now().Add(4 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		require.True(t, cache.Bypassed(a), "a probe answered slower than the op timeout closed the breaker")
+	}
+	p.replyDelay.Store(0)
 	require.Eventually(t, func() bool { return !cache.Bypassed(a) }, 10*time.Second, 10*time.Millisecond,
-		"the probe reconnects within the dial timeout")
+		"a probe answered in time closes it")
 }
 
 // A password rotated under a running process refuses its next connection's

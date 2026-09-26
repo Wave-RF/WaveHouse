@@ -45,7 +45,7 @@ func newMetrics(backend string, breakerOpen func() bool, pending func() int) (*m
 		metric.WithDescription("Shared-cache round-trip time by op: lookup, set, invalidate"), metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(.0001, .00025, .0005, .001, .0025, .005, .01, .025, .05, .1, .25))
 	m.invalidation, errs[2] = meter.Int64Counter("wavehouse_cache_invalidations_total",
-		metric.WithDescription("Version-token bumps by result: ok counts every bump that lands, retried ones included; deferred counts each time one is put off, a repeat of one already owed included. They overlap: wavehouse_cache_invalidations_pending is what is still owed"))
+		metric.WithDescription("Version-token bumps by result: ok counts every bump that lands, retried ones included; deferred counts each bump an invalidation could not deliver when made, a repeat of one already owed included; a failed retry is not counted again. They overlap: wavehouse_cache_invalidations_pending is what is still owed"))
 	m.valueBytes, errs[3] = meter.Int64Histogram("wavehouse_cache_value_bytes",
 		metric.WithDescription("Size of each value written to the shared cache, after compression"), metric.WithUnit("By"),
 		metric.WithExplicitBucketBoundaries(256, 1<<10, 4<<10, 16<<10, 64<<10, 256<<10, 1<<20, 4<<20))
