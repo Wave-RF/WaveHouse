@@ -23,8 +23,9 @@ const (
 // maxRedisTimeout caps cache.redis.timeout and cache.redis.dial_timeout.
 // Boot and the cache's Close each wait out a dial in flight: a connect and
 // a handshake, each bounded by dial_timeout, then for a cluster a topology
-// read bounded by the larger of the two. At the caps that is at most 3s,
-// inside the 5s budget Close shares with the stores released after it.
+// read bounded by the larger of the two. At the caps that is at most 3s;
+// Close then spends up to 1s delivering owed invalidations, so at most 4s,
+// inside the 5s budget it shares with the stores released after it.
 const maxRedisTimeout = time.Second
 
 // CacheRedisConfig configures cache.backend=redis: one Redis-compatible server
