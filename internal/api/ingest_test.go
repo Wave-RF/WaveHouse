@@ -2789,6 +2789,24 @@ func TestIngest_Dedup_FailedPublishReleasesTheID(t *testing.T) {
 	}
 }
 
+// A release that fails after a failed publish is only logged: the request
+// answers with the publish's own error, and the id is left to lapse with its
+// lease rather than being reported as a dedupe failure.
+func TestIngest_Dedup_FailedReleaseKeepsThePublishError(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{Err: errors.New("connection reset")}
+	dedup := testutil.NewMockDeduplicator()
+	dedup.ReleaseErr = errors.New("store unavailable")
+	h := dedupHandler(t, pub, dedup, false)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"})))
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.NotContains(t, w.Body.String(), "dedupe", "the publish's error, not the release's")
+	assert.Len(t, dedup.Released, 1, "the release was attempted")
+	assert.True(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "left to lapse with its lease")
+}
+
 // A batch whose publish fails part-way keeps what it published: the records
 // before the failure are committed, the failing one is released, and a
 // whole-batch retry reports the first as duplicates and publishes the rest.
