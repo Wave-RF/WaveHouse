@@ -667,7 +667,6 @@ func redisConfig(r config.CacheRedisConfig) (cache.RedisConfig, error) {
 	return cache.RedisConfig{
 		Addrs:            r.Addrs,
 		Mode:             r.Mode,
-		SentinelMaster:   r.SentinelMaster,
 		Username:         r.Username,
 		Password:         r.Password,
 		DB:               r.DB,

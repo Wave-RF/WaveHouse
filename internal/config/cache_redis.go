@@ -11,7 +11,8 @@ import (
 	"time"
 )
 
-// Redis deployment modes for cache.redis.mode.
+// Redis deployment modes for cache.redis.mode. RedisSentinel is refused
+// until the backend supports it (#656).
 const (
 	RedisStandalone = "standalone"
 	RedisCluster    = "cluster"
@@ -22,15 +23,13 @@ const (
 // (Redis, Valkey, Dragonfly, ElastiCache, MemoryDB) shared by every process.
 // Read only when that backend is selected.
 type CacheRedisConfig struct {
-	// Addrs are host:port pairs: the server, or seeds for a cluster, or the
-	// sentinels.
-	Addrs          []string      `yaml:"addrs" env:"WH_CACHE_REDIS_ADDRS"`
-	Mode           string        `yaml:"mode" env:"WH_CACHE_REDIS_MODE"`
-	SentinelMaster string        `yaml:"sentinel_master" env:"WH_CACHE_REDIS_SENTINEL_MASTER"`
-	Username       string        `yaml:"username" env:"WH_CACHE_REDIS_USERNAME"`
-	Password       string        `yaml:"password" env:"WH_CACHE_REDIS_PASSWORD"`
-	DB             int           `yaml:"db" env:"WH_CACHE_REDIS_DB"`
-	TLS            CacheRedisTLS `yaml:"tls"`
+	// Addrs are host:port pairs: the server, or seeds for a cluster.
+	Addrs    []string      `yaml:"addrs" env:"WH_CACHE_REDIS_ADDRS"`
+	Mode     string        `yaml:"mode" env:"WH_CACHE_REDIS_MODE"`
+	Username string        `yaml:"username" env:"WH_CACHE_REDIS_USERNAME"`
+	Password string        `yaml:"password" env:"WH_CACHE_REDIS_PASSWORD"`
+	DB       int           `yaml:"db" env:"WH_CACHE_REDIS_DB"`
+	TLS      CacheRedisTLS `yaml:"tls"`
 	// KeyPrefix leads every key, so deployments can share one server.
 	KeyPrefix   string        `yaml:"key_prefix" env:"WH_CACHE_REDIS_KEY_PREFIX"`
 	Timeout     time.Duration `yaml:"timeout" env:"WH_CACHE_REDIS_TIMEOUT"`
@@ -61,7 +60,7 @@ func (r CacheRedisConfig) hasAddrs() bool {
 
 func (r CacheRedisConfig) validate() error {
 	if !r.hasAddrs() {
-		return errors.New("cache.backend=redis needs cache.redis.addrs (WH_CACHE_REDIS_ADDRS): the server's host:port, or a cluster's seeds, or the sentinels")
+		return errors.New("cache.backend=redis needs cache.redis.addrs (WH_CACHE_REDIS_ADDRS): the server's host:port, or a cluster's seeds")
 	}
 	for _, a := range r.Addrs {
 		if strings.TrimSpace(a) != a {
@@ -72,12 +71,11 @@ func (r CacheRedisConfig) validate() error {
 		}
 	}
 	switch r.Mode {
-	case RedisStandalone, RedisCluster, RedisSentinel:
+	case RedisStandalone, RedisCluster:
+	case RedisSentinel:
+		return fmt.Errorf("cache.redis.mode (WH_CACHE_REDIS_MODE) %q is not supported yet: the cache neither authenticates to the sentinels nor refreshes their topology (https://github.com/Wave-RF/WaveHouse/issues/656); valid: %s, %s", r.Mode, RedisStandalone, RedisCluster)
 	default:
-		return fmt.Errorf("cache.redis.mode (WH_CACHE_REDIS_MODE) %q: valid: %s, %s, %s", r.Mode, RedisStandalone, RedisCluster, RedisSentinel)
-	}
-	if r.Mode == RedisSentinel && r.SentinelMaster == "" {
-		return errors.New("cache.redis.mode=sentinel needs cache.redis.sentinel_master (WH_CACHE_REDIS_SENTINEL_MASTER), the master set name")
+		return fmt.Errorf("cache.redis.mode (WH_CACHE_REDIS_MODE) %q: valid: %s, %s", r.Mode, RedisStandalone, RedisCluster)
 	}
 	if r.DB < 0 {
 		return fmt.Errorf("cache.redis.db (WH_CACHE_REDIS_DB) %d is negative", r.DB)
