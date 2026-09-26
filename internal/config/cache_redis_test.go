@@ -57,7 +57,7 @@ func TestLoad_CacheRedisFromEnv(t *testing.T) {
 		"WH_CACHE_REDIS_TLS_SERVER_NAME":          "redis.internal",
 		"WH_CACHE_REDIS_KEY_PREFIX":               "staging",
 		"WH_CACHE_REDIS_TIMEOUT":                  "250ms",
-		"WH_CACHE_REDIS_DIAL_TIMEOUT":             "3s",
+		"WH_CACHE_REDIS_DIAL_TIMEOUT":             "2s",
 		"WH_CACHE_REDIS_MAX_VALUE_BYTES":          "2048",
 		"WH_CACHE_REDIS_COMPRESS_MIN_BYTES":       "0",
 		"WH_CACHE_REDIS_VERSION_TTL":              "24h",
@@ -73,7 +73,7 @@ func TestLoad_CacheRedisFromEnv(t *testing.T) {
 		TLS: CacheRedisTLS{
 			Enabled: true, CAFile: caFile, CertFile: certFile, KeyFile: keyFile, ServerName: "redis.internal",
 		},
-		KeyPrefix: "staging", Timeout: 250 * time.Millisecond, DialTimeout: 3 * time.Second,
+		KeyPrefix: "staging", Timeout: 250 * time.Millisecond, DialTimeout: 2 * time.Second,
 		MaxValueBytes: 2048, CompressMinBytes: 0, VersionTTL: 24 * time.Hour,
 	}, cfg.Cache.Redis)
 	tc, err := cfg.Cache.Redis.TLS.Config()
@@ -221,6 +221,8 @@ func TestValidate_CacheRedis(t *testing.T) {
 		{"brace prefix", func(r *CacheRedisConfig) { r.KeyPrefix = "a{b}" }, "hash-tag brace"},
 		{"zero timeout", func(r *CacheRedisConfig) { r.Timeout = 0 }, "cache.redis.timeout (WH_CACHE_REDIS_TIMEOUT) 0s must be positive"},
 		{"negative dial timeout", func(r *CacheRedisConfig) { r.DialTimeout = -time.Second }, "cache.redis.dial_timeout"},
+		{"dial timeout at the cap", func(r *CacheRedisConfig) { r.DialTimeout = 2 * time.Second }, ""},
+		{"dial timeout over the cap", func(r *CacheRedisConfig) { r.DialTimeout = 2*time.Second + time.Millisecond }, "cache.redis.dial_timeout (WH_CACHE_REDIS_DIAL_TIMEOUT) 2.001s is over 2s"},
 		{"short version ttl", func(r *CacheRedisConfig) { r.VersionTTL = time.Second }, "cache.redis.version_ttl (WH_CACHE_REDIS_VERSION_TTL) 1s is under 2s"},
 		{"zero max value", func(r *CacheRedisConfig) { r.MaxValueBytes = 0 }, "cache.redis.max_value_bytes"},
 		{"compress never", func(r *CacheRedisConfig) { r.CompressMinBytes = 0 }, ""},

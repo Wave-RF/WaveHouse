@@ -19,6 +19,12 @@ const (
 	RedisSentinel   = "sentinel"
 )
 
+// maxRedisDialTimeout caps cache.redis.dial_timeout. A dial is a connect
+// and a handshake, each bounded by it, and both boot and the cache's Close
+// wait out one in flight: at 2s that is at most 4s, inside the 5s budget
+// Close shares with the stores released after the cache.
+const maxRedisDialTimeout = 2 * time.Second
+
 // CacheRedisConfig configures cache.backend=redis: one Redis-compatible server
 // (Redis, Valkey, Dragonfly, ElastiCache, MemoryDB) shared by every process.
 // Read only when that backend is selected.
@@ -101,6 +107,9 @@ func (r CacheRedisConfig) validate() error {
 		if d.v <= 0 {
 			return fmt.Errorf("%s %s must be positive", d.key, d.v)
 		}
+	}
+	if r.DialTimeout > maxRedisDialTimeout {
+		return fmt.Errorf("cache.redis.dial_timeout (WH_CACHE_REDIS_DIAL_TIMEOUT) %s is over %s: boot and shutdown each wait out a dial, up to twice this", r.DialTimeout, maxRedisDialTimeout)
 	}
 	if r.VersionTTL < 2*time.Second {
 		return fmt.Errorf("cache.redis.version_ttl (WH_CACHE_REDIS_VERSION_TTL) %s is under 2s", r.VersionTTL)
