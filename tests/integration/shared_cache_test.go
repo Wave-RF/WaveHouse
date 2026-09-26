@@ -216,6 +216,48 @@ func TestSharedCache_IngestOnOneInstanceInvalidatesAnother(t *testing.T) {
 	}
 }
 
+// The same lifecycle on the default backend, against the suite's own app
+// (cache.backend=local), which e2e no longer runs: a fill is a hit, and an
+// ingest invalidates it, so the first answer carrying the new row is a miss
+// well inside the stale entry's TTL, and the refill is a hit again.
+func TestLocalCache_IngestInvalidates(t *testing.T) {
+	base := env(t).baseURL
+	// As above: a round whose row lands past the TTL floor proves nothing,
+	// and runs again on a fresh table, so a fresh fill.
+	for round := 1; ; round++ {
+		table := createTable(t, "user_id String, value Float64", "ORDER BY user_id")
+		status, xc, body := structuredQuery(t, base, table)
+		require.Equal(t, http.StatusOK, status, body)
+		require.Equal(t, "MISS", xc)
+		filled := time.Now()
+		status, xc, _ = structuredQuery(t, base, table)
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, "HIT", xc)
+
+		ingestRow(t, base, table, "u1")
+		var seenAt time.Time
+		require.Eventually(t, func() bool {
+			var err error
+			status, xc, body, err = tryStructuredQuery(base, table)
+			if err == nil && status == http.StatusOK && strings.Contains(body, "u1") {
+				seenAt = time.Now()
+				return true
+			}
+			return false
+		}, 30*time.Second, 100*time.Millisecond, "the ingested row is never served")
+		if seenAt.Sub(filled) < minCacheTTL-time.Second {
+			assert.Equal(t, "MISS", xc, "the first answer carrying the new row is a refill")
+			status, xc, body = structuredQuery(t, base, table)
+			require.Equal(t, http.StatusOK, status)
+			assert.Equal(t, "HIT", xc, "the refill is cached again")
+			assert.Contains(t, body, "u1")
+			return
+		}
+		require.Less(t, round, 3, "the new row was served only once the stale entry could have expired, in every round: the ingest never invalidated it, or ingest is too slow here to tell")
+		t.Logf("round %d: row landed %s after the fill, past the TTL floor; retrying", round, seenAt.Sub(filled))
+	}
+}
+
 // A Redis that stops answering costs queries nothing but the cache: they
 // keep succeeding, straight from ClickHouse, each a miss; an ingest made
 // meanwhile is visible at once. Once it answers again, the cache serves hits.
