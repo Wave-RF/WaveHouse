@@ -655,8 +655,8 @@ func TestSharedTables_InvalidatesTheTenantsSharingTheTables(t *testing.T) {
 
 // A tenant back on a pool after an absence — its folder rejected, then
 // repaired; removed, then restored — was out of the fan-out while away, so
-// the wiring orphans its table-keyed cache as it comes back; a tenant that stayed
-// is never touched, and a reload that changes nothing bumps nobody.
+// the wiring orphans its cache as it comes back; a tenant that stayed is
+// never touched, and a reload that changes nothing bumps nobody.
 func TestReload_ReadmittedTenantCacheIsOrphaned(t *testing.T) {
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
 	a := newApp(t, testConfig(t, root), Options{})
