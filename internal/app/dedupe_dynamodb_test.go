@@ -23,11 +23,13 @@ import (
 
 // fakeDynamo answers the DynamoDB JSON protocol for one table, enough for
 // boot's check, the dev create path, and a claim and its commit. Whether the
-// table exists, and whether the endpoint hangs, are the test's to switch.
+// table exists, and whether the endpoint hangs (every call, or one op
+// alone), are the test's to switch.
 type fakeDynamo struct {
 	mu     sync.Mutex
 	exists bool
 	hangs  bool
+	hangOn string // hang calls of this op alone, once set; "" hangs none this way
 	calls  []string
 }
 
@@ -41,6 +43,12 @@ func (f *fakeDynamo) setHangs(v bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hangs = v
+}
+
+func (f *fakeDynamo) setHangOn(op string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hangOn = op
 }
 
 func (f *fakeDynamo) called(op string) bool { return f.count(op) > 0 }
@@ -58,6 +66,9 @@ func (f *fakeDynamo) count(op string) int {
 }
 
 func (f *fakeDynamo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Drained before any hang below: with the body unread, an SDK write
+	// deadline or the client giving up never reaches this handler, since the
+	// connection looks like it's still waiting for us to consume it.
 	_, _ = io.Copy(io.Discard, r.Body)
 	_, op, _ := strings.Cut(r.Header.Get("X-Amz-Target"), ".")
 	f.mu.Lock()
@@ -65,9 +76,9 @@ func (f *fakeDynamo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if op == "CreateTable" {
 		f.exists = true
 	}
-	exists, hangs := f.exists, f.hangs
+	exists, hang := f.exists, f.hangs || op == f.hangOn
 	f.mu.Unlock()
-	if hangs {
+	if hang {
 		<-r.Context().Done()
 		return
 	}
@@ -258,4 +269,51 @@ func TestNew_DynamoDBDedupeRefusesNoRegion(t *testing.T) {
 			require.ErrorContains(t, err, "dynamodb region is not set")
 		})
 	}
+}
+
+// A reload must not wait behind a tenant's own in-flight DynamoDB call when
+// nothing changes for that tenant: Managed.Apply's no-op fast path settles
+// under a read lock, so it never contends with a Commit already holding one
+// — and, since Go's RWMutex blocks new readers behind a pending writer, a
+// concurrent Reserve for the same tenant must also go through, which it
+// would not if the reload's Apply took the write lock unconditionally.
+func TestReload_DynamoDBDedupeDoesNotWaitOnInFlightCommit(t *testing.T) {
+	cfg := testConfig(t, writeSettings(t, dedupeOn))
+	fake := dynamoConfig(t, cfg, true)
+	fake.setHangOn("BatchWriteItem")
+	a := newApp(t, cfg, Options{})
+
+	store := a.dedup.For(tenant.Default)
+	require.True(t, store.Open())
+	claims, err := store.Reserve(context.Background(), []dedupe.Key{eventKey}, time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, dedupe.Claimed, claims[0].Status)
+
+	commitCtx, cancelCommit := context.WithCancel(context.Background())
+	defer cancelCommit()
+	commitDone := make(chan error, 1)
+	go func() { commitDone <- store.Commit(commitCtx, claims, 0) }()
+	require.Eventually(t, func() bool { return fake.called("BatchWriteItem") }, time.Second, time.Millisecond,
+		"commit reached the table and is now hanging on it")
+
+	start := time.Now()
+	a.tenants.Reload("test")
+	assert.Less(t, time.Since(start), 500*time.Millisecond,
+		"a reload that changes nothing for this tenant waited on its in-flight commit")
+
+	otherKey := dedupe.Key{Table: eventKey.Table, ID: "concurrent-reserve"}
+	reserveDone := make(chan error, 1)
+	go func() {
+		_, err := store.Reserve(context.Background(), []dedupe.Key{otherKey}, time.Minute)
+		reserveDone <- err
+	}()
+	select {
+	case err := <-reserveDone:
+		require.NoError(t, err, "a Reserve for the same tenant, started right after the reload")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("a concurrent Reserve for the same tenant was blocked")
+	}
+
+	cancelCommit()
+	<-commitDone // let the hung call finish (canceled) before the app closes
 }
