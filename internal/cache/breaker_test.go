@@ -26,10 +26,11 @@ func TestBreaker(t *testing.T) {
 	b.failure()
 	b.success() // a success resets the run
 	b.failure()
-	b.failure()
+	assert.False(t, b.failure())
 	assert.False(t, b.isOpen(), "two in a row is below the threshold")
-	b.failure()
+	assert.True(t, b.failure(), "it opened")
 	assert.True(t, b.isOpen())
+	assert.False(t, b.failure(), "already open")
 
 	ok, probe = allow()
 	assert.False(t, ok, "open: skip the server")
@@ -43,7 +44,7 @@ func TestBreaker(t *testing.T) {
 	assert.False(t, ok)
 	assert.False(t, probe, "one probe at a time")
 
-	b.failure() // the probe failed: open for another period
+	assert.True(t, b.failure(), "the probe failed: open for another period")
 	assert.True(t, b.isOpen())
 	clock.t = clock.t.Add(4 * time.Second)
 	_, probe = allow()

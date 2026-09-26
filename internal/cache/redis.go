@@ -160,7 +160,7 @@ func (c RedisConfig) clientOption() rueidis.ClientOption {
 		TLSConfig:         c.TLS,
 		Dialer:            net.Dialer{Timeout: c.DialTimeout},
 		ClientName:        "wavehouse",
-		DisableCache:      true, // no client-side caching until the near-cache (E5)
+		DisableCache:      true, // no client-side caching until a local near-cache in front of Redis exists
 		ForceSingleClient: c.Mode == RedisStandalone,
 	}
 	// How long a connection waits on a silent server, 10 s unset. A cluster
@@ -360,17 +360,7 @@ func (r *RedisCache) record(parent context.Context, err error) {
 		return
 	}
 	if re, ok := rueidis.IsRedisErr(err); ok {
-		switch msg := re.Error(); {
-		case rejectsCredentials(msg):
-			if r.breaker.trip() {
-				slog.ErrorContext(parent, "cache: redis rejected the credentials; bypassing the cache until they work",
-					"addrs", r.cfg.Addrs, "error", msg)
-			}
-		case refusesWork(msg):
-			r.breaker.trip()
-		default:
-			r.breaker.success()
-		}
+		r.recordReply(parent, re.Error())
 		return
 	}
 	if errors.Is(err, errMalformedReply) {
@@ -380,7 +370,29 @@ func (r *RedisCache) record(parent context.Context, err error) {
 	if parent.Err() != nil {
 		return
 	}
-	r.breaker.failure()
+	if r.breaker.failure() {
+		slog.WarnContext(parent, "cache: redis not answering; bypassing the cache",
+			"addrs", r.cfg.Addrs, "error", err)
+	}
+}
+
+// recordReply is record for an error reply. The breaker opening is logged
+// once, not once per operation in flight.
+func (r *RedisCache) recordReply(parent context.Context, msg string) {
+	switch {
+	case rejectsCredentials(msg):
+		if r.breaker.trip() {
+			slog.ErrorContext(parent, "cache: redis rejected the credentials; bypassing the cache until they work",
+				"addrs", r.cfg.Addrs, "error", msg)
+		}
+	case refusesWork(msg):
+		if r.breaker.trip() {
+			slog.WarnContext(parent, "cache: redis refusing writes; bypassing the cache",
+				"addrs", r.cfg.Addrs, "reply", msg)
+		}
+	default:
+		r.breaker.success()
+	}
 }
 
 // refusesWork reports whether an error reply says the server takes no

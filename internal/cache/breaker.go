@@ -54,14 +54,18 @@ func (b *breaker) success() {
 }
 
 // failure records a call the server did not answer in time, and opens the
-// breaker at the threshold — or at once, for a failed probe.
-func (b *breaker) failure() {
+// breaker at the threshold — or at once, for a failed probe. It reports
+// whether that opened a closed or probing breaker, as trip does.
+func (b *breaker) failure() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.failures++
 	if b.probing || b.failures >= b.threshold {
+		opened := !b.open || b.probing
 		b.open, b.openedAt, b.probing = true, b.now(), false
+		return opened
 	}
+	return false
 }
 
 // trip opens the breaker at once, for a reply that says the server cannot
