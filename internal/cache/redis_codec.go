@@ -53,6 +53,15 @@ func tenantTokenKey(prefix string, id tenant.ID) string {
 
 // tableTokenKey and scopeTokenKey take raw names and escape them after the
 // fixed prefix (keyenc), so no ':' in a name reads as the separator.
+//
+// Their layout is a protocol between builds: every process on the server
+// reads and bumps these keys for itself, so two builds that lay them out
+// differently — a change here, or to what keyenc keeps — split them, and one
+// build's bumps miss the entries the other filed, which are served until
+// their TTL for the whole rolling deploy. Such a change needs a
+// compatibility step (bump both layouts through the transition) or a
+// documented flush. The tenant token, placed verbatim, stays shared; a
+// valueKey change only orphans values, which is safe to roll.
 func tableTokenKey(prefix string, id tenant.ID, table string) string {
 	return string(keyenc.AppendJoin([]byte(prefix+":{"+string(id)+"}:B:"), ':', table))
 }

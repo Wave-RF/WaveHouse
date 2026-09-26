@@ -209,7 +209,7 @@ The hot-reloadable half of configuration: a directory of four JSON files (`confi
 
 ### `keyenc/` — Key Escaping
 
-- **keyenc.go** — The one escaping composite keys are built from, so a name can never be mistaken for a separator: `Escape` keeps ASCII letters, digits, `_` and `-` — exactly the tenant-id grammar, so a tenant id is its own escaped form — and writes every other byte as `%XX` (uppercase hex); `Unescape` is `url.PathUnescape`, which decodes `%XX` in either case and takes any other byte as itself, so a `%2D` for `-` that an earlier build wrote still reads. `Join`/`AppendJoin` escape each field and put a separator between them, panicking on no fields and on a separator the escaping could write or one outside ASCII, and `Split` reverses them. The package that builds a key takes raw names and escapes them itself, so no caller has to: NATS subject tokens (`internal/mq`) and the cache's keys (`internal/cache`) both use it. Keys built from it are stored, so changing what it keeps orphans them.
+- **keyenc.go** — The one escaping composite keys are built from, so a name can never be mistaken for a separator: `Escape` keeps ASCII letters, digits, `_` and `-` — exactly the tenant-id grammar, so a tenant id is its own escaped form — and writes every other byte as `%XX` (uppercase hex); `Unescape` is `url.PathUnescape`, which decodes `%XX` in either case and takes any other byte as itself, so a `%2D` for `-` that an earlier build wrote still reads. `Join`/`AppendJoin` escape each field and put a separator between them, panicking on no fields and on a separator the escaping could write or one outside ASCII, and `Split` reverses them. The package that builds a key takes raw names and escapes them itself, so no caller has to: NATS subject tokens (`internal/mq`) and the cache's keys — the version index and the shared backend's Redis keys (`internal/cache`) — use it. Keys built from it are stored, so changing what it keeps orphans them — and on the shared backend, whose keys every process builds for itself, it splits them for the length of a rolling upgrade: a bump one build makes does not reach the entries the other build filed, which are served until their TTL.
 
 ## Data Flows
 
@@ -373,7 +373,7 @@ Client GET /v1/stream
 | Analytics DB | ClickHouse | Primary data store + schema source of truth |
 | Message Queue | NATS + JetStream | Durable event streaming |
 | L1 Cache | Ristretto v2 | In-process memory cache |
-| Shared cache | [rueidis](https://github.com/redis/rueidis) | Redis-compatible client for the shared backend (not yet selectable) |
+| Shared Cache | [rueidis](https://github.com/redis/rueidis) | Redis-compatible client for the shared backend (not yet selectable) |
 | Embedded KV | Pebble | Optional deduplication |
 | Config | cleanenv | YAML + env var config loading |
 | Release | GoReleaser | Cross-platform binary builds |
