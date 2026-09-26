@@ -245,9 +245,9 @@ Ingest worker pipeline (StartIngestWorker):
     an unknown or absent format, columns and row that don't pair — is parked on the
     DLQ, or acked-and-dropped where the DLQ is off for the table; either way
     counted by wavehouse_ingest_poison_total under its disposition)
-  → At flush, a batch whose tenant has no ClickHouse connection is not inserted:
-    parkBatch takes it to the DLQ switch whole
-  → Batch events per tenant table, bulk INSERT to ClickHouse
+  → Batch events per tenant table
+  → At flush, a batch whose tenant has no ClickHouse connection is not inserted
+    (parkBatch takes it to the DLQ switch whole); otherwise bulk INSERT to ClickHouse
     (INSERTs pin date_time_input_format=best_effort — the server default since
     ClickHouse 26.5; see /ingest-pipeline for the basic-vs-best_effort divergence)
   → On success: DoubleAck messages
