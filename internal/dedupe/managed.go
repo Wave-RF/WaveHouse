@@ -58,9 +58,24 @@ func NewManaged(open func() (Deduplicator, error)) *Managed {
 // already-open store stays open, an already-closed one stays closed. A
 // failed open leaves the store closed and returns the error — the caller
 // decides whether that is fatal (boot) or a logged degradation (reload).
+//
+// A no-op call — the desired state already holds — returns under the read
+// lock alone; only a real transition takes the write lock, re-checked once
+// held in case another Apply won the race. This matters because a settings
+// reload calls Apply for every tenant under the registry lock: on a network
+// backend, Commit and Release can hold the read lock for as long as an
+// outage lasts, and the write lock waits out every reader, so an
+// unconditional write lock here would serialize the whole reload behind
+// them, tenant after tenant.
 func (m *Managed) Apply(enabled bool) error {
+	if m.settled(enabled) {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.settledLocked(enabled) {
+		return nil
+	}
 	m.enabled = enabled
 	switch {
 	case enabled && m.db == nil:
@@ -75,6 +90,22 @@ func (m *Managed) Apply(enabled bool) error {
 		return err
 	}
 	return nil
+}
+
+// settled reports whether the store already matches enabled, under its own
+// read lock.
+func (m *Managed) settled(enabled bool) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.settledLocked(enabled)
+}
+
+// settledLocked is settled's condition for a caller already holding mu (read
+// or write): an already-open store while enabling, or an already-closed one
+// while disabling (db is nil whenever !enabled — Apply's own invariant — so
+// disabling never needs the db pointer).
+func (m *Managed) settledLocked(enabled bool) bool {
+	return m.enabled == enabled && (!enabled || m.db != nil)
 }
 
 // Open reports whether the store is currently open.
