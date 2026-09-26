@@ -109,8 +109,9 @@ func selectAllQuery() query.StructuredQuery { return query.StructuredQuery{Selec
 
 // A tenant on no pool — its tuple could not be opened, such as by the
 // connection ceiling — fails closed on every route that reaches its
-// ClickHouse: a 503 with Retry-After ahead of the cache, so nothing it
-// cached before is served either, and on the refresh, which cannot run.
+// ClickHouse: a 503 with Retry-After before a cached result is served or a
+// query runs, so nothing it cached before is served either (TestCachedRoutes_ReloadAsThePoolIsTakenOrphansTheFill
+// pins that with a hit), and on the refresh, which cannot run.
 func TestClickHouseRoutes_NoPoolIs503(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t)
@@ -207,8 +208,8 @@ func TestClickHouseOpsRoutes_TenantParam(t *testing.T) {
 				{name: "schema list", call: schema.List, req: httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/ops/schema", nil), ok: http.StatusOK},
 				{name: "schema refresh", call: schema.Refresh, req: httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/schema/refresh", nil), ok: http.StatusOK},
 				// The proxy's target is a closed port: a served tenant is the
-				// 502 of an unreachable ClickHouse, past every tenant check.
-				{name: "ops query", call: proxy.Handle, req: httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/query", bytes.NewReader(sql)), ok: http.StatusBadGateway},
+				// 503 of an unreachable ClickHouse, past every tenant check.
+				{name: "ops query", call: proxy.Handle, req: httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/query", bytes.NewReader(sql)), ok: http.StatusServiceUnavailable},
 			}
 			for _, route := range routes {
 				handed = nil

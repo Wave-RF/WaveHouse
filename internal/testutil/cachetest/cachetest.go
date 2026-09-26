@@ -26,6 +26,11 @@ type Options struct {
 	// NewPair returns two instances over one shared store, as two processes
 	// see it; nil skips the cross-instance cases.
 	NewPair func(t *testing.T) (a, b cache.Cache)
+
+	// Entries counts the entries a cache from the factory holds. No Lookup
+	// reads the key a zero Snapshot would land under, so only a count shows
+	// that one stored nothing; nil skips that case.
+	Entries func(c cache.Cache) int
 }
 
 // Run runs the suite, each case on a fresh cache from newCache.
@@ -40,7 +45,7 @@ func Run(t *testing.T, newCache func(t *testing.T) cache.Cache, opts Options) {
 		{"overwrite", testOverwrite},
 		{"ttl expiry", testTTLExpiry},
 		{"non-positive ttl stores nothing", testNonPositiveTTL},
-		{"zero snapshot stores nothing", testZeroSnapshot},
+		{"zero snapshot stores nothing", func(t *testing.T, c cache.Cache) { testZeroSnapshot(t, c, opts.Entries) }},
 		{"deps order does not matter", testDepsOrder},
 		{"deps are part of the key", testDepsKeyed},
 		{"tenant isolation", testTenantIsolation},
@@ -169,10 +174,17 @@ func testNonPositiveTTL(t *testing.T, c cache.Cache) {
 	}
 }
 
-func testZeroSnapshot(t *testing.T, c cache.Cache) {
+// A zero Snapshot — what a failed Lookup returns — stores nothing, and is not
+// an error. The fill after it proves the count sees what Set stores.
+func testZeroSnapshot(t *testing.T, c cache.Cache, entries func(cache.Cache) int) {
 	require.NoError(t, c.Set(context.Background(), cache.Snapshot{}, []byte("rows"), ttl))
 	settle(c)
-	assertMiss(t, c, acme, "")
+	if entries == nil {
+		t.Skip("the backend has no Options.Entries")
+	}
+	assert.Zero(t, entries(c))
+	fill(t, c, acme, "q", "rows")
+	assert.Equal(t, 1, entries(c))
 }
 
 func testDepsOrder(t *testing.T, c cache.Cache) {
@@ -210,16 +222,14 @@ func testTenantIsolation(t *testing.T, c cache.Cache) {
 }
 
 // Every version an entry is filed under is its own tenant's, so a Lookup
-// naming another tenant's namespace is refused, and its snapshot stores
-// nothing.
+// naming another tenant's namespace is refused with a zero snapshot, which
+// stores nothing (testZeroSnapshot): a handler Sets whatever a Lookup
+// returned, error or not.
 func testForeignDependency(t *testing.T, c cache.Cache) {
 	e, snap, err := c.Lookup(context.Background(), acme, "q", []cache.Namespace{ns(globex, "events", "")})
 	require.ErrorIs(t, err, cache.ErrForeignDependency)
 	assert.Nil(t, e.Value)
-	require.NoError(t, c.Set(context.Background(), snap, []byte("rows"), ttl))
-	settle(c)
-	assertMiss(t, c, acme, "q", ns(acme, "events", ""))
-	assertMiss(t, c, globex, "q", ns(globex, "events", ""))
+	assert.Zero(t, snap, "a refused Lookup returns the zero Snapshot")
 }
 
 // A scoped bump orphans that scope and the whole-table view; a scopeless
