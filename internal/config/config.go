@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ilyakaznacheev/cleanenv"
 )
@@ -255,9 +256,16 @@ func defaults() Config {
 		Roles:   AllRoles(),
 		Server:  Server{Port: 8080, ShutdownTimeout: 10},
 		MQ:      MQ{Backend: MQEmbedded},
-		Cache:   Cache{Backend: CacheLocal, L1MaxCost: 64 << 20},
-		Dedupe:  Dedupe{Backend: DedupePebble},
-		Coord:   Coord{Backend: CoordLocal},
+		Cache: Cache{
+			Backend: CacheLocal, L1MaxCost: 64 << 20,
+			Redis: CacheRedisConfig{
+				Mode: RedisStandalone, KeyPrefix: "wh",
+				Timeout: 100 * time.Millisecond, DialTimeout: time.Second,
+				MaxValueBytes: 1 << 20, CompressMinBytes: 1 << 10, VersionTTL: 168 * time.Hour,
+			},
+		},
+		Dedupe: Dedupe{Backend: DedupePebble},
+		Coord:  Coord{Backend: CoordLocal},
 		OTel: OTel{
 			Traces:  OTelTraces{Enabled: true, SampleRate: 1.0},
 			Metrics: OTelMetrics{Enabled: true},

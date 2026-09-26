@@ -796,9 +796,10 @@ func TestNew_RedisCacheRefusesAnUnreadableTLSFile(t *testing.T) {
 	require.ErrorContains(t, err, "cache init: cache.redis.tls.ca_file")
 }
 
-// The boot config's defaults are the backend's, and -1 is the backend's
-// "never compress". Driven from Load, not a literal, so a default changed on
-// one side only fails here.
+// The boot config's defaults are the backend's, and a compress_min_bytes of
+// 0 reaches the backend as its "never compress" rather than its default.
+// Driven from Load, not a literal, so a default changed on one side only
+// fails here.
 func TestRedisConfig_FromLoadedDefaults(t *testing.T) {
 	t.Setenv("WH_SETTINGS_DIR", t.TempDir())
 	t.Setenv("WH_CACHE_BACKEND", "redis")
@@ -815,11 +816,13 @@ func TestRedisConfig_FromLoadedDefaults(t *testing.T) {
 		CompressMinBytes: cache.DefaultRedisCompressMinBytes, VersionTTL: cache.DefaultRedisVersionTTL,
 	}, got)
 
-	loaded.Cache.Redis.CompressMinBytes = -1
-	loaded.Cache.Redis.Mode = config.RedisCluster
+	t.Setenv("WH_CACHE_REDIS_COMPRESS_MIN_BYTES", "0")
+	t.Setenv("WH_CACHE_REDIS_MODE", "cluster")
+	loaded, err = config.Load(filepath.Join(t.TempDir(), "none.yaml"))
+	require.NoError(t, err)
 	got, err = redisConfig(loaded.Cache.Redis)
 	require.NoError(t, err)
-	assert.Zero(t, got.CompressMinBytes)
+	assert.Zero(t, got.CompressMinBytes, "the backend's never, not its default")
 	assert.Equal(t, cache.RedisCluster, got.Mode)
 	assert.Equal(t, cache.RedisSentinel, config.RedisSentinel)
 }

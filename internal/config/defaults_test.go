@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,6 +38,15 @@ var zeroCases = []zeroCase{
 	{"cache.l1_max_cost", "WH_CACHE_L1_MAX_COST", int64(0), int64(64 << 20), "1024", int64(1024), func(c *Config) any { return c.Cache.L1MaxCost }},
 	{"prometheus.path", "WH_PROMETHEUS_PATH", "", "/metrics", "/prom", "/prom", func(c *Config) any { return c.Prometheus.Path }},
 	{"data_dir", "WH_DATA_DIR", "", "./data", "/var/lib/wh", "/var/lib/wh", func(c *Config) any { return c.DataDir }},
+	// The cache.redis block is validated only under backend=redis, so under
+	// the default backend its zeros load as written.
+	{"cache.redis.mode", "WH_CACHE_REDIS_MODE", "", RedisStandalone, RedisCluster, RedisCluster, func(c *Config) any { return c.Cache.Redis.Mode }},
+	{"cache.redis.key_prefix", "WH_CACHE_REDIS_KEY_PREFIX", "", "wh", "staging", "staging", func(c *Config) any { return c.Cache.Redis.KeyPrefix }},
+	{"cache.redis.timeout", "WH_CACHE_REDIS_TIMEOUT", time.Duration(0), 100 * time.Millisecond, "250ms", 250 * time.Millisecond, func(c *Config) any { return c.Cache.Redis.Timeout }},
+	{"cache.redis.dial_timeout", "WH_CACHE_REDIS_DIAL_TIMEOUT", time.Duration(0), time.Second, "500ms", 500 * time.Millisecond, func(c *Config) any { return c.Cache.Redis.DialTimeout }},
+	{"cache.redis.max_value_bytes", "WH_CACHE_REDIS_MAX_VALUE_BYTES", 0, 1 << 20, "2048", 2048, func(c *Config) any { return c.Cache.Redis.MaxValueBytes }},
+	{"cache.redis.compress_min_bytes", "WH_CACHE_REDIS_COMPRESS_MIN_BYTES", 0, 1 << 10, "2048", 2048, func(c *Config) any { return c.Cache.Redis.CompressMinBytes }},
+	{"cache.redis.version_ttl", "WH_CACHE_REDIS_VERSION_TTL", time.Duration(0), 168 * time.Hour, "1h", time.Hour, func(c *Config) any { return c.Cache.Redis.VersionTTL }},
 }
 
 // refusedZeros are the non-zero defaults whose zero Validate refuses: written
@@ -296,11 +306,15 @@ func parseDocDefault(t *testing.T, key, cell string, like any) any {
 		v, err = strconv.ParseInt(cell, 10, 64)
 	case float64:
 		v, err = strconv.ParseFloat(cell, 64)
+	case time.Duration:
+		v, err = time.ParseDuration(cell)
 	default:
 		rt := reflect.TypeOf(like)
 		switch {
 		case rt.Kind() == reflect.String:
 			v = reflect.ValueOf(cell).Convert(rt).Interface()
+		case rt.Kind() == reflect.Slice && rt.Elem().Kind() == reflect.String && cell == "":
+			v = reflect.Zero(rt).Interface() // cache.redis.addrs: nil
 		case rt.Kind() == reflect.Slice && rt.Elem().Kind() == reflect.String: // roles: a comma-separated cell
 			parts := strings.Split(cell, ",")
 			sv := reflect.MakeSlice(rt, len(parts), len(parts))

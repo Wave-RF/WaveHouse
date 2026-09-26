@@ -150,23 +150,23 @@ The `redis` backend's settings, read only when `cache.backend` is `redis`. It is
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `cache.redis.addrs` | `WH_CACHE_REDIS_ADDRS` | — | **Required** with `backend: redis`. `host:port` of the server; several are a cluster's seed nodes or the sentinels. Comma-separated in the env var. |
+| `cache.redis.addrs` | `WH_CACHE_REDIS_ADDRS` | *(empty)* | **Required** with `backend: redis`. `host:port` of the server; several are a cluster's seed nodes or the sentinels. Comma-separated in the env var. |
 | `cache.redis.mode` | `WH_CACHE_REDIS_MODE` | `standalone` | `standalone`, `cluster` or `sentinel`. |
-| `cache.redis.sentinel_master` | `WH_CACHE_REDIS_SENTINEL_MASTER` | — | The master set name. Required with `mode: sentinel`. |
-| `cache.redis.username` | `WH_CACHE_REDIS_USERNAME` | — | ACL user. Empty uses the server's `default` user. |
-| `cache.redis.password` | `WH_CACHE_REDIS_PASSWORD` | — | A secret: set it through the environment (or your secret store's env injection), not in a tracked `config.yaml`. |
+| `cache.redis.sentinel_master` | `WH_CACHE_REDIS_SENTINEL_MASTER` | *(empty)* | The master set name. Required with `mode: sentinel`. |
+| `cache.redis.username` | `WH_CACHE_REDIS_USERNAME` | *(empty)* | ACL user. Empty uses the server's `default` user. |
+| `cache.redis.password` | `WH_CACHE_REDIS_PASSWORD` | *(empty)* | A secret: set it through the environment (or your secret store's env injection), not in a tracked `config.yaml`. |
 | `cache.redis.db` | `WH_CACHE_REDIS_DB` | `0` | Database number (`SELECT`). Standalone and sentinel only: a cluster has only database `0`, and any other value refuses boot. |
 | `cache.redis.tls.enabled` | `WH_CACHE_REDIS_TLS_ENABLED` | `false` | Connect over TLS, verifying the server against the system roots or `ca_file`. Any other `tls` key set while this is off refuses boot, rather than connecting in plaintext. |
-| `cache.redis.tls.ca_file` | `WH_CACHE_REDIS_TLS_CA_FILE` | — | PEM file of the authorities to trust instead of the system roots. |
-| `cache.redis.tls.cert_file` | `WH_CACHE_REDIS_TLS_CERT_FILE` | — | Client certificate (PEM) for mutual TLS. Set together with `key_file`. |
-| `cache.redis.tls.key_file` | `WH_CACHE_REDIS_TLS_KEY_FILE` | — | The client certificate's private key (PEM). |
-| `cache.redis.tls.server_name` | `WH_CACHE_REDIS_TLS_SERVER_NAME` | — | Name to verify the server's certificate against, when it differs from the address. |
+| `cache.redis.tls.ca_file` | `WH_CACHE_REDIS_TLS_CA_FILE` | *(empty)* | PEM file of the authorities to trust instead of the system roots. |
+| `cache.redis.tls.cert_file` | `WH_CACHE_REDIS_TLS_CERT_FILE` | *(empty)* | Client certificate (PEM) for mutual TLS. Set together with `key_file`. |
+| `cache.redis.tls.key_file` | `WH_CACHE_REDIS_TLS_KEY_FILE` | *(empty)* | The client certificate's private key (PEM). |
+| `cache.redis.tls.server_name` | `WH_CACHE_REDIS_TLS_SERVER_NAME` | *(empty)* | Name to verify the server's certificate against, when it differs from the address. |
 | `cache.redis.tls.insecure_skip_verify` | `WH_CACHE_REDIS_TLS_INSECURE_SKIP_VERIFY` | `false` | Accept any server certificate. Logged at `WARN` at boot: whoever can intercept the connection can read and replace cached results. |
 | `cache.redis.key_prefix` | `WH_CACHE_REDIS_KEY_PREFIX` | `wh` | Leads every key, so several deployments can share one server, provided you trust each as much as the others: any of them can overwrite what the rest serve. No `{` or `}`. |
 | `cache.redis.timeout` | `WH_CACHE_REDIS_TIMEOUT` | `100ms` | Per operation. A lookup or fill that takes longer is a miss or a skipped fill, never a failed query. |
 | `cache.redis.dial_timeout` | `WH_CACHE_REDIS_DIAL_TIMEOUT` | `1s` | Per connection attempt. |
 | `cache.redis.max_value_bytes` | `WH_CACHE_REDIS_MAX_VALUE_BYTES` | `1048576` | Largest result stored, after compression (1 MiB). A larger one is returned to the caller but not cached. |
-| `cache.redis.compress_min_bytes` | `WH_CACHE_REDIS_COMPRESS_MIN_BYTES` | `1024` | Results at least this large are zstd-compressed when that makes them smaller. `-1` never compresses. `0` is not "off": in the YAML file it reads as unset and takes the default, and in the env var it refuses boot. |
+| `cache.redis.compress_min_bytes` | `WH_CACHE_REDIS_COMPRESS_MIN_BYTES` | `1024` | Results at least this large are zstd-compressed when that makes them smaller. `0` never compresses. |
 | `cache.redis.version_ttl` | `WH_CACHE_REDIS_VERSION_TTL` | `168h` | How long a table's or tenant's version token outlives its last write, so the tokens of dropped tables and removed tenants eventually expire. At least `2s`. An expired token only causes misses. |
 
 **When the server is unreachable or misbehaves, the cache is bypassed; queries are not.** A failure or a timeout makes the lookup a miss and the fill a no-op, and five in a row open a circuit breaker that skips the server entirely until a probe, every 5 s, gets an answer. Queries then go straight to ClickHouse, still coalesced per instance by `singleflight`. An invalidation the server did not take is kept and retried until it lands. `/readyz` does not depend on the cache.
@@ -284,7 +284,7 @@ cache:
     timeout: 100ms
     dial_timeout: 1s
     max_value_bytes: 1048576
-    compress_min_bytes: 1024   # -1 = never
+    compress_min_bytes: 1024   # 0 = never
     version_ttl: 168h
 
 dedupe:

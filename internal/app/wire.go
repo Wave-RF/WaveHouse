@@ -664,10 +664,6 @@ func redisConfig(r config.CacheRedisConfig) (cache.RedisConfig, error) {
 	if err != nil {
 		return cache.RedisConfig{}, err
 	}
-	compressMin := r.CompressMinBytes
-	if compressMin < 0 {
-		compressMin = 0 // the backend's "never"
-	}
 	return cache.RedisConfig{
 		Addrs:            r.Addrs,
 		Mode:             r.Mode,
@@ -680,7 +676,7 @@ func redisConfig(r config.CacheRedisConfig) (cache.RedisConfig, error) {
 		Timeout:          r.Timeout,
 		DialTimeout:      r.DialTimeout,
 		MaxValueBytes:    r.MaxValueBytes,
-		CompressMinBytes: compressMin,
+		CompressMinBytes: r.CompressMinBytes,
 		VersionTTL:       r.VersionTTL,
 	}, nil
 }
