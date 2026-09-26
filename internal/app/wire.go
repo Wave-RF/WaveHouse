@@ -463,10 +463,12 @@ func (a *App) wireDiscovery(ctx context.Context) {
 
 // wireDedupe builds the dedupe stores — the one place the implementation is
 // chosen.
-func (a *App) wireDedupe() error {
+func (a *App) wireDedupe(ctx context.Context) error {
 	switch b := a.cfg.Dedupe.Backend; b {
 	case config.DedupePebble:
 		return a.wirePebbleDedupe()
+	case config.DedupeDynamoDB:
+		return a.wireDynamoDedupe(ctx)
 	default:
 		return unreachableBackend("dedupe.backend", b)
 	}
@@ -531,6 +533,11 @@ func (a *App) wirePebbleDedupe() error {
 	}
 	return nil
 }
+
+// wireDynamoDedupe (dedupe.backend: dynamodb) lives in wire_dynamodb.go,
+// excluded from the e2e coverage gate alongside internal/dedupe/dynamodb.go
+// (see .testcoverage.yml): the e2e binary always runs Pebble dedupe, so
+// nothing there exercises it. wireDedupe above still switches on it.
 
 // wireMQ starts the MQ — the one place the implementation is chosen;
 // everything after it sees mq.Broker.
@@ -913,6 +920,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	ingestHandler.PolicySource = (*settings.Store).Policy
 	ingestHandler.Dedup = func(s *settings.Store) dedupe.Deduplicator { return a.dedup.For(s.Tenant()) }
 	ingestHandler.DedupeSettings = (*settings.Store).DedupeFor
+	ingestHandler.DedupeLease = a.cfg.Dedupe.Lease
 
 	// Readiness pings every open pool at once and is ready at the first
 	// answer: one tenant's ClickHouse outage is not the process's.
