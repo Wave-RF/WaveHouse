@@ -163,8 +163,12 @@ func TestEmbeddedNATS_PublishHeaders(t *testing.T) {
 }
 
 // A repeated idempotency key inside the duplicate window is dropped as a
-// success, so an uncertain publish can be republished safely; a queue made
-// with another window gets this one on its next budget apply.
+// success, so an uncertain publish can be republished safely. This stream is
+// created directly, never recorded by takeStock, so SetMaxBytes's next
+// budget apply always runs and picks up the current window;
+// TestNewEmbedded_TakeStockRefreshesAStaleDuplicateWindow covers the boot
+// path, where takeStock itself must not mistake a stale window for one
+// already at budget.
 func TestEmbeddedNATS_Publish_IdempotencyKeyDropsARepeat(t *testing.T) {
 	e := openEmbedded(t, t.TempDir())
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -1498,6 +1502,34 @@ func TestNewEmbedded_TakesStockOfTheQueuesOnDisk(t *testing.T) {
 	// And a publish to it opens nothing new: the queue is there at its budget.
 	require.NoError(t, e.Publish(ctx, Topic{Tenant: "acme", Table: "t"}, []byte("x")))
 	assert.Equal(t, int64(8<<20), streamConfig(t, e, "INGEST_acme").MaxBytes)
+}
+
+// takeStock must not count a stream as at its budget when its Duplicates
+// window is stale (from before EmbeddedDuplicateWindow existed, or changed
+// underneath it): otherwise SetMaxBytes's same-budget early return never lets
+// a later apply bring the window forward, and the stream keeps whatever it
+// had indefinitely.
+func TestNewEmbedded_TakeStockRefreshesAStaleDuplicateWindow(t *testing.T) {
+	t.Parallel()
+	dir := storeDir(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	first, err := NewEmbedded(dir)
+	require.NoError(t, err)
+	require.NoError(t, first.SetMaxBytes(ctx, "acme", 8<<20))
+	stale := ingestStreamConfig("acme", 8<<20)
+	stale.Duplicates = 10 * time.Second
+	_, err = first.js.UpdateStream(ctx, stale)
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	e := openEmbedded(t, dir)
+	require.Equal(t, 10*time.Second, streamConfig(t, e, "INGEST_acme").Duplicates, "the stale window is still on disk")
+
+	require.NoError(t, e.SetMaxBytes(ctx, "acme", 8<<20), "same budget as before")
+	assert.Equal(t, EmbeddedDuplicateWindow, streamConfig(t, e, "INGEST_acme").Duplicates,
+		"takeStock must not have marked this pair already at budget, or this apply would have no-op'd")
 }
 
 // A durable found on disk is kept as it stands when it holds the settings
