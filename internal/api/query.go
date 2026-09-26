@@ -37,7 +37,7 @@ import (
 //     the upstream ClickHouse has multi-query enabled, which is the
 //     default in recent versions; older or restrictively-configured
 //     servers may reject the second statement with a clear error.
-//   - There is no isMutation heuristic to maintain — no leading-verb table,
+//   - There is no IsMutation heuristic to maintain — no leading-verb table,
 //     no comment stripper, no CTE-aware paren scanner, no class of bug
 //     where a future ClickHouse verb routes the wrong way.
 //   - ClickHouse's own error messages reach the admin verbatim, which is

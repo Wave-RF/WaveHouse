@@ -101,6 +101,8 @@ When ClickHouse fails a query on [`POST /v1/query`](#post-v1querytabletable--str
 | 503 | `clickhouse.unavailable` | `true` | ClickHouse, or the way to it, could not take the query now: connection refused or dropped, a timeout, too many queries, memory pressure, lost replicas or Keeper, or a `502`/`503`/`504`/`429`/`408` from a proxy. `Retry-After: 5` |
 | 500 (`/v1/query`, pipes) / 502 (`/v1/ops/query`) | `clickhouse.unknown` | `true` | A failure with no verdict: no exception code and no recognizable transport error |
 
+A [pipe that writes](/pipes#pipes-that-write) answers with the same status and `code`, but always `retryable: false` and with no `Retry-After`: the statement may have run, so a retry could run it twice.
+
 On `/v1/query`, when the role sets `max_execution_time`, ClickHouse enforces it and reports an overrun as `TIMEOUT_EXCEEDED`, answered `400 clickhouse.limit_exceeded`; WaveHouse then waits two seconds past the cap before giving up itself, and that give-up — like a wait for a pooled connection or a dial timeout — is `503 clickhouse.unavailable`. If the tenant's `clickhouse.query_timeout` is shorter than the cap, that timeout is what ClickHouse enforces, and its overrun is answered as for a role with no cap. When the role sets `max_memory_usage`, every `MEMORY_LIMIT_EXCEEDED` is taken as that cap and answered `400`, even one caused by the server's total memory. Without a role cap of that kind, and always on pipes and `/v1/ops/query`, a timeout or memory limit is `503 clickhouse.unavailable`: it can be the server's state as much as the query's ([#620](https://github.com/Wave-RF/WaveHouse/issues/620)). The classes are the ones the ingest worker uses to decide between retrying a batch and dead-lettering it ([ingest pipeline](/ingest-pipeline#when-clickhouse-cannot-take-an-insert)); the lists of exception codes live in `internal/chconn/errclass.go`.
 
 **Why a missing grant is a `403`.** A query path runs as the ClickHouse user in the tenant's settings, not as the caller, so `ACCESS_DENIED` is in one sense WaveHouse's configuration. It is still a verdict on *this statement*: ClickHouse understood it and refused it, the same statement is refused every time, and other statements from the same caller succeed. That is a `403`, and it matters most on `/v1/ops/query`, where the admin wrote the statement — a `CREATE USER` through a user without the grant is the admin asking for something this deployment does not allow. A `5xx` would tell clients and monitors that ClickHouse is down and invite retries of a request that can never pass. Denials that refuse every query, not one statement — the credentials, the user, the database — are the operator's to fix, so they are `502 clickhouse.misconfigured`, still not retryable.
@@ -233,9 +235,9 @@ The inbound request body is capped at 16 MiB; a body over the cap is rejected wi
 The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
 :::note[Insert-only]
-The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse), which is restricted to the admin role (`admin_role`, the same gate as the rest of `/v1/ops/*`).
+The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse), which is restricted to the admin role (`admin_role`, the same gate as the rest of `/v1/ops/*`), or through an operator-authored [pipe that writes](/pipes#pipes-that-write): an operator authors its statement in `pipes.json`, and the roles in its `allowed_roles` run it with parameter values only.
 
-The policy engine authorizes mutations by inspecting the columns being written. That works for inserts but not for predicate-driven mutations like `DELETE … WHERE` — there's no way to prove the predicate matches only rows the caller is allowed to touch. Routing those statements through the admin-gated raw-SQL surface keeps the policy contract honest.
+The policy engine authorizes mutations by inspecting the columns being written. That works for inserts but not for predicate-driven mutations like `DELETE … WHERE` — there's no way to prove the predicate matches only rows the caller is allowed to touch. Routing those statements through the admin-gated raw-SQL surface, or through a pipe whose predicate the operator wrote, keeps the policy contract honest.
 :::
 
 **Request:**
@@ -451,7 +453,7 @@ This endpoint **does not cache, does not singleflight, and emits `Cache-Control:
 The route is mounted under `/v1/ops/*`, behind the `RequireAdmin` gate: only a caller whose JWT role equals the policy `admin_role` (`"admin"` by default) — or who presents the non-JWT [operator key](#authentication) — may use it. A tokenless request (or a valid token without a role claim) resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is rejected with `403`; a present-but-invalid token — expired, malformed, bad signature — keeps its stashed verification error and fails loud with `401` instead. Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story, shared with the rest of `/v1/ops/*` (see [Admin Endpoints](#admin-endpoints)). The normal surfaces for non-admin callers are `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
 :::
 
-`/v1/ops/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate with the admin role (`admin_role`).
+`/v1/ops/query` is the only surface for ad-hoc non-insert mutations (the ingest pipeline is insert-only; a [pipe that writes](/pipes#pipes-that-write) runs only the statement an operator authored). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate with the admin role (`admin_role`).
 
 An optional `?tenant=<id>` names the [tenant](/deployment#the-nested-settings-directory) whose ClickHouse the SQL runs against — its own database, credentials and HTTP wiring; without it the SQL runs against tenant `0`'s, which is the whole settings directory unless it is nested. The parameter is parsed as strictly as on the [schema routes](#get-v1opsschema--list-all-table-schemas): `400` for a query string that does not parse or an empty, repeated or malformed id, `404` for an unknown tenant, `503` for one whose settings folder was rejected — all decided before the body is read. A tenant on no ClickHouse pool ([no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused) answers `503` `{"error":"no ClickHouse connection is open for this tenant"}` with `Retry-After: 30`.
 
@@ -585,7 +587,7 @@ The inbound request body is capped at 1 MiB; a body over the cap is rejected wit
 
 ### `GET/POST /v1/pipes/{name}` — Execute Named Pipe
 
-Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached in the shared L1 (Ristretto) with singleflight coalescing — same machinery as the structured query endpoint, keyed by [tenant](/deployment#multi-tenant-deployments) like it, and again, unlike `/v1/ops/query`.
+Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. A read's results are cached in the query cache with singleflight coalescing — same machinery as the structured query endpoint, keyed by [tenant](/deployment#multi-tenant-deployments) like it, and again, unlike `/v1/ops/query`; a [pipe that writes](/pipes#pipes-that-write) is neither cached nor coalesced (see Response).
 
 **Query Parameters:** Any key matching a pipe parameter name.
 
@@ -600,7 +602,7 @@ Executes a pre-defined named query (pipe) with parameter binding. Parameters can
 
 **Response:**
 
-JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whether the row came from the in-process L1.
+JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whether the row came from the in-process L1. A pipe whose SQL is a write (`INSERT`, `ALTER`, `WITH … INSERT`, …) bypasses the cache and singleflight: it executes on every call, identical calls in flight are not coalesced, and the response is `[]` with `X-Cache: BYPASS` and `Cache-Control: no-store` (so an HTTP cache in front of a `GET` cannot answer a repeat) — see [Pipes that write](/pipes#pipes-that-write).
 
 The POST parameter body is capped at 1 MiB; a body over the cap is rejected with `413` (the same 1 MiB parameter/AST-body cap as [`POST /v1/query`](#post-v1querytabletable--structured-query) — see [reverse proxy → body limits](/reverse-proxy#request-body-size-limits)). A malformed-but-within-cap body is ignored rather than rejected, since parameters may legitimately come from the query string alone.
 
@@ -615,7 +617,7 @@ The POST parameter body is capped at 1 MiB; a body over the cap is rejected with
 | 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL literal form — a JSON object, whether supplied directly or nested as an array element. A JSON **array** is valid and renders as an `IN`-style `(…)` list. |
 | 400 | `{"error":"parameter \"x\": array parameter must not be empty"}` | An empty array — it would render as the invalid `IN ()`. |
 | 413 | `{"error":"request body exceeded 1048576 bytes"}` | POST body over the 1 MiB cap |
-| 400 / 403 / 500 / 502 / 503 | `{"error":"clickhouse query: …","code":"clickhouse.…","retryable":…}` | ClickHouse failed the pipe's query — for instance a parameter value it cannot use (`400 clickhouse.rejected`), or ClickHouse down (`503 clickhouse.unavailable`, `Retry-After: 5`); see [ClickHouse errors on the query paths](#clickhouse-errors-on-the-query-paths) |
+| 400 / 403 / 500 / 502 / 503 | `{"error":"clickhouse query: …","code":"clickhouse.…","retryable":…}` | ClickHouse failed the pipe's query — for instance a parameter value it cannot use (`400 clickhouse.rejected`), or ClickHouse down (`503 clickhouse.unavailable`, `Retry-After: 5`); see [ClickHouse errors on the query paths](#clickhouse-errors-on-the-query-paths). A [pipe that writes](/pipes#pipes-that-write) answers `retryable: false` with no `Retry-After`, its message led by `clickhouse exec:` |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 ---
