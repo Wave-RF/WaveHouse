@@ -164,8 +164,8 @@ type TableDedupe struct {
 	RequireID *bool   `json:"require_id,omitempty"`
 }
 
-// DLQConfig gates the Dead Letter Queue: whether a row that still fails
-// after the row-by-row isolation retry is parked on the tenant's dead-letter
+// DLQConfig gates the Dead Letter Queue: whether a row ClickHouse still
+// rejects after the row-by-row isolation retry is parked on the tenant's dead-letter
 // queue (and its original acked) or left unacked to be redelivered
 // indefinitely. The queue is opened when the tenant is first served — empty
 // until something lands on it — so the switch is purely behavioral and

@@ -27,7 +27,7 @@ var mqBackends = []MQBackend{MQEmbedded}
 // MQ selects the message queue. The per-tenant byte budget, mq.max_bytes_gb,
 // is a settings-directory key, not this block's.
 type MQ struct {
-	Backend MQBackend `yaml:"backend" env:"WH_MQ_BACKEND" env-default:"embedded"`
+	Backend MQBackend `yaml:"backend" env:"WH_MQ_BACKEND"`
 }
 
 func (m MQ) validate() error {
@@ -46,8 +46,8 @@ var cacheBackends = []CacheBackend{CacheLocal}
 // structured queries normalize to is a settings-directory key
 // (query.timestamp_bucket_seconds) — query shaping, not process memory.
 type Cache struct {
-	Backend   CacheBackend `yaml:"backend" env:"WH_CACHE_BACKEND" env-default:"local"`
-	L1MaxCost int64        `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
+	Backend   CacheBackend `yaml:"backend" env:"WH_CACHE_BACKEND"`
+	L1MaxCost int64        `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST"`
 }
 
 func (c Cache) validate() error {
@@ -72,7 +72,7 @@ var dedupeBackends = []DedupeBackend{DedupePebble, DedupeDynamoDB}
 // Dedupe selects the dedupe store. Whether a tenant dedupes, on which field,
 // and for how long are settings-directory keys, not this block's.
 type Dedupe struct {
-	Backend DedupeBackend `yaml:"backend" env:"WH_DEDUPE_BACKEND" env-default:"pebble"`
+	Backend DedupeBackend `yaml:"backend" env:"WH_DEDUPE_BACKEND"`
 	// Lease is how long a claimed id stays pending while its record is
 	// published; a claim its request never settles lapses after it.
 	Lease time.Duration `yaml:"lease" env:"WH_DEDUPE_LEASE" env-default:"30s"`
@@ -134,7 +134,6 @@ func (d DedupeDynamoDBConfig) validate() error {
 }
 
 // CoordBackend names where leases for singleton work (the sweeper) are held.
-// Nothing reads it yet: the lease layer (#613) wires it.
 type CoordBackend string
 
 // CoordLocal holds leases in this process, which is enough while no other
@@ -145,7 +144,7 @@ var coordBackends = []CoordBackend{CoordLocal}
 
 // Coord selects the coordination layer.
 type Coord struct {
-	Backend CoordBackend `yaml:"backend" env:"WH_COORD_BACKEND" env-default:"local"`
+	Backend CoordBackend `yaml:"backend" env:"WH_COORD_BACKEND"`
 }
 
 func (c Coord) validate() error {
@@ -190,10 +189,11 @@ func (c *Config) validateBackends() error {
 // every process is an island: nothing else can reach its queue.
 func (c *Config) Distributed() bool { return c.MQ.Backend != MQEmbedded }
 
-// NeedsDataDir reports whether a selected backend keeps state under data_dir,
-// and so whether boot must probe it (CheckDataDir).
+// NeedsDataDir reports whether a backend this process opens keeps state
+// under data_dir, and so whether boot must probe it (CheckDataDir). Only the
+// api role opens the dedupe stores.
 func (c *Config) NeedsDataDir() bool {
-	return c.MQ.Backend == MQEmbedded || c.Dedupe.Backend == DedupePebble
+	return c.MQ.Backend == MQEmbedded || (c.Has(RoleAPI) && c.Dedupe.Backend == DedupePebble)
 }
 
 // Warnings returns what a valid configuration is still likely to get wrong,
@@ -201,6 +201,12 @@ func (c *Config) NeedsDataDir() bool {
 // correct for a single replica, and one process cannot count its replicas.
 func (c *Config) Warnings() []string {
 	if !c.Distributed() {
+		return nil
+	}
+	// Both are the api role's: a process without it opens neither a cache it
+	// reads nor a dedupe store (a split that would need the cache shared is
+	// refused, validateTopology).
+	if !c.Has(RoleAPI) {
 		return nil
 	}
 	var out []string

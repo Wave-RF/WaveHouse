@@ -10,7 +10,7 @@ import (
 
 // The key every backend stores is text:
 //
-//	<tenant>/<table>/<id>        acme/clicks/evt%2D123
+//	<tenant>/<table>/<id>        acme/clicks/evt-123
 //	<tenant>/<table>/#<sha256>   an id too long to store verbatim
 //
 // The table and id are escaped by internal/keyenc, which never writes '/' or

@@ -10,8 +10,7 @@ import (
 )
 
 // The subjects are pinned byte for byte: an embedded broker holds messages
-// under them across an upgrade, and the table token has been this encoding
-// since v0.1.0.
+// under them across an upgrade.
 func TestSubject_Golden(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -22,7 +21,7 @@ func TestSubject_Golden(t *testing.T) {
 		{Topic{Tenant: "acme-co", Table: "default.clicks", Scope: "org_1"}, "acme-co.default%2Eclicks.org_1"},
 		{Topic{Tenant: "a", Table: "a.*.>", Scope: "*"}, "a.a%2E%2A%2E%3E.%2A"},
 		{Topic{Tenant: "a", Table: "my table", Scope: "tab\there"}, "a.my%20table.tab%09here"},
-		{Topic{Tenant: "a", Table: "table-with-dashes", Scope: "org-1"}, "a.table%2Dwith%2Ddashes.org%2D1"},
+		{Topic{Tenant: "a", Table: "table-with-dashes", Scope: "org-1"}, "a.table-with-dashes.org-1"},
 		{Topic{Tenant: "a", Table: "100%", Scope: "a/b"}, "a.100%25.a%2Fb"},
 		{Topic{Tenant: "a", Table: "{acme}:x"}, "a.%7Bacme%7D%3Ax"},
 		{Topic{Tenant: "a", Table: "nul\x00", Scope: "\xff"}, "a.nul%00.%FF"},
@@ -40,10 +39,12 @@ func TestSubject_Golden(t *testing.T) {
 }
 
 // A token another writer left partly unescaped, or escaped in lowercase,
-// still reads as it always did.
+// still reads as it always did — and so does an earlier build's %2D for '-',
+// so a message it queued reads as the same topic.
 func TestParseTopicKey_LenientTokens(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, Topic{Tenant: "a", Table: "b-c", Scope: "d.e"}, parseTopicKey("a.b-c.d%2ee"))
+	assert.Equal(t, Topic{Tenant: "a", Table: "b~c", Scope: "d.e"}, parseTopicKey("a.b~c.d%2ee"))
+	assert.Equal(t, parseTopicKey("a.table-with-dashes.org-1"), parseTopicKey("a.table%2Dwith%2Ddashes.org%2D1"))
 }
 
 func TestSubject_RoundTripsEveryTopic(t *testing.T) {
@@ -121,6 +122,7 @@ func TestParseTopicKey_ForeignTailKeepsItself(t *testing.T) {
 		"a.b.c.d",       // more tokens than any topic renders
 		"0.bad%2Gtoken", // a token that does not decode
 		"a%2Eb.events",  // a tenant outside the grammar
+		"a%2Db.events",  // a tenant token is read verbatim, never decoded
 		".events",       // a topic whose tenant was never set
 		"events",        // one token: no tenant leads it
 		"bad%2G",        // one token that does not decode

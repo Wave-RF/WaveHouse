@@ -28,7 +28,7 @@ func TestKeyLayout(t *testing.T) {
 		k    dedupe.Key
 		want string
 	}{
-		{"acme", dedupe.Key{Table: "clicks", ID: "evt-123"}, "acme/clicks/evt%2D123"},
+		{"acme", dedupe.Key{Table: "clicks", ID: "evt-123"}, "acme/clicks/evt-123"},
 		{"acme-co", dedupe.Key{Table: "db.t", ID: "a/b"}, "acme-co/db%2Et/a%2Fb"},
 		{"0", dedupe.Key{Table: "a\x00b", ID: "e1"}, "0/a%00b/e1"},
 		{"0", dedupe.Key{Table: "", ID: ""}, "0//"},
@@ -50,9 +50,9 @@ func TestKeyLayout_HashesOnTheEscapedLength(t *testing.T) {
 	assert.False(t, dedupe.Key{ID: fits}.Hashed())
 	assert.Equal(t, "a/t/"+fits, key("a", dedupe.Key{Table: "t", ID: fits}))
 
-	escapedFits := strings.Repeat("-", dedupe.MaxIDBytes/3) + "x" // 1,023 + 1 bytes escaped
+	escapedFits := strings.Repeat(".", dedupe.MaxIDBytes/3) + "x" // 1,023 + 1 bytes escaped
 	assert.False(t, dedupe.Key{ID: escapedFits}.Hashed())
-	escapedOver := strings.Repeat("-", dedupe.MaxIDBytes/3+1) // 1,026 bytes escaped
+	escapedOver := strings.Repeat(".", dedupe.MaxIDBytes/3+1) // 1,026 bytes escaped
 	assert.True(t, dedupe.Key{ID: escapedOver}.Hashed())
 	assert.True(t, strings.HasPrefix(key("a", dedupe.Key{Table: "t", ID: escapedOver}), "a/t/#"))
 }
