@@ -15,6 +15,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -289,7 +290,7 @@ func (p *faultyPublisher) Publish(ctx context.Context, topic mq.Topic, data []by
 // in the tenant's queue.
 func realPipeline(t *testing.T, fail func(call int) (bool, error)) (*IngestHandler, func() int) {
 	t.Helper()
-	broker, err := mq.NewEmbedded(t.TempDir())
+	broker, err := mq.NewEmbedded(storedir.New(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = broker.Close() })
 	require.NoError(t, broker.SetMaxBytes(t.Context(), testStore.Tenant(), 64<<20))

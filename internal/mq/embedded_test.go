@@ -151,7 +151,7 @@ func TestEmbeddedNATS_PublishHeaders(t *testing.T) {
 // path, where takeStock itself must not mistake a stale window for one
 // already at budget.
 func TestEmbeddedNATS_Publish_IdempotencyKeyDropsARepeat(t *testing.T) {
-	e := openEmbedded(t, t.TempDir())
+	e := openEmbedded(t, storedir.New(t))
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	// Explicit rather than the server's default, which happens to match today.
