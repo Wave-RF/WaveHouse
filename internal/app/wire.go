@@ -617,7 +617,7 @@ func (a *App) wireDynamoDedupe(ctx context.Context) error {
 		if !a.tenants.Nested() {
 			return fmt.Errorf("dedupe open: %w", err)
 		}
-		slog.Error("dedupe: dynamodb table check failed; ingest with dedupe on fails closed until a reload passes it",
+		slog.Error("dedupe: dynamodb table check failed; ingest with dedupe on fails closed while it is retried",
 			"table", c.Table, "error", err)
 		a.add(component{name: "dedupe table check", run: func(ctx context.Context) error {
 			for wait := time.Second; ready() != nil; wait = min(2*wait, 30*time.Second) {
@@ -629,7 +629,7 @@ func (a *App) wireDynamoDedupe(ctx context.Context) error {
 				}
 				if err := check(ctx); err != nil {
 					if ctx.Err() == nil {
-						slog.Error("dedupe: dynamodb table check failed; ingest with dedupe on fails closed until a reload passes it",
+						slog.Error("dedupe: dynamodb table check failed again; ingest with dedupe on still fails closed",
 							"table", c.Table, "error", err)
 					}
 					continue
