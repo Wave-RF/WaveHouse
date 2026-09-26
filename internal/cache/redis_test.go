@@ -119,8 +119,11 @@ func TestRedis_UnreachableIsBypassed(t *testing.T) {
 	require.NoError(t, r.Close(), "idempotent")
 }
 
+// Each size limit is counted: the raw one before compression, the stored one
+// after it, which a server-less Set cannot otherwise tell from a bypass.
 func TestRedis_SetDeclinesWithoutTouchingTheServer(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel(): swaps the global meter provider.
+	reader := meterReader(t)
 	r, err := NewRedis(RedisConfig{Addrs: []string{closedAddr(t)}, DialTimeout: 100 * time.Millisecond, MaxValueBytes: 64})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close() })
@@ -139,6 +142,7 @@ func TestRedis_SetDeclinesWithoutTouchingTheServer(t *testing.T) {
 	} {
 		require.NoError(t, r.Set(ctx, tt.snap, tt.value, tt.ttl), tt.name)
 	}
+	assert.Equal(t, int64(2), sumOf(t, collect(t, reader), "wavehouse_cache_oversize_total", "", ""))
 }
 
 func TestRedis_Record(t *testing.T) {
@@ -154,6 +158,15 @@ func TestRedis_Record(t *testing.T) {
 
 	r.record(live, context.DeadlineExceeded)
 	assert.True(t, r.breaker.isOpen())
+}
+
+func TestRejectsCredentials(t *testing.T) {
+	t.Parallel()
+	assert.True(t, rejectsCredentials("WRONGPASS invalid username-password pair or user is disabled."))
+	assert.True(t, rejectsCredentials("NOAUTH Authentication required."))
+	assert.False(t, rejectsCredentials("NOPERM No permissions to access a key"), "about a key, not the credentials")
+	assert.False(t, rejectsCredentials("READONLY You can't write against a read only replica."))
+	assert.False(t, rejectsCredentials("ERR WRONGPASS"))
 }
 
 func TestRefusesWork(t *testing.T) {
@@ -224,8 +237,10 @@ func TestReadTokens_NotAnArrayIsMalformed(t *testing.T) {
 	require.ErrorIs(t, err, errMalformedReply)
 }
 
-func TestRedisMetrics(t *testing.T) {
-	// No t.Parallel(): swaps the global meter provider.
+// meterReader makes a manual reader the global meter provider's for the
+// test's duration, which must then not run in parallel.
+func meterReader(t *testing.T) *sdkmetric.ManualReader {
+	t.Helper()
 	saved := otel.GetMeterProvider()
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -234,7 +249,48 @@ func TestRedisMetrics(t *testing.T) {
 		_ = mp.Shutdown(context.Background())
 		otel.SetMeterProvider(saved)
 	})
+	return reader
+}
 
+// collect reads every instrument's data from reader, by name.
+func collect(t *testing.T, reader *sdkmetric.ManualReader) map[string]metricdata.Aggregation {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	got := map[string]metricdata.Aggregation{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			got[m.Name] = m.Data
+		}
+	}
+	return got
+}
+
+// sumOf adds up an int64 counter's or gauge's points whose attribute key
+// is value; key "" takes every point.
+func sumOf(t *testing.T, got map[string]metricdata.Aggregation, name, key, value string) int64 {
+	t.Helper()
+	var n int64
+	switch d := got[name].(type) {
+	case metricdata.Sum[int64]:
+		for _, dp := range d.DataPoints {
+			if v, ok := dp.Attributes.Value(attribute.Key(key)); key == "" || ok && v.AsString() == value {
+				n += dp.Value
+			}
+		}
+	case metricdata.Gauge[int64]:
+		for _, dp := range d.DataPoints {
+			n += dp.Value
+		}
+	default:
+		t.Fatalf("%s: %T", name, got[name])
+	}
+	return n
+}
+
+func TestRedisMetrics(t *testing.T) {
+	// No t.Parallel(): swaps the global meter provider.
+	reader := meterReader(t)
 	r, err := NewRedis(RedisConfig{Addrs: []string{closedAddr(t)}, DialTimeout: 100 * time.Millisecond})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close() })
@@ -246,39 +302,13 @@ func TestRedisMetrics(t *testing.T) {
 	r.metrics.tooLarge()
 	r.metrics.setFailed("oom")
 
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(ctx, &rm))
-	got := map[string]metricdata.Aggregation{}
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			got[m.Name] = m.Data
-		}
-	}
-	sumOf := func(name, key, value string) int64 {
-		t.Helper()
-		var n int64
-		switch d := got[name].(type) {
-		case metricdata.Sum[int64]:
-			for _, dp := range d.DataPoints {
-				if v, ok := dp.Attributes.Value(attribute.Key(key)); key == "" || ok && v.AsString() == value {
-					n += dp.Value
-				}
-			}
-		case metricdata.Gauge[int64]:
-			for _, dp := range d.DataPoints {
-				n += dp.Value
-			}
-		default:
-			t.Fatalf("%s: %T", name, got[name])
-		}
-		return n
-	}
-	assert.Equal(t, int64(1), sumOf("wavehouse_cache_lookups_total", "result", resultBypass))
-	assert.Equal(t, int64(1), sumOf("wavehouse_cache_invalidations_total", "result", "deferred"))
-	assert.Equal(t, int64(1), sumOf("wavehouse_cache_invalidations_pending", "", ""))
-	assert.Equal(t, int64(1), sumOf("wavehouse_cache_breaker_open", "", ""))
-	assert.Equal(t, int64(1), sumOf("wavehouse_cache_oversize_total", "", ""))
-	assert.Equal(t, int64(1), sumOf("wavehouse_cache_set_failures_total", "reason", "oom"))
+	got := collect(t, reader)
+	assert.Equal(t, int64(1), sumOf(t, got, "wavehouse_cache_lookups_total", "result", resultBypass))
+	assert.Equal(t, int64(1), sumOf(t, got, "wavehouse_cache_invalidations_total", "result", "deferred"))
+	assert.Equal(t, int64(1), sumOf(t, got, "wavehouse_cache_invalidations_pending", "", ""))
+	assert.Equal(t, int64(1), sumOf(t, got, "wavehouse_cache_breaker_open", "", ""))
+	assert.Equal(t, int64(1), sumOf(t, got, "wavehouse_cache_oversize_total", "", ""))
+	assert.Equal(t, int64(1), sumOf(t, got, "wavehouse_cache_set_failures_total", "reason", "oom"))
 	assert.Contains(t, got, "wavehouse_cache_op_duration_seconds")
 	assert.Contains(t, got, "wavehouse_cache_value_bytes")
 }

@@ -187,9 +187,11 @@ func (c RedisConfig) clientOption() rueidis.ClientOption {
 // Versions are random tokens, one per tenant, per table and per scope,
 // under the tenant's hash tag; a bump sets a fresh one. A value carries the
 // tokens it was computed under and is a hit only while they are all still
-// current, so a lost token (eviction, expiry, a restart) can only cause
-// misses. A lookup is one round trip. The server failing or timing out is
-// a miss, a skipped fill and a deferred invalidation — never a failed query.
+// current, so a lost token (eviction, expiry, a restart without persistence)
+// can only cause misses. Restoring a snapshot is not a loss but a rollback:
+// the old tokens return with their values. A lookup is one round trip. The
+// server failing or timing out is a miss, a skipped fill and a deferred
+// invalidation — never a failed query.
 type RedisCache struct {
 	cfg        RedisConfig
 	opt        rueidis.ClientOption
@@ -310,9 +312,12 @@ func (r *RedisCache) conn() rueidis.Client {
 }
 
 // probe decides whether an open breaker closes. It writes: a server that
-// answers but refuses writes (refusesWork) would take no bump either.
+// answers but refuses writes (refusesWork) would take no bump either. rueidis
+// redials under the calling operation's context, so the probe's budget is
+// DialTimeout for a reconnect plus Timeout for the write: a reconnect slower
+// than Timeout fails the operations waiting on it, but not the probe.
 func (r *RedisCache) probe(c rueidis.Client) {
-	ctx, cancel := context.WithTimeout(r.ctx, r.cfg.Timeout)
+	ctx, cancel := context.WithTimeout(r.ctx, r.cfg.DialTimeout+r.cfg.Timeout)
 	defer cancel()
 	r.record(r.ctx, c.Do(ctx, c.B().Set().Key(r.cfg.KeyPrefix+":probe").Value("1").Ex(time.Minute).Build()).Error())
 	if r.breaker.isOpen() {
@@ -337,9 +342,15 @@ func (r *RedisCache) record(parent context.Context, err error) {
 		return
 	}
 	if re, ok := rueidis.IsRedisErr(err); ok {
-		if refusesWork(re.Error()) {
+		switch msg := re.Error(); {
+		case rejectsCredentials(msg):
+			if r.breaker.trip() {
+				slog.ErrorContext(parent, "cache: redis rejected the credentials; bypassing the cache until they work",
+					"addrs", r.cfg.Addrs, "error", msg)
+			}
+		case refusesWork(msg):
 			r.breaker.trip()
-		} else {
+		default:
 			r.breaker.success()
 		}
 		return
@@ -369,6 +380,15 @@ func refusesWork(msg string) bool {
 		return true
 	}
 	return false
+}
+
+// rejectsCredentials reports whether an error reply refuses this process's
+// credentials, as a connection's handshake after a password rotation does:
+// every operation meets it, so it refuses all work. NOPERM is not one: it
+// names a key or a command, which the rest of the work may not touch.
+func rejectsCredentials(msg string) bool {
+	code, _, _ := strings.Cut(msg, " ")
+	return code == "WRONGPASS" || code == "NOAUTH"
 }
 
 // Lookup reads the tokens deps fold and the entry for sha in one pipelined

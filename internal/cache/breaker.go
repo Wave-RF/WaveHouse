@@ -65,11 +65,15 @@ func (b *breaker) failure() {
 }
 
 // trip opens the breaker at once, for a reply that says the server cannot
-// do the work: one is as conclusive as any number.
-func (b *breaker) trip() {
+// do the work: one is as conclusive as any number. It reports whether the
+// breaker was closed or probing, so a caller logs once per opening and once
+// per refused probe rather than once per operation in flight.
+func (b *breaker) trip() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	opened := !b.open || b.probing
 	b.open, b.openedAt, b.probing = true, b.now(), false
+	return opened
 }
 
 func (b *breaker) isOpen() bool {
