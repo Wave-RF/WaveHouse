@@ -95,6 +95,7 @@ var unavailableCodes = map[int32]struct{}{
 	692:  {}, // TOO_MANY_MUTATIONS
 	700:  {}, // USER_SESSION_LIMIT_EXCEEDED
 	735:  {}, // QUERY_WAS_CANCELLED_BY_CLIENT
+	745:  {}, // SERVER_OVERLOADED
 	749:  {}, // TCP_CONNECTION_LIMIT_REACHED
 	762:  {}, // HTTP_CONNECTION_LIMIT_REACHED
 	774:  {}, // TABLE_IS_PERMANENTLY_READ_ONLY
@@ -141,6 +142,27 @@ func TableScoped(err error) bool {
 	}
 	_, scoped := tableScopedCodes[code]
 	return scoped
+}
+
+// splittableCodes are the retried codes a batch can earn by its size alone,
+// each of its rows inserting on its own: a batch spanning more partitions than
+// max_partitions_per_insert_block gets TOO_MANY_PARTS, and a large one can
+// pass the memory limit. ClickHouse's own Distributed async inserts split a
+// batch on these codes (isSplittableErrorCode).
+var splittableCodes = map[int32]struct{}{
+	241: {}, // MEMORY_LIMIT_EXCEEDED
+	252: {}, // TOO_MANY_PARTS
+}
+
+// Splittable reports whether err is a retried failure that a smaller request
+// may avoid — so a caller holding a batch should split it before backing off.
+func Splittable(err error) bool {
+	code, ok := ExceptionCode(err)
+	if !ok {
+		return false
+	}
+	_, split := splittableCodes[code]
+	return split
 }
 
 // ClassOfCode classes a ClickHouse exception code. A code on neither list is

@@ -126,6 +126,9 @@ func TestClassify(t *testing.T) {
 		{"http TOO_MANY_PARTS by body", func(*testing.T) error {
 			return readHTTPError(500, nil, "Code: 252. DB::Exception: Too many parts (TOO_MANY_PARTS)")
 		}, Unavailable},
+		{"http SERVER_OVERLOADED", func(*testing.T) error {
+			return readHTTPError(500, codeHeader("745"), "Code: 745. DB::Exception: CPU is overloaded")
+		}, Unavailable},
 		{"http TABLE_IS_READ_ONLY", func(*testing.T) error {
 			return readHTTPError(500, codeHeader("242"), "Code: 242. DB::Exception: Table is in readonly mode")
 		}, Unavailable},
@@ -180,6 +183,24 @@ func TestTableScoped(t *testing.T) {
 	}
 	for _, err := range []error{&clickhouse.Exception{Code: 241}, &clickhouse.Exception{Code: 516}, &clickhouse.Exception{Code: 60}, context.DeadlineExceeded, nil} {
 		assert.False(t, TableScoped(err), "%v", err)
+	}
+}
+
+func TestSplittable(t *testing.T) {
+	t.Parallel()
+	for code := range splittableCodes {
+		// A split batch whose first row fails the same way is retried, never
+		// dead-lettered, so every splittable code must be a retried one.
+		assert.Equal(t, Unavailable, ClassOfCode(code), "code %d", code)
+	}
+	for _, err := range []error{
+		&clickhouse.Exception{Code: 241},
+		readHTTPError(500, codeHeader("252"), "Code: 252. DB::Exception: Too many partitions for single INSERT block (more than 100)"),
+	} {
+		assert.True(t, Splittable(err), "%v", err)
+	}
+	for _, err := range []error{&clickhouse.Exception{Code: 242}, &clickhouse.Exception{Code: 202}, &clickhouse.Exception{Code: 60}, context.DeadlineExceeded, nil} {
+		assert.False(t, Splittable(err), "%v", err)
 	}
 }
 
