@@ -28,6 +28,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
@@ -95,7 +96,11 @@ func testConfig(t *testing.T, settingsDir string) *config.Config {
 	return &config.Config{
 		DataDir:  t.TempDir(),
 		Server:   config.Server{Port: closedPort(t), ShutdownTimeout: 2},
-		Cache:    config.Cache{L1MaxCost: 1 << 20},
+		MQ:       config.MQ{Backend: config.MQEmbedded},
+		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
+		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
+		Coord:    config.Coord{Backend: config.CoordLocal},
+		Roles:    config.AllRoles(),
 		Auth:     config.Auth{JWTSecret: "unit-test-secret"},
 		Settings: config.Settings{Dir: settingsDir},
 	}
@@ -535,6 +540,29 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 	assert.False(t, restored.Open(), "Close releases every open store")
 }
 
+// Validate refuses a backend no layer has a case for, so the switch's default
+// is reached only by a Config built by hand; it must refuse boot, not wire
+// nothing.
+func TestNew_RefusesALayerWithoutABackend(t *testing.T) {
+	for _, tc := range []struct {
+		key   string
+		unset func(*config.Config)
+	}{
+		{"dedupe.backend", func(c *config.Config) { c.Dedupe.Backend = "" }},
+		{"mq.backend", func(c *config.Config) { c.MQ.Backend = "" }},
+		{"cache.backend", func(c *config.Config) { c.Cache.Backend = "" }},
+		{"coord.backend", func(c *config.Config) { c.Coord.Backend = "" }},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			guardGlobals(t)
+			cfg := testConfig(t, writeSettings(t, nil))
+			tc.unset(cfg)
+			_, err := New(t.Context(), Options{Config: cfg})
+			require.ErrorContains(t, err, tc.key+` "" has no wiring`)
+		})
+	}
+}
+
 // A Pebble instance that cannot open follows the registry's own rule for the
 // shape: a flat directory refuses boot, like every other store, and a nested
 // one fails closed for every tenant with dedupe on, since they share the
@@ -920,20 +948,20 @@ func TestNew_VerifierPerTenant(t *testing.T) {
 	cfg.Auth.OperatorKey = "unit-test-operator-key"
 	a := newApp(t, cfg, Options{})
 
-	pipe := func(id, token string) int {
+	serve := func(id, token string) *httptest.ResponseRecorder {
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/p", nil)
 		req.Header.Set(tenant.Header, id)
 		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
 		a.Handler().ServeHTTP(rec, req)
-		return rec.Code
+		return rec
 	}
 	// verified reports whether the token passed the pipe's role gate: the
-	// query then runs and fails against the closed ClickHouse, never the
-	// 401 of a refused token or the 503 of a verifier still fetching.
+	// query then runs and fails against the closed ClickHouse with a
+	// ClickHouse error code — a 503 too, so the body, not the status, tells
+	// it from the 503 of a verifier still fetching or the 401 of a refusal.
 	verified := func(id, token string) bool {
-		code := pipe(id, token)
-		return code != http.StatusUnauthorized && code != http.StatusServiceUnavailable
+		return strings.Contains(serve(id, token).Body.String(), `"code":"clickhouse.`)
 	}
 	eventuallyVerified := func(id, token string) {
 		t.Helper()
@@ -969,7 +997,9 @@ func TestNew_VerifierPerTenant(t *testing.T) {
 	req.Header.Set("X-Operator-Key", cfg.Auth.OperatorKey)
 	a.Handler().ServeHTTP(rec, req)
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
-	assert.Equal(t, http.StatusServiceUnavailable, pipe("globex", globexToken), "a rejected tenant is not served")
+	rejected := serve("globex", globexToken)
+	assert.Equal(t, http.StatusServiceUnavailable, rejected.Code)
+	assert.Contains(t, rejected.Body.String(), "tenant settings are invalid", "a rejected tenant is not served")
 	before := globexFetches.Load()
 	rewriteSettings(t, filepath.Join(root, "globex"), authPatch(globex.URL))
 	rec = httptest.NewRecorder()
@@ -1051,6 +1081,28 @@ func TestRun_ServesUntilCancelled(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 	assert.Error(t, err, "the listener is closed after Run returns")
+}
+
+func TestRun_SweeperRunsUnderItsLease(t *testing.T) {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{Listener: ln})
+	rival := a.coord.(*coord.Local).Peer()
+
+	_, stop := runApp(t, a, ln)
+	require.Eventually(t, func() bool {
+		term, err := rival.TryAcquire(t.Context(), sweeperLease)
+		if err == nil { // the sweeper has not campaigned yet: give it back
+			require.NoError(t, term.Resign(t.Context()))
+		}
+		return errors.Is(err, coord.ErrHeld)
+	}, 5*time.Second, 5*time.Millisecond, "the sweeper campaigns for its lease and keeps it while it runs")
+	require.NoError(t, stop())
+
+	term, err := rival.TryAcquire(t.Context(), sweeperLease)
+	require.NoError(t, err, "a stopped sweeper hands its lease on")
+	require.NoError(t, term.Resign(t.Context()))
 }
 
 func TestRun_PrometheusSidecar(t *testing.T) {
