@@ -157,6 +157,23 @@ func roundTrip(t *testing.T, h Harness) {
 	}
 }
 
+// A publish repeated with the same idempotency key inside the duplicate
+// window is a no-op reported as success: the ingest handler relies on this to
+// make a retry of an uncertain publish (the outcome unknown after a failure
+// other than a full queue) safe rather than a second copy. A different key
+// is its own event.
+func idempotencyKeyDropsARepeat(t *testing.T, h Harness) {
+	b := h.New(t)
+	topic := mq.Topic{Tenant: Acme, Table: "idem"}
+
+	require.NoError(t, b.Publish(ctx(t), topic, []byte("first"), mq.WithIdempotencyKey("k1")))
+	require.NoError(t, b.Publish(ctx(t), topic, []byte("repeat"), mq.WithIdempotencyKey("k1")),
+		"a repeat under the same key is reported as success, not stored again")
+	require.NoError(t, b.Publish(ctx(t), topic, []byte("second"), mq.WithIdempotencyKey("k2")))
+
+	replayEventually(t, b, topic, time.Time{}, []string{"first", "second"})
+}
+
 // Nothing lands on a tenant by omission (#583), and an invalid tenant is not
 // backpressure a retry could clear.
 func refusesATopicWithoutATenant(t *testing.T, h Harness) {

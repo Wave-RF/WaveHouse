@@ -83,6 +83,7 @@ func Run(t *testing.T, h Harness) {
 
 	cases := []testCase{
 		{"RoundTrip", true, roundTrip},
+		{"IdempotencyKeyDropsARepeat", true, idempotencyKeyDropsARepeat},
 		{"RefusesATopicWithoutATenant", true, refusesATopicWithoutATenant},
 		{"SubscribeCarriesTheTraceContext", true, subscribeCarriesTheTraceContext},
 		{"SubscribeSeesEveryTenant", true, subscribeSeesEveryTenant},
