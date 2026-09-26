@@ -162,6 +162,9 @@ func (e *Embedded) deleteSweepable(db *pebble.DB, candidates [][]byte) (expired,
 	b := db.NewBatch()
 	defer func() { _ = b.Close() }()
 	for _, k := range candidates {
+		if e.sweepTouchHook != nil {
+			e.sweepTouchHook()
+		}
 		val, closer, err := db.Get(k)
 		if errors.Is(err, pebble.ErrNotFound) {
 			continue
