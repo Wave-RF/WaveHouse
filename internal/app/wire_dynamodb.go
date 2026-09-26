@@ -19,13 +19,15 @@ var errDynamoUnchecked = errors.New("dedupe: dynamodb table not checked yet")
 // every tenant and every process shares (dedupe.Dynamo), so a tenant's store
 // opens for free once the table has passed its check. Boot checks it (after
 // creating it, with create_table on dynamodb-local) whether or not any tenant
-// has dedupe on, and never creates it otherwise. A table that fails the check
-// follows the registry's rule for the shape, as Pebble's instance does: a
-// flat directory refuses boot; a nested one boots with every switched-on
-// store closed, so its ingest fails closed. Unlike a local disk, a remote
-// table's failure is usually brief (a throttle, credentials not yet issued
-// mid-rollout), and a nested directory has no watcher to reload it, so the
-// check is then retried in the background, with backoff, until it passes.
+// has dedupe on, and never creates it otherwise. Boot is refused only when the
+// table is misconfigured (a failure that is not ErrUnavailable: missing, the
+// wrong key schema, access denied) over a flat directory in which a tenant
+// has dedupe on. Otherwise — a transient failure, a nested directory, or no
+// tenant deduping yet — the process boots with every switched-on store
+// closed, so its ingest fails closed, and the check is retried in the
+// background, with backoff, until it passes: a remote table's failure is
+// often brief, a nested directory has no watcher to reload it, and a fixed
+// table is picked up without a restart.
 // The check is network I/O, so the AfterAdopt hook never runs it: the hook
 // holds the lock that serializes reloads. It applies every store against the
 // last check's result and wakes the retry, so a reload still retries at once.
@@ -94,11 +96,17 @@ func (a *App) wireDynamoDedupe(ctx context.Context) error {
 		}
 	})
 	if err := check(ctx); err != nil {
-		if !a.tenants.Nested() {
+		misconfigured := !errors.Is(err, dedupe.ErrUnavailable)
+		if misconfigured && !a.tenants.Nested() && a.anyDedupeEnabled() {
 			return fmt.Errorf("dedupe open: %w", err)
 		}
-		slog.Error("dedupe: dynamodb table check failed; ingest with dedupe on fails closed while it is retried",
-			"table", c.Table, "error", err)
+		if misconfigured {
+			slog.Error("dedupe: dynamodb table is misconfigured; ingest with dedupe on fails closed until it is fixed",
+				"table", c.Table, "error", err)
+		} else {
+			slog.Error("dedupe: dynamodb table check failed; ingest with dedupe on fails closed while it is retried",
+				"table", c.Table, "error", err)
+		}
 		a.add(component{name: "dedupe table check", run: func(ctx context.Context) error {
 			for wait := time.Second; ready() != nil; wait = min(2*wait, 30*time.Second) {
 				select {
@@ -122,4 +130,14 @@ func (a *App) wireDynamoDedupe(ctx context.Context) error {
 	}
 	apply()
 	return nil
+}
+
+// anyDedupeEnabled reports whether a served tenant has dedupe switched on.
+func (a *App) anyDedupeEnabled() bool {
+	for _, store := range a.tenants.All() {
+		if store.DedupeEnabled() {
+			return true
+		}
+	}
+	return false
 }

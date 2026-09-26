@@ -1,8 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -23,14 +25,21 @@ import (
 
 // fakeDynamo answers the DynamoDB JSON protocol for one table, enough for
 // boot's check, the dev create path, and a claim and its commit. Whether the
-// table exists, and whether the endpoint hangs (every call, or one op
-// alone), are the test's to switch.
+// table exists, whether every call is throttled, and whether the endpoint
+// hangs (every call, or one op alone), are the test's to switch.
 type fakeDynamo struct {
-	mu     sync.Mutex
-	exists bool
-	hangs  bool
-	hangOn string // hang calls of this op alone, once set; "" hangs none this way
-	calls  []string
+	mu        sync.Mutex
+	exists    bool
+	throttles bool
+	hangs     bool
+	hangOn    string // hang calls of this op alone, once set; "" hangs none this way
+	calls     []string
+}
+
+func (f *fakeDynamo) setThrottles(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.throttles = v
 }
 
 func (f *fakeDynamo) setExists(v bool) {
@@ -76,13 +85,18 @@ func (f *fakeDynamo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if op == "CreateTable" {
 		f.exists = true
 	}
-	exists, hang := f.exists, f.hangs || op == f.hangOn
+	exists, throttled, hang := f.exists, f.throttles, f.hangs || op == f.hangOn
 	f.mu.Unlock()
 	if hang {
 		<-r.Context().Done()
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+	if throttled {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"__type":"com.amazonaws.dynamodb.v20120810#ThrottlingException","message":"Rate exceeded"}`)
+		return
+	}
 	if !exists {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found"}`)
@@ -154,20 +168,35 @@ func TestNew_DynamoDBDedupeCreatesTheTableOnlyWhenAsked(t *testing.T) {
 	assert.True(t, a.dedup.For(tenant.Default).Open())
 }
 
-// A table that fails the check follows the registry's rule for the shape,
-// as a Pebble instance that cannot open does.
+// A misconfigured table refuses boot only over a flat directory in which a
+// tenant has dedupe on; every other failure boots and fails closed.
 func TestNew_DynamoDBDedupeTableMissing(t *testing.T) {
-	t.Run("flat refuses boot", func(t *testing.T) {
-		for name, patch := range map[string]map[string]any{"dedupe on": dedupeOn, "dedupe off": nil} {
-			t.Run(name, func(t *testing.T) {
-				guardGlobals(t)
-				cfg := testConfig(t, writeSettings(t, patch))
-				dynamoConfig(t, cfg, false)
-				_, err := New(t.Context(), Options{Config: cfg})
-				require.ErrorContains(t, err, "dedupe open")
-				require.ErrorContains(t, err, "ResourceNotFoundException")
-			})
-		}
+	t.Run("flat with dedupe on refuses boot", func(t *testing.T) {
+		guardGlobals(t)
+		cfg := testConfig(t, writeSettings(t, dedupeOn))
+		dynamoConfig(t, cfg, false)
+		_, err := New(t.Context(), Options{Config: cfg})
+		require.ErrorContains(t, err, "dedupe open")
+		require.ErrorContains(t, err, "ResourceNotFoundException")
+		require.NotErrorIs(t, err, dedupe.ErrUnavailable)
+	})
+	t.Run("flat with dedupe off boots, and fails closed once it is on", func(t *testing.T) {
+		dir := writeSettings(t, nil)
+		cfg := testConfig(t, dir)
+		dynamoConfig(t, cfg, false)
+		logs := bootLogged(t)
+		a, err := New(t.Context(), Options{Config: cfg})
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, a.Close(context.Background())) })
+		assert.Contains(t, logs.String(), `level=ERROR msg="dedupe: dynamodb table is misconfigured`)
+
+		store := a.dedup.For(tenant.Default)
+		_, err = dedupetest.Mark(t.Context(), store, eventKey)
+		require.ErrorIs(t, err, dedupe.ErrDisabled)
+		rewriteSettings(t, dir, dedupeOn)
+		a.tenants.Reload("test")
+		_, err = dedupetest.Mark(t.Context(), store, eventKey)
+		require.ErrorIs(t, err, dedupe.ErrUnavailable, "switched on by a reload while the table is missing: closed, not un-deduped")
 	})
 	t.Run("nested fails closed", func(t *testing.T) {
 		root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": nil})
@@ -182,6 +211,58 @@ func TestNew_DynamoDBDedupeTableMissing(t *testing.T) {
 		_, err = dedupetest.Mark(t.Context(), a.dedup.For("globex"), eventKey)
 		require.ErrorIs(t, err, dedupe.ErrDisabled)
 	})
+}
+
+// A transient failure (a throttle) never refuses boot, even over a flat
+// directory with dedupe on: the tenant fails closed until the background
+// retry's check passes.
+func TestRun_DynamoDBDedupeFlatThrottledRecovers(t *testing.T) {
+	cfg := testConfig(t, writeSettings(t, dedupeOn))
+	fake := dynamoConfig(t, cfg, true)
+	fake.setThrottles(true)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	a := newApp(t, cfg, Options{Listener: ln})
+	store := a.dedup.For(tenant.Default)
+	require.False(t, store.Open())
+	_, err = dedupetest.Mark(t.Context(), store, eventKey)
+	require.ErrorIs(t, err, dedupe.ErrUnavailable, "switched on, table throttled: ingest fails closed")
+
+	_, stop := runApp(t, a, ln)
+	fake.setThrottles(false)
+	require.Eventually(t, store.Open, 10*time.Second, 50*time.Millisecond, "the retry opened the store")
+	_, err = dedupetest.Mark(context.Background(), store, eventKey)
+	require.NoError(t, err)
+	require.NoError(t, stop())
+}
+
+// bootLogged sends the default logger to a buffer for the rest of the test,
+// for a boot that logs what it tolerated.
+func bootLogged(t *testing.T) *lockedBuffer {
+	t.Helper()
+	guardGlobals(t)
+	buf := &lockedBuffer{}
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+	return buf
+}
+
+// lockedBuffer is a bytes.Buffer safe for the background retry's logging.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // The reload hook runs under the lock that serializes reloads, so it never
