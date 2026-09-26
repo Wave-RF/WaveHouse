@@ -13,6 +13,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/keyenc"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
@@ -33,16 +34,16 @@ type Topic struct {
 
 // key is the injective string form of the topic that a subject's tail
 // carries: the tenant first, verbatim — its grammar makes it one token — then
-// the table and scope as encoded tokens. A topic without a tenant has no
-// subject, and its key parses back to a topic of no tenant with the whole key
-// as its table (parseTopicKey's fallback). Callers key their own maps by the
-// Topic value itself.
+// the table and scope joined as escaped tokens (keyenc.AppendJoin). A topic
+// without a tenant has no subject, and its key parses back to a topic of no
+// tenant with the whole key as its table (parseTopicKey's fallback). Callers
+// key their own maps by the Topic value itself.
 func (t Topic) key() string {
-	key := string(t.Tenant) + "." + encodeToken(t.Table)
-	if t.Scope != "" {
-		key += "." + encodeToken(t.Scope)
+	key := append([]byte(t.Tenant), '.')
+	if t.Scope == "" {
+		return string(keyenc.AppendJoin(key, '.', t.Table))
 	}
-	return key
+	return string(keyenc.AppendJoin(key, '.', t.Table, t.Scope))
 }
 
 // Message represents a message received from the queue.
@@ -58,15 +59,29 @@ type Message struct {
 	doubleAckFn func(ctx context.Context) error
 	ackFn       func() error
 	nakFn       func() error
+	nakDelayFn  func(time.Duration) error
+}
+
+// MessageOpt configures a Message beyond its required callbacks.
+type MessageOpt func(*Message)
+
+// WithNakDelay gives a Message its delayed negative acknowledgement (see
+// NakWithDelay).
+func WithNakDelay(fn func(time.Duration) error) MessageOpt {
+	return func(m *Message) { m.nakDelayFn = fn }
 }
 
 // NewMessage constructs a Message with ack/nak callbacks.
-func NewMessage(ctx context.Context, topic Topic, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error) *Message {
-	return newMessage(ctx, topic.key(), data, ts, doubleAck, ack, nak)
+func NewMessage(ctx context.Context, topic Topic, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error, opts ...MessageOpt) *Message {
+	return newMessage(ctx, topic.key(), data, ts, doubleAck, ack, nak, opts...)
 }
 
-func newMessage(ctx context.Context, topicKey string, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error) *Message {
-	return &Message{Ctx: ctx, topicKey: topicKey, Data: data, Timestamp: ts, doubleAckFn: doubleAck, ackFn: ack, nakFn: nak}
+func newMessage(ctx context.Context, topicKey string, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error, opts ...MessageOpt) *Message {
+	m := &Message{Ctx: ctx, topicKey: topicKey, Data: data, Timestamp: ts, doubleAckFn: doubleAck, ackFn: ack, nakFn: nak}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // TopicKey is the delivered form of the topic the message was published on,
@@ -105,6 +120,17 @@ func (m *Message) Nak() error {
 		return m.nakFn()
 	}
 	return nil
+}
+
+// NakWithDelay negatively acknowledges the message, asking for redelivery no
+// sooner than delay — a retry that backs off rather than coming straight
+// back. Fire-and-forget like Nak, which it falls back to when the message
+// has no delayed form.
+func (m *Message) NakWithDelay(delay time.Duration) error {
+	if m.nakDelayFn != nil {
+		return m.nakDelayFn(delay)
+	}
+	return m.Nak()
 }
 
 // Headers carries a message's headers. It has the same map[string][]string
@@ -246,8 +272,8 @@ type DeadLetterer interface {
 // DeadLetterCounts is what is parked on one tenant's dead-letter queue.
 type DeadLetterCounts struct {
 	// Tables maps table name → parked messages, for the tables asked about.
-	// Scope is not broken out yet (it is inert until #235): a message parked
-	// under a scoped topic counts under "table.scope", not under its table.
+	// Every scope of a table counts under the table; scope is not broken out
+	// yet (it is inert until #235).
 	Tables map[string]uint64
 	// Total is every parked message of the tenant, whatever the filter.
 	Total uint64
@@ -262,8 +288,8 @@ var ErrNoDeadLetterQueue = errors.New("dead-letter queue not found")
 type DeadLetterStats interface {
 	// DeadLetterCounts counts tenant id's parked messages per table — a
 	// tenant served, rejected, or removed alike, for as long as its queue is
-	// kept. A non-empty table narrows Tables to that one (its unscoped
-	// messages).
+	// kept. A non-empty table narrows Tables to that one (all of its
+	// scopes).
 	DeadLetterCounts(ctx context.Context, id tenant.ID, table string) (DeadLetterCounts, error)
 }
 

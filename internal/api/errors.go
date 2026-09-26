@@ -25,8 +25,8 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 }
 
 // The Retry-After hints of the two 503s a tenant's ClickHouse side answers
-// with: a schema not discovered yet, which discovery retries on a 2s → 60s
-// backoff, and no pool — one that could not be opened, such as one the
+// with: a schema not discovered yet, which discovery retries on a jittered
+// 2s → 60s backoff, and no pool — one that could not be opened, such as one the
 // connection ceiling refused — which the next settings reload retries (the
 // ingest backpressure hint).
 const (
