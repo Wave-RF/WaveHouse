@@ -169,6 +169,39 @@ var Cases = []Case{
 	{"with bare element insert (read)", "WITH insert SELECT 1", false, false},
 	{"with function insert (read)", "WITH insert(1) AS y SELECT y", false, false},
 
+	// A number led by `.` ends with its digits and exponent, unlike one led
+	// by a digit, so a word glued to it is a word of its own.
+	{"with dot-led number glued to insert", "WITH 1 AS a, .5INSERT INTO t SELECT a", true, false},
+	{"with signed dot-led exponent glued to insert", "WITH -.5e-3INSERT INTO t SELECT 1", true, false},
+	{"with dot-led number and digit separator glued to insert", "WITH 1 AS a, .5_0INSERT INTO t SELECT a", true, false},
+	{"with dot-led exponent in a sum glued to insert", "WITH 1+.5e3INSERT INTO t SELECT 1", true, false},
+	{"with Unicode minus and dot-led number glued to insert", "WITH −.5INSERT INTO t SELECT 1", true, false},
+
+	// EXECUTE AS runs the statement after the user as that user, so that
+	// statement is the one classified; bare, it switches the session's user
+	// and returns no result set.
+	{"execute as insert", "EXECUTE AS default INSERT INTO t SELECT 1", true, false},
+	{"execute as with insert", "EXECUTE AS default WITH 1 AS a INSERT INTO t SELECT a", true, false},
+	{"execute as select", "EXECUTE AS default SELECT 1", false, false},
+	{"execute as with select", "EXECUTE AS default WITH 1 AS a SELECT a", false, false},
+	{"execute as drop", "EXECUTE AS u1 DROP TABLE t", true, false},
+	{"execute as show", "EXECUTE AS u1 SHOW TABLES", false, false},
+	{"execute as backticked user then insert", "EXECUTE AS `u 1` INSERT INTO t SELECT 1", true, false},
+	{"execute as double-quoted user then select", `EXECUTE AS "u1" SELECT 1`, false, false},
+	{"execute as string user glued to insert", "EXECUTE AS 'u1'INSERT INTO t SELECT 1", true, false},
+	{"execute as heredoc user then insert", "EXECUTE AS $$u1$$ INSERT INTO t SELECT 1", true, false},
+	{"execute as curly-quoted user then insert", "EXECUTE AS “u1” INSERT INTO t SELECT 1", true, false},
+	{"execute as user at host then insert", "EXECUTE AS u1@'localhost' INSERT INTO t SELECT 1", true, false},
+	{"execute as user at host then select", "EXECUTE AS u1 @ `h` SELECT 1", false, false},
+	{"execute as lower with comments then insert", "execute /* c */ as u1 -- c\ninsert into t select 1", true, false},
+	{"execute as user named insert then select", "EXECUTE AS insert SELECT 1", false, false},
+	{"execute as user named select then insert", "EXECUTE AS select INSERT INTO t SELECT 1", true, false},
+	{"execute as bare", "EXECUTE AS u1", true, false},
+	{"execute as bare with semicolon", "EXECUTE AS u1;", true, false},
+	{"execute as user glued to insert", "EXECUTE AS u1INSERT INTO t SELECT 1", false, true},
+	{"execute as nested", "EXECUTE AS u1 EXECUTE AS u2 INSERT INTO t SELECT 1", false, true},
+	{"execute without as", "EXECUTE u1 INSERT INTO t SELECT 1", false, true},
+
 	{"empty", "", false, true},
 	{"comment only", "-- just a comment", false, true},
 	{"unclosed block comment", "/* never closed", false, true},

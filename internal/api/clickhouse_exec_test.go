@@ -87,6 +87,7 @@ func TestExecuteCHQuery_MutationRoutesToExec(t *testing.T) {
 		"ALTER TABLE clicks ADD COLUMN c String",
 		"INSERT INTO clicks VALUES (1)",
 		"  -- audit log\n  UPDATE clicks SET v = 1 WHERE id = 2",
+		"EXECUTE AS writer INSERT INTO clicks VALUES (1)",
 	} {
 		t.Run(sql, func(t *testing.T) {
 			t.Parallel()
@@ -102,12 +103,17 @@ func TestExecuteCHQuery_MutationRoutesToExec(t *testing.T) {
 
 func TestExecuteCHQuery_SelectRoutesToQuery(t *testing.T) {
 	t.Parallel()
-	conn := &stubConn{}
-	rows, err := executeCHQuery(context.Background(), conn, "SELECT 1", nil)
-	require.NoError(t, err)
-	assert.Zero(t, conn.execCount, "Exec must not be used for SELECT")
-	assert.Equal(t, 1, conn.queryCount, "Query must be used for SELECT")
-	assert.Equal(t, []map[string]any{}, rows, "zero-row SELECT must marshal to [] not null")
+	for _, sql := range []string{"SELECT 1", "EXECUTE AS reader SELECT 1"} {
+		t.Run(sql, func(t *testing.T) {
+			t.Parallel()
+			conn := &stubConn{}
+			rows, err := executeCHQuery(context.Background(), conn, sql, nil)
+			require.NoError(t, err)
+			assert.Zero(t, conn.execCount, "Exec must not be used for SELECT")
+			assert.Equal(t, 1, conn.queryCount, "Query must be used for SELECT")
+			assert.Equal(t, []map[string]any{}, rows, "zero-row SELECT must marshal to [] not null")
+		})
+	}
 }
 
 // TestExecuteCHQuery_TransformsClickHouseTypes pins transformRow's contract

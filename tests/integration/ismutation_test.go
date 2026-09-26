@@ -23,9 +23,12 @@ import (
 // codeSyntaxError is ClickHouse's SYNTAX_ERROR.
 const codeSyntaxError = 62
 
-// astMutation is api.IsMutation's answer for each statement kind EXPLAIN AST
-// names at the root of the tree.
+// astMutation is api.IsMutation's answer for each statement kind astRoot
+// names.
 var astMutation = map[string]bool{
+	// A bare EXECUTE AS: it switches the session's user and returns no
+	// result set.
+	"ExecuteAsQuery":       true,
 	"SelectWithUnionQuery": false,
 	"ShowTables":           false,
 	"DescribeQuery":        false,
@@ -49,29 +52,48 @@ var astMutation = map[string]bool{
 	"UseQuery":             true,
 }
 
-// astRoot is the root node ClickHouse's parser gives sql, or the error it
-// rejects sql with. Parsing only: nothing runs, and no table need exist.
+// astRoot is the statement kind ClickHouse's parser gives sql — the root node
+// of its tree, or for an EXECUTE AS that leads a statement, that statement's
+// — or the error it rejects sql with. Parsing only: nothing runs, and no table
+// need exist.
 func astRoot(ctx context.Context, conn driver.Conn, sql string) (string, error) {
 	rows, err := conn.Query(ctx, "EXPLAIN AST "+sql)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = rows.Close() }()
-	if !rows.Next() {
-		if err := rows.Err(); err != nil {
+	var lines []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
 			return "", err
 		}
-		return "", errors.New("EXPLAIN AST returned no rows")
+		lines = append(lines, line)
 	}
-	var line string
-	if err := rows.Scan(&line); err != nil {
+	if err := rows.Err(); err != nil {
 		return "", err
 	}
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return "", fmt.Errorf("EXPLAIN AST returned %q", line)
+	if len(lines) == 0 {
+		return "", errors.New("EXPLAIN AST returned no rows")
 	}
-	return fields[0], nil
+	root := strings.Fields(lines[0])
+	if len(root) == 0 {
+		return "", fmt.Errorf("EXPLAIN AST returned %q", lines[0])
+	}
+	if root[0] != "ExecuteAsQuery" {
+		return root[0], nil
+	}
+	// Its children, indented one space: the user, then any statement.
+	var children []string
+	for _, line := range lines[1:] {
+		if strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "  ") {
+			children = append(children, strings.Fields(line)[0])
+		}
+	}
+	if len(children) < 2 {
+		return root[0], nil
+	}
+	return children[1], nil
 }
 
 func isSyntaxError(err error) bool {

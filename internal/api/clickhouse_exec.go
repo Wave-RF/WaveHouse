@@ -120,11 +120,19 @@ var mutationVerbs = map[string]struct{}{
 // them, then the first bareword is matched whole, case-insensitively, against
 // mutationVerbs. After a WITH list ClickHouse parses only SELECT, a FROM-first
 // SELECT or INSERT INTO, so a WITH-led statement is a write exactly when it
-// holds INSERT INTO at the top level (hasTopLevelInsertInto). A write
-// classified as a read goes through Query, which runs it and then fails the
-// call, so a client that retries the error writes again.
+// holds INSERT INTO at the top level (hasTopLevelInsertInto). An
+// `EXECUTE AS <user>` prefix is looked through to the statement it runs. A
+// write classified as a read goes through Query, which runs it and then fails
+// the call, so a client that retries the error writes again.
 func IsMutation(sql string) bool {
 	s := stripLeadingSQLComments(sql)
+	if rest, ok := skipExecuteAs(s); ok {
+		// Bare, it switches the session's user and returns no result set.
+		if rest == "" || rest[0] == ';' {
+			return true
+		}
+		s = rest
+	}
 	end := skipWord(s, 0)
 	if end == 0 {
 		return false
@@ -137,6 +145,45 @@ func IsMutation(sql string) bool {
 	return hasTopLevelInsertInto(s[end:])
 }
 
+// skipExecuteAs returns what follows an `EXECUTE AS <user>[@<host>]` prefix
+// leading s, past whitespace and comments, and true; or s and false if no such
+// prefix leads it.
+func skipExecuteAs(s string) (string, bool) {
+	i := skipWord(s, 0)
+	if !strings.EqualFold(s[:i], "EXECUTE") {
+		return s, false
+	}
+	i = skipSpaceAndComments(s, i)
+	j := skipWord(s, i)
+	if !strings.EqualFold(s[i:j], "AS") {
+		return s, false
+	}
+	i = skipSpaceAndComments(s, skipName(s, skipSpaceAndComments(s, j)))
+	if i < len(s) && s[i] == '@' {
+		i = skipSpaceAndComments(s, skipName(s, skipSpaceAndComments(s, i+1)))
+	}
+	return s[i:], true
+}
+
+// skipName returns the index just past the user or host name at s[i]: a
+// bareword, a quoted identifier or string literal, or a heredoc.
+func skipName(s string, i int) int {
+	if i >= len(s) {
+		return i
+	}
+	switch s[i] {
+	case '\'', '"', '`':
+		return skipQuoted(s, i)
+	case 0xE2:
+		return skipCurlyQuoted(s, i)
+	case '$':
+		if j := skipHeredoc(s, i); j > i {
+			return j
+		}
+	}
+	return skipWord(s, i)
+}
+
 // hasTopLevelInsertInto reports whether s holds INSERT INTO outside
 // parentheses, stepping over string literals and quoted identifiers
 // (skipQuoted, skipCurlyQuoted), heredocs (skipHeredoc) and comments
@@ -144,7 +191,9 @@ func IsMutation(sql string) bool {
 // names and aliases may be spelled like any keyword (`WITH 1 AS select`,
 // `WITH desc AS (…)`, `WITH set -> 1 AS f`, `WITH t.from AS y`), but only the
 // INSERT statement puts INTO after an insert. The exception, a read's
-// `… insert INTO OUTFILE 'f'`, is refused by the server either way.
+// `… AS insert INTO OUTFILE 'f'`, is classified as a write and answers `[]`
+// uncached: harmless, and contrived. OUTFILE cannot tell the two apart, as
+// `INSERT INTO outfile …` names a table.
 func hasTopLevelInsertInto(s string) bool {
 	depth := 0
 	i := 0
@@ -177,9 +226,16 @@ func hasTopLevelInsertInto(s string) bool {
 			} else {
 				i = skipWord(s, i+1)
 			}
+		case c == '.' && i+1 < len(s) && isDigit(s[i+1]):
+			// A number led by `.` ends with its digits, so a word glued to it
+			// is a word of its own: `.5INSERT` is `.5` then INSERT. After a
+			// name ClickHouse reads the `.` as a qualifier (`t.5insert`), which
+			// can only make a statement it rejects, or a read's INTO OUTFILE,
+			// look like a write.
+			i = skipDotNumber(s, i)
 		case isWordByte(c):
 			// A word led by a digit or `_` is read whole, so its tail is
-			// never taken for a keyword (`_insert`).
+			// never taken for a keyword (`_insert`, `5insert`).
 			start := i
 			i = skipWord(s, i)
 			if depth == 0 && strings.EqualFold(s[start:i], "INSERT") {
@@ -207,7 +263,34 @@ func skipWord(s string, i int) int {
 }
 
 func isWordByte(c byte) bool {
-	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || isDigit(c) || c == '_'
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// skipDotNumber returns the index just past the number led by the `.` at s[i],
+// read as ClickHouse's lexer reads one: digits, then an optional exponent (`e`
+// or `E`, an optional sign, any digits), `_` allowed between two digits.
+// Unlike a number led by a digit, it ends before any letters that follow it.
+func skipDotNumber(s string, i int) int {
+	i = skipDigits(s, i+1)
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		i = skipDigits(s, i)
+	}
+	return i
+}
+
+// skipDigits returns the index just past the run of digits at s[i], in which
+// each `_` stands between two digits.
+func skipDigits(s string, i int) int {
+	for i < len(s) && (isDigit(s[i]) || s[i] == '_' && i > 0 && isDigit(s[i-1]) && i+1 < len(s) && isDigit(s[i+1])) {
+		i++
+	}
+	return i
 }
 
 // skipHeredoc returns the index just past the heredoc opening at s[i] —
