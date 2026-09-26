@@ -832,6 +832,28 @@ func TestRedisConfig_FromLoadedDefaults(t *testing.T) {
 	assert.Equal(t, cache.RedisSentinel, config.RedisSentinel)
 }
 
+// Username, DB and TLS are zero on both sides of TestRedisConfig_FromLoadedDefaults'
+// assert.Equal, so deleting any of their three mapping lines in redisConfig
+// would pass it anyway. Drive all three through config.Load to a non-zero
+// value and assert on them directly.
+func TestRedisConfig_UsernameDBTLSMapped(t *testing.T) {
+	t.Setenv("WH_SETTINGS_DIR", t.TempDir())
+	t.Setenv("WH_CACHE_BACKEND", "redis")
+	t.Setenv("WH_CACHE_REDIS_ADDRS", "a:6379")
+	t.Setenv("WH_CACHE_REDIS_USERNAME", "u")
+	t.Setenv("WH_CACHE_REDIS_DB", "2")
+	t.Setenv("WH_CACHE_REDIS_TLS_ENABLED", "true")
+	t.Setenv("WH_CACHE_REDIS_TLS_SERVER_NAME", "r.internal")
+	loaded, err := config.Load(filepath.Join(t.TempDir(), "none.yaml"))
+	require.NoError(t, err)
+	got, err := redisConfig(loaded.Cache.Redis)
+	require.NoError(t, err)
+	assert.Equal(t, "u", got.Username)
+	assert.Equal(t, 2, got.DB)
+	require.NotNil(t, got.TLS)
+	assert.Equal(t, "r.internal", got.TLS.ServerName)
+}
+
 // keepalive is a config.json patch setting the stream block's keepalive pair.
 func keepalive(interval, buckets int) map[string]any {
 	return map[string]any{"stream": map[string]any{"keepalive_interval": interval, "keepalive_buckets": buckets, "gap_window_minutes": 15}}
