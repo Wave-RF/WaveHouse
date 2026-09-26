@@ -636,7 +636,8 @@ func TestDynamo_CommitAttemptsEveryChunk(t *testing.T) {
 // A caller that cancels mid-Reserve (a client disconnecting) leaves nothing
 // claimed. The fake applies a put after a delay whatever the caller does, as
 // DynamoDB applies a request already on the wire, so a put abandoned on the
-// cancel would land after its release and hold its id for the lease.
+// cancel would land after its release and hold its id for the lease. No
+// put applies before the cancel, so neither case depends on timing.
 func TestDynamo_CallerCancelLeavesNothingClaimed(t *testing.T) {
 	t.Parallel()
 	t.Run("a put still unsent", func(t *testing.T) {
@@ -659,6 +660,7 @@ func assertCancelLeavesNothing(t *testing.T, ks []Key) {
 		applies sync.WaitGroup
 	)
 	started := make(chan struct{}, 2)
+	cancelled := make(chan struct{})
 	_, m := openFakeWith(t, &fakeDynamo{
 		put: func(ctx context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
 			id := idOf(in.Item[attrKey])
@@ -668,7 +670,8 @@ func assertCancelLeavesNothing(t *testing.T, ks []Key) {
 			mu.Unlock()
 			applied := make(chan struct{})
 			applies.Go(func() {
-				time.Sleep(20 * time.Millisecond)
+				<-cancelled
+				time.Sleep(5 * time.Millisecond) // lands after the caller left
 				mu.Lock()
 				table[id] = tk
 				mu.Unlock()
@@ -695,7 +698,7 @@ func assertCancelLeavesNothing(t *testing.T, ks []Key) {
 		},
 	}, DynamoConfig{Table: "dedupe", ReserveConcurrency: 2})
 	ctx, cancel := context.WithCancel(t.Context())
-	go func() { <-started; <-started; cancel() }()
+	go func() { <-started; <-started; cancel(); close(cancelled) }()
 	_, err := m.Reserve(ctx, ks, time.Minute)
 	require.ErrorIs(t, err, context.Canceled)
 	applies.Wait()
