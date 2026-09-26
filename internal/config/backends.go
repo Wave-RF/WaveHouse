@@ -165,10 +165,15 @@ func checkBackend[T ~string](key, env string, got T, valid []T) error {
 	return fmt.Errorf("%s (%s) %q is not a backend this build has; valid: %s", key, env, got, strings.Join(names, ", "))
 }
 
-// embeddedDuplicateWindow mirrors mq.EmbeddedDuplicateWindow, the embedded
-// ingest stream's duplicate window (#613 F2). A lease longer than it would let
-// the republish of a publish whose outcome was unknown land twice.
+// embeddedDuplicateWindow is the embedded ingest stream's duplicate window,
+// counted from the stored publish.
 const embeddedDuplicateWindow = 2 * time.Minute
+
+// maxEmbeddedLease is the longest dedupe.lease that window covers: a client
+// that obeys the in-flight 503's Retry-After (the whole lease) after a
+// publish whose outcome it never learned republishes up to twice the lease
+// after the claim, and DynamoDB rounds a claim's expiry up to the second.
+const maxEmbeddedLease = (embeddedDuplicateWindow - time.Second) / 2
 
 // validateBackends checks every layer's backend and its sub-block, then the
 // rules that span two layers.
@@ -178,8 +183,8 @@ func (c *Config) validateBackends() error {
 			return err
 		}
 	}
-	if c.MQ.Backend == MQEmbedded && c.Dedupe.Lease > embeddedDuplicateWindow {
-		return fmt.Errorf("dedupe.lease (WH_DEDUPE_LEASE) %s exceeds the embedded mq's %s duplicate window: a claim must lapse before the queue forgets the publish it guards", c.Dedupe.Lease, embeddedDuplicateWindow)
+	if c.MQ.Backend == MQEmbedded && c.Dedupe.Lease > maxEmbeddedLease {
+		return fmt.Errorf("dedupe.lease (WH_DEDUPE_LEASE) %s is over %s with the embedded mq: twice the lease plus 1s must fit its %s duplicate window, since a client obeying the in-flight 503's Retry-After republishes up to twice the lease after the claim", c.Dedupe.Lease, maxEmbeddedLease, embeddedDuplicateWindow)
 	}
 	return nil
 }

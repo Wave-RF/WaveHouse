@@ -56,7 +56,7 @@ Whether a tenant dedupes, and on which field, are settings-directory keys ([Dedu
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `dedupe.lease` | `WH_DEDUPE_LEASE` | `30s` | How long a record's id stays claimed while the record is published. Another request carrying the same id meanwhile gets `503` with this as `Retry-After`, in whole seconds; a claim that is neither committed nor released, because its process died mid-publish, lapses after it. At most `2m` with `mq.backend: embedded`, the embedded queue's duplicate window: a longer lease refuses boot. A Go duration (`30s`, `1m`); `0` refuses boot. |
+| `dedupe.lease` | `WH_DEDUPE_LEASE` | `30s` | How long a record's id stays claimed while the record is published. Another request carrying the same id meanwhile gets `503` with this as `Retry-After`, in whole seconds; a claim that is neither committed nor released, because its process died mid-publish, lapses after it. With `mq.backend: embedded`, twice the lease plus one second must fit the embedded queue's 2-minute duplicate window, so the lease is at most `59.5s`: a client that obeys `Retry-After` after a publish whose outcome it never learned republishes up to twice the lease after the claim, and DynamoDB rounds a claim's expiry up to the second. A longer lease refuses boot. A Go duration (`30s`, `45s`); `0` refuses boot. |
 | `dedupe.reserve_concurrency` | `WH_DEDUPE_RESERVE_CONCURRENCY` | `64` | The most parallel calls one Reserve, Commit or Release makes to a remote dedupe backend. Ingest sends one id per call today, so it has no effect yet; `pebble` ignores it. `0` refuses boot. |
 
 #### DynamoDB dedupe
@@ -265,7 +265,7 @@ cache:
 
 dedupe:
   backend: pebble        # in-process Pebble under <data_dir>/pebble; or dynamodb
-  lease: 30s             # at most 2m with the embedded mq
+  lease: 30s             # at most 59.5s with the embedded mq
   reserve_concurrency: 64
   # dynamodb:            # read only when backend is dynamodb
   #   table: wavehouse-dedupe-prod
