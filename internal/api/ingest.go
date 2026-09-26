@@ -158,7 +158,7 @@ type recordReject struct {
 type requestAbort struct {
 	Status     int
 	Message    string
-	RetryAfter string // non-empty → emit a Retry-After header (503: backpressure, an unavailable broker, or an id another request holds)
+	RetryAfter string // non-empty → emit a Retry-After header
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
