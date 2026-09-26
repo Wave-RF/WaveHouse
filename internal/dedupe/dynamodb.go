@@ -579,8 +579,8 @@ func newToken() string {
 // classify maps a DynamoDB error onto the contract: a condition failure is
 // returned as is for the caller to read, anything retrying later can cure
 // wraps ErrUnavailable, and the rest — a missing table, denied access, a
-// malformed request — is a configuration bug. Ingest answers both 500 until
-// #629 maps ErrUnavailable to a retryable 503.
+// malformed request — is a configuration bug. Ingest answers ErrUnavailable
+// with a retryable 503 and a configuration bug with a 500.
 func classify(op string, err error) error {
 	if err == nil {
 		return nil

@@ -328,11 +328,12 @@ func (e *EmbeddedNATS) record(id tenant.ID, q *tenantQueue) {
 }
 
 // EmbeddedDuplicateWindow is how long an ingest queue remembers a
-// WithIdempotencyKey key. It must be at least 2*lease + 1s: a claim left to
-// lapse after an uncertain publish is republished once the lease ends, but
-// the in-flight 503 tells a client to retry only after the FULL lease, so an
-// obedient client's retry can land up to ~2*lease after the original
-// Reserve; the +1s covers a backend (DynamoDB, for one) that rounds a
+// WithIdempotencyKey key. It must be at least lease + ceil(lease) + 1s
+// (2*lease + 1s for a whole-second lease), which config checks against
+// dedupe.lease at boot. A claim left to lapse after an uncertain publish is
+// republished once the lease ends, but the in-flight 503 tells a client to
+// retry only after the FULL lease, so an obedient client's retry can land up
+// to ~2*lease after the original Reserve; the +1s covers a backend (DynamoDB, for one) that rounds a
 // claim's expiry up by as much. Only a window at least that long guarantees
 // this queue still drops the retry's second copy.
 const EmbeddedDuplicateWindow = 2 * time.Minute

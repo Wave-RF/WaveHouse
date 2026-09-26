@@ -568,7 +568,7 @@ func TestNew_RefusesALayerWithoutABackend(t *testing.T) {
 // A Pebble instance that cannot open follows the registry's own rule for the
 // shape: a flat directory refuses boot, like every other store, and a nested
 // one fails closed for every tenant with dedupe on, since they share the
-// instance — their ingest answers 500 until a reload or a restart opens it —
+// instance — their ingest answers 503 until a reload or a restart opens it —
 // while the process, and every tenant with dedupe off, carries on.
 func TestNew_DedupeOpenFailure(t *testing.T) {
 	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}}

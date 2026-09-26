@@ -167,7 +167,8 @@ func checkBackend[T ~string](key, env string, got T, valid []T) error {
 }
 
 // embeddedDuplicateWindow is the embedded ingest stream's duplicate window,
-// counted from the stored publish.
+// counted from the stored publish. It mirrors mq.EmbeddedDuplicateWindow,
+// which config must not import; window_test.go pins the two.
 const embeddedDuplicateWindow = 2 * time.Minute
 
 // maxEmbeddedLease is the longest dedupe.lease the duplicate window covers —
