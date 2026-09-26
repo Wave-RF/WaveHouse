@@ -48,6 +48,9 @@ exclude:
     # HTTP assertions). It is imported only from *_test.go files, never from
     # production code, so there's nothing meaningful to cover.
     - ^internal/testutil/
+    # The coord conformance suite: test helpers every Coordinator's tests
+    # run, imported only from *_test.go like testutil.
+    - ^internal/coord/coordtest/
     - ^tests/
     # scripts/ holds Go helpers (cov, orchestrator) that drive the build but
     # aren't part of the shipped binary; they show up in `-coverpkg=./...`

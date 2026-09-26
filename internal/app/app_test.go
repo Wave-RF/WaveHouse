@@ -28,6 +28,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
@@ -549,6 +550,7 @@ func TestNew_RefusesALayerWithoutABackend(t *testing.T) {
 		{"dedupe.backend", func(c *config.Config) { c.Dedupe.Backend = "" }},
 		{"mq.backend", func(c *config.Config) { c.MQ.Backend = "" }},
 		{"cache.backend", func(c *config.Config) { c.Cache.Backend = "" }},
+		{"coord.backend", func(c *config.Config) { c.Coord.Backend = "" }},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
 			guardGlobals(t)
@@ -1078,6 +1080,28 @@ func TestRun_ServesUntilCancelled(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 	assert.Error(t, err, "the listener is closed after Run returns")
+}
+
+func TestRun_SweeperRunsUnderItsLease(t *testing.T) {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{Listener: ln})
+	rival := a.coord.(*coord.Local).Peer()
+
+	_, stop := runApp(t, a, ln)
+	require.Eventually(t, func() bool {
+		term, err := rival.TryAcquire(t.Context(), sweeperLease)
+		if err == nil { // the sweeper has not campaigned yet: give it back
+			require.NoError(t, term.Resign(t.Context()))
+		}
+		return errors.Is(err, coord.ErrHeld)
+	}, 5*time.Second, 5*time.Millisecond, "the sweeper campaigns for its lease and keeps it while it runs")
+	require.NoError(t, stop())
+
+	term, err := rival.TryAcquire(t.Context(), sweeperLease)
+	require.NoError(t, err, "a stopped sweeper hands its lease on")
+	require.NoError(t, term.Resign(t.Context()))
 }
 
 func TestRun_PrometheusSidecar(t *testing.T) {

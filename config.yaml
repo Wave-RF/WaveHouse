@@ -50,7 +50,7 @@ mq:
 dedupe:
   backend: pebble # Pebble under <data_dir>/pebble
 coord:
-  backend: local # reserved: nothing is elected yet
+  backend: local # leases (the sweeper's) held in this process
 
 # In-process L1 cache size. The query time-bucket
 # (query.timestamp_bucket_seconds) is a settings key.
