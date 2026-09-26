@@ -45,7 +45,7 @@ func TestLoad_CacheRedisFromEnv(t *testing.T) {
 	caFile, certFile, keyFile := writeTestPKI(t, dir)
 	for k, v := range map[string]string{
 		"WH_CACHE_BACKEND":                        "redis",
-		"WH_CACHE_REDIS_ADDRS":                    "r1:6379,r2:6379",
+		"WH_CACHE_REDIS_ADDRS":                    "r1:6379",
 		"WH_CACHE_REDIS_MODE":                     "standalone",
 		"WH_CACHE_REDIS_USERNAME":                 "wavehouse",
 		"WH_CACHE_REDIS_PASSWORD":                 "s3cret",
@@ -68,7 +68,7 @@ func TestLoad_CacheRedisFromEnv(t *testing.T) {
 	cfg, err := Load("nonexistent.yaml")
 	require.NoError(t, err)
 	assert.Equal(t, CacheRedisConfig{
-		Addrs: []string{"r1:6379", "r2:6379"}, Mode: RedisStandalone,
+		Addrs: []string{"r1:6379"}, Mode: RedisStandalone,
 		Username: "wavehouse", Password: "s3cret", DB: 2,
 		TLS: CacheRedisTLS{
 			Enabled: true, CAFile: caFile, CertFile: certFile, KeyFile: keyFile, ServerName: "redis.internal",
@@ -211,6 +211,11 @@ func TestValidate_CacheRedis(t *testing.T) {
 		{"no addrs", func(r *CacheRedisConfig) { r.Addrs = nil }, "cache.backend=redis needs cache.redis.addrs (WH_CACHE_REDIS_ADDRS)"},
 		{"addr with space", func(r *CacheRedisConfig) { r.Addrs = []string{"a:6379", " b:6379"} }, "no spaces around an address"},
 		{"addr without port", func(r *CacheRedisConfig) { r.Addrs = []string{"redis"} }, `cache.redis.addrs (WH_CACHE_REDIS_ADDRS) "redis": want host:port`},
+		{"addr empty port", func(r *CacheRedisConfig) { r.Addrs = []string{"redis:"} }, `"redis:": want host:port with a port from 1 to 65535`},
+		{"addr port not a number", func(r *CacheRedisConfig) { r.Addrs = []string{"redis:637x"} }, "a port from 1 to 65535"},
+		{"addr port out of range", func(r *CacheRedisConfig) { r.Addrs = []string{"redis:99999"} }, "a port from 1 to 65535"},
+		{"standalone with two addrs", func(r *CacheRedisConfig) { r.Addrs = []string{"a:6379", "b:6379"} }, "has 2 addresses: mode standalone connects to one server"},
+		{"cluster with two seeds", func(r *CacheRedisConfig) { r.Mode, r.Addrs = RedisCluster, []string{"a:6379", "b:6379"} }, ""},
 		{"mode", func(r *CacheRedisConfig) { r.Mode = "replica" }, `cache.redis.mode (WH_CACHE_REDIS_MODE) "replica": valid: standalone, cluster`},
 		{"sentinel refused", func(r *CacheRedisConfig) { r.Mode = RedisSentinel }, `cache.redis.mode (WH_CACHE_REDIS_MODE) "sentinel" is not supported yet: the cache neither authenticates to the sentinels nor refreshes their topology (https://github.com/Wave-RF/WaveHouse/issues/656)`},
 		{"cluster", func(r *CacheRedisConfig) { r.Mode = RedisCluster }, ""},

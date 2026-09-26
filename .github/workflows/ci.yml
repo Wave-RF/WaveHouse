@@ -280,8 +280,8 @@ jobs:
         with:
           go-cache-suffix: "-e2e-cov"
       # `-j` builds the prereqs (build-ts ∥ build-cover) concurrently,
-      # then runs the orchestrator: ClickHouse testcontainer + the cover
-      # binary + the SDK vitest suite.
+      # then runs the orchestrator: ClickHouse and Redis testcontainers +
+      # the cover binary + the SDK vitest suite.
       - name: Build SDK dist + cover binary, run E2E suite
         run: make -j "$(nproc)" test-e2e COV_DEFER=1
       - name: Upload coverage fragment

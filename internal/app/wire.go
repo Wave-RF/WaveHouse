@@ -322,7 +322,7 @@ func (a *App) wireClickHouse() error {
 		// cached is stale, so all of it is orphaned at once.
 		for _, id := range stale {
 			if err := a.cache.InvalidateTenant(a.stopCtx, id); err != nil {
-				slog.Error("cache invalidation of a stale tenant failed; it may serve stale rows until they expire", "tenant", id, "error", err)
+				slog.Warn("cache invalidation of a stale tenant did not land; it may serve stale rows until it does", "tenant", id, "error", err)
 			}
 		}
 	})

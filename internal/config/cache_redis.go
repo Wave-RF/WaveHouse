@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -78,8 +79,12 @@ func (r CacheRedisConfig) validate() error {
 		if strings.TrimSpace(a) != a {
 			return fmt.Errorf("cache.redis.addrs (WH_CACHE_REDIS_ADDRS) %q: no spaces around an address", a)
 		}
-		if _, _, err := net.SplitHostPort(a); err != nil {
+		_, port, err := net.SplitHostPort(a)
+		if err != nil {
 			return fmt.Errorf("cache.redis.addrs (WH_CACHE_REDIS_ADDRS) %q: want host:port: %w", a, err)
+		}
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("cache.redis.addrs (WH_CACHE_REDIS_ADDRS) %q: want host:port with a port from 1 to 65535", a)
 		}
 	}
 	switch r.Mode {
@@ -88,6 +93,11 @@ func (r CacheRedisConfig) validate() error {
 		return fmt.Errorf("cache.redis.mode (WH_CACHE_REDIS_MODE) %q is not supported yet: the cache neither authenticates to the sentinels nor refreshes their topology (https://github.com/Wave-RF/WaveHouse/issues/656); valid: %s, %s", r.Mode, RedisStandalone, RedisCluster)
 	default:
 		return fmt.Errorf("cache.redis.mode (WH_CACHE_REDIS_MODE) %q: valid: %s, %s", r.Mode, RedisStandalone, RedisCluster)
+	}
+	// Standalone dials the first address only, so a second one (a replica,
+	// say) would be silently ignored rather than failed over to.
+	if r.Mode == RedisStandalone && len(r.Addrs) > 1 {
+		return fmt.Errorf("cache.redis.addrs (WH_CACHE_REDIS_ADDRS) has %d addresses: mode standalone connects to one server; several are a cluster's seeds (mode cluster)", len(r.Addrs))
 	}
 	if r.DB < 0 {
 		return fmt.Errorf("cache.redis.db (WH_CACHE_REDIS_DB) %d is negative", r.DB)
@@ -108,14 +118,6 @@ func (r CacheRedisConfig) validate() error {
 		if d.v <= 0 {
 			return fmt.Errorf("%s %s must be positive", d.key, d.v)
 		}
-	}
-	for _, d := range []struct {
-		key string
-		v   time.Duration
-	}{
-		{"cache.redis.timeout (WH_CACHE_REDIS_TIMEOUT)", r.Timeout},
-		{"cache.redis.dial_timeout (WH_CACHE_REDIS_DIAL_TIMEOUT)", r.DialTimeout},
-	} {
 		if d.v > maxRedisTimeout {
 			return fmt.Errorf("%s %s is over %s: boot and shutdown each wait out a connection attempt, which both bound", d.key, d.v, maxRedisTimeout)
 		}

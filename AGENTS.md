@@ -152,7 +152,7 @@ If `make ci` passes locally, your commit has crossed the same gates CI will run 
 
 ### Running `make ci` (for agents)
 
-`make ci` is **self-contained**: the integration suite (`tests/integration/`) and the E2E orchestrator (`scripts/orchestrator/`) each boot ClickHouse via **testcontainers on random host ports**, and the shared cache backend's integration tests (`internal/cache/`) start their own Redis, Valkey, Dragonfly and one-node Redis Cluster containers the same way. The only prerequisite is a running **Docker daemon** — do **not** `make deps-up` or start ClickHouse first (`deps-up` is for `make dev` only).
+`make ci` is **self-contained**: the integration suite (`tests/integration/`) and the E2E orchestrator (`scripts/orchestrator/`) each boot ClickHouse and a Redis via **testcontainers on random host ports**, and the shared cache backend's integration tests (`internal/cache/`) start their own Redis, Valkey, Dragonfly and one-node Redis Cluster containers the same way. The only prerequisite is a running **Docker daemon** — do **not** `make deps-up` or start ClickHouse first (`deps-up` is for `make dev` only).
 
 Run it via the **background Bash tool** (`run_in_background: true`) and wait for the completion notification; the harness re-invokes you on exit, so polling the log with `tail` only burns context:
 
@@ -449,8 +449,8 @@ internal/stream/        → SSE fan-out (event Hub: project once per role, Subsc
 internal/tenant/        → Tenant id (type, grammar, reserved default, request header name)
 internal/testutil/      → Shared test helpers (mocks, JWT + schema helpers; logtest/ captures or silences the default logger; cachetest/ is the conformance suite every cache.Cache backend runs)
 tests/                  → Integration & E2E tests
-tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer). A package tested against its own external server keeps them beside it: internal/cache/redis_integration_test.go (Redis, Valkey, Dragonfly, Redis Cluster testcontainers)
-tests/e2e/              → E2E test stack (scripts/orchestrator boots a ClickHouse testcontainer + the wavehouse-cov binary)
+tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer, and Redis for shared_cache_test.go). A package tested against its own external server keeps them beside it: internal/cache/redis_integration_test.go (Redis, Valkey, Dragonfly, Redis Cluster testcontainers)
+tests/e2e/              → E2E test stack (scripts/orchestrator boots ClickHouse and Redis testcontainers + the wavehouse-cov binary)
 tests/e2e/fixtures/     → Idempotent ClickHouse DDL scripts for test tables
 tests/e2e/sdk/          → E2E integration tests via TypeScript SDK (Vitest)
 deployments/compose/    → Docker Compose files (standalone.yaml, dependencies.yaml)

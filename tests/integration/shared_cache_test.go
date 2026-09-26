@@ -23,6 +23,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/Wave-RF/WaveHouse/internal/app"
+	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/config"
 )
 
@@ -31,7 +32,7 @@ const redisImage = "redis:8.10.2-alpine"
 
 // minCacheTTL is cache.QueryTimeToTTL's floor: a fill made less than this
 // long ago cannot have expired, so a miss inside it is an invalidation.
-const minCacheTTL = 10 * time.Second
+var minCacheTTL = cache.QueryTimeToTTL(0)
 
 var cachePrefixes atomic.Uint64
 

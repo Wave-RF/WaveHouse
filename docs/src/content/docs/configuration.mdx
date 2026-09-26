@@ -150,7 +150,7 @@ The `redis` backend's settings, read only when `cache.backend` is `redis`. It is
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `cache.redis.addrs` | `WH_CACHE_REDIS_ADDRS` | *(empty)* | **Required** with `backend: redis`. `host:port` of the server; several are a cluster's seed nodes. Comma-separated in the env var. Not a URL: `redis://user:password@host:port` refuses boot, without repeating the value, so set the credentials through `username` and `password`, and `rediss://` through `tls.enabled`. |
+| `cache.redis.addrs` | `WH_CACHE_REDIS_ADDRS` | *(empty)* | **Required** with `backend: redis`. `host:port` of the server: exactly one in `standalone` mode, where a second would be ignored and so refuses boot; several are a cluster's seed nodes. Comma-separated in the env var. Not a URL: `redis://user:password@host:port` refuses boot, without repeating the value, so set the credentials through `username` and `password`, and `rediss://` through `tls.enabled`. |
 | `cache.redis.mode` | `WH_CACHE_REDIS_MODE` | `standalone` | `standalone` or `cluster`. `sentinel` refuses boot until [#656](https://github.com/Wave-RF/WaveHouse/issues/656): the cache does not yet authenticate to the sentinels or refresh their topology, so it could not be trusted to follow a failover. |
 | `cache.redis.username` | `WH_CACHE_REDIS_USERNAME` | *(empty)* | ACL user. Empty uses the server's `default` user. |
 | `cache.redis.password` | `WH_CACHE_REDIS_PASSWORD` | *(empty)* | A secret: set it through the environment (or your secret store's env injection), not in a tracked `config.yaml`. |

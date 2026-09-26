@@ -806,14 +806,14 @@ func TestNew_RedisCacheRefusesAnUnreadableTLSFile(t *testing.T) {
 func TestRedisConfig_FromLoadedDefaults(t *testing.T) {
 	t.Setenv("WH_SETTINGS_DIR", t.TempDir())
 	t.Setenv("WH_CACHE_BACKEND", "redis")
-	t.Setenv("WH_CACHE_REDIS_ADDRS", "a:6379,b:6379")
+	t.Setenv("WH_CACHE_REDIS_ADDRS", "a:6379")
 	t.Setenv("WH_CACHE_REDIS_PASSWORD", "pw")
 	loaded, err := config.Load(filepath.Join(t.TempDir(), "none.yaml"))
 	require.NoError(t, err)
 	got, err := redisConfig(loaded.Cache.Redis)
 	require.NoError(t, err)
 	assert.Equal(t, cache.RedisConfig{
-		Addrs: []string{"a:6379", "b:6379"}, Mode: cache.RedisStandalone, Password: "pw",
+		Addrs: []string{"a:6379"}, Mode: cache.RedisStandalone, Password: "pw",
 		KeyPrefix: cache.DefaultRedisKeyPrefix, Timeout: cache.DefaultRedisTimeout,
 		DialTimeout: cache.DefaultRedisDialTimeout, MaxValueBytes: cache.DefaultRedisMaxValueBytes,
 		CompressMinBytes: cache.DefaultRedisCompressMinBytes, VersionTTL: cache.DefaultRedisVersionTTL,
@@ -821,12 +821,14 @@ func TestRedisConfig_FromLoadedDefaults(t *testing.T) {
 
 	t.Setenv("WH_CACHE_REDIS_COMPRESS_MIN_BYTES", "0")
 	t.Setenv("WH_CACHE_REDIS_MODE", "cluster")
+	t.Setenv("WH_CACHE_REDIS_ADDRS", "a:6379,b:6379")
 	loaded, err = config.Load(filepath.Join(t.TempDir(), "none.yaml"))
 	require.NoError(t, err)
 	got, err = redisConfig(loaded.Cache.Redis)
 	require.NoError(t, err)
 	assert.Zero(t, got.CompressMinBytes, "the backend's never, not its default")
 	assert.Equal(t, cache.RedisCluster, got.Mode)
+	assert.Equal(t, []string{"a:6379", "b:6379"}, got.Addrs, "a cluster's seeds")
 	assert.Equal(t, cache.RedisSentinel, config.RedisSentinel)
 }
 
