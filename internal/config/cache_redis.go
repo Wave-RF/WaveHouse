@@ -62,7 +62,12 @@ func (r CacheRedisConfig) validate() error {
 	if !r.hasAddrs() {
 		return errors.New("cache.backend=redis needs cache.redis.addrs (WH_CACHE_REDIS_ADDRS): the server's host:port, or a cluster's seeds")
 	}
-	for _, a := range r.Addrs {
+	for i, a := range r.Addrs {
+		// A redis:// URL, or user:pass@host, may carry a password: refuse it
+		// without echoing it into the boot error and the logs.
+		if strings.Contains(a, "://") || strings.Contains(a, "@") {
+			return fmt.Errorf("cache.redis.addrs (WH_CACHE_REDIS_ADDRS) entry %d is a URL or holds credentials (not echoed): give host:port, and set the user and password with WH_CACHE_REDIS_USERNAME and WH_CACHE_REDIS_PASSWORD, and TLS (rediss://) with WH_CACHE_REDIS_TLS_ENABLED", i+1)
+		}
 		if strings.TrimSpace(a) != a {
 			return fmt.Errorf("cache.redis.addrs (WH_CACHE_REDIS_ADDRS) %q: no spaces around an address", a)
 		}

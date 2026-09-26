@@ -165,6 +165,27 @@ func TestLoad_CacheRedisBlankAddrs(t *testing.T) {
 	require.ErrorContains(t, err, "cache.backend=redis needs cache.redis.addrs")
 }
 
+// A URL-style address carries its password, and a boot error reaches the
+// logs: the refusal names the entry, never its value.
+func TestLoad_CacheRedisRefusesURLAddrsWithoutEchoingThem(t *testing.T) {
+	for _, addr := range []string{
+		"redis://default:s3cret@redis:6379",
+		"rediss://default:s3cret@redis:6380",
+		"default:s3cret@redis:6379",
+		"redis://redis:6379",
+	} {
+		t.Run(addr, func(t *testing.T) {
+			t.Setenv("WH_CACHE_BACKEND", "redis")
+			t.Setenv("WH_CACHE_REDIS_ADDRS", "ok:6379,"+addr)
+			_, err := Load("nonexistent.yaml")
+			require.ErrorContains(t, err, "cache.redis.addrs (WH_CACHE_REDIS_ADDRS) entry 2 is a URL or holds credentials")
+			assert.Contains(t, err.Error(), "WH_CACHE_REDIS_USERNAME and WH_CACHE_REDIS_PASSWORD")
+			assert.NotContains(t, err.Error(), "s3cret")
+			assert.NotContains(t, err.Error(), addr)
+		})
+	}
+}
+
 func TestUnboundEnv_KnowsTheCacheRedisVariables(t *testing.T) {
 	t.Parallel()
 	assert.Empty(t, unboundEnv([]string{
