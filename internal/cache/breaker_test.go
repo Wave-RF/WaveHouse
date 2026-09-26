@@ -68,8 +68,9 @@ func TestBreaker_TripAndProbeSchedule(t *testing.T) {
 	_, open := b.untilProbe()
 	assert.False(t, open)
 
-	b.trip()
+	assert.True(t, b.trip(), "it opened")
 	assert.True(t, b.isOpen(), "no threshold for a refusal")
+	assert.False(t, b.trip(), "already open")
 	b.success()
 	assert.True(t, b.isOpen(), "a success that is not the probe's leaves it open")
 	d, open := b.untilProbe()
@@ -85,7 +86,7 @@ func TestBreaker_TripAndProbeSchedule(t *testing.T) {
 	require.True(t, probe)
 	d, _ = b.untilProbe()
 	assert.Equal(t, 5*time.Second, d, "while the probe runs, wait out a whole period")
-	b.trip() // the probe was refused too
+	assert.True(t, b.trip(), "the probe was refused too")
 	d, _ = b.untilProbe()
 	assert.Equal(t, 5*time.Second, d)
 

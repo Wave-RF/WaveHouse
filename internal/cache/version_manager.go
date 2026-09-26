@@ -16,14 +16,15 @@ import (
 // place, so the index holds one entry per live tenant, table and scope
 // however often each is bumped, and forgetting a tenant releases all of it.
 //
-// A query key folds all three versions of each dependency, which gives the
-// lattice: a table bump orphans every scope, a scope bump that scope and the
-// whole-table view, and a tenant bump everything of the tenant's.
+// An entry's key (`QueryKey`) folds all three versions of each dependency,
+// which gives the lattice: a table bump orphans every scope, a scope bump
+// that scope and the whole-table view, and a tenant bump everything of the
+// tenant's.
 type VersionManager struct {
 	mu sync.RWMutex
 
-	// tenants holds each tenant's index from the first query key built for
-	// it until the tenant is bumped or pruned.
+	// tenants holds each tenant's index from the first entry key (`QueryKey`)
+	// built for it until the tenant is bumped or pruned.
 	tenants map[tenant.ID]*tenantVersions
 
 	// lastGen is the last generation handed to a tenant; see tenantVersions.gen.

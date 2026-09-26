@@ -5,6 +5,7 @@ package cache_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -92,11 +94,12 @@ func startDragonfly(t *testing.T) *server {
 }
 
 // startCluster runs a one-node Redis Cluster owning every slot: enough for
-// the server to enforce cluster semantics — CROSSSLOT on a multi-key
-// command, MOVED routing through the client — which is what the key schema
-// must survive. The node announces 127.0.0.1 on a host port bound to the
-// same number, so the address the client learns from CLUSTER SLOTS is
-// dialable from the test.
+// the server to enforce CROSSSLOT on a multi-key command, which is what the
+// key schema must survive, and for the cluster client to read the topology.
+// It never routes across nodes: a node owning every slot never answers
+// MOVED. The node announces 127.0.0.1 on a host port bound to the same
+// number, so the address the client learns from CLUSTER SLOTS is dialable
+// from the test.
 func startCluster(t *testing.T) *server {
 	t.Helper()
 	port := freePort(t)
@@ -233,6 +236,10 @@ func TestRedis_Conformance(t *testing.T) {
 				t.Parallel()
 				testCompression(t, s)
 			})
+			t.Run("an incompressible value over the stored limit is not stored", func(t *testing.T) {
+				t.Parallel()
+				testIncompressible(t, s)
+			})
 		})
 	}
 }
@@ -314,6 +321,24 @@ func testCompression(t *testing.T, s *server) {
 	stored, err := r.Do(ctx, r.B().Strlen().Key(keys[0]).Build()).AsInt64()
 	require.NoError(t, err)
 	assert.Less(t, stored, int64(len(rows)/10))
+}
+
+// The stored-size limit, past the raw one: random bytes do not compress, so
+// a value between the two is refused only once it is encoded.
+func testIncompressible(t *testing.T, s *server) {
+	ctx := context.Background()
+	c := open(t, s, uniquePrefix())
+	rows := make([]byte, maxValue+1<<10)
+	_, _ = rand.Read(rows)
+	require.Less(t, len(rows), maxValue*cache.DecodedFactor, "within the raw limit")
+	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
+	_, snap, err := c.Lookup(ctx, "acme", "big", deps)
+	require.NoError(t, err)
+	require.NoError(t, c.Set(ctx, snap, rows, time.Minute), "declined, not failed")
+	e, _, err := c.Lookup(ctx, "acme", "big", deps)
+	require.NoError(t, err)
+	assert.Nil(t, e.Value)
+	assert.Zero(t, valueCount(raw(t, s))(c), "nothing stored")
 }
 
 // A token that is lost — evicted, expired, flushed, a restart without
@@ -424,8 +449,9 @@ func dockerClient(t *testing.T) *testcontainers.DockerClient {
 	return d
 }
 
-// A server that stops answering costs a request at most about the op
-// timeout, then nothing: the breaker opens and the cache is bypassed.
+// A server that stops answering costs a lookup a bounded wait — asserted
+// under ten times the op timeout, as the suite runs in parallel under -race —
+// then nothing: the breaker opens and the cache is bypassed.
 // Invalidations made meanwhile are kept and land once it answers again, and
 // a process that boots while it is down starts bypassed and connects later.
 func TestRedis_ServerStopsAnswering(t *testing.T) {
@@ -460,7 +486,7 @@ func TestRedis_ServerStopsAnswering(t *testing.T) {
 		e, snap, err := a.Lookup(ctx, "acme", "q", deps)
 		require.Error(t, err, "lookup %d", i)
 		assert.Nil(t, e.Value)
-		assert.Less(t, time.Since(start), 10*timeout, "a lookup costs at most about the timeout")
+		assert.Less(t, time.Since(start), 10*timeout, "a lookup returns within ten times the timeout")
 		require.NoError(t, a.Set(ctx, snap, []byte("rows"), time.Minute), "the failed lookup's snapshot files nothing")
 	}
 	require.True(t, cache.Bypassed(a), "three timeouts open the breaker")
@@ -560,35 +586,63 @@ func (c unanswered) Write(b []byte) (int, error) {
 	return c.Conn.Write(b)
 }
 
-// forward proxies each connection it accepts to the address target holds
-// at that moment, so a switch moves new connections only, as a stable DNS
-// name or a proxy does after a failover. It returns the address to dial.
-func forward(t *testing.T, target *atomic.Pointer[string]) string {
+// proxy forwards each connection it accepts to the address target holds at
+// that moment, so a switch moves new connections only, as a stable DNS name
+// or a proxy does after a failover. It holds a new connection for delay
+// before forwarding it, as a slow dial and handshake would.
+type proxy struct {
+	addr   string // to dial
+	target atomic.Pointer[string]
+	delay  atomic.Int64 // a time.Duration
+
+	mu    sync.Mutex
+	conns []net.Conn
+}
+
+func newProxy(t *testing.T, target string) *proxy {
 	t.Helper()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
+	p := &proxy{addr: ln.Addr().String()}
+	p.target.Store(&target)
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			go func() {
-				defer func() { _ = c.Close() }()
-				var d net.Dialer
-				u, err := d.DialContext(context.Background(), "tcp", *target.Load())
-				if err != nil {
-					return
-				}
-				defer func() { _ = u.Close() }()
-				go func() { _, _ = io.Copy(u, c); _ = u.Close() }()
-				_, _ = io.Copy(c, u)
-			}()
+			p.mu.Lock()
+			p.conns = append(p.conns, c)
+			p.mu.Unlock()
+			go p.serve(c)
 		}
 	}()
-	return ln.Addr().String()
+	return p
+}
+
+func (p *proxy) serve(c net.Conn) {
+	defer func() { _ = c.Close() }()
+	time.Sleep(time.Duration(p.delay.Load()))
+	var d net.Dialer
+	u, err := d.DialContext(context.Background(), "tcp", *p.target.Load())
+	if err != nil {
+		return
+	}
+	defer func() { _ = u.Close() }()
+	go func() { _, _ = io.Copy(u, c); _ = u.Close() }()
+	_, _ = io.Copy(c, u)
+}
+
+// drop closes every connection p carries, so the client must reconnect.
+func (p *proxy) drop() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, c := range p.conns {
+		_ = c.Close()
+	}
+	p.conns = nil
 }
 
 // A failover behind a stable address: the connections the process holds
@@ -616,9 +670,8 @@ func TestRedis_FailoverBehindAStableAddress(t *testing.T) {
 		return err == nil && strings.Contains(info, "master_link_status:up")
 	}, 30*time.Second, 50*time.Millisecond, "the replica syncs")
 
-	var target atomic.Pointer[string]
-	target.Store(&primary.addr)
-	stable := &server{addr: forward(t, &target), mode: cache.RedisStandalone}
+	fwd := newProxy(t, primary.addr)
+	stable := &server{addr: fwd.addr, mode: cache.RedisStandalone}
 	prefix := uniquePrefix()
 	a := open(t, stable, prefix, func(c *cache.RedisConfig) {
 		c.BreakerThreshold, c.BreakerOpenFor = 1000, 200*time.Millisecond
@@ -637,7 +690,7 @@ func TestRedis_FailoverBehindAStableAddress(t *testing.T) {
 	_, err = a.Invalidate(ctx, deps)
 	require.ErrorContains(t, err, "READONLY")
 	require.True(t, cache.Bypassed(a))
-	target.Store(&replica.addr)
+	fwd.target.Store(&replica.addr)
 
 	deadline := time.Now().Add(15 * time.Second)
 	for cache.Pending(a) > 0 {
@@ -813,4 +866,94 @@ func TestRedis_RefusedWrites(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Restoring a snapshot — RDB, AOF or a backup — is a rollback, not a lost
+// token: the old tokens come back with the values filed under them, so what
+// was invalidated since is served again, as after a failover to a replica
+// that missed the bumps. The documented exception to "lost tokens miss".
+func TestRedis_RestoredSnapshotIsARollback(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := startStandalone(t, redisImage, "redis-server", "--save", "", "--appendonly", "no", "--enable-debug-command", "yes")
+	r := raw(t, s)
+	prefix := uniquePrefix()
+	c := open(t, s, prefix)
+	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
+	_, snap, err := c.Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+	require.NoError(t, c.Set(ctx, snap, []byte("pre-write rows"), time.Minute))
+	command(t, r, "SAVE")
+
+	_, err = c.Invalidate(ctx, deps)
+	require.NoError(t, err)
+	e, _, err := c.Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+	require.Nil(t, e.Value)
+
+	command(t, r, "DEBUG", "RELOAD", "NOSAVE")
+	e, _, err = open(t, s, prefix).Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+	assert.Equal(t, "pre-write rows", string(e.Value), "the restore brought back the pre-write token")
+}
+
+// A reconnect slower than the op timeout (a dial and TLS handshake across
+// zones) fails the operations waiting on it, since rueidis dials under their
+// context; they open the breaker, and the probe, whose budget covers a dial,
+// completes the reconnect and closes it. Only the connection the probe
+// lands on: rueidis spreads commands over several, and the rest still
+// reconnect under the op timeout.
+func TestRedis_ProbeFitsASlowReconnect(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := startRedis(t)
+	p := newProxy(t, s.addr)
+	const timeout = 100 * time.Millisecond
+	a := open(t, &server{addr: p.addr, mode: cache.RedisStandalone}, uniquePrefix(), func(c *cache.RedisConfig) {
+		c.Timeout, c.DialTimeout = timeout, 2*time.Second
+		c.BreakerThreshold, c.BreakerOpenFor = 1, 200*time.Millisecond
+	})
+	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
+	_, _, err := a.Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+
+	p.delay.Store(int64(5 * timeout))
+	p.drop()
+	_, _, err = a.Lookup(ctx, "acme", "q", deps)
+	require.Error(t, err, "the reconnect does not fit in the lookup's timeout")
+	require.True(t, cache.Bypassed(a))
+	require.Eventually(t, func() bool { return !cache.Bypassed(a) }, 10*time.Second, 10*time.Millisecond,
+		"the probe reconnects within the dial timeout")
+}
+
+// A password rotated under a running process refuses its next connection's
+// handshake, and so every operation: one such reply opens the breaker,
+// whatever the threshold, and the probe closes it once the credentials work.
+func TestRedis_RejectedCredentialsOpenTheBreaker(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := startRedis(t)
+	r := raw(t, s)
+	command(t, r, "ACL", "SETUSER", "rotating", "on", ">old", "+@all", "~*")
+	a := open(t, s, uniquePrefix(), func(c *cache.RedisConfig) {
+		c.Username, c.Password = "rotating", "old"
+		c.BreakerThreshold, c.BreakerOpenFor = 1000, 200*time.Millisecond
+	})
+	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
+	_, _, err := a.Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+
+	command(t, r, "ACL", "SETUSER", "rotating", "resetpass", ">new")
+	command(t, r, "CLIENT", "KILL", "USER", "rotating") // as the connection lifetime would
+	require.Eventually(t, func() bool {
+		_, _, err = a.Lookup(ctx, "acme", "q", deps)
+		return err != nil && strings.Contains(err.Error(), "WRONGPASS")
+	}, 5*time.Second, 10*time.Millisecond, "the reconnect is refused")
+	assert.True(t, cache.Bypassed(a), "one refused handshake opens the breaker")
+	time.Sleep(time.Second) // several refused probes
+	assert.True(t, cache.Bypassed(a))
+
+	command(t, r, "ACL", "SETUSER", "rotating", ">old")
+	require.Eventually(t, func() bool { return !cache.Bypassed(a) }, 10*time.Second, 10*time.Millisecond,
+		"the probe closes it once the credentials work")
 }
