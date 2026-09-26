@@ -681,7 +681,7 @@ func TestDynamo_ReleaseAttemptsEveryClaim(t *testing.T) {
 
 // One throttled put in a multi-key Reserve: the unsent puts are never sent,
 // and a sibling already sent runs to its answer before the undo releases it,
-// so a put cannot land after its own release.
+// so a sibling's failure never lets a put land after its own release.
 func TestDynamo_FailedMultiKeyReserve(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex

@@ -320,8 +320,9 @@ type dynamoStore struct {
 // Reserve puts every key's pending item in parallel, each conditional on no
 // live item holding the key. A failed condition hands back the live item,
 // whose state says Duplicate or InFlight without a read, or Claimed when its
-// token is the put's own. On any error every put that may have landed is
-// released by its token.
+// token is the put's own. On any error it releases, by token, every put that
+// may have landed; what that undo misses (below) holds its key InFlight
+// until the lease ends, as a crashed request's claim does.
 func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Duration) ([]Claim, error) {
 	if len(keys) == 0 {
 		return []Claim{}, nil
@@ -338,9 +339,10 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 	sent := make([]bool, len(keys))
 	// The first failure skips the puts not yet sent: the Reserve fails
 	// either way, and a throttled table should not take the rest. A put
-	// already sent runs on ctx, not gctx, so it finishes and its outcome is
-	// known before the undo below; cancelled mid-flight, it could land after
-	// its release and hold the key for the lease.
+	// already sent runs on ctx, not gctx, so a sibling's failure never cuts
+	// it off: it answers before the undo below. The caller's cancellation or
+	// the put's own deadline can, and DynamoDB may then apply it after its
+	// release.
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(s.d.cfg.ReserveConcurrency)
 	for i, k := range keys {
@@ -363,8 +365,9 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 		})
 	}
 	if err := g.Wait(); err != nil {
-		// A put that was sent and errored may still have landed; its token
-		// is known, and releasing a key it does not hold is a no-op.
+		// A sent put that errored may have landed anyway; releasing a key
+		// its token does not hold is a no-op. Best effort: a put applied
+		// after this, or a release that fails, lapses with the lease.
 		var undo []Claim
 		for i, c := range claims {
 			if sent[i] && (c.Status == Claimed || c.Status == 0) {
