@@ -157,8 +157,8 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	// the tenant's version alone, so InvalidateTenant orphans it but no insert
 	// does (TTL-bound until #343). The snapshot is of the versions before
 	// anything the query reads is chosen, so a bump landing after — mid-query
-	// (#382), or a reload repointing the tenant once its pool below is taken —
-	// orphans the fill.
+	// (#382), or a reload moving the tenant to another address or database
+	// once its pool below is taken — orphans the fill.
 	// TODO: once pipes expose their tables/scopes, pass them as deps here so writes
 	// invalidate cached pipe results.
 	cacheKey := queryCacheKey(store.Tenant(), sql, params)

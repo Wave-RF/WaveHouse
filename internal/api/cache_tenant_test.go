@@ -263,10 +263,10 @@ func TestCachedRoutes_BumpDuringQueryOrphansTheFill(t *testing.T) {
 }
 
 // The snapshot is taken before the tenant's pool is chosen. A reload that
-// repoints the tenant — Pools.Reconcile, then InvalidateTenant — landing
-// between the two leaves the request on the old pool: its fill, read from
-// the old database, is orphaned by the bump rather than filed as fresh under
-// the new tenant version. And a tenant on no pool is a 503 even when its
+// moves the tenant to another address or database — Pools.Reconcile, then
+// InvalidateTenant — landing between the two leaves the request on the old
+// pool: its fill, read from the old database, is orphaned by the bump rather
+// than filed as fresh under the new tenant version. And a tenant on no pool is a 503 even when its
 // Lookup hit (#583 story 6).
 func TestCachedRoutes_ReloadAsThePoolIsTakenOrphansTheFill(t *testing.T) {
 	for _, route := range cachedRoutes {

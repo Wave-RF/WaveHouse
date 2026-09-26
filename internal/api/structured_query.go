@@ -172,8 +172,8 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 	// The snapshot is of the versions before anything the query reads is
 	// chosen, so a bump landing after — an insert mid-query (#382), or a
-	// reload repointing the tenant once its pool below is taken — orphans the
-	// fill.
+	// reload moving the tenant to another address or database once its pool
+	// below is taken — orphans the fill.
 	var entry cache.Entry
 	var snap cache.Snapshot
 	if h.Cache != nil {
