@@ -100,28 +100,52 @@ func TestEmbedded_SweepDeletesExpiredAndVersionZeroKeys(t *testing.T) {
 	assert.Equal(t, sweepResult{}, res, "a second pass finds nothing")
 }
 
-// A Commit that arrives while a sweep chunk has read an expired key but not
-// yet deleted it waits for the chunk, so the new commit is never deleted with
-// the old value. Without the lock the Commit lands in the gap and the sweep
-// then deletes it; the wait below only ever lets that pass, never fail.
-func TestEmbedded_SweepNeverDeletesACommitLandingMidChunk(t *testing.T) {
-	t.Parallel()
+// expiredAndClaimed commits id "e1" with an hour's retention, lets it expire
+// and claims it again, for a test to commit mid-sweep.
+func expiredAndClaimed(t *testing.T) (*Embedded, *Managed, []Claim) {
+	t.Helper()
 	e := NewEmbedded(t.TempDir())
 	clock := newStepClock()
 	SetClock(e, clock.now)
 	m := switchedOn(t, e, "acme")
 	commitIDs(t, m, time.Hour, "e1")
 	clock.advance(2 * time.Hour)
-
 	claims, err := m.Reserve(context.Background(), []Key{{Table: "events", ID: "e1"}}, DefaultLease)
 	require.NoError(t, err)
 	require.Equal(t, Claimed, claims[0].Status, "expired: claimable again")
+	return e, m, claims
+}
+
+// A key committed again after a sweep chunk read it as expired, but before
+// the chunk re-read it, is kept: the re-read sees the new commit.
+func TestEmbedded_SweepKeepsAKeyCommittedAfterItsRead(t *testing.T) {
+	t.Parallel()
+	e, m, claims := expiredAndClaimed(t)
+	var commitErr error
+	e.sweepScanHook = func() { commitErr = m.Commit(context.Background(), claims, time.Hour) }
+	res, err := e.sweep(context.Background(), e.db)
+	require.NoError(t, err)
+	require.NoError(t, commitErr)
+	assert.Equal(t, sweepResult{}, res)
+
+	dup, err := mark(context.Background(), m, "e1")
+	require.NoError(t, err)
+	assert.True(t, dup, "the commit made after the read survived the sweep")
+}
+
+// A Commit that arrives while a sweep chunk has re-read an expired key but
+// not yet deleted it waits for the chunk, so the new commit is never deleted
+// with the old value. Without the lock the Commit lands in the gap and the
+// sweep then deletes it; the wait below only ever lets that pass, never fail.
+func TestEmbedded_SweepNeverDeletesACommitLandingMidChunk(t *testing.T) {
+	t.Parallel()
+	e, m, claims := expiredAndClaimed(t)
 	done := make(chan error, 1)
-	e.sweepHook = func() {
+	e.sweepDeleteHook = func() {
 		go func() { done <- m.Commit(context.Background(), claims, time.Hour) }()
 		select {
-		case <-done:
-			done <- nil
+		case err := <-done:
+			done <- err
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
@@ -133,6 +157,49 @@ func TestEmbedded_SweepNeverDeletesACommitLandingMidChunk(t *testing.T) {
 	dup, err := mark(context.Background(), m, "e1")
 	require.NoError(t, err)
 	assert.True(t, dup, "the commit made mid-chunk survived the sweep")
+}
+
+// A chunk that starts over a long run of tombstones, as a tenant's version-0
+// block leaves until Pebble compacts it, reads through the run without the
+// lock, so a Commit racing it waits for the chunk's re-reads and deletes
+// alone. Sized for the race detector, which the unit suite runs under: there,
+// a chunk holding the lock across this run kept a Commit waiting ~250 ms.
+func TestEmbedded_SweepChunkOverTombstonesDoesNotHoldCommits(t *testing.T) {
+	t.Parallel()
+	e := NewEmbedded(t.TempDir())
+	m := switchedOn(t, e, "acme")
+	b := e.db.NewBatch()
+	for i := range 300_000 {
+		require.NoError(t, b.Delete(fmt.Appendf(nil, "acme\x00%06d", i), nil))
+	}
+	// A version-0 key after the run, so the chunk has one to delete.
+	require.NoError(t, b.Set([]byte("acme\x01"), make([]byte, 8), nil))
+	require.NoError(t, b.Commit(pebble.NoSync))
+	require.NoError(t, e.db.Flush())
+
+	type swept struct {
+		res sweepResult
+		err error
+	}
+	done := make(chan swept, 1)
+	go func() {
+		res, err := e.sweep(context.Background(), e.db)
+		done <- swept{res, err}
+	}()
+	var slowest time.Duration
+	for i := 0; ; i++ {
+		select {
+		case s := <-done:
+			require.NoError(t, s.err)
+			require.Equal(t, sweepResult{Version0: 1}, s.res)
+			assert.Less(t, slowest, 100*time.Millisecond, "the slowest Commit racing the sweep")
+			return
+		default:
+		}
+		start := time.Now()
+		commitIDs(t, m, 0, fmt.Sprintf("c%d", i))
+		slowest = max(slowest, time.Since(start))
+	}
 }
 
 // A retention is honoured on read before any sweep has run: the key is a

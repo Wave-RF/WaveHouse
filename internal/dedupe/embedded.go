@@ -35,8 +35,9 @@ type Embedded struct {
 	open      int    // tenant stores open over db
 	stopSweep func() // stops db's sweep
 
-	// commitMu is read-held by Commit and held by a sweep chunk, so a sweep
-	// never deletes a key a Commit rewrote after the sweep read it.
+	// commitMu is read-held by Commit and held by a sweep chunk while it
+	// re-reads and deletes, so a sweep never deletes a key a Commit rewrote
+	// after the sweep read it.
 	commitMu   sync.RWMutex
 	sweepFirst time.Duration
 	sweepEvery time.Duration
@@ -47,9 +48,11 @@ type Embedded struct {
 	// readHook, when set, runs before each Pebble read in Reserve; a test
 	// makes it fail to exercise Reserve's all-or-nothing error path.
 	readHook func() error
-	// sweepHook, when set, runs in a sweep chunk between reading its keys and
-	// deleting them; a test races a Commit into that gap.
-	sweepHook func()
+	// sweepScanHook and sweepDeleteHook, when set, run in a sweep chunk:
+	// between its unlocked read and its re-read, and between its re-read and
+	// its delete. A test races a Commit into each gap.
+	sweepScanHook   func()
+	sweepDeleteHook func()
 }
 
 // NewEmbedded returns the embedded implementation under dataDir. Nothing is

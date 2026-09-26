@@ -3,6 +3,7 @@ package dedupe
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -20,9 +21,9 @@ import (
 const (
 	sweepInterval   = time.Hour
 	sweepFirstDelay = time.Minute
-	// sweepChunk keys are read and deleted per lock hold, with sweepPause
-	// between chunks: at most ~100k keys a second, and a Commit never waits
-	// longer than one chunk.
+	// sweepChunk keys are read per chunk, with sweepPause between chunks: at
+	// most ~100k keys a second. A Commit waits only for a chunk's re-reads
+	// and deletes, never for its read, however many tombstones it skips.
 	sweepChunk = 1024
 	sweepPause = 10 * time.Millisecond
 )
@@ -98,52 +99,21 @@ func (e *Embedded) sweep(ctx context.Context, db *pebble.DB) (sweepResult, error
 }
 
 // sweepChunk deletes the sweepable keys among the next sweepChunk keys from
-// from, returning where the next chunk starts (nil at the end). It holds
-// commitMu, so no Commit lands between reading a key and deleting it: a key
-// re-committed after it expired is never deleted with its new value.
+// from, returning where the next chunk starts (nil at the end). It reads them
+// without commitMu, since Pebble skips the tombstones between keys inside the
+// read and a run of them left by an earlier pass would otherwise hold every
+// Commit for its whole length.
 func (e *Embedded) sweepChunk(ctx context.Context, db *pebble.DB, from []byte, res *sweepResult) ([]byte, error) {
-	e.commitMu.Lock()
-	defer e.commitMu.Unlock()
-	now := e.now()
-	it, err := db.NewIter(&pebble.IterOptions{LowerBound: from})
+	candidates, next, err := sweepCandidates(db, from, e.now())
+	if err != nil || len(candidates) == 0 {
+		return next, err
+	}
+	if e.sweepScanHook != nil {
+		e.sweepScanHook()
+	}
+	expired, v0, err := e.deleteSweepable(db, candidates)
 	if err != nil {
-		return nil, fmt.Errorf("dedupe sweep: %w", err)
-	}
-	b := db.NewBatch()
-	defer func() { _ = b.Close() }()
-	var next []byte
-	var expired, v0 int64
-	seen := 0
-	for valid := it.First(); valid; valid = it.Next() {
-		if seen == sweepChunk {
-			next = bytes.Clone(it.Key())
-			break
-		}
-		seen++
-		k := it.Key()
-		val := it.Value()
-		switch {
-		case !isCommit(val):
-			v0++
-		case committedExpired(val, now):
-			expired++
-		default:
-			continue
-		}
-		if err := b.Delete(k, nil); err != nil {
-			_ = it.Close()
-			return nil, fmt.Errorf("dedupe sweep: %w", err)
-		}
-	}
-	if err := it.Close(); err != nil {
-		return nil, fmt.Errorf("dedupe sweep: %w", err)
-	}
-	if e.sweepHook != nil {
-		e.sweepHook()
-	}
-	// NoSync: a delete lost to a crash is redone by the next pass.
-	if err := b.Commit(pebble.NoSync); err != nil {
-		return nil, fmt.Errorf("dedupe sweep: %w", err)
+		return nil, err
 	}
 	res.Expired += int(expired)
 	res.Version0 += int(v0)
@@ -154,4 +124,83 @@ func (e *Embedded) sweepChunk(ctx context.Context, db *pebble.DB, from []byte, r
 		sweptKeysCounter.Add(ctx, v0, metric.WithAttributes(attribute.String(sweptAttribute, sweptVersion0)))
 	}
 	return next, nil
+}
+
+// sweepCandidates reads the next sweepChunk keys, starting at from, and
+// returns those sweepable at now and where the next chunk starts (nil at the
+// end).
+func sweepCandidates(db *pebble.DB, from []byte, now time.Time) (candidates [][]byte, next []byte, err error) {
+	it, err := db.NewIter(&pebble.IterOptions{LowerBound: from})
+	if err != nil {
+		return nil, nil, fmt.Errorf("dedupe sweep: %w", err)
+	}
+	seen := 0
+	for valid := it.First(); valid; valid = it.Next() {
+		if seen == sweepChunk {
+			next = bytes.Clone(it.Key())
+			break
+		}
+		seen++
+		if sweepReason(it.Value(), now) != "" {
+			candidates = append(candidates, bytes.Clone(it.Key()))
+		}
+	}
+	if err := it.Close(); err != nil {
+		return nil, nil, fmt.Errorf("dedupe sweep: %w", err)
+	}
+	return candidates, next, nil
+}
+
+// deleteSweepable re-reads each candidate and deletes those still sweepable,
+// holding commitMu so no Commit lands between the re-read and the delete: a
+// key re-committed after the unlocked read is never deleted with its new
+// value.
+func (e *Embedded) deleteSweepable(db *pebble.DB, candidates [][]byte) (expired, v0 int64, err error) {
+	e.commitMu.Lock()
+	defer e.commitMu.Unlock()
+	now := e.now()
+	b := db.NewBatch()
+	defer func() { _ = b.Close() }()
+	for _, k := range candidates {
+		val, closer, err := db.Get(k)
+		if errors.Is(err, pebble.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return 0, 0, fmt.Errorf("dedupe sweep: %w", err)
+		}
+		reason := sweepReason(val, now)
+		_ = closer.Close()
+		switch reason {
+		case sweptVersion0:
+			v0++
+		case sweptExpired:
+			expired++
+		default:
+			continue
+		}
+		if err := b.Delete(k, nil); err != nil {
+			return 0, 0, fmt.Errorf("dedupe sweep: %w", err)
+		}
+	}
+	if e.sweepDeleteHook != nil {
+		e.sweepDeleteHook()
+	}
+	// NoSync: a delete lost to a crash is redone by the next pass.
+	if err := b.Commit(pebble.NoSync); err != nil {
+		return 0, 0, fmt.Errorf("dedupe sweep: %w", err)
+	}
+	return expired, v0, nil
+}
+
+// sweepReason is why the sweep deletes a key holding val at now, or "" when
+// it keeps it.
+func sweepReason(val []byte, now time.Time) string {
+	switch {
+	case !isCommit(val):
+		return sweptVersion0
+	case committedExpired(val, now):
+		return sweptExpired
+	}
+	return ""
 }
