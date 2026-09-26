@@ -303,10 +303,7 @@ func (d *Dynamo) call(ctx context.Context, op string, do func(context.Context) e
 	start := time.Now()
 	err := classify(op, do(ctx))
 	d.metrics.record(ctx, op, time.Since(start), err)
-	// A request cancelled because its caller went away (a client
-	// disconnecting mid-Reserve) says nothing about the table, and must not
-	// reset the breaker's count.
-	if op == opReserve && !errors.Is(err, context.Canceled) {
+	if op == opReserve {
 		d.breaker.record(err)
 	}
 	return err
@@ -321,9 +318,10 @@ type dynamoStore struct {
 // Reserve puts every key's pending item in parallel, each conditional on no
 // live item holding the key. A failed condition hands back the live item,
 // whose state says Duplicate or InFlight without a read, or Claimed when its
-// token is the put's own. On any error it releases, by token, every put that
-// may have landed; what that undo misses (below) holds its key InFlight
-// until the lease ends, as a crashed request's claim does.
+// token is the put's own. On any error, the caller's cancellation included,
+// it releases, by token, every put that may have landed; what that undo
+// misses (below) holds its key InFlight until the lease ends, as a crashed
+// request's claim does.
 func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Duration) ([]Claim, error) {
 	if len(keys) == 0 {
 		return []Claim{}, nil
@@ -338,12 +336,13 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 	claims := make([]Claim, len(keys))
 	tried := make([]Claim, len(keys))
 	sent := make([]bool, len(keys))
-	// The first failure skips the puts not yet sent: the Reserve fails
-	// either way, and a throttled table should not take the rest. A put
-	// already sent runs on ctx, not gctx, so a sibling's failure never cuts
-	// it off: it answers before the undo below. The caller's cancellation or
-	// the put's own deadline can, and DynamoDB may then apply it after its
-	// release.
+	// The first failure, or the caller's cancellation, skips the puts not
+	// yet sent: the Reserve fails either way, and a throttled table should
+	// not take the rest. A put already sent runs on sendCtx, which neither a
+	// sibling's failure nor the caller's cancellation reaches, so it answers
+	// before the undo below. Only its own Timeout (call) can cut it off, and
+	// DynamoDB may then apply it after its release.
+	sendCtx := context.WithoutCancel(ctx)
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(s.d.cfg.ReserveConcurrency)
 	for i, k := range keys {
@@ -354,7 +353,7 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 				return err
 			}
 			sent[i] = true
-			status, err := s.reserve(ctx, k, token, nowSec, exp)
+			status, err := s.reserve(sendCtx, k, token, nowSec, exp)
 			if err != nil {
 				return err
 			}
@@ -365,7 +364,13 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 			return nil
 		})
 	}
-	if err := g.Wait(); err != nil {
+	err := g.Wait()
+	if err == nil {
+		// Every sent put answered, but a caller that went away mid-Reserve
+		// will never commit or release what it claimed.
+		err = ctx.Err()
+	}
+	if err != nil {
 		// A sent put that errored may have landed anyway; releasing a key
 		// its token does not hold is a no-op. Best effort: a put applied
 		// after this, or a release that fails, lapses with the lease.
@@ -375,7 +380,7 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 				undo = append(undo, tried[i])
 			}
 		}
-		_ = s.Release(context.WithoutCancel(ctx), undo)
+		_ = s.Release(sendCtx, undo)
 		return nil, err
 	}
 	return claims, nil

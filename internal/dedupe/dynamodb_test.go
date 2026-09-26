@@ -633,34 +633,76 @@ func TestDynamo_CommitAttemptsEveryChunk(t *testing.T) {
 	assert.Equal(t, 2*batchWriteMax, written, "a failed chunk does not cancel the others: their records are published")
 }
 
-// A put cancelled by its caller is not an answer from the table: it does
-// not reset the breaker's count of throttled puts.
-func TestDynamo_CallerCancelDoesNotResetBreaker(t *testing.T) {
+// A caller that cancels mid-Reserve (a client disconnecting) leaves nothing
+// claimed. The fake applies a put after a delay whatever the caller does, as
+// DynamoDB applies a request already on the wire, so a put abandoned on the
+// cancel would land after its release and hold its id for the lease.
+func TestDynamo_CallerCancelLeavesNothingClaimed(t *testing.T) {
 	t.Parallel()
-	var hang atomic.Bool
-	started := make(chan struct{}, 1)
-	_, m := openFake(t, &fakeDynamo{put: func(ctx context.Context, _ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
-		if hang.Load() {
+	t.Run("a put still unsent", func(t *testing.T) {
+		t.Parallel()
+		assertCancelLeavesNothing(t, keys("k0", "k1", "k2"))
+	})
+	t.Run("every put sent", func(t *testing.T) {
+		t.Parallel()
+		assertCancelLeavesNothing(t, keys("k0", "k1"))
+	})
+}
+
+// assertCancelLeavesNothing cancels a Reserve of ks once two puts are sent.
+func assertCancelLeavesNothing(t *testing.T, ks []Key) {
+	t.Helper()
+	var (
+		mu      sync.Mutex
+		table   = map[string]string{}
+		sent    []string
+		applies sync.WaitGroup
+	)
+	started := make(chan struct{}, 2)
+	_, m := openFakeWith(t, &fakeDynamo{
+		put: func(ctx context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+			id := idOf(in.Item[attrKey])
+			tk := string(in.Item[attrToken].(*types.AttributeValueMemberB).Value)
+			mu.Lock()
+			sent = append(sent, id)
+			mu.Unlock()
+			applied := make(chan struct{})
+			applies.Go(func() {
+				time.Sleep(20 * time.Millisecond)
+				mu.Lock()
+				table[id] = tk
+				mu.Unlock()
+				close(applied)
+			})
 			started <- struct{}{}
-			<-ctx.Done()
-			return nil, ctx.Err()
-		}
-		return nil, &types.ProvisionedThroughputExceededException{}
-	}})
-	for range breakerTrips - 1 {
-		_, err := m.Reserve(t.Context(), keys("a"), time.Minute)
-		require.ErrorIs(t, err, ErrUnavailable)
-	}
-	hang.Store(true)
+			select {
+			case <-applied:
+				return &dynamodb.PutItemOutput{}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+		del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+			id := idOf(in.Key[attrKey])
+			tk := string(in.ExpressionAttributeValues[":tk"].(*types.AttributeValueMemberB).Value)
+			mu.Lock()
+			defer mu.Unlock()
+			if table[id] != tk {
+				return nil, &types.ConditionalCheckFailedException{}
+			}
+			delete(table, id)
+			return &dynamodb.DeleteItemOutput{}, nil
+		},
+	}, DynamoConfig{Table: "dedupe", ReserveConcurrency: 2})
 	ctx, cancel := context.WithCancel(t.Context())
-	go func() { <-started; cancel() }()
-	_, err := m.Reserve(ctx, keys("a"), time.Minute)
+	go func() { <-started; <-started; cancel() }()
+	_, err := m.Reserve(ctx, ks, time.Minute)
 	require.ErrorIs(t, err, context.Canceled)
-	hang.Store(false)
-	_, err = m.Reserve(t.Context(), keys("a"), time.Minute)
-	require.ErrorIs(t, err, ErrUnavailable)
-	_, err = m.Reserve(t.Context(), keys("a"), time.Minute)
-	require.ErrorIs(t, err, errBreakerOpen, "the cancelled put did not reset the count")
+	applies.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, sent, 2, "a put not yet sent is skipped")
+	assert.Empty(t, table, "every applied put was released")
 }
 
 func TestDynamo_ReleaseAttemptsEveryClaim(t *testing.T) {
