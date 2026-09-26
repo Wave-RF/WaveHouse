@@ -454,7 +454,7 @@ What the backend requires of the table:
 | `ex` | Number | Epoch seconds: the lease end while pending, the retention end once committed; absent = never expires. |
 | `tk` | Binary | The claim token that `Release` matches. |
 
-Only `pk` is declared in the table definition. Turn TTL on for `ex`. Correctness never depends on TTL, because a claim whose `ex` has passed counts as absent whether or not DynamoDB has deleted it yet; TTL only reclaims the storage. **Today TTL removes only lapsed claims:** ingest commits every id with no retention, so a committed item carries no `ex` and is kept forever, and the table grows by one item (about 200 bytes) per distinct id. Per-tenant retention is [#220](https://github.com/Wave-RF/WaveHouse/issues/220). Boot checks the table: it refuses one whose key schema does not match, and logs a warning if TTL is off.
+Only `pk` is declared in the table definition. Turn TTL on for `ex`. Correctness never depends on TTL, because a claim whose `ex` has passed counts as absent whether or not DynamoDB has deleted it yet; TTL only reclaims the storage. **Today TTL removes only lapsed claims:** ingest commits every id with no retention, so a committed item carries no `ex` and is kept forever, and the table grows by one item (about 200 bytes) per distinct id. Per-tenant retention is [#220](https://github.com/Wave-RF/WaveHouse/issues/220). Boot checks the table and logs a warning if TTL is off; a key schema that does not match is a misconfigured table, handled as described below.
 
 An example in Terraform. Replace the tags with your own conventions:
 
