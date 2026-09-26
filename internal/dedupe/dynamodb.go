@@ -277,8 +277,9 @@ type dynamoStore struct {
 
 // Reserve puts every key's pending item in parallel, each conditional on no
 // live item holding the key. A failed condition hands back the live item,
-// whose state says Duplicate or InFlight without a read. On any error every
-// put that may have landed is released by its token.
+// whose state says Duplicate or InFlight without a read, or Claimed when its
+// token is the put's own. On any error every put that may have landed is
+// released by its token.
 func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Duration) ([]Claim, error) {
 	if len(keys) == 0 {
 		return []Claim{}, nil
@@ -358,10 +359,21 @@ func (s *dynamoStore) reserve(ctx context.Context, k Key, token, nowSec string, 
 		}
 		return Claimed, nil
 	}
-	if st, ok := held.Item[attrState].(*types.AttributeValueMemberN); ok && st.Value == stateCommitted {
+	st, _ := held.Item[attrState].(*types.AttributeValueMemberN)
+	switch {
+	case st != nil && st.Value == stateCommitted:
 		return Duplicate, nil
+	case st != nil && st.Value == statePending && heldBy(held.Item, token):
+		// This put's own item: an SDK retry of an attempt that was applied
+		// but whose answer was lost (a 500, a connection reset).
+		return Claimed, nil
 	}
 	return InFlight, nil
+}
+
+func heldBy(item map[string]types.AttributeValue, token string) bool {
+	tk, ok := item[attrToken].(*types.AttributeValueMemberB)
+	return ok && string(tk.Value) == token
 }
 
 // Commit overwrites every claim's item as committed, unconditionally, 25 to a

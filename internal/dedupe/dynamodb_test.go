@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -153,6 +154,53 @@ func TestDynamo_ReserveReadsTheHeldItem(t *testing.T) {
 	assert.Equal(t, []Status{Claimed, Duplicate, InFlight}, []Status{claims[0].Status, claims[1].Status, claims[2].Status})
 	assert.Len(t, claims[0].Token, tokenBytes)
 	assert.Empty(t, claims[1].Token)
+}
+
+// An SDK retry of a put whose first attempt was applied fails its condition
+// on the put's own item: that is the caller's claim, not another request's.
+func TestDynamo_RetriedPutKeepsItsOwnClaim(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	putTokens := map[string]string{}
+	var released []string
+	fake := &fakeDynamo{
+		put: func(_ context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+			id := idOf(in.Item[attrKey])
+			mu.Lock()
+			putTokens[id] = string(in.Item[attrToken].(*types.AttributeValueMemberB).Value)
+			mu.Unlock()
+			switch id {
+			case "k0":
+				return nil, &types.ConditionalCheckFailedException{Item: in.Item}
+			case "k1":
+				theirs := maps.Clone(in.Item)
+				theirs[attrToken] = &types.AttributeValueMemberB{Value: []byte("theirs")}
+				return nil, &types.ConditionalCheckFailedException{Item: theirs}
+			}
+			return nil, &types.InternalServerError{}
+		},
+		del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+			id := idOf(in.Key[attrKey])
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Equal(t, putTokens[id], string(in.ExpressionAttributeValues[":tk"].(*types.AttributeValueMemberB).Value))
+			released = append(released, id)
+			return &dynamodb.DeleteItemOutput{}, nil
+		},
+	}
+	_, m := openFakeWith(t, fake, DynamoConfig{Table: "dedupe", ReserveConcurrency: 1})
+
+	claims, err := m.Reserve(t.Context(), keys("k0", "k1"), time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, []Status{Claimed, InFlight}, []Status{claims[0].Status, claims[1].Status}, "a pending item is InFlight only under another token")
+	assert.Equal(t, putTokens["k0"], claims[0].Token)
+
+	// k0 is sent and answered before k2 fails, so the undo owns it.
+	_, err = m.Reserve(t.Context(), keys("k0", "k2"), time.Minute)
+	require.ErrorIs(t, err, ErrUnavailable)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Contains(t, released, "k0", "the failed Reserve's undo releases the retried put's own item")
 }
 
 func TestDynamo_FailedReserveReleasesEveryPutThatMayHaveLanded(t *testing.T) {

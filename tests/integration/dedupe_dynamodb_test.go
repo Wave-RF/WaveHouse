@@ -86,6 +86,23 @@ func awsError(status int, code string) *http.Response {
 
 const putItem = "DynamoDB_20120810.PutItem"
 
+// landThenFail sends the first PutItem, then answers it 500 as if the
+// response were lost: the write is applied and the SDK retries it.
+type landThenFail struct {
+	next   *http.Client
+	failed atomic.Bool
+}
+
+func (l *landThenFail) Do(r *http.Request) (*http.Response, error) {
+	resp, err := l.next.Do(r)
+	if err != nil || r.Header.Get("X-Amz-Target") != putItem || !l.failed.CompareAndSwap(false, true) {
+		return resp, err
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	return awsError(http.StatusInternalServerError, "InternalServerError"), nil
+}
+
 func TestDedupeDynamo_Conformance(t *testing.T) {
 	t.Parallel()
 	dedupetest.Run(t, func(t *testing.T) dedupetest.Harness {
@@ -181,6 +198,35 @@ func TestDedupeDynamo_Throttled(t *testing.T) {
 			assert.Equal(t, int64(2), sent.Load(), "the SDK retried it once first")
 		})
 	}
+}
+
+// The SDK's retry of an applied put fails its condition on the put's own
+// item, which is still the caller's claim: without that, the id would be
+// held InFlight for the lease by a claim nobody commits or releases.
+func TestDedupeDynamo_RetriedPutKeepsItsClaim(t *testing.T) {
+	t.Parallel()
+	table := newDynamoTable()
+	lossy := &landThenFail{next: http.DefaultClient}
+	d := dynamoClient(t, table, dedupe.DynamoConfig{}, config.WithHTTPClient(lossy))
+	require.NoError(t, d.CreateTable(t.Context()))
+	m := d.Tenant("acme")
+	require.NoError(t, m.Apply(true))
+	peer := dynamoClient(t, table, dedupe.DynamoConfig{}).Tenant("acme")
+	require.NoError(t, peer.Apply(true))
+	k := []dedupe.Key{{Table: "events", ID: "e1"}}
+
+	claims, err := m.Reserve(t.Context(), k, time.Minute)
+	require.NoError(t, err)
+	require.True(t, lossy.failed.Load(), "the applied attempt was answered 500")
+	require.Equal(t, dedupe.Claimed, claims[0].Status)
+	other, err := peer.Reserve(t.Context(), k, time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, dedupe.InFlight, other[0].Status)
+
+	require.NoError(t, m.Release(t.Context(), claims))
+	other, err = peer.Reserve(t.Context(), k, time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, dedupe.Claimed, other[0].Status, "the claim's token was the applied put's, so Release freed the id")
 }
 
 func TestDedupeDynamo_Unreachable(t *testing.T) {
