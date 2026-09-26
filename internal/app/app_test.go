@@ -671,7 +671,7 @@ func TestReload_ReadmittedTenantCacheIsOrphaned(t *testing.T) {
 
 	rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
 	a.tenants.Reload("test")
-	assert.Empty(t, mock.GetTenants(), "a rejection releases; it orphans nothing yet")
+	assert.Empty(t, mock.GetTenants(), "a rejection calls no InvalidateTenant (Prune drops its index)")
 	rewriteSettings(t, filepath.Join(root, "globex"), nil)
 	_, adopted = a.tenants.Reload("test")
 	require.True(t, adopted)
@@ -712,6 +712,9 @@ func (p *pruneRecorder) last() map[tenant.ID]bool {
 func TestReload_PrunesCacheIndexToServedTenants(t *testing.T) {
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
 	a := newApp(t, testConfig(t, root), Options{})
+	_, ok := a.cache.(pruner)
+	require.True(t, ok, "the wired cache prunes")
+
 	rec := &pruneRecorder{}
 	a.cache = rec
 
