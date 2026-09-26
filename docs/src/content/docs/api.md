@@ -578,7 +578,7 @@ The inbound request body is capped at 1 MiB; a body over the cap is rejected wit
 | 400 / 403 / 502 / 503 | `{"error":"clickhouse query: …","code":"clickhouse.…","retryable":…}` | ClickHouse failed the query: a column dropped since the schema was discovered (`400 clickhouse.rejected`), the role's `max_rows_to_read`/`max_memory_usage` cap, or a `max_execution_time` no longer than `clickhouse.query_timeout` (`400 clickhouse.limit_exceeded`), ClickHouse down (`503 clickhouse.unavailable`, `Retry-After: 5`), … — see [ClickHouse errors on the query paths](#clickhouse-errors-on-the-query-paths) |
 | 500 | `{"error":"…","code":"clickhouse.unknown","retryable":true}` | A failure with no verdict |
 | 503 | `{"error":"schema not loaded yet"}` | The tenant's first schema discovery has not succeeded yet, so whether the table exists is not known; `Retry-After: 5` |
-| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused — so the query cannot run; decided ahead of the cache, so nothing cached before is served either; `Retry-After: 30`, a settings reload retries the pool |
+| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused — so the query cannot run; decided before anything is served, so nothing cached before is served either; `Retry-After: 30`, a settings reload retries the pool |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 ---
@@ -609,7 +609,7 @@ The POST parameter body is capped at 1 MiB; a body over the cap is rejected with
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 404 | `{"error":"pipe not found"}` | Pipe name not registered |
-| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused; decided ahead of the cache; `Retry-After: 30` |
+| 503 | `{"error":"no ClickHouse connection is open for this tenant"}` | The tenant is on no ClickHouse pool — [no pool could be opened for it](/settings-directory#clickhouse), such as one the connection ceiling refused; decided before anything is served, a cached result included; `Retry-After: 30` |
 | 403 | `{"error":"forbidden"}` | Role not in pipe's `allowed_roles` (and not the admin role). Fails closed: a request with no role (no token, or a JWT missing `auth.role_claim`) is denied unless a `default_role` resolves it into the list; a pipe with no `allowed_roles` denies everyone but the admin role. |
 | 400 | `{"error":"missing required parameter: x"}` | Required parameter not supplied |
 | 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL literal form — a JSON object, whether supplied directly or nested as an array element. A JSON **array** is valid and renders as an `IN`-style `(…)` list. |

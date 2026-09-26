@@ -598,12 +598,12 @@ func TestInvalidate_ReachesOneTenantsEntries(t *testing.T) {
 	assert.Equal(t, []byte("globex rows"), e.Value, "globex's entry survives acme's insert")
 }
 
-// From the envelope the /v1/ingest producer publishes to the real cache: an
-// insert into a table whose name holds a dot or a space — scoped or not —
-// orphans the whole-table result a structured query on that table filed,
-// under the raw name the request carries (the namespace internal/api's
-// TestStructuredQuery_RawTableNameMeetsTheInsertsBump reads through), and
-// leaves another table's.
+// From an envelope carrying the raw table and scope (makeEnvelope) to the
+// real cache: an insert into a table whose name holds a dot or a space —
+// scoped or not — orphans the whole-table result a structured query on that
+// table filed, under the raw name the request carries (the namespace
+// internal/api's TestStructuredQuery_RawTableNameMeetsTheInsertsBump reads
+// through), and leaves another table's.
 func TestFlushTable_BumpsWhatTheReadFiles(t *testing.T) {
 	t.Parallel()
 	ok := &testutil.MockRoundTripper{Fn: func(*http.Request) (*http.Response, error) {

@@ -14,10 +14,12 @@ type Entry struct {
 	TTL   time.Duration // remaining
 }
 
-// Snapshot is the dependency versions a Lookup observed. Set files a result
-// under the snapshot taken before its query ran, so a bump that lands while
-// the query runs orphans the fill rather than re-homing pre-write rows under
-// the post-bump versions (#382). The zero Snapshot makes Set a no-op.
+// Snapshot is the dependency versions a Lookup observed. A caller takes it
+// before choosing any input a bump invalidates — the tenant's connection as
+// well as the rows its query reads — and Set files the result under it, so a
+// bump that lands after the Lookup orphans the fill rather than re-homing
+// what was read before the bump under the post-bump versions (#382). The
+// zero Snapshot makes Set a no-op.
 type Snapshot struct {
 	key string // the backend's key for the entry at the observed versions
 }
@@ -42,8 +44,8 @@ type Cache interface {
 	// ErrForeignDependency. An error is a miss with a zero Snapshot.
 	Lookup(ctx context.Context, id tenant.ID, sha string, deps []Namespace) (Entry, Snapshot, error)
 
-	// Set stores value under snap, the Snapshot a Lookup returned before the
-	// value was computed. It returns an error only when the backend failed;
+	// Set stores value under snap, the Snapshot a Lookup returned before any
+	// input of the value was chosen. It returns an error only when the backend failed;
 	// a value the cache declines to keep — too large, refused admission, a
 	// non-positive ttl, or a zero snap — is not an error.
 	Set(ctx context.Context, snap Snapshot, value []byte, ttl time.Duration) error

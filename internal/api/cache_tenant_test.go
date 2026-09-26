@@ -65,6 +65,13 @@ var cachedRoutes = []struct{ name, path, body string }{
 // clicks.page and run top_pages.
 func cachedRouter(t *testing.T, tenants *settings.Registry, conn driver.Conn, c cache.Cache) http.Handler {
 	t.Helper()
+	return cachedRouterOver(t, tenants, fixedConn(conn), c)
+}
+
+// cachedRouterOver is cachedRouter with the tenant's connection chosen per
+// request by connFor.
+func cachedRouterOver(t *testing.T, tenants *settings.Registry, connFor func(*settings.Store) driver.Conn, c cache.Cache) http.Handler {
+	t.Helper()
 	reg := testRegistry(t)
 	viewer := staticPolicy(&policy.Policy{
 		DefaultRole: "viewer",
@@ -74,8 +81,8 @@ func cachedRouter(t *testing.T, tenants *settings.Registry, conn driver.Conn, c 
 	return NewRouter(Dependencies{
 		Tenants:         tenants,
 		Ingest:          NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
-		StructuredQuery: NewStructuredQueryHandler(fixedConn(conn), c, fixedRegistry(reg), viewer, func(*settings.Store) int { return 60 }, timeout, nil),
-		Pipes:           NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), viewer, fixedConn(conn), c, timeout),
+		StructuredQuery: NewStructuredQueryHandler(connFor, c, fixedRegistry(reg), viewer, func(*settings.Store) int { return 60 }, timeout, nil),
+		Pipes:           NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), viewer, connFor, c, timeout),
 		Query:           &QueryHandler{},
 		SSE:             NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:          &HealthHandler{},
@@ -251,6 +258,49 @@ func TestCachedRoutes_BumpDuringQueryOrphansTheFill(t *testing.T) {
 			assert.Equal(t, "MISS", xcache(), "the fill of a query a bump overtook is orphaned")
 			assert.Equal(t, "HIT", xcache())
 			assert.Equal(t, int32(2), conn.queries.Load())
+		})
+	}
+}
+
+// The snapshot is taken before the tenant's pool is chosen. A reload that
+// repoints the tenant — Pools.Reconcile, then InvalidateTenant — landing
+// between the two leaves the request on the old pool: its fill, read from
+// the old database, is orphaned by the bump rather than filed as fresh under
+// the new tenant version. And a tenant on no pool is a 503 even when its
+// Lookup hit (#583 story 6).
+func TestCachedRoutes_ReloadAsThePoolIsTakenOrphansTheFill(t *testing.T) {
+	for _, route := range cachedRoutes {
+		t.Run(route.name, func(t *testing.T) {
+			l1, err := cache.NewLocal(1 << 20)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = l1.Close() })
+			conn := &countingConn{}
+			var taken atomic.Int32
+			var noPool atomic.Bool
+			connFor := func(*settings.Store) driver.Conn {
+				if noPool.Load() {
+					return nil
+				}
+				if taken.Add(1) == 1 {
+					require.NoError(t, l1.InvalidateTenant(t.Context(), tenant.Default))
+				}
+				return conn
+			}
+			router := cachedRouterOver(t, testTenants(), connFor, l1)
+			xcache := func() string {
+				w := serveAs(t, router, route.path, route.body, "")
+				require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+				l1.Wait()
+				return w.Header().Get("X-Cache")
+			}
+			assert.Equal(t, "MISS", xcache())
+			assert.Equal(t, "MISS", xcache(), "the fill of a query on the pool a reload replaced is orphaned")
+			assert.Equal(t, "HIT", xcache())
+			assert.Equal(t, int32(2), conn.queries.Load())
+
+			noPool.Store(true)
+			w := serveAs(t, router, route.path, route.body, "")
+			assertUnavailable(t, w, noConnectionMessage, retryAfterPool)
 		})
 	}
 }
