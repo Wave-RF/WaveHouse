@@ -158,6 +158,11 @@ func (c RedisConfig) clientOption() rueidis.ClientOption {
 		DisableCache:      true, // no client-side caching until the near-cache (E5)
 		ForceSingleClient: c.Mode == RedisStandalone,
 	}
+	// How long a connection waits on a silent server, 10 s unset. A cluster
+	// client reads the topology under it after the handshake, which boot and
+	// Close would wait out; never under Timeout, so no connection is cut
+	// while an operation may still wait on it.
+	opt.ConnWriteTimeout = max(c.DialTimeout, c.Timeout)
 	if c.Mode == RedisSentinel {
 		opt.Sentinel = rueidis.SentinelOption{MasterSet: c.SentinelMaster, TLSConfig: c.TLS, Dialer: opt.Dialer}
 	}

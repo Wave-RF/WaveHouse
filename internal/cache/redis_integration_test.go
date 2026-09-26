@@ -5,6 +5,7 @@ package cache_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"slices"
@@ -495,6 +496,39 @@ func TestRedis_CloseDeliversPastAnOpenBreaker(t *testing.T) {
 	e, _, err := open(t, s, prefix).Lookup(ctx, "acme", "q", deps)
 	require.NoError(t, err)
 	assert.Nil(t, e.Value, "the bump Close delivered orphans the fill")
+}
+
+// A cluster client reads the topology after the handshake; a node that
+// answers the handshake and then goes quiet held that read, and so boot and
+// Close, for rueidis's 10 s default. It is bounded like a dial now. Any
+// server serves: what matters is that the read goes unanswered.
+func TestRedis_ClusterTopologyReadIsBounded(t *testing.T) {
+	t.Parallel()
+	s := startRedis(t)
+	opt, err := cache.ClientOption(cache.RedisConfig{Addrs: []string{s.addr}, Mode: cache.RedisCluster, DialTimeout: 300 * time.Millisecond})
+	require.NoError(t, err)
+	opt.DialCtxFn = func(ctx context.Context, addr string, d *net.Dialer, _ *tls.Config) (net.Conn, error) {
+		c, err := d.DialContext(ctx, "tcp", addr)
+		return unanswered{c}, err
+	}
+	start := time.Now()
+	c, err := rueidis.NewClient(opt)
+	if err == nil {
+		c.Close()
+	}
+	require.Error(t, err, "nothing answered the topology read")
+	assert.Less(t, time.Since(start), 3*time.Second)
+}
+
+// unanswered drops CLUSTER commands unsent, as a node gone quiet would
+// leave them unanswered.
+type unanswered struct{ net.Conn }
+
+func (c unanswered) Write(b []byte) (int, error) {
+	if bytes.Contains(b, []byte("CLUSTER")) {
+		return len(b), nil
+	}
+	return c.Conn.Write(b)
 }
 
 // command runs cmd on s through c, for the test to reconfigure the server.
