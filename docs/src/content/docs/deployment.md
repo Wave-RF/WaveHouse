@@ -244,7 +244,7 @@ Configure your load balancer or orchestrator to use these endpoints.
 
 ### Boot-time degraded mode
 
-If ClickHouse is unreachable when WaveHouse starts (connection refused, missing database, DNS failure, etc.), the gateway no longer exits — it binds `:8080` and serves `/livez` 503 with the latest schema-discovery error as the diagnostic. Schema discovery retries in the background with exponential backoff (2s → 60s cap). Once a Refresh succeeds, `/livez` flips to 200 and normal serving begins automatically.
+If ClickHouse is unreachable when WaveHouse starts (connection refused, missing database, DNS failure, etc.), the gateway no longer exits — it binds `:8080` and serves `/livez` 503 with the latest schema-discovery error as the diagnostic. Schema discovery retries in the background with jittered exponential backoff (each wait a random time below a bound that doubles from 2s to a 60s cap). Once a Refresh succeeds, `/livez` flips to 200 and normal serving begins automatically.
 
 This means:
 
