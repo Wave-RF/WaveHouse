@@ -17,11 +17,13 @@ const { data } = await wh.pipe('top_pages', { start_date: '2026-01-01', limit: 5
 
 ### `.fetch(opts?)`
 
-Execute and return results. A [pipe that writes](/pipes#pipes-that-write) returns `[]`. A ClickHouse failure on one comes back `retryable: false`, and the SDK does not retry it; it does still retry a request whose answer never arrives, such as one on a dropped connection, so a write can run twice. If that matters, give the client that runs write pipes [`options.maxRetries`](/sdk#clientconfigdb) `0`. Takes `PipeRequestOptions` — `{ signal }` only, narrower than the `.fetch(opts?)` on a [query builder](/sdk/queries), which also accepts `limit`. Passing a `limit` is a compile error rather than a silent no-op.
+Execute and return results. A [pipe that writes](/pipes#pipes-that-write) returns `[]`. `.fetch()` takes `PipeRequestOptions` — `{ signal }` only, narrower than the `.fetch(opts?)` on a [query builder](/sdk/queries), which also accepts `limit`. Passing a `limit` is a compile error rather than a silent no-op.
 
 `limit` is typed `never` rather than left out, so the rejection also catches a value passed in a variable — leaving it out would only reject an inline object. That cuts both ways: a value *declared* as `RequestOptions` is rejected whether or not it actually carries a limit, since the type permits one. If you share one options object across calls, type it as `PipeRequestOptions` — the table and query-builder `.fetch()` accept that too — or inline `{ signal }` at the pipe call.
 
 There is no per-call row cap here: the endpoint binds your `params` as the pipe's parameters, so a limit has to be declared in the pipe's SQL as `{{limit}}` (see [Named Pipes](/pipes)) and passed as `wh.pipe(name, { limit })`, as in the example above.
+
+A ClickHouse failure on a [pipe that writes](/pipes#pipes-that-write) comes back `retryable: false`, and the SDK does not retry it. The SDK does still retry when WaveHouse's own answer never reaches it — a dropped connection, or a `502`/`503`/`504` from a proxy in front of WaveHouse that gave up waiting — so a write can run twice that way. If that matters, give the client that runs write pipes [`options.maxRetries`](/sdk#clientconfigdb) `0`.
 
 ### `.stream(opts?)`
 
