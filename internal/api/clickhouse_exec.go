@@ -43,7 +43,7 @@ func timeoutOf(timeout func(*settings.Store) time.Duration, store *settings.Stor
 // The raw-SQL endpoint (/v1/ops/query) proxies straight to ClickHouse
 // over HTTP and never calls this; see internal/api/query.go.
 func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []any) ([]map[string]any, error) {
-	if isMutation(sql) {
+	if IsMutation(sql) {
 		if err := conn.Exec(ctx, sql, params...); err != nil {
 			return nil, fmt.Errorf("clickhouse exec: %w", err)
 		}
@@ -114,17 +114,16 @@ var mutationVerbs = map[string]struct{}{
 	"SYSTEM":   {},
 }
 
-// isMutation reports whether sql's leading statement is a non-SELECT — i.e.
+// IsMutation reports whether sql's leading statement is a non-SELECT — i.e.
 // one that returns no result set and must go through Exec, not Query.
 // Leading whitespace and comments are skipped as ClickHouse's lexer skips
 // them, then the first bareword is matched whole, case-insensitively, against
-// mutationVerbs. A leading WITH clause (CTE) routes through a paren-aware scan
-// because ClickHouse accepts `WITH cte AS (...) INSERT INTO t SELECT * FROM
-// cte` as equivalent to `INSERT INTO t WITH cte AS (...) SELECT * FROM cte`
-// (see https://clickhouse.com/docs/sql-reference/statements/insert-into).
-// A write classified as a read goes through Query, which runs it and then
-// fails the call, so a client that retries the error writes again.
-func isMutation(sql string) bool {
+// mutationVerbs. After a WITH list ClickHouse parses only SELECT, a FROM-first
+// SELECT or INSERT INTO, so a WITH-led statement is a write exactly when it
+// holds INSERT INTO at the top level (hasTopLevelInsertInto). A write
+// classified as a read goes through Query, which runs it and then fails the
+// call, so a client that retries the error writes again.
+func IsMutation(sql string) bool {
 	s := stripLeadingSQLComments(sql)
 	end := skipWord(s, 0)
 	if end == 0 {
@@ -135,52 +134,18 @@ func isMutation(sql string) bool {
 		_, ok := mutationVerbs[first]
 		return ok
 	}
-	return containsMutationVerbAtTopLevel(s[end:])
+	return hasTopLevelInsertInto(s[end:])
 }
 
-// nonMutationVerbs is the read/metadata-statement counterpart to
-// mutationVerbs. Together they cover every ClickHouse statement-introducing
-// keyword that can legally follow a CTE list. The CTE-aware scanner in
-// containsMutationVerbAtTopLevel needs the union to identify *which* token
-// is the statement keyword — without it, ordinary identifiers in the CTE
-// list (table names, database names like the ClickHouse-built-in `system`)
-// can collide with mutation-verb names and false-positive the classifier.
-var nonMutationVerbs = map[string]struct{}{
-	"SELECT":   {},
-	"SHOW":     {},
-	"DESCRIBE": {},
-	"DESC":     {},
-	"EXPLAIN":  {},
-	"EXISTS":   {},
-	"CHECK":    {},
-}
-
-// containsMutationVerbAtTopLevel scans s for the statement-introducing
-// keyword at paren-depth 0, stepping over string literals and quoted
-// identifiers (skipQuoted, skipCurlyQuoted), heredocs (skipHeredoc),
-// parenthesized CTE subqueries, and comments (skipComment). The CTE list
-// contains ordinary identifiers (CTE names, table/database names) that must
-// not be matched as mutation verbs — `system` would otherwise pattern-match
-// `SYSTEM` and route a `WITH … SELECT * FROM system.tables` read through
-// `Exec` (silent empty-array result instead of the actual rows). Two-part fix:
-//
-//  1. Skip identifiers whose next non-whitespace, non-comment token is
-//     `AS` (case-insensitive) or `(` — those are CTE definition names
-//     (with optional column list before AS). This catches the harder
-//     class where the CTE alias is itself a mutation-verb name
-//     (`WITH set AS (…) SELECT …`, `WITH alter AS (…) …`, etc.).
-//  2. Among the remaining identifiers, stop on the FIRST that's a
-//     known statement keyword (mutation OR read-class), and decide
-//     based on mutationVerbs membership.
-//
-// Tokens that aren't CTE names and aren't statement keywords (RECURSIVE,
-// MATERIALIZED, scalar CTE aliases, etc.) are skipped silently. Returns
-// false if no statement keyword is found — the SQL is syntactically
-// incomplete or unrecognised; safer to treat as non-mutation than to
-// silently route an unknown verb through Exec (an Exec'd SELECT returns
-// `[]` with no error; a Query'd unrecognised statement surfaces a clear
-// error).
-func containsMutationVerbAtTopLevel(s string) bool {
+// hasTopLevelInsertInto reports whether s holds INSERT INTO outside
+// parentheses, stepping over string literals and quoted identifiers
+// (skipQuoted, skipCurlyQuoted), heredocs (skipHeredoc) and comments
+// (skipComment). No other word is taken for the statement: a WITH list's
+// names and aliases may be spelled like any keyword (`WITH 1 AS select`,
+// `WITH desc AS (…)`, `WITH set -> 1 AS f`, `WITH t.from AS y`), but only the
+// INSERT statement puts INTO after an insert. The exception, a read's
+// `… insert INTO OUTFILE 'f'`, is refused by the server either way.
+func hasTopLevelInsertInto(s string) bool {
 	depth := 0
 	i := 0
 	for i < len(s) {
@@ -214,30 +179,12 @@ func containsMutationVerbAtTopLevel(s string) bool {
 			}
 		case isWordByte(c):
 			// A word led by a digit or `_` is read whole, so its tail is
-			// never taken for a keyword (`_delete`).
+			// never taken for a keyword (`_insert`).
 			start := i
 			i = skipWord(s, i)
-			if depth == 0 {
-				kw := strings.ToUpper(s[start:i])
-				// Check non-mutation statement keywords (SELECT, SHOW,
-				// DESCRIBE, …) FIRST — these can legitimately be followed
-				// by `(` (e.g. `SELECT (1) FROM …`, `SELECT (a, b) FROM …`
-				// for tuple syntax), so we must not let the CTE-name
-				// lookahead below misclassify them as CTE aliases.
-				if _, ok := nonMutationVerbs[kw]; ok {
-					return false
-				}
-				// CTE name suppression: an identifier that ISN'T a
-				// non-mutation statement keyword and is followed by `AS`
-				// or `(` is a CTE definition name (with optional column
-				// list before AS). Skip without checking mutationVerbs
-				// — protects against CTE aliases that share a spelling
-				// with a mutation verb (`WITH set AS (...)`,
-				// `WITH alter AS (...)`, etc.).
-				if isCTENameLookahead(s, i) {
-					continue
-				}
-				if _, ok := mutationVerbs[kw]; ok {
+			if depth == 0 && strings.EqualFold(s[start:i], "INSERT") {
+				next := skipSpaceAndComments(s, i)
+				if strings.EqualFold(s[next:skipWord(s, next)], "INTO") {
 					return true
 				}
 			}
@@ -248,22 +195,6 @@ func containsMutationVerbAtTopLevel(s string) bool {
 		}
 	}
 	return false
-}
-
-// isCTENameLookahead returns true if the next non-whitespace, non-comment
-// token at or after pos is `AS` (case-insensitive, word-boundary terminated)
-// or `(` — signaling that whatever identifier just ended at pos is a CTE
-// definition name (with optional column list before AS). Returns false on EOF
-// or any other token.
-func isCTENameLookahead(s string, pos int) bool {
-	i := skipSpaceAndComments(s, pos)
-	if i >= len(s) {
-		return false
-	}
-	if s[i] == '(' {
-		return true
-	}
-	return strings.EqualFold(s[i:skipWord(s, i)], "AS")
 }
 
 // skipWord returns the index just past the bareword at s[i]: ClickHouse's

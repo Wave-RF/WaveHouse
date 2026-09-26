@@ -152,7 +152,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if isMutation(sql) {
+	if IsMutation(sql) {
 		h.executeWrite(w, r, store, sql, params)
 		return
 	}
@@ -211,7 +211,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 // executeWrite runs a pipe that writes, on every call: a cached or coalesced
 // response would answer a repeat without executing it, silently dropping the
-// write (#386) — on every instance once the cache is shared. isMutation is the
+// write (#386) — on every instance once the cache is shared. IsMutation is the
 // classifier executeCHQuery routes Exec by, so what bypasses here is exactly
 // what runs as a write. no-store keeps an HTTP cache in front of a GET from
 // answering a repeat the same way.

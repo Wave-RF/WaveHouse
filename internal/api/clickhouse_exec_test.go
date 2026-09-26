@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/mutationtest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,139 +40,14 @@ func (c *stubConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, er
 	return &chainEmptyRows{}, nil
 }
 
+// TestIsMutation runs the shared cases; the integration suite checks the
+// same cases against ClickHouse's parser.
 func TestIsMutation(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name string
-		sql  string
-		want bool
-	}{
-		{"select", "SELECT 1", false},
-		{"select lower", "select 1", false},
-		{"with cte", "WITH x AS (SELECT 1) SELECT * FROM x", false},
-		{"show", "SHOW TABLES", false},
-		{"describe", "DESCRIBE clicks", false},
-		{"explain", "EXPLAIN SELECT 1", false},
-		{"exists", "EXISTS TABLE clicks", false},
-
-		{"insert", "INSERT INTO t VALUES (1)", true},
-		{"update", "UPDATE t SET a=1 WHERE b=2", true},
-		{"delete", "DELETE FROM t WHERE id=1", true},
-		{"truncate", "TRUNCATE TABLE t", true},
-		{"truncate lower", "truncate table t", true},
-		{"drop", "DROP TABLE t", true},
-		{"alter", "ALTER TABLE t ADD COLUMN c String", true},
-		{"create", "CREATE TABLE t (a Int)", true},
-		{"rename", "RENAME TABLE a TO b", true},
-		{"exchange", "EXCHANGE TABLES t1 AND t2", true},
-		{"optimize", "OPTIMIZE TABLE t", true},
-		{"replace", "REPLACE INTO t VALUES (1)", true},
-		{"grant", "GRANT SELECT ON t TO u", true},
-		{"revoke", "REVOKE SELECT ON t FROM u", true},
-		{"system", "SYSTEM RELOAD CONFIG", true},
-		{"attach", "ATTACH TABLE t FROM '/path'", true},
-		{"detach", "DETACH TABLE t", true},
-		{"kill", "KILL QUERY WHERE query_id = 'abc'", true},
-		{"set", "SET max_threads = 4", true},
-		{"use", "USE mydb", true},
-
-		{"leading whitespace", "   \n\tTRUNCATE TABLE t", true},
-		{"line comment then mutation", "-- drop guard\nDROP TABLE t", true},
-		{"hash line comment then mutation", "# audit\nDROP TABLE t", true},
-		{"block comment then mutation", "/* admin */ ALTER TABLE t ADD COLUMN c Int", true},
-		{"mixed comments then select", "-- foo\n# bar\n/* baz */ SELECT 1", false},
-		{"with insert", "WITH cte AS (SELECT 1) INSERT INTO t SELECT * FROM cte", true},
-		{"with insert lower", "with cte as (select 1) insert into t select * from cte", true},
-		{"with delete", "WITH cte AS (SELECT id FROM x) DELETE FROM t WHERE id IN (SELECT id FROM cte)", true},
-		{"with update", "WITH cte AS (SELECT 1) ALTER TABLE t UPDATE a=1 WHERE id IN (SELECT id FROM cte)", true},
-		{"with truncate", "WITH cte AS (SELECT 1) TRUNCATE TABLE t", true},
-		{"with multi-cte insert", "WITH a AS (SELECT 1), b AS (SELECT 2) INSERT INTO t SELECT * FROM a JOIN b", true},
-		{"with nested parens insert", "WITH cte AS (SELECT id FROM t WHERE id IN (1,2,3)) INSERT INTO t2 SELECT * FROM cte", true},
-		{"with paren-in-string insert", "WITH cte AS (SELECT ')' AS x) INSERT INTO t2 SELECT * FROM cte", true},
-		{"with materialized insert", "WITH cte AS MATERIALIZED (SELECT 1) INSERT INTO t SELECT * FROM cte", true},
-		{"with recursive select", "WITH RECURSIVE x AS (SELECT 1 UNION ALL SELECT * FROM x) SELECT * FROM x", false},
-		{"with nested select", "WITH x AS (SELECT 1) SELECT * FROM (SELECT * FROM x)", false},
-		{"with scalar insert", "WITH '/path' AS p INSERT INTO files VALUES (p)", true},
-		{"with line comment containing DELETE then select", "WITH cte AS (SELECT 1) -- old DELETE approach\nSELECT * FROM cte", false},
-		{"with hash comment containing TRUNCATE then select", "WITH cte AS (SELECT 1) # was TRUNCATE\nSELECT * FROM cte", false},
-		{"with block comment containing INSERT then select", "WITH cte AS (SELECT 1) /* INSERT reminder */ SELECT * FROM cte", false},
-		{"with comment then real mutation", "WITH cte AS (SELECT 1) -- explanatory\nINSERT INTO t SELECT * FROM cte", true},
-		{"with unclosed block comment", "WITH cte AS (SELECT 1) /* unterminated comment DELETE", false},
-		{"with select from system tables (collision regression)", "WITH x AS (SELECT 1) SELECT * FROM system.tables", false},
-		{"with select from system columns lower (collision regression)", "with x as (select 1) select name from system.columns", false},
-		{"with select aliased as set (false positive regression)", "WITH cte AS (SELECT 1) SELECT * FROM cte AS set", false},
-		{"with select from system tables then real insert", "WITH x AS (SELECT * FROM system.tables) INSERT INTO snapshot SELECT * FROM x", true},
-		{"with CTE alias named set (read)", "WITH set AS (SELECT 1) SELECT * FROM set", false},
-		{"with CTE alias named alter (read)", "WITH alter AS (SELECT 1) SELECT id FROM alter", false},
-		{"with CTE alias named drop lowercase (read)", "with drop as (select 1) select * from drop", false},
-		{"with CTE alias named update then real update", "WITH update AS (SELECT id FROM x) ALTER TABLE other UPDATE c=1 WHERE id IN (SELECT id FROM update)", true},
-		{"with CTE name with column list (read)", "WITH cte (a, b) AS (SELECT 1, 2) SELECT * FROM cte", false},
-		{"with multi-CTE both with verb-name aliases (read)", "WITH set AS (SELECT 1), kill AS (SELECT 2) SELECT * FROM set JOIN kill", false},
-		{"with parenthesized SELECT then system table (CTE-lookahead ordering regression)", "WITH x AS (SELECT 1) SELECT (1) FROM system.tables", false},
-		{"with tuple-shape SELECT then system table", "WITH x AS (SELECT 1) SELECT (a, b) FROM system.parts", false},
-
-		// A backslash escapes the next byte inside all three quote kinds, so an
-		// escaped quote does not end the literal or identifier.
-		{"with backslash-escaped quote in literal then insert", `WITH m AS (SELECT 'it\'s' AS s) INSERT INTO t SELECT s FROM m`, true},
-		{"with backslash-escaped quote in literal then select", `WITH m AS (SELECT 'a\'b' AS s) SELECT 'x) INSERT' FROM m`, false},
-		{"with backslash-escaped double quote then insert", `WITH m AS (SELECT 'x' AS "a\"(b") INSERT INTO t SELECT * FROM m`, true},
-		{"with backslash-escaped double quote then select", `WITH m AS (SELECT 1 AS "a\"b") SELECT 2 AS "x) INSERT" FROM m`, false},
-		{"with backslash-escaped backtick then insert", "WITH m AS (SELECT 'x' AS `a\\`(b`) INSERT INTO t SELECT * FROM m", true},
-		{"with backslash-escaped backtick then select", "WITH m AS (SELECT 1 AS `a\\`b`) SELECT 2 AS `x) INSERT` FROM m", false},
-
-		// A heredoc ($$…$$, $tag$…$tag$) is a literal: its parens, quotes
-		// and words are not the statement's.
-		{"with heredoc holding a paren then insert", "WITH $$ ( $$ AS s INSERT INTO t SELECT s", true},
-		{"with tagged heredoc holding a quote then insert", "WITH $x$ it's $x$ AS s INSERT INTO t SELECT s", true},
-		{"with tagged heredoc holding a paren and another tag then insert", "WITH $x$ ( $y$ $x$ AS s INSERT INTO t SELECT s", true},
-		{"with heredoc holding a verb then select", "WITH $$INSERT$$ AS s SELECT s", false},
-		{"with tagged heredoc holding a paren and a verb then select", "WITH $x$ ) INSERT $x$ AS s SELECT s", false},
-		{"with CTE alias set$ (read)", "WITH set$ AS (SELECT 1 AS v) SELECT * FROM set$", false},
-
-		// A word led by `_` is one bareword, never a keyword's tail, and a
-		// leading bareword is matched whole, never by its first letters.
-		{"leading bareword insert_log", "insert_log VALUES (1)", false},
-		{"leading bareword insert2", "insert2 INTO t VALUES (1)", false},
-		{"with alias _delete (read)", "WITH 1 AS _delete SELECT _delete", false},
-		{"with alias _set (read)", "WITH [1,2] AS _set SELECT has(_set, 1)", false},
-
-		// `//` starts a line comment.
-		{"slash comment then insert", "// note\nINSERT INTO t VALUES (1)", true},
-		{"slash comment hiding insert then select", "// INSERT\nSELECT 1", false},
-		{"with slash comment holding a paren then insert", "WITH x AS (SELECT 'a' AS s) // (\nINSERT INTO t SELECT * FROM x", true},
-
-		// ‘…’ is a string literal and “…” a quoted identifier; nothing escapes
-		// inside them.
-		{"with curly-quoted literal holding a paren then insert", "WITH x AS (SELECT \u2018(\u2019 AS s) INSERT INTO t SELECT s FROM x", true},
-		{"with curly-quoted literal holding a verb then select", "WITH x AS (SELECT \u2018) INSERT\u2019 AS s) SELECT s FROM x", false},
-		{"with curly-quoted identifier holding a paren then insert", "WITH x AS (SELECT 'q' AS \u201cc(d\u201d) INSERT INTO t SELECT * FROM x", true},
-
-		// ClickHouse's lexer skips \v, \f and Unicode spaces as whitespace
-		// (TestIsMutation_ClickHouseWhitespace covers the whole set).
-		{"leading form feed then insert", "\fINSERT INTO t VALUES (1)", true},
-		{"leading vertical tab then insert", "\vINSERT INTO t VALUES (1)", true},
-		{"leading NBSP then insert", "\u00a0INSERT INTO t VALUES (1)", true},
-		{"leading BOM then insert", "\ufeffINSERT INTO t VALUES (1)", true},
-		{"leading NBSP then select", "\u00a0SELECT 1", false},
-		{"with CTE alias named set before form feed AS (read)", "WITH set\fAS (SELECT 1) SELECT * FROM set", false},
-		{"with CTE alias named set before NBSP AS (read)", "WITH set\u00a0AS (SELECT 1) SELECT * FROM set", false},
-
-		// ClickHouse block comments nest.
-		{"nested block comment hiding select then insert", "/* a /* b */ SELECT */ INSERT INTO t VALUES (1)", true},
-		{"nested block comment hiding insert then select", "/* a /* b */ INSERT */ SELECT 1", false},
-		{"unclosed nested block comment", "/* a /* b */ INSERT INTO t VALUES (1)", false},
-		{"with nested block comment hiding select then insert", "WITH x AS (SELECT 1) /* a /* b */ SELECT */ INSERT INTO t SELECT * FROM x", true},
-		{"with nested block comment hiding insert then select", "WITH x AS (SELECT 1) /* a /* b */ INSERT */ SELECT * FROM x", false},
-		{"with nested block comment before CTE AS (read)", "WITH set /* a /* b */ c */ AS (SELECT 1) SELECT * FROM set", false},
-
-		{"empty", "", false},
-		{"comment only", "-- just a comment", false},
-		{"unclosed block comment", "/* never closed", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, tc := range mutationtest.Cases {
+		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, isMutation(tt.sql))
+			assert.Equal(t, tc.Mutation, IsMutation(tc.SQL))
 		})
 	}
 }
@@ -187,13 +63,13 @@ func TestIsMutation_ClickHouseWhitespace(t *testing.T) {
 	}
 	for _, r := range spaces {
 		ws := string(r)
-		assert.True(t, isMutation(ws+"INSERT INTO t VALUES (1)"), "U+%04X before INSERT", r)
-		assert.False(t, isMutation(ws+"SELECT 1"), "U+%04X before SELECT", r)
-		assert.True(t, isMutation("WITH x AS (SELECT 1)"+ws+"INSERT INTO t SELECT * FROM x"), "U+%04X before a WITH's INSERT", r)
-		assert.False(t, isMutation("WITH set"+ws+"AS (SELECT 1) SELECT * FROM set"), "U+%04X between a CTE name and AS", r)
+		assert.True(t, IsMutation(ws+"INSERT INTO t VALUES (1)"), "U+%04X before INSERT", r)
+		assert.False(t, IsMutation(ws+"SELECT 1"), "U+%04X before SELECT", r)
+		assert.True(t, IsMutation("WITH x AS (SELECT 1)"+ws+"INSERT INTO t SELECT * FROM x"), "U+%04X before a WITH's INSERT", r)
+		assert.True(t, IsMutation("WITH 1 AS x INSERT"+ws+"INTO t SELECT x"), "U+%04X between a WITH's INSERT and INTO", r)
 	}
 	// Not whitespace to ClickHouse (it rejects the statement), so not skipped.
-	assert.False(t, isMutation("\u1680INSERT INTO t VALUES (1)"))
+	assert.False(t, IsMutation("\u1680INSERT INTO t VALUES (1)"))
 }
 
 func TestExecuteCHQuery_MutationRoutesToExec(t *testing.T) {
