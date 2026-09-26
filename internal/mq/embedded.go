@@ -680,14 +680,13 @@ func (e *EmbeddedNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (
 		failed: make(chan error, 1),
 	}
 	c.fail = func(err error) {
-		// Exactly one error, and nothing once stop has been called.
-		if c.stopped.Load() {
+		// Exactly one error, and nothing once stop has been called: a durable
+		// deleted on several tenants' queues ends each delivery, and a caller
+		// that already drained the first must not see the next.
+		if c.stopped.Load() || !c.reported.CompareAndSwap(false, true) {
 			return
 		}
-		select {
-		case c.failed <- err:
-		default:
-		}
+		c.failed <- err
 	}
 	if err := e.register(ctx, c.fanIn); err != nil {
 		return nil, fmt.Errorf("create consumer: %w", err)
@@ -873,7 +872,8 @@ func (f *fanIn) start(deliver func(jetstream.Msg), prefetch int, watch bool) (st
 // failed channel its contract promises.
 type workerConsumer struct {
 	*fanIn
-	failed chan error
+	failed   chan error
+	reported atomic.Bool
 }
 
 func (c *workerConsumer) Consume(handler func(msg *Message), prefetch int) (func(), <-chan error, error) {
@@ -1057,7 +1057,9 @@ func (e *EmbeddedNATS) ReplaySince(ctx context.Context, topic Topic, since time.
 		}
 		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
 		if err != nil {
-			if errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout) {
+			// A pull that raced the connection closing can end in either
+			// answer too, and that is not caught up.
+			if (errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout)) && !e.conn.IsClosed() {
 				return nil // caught up
 			}
 			return fmt.Errorf("replay next: %w", err)
