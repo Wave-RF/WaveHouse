@@ -1124,3 +1124,42 @@ func TestNewRouter_CORSPerTenant(t *testing.T) {
 		}
 	})
 }
+
+// The ops-only router serves the probes, /version, and the reload behind the
+// operator key; every other route is absent. Without a settings handler the
+// reload is absent too.
+func TestNewOpsRouter(t *testing.T) {
+	t.Parallel()
+	dir := writeSettingsFixture(t, fullConfig(100))
+	tenants, _ := settings.Open(dir)
+	require.NotNil(t, tenants)
+	const key = "ops-key"
+	authMW := auth.NewAuthenticator(auth.Config{OperatorKey: key}, nil, nil).Middleware()
+	deps := OpsDependencies{
+		Health:   NewHealthHandler(nil),
+		Version:  NewVersionHandler("v", "c", "t"),
+		Settings: NewSettingsHandler(tenants),
+		AuthMW:   authMW,
+	}
+	do := func(h http.Handler, method, path, operatorKey string) int {
+		req := httptest.NewRequestWithContext(t.Context(), method, path, nil)
+		if operatorKey != "" {
+			req.Header.Set("X-Operator-Key", operatorKey)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	r := NewOpsRouter(deps)
+	for _, path := range []string{"/livez", "/readyz", "/version"} {
+		assert.Equal(t, http.StatusOK, do(r, http.MethodGet, path, ""), path)
+	}
+	assert.Equal(t, http.StatusOK, do(r, http.MethodPost, "/v1/ops/settings/reload", key))
+	assert.Equal(t, http.StatusForbidden, do(r, http.MethodPost, "/v1/ops/settings/reload", ""))
+	assert.Equal(t, http.StatusNotFound, do(r, http.MethodPost, "/v1/ingest", key))
+	assert.Equal(t, http.StatusNotFound, do(r, http.MethodGet, "/v1/ops/schema", key))
+
+	deps.Settings = nil
+	assert.Equal(t, http.StatusNotFound, do(NewOpsRouter(deps), http.MethodPost, "/v1/ops/settings/reload", key))
+}

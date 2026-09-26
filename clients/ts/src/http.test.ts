@@ -108,6 +108,29 @@ describe("request", () => {
     expect(result.error?.retryable).toBe(false);
   });
 
+  it("does not retry a 5xx the server marks not retryable", async () => {
+    fetchSpy.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: "Authentication failed",
+          code: "clickhouse.misconfigured",
+          retryable: false,
+        }),
+        { status: 502 },
+      ),
+    );
+
+    const result = await request(makeCtx({ options: { maxRetries: 2 } }), {
+      method: "POST",
+      path: "/v1/query?table=clicks",
+      body: {},
+    });
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(result.error?.code).toBe("clickhouse.misconfigured");
+    expect(result.error?.retryable).toBe(false);
+  });
+
   it("returns error for 500 without retry when maxRetries=0", async () => {
     fetchSpy.mockResolvedValue(
       new Response(JSON.stringify({ error: "internal" }), { status: 500 }),

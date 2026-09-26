@@ -58,8 +58,8 @@ type Claim struct {
 }
 
 // Deduplicator is a tenant's store of seen ids. Callers reach every backend
-// through Managed, which hands a backend distinct, valid keys, a lease > 0,
-// and only Claimed claims to Commit and Release — a backend may assume all
+// through Managed, which hands a backend distinct keys, a lease > 0, and
+// only Claimed claims to Commit and Release — a backend may assume all
 // three, and Managed's callers get the behaviour below either way.
 //
 // Reserve is atomic per key: of any number of concurrent Reserves for the

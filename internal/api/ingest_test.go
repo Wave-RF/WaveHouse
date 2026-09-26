@@ -252,6 +252,20 @@ func TestIngest_PublishError_503(t *testing.T) {
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
+func TestIngest_PublishUnavailable_503(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{Err: fmt.Errorf("%w: nats: timeout", mq.ErrUnavailable)}
+	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
+
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(req))
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "5", w.Header().Get("Retry-After"))
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
 func TestIngest_PublishError_500(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{Err: errors.New("some other error")}
@@ -1053,6 +1067,20 @@ func TestIngest_NDJSON_Backpressure_503(t *testing.T) {
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.Equal(t, "30", w.Header().Get("Retry-After"))
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+func TestIngest_NDJSON_Unavailable_503(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{Err: fmt.Errorf("%w: nats: no responders", mq.ErrUnavailable)}
+	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
+
+	req := ndjsonRequest(t, "clicks", jsonLine(t, map[string]any{"page": "/a"}))
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(req))
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "5", w.Header().Get("Retry-After"))
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
@@ -2787,6 +2815,24 @@ func TestIngest_Dedup_FailedPublishReleasesTheID(t *testing.T) {
 			assert.Contains(t, w.Body.String(), `"duplicate":true`, "and committed once published")
 		})
 	}
+}
+
+// A release that fails after a failed publish is only logged: the request
+// answers with the publish's own error, and the id is left to lapse with its
+// lease rather than being reported as a dedupe failure.
+func TestIngest_Dedup_FailedReleaseKeepsThePublishError(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{Err: errors.New("connection reset")}
+	dedup := testutil.NewMockDeduplicator()
+	dedup.ReleaseErr = errors.New("store unavailable")
+	h := dedupHandler(t, pub, dedup, false)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"})))
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.NotContains(t, w.Body.String(), "dedupe", "the publish's error, not the release's")
+	assert.Len(t, dedup.Released, 1, "the release was attempted")
+	assert.True(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "left to lapse with its lease")
 }
 
 // A batch whose publish fails part-way keeps what it published: the records

@@ -5,7 +5,8 @@
 // ingest queue, park a message on the dead-letter queue, replay since a time,
 // drop what is both written and expired — in the types below. How that maps to
 // subjects, streams, sequences, and consumers is the implementation's
-// (EmbeddedNATS), so a broker change lands here once.
+// (EmbeddedNATS), so a broker change lands here once. The behavior below is
+// what mqtest checks: every implementation passes its suite.
 package mq
 
 import (
@@ -34,16 +35,16 @@ type Topic struct {
 
 // key is the injective string form of the topic that a subject's tail
 // carries: the tenant first, verbatim — its grammar makes it one token — then
-// the table and scope as encoded tokens. A topic without a tenant has no
-// subject, and its key parses back to a topic of no tenant with the whole key
-// as its table (parseTopicKey's fallback). Callers key their own maps by the
-// Topic value itself.
+// the table and scope joined as escaped tokens (keyenc.AppendJoin). A topic
+// without a tenant has no subject, and its key parses back to a topic of no
+// tenant with the whole key as its table (parseTopicKey's fallback). Callers
+// key their own maps by the Topic value itself.
 func (t Topic) key() string {
-	key := string(t.Tenant) + "." + keyenc.Escape(t.Table)
-	if t.Scope != "" {
-		key += "." + keyenc.Escape(t.Scope)
+	key := append([]byte(t.Tenant), '.')
+	if t.Scope == "" {
+		return string(keyenc.AppendJoin(key, '.', t.Table))
 	}
-	return key
+	return string(keyenc.AppendJoin(key, '.', t.Table, t.Scope))
 }
 
 // Message represents a message received from the queue.
@@ -59,15 +60,29 @@ type Message struct {
 	doubleAckFn func(ctx context.Context) error
 	ackFn       func() error
 	nakFn       func() error
+	nakDelayFn  func(time.Duration) error
+}
+
+// MessageOpt configures a Message beyond its required callbacks.
+type MessageOpt func(*Message)
+
+// WithNakDelay gives a Message its delayed negative acknowledgement (see
+// NakWithDelay).
+func WithNakDelay(fn func(time.Duration) error) MessageOpt {
+	return func(m *Message) { m.nakDelayFn = fn }
 }
 
 // NewMessage constructs a Message with ack/nak callbacks.
-func NewMessage(ctx context.Context, topic Topic, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error) *Message {
-	return newMessage(ctx, topic.key(), data, ts, doubleAck, ack, nak)
+func NewMessage(ctx context.Context, topic Topic, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error, opts ...MessageOpt) *Message {
+	return newMessage(ctx, topic.key(), data, ts, doubleAck, ack, nak, opts...)
 }
 
-func newMessage(ctx context.Context, topicKey string, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error) *Message {
-	return &Message{Ctx: ctx, topicKey: topicKey, Data: data, Timestamp: ts, doubleAckFn: doubleAck, ackFn: ack, nakFn: nak}
+func newMessage(ctx context.Context, topicKey string, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error, opts ...MessageOpt) *Message {
+	m := &Message{Ctx: ctx, topicKey: topicKey, Data: data, Timestamp: ts, doubleAckFn: doubleAck, ackFn: ack, nakFn: nak}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // TopicKey is the delivered form of the topic the message was published on,
@@ -108,6 +123,17 @@ func (m *Message) Nak() error {
 	return nil
 }
 
+// NakWithDelay negatively acknowledges the message, asking for redelivery no
+// sooner than delay — a retry that backs off rather than coming straight
+// back. Fire-and-forget like Nak, which it falls back to when the message
+// has no delayed form.
+func (m *Message) NakWithDelay(delay time.Duration) error {
+	if m.nakDelayFn != nil {
+		return m.nakDelayFn(delay)
+	}
+	return m.Nak()
+}
+
 // Headers carries a message's headers. It has the same map[string][]string
 // shape as NATS and HTTP headers, so it converts to either without a copy.
 // Keys are exact (case-sensitive, no canonicalization), matching nats.Header.
@@ -142,32 +168,44 @@ func WithHeader(key, value string) PublishOpt {
 	}
 }
 
-// ErrQueueFull is returned by Publisher.Publish when the topic's tenant's
-// ingest queue refuses new events — it is at its byte budget, or the tenant
-// has no queue open yet — the backpressure signal the API turns into a 503
-// with Retry-After.
+// ErrQueueFull is returned by Publisher.Publish when the queue that holds the
+// topic's tenant refuses new events because it is at a byte limit — the
+// backpressure signal the API turns into a 503 with Retry-After. Which limits
+// there are, and which tenants share one, is the implementation's (see
+// Broker.SetMaxBytes). An implementation that opens a queue per tenant also
+// returns it for a tenant whose queue it cannot open yet.
 var ErrQueueFull = errors.New("ingest queue is full")
+
+// ErrUnavailable is returned when the broker cannot be reached or does not
+// answer in time — a transient failure, not a refusal, that the API turns
+// into a 503 with a short Retry-After. Only a backend whose broker is out of
+// process returns it; the embedded one's publish failures are plain errors.
+var ErrUnavailable = errors.New("message queue unavailable")
 
 // Publisher appends events to the ingest queue.
 type Publisher interface {
-	// Publish stores data as one event on topic, in the ingest queue of the
-	// topic's tenant. ErrQueueFull when that queue is at its byte budget, or
-	// the tenant has no queue open yet (see Broker.SetMaxBytes).
+	// Publish stores data as one event on topic, in the ingest queue that
+	// holds the topic's tenant. A topic without a valid tenant is refused
+	// before anything is sent. ErrQueueFull when that queue refuses the event
+	// at a byte limit (or, per tenant, cannot be opened yet), ErrUnavailable
+	// when the broker cannot take it now.
 	Publish(ctx context.Context, topic Topic, data []byte, opts ...PublishOpt) error
 	Close() error
 }
 
 // Subscriber delivers every event on the ingest queue, across all tenants
-// and topics: each tenant's in the order it was published, and different
-// tenants' concurrently.
+// and topics: each tenant's in the order it was published.
 type Subscriber interface {
-	// Subscribe registers a handler for incoming events under a durable
-	// consumer named consumerName, held on every tenant's queue — those
-	// opened after Subscribe included. The handler runs on one delivery
-	// goroutine per tenant, one message at a time, so it must be safe to
-	// call concurrently for different tenants. The messages fetched ahead of
-	// it are a fixed number split across the tenants, as Consumer.Consume's
-	// prefetch is, so they do not grow with the number of tenants.
+	// Subscribe registers a handler for incoming events, across every
+	// tenant — those whose queues open after Subscribe included. Every event
+	// published after Subscribe returns is delivered; whether earlier ones
+	// are is the implementation's, and so is whether consumerName names a
+	// durable consumer. The handler runs one message at a time on each
+	// delivery unit — a tenant's queue, or the partition that holds it — so
+	// it must be safe to call concurrently for different units. The messages
+	// fetched ahead of it are a fixed number split across the units, as
+	// Consumer.Consume's prefetch is, so they do not grow with the number of
+	// tenants.
 	//
 	// CONTRACT: If the handler intends to return an error to trigger automatic
 	// redelivery, it MUST NOT manually call msg.Ack() or msg.Nak() beforehand.
@@ -177,7 +215,7 @@ type Subscriber interface {
 	// error return.
 	//
 	// CONTRACT: Calling msg.DoubleAck(ctx) and then returning a non-nil error is
-	// undefined behaviour — the consume loop will Nak() after a successful
+	// undefined behavior — the consume loop will Nak() after a successful
 	// broker-confirmed Ack. Call DoubleAck, then return nil on success.
 	Subscribe(ctx context.Context, consumerName string, handler func(msg *Message) error) error
 	Close() error
@@ -190,31 +228,33 @@ type ConsumerConfig struct {
 	// AckWait is the redelivery timeout: a message not acked within it is
 	// delivered again.
 	AckWait time.Duration
-	// MaxAckPending caps unacked messages broker-side, per tenant: delivery
-	// of a tenant's events pauses when that tenant's unacked ones hit it
-	// (backpressure), and no other tenant's does.
+	// MaxAckPending caps unacked messages broker-side, per delivery unit (a
+	// tenant's queue, or the partition that holds it): delivery from a unit
+	// pauses when its unacked messages hit it (backpressure), and no other
+	// unit's does.
 	MaxAckPending int
 }
 
 // Consumer is a live durable consumer created by ConsumerManager.
 type Consumer interface {
-	// Consume delivers each message to handler on a delivery goroutine of its
-	// tenant's: one per tenant, so a tenant's messages arrive in order, one at
-	// a time, while different tenants' arrive concurrently — handler must be
-	// safe for that. A handler that blocks holds back its tenant's delivery —
+	// Consume delivers each message to handler on the delivery goroutine of
+	// its delivery unit — the tenant's queue, or the partition that holds
+	// it: one per unit, so a tenant's messages arrive in order, one at a
+	// time, while different units' arrive concurrently — handler must be
+	// safe for that. A handler that blocks holds back its unit's delivery —
 	// that is the backpressure the ingest worker relies on. About prefetch
-	// messages are fetched ahead across the tenants together: the tenants'
-	// queues when delivery starts split it, and a queue joined later fetches
-	// ahead its share of it at that point, at least one message each (0 = the
-	// client default, per tenant). The returned stop asks delivery to end and
-	// returns without waiting: a handler invocation already in flight, or one
-	// for a message already queued client-side, may still run after stop
-	// returns, so a handler must not write to anything the caller tears down
-	// right after stopping.
+	// messages are fetched ahead across the units together: the units when
+	// delivery starts split it, and a queue joined later fetches ahead its
+	// share of it at that point, at least one message each (0 = the client
+	// default, per unit). The returned stop asks delivery to end and returns
+	// without waiting: a handler invocation already in flight, or one for a
+	// message already queued client-side, may still run after stop returns,
+	// so a handler must not write to anything the caller tears down right
+	// after stopping.
 	//
 	// Delivery can also end on its own after Consume has returned: the broker
 	// or the client gives up on the consumer (it was deleted, the connection
-	// closed), or a tenant's queue opened later could not be joined. That is
+	// closed), or a queue opened later could not be joined. That is
 	// reported on failed — exactly one error, and nothing once stop has been
 	// called — because no message will ever arrive to say so. A caller that
 	// ignores failed waits forever on a dead consumer.
@@ -225,8 +265,10 @@ type Consumer interface {
 // broker's reason when it gave one.
 var ErrDeliveryEnded = errors.New("consumer delivery ended")
 
-// ConsumerManager creates durable consumers on the ingest queue, held on
-// every tenant's queue — those opened later included. A delivered
+// ConsumerManager gives access to durable consumers on the ingest queue, held
+// on every tenant's queue — those opened later included. Whether
+// CreateConsumer creates the durable, or only finds one someone else made and
+// checks it against the config, is the implementation's. A delivered
 // Message.Ctx is the ctx given to CreateConsumer: unlike Subscriber, the
 // consumer path does not extract the trace context carried in the message
 // headers, because its one consumer (the ingest worker) batches across
@@ -246,25 +288,28 @@ type DeadLetterer interface {
 
 // DeadLetterCounts is what is parked on one tenant's dead-letter queue.
 type DeadLetterCounts struct {
-	// Tables maps table name → parked messages, for the tables asked about.
-	// Scope is not broken out yet (it is inert until #235): a message parked
-	// under a scoped topic counts under "table.scope", not under its table.
+	// Tables maps table name → parked messages, for the tables asked about;
+	// empty, never nil, when none has any.
+	// Every scope of a table counts under the table; scope is not broken out
+	// yet (it is inert until #235).
 	Tables map[string]uint64
 	// Total is every parked message of the tenant, whatever the filter.
 	Total uint64
 }
 
 // ErrNoDeadLetterQueue is returned by DeadLetterStats.DeadLetterCounts when
-// the tenant has no dead-letter queue (nothing can have been parked for it).
-// Any other failure to read it is a plain error.
+// the tenant has no dead-letter queue of its own (nothing can have been
+// parked for it). An implementation whose tenants share one queue returns
+// zero counts instead. Any other failure to read it is a plain error.
 var ErrNoDeadLetterQueue = errors.New("dead-letter queue not found")
 
 // DeadLetterStats reports on the dead-letter queues.
 type DeadLetterStats interface {
 	// DeadLetterCounts counts tenant id's parked messages per table — a
 	// tenant served, rejected, or removed alike, for as long as its queue is
-	// kept. A non-empty table narrows Tables to that one (its unscoped
-	// messages).
+	// kept. A non-empty table narrows Tables to that one (all of its
+	// scopes). A tenant with nothing parked has zero counts, or
+	// ErrNoDeadLetterQueue when it has no queue at all.
 	DeadLetterCounts(ctx context.Context, id tenant.ID, table string) (DeadLetterCounts, error)
 }
 
@@ -283,7 +328,9 @@ type Purger interface {
 	// acknowledged goes. Reports whether anything was removed, and joins
 	// each failed tenant's error — ErrConsumerNotFound for one whose queue the
 	// consumer has not been created on; the other tenants' are purged all the
-	// same.
+	// same. An implementation whose retention the broker's operator owns
+	// removes nothing and reports false: either way, no unacked event is
+	// removed.
 	PurgeAcked(ctx context.Context, consumer string, olderThan map[tenant.ID]time.Time) (purged bool, err error)
 }
 
@@ -293,7 +340,8 @@ type Replayer interface {
 	// since, in order, until send returns false or the queue is caught up.
 	// Running out of events is the normal end; failing to start the replay, or
 	// a delivery failure before it catches up, is an error. A done ctx stops
-	// the replay and returns ctx's error.
+	// the replay and returns ctx's error. A topic without a valid tenant is
+	// refused as Publish refuses it.
 	ReplaySince(ctx context.Context, topic Topic, since time.Time, send func(data []byte) bool) error
 }
 
@@ -311,10 +359,12 @@ type Broker interface {
 	// SetMaxBytes applies tenant id's byte budget (its hot-reloadable
 	// mq.max_bytes_gb) to that tenant's queues — how it is split between them
 	// is the implementation's — opening them if the tenant has none yet. No
-	// other tenant's queues are touched. On an error the implementation
-	// restores the previous budget where it can (best effort: the error says
-	// when it could not, and a canceled ctx abandons the restore too), and
-	// MaxBytes keeps reporting the previous budget so the next call retries.
+	// other tenant's queues are touched. An implementation whose tenants
+	// share queues may only record the budget, and say so where it does. On
+	// an error the implementation restores the previous budget where it can
+	// (best effort: the error says when it could not, and a canceled ctx
+	// abandons the restore too), and MaxBytes keeps reporting the previous
+	// budget so the next call retries.
 	// MaxBytes reports the budget last applied in full for id, 0 when none
 	// has been.
 	SetMaxBytes(ctx context.Context, id tenant.ID, maxBytes int64) error
