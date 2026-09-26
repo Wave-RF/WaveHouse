@@ -38,6 +38,7 @@ const (
 	DefaultRedisPendingMax       = 100_000
 	defaultBreakerThreshold      = 5
 	defaultBreakerOpenFor        = 5 * time.Second
+	defaultConnLifetime          = time.Minute
 )
 
 const (
@@ -77,6 +78,8 @@ type RedisConfig struct {
 
 	BreakerThreshold int           // consecutive failures that open the breaker
 	BreakerOpenFor   time.Duration // how long it stays open before a probe
+
+	connLifetime time.Duration // defaultConnLifetime; tests shorten it
 }
 
 func (c RedisConfig) withDefaults() (RedisConfig, error) {
@@ -135,6 +138,7 @@ func (c RedisConfig) withDefaults() (RedisConfig, error) {
 	c.PendingMax = cmpOr(c.PendingMax, DefaultRedisPendingMax)
 	c.BreakerThreshold = cmpOr(c.BreakerThreshold, defaultBreakerThreshold)
 	c.BreakerOpenFor = cmpOr(c.BreakerOpenFor, defaultBreakerOpenFor)
+	c.connLifetime = cmpOr(c.connLifetime, defaultConnLifetime)
 	return c, nil
 }
 
@@ -163,6 +167,13 @@ func (c RedisConfig) clientOption() rueidis.ClientOption {
 	// Close would wait out; never under Timeout, so no connection is cut
 	// while an operation may still wait on it.
 	opt.ConnWriteTimeout = max(c.DialTimeout, c.Timeout)
+	// A connection outlives a failover behind a stable address: the demoted
+	// node still answers, refusing writes, and rueidis does not redial on
+	// READONLY. Replacing each connection this often (rueidis retries what
+	// was in flight) re-resolves the address, so a process the refusals
+	// bypass reaches the new primary, and delivers its owed bumps, within
+	// about this long.
+	opt.ConnLifetime = c.connLifetime
 	if c.Mode == RedisSentinel {
 		opt.Sentinel = rueidis.SentinelOption{MasterSet: c.SentinelMaster, TLSConfig: c.TLS, Dialer: opt.Dialer}
 	}
@@ -558,7 +569,7 @@ func setFailureReason(err error) string {
 }
 
 // Invalidate sets a fresh token for every token the namespaces' writes
-// reach, in one pipelined round trip. Bumps the server does not take are
+// reach, in pipelined batches of drainBatch, one round trip each. Bumps the server does not take are
 // kept and retried until it does, and reported as an error meanwhile.
 func (r *RedisCache) Invalidate(ctx context.Context, namespaces []Namespace) (uint64, error) {
 	owner := map[string]tenant.ID{}

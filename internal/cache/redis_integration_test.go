@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"slices"
 	"strconv"
@@ -559,6 +560,98 @@ func (c unanswered) Write(b []byte) (int, error) {
 	return c.Conn.Write(b)
 }
 
+// forward proxies each connection it accepts to the address target holds
+// at that moment, so a switch moves new connections only, as a stable DNS
+// name or a proxy does after a failover. It returns the address to dial.
+func forward(t *testing.T, target *atomic.Pointer[string]) string {
+	t.Helper()
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				var d net.Dialer
+				u, err := d.DialContext(context.Background(), "tcp", *target.Load())
+				if err != nil {
+					return
+				}
+				defer func() { _ = u.Close() }()
+				go func() { _, _ = io.Copy(u, c); _ = u.Close() }()
+				_, _ = io.Copy(c, u)
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// A failover behind a stable address: the connections the process holds
+// stay on the demoted node, which answers but refuses writes, while new ones
+// reach the node promoted in its place. The refusals bypass the cache, and
+// replacing connections carries it to the new primary, where the owed bump
+// lands before anything it would orphan is served.
+func TestRedis_FailoverBehindAStableAddress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	start := func() *server { // no delay before a full sync
+		return startStandalone(t, redisImage, "redis-server", "--save", "", "--appendonly", "no", "--repl-diskless-sync-delay", "0")
+	}
+	primary, replica := start(), start()
+	rPrimary, rReplica := raw(t, primary), raw(t, replica)
+	ip := func(s *server) string {
+		t.Helper()
+		ip, err := s.ctr.ContainerIP(ctx)
+		require.NoError(t, err)
+		return ip
+	}
+	command(t, rReplica, "REPLICAOF", ip(primary), "6379")
+	require.Eventually(t, func() bool {
+		info, err := rReplica.Do(ctx, rReplica.B().Info().Section("replication").Build()).ToString()
+		return err == nil && strings.Contains(info, "master_link_status:up")
+	}, 30*time.Second, 50*time.Millisecond, "the replica syncs")
+
+	var target atomic.Pointer[string]
+	target.Store(&primary.addr)
+	stable := &server{addr: forward(t, &target), mode: cache.RedisStandalone}
+	prefix := uniquePrefix()
+	a := open(t, stable, prefix, func(c *cache.RedisConfig) {
+		c.BreakerThreshold, c.BreakerOpenFor = 1000, 200*time.Millisecond
+		cache.SetConnLifetime(c, time.Second)
+	})
+	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
+	_, snap, err := a.Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+	require.NoError(t, a.Set(ctx, snap, []byte("pre-write rows"), time.Minute))
+	acked, err := rPrimary.Do(ctx, rPrimary.B().Wait().Numreplicas(1).Timeout(5000).Build()).AsInt64()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), acked, "the replica holds the fill")
+
+	command(t, rReplica, "REPLICAOF", "NO", "ONE")
+	command(t, rPrimary, "REPLICAOF", ip(replica), "6379")
+	_, err = a.Invalidate(ctx, deps)
+	require.ErrorContains(t, err, "READONLY")
+	require.True(t, cache.Bypassed(a))
+	target.Store(&replica.addr)
+
+	deadline := time.Now().Add(15 * time.Second)
+	for cache.Pending(a) > 0 {
+		require.True(t, time.Now().Before(deadline), "the owed bump reaches the new primary")
+		e, _, err := a.Lookup(ctx, "acme", "q", deps)
+		require.NoError(t, err)
+		require.NotEqual(t, "pre-write rows", string(e.Value), "served before the owed bump landed")
+		time.Sleep(10 * time.Millisecond)
+	}
+	e, _, err := open(t, stable, prefix).Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+	assert.Nil(t, e.Value, "the bump landed where every process now reads")
+}
+
 // command runs cmd on s through c, for the test to reconfigure the server.
 func command(t *testing.T, c rueidis.Client, cmd ...string) {
 	t.Helper()
@@ -693,8 +786,8 @@ func TestRedis_RefusedWrites(t *testing.T) {
 			assert.True(t, cache.Bypassed(reader), "a refused fill opens the breaker too")
 
 			// Long enough for many probes to be refused, and for a drain
-			// backing off unchecked to be seconds from its next attempt.
-			time.Sleep(3500 * time.Millisecond)
+			// backing off unchecked to be at its 10 s cap.
+			time.Sleep(7 * time.Second)
 			assert.True(t, cache.Bypassed(reader), "owing nothing, it is held open by probes that write and are refused")
 			assert.True(t, cache.Bypassed(a))
 			assert.Empty(t, lookup(a, events))
@@ -711,7 +804,7 @@ func TestRedis_RefusedWrites(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 			require.Eventually(t, func() bool { return cache.Pending(ingest) == 0 }, 10*time.Second, 5*time.Millisecond)
-			assert.Less(t, time.Since(restored), openFor+time.Second, "an ingest-only process probes when due, not at the drain's backoff")
+			assert.Less(t, time.Since(restored), openFor+3*time.Second, "an ingest-only process probes when due, not at the drain's backoff")
 			require.Eventually(t, func() bool { return !cache.Bypassed(reader) }, 10*time.Second, 5*time.Millisecond)
 
 			fresh := open(t, s, prefix)

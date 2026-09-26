@@ -61,6 +61,7 @@ func TestRedisConfig_Defaults(t *testing.T) {
 	assert.Zero(t, c.CompressMinBytes, "0 means never compress, not the default")
 	assert.True(t, c.clientOption().ForceSingleClient)
 	assert.Equal(t, DefaultRedisDialTimeout, c.clientOption().ConnWriteTimeout)
+	assert.Equal(t, defaultConnLifetime, c.clientOption().ConnLifetime)
 	slow := c
 	slow.Timeout = 5 * time.Second
 	assert.Equal(t, slow.Timeout, slow.clientOption().ConnWriteTimeout, "never under the op timeout")

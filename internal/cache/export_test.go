@@ -1,6 +1,10 @@
 package cache
 
-import "github.com/redis/rueidis"
+import (
+	"time"
+
+	"github.com/redis/rueidis"
+)
 
 // Hooks for the integration tests in package cache_test.
 
@@ -15,6 +19,10 @@ func Pending(r *RedisCache) int { return r.pending.len() }
 
 // Bypassed reports whether r is skipping the server.
 func Bypassed(r *RedisCache) bool { return r.bypassed() }
+
+// SetConnLifetime shortens how long c's connections live before they are
+// replaced, for a failover test.
+func SetConnLifetime(c *RedisConfig, d time.Duration) { c.connLifetime = d }
 
 // KeyPrefix is the prefix every key r writes leads with.
 func KeyPrefix(r *RedisCache) string { return r.cfg.KeyPrefix }
