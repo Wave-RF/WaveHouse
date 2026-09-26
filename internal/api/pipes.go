@@ -208,7 +208,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return data, nil
 	})
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		writeCHError(w, r, err, err.Error(), http.StatusInternalServerError, queryCaps{})
 		return
 	}
 
