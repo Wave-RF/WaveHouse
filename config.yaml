@@ -8,6 +8,14 @@
 # the relative default is for local binary use only.
 data_dir: ./data
 
+# The work this process runs; every role by default. A split (one Deployment
+# per role) needs a shared mq.backend and cache.backend, and boot refuses one
+# on the in-process backends.
+roles: [api, ingest, sweeper]
+# Names this process: logged at boot today, a lease's holder once a shared
+# coord.backend exists. Empty means <hostname>-<8 hex>, fresh at every boot.
+instance_id: ""
+
 server:
   port: 8080
   # Drain budget for a stop (in-flight requests and ingest batches). The
@@ -43,9 +51,19 @@ clickhouse:
   password: ""
   max_total_conns: 0 # ceiling on open native connections across pools; 0 = none
 
+# Each layer's implementation, chosen at boot. Only the in-process backend
+# exists for each today, and it is the default.
+mq:
+  backend: embedded # NATS JetStream under <data_dir>/nats
+dedupe:
+  backend: pebble # Pebble under <data_dir>/pebble
+coord:
+  backend: local # leases (the sweeper's) held in this process
+
 # In-process L1 cache size. The query time-bucket
 # (query.timestamp_bucket_seconds) is a settings key.
 cache:
+  backend: local
   l1_max_cost: 67108864
 
 # Auth has no on/off switch — the JWT middleware always runs. A request with no

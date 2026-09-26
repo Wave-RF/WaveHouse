@@ -89,7 +89,7 @@ var dedupeMissingIDCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 // dedupeCommitFailedCounter counts records published whose id could not be
 // committed afterwards: a retry after the lease lapses publishes them again.
 var dedupeCommitFailedCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
-	"wavehouse_dedupe_commit_failed_total",
+	"wavehouse_ingest_dedupe_commit_failed_total",
 	metric.WithDescription("Published records whose dedupe id failed to commit afterwards (the claim lapses with its lease)"),
 )
 
@@ -145,9 +145,10 @@ type recordReject struct {
 // committed, so a whole-batch retry reports those records as duplicates.
 //
 // Most causes are TRANSIENT system conditions, where abandoning the tail is what
-// makes the batch safe to retry: publish backpressure (503), a publish/marshal
-// failure (500), a dedupe store that cannot answer (503) or fails (500), an id
-// another request holds (503).
+// makes the batch safe to retry: publish backpressure (503), an unreachable
+// broker (503, mq.ErrUnavailable), a publish/marshal failure (500), a dedupe
+// store that cannot answer (503) or fails (500), an id another request holds
+// (503).
 //
 // One is not. An insert grant that resolved for the other operation is a 403 and
 // a caller/config bug — retrying cannot help. It aborts rather than rejecting
@@ -157,7 +158,7 @@ type recordReject struct {
 type requestAbort struct {
 	Status     int
 	Message    string
-	RetryAfter string // non-empty → emit a Retry-After header (503 backpressure)
+	RetryAfter string // non-empty → emit a Retry-After header (503: backpressure, an unavailable broker, or an id another request holds)
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -797,6 +798,17 @@ func (h *IngestHandler) ingestWindow(ctx context.Context, store *settings.Store,
 	return nil
 }
 
+// lease is the dedupe lease in effect: h.DedupeLease when set, else
+// dedupe.DefaultLease. Shared by reserve (Reserve's argument) and
+// publishFailed (the Retry-After of a claim left to lapse), so both name the
+// same window a client is told to wait out.
+func (h *IngestHandler) lease() time.Duration {
+	if h.DedupeLease > 0 {
+		return h.DedupeLease
+	}
+	return dedupe.DefaultLease
+}
+
 // reserve claims the keys of recs[keyed] in one call and records each answer.
 // A duplicate is skipped. A key another request holds releases the window's
 // claims and aborts with 503 and the lease as Retry-After, since that
@@ -805,10 +817,7 @@ func (h *IngestHandler) ingestWindow(ctx context.Context, store *settings.Store,
 // switched the store off after the settings snapshot was read — publishes the
 // window un-deduped, as records under the other setting would have been.
 func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, table string, recs []pendingRecord, keyed []int) *requestAbort {
-	lease := h.DedupeLease
-	if lease <= 0 {
-		lease = dedupe.DefaultLease
-	}
+	lease := h.lease()
 	keys := make([]dedupe.Key, len(keyed))
 	for j, i := range keyed {
 		keys[j] = *recs[i].key
@@ -862,7 +871,16 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 // failure may have stored the event before failing, so k's claim is left to
 // lapse with its lease instead: a retry before then answers in-flight, and one
 // after republishes under the same idempotency key, which the queue drops if
-// the first copy landed. The records after k were never sent and are released.
+// the first copy landed. The records after k were never sent and are
+// released.
+//
+// mq.ErrUnavailable — a broker blip, not a refusal — is one such uncertain
+// failure, but still answers 503 rather than the plain 500 below: when k held
+// a Claimed claim (left to lapse, as above), Retry-After is that lease
+// rounded up to whole seconds, so an obedient client waits out the in-flight
+// window instead of retrying straight into it and getting the 503 reserve
+// already answers for that; when k was never keyed there is no lapse to wait
+// out, so Retry-After is the flat 5 seconds main's per-record path used.
 func (h *IngestHandler) publishFailed(ctx context.Context, dd dedupe.Deduplicator, topic mq.Topic, recs []pendingRecord, k int, err error) *requestAbort {
 	definite := errors.Is(err, mq.ErrQueueFull)
 	commitClaims(ctx, dd, claimedIn(recs[:k]), topic.Table)
@@ -871,9 +889,17 @@ func (h *IngestHandler) publishFailed(ctx context.Context, dd dedupe.Deduplicato
 		after = k
 	}
 	releaseClaims(ctx, dd, claimedIn(recs[after:]))
-	if definite {
+	switch {
+	case definite:
 		slog.WarnContext(ctx, "ingest queue is full", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
 		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30"}
+	case errors.Is(err, mq.ErrUnavailable):
+		retryAfter := "5"
+		if recs[k].claim.Status == dedupe.Claimed {
+			retryAfter = strconv.Itoa(int(math.Ceil(h.lease().Seconds())))
+		}
+		slog.WarnContext(ctx, "ingest queue unavailable", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
+		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: retryAfter}
 	}
 	slog.ErrorContext(ctx, "failed to publish to the ingest queue", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
 	return &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed"}
