@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -181,10 +182,15 @@ var cases = []struct {
 			"retention 0 never expires")
 	}},
 	{"concurrent reserves of one key claim it once", func(t *testing.T, s *suite) {
-		// #390: two requests carrying one id must not both publish.
-		const n = 64
+		// #390: two requests carrying one id must not both publish. Run
+		// over many fresh keys, not just one: a race confined to a narrow
+		// lock window (e.g. one unlocked too early around a single
+		// backend read) can slip past a single key far more often than it
+		// triggers, so one key is a weak witness.
+		const n = 16
+		const keys = 20
 		d, p := s.store(t, "acme"), s.peer(t, "acme")
-		race := func() []dedupe.Claim {
+		race := func(k dedupe.Key) []dedupe.Claim {
 			out := make([]dedupe.Claim, n)
 			var wg sync.WaitGroup
 			for i := range n {
@@ -193,7 +199,7 @@ var cases = []struct {
 					store = p
 				}
 				wg.Go(func() {
-					c, err := store.Reserve(context.Background(), []dedupe.Key{key("e1")}, long)
+					c, err := store.Reserve(context.Background(), []dedupe.Key{k}, long)
 					if assert.NoError(t, err) {
 						out[i] = c[0]
 					}
@@ -202,18 +208,75 @@ var cases = []struct {
 			wg.Wait()
 			return out
 		}
-		var winner []dedupe.Claim
-		for _, c := range race() {
-			if c.Status == dedupe.Claimed {
-				winner = append(winner, c)
-			} else {
-				assert.Equal(t, dedupe.InFlight, c.Status)
+		for round := range keys {
+			k := key(fmt.Sprintf("race-%d", round))
+			var winner []dedupe.Claim
+			for _, c := range race(k) {
+				if c.Status == dedupe.Claimed {
+					winner = append(winner, c)
+				} else {
+					assert.Equal(t, dedupe.InFlight, c.Status, "round %d", round)
+				}
+			}
+			require.Len(t, winner, 1, "round %d: exactly one reserve claims the key", round)
+			require.NoError(t, d.Commit(t.Context(), winner, 0))
+			for _, c := range race(k) {
+				assert.Equal(t, dedupe.Duplicate, c.Status, "round %d", round)
 			}
 		}
-		require.Len(t, winner, 1, "exactly one reserve claims the key")
-		require.NoError(t, d.Commit(t.Context(), winner, 0))
-		for _, c := range race() {
-			assert.Equal(t, dedupe.Duplicate, c.Status)
+	}},
+	{"a reserve racing a commit never claims, and settles to duplicate once it lands", func(t *testing.T, s *suite) {
+		// A backend's Commit must write the durable record before it drops
+		// the pending claim (e.g. the Pebble backend's synced batch flush
+		// ahead of releasing the in-memory claim) — a Reserve spinning
+		// against the same key during that window must never see Claimed,
+		// and must see Duplicate the instant Commit returns. Run over many
+		// fresh keys and both clients so a narrow unlock window isn't
+		// masked by luck on one key or one process's view.
+		const workers = 8
+		const rounds = 20
+		d, p := s.store(t, "acme"), s.peer(t, "acme")
+		for round := range rounds {
+			k := key(fmt.Sprintf("commit-race-%d", round))
+			c := reserve(t, d, long, k)
+			var stop atomic.Bool
+			var claimed atomic.Int64
+			var wg sync.WaitGroup
+			for i := range workers {
+				store := d
+				if i%2 == 1 {
+					store = p
+				}
+				wg.Go(func() {
+					for !stop.Load() {
+						got, err := store.Reserve(context.Background(), []dedupe.Key{k}, long)
+						if !assert.NoError(t, err) {
+							return
+						}
+						switch got[0].Status {
+						case dedupe.Claimed:
+							claimed.Add(1)
+						case dedupe.InFlight, dedupe.Duplicate:
+						default:
+							t.Errorf("round %d: unexpected status %v", round, got[0].Status)
+						}
+					}
+				})
+			}
+			require.NoError(t, d.Commit(t.Context(), c, 0))
+			stop.Store(true)
+			wg.Wait()
+			assert.Zero(t, claimed.Load(), "round %d: a reserve claimed a key mid-commit", round)
+			for i := range workers {
+				store := d
+				if i%2 == 1 {
+					store = p
+				}
+				got, err := store.Reserve(context.Background(), []dedupe.Key{k}, long)
+				if assert.NoError(t, err) {
+					assert.Equal(t, dedupe.Duplicate, got[0].Status, "round %d: reserve %d after commit", round, i)
+				}
+			}
 		}
 	}},
 	{"a key repeated in one call is claimed once", func(t *testing.T, s *suite) {
