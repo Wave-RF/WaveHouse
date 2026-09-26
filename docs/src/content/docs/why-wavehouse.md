@@ -152,7 +152,7 @@ flowchart TB
 | ---------- | --------- | --------- |
 | Durable ingest buffer | Kafka / Redpanda cluster (3+ brokers, Zookeeper/KRaft) | Embedded NATS JetStream |
 | Batch consumer | Custom Go/Rust/Java service you write and operate | Built in |
-| Query cache | Redis + singleflight middleware you write | Built in (Ristretto + singleflight) |
+| Query cache | Redis + singleflight middleware you write | Built in (Ristretto + singleflight; or one Redis shared by every instance, `cache.backend: redis`) |
 | Real-time push | WebSocket service + bridge from Kafka | Built in (`/v1/stream`) |
 | Schema validation | Custom code in ingest API | Built in (discovers `system.columns`) |
 | Row/column access control | Custom middleware or a dedicated service | Built in (Hasura-style, JWT-driven) |

@@ -97,7 +97,7 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
   Every event is broadcast to SSE subscribers **before** it's flushed to ClickHouse. Gap-fill from JetStream history for late-connecting clients.
  </Card>
  <Card title="In-process query cache" icon="laptop">
-  Ristretto cache plus Go `singleflight` coalesces identical concurrent queries — dashboards survive thundering herds without an extra cache tier to operate.
+  Ristretto cache plus Go `singleflight` coalesces identical concurrent queries — dashboards survive thundering herds without an extra cache tier to operate. Running several instances? Share one Redis-compatible cache with `cache.backend: redis`.
  </Card>
  <Card title="Hasura-style access control" icon="seti:lock">
   Per-table, per-role column and row-level policies with JWT claim templating, defined in the hot-reloadable settings directory.
