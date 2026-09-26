@@ -471,7 +471,7 @@ WaveHouse/
 │   ├── settings/           # Settings directory: validate, adopted snapshot, reload
 │   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
 │   ├── tenant/             # Tenant id: type, grammar, reserved default, request header name
-│   └── testutil/           # Shared test helpers and mocks
+│   └── testutil/           # Shared test helpers and mocks (cachetest suite)
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)
 │   └── e2e/                # E2E suite (orchestrator + ClickHouse testcontainer)
