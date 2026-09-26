@@ -214,6 +214,8 @@ type RedisCache struct {
 	wg        sync.WaitGroup
 	wake      chan struct{}
 	closeOnce sync.Once
+
+	openCause atomic.Pointer[string] // message of the last opening logged at its own level
 }
 
 var _ Cache = (*RedisCache)(nil)
@@ -370,7 +372,7 @@ func (r *RedisCache) record(parent context.Context, err error) {
 	if parent.Err() != nil {
 		return
 	}
-	logOpening(parent, r.breaker.failure(), slog.LevelWarn, "cache: redis not answering; bypassing the cache",
+	r.logOpening(parent, r.breaker.failure(), slog.LevelWarn, "cache: redis not answering; bypassing the cache",
 		"addrs", r.cfg.Addrs, "error", err)
 }
 
@@ -378,10 +380,10 @@ func (r *RedisCache) record(parent context.Context, err error) {
 func (r *RedisCache) recordReply(parent context.Context, msg string) {
 	switch {
 	case rejectsCredentials(msg):
-		logOpening(parent, r.breaker.trip(), slog.LevelError, "cache: redis rejected the credentials; bypassing the cache until they work",
+		r.logOpening(parent, r.breaker.trip(), slog.LevelError, "cache: redis rejected the credentials; bypassing the cache until they work",
 			"addrs", r.cfg.Addrs, "error", msg)
 	case refusesWork(msg):
-		logOpening(parent, r.breaker.trip(), slog.LevelWarn, "cache: redis refusing writes; bypassing the cache",
+		r.logOpening(parent, r.breaker.trip(), slog.LevelWarn, "cache: redis refusing writes; bypassing the cache",
 			"addrs", r.cfg.Addrs, "reply", msg)
 	default:
 		r.breaker.success()
@@ -389,15 +391,22 @@ func (r *RedisCache) recordReply(parent context.Context, msg string) {
 }
 
 // logOpening logs a closed breaker opening at level, and a failed probe
-// reopening it at DEBUG: a long outage is one line, not one per probe.
-func logOpening(ctx context.Context, o opening, level slog.Level, msg string, args ...any) {
+// reopening it at DEBUG: a long outage is one line, not one per probe. A
+// reopening for another cause than the one last logged — rejected
+// credentials after a restart, say — is logged at its own level.
+func (r *RedisCache) logOpening(ctx context.Context, o opening, level slog.Level, msg string, args ...any) {
 	switch o {
-	case opened:
-		slog.Log(ctx, level, msg, args...)
-	case reopened:
-		slog.Log(ctx, slog.LevelDebug, msg, args...)
 	case unchanged:
+		return
+	case reopened:
+		if last := r.openCause.Load(); last != nil && *last == msg {
+			slog.Log(ctx, slog.LevelDebug, msg, args...)
+			return
+		}
+	case opened:
 	}
+	r.openCause.Store(&msg)
+	slog.Log(ctx, level, msg, args...)
 }
 
 // refusesWork reports whether an error reply says the server takes no

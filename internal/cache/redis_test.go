@@ -165,7 +165,8 @@ func TestRedis_Record(t *testing.T) {
 
 // A closed breaker opening logs one WARN naming why; the operations that
 // fail while it is open log nothing, and a failed probe reopening it logs at
-// DEBUG. Not parallel: it captures the default logger.
+// DEBUG unless its cause changed. Not parallel: it captures the default
+// logger.
 func TestRedis_BreakerOpeningLogsOnce(t *testing.T) {
 	buf := logtest.Capture(t, slog.LevelDebug)
 	clock := &fakeClock{t: time.Unix(0, 0)}
@@ -173,6 +174,18 @@ func TestRedis_BreakerOpeningLogsOnce(t *testing.T) {
 	live := context.Background()
 	warns := func() int { return strings.Count(buf.String(), `"level":"WARN"`) }
 	debugs := func() int { return strings.Count(buf.String(), `"level":"DEBUG"`) }
+	errs := func() int { return strings.Count(buf.String(), `"level":"ERROR"`) }
+	failProbe := func(fail func()) {
+		t.Helper()
+		clock.t = clock.t.Add(time.Second)
+		_, probe := r.breaker.allow()
+		require.True(t, probe)
+		fail()
+		require.True(t, r.breaker.isOpen())
+	}
+	timeout := func() { r.record(live, context.DeadlineExceeded) }
+	readonly := func() { r.recordReply(live, "READONLY You can't write against a read only replica.") }
+	wrongpass := func() { r.recordReply(live, "WRONGPASS invalid username-password pair or user is disabled.") }
 
 	r.recordReply(live, "READONLY You can't write against a read only replica.")
 	r.recordReply(live, "READONLY You can't write against a read only replica.")
@@ -194,20 +207,18 @@ func TestRedis_BreakerOpeningLogsOnce(t *testing.T) {
 	assert.Equal(t, 2, warns(), buf.String())
 	assert.Contains(t, buf.String(), "not answering")
 
-	clock.t = clock.t.Add(time.Second)
-	_, probe = r.breaker.allow()
-	require.True(t, probe)
-	r.record(live, context.DeadlineExceeded)
-	assert.True(t, r.breaker.isOpen(), "a failed probe opens it again")
-	assert.Equal(t, 2, warns(), "not at WARN")
+	failProbe(timeout)
+	assert.Equal(t, 2, warns(), "same cause: not at WARN")
 	assert.Equal(t, 1, debugs(), buf.String())
 
-	clock.t = clock.t.Add(time.Second)
-	_, probe = r.breaker.allow()
-	require.True(t, probe)
-	r.recordReply(live, "READONLY You can't write against a read only replica.")
-	assert.Equal(t, 2, warns(), "a refused probe is a reopening too")
-	assert.Equal(t, 2, debugs(), buf.String())
+	failProbe(wrongpass)
+	assert.Equal(t, 1, errs(), "a new cause is logged at its own level")
+	failProbe(wrongpass)
+	failProbe(readonly)
+	failProbe(readonly)
+	assert.Equal(t, 1, errs(), buf.String())
+	assert.Equal(t, 3, warns(), buf.String())
+	assert.Equal(t, 3, debugs(), buf.String())
 }
 
 func TestRejectsCredentials(t *testing.T) {
