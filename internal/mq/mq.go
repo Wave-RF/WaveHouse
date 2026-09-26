@@ -263,7 +263,8 @@ type DeadLetterer interface {
 
 // DeadLetterCounts is what is parked on one tenant's dead-letter queue.
 type DeadLetterCounts struct {
-	// Tables maps table name → parked messages, for the tables asked about.
+	// Tables maps table name → parked messages, for the tables asked about;
+	// empty, never nil, when none has any.
 	// Every scope of a table counts under the table; scope is not broken out
 	// yet (it is inert until #235).
 	Tables map[string]uint64

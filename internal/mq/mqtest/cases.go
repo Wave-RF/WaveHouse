@@ -315,7 +315,7 @@ func deadLetterCounts(t *testing.T, h Harness) {
 
 	empty, err := b.DeadLetterCounts(c, Globex, "")
 	require.NoError(t, err, "a tenant with a budget and nothing parked")
-	assert.Empty(t, empty.Tables)
+	assert.Equal(t, map[string]uint64{}, empty.Tables, "empty, not nil: the ops API encodes it as {}")
 	assert.Zero(t, empty.Total)
 
 	park := func(topic mq.Topic, n int) {
@@ -355,6 +355,7 @@ func deadLetterCounts(t *testing.T, h Harness) {
 		return
 	}
 	require.NoError(t, err)
+	assert.Equal(t, map[string]uint64{}, unbudgeted.Tables)
 	assert.Zero(t, unbudgeted.Total)
 }
 
