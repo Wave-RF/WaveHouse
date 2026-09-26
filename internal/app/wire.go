@@ -25,6 +25,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
@@ -631,15 +632,33 @@ func unreachableBackend[T ~string](key string, got T) error {
 	return fmt.Errorf("%s %q has no wiring: a Config built without config.Load must name the backend of every layer it wires", key, got)
 }
 
+// wireCoord opens the lease coordinator the singleton loops campaign on.
+func (a *App) wireCoord() error {
+	switch b := a.cfg.Coord.Backend; b {
+	case config.CoordLocal:
+		c := coord.NewLocal()
+		a.coord = c
+		a.add(component{name: "coord", close: c.Close})
+		return nil
+	default:
+		return unreachableBackend("coord.backend", b)
+	}
+}
+
+// sweeperLease is the lease the sweeper runs under, one sweeper per queue.
+const sweeperLease = "sweeper"
+
 // wireSweeper adds the active sweeper — purges messages that are both
 // written to ClickHouse and older than their tenant's SSE gap window (its own
 // stream.gap_window_minutes, re-read every sweep — see gapWindows). Runs
-// every minute.
+// every minute, while this process holds the sweeper lease.
 func (a *App) wireSweeper() {
 	sweeper := ingest.NewSweeper(a.mq, func() map[tenant.ID]time.Duration { return gapWindows(a.tenants) })
 	a.add(component{name: "sweeper", run: func(ctx context.Context) error {
-		sweeper.Start(ctx)
-		return nil
+		return coord.RunElected(ctx, a.coord, sweeperLease, coord.RetryPeriod, func(ctx context.Context, _ coord.Term) error {
+			sweeper.Start(ctx)
+			return nil
+		})
 	}})
 }
 

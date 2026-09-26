@@ -46,7 +46,7 @@ Each layer's implementation is chosen once, at boot. Today every layer has one b
 | `mq.backend` | `WH_MQ_BACKEND` | `embedded` | The message queue. `embedded`: NATS JetStream inside this process, under `<data_dir>/nats`. It listens on no port, so no other process can reach its queue. |
 | `cache.backend` | `WH_CACHE_BACKEND` | `local` | The query-result cache. `local`: in this process, sized by `cache.l1_max_cost`. |
 | `dedupe.backend` | `WH_DEDUPE_BACKEND` | `pebble` | Where ingest dedupe keeps the event ids it has seen. `pebble`: in this process, under `<data_dir>/pebble`, open while any tenant has dedupe on. |
-| `coord.backend` | `WH_COORD_BACKEND` | `local` | Reserved for the leases that will elect work only one process may do at a time, such as the sweeper. Nothing is elected yet: every process runs its own sweeper, and `local`, the only value, changes nothing. |
+| `coord.backend` | `WH_COORD_BACKEND` | `local` | Where the leases for work only one process may do at a time, such as the sweeper, are held. `local`: in this process, so the one process always holds them. It shares nothing with another process, so every process runs its own sweeper. |
 
 Settings for one backend will go in a sub-block named after it, `<layer>.<backend>`, read only when that backend is selected. No backend has settings yet, so today any such sub-block, `mq.embedded` included, is an unknown key and refuses boot. `mq` and `dedupe` also appear in the settings directory's `config.json`, with different keys (`mq.max_bytes_gb`, `dedupe.enabled`, …): those are per-tenant tunables and stay there, and one written in `config.yaml` refuses boot as an unknown key.
 
@@ -217,7 +217,7 @@ dedupe:
   backend: pebble        # in-process Pebble under <data_dir>/pebble
 
 coord:
-  backend: local         # reserved: nothing is elected yet
+  backend: local         # in-process leases (the sweeper's)
 
 auth:
   jwt_secret: change-me-in-production   # jwks_url and role_claim are settings (config.json)

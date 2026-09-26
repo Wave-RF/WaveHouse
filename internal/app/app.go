@@ -38,6 +38,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
@@ -106,6 +107,7 @@ type App struct {
 	dedupeStats func() map[string]int64
 	mq          mq.Broker
 	cache       cache.Cache
+	coord       coord.Coordinator
 	sseMetrics  *stream.Metrics
 	hub         *stream.Hub
 	heartbeater *stream.Heartbeater
@@ -181,6 +183,9 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 		return nil, err
 	}
 	if err := a.wireCache(); err != nil {
+		return nil, err
+	}
+	if err := a.wireCoord(); err != nil {
 		return nil, err
 	}
 	a.wireSweeper()
