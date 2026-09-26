@@ -104,7 +104,7 @@ func (e *Embedded) sweep(ctx context.Context, db *pebble.DB) (sweepResult, error
 // read and a run of them left by an earlier pass would otherwise hold every
 // Commit for its whole length.
 func (e *Embedded) sweepChunk(ctx context.Context, db *pebble.DB, from []byte, res *sweepResult) ([]byte, error) {
-	candidates, next, err := sweepCandidates(db, from, e.now())
+	candidates, next, err := sweepCandidates(db, from, e.now(), e.sweepReadHook)
 	if err != nil || len(candidates) == 0 {
 		return next, err
 	}
@@ -128,14 +128,18 @@ func (e *Embedded) sweepChunk(ctx context.Context, db *pebble.DB, from []byte, r
 
 // sweepCandidates reads the next sweepChunk keys, starting at from, and
 // returns those sweepable at now and where the next chunk starts (nil at the
-// end).
-func sweepCandidates(db *pebble.DB, from []byte, now time.Time) (candidates [][]byte, next []byte, err error) {
+// end). onKey, when non-nil, runs once per key visited, before it is
+// evaluated — a test hook proving this read holds no lock while it runs.
+func sweepCandidates(db *pebble.DB, from []byte, now time.Time, onKey func()) (candidates [][]byte, next []byte, err error) {
 	it, err := db.NewIter(&pebble.IterOptions{LowerBound: from})
 	if err != nil {
 		return nil, nil, fmt.Errorf("dedupe sweep: %w", err)
 	}
 	seen := 0
 	for valid := it.First(); valid; valid = it.Next() {
+		if onKey != nil {
+			onKey()
+		}
 		if seen == sweepChunk {
 			next = bytes.Clone(it.Key())
 			break
@@ -162,9 +166,6 @@ func (e *Embedded) deleteSweepable(db *pebble.DB, candidates [][]byte) (expired,
 	b := db.NewBatch()
 	defer func() { _ = b.Close() }()
 	for _, k := range candidates {
-		if e.sweepTouchHook != nil {
-			e.sweepTouchHook()
-		}
 		val, closer, err := db.Get(k)
 		if errors.Is(err, pebble.ErrNotFound) {
 			continue

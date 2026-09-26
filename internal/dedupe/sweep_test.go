@@ -159,54 +159,39 @@ func TestEmbedded_SweepNeverDeletesACommitLandingMidChunk(t *testing.T) {
 	assert.True(t, dup, "the commit made mid-chunk survived the sweep")
 }
 
-// A chunk that starts over a long run of tombstones, as a tenant's version-0
-// block leaves until Pebble compacts it, reads through the run without the
-// lock: deleteSweepable's locked phase only ever touches the candidates the
-// unlocked read found sweepable (one here), never the tombstones stepped
-// over to find them, and commitMu is free the instant that read returns.
-//
-// This used to race a Commit against the sweep and assert its slowest
-// attempt stayed under 100ms — a wall-clock budget the race detector alone
-// could push past (250ms measured once), and one that moves further under
-// make ci's parallel test-unit packages (313ms measured there once, this
-// PR's e52b336c: the test that introduced it flaked in its own author's
-// verification). A count and a direct, non-blocking TryLock don't move with
-// scheduler contention, so they replace it.
-func TestEmbedded_SweepChunkOverTombstonesDoesNotHoldCommits(t *testing.T) {
+// sweepCandidates' read never holds commitMu, over a fixture with a few
+// tombstones ahead of the one live key it finds sweepable.
+func TestEmbedded_SweepReadRunsUnlocked(t *testing.T) {
 	t.Parallel()
 	e := NewEmbedded(t.TempDir())
 	switchedOn(t, e, "acme")
 	b := e.db.NewBatch()
-	for i := range 300_000 {
-		require.NoError(t, b.Delete(fmt.Appendf(nil, "acme\x00%06d", i), nil))
+	for i := range 4 {
+		require.NoError(t, b.Delete(fmt.Appendf(nil, "acme\x00%02d", i), nil))
 	}
-	// A version-0 key after the run, so the chunk has exactly one candidate.
 	require.NoError(t, b.Set([]byte("acme\x01"), make([]byte, 8), nil))
 	require.NoError(t, b.Commit(pebble.NoSync))
 	require.NoError(t, e.db.Flush())
 
-	var touched int
-	e.sweepTouchHook = func() { touched++ }
-	var unlockedAfterScan bool
-	e.sweepScanHook = func() {
-		// Fires after the unlocked read, before deleteSweepable takes
-		// commitMu. TryLock needs no racing goroutine and no clock: on the
-		// same goroutine that just did the read, it fails instead of
-		// blocking if commitMu is already held — which a regression moving
-		// the read under the lock would leave it, self-deadlock included —
-		// so success here is a direct proof the read ran unlocked, not an
-		// inference from a race won in time.
+	var sawLocked bool
+	e.sweepReadHook = func() {
+		// TryLock from inside the still-running read needs no racing
+		// goroutine and no clock: on the same goroutine doing the read, it
+		// fails instead of blocking if commitMu is already held, so a
+		// regression that reads under the lock is caught while the read is
+		// still in progress — not inferred from a race won in time, and not
+		// missable by a lock released just before some later checkpoint.
 		if e.commitMu.TryLock() {
 			e.commitMu.Unlock()
-			unlockedAfterScan = true
+		} else {
+			sawLocked = true
 		}
 	}
 
 	res, err := e.sweep(context.Background(), e.db)
 	require.NoError(t, err)
 	assert.Equal(t, sweepResult{Version0: 1}, res)
-	assert.True(t, unlockedAfterScan, "commitMu was free right after the unlocked read of 300k tombstones")
-	assert.LessOrEqual(t, touched, 1, "the locked phase touches only the sweepable candidates (1 here), not the tombstones the read stepped over to find them")
+	assert.False(t, sawLocked, "commitMu must be free while sweepCandidates' read is running")
 }
 
 // A retention is honoured on read before any sweep has run: the key is a

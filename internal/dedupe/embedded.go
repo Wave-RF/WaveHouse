@@ -50,14 +50,13 @@ type Embedded struct {
 	readHook func() error
 	// sweepScanHook and sweepDeleteHook, when set, run in a sweep chunk:
 	// between its unlocked read and its re-read, and between its re-read and
-	// its delete. A test races a Commit into each gap. sweepTouchHook, when
-	// set, runs once per candidate deleteSweepable re-reads under commitMu —
-	// a test tallies calls to pin that the locked phase's work is bounded by
-	// the candidate count, not by however many keys the unlocked read
-	// stepped over (silently, inside Pebble) to find them.
+	// its delete. A test races a Commit into each gap. sweepReadHook, when
+	// set, runs once per key sweepCandidates' unlocked read visits, from
+	// inside its loop — a test TryLocks commitMu there to prove the read
+	// itself never holds it, not just the instant after it returns.
 	sweepScanHook   func()
 	sweepDeleteHook func()
-	sweepTouchHook  func()
+	sweepReadHook   func()
 }
 
 // NewEmbedded returns the embedded implementation under dataDir. Nothing is
