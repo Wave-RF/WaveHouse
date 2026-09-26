@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -131,6 +132,11 @@ const (
 	reopenRetry = 5 * time.Second
 )
 
+// EmbeddedSyncAlways is NewEmbedded's SyncAlways. Only a TestMain may turn it
+// off, before any broker starts: unit tests assert nothing across a crash, and
+// on macOS an fsync per write is most of their run time (#617).
+var EmbeddedSyncAlways = true
+
 // errNoQueue is why a publish or park finds no queue it can open: no budget
 // has been asked for the tenant yet (see SetMaxBytes). Publish reports it as
 // ErrQueueFull.
@@ -146,11 +152,16 @@ var errNoQueue = errors.New("no queue is open for it yet")
 // applied, or by a publish or park that finds it missing, at the budget last
 // asked for it. The server logs through slog's default logger.
 func NewEmbedded(storeDir string) (*EmbeddedNATS, error) {
+	// A store the server cannot create fails JetStream in the background, and
+	// ReadyForConnections would only give up on it after its whole wait.
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
+		return nil, fmt.Errorf("nats store: %w", err)
+	}
 	opts := &natsserver.Options{
 		DontListen: true,
 		JetStream:  true,
 		StoreDir:   storeDir,
-		SyncAlways: true, // fsync every JetStream write — publish ACKs only after data is on disk
+		SyncAlways: EmbeddedSyncAlways, // fsync every JetStream write — publish ACKs only after data is on disk
 		// Without NoSigs, Start() installs a process-wide SIGINT handler that
 		// races the app's graceful shutdown (double Shutdown → "close of nil
 		// channel" panic) and os.Exit(0)s past its cleanup. WaveHouse owns
@@ -992,9 +1003,9 @@ func (e *EmbeddedNATS) PurgeAcked(ctx context.Context, consumer string, olderTha
 }
 
 // DeadLetterCounts reads tenant id's dead-letter stream's per-subject counts
-// and keys them by table. The table filter matches that table's unscoped
-// subject, so it is applied to the parsed topic rather than as a subject
-// filter; a scoped topic counts under "table.scope".
+// and keys them by table (deadLetterTables). The table filter matches every
+// scope of that table, so it is applied to the parsed topic rather than as a
+// subject filter.
 func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table string) (DeadLetterCounts, error) {
 	if _, err := tenant.Parse(string(id)); err != nil {
 		return DeadLetterCounts{}, fmt.Errorf("tenant: %w", err)
@@ -1012,20 +1023,7 @@ func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table
 		return DeadLetterCounts{}, fmt.Errorf("dlq stream info: %w", err)
 	}
 
-	counts := DeadLetterCounts{Tables: make(map[string]uint64, len(state.Subjects)), Total: state.Msgs}
-	for subj, n := range state.Subjects {
-		t := parseTopicKey(topicKey(dlqPrefix, subj))
-		if table != "" && (t.Table != table || t.Scope != "") {
-			continue
-		}
-		name := t.Table
-		if t.Scope != "" {
-			// TODO(#235): break scopes out rather than fold them into the name.
-			name += "." + t.Scope
-		}
-		counts.Tables[name] += n
-	}
-	return counts, nil
+	return DeadLetterCounts{Tables: deadLetterTables(state.Subjects, dlqPrefix, table), Total: state.Msgs}, nil
 }
 
 // ReplaySince creates an ephemeral consumer on topic's ingest subject, in its
