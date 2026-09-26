@@ -126,6 +126,8 @@ Set the backstop on the profile of the ClickHouse user WaveHouse connects as (th
 </clickhouse>
 ```
 
+What a caller sees when one of these trips: a row or byte limit is `400 clickhouse.limit_exceeded`; a server-wide time, memory or quota limit is `503 clickhouse.unavailable` (retryable, so the SDK retries it), since WaveHouse cannot tell it from server pressure — except on `/v1/query` for a role that sets its own `max_memory_usage`, where every memory-limit error is read as that cap and answered `400 clickhouse.limit_exceeded`. See [ClickHouse errors on the query paths](/api#clickhouse-errors-on-the-query-paths).
+
 :::caution[How the two layers compose]
 WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so they **compose** with the ClickHouse profile — a per-role cap *tightens* within the profile's ceiling, and a `<constraints>` block bounds how far any setting can move. But if the profile marks a setting `readonly` (or `<constraints>` disallows changing it), ClickHouse will **reject** WaveHouse's per-query override and the query fails. So keep the settings WaveHouse manages (`max_memory_usage`, `max_execution_time`, `max_rows_to_read`, `max_result_rows`) **changeable** for its user — use a `<max>` constraint, not `readonly`, if you want a hard ceiling.
 :::

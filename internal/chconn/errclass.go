@@ -18,7 +18,7 @@ import (
 // Class is what a failed ClickHouse request says about the request itself:
 // whether sending it again, unchanged, can succeed. The ingest worker retries
 // every class but Rejected and dead-letters only Rejected; the query handlers
-// can map the same classes onto HTTP statuses (#403, #271).
+// map the same classes onto HTTP statuses (api/ch_errors.go).
 type Class int
 
 const (
@@ -189,7 +189,7 @@ func Classify(err error) Class {
 	if code, ok := ExceptionCode(err); ok {
 		return ClassOfCode(code)
 	}
-	if status, ok := httpStatus(err); ok {
+	if status, ok := HTTPStatus(err); ok {
 		return classOfStatus(status)
 	}
 	if transportFailure(err) {
@@ -211,7 +211,8 @@ func ExceptionCode(err error) (int32, bool) {
 	return 0, false
 }
 
-func httpStatus(err error) (int, bool) {
+// HTTPStatus is the status of the non-2xx HTTP answer err carries, if any.
+func HTTPStatus(err error) (int, bool) {
 	var he *HTTPError
 	if errors.As(err, &he) {
 		return he.StatusCode, true

@@ -207,8 +207,8 @@ func TestClickHouseOpsRoutes_TenantParam(t *testing.T) {
 				{name: "schema list", call: schema.List, req: httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/ops/schema", nil), ok: http.StatusOK},
 				{name: "schema refresh", call: schema.Refresh, req: httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/schema/refresh", nil), ok: http.StatusOK},
 				// The proxy's target is a closed port: a served tenant is the
-				// 502 of an unreachable ClickHouse, past every tenant check.
-				{name: "ops query", call: proxy.Handle, req: httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/query", bytes.NewReader(sql)), ok: http.StatusBadGateway},
+				// 503 of an unreachable ClickHouse, past every tenant check.
+				{name: "ops query", call: proxy.Handle, req: httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ops/query", bytes.NewReader(sql)), ok: http.StatusServiceUnavailable},
 			}
 			for _, route := range routes {
 				handed = nil

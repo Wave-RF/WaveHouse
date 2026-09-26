@@ -267,5 +267,14 @@ describe("Admin", () => {
         expect(result.data).toBeInstanceOf(Array);
       }
     });
+
+    it("raw SQL: a syntax error is the caller's, and not retried (#403)", async () => {
+      const result = await wh.sql("SELEC 1");
+      expect(result.error).not.toBeNull();
+      expect(result.error!.status).toBe(400);
+      expect(result.error!.code).toBe("clickhouse.rejected");
+      expect(result.error!.retryable).toBe(false);
+      expect(result.error!.message).toContain("SYNTAX_ERROR");
+    });
   });
 });
