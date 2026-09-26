@@ -164,10 +164,26 @@ func TestVersionManager_GenerationsNeverRepeat(t *testing.T) {
 func TestVersionManager_BumpWithoutIndex(t *testing.T) {
 	t.Parallel()
 	vm := NewVersionManager()
+
+	vm.BumpTable("acme", "users")
+	assert.Zero(t, vm.size(), "a table bump for a tenant with no index creates nothing")
+
+	vm.BumpNamespace(Namespace{Tenant: "acme", Table: "users", Scope: "org_1"})
+	assert.Zero(t, vm.size(), "a namespace bump for a tenant with no index creates nothing")
+
+	vm.BumpTenant("acme")
+	assert.Zero(t, vm.size(), "bumping a tenant with no index is a no-op")
+
+	// An insert still in flight for a tenant just pruned must not bring its
+	// index back: a write racing the prune sees the tenant gone and bumps
+	// blind, same as above.
+	vm.QueryKey("acme", "h", nil)
+	vm.Prune(func(tenant.ID) bool { return false })
+	assert.Zero(t, vm.size(), "prune released the tenant's index")
+
 	vm.BumpTable("acme", "users")
 	vm.BumpNamespace(Namespace{Tenant: "acme", Table: "users", Scope: "org_1"})
-	vm.BumpTenant("acme")
-	assert.Zero(t, vm.size())
+	assert.Zero(t, vm.size(), "a bump for a tenant just pruned must not recreate its index")
 }
 
 func TestVersionManager_Prune(t *testing.T) {
