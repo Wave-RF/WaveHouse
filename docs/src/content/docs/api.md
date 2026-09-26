@@ -235,7 +235,7 @@ The inbound request body is capped at 16 MiB; a body over the cap is rejected wi
 The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
 :::note[Insert-only]
-The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse), which is restricted to the admin role (`admin_role`, the same gate as the rest of `/v1/ops/*`). The one other route is a [pipe that writes](/pipes#pipes-that-write): an operator authors its statement in `pipes.json`, and the roles in its `allowed_roles` run it with parameter values only.
+The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/ops/query`](#post-v1opsquery--query-clickhouse), which is restricted to the admin role (`admin_role`, the same gate as the rest of `/v1/ops/*`), or through an operator-authored [pipe that writes](/pipes#pipes-that-write): an operator authors its statement in `pipes.json`, and the roles in its `allowed_roles` run it with parameter values only.
 
 The policy engine authorizes mutations by inspecting the columns being written. That works for inserts but not for predicate-driven mutations like `DELETE … WHERE` — there's no way to prove the predicate matches only rows the caller is allowed to touch. Routing those statements through the admin-gated raw-SQL surface, or through a pipe whose predicate the operator wrote, keeps the policy contract honest.
 :::
