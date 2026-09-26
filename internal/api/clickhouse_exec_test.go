@@ -119,6 +119,15 @@ func TestIsMutation(t *testing.T) {
 		{"with backslash-escaped backtick then insert", "WITH m AS (SELECT 'x' AS `a\\`(b`) INSERT INTO t SELECT * FROM m", true},
 		{"with backslash-escaped backtick then select", "WITH m AS (SELECT 1 AS `a\\`b`) SELECT 2 AS `x) INSERT` FROM m", false},
 
+		// A heredoc ($$…$$, $tag$…$tag$) is a literal: its parens, quotes
+		// and words are not the statement's.
+		{"with heredoc holding a paren then insert", "WITH $$ ( $$ AS s INSERT INTO t SELECT s", true},
+		{"with tagged heredoc holding a quote then insert", "WITH $x$ it's $x$ AS s INSERT INTO t SELECT s", true},
+		{"with tagged heredoc holding a paren and another tag then insert", "WITH $x$ ( $y$ $x$ AS s INSERT INTO t SELECT s", true},
+		{"with heredoc holding a verb then select", "WITH $$INSERT$$ AS s SELECT s", false},
+		{"with tagged heredoc holding a paren and a verb then select", "WITH $x$ ) INSERT $x$ AS s SELECT s", false},
+		{"with CTE alias set$ (read)", "WITH set$ AS (SELECT 1 AS v) SELECT * FROM set$", false},
+
 		// ClickHouse's lexer skips \v, \f and Unicode spaces as whitespace
 		// (TestIsMutation_ClickHouseWhitespace covers the whole set).
 		{"leading form feed then insert", "\fINSERT INTO t VALUES (1)", true},

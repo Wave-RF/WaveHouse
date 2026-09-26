@@ -164,10 +164,10 @@ var nonMutationVerbs = map[string]struct{}{
 
 // containsMutationVerbAtTopLevel scans s for the statement-introducing
 // keyword at paren-depth 0, stepping over string literals and quoted
-// identifiers (skipQuoted), parenthesized CTE subqueries, and comments
-// (skipComment). The CTE list contains ordinary identifiers
-// (CTE names, table/database names) that must not be matched as mutation
-// verbs — `system` would otherwise pattern-match `SYSTEM` and route a
+// identifiers (skipQuoted), heredocs (skipHeredoc), parenthesized CTE
+// subqueries, and comments (skipComment). The CTE list contains ordinary
+// identifiers (CTE names, table/database names) that must not be matched as
+// mutation verbs — `system` would otherwise pattern-match `SYSTEM` and route a
 // `WITH … SELECT * FROM system.tables` read through `Exec` (silent empty-
 // array result instead of the actual rows). Two-part fix:
 //
@@ -203,15 +203,17 @@ func containsMutationVerbAtTopLevel(s string) bool {
 			i++
 		case c == '\'' || c == '"' || c == '`':
 			i = skipQuoted(s, i)
+		case c == '$':
+			// A heredoc, else a bareword led by `$` (never a keyword) or a
+			// lone `$`.
+			if j := skipHeredoc(s, i); j > i {
+				i = j
+			} else {
+				i = skipWord(s, i+1)
+			}
 		case (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'):
 			start := i
-			for i < len(s) {
-				c2 := s[i]
-				if (c2 < 'A' || c2 > 'Z') && (c2 < 'a' || c2 > 'z') && (c2 < '0' || c2 > '9') && c2 != '_' {
-					break
-				}
-				i++
-			}
+			i = skipWord(s, i)
 			if depth == 0 {
 				kw := strings.ToUpper(s[start:i])
 				// Check non-mutation statement keywords (SELECT, SHOW,
@@ -258,15 +260,39 @@ func isCTENameLookahead(s string, pos int) bool {
 	if s[i] == '(' {
 		return true
 	}
-	end := i
-	for end < len(s) {
-		c := s[end]
-		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
-			break
-		}
-		end++
+	return strings.EqualFold(s[i:skipWord(s, i)], "AS")
+}
+
+// skipWord returns the index just past the bareword at s[i]: ClickHouse's
+// barewords run over ASCII letters, digits, `_` and `$`.
+func skipWord(s string, i int) int {
+	for i < len(s) && (isWordByte(s[i]) || s[i] == '$') {
+		i++
 	}
-	return strings.EqualFold(s[i:end], "AS")
+	return i
+}
+
+func isWordByte(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+// skipHeredoc returns the index just past the heredoc opening at s[i] —
+// `$tag$ … $tag$`, the tag a possibly empty run of letters, digits and `_`,
+// matched exactly — or i if none does, as an unclosed one is not a heredoc to
+// ClickHouse either.
+func skipHeredoc(s string, i int) int {
+	j := i + 1
+	for j < len(s) && isWordByte(s[j]) {
+		j++
+	}
+	if j >= len(s) || s[j] != '$' {
+		return i
+	}
+	tag := s[i : j+1]
+	if k := strings.Index(s[j+1:], tag); k >= 0 {
+		return j + 1 + k + len(tag)
+	}
+	return i
 }
 
 // stripLeadingSQLComments trims whitespace and comments from the front of
