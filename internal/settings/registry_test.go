@@ -79,7 +79,7 @@ func TestRegistry_ReloadWithWarningsAdopts(t *testing.T) {
 
 // TestOpen_RejectsInvalid pins the boot contract: an invalid directory yields
 // no Registry at all — there is no "store without a document" state and no
-// compiled defaults to fall back on.
+// compiled default for a required key to fall back on.
 func TestOpen_RejectsInvalid(t *testing.T) {
 	t.Parallel()
 	files := validFiles()

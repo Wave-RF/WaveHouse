@@ -704,8 +704,8 @@ func (h *IngestHandler) prepareRecord(
 
 	// Optional deduplication. The dedupe settings resolve per record
 	// from one snapshot (table override → global; the settings directory
-	// always states them, so no compiled fallback is needed), so a reload
-	// lands at a record boundary. A Deduplicator without a settings source is
+	// states them all but dedupe.retention, whose absence means "0"), so a
+	// reload lands at a record boundary. A Deduplicator without a settings source is
 	// a wiring bug, not a mode — main wires both or neither. The id is claimed
 	// in ingestWindow, once every record of the window is encoded, so nothing
 	// but the publish can fail while the claim is held.
