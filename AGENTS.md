@@ -448,7 +448,7 @@ internal/query/         → Structured query AST + SQL builder
 internal/settings/      → Settings directory (validate, adopted snapshot + reload, watcher, embedded seed)
 internal/stream/        → SSE fan-out (event Hub: project once per role, Subscriber outbound queue, Bucket fan-out, keepalive Heartbeater wheel)
 internal/tenant/        → Tenant id (type, grammar, reserved default, request header name)
-internal/testutil/      → Shared test helpers (mocks, JWT + schema helpers; logtest/ captures or silences the default logger; cachetest/ is the conformance suite every cache.Cache backend runs)
+internal/testutil/      → Shared test helpers (mocks, JWT + schema helpers; logtest/ captures or silences the default logger; cachetest/ is the conformance suite every cache.Cache backend runs; mutationtest/ holds the shared write-classifier cases)
 tests/                  → Integration & E2E tests
 tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer)
 tests/e2e/              → E2E test stack (scripts/orchestrator boots a ClickHouse testcontainer + the wavehouse-cov binary)
