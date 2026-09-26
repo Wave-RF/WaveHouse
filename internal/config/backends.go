@@ -75,10 +75,10 @@ type Dedupe struct {
 	Backend DedupeBackend `yaml:"backend" env:"WH_DEDUPE_BACKEND"`
 	// Lease is how long a claimed id stays pending while its record is
 	// published; a claim its request never settles lapses after it.
-	Lease time.Duration `yaml:"lease" env:"WH_DEDUPE_LEASE" env-default:"30s"`
+	Lease time.Duration `yaml:"lease" env:"WH_DEDUPE_LEASE"`
 	// ReserveConcurrency bounds the parallel calls one Reserve, Commit or
 	// Release makes to a remote backend. Pebble ignores it.
-	ReserveConcurrency int                  `yaml:"reserve_concurrency" env:"WH_DEDUPE_RESERVE_CONCURRENCY" env-default:"64"`
+	ReserveConcurrency int                  `yaml:"reserve_concurrency" env:"WH_DEDUPE_RESERVE_CONCURRENCY"`
 	DynamoDB           DedupeDynamoDBConfig `yaml:"dynamodb"`
 }
 
@@ -93,23 +93,23 @@ type DedupeDynamoDBConfig struct {
 	Region string `yaml:"region" env:"WH_DEDUPE_DYNAMODB_REGION"`
 	// Endpoint points the client at dynamodb-local.
 	Endpoint    string        `yaml:"endpoint" env:"WH_DEDUPE_DYNAMODB_ENDPOINT"`
-	Timeout     time.Duration `yaml:"timeout" env:"WH_DEDUPE_DYNAMODB_TIMEOUT" env-default:"250ms"`
-	MaxAttempts int           `yaml:"max_attempts" env:"WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS" env-default:"3"`
-	RetryMode   string        `yaml:"retry_mode" env:"WH_DEDUPE_DYNAMODB_RETRY_MODE" env-default:"standard"`
+	Timeout     time.Duration `yaml:"timeout" env:"WH_DEDUPE_DYNAMODB_TIMEOUT"`
+	MaxAttempts int           `yaml:"max_attempts" env:"WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS"`
+	RetryMode   string        `yaml:"retry_mode" env:"WH_DEDUPE_DYNAMODB_RETRY_MODE"`
 	// CreateTable creates the table at boot if it is missing. Development
 	// only: refused unless Endpoint is set.
-	CreateTable bool `yaml:"create_table" env:"WH_DEDUPE_DYNAMODB_CREATE_TABLE" env-default:"false"`
+	CreateTable bool `yaml:"create_table" env:"WH_DEDUPE_DYNAMODB_CREATE_TABLE"`
 }
 
 func (d Dedupe) validate() error {
 	if err := checkBackend("dedupe.backend", "WH_DEDUPE_BACKEND", d.Backend, dedupeBackends); err != nil {
 		return err
 	}
-	if d.Lease < 0 {
-		return fmt.Errorf("dedupe.lease (WH_DEDUPE_LEASE) must be >= 0, got %s", d.Lease)
+	if d.Lease <= 0 {
+		return fmt.Errorf("dedupe.lease (WH_DEDUPE_LEASE) must be > 0, got %s", d.Lease)
 	}
-	if d.ReserveConcurrency < 0 {
-		return fmt.Errorf("dedupe.reserve_concurrency (WH_DEDUPE_RESERVE_CONCURRENCY) must be >= 0, got %d", d.ReserveConcurrency)
+	if d.ReserveConcurrency <= 0 {
+		return fmt.Errorf("dedupe.reserve_concurrency (WH_DEDUPE_RESERVE_CONCURRENCY) must be > 0, got %d", d.ReserveConcurrency)
 	}
 	if d.Backend == DedupeDynamoDB {
 		return d.DynamoDB.validate()
@@ -121,11 +121,11 @@ func (d DedupeDynamoDBConfig) validate() error {
 	switch {
 	case strings.TrimSpace(d.Table) == "":
 		return errors.New("dedupe.dynamodb.table (WH_DEDUPE_DYNAMODB_TABLE) is required when dedupe.backend is dynamodb")
-	case d.Timeout < 0:
-		return fmt.Errorf("dedupe.dynamodb.timeout (WH_DEDUPE_DYNAMODB_TIMEOUT) must be >= 0, got %s", d.Timeout)
-	case d.MaxAttempts < 0:
-		return fmt.Errorf("dedupe.dynamodb.max_attempts (WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS) must be >= 0, got %d", d.MaxAttempts)
-	case d.RetryMode != "" && d.RetryMode != "standard" && d.RetryMode != "adaptive":
+	case d.Timeout <= 0:
+		return fmt.Errorf("dedupe.dynamodb.timeout (WH_DEDUPE_DYNAMODB_TIMEOUT) must be > 0, got %s", d.Timeout)
+	case d.MaxAttempts <= 0:
+		return fmt.Errorf("dedupe.dynamodb.max_attempts (WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS) must be > 0, got %d", d.MaxAttempts)
+	case d.RetryMode != "standard" && d.RetryMode != "adaptive":
 		return fmt.Errorf("dedupe.dynamodb.retry_mode (WH_DEDUPE_DYNAMODB_RETRY_MODE) %q: want standard or adaptive", d.RetryMode)
 	case d.CreateTable && d.Endpoint == "":
 		return errors.New("dedupe.dynamodb.create_table (WH_DEDUPE_DYNAMODB_CREATE_TABLE) is for dynamodb-local only: set dedupe.dynamodb.endpoint, or create the table with your infrastructure code")

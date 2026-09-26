@@ -11,11 +11,11 @@ import (
 )
 
 // withDefaultBackends sets what defaults() would: a literal Config
-// names no backend and no role, and Validate refuses that.
+// names no backend, no role and no dedupe lease, and Validate refuses that.
 func withDefaultBackends(c Config) *Config {
 	c.Roles = AllRoles()
 	c.MQ.Backend, c.Cache.Backend = MQEmbedded, CacheLocal
-	c.Dedupe.Backend, c.Coord.Backend = DedupePebble, CoordLocal
+	c.Dedupe, c.Coord.Backend = defaults().Dedupe, CoordLocal
 	return &c
 }
 
@@ -254,15 +254,11 @@ func TestValidate_Dedupe(t *testing.T) {
 		want string // "" = valid
 	}{
 		{"dynamodb", dynamo, ""},
-		{"zero values read as the defaults", func(c *Config) {
-			c.Dedupe.Backend = DedupeDynamoDB
-			c.Dedupe.DynamoDB = DedupeDynamoDBConfig{Table: "t"}
-		}, ""},
 		{"create_table with an endpoint", func(c *Config) {
 			dynamo(c)
 			c.Dedupe.DynamoDB.Endpoint, c.Dedupe.DynamoDB.CreateTable = "http://localhost:8000", true
 		}, ""},
-		{"the block is not read under pebble", func(c *Config) { c.Dedupe.DynamoDB.CreateTable = true }, ""},
+		{"the block is not read under pebble", func(c *Config) { c.Dedupe.DynamoDB = DedupeDynamoDBConfig{CreateTable: true} }, ""},
 		{"lease at the duplicate window", func(c *Config) { c.Dedupe.Lease = 2 * time.Minute }, ""},
 		{"create_table without an endpoint", func(c *Config) {
 			dynamo(c)
@@ -270,9 +266,14 @@ func TestValidate_Dedupe(t *testing.T) {
 		}, "dedupe.dynamodb.create_table (WH_DEDUPE_DYNAMODB_CREATE_TABLE) is for dynamodb-local only"},
 		{"no table", func(c *Config) { dynamo(c); c.Dedupe.DynamoDB.Table = " " }, "dedupe.dynamodb.table (WH_DEDUPE_DYNAMODB_TABLE) is required"},
 		{"retry mode", func(c *Config) { dynamo(c); c.Dedupe.DynamoDB.RetryMode = "legacy" }, `retry_mode (WH_DEDUPE_DYNAMODB_RETRY_MODE) "legacy"`},
+		{"zero timeout", func(c *Config) { dynamo(c); c.Dedupe.DynamoDB.Timeout = 0 }, "dedupe.dynamodb.timeout (WH_DEDUPE_DYNAMODB_TIMEOUT) must be > 0"},
 		{"negative timeout", func(c *Config) { dynamo(c); c.Dedupe.DynamoDB.Timeout = -time.Second }, "dedupe.dynamodb.timeout"},
+		{"zero attempts", func(c *Config) { dynamo(c); c.Dedupe.DynamoDB.MaxAttempts = 0 }, "dedupe.dynamodb.max_attempts (WH_DEDUPE_DYNAMODB_MAX_ATTEMPTS) must be > 0"},
 		{"negative attempts", func(c *Config) { dynamo(c); c.Dedupe.DynamoDB.MaxAttempts = -1 }, "dedupe.dynamodb.max_attempts"},
-		{"negative lease", func(c *Config) { c.Dedupe.Lease = -time.Second }, "dedupe.lease (WH_DEDUPE_LEASE) must be >= 0"},
+		{"no retry mode", func(c *Config) { dynamo(c); c.Dedupe.DynamoDB.RetryMode = "" }, `retry_mode (WH_DEDUPE_DYNAMODB_RETRY_MODE) ""`},
+		{"zero lease", func(c *Config) { c.Dedupe.Lease = 0 }, "dedupe.lease (WH_DEDUPE_LEASE) must be > 0, got 0s"},
+		{"negative lease", func(c *Config) { c.Dedupe.Lease = -time.Second }, "dedupe.lease (WH_DEDUPE_LEASE) must be > 0"},
+		{"zero concurrency", func(c *Config) { c.Dedupe.ReserveConcurrency = 0 }, "dedupe.reserve_concurrency (WH_DEDUPE_RESERVE_CONCURRENCY) must be > 0"},
 		{"negative concurrency", func(c *Config) { c.Dedupe.ReserveConcurrency = -1 }, "dedupe.reserve_concurrency"},
 		{"lease past the duplicate window", func(c *Config) { c.Dedupe.Lease = 3 * time.Minute }, "exceeds the embedded mq's 2m0s duplicate window"},
 	}
