@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 )
 
 func TestRedisConfig_Validation(t *testing.T) {
@@ -158,6 +161,43 @@ func TestRedis_Record(t *testing.T) {
 
 	r.record(live, context.DeadlineExceeded)
 	assert.True(t, r.breaker.isOpen())
+}
+
+// Each opening of the breaker logs one WARN naming why; the operations that
+// fail while it is open log nothing. Not parallel: it captures the default
+// logger.
+func TestRedis_BreakerOpeningLogsOnce(t *testing.T) {
+	buf := logtest.Capture(t, slog.LevelWarn)
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	r := &RedisCache{breaker: newBreaker(2, time.Second, clock.now)}
+	live := context.Background()
+	warns := func() int { return strings.Count(buf.String(), `"level":"WARN"`) }
+
+	r.recordReply(live, "READONLY You can't write against a read only replica.")
+	r.recordReply(live, "READONLY You can't write against a read only replica.")
+	r.record(live, context.DeadlineExceeded)
+	r.record(live, context.DeadlineExceeded)
+	assert.Equal(t, 1, warns(), buf.String())
+	assert.Contains(t, buf.String(), `"reply":"READONLY You can't write against a read only replica."`)
+
+	clock.t = clock.t.Add(time.Second)
+	_, probe := r.breaker.allow()
+	require.True(t, probe)
+	r.record(live, nil)
+	require.False(t, r.breaker.isOpen())
+
+	r.record(live, context.DeadlineExceeded)
+	assert.Equal(t, 1, warns(), "under the threshold")
+	r.record(live, context.DeadlineExceeded)
+	r.record(live, context.DeadlineExceeded)
+	assert.Equal(t, 2, warns(), buf.String())
+	assert.Contains(t, buf.String(), "not answering")
+
+	clock.t = clock.t.Add(time.Second)
+	_, probe = r.breaker.allow()
+	require.True(t, probe)
+	r.record(live, context.DeadlineExceeded)
+	assert.Equal(t, 3, warns(), "a failed probe opens it again")
 }
 
 func TestRejectsCredentials(t *testing.T) {
