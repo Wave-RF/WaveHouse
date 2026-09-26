@@ -108,6 +108,8 @@ func TestNew_OpsOnlyRouter(t *testing.T) {
 
 	sweeperCfg := *cfg
 	sweeperCfg.Roles = []config.Role{config.RoleSweeper}
+	// Its own store: full's embedded JetStream is still open on cfg.DataDir.
+	sweeperCfg.DataDir = t.TempDir()
 	a := newApp(t, &sweeperCfg, Options{})
 
 	for _, path := range []string{"/livez", "/readyz", "/healthz", "/version"} {
