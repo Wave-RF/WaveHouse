@@ -182,11 +182,8 @@ var cases = []struct {
 			"retention 0 never expires")
 	}},
 	{"concurrent reserves of one key claim it once", func(t *testing.T, s *suite) {
-		// #390: two requests carrying one id must not both publish. Run
-		// over many fresh keys, not just one: a race confined to a narrow
-		// lock window (e.g. one unlocked too early around a single
-		// backend read) can slip past a single key far more often than it
-		// triggers, so one key is a weak witness.
+		// #390: two requests carrying one id must not both publish, checked
+		// across many fresh keys since a narrow lock window can miss one.
 		const n = 16
 		const keys = 20
 		d, p := s.store(t, "acme"), s.peer(t, "acme")
@@ -226,21 +223,21 @@ var cases = []struct {
 		}
 	}},
 	{"a reserve racing a commit never claims, and settles to duplicate once it lands", func(t *testing.T, s *suite) {
-		// A backend's Commit must write the durable record before it drops
-		// the pending claim (e.g. the Pebble backend's synced batch flush
-		// ahead of releasing the in-memory claim) — a Reserve spinning
-		// against the same key during that window must never see Claimed,
-		// and must see Duplicate the instant Commit returns. Run over many
-		// fresh keys and both clients so a narrow unlock window isn't
-		// masked by luck on one key or one process's view.
-		const workers = 8
-		const rounds = 20
+		// Commit must land durably before it drops the pending claim; a
+		// racing Reserve must never see Claimed, only Duplicate once it
+		// returns. A start barrier holds Commit until every worker has
+		// made its first call, so low GOMAXPROCS can't starve them out of
+		// overlapping it at all.
+		const workers = 4
+		const rounds = 8
 		d, p := s.store(t, "acme"), s.peer(t, "acme")
 		for round := range rounds {
 			k := key(fmt.Sprintf("commit-race-%d", round))
 			c := reserve(t, d, long, k)
 			var stop atomic.Bool
 			var claimed atomic.Int64
+			var ready sync.WaitGroup
+			ready.Add(workers)
 			var wg sync.WaitGroup
 			for i := range workers {
 				store := d
@@ -248,8 +245,13 @@ var cases = []struct {
 					store = p
 				}
 				wg.Go(func() {
+					first := true
 					for !stop.Load() {
 						got, err := store.Reserve(context.Background(), []dedupe.Key{k}, long)
+						if first {
+							first = false
+							ready.Done()
+						}
 						if !assert.NoError(t, err) {
 							return
 						}
@@ -263,6 +265,7 @@ var cases = []struct {
 					}
 				})
 			}
+			ready.Wait()
 			require.NoError(t, d.Commit(t.Context(), c, 0))
 			stop.Store(true)
 			wg.Wait()

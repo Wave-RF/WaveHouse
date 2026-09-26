@@ -2783,12 +2783,14 @@ func dedupHandler(t *testing.T, pub *testutil.MockPublisher, dedup dedupe.Dedupl
 func TestIngest_Dedup_FailedPublishReleasesTheID(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name   string
-		err    error
-		status int
+		name       string
+		err        error
+		status     int
+		retryAfter string
 	}{
-		{"backpressure", fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), http.StatusServiceUnavailable},
-		{"other failure", errors.New("connection reset"), http.StatusInternalServerError},
+		{"backpressure", fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), http.StatusServiceUnavailable, "30"},
+		{"unavailable broker", fmt.Errorf("%w: timeout", mq.ErrUnavailable), http.StatusServiceUnavailable, "5"},
+		{"other failure", errors.New("connection reset"), http.StatusInternalServerError, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2801,6 +2803,7 @@ func TestIngest_Dedup_FailedPublishReleasesTheID(t *testing.T) {
 			w := httptest.NewRecorder()
 			h.Handle(w, withTenant(ingestRequest(t, "clicks", body)))
 			require.Equal(t, tt.status, w.Code)
+			assert.Equal(t, tt.retryAfter, w.Header().Get("Retry-After"))
 			assert.False(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "e1"}), "released, not left to lapse")
 
 			pub.Err = nil

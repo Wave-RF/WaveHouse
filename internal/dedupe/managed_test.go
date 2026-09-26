@@ -166,3 +166,60 @@ func TestManaged_CommitAndReleaseFollowTheSwitch(t *testing.T) {
 	require.ErrorIs(t, m.Commit(ctx, claimed, 0), ErrUnavailable)
 	require.ErrorIs(t, m.Release(ctx, claimed), ErrUnavailable)
 }
+
+// blockingDedup's Commit blocks until unblock is closed, standing in for a
+// network backend mid-outage: the caller holds Managed's read lock for as
+// long as the call takes.
+type blockingDedup struct {
+	memDedup
+	inCommit chan struct{} // closed once Commit is entered
+	unblock  chan struct{}
+}
+
+func (b *blockingDedup) Commit(ctx context.Context, claims []Claim, retention time.Duration) error {
+	close(b.inCommit)
+	<-b.unblock
+	return b.memDedup.Commit(ctx, claims, retention)
+}
+
+// A no-op Apply must not queue behind an in-flight Commit: it settles under
+// the read lock alone, so a reload naming the same state for every tenant
+// never waits out another tenant's slow backend call. A real transition is
+// the opposite — it still needs the store quiescent, so it waits for Commit
+// to finish before touching it.
+func TestManaged_ApplyNoOpDoesNotWaitOnCommit(t *testing.T) {
+	t.Parallel()
+	backend := &blockingDedup{memDedup: memDedup{seen: map[Key]bool{}}, inCommit: make(chan struct{}), unblock: make(chan struct{})}
+	m := NewManaged(func() (Deduplicator, error) { return backend, nil })
+	require.NoError(t, m.Apply(true))
+
+	claimed := []Claim{{Key: Key{Table: "t", ID: "a"}, Status: Claimed, Token: "t"}}
+	commitDone := make(chan error, 1)
+	go func() { commitDone <- m.Commit(context.Background(), claimed, 0) }()
+	<-backend.inCommit // Commit is inside the backend call, holding the read lock
+
+	noop := make(chan error, 1)
+	go func() { noop <- m.Apply(true) }()
+	select {
+	case err := <-noop:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Apply(true) blocked behind an in-flight Commit for a state that already held")
+	}
+
+	// A real transition is the genuine case: it must wait for Commit, not
+	// race it — assert it's still pending, then let Commit finish and
+	// confirm Apply(false) then proceeds and closes the store.
+	transition := make(chan error, 1)
+	go func() { transition <- m.Apply(false) }()
+	select {
+	case err := <-transition:
+		t.Fatalf("Apply(false) returned (%v) before the in-flight Commit finished", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(backend.unblock)
+	require.NoError(t, <-commitDone)
+	require.NoError(t, <-transition)
+	assert.True(t, backend.closed)
+}

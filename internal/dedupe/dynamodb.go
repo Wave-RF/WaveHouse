@@ -81,7 +81,8 @@ type DynamoConfig struct {
 	// the client after throttles.
 	RetryMode string
 	// ReserveConcurrency bounds the parallel calls one Reserve, Commit or
-	// Release makes, and sizes the client's idle connection pool to match.
+	// Release makes, and sizes the client's idle connection pool to match
+	// (never below the SDK's default of 10 per host).
 	// 0 = 64.
 	ReserveConcurrency int
 }
@@ -161,11 +162,11 @@ func NewDynamo(ctx context.Context, cfg DynamoConfig, extra ...func(*config.Load
 }
 
 // newHTTPClient keeps an idle connection for every call one Reserve can have
-// in flight: with the SDK's default of 10 per host, a wide Reserve would dial
-// most of its puts afresh.
+// in flight, and never fewer than the SDK's defaults: with its 10 per host, a
+// wide Reserve would dial most of its puts afresh.
 func newHTTPClient(cfg DynamoConfig) *awshttp.BuildableClient {
 	return awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
-		tr.MaxIdleConnsPerHost = cfg.ReserveConcurrency
+		tr.MaxIdleConnsPerHost = max(tr.MaxIdleConnsPerHost, cfg.ReserveConcurrency)
 		tr.MaxIdleConns = max(tr.MaxIdleConns, cfg.ReserveConcurrency)
 	})
 }
