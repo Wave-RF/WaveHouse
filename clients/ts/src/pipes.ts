@@ -67,8 +67,8 @@ export class PipeRef<Row = Record<string, unknown>> implements PromiseLike<Resul
  * Admin namespace for reading named query pipes.
  *
  * Pipes are defined in the server's settings directory (`pipes.json`, with
- * every `allowed_roles` entry declared in `roles.json`); files are the only
- * write path. Edit the files and the server re-adopts them on change, on
+ * every `allowed_roles` entry declared in `roles.json`); the files are the only
+ * way to define or change a pipe. Edit the files and the server re-adopts them on change, on
  * SIGHUP, or on `wh.settings.reload()` (POST /v1/ops/settings/reload).
  */
 export class PipesNamespace {

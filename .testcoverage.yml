@@ -79,3 +79,14 @@ exclude:
       - ^internal/settings/
       - ^cmd/wavehouse/validate\.go$
       - ^cmd/wavehouse/bootstrap\.go$
+      # The in-process cache backend: the e2e stack runs cache.backend=redis
+      # (#613), so the binary carries LocalCache and its version index but e2e
+      # never reaches them. The unit suite and the integration suite's main
+      # app (cache.backend=local) cover them; the merged total still counts them.
+      - ^internal/cache/(local|version_manager)\.go$
+      # What e2e's Redis never makes it run: the cache.redis block's rejection
+      # paths (boot adopts a valid fixture, as with internal/settings above)
+      # and the retry of invalidations the server did not take, which needs an
+      # outage. The unit and integration suites cover both.
+      - ^internal/config/cache_redis\.go$
+      - ^internal/cache/pending\.go$

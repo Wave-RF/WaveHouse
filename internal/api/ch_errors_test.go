@@ -149,6 +149,32 @@ func TestPipes_ClickHouseErrors(t *testing.T) {
 	}
 }
 
+// TestPipes_WriteClickHouseErrors: a failed write pipe answers with its
+// class's status and code, but never as retryable and with no Retry-After:
+// the statement may have run, so a client that retried would run it again.
+func TestPipes_WriteClickHouseErrors(t *testing.T) {
+	t.Parallel()
+	for _, tc := range chErrorCases(t) {
+		if tc.caps.MaxExecutionTime > 0 || tc.caps.MaxMemoryUsage > 0 {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			conn := &writeConn{err: tc.err}
+			h := writerPipesHandler(t, conn, nil, &pipes.NamedQuery{Name: "log", SQL: "INSERT INTO audit_log VALUES ({{msg}}, now())"})
+			w := pipeCallAs(t, h, "log")
+			require.Equal(t, tc.wantStatus, w.Code, w.Body.String())
+			var got errorBody
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+			assert.Equal(t, tc.wantCode, got.Code)
+			require.NotNil(t, got.Retryable)
+			assert.False(t, *got.Retryable)
+			assert.Empty(t, w.Header().Get("Retry-After"))
+			assert.Equal(t, int32(1), conn.execs.Load())
+		})
+	}
+}
+
 type errRow struct{ err error }
 
 func (r errRow) Err() error           { return r.err }

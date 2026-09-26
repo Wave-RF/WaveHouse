@@ -459,7 +459,7 @@ func TestHandleSuccess(t *testing.T) {
 	t.Parallel()
 
 	// handleSuccess invalidates one namespace per distinct scope in the batch: the
-	// encoded table paired with the encoded scope (envelope.scope). Invalidate turns
+	// raw table paired with the raw scope (envelope.scope). Invalidate turns
 	// an empty scope into a whole-table bump and a non-empty scope into a per-scope
 	// bump, so the worker only needs to emit the table+scope pairs it saw.
 
@@ -500,12 +500,12 @@ func TestHandleSuccess(t *testing.T) {
 			wantNamespaces: []cache.Namespace{{Tenant: tenant.Default, Table: "events", Scope: ""}},
 		},
 		{
-			// Table and scope are percent-encoded so keys line up with the reader
-			// (internal/api/structured_query.go), which encodes the table too.
-			name:           "table and scope are percent-encoded",
+			// Table and scope reach the cache raw, as the reader
+			// (internal/api/structured_query.go) passes them; the cache escapes.
+			name:           "table and scope reach the cache raw",
 			table:          "events.staging",
 			scopes:         []string{"org.1"},
-			wantNamespaces: []cache.Namespace{{Tenant: tenant.Default, Table: "events%2Estaging", Scope: "org%2E1"}},
+			wantNamespaces: []cache.Namespace{{Tenant: tenant.Default, Table: "events.staging", Scope: "org.1"}},
 		},
 		{
 			// Cache failure must not prevent ack — failure is logged, non-fatal.
@@ -579,18 +579,69 @@ func TestInvalidate_ReachesOneTenantsEntries(t *testing.T) {
 	ctx := context.Background()
 	acme := []cache.Namespace{{Tenant: "acme", Table: "events", Scope: "org_1"}}
 	globex := []cache.Namespace{{Tenant: "globex", Table: "events", Scope: "org_1"}}
-	require.NoError(t, l1.Set(ctx, "q", acme, []byte("acme rows"), time.Minute))
-	require.NoError(t, l1.Set(ctx, "q", globex, []byte("globex rows"), time.Minute))
+	get := func(id tenant.ID, deps []cache.Namespace) (cache.Entry, cache.Snapshot) {
+		e, snap, err := l1.Lookup(ctx, id, "q", deps)
+		require.NoError(t, err)
+		return e, snap
+	}
+	_, snap := get("acme", acme)
+	require.NoError(t, l1.Set(ctx, snap, []byte("acme rows"), time.Minute))
+	_, snap = get("globex", globex)
+	require.NoError(t, l1.Set(ctx, snap, []byte("globex rows"), time.Minute))
 	l1.Wait()
 
 	w.invalidate(ctx, "acme", "events", []parsedMsg{{scope: "org_1"}})
 
-	val, _, err := l1.Get(ctx, "q", acme)
-	require.NoError(t, err)
-	assert.Nil(t, val, "acme's entry is orphaned by acme's insert")
-	val, _, err = l1.Get(ctx, "q", globex)
-	require.NoError(t, err)
-	assert.Equal(t, []byte("globex rows"), val, "globex's entry survives acme's insert")
+	e, _ := get("acme", acme)
+	assert.Nil(t, e.Value, "acme's entry is orphaned by acme's insert")
+	e, _ = get("globex", globex)
+	assert.Equal(t, []byte("globex rows"), e.Value, "globex's entry survives acme's insert")
+}
+
+// From an envelope carrying the raw table and scope (makeEnvelope) to the
+// real cache: an insert into a table whose name holds a dot or a space —
+// scoped or not — orphans the whole-table result a structured query on that
+// table filed, under the raw name the request carries (the namespace
+// internal/api's TestStructuredQuery_RawTableNameMeetsTheInsertsBump reads
+// through), and leaves another table's.
+func TestFlushTable_BumpsWhatTheReadFiles(t *testing.T) {
+	t.Parallel()
+	ok := &testutil.MockRoundTripper{Fn: func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
+	}}
+	for _, tc := range []struct{ table, scope string }{
+		{"default.clicks", ""}, {"my table", ""}, {"default.clicks", "org.1"}, {"my table", "org 1"},
+	} {
+		t.Run(tc.table+"/"+tc.scope, func(t *testing.T) {
+			t.Parallel()
+			l1, err := cache.NewLocal(1 << 20)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = l1.Close() })
+			w, _, _, wait := newTestWorker(ok)
+			w.cache = l1
+
+			ctx := context.Background()
+			read := []cache.Namespace{{Tenant: tenant.Default, Table: tc.table}}
+			other := []cache.Namespace{{Tenant: tenant.Default, Table: "clicks"}}
+			for _, deps := range [][]cache.Namespace{read, other} {
+				_, snap, err := l1.Lookup(ctx, tenant.Default, "q", deps)
+				require.NoError(t, err)
+				require.NoError(t, l1.Set(ctx, snap, []byte(deps[0].Table), time.Minute))
+			}
+			l1.Wait()
+
+			msgs := parseAll(t, w, newIngestMsg(t, tc.table, tc.scope, map[string]any{"id": 1}))
+			w.flushTable(ctx, msgs[0].tableName, msgs)
+			wait()
+
+			e, _, err := l1.Lookup(ctx, tenant.Default, "q", read)
+			require.NoError(t, err)
+			assert.Nil(t, e.Value, "the insert orphans the read's entry")
+			e, _, err = l1.Lookup(ctx, tenant.Default, "q", other)
+			require.NoError(t, err)
+			assert.Equal(t, []byte("clicks"), e.Value, "another table's entry survives")
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
