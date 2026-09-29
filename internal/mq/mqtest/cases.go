@@ -305,16 +305,17 @@ func deadLetterKeepsTheTopicAndDoesNotAck(t *testing.T, h Harness) {
 	assert.Equal(t, uint64(1), counts.Total)
 }
 
-// Counts are per tenant and per table (every scope of a table folded into
-// it), a table filter narrows Tables to all of that table's scopes but not
-// Total, and a tenant with nothing parked has zero counts.
+// Counts are per tenant and per table, every scope of a table under the table
+// itself (so a dotted table name never shares a count with a table + scope
+// pair), a table filter narrows Tables but not Total, and a tenant with
+// nothing parked has zero counts.
 func deadLetterCounts(t *testing.T, h Harness) {
 	b := h.New(t)
 	c := ctx(t)
 
 	empty, err := b.DeadLetterCounts(c, Globex, "")
 	require.NoError(t, err, "a tenant with a budget and nothing parked")
-	assert.Empty(t, empty.Tables)
+	assert.Equal(t, map[string]uint64{}, empty.Tables, "empty, not nil: the ops API encodes it as {}")
 	assert.Zero(t, empty.Total)
 
 	park := func(topic mq.Topic, n int) {
@@ -325,7 +326,7 @@ func deadLetterCounts(t *testing.T, h Harness) {
 	park(mq.Topic{Tenant: Acme, Table: "t1"}, 2)
 	park(mq.Topic{Tenant: Acme, Table: "t2"}, 1)
 	park(mq.Topic{Tenant: Acme, Table: "t1", Scope: "s"}, 1)
-	park(mq.Topic{Tenant: Acme, Table: "odd.name"}, 1)
+	park(mq.Topic{Tenant: Acme, Table: "t1.s"}, 1)
 	park(mq.Topic{Tenant: Globex, Table: "t1"}, 1)
 
 	tests := []struct {
@@ -335,8 +336,9 @@ func deadLetterCounts(t *testing.T, h Harness) {
 		tables map[string]uint64
 		total  uint64
 	}{
-		{"every table", Acme, "", map[string]uint64{"t1": 3, "t2": 1, "odd.name": 1}, 5},
-		{"one table", Acme, "t1", map[string]uint64{"t1": 3}, 5},
+		{"every table", Acme, "", map[string]uint64{"t1": 3, "t2": 1, "t1.s": 1}, 5},
+		{"one table, all of its scopes", Acme, "t1", map[string]uint64{"t1": 3}, 5},
+		{"a dotted table", Acme, "t1.s", map[string]uint64{"t1.s": 1}, 5},
 		{"a table with nothing parked", Acme, "none", map[string]uint64{}, 5},
 		{"the other tenant", Globex, "", map[string]uint64{"t1": 1}, 1},
 	}
@@ -353,6 +355,7 @@ func deadLetterCounts(t *testing.T, h Harness) {
 		return
 	}
 	require.NoError(t, err)
+	assert.Equal(t, map[string]uint64{}, unbudgeted.Tables)
 	assert.Zero(t, unbudgeted.Total)
 }
 
