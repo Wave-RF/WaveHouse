@@ -462,7 +462,7 @@ WaveHouse/
 │   ├── coord/              # Leases with fencing tokens (in-process Local, RunElected, coordtest suite)
 │   ├── dedupe/             # Optional deduplication (Reserve/Commit/Release; Pebble or DynamoDB)
 │   ├── discovery/          # ClickHouse schema introspection + validation
-│   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
+│   ├── ingest/             # Batch buffering + DLQ + Active Sweeper + shard claims
 │   ├── keyenc/             # One escaping for composite keys (NATS subject tokens, cache keys, dedupe keys)
 │   ├── mq/                 # MQ boundary: the only NATS/JetStream importer
 │   ├── observability/      # OpenTelemetry pipeline (traces/metrics/logs + Prometheus)

@@ -60,6 +60,17 @@ func (l *Local) TryAcquire(ctx context.Context, name string) (Term, error) {
 	return t, nil
 }
 
+// Held implements Observer.
+func (l *Local) Held(ctx context.Context, name string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	l.table.mu.Lock()
+	defer l.table.mu.Unlock()
+	_, ok := l.table.held[name]
+	return ok, nil
+}
+
 // Close implements Coordinator.
 func (l *Local) Close(context.Context) error {
 	l.mu.Lock()

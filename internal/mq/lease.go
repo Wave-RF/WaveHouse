@@ -108,7 +108,10 @@ type leaseSighting struct {
 	since    time.Time
 }
 
-var _ coord.Coordinator = (*natsLeases)(nil)
+var (
+	_ coord.Coordinator = (*natsLeases)(nil)
+	_ coord.Observer    = (*natsLeases)(nil)
+)
 
 // TryAcquire implements coord.Coordinator.
 func (l *natsLeases) TryAcquire(ctx context.Context, name string) (coord.Term, error) {
@@ -197,6 +200,31 @@ func (l *natsLeases) campaign(ctx context.Context, name, key string, val []byte)
 		return 0, fmt.Errorf("coord lease %s: %w", name, err)
 	}
 	return rev, nil
+}
+
+// Held implements coord.Observer: a lease this coordinator holds is held; a
+// key that is absent, resigned, or this coordinator's own leftover write is
+// not; another holder's is held until this coordinator has seen its revision
+// unchanged for the lease duration, the clock TryAcquire keeps.
+func (l *natsLeases) Held(ctx context.Context, name string) (bool, error) {
+	l.mu.Lock()
+	_, mine := l.held[name]
+	l.mu.Unlock()
+	if mine {
+		return true, nil
+	}
+	entry, err := l.kv.Get(ctx, leaseKeyPrefix+name)
+	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("coord lease %s: %w", name, err)
+	}
+	var cur leaseValue
+	if json.Unmarshal(entry.Value(), &cur) == nil && cur.Session == l.value.Session {
+		return false, nil
+	}
+	return !l.expired(name, entry.Revision(), cur), nil
 }
 
 // expired reports whether another holder's lease at revision has been seen

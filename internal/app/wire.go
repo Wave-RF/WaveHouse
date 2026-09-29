@@ -796,10 +796,21 @@ func (a *App) wireStreaming() {
 
 // wireIngestWorker adds the batch consumer (JetStream → ClickHouse). Its
 // consumer is created when Run starts it; at shutdown the in-flight batches
-// drain within the shutdown timeout.
+// drain within the shutdown timeout. Over a sharded queue (mq.backend: nats)
+// it consumes only the shards this process is assigned (ingest.ClaimShards),
+// so each table has one writer.
 func (a *App) wireIngestWorker() {
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
-		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, sharedTables{Cache: a.cache, sharing: a.pools.SharingTables}, a.pools.Target, dlqFor(a.tenants))
+		var queue ingest.Queue = a.mq
+		if _, ok := a.mq.(mq.Sharded); ok {
+			// One process per shard at a time, balanced over the ingest
+			// processes through the shared coordinator.
+			var err error
+			if queue, err = ingest.ClaimShards(a.mq, a.coord, ingest.ClaimConfig{}); err != nil {
+				return err
+			}
+		}
+		stop, failed, err := ingest.StartIngestWorker(ctx, queue, sharedTables{Cache: a.cache, sharing: a.pools.SharingTables}, a.pools.Target, dlqFor(a.tenants))
 		if err != nil {
 			return err
 		}

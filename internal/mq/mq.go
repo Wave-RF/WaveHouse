@@ -137,15 +137,15 @@ func (m *Message) NakWithDelay(delay time.Duration) error {
 }
 
 // OnSettled arranges for fn to run once, after the first DoubleAck, Ack,
-// Nak or NakWithDelay that succeeds: the message is no longer this consumer's
-// to write. A consumer handing a shard on to another process waits for it.
-// Call it before the message is shared with another goroutine.
+// Nak or NakWithDelay, whether or not the broker confirms it: the consumer
+// has let go of the message either way, and one it failed to settle comes
+// back from the broker as a new delivery. A consumer handing a shard on to
+// another process waits for it, and one that caps the messages it holds
+// frees a slot. Call it before the message is shared with another goroutine.
 func (m *Message) OnSettled(fn func()) {
 	var once sync.Once
 	settle := func(err error) error {
-		if err == nil {
-			once.Do(fn)
-		}
+		once.Do(fn)
 		return err
 	}
 	doubleAck, ack, nak, nakDelay := m.doubleAckFn, m.ackFn, m.nakFn, m.nakDelayFn
@@ -306,10 +306,14 @@ type Sharded interface {
 	IngestUnits() (configured, extra []string)
 	// ResetOrphaned redelivers at once what a unit's previous owner received
 	// and never settled, when no consumer holds the unit and rows are
-	// awaiting a settlement, and reports whether it did. Call it before
-	// consuming a unit taken over from an owner that died, never while
-	// consuming it: a reset also redelivers what the caller itself holds.
+	// awaiting a settlement, and reports whether it did; ErrUnitHeld while a
+	// consumer still holds it. Call it before consuming a unit taken over
+	// from an owner that died, never while consuming it: a reset also
+	// redelivers what the caller itself holds.
 	ResetOrphaned(ctx context.Context, unit string) (bool, error)
+	// Unowned counts the units with rows waiting that no consumer holds:
+	// rows nobody is writing.
+	Unowned(ctx context.Context) (int, error)
 }
 
 // Releaser is implemented by a consumer of a Sharded broker's units. Release
@@ -320,6 +324,9 @@ type Sharded interface {
 type Releaser interface {
 	Release(ctx context.Context) error
 }
+
+// ErrUnitHeld is ResetOrphaned's answer while a consumer still holds the unit.
+var ErrUnitHeld = errors.New("unit held by a consumer")
 
 // ErrUnitsUnsupported is CreateConsumer's answer to a ConsumerConfig naming
 // units on a broker that does not implement Sharded, or naming one it does

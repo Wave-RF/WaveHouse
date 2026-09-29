@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -19,9 +20,10 @@ import (
 )
 
 // Two full replicas on one NATS, through the shipped lease bucket as the
-// restricted wavehouse user, take no sweeper lease: under nats retention is
-// the operator's streams', so no sweeper is wired.
-func TestCoordNATS_NoSweeperUnderNATS(t *testing.T) {
+// restricted wavehouse user, each hold a shard claim membership lease, and
+// take no sweeper lease: under nats retention is the operator's streams', so
+// no sweeper is wired. When one stops, its membership lease is resigned.
+func TestCoordNATS_ReplicasShareTheShards(t *testing.T) {
 	e := env(t)
 	ctx := context.Background()
 	natsURL := startNATS(t)
@@ -32,15 +34,44 @@ func TestCoordNATS_NoSweeperUnderNATS(t *testing.T) {
 	root, err := writeTestSettings(e.ch)
 	require.NoError(t, err)
 
+	replicas := map[string]*natsProcess{}
 	for range 2 {
-		bootNATSProcess(t, natsURL, root, config.AllRoles()...)
+		p := bootNATSProcess(t, natsURL, root, config.AllRoles()...)
+		replicas[p.id] = p
 	}
-	// A sweeper would campaign within coord.RetryPeriod (2s) of boot.
-	assert.Never(t, func() bool {
-		h, err := op.LeaseHolder(ctx, natstest.CoordBucket, "sweeper")
+	members := func() map[string]bool {
+		out := map[string]bool{}
+		for j := range 32 {
+			h, err := op.LeaseHolder(ctx, natstest.CoordBucket, "ingest.m"+strconv.Itoa(j))
+			require.NoError(t, err)
+			if h != "" {
+				out[h] = true
+			}
+		}
+		return out
+	}
+	require.Eventually(t, func() bool { m := members(); return len(m) == 2 }, 15*time.Second, 50*time.Millisecond, "each replica is a member: %v", members())
+	for id := range members() {
+		assert.Contains(t, replicas, id)
+	}
+	sweeper, err := op.LeaseHolder(ctx, natstest.CoordBucket, "sweeper")
+	require.NoError(t, err)
+	assert.Empty(t, sweeper, "no sweeper runs under nats")
+
+	var first string
+	for id := range replicas {
+		first = id
+		break
+	}
+	replicas[first].stop()
+	select {
+	case err := <-replicas[first].runDone:
 		require.NoError(t, err)
-		return h != ""
-	}, 5*time.Second, 100*time.Millisecond, "no sweeper lease is taken under nats")
+	case <-time.After(15 * time.Second):
+		t.Fatal("the replica did not stop")
+	}
+	require.Eventually(t, func() bool { m := members(); return len(m) == 1 && !m[first] }, 10*time.Second, 50*time.Millisecond,
+		"the stopped replica resigned its membership: %v", members())
 }
 
 // The lease bucket is the operator's: boot waits for it with the rest of the

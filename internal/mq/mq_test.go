@@ -75,9 +75,10 @@ func TestWithHeader(t *testing.T) {
 	assert.Equal(t, Headers{"X-A": {"1", "2"}, "X-B": {"b"}}, h)
 }
 
-// OnSettled runs once, on the first settlement that succeeds, whichever of
-// the four it is; a failed one does not count, and NakWithDelay without a
-// delayed form falls back through the wrapped Nak.
+// OnSettled runs once, on the first settlement attempted, whichever of the
+// four it is and whether or not the broker confirms it: the consumer has let
+// go of the message either way. NakWithDelay without a delayed form falls
+// back through the wrapped Nak.
 func TestMessage_OnSettled(t *testing.T) {
 	t.Parallel()
 	fail := errors.New("no answer")
@@ -90,19 +91,17 @@ func TestMessage_OnSettled(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			var calls, fired int
-			var err error
+			err := fail
 			cb := func() error { calls++; return err }
 			m := NewMessage(context.Background(), Topic{Tenant: "acme", Table: "t"}, nil, time.Now(),
 				func(context.Context) error { return cb() }, cb, cb)
 			m.OnSettled(func() { fired++ })
-			err = fail
-			require.ErrorIs(t, settle(m), fail)
-			assert.Zero(t, fired, "a failed settlement does not count")
+			require.ErrorIs(t, settle(m), fail, "the broker's answer passes through")
+			assert.Equal(t, 1, fired, "a failed settlement counts: the message is let go")
 			err = nil
 			require.NoError(t, settle(m))
-			require.NoError(t, settle(m))
-			assert.Equal(t, 1, fired)
-			assert.Equal(t, 3, calls, "every call reaches the broker")
+			assert.Equal(t, 1, fired, "once")
+			assert.Equal(t, 2, calls, "every call reaches the broker")
 		})
 	}
 	m := NewMessage(context.Background(), Topic{Tenant: "acme", Table: "t"}, nil, time.Now(), nil, nil, nil)

@@ -863,8 +863,8 @@ func TestExternalNATS_ResetOrphaned(t *testing.T) {
 		require.NoError(t, a.Publish(t.Context(), topic, []byte(row)))
 	}
 	reset, err := b.ResetOrphaned(t.Context(), unit)
-	require.NoError(t, err)
-	assert.False(t, reset, "a live holder's rows are its own")
+	require.ErrorIs(t, err, ErrUnitHeld, "a live holder's rows are its own")
+	assert.False(t, reset)
 
 	a.nc.Close() // A dies holding x and y
 	st, err := f.admin.Stream(t.Context(), shippedPartition(p))
@@ -877,8 +877,8 @@ func TestExternalNATS_ResetOrphaned(t *testing.T) {
 	assert.ElementsMatch(t, []string{"x", "y"}, []string{receive(t, gotB), receive(t, gotB)})
 
 	reset, err = b.ResetOrphaned(t.Context(), unit)
-	require.NoError(t, err)
-	assert.False(t, reset, "nothing is left unsettled")
+	require.ErrorIs(t, err, ErrUnitHeld, "b holds it now")
+	assert.False(t, reset)
 }
 
 // unitPin is the pin the server holds on topic's unit in the shipped topology.
@@ -965,4 +965,29 @@ func TestExternalNATS_ReleaseChecksThePinIsStillItsOwn(t *testing.T) {
 
 	require.NoError(t, ca.(Releaser).Release(t.Context()))
 	assert.Equal(t, pin, unitPin(t, f, topic), "A's release leaves B's pin")
+}
+
+// Unowned counts the units with rows waiting that no consumer holds.
+func TestExternalNATS_Unowned(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	n, err := e.Unowned(t.Context())
+	require.NoError(t, err)
+	assert.Zero(t, n, "no rows, nothing to own")
+
+	topic := Topic{Tenant: "acme", Table: "events"}
+	require.NoError(t, e.Publish(t.Context(), topic, []byte("x")))
+	n, err = e.Unowned(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "a row nobody pulls")
+
+	var hold atomic.Bool
+	hold.Store(true)
+	p, s := natsRoute(topic, 4, 8)
+	_, _, got := unitConsumer(t, e, shippedPartition(p)+"/"+natsShardDurable("wh-ingest", s), &hold)
+	require.Equal(t, "x", receive(t, got))
+	n, err = e.Unowned(t.Context())
+	require.NoError(t, err)
+	assert.Zero(t, n, "held by the consumer that received it")
 }

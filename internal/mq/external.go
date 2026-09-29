@@ -756,8 +756,9 @@ func (e *ExternalNATS) unit(name string) (natsUnit, bool, bool) {
 	return natsUnit{}, false, false
 }
 
-// ResetOrphaned implements Sharded. With nobody pinned on the unit's durable
-// and rows awaiting an ack, whoever received them is gone: the reset
+// ResetOrphaned implements Sharded. A pinned client holds the unit
+// (ErrUnitHeld). With nobody pinned and rows awaiting an ack, whoever received
+// them is gone: the reset
 // redelivers them from the ack floor at once, where the server would wait
 // out ack_wait. Rows already acked are not delivered again.
 func (e *ExternalNATS) ResetOrphaned(ctx context.Context, name string) (bool, error) {
@@ -770,13 +771,41 @@ func (e *ExternalNATS) ResetOrphaned(ctx context.Context, name string) (bool, er
 		return false, fmt.Errorf("consumer %s: %w", name, e.apiError(err))
 	}
 	info := c.CachedInfo()
-	if info.NumAckPending == 0 || pinnedClient(info) != "" {
+	if pinnedClient(info) != "" {
+		return false, fmt.Errorf("unit %s: %w", name, ErrUnitHeld)
+	}
+	if info.NumAckPending == 0 {
 		return false, nil
 	}
 	if _, err := e.js.ResetConsumer(ctx, u.stream, u.durable); err != nil {
 		return false, fmt.Errorf("reset %s: %w", name, e.apiError(err))
 	}
 	return true, nil
+}
+
+// Unowned implements Sharded: the units whose durable has rows pending or
+// awaiting an ack while no client holds its pin. A live owner keeps its pin
+// by pulling, so such a unit has nobody writing it.
+func (e *ExternalNATS) Unowned(ctx context.Context) (int, error) {
+	units := slices.Clone(e.units)
+	if xs := e.extras.Load(); xs != nil {
+		units = append(units, *xs...)
+	}
+	n := 0
+	for _, u := range units {
+		c, err := e.js.Consumer(ctx, u.stream, u.durable)
+		if errors.Is(err, jetstream.ErrConsumerNotFound) {
+			continue // the topology check names it
+		}
+		if err != nil {
+			return 0, fmt.Errorf("consumer %s: %w", u.id(), e.apiError(err))
+		}
+		info := c.CachedInfo()
+		if (info.NumPending > 0 || info.NumAckPending > 0) && pinnedClient(info) == "" {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // pinnedClient is the pin id the server holds for WaveHouse's priority group
@@ -969,7 +998,9 @@ func (c *externalConsumer) takeOver() {
 	ctx, cancel := context.WithTimeout(c.ctx, recheckTimeout)
 	defer cancel()
 	for _, part := range c.parts {
-		if reset, err := c.e.ResetOrphaned(ctx, part.unit.id()); err != nil {
+		if reset, err := c.e.ResetOrphaned(ctx, part.unit.id()); errors.Is(err, ErrUnitHeld) {
+			continue // another consumer holds it; the pin decides
+		} else if err != nil {
 			slog.Warn("mq: could not take over a shard's unsettled rows; they come back after ack_wait", "component", "nats", "unit", part.unit.id(), "error", err)
 		} else if reset {
 			slog.Info("mq: took over a shard's unsettled rows", "component", "nats", "unit", part.unit.id())
