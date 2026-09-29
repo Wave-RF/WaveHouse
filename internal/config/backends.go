@@ -57,15 +57,15 @@ type MQNATSConfig struct {
 	// JSDomain is the JetStream domain, for a leafnode or hub-and-spoke
 	// deployment.
 	JSDomain       string `yaml:"js_domain" env:"WH_MQ_NATS_JS_DOMAIN"`
-	SubjectPrefix  string `yaml:"subject_prefix" env:"WH_MQ_NATS_SUBJECT_PREFIX" env-default:"wh"`
-	Partitions     int    `yaml:"partitions" env:"WH_MQ_NATS_PARTITIONS" env-default:"1"`
-	IngestConsumer string `yaml:"ingest_consumer" env:"WH_MQ_NATS_INGEST_CONSUMER" env-default:"wh-ingest"`
+	SubjectPrefix  string `yaml:"subject_prefix" env:"WH_MQ_NATS_SUBJECT_PREFIX"`
+	Partitions     int    `yaml:"partitions" env:"WH_MQ_NATS_PARTITIONS"`
+	IngestConsumer string `yaml:"ingest_consumer" env:"WH_MQ_NATS_INGEST_CONSUMER"`
 	// HistoryStream has no subjects to be found by, so it is named; empty is
 	// <SUBJECT_PREFIX>_HISTORY, the name the generated manifests give it.
 	HistoryStream  string        `yaml:"history_stream" env:"WH_MQ_NATS_HISTORY_STREAM"`
-	ConnectTimeout time.Duration `yaml:"connect_timeout" env:"WH_MQ_NATS_CONNECT_TIMEOUT" env-default:"5s"`
-	PublishTimeout time.Duration `yaml:"publish_timeout" env:"WH_MQ_NATS_PUBLISH_TIMEOUT" env-default:"5s"`
-	TopologyWait   time.Duration `yaml:"topology_wait" env:"WH_MQ_NATS_TOPOLOGY_WAIT" env-default:"60s"`
+	ConnectTimeout time.Duration `yaml:"connect_timeout" env:"WH_MQ_NATS_CONNECT_TIMEOUT"`
+	PublishTimeout time.Duration `yaml:"publish_timeout" env:"WH_MQ_NATS_PUBLISH_TIMEOUT"`
+	TopologyWait   time.Duration `yaml:"topology_wait" env:"WH_MQ_NATS_TOPOLOGY_WAIT"`
 }
 
 // MQNATSTLS is the client side of TLS to the NATS servers.
@@ -77,8 +77,8 @@ type MQNATSTLS struct {
 	HandshakeFirst bool   `yaml:"handshake_first" env:"WH_MQ_NATS_TLS_HANDSHAKE_FIRST"`
 }
 
-// defaultMQNATS is the block as Load's env-defaults leave it
-// (TestLoad_MQNATSDefaults pins the two together).
+// defaultMQNATS is the mq.nats part of defaults()
+// (TestLoad_MQNATSDefaults pins what Load returns to it).
 func defaultMQNATS() MQNATSConfig {
 	return MQNATSConfig{
 		SubjectPrefix: "wh", Partitions: 1, IngestConsumer: "wh-ingest",
