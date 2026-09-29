@@ -506,8 +506,9 @@ func (e *ExternalNATS) track(stop func()) (untrack func()) {
 
 // Publish stores data on topic's subject in its tenant's partition, bounded
 // by the topology's PublishTimeout per attempt. A publish that gets no answer
-// is sent again up to twice with the same Nats-Msg-Id, which the partition's
-// duplicate window stores once. A partition at max_bytes, or a topic at its
+// is sent again up to twice with the same Nats-Msg-Id — the caller's
+// WithIdempotencyKey when given — which the partition's duplicate window
+// stores once. A partition at max_bytes, or a topic at its
 // max_msgs_per_subject, is ErrQueueFull; no answer, a lost connection, or a
 // partition stream that is gone is ErrUnavailable. It never creates anything.
 func (e *ExternalNATS) Publish(ctx context.Context, topic Topic, data []byte, opts ...PublishOpt) error {
@@ -533,8 +534,14 @@ func (e *ExternalNATS) publish(ctx context.Context, subj, stream string, data []
 	}
 	observability.InjectHeaders(ctx, headers)
 	msg.Header = nats.Header(headers)
+	// WithMsgID overwrites the header, so a caller's idempotency key must be
+	// the id itself; otherwise a fresh one keeps this publish's retries one.
+	id := headers.Get(idempotencyHeader)
+	if id == "" {
+		id = nuid.Next()
+	}
 	pubOpts := []jetstream.PublishOpt{
-		jetstream.WithMsgID(nuid.Next()),
+		jetstream.WithMsgID(id),
 		jetstream.WithExpectStream(stream),
 		jetstream.WithRetryAttempts(0),
 	}
