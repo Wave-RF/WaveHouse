@@ -1,9 +1,11 @@
 package mq
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -63,6 +65,9 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		history = "WH_HISTORY"
 		dlq     = "WH_DLQ"
 	)
+	// Four partitions, as shipped, of two shards: fewer consumers to create
+	// per case.
+	spec := NATSTopology{Partitions: 4, Shards: 2, DedupeLease: 30 * time.Second}
 	type want struct {
 		sev    FindingSeverity
 		object string // a substring of Finding.Object
@@ -87,128 +92,128 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		want   want
 	}{
 		// Ingest partitions.
-		{"partition missing", func(_ *testing.T, tp *fixtureTopology) { tp.drop(p0) }, shippedSpec, req("ingest partition 0", "subjects")},
-		{"partition subjects", stream(p0, func(s *jetstream.StreamConfig) { s.Subjects = []string{"wh.ingest.0.*"} }), shippedSpec, req(p0, "subjects")},
-		{"partition retention", stream(p0, func(s *jetstream.StreamConfig) { s.Retention = jetstream.LimitsPolicy }), shippedSpec, req(p0, "retention")},
-		{"partition interest retention", stream(p0, func(s *jetstream.StreamConfig) { s.Retention = jetstream.InterestPolicy }), shippedSpec, req(p0, "retention")},
-		{"partition republish missing", stream(p0, func(s *jetstream.StreamConfig) { s.RePublish = nil }), shippedSpec, want{FindingRequired, p0, "republish", "is unset"}},
+		{"partition missing", func(_ *testing.T, tp *fixtureTopology) { tp.drop(p0) }, spec, req("ingest partition 0", "subjects")},
+		{"partition subjects", stream(p0, func(s *jetstream.StreamConfig) { s.Subjects = []string{"wh.ingest.0.*"} }), spec, req(p0, "subjects")},
+		{"partition retention", stream(p0, func(s *jetstream.StreamConfig) { s.Retention = jetstream.LimitsPolicy }), spec, req(p0, "retention")},
+		{"partition interest retention", stream(p0, func(s *jetstream.StreamConfig) { s.Retention = jetstream.InterestPolicy }), spec, req(p0, "retention")},
+		{"partition republish missing", stream(p0, func(s *jetstream.StreamConfig) { s.RePublish = nil }), spec, want{FindingRequired, p0, "republish", "is unset"}},
 		{"partition republish keeps the partition token", stream(p0, func(s *jetstream.StreamConfig) {
 			s.RePublish = &jetstream.RePublish{Source: "wh.ingest.>", Destination: "wh.hist.>"}
-		}), shippedSpec, want{FindingRequired, p0, "republish", "must be {src"}},
+		}), spec, want{FindingRequired, p0, "republish", "must be {src"}},
 		{"partition republish keeps the shard token", stream(p0, func(s *jetstream.StreamConfig) {
 			s.RePublish = &jetstream.RePublish{Source: "wh.ingest.0.>", Destination: "wh.hist.>"}
-		}), shippedSpec, want{FindingRequired, p0, "republish", "must be {src"}},
-		{"partition republish headers only", stream(p0, func(s *jetstream.StreamConfig) { s.RePublish.HeadersOnly = true }), shippedSpec, want{FindingRequired, p0, "republish", "headers_only"}},
+		}), spec, want{FindingRequired, p0, "republish", "must be {src"}},
+		{"partition republish headers only", stream(p0, func(s *jetstream.StreamConfig) { s.RePublish.HeadersOnly = true }), spec, want{FindingRequired, p0, "republish", "headers_only"}},
 		{"partition discard", stream(p0, func(s *jetstream.StreamConfig) {
 			s.Discard, s.DiscardNewPerSubject = jetstream.DiscardOld, false
-		}), shippedSpec, req(p0, "discard")},
-		{"partition max_bytes", stream(p0, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), shippedSpec, req(p0, "max_bytes")},
-		{"partition max_age", stream(p0, func(s *jetstream.StreamConfig) { s.MaxAge = time.Hour }), shippedSpec, req(p0, "max_age")},
-		{"partition storage", stream(p0, func(s *jetstream.StreamConfig) { s.Storage = jetstream.MemoryStorage }), shippedSpec, req(p0, "storage")},
-		{"partition duplicate_window", stream(p0, func(s *jetstream.StreamConfig) { s.Duplicates = time.Second }), shippedSpec, req(p0, "duplicate_window")},
-		{"duplicate window against the publish timeout", nil, NATSTopology{Partitions: 4, Shards: 8, PublishTimeout: 2 * time.Minute}, req(p0, "duplicate_window")},
+		}), spec, req(p0, "discard")},
+		{"partition max_bytes", stream(p0, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), spec, req(p0, "max_bytes")},
+		{"partition max_age", stream(p0, func(s *jetstream.StreamConfig) { s.MaxAge = time.Hour }), spec, req(p0, "max_age")},
+		{"partition storage", stream(p0, func(s *jetstream.StreamConfig) { s.Storage = jetstream.MemoryStorage }), spec, req(p0, "storage")},
+		{"partition duplicate_window", stream(p0, func(s *jetstream.StreamConfig) { s.Duplicates = time.Second }), spec, req(p0, "duplicate_window")},
+		{"duplicate window against the publish timeout", nil, NATSTopology{Partitions: 4, Shards: 2, PublishTimeout: 2 * time.Minute}, req(p0, "duplicate_window")},
 		// 59.5s + 60s + 1s = 2m0.5s, just over the shipped 2m.
-		{"duplicate window against the dedupe lease", nil, NATSTopology{Partitions: 4, Shards: 8, DedupeLease: 59500 * time.Millisecond}, want{FindingRequired, p0, "duplicate_window", "dedupe.lease"}},
-		{"partition no_ack", stream(p0, func(s *jetstream.StreamConfig) { s.NoAck = true }), shippedSpec, req(p0, "no_ack")},
+		{"duplicate window against the dedupe lease", nil, NATSTopology{Partitions: 4, Shards: 2, DedupeLease: 59500 * time.Millisecond}, want{FindingRequired, p0, "duplicate_window", "dedupe.lease"}},
+		{"partition no_ack", stream(p0, func(s *jetstream.StreamConfig) { s.NoAck = true }), spec, req(p0, "no_ack")},
 		{"partition per-subject cap", stream(p0, func(s *jetstream.StreamConfig) {
 			s.MaxMsgsPerSubject, s.DiscardNewPerSubject = 0, false
-		}), shippedSpec, rec(p0, "max_msgs_per_subject")},
+		}), spec, rec(p0, "max_msgs_per_subject")},
 		{"partition per-subject cap evicting", stream(p0, func(s *jetstream.StreamConfig) {
 			s.MaxMsgsPerSubject, s.DiscardNewPerSubject = 1000, false
-		}), shippedSpec, req(p0, "discard_new_per_subject")},
+		}), spec, req(p0, "discard_new_per_subject")},
 		{"one stream for two partitions", func(t *testing.T, tp *fixtureTopology) {
 			tp.drop("WH_INGEST_1")
 			s := tp.stream(t, p0)
 			s.Subjects = append(s.Subjects, "wh.ingest.1.>")
 			s.Metadata = nil
-		}, shippedSpec, req(p0, "subjects")},
-		{"partition deny_purge", stream(p0, func(s *jetstream.StreamConfig) { s.DenyPurge = false }), shippedSpec, rec(p0, "deny_purge")},
-		{"partition at one replica", nil, shippedSpec, want{FindingRecommended, p0, "num_replicas", "sync_interval"}},
-		{"partition persist_mode async", stream(p0, func(s *jetstream.StreamConfig) { s.PersistMode = jetstream.AsyncPersistMode }), shippedSpec, req(p0, "persist_mode")},
-		{"partition metadata missing", stream(p0, func(s *jetstream.StreamConfig) { s.Metadata = nil }), shippedSpec, rec(p0, "metadata")},
+		}, spec, req(p0, "subjects")},
+		{"partition deny_purge", stream(p0, func(s *jetstream.StreamConfig) { s.DenyPurge = false }), spec, rec(p0, "deny_purge")},
+		{"partition at one replica", nil, spec, want{FindingRecommended, p0, "num_replicas", "sync_interval"}},
+		{"partition persist_mode async", stream(p0, func(s *jetstream.StreamConfig) { s.PersistMode = jetstream.AsyncPersistMode }), spec, req(p0, "persist_mode")},
+		{"partition metadata missing", stream(p0, func(s *jetstream.StreamConfig) { s.Metadata = nil }), spec, rec(p0, "metadata")},
 		{"partition metadata mismatch", stream(p0, func(s *jetstream.StreamConfig) {
 			s.Metadata = map[string]string{"wavehouse.dev/partition": "3", "wavehouse.dev/partitions": "4"}
-		}), shippedSpec, req(p0, "metadata")},
-		{"partition count mismatch caught by metadata", nil, NATSTopology{Partitions: 2, Shards: 8}, req(p0, "metadata")},
+		}), spec, req(p0, "metadata")},
+		{"partition count mismatch caught by metadata", nil, NATSTopology{Partitions: 2, Shards: 2}, req(p0, "metadata")},
 		{
 			"partitions beyond N are drained", nil,
-			NATSTopology{Partitions: 2, Shards: 8},
-			want{FindingRecommended, "WH_INGEST_3/wh-ingest-5", "durable_name", "the ingest workers drain its 0 rows"},
+			NATSTopology{Partitions: 2, Shards: 2},
+			want{FindingRecommended, "WH_INGEST_3/wh-ingest-1", "durable_name", "the ingest workers drain its 0 rows"},
 		},
 		{
 			"partitions beyond N without the durables", func(_ *testing.T, tp *fixtureTopology) { delete(tp.Consumers, "WH_INGEST_3") },
-			NATSTopology{Partitions: 2, Shards: 8},
+			NATSTopology{Partitions: 2, Shards: 2},
 			want{FindingRecommended, "WH_INGEST_3", "subjects", "has no shard durable wh-ingest-<s>, so nothing drains"},
 		},
 		{
 			"shards beyond V are drained", nil,
-			NATSTopology{Partitions: 4, Shards: 6},
-			want{FindingRecommended, p0 + "/wh-ingest-7", "durable_name", "the ingest workers drain its 0 rows"},
+			NATSTopology{Partitions: 4, Shards: 1},
+			want{FindingRecommended, p0 + "/wh-ingest-1", "durable_name", "the ingest workers drain its 0 rows"},
 		},
-		{"shard count mismatch caught by metadata", nil, NATSTopology{Partitions: 4, Shards: 6}, req(p0, "metadata")},
+		{"shard count mismatch caught by metadata", nil, NATSTopology{Partitions: 4, Shards: 1}, req(p0, "metadata")},
 		{"shard durable missing", func(_ *testing.T, tp *fixtureTopology) {
-			tp.Consumers[p0] = slices.DeleteFunc(tp.Consumers[p0], func(c jetstream.ConsumerConfig) bool { return c.Durable == "wh-ingest-3" })
-		}, shippedSpec, req(p0+"/wh-ingest-3", "durable_name")},
+			tp.Consumers[p0] = slices.DeleteFunc(tp.Consumers[p0], func(c jetstream.ConsumerConfig) bool { return c.Durable == "wh-ingest-1" })
+		}, spec, req(p0+"/wh-ingest-1", "durable_name")},
 
 		// The wh-ingest durable.
-		{"durable missing", func(_ *testing.T, tp *fixtureTopology) { delete(tp.Consumers, p0) }, shippedSpec, req(p0+"/wh-ingest-0", "durable_name")},
+		{"durable missing", func(_ *testing.T, tp *fixtureTopology) { delete(tp.Consumers, p0) }, spec, req(p0+"/wh-ingest-0", "durable_name")},
 		{"durable is push", durable(func(c *jetstream.ConsumerConfig) {
 			c.DeliverSubject = "deliver.here"
 			c.MaxAckPending = 0
 			c.PriorityPolicy, c.PriorityGroups, c.PinnedTTL = jetstream.PriorityPolicyNone, nil, 0
-		}), shippedSpec, req(p0+"/wh-ingest-0", "deliver_subject")},
+		}), spec, req(p0+"/wh-ingest-0", "deliver_subject")},
 		{"durable ack_policy", func(t *testing.T, tp *fixtureTopology) {
 			tp.stream(t, p0).Retention = jetstream.LimitsPolicy
 			c := tp.consumer(t, p0)
 			c.AckPolicy, c.MaxAckPending = jetstream.AckNonePolicy, 0
-		}, shippedSpec, req(p0+"/wh-ingest-0", "ack_policy")},
-		{"durable ack_wait", durable(func(c *jetstream.ConsumerConfig) { c.AckWait = 30 * time.Second }), shippedSpec, req(p0+"/wh-ingest-0", "ack_wait")},
-		{"durable max_deliver", durable(func(c *jetstream.ConsumerConfig) { c.MaxDeliver = 5 }), shippedSpec, req(p0+"/wh-ingest-0", "max_deliver")},
-		{"durable max_ack_pending unlimited", durable(func(c *jetstream.ConsumerConfig) { c.MaxAckPending = -1 }), shippedSpec, req(p0+"/wh-ingest-0", "max_ack_pending")},
-		{"durable max_ack_pending low", durable(func(c *jetstream.ConsumerConfig) { c.MaxAckPending = 100 }), shippedSpec, rec(p0+"/wh-ingest-0", "max_ack_pending")},
+		}, spec, req(p0+"/wh-ingest-0", "ack_policy")},
+		{"durable ack_wait", durable(func(c *jetstream.ConsumerConfig) { c.AckWait = 30 * time.Second }), spec, req(p0+"/wh-ingest-0", "ack_wait")},
+		{"durable max_deliver", durable(func(c *jetstream.ConsumerConfig) { c.MaxDeliver = 5 }), spec, req(p0+"/wh-ingest-0", "max_deliver")},
+		{"durable max_ack_pending unlimited", durable(func(c *jetstream.ConsumerConfig) { c.MaxAckPending = -1 }), spec, req(p0+"/wh-ingest-0", "max_ack_pending")},
+		{"durable max_ack_pending low", durable(func(c *jetstream.ConsumerConfig) { c.MaxAckPending = 100 }), spec, rec(p0+"/wh-ingest-0", "max_ack_pending")},
 		// A work queue refuses such a durable itself; on a partition of the
 		// wrong retention the verifier still names it.
 		{"durable deliver_policy", func(t *testing.T, tp *fixtureTopology) {
 			tp.stream(t, p0).Retention = jetstream.LimitsPolicy
 			tp.consumer(t, p0).DeliverPolicy = jetstream.DeliverNewPolicy
-		}, shippedSpec, req(p0+"/wh-ingest-0", "deliver_policy")},
-		{"durable filter", durable(func(c *jetstream.ConsumerConfig) { c.FilterSubject = "wh.ingest.0.0.acme.>" }), shippedSpec, req(p0+"/wh-ingest-0", "filter_subject")},
-		{"durable headers_only", durable(func(c *jetstream.ConsumerConfig) { c.HeadersOnly = true }), shippedSpec, req(p0+"/wh-ingest-0", "headers_only")},
-		{"durable replay_policy", durable(func(c *jetstream.ConsumerConfig) { c.ReplayPolicy = jetstream.ReplayOriginalPolicy }), shippedSpec, req(p0+"/wh-ingest-0", "replay_policy")},
-		{"durable inactive_threshold", durable(func(c *jetstream.ConsumerConfig) { c.InactiveThreshold = time.Hour }), shippedSpec, req(p0+"/wh-ingest-0", "inactive_threshold")},
-		{"durable max_expires", durable(func(c *jetstream.ConsumerConfig) { c.MaxRequestExpires = time.Second }), shippedSpec, req(p0+"/wh-ingest-0", "max_expires")},
-		{"durable max_request_batch", durable(func(c *jetstream.ConsumerConfig) { c.MaxRequestBatch = 10 }), shippedSpec, req(p0+"/wh-ingest-0", "max_request_batch")},
+		}, spec, req(p0+"/wh-ingest-0", "deliver_policy")},
+		{"durable filter", durable(func(c *jetstream.ConsumerConfig) { c.FilterSubject = "wh.ingest.0.0.acme.>" }), spec, req(p0+"/wh-ingest-0", "filter_subject")},
+		{"durable headers_only", durable(func(c *jetstream.ConsumerConfig) { c.HeadersOnly = true }), spec, req(p0+"/wh-ingest-0", "headers_only")},
+		{"durable replay_policy", durable(func(c *jetstream.ConsumerConfig) { c.ReplayPolicy = jetstream.ReplayOriginalPolicy }), spec, req(p0+"/wh-ingest-0", "replay_policy")},
+		{"durable inactive_threshold", durable(func(c *jetstream.ConsumerConfig) { c.InactiveThreshold = time.Hour }), spec, req(p0+"/wh-ingest-0", "inactive_threshold")},
+		{"durable max_expires", durable(func(c *jetstream.ConsumerConfig) { c.MaxRequestExpires = time.Second }), spec, req(p0+"/wh-ingest-0", "max_expires")},
+		{"durable max_request_batch", durable(func(c *jetstream.ConsumerConfig) { c.MaxRequestBatch = 10 }), spec, req(p0+"/wh-ingest-0", "max_request_batch")},
 		{"durable priority_policy", durable(func(c *jetstream.ConsumerConfig) {
 			c.PriorityPolicy, c.PriorityGroups, c.PinnedTTL = jetstream.PriorityPolicyNone, nil, 0
-		}), shippedSpec, want{FindingRequired, p0 + "/wh-ingest-0", "priority_policy", "is none; must be pinned_client"}},
-		{"durable priority_groups", durable(func(c *jetstream.ConsumerConfig) { c.PriorityGroups = []string{"workers"} }), shippedSpec, req(p0+"/wh-ingest-0", "priority_groups")},
-		{"durable pinned ttl under two pull expiries", durable(func(c *jetstream.ConsumerConfig) { c.PinnedTTL = 9 * time.Second }), shippedSpec, req(p0+"/wh-ingest-0", "priority_timeout")},
-		{"durable pinned ttl over the membership lease", durable(func(c *jetstream.ConsumerConfig) { c.PinnedTTL = 20 * time.Second }), shippedSpec, rec(p0+"/wh-ingest-0", "priority_timeout")},
+		}), spec, want{FindingRequired, p0 + "/wh-ingest-0", "priority_policy", "is none; must be pinned_client"}},
+		{"durable priority_groups", durable(func(c *jetstream.ConsumerConfig) { c.PriorityGroups = []string{"workers"} }), spec, req(p0+"/wh-ingest-0", "priority_groups")},
+		{"durable pinned ttl under two pull expiries", durable(func(c *jetstream.ConsumerConfig) { c.PinnedTTL = 9 * time.Second }), spec, req(p0+"/wh-ingest-0", "priority_timeout")},
+		{"durable pinned ttl over the membership lease", durable(func(c *jetstream.ConsumerConfig) { c.PinnedTTL = 20 * time.Second }), spec, rec(p0+"/wh-ingest-0", "priority_timeout")},
 
 		// The history.
-		{"history missing", func(_ *testing.T, tp *fixtureTopology) { tp.drop(history) }, shippedSpec, req(history, "name")},
-		{"history subjects", stream(history, func(s *jetstream.StreamConfig) { s.Subjects = []string{"history.>"} }), shippedSpec, req(history, "subjects")},
-		{"history subjects wider", stream(history, func(s *jetstream.StreamConfig) { s.Subjects = []string{"wh.hist.>", "wh.other.>"} }), shippedSpec, req(history, "subjects")},
+		{"history missing", func(_ *testing.T, tp *fixtureTopology) { tp.drop(history) }, spec, req(history, "name")},
+		{"history subjects", stream(history, func(s *jetstream.StreamConfig) { s.Subjects = []string{"history.>"} }), spec, req(history, "subjects")},
+		{"history subjects wider", stream(history, func(s *jetstream.StreamConfig) { s.Subjects = []string{"wh.hist.>", "wh.other.>"} }), spec, req(history, "subjects")},
 		{"history sources a partition", stream(history, func(s *jetstream.StreamConfig) {
 			s.Sources = []*jetstream.StreamSource{{Name: p0}}
-		}), shippedSpec, req(history, "sources")},
-		{"history retention", stream(history, func(s *jetstream.StreamConfig) { s.Retention = jetstream.InterestPolicy }), shippedSpec, req(history, "retention")},
-		{"history discard", stream(history, func(s *jetstream.StreamConfig) { s.Discard = jetstream.DiscardNew }), shippedSpec, rec(history, "discard")},
-		{"history max_age", stream(history, func(s *jetstream.StreamConfig) { s.MaxAge = 0 }), shippedSpec, req(history, "max_age")},
-		{"history max_bytes", stream(history, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), shippedSpec, rec(history, "max_bytes")},
-		{"history at one replica", nil, shippedSpec, want{FindingRecommended, history, "num_replicas", "sync_interval"}},
-		{"history named elsewhere", nil, NATSTopology{Partitions: 4, Shards: 8, HistoryStream: "OTHER"}, req("OTHER", "name")},
+		}), spec, req(history, "sources")},
+		{"history retention", stream(history, func(s *jetstream.StreamConfig) { s.Retention = jetstream.InterestPolicy }), spec, req(history, "retention")},
+		{"history discard", stream(history, func(s *jetstream.StreamConfig) { s.Discard = jetstream.DiscardNew }), spec, rec(history, "discard")},
+		{"history max_age", stream(history, func(s *jetstream.StreamConfig) { s.MaxAge = 0 }), spec, req(history, "max_age")},
+		{"history max_bytes", stream(history, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), spec, rec(history, "max_bytes")},
+		{"history at one replica", nil, spec, want{FindingRecommended, history, "num_replicas", "sync_interval"}},
+		{"history named elsewhere", nil, NATSTopology{Partitions: 4, Shards: 2, HistoryStream: "OTHER"}, req("OTHER", "name")},
 
 		// The dead-letter stream.
-		{"dlq missing", func(_ *testing.T, tp *fixtureTopology) { tp.drop(dlq) }, shippedSpec, req("dead-letter stream", "subjects")},
-		{"dlq subjects", stream(dlq, func(s *jetstream.StreamConfig) { s.Subjects = []string{"wh.dlq.x", "wh.dlq.acme.>"} }), shippedSpec, req(dlq, "subjects")},
-		{"dlq retention", stream(dlq, func(s *jetstream.StreamConfig) { s.Retention = jetstream.InterestPolicy }), shippedSpec, req(dlq, "retention")},
-		{"dlq discard", stream(dlq, func(s *jetstream.StreamConfig) { s.Discard = jetstream.DiscardNew }), shippedSpec, req(dlq, "discard")},
-		{"dlq storage", stream(dlq, func(s *jetstream.StreamConfig) { s.Storage = jetstream.MemoryStorage }), shippedSpec, req(dlq, "storage")},
-		{"dlq max_bytes", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), shippedSpec, req(dlq, "max_bytes")},
-		{"dlq at one replica", nil, shippedSpec, want{FindingRecommended, dlq, "num_replicas", "sync_interval"}},
-		{"dlq persist_mode async", stream(dlq, func(s *jetstream.StreamConfig) { s.PersistMode = jetstream.AsyncPersistMode }), shippedSpec, rec(dlq, "persist_mode")},
-		{"dlq per-subject cap", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxMsgsPerSubject = 0 }), shippedSpec, rec(dlq, "max_msgs_per_subject")},
+		{"dlq missing", func(_ *testing.T, tp *fixtureTopology) { tp.drop(dlq) }, spec, req("dead-letter stream", "subjects")},
+		{"dlq subjects", stream(dlq, func(s *jetstream.StreamConfig) { s.Subjects = []string{"wh.dlq.x", "wh.dlq.acme.>"} }), spec, req(dlq, "subjects")},
+		{"dlq retention", stream(dlq, func(s *jetstream.StreamConfig) { s.Retention = jetstream.InterestPolicy }), spec, req(dlq, "retention")},
+		{"dlq discard", stream(dlq, func(s *jetstream.StreamConfig) { s.Discard = jetstream.DiscardNew }), spec, req(dlq, "discard")},
+		{"dlq storage", stream(dlq, func(s *jetstream.StreamConfig) { s.Storage = jetstream.MemoryStorage }), spec, req(dlq, "storage")},
+		{"dlq max_bytes", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), spec, req(dlq, "max_bytes")},
+		{"dlq at one replica", nil, spec, want{FindingRecommended, dlq, "num_replicas", "sync_interval"}},
+		{"dlq persist_mode async", stream(dlq, func(s *jetstream.StreamConfig) { s.PersistMode = jetstream.AsyncPersistMode }), spec, rec(dlq, "persist_mode")},
+		{"dlq per-subject cap", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxMsgsPerSubject = 0 }), spec, rec(dlq, "max_msgs_per_subject")},
 	}
 	// One server for every case, emptied between them: a server per case
 	// costs more than the unit suite's per-package timeout can spare.
@@ -217,7 +222,7 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f.reset(t)
-			tp := shippedTopology(t)
+			tp := smallTopology(t)
 			tp.KeyValues = nil // no case here checks the lease bucket
 			if tc.mutate != nil {
 				tc.mutate(t, tp)
@@ -444,4 +449,15 @@ func TestWriteNATSManifests_RefusesAnImpossibleSpec(t *testing.T) {
 	require.Error(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: NATSTopology{Prefix: "a.b"}}))
 	require.Error(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: NATSTopology{Partitions: -2}}))
 	require.Error(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: NATSTopology{CoordBucket: "a.b"}}))
+}
+
+// smallTopology is `wavehouse mq manifests --partitions 4 --shards 2` at
+// one replica.
+func smallTopology(t *testing.T) *fixtureTopology {
+	t.Helper()
+	var buf bytes.Buffer
+	require.NoError(t, WriteNATSManifests(&buf, NATSManifestOptions{Topology: NATSTopology{Partitions: 4, Shards: 2}, Replicas: 1}))
+	path := filepath.Join(t.TempDir(), "manifests.yaml")
+	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o600))
+	return loadNATSManifests(t, path)
 }

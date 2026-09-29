@@ -142,6 +142,8 @@ type fakeProc struct {
 	name string
 	// failCreate, when set, fails binding that unit.
 	failCreate atomic.Pointer[string]
+	// failWith, when set, is the error binding failCreate's unit returns.
+	failWith error
 }
 
 func (p *fakeProc) IngestUnits() ([]string, []string) { return p.f.units, p.f.extra }
@@ -172,6 +174,9 @@ func (p *fakeProc) CreateConsumer(_ context.Context, cfg mq.ConsumerConfig) (mq.
 	}
 	u := cfg.Units[0]
 	if bad := p.failCreate.Load(); bad != nil && *bad == u {
+		if p.failWith != nil {
+			return nil, p.failWith
+		}
 		return nil, errors.New("no such durable")
 	}
 	p.f.record(p.name, "create", u)
@@ -481,6 +486,7 @@ func TestClaims_EndedDelivery(t *testing.T) {
 		select {
 		case err := <-failed:
 			assert.ErrorContains(t, err, bad)
+			assert.NotErrorIs(t, err, mq.ErrDeliveryEnded, "a failure other than a missing durable is not delivery ending")
 		case <-time.After(5 * time.Second):
 			t.Fatal("a unit that cannot be bound did not fail the claims")
 		}
@@ -753,4 +759,28 @@ func TestClaims_MembershipSlotsCapped(t *testing.T) {
 	p := startClaims(t, f, coord.NewLocal(), "a", ClaimConfig{}, nil)
 	require.Eventually(t, func() bool { return f.split("a") }, 10*time.Second, 10*time.Millisecond)
 	assert.Equal(t, maxMembers, p.loop.slots)
+}
+
+// A configured unit whose durable is gone when it is bound ends delivery,
+// the same end as the broker ending a durable deleted under it.
+func TestClaims_MissingDurableEndsDelivery(t *testing.T) {
+	t.Parallel()
+	f := newFakeShards(2)
+	bad := "S/u-01"
+	p := &fakeProc{f: f, name: "a", failWith: fmt.Errorf("consumer %s: %w", bad, mq.ErrConsumerNotFound)}
+	p.failCreate.Store(&bad)
+	q, err := ClaimShards(p, coord.NewLocal(), fastClaims(ClaimConfig{}))
+	require.NoError(t, err)
+	cons, err := q.CreateConsumer(t.Context(), mq.ConsumerConfig{})
+	require.NoError(t, err)
+	stop, failed, err := cons.Consume(func(*mq.Message) {}, 10)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	select {
+	case err := <-failed:
+		assert.ErrorIs(t, err, mq.ErrDeliveryEnded)
+		assert.ErrorIs(t, err, mq.ErrConsumerNotFound)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a missing durable did not end delivery")
+	}
 }

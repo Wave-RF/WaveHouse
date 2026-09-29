@@ -435,6 +435,11 @@ func (l *claimLoop) take(ctx context.Context, targets map[string]bool, count int
 				slog.Info("ingest: could not bind a shard durable outside the configured ones", "unit", u, "error", err)
 				continue
 			}
+			if errors.Is(err, mq.ErrConsumerNotFound) {
+				// Its durable is gone: the same end as a delivery the
+				// broker ends because the durable was deleted under it.
+				err = fmt.Errorf("%w: %w", mq.ErrDeliveryEnded, err)
+			}
 			l.fail(fmt.Errorf("shard %s: %w", u, err))
 			return
 		}
