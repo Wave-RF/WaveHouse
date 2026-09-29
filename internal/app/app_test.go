@@ -2030,6 +2030,9 @@ func (c *stuckConn) Query(context.Context, string, ...any) (driver.Rows, error) 
 // tenants, and names its tenant when the release budget ends first.
 func TestClose_WaitsForALoopAReloadStopped(t *testing.T) {
 	conn := &stuckConn{entered: make(chan struct{}), release: make(chan struct{})}
+	// Released on every way out, so a failed assertion leaves no loop stuck.
+	release := sync.OnceFunc(func() { close(conn.release) })
+	defer release()
 	d := newDiscoveries(t.Context(), nil, func(tenant.ID, error) {}, func(tenant.ID) {})
 	d.adopt("acme", discovery.NewSchemaRegistry(func() (driver.Conn, string) { return conn, "default" }, "acme",
 		func(tenant.ID) time.Duration { return time.Hour }))
@@ -2044,7 +2047,7 @@ func TestClose_WaitsForALoopAReloadStopped(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.ErrorContains(t, err, "tenant acme not stopped")
 
-	close(conn.release)
+	release()
 	require.NoError(t, d.close(t.Context()), "a later close waits for it still")
 	select {
 	case <-loop.done:
