@@ -110,14 +110,18 @@ func createTable(t *testing.T, columns, tableOpts string) string {
 }
 
 func TestMain(m *testing.M) {
+	go buildWavehouseBinary()
 	code, cleanup := setup()
 	if code != 0 {
 		cleanup()
+		removeRolesBinary()
 		os.Exit(code)
 	}
+	<-binaryBuilt
 
 	exit := m.Run()
 	cleanup()
+	removeRolesBinary()
 	os.Exit(exit)
 }
 
