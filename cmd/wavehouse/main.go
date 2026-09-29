@@ -141,6 +141,7 @@ func printUsage(w io.Writer) {
   wavehouse validate [dir]  validate a settings directory (dir falls back to %[1]s)
   wavehouse bootstrap [dir] write a starter settings directory, every key at its default (dir falls back to %[1]s)
   wavehouse mq manifests    print the nack resources for an external NATS JetStream
+  wavehouse mq permissions  print the wavehouse NATS user's permissions for it
   wavehouse health          liveness self-probe against the local server (container HEALTHCHECK)
   wavehouse version         print version, commit, and build time
   wavehouse help            show this help
