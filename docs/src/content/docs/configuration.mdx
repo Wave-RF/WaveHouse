@@ -68,10 +68,10 @@ Read only with `mq.backend: nats`. WaveHouse connects to NATS you run and uses s
 | `mq.nats.tls.server_name` | `WH_MQ_NATS_TLS_SERVER_NAME` | *(empty)* | The name to verify the servers' certificates against, when it is not the host dialed. |
 | `mq.nats.tls.handshake_first` | `WH_MQ_NATS_TLS_HANDSHAKE_FIRST` | `false` | Start TLS before the NATS protocol, for servers that require it. |
 | `mq.nats.js_domain` | `WH_MQ_NATS_JS_DOMAIN` | *(empty)* | The JetStream domain, for a leafnode or hub-and-spoke deployment. |
-| `mq.nats.subject_prefix` | `WH_MQ_NATS_SUBJECT_PREFIX` | `wh` | Leads every subject WaveHouse publishes (`<prefix>.ingest.…`, `<prefix>.dlq.…`). One token of `[a-z0-9_-]`. |
+| `mq.nats.subject_prefix` | `WH_MQ_NATS_SUBJECT_PREFIX` | `wh` | Leads every subject WaveHouse uses (`<prefix>.ingest.…`, `<prefix>.hist.…`, `<prefix>.dlq.…`). One token of `[a-z0-9_-]`. |
 | `mq.nats.partitions` | `WH_MQ_NATS_PARTITIONS` | `1` | How many ingest partition streams there are. It must equal the number you created; boot finds each one by its subject. |
 | `mq.nats.ingest_consumer` | `WH_MQ_NATS_INGEST_CONSUMER` | `wh-ingest` | The durable consumer on every partition that the ingest worker consumes. |
-| `mq.nats.history_stream` | `WH_MQ_NATS_HISTORY_STREAM` | `<PREFIX>_HISTORY` | The history stream, which SSE replay and the live hub read. It has no subjects of its own, so it is named here; the partition and dead-letter streams are found by subject and can have any name. The default is the upper-cased prefix, `WH_HISTORY` for `wh`, as `wavehouse mq manifests` names it. |
+| `mq.nats.history_stream` | `WH_MQ_NATS_HISTORY_STREAM` | `<PREFIX>_HISTORY` | The history stream, which SSE replay and the live hub read. WaveHouse looks it up by this name; the partition and dead-letter streams are found by subject and can have any name. The default is the upper-cased prefix, `WH_HISTORY` for `wh`, as `wavehouse mq manifests` names it. |
 | `mq.nats.connect_timeout` | `WH_MQ_NATS_CONNECT_TIMEOUT` | `5s` | Bounds one dial. |
 | `mq.nats.publish_timeout` | `WH_MQ_NATS_PUBLISH_TIMEOUT` | `5s` | Bounds one publish attempt. A publish is tried at most three times; a partition's `duplicate_window` must cover all three, or boot refuses. |
 | `mq.nats.topology_wait` | `WH_MQ_NATS_TOPOLOGY_WAIT` | `60s` | How long boot waits for the cluster and for your streams and consumers to be right. Boot then refuses with every finding at once. |

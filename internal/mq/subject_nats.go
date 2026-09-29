@@ -8,11 +8,13 @@ import (
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // The external broker's subjects, on streams every tenant shares:
 //
 //	<prefix>.ingest.<p>.<tenant>.<table>[.<scope>]   p = partitionOf(tenant, N)
+//	<prefix>.hist.<tenant>.<table>[.<scope>]         republished by each partition
 //	<prefix>.dlq.<tenant>.<table>[.<scope>]          not partitioned (low volume)
 //
 // The tail after the partition (or after dlq) is the topic key, the same one
@@ -47,6 +49,20 @@ func natsIngestPartition(prefix string, p int) string {
 	return prefix + ".ingest." + strconv.Itoa(p) + ".>"
 }
 
+// natsHistorySubjects is every subject of the history stream.
+func natsHistorySubjects(prefix string) string { return prefix + ".hist.>" }
+
+// natsHistorySubject is where topic t's rows are republished.
+func natsHistorySubject(prefix string, t Topic) (string, error) {
+	return subject(prefix+".hist.", t)
+}
+
+// natsRepublish is how partition p republishes each row it stores to the
+// history: the same subject with the partition token dropped.
+func natsRepublish(prefix string, p int) jetstream.RePublish {
+	return jetstream.RePublish{Source: natsIngestPartition(prefix, p), Destination: natsHistorySubjects(prefix)}
+}
+
 // natsDLQSubjects is every subject of the shared dead-letter stream.
 func natsDLQSubjects(prefix string) string { return prefix + ".dlq.>" }
 
@@ -68,6 +84,9 @@ func natsTopicKey(prefix, subj string) (string, bool) {
 		return "", false
 	}
 	if key, ok := strings.CutPrefix(rest, "dlq."); ok {
+		return key, key != ""
+	}
+	if key, ok := strings.CutPrefix(rest, "hist."); ok {
 		return key, key != ""
 	}
 	rest, ok = strings.CutPrefix(rest, "ingest.")

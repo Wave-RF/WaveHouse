@@ -20,7 +20,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nuid"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
 
@@ -50,9 +49,9 @@ type NATSConfig struct {
 	// default 60s.
 	TopologyWait time.Duration
 
-	// recheckEvery and sourcesEvery override the periodic checks' intervals
+	// recheckEvery and historyEvery override the periodic checks' intervals
 	// (tests).
-	recheckEvery, sourcesEvery time.Duration
+	recheckEvery, historyEvery time.Duration
 }
 
 // NATSTLS is the client side of TLS to the NATS servers.
@@ -68,10 +67,10 @@ const (
 	defaultNATSConnectTimeout = 5 * time.Second
 	defaultNATSTopologyWait   = 60 * time.Second
 	// topologyRecheck is how often the topology is checked again after boot,
-	// and sourcesPoll how often the history's sources are read for the lag
-	// gauges: one stream-info call.
+	// and historyPoll how often the history and the partitions are read for
+	// the history's gauges: one stream-info call each.
 	topologyRecheck = 5 * time.Minute
-	sourcesPoll     = 30 * time.Second
+	historyPoll     = 30 * time.Second
 	recheckTimeout  = 30 * time.Second
 	// publishRetries is how many times a publish that got no answer is sent
 	// again, with the same Nats-Msg-Id, so the stream stores it once.
@@ -98,8 +97,8 @@ const (
 )
 
 // ExternalNATS is the Broker over an operator-owned NATS cluster (see
-// NATSTopology): every tenant shares N interest-retention ingest partitions,
-// a history stream that sources them, and one dead-letter stream. It never
+// NATSTopology): every tenant shares N work-queue ingest partitions, a
+// history stream they republish every row to, and one dead-letter stream. It never
 // creates, changes, purges or deletes a stream or a durable. The only
 // JetStream objects it creates are auto-expiring consumers on the history
 // stream: one per Subscribe (the hub bridge) and one per replay.
@@ -128,8 +127,10 @@ type ExternalNATS struct {
 	topologyOK atomic.Bool
 	// closing is set by Close, whose own disconnect is not worth a warning.
 	closing atomic.Bool
-	sources atomic.Pointer[[]sourceState]
-	gauges  metric.Registration
+	// historyBehind is how far the history's newest row trails the
+	// partitions' newest, as last read (nanoseconds).
+	historyBehind atomic.Int64
+	gauges        metric.Registration
 
 	mu       sync.Mutex
 	nextID   int
@@ -141,16 +142,6 @@ type ExternalNATS struct {
 	stop                 context.CancelFunc
 	loopDone, connClosed chan struct{}
 	closeOnce            sync.Once
-}
-
-// sourceState is one history source as last read. active is the time since
-// it last heard from its partition, negative when it never attached: after
-// a NATS restart it keeps counting up until the source re-attaches (~10s),
-// rather than reading as detached.
-type sourceState struct {
-	name   string
-	active time.Duration
-	lag    uint64
 }
 
 var _ Broker = (*ExternalNATS)(nil)
@@ -217,7 +208,7 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 		slog.Warn("mq: nats topology: "+f.String(), "component", "nats")
 	}
 	e.topologyOK.Store(true)
-	if err := e.readSources(ctx); err != nil {
+	if err := e.readHistory(ctx); err != nil {
 		e.nc.Close()
 		return nil, err
 	}
@@ -226,7 +217,7 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 		return nil, fmt.Errorf("register mq gauges: %w", err)
 	}
 	e.stopping, e.stop = context.WithCancel(context.Background()) //nolint:gosec // G118: Close calls it
-	go e.watch(orDefault(cfg.recheckEvery, topologyRecheck), orDefault(cfg.sourcesEvery, sourcesPoll))
+	go e.watch(orDefault(cfg.recheckEvery, topologyRecheck), orDefault(cfg.historyEvery, historyPoll))
 	return e, nil
 }
 
@@ -364,22 +355,22 @@ func (e *ExternalNATS) resolveStreams(ctx context.Context) error {
 	return nil
 }
 
-// watch re-checks the topology and polls the history's sources until Close.
+// watch re-checks the topology and polls the history until Close.
 func (e *ExternalNATS) watch(recheck, poll time.Duration) {
 	defer close(e.loopDone)
 	topology := time.NewTicker(recheck)
 	defer topology.Stop()
-	sources := time.NewTicker(poll)
-	defer sources.Stop()
+	history := time.NewTicker(poll)
+	defer history.Stop()
 	for {
 		select {
 		case <-e.stopping.Done():
 			return
 		case <-topology.C:
 			e.recheck()
-		case <-sources.C:
+		case <-history.C:
 			ctx, cancel := context.WithTimeout(e.stopping, recheckTimeout)
-			if err := e.readSources(ctx); err != nil {
+			if err := e.readHistory(ctx); err != nil {
 				slog.Warn("mq: read the nats history stream", "component", "nats", "error", err)
 			}
 			cancel()
@@ -388,9 +379,7 @@ func (e *ExternalNATS) watch(recheck, poll time.Duration) {
 }
 
 // recheck verifies the topology again, reporting the outcome on the gauge
-// and in the log. A history source that has not attached yet is transient,
-// as is one re-attaching after a NATS restart (~10s): both show on the source
-// gauges instead. It skips a check while disconnected, which has a gauge of
+// and in the log. It skips a check while disconnected, which has a gauge of
 // its own: the server version reads as empty then, a false fault.
 func (e *ExternalNATS) recheck() {
 	if !e.nc.IsConnected() {
@@ -408,7 +397,7 @@ func (e *ExternalNATS) recheck() {
 	}
 	var faults []string
 	for _, f := range findings {
-		if f.Severity == FindingRequired && !f.transient {
+		if f.Severity == FindingRequired {
 			faults = append(faults, f.String())
 		}
 	}
@@ -421,9 +410,23 @@ func (e *ExternalNATS) recheck() {
 	}
 }
 
-// readSources reads the history stream's max_age and the state of its
-// sources.
-func (e *ExternalNATS) readSources(ctx context.Context) error {
+// readHistory reads the history stream's max_age, and how far its newest row
+// trails the newest row any partition stored. Republish is best effort, so
+// the history misses what the partitions stored while it refused rows (full,
+// or electing a leader); the gap shows until the next row reaches it. The
+// partitions are read first, so a row stored while the history is read
+// counts as newer only if the history really lacks it.
+func (e *ExternalNATS) readHistory(ctx context.Context) error {
+	var newest time.Time
+	for _, name := range e.partitions {
+		p, err := e.js.Stream(ctx, name)
+		if err != nil {
+			return fmt.Errorf("partition stream %s: %w", name, err)
+		}
+		if last := p.CachedInfo().State.LastTime; last.After(newest) {
+			newest = last
+		}
+	}
 	s, err := e.js.Stream(ctx, e.topo.HistoryStream)
 	if err != nil {
 		return fmt.Errorf("history stream %s: %w", e.topo.HistoryStream, err)
@@ -434,18 +437,18 @@ func (e *ExternalNATS) readSources(ctx context.Context) error {
 			e.CheckReplayWindows(*w)
 		}
 	}
-	states := make([]sourceState, 0, len(info.Sources))
-	for _, src := range info.Sources {
-		states = append(states, sourceState{name: src.Name, active: src.Active, lag: src.Lag})
+	// An empty history has no last row: it has seen nothing since it was
+	// created, so rows the partitions stored before that are not its gap.
+	since := info.State.LastTime
+	if since.IsZero() {
+		since = info.Created
 	}
-	e.sources.Store(&states)
+	e.historyBehind.Store(int64(max(0, newest.Sub(since))))
 	return nil
 }
 
-// registerGauges reports the connection, the topology check and the history
-// sources. The source lag matters beyond SSE: a source holds each row on its
-// partition until the history has it, so a history that stops copying fills
-// the partitions and refuses ingest.
+// registerGauges reports the connection, the topology check, and how far the
+// history trails the partitions.
 func (e *ExternalNATS) registerGauges() (metric.Registration, error) {
 	meter := otel.Meter("wavehouse-mq")
 	connected, err := meter.Int64ObservableGauge("wavehouse_mq_connected",
@@ -458,37 +461,17 @@ func (e *ExternalNATS) registerGauges() (metric.Registration, error) {
 	if err != nil {
 		return nil, err
 	}
-	active, err := meter.Float64ObservableGauge("wavehouse_mq_history_source_last_active_seconds",
-		metric.WithDescription("Seconds since the history stream's source last heard from an ingest partition; -1 if it never attached"))
-	if err != nil {
-		return nil, err
-	}
-	lag, err := meter.Int64ObservableGauge("wavehouse_mq_history_source_lag",
-		metric.WithDescription("Messages on an ingest partition the history stream has yet to copy"))
+	behind, err := meter.Float64ObservableGauge("wavehouse_mq_history_behind_seconds",
+		metric.WithDescription("How far the history stream's newest row trails the newest row an ingest partition stored; one that stays up or grows means the history is not taking rows, which SSE replay and the live hub then miss"))
 	if err != nil {
 		return nil, err
 	}
 	return meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		o.ObserveInt64(connected, boolGauge(e.connected.Load()))
 		o.ObserveInt64(topologyOK, boolGauge(e.topologyOK.Load()))
-		if states := e.sources.Load(); states != nil {
-			for _, s := range *states {
-				set := metric.WithAttributes(attribute.String("source", s.name))
-				o.ObserveFloat64(active, activeSeconds(s.active), set)
-				o.ObserveInt64(lag, int64(min(s.lag, uint64(1<<62))), set) //nolint:gosec // capped
-			}
-		}
+		o.ObserveFloat64(behind, time.Duration(e.historyBehind.Load()).Seconds())
 		return nil
-	}, connected, topologyOK, active, lag)
-}
-
-// activeSeconds is a source's time since last contact as the gauge reports
-// it: -1 for a source that never attached, which the server reports as -1ns.
-func activeSeconds(d time.Duration) float64 {
-	if d < 0 {
-		return -1
-	}
-	return d.Seconds()
+	}, connected, topologyOK, behind)
 }
 
 func boolGauge(b bool) int64 {
@@ -524,7 +507,7 @@ func (e *ExternalNATS) Publish(ctx context.Context, topic Topic, data []byte, op
 	if err != nil {
 		return err
 	}
-	return e.publish(ctx, subj, e.partitions[partitionOf(topic.Tenant, e.topo.Partitions)], data, opts)
+	return e.publish(ctx, subj, e.partitions[partitionOf(topic.Tenant, e.topo.Partitions)], false, data, opts)
 }
 
 // DuplicateWindow is the shortest duplicate_window among the partitions: how
@@ -546,10 +529,17 @@ func (e *ExternalNATS) DuplicateWindow(ctx context.Context) (time.Duration, erro
 // DeadLetter parks msg's data on the shared dead-letter stream under its
 // topic, with a fresh Nats-Msg-Id. It does not ack msg.
 func (e *ExternalNATS) DeadLetter(ctx context.Context, msg *Message, opts ...PublishOpt) error {
-	return e.publish(ctx, e.topo.Prefix+".dlq."+msg.topicKey, e.dlq, msg.Data, opts)
+	return e.publish(ctx, e.topo.Prefix+".dlq."+msg.topicKey, e.dlq, true, msg.Data, opts)
 }
 
-func (e *ExternalNATS) publish(ctx context.Context, subj, stream string, data []byte, opts []PublishOpt) error {
+// publish stores data on subj, which stream should hold. With expect the
+// server refuses a publish another stream holds. Without it the row is
+// stored wherever the subject leads, and a mismatch the ack names is
+// reported as a topology fault and ErrUnavailable, the row left on the other
+// stream. An ingest publish goes without: the partition republishes each row
+// with its headers, and the history would refuse a copy expecting the
+// partition.
+func (e *ExternalNATS) publish(ctx context.Context, subj, stream string, expect bool, data []byte, opts []PublishOpt) error {
 	msg := nats.NewMsg(subj)
 	msg.Data = data
 	headers := Headers{}
@@ -566,15 +556,22 @@ func (e *ExternalNATS) publish(ctx context.Context, subj, stream string, data []
 	}
 	pubOpts := []jetstream.PublishOpt{
 		jetstream.WithMsgID(id),
-		jetstream.WithExpectStream(stream),
 		jetstream.WithRetryAttempts(0),
+	}
+	if expect {
+		pubOpts = append(pubOpts, jetstream.WithExpectStream(stream))
 	}
 
 	var err error
 	for attempt := 0; ; attempt++ {
 		actx, cancel := context.WithTimeout(ctx, e.topo.PublishTimeout)
-		_, err = e.js.PublishMsg(actx, msg, pubOpts...)
+		var ack *jetstream.PubAck
+		ack, err = e.js.PublishMsg(actx, msg, pubOpts...)
 		cancel()
+		if err == nil && ack.Stream != stream {
+			e.lostTopology("the subject is held by another stream than " + stream)
+			return fmt.Errorf("%w: %s was stored by stream %s, not %s", ErrUnavailable, subj, ack.Stream, stream)
+		}
 		if err == nil {
 			return nil
 		}
@@ -654,7 +651,7 @@ func (e *ExternalNATS) wrapMsg(ctx context.Context, m jetstream.Msg, acks bool) 
 // ask for: it is logged.
 func (e *ExternalNATS) Subscribe(ctx context.Context, consumerName string, handler func(msg *Message) error) error {
 	cons, err := e.js.OrderedConsumer(ctx, e.topo.HistoryStream, jetstream.OrderedConsumerConfig{
-		FilterSubjects:    []string{e.topo.Prefix + ".ingest.>"},
+		FilterSubjects:    []string{natsHistorySubjects(e.topo.Prefix)},
 		DeliverPolicy:     jetstream.DeliverNewPolicy,
 		InactiveThreshold: hubInactiveThreshold,
 	})
@@ -928,7 +925,7 @@ func (e *ExternalNATS) CheckReplayWindows(windows map[tenant.ID]time.Duration) {
 // counted when the replay began are sent. Anything older than the history's max_age is gone.
 // A pull that fails before then is an error; a done ctx returns ctx's error.
 func (e *ExternalNATS) ReplaySince(ctx context.Context, topic Topic, since time.Time, send func(data []byte) bool) error {
-	subj, err := natsIngestSubject(e.topo.Prefix, e.topo.Partitions, topic)
+	subj, err := natsHistorySubject(e.topo.Prefix, topic)
 	if err != nil {
 		return err
 	}

@@ -116,15 +116,10 @@ func (tp *fixtureTopology) drop(name string) {
 	delete(tp.Consumers, name)
 }
 
-// apply creates tp as the operator would, and waits for every history source
-// to attach: a row acked on a partition before its source exists never
-// reaches the history.
+// apply creates tp as the operator would.
 func (f *natsFixture) apply(t *testing.T, tp *fixtureTopology) {
 	t.Helper()
 	require.NoError(t, f.create(t.Context(), tp))
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	require.NoError(t, tp.AwaitSources(ctx, f.admin))
 }
 
 // reset deletes every stream, and with them their consumers.

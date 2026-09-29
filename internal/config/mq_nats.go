@@ -35,8 +35,8 @@ type MQNATSConfig struct {
 	SubjectPrefix  string `yaml:"subject_prefix" env:"WH_MQ_NATS_SUBJECT_PREFIX"`
 	Partitions     int    `yaml:"partitions" env:"WH_MQ_NATS_PARTITIONS"`
 	IngestConsumer string `yaml:"ingest_consumer" env:"WH_MQ_NATS_INGEST_CONSUMER"`
-	// HistoryStream has no subjects to be found by, so it is named; empty is
-	// <SUBJECT_PREFIX>_HISTORY, the name the generated manifests give it.
+	// HistoryStream is looked up by name; empty is <SUBJECT_PREFIX>_HISTORY,
+	// the name the generated manifests give it.
 	HistoryStream  string        `yaml:"history_stream" env:"WH_MQ_NATS_HISTORY_STREAM"`
 	ConnectTimeout time.Duration `yaml:"connect_timeout" env:"WH_MQ_NATS_CONNECT_TIMEOUT"`
 	PublishTimeout time.Duration `yaml:"publish_timeout" env:"WH_MQ_NATS_PUBLISH_TIMEOUT"`

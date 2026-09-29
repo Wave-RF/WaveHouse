@@ -279,14 +279,15 @@ func TestNewNATS_RefusesConflictingOptions(t *testing.T) {
 }
 
 // The re-check reports a topology the operator broke after boot, and its
-// repair; a history source re-attaching after a restart is not a fault but
-// shows on the source gauges.
+// repair. The history poll reports how far the history trails the partitions:
+// a row stored while the history refused it never reaches it, which shows
+// as a gap until the next row republished closes it.
 func TestExternalNATS_Recheck(t *testing.T) {
 	t.Parallel()
 	f := shippedFixture(t)
 	e := f.broker(t, func(c *NATSConfig) {
 		c.recheckEvery = 50 * time.Millisecond
-		c.sourcesEvery = 50 * time.Millisecond
+		c.historyEvery = 50 * time.Millisecond
 	})
 	require.True(t, e.topologyOK.Load())
 
@@ -299,27 +300,55 @@ func TestExternalNATS_Recheck(t *testing.T) {
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { return e.topologyOK.Load() }, 5*time.Second, 10*time.Millisecond)
 
-	// After a NATS restart the history's sources take ~10s to re-attach, and
-	// read as silent until then: the source gauges show it, and it is no
-	// topology fault.
-	f.restart(t)
-	silent := func() bool {
-		for _, s := range *e.sources.Load() {
-			if s.active > time.Second {
-				return true
-			}
-		}
-		return false
-	}
-	require.Eventually(t, func() bool { return e.connected.Load() && silent() }, 10*time.Second, 10*time.Millisecond,
-		"no source read as silent after the restart")
-	for range 20 {
-		assert.True(t, e.topologyOK.Load(), "a source re-attaching is not a topology fault")
-		time.Sleep(50 * time.Millisecond)
-	}
+	topic := Topic{Tenant: "acme", Table: "events"}
+	require.NoError(t, e.Publish(t.Context(), topic, []byte("1")))
+	require.Eventually(t, func() bool { return e.historyBehind.Load() == 0 }, 5*time.Second, 10*time.Millisecond, "healthy")
+
+	// A full history with discard new refuses the next row's copy.
+	h, err := f.admin.Stream(t.Context(), "WH_HISTORY")
+	require.NoError(t, err)
+	history := h.CachedInfo().Config
+	full := history
+	full.MaxMsgs, full.Discard = int64(h.CachedInfo().State.Msgs), jetstream.DiscardNew
+	_, err = f.admin.UpdateStream(t.Context(), full)
+	require.NoError(t, err)
+	time.Sleep(50 * time.Millisecond) // a gap the gauge can see
+	published := time.Now()
+	require.NoError(t, e.Publish(t.Context(), topic, []byte("2")), "ingest does not depend on the history")
+	require.Eventually(t, func() bool { return e.historyBehind.Load() > 0 }, 5*time.Second, 10*time.Millisecond,
+		"a row the history refused shows as a gap")
+	assert.Less(t, time.Duration(e.historyBehind.Load()), time.Since(published)+time.Second, "the gap is the missed row's, bounded")
+
+	_, err = f.admin.UpdateStream(t.Context(), history)
+	require.NoError(t, err)
+	require.NoError(t, e.Publish(t.Context(), topic, []byte("3")))
+	require.Eventually(t, func() bool { return e.historyBehind.Load() == 0 }, 5*time.Second, 10*time.Millisecond,
+		"the next row republished closes it")
 }
 
-// The gauges report the connection, the topology and each history source.
+// A publish the ack says another stream stored — the operator replaced a
+// partition's stream under the same subjects — is a topology fault.
+func TestExternalNATS_PublishStoredElsewhere(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	stream := shippedPartition(partitionOf(topic.Tenant, 4))
+	s, err := f.admin.Stream(t.Context(), stream)
+	require.NoError(t, err)
+	rogue := s.CachedInfo().Config
+	rogue.Name = "ROGUE"
+	require.NoError(t, f.admin.DeleteStream(t.Context(), stream))
+	_, err = f.admin.CreateStream(t.Context(), rogue)
+	require.NoError(t, err)
+
+	err = e.Publish(t.Context(), topic, []byte("x"))
+	require.ErrorIs(t, err, ErrUnavailable)
+	assert.ErrorContains(t, err, "stored by stream ROGUE")
+	assert.False(t, e.topologyOK.Load())
+}
+
+// The gauges report the connection, the topology and the history's gap.
 func TestExternalNATS_Gauges(t *testing.T) { //nolint:paralleltest // sets the global meter provider
 	reader := sdkmetric.NewManualReader()
 	prev := otel.GetMeterProvider()
@@ -347,11 +376,7 @@ func TestExternalNATS_Gauges(t *testing.T) { //nolint:paralleltest // sets the g
 	}
 	assert.Equal(t, []float64{1}, got["wavehouse_mq_connected"])
 	assert.Equal(t, []float64{1}, got["wavehouse_mq_topology_ok"])
-	assert.Equal(t, []float64{0, 0, 0, 0}, got["wavehouse_mq_history_source_lag"])
-	require.Len(t, got["wavehouse_mq_history_source_last_active_seconds"], 4)
-	for _, v := range got["wavehouse_mq_history_source_last_active_seconds"] {
-		assert.GreaterOrEqual(t, v, 0.0, "every source attached")
-	}
+	assert.Equal(t, []float64{0}, got["wavehouse_mq_history_behind_seconds"])
 }
 
 // PurgeAcked removes nothing. CheckReplayWindows warns for a tenant whose
@@ -388,7 +413,7 @@ func TestExternalNATS_ReplayWindowsAgainstTheHistory(t *testing.T) { //nolint:pa
 	shorter.MaxAge = maxAge / 2
 	_, err = f.admin.UpdateStream(t.Context(), shorter)
 	require.NoError(t, err)
-	require.NoError(t, e.readSources(t.Context()))
+	require.NoError(t, e.readHistory(t.Context()))
 	assert.Equal(t, 3, warned(), "initech's window no longer fits: %s", logs.String())
 }
 
@@ -455,11 +480,48 @@ func TestNATSPermissions_RefuseTopologyChanges(t *testing.T) {
 	denied("delete the ingest durable", call(ctx, func(ctx context.Context) error {
 		return js.DeleteConsumer(ctx, partition, DefaultNATSIngestConsumer)
 	}))
+	denied("forge a history row", call(ctx, func(ctx context.Context) error {
+		_, err := js.Publish(ctx, "wh.hist.acme.events", []byte("forged"))
+		return err
+	}))
 
 	_, err = f.admin.Stream(ctx, "ROGUE")
 	require.ErrorIs(t, err, jetstream.ErrStreamNotFound)
+	h, err := f.admin.Stream(ctx, "WH_HISTORY")
+	require.NoError(t, err)
+	assert.Zero(t, h.CachedInfo().State.Msgs, "only the partitions' republish writes the history")
 	_, err = f.admin.Consumer(ctx, partition, DefaultNATSIngestConsumer)
 	require.NoError(t, err)
+}
+
+// Each partition republishes a row to the history under its topic, the
+// partition token dropped, headers and body intact: what the hub and a
+// replay read, whatever the partition count.
+func TestExternalNATS_HistoryDropsThePartition(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topics := []Topic{{Tenant: "acme", Table: "events"}, {Tenant: "acme", Table: "events", Scope: "eu"}, {Tenant: "globex", Table: "a.b"}}
+	for _, topic := range topics {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(topic.Table), WithHeader("X-Test", "kept")))
+	}
+	h, err := f.admin.Stream(t.Context(), "WH_HISTORY")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		info, err := h.Info(t.Context(), jetstream.WithSubjectFilter(">"))
+		return err == nil && info.State.Msgs == uint64(len(topics))
+	}, 5*time.Second, 10*time.Millisecond)
+	info, err := h.Info(t.Context(), jetstream.WithSubjectFilter(">"))
+	require.NoError(t, err)
+	var subjects []string
+	for subj := range info.State.Subjects {
+		subjects = append(subjects, subj)
+	}
+	assert.ElementsMatch(t, []string{"wh.hist.acme.events", "wh.hist.acme.events.eu", "wh.hist.globex.a%2Eb"}, subjects)
+	m, err := h.GetLastMsgForSubject(t.Context(), "wh.hist.acme.events")
+	require.NoError(t, err)
+	assert.Equal(t, "events", string(m.Data))
+	assert.Equal(t, "kept", m.Header.Get("X-Test"))
 }
 
 // call runs a request that a permission violation answers by never
@@ -480,7 +542,7 @@ func measure(t *testing.T) {
 }
 
 // A publish's latency until the hub's Subscribe sees it, through the
-// partition and the history's source. Design risk 3 moves the hub off the
+// partition and its republish to the history. Design risk 3 moves the hub off the
 // history if p99 passes 50ms.
 func TestExternalNATS_MeasurePublishToHub(t *testing.T) {
 	measure(t)
@@ -522,14 +584,6 @@ func TestExternalNATS_MeasurePublishThroughput(t *testing.T) {
 	wg.Wait()
 	elapsed := time.Since(start)
 	t.Logf("%d publishes of %d bytes by %d callers in %s: %.0f/s", workers*each, len(payload), workers, elapsed, float64(workers*each)/elapsed.Seconds())
-}
-
-// A source that never attached reads -1 on its gauge: the server reports it
-// as -1ns, which Seconds() would pass on as -1e-9.
-func TestExternalNATS_ActiveSeconds(t *testing.T) {
-	t.Parallel()
-	assert.InDelta(t, -1.0, activeSeconds(-1), 0)
-	assert.InDelta(t, 0.5, activeSeconds(500*time.Millisecond), 1e-9)
 }
 
 // The duplicate window must cover every attempt of a retried publish, not

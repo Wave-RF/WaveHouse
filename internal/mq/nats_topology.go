@@ -14,23 +14,23 @@ import (
 )
 
 // NATSTopology is what WaveHouse needs of an operator-owned JetStream: N
-// ingest partition streams with interest retention, each with a durable pull
-// consumer; a history stream with limits retention that sources every
-// partition, for SSE replay and the live hub; one dead-letter stream; and,
+// ingest partition streams with work-queue retention, each with a durable
+// pull consumer, and each republishing every row it stores to the history
+// stream (limits retention, for SSE replay and the live hub) under the
+// row's subject without the partition; one dead-letter stream; and,
 // for coord.backend=nats, a KV bucket holding the leases (Leases). The
 // operator creates all of it (WriteNATSManifests renders it as nack CRs);
 // WaveHouse only checks it (verifyNATSTopology) and never repairs it.
 type NATSTopology struct {
-	// Prefix leads every subject: <prefix>.ingest.<p>.… and <prefix>.dlq.….
+	// Prefix leads every subject: <prefix>.ingest.<p>.…, <prefix>.hist.… and
+	// <prefix>.dlq.….
 	Prefix string
 	// Partitions is N, the number of ingest partition streams.
 	Partitions int
 	// IngestConsumer is the durable on every partition the ingest worker
 	// consumes.
 	IngestConsumer string
-	// HistoryStream names the history stream. It has no subjects of its own,
-	// so unlike the partitions and the dead-letter stream it cannot be found
-	// by subject.
+	// HistoryStream names the history stream, which holds <prefix>.hist.>.
 	HistoryStream string
 	// PublishTimeout bounds one publish attempt; a partition's duplicate
 	// window must cover every attempt (minDuplicateWindow), so a retried
@@ -181,11 +181,6 @@ type Finding struct {
 	Field string
 	// Problem says what is wrong and what is needed.
 	Problem string
-	// transient marks a finding that clears on its own, such as a history
-	// source re-attaching after a NATS restart (~10s): boot waits it out, and
-	// the periodic re-check reports it on its own gauge rather than as a
-	// topology fault.
-	transient bool
 }
 
 func (f Finding) String() string {
@@ -261,7 +256,7 @@ func verifyNATSTopology(ctx context.Context, js jetstream.JetStream, t NATSTopol
 	if err := v.extraPartitions(ctx, partitions); err != nil {
 		return nil, err
 	}
-	if err := v.history(ctx, partitions); err != nil {
+	if err := v.history(ctx); err != nil {
 		return nil, err
 	}
 	if err := v.dlq(ctx); err != nil {
@@ -392,9 +387,12 @@ func (v *topologyVerifier) partition(ctx context.Context, p int) (string, error)
 	if !slices.Contains(cfg.Subjects, filter) {
 		req("subjects", "are %q; must include %q", cfg.Subjects, filter)
 	}
-	if cfg.Retention != jetstream.InterestPolicy {
-		req("retention", "is %s; must be interest, so a row is deleted once it is written", cfg.Retention)
+	// Work queue, not interest: a row no consumer's filter covers yet is
+	// kept rather than dropped, and a row leaves once the worker acks it.
+	if cfg.Retention != jetstream.WorkQueuePolicy {
+		req("retention", "is %s; must be workqueue, so a row is kept until the ingest worker acks it, even while no consumer covers it", cfg.Retention)
 	}
+	v.republish(obj, cfg.RePublish, p)
 	if cfg.Discard != jetstream.DiscardNew {
 		req("discard", "is %s; must be new, so a full partition refuses rather than dropping unwritten rows", cfg.Discard)
 	}
@@ -547,7 +545,7 @@ func (v *topologyVerifier) extraPartitions(ctx context.Context, partitions []str
 	return nil
 }
 
-func (v *topologyVerifier) history(ctx context.Context, partitions []string) error {
+func (v *topologyVerifier) history(ctx context.Context) error {
 	t := v.t
 	obj := "stream " + t.HistoryStream
 	s, err := v.stream(ctx, obj, t.HistoryStream)
@@ -558,43 +556,19 @@ func (v *topologyVerifier) history(ctx context.Context, partitions []string) err
 	cfg := info.Config
 	req := func(field, format string, args ...any) { v.add(FindingRequired, obj, field, format, args...) }
 
-	if len(cfg.Subjects) > 0 {
-		req("subjects", "are %q; the history must have none, only sources", cfg.Subjects)
+	if subjects := natsHistorySubjects(t.Prefix); !slices.Equal(cfg.Subjects, []string{subjects}) {
+		req("subjects", "are %q; must be exactly %q, where the partitions republish every row", cfg.Subjects, subjects)
 	}
-	for p, name := range partitions {
-		if name == "" {
-			continue // the partition's own finding says why
-		}
-		i := slices.IndexFunc(cfg.Sources, func(src *jetstream.StreamSource) bool { return src.Name == name })
-		if i < 0 {
-			req("sources", "do not include %s (partition %d)", name, p)
-			continue
-		}
-		src := cfg.Sources[i]
-		if filter := natsIngestPartition(t.Prefix, p); src.FilterSubject != "" && src.FilterSubject != filter {
-			req("sources", "filter %s by %q; must be unfiltered or %q", name, src.FilterSubject, filter)
-		}
-		if len(src.SubjectTransforms) > 0 {
-			req("sources", "transform %s's subjects; they must arrive unchanged", name)
-		}
-		if src.External != nil {
-			req("sources", "take %s from another domain or account; it must be local", name)
-		}
-		// A row wh-ingest acks before the source attaches never reaches the
-		// history; the server reports active -1 until then.
-		j := slices.IndexFunc(info.Sources, func(si *jetstream.StreamSourceInfo) bool { return si.Name == name })
-		if j < 0 || info.Sources[j].Active < 0 {
-			req("sources", "%s is not attached yet", name)
-			v.findings[len(v.findings)-1].transient = true
-		}
+	if len(cfg.Sources) > 0 || cfg.Mirror != nil {
+		req("sources", "are set; the history must have no sources or mirror, since the partitions' republish already stores every row there")
 	}
 	if cfg.Retention != jetstream.LimitsPolicy {
 		req("retention", "is %s; must be limits", cfg.Retention)
 	}
-	// discard: new would stall the source when the history is full, and the
-	// source holds every partition's rows until it has copied them.
+	// A full history never holds up ingest (republish does not wait for it),
+	// but with discard new it stops taking the newest rows SSE wants.
 	if cfg.Discard != jetstream.DiscardOld {
-		req("discard", "is %s; must be old, or a full history holds every partition's rows", cfg.Discard)
+		v.add(FindingRecommended, obj, "discard", "is %s; old keeps the newest rows for SSE when the history is full", cfg.Discard)
 	}
 	if cfg.MaxAge <= 0 {
 		req("max_age", "is unlimited; must be set, at least the longest gap window a tenant replays")
@@ -604,6 +578,20 @@ func (v *topologyVerifier) history(ctx context.Context, partitions []string) err
 	}
 	v.replicas(obj, cfg.Replicas)
 	return nil
+}
+
+// republish checks that partition p republishes every row it stores to the
+// history, with the partition token dropped from the subject.
+func (v *topologyVerifier) republish(obj string, rp *jetstream.RePublish, p int) {
+	want := natsRepublish(v.t.Prefix, p)
+	switch {
+	case rp == nil:
+		v.add(FindingRequired, obj, "republish", "is unset; must be {src: %q, dest: %q}, or the history (SSE replay and the live hub) gets nothing", want.Source, want.Destination)
+	case rp.Source != want.Source || rp.Destination != want.Destination:
+		v.add(FindingRequired, obj, "republish", "is {src: %q, dest: %q}; must be {src: %q, dest: %q}", rp.Source, rp.Destination, want.Source, want.Destination)
+	case rp.HeadersOnly:
+		v.add(FindingRequired, obj, "republish", "is headers_only; the history needs the bodies")
+	}
 }
 
 func (v *topologyVerifier) dlq(ctx context.Context) error {

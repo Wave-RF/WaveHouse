@@ -66,8 +66,8 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		sev    FindingSeverity
 		object string // a substring of Finding.Object
 		field  string
-		// problem, when set, is a substring of Finding.Problem: the history
-		// cases share the "sources" field with a source still attaching.
+		// problem, when set, is a substring of Finding.Problem, for cases
+		// whose field has more than one rule.
 		problem string
 	}
 	req := func(object, field string) want { return want{FindingRequired, object, field, ""} }
@@ -89,6 +89,12 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		{"partition missing", func(_ *testing.T, tp *fixtureTopology) { tp.drop(p0) }, shippedSpec, req("ingest partition 0", "subjects")},
 		{"partition subjects", stream(p0, func(s *jetstream.StreamConfig) { s.Subjects = []string{"wh.ingest.0.*"} }), shippedSpec, req(p0, "subjects")},
 		{"partition retention", stream(p0, func(s *jetstream.StreamConfig) { s.Retention = jetstream.LimitsPolicy }), shippedSpec, req(p0, "retention")},
+		{"partition interest retention", stream(p0, func(s *jetstream.StreamConfig) { s.Retention = jetstream.InterestPolicy }), shippedSpec, req(p0, "retention")},
+		{"partition republish missing", stream(p0, func(s *jetstream.StreamConfig) { s.RePublish = nil }), shippedSpec, want{FindingRequired, p0, "republish", "is unset"}},
+		{"partition republish keeps the partition token", stream(p0, func(s *jetstream.StreamConfig) {
+			s.RePublish = &jetstream.RePublish{Source: "wh.ingest.>", Destination: "wh.hist.>"}
+		}), shippedSpec, want{FindingRequired, p0, "republish", "must be {src"}},
+		{"partition republish headers only", stream(p0, func(s *jetstream.StreamConfig) { s.RePublish.HeadersOnly = true }), shippedSpec, want{FindingRequired, p0, "republish", "headers_only"}},
 		{"partition discard", stream(p0, func(s *jetstream.StreamConfig) {
 			s.Discard, s.DiscardNewPerSubject = jetstream.DiscardOld, false
 		}), shippedSpec, req(p0, "discard")},
@@ -138,14 +144,21 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 			c.DeliverSubject = "deliver.here"
 			c.MaxAckPending = 0
 		}), shippedSpec, req(p0+"/wh-ingest", "deliver_subject")},
-		{"durable ack_policy", durable(func(c *jetstream.ConsumerConfig) {
+		{"durable ack_policy", func(t *testing.T, tp *fixtureTopology) {
+			tp.stream(t, p0).Retention = jetstream.LimitsPolicy
+			c := tp.consumer(t, p0)
 			c.AckPolicy, c.MaxAckPending = jetstream.AckNonePolicy, 0
-		}), shippedSpec, req(p0+"/wh-ingest", "ack_policy")},
+		}, shippedSpec, req(p0+"/wh-ingest", "ack_policy")},
 		{"durable ack_wait", durable(func(c *jetstream.ConsumerConfig) { c.AckWait = 30 * time.Second }), shippedSpec, req(p0+"/wh-ingest", "ack_wait")},
 		{"durable max_deliver", durable(func(c *jetstream.ConsumerConfig) { c.MaxDeliver = 5 }), shippedSpec, req(p0+"/wh-ingest", "max_deliver")},
 		{"durable max_ack_pending unlimited", durable(func(c *jetstream.ConsumerConfig) { c.MaxAckPending = -1 }), shippedSpec, req(p0+"/wh-ingest", "max_ack_pending")},
 		{"durable max_ack_pending low", durable(func(c *jetstream.ConsumerConfig) { c.MaxAckPending = 100 }), shippedSpec, rec(p0+"/wh-ingest", "max_ack_pending")},
-		{"durable deliver_policy", durable(func(c *jetstream.ConsumerConfig) { c.DeliverPolicy = jetstream.DeliverNewPolicy }), shippedSpec, req(p0+"/wh-ingest", "deliver_policy")},
+		// A work queue refuses such a durable itself; on a partition of the
+		// wrong retention the verifier still names it.
+		{"durable deliver_policy", func(t *testing.T, tp *fixtureTopology) {
+			tp.stream(t, p0).Retention = jetstream.LimitsPolicy
+			tp.consumer(t, p0).DeliverPolicy = jetstream.DeliverNewPolicy
+		}, shippedSpec, req(p0+"/wh-ingest", "deliver_policy")},
 		{"durable filter", durable(func(c *jetstream.ConsumerConfig) { c.FilterSubject = "wh.ingest.0.acme.>" }), shippedSpec, req(p0+"/wh-ingest", "filter_subject")},
 		{"durable headers_only", durable(func(c *jetstream.ConsumerConfig) { c.HeadersOnly = true }), shippedSpec, req(p0+"/wh-ingest", "headers_only")},
 		{"durable replay_policy", durable(func(c *jetstream.ConsumerConfig) { c.ReplayPolicy = jetstream.ReplayOriginalPolicy }), shippedSpec, req(p0+"/wh-ingest", "replay_policy")},
@@ -157,14 +170,13 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 
 		// The history.
 		{"history missing", func(_ *testing.T, tp *fixtureTopology) { tp.drop(history) }, shippedSpec, req(history, "name")},
-		{"history has subjects", stream(history, func(s *jetstream.StreamConfig) { s.Subjects = []string{"history.>"} }), shippedSpec, req(history, "subjects")},
-		{"history misses a partition", stream(history, func(s *jetstream.StreamConfig) { s.Sources = s.Sources[1:] }), shippedSpec, want{FindingRequired, history, "sources", "do not include WH_INGEST_0"}},
-		{"history filters a partition", stream(history, func(s *jetstream.StreamConfig) {
-			s.Sources[0].FilterSubject = "wh.ingest.0.acme.>"
-		}), shippedSpec, want{FindingRequired, history, "sources", "filter WH_INGEST_0"}},
-		{"history source cannot attach", stream(p0, func(s *jetstream.StreamConfig) { s.MaxConsumers = 1 }), shippedSpec, want{FindingRequired, history, "sources", "WH_INGEST_0 is not attached"}},
+		{"history subjects", stream(history, func(s *jetstream.StreamConfig) { s.Subjects = []string{"history.>"} }), shippedSpec, req(history, "subjects")},
+		{"history subjects wider", stream(history, func(s *jetstream.StreamConfig) { s.Subjects = []string{"wh.hist.>", "wh.other.>"} }), shippedSpec, req(history, "subjects")},
+		{"history sources a partition", stream(history, func(s *jetstream.StreamConfig) {
+			s.Sources = []*jetstream.StreamSource{{Name: p0}}
+		}), shippedSpec, req(history, "sources")},
 		{"history retention", stream(history, func(s *jetstream.StreamConfig) { s.Retention = jetstream.InterestPolicy }), shippedSpec, req(history, "retention")},
-		{"history discard", stream(history, func(s *jetstream.StreamConfig) { s.Discard = jetstream.DiscardNew }), shippedSpec, req(history, "discard")},
+		{"history discard", stream(history, func(s *jetstream.StreamConfig) { s.Discard = jetstream.DiscardNew }), shippedSpec, rec(history, "discard")},
 		{"history max_age", stream(history, func(s *jetstream.StreamConfig) { s.MaxAge = 0 }), shippedSpec, req(history, "max_age")},
 		{"history max_bytes", stream(history, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), shippedSpec, rec(history, "max_bytes")},
 		{"history at one replica", nil, shippedSpec, want{FindingRecommended, history, "num_replicas", "sync_interval"}},
@@ -193,8 +205,6 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 			if tc.mutate != nil {
 				tc.mutate(t, tp)
 			}
-			// No wait for the sources: an unattached one is one more finding, and the
-			// case only looks for its own.
 			require.NoError(t, f.create(t.Context(), tp))
 			findings, err := verifyNATSTopology(t.Context(), js, tc.spec)
 			require.NoError(t, err)

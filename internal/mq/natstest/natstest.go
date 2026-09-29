@@ -117,22 +117,25 @@ type Manifests struct {
 // Decoding is strict, so a field the generator starts writing fails here
 // rather than being dropped from every fixture.
 type nackStream struct {
-	Name              string                  `yaml:"name"`
-	Subjects          []string                `yaml:"subjects"`
-	Sources           []struct{ Name string } `yaml:"sources"`
-	Retention         string                  `yaml:"retention"`
-	Discard           string                  `yaml:"discard"`
-	DiscardPerSubject bool                    `yaml:"discardPerSubject"`
-	MaxBytes          int64                   `yaml:"maxBytes"`
-	MaxAge            string                  `yaml:"maxAge"`
-	MaxMsgsPerSubject int64                   `yaml:"maxMsgsPerSubject"`
-	Storage           string                  `yaml:"storage"`
-	Replicas          int                     `yaml:"replicas"`
-	DuplicateWindow   string                  `yaml:"duplicateWindow"`
-	DenyPurge         bool                    `yaml:"denyPurge"`
-	DenyDelete        bool                    `yaml:"denyDelete"`
-	Metadata          map[string]string       `yaml:"metadata"`
-	PreventDelete     bool                    `yaml:"preventDelete"`
+	Name              string            `yaml:"name"`
+	Subjects          []string          `yaml:"subjects"`
+	Retention         string            `yaml:"retention"`
+	Discard           string            `yaml:"discard"`
+	DiscardPerSubject bool              `yaml:"discardPerSubject"`
+	MaxBytes          int64             `yaml:"maxBytes"`
+	MaxAge            string            `yaml:"maxAge"`
+	MaxMsgsPerSubject int64             `yaml:"maxMsgsPerSubject"`
+	Storage           string            `yaml:"storage"`
+	Replicas          int               `yaml:"replicas"`
+	DuplicateWindow   string            `yaml:"duplicateWindow"`
+	DenyPurge         bool              `yaml:"denyPurge"`
+	DenyDelete        bool              `yaml:"denyDelete"`
+	Metadata          map[string]string `yaml:"metadata"`
+	PreventDelete     bool              `yaml:"preventDelete"`
+	Republish         *struct {
+		Source      string `yaml:"source"`
+		Destination string `yaml:"destination"`
+	} `yaml:"republish"`
 }
 
 type nackConsumer struct {
@@ -271,8 +274,8 @@ func streamConfig(s nackStream) (jetstream.StreamConfig, error) {
 	errs = append(errs, err)
 	cfg.Duplicates, err = duration(s.DuplicateWindow)
 	errs = append(errs, err)
-	for _, src := range s.Sources {
-		cfg.Sources = append(cfg.Sources, &jetstream.StreamSource{Name: src.Name})
+	if r := s.Republish; r != nil {
+		cfg.RePublish = &jetstream.RePublish{Source: r.Source, Destination: r.Destination}
 	}
 	return cfg, errors.Join(errs...)
 }
@@ -350,50 +353,6 @@ func (m *Manifests) Apply(ctx context.Context, js jetstream.JetStream) error {
 	return nil
 }
 
-// AwaitSources waits for every sourcing stream's source consumer to appear
-// beside its origin's own consumers, until ctx ends. The server creates it
-// asynchronously, and a row acked on an interest partition before it exists
-// never reaches the history. Only an interest-retention origin lists it; an
-// origin m leaves out, or keeps from gaining one (max_consumers), is skipped.
-func (m *Manifests) AwaitSources(ctx context.Context, js jetstream.JetStream) error {
-	for _, cfg := range m.Streams {
-		for _, src := range cfg.Sources {
-			if err := awaitSource(ctx, js, src.Name, len(m.Consumers[src.Name])); err != nil {
-				return fmt.Errorf("%s's source on %s never attached: %w", cfg.Name, src.Name, err)
-			}
-		}
-	}
-	return nil
-}
-
-func awaitSource(ctx context.Context, js jetstream.JetStream, origin string, own int) error {
-	s, err := js.Stream(ctx, origin)
-	if errors.Is(err, jetstream.ErrStreamNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	cfg := s.CachedInfo().Config
-	if cfg.Retention != jetstream.InterestPolicy || (cfg.MaxConsumers > 0 && cfg.MaxConsumers <= own) {
-		return nil
-	}
-	for {
-		n := 0
-		for range s.ListConsumers(ctx).Info() {
-			n++
-		}
-		if n > own {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-}
-
 // Operator is the operator's hand on a running server: nack's user.
 type Operator struct {
 	nc *nats.Conn
@@ -420,20 +379,14 @@ func (o *Operator) JetStream() jetstream.JetStream { return o.js }
 // Close closes the connection.
 func (o *Operator) Close() { o.nc.Close() }
 
-// ApplyShipped creates the shipped manifests at one replica, as nack would,
-// and waits up to a minute for the history's sources to attach.
+// ApplyShipped creates the shipped manifests at one replica, as nack would.
 func (o *Operator) ApplyShipped(ctx context.Context) error {
 	m, err := LoadManifests(ShippedManifests())
 	if err != nil {
 		return err
 	}
 	m.SingleReplica()
-	if err := m.Create(ctx, o.js); err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-	return m.AwaitSources(ctx, o.js)
+	return m.Create(ctx, o.js)
 }
 
 // DeleteDurable deletes the durable on every stream that has it in the

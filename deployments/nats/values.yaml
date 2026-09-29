@@ -49,6 +49,7 @@ config:
                   - $KV.wh_coord.lease.>
                   - $JS.API.DIRECT.GET.KV_wh_coord.$KV.wh_coord.lease.>
                 deny:
+                  - wh.hist.>
                   - $JS.API.STREAM.CREATE.>
                   - $JS.API.STREAM.UPDATE.>
                   - $JS.API.STREAM.DELETE.>
