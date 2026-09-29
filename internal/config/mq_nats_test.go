@@ -188,7 +188,7 @@ func TestValidate_MQNATSIgnoredUnderEmbedded(t *testing.T) {
 }
 
 // On a shared queue every role split boots except the one the local cache
-// cannot serve (rule 5, until a shared cache exists).
+// cannot serve (rule 5; cache.backend: redis lifts it).
 func TestValidate_SplitsBootOnNATS(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
