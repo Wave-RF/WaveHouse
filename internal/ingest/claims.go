@@ -49,9 +49,13 @@ import (
 // While the dead owner's pin has not lapsed yet the unit waits, unbound, and
 // is tried again next tick, up to orphanWait. On a process's first tick,
 // which has no previous view, only when it is the one live member: then
-// whatever holds rows unpinned is gone (a crash or a restart of the only
-// process). Never after pulling: a reset also redelivers the caller's own
-// unacked rows.
+// whatever holds rows unpinned is gone. That covers the only process
+// restarting after a clean stop, which resigned its lease. After a crash
+// the dead run's lease still counts as live for a lease duration, so the
+// restarted process takes the units assigned to its own slot without a
+// reset (their rows come back after ack_wait), and the dead slot's units by
+// the takeover above once its lease has lapsed. Never after pulling: a
+// reset also redelivers the caller's own unacked rows.
 //
 // Memory. Rows delivered and not yet settled, across every unit this process
 // holds, are capped at MaxHeld: at the cap a unit's delivery waits, and the
@@ -279,7 +283,7 @@ func (l *claimLoop) run() {
 func (l *claimLoop) tick() {
 	ctx, cancel := context.WithTimeout(l.ctx, tickTimeout)
 	defer cancel()
-	defer l.ownedGauge.Store(int64(len(l.owned)))
+	defer func() { l.ownedGauge.Store(int64(len(l.owned))) }()
 	defer func() { m := l.member; l.memberSnap.Store(&m) }()
 	l.reap()
 	if l.member == nil {
@@ -346,8 +350,8 @@ func (l *claimLoop) readMembers(ctx context.Context) ([]int, error) {
 	return live, nil
 }
 
-// reap drops the membership term if it ended under this process; the next
-// tick then gives up every unit and joins again.
+// reap drops the membership term if it ended under this process; the same
+// tick joins again, and gives up whatever the new slot is not assigned.
 func (l *claimLoop) reap() {
 	if l.member == nil {
 		return

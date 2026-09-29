@@ -834,3 +834,12 @@ func TestClaims_DifferingExtrasLeaveConfiguredUnitsAlone(t *testing.T) {
 	}
 	noFailure(t, procs...)
 }
+
+// The owned gauge reads the tick's own result, not the count it began with.
+func TestClaims_OwnedGaugeCurrentAfterOneTick(t *testing.T) {
+	t.Parallel()
+	f := newFakeShards(4)
+	p := startClaims(t, f, coord.NewLocal(), "a", ClaimConfig{Every: time.Hour}, nil)
+	require.Eventually(t, func() bool { return f.split("a") }, 5*time.Second, 10*time.Millisecond, "the first tick takes every unit")
+	require.Eventually(t, func() bool { return p.loop.ownedGauge.Load() == 4 }, time.Second, 10*time.Millisecond, "after the first tick alone")
+}
