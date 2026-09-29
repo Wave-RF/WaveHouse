@@ -482,7 +482,7 @@ func TestClaims_EndedDelivery(t *testing.T) {
 			t.Fatal("a configured unit's delivery ending did not fail the claims")
 		}
 	})
-	t.Run("unbound", func(t *testing.T) {
+	t.Run("unbound, then bound", func(t *testing.T) {
 		t.Parallel()
 		f := newFakeShards(2)
 		bad := "S/u-01"
@@ -495,13 +495,16 @@ func TestClaims_EndedDelivery(t *testing.T) {
 		stop, failed, err := cons.Consume(func(*mq.Message) {}, 10)
 		require.NoError(t, err)
 		t.Cleanup(stop)
+		require.Eventually(t, func() bool { return len(f.owners()["S/u-00"]) == 1 }, 5*time.Second, 10*time.Millisecond)
+		time.Sleep(100 * time.Millisecond) // a few ticks of failed binds
 		select {
 		case err := <-failed:
-			assert.ErrorContains(t, err, bad)
-			assert.NotErrorIs(t, err, mq.ErrDeliveryEnded, "a failure other than a missing durable is not delivery ending")
-		case <-time.After(5 * time.Second):
-			t.Fatal("a unit that cannot be bound did not fail the claims")
+			t.Fatalf("a bind that failed on something other than a missing durable failed the claims: %v", err)
+		default:
 		}
+		assert.Empty(t, f.owners()[bad])
+		p.failCreate.Store(nil)
+		require.Eventually(t, func() bool { return f.split("a") }, 5*time.Second, 10*time.Millisecond, "bound on a later tick")
 	})
 }
 

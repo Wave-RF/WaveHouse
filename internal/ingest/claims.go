@@ -438,10 +438,15 @@ func (l *claimLoop) take(ctx context.Context, targets map[string]bool, count int
 			if errors.Is(err, mq.ErrConsumerNotFound) {
 				// Its durable is gone: the same end as a delivery the
 				// broker ends because the durable was deleted under it.
-				err = fmt.Errorf("%w: %w", mq.ErrDeliveryEnded, err)
+				l.fail(fmt.Errorf("shard %s: %w: %w", u, mq.ErrDeliveryEnded, err))
+				return
 			}
-			l.fail(fmt.Errorf("shard %s: %w", u, err))
-			return
+			// Anything else (a request the server did not answer while a
+			// consumer leader moves) is tried again next tick; the unit
+			// shows as unowned meanwhile.
+			claimEvents.Add(context.Background(), 1, eventAttr("bind_failed"))
+			l.warn("ingest: could not bind a shard; trying again next tick", fmt.Errorf("shard %s: %w", u, err))
+			continue
 		}
 	}
 }
@@ -656,7 +661,7 @@ func (h *heldRows) count() int { return len(h.slots) }
 var (
 	claimEvents, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 		"wavehouse_ingest_shard_events_total",
-		metric.WithDescription("Shard claim events in this process: taken, released (handed on or stopped), reset (a dead owner's unsettled rows redelivered at takeover), handover_timeout (released before its rows settled), lost (the membership lease ended under it)"),
+		metric.WithDescription("Shard claim events in this process: taken, released (handed on or stopped), reset (a dead owner's unsettled rows redelivered at takeover), handover_timeout (released before its rows settled), lost (the membership lease ended under it), bind_failed (a shard could not be bound; tried again next tick)"),
 	)
 	handoverSeconds, _ = otel.Meter("wavehouse-ingest").Float64Histogram(
 		"wavehouse_ingest_shard_handover_seconds",
