@@ -103,11 +103,12 @@ func (tp *fixtureTopology) stream(t *testing.T, name string) *jetstream.StreamCo
 	return &tp.Streams[i]
 }
 
-// consumer is the one consumer on the named stream, to mutate before apply.
+// consumer is shard 0's durable on the named stream, to mutate before apply.
 func (tp *fixtureTopology) consumer(t *testing.T, stream string) *jetstream.ConsumerConfig {
 	t.Helper()
-	require.Len(t, tp.Consumers[stream], 1, "consumers on %s", stream)
-	return &tp.Consumers[stream][0]
+	i := slices.IndexFunc(tp.Consumers[stream], func(c jetstream.ConsumerConfig) bool { return c.Durable == "wh-ingest-0" })
+	require.GreaterOrEqual(t, i, 0, "no wh-ingest-0 on %s", stream)
+	return &tp.Consumers[stream][i]
 }
 
 // drop removes the named stream and its consumers.

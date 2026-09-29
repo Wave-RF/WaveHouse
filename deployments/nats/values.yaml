@@ -3,16 +3,19 @@
 # file storage, and an account holding two users —
 #   nack       the JetStream controller that applies jetstream.yaml (full access)
 #   wavehouse  WaveHouse itself, with exactly the permissions it needs: it can
-#              publish, read and consume, read and write the lease keys in the
-#              coord bucket, and cannot create, change, purge or delete a
-#              stream or bucket, nor create a durable on an ingest partition.
+#              publish, read and consume, unpin and reset its shard durables,
+#              read and write the lease keys in the coord bucket, and cannot
+#              create, change, purge or delete a stream or bucket, create a
+#              durable on an ingest partition, or publish to the history.
 # Passwords come from Secrets through the container env; `<< $VAR >>` is the
 # chart's syntax for an unquoted NATS config variable.
 #
 # The wavehouse user's permissions are for the default subject prefix (wh),
-# history stream (WH_HISTORY), ingest durable (wh-ingest) and lease bucket
-# (wh_coord). A test keeps them in step with WaveHouse, and the conformance
-# tests connect with them verbatim.
+# history stream (WH_HISTORY), shard durables (wh-ingest-<shard>) and lease
+# bucket (wh_coord), with 8 shards per partition as in jetstream.yaml: they
+# name every shard's durable, so regenerate them with
+# `wavehouse mq permissions --shards <V>`. A test keeps them in step with
+# WaveHouse, and the conformance tests connect with them verbatim.
 config:
   cluster:
     enabled: true
@@ -41,7 +44,31 @@ config:
                   - $JS.API.STREAM.NAMES
                   - $JS.API.STREAM.INFO.*
                   - $JS.API.CONSUMER.INFO.*.*
-                  - $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest
+                  - $JS.API.CONSUMER.NAMES.*
+                  - $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-0
+                  - $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-1
+                  - $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-2
+                  - $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-3
+                  - $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-4
+                  - $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-5
+                  - $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-6
+                  - $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-7
+                  - $JS.API.CONSUMER.UNPIN.*.wh-ingest-0
+                  - $JS.API.CONSUMER.UNPIN.*.wh-ingest-1
+                  - $JS.API.CONSUMER.UNPIN.*.wh-ingest-2
+                  - $JS.API.CONSUMER.UNPIN.*.wh-ingest-3
+                  - $JS.API.CONSUMER.UNPIN.*.wh-ingest-4
+                  - $JS.API.CONSUMER.UNPIN.*.wh-ingest-5
+                  - $JS.API.CONSUMER.UNPIN.*.wh-ingest-6
+                  - $JS.API.CONSUMER.UNPIN.*.wh-ingest-7
+                  - $JS.API.CONSUMER.RESET.*.wh-ingest-0
+                  - $JS.API.CONSUMER.RESET.*.wh-ingest-1
+                  - $JS.API.CONSUMER.RESET.*.wh-ingest-2
+                  - $JS.API.CONSUMER.RESET.*.wh-ingest-3
+                  - $JS.API.CONSUMER.RESET.*.wh-ingest-4
+                  - $JS.API.CONSUMER.RESET.*.wh-ingest-5
+                  - $JS.API.CONSUMER.RESET.*.wh-ingest-6
+                  - $JS.API.CONSUMER.RESET.*.wh-ingest-7
                   - $JS.ACK.>
                   - $JS.API.CONSUMER.CREATE.WH_HISTORY.>
                   - $JS.API.CONSUMER.MSG.NEXT.WH_HISTORY.>

@@ -62,7 +62,7 @@ func bootNATSProcess(t *testing.T, natsURL, root string, roles ...config.Role) *
 		Auth:       config.Auth{OperatorKey: natsOperatorKey},
 		MQ: config.MQ{Backend: config.MQNATS, NATS: config.MQNATSConfig{
 			URLs: []string{natsURL}, User: natstest.WaveHouseUser, PasswordFile: pw,
-			SubjectPrefix: "wh", Partitions: 4, IngestConsumer: "wh-ingest",
+			SubjectPrefix: "wh", Partitions: 4, Shards: 8, IngestConsumer: "wh-ingest",
 			ConnectTimeout: 5 * time.Second, PublishTimeout: 5 * time.Second, TopologyWait: 30 * time.Second,
 		}},
 		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
@@ -260,7 +260,7 @@ func TestNATSBackend_EndToEnd(t *testing.T) {
 
 	// The operator deleting the durable ends every worker, and with it every
 	// process: nothing can write what the API would go on accepting.
-	require.NoError(t, op.DeleteDurable(ctx, "wh-ingest"))
+	require.NoError(t, op.DeleteIngestDurables(ctx))
 	for name, p := range map[string]*natsProcess{"A": a, "B": b} {
 		select {
 		case err := <-p.runDone:

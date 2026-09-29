@@ -175,8 +175,8 @@ const (
 	// its bridge off the queue and its keepalive wheel. Per process: every
 	// API process runs its own.
 	RoleAPI Role = "api"
-	// RoleIngest runs the ingest worker, queue to ClickHouse. Every ingest
-	// process consumes the one shared durable, competing for messages.
+	// RoleIngest runs the ingest worker, queue to ClickHouse. Under nats each
+	// shard of the queue is delivered to one ingest process at a time.
 	RoleIngest Role = "ingest"
 	// RoleSweeper runs the sweeper, one per queue, under the sweeper lease, on
 	// the embedded MQ only: under nats the streams' own retention replaces it.

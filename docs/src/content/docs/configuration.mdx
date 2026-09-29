@@ -70,13 +70,14 @@ Read only with `mq.backend: nats`. WaveHouse connects to NATS you run and uses s
 | `mq.nats.js_domain` | `WH_MQ_NATS_JS_DOMAIN` | *(empty)* | The JetStream domain, for a leafnode or hub-and-spoke deployment. |
 | `mq.nats.subject_prefix` | `WH_MQ_NATS_SUBJECT_PREFIX` | `wh` | Leads every subject WaveHouse uses (`<prefix>.ingest.…`, `<prefix>.hist.…`, `<prefix>.dlq.…`). One token of `[a-z0-9_-]`. |
 | `mq.nats.partitions` | `WH_MQ_NATS_PARTITIONS` | `1` | How many ingest partition streams there are. It must equal the number you created; boot finds each one by its subject. |
-| `mq.nats.ingest_consumer` | `WH_MQ_NATS_INGEST_CONSUMER` | `wh-ingest` | The durable consumer on every partition that the ingest worker consumes. |
+| `mq.nats.shards` | `WH_MQ_NATS_SHARDS` | `32` | How many shards each partition has: a table's events all go to one shard, by a consistent hash of the tenant and table, and each shard has a durable of its own that one ingest process at a time consumes. It must equal the number you created (`wavehouse mq manifests --shards`); from 1 to 256. It caps the ingest processes that get work at partitions × shards. |
+| `mq.nats.ingest_consumer` | `WH_MQ_NATS_INGEST_CONSUMER` | `wh-ingest` | Names the shard durables: shard `s` of every partition is `<ingest_consumer>-<s>`, unpadded. |
 | `mq.nats.history_stream` | `WH_MQ_NATS_HISTORY_STREAM` | `<PREFIX>_HISTORY` | The history stream, which SSE replay and the live hub read. WaveHouse looks it up by this name; the partition and dead-letter streams are found by subject and can have any name. The default is the upper-cased prefix, `WH_HISTORY` for `wh`, as `wavehouse mq manifests` names it. |
 | `mq.nats.connect_timeout` | `WH_MQ_NATS_CONNECT_TIMEOUT` | `5s` | Bounds one dial. |
 | `mq.nats.publish_timeout` | `WH_MQ_NATS_PUBLISH_TIMEOUT` | `5s` | Bounds one publish attempt. A publish is tried at most three times; a partition's `duplicate_window` must cover all three, or boot refuses. |
 | `mq.nats.topology_wait` | `WH_MQ_NATS_TOPOLOGY_WAIT` | `60s` | How long boot waits for the cluster and for your streams and consumers to be right. Boot then refuses with every finding at once. |
 
-Boot refuses a `nats` block with no URLs, a URL with credentials in it, more than one of `creds_file`, `nkey_seed_file` and `user`, half a certificate pair, a prefix outside the grammar, fewer than one partition, or a timeout that is not positive. Durations take Go syntax (`5s`, `2m`).
+Boot refuses a `nats` block with no URLs, a URL with credentials in it, more than one of `creds_file`, `nkey_seed_file` and `user`, half a certificate pair, a prefix outside the grammar, fewer than one partition, a shard count outside 1 to 256, an empty `ingest_consumer`, or a timeout that is not positive. Durations take Go syntax (`5s`, `2m`).
 
 A tenant's [`mq.max_bytes_gb`](/settings-directory#message-queue) is not applied under `nats`: its events share a partition stream with other tenants, and that stream's limits, which you set, bound them. Boot logs a warning saying so.
 
@@ -137,7 +138,7 @@ By default one process does all the work. `roles` splits it, so that the API and
 | Role | Runs |
 | --- | --- |
 | `api` | The HTTP API, and what answers it: schema discovery, the token verifiers and their JWKS refresh, the dedupe stores, and the SSE hub with its bridge off the queue and its keepalive wheel. Every API process runs its own set of these, and each API process receives every event for its own SSE clients. |
-| `ingest` | The ingest worker, which writes the queue to ClickHouse. Every ingest process consumes the same shared durable consumer and competes for its messages. |
+| `ingest` | The ingest worker, which writes the queue to ClickHouse. Under `mq.backend=nats` each shard of the queue is delivered to one ingest process at a time, so a table's rows are written by one process. |
 | `sweeper` | The sweeper, which purges messages that are written and older than their tenant's gap window. It runs under the `sweeper` lease, on `mq.backend=embedded` only. Under `mq.backend=nats` your streams' retention does its work, so it is not wired there, and a process whose only role is `sweeper` is refused (below). A tenant whose gap window is longer than the history stream keeps is logged by the API processes instead, at boot and after each reload. |
 
 Every process, whatever its roles, reads the settings directory and reloads it (SIGHUP, the directory watcher, and the reload route), and serves `server.port`. A process without the `api` role serves only an ops listener there: `/livez`, `/readyz` and their `/healthz`, `/health`, `/ready` aliases, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404; under `/v1/ops`, only once the operator-key check has passed (403 without a credential; a bearer token is refused with 401, since no token verifier runs without the `api` role). The reload route on that listener accepts only the [operator key](#authentication), because no token verifier runs without the `api` role. `/readyz` is ready when a ClickHouse pool answers in an `ingest` process.
@@ -345,6 +346,7 @@ mq:
   #   user: wavehouse
   #   password_file: /var/run/secrets/nats/password
   #   partitions: 4        # the number of ingest partition streams
+  #   shards: 8            # shards per partition, as generated (default 32)
 
 cache:
   backend: local         # local | redis
@@ -443,6 +445,7 @@ WH_MQ_BACKEND=embedded
 # WH_MQ_NATS_USER=wavehouse
 # WH_MQ_NATS_PASSWORD_FILE=/var/run/secrets/nats/password
 # WH_MQ_NATS_PARTITIONS=4
+# WH_MQ_NATS_SHARDS=8
 WH_CACHE_BACKEND=local
 WH_CACHE_L1_MAX_COST=67108864
 # Read only with WH_CACHE_BACKEND=redis; WH_CACHE_REDIS_ADDRS is then required.

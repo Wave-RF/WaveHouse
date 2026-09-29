@@ -46,6 +46,7 @@ func TestLoad_MQNATSFromEnv(t *testing.T) {
 		"WH_MQ_NATS_JS_DOMAIN":           "hub",
 		"WH_MQ_NATS_SUBJECT_PREFIX":      "whprod",
 		"WH_MQ_NATS_PARTITIONS":          "4",
+		"WH_MQ_NATS_SHARDS":              "8",
 		"WH_MQ_NATS_INGEST_CONSUMER":     "ingest",
 		"WH_MQ_NATS_HISTORY_STREAM":      "HIST",
 		"WH_MQ_NATS_CONNECT_TIMEOUT":     "2s",
@@ -61,7 +62,7 @@ func TestLoad_MQNATSFromEnv(t *testing.T) {
 		User: "wavehouse", PasswordFile: "/var/run/secrets/nats/password",
 		TLS:           MQNATSTLS{CAFile: "/ca.pem", CertFile: "/cert.pem", KeyFile: "/key.pem", ServerName: "nats.internal", HandshakeFirst: true},
 		JSDomain:      "hub",
-		SubjectPrefix: "whprod", Partitions: 4, IngestConsumer: "ingest", HistoryStream: "HIST",
+		SubjectPrefix: "whprod", Partitions: 4, Shards: 8, IngestConsumer: "ingest", HistoryStream: "HIST",
 		ConnectTimeout: 2 * time.Second, PublishTimeout: 3 * time.Second, TopologyWait: 2 * time.Minute,
 	}, cfg.MQ.NATS)
 	assert.True(t, cfg.Distributed())
@@ -150,6 +151,8 @@ func TestValidate_MQNATS(t *testing.T) {
 		{"prefix upper case", func(n *MQNATSConfig) { n.SubjectPrefix = "WH" }, "must be one token"},
 		{"empty prefix", func(n *MQNATSConfig) { n.SubjectPrefix = "" }, "must be one token"},
 		{"no partitions", func(n *MQNATSConfig) { n.Partitions = 0 }, "mq.nats.partitions (WH_MQ_NATS_PARTITIONS) must be at least 1, got 0"},
+		{"no shards", func(n *MQNATSConfig) { n.Shards = 0 }, "mq.nats.shards (WH_MQ_NATS_SHARDS) must be from 1 to 256, got 0"},
+		{"too many shards", func(n *MQNATSConfig) { n.Shards = 257 }, "must be from 1 to 256, got 257"},
 		{"no ingest consumer", func(n *MQNATSConfig) { n.IngestConsumer = "" }, "mq.nats.ingest_consumer"},
 		{"creds and user", func(n *MQNATSConfig) { n.CredsFile, n.User = "/c", "u" }, "set at most one of creds_file, nkey_seed_file and user"},
 		{"creds and nkey", func(n *MQNATSConfig) { n.CredsFile, n.NKeySeedFile = "/c", "/n" }, "set at most one"},

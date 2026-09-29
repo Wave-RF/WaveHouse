@@ -34,31 +34,50 @@ func (x *ExternalFixture) Broker(t *testing.T) Broker {
 	return x.f.broker(t, nil)
 }
 
-// DeleteIngestDurable deletes wh-ingest on every partition, as the operator
-// could.
+// DeleteIngestDurable deletes every shard durable of every partition, as the
+// operator could.
 func (x *ExternalFixture) DeleteIngestDurable(t *testing.T) {
 	t.Helper()
 	for p := range 4 {
-		require.NoError(t, x.f.admin.DeleteConsumer(t.Context(), shippedPartition(p), DefaultNATSIngestConsumer))
+		for s := range 8 {
+			require.NoError(t, x.f.admin.DeleteConsumer(t.Context(), shippedPartition(p), natsShardDurable(DefaultNATSIngestConsumer, s)))
+		}
 	}
 }
 
-// FillPartition shrinks the partition holding id to a few KiB and publishes
-// until it refuses even the smallest event.
+// FillPartition shrinks every partition to a few KiB and publishes id's
+// events into each until it refuses even the smallest: a tenant's tables
+// spread over the partitions, so any of them then finds its own full.
 func (x *ExternalFixture) FillPartition(t *testing.T, b Broker, id tenant.ID) {
 	t.Helper()
-	x.f.shrink(t, shippedPartition(partitionOf(id, 4)), 4<<10)
-	for _, size := range []int{1 << 10, 1} {
-		payload := make([]byte, size)
-		for i := 0; ; i++ {
-			require.Less(t, i, 1<<10, "the partition never filled")
-			err := b.Publish(t.Context(), Topic{Tenant: id, Table: "f"}, payload)
-			if err != nil {
-				require.ErrorIs(t, err, ErrQueueFull)
-				break
+	for p := range 4 {
+		x.f.shrink(t, shippedPartition(p), 4<<10)
+		topic := topicIn(t, id, p, 4, 8)
+		for _, size := range []int{1 << 10, 1} {
+			payload := make([]byte, size)
+			for i := 0; ; i++ {
+				require.Less(t, i, 1<<10, "partition %d never filled", p)
+				err := b.Publish(t.Context(), topic, payload)
+				if err != nil {
+					require.ErrorIs(t, err, ErrQueueFull)
+					break
+				}
 			}
 		}
 	}
+}
+
+// topicIn is a table of id's whose events go to partition p of n (v shards).
+func topicIn(t *testing.T, id tenant.ID, p, n, v int) Topic {
+	t.Helper()
+	for i := range 1000 {
+		topic := Topic{Tenant: id, Table: "t" + strconv.Itoa(i)}
+		if got, _ := natsRoute(topic, n, v); got == p {
+			return topic
+		}
+	}
+	t.Fatalf("no table of %s in partition %d of %d", id, p, n)
+	return Topic{}
 }
 
 // shippedPartition is partition p's stream in the shipped manifests.
@@ -72,7 +91,7 @@ func (f *natsFixture) broker(t *testing.T, edit func(*NATSConfig)) *ExternalNATS
 		URLs:         []string{f.server.ClientURL()},
 		User:         "wavehouse",
 		PasswordFile: writeSecret(t, fixturePassword("wavehouse")),
-		Topology:     NATSTopology{Partitions: 4},
+		Topology:     NATSTopology{Partitions: 4, Shards: 8},
 		TopologyWait: 10 * time.Second,
 	}
 	if edit != nil {
@@ -101,4 +120,10 @@ func (f *natsFixture) streamMsgs(t *testing.T, stream string) uint64 {
 	s, err := f.admin.Stream(t.Context(), stream)
 	require.NoError(t, err)
 	return s.CachedInfo().State.Msgs
+}
+
+// mustPartition is the shipped partition topic's table lives in.
+func mustPartition(topic Topic) int {
+	p, _ := natsRoute(topic, 4, 8)
+	return p
 }

@@ -734,8 +734,12 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, consumerName string, handl
 // every tenant's queue, and joins each queue opened later — one it cannot
 // join is that tenant's failure (SetMaxBytes), not the consumer's. ctx
 // becomes every delivered Message.Ctx (see ConsumerManager); it does not
-// stop delivery — Consumer.Consume's stop does.
+// stop delivery — Consumer.Consume's stop does. It has no units: a config
+// naming any is ErrUnitsUnsupported.
 func (e *EmbeddedNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (Consumer, error) {
+	if cfg.Units != nil {
+		return nil, fmt.Errorf("create consumer: %w: the embedded queue is one per tenant", ErrUnitsUnsupported)
+	}
 	c := &workerConsumer{
 		fanIn: e.newFanIn(ctx, jetstream.ConsumerConfig{
 			Durable:       cfg.Durable,

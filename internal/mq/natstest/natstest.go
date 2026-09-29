@@ -139,15 +139,18 @@ type nackStream struct {
 }
 
 type nackConsumer struct {
-	StreamName    string `yaml:"streamName"`
-	DurableName   string `yaml:"durableName"`
-	DeliverPolicy string `yaml:"deliverPolicy"`
-	AckPolicy     string `yaml:"ackPolicy"`
-	AckWait       string `yaml:"ackWait"`
-	MaxDeliver    int    `yaml:"maxDeliver"`
-	MaxAckPending int    `yaml:"maxAckPending"`
-	FilterSubject string `yaml:"filterSubject"`
-	PreventDelete bool   `yaml:"preventDelete"`
+	PriorityPolicy string   `yaml:"priorityPolicy"`
+	PriorityGroups []string `yaml:"priorityGroups"`
+	PinnedTTL      string   `yaml:"pinnedTtl"`
+	StreamName     string   `yaml:"streamName"`
+	DurableName    string   `yaml:"durableName"`
+	DeliverPolicy  string   `yaml:"deliverPolicy"`
+	AckPolicy      string   `yaml:"ackPolicy"`
+	AckWait        string   `yaml:"ackWait"`
+	MaxDeliver     int      `yaml:"maxDeliver"`
+	MaxAckPending  int      `yaml:"maxAckPending"`
+	FilterSubject  string   `yaml:"filterSubject"`
+	PreventDelete  bool     `yaml:"preventDelete"`
 }
 
 type nackKeyValue struct {
@@ -282,13 +285,21 @@ func streamConfig(s nackStream) (jetstream.StreamConfig, error) {
 
 func consumerConfig(c nackConsumer) (jetstream.ConsumerConfig, error) {
 	cfg := jetstream.ConsumerConfig{
-		Durable:       c.DurableName,
-		MaxDeliver:    c.MaxDeliver,
-		MaxAckPending: c.MaxAckPending,
-		FilterSubject: c.FilterSubject,
+		Durable:        c.DurableName,
+		MaxDeliver:     c.MaxDeliver,
+		MaxAckPending:  c.MaxAckPending,
+		FilterSubject:  c.FilterSubject,
+		PriorityGroups: c.PriorityGroups,
 	}
 	var err error
 	var errs []error
+	cfg.PriorityPolicy, err = enum("priorityPolicy", c.PriorityPolicy, map[string]jetstream.PriorityPolicy{
+		"": jetstream.PriorityPolicyNone, "none": jetstream.PriorityPolicyNone, "pinned_client": jetstream.PriorityPolicyPinned,
+		"overflow": jetstream.PriorityPolicyOverflow, "prioritized": jetstream.PriorityPolicyPrioritized,
+	})
+	errs = append(errs, err)
+	cfg.PinnedTTL, err = duration(c.PinnedTTL)
+	errs = append(errs, err)
 	cfg.DeliverPolicy, err = enum("deliverPolicy", c.DeliverPolicy, map[string]jetstream.DeliverPolicy{
 		"all": jetstream.DeliverAllPolicy, "last": jetstream.DeliverLastPolicy, "new": jetstream.DeliverNewPolicy,
 	})
@@ -389,20 +400,17 @@ func (o *Operator) ApplyShipped(ctx context.Context) error {
 	return m.Create(ctx, o.js)
 }
 
-// DeleteDurable deletes the durable on every stream that has it in the
-// shipped manifests, as an operator could while WaveHouse consumes it.
-func (o *Operator) DeleteDurable(ctx context.Context, durable string) error {
+// DeleteIngestDurables deletes every shard durable of the shipped
+// manifests, as an operator could while WaveHouse consumes them.
+func (o *Operator) DeleteIngestDurables(ctx context.Context) error {
 	m, err := LoadManifests(ShippedManifests())
 	if err != nil {
 		return err
 	}
 	for stream, consumers := range m.Consumers {
 		for _, c := range consumers {
-			if c.Durable != durable {
-				continue
-			}
-			if err := o.js.DeleteConsumer(ctx, stream, durable); err != nil {
-				return fmt.Errorf("delete %s/%s: %w", stream, durable, err)
+			if err := o.js.DeleteConsumer(ctx, stream, c.Durable); err != nil {
+				return fmt.Errorf("delete %s/%s: %w", stream, c.Durable, err)
 			}
 		}
 	}

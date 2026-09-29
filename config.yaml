@@ -63,6 +63,7 @@ mq:
   #   user: wavehouse
   #   password_file: ./nats-password
   #   partitions: 4
+  #   shards: 8 # must match the generated manifests (default 32)
 dedupe:
   backend: pebble # Pebble under <data_dir>/pebble; or dynamodb (below)
   lease: 30s # how long a claimed id stays pending; at most 59s with the embedded mq (lease + ceil(lease) + 1s within its 2m duplicate window)

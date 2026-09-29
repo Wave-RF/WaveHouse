@@ -1,60 +1,108 @@
 package mq
 
 import (
-	"math/rand/v2"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// partitionOf agrees with the server's own {{partition(n,…)}} mapping, so a
-// later move to a server-side mapping keeps every tenant in its partition.
-func TestPartitionOf_MatchesServerMapping(t *testing.T) {
+// The table-to-(partition, shard) mapping is pinned: a change moves tables
+// on upgrade, so it must be deliberate. The values were derived apart from
+// this code (the paper's algorithm, FNV-1a 64 and splitmix64's finalizer,
+// in another language), not by running natsRoute.
+func TestNATSRoute_Golden(t *testing.T) {
 	t.Parallel()
-	const n, tenants = 8, 10_000
-	s, err := natsserver.NewServer(&natsserver.Options{Host: "127.0.0.1", Port: -1, NoSigs: true, NoLog: true})
-	require.NoError(t, err)
-	s.Start()
-	require.True(t, s.ReadyForConnections(10*time.Second))
-	t.Cleanup(s.Shutdown)
-	require.NoError(t, s.GlobalAccount().AddMapping("x.*", "x.{{partition("+strconv.Itoa(n)+",1)}}.{{wildcard(1)}}"))
-
-	nc, err := nats.Connect(s.ClientURL())
-	require.NoError(t, err)
-	t.Cleanup(nc.Close)
-	got := make(chan string, tenants)
-	_, err = nc.Subscribe("x.>", func(m *nats.Msg) { got <- m.Subject })
-	require.NoError(t, err)
-	require.NoError(t, nc.Flush())
-
-	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-	rng := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // G404: reproducible test tenants, not secrets
-	for range tenants {
-		b := make([]byte, 1+rng.IntN(tenant.MaxLen))
-		for i := range b {
-			b[i] = alphabet[rng.IntN(len(alphabet))]
+	assert.Equal(t, []int{0, 6, 87, 520}, []int{jumpHash(0, 1), jumpHash(1, 10), jumpHash(0xdeadbeef, 128), jumpHash(256, 1024)})
+	assert.Equal(t, []uint64{0, 0x5692161d100b05e5, 0x4e062702ec929eea}, []uint64{mix64(0), mix64(1), mix64(0xdeadbeef)})
+	ns, vs := []int{1, 2, 4, 7, 16, 64}, []int{1, 8, 32, 33, 100}
+	for _, tc := range []struct {
+		topic      Topic
+		partitions []int
+		shards     []int
+	}{
+		{Topic{Tenant: "0", Table: "events"}, []int{0, 1, 2, 2, 2, 2}, []int{0, 4, 29, 29, 84}},
+		{Topic{Tenant: "acme", Table: "events"}, []int{0, 0, 2, 2, 11, 11}, []int{0, 0, 22, 22, 42}},
+		{Topic{Tenant: "acme", Table: "clicks"}, []int{0, 1, 2, 6, 15, 41}, []int{0, 6, 16, 16, 33}},
+		{Topic{Tenant: "globex", Table: "a.b *>% c"}, []int{0, 1, 3, 3, 3, 63}, []int{0, 3, 3, 3, 89}},
+		{Topic{Tenant: "t-1_x", Table: "users", Scope: "ignored"}, []int{0, 0, 0, 0, 15, 27}, []int{0, 0, 22, 22, 22}},
+	} {
+		got := make([]int, len(ns))
+		for i, n := range ns {
+			got[i], _ = natsRoute(tc.topic, n, 1)
 		}
-		require.NoError(t, nc.Publish("x."+string(b), nil))
+		assert.Equal(t, tc.partitions, got, "partitions of %+v", tc.topic)
+		got = make([]int, len(vs))
+		for i, v := range vs {
+			_, got[i] = natsRoute(tc.topic, 1, v)
+		}
+		assert.Equal(t, tc.shards, got, "shards of %+v", tc.topic)
 	}
-	require.NoError(t, nc.Flush())
-	for range tenants {
-		select {
-		case subj := <-got:
-			parts := strings.SplitN(subj, ".", 3)
-			require.Len(t, parts, 3, subj)
-			id, err := tenant.Parse(parts[2])
-			require.NoError(t, err)
-			assert.Equal(t, parts[1], strconv.Itoa(partitionOf(id, n)), "tenant %s", id)
-		case <-time.After(10 * time.Second):
-			t.Fatal("timed out waiting for mapped messages")
+}
+
+// Consistent hashing, for partitions and shards alike: growing the count by
+// one moves a table only into the new bucket, and about 1/(n+1) of the
+// tables; the tables spread evenly. The shard does not depend on the
+// partition, so every partition's shards fill.
+func TestNATSRoute_Consistent(t *testing.T) {
+	t.Parallel()
+	const tables = 20_000
+	topics := make([]Topic, tables)
+	for i := range topics {
+		topics[i] = Topic{Tenant: tenant.ID("t" + strconv.Itoa(i%97)), Table: "table_" + strconv.Itoa(i)}
+	}
+	for _, n := range []int{1, 3, 4, 8, 15} {
+		movedP, movedS := 0, 0
+		countsP, countsS := make([]int, n+1), make([]int, n+1)
+		for _, topic := range topics {
+			p0, s0 := natsRoute(topic, n, n)
+			p1, s1 := natsRoute(topic, n+1, n+1)
+			countsP[p1]++
+			countsS[s1]++
+			if p0 != p1 {
+				movedP++
+				require.Equal(t, n, p1, "%+v moved to an old partition", topic)
+			}
+			if s0 != s1 {
+				movedS++
+				require.Equal(t, n, s1, "%+v moved to an old shard", topic)
+			}
 		}
+		want := float64(tables) / float64(n+1)
+		assert.InDelta(t, want, float64(movedP), want*0.1, "partitions %d→%d", n, n+1)
+		assert.InDelta(t, want, float64(movedS), want*0.1, "shards %d→%d", n, n+1)
+		for b := range n + 1 {
+			assert.InDelta(t, want, float64(countsP[b]), want*0.1, "partition %d of %d", b, n+1)
+			assert.InDelta(t, want, float64(countsS[b]), want*0.1, "shard %d of %d", b, n+1)
+		}
+	}
+	// Four shards in each of two partitions: every one of the eight holds tables.
+	cells := map[[2]int]int{}
+	for _, topic := range topics {
+		p, s := natsRoute(topic, 2, 4)
+		cells[[2]int{p, s}]++
+	}
+	assert.Len(t, cells, 8)
+	for cell, n := range cells {
+		assert.InDelta(t, tables/8, n, tables/8*0.1, "cell %v", cell)
+	}
+}
+
+func TestNATSShardDurable(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "wh-ingest-0", natsShardDurable("wh-ingest", 0))
+	assert.Equal(t, "wh-ingest-31", natsShardDurable("wh-ingest", 31))
+	for name, want := range map[string]int{"wh-ingest-0": 0, "wh-ingest-7": 7, "wh-ingest-255": 255} {
+		got, ok := parseShardDurable("wh-ingest", name)
+		assert.True(t, ok, name)
+		assert.Equal(t, want, got, name)
+	}
+	for _, name := range []string{"wh-ingest", "wh-ingest-", "wh-ingest-07", "wh-ingest-x", "wh-ingest-1-2", "other-1", "wh-ingest--1"} {
+		_, ok := parseShardDurable("wh-ingest", name)
+		assert.False(t, ok, name)
 	}
 }
 
@@ -65,11 +113,20 @@ func TestNATSSubjects_RoundTrip(t *testing.T) {
 		{Tenant: "globex", Table: "a.b *>% c", Scope: "s.1"},
 	}
 	for _, topic := range topics {
-		subj, err := natsIngestSubject("wh", 4, topic)
+		subj, p, err := natsIngestSubject("wh", 4, 8, topic)
 		require.NoError(t, err)
-		assert.True(t, strings.HasPrefix(subj, "wh.ingest."+strconv.Itoa(partitionOf(topic.Tenant, 4))+"."+string(topic.Tenant)+"."), subj)
+		wantP, wantS := natsRoute(topic, 4, 8)
+		assert.Equal(t, wantP, p)
+		assert.True(t, strings.HasPrefix(subj, "wh.ingest."+strconv.Itoa(p)+"."+strconv.Itoa(wantS)+"."+string(topic.Tenant)+"."), subj)
 		key, ok := natsTopicKey("wh", subj)
 		require.True(t, ok, subj)
+		assert.Equal(t, topic, parseTopicKey(key))
+
+		hist, err := natsHistorySubject("wh", topic)
+		require.NoError(t, err)
+		assert.Equal(t, "wh.hist."+topic.key(), hist)
+		key, ok = natsTopicKey("wh", hist)
+		require.True(t, ok, hist)
 		assert.Equal(t, topic, parseTopicKey(key))
 
 		dlq, err := natsDLQSubject("wh", topic)
@@ -83,7 +140,7 @@ func TestNATSSubjects_RoundTrip(t *testing.T) {
 
 func TestNATSSubjects_RefuseATopicWithoutATenant(t *testing.T) {
 	t.Parallel()
-	_, err := natsIngestSubject("wh", 4, Topic{Table: "events"})
+	_, _, err := natsIngestSubject("wh", 4, 8, Topic{Table: "events"})
 	require.Error(t, err)
 	_, err = natsDLQSubject("wh", Topic{Tenant: "a.b", Table: "events"})
 	require.Error(t, err)
@@ -92,8 +149,8 @@ func TestNATSSubjects_RefuseATopicWithoutATenant(t *testing.T) {
 func TestNATSTopicKey_OtherSubjects(t *testing.T) {
 	t.Parallel()
 	for _, subj := range []string{
-		"other.ingest.0.acme.events", "wh.ingest.acme.events", "wh.ingest.x.acme.events",
-		"wh.ingest.0.", "wh.ingest.0", "wh.dlq.", "wh.history.acme.events", "wh", "",
+		"other.ingest.0.1.acme.events", "wh.ingest.acme.events", "wh.ingest.x.1.acme.events", "wh.ingest.0.x.acme.events",
+		"wh.ingest.0.1.", "wh.ingest.0.1", "wh.ingest.0", "wh.dlq.", "wh.hist.", "wh.history.acme.events", "wh", "",
 	} {
 		_, ok := natsTopicKey("wh", subj)
 		assert.False(t, ok, subj)

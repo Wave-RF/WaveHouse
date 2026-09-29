@@ -27,7 +27,7 @@ func natsConfig(t *testing.T, url string) *config.Config {
 	cfg := testConfig(t, writeSettings(t, nil))
 	cfg.MQ = config.MQ{Backend: config.MQNATS, NATS: config.MQNATSConfig{
 		URLs: []string{url}, User: natstest.WaveHouseUser, PasswordFile: pw,
-		SubjectPrefix: "wh", Partitions: 4, IngestConsumer: "wh-ingest",
+		SubjectPrefix: "wh", Partitions: 4, Shards: 8, IngestConsumer: "wh-ingest",
 		ConnectTimeout: 5 * time.Second, PublishTimeout: 5 * time.Second, TopologyWait: 10 * time.Second,
 	}}
 	return cfg
@@ -59,10 +59,10 @@ func TestNew_NATSBackend(t *testing.T) {
 	go func() { done <- a.Run(ctx) }()
 	// Once the worker has bound it, the durable has a pull waiting.
 	require.Eventually(t, func() bool {
-		c, err := srv.Operator.JetStream().Consumer(ctx, "WH_INGEST_0", "wh-ingest")
+		c, err := srv.Operator.JetStream().Consumer(ctx, "WH_INGEST_0", "wh-ingest-0")
 		return err == nil && c.CachedInfo().NumWaiting > 0
 	}, 10*time.Second, 20*time.Millisecond, "the ingest worker pulls from the operator's durable")
-	require.NoError(t, srv.Operator.DeleteDurable(ctx, "wh-ingest"))
+	require.NoError(t, srv.Operator.DeleteIngestDurables(ctx))
 	err = <-done
 	require.ErrorIs(t, err, mq.ErrDeliveryEnded)
 	assert.True(t, strings.HasPrefix(err.Error(), "ingest worker: "), "the failing component names itself: %v", err)
@@ -117,4 +117,11 @@ func TestNew_NATSTopologyMissing(t *testing.T) {
 	_, err := New(t.Context(), Options{Config: cfg})
 	require.ErrorIs(t, err, mq.ErrTopology)
 	assert.ErrorContains(t, err, "dead-letter stream")
+}
+
+// config bounds mq.nats.shards by internal/mq's own bound, which it cannot
+// import.
+func TestMQNATSShards_BoundMatchesMQ(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, mq.MaxNATSShards, config.MaxNATSShards)
 }

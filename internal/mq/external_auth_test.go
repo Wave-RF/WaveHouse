@@ -55,7 +55,7 @@ func authFixture(t *testing.T, opts *natsserver.Options, admin ...nats.Option) *
 func connects(t *testing.T, url string, cfg NATSConfig) {
 	t.Helper()
 	cfg.URLs = []string{url}
-	cfg.Topology = NATSTopology{Partitions: 4}
+	cfg.Topology = NATSTopology{Partitions: 4, Shards: 8}
 	cfg.TopologyWait = 5 * time.Second
 	e, err := NewNATS(t.Context(), cfg)
 	require.NoError(t, err)

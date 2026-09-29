@@ -14,8 +14,9 @@ import (
 )
 
 // NATSTopology is what WaveHouse needs of an operator-owned JetStream: N
-// ingest partition streams with work-queue retention, each with a durable
-// pull consumer, and each republishing every row it stores to the history
+// ingest partition streams with work-queue retention, each split into V
+// shards by a subject token, with one pinned-client durable per shard, and
+// each republishing every row it stores to the history
 // stream (limits retention, for SSE replay and the live hub) under the
 // row's subject without the partition; one dead-letter stream; and,
 // for coord.backend=nats, a KV bucket holding the leases (Leases). The
@@ -27,8 +28,11 @@ type NATSTopology struct {
 	Prefix string
 	// Partitions is N, the number of ingest partition streams.
 	Partitions int
-	// IngestConsumer is the durable on every partition the ingest worker
-	// consumes.
+	// Shards is V, the shards of every partition: a table's rows are all in
+	// one shard, and each shard has a durable of its own.
+	Shards int
+	// IngestConsumer names the shard durables: shard s's on every partition
+	// is <IngestConsumer>-<s> (natsShardDurable).
 	IngestConsumer string
 	// HistoryStream names the history stream, which holds <prefix>.hist.>.
 	HistoryStream string
@@ -54,8 +58,12 @@ type NATSTopology struct {
 
 // Defaults for a NATSTopology's zero fields.
 const (
-	DefaultNATSSubjectPrefix  = "wh"
-	DefaultNATSPartitions     = 1
+	DefaultNATSSubjectPrefix = "wh"
+	DefaultNATSPartitions    = 1
+	DefaultNATSShards        = 32
+	// MaxNATSShards bounds V: the wavehouse user's permissions name every
+	// shard's durable, and each shard is a consumer (a Raft group at R3).
+	MaxNATSShards             = 256
 	DefaultNATSIngestConsumer = "wh-ingest"
 	defaultNATSPublishTimeout = 5 * time.Second
 	defaultNATSAckWait        = 60 * time.Second
@@ -70,6 +78,9 @@ func (t NATSTopology) withDefaults() NATSTopology {
 	}
 	if t.Partitions == 0 {
 		t.Partitions = DefaultNATSPartitions
+	}
+	if t.Shards == 0 {
+		t.Shards = DefaultNATSShards
 	}
 	if t.IngestConsumer == "" {
 		t.IngestConsumer = DefaultNATSIngestConsumer
@@ -99,6 +110,9 @@ func (t NATSTopology) validate() error {
 	}
 	if t.Partitions < 1 {
 		return fmt.Errorf("partitions must be at least 1, got %d", t.Partitions)
+	}
+	if t.Shards < 1 || t.Shards > MaxNATSShards {
+		return fmt.Errorf("shards must be from 1 to %d, got %d", MaxNATSShards, t.Shards)
 	}
 	if !natsBucketName.MatchString(t.coordBucket()) {
 		return fmt.Errorf("coord bucket %q must be a KV bucket name of [a-zA-Z0-9_-]", t.coordBucket())
@@ -148,10 +162,19 @@ func (t NATSTopology) dedupeDuplicateWindow() time.Duration {
 	return t.DedupeLease + ceil + time.Second
 }
 
-// partitionShare is the worker's prefetch share of one partition, at least one.
-func (t NATSTopology) partitionShare() int {
-	return max(1, t.Prefetch/t.Partitions)
-}
+// natsPriorityGroup is the one priority group of every shard durable: a
+// worker pulls a shard in it, and the server delivers to the one pinned
+// puller.
+const natsPriorityGroup = "wavehouse"
+
+// natsPullExpiry is how long one pull request of a shard waits. The server
+// renews a pin only when its holder sends a new pull, so a live idle owner
+// keeps its pin only while this is well under the durable's pinned TTL.
+const natsPullExpiry = 5 * time.Second
+
+// minPinnedTTL is the shortest pinned TTL a shard durable may have: two pull
+// expiries, so a live owner re-pulls at least once before its pin lapses.
+const minPinnedTTL = 2 * natsPullExpiry
 
 // FindingSeverity says whether a finding stops WaveHouse from serving.
 type FindingSeverity int
@@ -253,7 +276,7 @@ func verifyNATSTopology(ctx context.Context, js jetstream.JetStream, t NATSTopol
 		}
 		partitions[p] = name
 	}
-	if err := v.extraPartitions(ctx, partitions); err != nil {
+	if err := v.extras(ctx, partitions); err != nil {
 		return nil, err
 	}
 	if err := v.history(ctx); err != nil {
@@ -443,14 +466,27 @@ func (v *topologyVerifier) partition(ctx context.Context, p int) (string, error)
 		req("metadata", "says partition %s of %s; WaveHouse is configured for partition %d of %d (mq.nats.partitions must match the operator's)", gotP, gotN, p, t.Partitions)
 	}
 
-	return cfg.Name, v.durable(ctx, s, filter)
+	shards, hasV := cfg.Metadata["wavehouse.dev/shards"]
+	switch {
+	case !hasV:
+		rec("metadata", "set wavehouse.dev/shards, so a shard count mismatch is caught by name")
+	case shards != strconv.Itoa(t.Shards):
+		req("metadata", "says %s shards; WaveHouse is configured for %d (mq.nats.shards must match the operator's)", shards, t.Shards)
+	}
+	for sh := range t.Shards {
+		if err := v.durable(ctx, s, natsShardDurable(t.IngestConsumer, sh), natsShardFilter(t.Prefix, p, sh)); err != nil {
+			return "", err
+		}
+	}
+	return cfg.Name, nil
 }
 
-func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, filter string) error {
+// durable checks shard durable name on stream s, filtering on filter.
+func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, name, filter string) error {
 	t := v.t
 	stream := s.CachedInfo().Config.Name
-	obj := "consumer " + stream + "/" + t.IngestConsumer
-	c, err := s.Consumer(ctx, t.IngestConsumer)
+	obj := "consumer " + stream + "/" + name
+	c, err := s.Consumer(ctx, name)
 	if errors.Is(err, jetstream.ErrConsumerNotFound) {
 		v.add(FindingRequired, obj, "durable_name", "does not exist")
 		return nil
@@ -460,7 +496,7 @@ func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, filt
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("consumer %s/%s: %w", stream, t.IngestConsumer, err)
+		return fmt.Errorf("consumer %s/%s: %w", stream, name, err)
 	}
 	cfg := c.CachedInfo().Config
 	req := func(field, format string, args ...any) { v.add(FindingRequired, obj, field, format, args...) }
@@ -487,8 +523,8 @@ func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, filt
 	if cfg.FilterSubject != "" {
 		filters = append(filters, cfg.FilterSubject)
 	}
-	if len(filters) > 0 && !slices.Equal(filters, []string{filter}) {
-		req("filter_subject", "is %q; must be empty or %q", filters, filter)
+	if !slices.Equal(filters, []string{filter}) {
+		req("filter_subject", "is %q; must be %q, the shard's subjects", filters, filter)
 	}
 	if cfg.HeadersOnly {
 		req("headers_only", "is set; the worker needs the bodies, and acking an empty one deletes the row")
@@ -499,50 +535,122 @@ func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, filt
 	if cfg.InactiveThreshold != 0 {
 		req("inactive_threshold", "is %s; a durable must not expire", cfg.InactiveThreshold)
 	}
-	if cfg.MaxRequestBatch != 0 && cfg.MaxRequestBatch < t.partitionShare() {
-		req("max_request_batch", "is %d; must be 0 or at least %d, the worker's prefetch per partition", cfg.MaxRequestBatch, t.partitionShare())
+	if cfg.MaxRequestExpires != 0 && cfg.MaxRequestExpires < natsPullExpiry {
+		req("max_expires", "is %s; must be unset or at least %s, WaveHouse's pull expiry, or the server refuses every pull", cfg.MaxRequestExpires, natsPullExpiry)
 	}
-	if cfg.PriorityPolicy != jetstream.PriorityPolicyNone {
-		req("priority_policy", "must be none; WaveHouse assigns partitions to workers itself")
+	if cfg.MaxRequestBatch != 0 && cfg.MaxRequestBatch < t.Prefetch {
+		req("max_request_batch", "is %d; must be 0 or at least %d, the prefetch of a worker that owns this one shard", cfg.MaxRequestBatch, t.Prefetch)
+	}
+	// One puller receives at a time: the one the server pinned.
+	if cfg.PriorityPolicy != jetstream.PriorityPolicyPinned {
+		req("priority_policy", "is %s; must be pinned_client, so one worker at a time receives the shard's rows", priorityPolicyName(cfg.PriorityPolicy))
+	}
+	if !slices.Equal(cfg.PriorityGroups, []string{natsPriorityGroup}) {
+		req("priority_groups", "are %q; must be exactly [%q]", cfg.PriorityGroups, natsPriorityGroup)
+	}
+	switch {
+	case cfg.PriorityPolicy != jetstream.PriorityPolicyPinned:
+	case cfg.PinnedTTL < minPinnedTTL:
+		// The server renews a pin only on a new pull from its holder.
+		req("priority_timeout", "is %s; must be at least %s, twice WaveHouse's %s pull expiry, or a live idle owner loses its pin", cfg.PinnedTTL, minPinnedTTL, natsPullExpiry)
+	case cfg.PinnedTTL >= defaultLeaseDuration:
+		v.add(FindingRecommended, obj, "priority_timeout", "is %s; keep it under %s, the lease after which the other processes count a dead holder gone, so its pin has lapsed by then", cfg.PinnedTTL, defaultLeaseDuration)
 	}
 	return nil
 }
 
-// extraPartitions warns about streams holding ingest subjects beyond the N
-// partitions, which lowering N leaves behind. The ingest worker drains each
-// one through its durable (ExternalNATS.CreateConsumer) until the operator
-// deletes it; one without the durable has nothing to drain it.
-func (v *topologyVerifier) extraPartitions(ctx context.Context, partitions []string) error {
-	names, err := v.streamsHolding(ctx, v.t.Prefix+".ingest.>")
+// priorityPolicyName is p as the consumer config spells it.
+func priorityPolicyName(p jetstream.PriorityPolicy) string {
+	b, err := p.MarshalJSON()
+	if err != nil {
+		return strconv.Itoa(int(p))
+	}
+	if name := strings.Trim(string(b), `"`); name != "" {
+		return name
+	}
+	return "none"
+}
+
+// extras warns about shard durables outside the N×V the topology names: on
+// a stream a lower partition count left behind, or for a shard past a lower
+// shard count. The ingest workers drain each one (ExternalNATS.IngestUnits)
+// until the operator deletes it; a stream without one has nothing to drain it.
+func (v *topologyVerifier) extras(ctx context.Context, partitions []string) error {
+	units, err := findExtraUnits(ctx, v.js, v.t, partitions)
 	if err != nil {
 		return err
 	}
-	for _, name := range names {
-		if slices.Contains(partitions, name) {
+	for _, u := range units {
+		if u.durable == "" {
+			v.add(FindingRecommended, "stream "+u.stream, "subjects",
+				"holds %s.ingest subjects outside partitions 0-%d and has no shard durable %s-<s>, so nothing drains its %d rows; delete it", v.t.Prefix, v.t.Partitions-1, v.t.IngestConsumer, u.rows)
 			continue
 		}
-		s, err := v.js.Stream(ctx, name)
+		v.add(FindingRecommended, "consumer "+u.id(), "durable_name",
+			"is outside the %d partition(s) of %d shard(s) WaveHouse is configured for; the ingest workers drain its %d rows: delete it once it holds none and no process runs the old counts", v.t.Partitions, v.t.Shards, u.rows)
+	}
+	return nil
+}
+
+// natsUnit is one shard durable on one stream: what one worker at a time
+// consumes.
+type natsUnit struct {
+	stream, durable string
+	// rows is what the unit still holds: pending delivery or unacked, as
+	// last read (extras only).
+	rows uint64
+}
+
+// id is the unit's name, the same in every process.
+func (u natsUnit) id() string { return u.stream + "/" + u.durable }
+
+// findExtraUnits lists the shard durables outside the topology's N×V, on any
+// stream holding ingest subjects, and each such stream with none at all
+// (durable empty). partitions is the configured partitions' streams.
+func findExtraUnits(ctx context.Context, js jetstream.JetStream, t NATSTopology, partitions []string) ([]natsUnit, error) {
+	v := &topologyVerifier{js: js, t: t}
+	names, err := v.streamsHolding(ctx, t.Prefix+".ingest.>")
+	if err != nil {
+		return nil, err
+	}
+	var out []natsUnit
+	for _, name := range names {
+		configured := slices.Contains(partitions, name)
+		s, err := js.Stream(ctx, name)
 		if errors.Is(err, jetstream.ErrStreamNotFound) {
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("stream %s: %w", name, err)
+			return nil, fmt.Errorf("stream %s: %w", name, err)
 		}
-		rows := s.CachedInfo().State.Msgs
-		outside := fmt.Sprintf("holds %s.ingest subjects outside partitions 0-%d", v.t.Prefix, v.t.Partitions-1)
-		_, err = s.Consumer(ctx, v.t.IngestConsumer)
-		switch {
-		case errors.Is(err, jetstream.ErrConsumerNotFound), errors.Is(err, jetstream.ErrNotPullConsumer):
-			v.add(FindingRecommended, "stream "+name, "subjects",
-				"%s and has no pull durable %s, so nothing drains its %d rows; delete it", outside, v.t.IngestConsumer, rows)
-		case err != nil:
-			return fmt.Errorf("consumer %s/%s: %w", name, v.t.IngestConsumer, err)
-		default:
-			v.add(FindingRecommended, "stream "+name, "subjects",
-				"%s; the ingest worker drains its %d rows through %s: delete it once it is empty and no process runs the old partition count", outside, rows, v.t.IngestConsumer)
+		lister := s.ConsumerNames(ctx)
+		var shards []int
+		for c := range lister.Name() {
+			if sh, ok := parseShardDurable(t.IngestConsumer, c); ok && (!configured || sh >= t.Shards) {
+				shards = append(shards, sh)
+			}
+		}
+		if err := lister.Err(); err != nil {
+			return nil, fmt.Errorf("list consumers of %s: %w", name, err)
+		}
+		slices.Sort(shards)
+		if len(shards) == 0 && !configured {
+			out = append(out, natsUnit{stream: name, rows: s.CachedInfo().State.Msgs})
+		}
+		for _, sh := range shards {
+			durable := natsShardDurable(t.IngestConsumer, sh)
+			c, err := s.Consumer(ctx, durable)
+			if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrNotPullConsumer) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("consumer %s/%s: %w", name, durable, err)
+			}
+			info := c.CachedInfo()
+			out = append(out, natsUnit{stream: name, durable: durable, rows: info.NumPending + uint64(max(0, info.NumAckPending))})
 		}
 	}
-	return nil
+	return out, nil
 }
 
 func (v *topologyVerifier) history(ctx context.Context) error {

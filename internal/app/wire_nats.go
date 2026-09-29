@@ -41,6 +41,7 @@ func (a *App) wireNATSMQ(ctx context.Context) error {
 		Topology: mq.NATSTopology{
 			Prefix:         n.SubjectPrefix,
 			Partitions:     n.Partitions,
+			Shards:         n.Shards,
 			IngestConsumer: n.IngestConsumer,
 			HistoryStream:  n.HistoryStream,
 			PublishTimeout: n.PublishTimeout,

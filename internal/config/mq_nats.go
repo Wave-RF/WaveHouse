@@ -31,9 +31,12 @@ type MQNATSConfig struct {
 	TLS          MQNATSTLS `yaml:"tls"`
 	// JSDomain is the JetStream domain, for a leafnode or hub-and-spoke
 	// deployment.
-	JSDomain       string `yaml:"js_domain" env:"WH_MQ_NATS_JS_DOMAIN"`
-	SubjectPrefix  string `yaml:"subject_prefix" env:"WH_MQ_NATS_SUBJECT_PREFIX"`
-	Partitions     int    `yaml:"partitions" env:"WH_MQ_NATS_PARTITIONS"`
+	JSDomain      string `yaml:"js_domain" env:"WH_MQ_NATS_JS_DOMAIN"`
+	SubjectPrefix string `yaml:"subject_prefix" env:"WH_MQ_NATS_SUBJECT_PREFIX"`
+	Partitions    int    `yaml:"partitions" env:"WH_MQ_NATS_PARTITIONS"`
+	// Shards is how many shards each partition has, one durable each.
+	Shards int `yaml:"shards" env:"WH_MQ_NATS_SHARDS"`
+	// IngestConsumer names the shard durables: <ingest_consumer>-<shard>.
 	IngestConsumer string `yaml:"ingest_consumer" env:"WH_MQ_NATS_INGEST_CONSUMER"`
 	// HistoryStream is looked up by name; empty is <SUBJECT_PREFIX>_HISTORY,
 	// the name the generated manifests give it.
@@ -56,10 +59,14 @@ type MQNATSTLS struct {
 // (TestLoad_MQNATSDefaults pins what Load returns to it).
 func defaultMQNATS() MQNATSConfig {
 	return MQNATSConfig{
-		SubjectPrefix: "wh", Partitions: 1, IngestConsumer: "wh-ingest",
+		SubjectPrefix: "wh", Partitions: 1, Shards: 32, IngestConsumer: "wh-ingest",
 		ConnectTimeout: 5 * time.Second, PublishTimeout: 5 * time.Second, TopologyWait: time.Minute,
 	}
 }
+
+// MaxNATSShards is the largest mq.nats.shards boot accepts: internal/mq's
+// own bound, which config cannot import (internal/app pins the two together).
+const MaxNATSShards = 256
 
 // natsSubjectPrefix is internal/mq's grammar for the prefix: one subject
 // token.
@@ -84,6 +91,9 @@ func (n MQNATSConfig) validate() error {
 	}
 	if n.Partitions < 1 {
 		return fmt.Errorf("mq.nats.partitions (WH_MQ_NATS_PARTITIONS) must be at least 1, got %d", n.Partitions)
+	}
+	if n.Shards < 1 || n.Shards > MaxNATSShards {
+		return fmt.Errorf("mq.nats.shards (WH_MQ_NATS_SHARDS) must be from 1 to %d, got %d", MaxNATSShards, n.Shards)
 	}
 	if n.IngestConsumer == "" {
 		return errors.New("mq.nats.ingest_consumer (WH_MQ_NATS_INGEST_CONSUMER) must not be empty")

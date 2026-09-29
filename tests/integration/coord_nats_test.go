@@ -57,7 +57,7 @@ func TestCoordNATS_MissingBucketRefusesBoot(t *testing.T) {
 		Server:  config.Server{Port: 1, ShutdownTimeout: 1},
 		MQ: config.MQ{Backend: config.MQNATS, NATS: config.MQNATSConfig{
 			URLs: []string{srv.URL()}, User: natstest.WaveHouseUser, PasswordFile: pw,
-			SubjectPrefix: "wh", Partitions: 4, IngestConsumer: "wh-ingest",
+			SubjectPrefix: "wh", Partitions: 4, Shards: 8, IngestConsumer: "wh-ingest",
 			ConnectTimeout: 5 * time.Second, PublishTimeout: 5 * time.Second, TopologyWait: 300 * time.Millisecond,
 		}},
 		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},

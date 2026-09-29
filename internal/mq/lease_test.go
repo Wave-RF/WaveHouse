@@ -382,7 +382,7 @@ func TestNewNATS_RefusesAMissingLeaseBucket(t *testing.T) {
 
 	_, err = NewNATS(t.Context(), NATSConfig{
 		URLs: []string{f.server.ClientURL()}, User: "wavehouse", PasswordFile: writeSecret(t, fixturePassword("wavehouse")),
-		Topology:     NATSTopology{Partitions: 4, CoordBucket: natstest.CoordBucket},
+		Topology:     NATSTopology{Partitions: 4, Shards: 8, CoordBucket: natstest.CoordBucket},
 		TopologyWait: 300 * time.Millisecond,
 	})
 	var terr *TopologyError
@@ -459,7 +459,7 @@ func TestNATSPermissions_RefuseBucketChanges(t *testing.T) {
 func TestLeases_VerifierChecksTheBucket(t *testing.T) {
 	t.Parallel()
 	const obj = "kv bucket wh_coord"
-	coordSpec := NATSTopology{Partitions: 4, CoordBucket: natstest.CoordBucket}
+	coordSpec := NATSTopology{Partitions: 4, Shards: 8, CoordBucket: natstest.CoordBucket}
 	bucket := func(mut func(*jetstream.KeyValueConfig)) func(*fixtureTopology) {
 		return func(tp *fixtureTopology) { mut(&tp.KeyValues[0]) }
 	}
@@ -485,7 +485,7 @@ func TestLeases_VerifierChecksTheBucket(t *testing.T) {
 		field  string
 	}{
 		{"missing", func(tp *fixtureTopology) { tp.KeyValues = nil }, coordSpec, FindingRequired, obj, "bucket"},
-		{"named elsewhere", nil, NATSTopology{Partitions: 4, CoordBucket: "other"}, FindingRequired, "kv bucket other", "bucket"},
+		{"named elsewhere", nil, NATSTopology{Partitions: 4, Shards: 8, CoordBucket: "other"}, FindingRequired, "kv bucket other", "bucket"},
 		{"ttl", bucket(func(kv *jetstream.KeyValueConfig) { kv.TTL = time.Hour }), coordSpec, FindingRequired, obj, "ttl"},
 		{"no direct get", raw(func(s *jetstream.StreamConfig) { s.AllowDirect = false }), coordSpec, FindingRequired, obj, "allow_direct"},
 		{"keeps no value", raw(func(s *jetstream.StreamConfig) { s.MaxMsgsPerSubject = 0 }), coordSpec, FindingRequired, obj, "history"},

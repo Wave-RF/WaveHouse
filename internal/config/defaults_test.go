@@ -50,6 +50,7 @@ var zeroCases = []zeroCase{
 	// So is the mq.nats block, validated only under backend=nats.
 	{"mq.nats.subject_prefix", "WH_MQ_NATS_SUBJECT_PREFIX", "", "wh", "acme", "acme", func(c *Config) any { return c.MQ.NATS.SubjectPrefix }},
 	{"mq.nats.partitions", "WH_MQ_NATS_PARTITIONS", 0, 1, "4", 4, func(c *Config) any { return c.MQ.NATS.Partitions }},
+	{"mq.nats.shards", "WH_MQ_NATS_SHARDS", 0, 32, "8", 8, func(c *Config) any { return c.MQ.NATS.Shards }},
 	{"mq.nats.ingest_consumer", "WH_MQ_NATS_INGEST_CONSUMER", "", "wh-ingest", "ingest", "ingest", func(c *Config) any { return c.MQ.NATS.IngestConsumer }},
 	{"mq.nats.connect_timeout", "WH_MQ_NATS_CONNECT_TIMEOUT", time.Duration(0), 5 * time.Second, "2s", 2 * time.Second, func(c *Config) any { return c.MQ.NATS.ConnectTimeout }},
 	{"mq.nats.publish_timeout", "WH_MQ_NATS_PUBLISH_TIMEOUT", time.Duration(0), 5 * time.Second, "2s", 2 * time.Second, func(c *Config) any { return c.MQ.NATS.PublishTimeout }},

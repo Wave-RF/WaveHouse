@@ -149,7 +149,7 @@ func TestExternalNATS_PublishRetryStoresOnce(t *testing.T) {
 	flaky.lose.Store(publishRetries)
 	e.js = flaky
 	topic := Topic{Tenant: "acme", Table: "t"}
-	stream := shippedPartition(partitionOf(topic.Tenant, 4))
+	stream := shippedPartition(mustPartition(topic))
 
 	require.NoError(t, e.Publish(t.Context(), topic, []byte("x")))
 	require.Len(t, flaky.ids, publishRetries+1)
@@ -197,7 +197,7 @@ func TestExternalNATS_PublishesWithoutSyncAlways(t *testing.T) {
 
 	e := f.broker(t, nil)
 	topic := Topic{Tenant: "acme", Table: "t"}
-	stream := shippedPartition(partitionOf(topic.Tenant, 4))
+	stream := shippedPartition(mustPartition(topic))
 	s, err := f.admin.Stream(t.Context(), stream)
 	require.NoError(t, err)
 	require.Equal(t, 1, s.CachedInfo().Config.Replicas)
@@ -222,7 +222,7 @@ func TestExternalNATS_MissingPartitionIsUnavailable(t *testing.T) {
 	f := shippedFixture(t)
 	e := f.broker(t, func(c *NATSConfig) { c.Topology.PublishTimeout = 300 * time.Millisecond })
 	topic := Topic{Tenant: "acme", Table: "t"}
-	stream := shippedPartition(partitionOf(topic.Tenant, 4))
+	stream := shippedPartition(mustPartition(topic))
 	require.True(t, e.topologyOK.Load())
 
 	require.NoError(t, f.admin.DeleteStream(t.Context(), stream))
@@ -243,7 +243,7 @@ func TestNewNATS_RefusesAMissingTopology(t *testing.T) {
 	f.apply(t, tp)
 	_, err := NewNATS(t.Context(), NATSConfig{
 		URLs: []string{f.server.ClientURL()}, User: "wavehouse", PasswordFile: writeSecret(t, fixturePassword("wavehouse")),
-		Topology: NATSTopology{Partitions: 4}, TopologyWait: 500 * time.Millisecond,
+		Topology: NATSTopology{Partitions: 4, Shards: 8}, TopologyWait: 500 * time.Millisecond,
 	})
 	require.ErrorIs(t, err, ErrTopology)
 	var te *TopologyError
@@ -333,7 +333,7 @@ func TestExternalNATS_PublishStoredElsewhere(t *testing.T) {
 	f := shippedFixture(t)
 	e := f.broker(t, nil)
 	topic := Topic{Tenant: "acme", Table: "events"}
-	stream := shippedPartition(partitionOf(topic.Tenant, 4))
+	stream := shippedPartition(mustPartition(topic))
 	s, err := f.admin.Stream(t.Context(), stream)
 	require.NoError(t, err)
 	rogue := s.CachedInfo().Config
@@ -431,10 +431,10 @@ func TestExternalNATS_CreateConsumerChecksTheDurable(t *testing.T) {
 	_, err = e.CreateConsumer(t.Context(), ConsumerConfig{Durable: DefaultNATSIngestConsumer, AckWait: time.Minute})
 	require.NoError(t, err)
 
-	require.NoError(t, f.admin.DeleteConsumer(t.Context(), shippedPartition(0), DefaultNATSIngestConsumer))
+	require.NoError(t, f.admin.DeleteConsumer(t.Context(), shippedPartition(0), "wh-ingest-3"))
 	_, err = e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable})
 	require.ErrorIs(t, err, ErrConsumerNotFound)
-	_, err = f.admin.Consumer(t.Context(), shippedPartition(0), DefaultNATSIngestConsumer)
+	_, err = f.admin.Consumer(t.Context(), shippedPartition(0), "wh-ingest-3")
 	require.ErrorIs(t, err, jetstream.ErrConsumerNotFound, "the broker must not recreate the durable")
 }
 
@@ -477,8 +477,8 @@ func TestNATSPermissions_RefuseTopologyChanges(t *testing.T) {
 		_, err := js.CreateConsumer(ctx, partition, jetstream.ConsumerConfig{Durable: "rogue", AckPolicy: jetstream.AckExplicitPolicy})
 		return err
 	}))
-	denied("delete the ingest durable", call(ctx, func(ctx context.Context) error {
-		return js.DeleteConsumer(ctx, partition, DefaultNATSIngestConsumer)
+	denied("delete a shard durable", call(ctx, func(ctx context.Context) error {
+		return js.DeleteConsumer(ctx, partition, "wh-ingest-0")
 	}))
 	denied("forge a history row", call(ctx, func(ctx context.Context) error {
 		_, err := js.Publish(ctx, "wh.hist.acme.events", []byte("forged"))
@@ -490,7 +490,7 @@ func TestNATSPermissions_RefuseTopologyChanges(t *testing.T) {
 	h, err := f.admin.Stream(ctx, "WH_HISTORY")
 	require.NoError(t, err)
 	assert.Zero(t, h.CachedInfo().State.Msgs, "only the partitions' republish writes the history")
-	_, err = f.admin.Consumer(ctx, partition, DefaultNATSIngestConsumer)
+	_, err = f.admin.Consumer(ctx, partition, "wh-ingest-0")
 	require.NoError(t, err)
 }
 
@@ -593,7 +593,7 @@ func TestExternalNATS_DuplicateWindowCoversEveryRetry(t *testing.T) {
 	t.Parallel()
 	f := newNATSFixture(t)
 	tp := shippedTopology(t)
-	topo := NATSTopology{Partitions: 4, PublishTimeout: 30 * time.Second}
+	topo := NATSTopology{Partitions: 4, Shards: 8, PublishTimeout: 30 * time.Second}
 	for i := range 4 {
 		tp.stream(t, shippedPartition(i)).Duplicates = 2 * topo.PublishTimeout
 	}
@@ -689,51 +689,44 @@ func TestExternalNATS_CloseLogsNoWarning(t *testing.T) { //nolint:paralleltest /
 		5*time.Second, 10*time.Millisecond, "a lost server must still warn")
 }
 
-// generatedTopology is `wavehouse mq manifests --partitions n` at one replica.
-func generatedTopology(t *testing.T, n int) *fixtureTopology {
+// generatedTopology is `wavehouse mq manifests --partitions n --shards v`
+// at one replica.
+func generatedTopology(t *testing.T, n, v int) *fixtureTopology {
 	t.Helper()
 	var buf bytes.Buffer
-	require.NoError(t, WriteNATSManifests(&buf, NATSManifestOptions{Topology: NATSTopology{Partitions: n}, Replicas: 1}))
+	require.NoError(t, WriteNATSManifests(&buf, NATSManifestOptions{Topology: NATSTopology{Partitions: n, Shards: v}, Replicas: 1}))
 	path := filepath.Join(t.TempDir(), "manifests.yaml")
 	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o600))
 	return loadNATSManifests(t, path)
 }
 
-// tenantIn is a tenant whose events go to partition p of n.
-func tenantIn(t *testing.T, p, n int) tenant.ID {
-	t.Helper()
-	for i := range 1000 {
-		if id := tenant.ID("t" + strconv.Itoa(i)); partitionOf(id, n) == p {
-			return id
-		}
-	}
-	t.Fatalf("no tenant in partition %d of %d", p, n)
-	return ""
-}
-
 // Lowering N from 2 to 1 the way deployment.md says — apply the regenerated
 // manifests, roll out the smaller N while an old-N process keeps publishing —
-// loses none of partition 1's rows: the new worker drains them through
-// wh-ingest, and the operator deleting the emptied stream ends only that
-// stream's delivery.
+// loses none of partition 1's rows: the new worker drains them through its
+// shard durables, which are extra units now, and the operator deleting the
+// emptied stream ends only those units' delivery.
 func TestExternalNATS_LoweringNDrainsTheRemovedPartition(t *testing.T) { //nolint:paralleltest // captures the default logger
 	f := newNATSFixture(t)
-	f.apply(t, generatedTopology(t, 2))
+	f.apply(t, generatedTopology(t, 2, 2))
 	const removed = "WH_INGEST_1"
-	topic := Topic{Tenant: tenantIn(t, 1, 2), Table: "t"}
-	old := f.broker(t, func(c *NATSConfig) { c.Topology.Partitions = 2 })
+	topic := topicIn(t, "acme", 1, 2, 2)
+	_, shard := natsRoute(topic, 2, 2)
+	unit := removed + "/" + natsShardDurable(DefaultNATSIngestConsumer, shard)
+	old := f.broker(t, func(c *NATSConfig) { c.Topology.Partitions, c.Topology.Shards = 2, 2 })
 	before := []string{"a", "b", "c", "d", "e"}
 	for _, row := range before {
 		require.NoError(t, old.Publish(t.Context(), topic, []byte(row)))
 	}
 	require.Equal(t, uint64(len(before)), f.streamMsgs(t, removed))
 
-	require.NoError(t, generatedTopology(t, 1).Apply(t.Context(), f.admin))
-	e := f.broker(t, func(c *NATSConfig) { c.Topology.Partitions = 1 })
+	require.NoError(t, generatedTopology(t, 1, 2).Apply(t.Context(), f.admin))
+	e := f.broker(t, func(c *NATSConfig) { c.Topology.Partitions, c.Topology.Shards = 1, 2 })
+	_, extra := e.IngestUnits()
+	assert.Equal(t, []string{removed + "/wh-ingest-0", removed + "/wh-ingest-1"}, extra)
 	findings, err := verifyNATSTopology(t.Context(), e.js, e.topo)
 	require.NoError(t, err)
 	assert.True(t, slices.ContainsFunc(findings, func(got Finding) bool {
-		return got.Severity == FindingRecommended && got.Object == "stream "+removed && strings.Contains(got.Problem, "drains its 5 rows")
+		return got.Severity == FindingRecommended && got.Object == "consumer "+unit && strings.Contains(got.Problem, "drain its 5 rows")
 	}), "no finding names the removed partition's rows among %v", findings)
 
 	logs := logtest.Capture(t, slog.LevelInfo)
@@ -763,7 +756,7 @@ func TestExternalNATS_LoweringNDrainsTheRemovedPartition(t *testing.T) { //nolin
 
 	require.NoError(t, f.admin.DeleteStream(t.Context(), removed))
 	require.Eventually(t, func() bool {
-		return strings.Contains(logs.String(), "mq: stopped draining a stream outside the configured partitions")
+		return strings.Contains(logs.String(), "mq: stopped draining a shard durable outside the configured ones")
 	}, 15*time.Second, 50*time.Millisecond, "the removed partition's delivery never ended")
 	select {
 	case err := <-failed:
@@ -772,4 +765,204 @@ func TestExternalNATS_LoweringNDrainsTheRemovedPartition(t *testing.T) { //nolin
 	}
 	require.NoError(t, e.Publish(t.Context(), topic, []byte("still")))
 	require.Equal(t, "still", receive(t, got))
+}
+
+// The queue's units are every partition's shard durables, in partition then
+// shard order, and a publish lands on its table's (partition, shard).
+func TestExternalNATS_ShardUnits(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	configured, extra := e.IngestUnits()
+	require.Len(t, configured, 32)
+	assert.Equal(t, "WH_INGEST_0/wh-ingest-0", configured[0])
+	assert.Equal(t, "WH_INGEST_3/wh-ingest-7", configured[31])
+	assert.Empty(t, extra)
+
+	topic := Topic{Tenant: "acme", Table: "events"}
+	require.NoError(t, e.Publish(t.Context(), topic, []byte("x")))
+	p, s := natsRoute(topic, 4, 8)
+	c, err := f.admin.Consumer(t.Context(), shippedPartition(p), natsShardDurable("wh-ingest", s))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), c.CachedInfo().NumPending, "the row waits on its shard's durable")
+
+	_, err = e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable, Units: []string{"WH_INGEST_9/wh-ingest-0"}})
+	require.ErrorIs(t, err, ErrUnitsUnsupported)
+}
+
+// unitConsumer consumes one unit of e, sending each row's body to the
+// returned channel and acking it unless hold is set.
+func unitConsumer(t *testing.T, e *ExternalNATS, unit string, hold *atomic.Bool) (Consumer, func(), <-chan string) {
+	t.Helper()
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable, Units: []string{unit}})
+	require.NoError(t, err)
+	got := make(chan string, 64)
+	stop, _, err := c.Consume(func(m *Message) {
+		if hold == nil || !hold.Load() {
+			assert.NoError(t, m.Ack())
+		}
+		got <- string(m.Data)
+	}, 16)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	return c, stop, got
+}
+
+// Two processes pull one unit and only the pinned one receives. Release by
+// the one that never received leaves the owner's pin alone; the owner's own
+// release, after it stopped, hands the unit over at once.
+func TestExternalNATS_ReleaseUnpinsOnlyItsOwnPin(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	a, b := f.broker(t, nil), f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	unit := shippedPartition(p) + "/" + natsShardDurable("wh-ingest", s)
+
+	ca, stopA, gotA := unitConsumer(t, a, unit, nil)
+	require.NoError(t, a.Publish(t.Context(), topic, []byte("1")))
+	require.Equal(t, "1", receive(t, gotA))
+	cb, _, gotB := unitConsumer(t, b, unit, nil)
+	require.NoError(t, a.Publish(t.Context(), topic, []byte("2")))
+	require.Equal(t, "2", receive(t, gotA), "A holds the pin")
+
+	pinnedTo := func() string {
+		c, err := f.admin.Consumer(t.Context(), shippedPartition(p), natsShardDurable("wh-ingest", s))
+		require.NoError(t, err)
+		return pinnedClient(c.CachedInfo())
+	}
+	pin := pinnedTo()
+	require.NotEmpty(t, pin)
+	require.NoError(t, cb.(Releaser).Release(t.Context()))
+	assert.Equal(t, pin, pinnedTo(), "B never held the unit, so its release leaves A's pin")
+
+	stopA()
+	released := time.Now()
+	require.NoError(t, ca.(Releaser).Release(t.Context()))
+	assert.Empty(t, pinnedTo())
+	require.NoError(t, a.Publish(t.Context(), topic, []byte("3")))
+	require.Equal(t, "3", receive(t, gotB))
+	assert.Less(t, time.Since(released), 5*time.Second, "at once, not after the pinned ttl")
+}
+
+// A unit whose holder is gone with rows unacked: ResetOrphaned leaves it
+// alone while a client still holds the pin, and once none does, redelivers
+// the held rows to the next owner at once, not after ack_wait.
+func TestExternalNATS_ResetOrphaned(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	a, b := f.broker(t, nil), f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	unit := shippedPartition(p) + "/" + natsShardDurable("wh-ingest", s)
+
+	var hold atomic.Bool
+	hold.Store(true)
+	unitConsumer(t, a, unit, &hold)
+	for _, row := range []string{"x", "y"} {
+		require.NoError(t, a.Publish(t.Context(), topic, []byte(row)))
+	}
+	reset, err := b.ResetOrphaned(t.Context(), unit)
+	require.NoError(t, err)
+	assert.False(t, reset, "a live holder's rows are its own")
+
+	a.nc.Close() // A dies holding x and y
+	st, err := f.admin.Stream(t.Context(), shippedPartition(p))
+	require.NoError(t, err)
+	require.NoError(t, st.UnpinConsumer(t.Context(), natsShardDurable("wh-ingest", s), natsPriorityGroup), "stands in for the pin lapsing")
+	reset, err = b.ResetOrphaned(t.Context(), unit)
+	require.NoError(t, err)
+	require.True(t, reset)
+	_, _, gotB := unitConsumer(t, b, unit, nil)
+	assert.ElementsMatch(t, []string{"x", "y"}, []string{receive(t, gotB), receive(t, gotB)})
+
+	reset, err = b.ResetOrphaned(t.Context(), unit)
+	require.NoError(t, err)
+	assert.False(t, reset, "nothing is left unsettled")
+}
+
+// unitPin is the pin the server holds on topic's unit in the shipped topology.
+func unitPin(t *testing.T, f *natsFixture, topic Topic) string {
+	t.Helper()
+	p, s := natsRoute(topic, 4, 8)
+	c, err := f.admin.Consumer(t.Context(), shippedPartition(p), natsShardDurable("wh-ingest", s))
+	require.NoError(t, err)
+	return pinnedClient(c.CachedInfo())
+}
+
+// A consumer of every unit releases each unit it held once its stop has
+// drained, so the next process receives at once.
+func TestExternalNATS_WholeConsumerReleasesOnStop(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable})
+	require.NoError(t, err)
+	got := make(chan string, 4)
+	stop, _, err := c.Consume(func(m *Message) { assert.NoError(t, m.Ack()); got <- string(m.Data) }, 16)
+	require.NoError(t, err)
+	require.NoError(t, e.Publish(t.Context(), topic, []byte("x")))
+	require.Equal(t, "x", receive(t, got))
+	require.NotEmpty(t, unitPin(t, f, topic))
+	stop()
+	require.Eventually(t, func() bool { return unitPin(t, f, topic) == "" }, 3*time.Second, 20*time.Millisecond,
+		"released after the drain, well before the 10s pinned ttl")
+}
+
+// A consumer of every unit takes over a unit whose holder is gone with rows
+// unacked: it receives them at once, not after ack_wait.
+func TestExternalNATS_WholeConsumerTakesOrphansOver(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	a := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	var hold atomic.Bool
+	hold.Store(true)
+	_, _, gotA := unitConsumer(t, a, shippedPartition(p)+"/"+natsShardDurable("wh-ingest", s), &hold)
+	require.NoError(t, a.Publish(t.Context(), topic, []byte("held")))
+	require.Equal(t, "held", receive(t, gotA))
+	a.nc.Close()
+	st, err := f.admin.Stream(t.Context(), shippedPartition(p))
+	require.NoError(t, err)
+	require.NoError(t, st.UnpinConsumer(t.Context(), natsShardDurable("wh-ingest", s), natsPriorityGroup), "stands in for the pin lapsing")
+
+	b := f.broker(t, nil)
+	c, err := b.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable})
+	require.NoError(t, err)
+	got := make(chan string, 4)
+	began := time.Now()
+	stop, _, err := c.Consume(func(m *Message) { assert.NoError(t, m.Ack()); got <- string(m.Data) }, 16)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	require.Equal(t, "held", receive(t, got))
+	assert.Less(t, time.Since(began), 5*time.Second, "at once, not after the minute's ack_wait")
+}
+
+// A consumer whose pin was taken over since it last received leaves the new
+// holder's pin alone when it releases.
+func TestExternalNATS_ReleaseChecksThePinIsStillItsOwn(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	a, b := f.broker(t, nil), f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	unit := shippedPartition(p) + "/" + natsShardDurable("wh-ingest", s)
+	ca, stopA, gotA := unitConsumer(t, a, unit, nil)
+	require.NoError(t, a.Publish(t.Context(), topic, []byte("1")))
+	require.Equal(t, "1", receive(t, gotA))
+	stopA()
+
+	st, err := f.admin.Stream(t.Context(), shippedPartition(p))
+	require.NoError(t, err)
+	require.NoError(t, st.UnpinConsumer(t.Context(), natsShardDurable("wh-ingest", s), natsPriorityGroup))
+	_, _, gotB := unitConsumer(t, b, unit, nil)
+	require.NoError(t, b.Publish(t.Context(), topic, []byte("2")))
+	require.Equal(t, "2", receive(t, gotB))
+	pin := unitPin(t, f, topic)
+	require.NotEmpty(t, pin)
+
+	require.NoError(t, ca.(Releaser).Release(t.Context()))
+	assert.Equal(t, pin, unitPin(t, f, topic), "A's release leaves B's pin")
 }

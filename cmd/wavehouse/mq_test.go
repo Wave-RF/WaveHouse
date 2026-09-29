@@ -9,13 +9,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The shipped manifests are the generator's output for four partitions.
-// Regenerate with: go run ./cmd/wavehouse mq manifests --partitions 4 > deployments/nats/jetstream.yaml
+// The shipped manifests are the generator's output for four partitions of eight shards.
+// Regenerate with: go run ./cmd/wavehouse mq manifests --partitions 4 --shards 8 > deployments/nats/jetstream.yaml
 func TestRunMQManifests_MatchesShipped(t *testing.T) {
 	want, err := os.ReadFile("../../deployments/nats/jetstream.yaml")
 	require.NoError(t, err)
 	var out, errOut bytes.Buffer
-	require.Equal(t, 0, runMQ([]string{"manifests", "--partitions", "4"}, &out, &errOut), errOut.String())
+	require.Equal(t, 0, runMQ([]string{"manifests", "--partitions", "4", "--shards", "8"}, &out, &errOut), errOut.String())
 	assert.Equal(t, string(want), out.String(), "deployments/nats/jetstream.yaml is stale; regenerate it")
 }
 
@@ -57,4 +57,22 @@ func TestRunMQManifests_CoversTheDedupeLease(t *testing.T) {
 	var out, errOut bytes.Buffer
 	require.Equal(t, 0, runMQ([]string{"manifests", "--partitions", "1", "--dedupe-lease", "90s"}, &out, &errOut), errOut.String())
 	assert.Contains(t, out.String(), "duplicateWindow: 3m1s\n")
+}
+
+// The permissions name every shard's durable, and match what the verifier's
+// test holds the shipped values to.
+func TestRunMQPermissions(t *testing.T) {
+	var out, errOut bytes.Buffer
+	require.Equal(t, 0, runMQ([]string{"permissions", "--shards", "3", "--prefix", "acme"}, &out, &errOut), errOut.String())
+	for _, want := range []string{"$JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-2", "$JS.API.CONSUMER.UNPIN.*.wh-ingest-0", "$JS.API.CONSUMER.RESET.*.wh-ingest-1", "acme.hist.>", "_INBOX_acme.>"} {
+		assert.Contains(t, out.String(), want)
+	}
+	assert.NotContains(t, out.String(), "wh-ingest-3")
+	out.Reset()
+	errOut.Reset()
+	assert.Equal(t, 2, runMQ([]string{"permissions", "--shards", "0"}, &out, &errOut))
+	assert.Contains(t, errOut.String(), "--shards must be at least 1")
+	errOut.Reset()
+	assert.Equal(t, 1, runMQ([]string{"permissions", "--shards", "257"}, &out, &errOut))
+	assert.Contains(t, errOut.String(), "shards must be from 1 to 256")
 }

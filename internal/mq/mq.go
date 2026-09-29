@@ -13,6 +13,7 @@ package mq
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/keyenc"
@@ -135,6 +136,42 @@ func (m *Message) NakWithDelay(delay time.Duration) error {
 	return m.Nak()
 }
 
+// OnSettled arranges for fn to run once, after the first DoubleAck, Ack,
+// Nak or NakWithDelay that succeeds: the message is no longer this consumer's
+// to write. A consumer handing a shard on to another process waits for it.
+// Call it before the message is shared with another goroutine.
+func (m *Message) OnSettled(fn func()) {
+	var once sync.Once
+	settle := func(err error) error {
+		if err == nil {
+			once.Do(fn)
+		}
+		return err
+	}
+	doubleAck, ack, nak, nakDelay := m.doubleAckFn, m.ackFn, m.nakFn, m.nakDelayFn
+	m.doubleAckFn = func(ctx context.Context) error {
+		if doubleAck == nil {
+			return settle(nil)
+		}
+		return settle(doubleAck(ctx))
+	}
+	m.ackFn = func() error {
+		if ack == nil {
+			return settle(nil)
+		}
+		return settle(ack())
+	}
+	m.nakFn = func() error {
+		if nak == nil {
+			return settle(nil)
+		}
+		return settle(nak())
+	}
+	if nakDelay != nil {
+		m.nakDelayFn = func(d time.Duration) error { return settle(nakDelay(d)) }
+	}
+}
+
 // Headers carries a message's headers. It has the same map[string][]string
 // shape as NATS and HTTP headers, so it converts to either without a copy.
 // Keys are exact (case-sensitive, no canonicalization), matching nats.Header.
@@ -240,9 +277,14 @@ type Subscriber interface {
 }
 
 // ConsumerConfig describes a durable, explicit-ack consumer of every event on
-// the ingest queue. Zero values take the broker's defaults.
+// the ingest queue, or of some of its units (see Sharded). Zero values take
+// the broker's defaults.
 type ConsumerConfig struct {
 	Durable string
+	// Units limits the consumer to these units of a Sharded broker's queue,
+	// by the names IngestUnits gives. Nil is every unit. A broker that does
+	// not implement Sharded refuses a non-nil Units.
+	Units []string
 	// AckWait is the redelivery timeout: a message not acked within it is
 	// delivered again.
 	AckWait time.Duration
@@ -252,6 +294,37 @@ type ConsumerConfig struct {
 	// unit's does.
 	MaxAckPending int
 }
+
+// Sharded is implemented by a broker whose ingest queue is split into units
+// that one consumer at a time owns: every event of one tenant table is in one
+// unit, and the broker lets exactly one puller receive from a unit at a time.
+// A broker that does not implement it is one queue every consumer shares.
+type Sharded interface {
+	// IngestUnits names the units: the configured ones, in a fixed order the
+	// same in every process, then any extra ones a lower unit count left
+	// holding rows, as last read, which are drained like the others.
+	IngestUnits() (configured, extra []string)
+	// ResetOrphaned redelivers at once what a unit's previous owner received
+	// and never settled, when no consumer holds the unit and rows are
+	// awaiting a settlement, and reports whether it did. Call it before
+	// consuming a unit taken over from an owner that died, never while
+	// consuming it: a reset also redelivers what the caller itself holds.
+	ResetOrphaned(ctx context.Context, unit string) (bool, error)
+}
+
+// Releaser is implemented by a consumer of a Sharded broker's units. Release
+// gives the units up so that their next owner is served at once, rather than
+// once the broker judges this consumer gone: call it after Consume's stop,
+// once every message delivered has been settled. A unit this consumer never
+// held is left alone.
+type Releaser interface {
+	Release(ctx context.Context) error
+}
+
+// ErrUnitsUnsupported is CreateConsumer's answer to a ConsumerConfig naming
+// units on a broker that does not implement Sharded, or naming one it does
+// not have.
+var ErrUnitsUnsupported = errors.New("consumer units not supported")
 
 // Consumer is a live durable consumer created by ConsumerManager.
 type Consumer interface {
