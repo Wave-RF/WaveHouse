@@ -155,10 +155,15 @@ func (c *Config) validateNATSTopology() error {
 	if c.Coord.Backend == CoordNATS && c.MQ.Backend != MQNATS {
 		return fmt.Errorf("coord.backend=nats with mq.backend=%s: the NATS leases ride mq.nats's connection — set mq.backend=nats, or coord.backend=local", c.MQ.Backend)
 	}
-	// Only the sweeper runs under a lease today, so only a process running it
-	// needs a shared one.
-	if c.MQ.Backend == MQNATS && c.Coord.Backend == CoordLocal && c.Has(RoleSweeper) {
-		return fmt.Errorf("coord.backend=local with mq.backend=nats in a process running the sweeper: a shared queue needs a shared lease, or every replica sweeps it — set coord.backend=nats")
+	// Under nats the sweeper is not wired (retention is the operator's), so
+	// a process that runs only it would run nothing.
+	if c.MQ.Backend == MQNATS && len(c.Roles) == 1 && c.Roles[0] == RoleSweeper {
+		return fmt.Errorf("roles sweeper with mq.backend=nats: this process would run nothing, since the streams' own retention replaces the sweeper there — remove this process")
+	}
+	// Ingest processes on a shared queue share its shards through leases, so
+	// each needs the shared coordinator.
+	if c.MQ.Backend == MQNATS && c.Coord.Backend == CoordLocal && c.Has(RoleIngest) {
+		return fmt.Errorf("coord.backend=local with mq.backend=nats in a process running ingest: ingest processes share the queue's shards through shared leases — set coord.backend=nats")
 	}
 	return nil
 }

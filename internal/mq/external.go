@@ -115,10 +115,14 @@ type ExternalNATS struct {
 
 	budgets    sync.Map // tenant.ID → int64
 	budgetNote sync.Once
-	// warnedGap holds the tenants PurgeAcked has warned about.
-	warnedGap sync.Map // tenant.ID → struct{}
-	// historyMaxAge is the history stream's max_age as last read.
+	// warnedGap holds, per tenant CheckReplayWindows warned about, the gap
+	// window it warned for.
+	warnedGap sync.Map // tenant.ID → time.Duration
+	// historyMaxAge is the history stream's max_age as last read, and
+	// replayWindows the gap windows CheckReplayWindows was last given, checked
+	// again when the poll reads a different max_age.
 	historyMaxAge atomic.Int64
+	replayWindows atomic.Pointer[map[tenant.ID]time.Duration]
 
 	connected  atomic.Bool
 	topologyOK atomic.Bool
@@ -425,7 +429,11 @@ func (e *ExternalNATS) readSources(ctx context.Context) error {
 		return fmt.Errorf("history stream %s: %w", e.topo.HistoryStream, err)
 	}
 	info := s.CachedInfo()
-	e.historyMaxAge.Store(int64(info.Config.MaxAge))
+	if prev := e.historyMaxAge.Swap(int64(info.Config.MaxAge)); prev != int64(info.Config.MaxAge) {
+		if w := e.replayWindows.Load(); w != nil {
+			e.CheckReplayWindows(*w)
+		}
+	}
 	states := make([]sourceState, 0, len(info.Sources))
 	for _, src := range info.Sources {
 		states = append(states, sourceState{name: src.Name, active: src.Active, lag: src.Lag})
@@ -880,29 +888,38 @@ func (e *ExternalNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table
 
 // PurgeAcked removes nothing: the partitions delete each row once it is
 // acknowledged, and the history keeps what its max_age allows, both the
-// operator's. It warns once per tenant whose cutoff is older than the history
-// keeps — a gap window SSE replay cannot serve in full. No I/O: max_age is
-// read by the periodic source poll.
-func (e *ExternalNATS) PurgeAcked(_ context.Context, consumer string, olderThan map[tenant.ID]time.Time) (bool, error) {
+// operator's. No sweeper is wired under this broker, so nothing calls it
+// there; it is here for the Broker contract.
+func (e *ExternalNATS) PurgeAcked(_ context.Context, consumer string, _ map[tenant.ID]time.Time) (bool, error) {
 	if _, ok := e.durable(consumer); !ok {
 		return false, fmt.Errorf("consumer %q: %w", consumer, ErrConsumerNotFound)
 	}
+	return false, nil
+}
+
+// CheckReplayWindows warns for each tenant whose gap window is longer than
+// the history stream keeps: SSE replay serves only the last max_age of it.
+// It warns once per tenant and window, so calling it after every settings
+// reload repeats nothing until a window changes. No I/O: max_age is read at
+// boot and by the periodic poll, which runs the check again with the last
+// windows when max_age changes.
+func (e *ExternalNATS) CheckReplayWindows(windows map[tenant.ID]time.Duration) {
+	e.replayWindows.Store(&windows)
 	maxAge := time.Duration(e.historyMaxAge.Load())
 	if maxAge <= 0 {
-		return false, nil
+		return
 	}
-	for id, cutoff := range olderThan {
-		// The caller took its now before this call, so a window equal to
-		// max_age reads a little longer here; a second's slack keeps it quiet.
-		if time.Since(cutoff) <= maxAge+time.Second {
+	for id, window := range windows {
+		if window <= maxAge {
+			e.warnedGap.Delete(id)
 			continue
 		}
-		if _, warned := e.warnedGap.LoadOrStore(id, struct{}{}); !warned {
-			slog.Warn("mq: the nats history keeps less than this tenant's gap window; SSE replay serves only the last max_age",
-				"component", "nats", "tenant", id, "history_stream", e.topo.HistoryStream, "max_age", maxAge, "gap_window", time.Since(cutoff).Round(time.Second))
+		if prev, ok := e.warnedGap.Swap(id, window); ok && prev.(time.Duration) == window {
+			continue
 		}
+		slog.Warn("mq: the nats history keeps less than this tenant's gap window; SSE replay serves only the last max_age",
+			"component", "nats", "tenant", id, "history_stream", e.topo.HistoryStream, "max_age", maxAge, "gap_window", window)
 	}
-	return false, nil
 }
 
 // ReplaySince reads topic's events from the history stream, stored at or

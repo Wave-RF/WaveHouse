@@ -211,12 +211,12 @@ Where those values come from depends on how the binary was built:
 
 ### A process without the `api` role — the ops listener
 
-A process whose [`roles`](/configuration#process-roles) leave out `api` (an ingest or sweeper worker, possible with [`mq.backend: nats`](/deployment#external-nats)) serves only these routes on `server.port`:
+A process whose [`roles`](/configuration#process-roles) leave out `api` (an ingest worker, possible with [`mq.backend: nats`](/deployment#external-nats)) serves only these routes on `server.port`:
 
 | Route | Notes |
 | ----- | ----- |
 | `GET /livez` (and `/healthz`, `/health`) | `200` once booted. It does not wait for schema discovery, which only the API runs. |
-| `GET /readyz` (and `/ready`) | In a process running `ingest`, `200` when a ClickHouse pool answers, as above. In a `sweeper`-only process, `200` once booted. |
+| `GET /readyz` (and `/ready`) | In a process running `ingest`, `200` when a ClickHouse pool answers, as above. |
 | `GET /version` | As above. |
 | The metrics path | When `prometheus.port` is `0`. |
 | `POST /v1/ops/settings/reload` | As [below](#post-v1opssettingsreload--reload-settings-directory), but it accepts only the [operator key](#authentication): no token verifier runs without the `api` role, so an admin token is `401`. |

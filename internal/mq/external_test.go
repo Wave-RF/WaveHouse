@@ -354,28 +354,42 @@ func TestExternalNATS_Gauges(t *testing.T) { //nolint:paralleltest // sets the g
 	}
 }
 
-// PurgeAcked removes nothing, and warns once for a tenant whose gap window
-// the history cannot hold.
-func TestExternalNATS_PurgeAckedWarnsOnAShortHistory(t *testing.T) {
-	t.Parallel()
+// PurgeAcked removes nothing. CheckReplayWindows warns for a tenant whose
+// gap window the history cannot hold, once per window: the same windows warn
+// nobody again, a longer one warns anew, and a window equal to max_age fits.
+func TestExternalNATS_ReplayWindowsAgainstTheHistory(t *testing.T) { //nolint:paralleltest // captures the default logger
+	logs := logtest.Capture(t, slog.LevelWarn)
 	f := shippedFixture(t)
 	e := f.broker(t, nil)
 	maxAge := time.Duration(e.historyMaxAge.Load())
 	require.Positive(t, maxAge, "the shipped history has a max_age")
 
-	purged, err := e.PurgeAcked(t.Context(), workerDurable, map[tenant.ID]time.Time{
-		"acme":    time.Now().Add(-2 * maxAge),
-		"globex":  time.Now().Add(-time.Minute),
-		"initech": time.Now().Add(-maxAge), // a window equal to max_age, as the sweeper computes it
-	})
+	purged, err := e.PurgeAcked(t.Context(), workerDurable, map[tenant.ID]time.Time{"acme": time.Now().Add(-2 * maxAge)})
 	require.NoError(t, err)
 	assert.False(t, purged)
-	_, acme := e.warnedGap.Load(tenant.ID("acme"))
-	_, globex := e.warnedGap.Load(tenant.ID("globex"))
-	_, initech := e.warnedGap.Load(tenant.ID("initech"))
-	assert.False(t, initech, "a history exactly as long as the window holds it")
-	assert.True(t, acme)
-	assert.False(t, globex)
+	_, err = e.PurgeAcked(t.Context(), "someone-else", nil)
+	require.ErrorIs(t, err, ErrConsumerNotFound)
+
+	warned := func() int { return strings.Count(logs.String(), "keeps less than this tenant's gap window") }
+	windows := map[tenant.ID]time.Duration{"acme": 2 * maxAge, "globex": time.Minute, "initech": maxAge}
+	e.CheckReplayWindows(windows)
+	assert.Equal(t, 1, warned(), "acme only: %s", logs.String())
+	assert.Contains(t, logs.String(), `"tenant":"acme"`)
+	e.CheckReplayWindows(windows)
+	assert.Equal(t, 1, warned(), "the same window warns once")
+	windows["acme"] = 3 * maxAge
+	e.CheckReplayWindows(windows)
+	assert.Equal(t, 2, warned(), "a longer window warns again")
+
+	// The operator shortens the history: the poll checks the last windows again.
+	h, err := f.admin.Stream(t.Context(), e.topo.HistoryStream)
+	require.NoError(t, err)
+	shorter := h.CachedInfo().Config
+	shorter.MaxAge = maxAge / 2
+	_, err = f.admin.UpdateStream(t.Context(), shorter)
+	require.NoError(t, err)
+	require.NoError(t, e.readSources(t.Context()))
+	assert.Equal(t, 3, warned(), "initech's window no longer fits: %s", logs.String())
 }
 
 // CreateConsumer finds the operator's durable and holds it to the worker's

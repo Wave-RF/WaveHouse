@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/mq/natstest"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 )
 
 // natsConfig is testConfig on mq.backend: nats against url, connected as the
@@ -64,6 +66,35 @@ func TestNew_NATSBackend(t *testing.T) {
 	err = <-done
 	require.ErrorIs(t, err, mq.ErrDeliveryEnded)
 	assert.True(t, strings.HasPrefix(err.Error(), "ingest worker: "), "the failing component names itself: %v", err)
+}
+
+// Every role under mq.backend: nats wires no sweeper (retention is the
+// operator's stream policy there), and a tenant's gap window is checked
+// against what the history keeps instead, at boot and after a reload.
+func TestNew_NATSWiresNoSweeper(t *testing.T) { //nolint:paralleltest // captures the default logger
+	srv := natstest.Start(t)
+	cfg := natsConfig(t, srv.URL())
+	cfg.Roles = config.AllRoles()
+	cfg.Coord.Backend = config.CoordNATS
+	day := map[string]any{"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": 24 * 60}
+	rewriteSettings(t, cfg.Settings.Dir, map[string]any{"stream": day})
+	a := newApp(t, cfg, Options{})
+	assert.NotContains(t, componentNames(a), "sweeper")
+
+	// New's observability wiring replaced the default logger; capture after.
+	// The boot check already warned for this window, so reloading it again
+	// warns nobody: only a changed window does.
+	logs := logtest.Capture(t, slog.LevelWarn)
+	warned := func() int { return strings.Count(logs.String(), "keeps less than this tenant's gap window") }
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Zero(t, warned(), "boot checked a day's window against the shipped history already")
+
+	day["gap_window_minutes"] = 2 * 24 * 60
+	rewriteSettings(t, cfg.Settings.Dir, map[string]any{"stream": day})
+	_, adopted = a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Equal(t, 1, warned(), "a reload checks the new window")
 }
 
 // A cluster never reached within topology_wait refuses boot as unavailable.

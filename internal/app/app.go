@@ -202,7 +202,9 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	if err := a.wireCoord(ctx); err != nil {
 		return nil, err
 	}
-	if a.cfg.Has(config.RoleSweeper) {
+	// Under nats, retention is the operator's stream policy, so the sweeper
+	// has nothing to purge and is not wired.
+	if a.cfg.Has(config.RoleSweeper) && a.cfg.MQ.Backend == config.MQEmbedded {
 		a.wireSweeper()
 	}
 	if apiRole {

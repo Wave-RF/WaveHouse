@@ -9,8 +9,8 @@
 data_dir: ./data
 
 # The work this process runs; every role by default. A split (one Deployment
-# per role) needs mq.backend: nats and, wherever the sweeper runs,
-# coord.backend: nats; separate api and ingest processes also need
+# per role) needs mq.backend: nats and, wherever ingest runs,
+# coord.backend: nats (there is no sweeper under nats); separate api and ingest processes also need
 # cache.backend: redis. Boot refuses a split the backends cannot serve.
 roles: [api, ingest, sweeper]
 # Names this process: logged at boot, and a lease's holder under
@@ -76,9 +76,9 @@ dedupe:
   #   retry_mode: standard # or adaptive
   #   create_table: false # dynamodb-local only; refused without endpoint
 coord:
-  backend: local # leases (the sweeper's) held in this process
+  backend: local # leases held in this process
   # backend: nats holds them in a KV bucket on mq.nats's connection instead,
-  # and mq.backend: nats requires it in a process running the sweeper.
+  # and mq.backend: nats requires it in a process running ingest.
   # nats:
   #   bucket: wh_coord # empty = <mq.nats.subject_prefix>_coord
 

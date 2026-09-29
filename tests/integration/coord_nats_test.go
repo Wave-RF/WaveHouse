@@ -18,10 +18,10 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq/natstest"
 )
 
-// Two full replicas on one NATS elect exactly one sweeper between them
-// through the shipped lease bucket, as the restricted wavehouse user, and the
-// lease moves to the other replica when the holder stops.
-func TestCoordNATS_OneSweeperAcrossReplicas(t *testing.T) {
+// Two full replicas on one NATS, through the shipped lease bucket as the
+// restricted wavehouse user, take no sweeper lease: under nats retention is
+// the operator's streams', so no sweeper is wired.
+func TestCoordNATS_NoSweeperUnderNATS(t *testing.T) {
 	e := env(t)
 	ctx := context.Background()
 	natsURL := startNATS(t)
@@ -32,32 +32,15 @@ func TestCoordNATS_OneSweeperAcrossReplicas(t *testing.T) {
 	root, err := writeTestSettings(e.ch)
 	require.NoError(t, err)
 
-	replicas := map[string]*natsProcess{}
 	for range 2 {
-		p := bootNATSProcess(t, natsURL, root, config.AllRoles()...)
-		replicas[p.id] = p
+		bootNATSProcess(t, natsURL, root, config.AllRoles()...)
 	}
-	holder := func() string {
+	// A sweeper would campaign within coord.RetryPeriod (2s) of boot.
+	assert.Never(t, func() bool {
 		h, err := op.LeaseHolder(ctx, natstest.CoordBucket, "sweeper")
 		require.NoError(t, err)
-		return h
-	}
-	require.Eventually(t, func() bool { return replicas[holder()] != nil }, 10*time.Second, 50*time.Millisecond, "one replica is elected")
-	first := holder()
-	// The other campaigns every 2s (coord.RetryPeriod) and must not win.
-	time.Sleep(5 * time.Second)
-	require.Equal(t, first, holder(), "the elected sweeper keeps its lease while it runs")
-
-	replicas[first].stop()
-	select {
-	case err := <-replicas[first].runDone:
-		require.NoError(t, err)
-	case <-time.After(15 * time.Second):
-		t.Fatal("the holder did not stop")
-	}
-	require.Eventually(t, func() bool { h := holder(); return h != first && replicas[h] != nil }, 10*time.Second, 50*time.Millisecond,
-		"the lease moves to the other replica once the holder stops")
-	assert.NotEqual(t, first, holder())
+		return h != ""
+	}, 5*time.Second, 100*time.Millisecond, "no sweeper lease is taken under nats")
 }
 
 // The lease bucket is the operator's: boot waits for it with the rest of the
@@ -80,7 +63,7 @@ func TestCoordNATS_MissingBucketRefusesBoot(t *testing.T) {
 		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
 		Dedupe:     config.Dedupe{Backend: config.DedupePebble, Lease: 30 * time.Second, ReserveConcurrency: 64},
 		Coord:      config.Coord{Backend: config.CoordNATS},
-		Roles:      []config.Role{config.RoleSweeper},
+		Roles:      config.AllRoles(),
 		InstanceID: "boot",
 		Settings:   config.Settings{Dir: root},
 	}

@@ -43,9 +43,11 @@ func TestUnboundEnv_KnowsTheCoordNATSVariables(t *testing.T) {
 	assert.Empty(t, unboundEnv([]string{"WH_COORD_NATS_BUCKET=x"}))
 }
 
-// Rules 3 and 4 (#613): NATS leases need the NATS connection, and a
-// process sweeping a shared queue needs a shared lease. Only the sweeper runs
-// under a lease, so a process without it may keep coord.backend=local.
+// Rules 3 and 4 (#613): NATS leases need the NATS connection, and a process
+// ingesting a shared queue needs shared leases for its shards; one without
+// ingest holds no lease there, so it may keep coord.backend=local. The
+// sweeper is not wired on nats, so a process that would run only it is
+// refused.
 func TestValidate_CoordAgainstMQ(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -58,9 +60,11 @@ func TestValidate_CoordAgainstMQ(t *testing.T) {
 		{"embedded, local", MQEmbedded, CoordLocal, AllRoles(), ""},
 		{"nats, nats", MQNATS, CoordNATS, AllRoles(), ""},
 		{"rule 3: nats leases on embedded", MQEmbedded, CoordNATS, AllRoles(), "coord.backend=nats with mq.backend=embedded"},
-		{"rule 4: sweeping a shared queue on a local lease", MQNATS, CoordLocal, AllRoles(), "coord.backend=local with mq.backend=nats in a process running the sweeper"},
-		{"rule 4: a sweeper-only process", MQNATS, CoordLocal, []Role{RoleSweeper}, "set coord.backend=nats"},
-		{"rule 4 spares a process without the sweeper", MQNATS, CoordLocal, []Role{RoleAPI, RoleIngest}, ""},
+		{"rule 4: every role on a local lease", MQNATS, CoordLocal, AllRoles(), "coord.backend=local with mq.backend=nats in a process running ingest"},
+		{"rule 4: an ingest-only process", MQNATS, CoordLocal, []Role{RoleIngest}, "set coord.backend=nats"},
+		{"rule 4 spares a process without ingest", MQNATS, CoordLocal, []Role{RoleAPI}, "-"},
+		{"a sweeper-only process runs nothing on nats", MQNATS, CoordNATS, []Role{RoleSweeper}, "would run nothing"},
+		{"a sweeper-only process runs nothing, whatever the coordinator", MQNATS, CoordLocal, []Role{RoleSweeper}, "would run nothing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -69,6 +73,12 @@ func TestValidate_CoordAgainstMQ(t *testing.T) {
 			err := cfg.Validate()
 			if tc.want == "" {
 				require.NoError(t, err)
+				return
+			}
+			if tc.want == "-" { // passes rules 3 and 4; rule 5 may still refuse
+				if err != nil {
+					assert.NotContains(t, err.Error(), "coord.backend")
+				}
 				return
 			}
 			require.Error(t, err)

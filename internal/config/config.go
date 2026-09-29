@@ -178,7 +178,8 @@ const (
 	// RoleIngest runs the ingest worker, queue to ClickHouse. Every ingest
 	// process consumes the one shared durable, competing for messages.
 	RoleIngest Role = "ingest"
-	// RoleSweeper runs the sweeper, one per queue, under the sweeper lease.
+	// RoleSweeper runs the sweeper, one per queue, under the sweeper lease, on
+	// the embedded MQ only: under nats the streams' own retention replaces it.
 	RoleSweeper Role = "sweeper"
 )
 

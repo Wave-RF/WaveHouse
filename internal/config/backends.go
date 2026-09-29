@@ -160,7 +160,8 @@ func (d DedupeDynamoDBConfig) validate() error {
 	return nil
 }
 
-// CoordBackend names where leases for singleton work (the sweeper) are held.
+// CoordBackend names where leases are held: the sweeper's on the embedded
+// MQ, and the ingest processes' on a shared one.
 type CoordBackend string
 
 // CoordLocal holds leases in this process, which is enough while no other
