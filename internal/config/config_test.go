@@ -203,7 +203,7 @@ func TestValidate_SampleRatesIgnoredWhenObservabilityDisabled(t *testing.T) {
 			Logs:    OTelLogs{SampleRate: -1},
 		},
 	}
-	assert.NoError(t, cfg.Validate())
+	assert.NoError(t, withDefaultBackends(cfg).Validate())
 }
 
 func TestValidate_SampleRatesIgnoredWhenSignalDisabled(t *testing.T) {
@@ -219,7 +219,7 @@ func TestValidate_SampleRatesIgnoredWhenSignalDisabled(t *testing.T) {
 			Logs:    OTelLogs{Enabled: false, SampleRate: -1},
 		},
 	}
-	assert.NoError(t, cfg.Validate())
+	assert.NoError(t, withDefaultBackends(cfg).Validate())
 }
 
 func TestLoad_Defaults_PrometheusDisabled(t *testing.T) {
@@ -336,7 +336,7 @@ func TestValidate_PrometheusV1PathAllowedOnSidecarPort(t *testing.T) {
 		Settings:   Settings{Dir: "./settings"},
 		Prometheus: Prometheus{Enabled: true, Path: "/v1/metrics", Port: 9091},
 	}
-	assert.NoError(t, cfg.Validate())
+	assert.NoError(t, withDefaultBackends(cfg).Validate())
 }
 
 func TestValidate_PrometheusOnly_NoOTel(t *testing.T) {
@@ -348,7 +348,7 @@ func TestValidate_PrometheusOnly_NoOTel(t *testing.T) {
 		Settings:   Settings{Dir: "./settings"},
 		Prometheus: Prometheus{Enabled: true, Path: "/metrics", Port: 0},
 	}
-	assert.NoError(t, cfg.Validate())
+	assert.NoError(t, withDefaultBackends(cfg).Validate())
 }
 
 func TestValidate_PrometheusIgnoredWhenDisabled(t *testing.T) {
@@ -365,7 +365,7 @@ func TestValidate_PrometheusIgnoredWhenDisabled(t *testing.T) {
 			Port:    8080,
 		},
 	}
-	assert.NoError(t, cfg.Validate())
+	assert.NoError(t, withDefaultBackends(cfg).Validate())
 }
 
 // TestEnvSettingsDir_MatchesStructTag pins the exported constant to the

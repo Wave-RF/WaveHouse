@@ -57,76 +57,7 @@ type Dependencies struct {
 
 // NewRouter creates the chi router with all routes.
 func NewRouter(deps Dependencies) http.Handler {
-	r := chi.NewRouter()
-
-	r.Use(middleware.RequestID)
-	// No middleware.RealIP: it rewrites r.RemoteAddr from spoofable forwarded
-	// headers on every request (chi deprecated it for the IP-spoofing GHSAs),
-	// and nothing here reads RemoteAddr — WaveHouse does no per-IP logic (that's
-	// the reverse proxy's job). Trusted-proxy-aware client-IP capture for
-	// traces/logs is tracked in #333; don't re-add RealIP to get it.
-	r.Use(jsonRecoverer)
-	r.Use(corsMiddleware(corsOrigins(deps.Tenants, deps.CORSOrigins)))
-
-	// Route the chi router's own 404/405 paths through writeJSONError so
-	// hits to unknown URLs and unsupported methods carry the same JSON
-	// error contract as handler-emitted errors. Without this chi falls
-	// back to http.Error / empty bodies and the response is text/plain.
-	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSONError(w, http.StatusNotFound, "not found")
-	})
-	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-	})
-
-	metricsPath := deps.MetricsPath
-	r.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip span creation on infra/probe paths:
-			//   /v1/stream    — long-lived streams (SSE); the standard
-			//                   HTTP tracer would emit one span per stream
-			//                   that lives until the client disconnects. // TODO: do we not want this behavior?
-			//   prometheus    — scrape every ~15s would produce ~4 spans/min
-			//                   of pure infra cardinality, and creates a
-			//                   self-loop when the same backend stores both
-			//                   traces and scraped metrics.
-			//   /livez, /readyz — liveness/readiness probes (and the
-			//                   deprecated /healthz, /health, /ready aliases),
-			//                   plus the SDK's /v1/health ping, inflate span
-			//                   counts and skew latency percentiles.
-			p := r.URL.Path
-			if strings.HasPrefix(p, "/v1/stream") ||
-				p == "/livez" || p == "/readyz" ||
-				p == "/healthz" || p == "/health" || p == "/ready" ||
-				p == "/v1/health" ||
-				(metricsPath != "" && p == metricsPath) {
-				next.ServeHTTP(w, r)
-				return
-			}
-			// Normal REST tracing for everything else
-			otelhttp.NewMiddleware("wavehouse-api")(next).ServeHTTP(w, r)
-		})
-	})
-
-	// Public endpoints. /livez and /readyz are the canonical probe names
-	// (current Kubernetes convention — the kube-apiserver split that replaced
-	// the older conflated /healthz). /healthz is kept as a permanent alias of
-	// /livez (it's the most widely-recognized name); /health and /ready are
-	// deprecated aliases, kept for v0.1.x and scheduled for removal in v0.2.0
-	// (see CHANGELOG). The SDK-facing public liveness ping is /v1/health.
-	r.Get("/livez", deps.Health.Liveness)
-	r.Get("/readyz", deps.Health.Readiness)
-	r.Get("/healthz", deps.Health.Liveness) // permanent alias of /livez
-	r.Get("/health", deps.Health.Liveness)  // deprecated alias of /livez
-	r.Get("/ready", deps.Health.Readiness)  // deprecated alias of /readyz
-	r.Get("/version", deps.Version.Handle)
-
-	// Prometheus scrape endpoint — wired only when prometheus.enabled is true
-	// AND prometheus.port is 0 (mount on this router). When prometheus.port
-	// is non-zero, internal/app runs a dedicated listener instead and this is nil.
-	if deps.MetricsHandler != nil && deps.MetricsPath != "" {
-		r.Method(http.MethodGet, deps.MetricsPath, deps.MetricsHandler)
-	}
+	r := newProbeRouter(corsOrigins(deps.Tenants, deps.CORSOrigins), deps.Health, deps.Version, deps.MetricsHandler, deps.MetricsPath)
 
 	// API v1 endpoints. The JWT auth middleware always runs (no enable/disable
 	// switch) on both halves: the tenant routes, which resolve their tenant
@@ -223,6 +154,115 @@ func NewRouter(deps Dependencies) http.Handler {
 		})
 	})
 
+	return r
+}
+
+// newProbeRouter is what every listener serves, the API's and the ops-only
+// one alike: the middleware, the JSON 404/405, the probes, /version, and the
+// same-port metrics endpoint.
+func newProbeRouter(origins func(*http.Request) []string, health *HealthHandler, version *VersionHandler, metrics http.Handler, metricsPath string) chi.Router {
+	r := chi.NewRouter()
+
+	r.Use(middleware.RequestID)
+	// No middleware.RealIP: it rewrites r.RemoteAddr from spoofable forwarded
+	// headers on every request (chi deprecated it for the IP-spoofing GHSAs),
+	// and nothing here reads RemoteAddr — WaveHouse does no per-IP logic (that's
+	// the reverse proxy's job). Trusted-proxy-aware client-IP capture for
+	// traces/logs is tracked in #333; don't re-add RealIP to get it.
+	r.Use(jsonRecoverer)
+	r.Use(corsMiddleware(origins))
+
+	// Route the chi router's own 404/405 paths through writeJSONError so
+	// hits to unknown URLs and unsupported methods carry the same JSON
+	// error contract as handler-emitted errors. Without this chi falls
+	// back to http.Error / empty bodies and the response is text/plain.
+	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONError(w, http.StatusNotFound, "not found")
+	})
+	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+	})
+
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip span creation on infra/probe paths:
+			//   /v1/stream    — long-lived streams (SSE); the standard
+			//                   HTTP tracer would emit one span per stream
+			//                   that lives until the client disconnects. // TODO: do we not want this behavior?
+			//   prometheus    — scrape every ~15s would produce ~4 spans/min
+			//                   of pure infra cardinality, and creates a
+			//                   self-loop when the same backend stores both
+			//                   traces and scraped metrics.
+			//   /livez, /readyz — liveness/readiness probes (and the
+			//                   deprecated /healthz, /health, /ready aliases),
+			//                   plus the SDK's /v1/health ping, inflate span
+			//                   counts and skew latency percentiles.
+			p := r.URL.Path
+			if strings.HasPrefix(p, "/v1/stream") ||
+				p == "/livez" || p == "/readyz" ||
+				p == "/healthz" || p == "/health" || p == "/ready" ||
+				p == "/v1/health" ||
+				(metricsPath != "" && p == metricsPath) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Normal REST tracing for everything else
+			otelhttp.NewMiddleware("wavehouse-api")(next).ServeHTTP(w, r)
+		})
+	})
+
+	// Public endpoints. /livez and /readyz are the canonical probe names
+	// (current Kubernetes convention — the kube-apiserver split that replaced
+	// the older conflated /healthz). /healthz is kept as a permanent alias of
+	// /livez (it's the most widely-recognized name); /health and /ready are
+	// deprecated aliases, kept for v0.1.x and scheduled for removal in v0.2.0
+	// (see CHANGELOG). The SDK-facing public liveness ping is /v1/health.
+	r.Get("/livez", health.Liveness)
+	r.Get("/readyz", health.Readiness)
+	r.Get("/healthz", health.Liveness) // permanent alias of /livez
+	r.Get("/health", health.Liveness)  // deprecated alias of /livez
+	r.Get("/ready", health.Readiness)  // deprecated alias of /readyz
+	r.Get("/version", version.Handle)
+
+	// Prometheus scrape endpoint — wired only when prometheus.enabled is true
+	// AND prometheus.port is 0 (mount on this router). When prometheus.port
+	// is non-zero, internal/app runs a dedicated listener instead and this is nil.
+	if metrics != nil && metricsPath != "" {
+		r.Method(http.MethodGet, metricsPath, metrics)
+	}
+	return r
+}
+
+// OpsDependencies is what the ops-only listener serves: a process that runs
+// no api role still answers its probes, /version, the same-port metrics
+// endpoint, and the settings reload, so the control plane drives every
+// process's tenant tree the same way.
+type OpsDependencies struct {
+	Health  *HealthHandler
+	Version *VersionHandler
+	// Settings mounts POST /v1/ops/settings/reload.
+	Settings *SettingsHandler
+	// AuthMW authenticates the reload. It runs no token verifier (those are
+	// the api role's), so the operator key is the one credential that passes.
+	AuthMW         func(http.Handler) http.Handler
+	MetricsHandler http.Handler
+	MetricsPath    string
+}
+
+// NewOpsRouter creates the router of a process without the api role. Every
+// other route — the tenant routes and the rest of /v1/ops — answers 404: the
+// handlers behind them are not wired here. The reload is gated by the
+// operator key alone, as the ops tree is over a nested directory.
+func NewOpsRouter(deps OpsDependencies) http.Handler {
+	r := newProbeRouter(nil, deps.Health, deps.Version, deps.MetricsHandler, deps.MetricsPath)
+	if deps.Settings != nil {
+		r.Route("/v1/ops", func(r chi.Router) {
+			r.Use(deps.AuthMW)
+			r.Use(refuseUnverifiable)
+			r.Use(RequireAdmin(nil))
+			r.Post("/settings/reload", deps.Settings.Reload)
+		})
+	}
 	return r
 }
 

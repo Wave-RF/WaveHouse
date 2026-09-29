@@ -251,6 +251,20 @@ func TestIngest_PublishError_503(t *testing.T) {
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
+func TestIngest_PublishUnavailable_503(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{Err: fmt.Errorf("%w: nats: timeout", mq.ErrUnavailable)}
+	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
+
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(req))
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "5", w.Header().Get("Retry-After"))
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
 func TestIngest_PublishError_500(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{Err: errors.New("some other error")}
@@ -1052,6 +1066,20 @@ func TestIngest_NDJSON_Backpressure_503(t *testing.T) {
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.Equal(t, "30", w.Header().Get("Retry-After"))
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+func TestIngest_NDJSON_Unavailable_503(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{Err: fmt.Errorf("%w: nats: no responders", mq.ErrUnavailable)}
+	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
+
+	req := ndjsonRequest(t, "clicks", jsonLine(t, map[string]any{"page": "/a"}))
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(req))
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "5", w.Header().Get("Retry-After"))
 	testutil.AssertJSONErrorResponse(t, w)
 }
 

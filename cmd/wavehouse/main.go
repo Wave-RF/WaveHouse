@@ -174,14 +174,17 @@ func run(ctx context.Context) int {
 		return 1
 	}
 
-	// data_dir must be writable before anything dials out, so the refusal
-	// (and, for the typical cause — a bind mount owned by root rather than
-	// UID 65532 — the remediation) lands at the top of the log rather than
-	// after ClickHouse discovery. NATS and Pebble still fail loud on their
-	// own if the directory changes underneath us.
-	if err := config.CheckDataDir(cfg.DataDir); err != nil {
-		logger.Error("check data_dir", "error", err)
-		return 1
+	// data_dir, when a selected backend keeps state there, must be writable
+	// before anything dials out, so the refusal (and, for the typical cause —
+	// a bind mount owned by root rather than UID 65532 — the remediation)
+	// lands at the top of the log rather than after ClickHouse discovery.
+	// NATS and Pebble still fail loud on their own if the directory changes
+	// underneath us.
+	if cfg.NeedsDataDir() {
+		if err := config.CheckDataDir(cfg.DataDir); err != nil {
+			logger.Error("check data_dir", "error", err)
+			return 1
+		}
 	}
 
 	a, err := app.New(ctx, app.Options{

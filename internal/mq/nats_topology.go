@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,7 +16,8 @@ import (
 // NATSTopology is what WaveHouse needs of an operator-owned JetStream: N
 // ingest partition streams with interest retention, each with a durable pull
 // consumer; a history stream with limits retention that sources every
-// partition, for SSE replay and the live hub; and one dead-letter stream. The
+// partition, for SSE replay and the live hub; one dead-letter stream; and,
+// for coord.backend=nats, a KV bucket holding the leases (Leases). The
 // operator creates all of it (WriteNATSManifests renders it as nack CRs);
 // WaveHouse only checks it (verifyNATSTopology) and never repairs it.
 type NATSTopology struct {
@@ -30,9 +32,13 @@ type NATSTopology struct {
 	// so unlike the partitions and the dead-letter stream it cannot be found
 	// by subject.
 	HistoryStream string
-	// PublishTimeout bounds one publish; a partition's duplicate window must
-	// cover two of them, so a retried publish is not stored twice.
+	// PublishTimeout bounds one publish attempt; a partition's duplicate
+	// window must cover every attempt (minDuplicateWindow), so a retried
+	// publish is not stored twice.
 	PublishTimeout time.Duration
+	// CoordBucket is the KV bucket this process holds its leases in; empty
+	// when it holds none there, and then the bucket is not checked.
+	CoordBucket string
 	// AckWait, MaxAckPending and Prefetch are what the ingest worker asks of
 	// the durable (internal/ingest/worker.go, which imports this package).
 	AckWait       time.Duration
@@ -88,13 +94,39 @@ func (t NATSTopology) validate() error {
 	if t.Partitions < 1 {
 		return fmt.Errorf("partitions must be at least 1, got %d", t.Partitions)
 	}
+	if !natsBucketName.MatchString(t.coordBucket()) {
+		return fmt.Errorf("coord bucket %q must be a KV bucket name of [a-zA-Z0-9_-]", t.coordBucket())
+	}
 	return nil
+}
+
+// natsBucketName is JetStream's grammar for a KV bucket name.
+var natsBucketName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// DefaultNATSCoordBucket is the lease bucket's name for a subject prefix, as
+// the generated manifests name it: one per prefix, so deployments sharing a
+// NATS account under different prefixes never contend for one lease.
+func DefaultNATSCoordBucket(prefix string) string { return prefix + "_coord" }
+
+// coordBucket is the lease bucket: the configured one, or the prefix's.
+func (t NATSTopology) coordBucket() string {
+	if t.CoordBucket != "" {
+		return t.CoordBucket
+	}
+	return DefaultNATSCoordBucket(t.Prefix)
 }
 
 // streamName is the name the generated manifests give a stream of kind. Only
 // the history's is binding; the others are found by subject.
 func (t NATSTopology) streamName(kind string) string {
 	return strings.ToUpper(t.Prefix) + "_" + kind
+}
+
+// minDuplicateWindow is the shortest duplicate window that stores a publish
+// once however many of its attempts were stored: ExternalNATS sends the last
+// retry this long after the first attempt.
+func (t NATSTopology) minDuplicateWindow() time.Duration {
+	return (publishRetries+1)*t.PublishTimeout + publishRetries*publishRetryWait
 }
 
 // partitionShare is the worker's prefetch share of one partition, at least one.
@@ -130,6 +162,11 @@ type Finding struct {
 	Field string
 	// Problem says what is wrong and what is needed.
 	Problem string
+	// transient marks a finding that clears on its own, such as a history
+	// source re-attaching after a NATS restart (~10s): boot waits it out, and
+	// the periodic re-check reports it on its own gauge rather than as a
+	// topology fault.
+	transient bool
 }
 
 func (f Finding) String() string {
@@ -210,6 +247,11 @@ func verifyNATSTopology(ctx context.Context, js jetstream.JetStream, t NATSTopol
 	}
 	if err := v.dlq(ctx); err != nil {
 		return nil, err
+	}
+	if t.CoordBucket != "" {
+		if err := v.coordBucket(ctx); err != nil {
+			return nil, err
+		}
 	}
 	slices.SortStableFunc(v.findings, func(a, b Finding) int { return int(a.Severity) - int(b.Severity) })
 	return v.findings, nil
@@ -346,8 +388,8 @@ func (v *topologyVerifier) partition(ctx context.Context, p int) (string, error)
 	if cfg.Storage != jetstream.FileStorage {
 		req("storage", "is %s; must be file", cfg.Storage)
 	}
-	if cfg.Duplicates < 2*t.PublishTimeout {
-		req("duplicate_window", "is %s; must be at least %s (twice the publish timeout), so a retried publish is stored once", cfg.Duplicates, 2*t.PublishTimeout)
+	if cfg.Duplicates < t.minDuplicateWindow() {
+		req("duplicate_window", "is %s; must be at least %s (every attempt of a retried publish), so it is stored once", cfg.Duplicates, t.minDuplicateWindow())
 	}
 	if cfg.NoAck {
 		req("no_ack", "is set; publishes must be acknowledged")
@@ -368,9 +410,10 @@ func (v *topologyVerifier) partition(ctx context.Context, p int) (string, error)
 	if !cfg.DenyPurge || !cfg.DenyDelete {
 		rec("deny_purge", "set deny_purge and deny_delete; nothing should remove unwritten rows")
 	}
-	if cfg.Replicas < 3 {
-		rec("num_replicas", "is %d; 3 survives losing a server", cfg.Replicas)
+	if cfg.PersistMode == jetstream.AsyncPersistMode {
+		req("persist_mode", "is async; must be default, or an ack precedes the write and a crash of the server process loses unwritten rows")
 	}
+	v.replicas(obj, cfg.Replicas)
 	gotP, hasP := cfg.Metadata["wavehouse.dev/partition"]
 	gotN, hasN := cfg.Metadata["wavehouse.dev/partitions"]
 	switch {
@@ -446,17 +489,37 @@ func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, filt
 }
 
 // extraPartitions warns about streams holding ingest subjects beyond the N
-// partitions — left over from a smaller or larger N, and drained until the
-// operator deletes them.
+// partitions, which lowering N leaves behind. The ingest worker drains each
+// one through its durable (ExternalNATS.CreateConsumer) until the operator
+// deletes it; one without the durable has nothing to drain it.
 func (v *topologyVerifier) extraPartitions(ctx context.Context, partitions []string) error {
 	names, err := v.streamsHolding(ctx, v.t.Prefix+".ingest.>")
 	if err != nil {
 		return err
 	}
 	for _, name := range names {
-		if !slices.Contains(partitions, name) {
+		if slices.Contains(partitions, name) {
+			continue
+		}
+		s, err := v.js.Stream(ctx, name)
+		if errors.Is(err, jetstream.ErrStreamNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("stream %s: %w", name, err)
+		}
+		rows := s.CachedInfo().State.Msgs
+		outside := fmt.Sprintf("holds %s.ingest subjects outside partitions 0-%d", v.t.Prefix, v.t.Partitions-1)
+		_, err = s.Consumer(ctx, v.t.IngestConsumer)
+		switch {
+		case errors.Is(err, jetstream.ErrConsumerNotFound), errors.Is(err, jetstream.ErrNotPullConsumer):
 			v.add(FindingRecommended, "stream "+name, "subjects",
-				"holds %s.ingest subjects outside partitions 0-%d; delete it once it is empty if the partition count changed", v.t.Prefix, v.t.Partitions-1)
+				"%s and has no pull durable %s, so nothing drains its %d rows; delete it", outside, v.t.IngestConsumer, rows)
+		case err != nil:
+			return fmt.Errorf("consumer %s/%s: %w", name, v.t.IngestConsumer, err)
+		default:
+			v.add(FindingRecommended, "stream "+name, "subjects",
+				"%s; the ingest worker drains its %d rows through %s: delete it once it is empty and no process runs the old partition count", outside, rows, v.t.IngestConsumer)
 		}
 	}
 	return nil
@@ -500,6 +563,7 @@ func (v *topologyVerifier) history(ctx context.Context, partitions []string) err
 		j := slices.IndexFunc(info.Sources, func(si *jetstream.StreamSourceInfo) bool { return si.Name == name })
 		if j < 0 || info.Sources[j].Active < 0 {
 			req("sources", "%s is not attached yet", name)
+			v.findings[len(v.findings)-1].transient = true
 		}
 	}
 	if cfg.Retention != jetstream.LimitsPolicy {
@@ -516,6 +580,7 @@ func (v *topologyVerifier) history(ctx context.Context, partitions []string) err
 	if cfg.MaxBytes <= 0 {
 		v.add(FindingRecommended, obj, "max_bytes", "is unlimited; set it to bound the disk")
 	}
+	v.replicas(obj, cfg.Replicas)
 	return nil
 }
 
@@ -545,6 +610,66 @@ func (v *topologyVerifier) dlq(ctx context.Context) error {
 	}
 	if cfg.MaxMsgsPerSubject <= 0 {
 		v.add(FindingRecommended, obj, "max_msgs_per_subject", "set it, so one topic's parked rows evict only its own")
+	}
+	if cfg.PersistMode == jetstream.AsyncPersistMode {
+		v.add(FindingRecommended, obj, "persist_mode", "is async; a crash of the server process loses parked rows it acked")
+	}
+	v.replicas(obj, cfg.Replicas)
+	return nil
+}
+
+// replicas recommends 3 replicas for a stream holding rows. WaveHouse does
+// not require sync_always under nats: an R3 publish is acked once a quorum
+// has stored it, so with one replica an ack rests on one server's disk.
+func (v *topologyVerifier) replicas(obj string, n int) {
+	if problem, ok := replicasProblem(n); ok {
+		v.add(FindingRecommended, obj, "num_replicas", "%s", problem)
+	}
+}
+
+func replicasProblem(n int) (string, bool) {
+	switch {
+	case n <= 1:
+		return fmt.Sprintf("is %d; an ack then rests on one server's disk, and a crash loses what it stored since its last sync (sync_interval); 3 across failure domains survives losing a server", n), true
+	case n < 3:
+		return fmt.Sprintf("is %d; 3 across failure domains survives losing a server", n), true
+	}
+	return "", false
+}
+
+// coordBucket checks the KV bucket the leases live in (Leases). Its stream
+// is KV_<bucket>, which is how JetStream stores a bucket.
+func (v *topologyVerifier) coordBucket(ctx context.Context) error {
+	name := v.t.CoordBucket
+	obj := "kv bucket " + name
+	s, err := v.js.Stream(ctx, "KV_"+name)
+	if errors.Is(err, jetstream.ErrStreamNotFound) {
+		v.add(FindingRequired, obj, "bucket", "does not exist; coord.backend=nats holds its leases there")
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("kv bucket %s: %w", name, err)
+	}
+	cfg := s.CachedInfo().Config
+	req := func(field, format string, args ...any) { v.add(FindingRequired, obj, field, format, args...) }
+
+	if cfg.MaxMsgsPerSubject < 1 {
+		req("history", "is unset; a KV bucket keeps at least one value per key")
+	}
+	// The wavehouse user may read a key only by direct get.
+	if !cfg.AllowDirect {
+		req("allow_direct", "is unset; WaveHouse reads leases by direct get (a bucket nack or `nats kv add` creates has it)")
+	}
+	// A candidate judges expiry on its own clock; a key the server expires
+	// would end a live lease early.
+	if cfg.MaxAge != 0 {
+		req("ttl", "is %s; must be unset, or a live lease expires under its holder", cfg.MaxAge)
+	}
+	if cfg.Storage != jetstream.FileStorage {
+		v.add(FindingRecommended, obj, "storage", "is %s; file survives a server restart without every lease starting over", cfg.Storage)
+	}
+	if cfg.Replicas < 3 {
+		v.add(FindingRecommended, obj, "num_replicas", "is %d; 3 survives losing a server", cfg.Replicas)
 	}
 	return nil
 }

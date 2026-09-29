@@ -3,14 +3,16 @@
 # file storage, and an account holding two users —
 #   nack       the JetStream controller that applies jetstream.yaml (full access)
 #   wavehouse  WaveHouse itself, with exactly the permissions it needs: it can
-#              publish, read and consume, and cannot create, change, purge or
-#              delete a stream, nor create a durable on an ingest partition.
+#              publish, read and consume, read and write the lease keys in the
+#              coord bucket, and cannot create, change, purge or delete a
+#              stream or bucket, nor create a durable on an ingest partition.
 # Passwords come from Secrets through the container env; `<< $VAR >>` is the
 # chart's syntax for an unquoted NATS config variable.
 #
 # The wavehouse user's permissions are for the default subject prefix (wh),
-# history stream (WH_HISTORY) and ingest durable (wh-ingest). A test keeps them
-# in step with WaveHouse, and the conformance tests connect with them verbatim.
+# history stream (WH_HISTORY), ingest durable (wh-ingest) and lease bucket
+# (wh_coord). A test keeps them in step with WaveHouse, and the conformance
+# tests connect with them verbatim.
 config:
   cluster:
     enabled: true
@@ -44,6 +46,8 @@ config:
                   - $JS.API.CONSUMER.CREATE.WH_HISTORY.>
                   - $JS.API.CONSUMER.MSG.NEXT.WH_HISTORY.>
                   - $JS.API.CONSUMER.DELETE.WH_HISTORY.>
+                  - $KV.wh_coord.lease.>
+                  - $JS.API.DIRECT.GET.KV_wh_coord.$KV.wh_coord.lease.>
                 deny:
                   - $JS.API.STREAM.CREATE.>
                   - $JS.API.STREAM.UPDATE.>

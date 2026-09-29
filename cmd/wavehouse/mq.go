@@ -37,20 +37,21 @@ commands:
 }
 
 // runMQManifests implements `wavehouse mq manifests`: print the nack
-// Stream and Consumer resources for the topology WaveHouse checks at boot
+// Stream, Consumer and KeyValue resources for the topology WaveHouse checks at boot
 // under mq.backend: nats, for the operator to apply.
 func runMQManifests(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("mq manifests", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	partitions := fs.Int("partitions", mq.DefaultNATSPartitions, "number of ingest partition streams (mq.nats.partitions)")
 	prefix := fs.String("prefix", mq.DefaultNATSSubjectPrefix, "subject prefix (mq.nats.subject_prefix)")
-	replicas := fs.Int("replicas", 3, "replicas for every stream")
+	replicas := fs.Int("replicas", 3, "replicas for every stream and the lease bucket")
+	bucket := fs.String("coord-bucket", "", "the lease KV bucket (coord.nats.bucket); empty is <prefix>_coord")
 	fs.Usage = func() {
-		_, _ = fmt.Fprint(fs.Output(), `usage: wavehouse mq manifests [--partitions N] [--prefix wh] [--replicas 3]
+		_, _ = fmt.Fprint(fs.Output(), `usage: wavehouse mq manifests [--partitions N] [--prefix wh] [--replicas 3] [--coord-bucket B]
 
-Print the nack (jetstream.nats.io/v1beta2) Stream and Consumer resources for
-the JetStream topology WaveHouse needs under mq.backend: nats, as YAML for
-kubectl apply. WaveHouse never creates these itself; it checks them at boot.
+Print the nack (jetstream.nats.io/v1beta2) Stream, Consumer and KeyValue
+resources for the JetStream topology WaveHouse needs under mq.backend: nats
+and coord.backend: nats, as YAML for kubectl apply. WaveHouse never creates these itself; it checks them at boot.
 
 `)
 		fs.PrintDefaults()
@@ -71,7 +72,7 @@ kubectl apply. WaveHouse never creates these itself; it checks them at boot.
 		return 2
 	}
 	err := mq.WriteNATSManifests(stdout, mq.NATSManifestOptions{
-		Topology: mq.NATSTopology{Prefix: *prefix, Partitions: *partitions},
+		Topology: mq.NATSTopology{Prefix: *prefix, Partitions: *partitions, CoordBucket: *bucket},
 		Replicas: *replicas,
 	})
 	if err != nil {
