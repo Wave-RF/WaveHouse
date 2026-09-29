@@ -909,22 +909,6 @@ func (a *App) wireAuth() func(http.Handler) http.Handler {
 	return authn.Middleware()
 }
 
-// wireOpsAuth is the authentication of a process without the api role: the
-// operator key and nothing else. Token verifiers — and the JWKS fetches that
-// keep them — are per API process, so no token validates here and the reload
-// route admits the operator alone (api.NewOpsRouter).
-func (a *App) wireOpsAuth() func(http.Handler) http.Handler {
-	operatorKey := strings.TrimSpace(a.cfg.Auth.OperatorKey)
-	switch {
-	case operatorKey == "" && a.tenants.Nested():
-		slog.Warn("no auth.operator_key set: a process without the api role takes only the operator key on POST /v1/ops/settings/reload, and a nested settings directory has no watcher, so its settings can only be reloaded by SIGHUP")
-	case operatorKey == "":
-		slog.Warn("no auth.operator_key set: a process without the api role takes only the operator key on POST /v1/ops/settings/reload, so its settings can only be reloaded by SIGHUP or the directory watcher")
-	}
-	authn := auth.NewAuthenticator(auth.Config{OperatorKey: operatorKey}, nil, nil)
-	return authn.Middleware()
-}
-
 // wireReloadTriggers adds SIGHUP and the directory watcher. All three
 // triggers (these two and POST /v1/ops/settings/reload) funnel into the same
 // serialized Registry.Reload, and a rejected reload keeps the previous good
@@ -1038,26 +1022,6 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	deps.MetricsHandler, deps.MetricsPath = a.inlineMetrics()
 	a.handler = api.NewRouter(deps)
 	a.wireServers(func() { close(closing) })
-}
-
-// wireOpsHTTP serves the ops-only router of a process without the api role:
-// the probes, /version, the metrics endpoint, and the settings reload.
-// Readiness pings the ClickHouse pools when the process has them (the ingest
-// role); a sweeper-only process is ready once booted.
-func (a *App) wireOpsHTTP(authMW func(http.Handler) http.Handler) {
-	health := api.NewHealthHandler(nil)
-	if a.pools != nil {
-		health.Ping = a.pools.Ping
-	}
-	deps := api.OpsDependencies{
-		Health:   health,
-		Version:  api.NewVersionHandler(a.build.Version, a.build.GitCommit, a.build.BuildTime),
-		Settings: api.NewSettingsHandler(a.tenants),
-		AuthMW:   authMW,
-	}
-	deps.MetricsHandler, deps.MetricsPath = a.inlineMetrics()
-	a.handler = api.NewOpsRouter(deps)
-	a.wireServers(nil)
 }
 
 // inlineMetrics is the metrics endpoint to mount on the main router: with
