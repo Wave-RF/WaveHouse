@@ -144,9 +144,17 @@ type fakeProc struct {
 	failCreate atomic.Pointer[string]
 	// failWith, when set, is the error binding failCreate's unit returns.
 	failWith error
+	// extra, when set, is this process's own list of extras, as a process
+	// that last refreshed it at another time than the others would have.
+	extra []string
 }
 
-func (p *fakeProc) IngestUnits() ([]string, []string) { return p.f.units, p.f.extra }
+func (p *fakeProc) IngestUnits() ([]string, []string) {
+	if p.extra != nil {
+		return p.f.units, p.extra
+	}
+	return p.f.units, p.f.extra
+}
 
 func (p *fakeProc) ResetOrphaned(_ context.Context, unit string) (bool, error) {
 	p.f.mu.Lock()
@@ -235,7 +243,11 @@ func fastClaims(cfg ClaimConfig) ClaimConfig {
 
 func startClaims(t *testing.T, f *fakeShards, c *coord.Local, name string, cfg ClaimConfig, handler func(*mq.Message)) *claimProc {
 	t.Helper()
-	p := &fakeProc{f: f, name: name}
+	return startClaimsAs(t, &fakeProc{f: f, name: name}, c, cfg, handler)
+}
+
+func startClaimsAs(t *testing.T, p *fakeProc, c *coord.Local, cfg ClaimConfig, handler func(*mq.Message)) *claimProc {
+	t.Helper()
 	q, err := ClaimShards(p, c, fastClaims(cfg))
 	require.NoError(t, err)
 	cons, err := q.CreateConsumer(t.Context(), mq.ConsumerConfig{Durable: BufferConsumerName})
@@ -783,4 +795,33 @@ func TestClaims_MissingDurableEndsDelivery(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a missing durable did not end delivery")
 	}
+}
+
+// Processes whose lists of extras differ (each refreshes it on its own
+// timer) still agree on every configured unit: each has exactly one owner,
+// and nothing is handed back and forth.
+func TestClaims_DifferingExtrasLeaveConfiguredUnitsAlone(t *testing.T) {
+	t.Parallel()
+	f, c := newFakeShards(32), coord.NewLocal()
+	procs := []*claimProc{startClaimsAs(t, &fakeProc{f: f, name: "p0", extra: []string{"X/a", "X/b", "X/c"}}, c, ClaimConfig{}, nil)}
+	for i := 1; i < 5; i++ {
+		procs = append(procs, startClaims(t, f, c.Peer(), fmt.Sprintf("p%d", i), ClaimConfig{}, nil))
+	}
+	oneEach := func() bool {
+		owners := f.owners()
+		for _, u := range f.units {
+			if len(owners[u]) != 1 {
+				return false
+			}
+		}
+		return true
+	}
+	require.Eventually(t, oneEach, 5*time.Second, 10*time.Millisecond, "%v", f.owners())
+	settled := len(f.eventLog())
+	time.Sleep(300 * time.Millisecond) // several ticks
+	assert.True(t, oneEach(), "%v", f.owners())
+	for _, e := range f.eventLog()[settled:] {
+		assert.NotContains(t, e, " S/u-", "a configured unit moved once settled: %s", e)
+	}
+	noFailure(t, procs...)
 }

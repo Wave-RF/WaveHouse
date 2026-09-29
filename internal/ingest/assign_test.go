@@ -2,7 +2,6 @@ package ingest
 
 import (
 	"fmt"
-	"maps"
 	"math/rand/v2"
 	"slices"
 	"testing"
@@ -118,19 +117,3 @@ func TestAssignUnits_Golden(t *testing.T) {
 // goldenOwners was derived apart from this code, by the same algorithm in
 // another language (FNV-1a 64, splitmix64's finalizer, capped rendezvous).
 var goldenOwners = []int{1, 0, 0, 0, 1, 1, 1, 2, 2, 2, 0, 0, 0, 2, 2, 2, 0, 1, 0, 1, 0, 2, 0, 1, 1, 1, 2, 0, 2, 1, 1, 2}
-
-// Extras are assigned apart from the configured units, so a process that
-// lists one extra more or less than another agrees with it on every
-// configured unit's owner.
-func TestClaims_ExtrasNeverMoveConfiguredUnits(t *testing.T) {
-	t.Parallel()
-	units, slots := unitNames(32), slotsUpTo(5)
-	without := assignUnits(units, slots)
-	for _, extras := range [][]string{{"X/a"}, {"X/a", "X/b", "X/c"}} {
-		with := assignUnits(units, slots)
-		maps.Copy(with, assignUnits(extras, slots))
-		for _, u := range units {
-			assert.Equal(t, without[u], with[u], "%s with extras %v", u, extras)
-		}
-	}
-}
