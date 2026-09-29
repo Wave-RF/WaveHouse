@@ -13,7 +13,6 @@ package mq
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/keyenc"
@@ -134,42 +133,6 @@ func (m *Message) NakWithDelay(delay time.Duration) error {
 		return m.nakDelayFn(delay)
 	}
 	return m.Nak()
-}
-
-// OnSettled arranges for fn to run once, after the first DoubleAck, Ack,
-// Nak or NakWithDelay, whether or not the broker confirms it: the consumer
-// has let go of the message either way, and one it failed to settle comes
-// back from the broker as a new delivery. A consumer handing a shard on to
-// another process waits for it, and one that caps the messages it holds
-// frees a slot. Call it before the message is shared with another goroutine.
-func (m *Message) OnSettled(fn func()) {
-	var once sync.Once
-	settle := func(err error) error {
-		once.Do(fn)
-		return err
-	}
-	doubleAck, ack, nak, nakDelay := m.doubleAckFn, m.ackFn, m.nakFn, m.nakDelayFn
-	m.doubleAckFn = func(ctx context.Context) error {
-		if doubleAck == nil {
-			return settle(nil)
-		}
-		return settle(doubleAck(ctx))
-	}
-	m.ackFn = func() error {
-		if ack == nil {
-			return settle(nil)
-		}
-		return settle(ack())
-	}
-	m.nakFn = func() error {
-		if nak == nil {
-			return settle(nil)
-		}
-		return settle(nak())
-	}
-	if nakDelay != nil {
-		m.nakDelayFn = func(d time.Duration) error { return settle(nakDelay(d)) }
-	}
 }
 
 // Headers carries a message's headers. It has the same map[string][]string

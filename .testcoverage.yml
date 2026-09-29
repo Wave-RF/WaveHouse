@@ -124,6 +124,11 @@ exclude:
       # The mq.nats block's checks, as cache_redis.go above: boot adopts the
       # embedded fixture, so e2e never reads it.
       - ^internal/config/mq_nats\.go$
+      # The ingest processes' shard claims, which run only over the external
+      # broker's shards: the unit suite covers them with a fake queue, and
+      # the integration suite against NATS.
+      - ^internal/ingest/(claims|assign)\.go$
+      - ^internal/mq/settle\.go$
     unit:
       # The external NATS broker's tests start a server per case, which the
       # unit suite's 15s per package cannot hold: they are integration-tagged
