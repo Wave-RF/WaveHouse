@@ -120,7 +120,8 @@ Boot logs each of these at `WARN` rather than refusing. The first two are right 
 - **`mq.backend=nats` with `cache.backend=local`**, in a process running `api`: an event ingested on another replica never invalidates this one's cache, so its reads stay stale until the cached entry expires.
 - **`mq.backend=nats` with `dedupe.backend=pebble`**, in a process running `api`: an id seen by another replica is not seen by this one.
 - **`mq.backend=nats`**: `mq.max_bytes_gb` is not applied (above).
-- **`mq.nats` set with `mq.backend=embedded`**, **`coord.nats` set with `coord.backend=local`**, or **`cache.redis.addrs` set with `cache.backend=local`**: the block is ignored.
+- **`mq.nats` set with `mq.backend=embedded`**, or **`coord.nats` set with `coord.backend=local`**: the block is ignored.
+- **`cache.redis.addrs` set with `cache.backend=local`**, in a process running `api`: the block is ignored.
 - **`cache.redis.tls.insecure_skip_verify` on**, in a process running `api`: the cache accepts any certificate (see [Cache](#cache)).
 - **`mq.backend=nats` and a tenant with dedupe on whose finite `dedupe.retention` is under the partitions' `duplicate_window`**, in a process running `api`, at boot and after every reload: see [Deployment → Create the topology](/deployment#create-the-topology).
 

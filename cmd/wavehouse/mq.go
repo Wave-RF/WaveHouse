@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 )
 
@@ -46,8 +47,9 @@ func runMQManifests(args []string, stdout, stderr io.Writer) int {
 	prefix := fs.String("prefix", mq.DefaultNATSSubjectPrefix, "subject prefix (mq.nats.subject_prefix)")
 	replicas := fs.Int("replicas", 3, "replicas for every stream and the lease bucket")
 	bucket := fs.String("coord-bucket", "", "the lease KV bucket (coord.nats.bucket); empty is <prefix>_coord")
+	lease := fs.Duration("dedupe-lease", dedupe.DefaultLease, "the dedupe.lease the partitions' duplicate window must cover")
 	fs.Usage = func() {
-		_, _ = fmt.Fprint(fs.Output(), `usage: wavehouse mq manifests [--partitions N] [--prefix wh] [--replicas 3] [--coord-bucket B]
+		_, _ = fmt.Fprint(fs.Output(), `usage: wavehouse mq manifests [--partitions N] [--prefix wh] [--replicas 3] [--coord-bucket B] [--dedupe-lease 30s]
 
 Print the nack (jetstream.nats.io/v1beta2) Stream, Consumer and KeyValue
 resources for the JetStream topology WaveHouse needs under mq.backend: nats
@@ -67,12 +69,16 @@ and coord.backend: nats, as YAML for kubectl apply. WaveHouse never creates thes
 		fs.Usage()
 		return 2
 	}
+	if *lease < 0 {
+		_, _ = fmt.Fprintf(stderr, "wavehouse mq manifests: --dedupe-lease must not be negative\n")
+		return 2
+	}
 	if *replicas < 1 {
 		_, _ = fmt.Fprintf(stderr, "wavehouse mq manifests: --replicas must be at least 1\n")
 		return 2
 	}
 	err := mq.WriteNATSManifests(stdout, mq.NATSManifestOptions{
-		Topology: mq.NATSTopology{Prefix: *prefix, Partitions: *partitions, CoordBucket: *bucket},
+		Topology: mq.NATSTopology{Prefix: *prefix, Partitions: *partitions, CoordBucket: *bucket, DedupeLease: *lease},
 		Replicas: *replicas,
 	})
 	if err != nil {

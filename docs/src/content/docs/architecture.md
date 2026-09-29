@@ -45,7 +45,7 @@ flowchart TD
 
 ## Binaries
 
-WaveHouse ships a single binary, `wavehouse`: an all-in-one process running the API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup. The only external dependency is ClickHouse, unless `mq.backend: nats` points the queue at a NATS cluster the operator runs, which lets several processes, each running some of the [roles](/configuration#process-roles), share it. `cmd/wavehouse` is the shell — subcommand dispatch, the logger, `config.Load`, the signal context — and `internal/app` is the process itself (see [`app/`](#app--process-wiring) below).
+WaveHouse ships a single binary, `wavehouse`: an all-in-one process running the API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup. The only external dependency is ClickHouse, unless a shared backend is selected: `cache.backend: redis`, `dedupe.backend: dynamodb`, or `mq.backend: nats`, which points the queue at a NATS cluster the operator runs and lets several processes, each running some of the [roles](/configuration#process-roles), share it. `cmd/wavehouse` is the shell — subcommand dispatch, the logger, `config.Load`, the signal context — and `internal/app` is the process itself (see [`app/`](#app--process-wiring) below).
 
 ## Internal Packages
 

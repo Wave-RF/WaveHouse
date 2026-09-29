@@ -221,7 +221,7 @@ A process whose [`roles`](/configuration#process-roles) leave out `api` (an inge
 | The metrics path | When `prometheus.port` is `0`. |
 | `POST /v1/ops/settings/reload` | As [below](#post-v1opssettingsreload--reload-settings-directory), but it accepts only the [operator key](#authentication): no token verifier runs without the `api` role, so an admin token is `401`. |
 
-Every other route answers `404`, including every tenant route. Under `/v1/ops`, the operator-key check comes first, so a request without the key gets `403` there instead.
+Every other route answers `404`, including every tenant route. Under `/v1/ops`, the operator-key check comes first, so a request there gets `403` without a credential, and `401` for a bearer token.
 
 ---
 

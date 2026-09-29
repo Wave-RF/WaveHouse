@@ -43,7 +43,7 @@ func TestUnboundEnv_KnowsTheCoordNATSVariables(t *testing.T) {
 	assert.Empty(t, unboundEnv([]string{"WH_COORD_NATS_BUCKET=x"}))
 }
 
-// Rules 3 and 4 (#613 core G.3): NATS leases need the NATS connection, and a
+// Rules 3 and 4 (#613): NATS leases need the NATS connection, and a
 // process sweeping a shared queue needs a shared lease. Only the sweeper runs
 // under a lease, so a process without it may keep coord.backend=local.
 func TestValidate_CoordAgainstMQ(t *testing.T) {

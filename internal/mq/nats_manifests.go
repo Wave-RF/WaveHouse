@@ -154,7 +154,7 @@ func natsManifestObjects(o NATSManifestOptions) []nackObject {
 				MaxMsgsPerSubject: o.MaxMsgsPerSubject,
 				Storage:           "file",
 				Replicas:          o.Replicas,
-				DuplicateWindow:   nackDuration(max(2*time.Minute, t.minDuplicateWindow())),
+				DuplicateWindow:   nackDuration(max(2*time.Minute, t.minDuplicateWindow(), t.dedupeDuplicateWindow())),
 				DenyPurge:         true,
 				DenyDelete:        true,
 				Metadata: map[string]string{

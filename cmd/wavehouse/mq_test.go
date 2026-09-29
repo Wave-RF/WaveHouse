@@ -34,6 +34,7 @@ func TestRunMQ_ExitCodes(t *testing.T) {
 		"bad prefix":        {[]string{"manifests", "--prefix", "a.b"}, 1},
 		"bad partitions":    {[]string{"manifests", "--partitions", "-1"}, 1},
 		"bad coord bucket":  {[]string{"manifests", "--coord-bucket", "a.b"}, 1},
+		"negative lease":    {[]string{"manifests", "--dedupe-lease", "-1s"}, 2},
 		"defaults generate": {[]string{"manifests"}, 0},
 	}
 	for name, tc := range cases {
@@ -48,4 +49,12 @@ func TestRunMQManifests_NamesTheLeaseBucket(t *testing.T) {
 	var out, errOut bytes.Buffer
 	require.Equal(t, 0, runMQ([]string{"manifests", "--prefix", "acme", "--coord-bucket", "acme_leases"}, &out, &errOut), errOut.String())
 	assert.Contains(t, out.String(), "kind: KeyValue\nmetadata:\n  name: acme-coord\nspec:\n  bucket: acme_leases\n")
+}
+
+// A lease past the shipped 2m window's reach widens every partition's window
+// to cover it (90s + 90s + 1s), so the manifests pass the boot check.
+func TestRunMQManifests_CoversTheDedupeLease(t *testing.T) {
+	var out, errOut bytes.Buffer
+	require.Equal(t, 0, runMQ([]string{"manifests", "--partitions", "1", "--dedupe-lease", "90s"}, &out, &errOut), errOut.String())
+	assert.Contains(t, out.String(), "duplicateWindow: 3m1s\n")
 }
