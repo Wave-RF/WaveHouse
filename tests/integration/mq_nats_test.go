@@ -66,7 +66,7 @@ func bootNATSProcess(t *testing.T, natsURL, root string, roles ...config.Role) *
 			ConnectTimeout: 5 * time.Second, PublishTimeout: 5 * time.Second, TopologyWait: 30 * time.Second,
 		}},
 		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
-		Dedupe:     config.Dedupe{Backend: config.DedupePebble},
+		Dedupe:     config.Dedupe{Backend: config.DedupePebble, Lease: 30 * time.Second, ReserveConcurrency: 64},
 		Coord:      config.Coord{Backend: config.CoordNATS},
 		Roles:      roles,
 		InstanceID: fmt.Sprintf("proc-%d", natsProcesses.Add(1)),

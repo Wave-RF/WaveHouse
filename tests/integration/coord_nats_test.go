@@ -78,7 +78,7 @@ func TestCoordNATS_MissingBucketRefusesBoot(t *testing.T) {
 			ConnectTimeout: 5 * time.Second, PublishTimeout: 5 * time.Second, TopologyWait: 300 * time.Millisecond,
 		}},
 		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
-		Dedupe:     config.Dedupe{Backend: config.DedupePebble},
+		Dedupe:     config.Dedupe{Backend: config.DedupePebble, Lease: 30 * time.Second, ReserveConcurrency: 64},
 		Coord:      config.Coord{Backend: config.CoordNATS},
 		Roles:      []config.Role{config.RoleSweeper},
 		InstanceID: "boot",
