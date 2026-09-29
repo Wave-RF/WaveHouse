@@ -744,3 +744,13 @@ func TestClaims_StopCutsHandoversShort(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	assert.Equal(t, int64(4), received.Load(), "the waiting deliveries never reached the handler")
 }
+
+// Membership slots are capped: a queue of many units still reads at most
+// maxMembers leases a tick.
+func TestClaims_MembershipSlotsCapped(t *testing.T) {
+	t.Parallel()
+	f := newFakeShards(3 * maxMembers)
+	p := startClaims(t, f, coord.NewLocal(), "a", ClaimConfig{}, nil)
+	require.Eventually(t, func() bool { return f.split("a") }, 10*time.Second, 10*time.Millisecond)
+	assert.Equal(t, maxMembers, p.loop.slots)
+}

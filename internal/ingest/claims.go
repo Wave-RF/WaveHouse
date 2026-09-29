@@ -27,8 +27,9 @@ import (
 // balanced.
 //
 // Membership. Each process holds one lease, "ingest.m<j>" for the lowest free
-// j below the number of configured units, and every tick reads which slots
-// are live (coord.Observer). A process without a slot idles.
+// j below the number of configured units (at most maxMembers), and every tick
+// reads which slots are live (coord.Observer). A process without a slot
+// idles.
 //
 // Assignment. Every process computes the same owner for every unit from the
 // live slots (assignUnits: rendezvous hashing capped at an even share), and
@@ -68,6 +69,11 @@ const (
 	tickTimeout = 10 * time.Second
 	// releaseWait bounds a lease resign or a unit's release.
 	releaseWait = 5 * time.Second
+	// maxMembers caps the membership slots, and so the ingest processes that
+	// get work, whatever the unit count: every tick reads every slot.
+	maxMembers = 64
+	// membershipReaders is how many slots a tick reads at once.
+	membershipReaders = 16
 	// orphanWait bounds how long a unit taken over waits for its dead
 	// owner's pin to lapse before it is bound anyway: past it, whoever holds
 	// the pin is alive, and the broker's pin decides.
@@ -175,7 +181,7 @@ func (c *claimingConsumer) Consume(handler func(*mq.Message), prefetch int) (fun
 	loopCtx, cancel := context.WithCancel(context.WithoutCancel(c.ctx))
 	l := &claimLoop{
 		q: c.q, ctx: loopCtx, cancel: cancel, cfg: c.cfg, handler: handler, prefetch: prefetch,
-		slots: len(configured), configured: map[string]bool{},
+		slots: min(len(configured), maxMembers), configured: map[string]bool{},
 		owned: map[string]*claim{}, releasing: map[string]struct{}{}, orphaned: map[string]time.Time{},
 		held:   newHeldRows(c.q.cfg.MaxHeld),
 		failed: make(chan error, 1), quit: make(chan struct{}), done: make(chan struct{}),
@@ -279,21 +285,17 @@ func (l *claimLoop) tick() {
 	if l.member == nil {
 		l.joinMembers(ctx)
 	}
-	var live []int
-	for j := range l.slots {
-		held, err := l.q.obs.Held(ctx, memberLease(j))
-		if err != nil {
-			l.warn("ingest: could not read the shard claim membership", err)
-			return
-		}
-		if held {
-			live = append(live, j)
-		}
+	live, err := l.readMembers(ctx)
+	if err != nil {
+		l.warn("ingest: could not read the shard claim membership", err)
+		return
 	}
 	l.membersGauge.Store(int64(len(live)))
+	// Apart, so processes whose lists of extras differ for a while (each
+	// refreshes it on its own timer) still agree on the configured units.
 	configured, extra := l.q.sq.IngestUnits()
-	units := slices.Concat(configured, extra)
-	assignment := assignUnits(units, live)
+	assignment := assignUnits(configured, live)
+	maps.Copy(assignment, assignUnits(extra, live))
 	mine := l.member != nil && slices.Contains(live, l.slot)
 	targets := map[string]bool{}
 	if mine {
@@ -307,7 +309,7 @@ func (l *claimLoop) tick() {
 	l.take(ctx, targets, len(targets), live)
 	l.prev = assignment
 	l.rankZero.Store(mine && len(live) > 0 && live[0] == l.slot)
-	l.readUnowned(ctx)
+	l.readUnowned()
 }
 
 // memberTerm is the membership term as of the last tick, nil for none.
@@ -316,6 +318,32 @@ func (l *claimLoop) memberTerm() coord.Term {
 		return *t
 	}
 	return nil
+}
+
+// readMembers reads which membership slots are live, a few at a time.
+func (l *claimLoop) readMembers(ctx context.Context) ([]int, error) {
+	held := make([]bool, l.slots)
+	errs := make([]error, l.slots)
+	sem := make(chan struct{}, membershipReaders)
+	var wg sync.WaitGroup
+	for j := range l.slots {
+		sem <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			held[j], errs[j] = l.q.obs.Held(ctx, memberLease(j))
+		})
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	var live []int
+	for j, h := range held {
+		if h {
+			live = append(live, j)
+		}
+	}
+	return live, nil
 }
 
 // reap drops the membership term if it ended under this process; the next
@@ -524,10 +552,13 @@ func (l *claimLoop) release(cl *claim) {
 
 // readUnowned has the lowest live member count the units with rows and no
 // owner, every UnownedEvery; the others report nothing.
-func (l *claimLoop) readUnowned(ctx context.Context) {
+func (l *claimLoop) readUnowned() {
 	if !l.rankZero.Load() || time.Since(l.lastUnowned) < l.q.cfg.UnownedEvery {
 		return
 	}
+	// A context of its own, not what the tick's reads left.
+	ctx, cancel := context.WithTimeout(l.ctx, tickTimeout)
+	defer cancel()
 	n, err := l.q.sq.Unowned(ctx)
 	if err != nil {
 		l.warn("ingest: could not count the shards without an owner", err)
