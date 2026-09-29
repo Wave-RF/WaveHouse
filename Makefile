@@ -762,8 +762,9 @@ test: test-unit
 test-integration: go-mod-download ## Run Go integration tests + render coverage + gate threshold (requires Docker)
 	@printf "$(CYAN)==> Running Integration Tests...$(RESET)\n"
 	@rm -rf $(COV_INT)/data && mkdir -p $(COV_INT)/data
-	@# 480s: the multi-process roles test waits out real membership leases
-	@# in sequence, and the package ran past 240s under -race on CI.
+	@# 480s: the go command kills the package at -timeout + 1m, counting
+	@# TestMain's wavehouse binary build before m.Run, and the multi-process
+	@# roles test runs its handover steps in sequence; at 240s CI killed it.
 	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
 		-tags="integration $(TAGS)" -timeout 480s -coverpkg=./... -race -count=1 \
 		./tests/integration/... ./internal/mq/natsspike/... ./internal/cache/... $(ARGS) \
