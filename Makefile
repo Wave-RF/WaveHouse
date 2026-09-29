@@ -762,8 +762,10 @@ test: test-unit
 test-integration: go-mod-download ## Run Go integration tests + render coverage + gate threshold (requires Docker)
 	@printf "$(CYAN)==> Running Integration Tests...$(RESET)\n"
 	@rm -rf $(COV_INT)/data && mkdir -p $(COV_INT)/data
+	@# 480s: the multi-process roles test waits out real membership leases
+	@# in sequence, and the package ran past 240s under -race on CI.
 	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
-		-tags="integration $(TAGS)" -timeout 240s -coverpkg=./... -race -count=1 \
+		-tags="integration $(TAGS)" -timeout 480s -coverpkg=./... -race -count=1 \
 		./tests/integration/... ./internal/mq/natsspike/... ./internal/cache/... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
 	@# internal/mq's integration-tagged tests (the external NATS broker) run
