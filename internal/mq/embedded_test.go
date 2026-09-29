@@ -651,6 +651,29 @@ func TestEmbeddedNATS_SetMaxBytes_UndoRestoresTheIngestStreamsCap(t *testing.T) 
 	assert.Zero(t, e.MaxBytes("acme"), "and the next call retries")
 }
 
+// A queue whose streams went missing under delivering consumers is opened
+// again by the tenant's next publish, and delivery starts again on the new
+// ingest stream, so the row reaches both consumers rather than a stream
+// nobody reads. Losing the durable is still the worker's consumer's to
+// report on failed, as any delivery that ends on its own is; that is not
+// asserted here, since the reopen may get there first.
+func TestEmbeddedNATS_Publish_RestartsDeliveryOnAReopenedQueue(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	x := newJoinFixture(ctx, t)
+	globex := Topic{Tenant: "globex", Table: "t"}
+	// A delivery proves the pulls are live before the streams go.
+	require.NoError(t, x.e.Publish(ctx, globex, []byte("x")))
+	x.delivered(t, globex)
+
+	for _, name := range []string{"INGEST_globex", "DLQ_globex"} {
+		require.NoError(t, x.e.js.DeleteStream(ctx, name))
+	}
+	require.NoError(t, x.e.Publish(ctx, globex, []byte("x")))
+	x.delivered(t, globex)
+}
+
 // obstructJoin opens tenant id's ingest stream behind the broker's back, as
 // an open that gave up can, with a file where the named durable's store goes:
 // that consumer cannot join the queue until the returned clear removes it.

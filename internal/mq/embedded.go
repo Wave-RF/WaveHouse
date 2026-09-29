@@ -448,9 +448,10 @@ func (e *EmbeddedNATS) apply(ctx context.Context, id tenant.ID, q *tenantQueue, 
 		}
 		q.ingest, q.ingestCap = true, maxBytes
 		// Every consumer joins a stream just opened: a durable one held on
-		// the stream before it went missing went with it.
+		// the stream before it went missing went with it, and so did what
+		// its delivery read from.
 		for _, f := range e.consumers {
-			delete(f.handles, id)
+			f.leave(id)
 		}
 		return e.applied(ctx, id, q, maxBytes)
 	}
@@ -850,6 +851,25 @@ func (f *fanIn) holds(id tenant.ID) bool {
 	return ok
 }
 
+// leave forgets tenant id's queue, whose ingest stream is gone: the durable
+// went with it, and the delivery from it is stopped — the broker's doing, so
+// not one that ended on its own (run). Under e.mu.
+func (f *fanIn) leave(id tenant.ID) {
+	delete(f.handles, id)
+	if cctx, ok := f.running[id]; ok {
+		delete(f.running, id)
+		cctx.Stop()
+	}
+}
+
+// delivering reports whether cctx is still the delivery from tenant id's
+// queue, rather than one leave stopped.
+func (f *fanIn) delivering(id tenant.ID, cctx jetstream.ConsumeContext) bool {
+	f.e.mu.Lock()
+	defer f.e.mu.Unlock()
+	return f.running[id] == cctx
+}
+
 // sameConsumer reports whether a durable holds the fields this package sets;
 // a zero field in want is the server's default, whatever that resolved to.
 func sameConsumer(have, want jetstream.ConsumerConfig) bool {
@@ -902,7 +922,7 @@ func (f *fanIn) run(id tenant.ID) error {
 	}
 	go func() {
 		<-cctx.Closed()
-		if f.stopped.Load() {
+		if f.stopped.Load() || !f.delivering(id, cctx) {
 			return
 		}
 		reason := ErrDeliveryEnded
