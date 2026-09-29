@@ -217,13 +217,8 @@ func (c *Config) validateTopology() error {
 	if c.MQ.Backend == MQEmbedded && len(c.Roles) != len(allRoles) {
 		return fmt.Errorf("roles %s with mq.backend=embedded: the embedded MQ lives inside this process, and a process without it cannot reach its queue — run every role (%s), or set a shared mq.backend", joinRoles(c.Roles), joinRoles(allRoles))
 	}
-	if c.Coord.Backend == CoordNATS && c.MQ.Backend != MQNATS {
-		return fmt.Errorf("coord.backend=nats with mq.backend=%s: the NATS leases ride mq.nats's connection — set mq.backend=nats, or coord.backend=local", c.MQ.Backend)
-	}
-	// Only the sweeper runs under a lease today, so only a process running it
-	// needs a shared one.
-	if c.MQ.Backend == MQNATS && c.Coord.Backend == CoordLocal && c.Has(RoleSweeper) {
-		return fmt.Errorf("coord.backend=local with mq.backend=nats in a process running the sweeper: a shared queue needs a shared lease, or every replica sweeps it — set coord.backend=nats")
+	if err := c.validateNATSTopology(); err != nil {
+		return err
 	}
 	if c.splitsCache() && c.Cache.Backend == CacheLocal {
 		return fmt.Errorf("roles %s with cache.backend=local: api and ingest run in different processes, and the ingest worker's cache invalidation would never reach the API's cache — run api and ingest together, or set cache.backend=redis, one cache every process shares", joinRoles(c.Roles))
@@ -389,9 +384,7 @@ func Load(path string) (*Config, error) {
 	for i, r := range cfg.Roles {
 		cfg.Roles[i] = Role(strings.TrimSpace(string(r)))
 	}
-	for i, u := range cfg.MQ.NATS.URLs {
-		cfg.MQ.NATS.URLs[i] = strings.TrimSpace(u)
-	}
+	cfg.MQ.NATS.trimURLs()
 	if cfg.InstanceID = strings.TrimSpace(cfg.InstanceID); cfg.InstanceID == "" {
 		cfg.InstanceID = defaultInstanceID()
 	}
