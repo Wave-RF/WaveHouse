@@ -115,6 +115,9 @@ exclude:
       - ^internal/mq/external\.go$
       - ^internal/mq/lease\.go$
       - ^cmd/wavehouse/mq\.go$
+      # Their wiring, apart from wire.go for this: the NATS queue and lease
+      # wiring and the retention warning under it.
+      - ^internal/app/wire_nats\.go$
     unit:
       # The external NATS broker's tests start a server per case, which the
       # unit suite's 15s per package cannot hold: they are integration-tagged

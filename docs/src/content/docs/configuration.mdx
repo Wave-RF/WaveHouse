@@ -96,7 +96,7 @@ Whether a tenant dedupes, and on which field, are settings-directory keys ([Dedu
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `dedupe.lease` | `WH_DEDUPE_LEASE` | `30s` | How long a record's id stays claimed while the record is published. Another request carrying the same id meanwhile gets `503` with this as `Retry-After`, in whole seconds; a claim that is neither committed nor released, because its process died mid-publish, lapses after it. With `mq.backend: embedded`, the lease plus its own ceiling to the next whole second plus one more second must fit the embedded queue's 2-minute duplicate window, so the lease is at most `59s`: a client that obeys `Retry-After` after a publish whose outcome it never learned can republish as late as the lease plus that ceiling plus a second after the claim, since DynamoDB rounds a claim's expiry up to the second. A longer lease refuses boot. A Go duration (`30s`, `45s`); `0` refuses boot. |
+| `dedupe.lease` | `WH_DEDUPE_LEASE` | `30s` | How long a record's id stays claimed while the record is published. Another request carrying the same id meanwhile gets `503` with this as `Retry-After`, in whole seconds; a claim that is neither committed nor released, because its process died mid-publish, lapses after it. With `mq.backend: embedded`, the lease plus its own ceiling to the next whole second plus one more second must fit the embedded queue's 2-minute duplicate window, so the lease is at most `59s`: a client that obeys `Retry-After` after a publish whose outcome it never learned can republish as late as the lease plus that ceiling plus a second after the claim, since DynamoDB rounds a claim's expiry up to the second. A longer lease refuses boot. Under `mq.backend: nats` there is no cap here; instead every partition's `duplicate_window` must cover the same span, or boot refuses with a topology finding ([Deployment](/deployment#create-the-topology)). A Go duration (`30s`, `45s`); `0` refuses boot. |
 | `dedupe.reserve_concurrency` | `WH_DEDUPE_RESERVE_CONCURRENCY` | `64` | The most parallel calls one Reserve, Commit or Release makes to a remote dedupe backend, and the idle connections per host the DynamoDB client keeps to match, never fewer than the SDK's own default (10). Ingest reserves and commits a window of up to 256 ids per call; `pebble` ignores it. `0` refuses boot. |
 
 #### DynamoDB dedupe
@@ -115,13 +115,14 @@ Read only when `dedupe.backend` is `dynamodb`. Credentials come from the AWS SDK
 
 ### Boot warnings
 
-Boot logs each of these at `WARN` rather than refusing: the first two are right for a single replica only, which one process cannot tell from many, and the rest are harmless but likely mistakes:
+Boot logs each of these at `WARN` rather than refusing. The first two are right for a single replica only, which one process cannot tell from many; the last depends on a window only your streams know:
 
 - **`mq.backend=nats` with `cache.backend=local`**, in a process running `api`: an event ingested on another replica never invalidates this one's cache, so its reads stay stale until the cached entry expires.
 - **`mq.backend=nats` with `dedupe.backend=pebble`**, in a process running `api`: an id seen by another replica is not seen by this one.
 - **`mq.backend=nats`**: `mq.max_bytes_gb` is not applied (above).
 - **`mq.nats` set with `mq.backend=embedded`**, **`coord.nats` set with `coord.backend=local`**, or **`cache.redis.addrs` set with `cache.backend=local`**: the block is ignored.
 - **`cache.redis.tls.insecure_skip_verify` on**, in a process running `api`: the cache accepts any certificate (see [Cache](#cache)).
+- **`mq.backend=nats` and a tenant with dedupe on whose finite `dedupe.retention` is under the partitions' `duplicate_window`**, in a process running `api`, at boot and after every reload: see [Deployment → Create the topology](/deployment#create-the-topology).
 
 ### Process roles
 

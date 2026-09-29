@@ -36,6 +36,12 @@ type NATSTopology struct {
 	// window must cover every attempt (minDuplicateWindow), so a retried
 	// publish is not stored twice.
 	PublishTimeout time.Duration
+	// DedupeLease is how long a dedupe claim stays pending (dedupe.lease); 0
+	// skips its rule. A publish whose outcome was unknown keeps its claim
+	// until the lease lapses, and the client's retry is published under the
+	// same idempotency key, so a partition's duplicate window must still hold
+	// the first copy then (dedupeDuplicateWindow).
+	DedupeLease time.Duration
 	// CoordBucket is the KV bucket this process holds its leases in; empty
 	// when it holds none there, and then the bucket is not checked.
 	CoordBucket string
@@ -127,6 +133,19 @@ func (t NATSTopology) streamName(kind string) string {
 // retry this long after the first attempt.
 func (t NATSTopology) minDuplicateWindow() time.Duration {
 	return (publishRetries+1)*t.PublishTimeout + publishRetries*publishRetryWait
+}
+
+// dedupeDuplicateWindow is how long after a claim its record's retry can
+// still be published under the same idempotency key: the lease, the
+// Retry-After a client obeys (the lease rounded up to a second), and the
+// second a claim can outlive its lease — config's rule for the embedded
+// queue's window, applied here to the operator's.
+func (t NATSTopology) dedupeDuplicateWindow() time.Duration {
+	ceil := t.DedupeLease
+	if r := ceil % time.Second; r != 0 {
+		ceil += time.Second - r
+	}
+	return t.DedupeLease + ceil + time.Second
 }
 
 // partitionShare is the worker's prefetch share of one partition, at least one.
@@ -390,6 +409,9 @@ func (v *topologyVerifier) partition(ctx context.Context, p int) (string, error)
 	}
 	if cfg.Duplicates < t.minDuplicateWindow() {
 		req("duplicate_window", "is %s; must be at least %s (every attempt of a retried publish), so it is stored once", cfg.Duplicates, t.minDuplicateWindow())
+	}
+	if t.DedupeLease > 0 && cfg.Duplicates < t.dedupeDuplicateWindow() {
+		req("duplicate_window", "is %s; must be at least %s for dedupe.lease %s (the lease, a Retry-After of it rounded up, and a second), so the retry of a publish whose outcome was unknown is stored once", cfg.Duplicates, t.dedupeDuplicateWindow(), t.DedupeLease)
 	}
 	if cfg.NoAck {
 		req("no_ack", "is set; publishes must be acknowledged")

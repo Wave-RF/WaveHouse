@@ -19,7 +19,7 @@ import (
 // shippedSpec is the topology the shipped manifests are generated for, and
 // coordSpec the same for a process holding its leases there.
 var (
-	shippedSpec = NATSTopology{Partitions: 4}
+	shippedSpec = NATSTopology{Partitions: 4, DedupeLease: 30 * time.Second}
 	coordSpec   = NATSTopology{Partitions: 4, CoordBucket: natstest.CoordBucket}
 )
 
@@ -97,6 +97,8 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		{"partition storage", stream(p0, func(s *jetstream.StreamConfig) { s.Storage = jetstream.MemoryStorage }), shippedSpec, req(p0, "storage")},
 		{"partition duplicate_window", stream(p0, func(s *jetstream.StreamConfig) { s.Duplicates = time.Second }), shippedSpec, req(p0, "duplicate_window")},
 		{"duplicate window against the publish timeout", nil, NATSTopology{Partitions: 4, PublishTimeout: 2 * time.Minute}, req(p0, "duplicate_window")},
+		// 59.5s + 60s + 1s = 2m0.5s, just over the shipped 2m.
+		{"duplicate window against the dedupe lease", nil, NATSTopology{Partitions: 4, DedupeLease: 59500 * time.Millisecond}, want{FindingRequired, p0, "duplicate_window", "dedupe.lease"}},
 		{"partition no_ack", stream(p0, func(s *jetstream.StreamConfig) { s.NoAck = true }), shippedSpec, req(p0, "no_ack")},
 		{"partition per-subject cap", stream(p0, func(s *jetstream.StreamConfig) {
 			s.MaxMsgsPerSubject, s.DiscardNewPerSubject = 0, false

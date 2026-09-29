@@ -554,46 +554,6 @@ func (a *App) wireMQ(ctx context.Context) error {
 	}
 }
 
-// wireNATSMQ connects to the operator's NATS (mq.backend: nats) and waits,
-// up to mq.nats.topology_wait, for the streams and durables it needs; a
-// topology still wrong then refuses boot with every finding. The operator
-// owns every limit, so a tenant's mq.max_bytes_gb is not handed over
-// (config.Warnings says so at boot).
-func (a *App) wireNATSMQ(ctx context.Context) error {
-	n := a.cfg.MQ.NATS
-	broker, err := mq.NewNATS(ctx, mq.NATSConfig{
-		URLs:         n.URLs,
-		Name:         n.Name,
-		CredsFile:    n.CredsFile,
-		NKeySeedFile: n.NKeySeedFile,
-		User:         n.User,
-		PasswordFile: n.PasswordFile,
-		TLS: mq.NATSTLS{
-			CAFile: n.TLS.CAFile, CertFile: n.TLS.CertFile, KeyFile: n.TLS.KeyFile,
-			ServerName: n.TLS.ServerName, HandshakeFirst: n.TLS.HandshakeFirst,
-		},
-		JSDomain: n.JSDomain,
-		// AckWait, MaxAckPending and Prefetch are left to mq's defaults,
-		// which are the ingest worker's own.
-		Topology: mq.NATSTopology{
-			Prefix:         n.SubjectPrefix,
-			Partitions:     n.Partitions,
-			IngestConsumer: n.IngestConsumer,
-			HistoryStream:  n.HistoryStream,
-			PublishTimeout: n.PublishTimeout,
-			// Boot waits for the lease bucket with the rest of the topology.
-			CoordBucket: a.coordBucket(),
-		},
-		ConnectTimeout: n.ConnectTimeout,
-		TopologyWait:   n.TopologyWait,
-	})
-	if err != nil {
-		return fmt.Errorf("mq open: %w", err)
-	}
-	a.adoptMQ(broker)
-	return nil
-}
-
 // adoptMQ makes broker the process's MQ, closed with it.
 func (a *App) adoptMQ(broker mq.Broker) {
 	a.mq = broker
@@ -757,31 +717,10 @@ func (a *App) wireCoord(ctx context.Context) error {
 		a.add(component{name: "coord", close: c.Close})
 		return nil
 	case config.CoordNATS:
-		broker, ok := a.mq.(*mq.ExternalNATS)
-		if !ok {
-			return fmt.Errorf("coord.backend=nats needs mq.backend=nats, got %T", a.mq)
-		}
-		c, err := broker.Leases(ctx, a.coordBucket(), a.cfg.InstanceID)
-		if err != nil {
-			return fmt.Errorf("coord open: %w", err)
-		}
-		a.coord = c
-		a.add(component{name: "coord", close: c.Close})
-		return nil
+		return a.wireNATSCoord(ctx)
 	default:
 		return unreachableBackend("coord.backend", b)
 	}
-}
-
-// coordBucket is the lease bucket under coord.backend=nats, "" otherwise.
-func (a *App) coordBucket() string {
-	if a.cfg.Coord.Backend != config.CoordNATS {
-		return ""
-	}
-	if b := a.cfg.Coord.NATS.Bucket; b != "" {
-		return b
-	}
-	return mq.DefaultNATSCoordBucket(a.cfg.MQ.NATS.SubjectPrefix)
 }
 
 // sweeperLease is the lease the sweeper runs under, one sweeper per queue.
