@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,6 +33,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe/dedupetest"
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
@@ -1799,6 +1801,170 @@ func TestNew_SchemaNotLoadedIs503(t *testing.T) {
 		rec = get(t, a.Handler(), "/v1/ops/schema?tenant=acme")
 		assert.Equal(t, http.StatusForbidden, rec.Code, "the ops tree keeps its gate")
 	})
+}
+
+// fakeClickHouse stands in for the ClickHouse servers: a registry built
+// after newFakeClickHouse discovers the tables named for the database its
+// tenant's pool was opened for, and from that pool itself — a closed port —
+// for a database with none named.
+type fakeClickHouse struct {
+	mu    sync.Mutex
+	conns map[string]driver.Conn
+}
+
+// set names the tables of database.
+func (f *fakeClickHouse) set(database string, tables ...string) {
+	schemas := make([]*discovery.TableSchema, 0, len(tables))
+	for _, name := range tables {
+		schemas = append(schemas, &discovery.TableSchema{Name: name, Columns: []discovery.Column{{Name: "id", Type: "String"}}})
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.conns[database] = testutil.NewSchemaConn(schemas)
+}
+
+func (f *fakeClickHouse) conn(database string) driver.Conn {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.conns[database]
+}
+
+// newFakeClickHouse starts every served tenant's discovery over against
+// databases (database → its tables) and waits for each to load. The source
+// stays the production one, the fake replacing only the connection.
+func newFakeClickHouse(t *testing.T, a *App, databases map[string][]string) *fakeClickHouse {
+	t.Helper()
+	f := &fakeClickHouse{conns: map[string]driver.Conn{}}
+	for database, tables := range databases {
+		f.set(database, tables...)
+	}
+	a.discoveries.build = func(id tenant.ID, _ *settings.Store) *discovery.SchemaRegistry {
+		source := a.discoverySource(id)
+		return discovery.NewSchemaRegistry(func() (driver.Conn, string) {
+			conn, database := source()
+			if fake := f.conn(database); conn != nil && fake != nil {
+				return fake, database
+			}
+			return conn, database
+		}, id, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
+	}
+	var served []tenant.ID
+	for id := range a.tenants.All() {
+		served = append(served, id)
+	}
+	a.discoveries.drop(served)
+	a.discoveries.reconcile(a.tenants)
+	for _, id := range served {
+		require.Eventually(t, a.discoveries.For(id).Loaded, 5*time.Second, 10*time.Millisecond, "tenant %s", id)
+	}
+	return f
+}
+
+// databaseSettings is chSettings with the database named.
+func databaseSettings(addr, database string) map[string]any {
+	p := chSettings(addr, "default", 10)
+	p["clickhouse"].(map[string]any)["database"] = database
+	return p
+}
+
+// A reload that moves a tenant to another ClickHouse database starts its
+// schema discovery over (#638): the schema it held is dropped with the
+// reload, so no lookup is answered from the previous database's, and the new
+// database's tables are discovered at once rather than at the next
+// schema.refresh_interval (60 seconds here). The tenant beside it, and a
+// reload that moves nobody, keep the registry and the loop they had.
+func TestReload_MovedTenantDiscoversTheNewDatabase(t *testing.T) {
+	addr := closedAddr(t)
+	root := writeNestedSettings(t, map[string]map[string]any{
+		"acme":   databaseSettings(addr, "default"),
+		"globex": databaseSettings(addr, "default"),
+	})
+	a := newApp(t, testConfig(t, root), Options{})
+	newFakeClickHouse(t, a, map[string][]string{"default": {"events"}, "moved_db": {"orders"}})
+	acme, globex := a.discoveries.For("acme"), a.discoveries.For("globex")
+	require.NotNil(t, acme.Get("events"))
+	loops := *a.discoveries.cur.Load()
+
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Same(t, acme, a.discoveries.For("acme"), "nobody moved, nobody starts over")
+	assert.Same(t, globex, a.discoveries.For("globex"))
+
+	rewriteSettings(t, filepath.Join(root, "acme"), databaseSettings(addr, "moved_db"))
+	_, adopted = a.tenants.Reload("test")
+	require.True(t, adopted)
+	moved := a.discoveries.For("acme")
+	require.NotNil(t, moved)
+	assert.NotSame(t, acme, moved, "a fresh registry")
+	assert.Nil(t, moved.Get("events"), "never the previous database's schema")
+	select {
+	case <-loops["acme"].done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the loop refreshing the previous registry did not stop")
+	}
+	require.Eventually(t, moved.Loaded, 5*time.Second, 10*time.Millisecond, "discovered without waiting for schema.refresh_interval")
+	_, err := moved.Lookup("orders")
+	require.NoError(t, err, "the new database's table")
+	_, err = moved.Lookup("events")
+	require.ErrorIs(t, err, discovery.ErrUnknownTable, "the previous database's table")
+
+	assert.Same(t, globex, a.discoveries.For("globex"), "the tenant that stayed is untouched")
+	assert.Same(t, loops["globex"], (*a.discoveries.cur.Load())["globex"], "its loop too")
+	assert.NotNil(t, globex.Get("events"))
+}
+
+// A flat directory's tenant 0 moves the same way.
+func TestReload_MovedTenantDiscoversTheNewDatabase_Flat(t *testing.T) {
+	addr := closedAddr(t)
+	dir := writeSettings(t, databaseSettings(addr, "default"))
+	a := newApp(t, testConfig(t, dir), Options{})
+	newFakeClickHouse(t, a, map[string][]string{"default": {"events"}, "moved_db": {"orders"}})
+	before := a.Registry()
+	require.NotNil(t, before.Get("events"))
+
+	rewriteSettings(t, dir, databaseSettings(addr, "moved_db"))
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	moved := a.Registry()
+	require.NotNil(t, moved)
+	assert.NotSame(t, before, moved)
+	assert.Nil(t, moved.Get("events"), "never the previous database's schema")
+	require.Eventually(t, moved.Loaded, 5*time.Second, 10*time.Millisecond)
+	assert.NotNil(t, moved.Get("orders"))
+}
+
+// A moved tenant whose first discovery of the new database fails answers
+// like any tenant before its first discovery — 503 with Retry-After, for a
+// table the previous database had too — with the failure logged under its
+// tenant, and its loop keeps retrying until the database answers.
+func TestReload_MovedTenantFailedDiscoveryIsRetried(t *testing.T) {
+	addr := closedAddr(t)
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": databaseSettings(addr, "default")})
+	a := newApp(t, testConfig(t, root), Options{})
+	fake := newFakeClickHouse(t, a, map[string][]string{"default": {"events"}})
+
+	logs := logtest.Capture(t, slog.LevelWarn)
+	// No fake names moved_db: its discovery dials the closed port.
+	rewriteSettings(t, filepath.Join(root, "acme"), databaseSettings(addr, "moved_db"))
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	require.Eventually(t, func() bool { return strings.Contains(logs.String(), "schema discovery retry failed") }, 5*time.Second, 10*time.Millisecond)
+	assert.Contains(t, logs.String(), `"tenant":"acme"`)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ingest?table=events", strings.NewReader(`{"id": "1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(tenant.Header, "acme")
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "5", rec.Header().Get("Retry-After"))
+	assert.Contains(t, rec.Body.String(), "schema not loaded yet")
+
+	fake.set("moved_db", "orders")
+	moved := a.discoveries.For("acme")
+	require.Eventually(t, moved.Loaded, 15*time.Second, 10*time.Millisecond, "the loop kept retrying")
+	assert.NotNil(t, moved.Get("orders"))
+	assert.Nil(t, moved.Get("events"))
 }
 
 // Close stops every tenant's discovery loop within the release budget, and

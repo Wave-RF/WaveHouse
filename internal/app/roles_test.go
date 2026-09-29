@@ -17,6 +17,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 )
 
@@ -153,6 +154,22 @@ func TestNew_OpsOnlyReadiness(t *testing.T) {
 	rec := get(t, a.Handler(), "/readyz")
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.Nil(t, a.Registry(), "no schema registry without the api role")
+}
+
+// A reload that moves the tenant repoints the pool of a process without the
+// api role, which has no schema registry to start over.
+func TestReload_OpsOnlyMovedTenant(t *testing.T) {
+	addr := closedAddr(t)
+	dir := writeSettings(t, databaseSettings(addr, "default"))
+	cfg := testConfig(t, dir)
+	cfg.Roles = []config.Role{config.RoleIngest}
+	a := newApp(t, cfg, Options{})
+
+	rewriteSettings(t, dir, databaseSettings(addr, "moved_db"))
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Equal(t, "moved_db", a.pools.For(tenant.Default).Identity().Database)
+	assert.Nil(t, a.Registry())
 }
 
 func TestNew_OpsOnlyPrometheusInline(t *testing.T) {

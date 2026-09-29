@@ -326,6 +326,13 @@ func (a *App) wireClickHouse() error {
 				slog.Warn("cache invalidation of a stale tenant did not land; it may serve stale rows until it does", "tenant", id, "error", err)
 			}
 		}
+		// The schema a moved tenant discovered is the previous database's
+		// (#638): its registry is dropped here, and the discovery hook, which
+		// runs after this one, builds it a fresh one over the pool it is on
+		// now. Only an API process discovers schemas.
+		if a.discoveries != nil {
+			a.discoveries.drop(stale)
+		}
 	})
 	return nil
 }
@@ -342,11 +349,12 @@ func (a *App) chConn(id tenant.ID) driver.Conn {
 }
 
 // discoverySource is what tenant id's schema registry discovers from, read
-// per refresh so a reload that repoints the tenant or moves its database
-// applies to the next one: its pool's connection and the database that pool
-// was opened for — never the adopted document's, which a refused move would
-// pair with the pool the tenant kept, discovering a database its queries and
-// inserts do not use.
+// per refresh so a reload that repoints the tenant applies to the next one
+// (a move to another address or database starts the tenant over on a fresh
+// registry, see wireClickHouse): its pool's connection and the database that
+// pool was opened for — never the adopted document's, which a refused move
+// would pair with the pool the tenant kept, discovering a database its
+// queries and inserts do not use.
 func (a *App) discoverySource(id tenant.ID) discovery.Source {
 	return func() (driver.Conn, string) {
 		m := a.pools.For(id)

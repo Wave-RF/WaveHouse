@@ -21,8 +21,12 @@ import (
 // from the settings registry's AfterAdopt hook, after the pools: a newly
 // served tenant gets a registry over the pool it is on and a loop; a tenant
 // no longer served — rejected or removed — has its loop stopped and its
-// registry dropped, and starts over when it is back. Every loop stops under
-// App.Close within the release budget. A lookup is one lock-free load.
+// registry dropped, and starts over when it is back. A tenant a reload moved
+// to another ClickHouse address or database starts over the same way (drop,
+// #638): the schema it held describes tables it no longer reads, so its
+// lookups answer not loaded, never the previous database's schema, until the
+// first discovery of the new one. Every loop stops under App.Close within the
+// release budget. A lookup is one lock-free load.
 type discoveries struct {
 	// ctx is the loops' parent: the App's stop context.
 	ctx context.Context
@@ -75,6 +79,24 @@ func (d *discoveries) reconcile(tenants *settings.Registry) {
 	}
 	for id, td := range cur {
 		if !served[id] {
+			td.cancel()
+			delete(next, id)
+		}
+	}
+	d.cur.Store(&next)
+}
+
+// drop stops the loop of each of ids and drops its registry, so the
+// reconcile that follows builds each a fresh one, whose loop discovers at
+// once and retries until it succeeds. No I/O: the hook calling it holds the
+// lock that serializes reloads. A tenant with no registry — new, or back
+// after a rejection or removal — is left to that reconcile alone.
+func (d *discoveries) drop(ids []tenant.ID) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	next := maps.Clone(*d.cur.Load())
+	for _, id := range ids {
+		if td, ok := next[id]; ok {
 			td.cancel()
 			delete(next, id)
 		}
