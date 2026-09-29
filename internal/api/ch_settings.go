@@ -14,12 +14,10 @@ import (
 // by ClickHouse's own config.
 type chQueryLimits struct {
 	// ExecutionTime is the wall-clock budget, emitted as max_execution_time in
-	// fractional seconds. clickhouse-go already derives max_execution_time from
-	// the context deadline, but only for deadlines > 1s — so a sub-second cap
-	// would otherwise reach the server with no time bound, and a context cancel
-	// can't interrupt an already-running server-side phase. Emitting it
-	// explicitly closes that hole; for >1s budgets the driver overwrites it with
-	// deadline+5s, a fine backstop.
+	// fractional seconds, so ClickHouse itself stops the query and says so
+	// (TIMEOUT_EXCEEDED). The query context carries no deadline when this is
+	// set (cancelAfter): clickhouse-go would otherwise overwrite the setting
+	// with deadline+5s for any deadline over 1s.
 	ExecutionTime time.Duration
 	// MaxResultRows caps rows RETURNED (max_result_rows + result_overflow_mode=
 	// throw) — defense-in-depth behind the SQL LIMIT the structured builder

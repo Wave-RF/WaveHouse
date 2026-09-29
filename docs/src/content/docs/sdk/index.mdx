@@ -321,7 +321,7 @@ const wh = createClient<Database>({
 |-------|------|---------|-------------|
 | `baseURL` | `string` | — | WaveHouse server URL, optionally including a path prefix (required) |
 | `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
-| `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx **REST** requests; stream reconnects are unbounded ([details](/sdk/streaming#transport-behavior)) |
+| `options.maxRetries` | `number` | `2` | Retry attempts for retryable **REST** failures — network errors and 5xx, unless the server's body says `retryable: false`; stream reconnects are unbounded ([details](/sdk/streaming#transport-behavior)) |
 | `options.headers` | `Record<string, string>` | — | Headers added to every request ([details](#custom-headers)) |
 | `options.fetchOptions` | `RequestInit` | — | Extra `RequestInit` fields merged into every request ([details](#extra-requestinit-fields)) |
 | `options.fetch` | `FetchLike` | global `fetch` | HTTP implementation for every request ([details](#supplying-your-own-fetch)) |
@@ -507,7 +507,7 @@ type Result<T> =
 
 interface WaveHouseError {
   status: number;     // HTTP status (0 for network errors)
-  code: string;       // e.g. 'HTTP_400', 'NETWORK_ERROR', 'ABORTED'
+  code: string;       // e.g. 'HTTP_400', 'clickhouse.rejected', 'NETWORK_ERROR', 'ABORTED'
   message: string;    // Human-readable error message
   details?: unknown;  // Raw response body
   retryable: boolean; // Whether SDK would retry this error

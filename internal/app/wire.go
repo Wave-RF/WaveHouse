@@ -379,7 +379,7 @@ func queryTimeout(s *settings.Store) time.Duration { return s.ClickHouse().Query
 // again. Non-fatal either way. A flat
 // directory's tenant 0 is refreshed synchronously here, as before, so the
 // port binds with the state known; a failure marks the binary degraded and
-// leaves the retry (backoff 2s → 60s) to its loop. A nested directory's
+// leaves the retry (jittered backoff 2s → 60s) to its loop. A nested directory's
 // tenants refresh in their loops from the start, so boot never waits on a
 // tenant's ClickHouse, and a nested directory serving no tenant stays
 // degraded until a reload adopts one that loads. The process still binds its
@@ -911,7 +911,10 @@ func (a *App) wireAuth() func(http.Handler) http.Handler {
 // route admits the operator alone (api.NewOpsRouter).
 func (a *App) wireOpsAuth() func(http.Handler) http.Handler {
 	operatorKey := strings.TrimSpace(a.cfg.Auth.OperatorKey)
-	if operatorKey == "" {
+	switch {
+	case operatorKey == "" && a.tenants.Nested():
+		slog.Warn("no auth.operator_key set: a process without the api role takes only the operator key on POST /v1/ops/settings/reload, and a nested settings directory has no watcher, so its settings can only be reloaded by SIGHUP")
+	case operatorKey == "":
 		slog.Warn("no auth.operator_key set: a process without the api role takes only the operator key on POST /v1/ops/settings/reload, so its settings can only be reloaded by SIGHUP or the directory watcher")
 	}
 	authn := auth.NewAuthenticator(auth.Config{OperatorKey: operatorKey}, nil, nil)

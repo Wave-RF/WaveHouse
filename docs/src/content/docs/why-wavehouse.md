@@ -53,7 +53,7 @@ Even if you remember to batch client-side, a naive ingest path has no safe way t
 - **No backpressure channel.** If the merger falls behind, ClickHouse raises an error at the *next* insert. The client has already left.
 - **No DLQ.** Bad events that fail to insert are either lost or logged into ClickHouse's error log. Good luck replaying yesterday's dropped rows.
 
-WaveHouse fixes all three at the gateway: validates every payload against the real `system.columns` schema before accepting, returns `503 Service Unavailable` with a `Retry-After` header when the NATS WAL fills, and routes failed batch inserts to a dedicated dead-letter stream, one per tenant, you can inspect via `GET /v1/ops/dlq/stats`.
+WaveHouse fixes all three at the gateway: validates every payload against the real `system.columns` schema before accepting, returns `503 Service Unavailable` with a `Retry-After` header when the NATS WAL fills, and retries a ClickHouse outage with backoff while routing rows ClickHouse rejects to a dedicated dead-letter stream, one per tenant, you can inspect via `GET /v1/ops/dlq/stats`.
 
 ### No real-time push
 
@@ -221,7 +221,7 @@ flowchart TB
 
     NATS --> BC["Buffer consumer<br/>5-second batches"]:::wh
     BC --> CH[("ClickHouse")]:::store
-    BC -. "on failure" .-> DLQ["dead-letter stream"]:::fail
+    BC -. "rejected rows" .-> DLQ["dead-letter stream"]:::fail
 ```
 
 **Query path with tiered cache:**

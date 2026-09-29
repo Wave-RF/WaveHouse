@@ -15,6 +15,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/keyenc"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
@@ -35,16 +36,16 @@ type Topic struct {
 
 // key is the injective string form of the topic that a subject's tail
 // carries: the tenant first, verbatim — its grammar makes it one token — then
-// the table and scope as encoded tokens. A topic without a tenant has no
-// subject, and its key parses back to a topic of no tenant with the whole key
-// as its table (parseTopicKey's fallback). Callers key their own maps by the
-// Topic value itself.
+// the table and scope joined as escaped tokens (keyenc.AppendJoin). A topic
+// without a tenant has no subject, and its key parses back to a topic of no
+// tenant with the whole key as its table (parseTopicKey's fallback). Callers
+// key their own maps by the Topic value itself.
 func (t Topic) key() string {
-	key := string(t.Tenant) + "." + encodeToken(t.Table)
-	if t.Scope != "" {
-		key += "." + encodeToken(t.Scope)
+	key := append([]byte(t.Tenant), '.')
+	if t.Scope == "" {
+		return string(keyenc.AppendJoin(key, '.', t.Table))
 	}
-	return key
+	return string(keyenc.AppendJoin(key, '.', t.Table, t.Scope))
 }
 
 // Message represents a message received from the queue.
@@ -60,15 +61,29 @@ type Message struct {
 	doubleAckFn func(ctx context.Context) error
 	ackFn       func() error
 	nakFn       func() error
+	nakDelayFn  func(time.Duration) error
+}
+
+// MessageOpt configures a Message beyond its required callbacks.
+type MessageOpt func(*Message)
+
+// WithNakDelay gives a Message its delayed negative acknowledgement (see
+// NakWithDelay).
+func WithNakDelay(fn func(time.Duration) error) MessageOpt {
+	return func(m *Message) { m.nakDelayFn = fn }
 }
 
 // NewMessage constructs a Message with ack/nak callbacks.
-func NewMessage(ctx context.Context, topic Topic, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error) *Message {
-	return newMessage(ctx, topic.key(), data, ts, doubleAck, ack, nak)
+func NewMessage(ctx context.Context, topic Topic, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error, opts ...MessageOpt) *Message {
+	return newMessage(ctx, topic.key(), data, ts, doubleAck, ack, nak, opts...)
 }
 
-func newMessage(ctx context.Context, topicKey string, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error) *Message {
-	return &Message{Ctx: ctx, topicKey: topicKey, Data: data, Timestamp: ts, doubleAckFn: doubleAck, ackFn: ack, nakFn: nak}
+func newMessage(ctx context.Context, topicKey string, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error, opts ...MessageOpt) *Message {
+	m := &Message{Ctx: ctx, topicKey: topicKey, Data: data, Timestamp: ts, doubleAckFn: doubleAck, ackFn: ack, nakFn: nak}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // TopicKey is the delivered form of the topic the message was published on,
@@ -107,6 +122,17 @@ func (m *Message) Nak() error {
 		return m.nakFn()
 	}
 	return nil
+}
+
+// NakWithDelay negatively acknowledges the message, asking for redelivery no
+// sooner than delay — a retry that backs off rather than coming straight
+// back. Fire-and-forget like Nak, which it falls back to when the message
+// has no delayed form.
+func (m *Message) NakWithDelay(delay time.Duration) error {
+	if m.nakDelayFn != nil {
+		return m.nakDelayFn(delay)
+	}
+	return m.Nak()
 }
 
 // Headers carries a message's headers. It has the same map[string][]string

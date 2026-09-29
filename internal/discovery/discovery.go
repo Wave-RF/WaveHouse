@@ -211,6 +211,9 @@ type SchemaRegistry struct {
 	// firstTick picks how long StartAutoRefresh waits before its first
 	// refresh, within the interval; rand.N, substituted by tests.
 	firstTick func(interval time.Duration) time.Duration
+	// retryDelay picks how long RetryRefresh sleeps before its next attempt,
+	// within the current backoff; rand.N, substituted by tests.
+	retryDelay func(backoff time.Duration) time.Duration
 	// loaded is set by the first successful Refresh and never cleared: the
 	// line between "no schema known yet" and "this table is unknown".
 	loaded atomic.Bool
@@ -237,6 +240,7 @@ func NewSchemaRegistry(source Source, id tenant.ID, refreshInterval func(tenant.
 		tenant:          id,
 		refreshInterval: refreshInterval,
 		firstTick:       rand.N[time.Duration],
+		retryDelay:      rand.N[time.Duration],
 		tables:          make(map[string]*TableSchema),
 	}
 }
@@ -454,10 +458,12 @@ func clampBackoff(initialBackoff, maxBackoff time.Duration) (time.Duration, time
 // attempt with the resulting error, letting callers surface the latest
 // diagnostic (e.g. via /livez) while the registry is still degraded.
 //
-// The first attempt fires immediately. After a failure the loop sleeps for
-// initialBackoff, then doubles up to maxBackoff between attempts. Returns
-// nil on success or ctx.Err() on cancellation. Zero/negative bounds are
-// clamped via clampBackoff rather than busy-looping.
+// The first attempt fires immediately. After a failure the loop sleeps a
+// uniformly random time below the backoff ("full jitter"), which starts at
+// initialBackoff and doubles up to maxBackoff, so instances retrying against
+// one recovering ClickHouse spread over the whole window rather than firing
+// in lockstep (#141). Returns nil on success or ctx.Err() on cancellation.
+// Zero/negative bounds are clamped via clampBackoff rather than busy-looping.
 func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxBackoff time.Duration, onAttempt func(err error)) error {
 	initialBackoff, maxBackoff = clampBackoff(initialBackoff, maxBackoff)
 	backoff := initialBackoff
@@ -481,7 +487,7 @@ func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxB
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(backoff):
+		case <-time.After(sr.retryDelay(backoff)):
 		}
 		backoff *= 2
 		if backoff > maxBackoff {

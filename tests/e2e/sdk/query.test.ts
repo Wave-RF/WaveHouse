@@ -445,10 +445,10 @@ describe("Query", () => {
       // a tiny table CAN finish sub-millisecond before the deadline is ever
       // observed, so a single attempt is a coin flip (flaked on 2-core CI,
       // #283). The enforced property is existential — a 1ms budget must
-      // produce deadline 500s — so retry until one fires; if enforcement is
+      // produce a limit error — so retry until one fires; if enforcement is
       // broken, every attempt succeeds and the wait times out the test.
       // IMPORTANT: unique event_id per attempt so no attempt is cache-served!
-      let deadlineError: { status: number } | null = null;
+      let deadlineError: { status: number; code: string; retryable: boolean } | null = null;
       await waitForCondition(
         async () => {
           const result = await wh
@@ -464,7 +464,10 @@ describe("Query", () => {
         100,
       );
       expect(deadlineError).not.toBeNull();
-      expect(deadlineError!.status).toBe(500);
+      // The role's own cap, not an outage: a 400 the SDK does not retry.
+      expect(deadlineError!.status).toBe(400);
+      expect(deadlineError!.code).toBe("clickhouse.limit_exceeded");
+      expect(deadlineError!.retryable).toBe(false);
     } finally {
       // Restore policy even if test fails so that others don't too
       await setPolicy(currentPolicy);
@@ -478,7 +481,7 @@ describe("Query", () => {
   // capped role's query returned the full result set instead of being rejected.
   // These drive the real public path (SDK → WaveHouse → ClickHouse) under a
   // viewer policy whose cap is impossibly small, and assert the server rejects
-  // the read (500 carrying the ClickHouse limit error). Unlike the
+  // the read (400 `clickhouse.limit_exceeded`, carrying the ClickHouse limit error). Unlike the
   // execution-time race above, both are deterministic: a full scan always blows
   // past a 1-row / 1-byte budget on the first attempt. The unique event_id
   // filter keeps each query's SQL out of the shared result cache, so a cached
@@ -488,7 +491,8 @@ describe("Query", () => {
     await withViewerSelect({ allow_columns: ["*"], max_rows_to_read: 1 }, async () => {
       const result = await wh.from(T.clicks).selectAll().where("event_id", "=", testId()).fetch();
       expect(result.error).not.toBeNull();
-      expect(result.error!.status).toBe(500);
+      expect(result.error!.status).toBe(400);
+      expect(result.error!.code).toBe("clickhouse.limit_exceeded");
     });
   });
 
@@ -498,7 +502,8 @@ describe("Query", () => {
     await withViewerSelect({ allow_columns: ["*"], max_memory_usage: 1 }, async () => {
       const result = await wh.from(T.clicks).selectAll().where("event_id", "=", testId()).fetch();
       expect(result.error).not.toBeNull();
-      expect(result.error!.status).toBe(500);
+      expect(result.error!.status).toBe(400);
+      expect(result.error!.code).toBe("clickhouse.limit_exceeded");
     });
   });
 });

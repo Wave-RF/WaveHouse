@@ -14,7 +14,7 @@ WaveHouse is configured via a YAML file with environment variable overrides. All
 ## Loading Order
 
 1. If a config file exists at the specified path (default: `config.yaml`), it is loaded first.
-2. Environment variables override any values from the YAML file.
+2. Environment variables override any values from the YAML file. A key the file sets always wins over its default, including an explicit `false`, `0` or `""`: `otel.traces.enabled: false` turns traces off, and `otel.traces.sample_rate: 0` exports no traces. Only a key the file leaves out takes the default listed below.
 3. If no config file exists, all values are read from environment variables. Every key has a default except `settings.dir` (`WH_SETTINGS_DIR`), which must be set either way.
 4. Both sources are **strict**. A YAML key this page doesn't list — a typo, or a tunable that has moved to the settings directory (`dlq.enabled`, `clickhouse.addr`, `stream.*`, a leftover `policy:` or `pipes:` block, …) — refuses to boot and names every offending key, so nothing is read, ignored, and believed. A `WH_*` environment variable that binds to no key on this page (`WH_DEDUPE_ENABLED`, `WH_CH_ADDR`, a misspelling) refuses to boot the same way. Two variables have no YAML key and are exempt because they are not config keys at all but process-level settings `main` reads directly: `WH_CONFIG` (below), which locates the file, and `WH_LOG_LEVEL`. Only the `WH_` prefix is checked, since the environment always carries names that aren't WaveHouse's. One outside source does share the prefix. Kubernetes injects `{SERVICE}_SERVICE_HOST`, `{SERVICE}_PORT`, and similar link variables into every pod in a Service's own namespace, for each Service with a cluster IP that existed before the pod started (a headless Service injects nothing, and a Service in another namespace is harmless). The name is uppercased with `-` mapped to `_`, so a Service named `wh` produces `WH_SERVICE_HOST` and `WH_PORT`, one named `wh-foo` produces `WH_FOO_SERVICE_HOST` and `WH_FOO_PORT`, and either way the pod refuses to boot on its next restart. Set `enableServiceLinks: false` on the pod spec, or name the Service something else. The error says so.
 5. Before anything dials out, `data_dir` is probed — when a selected [backend](#backends) keeps state there, as the in-process `mq` backend does, and the in-process `dedupe` backend does in a process running the `api` [role](#process-roles) — and boot refuses on any of these: the value is empty; the path exists but is not a directory; the path, or any component above it, is a dangling symlink (a mount that never came up); the directory exists but the process cannot write to it; the directory is absent and its nearest existing ancestor is not writable, so it could not be created. The probe runs before ClickHouse discovery, so the refusal lands at the top of the log, and a permission denial — on the write probe, or on reaching the path at all through a parent without search permission — carries the UID-65532 remediation, since a bind mount owned by root is the typical cause.
@@ -105,7 +105,7 @@ By default one process does all the work. `roles` splits it, so that the API and
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `roles` | `WH_ROLES` | `api,ingest,sweeper` | The roles this process runs: a YAML list, or a comma-separated variable. Order does not matter. An empty list, an empty entry, an unknown role, or a role named twice refuses boot. |
-| `instance_id` | `WH_INSTANCE_ID` | `<hostname>-<8 hex>` | Names this process: it is logged at boot (the `process roles` line), and under `coord.backend=nats` it is the `holder` a lease's value names, so you can see which process sweeps. An empty value gets a fresh random suffix at every boot, so a restarted process is a new instance. |
+| `instance_id` | `WH_INSTANCE_ID` | *(empty)* | Names this process: it is logged at boot (the `process roles` line), and under `coord.backend=nats` it is the `holder` a lease's value names, so you can see which process sweeps. Empty resolves at boot to `<hostname>-<8 hex>`, with a fresh random suffix every time, so a restarted process is a new instance. |
 
 | Role | Runs |
 | --- | --- |
@@ -113,7 +113,7 @@ By default one process does all the work. `roles` splits it, so that the API and
 | `ingest` | The ingest worker, which writes the queue to ClickHouse. Every ingest process consumes the same shared durable consumer and competes for its messages. |
 | `sweeper` | The sweeper, which purges messages that are written and older than their tenant's gap window. Under `mq.backend=nats` it removes nothing, because your streams' retention does that; it only warns about a tenant whose gap window is longer than the history stream keeps. It runs under the `sweeper` lease. With `coord.backend=nats`, only one process sweeps at a time, however many run the role. `mq.backend=nats` requires it wherever the role runs (below). |
 
-Every process, whatever its roles, reads the settings directory and reloads it (SIGHUP, the directory watcher, and the reload route), and serves `server.port`. A process without the `api` role serves only an ops listener there: `/livez`, `/readyz` and their `/healthz`, `/health`, `/ready` aliases, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404; under `/v1/ops`, only once the operator-key check has passed (403 without it). The reload route on that listener accepts only the [operator key](#authentication), because no token verifier runs without the `api` role. `/readyz` is ready when a ClickHouse pool answers in an `ingest` process, and as soon as the process has booted in a `sweeper`-only one.
+Every process, whatever its roles, reads the settings directory and reloads it (SIGHUP, the directory watcher, and the reload route), and serves `server.port`. A process without the `api` role serves only an ops listener there: `/livez`, `/readyz` and their `/healthz`, `/health`, `/ready` aliases, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404; under `/v1/ops`, only once the operator-key check has passed (403 without a credential; a bearer token is refused with 401, since no token verifier runs without the `api` role). The reload route on that listener accepts only the [operator key](#authentication), because no token verifier runs without the `api` role. `/readyz` is ready when a ClickHouse pool answers in an `ingest` process, and as soon as the process has booted in a `sweeper`-only one.
 
 Boot refuses a role set the selected backends cannot serve:
 
@@ -175,6 +175,8 @@ Set the backstop on the profile of the ClickHouse user WaveHouse connects as (th
   </quotas>
 </clickhouse>
 ```
+
+What a caller sees when one of these trips: a row or byte limit is `400 clickhouse.limit_exceeded`; a server-wide time, memory or quota limit is `503 clickhouse.unavailable` (retryable, so the SDK retries it), since WaveHouse cannot tell it from server pressure — except on `/v1/query` for a role that sets its own `max_memory_usage`, where every memory-limit error is read as that cap and answered `400 clickhouse.limit_exceeded`. See [ClickHouse errors on the query paths](/api#clickhouse-errors-on-the-query-paths).
 
 :::caution[How the two layers compose]
 WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so they **compose** with the ClickHouse profile — a per-role cap *tightens* within the profile's ceiling, and a `<constraints>` block bounds how far any setting can move. But if the profile marks a setting `readonly` (or `<constraints>` disallows changing it), ClickHouse will **reject** WaveHouse's per-query override and the query fails. So keep the settings WaveHouse manages (`max_memory_usage`, `max_execution_time`, `max_rows_to_read`, `max_result_rows`) **changeable** for its user — use a `<max>` constraint, not `readonly`, if you want a hard ceiling.
@@ -298,7 +300,7 @@ dedupe:
   backend: pebble        # in-process Pebble under <data_dir>/pebble
 
 coord:
-  backend: local        # in-process leases (the sweeper's)
+  backend: local         # in-process leases (the sweeper's)
   # With backend: nats (needs mq.backend: nats; read only then):
   # nats:
   #   bucket: ""         # empty = <mq.nats.subject_prefix>_coord

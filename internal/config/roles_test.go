@@ -61,7 +61,7 @@ instance_id: pod-b
 `), 0o600))
 	cfg, err := Load(path)
 	require.NoError(t, err)
-	assert.Equal(t, []Role{RoleSweeper, RoleAPI, RoleIngest}, cfg.Roles, "the file's list, not the env default")
+	assert.Equal(t, []Role{RoleSweeper, RoleAPI, RoleIngest}, cfg.Roles, "the file's list, not the default")
 	assert.Equal(t, "pod-b", cfg.InstanceID)
 }
 

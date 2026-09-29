@@ -63,6 +63,44 @@ describe("parseErrorResponse", () => {
     expect(e.retryable).toBe(true);
   });
 
+  it("takes the server's code and retryable when it sends them", async () => {
+    const res = new Response(
+      JSON.stringify({
+        error: "Code: 62. Syntax error",
+        code: "clickhouse.rejected",
+        retryable: false,
+      }),
+      { status: 400, statusText: "Bad Request" },
+    );
+    const e = await parseErrorResponse(res);
+    expect(e.code).toBe("clickhouse.rejected");
+    expect(e.retryable).toBe(false);
+  });
+
+  it("lets the server mark a 5xx not retryable", async () => {
+    const res = new Response(
+      JSON.stringify({
+        error: "Authentication failed",
+        code: "clickhouse.misconfigured",
+        retryable: false,
+      }),
+      { status: 502, statusText: "Bad Gateway" },
+    );
+    const e = await parseErrorResponse(res);
+    expect(e.code).toBe("clickhouse.misconfigured");
+    expect(e.retryable).toBe(false);
+  });
+
+  it("ignores a non-string code and a non-boolean retryable", async () => {
+    const res = new Response(JSON.stringify({ error: "x", code: 123, retryable: "no" }), {
+      status: 500,
+      statusText: "Internal Server Error",
+    });
+    const e = await parseErrorResponse(res);
+    expect(e.code).toBe("HTTP_500");
+    expect(e.retryable).toBe(true);
+  });
+
   it("marks 4xx as not retryable", async () => {
     const res = new Response(JSON.stringify({ error: "forbidden" }), {
       status: 403,

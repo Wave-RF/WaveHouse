@@ -73,7 +73,7 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 			// numeric code, not the HTTP interface's symbolic suffix).
 			name:        "per-role max_rows_to_read is enforced (code 158 TOO_MANY_ROWS)",
 			perms:       policy.SelectPermissions{AllowColumns: []string{"*"}, MaxRowsToRead: 1},
-			wantStatus:  http.StatusInternalServerError,
+			wantStatus:  http.StatusBadRequest,
 			wantBodyHas: "code: 158",
 		},
 		{
@@ -83,7 +83,7 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 			// (ByteSize literal 1 == 1 byte.)
 			name:        "per-role max_memory_usage is enforced (code 241 MEMORY_LIMIT_EXCEEDED)",
 			perms:       policy.SelectPermissions{AllowColumns: []string{"*"}, MaxMemoryUsage: 1},
-			wantStatus:  http.StatusInternalServerError,
+			wantStatus:  http.StatusBadRequest,
 			wantBodyHas: "code: 241",
 		},
 	}
@@ -118,6 +118,10 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 			require.Equal(t, tt.wantStatus, rec.Code,
 				"unexpected status; body: %s", body)
 			assert.Contains(t, body, tt.wantBodyHas)
+			if tt.wantStatus != http.StatusOK {
+				// The role's own cap: the caller's, and not retried.
+				assert.Contains(t, body, `"code":"clickhouse.limit_exceeded","retryable":false`)
+			}
 		})
 	}
 }

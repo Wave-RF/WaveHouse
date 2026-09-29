@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 )
@@ -115,6 +116,10 @@ func (h *SchemaHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	if err := reg.Refresh(r.Context()); err != nil {
 		if errors.Is(err, discovery.ErrNoConnection) {
 			writeUnavailable(w, noConnectionMessage, retryAfterPool)
+			return
+		}
+		if chconn.Classify(err) == chconn.Unavailable {
+			writeUnavailable(w, "refresh failed: clickhouse unavailable", retryAfterClickHouse)
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, "refresh failed")
