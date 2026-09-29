@@ -651,29 +651,167 @@ func TestEmbeddedNATS_SetMaxBytes_UndoRestoresTheIngestStreamsCap(t *testing.T) 
 	assert.Zero(t, e.MaxBytes("acme"), "and the next call retries")
 }
 
-// A consumer that cannot join a tenant's queue opened after it started says so
-// on failed — the one report that stops the ingest worker, which would
-// otherwise let the tenant's ingest answer 200 for rows nobody reads. The
-// queue itself is open, so SetMaxBytes succeeds.
-func TestEmbeddedNATS_Consume_ReportsAQueueItCannotJoin(t *testing.T) {
+// A queue whose streams went missing under delivering consumers is opened
+// again by the tenant's next publish, and delivery starts again on the new
+// ingest stream, so the row reaches both consumers rather than a stream
+// nobody reads. Losing the durable is still the worker's consumer's to
+// report on failed, as any delivery that ends on its own is; that is not
+// asserted here, since the reopen may get there first.
+func TestEmbeddedNATS_Publish_RestartsDeliveryOnAReopenedQueue(t *testing.T) {
 	t.Parallel()
-	e := openEmbedded(t, storedir.New(t))
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	// A durable name the client refuses: with no queue yet, nothing checks it.
-	cons, err := e.CreateConsumer(ctx, ConsumerConfig{Durable: "bad.name", MaxAckPending: 10})
+	x := newJoinFixture(ctx, t)
+	globex := Topic{Tenant: "globex", Table: "t"}
+	// A delivery proves the pulls are live before the streams go.
+	require.NoError(t, x.e.Publish(ctx, globex, []byte("x")))
+	x.delivered(t, globex)
+
+	for _, name := range []string{"INGEST_globex", "DLQ_globex"} {
+		require.NoError(t, x.e.js.DeleteStream(ctx, name))
+	}
+	require.NoError(t, x.e.Publish(ctx, globex, []byte("x")))
+	x.delivered(t, globex)
+}
+
+// obstructJoin opens tenant id's ingest stream behind the broker's back, as
+// an open that gave up can, with a file where the named durable's store goes:
+// that consumer cannot join the queue until the returned clear removes it.
+func obstructJoin(t *testing.T, e *EmbeddedNATS, dir string, id tenant.ID, durable string) (clearObstacle func()) {
+	t.Helper()
+	_, err := e.js.CreateStream(t.Context(), ingestStreamConfig(id, testBudget))
 	require.NoError(t, err)
-	stop, failed, err := cons.Consume(func(*Message) {}, 4)
+	consumers := filepath.Join(dir, "jetstream", "$G", "streams", ingestStreamName(id), "obs")
+	require.NoError(t, os.MkdirAll(consumers, 0o750))
+	block := filepath.Join(consumers, durable)
+	require.NoError(t, os.WriteFile(block, nil, 0o600))
+	return func() {
+		t.Helper()
+		require.NoError(t, os.Remove(block))
+	}
+}
+
+// joinFixture is a broker with globex's queue open, the ingest worker's and
+// the hub bridge's consumers delivering, and acme's queue not opened yet.
+type joinFixture struct {
+	e           *EmbeddedNATS
+	dir         string
+	worker, hub chan Topic
+	failed      <-chan error
+}
+
+func newJoinFixture(ctx context.Context, t *testing.T) joinFixture {
+	t.Helper()
+	dir := storedir.New(t)
+	x := joinFixture{e: openEmbedded(t, dir), dir: dir, worker: make(chan Topic, 8), hub: make(chan Topic, 8)}
+	require.NoError(t, x.e.SetMaxBytes(ctx, "globex", testBudget))
+	cons, err := x.e.CreateConsumer(ctx, ConsumerConfig{Durable: "buffer", MaxAckPending: 10})
+	require.NoError(t, err)
+	stop, failed, err := cons.Consume(func(msg *Message) {
+		_ = msg.Ack()
+		x.worker <- msg.Topic()
+	}, 4)
 	require.NoError(t, err)
 	t.Cleanup(stop)
+	x.failed = failed
+	require.NoError(t, x.e.Subscribe(ctx, "hub-bridge", func(msg *Message) error {
+		_ = msg.Ack()
+		x.hub <- msg.Topic()
+		return nil
+	}))
+	return x
+}
 
-	require.NoError(t, e.SetMaxBytes(ctx, "acme", testBudget))
-	select {
-	case err := <-failed:
-		require.ErrorIs(t, err, ErrDeliveryEnded)
-		assert.Contains(t, err.Error(), "acme")
-	case <-time.After(5 * time.Second):
-		t.Fatal("a queue the consumer could not join was not reported")
+// delivered waits for topic on both consumers.
+func (x joinFixture) delivered(t *testing.T, topic Topic) {
+	t.Helper()
+	for name, got := range map[string]chan Topic{"worker": x.worker, "hub": x.hub} {
+		select {
+		case have := <-got:
+			assert.Equal(t, topic, have, name)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: %v was not delivered", name, topic)
+		}
+	}
+}
+
+// A consumer that cannot join a tenant's queue opened after it started costs
+// that tenant alone, whichever consumer it is: the tenant's publishes are
+// refused, so no row is answered 200 that a consumer would not read, while
+// nothing is reported on failed — which would stop the ingest worker, and
+// the process with it — and every other tenant publishes and consumes.
+func TestEmbeddedNATS_AQueueAConsumerCannotJoin_CostsThatTenantAlone(t *testing.T) {
+	t.Parallel()
+	for _, durable := range []string{"buffer", "hub-bridge"} {
+		t.Run(durable, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			x := newJoinFixture(ctx, t)
+			obstructJoin(t, x.e, x.dir, "acme", durable)
+
+			err := x.e.SetMaxBytes(ctx, "acme", testBudget)
+			require.ErrorContains(t, err, "consumer "+durable+": join the queue")
+			assert.Zero(t, x.e.MaxBytes("acme"), "no budget applied in full, so the next reload retries")
+			err = x.e.Publish(ctx, Topic{Tenant: "acme", Table: "t"}, []byte("x"))
+			require.ErrorIs(t, err, ErrQueueFull, "the tenant's queue takes nothing; a retry is the answer")
+
+			globex := Topic{Tenant: "globex", Table: "t"}
+			require.NoError(t, x.e.Publish(ctx, globex, []byte("x")))
+			x.delivered(t, globex)
+			select {
+			case err := <-x.failed:
+				t.Fatalf("one tenant's failed join was reported as the consumer's failure: %v", err)
+			case <-time.After(300 * time.Millisecond):
+			}
+		})
+	}
+}
+
+// A queue a consumer could not join is joined by the tenant's next publish
+// once its pacing window has passed, or by the next reload, and the row
+// published then reaches both consumers without a restart.
+func TestEmbeddedNATS_AQueueAConsumerCannotJoin_IsJoinedLater(t *testing.T) {
+	t.Parallel()
+	acme := Topic{Tenant: "acme", Table: "t"}
+	retries := map[string]func(context.Context, *testing.T, *EmbeddedNATS){
+		"publish": func(ctx context.Context, t *testing.T, e *EmbeddedNATS) {
+			// The refused publish below opened the window; it is closed here
+			// rather than waited out.
+			v, ok := e.failedOpen.Load(acme.Tenant)
+			require.True(t, ok, "the refused publish's attempt is paced")
+			failed := v.(openFailure)
+			failed.until = time.Now()
+			e.failedOpen.Store(acme.Tenant, failed)
+		},
+		"reload": func(ctx context.Context, t *testing.T, e *EmbeddedNATS) {
+			require.NoError(t, e.SetMaxBytes(ctx, acme.Tenant, testBudget), "a reload retries regardless of the window")
+		},
+	}
+	for _, durable := range []string{"buffer", "hub-bridge"} {
+		for name, retry := range retries {
+			t.Run(durable+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				x := newJoinFixture(ctx, t)
+				clearObstacle := obstructJoin(t, x.e, x.dir, acme.Tenant, durable)
+				require.Error(t, x.e.SetMaxBytes(ctx, acme.Tenant, testBudget))
+				require.ErrorIs(t, x.e.Publish(ctx, acme, []byte("x")), ErrQueueFull, "the publish's own attempt fails")
+
+				clearObstacle()
+				require.ErrorIs(t, x.e.Publish(ctx, acme, []byte("x")), ErrQueueFull, "within the window a publish tries nothing")
+				retry(ctx, t, x.e)
+				require.NoError(t, x.e.Publish(ctx, acme, []byte("x")))
+				x.delivered(t, acme)
+				assert.Equal(t, int64(testBudget), x.e.MaxBytes(acme.Tenant))
+				select {
+				case err := <-x.failed:
+					t.Fatalf("a failure was reported: %v", err)
+				default:
+				}
+			})
+		}
 	}
 }
 
@@ -944,9 +1082,9 @@ func TestEmbeddedNATS_Publish_OpensTheQueueAtTheLastBudget(t *testing.T) {
 
 // The context a publish reopens a queue under is one client's request, but
 // the queue is every consumer's: a client gone before the consumers join must
-// not leave a queue that no consumer holds, which the ingest worker would
-// report as its delivery ending. So the reopen — joins included — outlives
-// the caller's cancellation.
+// not leave a queue that no consumer holds, which would refuse the tenant's
+// publishes until a later one joined them. So the reopen — joins included —
+// outlives the caller's cancellation.
 func TestEmbeddedNATS_ReopenOutlivesTheCallersCancellation(t *testing.T) {
 	t.Parallel()
 	e := newTestEmbedded(t, "acme")

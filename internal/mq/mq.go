@@ -271,10 +271,12 @@ type Consumer interface {
 	//
 	// Delivery can also end on its own after Consume has returned: the broker
 	// or the client gives up on the consumer (it was deleted, the connection
-	// closed), or a queue opened later could not be joined. That is
-	// reported on failed — exactly one error, and nothing once stop has been
-	// called — because no message will ever arrive to say so. A caller that
-	// ignores failed waits forever on a dead consumer.
+	// closed). That is reported on failed — exactly one error, and nothing
+	// once stop has been called — because no message will ever arrive to say
+	// so. A caller that ignores failed waits forever on a dead consumer. A
+	// queue opened later that the consumer cannot join is not that: it is
+	// its tenant's failure, reported by SetMaxBytes and to the tenant's
+	// publishes, and delivery from every other queue goes on.
 	Consume(handler func(msg *Message), prefetch int) (stop func(), failed <-chan error, err error)
 }
 
