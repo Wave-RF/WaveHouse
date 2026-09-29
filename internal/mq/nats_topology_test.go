@@ -357,7 +357,8 @@ func TestVerifyNATSTopology_ServerVersion(t *testing.T) {
 	cases := map[string]*FindingSeverity{
 		"2.14.6":       nil,
 		"v2.14.0-beta": nil,
-		"2.10.0":       new(FindingRecommended),
+		"2.10.0":       new(FindingRequired),
+		"2.13.9":       new(FindingRequired),
 		"2.15.1":       new(FindingRecommended),
 		"2.9.25":       new(FindingRequired),
 		"1.4.1":        new(FindingRequired),

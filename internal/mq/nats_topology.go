@@ -236,8 +236,10 @@ func hasRequired(findings []Finding) bool {
 }
 
 // minNATSServer is the oldest server whose features the topology relies on:
-// stream metadata, subject-filtered stream info and discard_new_per_subject.
-var minNATSServer = [3]int{2, 10, 0}
+// pinned-client priority groups and unpinning (2.11) and resetting a consumer
+// to its ack floor (2.14), besides stream metadata, subject-filtered stream
+// info and discard_new_per_subject.
+var minNATSServer = [3]int{2, 14, 0}
 
 // recommendedNATSMinor is the server line the embedded broker runs.
 const recommendedNATSMinor = "2.14."
