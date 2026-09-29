@@ -53,7 +53,8 @@ func withoutContext(release func() error) func(context.Context) error {
 // configuration (dedupe, dlq, query, schema, stream, cors — see
 // settings.TenantConfig). Required: config.Validate already rejected an
 // empty settings.dir, and an invalid directory refuses boot. The binary
-// carries no compiled defaults; `wavehouse bootstrap` writes the seed. A
+// carries no compiled defaults but a missing dedupe.retention ("0");
+// `wavehouse bootstrap` writes the seed. A
 // *reload* of an invalid directory merely keeps the previous snapshot. A
 // nested directory (one folder per tenant, #583) fails closed per tenant
 // instead, at boot and on reload alike: see settings.Registry.
@@ -132,8 +133,9 @@ func gapWindows(tenants *settings.Registry) map[tenant.ID]time.Duration {
 const keepEverything = time.Duration(math.MaxInt64)
 
 // served reports whether the registry is serving tenant id: what the
-// per-tenant resources — verifiers, dedupe stores, open streams — are pruned
-// by once a reload removes or rejects their tenant.
+// per-tenant resources — verifiers, dedupe stores, open streams, the cache
+// version index — are pruned by once a reload removes or rejects their
+// tenant.
 func (a *App) served(id tenant.ID) bool {
 	_, ok := a.tenants.For(id)
 	return ok
@@ -188,11 +190,12 @@ func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 // its tables (chconn.Pools.SharingTables), the named one included. Reads are
 // untouched: a tenant's cached results stay its own. A tenant on no pool —
 // rejected, removed, or one no pool could be opened for, such as by the
-// connection ceiling — is out of the fan-out, and its table-keyed cache is
-// orphaned when it gets one (wireClickHouse, Cache.InvalidateTenant), so a
-// folder repaired or restored inside a TTL never serves pre-insert
-// structured-query rows; a pipe result names no table, so no insert
-// invalidates it and it stays until its TTL expires (#343).
+// connection ceiling — is out of the fan-out, and its cache is orphaned
+// when it gets one (wireClickHouse, Cache.InvalidateTenant), so a folder
+// repaired or restored inside a TTL never serves pre-insert rows. That also
+// drops the tenant's cached pipe results; apart from it a pipe result stays
+// until its TTL expires, since a pipe names no table and no insert
+// invalidates it (#343).
 type sharedTables struct {
 	cache.Cache
 	sharing func(tenant.ID) []tenant.ID
@@ -320,7 +323,7 @@ func (a *App) wireClickHouse() error {
 		// cached is stale, so all of it is orphaned at once.
 		for _, id := range stale {
 			if err := a.cache.InvalidateTenant(a.stopCtx, id); err != nil {
-				slog.Error("cache invalidation of a stale tenant failed; it may serve stale rows until they expire", "tenant", id, "error", err)
+				slog.Warn("cache invalidation of a stale tenant did not land; it may serve stale rows until it does", "tenant", id, "error", err)
 			}
 		}
 	})
@@ -366,8 +369,8 @@ func (a *App) registryFor(s *settings.Store) *discovery.SchemaRegistry {
 	return a.discoveries.For(s.Tenant())
 }
 
-// queryTimeout is the tenant's read deadline, a per-call setting rather
-// than a property of the pool it shares.
+// queryTimeout is the tenant's deadline for a call on the query paths, a
+// per-call setting rather than a property of the pool it shares.
 func queryTimeout(s *settings.Store) time.Duration { return s.ClickHouse().QueryTimeout }
 
 // wireDiscovery builds one schema registry per served tenant, each with a
@@ -462,10 +465,12 @@ func (a *App) wireDiscovery(ctx context.Context) {
 
 // wireDedupe builds the dedupe stores — the one place the implementation is
 // chosen.
-func (a *App) wireDedupe() error {
+func (a *App) wireDedupe(ctx context.Context) error {
 	switch b := a.cfg.Dedupe.Backend; b {
 	case config.DedupePebble:
 		return a.wirePebbleDedupe()
+	case config.DedupeDynamoDB:
+		return a.wireDynamoDedupe(ctx)
 	default:
 		return unreachableBackend("dedupe.backend", b)
 	}
@@ -484,8 +489,9 @@ func (a *App) wireDedupe() error {
 // still closed — either the hook sees it or the boot apply reads it. An
 // instance that cannot open follows the registry's own rule for the shape:
 // flat refuses boot, like every other store, and on reload logs and leaves
-// the store closed — ingest then fails closed (500 "dedupe failed") rather
-// than silently publishing un-deduped, since the files asked for dedupe;
+// the store closed — ingest then fails closed (503 "dedupe store
+// unavailable", Retry-After: 5) rather than silently publishing un-deduped,
+// since the files asked for dedupe;
 // nested fails closed the same way at boot too, for every tenant with
 // dedupe on, the next reload retrying, so it never costs the process.
 func (a *App) wirePebbleDedupe() error {
@@ -529,6 +535,11 @@ func (a *App) wirePebbleDedupe() error {
 	}
 	return nil
 }
+
+// wireDynamoDedupe (dedupe.backend: dynamodb) lives in wire_dynamodb.go,
+// excluded from the e2e coverage gate alongside internal/dedupe/dynamodb.go
+// (see .testcoverage.yml): the e2e binary always runs Pebble dedupe, so
+// nothing there exercises it. wireDedupe above still switches on it.
 
 // wireMQ starts the MQ — the one place the implementation is chosen;
 // everything after it sees mq.Broker.
@@ -655,21 +666,75 @@ func (a *App) wireEmbeddedMQ(ctx context.Context) error {
 	return nil
 }
 
+// pruner is a cache whose version index lives in the process and would
+// otherwise keep a tenant that stopped being served (cache.LocalCache).
+type pruner interface {
+	Prune(served func(tenant.ID) bool)
+}
+
+// The hook below asserts pruner at run time; this keeps LocalCache from
+// silently dropping out of it.
+var _ pruner = (*cache.LocalCache)(nil)
+
 // wireCache opens the query-result cache — the one place the implementation
-// is chosen.
+// is chosen. After every reload a tenant no longer served, removed or
+// rejected alike, has its in-process version index dropped (#262); its cache
+// is orphaned with it, as it would be anyway when it came back
+// (wireClickHouse). A shared backend keeps no such index and is skipped.
 func (a *App) wireCache() error {
+	var c cache.Cache
 	switch b := a.cfg.Cache.Backend; b {
 	case config.CacheLocal:
 		l1, err := cache.NewLocal(a.cfg.Cache.L1MaxCost)
 		if err != nil {
 			return fmt.Errorf("cache init: %w", err)
 		}
-		a.cache = l1
-		a.add(component{name: "cache", close: withoutContext(l1.Close)})
-		return nil
+		c = l1
+	case config.CacheRedis:
+		rc, err := redisConfig(a.cfg.Cache.Redis)
+		if err != nil {
+			return fmt.Errorf("cache init: %w", err)
+		}
+		r, err := cache.NewRedis(rc)
+		if err != nil {
+			return fmt.Errorf("cache init: %w", err)
+		}
+		c = r
 	default:
 		return unreachableBackend("cache.backend", b)
 	}
+	a.cache = c
+	a.add(component{name: "cache", close: withoutContext(c.Close)})
+	a.tenants.AfterAdopt(func([]tenant.ID) {
+		if p, ok := a.cache.(pruner); ok {
+			p.Prune(a.served)
+		}
+	})
+	return nil
+}
+
+// redisConfig maps the boot config's cache.redis block onto the backend's
+// config. Load has applied every default and validated the block; the TLS
+// files are read again here, so the connection uses what is on disk now.
+func redisConfig(r config.CacheRedisConfig) (cache.RedisConfig, error) {
+	t, err := r.TLS.Config()
+	if err != nil {
+		return cache.RedisConfig{}, err
+	}
+	return cache.RedisConfig{
+		Addrs:            r.Addrs,
+		Mode:             r.Mode,
+		Username:         r.Username,
+		Password:         r.Password,
+		DB:               r.DB,
+		TLS:              t,
+		KeyPrefix:        r.KeyPrefix,
+		Timeout:          r.Timeout,
+		DialTimeout:      r.DialTimeout,
+		MaxValueBytes:    r.MaxValueBytes,
+		CompressMinBytes: r.CompressMinBytes,
+		VersionTTL:       r.VersionTTL,
+	}, nil
 }
 
 // unreachableBackend is each layer switch's default case. config.Validate
@@ -985,6 +1050,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	ingestHandler.PolicySource = (*settings.Store).Policy
 	ingestHandler.Dedup = func(s *settings.Store) dedupe.Deduplicator { return a.dedup.For(s.Tenant()) }
 	ingestHandler.DedupeSettings = (*settings.Store).DedupeFor
+	ingestHandler.DedupeLease = a.cfg.Dedupe.Lease
 
 	// Readiness pings every open pool at once and is ready at the first
 	// answer: one tenant's ClickHouse outage is not the process's.

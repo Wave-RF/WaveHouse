@@ -16,9 +16,10 @@ import (
 // accessors below each resolve from a single snapshot load, so a reload lands
 // between lookups, never inside one.
 //
-// There are no compiled defaults here on purpose: every key is required by
-// Validate, so the snapshot is exactly what the files said when they were
-// adopted. Defaults live in the seed directory (Seed / WriteSeed).
+// There are no compiled defaults here on purpose, but one: every key but
+// dedupe.retention (missing means "0", forever) is required by Validate, so
+// the snapshot is exactly what the files said when they were adopted.
+// Defaults live in the seed directory (Seed / WriteSeed).
 type Store struct {
 	// tenant is the id the Registry created the store for; the zero value
 	// only for a Store built outside a Registry (tests).
@@ -76,23 +77,41 @@ func (s *Store) DedupeEnabled() bool {
 	return *s.doc().Config.Dedupe.Enabled
 }
 
+// Dedupe is a table's effective dedupe settings.
+type Dedupe struct {
+	Enabled   bool
+	IDField   string
+	RequireID bool
+	// Retention is how long a committed id stays a duplicate; 0 is forever.
+	Retention time.Duration
+}
+
 // DedupeFor resolves the effective dedupe settings for a table: the switch,
 // then the table override for each field it names, the global value
-// otherwise. All three resolve from one snapshot load, so a reload can never
-// hand a record the id_field of one document and the require_id (or enabled)
-// of another.
-func (s *Store) DedupeFor(table string) (enabled bool, idField string, requireID bool) {
+// otherwise. Every field resolves from one snapshot load, so a reload can
+// never hand a record the id_field of one document and the require_id,
+// retention or switch of another.
+func (s *Store) DedupeFor(table string) Dedupe {
 	d := s.doc().Config.Dedupe
-	enabled, idField, requireID = *d.Enabled, *d.IDField, *d.RequireID
+	out := Dedupe{Enabled: *d.Enabled, IDField: *d.IDField, RequireID: *d.RequireID}
+	retention := "0"
+	if d.Retention != nil {
+		retention = *d.Retention
+	}
 	if td, ok := d.Tables[table]; ok {
 		if td.IDField != nil {
-			idField = *td.IDField
+			out.IDField = *td.IDField
 		}
 		if td.RequireID != nil {
-			requireID = *td.RequireID
+			out.RequireID = *td.RequireID
+		}
+		if td.Retention != nil {
+			retention = *td.Retention
 		}
 	}
-	return enabled, idField, requireID
+	// Validate has parsed it already.
+	out.Retention, _ = time.ParseDuration(retention)
+	return out
 }
 
 // ClickHouse is the adopted connection wiring, resolved as one value from

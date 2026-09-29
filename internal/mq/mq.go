@@ -169,6 +169,20 @@ func WithHeader(key, value string) PublishOpt {
 	}
 }
 
+// idempotencyHeader carries WithIdempotencyKey's key: JetStream's own
+// message-id header, which the stream deduplicates on.
+const idempotencyHeader = "Nats-Msg-Id"
+
+// WithIdempotencyKey marks a publish with key: a second publish carrying the
+// same key within the queue's duplicate window is dropped by the broker and
+// reported as success, so republishing an event whose first publish had an
+// unknown outcome stores it once.
+func WithIdempotencyKey(key string) PublishOpt {
+	return func(h Headers) {
+		h.Set(idempotencyHeader, key)
+	}
+}
+
 // ErrQueueFull is returned by Publisher.Publish when the queue that holds the
 // topic's tenant refuses new events because it is at a byte limit — the
 // backpressure signal the API turns into a 503 with Retry-After. Which limits
@@ -179,8 +193,11 @@ var ErrQueueFull = errors.New("ingest queue is full")
 
 // ErrUnavailable is returned when the broker cannot be reached or does not
 // answer in time — a transient failure, not a refusal, that the API turns
-// into a 503 with a short Retry-After. Only a backend whose broker is out of
-// process returns it; the embedded one's publish failures are plain errors.
+// into a 503. Retry-After is the dedupe lease, rounded up to whole seconds,
+// when the record held a claim (so an obedient client waits out the window
+// instead of retrying straight into it), else a flat few seconds. Only a
+// backend whose broker is out of process returns it; the embedded one's
+// publish failures are plain errors.
 var ErrUnavailable = errors.New("message queue unavailable")
 
 // Publisher appends events to the ingest queue.
@@ -255,10 +272,12 @@ type Consumer interface {
 	//
 	// Delivery can also end on its own after Consume has returned: the broker
 	// or the client gives up on the consumer (it was deleted, the connection
-	// closed), or a queue opened later could not be joined. That is
-	// reported on failed — exactly one error, and nothing once stop has been
-	// called — because no message will ever arrive to say so. A caller that
-	// ignores failed waits forever on a dead consumer.
+	// closed). That is reported on failed — exactly one error, and nothing
+	// once stop has been called — because no message will ever arrive to say
+	// so. A caller that ignores failed waits forever on a dead consumer. A
+	// queue opened later that the consumer cannot join is not that: it is
+	// its tenant's failure, reported by SetMaxBytes and to the tenant's
+	// publishes, and delivery from every other queue goes on.
 	Consume(handler func(msg *Message), prefetch int) (stop func(), failed <-chan error, err error)
 }
 

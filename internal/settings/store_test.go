@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,25 +47,40 @@ func TestStore_Tenant(t *testing.T) {
 func TestStore_DedupeFor_Cascade(t *testing.T) {
 	t.Parallel()
 	s := newLoadedStore(t, map[string]string{
-		FileConfig: configJSON(`{"dedupe": {"require_id": true, "tables": {"clicks": {"id_field": "click_id"}, "views": {"require_id": false}}}}`),
+		FileConfig: configJSON(`{"dedupe": {"require_id": true, "retention": "720h", "tables": {"clicks": {"id_field": "click_id"}, "views": {"require_id": false, "retention": "24h"}, "audit": {"retention": "0"}}}}`),
 	})
 
 	tests := []struct {
-		name, table, wantID string
-		wantRequire         bool
+		name, table string
+		want        Dedupe
 	}{
-		{name: "table overrides id_field, inherits require_id", table: "clicks", wantID: "click_id", wantRequire: true},
-		{name: "table overrides require_id, inherits id_field", table: "views", wantID: "event_id", wantRequire: false},
-		{name: "unlisted table gets globals", table: "other", wantID: "event_id", wantRequire: true},
+		{name: "table overrides id_field, inherits the rest", table: "clicks", want: Dedupe{IDField: "click_id", RequireID: true, Retention: 720 * time.Hour}},
+		{name: "table overrides require_id and retention, inherits id_field", table: "views", want: Dedupe{IDField: "event_id", Retention: 24 * time.Hour}},
+		{name: "table keeps ids forever under a finite tenant retention", table: "audit", want: Dedupe{IDField: "event_id", RequireID: true}},
+		{name: "unlisted table gets globals", table: "other", want: Dedupe{IDField: "event_id", RequireID: true, Retention: 720 * time.Hour}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, id, req := s.DedupeFor(tt.table)
-			assert.Equal(t, tt.wantID, id)
-			assert.Equal(t, tt.wantRequire, req)
+			assert.Equal(t, tt.want, s.DedupeFor(tt.table))
 		})
 	}
+}
+
+// A config.json without dedupe.retention keeps ids forever, and its table
+// overrides inherit that or set their own.
+func TestStore_DedupeFor_RetentionMissing(t *testing.T) {
+	t.Parallel()
+	var doc map[string]map[string]any
+	require.NoError(t, json.Unmarshal([]byte(configJSON(`{"dedupe": {"tables": {"clicks": {"id_field": "click_id"}, "views": {"retention": "24h"}}}}`)), &doc))
+	delete(doc["dedupe"], "retention")
+	body, err := json.Marshal(doc)
+	require.NoError(t, err)
+	s := newLoadedStore(t, map[string]string{FileConfig: string(body)})
+
+	assert.Equal(t, Dedupe{IDField: "event_id"}, s.DedupeFor("other"), "forever")
+	assert.Equal(t, Dedupe{IDField: "click_id"}, s.DedupeFor("clicks"), "inherits forever")
+	assert.Equal(t, Dedupe{IDField: "event_id", Retention: 24 * time.Hour}, s.DedupeFor("views"))
 }
 
 // TestStore_SeedIsValid pins that the shipped starter directory passes its
@@ -83,9 +99,7 @@ func TestStore_SeedIsValid(t *testing.T) {
 	// decision (deployments/compose/settings ships the opt-in trial one).
 	assert.Len(t, findings, 1, "findings: %s", findingStrings(findings))
 	assert.Contains(t, findingStrings(findings), "no policy")
-	_, id, req := s.DedupeFor("anything")
-	assert.Equal(t, "event_id", id)
-	assert.False(t, req)
+	assert.Equal(t, Dedupe{IDField: "event_id"}, s.DedupeFor("anything"), "retention 0: ids kept forever, as before retention existed")
 	assert.Equal(t, ClickHouse{Addr: "localhost:9000", HTTPPort: 8123, HTTPScheme: "http", Database: "default", Username: "default", QueryTimeout: 30 * time.Second, Headers: map[string]string{}, MaxOpenConns: 10, MaxIdleConns: 5}, s.ClickHouse())
 	assert.Equal(t, Auth{JWKSURL: "", RoleClaim: "role"}, s.Auth())
 	assert.True(t, s.DLQFor("anything"))

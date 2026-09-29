@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
@@ -450,6 +451,26 @@ func (v *validator) checkIDField(path string, val *string) {
 	}
 }
 
+// checkRetention rejects a dedupe retention that is not a duration, is
+// negative, or is finite but shorter than MinDedupeRetention. The short one
+// is refused rather than raised to the minimum, so the file never means
+// something other than what it says. nil is valid: forever at the tenant
+// level, inherited at the table level.
+func (v *validator) checkRetention(path string, val *string) {
+	if val == nil {
+		return
+	}
+	d, err := time.ParseDuration(*val)
+	switch {
+	case err != nil:
+		v.errorf(FileConfig, path, "must be a duration such as \"720h\", or \"0\" to keep ids forever, got %q", *val)
+	case d < 0:
+		v.errorf(FileConfig, path, "must not be negative, got %q", *val)
+	case d > 0 && d < MinDedupeRetention:
+		v.errorf(FileConfig, path, "%q is shorter than the ingest queue's %s duplicate window: an id re-sent after it expires but inside the window would be dropped by the queue while the client is told it was accepted — use at least %q, or \"0\" to keep ids forever", *val, MinDedupeRetention, MinDedupeRetention.String())
+	}
+}
+
 // checkTableName rejects a per-table override key that could never match a
 // table: empty, or carrying surrounding whitespace. Shared by the dedupe and
 // dlq override maps.
@@ -670,14 +691,16 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 			v.required("dedupe.require_id")
 		}
 		v.checkIDField("dedupe.id_field", d.IDField)
+		v.checkRetention("dedupe.retention", d.Retention)
 		// Sorted iteration keeps finding order deterministic across runs.
 		for _, table := range slices.Sorted(maps.Keys(d.Tables)) {
 			td := d.Tables[table]
 			path := "dedupe.tables." + table
 			v.checkTableName("dedupe.tables", table)
 			v.checkIDField(path+".id_field", td.IDField)
-			if td.IDField == nil && td.RequireID == nil {
-				v.warnf(FileConfig, path, "override sets nothing — remove it, or set id_field or require_id")
+			v.checkRetention(path+".retention", td.Retention)
+			if td.IDField == nil && td.RequireID == nil && td.Retention == nil {
+				v.warnf(FileConfig, path, "override sets nothing — remove it, or set id_field, require_id or retention")
 			}
 		}
 	}

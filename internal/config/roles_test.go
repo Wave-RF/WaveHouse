@@ -114,12 +114,14 @@ func TestValidate_RoleSplits(t *testing.T) {
 		{"every role, shared queue", all, "shared", CacheLocal, ""},
 		{"api+ingest, shared queue", []Role{RoleAPI, RoleIngest}, "shared", CacheLocal, ""},
 		{"sweeper, shared queue", []Role{RoleSweeper}, "shared", CacheLocal, ""},
-		{"api, local cache", []Role{RoleAPI}, "shared", CacheLocal, "roles api with cache.backend=local: api and ingest run in different processes"},
+		{"api, local cache", []Role{RoleAPI}, "shared", CacheLocal, "roles api with cache.backend=local: api and ingest run in different processes, and the ingest worker's cache invalidation would never reach the API's cache — run api and ingest together, or set cache.backend=redis"},
 		{"ingest, local cache", []Role{RoleIngest}, "shared", CacheLocal, "roles ingest with cache.backend=local"},
 		{"api+sweeper, local cache", []Role{RoleAPI, RoleSweeper}, "shared", CacheLocal, "roles api,sweeper with cache.backend=local"},
 		{"ingest+sweeper, local cache", []Role{RoleIngest, RoleSweeper}, "shared", CacheLocal, "roles ingest,sweeper with cache.backend=local"},
 		{"api, shared cache", []Role{RoleAPI}, "shared", "shared", ""},
 		{"ingest, shared cache", []Role{RoleIngest}, "shared", "shared", ""},
+		{"api, redis cache", []Role{RoleAPI}, "shared", CacheRedis, ""},
+		{"ingest, redis cache", []Role{RoleIngest}, "shared", CacheRedis, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

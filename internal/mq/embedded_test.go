@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -18,26 +19,6 @@ import (
 
 // testBudget is the byte budget newTestEmbedded opens each queue at.
 const testBudget = 64 << 20
-
-// storeDir is a temporary directory for a broker's store whose removal
-// retries briefly: a consumer's state file can land after Close has returned,
-// which fails t.TempDir's one-shot RemoveAll (#442). The retrying cleanup runs
-// first (cleanups are LIFO), leaving t.TempDir an empty directory to remove.
-func storeDir(t *testing.T) string {
-	t.Helper()
-	dir := filepath.Join(t.TempDir(), "store")
-	t.Cleanup(func() {
-		var err error
-		for range 50 {
-			if err = os.RemoveAll(dir); err == nil {
-				return
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		t.Errorf("remove %s: %v", dir, err)
-	})
-	return dir
-}
 
 // openEmbedded starts an EmbeddedNATS over dir, closed by the test framework.
 func openEmbedded(t *testing.T, dir string) *EmbeddedNATS {
@@ -53,7 +34,7 @@ func openEmbedded(t *testing.T, dir string) *EmbeddedNATS {
 // at testBudget.
 func newTestEmbedded(t *testing.T, tenants ...tenant.ID) *EmbeddedNATS {
 	t.Helper()
-	e := openEmbedded(t, storeDir(t))
+	e := openEmbedded(t, storedir.New(t))
 	if len(tenants) == 0 {
 		tenants = []tenant.ID{tenant.Default}
 	}
@@ -162,12 +143,46 @@ func TestEmbeddedNATS_PublishHeaders(t *testing.T) {
 	assert.Equal(t, []byte("x"), raw.Data)
 }
 
+// A repeated idempotency key inside the duplicate window is dropped as a
+// success, so an uncertain publish can be republished safely. This stream is
+// created directly, never recorded by takeStock, so SetMaxBytes's next
+// budget apply always runs and picks up the current window;
+// TestNewEmbedded_TakeStockRefreshesAStaleDuplicateWindow covers the boot
+// path, where takeStock itself must not mistake a stale window for one
+// already at budget.
+func TestEmbeddedNATS_Publish_IdempotencyKeyDropsARepeat(t *testing.T) {
+	e := openEmbedded(t, storedir.New(t))
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	// Explicit rather than the server's default, which happens to match today.
+	require.Equal(t, EmbeddedDuplicateWindow, ingestStreamConfig(tenant.Default, testBudget).Duplicates)
+	old := ingestStreamConfig(tenant.Default, testBudget)
+	old.Duplicates = 10 * time.Second
+	_, err := e.js.CreateStream(ctx, old)
+	require.NoError(t, err)
+	require.NoError(t, e.SetMaxBytes(ctx, tenant.Default, testBudget))
+	require.Equal(t, EmbeddedDuplicateWindow, streamConfig(t, e, "INGEST_0").Duplicates)
+
+	topic := Topic{Tenant: tenant.Default, Table: "t"}
+	require.NoError(t, e.Publish(ctx, topic, []byte("a"), WithIdempotencyKey("k1")))
+	require.NoError(t, e.Publish(ctx, topic, []byte("a again"), WithIdempotencyKey("k1")), "a repeat is a success")
+	require.NoError(t, e.Publish(ctx, topic, []byte("b"), WithIdempotencyKey("k2")))
+	require.NoError(t, e.Publish(ctx, topic, []byte("c")))
+
+	var got []string
+	require.NoError(t, e.ReplaySince(ctx, topic, time.Time{}, func(data []byte) bool {
+		got = append(got, string(data))
+		return true
+	}))
+	assert.Equal(t, []string{"a", "b", "c"}, got)
+}
+
 // A tenant's first budget opens its queue: an ingest stream holding its
 // subjects alone at the budget, refusing when full, and a dead-letter stream
 // at a tenth of it, dropping its oldest when full. No other tenant gets one.
 func TestEmbeddedNATS_SetMaxBytes_OpensTheTenantsQueue(t *testing.T) {
 	t.Parallel()
-	e := openEmbedded(t, storeDir(t))
+	e := openEmbedded(t, storedir.New(t))
 	assert.Zero(t, e.MaxBytes("acme"), "no budget applied yet")
 
 	require.NoError(t, e.SetMaxBytes(t.Context(), "acme", testBudget))
@@ -177,6 +192,7 @@ func TestEmbeddedNATS_SetMaxBytes_OpensTheTenantsQueue(t *testing.T) {
 	assert.Equal(t, []string{"ingest.acme.>"}, ingest.Subjects)
 	assert.Equal(t, int64(testBudget), ingest.MaxBytes)
 	assert.Equal(t, jetstream.DiscardNew, ingest.Discard)
+	assert.Equal(t, EmbeddedDuplicateWindow, ingest.Duplicates)
 	dlq := streamConfig(t, e, "DLQ_acme")
 	assert.Equal(t, []string{"dlq.acme.>"}, dlq.Subjects)
 	assert.Equal(t, int64(testBudget)/10, dlq.MaxBytes)
@@ -342,7 +358,7 @@ func TestEmbeddedNATS_DefaultLogger(t *testing.T) {
 	t.Parallel()
 	// NewEmbedded without a logger should not panic — it falls back to the
 	// default slog logger.
-	e, err := NewEmbedded(storeDir(t))
+	e, err := NewEmbedded(storedir.New(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = e.Close() })
 }
@@ -458,7 +474,7 @@ func TestEmbeddedNATS_SetMaxBytes_IngestFailureChangesNothing(t *testing.T) {
 // however recently a publish tried.
 func TestEmbeddedNATS_SetMaxBytes_AQueueThatCannotOpen(t *testing.T) {
 	t.Parallel()
-	dir := storeDir(t)
+	dir := storedir.New(t)
 	// The dead-letter stream is the first of the pair to open. A failed open
 	// removes what was in the way, so the obstacle is put back before each
 	// attempt meant to fail.
@@ -509,7 +525,7 @@ func TestEmbeddedNATS_SetMaxBytes_AQueueThatCannotOpen(t *testing.T) {
 // resize and reload takes. Once the window has passed, a publish tries again.
 func TestEmbeddedNATS_PacesTheRetriesOfAQueueThatCannotOpen(t *testing.T) {
 	t.Parallel()
-	dir := storeDir(t)
+	dir := storedir.New(t)
 	block := filepath.Join(dir, "jetstream", "$G", "streams", dlqStreamName("acme"))
 	obstruct := func() {
 		t.Helper()
@@ -574,7 +590,7 @@ func TestEmbeddedNATS_PacesTheRetriesOfAQueueThatCannotOpen(t *testing.T) {
 // joined, so its row reaches them rather than a stream nobody reads.
 func TestEmbeddedNATS_Publish_OpensAQueueItsOpenGaveUpOn(t *testing.T) {
 	t.Parallel()
-	dir := storeDir(t)
+	dir := storedir.New(t)
 	block := filepath.Join(dir, "jetstream", "$G", "streams", ingestStreamName("acme"))
 	require.NoError(t, os.MkdirAll(filepath.Dir(block), 0o750))
 	require.NoError(t, os.WriteFile(block, nil, 0o600))
@@ -618,7 +634,7 @@ func TestEmbeddedNATS_SetMaxBytes_UndoRestoresTheIngestStreamsCap(t *testing.T) 
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	dir := storeDir(t)
+	dir := storedir.New(t)
 	first, err := NewEmbedded(dir)
 	require.NoError(t, err)
 	require.NoError(t, first.SetMaxBytes(ctx, "acme", 8<<20))
@@ -635,29 +651,167 @@ func TestEmbeddedNATS_SetMaxBytes_UndoRestoresTheIngestStreamsCap(t *testing.T) 
 	assert.Zero(t, e.MaxBytes("acme"), "and the next call retries")
 }
 
-// A consumer that cannot join a tenant's queue opened after it started says so
-// on failed — the one report that stops the ingest worker, which would
-// otherwise let the tenant's ingest answer 200 for rows nobody reads. The
-// queue itself is open, so SetMaxBytes succeeds.
-func TestEmbeddedNATS_Consume_ReportsAQueueItCannotJoin(t *testing.T) {
+// A queue whose streams went missing under delivering consumers is opened
+// again by the tenant's next publish, and delivery starts again on the new
+// ingest stream, so the row reaches both consumers rather than a stream
+// nobody reads. Losing the durable is still the worker's consumer's to
+// report on failed, as any delivery that ends on its own is; that is not
+// asserted here, since the reopen may get there first.
+func TestEmbeddedNATS_Publish_RestartsDeliveryOnAReopenedQueue(t *testing.T) {
 	t.Parallel()
-	e := openEmbedded(t, storeDir(t))
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	// A durable name the client refuses: with no queue yet, nothing checks it.
-	cons, err := e.CreateConsumer(ctx, ConsumerConfig{Durable: "bad.name", MaxAckPending: 10})
+	x := newJoinFixture(ctx, t)
+	globex := Topic{Tenant: "globex", Table: "t"}
+	// A delivery proves the pulls are live before the streams go.
+	require.NoError(t, x.e.Publish(ctx, globex, []byte("x")))
+	x.delivered(t, globex)
+
+	for _, name := range []string{"INGEST_globex", "DLQ_globex"} {
+		require.NoError(t, x.e.js.DeleteStream(ctx, name))
+	}
+	require.NoError(t, x.e.Publish(ctx, globex, []byte("x")))
+	x.delivered(t, globex)
+}
+
+// obstructJoin opens tenant id's ingest stream behind the broker's back, as
+// an open that gave up can, with a file where the named durable's store goes:
+// that consumer cannot join the queue until the returned clear removes it.
+func obstructJoin(t *testing.T, e *EmbeddedNATS, dir string, id tenant.ID, durable string) (clearObstacle func()) {
+	t.Helper()
+	_, err := e.js.CreateStream(t.Context(), ingestStreamConfig(id, testBudget))
 	require.NoError(t, err)
-	stop, failed, err := cons.Consume(func(*Message) {}, 4)
+	consumers := filepath.Join(dir, "jetstream", "$G", "streams", ingestStreamName(id), "obs")
+	require.NoError(t, os.MkdirAll(consumers, 0o750))
+	block := filepath.Join(consumers, durable)
+	require.NoError(t, os.WriteFile(block, nil, 0o600))
+	return func() {
+		t.Helper()
+		require.NoError(t, os.Remove(block))
+	}
+}
+
+// joinFixture is a broker with globex's queue open, the ingest worker's and
+// the hub bridge's consumers delivering, and acme's queue not opened yet.
+type joinFixture struct {
+	e           *EmbeddedNATS
+	dir         string
+	worker, hub chan Topic
+	failed      <-chan error
+}
+
+func newJoinFixture(ctx context.Context, t *testing.T) joinFixture {
+	t.Helper()
+	dir := storedir.New(t)
+	x := joinFixture{e: openEmbedded(t, dir), dir: dir, worker: make(chan Topic, 8), hub: make(chan Topic, 8)}
+	require.NoError(t, x.e.SetMaxBytes(ctx, "globex", testBudget))
+	cons, err := x.e.CreateConsumer(ctx, ConsumerConfig{Durable: "buffer", MaxAckPending: 10})
+	require.NoError(t, err)
+	stop, failed, err := cons.Consume(func(msg *Message) {
+		_ = msg.Ack()
+		x.worker <- msg.Topic()
+	}, 4)
 	require.NoError(t, err)
 	t.Cleanup(stop)
+	x.failed = failed
+	require.NoError(t, x.e.Subscribe(ctx, "hub-bridge", func(msg *Message) error {
+		_ = msg.Ack()
+		x.hub <- msg.Topic()
+		return nil
+	}))
+	return x
+}
 
-	require.NoError(t, e.SetMaxBytes(ctx, "acme", testBudget))
-	select {
-	case err := <-failed:
-		require.ErrorIs(t, err, ErrDeliveryEnded)
-		assert.Contains(t, err.Error(), "acme")
-	case <-time.After(5 * time.Second):
-		t.Fatal("a queue the consumer could not join was not reported")
+// delivered waits for topic on both consumers.
+func (x joinFixture) delivered(t *testing.T, topic Topic) {
+	t.Helper()
+	for name, got := range map[string]chan Topic{"worker": x.worker, "hub": x.hub} {
+		select {
+		case have := <-got:
+			assert.Equal(t, topic, have, name)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: %v was not delivered", name, topic)
+		}
+	}
+}
+
+// A consumer that cannot join a tenant's queue opened after it started costs
+// that tenant alone, whichever consumer it is: the tenant's publishes are
+// refused, so no row is answered 200 that a consumer would not read, while
+// nothing is reported on failed — which would stop the ingest worker, and
+// the process with it — and every other tenant publishes and consumes.
+func TestEmbeddedNATS_AQueueAConsumerCannotJoin_CostsThatTenantAlone(t *testing.T) {
+	t.Parallel()
+	for _, durable := range []string{"buffer", "hub-bridge"} {
+		t.Run(durable, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			x := newJoinFixture(ctx, t)
+			obstructJoin(t, x.e, x.dir, "acme", durable)
+
+			err := x.e.SetMaxBytes(ctx, "acme", testBudget)
+			require.ErrorContains(t, err, "consumer "+durable+": join the queue")
+			assert.Zero(t, x.e.MaxBytes("acme"), "no budget applied in full, so the next reload retries")
+			err = x.e.Publish(ctx, Topic{Tenant: "acme", Table: "t"}, []byte("x"))
+			require.ErrorIs(t, err, ErrQueueFull, "the tenant's queue takes nothing; a retry is the answer")
+
+			globex := Topic{Tenant: "globex", Table: "t"}
+			require.NoError(t, x.e.Publish(ctx, globex, []byte("x")))
+			x.delivered(t, globex)
+			select {
+			case err := <-x.failed:
+				t.Fatalf("one tenant's failed join was reported as the consumer's failure: %v", err)
+			case <-time.After(300 * time.Millisecond):
+			}
+		})
+	}
+}
+
+// A queue a consumer could not join is joined by the tenant's next publish
+// once its pacing window has passed, or by the next reload, and the row
+// published then reaches both consumers without a restart.
+func TestEmbeddedNATS_AQueueAConsumerCannotJoin_IsJoinedLater(t *testing.T) {
+	t.Parallel()
+	acme := Topic{Tenant: "acme", Table: "t"}
+	retries := map[string]func(context.Context, *testing.T, *EmbeddedNATS){
+		"publish": func(ctx context.Context, t *testing.T, e *EmbeddedNATS) {
+			// The refused publish below opened the window; it is closed here
+			// rather than waited out.
+			v, ok := e.failedOpen.Load(acme.Tenant)
+			require.True(t, ok, "the refused publish's attempt is paced")
+			failed := v.(openFailure)
+			failed.until = time.Now()
+			e.failedOpen.Store(acme.Tenant, failed)
+		},
+		"reload": func(ctx context.Context, t *testing.T, e *EmbeddedNATS) {
+			require.NoError(t, e.SetMaxBytes(ctx, acme.Tenant, testBudget), "a reload retries regardless of the window")
+		},
+	}
+	for _, durable := range []string{"buffer", "hub-bridge"} {
+		for name, retry := range retries {
+			t.Run(durable+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				x := newJoinFixture(ctx, t)
+				clearObstacle := obstructJoin(t, x.e, x.dir, acme.Tenant, durable)
+				require.Error(t, x.e.SetMaxBytes(ctx, acme.Tenant, testBudget))
+				require.ErrorIs(t, x.e.Publish(ctx, acme, []byte("x")), ErrQueueFull, "the publish's own attempt fails")
+
+				clearObstacle()
+				require.ErrorIs(t, x.e.Publish(ctx, acme, []byte("x")), ErrQueueFull, "within the window a publish tries nothing")
+				retry(ctx, t, x.e)
+				require.NoError(t, x.e.Publish(ctx, acme, []byte("x")))
+				x.delivered(t, acme)
+				assert.Equal(t, int64(testBudget), x.e.MaxBytes(acme.Tenant))
+				select {
+				case err := <-x.failed:
+					t.Fatalf("a failure was reported: %v", err)
+				default:
+				}
+			})
+		}
 	}
 }
 
@@ -666,7 +820,7 @@ func TestEmbeddedNATS_Consume_ReportsAQueueItCannotJoin(t *testing.T) {
 // stream keeps what it holds, capped at that, and every row survives.
 func TestEmbeddedNATS_SetMaxBytes_NeverShrinksTheDeadLetterQueueBelowWhatItHolds(t *testing.T) {
 	t.Parallel()
-	e := openEmbedded(t, storeDir(t))
+	e := openEmbedded(t, storedir.New(t))
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	require.NoError(t, e.SetMaxBytes(ctx, "acme", 10<<20))
@@ -881,7 +1035,7 @@ func TestEmbeddedNATS_DeadLetter_ReopensAMissingQueue(t *testing.T) {
 
 func TestEmbeddedNATS_Publish_QueueFull(t *testing.T) {
 	t.Parallel()
-	e := openEmbedded(t, storeDir(t))
+	e := openEmbedded(t, storedir.New(t))
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	require.NoError(t, e.SetMaxBytes(ctx, "acme", 4<<10))
@@ -928,9 +1082,9 @@ func TestEmbeddedNATS_Publish_OpensTheQueueAtTheLastBudget(t *testing.T) {
 
 // The context a publish reopens a queue under is one client's request, but
 // the queue is every consumer's: a client gone before the consumers join must
-// not leave a queue that no consumer holds, which the ingest worker would
-// report as its delivery ending. So the reopen — joins included — outlives
-// the caller's cancellation.
+// not leave a queue that no consumer holds, which would refuse the tenant's
+// publishes until a later one joined them. So the reopen — joins included —
+// outlives the caller's cancellation.
 func TestEmbeddedNATS_ReopenOutlivesTheCallersCancellation(t *testing.T) {
 	t.Parallel()
 	e := newTestEmbedded(t, "acme")
@@ -1364,7 +1518,7 @@ func TestNewEmbedded_AStoreItCannotCreateFailsAtOnce(t *testing.T) {
 // so no tenant's queue could open beside them.
 func TestNewEmbedded_DeletesTheStreamsAnEarlierBuildShared(t *testing.T) {
 	t.Parallel()
-	dir := storeDir(t)
+	dir := storedir.New(t)
 	old, err := NewEmbedded(dir)
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -1395,7 +1549,7 @@ func TestNewEmbedded_ASplitPairIsAppliedAgainAtBoot(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	dir := storeDir(t)
+	dir := storedir.New(t)
 	first, err := NewEmbedded(dir)
 	require.NoError(t, err)
 	for _, id := range []tenant.ID{"split", "gone", "guarded"} {
@@ -1433,7 +1587,7 @@ func TestNewEmbedded_ASplitPairIsAppliedAgainAtBoot(t *testing.T) {
 // so what such a tenant had queued still reaches the worker.
 func TestNewEmbedded_TakesStockOfTheQueuesOnDisk(t *testing.T) {
 	t.Parallel()
-	dir := storeDir(t)
+	dir := storedir.New(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	first, err := NewEmbedded(dir)
@@ -1469,6 +1623,34 @@ func TestNewEmbedded_TakesStockOfTheQueuesOnDisk(t *testing.T) {
 	assert.Equal(t, int64(8<<20), streamConfig(t, e, "INGEST_acme").MaxBytes)
 }
 
+// takeStock must not count a stream as at its budget when its Duplicates
+// window is stale (from before EmbeddedDuplicateWindow existed, or changed
+// underneath it): otherwise SetMaxBytes's same-budget early return never lets
+// a later apply bring the window forward, and the stream keeps whatever it
+// had indefinitely.
+func TestNewEmbedded_TakeStockRefreshesAStaleDuplicateWindow(t *testing.T) {
+	t.Parallel()
+	dir := storedir.New(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	first, err := NewEmbedded(dir)
+	require.NoError(t, err)
+	require.NoError(t, first.SetMaxBytes(ctx, "acme", 8<<20))
+	stale := ingestStreamConfig("acme", 8<<20)
+	stale.Duplicates = 10 * time.Second
+	_, err = first.js.UpdateStream(ctx, stale)
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	e := openEmbedded(t, dir)
+	require.Equal(t, 10*time.Second, streamConfig(t, e, "INGEST_acme").Duplicates, "the stale window is still on disk")
+
+	require.NoError(t, e.SetMaxBytes(ctx, "acme", 8<<20), "same budget as before")
+	assert.Equal(t, EmbeddedDuplicateWindow, streamConfig(t, e, "INGEST_acme").Duplicates,
+		"takeStock must not have marked this pair already at budget, or this apply would have no-op'd")
+}
+
 // A durable found on disk is kept as it stands when it holds the settings
 // asked for — a boot over many queues writes nothing it need not — and is
 // updated in place when they differ; either way delivery resumes past what it
@@ -1484,7 +1666,7 @@ func TestEmbeddedNATS_ADurableOnDiskIsReusedAcrossARestart(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			dir := storeDir(t)
+			dir := storedir.New(t)
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			topic := Topic{Tenant: "acme", Table: "t"}

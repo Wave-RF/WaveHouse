@@ -17,6 +17,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 )
 
 // Each role wires its own components and nothing else; the settings registry,
@@ -109,7 +110,7 @@ func TestNew_OpsOnlyRouter(t *testing.T) {
 	sweeperCfg := *cfg
 	sweeperCfg.Roles = []config.Role{config.RoleSweeper}
 	// Its own store: full's embedded JetStream is still open on cfg.DataDir.
-	sweeperCfg.DataDir = t.TempDir()
+	sweeperCfg.DataDir = storedir.New(t)
 	a := newApp(t, &sweeperCfg, Options{})
 
 	for _, path := range []string{"/livez", "/readyz", "/healthz", "/version"} {

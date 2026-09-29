@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +16,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 )
 
 // NewTestSchemaRegistry creates a SchemaRegistry pre-loaded with the given
@@ -42,13 +41,13 @@ func NewTestSchemaRegistry(t testing.TB, tables []*discovery.TableSchema) *disco
 // hardcoding the same literal twice.
 const TestServerVersion = "24.8.1.1"
 
-// NewEmbeddedMQ starts the embedded broker over a temporary directory, closed
-// by the test framework, with a queue open for each of tenants —
+// NewEmbeddedMQ starts the embedded broker over a storedir.New directory,
+// closed by the test framework, with a queue open for each of tenants —
 // tenant.Default when none is named — at maxBytes: a tenant has a queue once
 // its budget is applied, as the wiring does for every tenant it serves.
 func NewEmbeddedMQ(t testing.TB, maxBytes int64, tenants ...tenant.ID) *mq.EmbeddedNATS {
 	t.Helper()
-	emb, err := mq.NewEmbedded(StoreDir(t))
+	emb, err := mq.NewEmbedded(storedir.New(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
 	if len(tenants) == 0 {
@@ -58,27 +57,6 @@ func NewEmbeddedMQ(t testing.TB, maxBytes int64, tenants ...tenant.ID) *mq.Embed
 		require.NoError(t, emb.SetMaxBytes(context.Background(), id, maxBytes))
 	}
 	return emb
-}
-
-// StoreDir is a temporary directory for a broker's store whose removal
-// retries briefly: under load a consumer's state file can land after Close
-// has returned, which fails t.TempDir's one-shot RemoveAll (#442). The
-// retrying cleanup runs first (cleanups are LIFO), leaving t.TempDir an empty
-// directory to remove.
-func StoreDir(t testing.TB) string {
-	t.Helper()
-	dir := filepath.Join(t.TempDir(), "store")
-	t.Cleanup(func() {
-		var err error
-		for range 50 {
-			if err = os.RemoveAll(dir); err == nil {
-				return
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		t.Errorf("remove %s: %v", dir, err)
-	})
-	return dir
 }
 
 // schemaConn is a mock driver.Conn serving exactly the queries Refresh issues:
