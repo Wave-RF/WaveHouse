@@ -68,11 +68,12 @@ type EmbeddedNATS struct {
 	// consumers are the durable consumers held on every tenant's queue, each
 	// joined to a queue as it opens.
 	consumers []*fanIn
-	// opened holds the tenants whose queue has both streams, every registered
-	// consumer joined to it or told it could not be (fanIn.fail) — what
-	// Publish trusts, rather than a stream answering: an open that gave up can
-	// leave behind a stream JetStream goes on to create, which no consumer
-	// holds. Written under mu, read without it.
+	// opened holds the tenants whose queue has both streams and every
+	// registered consumer joined to it — what Publish trusts, rather than a
+	// stream answering: an open that gave up can leave behind a stream
+	// JetStream goes on to create, which no consumer holds, and a queue a
+	// consumer could not join takes no row until it has. Written under mu,
+	// read without it.
 	opened sync.Map // tenant.ID → struct{}
 	// reopening merges into one attempt the publishes and parks that find
 	// the same tenant's queue not open, and failedOpen holds, for a tenant
@@ -94,11 +95,12 @@ type openFailure struct {
 type tenantQueue struct {
 	// ingest and dlq report whether each of the tenant's streams exists.
 	ingest, dlq bool
-	// maxBytes is the budget last applied in full (MaxBytes); asked is the
-	// budget last asked for, which a publish or park that finds a stream
-	// missing opens it at. Boot reads asked back from the ingest stream, so a
-	// tenant no longer served keeps the budget it last had, and maxBytes too
-	// when the pair is whole at it (takeStock).
+	// maxBytes is the budget last applied in full (MaxBytes), every
+	// registered consumer joined; asked is the budget last asked for, which a
+	// publish or park that finds the queue not open opens it at. Boot reads
+	// asked back from the ingest stream, so a tenant no longer served keeps
+	// the budget it last had, and maxBytes too when the pair is whole at it
+	// (takeStock).
 	maxBytes, asked int64
 	// ingestCap is the cap the ingest stream has — what a failed resize
 	// restores it to. Not maxBytes: a pair boot found split has a cap but no
@@ -123,9 +125,9 @@ const (
 	// fails: in-process JetStream fails by stalling rather than erroring, so
 	// the likely cause is that resizeTimeout has just run out, and an undo on
 	// that context would fail without touching the stream. SetMaxBytes runs
-	// for at most the sum of the two when it resizes, and for two
-	// resizeTimeouts when it opens a queue: the consumers join on a budget of
-	// their own (apply).
+	// for at most the sum of the two when a resize fails, and for two
+	// resizeTimeouts otherwise: the consumers join on a budget of their own
+	// (joinConsumers).
 	rollbackTimeout = 5 * time.Second
 	// reopenRetry is how long a tenant's publishes and parks are refused at
 	// once after one failed to open its queue (reopenPaced).
@@ -314,12 +316,12 @@ func (e *EmbeddedNATS) ingestTenants() []tenant.ID {
 }
 
 // record brings opened in line with what the broker knows of tenant id's
-// queue. Both streams known means every consumer has been joined to the
-// queue too, or told it could not be: apply joins the consumers to a queue it
-// opens before this records it, and a consumer registered later joins every
-// ingest stream there is. Under e.mu (or before e is shared).
+// queue: open with both streams known and every registered consumer joined
+// to it. A queue a consumer could not join stays unrecorded, so the tenant's
+// publishes are refused until a publish or a reload joins it. Under e.mu (or
+// before e is shared).
 func (e *EmbeddedNATS) record(id tenant.ID, q *tenantQueue) {
-	if q.ingest && q.dlq {
+	if q.ingest && q.dlq && e.joined(id) {
 		e.opened.Store(id, struct{}{})
 		e.failedOpen.Delete(id)
 	} else {
@@ -383,6 +385,12 @@ func (e *EmbeddedNATS) MaxBytes(id tenant.ID) int64 {
 // its dead-letter stream first, so no row is queued that could not be parked,
 // and every registered consumer joins it. No other tenant's queue is touched.
 //
+// A consumer that cannot join is this tenant's failure alone: the error says
+// so, the queue stays closed to the tenant's publishes (ErrQueueFull), and
+// the consumers that had not joined are tried again by the next call and by
+// the tenant's next publish (reopenPaced). No consumer's delivery from
+// another tenant's queue is touched.
+//
 // JetStream applies a limit change to a live stream without touching its
 // messages: growing takes effect immediately; shrinking the ingest stream
 // below its current size makes DiscardNew refuse new publishes until the
@@ -401,13 +409,14 @@ func (e *EmbeddedNATS) MaxBytes(id tenant.ID) int64 {
 // call with the new budget reapplies both.
 //
 // The JetStream calls are bounded by resizeTimeout, plus rollbackTimeout for
-// the undo — or another resizeTimeout for the consumers joining a queue just
-// opened — all rooted in ctx. That is deliberate: ctx is the process's stop
-// context, so a reload caught mid-hook by a stop gives up — undo included —
-// rather than holding the drain past server.shutdown_timeout. A cancellation
-// between the two updates is therefore the one way to leave the pair split,
-// and only for the rest of a process that is exiting: the next boot applies
-// the adopted settings to it again.
+// the undo — or another resizeTimeout for the consumers joining a queue they
+// do not hold yet — all rooted in ctx. That is deliberate: ctx is the
+// process's stop context, so a reload caught mid-hook by a stop gives up —
+// undo included — rather than holding the drain past
+// server.shutdown_timeout. A cancellation between the two updates is
+// therefore the one way to leave the pair split, and only for the rest of a
+// process that is exiting: the next boot applies the adopted settings to it
+// again.
 func (e *EmbeddedNATS) SetMaxBytes(ctx context.Context, id tenant.ID, maxBytes int64) error {
 	if _, err := tenant.Parse(string(id)); err != nil {
 		return fmt.Errorf("tenant: %w", err)
@@ -416,14 +425,16 @@ func (e *EmbeddedNATS) SetMaxBytes(ctx context.Context, id tenant.ID, maxBytes i
 	defer e.mu.Unlock()
 	q := e.queue(id)
 	q.asked = maxBytes
-	if q.ingest && q.dlq && maxBytes == q.maxBytes {
+	if q.ingest && q.dlq && maxBytes == q.maxBytes && e.joined(id) {
 		return nil
 	}
 	return e.apply(ctx, id, q, maxBytes)
 }
 
 // apply brings tenant id's queue to maxBytes: opening it when its ingest
-// stream is missing, resizing it otherwise (see SetMaxBytes). Under e.mu.
+// stream is missing, resizing it otherwise, and joining to it the consumers
+// that do not hold it; only then is the budget applied in full (see
+// SetMaxBytes). Under e.mu.
 func (e *EmbeddedNATS) apply(ctx context.Context, id tenant.ID, q *tenantQueue, maxBytes int64) error {
 	defer e.record(id, q)
 	resizeCtx, cancel := context.WithTimeout(ctx, resizeTimeout)
@@ -435,18 +446,13 @@ func (e *EmbeddedNATS) apply(ctx context.Context, id tenant.ID, q *tenantQueue, 
 		if _, err := e.js.CreateOrUpdateStream(resizeCtx, ingestStreamConfig(id, maxBytes)); err != nil {
 			return fmt.Errorf("open ingest stream: %w", err)
 		}
-		q.ingest, q.maxBytes, q.ingestCap = true, maxBytes, maxBytes
-		// The joins run on a budget of their own: a queue that opened but no
-		// consumer holds fails every consumer (fail), so a slow open must not
-		// leave them no time.
-		joinCtx, cancelJoin := context.WithTimeout(ctx, resizeTimeout)
-		defer cancelJoin()
+		q.ingest, q.ingestCap = true, maxBytes
+		// Every consumer joins a stream just opened: a durable one held on
+		// the stream before it went missing went with it.
 		for _, f := range e.consumers {
-			if err := f.join(joinCtx, id); err != nil {
-				f.fail(fmt.Errorf("tenant %s: %w: join its queue: %w", id, ErrDeliveryEnded, err))
-			}
+			delete(f.handles, id)
 		}
-		return nil
+		return e.applied(ctx, id, q, maxBytes)
 	}
 	prevCap := q.ingestCap
 	if _, err := e.js.UpdateStream(resizeCtx, ingestStreamConfig(id, maxBytes)); err != nil {
@@ -464,8 +470,45 @@ func (e *EmbeddedNATS) apply(ctx context.Context, id tenant.ID, q *tenantQueue, 
 		q.ingestCap = prevCap
 		return fmt.Errorf("%w (ingest stream restored to the previous limit)", err)
 	}
+	return e.applied(ctx, id, q, maxBytes)
+}
+
+// applied ends an apply that left both of tenant id's streams at maxBytes:
+// the consumers that do not hold the queue join it, and only then is the
+// budget applied in full. Under e.mu.
+func (e *EmbeddedNATS) applied(ctx context.Context, id tenant.ID, q *tenantQueue, maxBytes int64) error {
+	if err := e.joinConsumers(ctx, id); err != nil {
+		return err
+	}
 	q.maxBytes = maxBytes
 	return nil
+}
+
+// joined reports whether every registered consumer holds tenant id's queue.
+// Under e.mu (or before e is shared).
+func (e *EmbeddedNATS) joined(id tenant.ID) bool {
+	return !slices.ContainsFunc(e.consumers, func(f *fanIn) bool { return !f.holds(id) })
+}
+
+// joinConsumers joins to tenant id's queue every registered consumer that
+// does not hold it. One that cannot is named in the error and costs the
+// others nothing: each is tried. Under e.mu.
+func (e *EmbeddedNATS) joinConsumers(ctx context.Context, id tenant.ID) error {
+	// The joins run on a budget of their own: a queue a consumer could not
+	// join takes none of its tenant's publishes, so a slow open must not
+	// leave the consumers no time.
+	ctx, cancel := context.WithTimeout(ctx, resizeTimeout)
+	defer cancel()
+	var errs []error
+	for _, f := range e.consumers {
+		if f.holds(id) {
+			continue
+		}
+		if err := f.join(ctx, id); err != nil {
+			errs = append(errs, fmt.Errorf("consumer %s: join the queue: %w", f.cfg.Durable, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // applyDLQ gives tenant id's dead-letter stream a tenth of maxBytes, creating
@@ -499,15 +542,16 @@ func (e *EmbeddedNATS) applyDLQ(ctx context.Context, id tenant.ID, q *tenantQueu
 }
 
 // reopen opens tenant id's queue at the budget last asked for it, for a
-// publish that finds the queue not recorded open, or a publish or park that
-// found one of its streams missing. errNoQueue when no budget has been asked
-// for the tenant yet: a reload can make a tenant resolvable an instant before
-// its budget arrives.
+// publish that finds the queue not recorded open — a consumer that could not
+// join it is tried again — or a publish or park that found one of its streams
+// missing. errNoQueue when no budget has been asked for the tenant yet: a
+// reload can make a tenant resolvable an instant before its budget arrives.
 //
 // It runs detached from ctx's cancellation, bounded by its own timeouts:
 // ctx is one caller's — an ingest request — while the queue is every
 // consumer's, and a client that goes away between the open and the joins
-// would leave a queue no consumer holds, which fails the ingest worker.
+// would leave a queue no consumer holds, refusing the tenant's publishes
+// until the next one joins them.
 func (e *EmbeddedNATS) reopen(ctx context.Context, id tenant.ID) error {
 	ctx = context.WithoutCancel(ctx)
 	e.mu.Lock()
@@ -533,7 +577,7 @@ func (e *EmbeddedNATS) reopen(ctx context.Context, id tenant.ID) error {
 			return fmt.Errorf("stream info: %w", err)
 		}
 	}
-	if q.ingest && q.dlq {
+	if q.ingest && q.dlq && e.joined(id) {
 		return nil
 	}
 	return e.apply(ctx, id, q, q.asked)
@@ -545,10 +589,10 @@ func (e *EmbeddedNATS) reopen(ctx context.Context, id tenant.ID) error {
 // for it (see SetMaxBytes) — and so does one whose stream exists but whose
 // queue the broker has not recorded open, since no consumer may hold that
 // stream (see reopenPaced for how often a publish tries). A queue that
-// cannot be opened — none asked for yet, or JetStream refused it — and a
-// queue at its byte budget (DiscardNew) are reported as ErrQueueFull: either
-// way the tenant's queue takes nothing now, and a retry is the caller's
-// answer.
+// cannot be opened — none asked for yet, JetStream refused it, or a consumer
+// could not join it — and a queue at its byte budget (DiscardNew) are
+// reported as ErrQueueFull: either way the tenant's queue takes nothing now,
+// and a retry is the caller's answer.
 func (e *EmbeddedNATS) Publish(ctx context.Context, topic Topic, data []byte, opts ...PublishOpt) error {
 	subj, err := subject(ingestPrefix, topic)
 	if err != nil {
@@ -659,13 +703,11 @@ func wrapMsg(ctx context.Context, m jetstream.Msg) *Message {
 // handler with the trace context its headers carry, until ctx is done. It
 // fetches the client's default number of messages ahead across the tenants
 // together (see fanIn.share), so what sits client-side does not grow with
-// the tenants. A tenant's queue that cannot be joined when it opens is
-// logged: its events reach handler from the next boot.
+// the tenants. A tenant's queue that cannot be joined when it opens stays
+// closed to the tenant's publishes until it is (SetMaxBytes), so handler
+// misses none of its events.
 func (e *EmbeddedNATS) Subscribe(ctx context.Context, consumerName string, handler func(msg *Message) error) error {
 	f := e.newFanIn(ctx, jetstream.ConsumerConfig{Durable: consumerName, AckPolicy: jetstream.AckExplicitPolicy})
-	f.fail = func(err error) {
-		slog.Error("mq: a tenant's events do not reach this consumer until the next boot", "component", "nats", "consumer", consumerName, "error", err)
-	}
 	if err := e.register(ctx, f); err != nil {
 		return fmt.Errorf("create consumer: %w", err)
 	}
@@ -688,9 +730,10 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, consumerName string, handl
 }
 
 // CreateConsumer creates or updates a durable explicit-ack pull consumer on
-// every tenant's queue, and joins each queue opened later. ctx becomes every
-// delivered Message.Ctx (see ConsumerManager); it does not stop delivery —
-// Consumer.Consume's stop does.
+// every tenant's queue, and joins each queue opened later — one it cannot
+// join is that tenant's failure (SetMaxBytes), not the consumer's. ctx
+// becomes every delivered Message.Ctx (see ConsumerManager); it does not
+// stop delivery — Consumer.Consume's stop does.
 func (e *EmbeddedNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (Consumer, error) {
 	c := &workerConsumer{
 		fanIn: e.newFanIn(ctx, jetstream.ConsumerConfig{
@@ -717,7 +760,7 @@ func (e *EmbeddedNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (
 }
 
 // newFanIn is a fanIn over cfg, not yet holding any durable; the caller sets
-// its fail and registers it.
+// its fail, when it watches its deliveries (start), and registers it.
 func (e *EmbeddedNATS) newFanIn(ctx context.Context, cfg jetstream.ConsumerConfig) *fanIn {
 	return &fanIn{
 		e:       e,
@@ -759,8 +802,7 @@ type fanIn struct {
 	ctx context.Context // each delivered Message.Ctx (CreateConsumer), or where Subscribe extracts trace context into
 	cfg jetstream.ConsumerConfig
 
-	// fail reports a tenant's delivery that ended on its own, or a queue that
-	// could not be joined when it opened.
+	// fail reports a tenant's delivery that ended on its own.
 	fail func(error)
 
 	// handles is the durable on each tenant's ingest stream; running, the
@@ -793,6 +835,19 @@ func (f *fanIn) join(ctx context.Context, id tenant.ID) error {
 		return nil
 	}
 	return f.run(id)
+}
+
+// holds reports whether f holds its durable on tenant id's ingest stream,
+// delivering from it when f is delivering. Under e.mu.
+func (f *fanIn) holds(id tenant.ID) bool {
+	if _, ok := f.handles[id]; !ok {
+		return false
+	}
+	if f.deliver == nil || f.stopped.Load() {
+		return true
+	}
+	_, ok := f.running[id]
+	return ok
 }
 
 // sameConsumer reports whether a durable holds the fields this package sets;
