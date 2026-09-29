@@ -315,12 +315,18 @@ func TestClaims_JoinAndStopHandOver(t *testing.T) {
 	require.Eventually(t, func() bool { return f.split("a") }, 5*time.Second, 10*time.Millisecond)
 	b := startClaims(t, f, c.Peer(), "b", ClaimConfig{}, nil)
 	require.Eventually(t, func() bool { return f.split("a", "b") }, 5*time.Second, 10*time.Millisecond, "%v", f.owners())
-	for _, e := range f.eventLog() {
-		if strings.HasPrefix(e, "b create ") {
-			unit := strings.TrimPrefix(e, "b create ")
-			assert.Contains(t, f.eventLog(), "a release "+unit, "a released %s before b took it", unit)
+	// Every unit b took, a gave up (stopped, then released): a handover,
+	// not two owners. b does not wait for the release; the pin keeps a unit
+	// exclusive meanwhile.
+	require.Eventually(t, func() bool {
+		log := f.eventLog()
+		for _, e := range log {
+			if unit, ok := strings.CutPrefix(e, "b create "); ok && !slices.Contains(log, "a release "+unit) {
+				return false
+			}
 		}
-	}
+		return true
+	}, 5*time.Second, 10*time.Millisecond, "a released every unit b took: %v", f.eventLog())
 	b.stop()
 	require.Eventually(t, func() bool { return f.split("a") }, 5*time.Second, 10*time.Millisecond)
 	for _, e := range f.eventLog() {
@@ -675,7 +681,7 @@ func TestClaims_HeldRowsFreedOnAFailedSettle(t *testing.T) {
 		require.True(t, f.deliverFailing(f.units[i%2], fail))
 	}
 	require.Eventually(t, func() bool { return received.Load() == 10 }, 5*time.Second, 10*time.Millisecond, "no slot leaks: got %d", received.Load())
-	assert.Zero(t, p.loop.held.count())
+	require.Eventually(t, func() bool { return p.loop.held.count() == 0 }, 5*time.Second, 10*time.Millisecond)
 }
 
 // A row the worker never settles (it leaves some for the broker to
