@@ -317,6 +317,16 @@ func (a *App) wireClickHouse() error {
 		if err != nil {
 			slog.Error("clickhouse pools reconciled in part; the next reload retries", "error", err)
 		}
+		// The schema a moved tenant discovered is the previous database's
+		// (#638): its registry is dropped here, and the discovery hook, which
+		// runs after this one, builds it a fresh one over the pool it is on
+		// now. Dropped first, before the cache invalidation below, which may
+		// wait on its backend: the tenant is on its new pool already, and a
+		// request arriving meanwhile must find no schema rather than the
+		// previous database's. Only an API process discovers schemas.
+		if a.discoveries != nil {
+			a.discoveries.drop(stale)
+		}
 		// A tenant back on a pool after an absence was out of the cache
 		// fan-out (sharedTables) while away, and one moved to another
 		// address or database now reads other tables: either way what it
@@ -325,13 +335,6 @@ func (a *App) wireClickHouse() error {
 			if err := a.cache.InvalidateTenant(a.stopCtx, id); err != nil {
 				slog.Warn("cache invalidation of a stale tenant did not land; it may serve stale rows until it does", "tenant", id, "error", err)
 			}
-		}
-		// The schema a moved tenant discovered is the previous database's
-		// (#638): its registry is dropped here, and the discovery hook, which
-		// runs after this one, builds it a fresh one over the pool it is on
-		// now. Only an API process discovers schemas.
-		if a.discoveries != nil {
-			a.discoveries.drop(stale)
 		}
 	})
 	return nil

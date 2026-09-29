@@ -1967,6 +1967,92 @@ func TestReload_MovedTenantFailedDiscoveryIsRetried(t *testing.T) {
 	assert.Nil(t, moved.Get("events"))
 }
 
+// registryAtInvalidation is a cache that records, at each InvalidateTenant,
+// the tenants that still had a schema registry.
+type registryAtInvalidation struct {
+	*testutil.MockCache
+	registry func(tenant.ID) *discovery.SchemaRegistry
+
+	mu   sync.Mutex
+	held []tenant.ID
+}
+
+func (c *registryAtInvalidation) InvalidateTenant(ctx context.Context, id tenant.ID) error {
+	if c.registry(id) != nil {
+		c.mu.Lock()
+		c.held = append(c.held, id)
+		c.mu.Unlock()
+	}
+	return c.MockCache.InvalidateTenant(ctx, id)
+}
+
+// A moved tenant's registry is gone before its cache is invalidated: the
+// invalidation may wait on its backend with the tenant already on its new
+// pool, and a request arriving meanwhile must not find the previous
+// database's schema.
+func TestReload_MovedTenantRegistryIsDroppedBeforeTheCacheInvalidation(t *testing.T) {
+	addr := closedAddr(t)
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": databaseSettings(addr, "default")})
+	a := newApp(t, testConfig(t, root), Options{})
+	newFakeClickHouse(t, a, map[string][]string{"default": {"events"}, "moved_db": {"orders"}})
+	recorder := &registryAtInvalidation{MockCache: &testutil.MockCache{}, registry: a.discoveries.For}
+	a.cache = recorder
+
+	rewriteSettings(t, filepath.Join(root, "acme"), databaseSettings(addr, "moved_db"))
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	require.Equal(t, []tenant.ID{"acme"}, recorder.GetTenants())
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	assert.Empty(t, recorder.held, "no registry while the cache is invalidated")
+}
+
+// stuckConn is a connection whose first query, once entered, ignores its
+// context and answers only when released.
+type stuckConn struct {
+	driver.Conn
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (c *stuckConn) QueryRow(context.Context, string, ...any) driver.Row {
+	c.once.Do(func() { close(c.entered) })
+	<-c.release
+	return testutil.UTCRow{}
+}
+
+func (c *stuckConn) Query(context.Context, string, ...any) (driver.Rows, error) {
+	return nil, errors.New("stuck connection")
+}
+
+// A loop a reload stopped in the middle of a refresh is still running when
+// the reload returns: Close waits for it with the loops of the served
+// tenants, and names its tenant when the release budget ends first.
+func TestClose_WaitsForALoopAReloadStopped(t *testing.T) {
+	conn := &stuckConn{entered: make(chan struct{}), release: make(chan struct{})}
+	d := newDiscoveries(t.Context(), nil, func(tenant.ID, error) {}, func(tenant.ID) {})
+	d.adopt("acme", discovery.NewSchemaRegistry(func() (driver.Conn, string) { return conn, "default" }, "acme",
+		func(tenant.ID) time.Duration { return time.Hour }))
+	loop := (*d.cur.Load())["acme"]
+	<-conn.entered
+
+	d.drop([]tenant.ID{"acme"})
+	require.Nil(t, d.For("acme"))
+	budget, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	err := d.close(budget)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorContains(t, err, "tenant acme not stopped")
+
+	close(conn.release)
+	require.NoError(t, d.close(t.Context()), "a later close waits for it still")
+	select {
+	case <-loop.done:
+	default:
+		t.Fatal("close returned before the loop ended")
+	}
+}
+
 // Close stops every tenant's discovery loop within the release budget, and
 // the pools after them.
 func TestClose_StopsTheDiscoveryLoops(t *testing.T) {
