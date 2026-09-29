@@ -264,8 +264,8 @@ type DeadLetterer interface {
 // DeadLetterCounts is what is parked on one tenant's dead-letter queue.
 type DeadLetterCounts struct {
 	// Tables maps table name → parked messages, for the tables asked about.
-	// Scope is not broken out yet (it is inert until #235): a message parked
-	// under a scoped topic counts under "table.scope", not under its table.
+	// Every scope of a table counts under the table; scope is not broken out
+	// yet (it is inert until #235).
 	Tables map[string]uint64
 	// Total is every parked message of the tenant, whatever the filter.
 	Total uint64
@@ -281,8 +281,8 @@ var ErrNoDeadLetterQueue = errors.New("dead-letter queue not found")
 type DeadLetterStats interface {
 	// DeadLetterCounts counts tenant id's parked messages per table — a
 	// tenant served, rejected, or removed alike, for as long as its queue is
-	// kept. A non-empty table narrows Tables to that one (its unscoped
-	// messages). A tenant with nothing parked has zero counts, or
+	// kept. A non-empty table narrows Tables to that one (all of its
+	// scopes). A tenant with nothing parked has zero counts, or
 	// ErrNoDeadLetterQueue when it has no queue at all.
 	DeadLetterCounts(ctx context.Context, id tenant.ID, table string) (DeadLetterCounts, error)
 }
