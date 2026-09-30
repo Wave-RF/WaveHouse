@@ -1093,3 +1093,61 @@ func TestExternalNATS_DurableDeletedWhileBusyEndsDelivery(t *testing.T) {
 		t.Fatal("a durable deleted under a busy handler stalled silently")
 	}
 }
+
+// Rows NAKed with a delay that come due while their unit is at its cap come
+// back in order. A pin renewal that held a due row back would have the server
+// requeue it behind the others (measured with max_bytes-1 renewals: 2 3 0 1),
+// so at the cap the renewal takes the row instead.
+func TestExternalNATS_RedeliveryOrderKeptAtTheCap(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{
+		Durable: workerDurable,
+		Units:   []string{shippedPartition(p) + "/" + natsShardDurable("wh-ingest", s)}, MaxHeld: func() int { return 4 },
+	})
+	require.NoError(t, err)
+	var mu sync.Mutex
+	var got []string
+	var held []*Message
+	stop, _, err := c.Consume(func(m *Message) {
+		mu.Lock()
+		got = append(got, string(m.Data))
+		held = append(held, m)
+		mu.Unlock()
+	}, 16)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	for i := range 8 {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(strconv.Itoa(i))))
+	}
+	take := func(n int) []*Message {
+		require.Eventually(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(held) >= n }, 20*time.Second, 10*time.Millisecond)
+		mu.Lock()
+		defer mu.Unlock()
+		out := held[:n]
+		held = held[n:]
+		return out
+	}
+	for _, m := range take(4) { // 0..3 come due in 3s, while 4..7 fill the cap
+		require.NoError(t, m.NakWithDelay(3*time.Second))
+	}
+	later := take(4)
+	time.Sleep(14 * time.Second) // two renewals at least
+	for _, m := range later {
+		require.NoError(t, m.Ack())
+	}
+	redelivered := take(4)
+	var order []string
+	for _, m := range redelivered {
+		order = append(order, string(m.Data))
+		_ = m.Ack()
+	}
+	mu.Lock()
+	first := slices.Clone(got[:8])
+	mu.Unlock()
+	assert.Equal(t, []string{"0", "1", "2", "3", "4", "5", "6", "7"}, first)
+	assert.Equal(t, []string{"0", "1", "2", "3"}, order, "redelivered in order across the renewals")
+}

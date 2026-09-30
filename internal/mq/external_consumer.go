@@ -22,8 +22,8 @@ const (
 	pinIDHeader = "Nats-Pin-Id"
 	// releaseTimeout bounds one unit's release.
 	releaseTimeout = 2 * time.Second
-	// renewEvery is how often a unit that fetches nothing (at its cap, or
-	// halted) sends the server a pull that keeps its pin. The server resets
+	// renewEvery is how often a unit at its cap, or halted, sends the server
+	// a pull that keeps its pin. The server resets
 	// the pin's timer on each pull from the pinned client, and the verifier
 	// holds pinned_ttl to at least twice natsPullExpiry, so the pin cannot
 	// lapse between two.
@@ -105,8 +105,9 @@ func (e *ExternalNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (
 // however long the handler takes. A deliverer hands what was fetched to the
 // handler, in order. The puller fetches only as much as the unit's cap
 // (MaxHeld, and prefetch for what waits for the handler) leaves room for; at
-// the cap, and once halted, it sends pulls that renew the pin and deliver
-// nothing (max_bytes 1: the server holds any row back).
+// the cap it renews the pin every renewEvery with a one-row fetch, and once
+// halted with pulls that deliver nothing (max_bytes 1: the server holds any
+// row back).
 type externalConsumer struct {
 	e   *ExternalNATS
 	ctx context.Context
@@ -320,10 +321,13 @@ func (c *externalConsumer) pull(part *consumerPart) bool {
 	for !part.halted() {
 		n := part.room()
 		if n <= 0 {
-			if c.renewOrWait(part) {
-				return true
+			if !c.renewalDue(part) {
+				continue
 			}
-			continue
+			// Renewed by taking one row past the cap: a pull that held a
+			// due redelivery back would have the server requeue it behind
+			// the others, reordering them.
+			n = 1
 		}
 		part.lastPull = time.Now()
 		batch, err := part.h.Fetch(n, jetstream.FetchMaxWait(fetchExpiry), jetstream.FetchPriorityGroup(natsPriorityGroup))
@@ -361,12 +365,10 @@ func (c *externalConsumer) pull(part *consumerPart) bool {
 	return false
 }
 
-// renewOrWait, for a unit at its cap, renews the pin when one is due and
-// otherwise waits for a row to settle, a halt, or the renewal; it reports
-// whether the unit's delivery ended for good.
-func (c *externalConsumer) renewOrWait(part *consumerPart) bool {
-	pin := part.pin.Load()
-	if pin == nil {
+// renewalDue, for a unit at its cap, reports whether its pin is due a
+// renewal, and otherwise waits for a row to settle, a halt, or the renewal.
+func (c *externalConsumer) renewalDue(part *consumerPart) bool {
+	if part.pin.Load() == nil {
 		c.pause(part, 0) // never received: no pin to keep
 		return false
 	}
@@ -374,7 +376,7 @@ func (c *externalConsumer) renewOrWait(part *consumerPart) bool {
 		c.pause(part, due)
 		return false
 	}
-	return c.renew(part, *pin)
+	return true
 }
 
 // pause waits up to d (0: no bound) for a row to settle, a halt, or the

@@ -198,8 +198,8 @@ func unitState(t *testing.T, srv *natstest.Server, unit string) (pin string, del
 
 // An owner whose ClickHouse takes longer than the durable's pinned_ttl (10s)
 // to answer, with its unit's share of held rows full, keeps its pin all the
-// while: nothing more is delivered to it, the unit never reads as unowned,
-// and no other process may reset it. Once the insert returns, the rest of
+// while: it takes at most one row past its share per 5s renewal, the unit
+// never reads as unowned, and no other process may reset it. Once the insert returns, the rest of
 // the table's rows follow, in order.
 func TestShardClaims_BlockedOwnerKeepsItsShard(t *testing.T) {
 	srv := natstest.Start(t)
@@ -225,7 +225,7 @@ func TestShardClaims_BlockedOwnerKeepsItsShard(t *testing.T) {
 	}
 	pin, delivered, ackPending := unitState(t, srv, unit)
 	require.NotEmpty(t, pin)
-	require.Equal(t, share, ackPending, "the unit's share is full")
+	require.GreaterOrEqual(t, ackPending, share, "the unit's share is full")
 
 	other := shardBroker(t, srv.URL())
 	blocked := time.Now()
@@ -233,7 +233,7 @@ func TestShardClaims_BlockedOwnerKeepsItsShard(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		now, d, _ := unitState(t, srv, unit)
 		require.Equal(t, pin, now, "the pin moved %s into the block", time.Since(blocked).Round(time.Millisecond))
-		require.Equal(t, delivered, d, "nothing is delivered past the share")
+		require.LessOrEqual(t, d-delivered, uint64(time.Since(blocked)/(5*time.Second))+1, "at most one row past the share per renewal")
 		if time.Since(blocked) > 11*time.Second {
 			n, err := a.broker.Unowned(t.Context())
 			require.NoError(t, err)
@@ -242,8 +242,9 @@ func TestShardClaims_BlockedOwnerKeepsItsShard(t *testing.T) {
 			assert.ErrorIs(t, err, mq.ErrUnitHeld, "nor may another process reset it")
 		}
 	}
-	_, _, ackPending = unitState(t, srv, unit)
-	assert.Equal(t, share, ackPending, "the held rows are still the owner's")
+	_, d, ackPending := unitState(t, srv, unit)
+	assert.Equal(t, int(d), ackPending, "every row delivered is still the owner's, none reset")
+	t.Logf("%d rows past the share delivered over %s of renewals", d-delivered, time.Since(blocked).Round(time.Second))
 
 	blockedFor := time.Since(blocked)
 	closeOnce(unblock)
@@ -290,7 +291,7 @@ func TestShardClaims_StuckShardDoesNotStallTheOthers(t *testing.T) {
 		t.Fatal("the stuck table's insert never started")
 	}
 	_, _, held := unitState(t, srv, stuckUnit)
-	require.Equal(t, 8, held, "the stuck unit's share is full")
+	require.GreaterOrEqual(t, held, 8, "the stuck unit's share is full")
 
 	const more = 30
 	for i := 1; i <= more; i++ {
