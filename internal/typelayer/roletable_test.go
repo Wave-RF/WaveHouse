@@ -283,12 +283,12 @@ func TestRoleTable_BoundedUnderTenantValueChurn(t *testing.T) {
 	assert.Equal(t, `[1, "acme", "", 5]`, string(batch.Rows[0].Line))
 }
 
-// TestRoleTable_HasItsOwnHandlePool: the role handle is the ingest path's hot
-// handle, so it gets the pool too.
+// TestRoleTable_HasItsOwnHandlePool: a role shape holds its own single handle,
+// not the base table's pool (256 shapes x the pool would be unbounded memory).
 func TestRoleTable_HasItsOwnHandlePool(t *testing.T) {
 	eng := TestEngine(t, ordersTable())
 	tbl := roleTableFor(t, eng, RoleShape{Defaults: map[string]string{"tenant": "acme"}})
-	assert.Equal(t, poolSize(), len(tbl.slots))
+	assert.Equal(t, roleHandles, len(tbl.slots))
 	assert.Nil(t, tbl.roles, "a projection is never itself projected")
 }
 

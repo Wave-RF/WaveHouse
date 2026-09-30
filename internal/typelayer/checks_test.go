@@ -158,9 +158,11 @@ func TestIngestChecks_FailsClosed(t *testing.T) {
 		preds := []Predicate{{Column: "tenant", Op: "=", Values: []string{"closed"}}}
 		expr, params, ok := tbl.render(preds)
 		require.True(t, ok)
-		f := tbl.filterOn(tbl.slots[0], expr, params)
-		require.NotNil(t, f)
-		f.Close() // what an eviction racing this request does
+		for _, s := range tbl.slots { // whichever slot the request lands on
+			f := tbl.filterOn(s, expr, params)
+			require.NotNil(t, f)
+			f.Close() // what an eviction racing this request does
+		}
 
 		batch, err := tbl.Ingest(FormatJSONEachRow, []byte(checksBody), preds...)
 		require.NoError(t, err, "a closed filter fails the checks, not the request")
@@ -378,7 +380,7 @@ func TestIngest_WithNamesFormats(t *testing.T) {
 	assert.True(t, b.Rows[0].Accepted, b.Rows[0].Message)
 }
 
-// BenchmarkIngest_HandlePool is the standing evidence behind maxPoolSize.
+// BenchmarkIngest_HandlePool is the standing evidence behind maxPoolSize (re-run it on deployment hardware).
 // Three arms, identical work, only the concurrency and the handle differ:
 //
 //   - serial: one goroutine, one handle — the cost of a call with no contention
@@ -387,7 +389,7 @@ func TestIngest_WithNamesFormats(t *testing.T) {
 //
 // Read it this way: if parallel-shared's ns/op is not meaningfully better than
 // serial's, RowsExport is not parallelizing at all and a pool of handles
-// cannot help — which is what was measured on 2026-09-16 (see maxPoolSize).
+// cannot help — which is what darwin shows, while Linux scales (see maxPoolSize).
 // Only when parallel-shared is ~GOMAXPROCS× worse than serial does a pool have
 // anything to win, and parallel-pooled is then the size of the win.
 func BenchmarkIngest_HandlePool(b *testing.B) {

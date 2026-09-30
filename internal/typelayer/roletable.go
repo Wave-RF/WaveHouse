@@ -17,7 +17,7 @@ import (
 // roleCacheSize bounds the per-role shapes held per table. A shape's Defaults
 // values come from tenant claims and are baked into the compiled handle, so an
 // unbounded cache is a memory and CPU denial of service — the same reason
-// filterCache is bounded. Each entry costs poolSize() compiled handles.
+// filterCache is bounded. Each entry costs roleHandles (1) compiled handle.
 const roleCacheSize = 256
 
 // RoleShape is the projection of a table a role may insert through. It is the
@@ -168,7 +168,7 @@ func (t *Table) compileRole(shape RoleShape) (*Table, string) {
 	if rerr != nil {
 		return nil, "cannot reconstruct role column declarations: " + rerr.Error()
 	}
-	slots, cause := compileDDL(t.lib, ddl)
+	slots, cause := compileDDL(t.lib, ddl, roleHandles)
 	if cause != "" {
 		return nil, cause
 	}

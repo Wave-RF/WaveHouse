@@ -62,38 +62,23 @@ var compileSettings = map[string]string{
 	"input_format_skip_unknown_fields": "0",
 }
 
-// maxPoolSize caps the identically-compiled handles one shape holds, and is
-// deliberately 1.
+// maxPoolSize caps the identically-compiled handles a base table holds.
 //
-// The design called for min(GOMAXPROCS, 8) on AUDIT §C.3's measurement — 8
-// goroutines × 40 RowsExport calls taking 266.6 ms on one shared handle and
-// 149.5 ms on a pool of 8, a 1.78× win, because a LoadedSchema serializes its
-// own calls. Re-measured here on 2026-09-16 (darwin-arm64, Apple M4 Pro,
-// artifact 26.6.8.7, BenchmarkIngest_HandlePool), that does NOT reproduce:
-//
-//	workers=1 handles=1   1341 calls/s
-//	workers=2 handles=2   1594 calls/s
-//	workers=4 handles=4   1408 calls/s
-//	workers=8 handles=8   1310 calls/s
-//	8 goroutines, shared handle 0.65 ms/call vs pool of 8 0.76 ms/call (0.86×,
-//	same result with the arms in either order, both warmed up)
-//
-// The throughput curve is FLAT from one worker to eight even when each worker
-// has its own handle, so something inside the artifact serializes globally and
-// the per-schema mutex is not the binding constraint. A pool then buys no
-// parallelism and costs ~15% plus N× the compiled handles per table AND per
-// role shape. The §C.3 number looks like a cold-start artifact: its harness
-// averaged three un-warmed iterations with the shared arm first.
-//
-// The structure is kept — one pool constant, per-slot filter caches, a slot
-// chosen per operation — so that turning this up is a one-line change if a
-// future artifact, or Linux, parallelizes. Re-run BenchmarkIngest_HandlePool
-// before you do: if its parallel-shared arm is no faster per op than its
-// serial arm, handles still do not parallelize and a pool cannot help.
-// chtypes FR I‑4 asks the library to own this properly.
-const maxPoolSize = 1
+// A LoadedSchema serializes its own calls, so one handle per table is a
+// ceiling. Measured on a Linux arm64 VM (BenchmarkIngest_HandlePool, artifacts
+// 26.6 and 25.8), own handles scale 4-6x at 8 goroutines, while a
+// process-wide serialization gate never beats one thread (0.83-1.0x). A
+// compiled handle costs ~40 KiB (~96 KiB warm), so a pool of 8 is cheap.
+// Role tables keep one handle (roleHandles): hot tenants already spread over
+// distinct role handles, and 256 shapes x 8 warm handles would be ~200 MiB.
+// An earlier darwin run showed a flat curve, so treat the size as
+// hardware-dependent and re-measure it on the deployment hardware.
+const maxPoolSize = 8
 
-// poolSize is how many identical handles one compiled shape gets.
+// roleHandles is the handle count of a role-shape table.
+const roleHandles = 1
+
+// poolSize is how many identical handles one base-table shape gets.
 func poolSize() int {
 	n := runtime.GOMAXPROCS(0)
 	if n > maxPoolSize {
@@ -457,10 +442,10 @@ func compile(lib *chtypes.Library, ts *discovery.TableSchema) ([]*schemaSlot, st
 	if err != nil {
 		return nil, "cannot reconstruct column declarations: " + err.Error()
 	}
-	return compileDDL(lib, ddl)
+	return compileDDL(lib, ddl, poolSize())
 }
 
-// compileDDL compiles poolSize() identical handles for one declaration list. A
+// compileDDL compiles n identical handles for one declaration list. A
 // refusal on any of them is a refusal for the whole shape: the handles are
 // interchangeable by construction, so half a pool would be a table that
 // answers differently depending on which slot a request landed on.
@@ -468,8 +453,7 @@ func compile(lib *chtypes.Library, ts *discovery.TableSchema) ([]*schemaSlot, st
 // The per-table filter budget is SPLIT across the pool rather than multiplied
 // by it: values are tenant-controlled and baked into a compiled handle, so the
 // bound that makes the cache not-a-DoS has to be a bound on the table.
-func compileDDL(lib *chtypes.Library, ddl string) ([]*schemaSlot, string) {
-	n := poolSize()
+func compileDDL(lib *chtypes.Library, ddl string, n int) ([]*schemaSlot, string) {
 	perSlot := max(filterCacheSize/n, 1)
 	slots := make([]*schemaSlot, 0, n)
 	for range n {
