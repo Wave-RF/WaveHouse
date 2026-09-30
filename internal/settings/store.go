@@ -114,6 +114,23 @@ func (s *Store) DedupeFor(table string) Dedupe {
 	return out
 }
 
+// DedupeRetentions is the retention of the default (key "") and of every
+// table override that names one, from one snapshot; 0 is forever.
+func (s *Store) DedupeRetentions() map[string]time.Duration {
+	d := s.doc().Config.Dedupe
+	out := map[string]time.Duration{"": 0}
+	// Validate has parsed them already.
+	if d.Retention != nil {
+		out[""], _ = time.ParseDuration(*d.Retention)
+	}
+	for table, td := range d.Tables {
+		if td.Retention != nil {
+			out[table], _ = time.ParseDuration(*td.Retention)
+		}
+	}
+	return out
+}
+
 // ClickHouse is the adopted connection wiring, resolved as one value from
 // one snapshot so a reconnect never mixes the address of one document with
 // the database of another. The password is not here — it is boot config.

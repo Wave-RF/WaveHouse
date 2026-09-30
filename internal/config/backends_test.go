@@ -52,10 +52,10 @@ func TestLoad_BackendsFromEnv(t *testing.T) {
 }
 
 func TestLoad_BackendFromEnvRefusesAnUnknownValue(t *testing.T) {
-	t.Setenv("WH_MQ_BACKEND", "nats")
+	t.Setenv("WH_MQ_BACKEND", "kafka")
 	_, err := Load("nonexistent.yaml")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `mq.backend (WH_MQ_BACKEND) "nats" is not a backend this build has; valid: embedded`)
+	assert.Contains(t, err.Error(), `mq.backend (WH_MQ_BACKEND) "kafka" is not a backend this build has; valid: embedded, nats`)
 }
 
 func TestLoad_BackendsFromYAML(t *testing.T) {
@@ -90,14 +90,14 @@ func TestLoad_BackendBlocksRefuseUnknownKeys(t *testing.T) {
 mq:
   backend: embedded
   max_bytes_gb: 5
-  nats:
-    urls: nats://localhost:4222
+  redis:
+    addr: localhost:6379
 dedupe:
   enabled: true
 `), 0o600))
 	_, err := Load(path)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "dedupe.enabled, mq.max_bytes_gb, mq.nats")
+	assert.Contains(t, err.Error(), "dedupe.enabled, mq.max_bytes_gb, mq.redis")
 	assert.Contains(t, err.Error(), EnvSettingsDir)
 }
 
@@ -116,10 +116,10 @@ func TestValidate_UnknownBackend(t *testing.T) {
 		set  func(*Config)
 		want string
 	}{
-		{"mq", func(c *Config) { c.MQ.Backend = "kafka" }, `mq.backend (WH_MQ_BACKEND) "kafka" is not a backend this build has; valid: embedded`},
+		{"mq", func(c *Config) { c.MQ.Backend = "kafka" }, `mq.backend (WH_MQ_BACKEND) "kafka" is not a backend this build has; valid: embedded, nats`},
 		{"cache", func(c *Config) { c.Cache.Backend = "memcached" }, `cache.backend (WH_CACHE_BACKEND) "memcached" is not a backend this build has; valid: local, redis`},
 		{"dedupe", func(c *Config) { c.Dedupe.Backend = "redis" }, `dedupe.backend (WH_DEDUPE_BACKEND) "redis" is not a backend this build has; valid: pebble, dynamodb`},
-		{"coord", func(c *Config) { c.Coord.Backend = "nats" }, `coord.backend (WH_COORD_BACKEND) "nats" is not a backend this build has; valid: local`},
+		{"coord", func(c *Config) { c.Coord.Backend = "kubernetes" }, `coord.backend (WH_COORD_BACKEND) "kubernetes" is not a backend this build has; valid: local, nats`},
 		// The zero value, which a Config built without Load carries.
 		{"empty", func(c *Config) { c.MQ.Backend = "" }, `mq.backend (WH_MQ_BACKEND) "" is not a backend`},
 	}
@@ -136,7 +136,7 @@ func TestValidate_UnknownBackend(t *testing.T) {
 	}
 }
 
-// Every warning keys on a shared queue, which no backend offers yet, so the
+// These warnings key on any shared queue, not on nats alone, so a stand-in
 // value is set directly: Warnings reads the choice, it doesn't validate it.
 func TestWarnings_SharedQueue(t *testing.T) {
 	t.Parallel()

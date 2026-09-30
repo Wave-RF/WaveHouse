@@ -25,8 +25,8 @@ type Config struct {
 	// a Deployment per role differs only in this. See Role.
 	Roles []Role `yaml:"roles" env:"WH_ROLES"`
 	// InstanceID names this process: logged at boot, and the holder a
-	// distributed coordinator will record. Empty resolves to <hostname>-<8 hex>
-	// at Load.
+	// coord.backend=nats lease names. Empty resolves to <hostname>-<8 hex> at
+	// Load.
 	InstanceID string     `yaml:"instance_id" env:"WH_INSTANCE_ID"`
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
@@ -175,10 +175,11 @@ const (
 	// its bridge off the queue and its keepalive wheel. Per process: every
 	// API process runs its own.
 	RoleAPI Role = "api"
-	// RoleIngest runs the ingest worker, queue to ClickHouse. Every ingest
-	// process consumes the one shared durable, competing for messages.
+	// RoleIngest runs the ingest worker, queue to ClickHouse. Under nats each
+	// shard of the queue is delivered to one ingest process at a time.
 	RoleIngest Role = "ingest"
-	// RoleSweeper runs the sweeper, one per queue, under the sweeper lease.
+	// RoleSweeper runs the sweeper, one per queue, under the sweeper lease, on
+	// the embedded MQ only: under nats the streams' own retention replaces it.
 	RoleSweeper Role = "sweeper"
 )
 
@@ -216,6 +217,9 @@ func (c *Config) validateRoles() error {
 func (c *Config) validateTopology() error {
 	if c.MQ.Backend == MQEmbedded && len(c.Roles) != len(allRoles) {
 		return fmt.Errorf("roles %s with mq.backend=embedded: the embedded MQ lives inside this process, and a process without it cannot reach its queue — run every role (%s), or set a shared mq.backend", joinRoles(c.Roles), joinRoles(allRoles))
+	}
+	if err := c.validateNATSTopology(); err != nil {
+		return err
 	}
 	if c.splitsCache() && c.Cache.Backend == CacheLocal {
 		return fmt.Errorf("roles %s with cache.backend=local: api and ingest run in different processes, and the ingest worker's cache invalidation would never reach the API's cache — run api and ingest together, or set cache.backend=redis, one cache every process shares", joinRoles(c.Roles))
@@ -255,7 +259,7 @@ func defaults() Config {
 		DataDir: "./data",
 		Roles:   AllRoles(),
 		Server:  Server{Port: 8080, ShutdownTimeout: 10},
-		MQ:      MQ{Backend: MQEmbedded},
+		MQ:      MQ{Backend: MQEmbedded, NATS: defaultMQNATS()},
 		Cache: Cache{
 			Backend: CacheLocal, L1MaxCost: 64 << 20,
 			Redis: CacheRedisConfig{
@@ -381,6 +385,7 @@ func Load(path string) (*Config, error) {
 	for i, r := range cfg.Roles {
 		cfg.Roles[i] = Role(strings.TrimSpace(string(r)))
 	}
+	cfg.MQ.NATS.trimURLs()
 	if cfg.InstanceID = strings.TrimSpace(cfg.InstanceID); cfg.InstanceID == "" {
 		cfg.InstanceID = defaultInstanceID()
 	}

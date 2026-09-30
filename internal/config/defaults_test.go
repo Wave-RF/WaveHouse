@@ -47,6 +47,14 @@ var zeroCases = []zeroCase{
 	{"cache.redis.max_value_bytes", "WH_CACHE_REDIS_MAX_VALUE_BYTES", 0, 1 << 20, "2048", 2048, func(c *Config) any { return c.Cache.Redis.MaxValueBytes }},
 	{"cache.redis.compress_min_bytes", "WH_CACHE_REDIS_COMPRESS_MIN_BYTES", 0, 1 << 10, "2048", 2048, func(c *Config) any { return c.Cache.Redis.CompressMinBytes }},
 	{"cache.redis.version_ttl", "WH_CACHE_REDIS_VERSION_TTL", time.Duration(0), 168 * time.Hour, "1h", time.Hour, func(c *Config) any { return c.Cache.Redis.VersionTTL }},
+	// So is the mq.nats block, validated only under backend=nats.
+	{"mq.nats.subject_prefix", "WH_MQ_NATS_SUBJECT_PREFIX", "", "wh", "acme", "acme", func(c *Config) any { return c.MQ.NATS.SubjectPrefix }},
+	{"mq.nats.partitions", "WH_MQ_NATS_PARTITIONS", 0, 1, "4", 4, func(c *Config) any { return c.MQ.NATS.Partitions }},
+	{"mq.nats.shards", "WH_MQ_NATS_SHARDS", 0, 32, "8", 8, func(c *Config) any { return c.MQ.NATS.Shards }},
+	{"mq.nats.ingest_consumer", "WH_MQ_NATS_INGEST_CONSUMER", "", "wh-ingest", "ingest", "ingest", func(c *Config) any { return c.MQ.NATS.IngestConsumer }},
+	{"mq.nats.connect_timeout", "WH_MQ_NATS_CONNECT_TIMEOUT", time.Duration(0), 5 * time.Second, "2s", 2 * time.Second, func(c *Config) any { return c.MQ.NATS.ConnectTimeout }},
+	{"mq.nats.publish_timeout", "WH_MQ_NATS_PUBLISH_TIMEOUT", time.Duration(0), 5 * time.Second, "2s", 2 * time.Second, func(c *Config) any { return c.MQ.NATS.PublishTimeout }},
+	{"mq.nats.topology_wait", "WH_MQ_NATS_TOPOLOGY_WAIT", time.Duration(0), time.Minute, "2s", 2 * time.Second, func(c *Config) any { return c.MQ.NATS.TopologyWait }},
 }
 
 // refusedZeros are the non-zero defaults whose zero Validate refuses: written
@@ -304,7 +312,9 @@ func TestDocs_DefaultsMatchCode(t *testing.T) {
 func parseDocDefault(t *testing.T, key, cell string, like any) any {
 	t.Helper()
 	cell = strings.TrimSpace(cell)
-	if cell == "*(empty)*" || cell == "*(required)*" {
+	// *(empty)*, *(none)*, *(required)*, and a default derived at boot
+	// (`<prefix>_coord`) all read as the field's zero.
+	if strings.HasPrefix(cell, "*(") && strings.HasSuffix(cell, ")*") || strings.Contains(cell, "<") {
 		cell = ""
 	} else {
 		cell = strings.Trim(cell, "`")

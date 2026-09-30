@@ -54,6 +54,9 @@ exclude:
     # internal/mq/mqtest/ is the Broker conformance suite: test code that
     # lives outside *_test.go only so each backend's tests can import it.
     - ^internal/mq/mqtest/
+    # internal/mq/natstest/ stands up NATS as an operator deploys it, for
+    # tests outside internal/mq; test code, like mqtest.
+    - ^internal/mq/natstest/
     - ^tests/
     # scripts/ holds Go helpers (cov, orchestrator) that drive the build but
     # aren't part of the shipped binary; they show up in `-coverpkg=./...`
@@ -101,3 +104,36 @@ exclude:
       # outage. The unit and integration suites cover both.
       - ^internal/config/cache_redis\.go$
       - ^internal/cache/pending\.go$
+      # The external-NATS topology spec, verifier and manifest generator
+      # (and the `mq manifests` CLI) run against an operator's NATS, which
+      # the e2e stack (embedded broker) never has: unit territory, covered
+      # there by a fixture server. Excluding them keeps e2e at ~61%. The
+      # external broker is the same, covered by the integration suite.
+      - ^internal/mq/nats_topology\.go$
+      - ^internal/mq/nats_manifests\.go$
+      - ^internal/mq/nats_permprobe\.go$
+      - ^internal/mq/subject_nats\.go$
+      - ^internal/mq/external(_consumer)?\.go$
+      - ^internal/mq/lease\.go$
+      - ^cmd/wavehouse/mq\.go$
+      # Their wiring, apart from wire.go for this: the NATS queue and lease
+      # wiring and the retention warning under it.
+      - ^internal/app/wire_nats\.go$
+      # The ops-only listener of a process without the api role, moved
+      # out of wire.go the same way: the e2e binary runs every role.
+      - ^internal/app/wire_ops\.go$
+      # The mq.nats block's checks, as cache_redis.go above: boot adopts the
+      # embedded fixture, so e2e never reads it.
+      - ^internal/config/mq_nats\.go$
+      # The ingest processes' shard claims, which run only over the external
+      # broker's shards: the unit suite covers them with a fake queue, and
+      # the integration suite against NATS.
+      - ^internal/ingest/(claims|assign)\.go$
+      - ^internal/mq/settle\.go$
+    unit:
+      # The external NATS broker's tests start a server per case, which the
+      # unit suite's 15s per package cannot hold: they are integration-tagged
+      # (make test-integration), and the merged total counts them.
+      - ^internal/mq/external(_consumer)?\.go$
+      # The NATS KV leases, the same way.
+      - ^internal/mq/lease\.go$

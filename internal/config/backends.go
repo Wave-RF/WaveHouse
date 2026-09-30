@@ -22,16 +22,29 @@ type MQBackend string
 // <data_dir>/nats.
 const MQEmbedded MQBackend = "embedded"
 
-var mqBackends = []MQBackend{MQEmbedded}
+// MQNATS is a NATS JetStream cluster the operator runs, holding the streams
+// and durables deployments/nats describes; every process naming it shares
+// one queue. Its settings are the mq.nats block.
+const MQNATS MQBackend = "nats"
+
+var mqBackends = []MQBackend{MQEmbedded, MQNATS}
 
 // MQ selects the message queue. The per-tenant byte budget, mq.max_bytes_gb,
 // is a settings-directory key, not this block's.
 type MQ struct {
 	Backend MQBackend `yaml:"backend" env:"WH_MQ_BACKEND"`
+	// NATS is read only when Backend is nats.
+	NATS MQNATSConfig `yaml:"nats"`
 }
 
 func (m MQ) validate() error {
-	return checkBackend("mq.backend", "WH_MQ_BACKEND", m.Backend, mqBackends)
+	if err := checkBackend("mq.backend", "WH_MQ_BACKEND", m.Backend, mqBackends); err != nil {
+		return err
+	}
+	if m.Backend == MQNATS {
+		return m.NATS.validate()
+	}
+	return nil
 }
 
 // CacheBackend names the query-result cache implementation.
@@ -147,22 +160,36 @@ func (d DedupeDynamoDBConfig) validate() error {
 	return nil
 }
 
-// CoordBackend names where leases for singleton work (the sweeper) are held.
+// CoordBackend names where leases are held: the sweeper's on the embedded
+// MQ, and the ingest processes' on a shared one.
 type CoordBackend string
 
 // CoordLocal holds leases in this process, which is enough while no other
 // process shares its queue.
 const CoordLocal CoordBackend = "local"
 
-var coordBackends = []CoordBackend{CoordLocal}
+// CoordNATS holds leases in a KV bucket on mq.nats's connection, so every
+// process on the shared queue contends for the same ones. It needs
+// mq.backend=nats; its settings are the coord.nats block.
+const CoordNATS CoordBackend = "nats"
+
+var coordBackends = []CoordBackend{CoordLocal, CoordNATS}
 
 // Coord selects the coordination layer.
 type Coord struct {
 	Backend CoordBackend `yaml:"backend" env:"WH_COORD_BACKEND"`
+	// NATS is read only when Backend is nats.
+	NATS CoordNATSConfig `yaml:"nats"`
 }
 
 func (c Coord) validate() error {
-	return checkBackend("coord.backend", "WH_COORD_BACKEND", c.Backend, coordBackends)
+	if err := checkBackend("coord.backend", "WH_COORD_BACKEND", c.Backend, coordBackends); err != nil {
+		return err
+	}
+	if c.Backend == CoordNATS {
+		return c.NATS.validate()
+	}
+	return nil
 }
 
 // checkBackend refuses a backend this build has no implementation for,
@@ -234,17 +261,17 @@ func (c *Config) NeedsDataDir() bool {
 }
 
 // Warnings returns what a valid configuration is still likely to get wrong,
-// one line each, for boot to log at WARN. The shared-queue ones are not
-// errors because each is correct for a single replica, and one process
-// cannot count its replicas.
+// one line each, for boot to log at WARN. None is an error: an ignored block
+// is harmless, and the shared-queue ones are correct for a single replica,
+// which one process cannot tell from many.
 func (c *Config) Warnings() []string {
-	// All are the api role's: a process without it opens no cache it reads
-	// and no dedupe store, and a split's Deployments differ only in roles, so
-	// the API's warnings cover the others'.
+	out := c.natsWarnings()
+	// The rest are the api role's: a process without it opens no cache it
+	// reads and no dedupe store, and a split's Deployments differ only in
+	// roles, so the API's warnings cover the others'.
 	if !c.Has(RoleAPI) {
-		return nil
+		return out
 	}
-	var out []string
 	if c.Cache.Backend == CacheRedis && c.Cache.Redis.TLS.InsecureSkipVerify {
 		out = append(out, "cache.redis.tls.insecure_skip_verify is on: the cache accepts any certificate, so whoever can intercept the connection can read and replace cached query results")
 	}

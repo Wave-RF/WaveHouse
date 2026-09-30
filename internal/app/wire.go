@@ -558,8 +558,26 @@ func (a *App) wireMQ(ctx context.Context) error {
 	switch b := a.cfg.MQ.Backend; b {
 	case config.MQEmbedded:
 		return a.wireEmbeddedMQ(ctx)
+	case config.MQNATS:
+		return a.wireNATSMQ(ctx)
 	default:
 		return unreachableBackend("mq.backend", b)
+	}
+}
+
+// adoptMQ makes broker the process's MQ, closed with it.
+func (a *App) adoptMQ(broker mq.Broker) {
+	a.mq = broker
+	a.add(component{name: "mq", close: withoutContext(broker.Close)})
+
+	// Only register system metric gauges when a real MeterProvider is in
+	// place — otherwise `otel.GetMeterProvider()` returns the no-op SDK
+	// provider and RegisterCallback silently no-ops, making this look
+	// authoritative when it's actually doing nothing.
+	if a.cfg.OTel.Enabled || a.cfg.Prometheus.Enabled {
+		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedupeStats); err != nil {
+			slog.Error("failed to register system metrics", "error", err)
+		}
 	}
 }
 
@@ -587,18 +605,7 @@ func (a *App) wireEmbeddedMQ(ctx context.Context) error {
 		config.LogStorageInitError("mq", dir, err)
 		return fmt.Errorf("mq open: %w", err)
 	}
-	a.mq = broker
-	a.add(component{name: "mq", close: withoutContext(broker.Close)})
-
-	// Only register system metric gauges when a real MeterProvider is in
-	// place — otherwise `otel.GetMeterProvider()` returns the no-op SDK
-	// provider and RegisterCallback silently no-ops, making this look
-	// authoritative when it's actually doing nothing.
-	if a.cfg.OTel.Enabled || a.cfg.Prometheus.Enabled {
-		if err := observability.RegisterSystemMetrics(broker.Stats, a.dedupeStats); err != nil {
-			slog.Error("failed to register system metrics", "error", err)
-		}
-	}
+	a.adoptMQ(broker)
 
 	// The hook's apply is rooted in the App's stop context, so a reload
 	// caught mid-hook by SIGTERM gives up rather than holding the drain past
@@ -708,14 +715,20 @@ func unreachableBackend[T ~string](key string, got T) error {
 	return fmt.Errorf("%s %q has no wiring: a Config built without config.Load must name the backend of every layer it wires", key, got)
 }
 
-// wireCoord opens the lease coordinator the singleton loops campaign on.
-func (a *App) wireCoord() error {
+// wireCoord opens the lease coordinator the singleton loops campaign on:
+// in-process, or the operator's KV bucket on the external broker's
+// connection (config refuses coord.backend=nats without mq.backend=nats). It
+// is added after the MQ, so it closes first and its terms are resigned while
+// the connection is still up.
+func (a *App) wireCoord(ctx context.Context) error {
 	switch b := a.cfg.Coord.Backend; b {
 	case config.CoordLocal:
 		c := coord.NewLocal()
 		a.coord = c
 		a.add(component{name: "coord", close: c.Close})
 		return nil
+	case config.CoordNATS:
+		return a.wireNATSCoord(ctx)
 	default:
 		return unreachableBackend("coord.backend", b)
 	}
@@ -794,10 +807,21 @@ func (a *App) wireStreaming() {
 
 // wireIngestWorker adds the batch consumer (JetStream → ClickHouse). Its
 // consumer is created when Run starts it; at shutdown the in-flight batches
-// drain within the shutdown timeout.
+// drain within the shutdown timeout. Over a sharded queue (mq.backend: nats)
+// it consumes only the shards this process is assigned (ingest.ClaimShards),
+// so each table has one writer.
 func (a *App) wireIngestWorker() {
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
-		stop, failed, err := ingest.StartIngestWorker(ctx, a.mq, sharedTables{Cache: a.cache, sharing: a.pools.SharingTables}, a.pools.Target, dlqFor(a.tenants))
+		var queue ingest.Queue = a.mq
+		if _, ok := a.mq.(mq.Sharded); ok {
+			// One process per shard at a time, balanced over the ingest
+			// processes through the shared coordinator.
+			var err error
+			if queue, err = ingest.ClaimShards(a.mq, a.coord, ingest.ClaimConfig{}); err != nil {
+				return err
+			}
+		}
+		stop, failed, err := ingest.StartIngestWorker(ctx, queue, sharedTables{Cache: a.cache, sharing: a.pools.SharingTables}, a.pools.Target, dlqFor(a.tenants))
 		if err != nil {
 			return err
 		}
@@ -904,22 +928,6 @@ func (a *App) wireAuth() func(http.Handler) http.Handler {
 		}
 		authn.Prune(a.served)
 	})
-	return authn.Middleware()
-}
-
-// wireOpsAuth is the authentication of a process without the api role: the
-// operator key and nothing else. Token verifiers — and the JWKS fetches that
-// keep them — are per API process, so no token validates here and the reload
-// route admits the operator alone (api.NewOpsRouter).
-func (a *App) wireOpsAuth() func(http.Handler) http.Handler {
-	operatorKey := strings.TrimSpace(a.cfg.Auth.OperatorKey)
-	switch {
-	case operatorKey == "" && a.tenants.Nested():
-		slog.Warn("no auth.operator_key set: a process without the api role takes only the operator key on POST /v1/ops/settings/reload, and a nested settings directory has no watcher, so its settings can only be reloaded by SIGHUP")
-	case operatorKey == "":
-		slog.Warn("no auth.operator_key set: a process without the api role takes only the operator key on POST /v1/ops/settings/reload, so its settings can only be reloaded by SIGHUP or the directory watcher")
-	}
-	authn := auth.NewAuthenticator(auth.Config{OperatorKey: operatorKey}, nil, nil)
 	return authn.Middleware()
 }
 
@@ -1036,26 +1044,6 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	deps.MetricsHandler, deps.MetricsPath = a.inlineMetrics()
 	a.handler = api.NewRouter(deps)
 	a.wireServers(func() { close(closing) })
-}
-
-// wireOpsHTTP serves the ops-only router of a process without the api role:
-// the probes, /version, the metrics endpoint, and the settings reload.
-// Readiness pings the ClickHouse pools when the process has them (the ingest
-// role); a sweeper-only process is ready once booted.
-func (a *App) wireOpsHTTP(authMW func(http.Handler) http.Handler) {
-	health := api.NewHealthHandler(nil)
-	if a.pools != nil {
-		health.Ping = a.pools.Ping
-	}
-	deps := api.OpsDependencies{
-		Health:   health,
-		Version:  api.NewVersionHandler(a.build.Version, a.build.GitCommit, a.build.BuildTime),
-		Settings: api.NewSettingsHandler(a.tenants),
-		AuthMW:   authMW,
-	}
-	deps.MetricsHandler, deps.MetricsPath = a.inlineMetrics()
-	a.handler = api.NewOpsRouter(deps)
-	a.wireServers(nil)
 }
 
 // inlineMetrics is the metrics endpoint to mount on the main router: with

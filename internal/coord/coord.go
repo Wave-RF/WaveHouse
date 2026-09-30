@@ -1,5 +1,5 @@
 // Package coord holds leases for work that must run in one process at a
-// time — the sweeper today, partition claims later. A lease is taken with
+// time — the sweeper, and the ingest processes' shard claim membership. A lease is taken with
 // TryAcquire and held as a Term until it is resigned, its coordinator is
 // closed, or the backend reports it lost; RunElected drives a leader loop
 // over one. Local is the in-process implementation; a distributed one lives
@@ -39,6 +39,16 @@ type Coordinator interface {
 	// Close resigns every term this coordinator holds (best effort, within
 	// ctx); TryAcquire returns ErrClosed from then on. Safe to call again.
 	Close(ctx context.Context) error
+}
+
+// Observer is implemented by a Coordinator that can tell whether a lease is
+// held without campaigning for it: how a set of leases works out how many
+// holders are live (the ingest processes count their peers this way).
+type Observer interface {
+	// Held reports whether the named lease is live under any holder, this
+	// coordinator included, judged as TryAcquire would judge it: false for
+	// a lease TryAcquire could take now.
+	Held(ctx context.Context, name string) (bool, error)
 }
 
 // Term is one holding of a lease.
