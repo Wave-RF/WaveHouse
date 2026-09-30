@@ -189,16 +189,15 @@ Validates a body of records against the ClickHouse schema for `{table}` and publ
 | --- | --- |
 | `application/json` | one flat object, **or** a top-level array of them |
 | `application/x-ndjson`, `application/ndjson`, `application/jsonl`, `application/jsonlines` | one object per line; always a batch |
-| `text/csv` | header-less, positional — see [Positional formats](#positional-formats-csv--tsv) |
-| `text/tab-separated-values` | header-less, positional |
-| `text/csv; header=present` | a header line naming the columns, in any order — see [Header formats](#header-formats-headerpresent) |
-| `text/tab-separated-values; header=present` | the same, tab-separated |
+| `text/csv`, `text/tab-separated-values` | positional, with ClickHouse's own header auto-detection — see [Positional formats](#positional-formats-csv--tsv) |
+| `text/csv; header=absent`, `text/tab-separated-values; header=absent` | strictly positional, no header detection |
+| `text/csv; header=present`, `text/tab-separated-values; header=present` | a header line naming the columns, in any order — see [Header formats](#header-formats-headerpresent) |
 | anything else, or none | `415`, listing the accepted types |
 
 The two JSON families are one format to ClickHouse; the declaration decides only how the body frames its records. The single thing the body still chooses is *arity within `application/json`*: the first non-whitespace byte picks an array (`[`) or a single object. Under a single-object body only the first object is read — concatenated objects after it are ignored, a `200` for one record; declare NDJSON for anything line-framed ([#561](https://github.com/Wave-RF/WaveHouse/issues/561)). The reverse now works: a JSON array declared `application/x-ndjson` ingests every element.
 
 :::note[What counts as a valid declaration]
-The header is parsed with Go's `mime.ParseMediaType` (RFC 9110 §8.3) and the **media type** decides the format, so no malformed *parameter* costs the request — `application/json; charset`, `application/json;;`, a value left mid-quote, a name repeated with different values all read as `application/json`. The one parameter that also decides a format is `header`, on `text/csv` and `text/tab-separated-values` only: `present` selects the header format, `absent` or no `header` at all the positional one, and any other value is a `415`. A line whose parameters did not parse and that mentions `header` is a `415` as well, because reading it as `absent` would ingest a declared header line as data. Two more things are refused. A malformed parameter on a line that **also contains a comma** is a `415`, because the comma may be a second declaration joined on and the error cannot tell that from a comma inside data ([#563](https://github.com/Wave-RF/WaveHouse/issues/563)) — so `application/json; profile="a,b"` is fine and `application/json; profile="a,b"; charset` is not. And `Content-Type` is a **singleton** field (§5.3 forbids repeating it), so repeated header *lines* are accepted only when they agree, while a comma-joined value is refused outright: §8.3 warns that picking a member of the resulting pseudo-list is itself an interoperability and security hazard.
+The header is parsed with Go's `mime.ParseMediaType` (RFC 9110 §8.3) and the **media type** decides the format, so no malformed *parameter* costs the request — `application/json; charset`, `application/json;;`, a value left mid-quote, a name repeated with different values all read as `application/json`. The one parameter that also decides a format is `header`, on `text/csv` and `text/tab-separated-values` only: `present` selects the header format, `absent` the strictly positional one, no `header` at all ClickHouse's default reading, and any other value is a `415`. A line whose parameters did not parse and that mentions `header` is a `415` as well, because guessing at it could ingest a declared header line as data or drop a data row as a header. Two more things are refused. A malformed parameter on a line that **also contains a comma** is a `415`, because the comma may be a second declaration joined on and the error cannot tell that from a comma inside data ([#563](https://github.com/Wave-RF/WaveHouse/issues/563)) — so `application/json; profile="a,b"` is fine and `application/json; profile="a,b"; charset` is not. And `Content-Type` is a **singleton** field (§5.3 forbids repeating it), so repeated header *lines* are accepted only when they agree, while a comma-joined value is refused outright: §8.3 warns that picking a member of the resulting pseudo-list is itself an interoperability and security hazard.
 
 The 415 body quotes what you declared, bounded: at most **four distinct** header lines, each capped at 128 bytes and marked `…(truncated)` when cut, then `"…and N more"` counting every line not quoted, duplicates included. When declarations conflict, the one that actually disagreed is always quoted.
 :::
@@ -233,7 +232,7 @@ WaveHouse decides only policy: whether the role may insert at all, and whether t
 | 403 | `{"error":"policy check references column \"x\", which table \"t\" does not have"}` (also `… which is materialized and cannot be inserted`, the same for `alias`, and `… which is ephemeral and is never stored`) | **Per-record.** A **policy misconfiguration**, not a bad request: the role's `check` names a column the table lacks, one ClickHouse computes, or an `EPHEMERAL` one. None can be enforced, so the check would have passed silently while enforcing nothing. It fires on every insert by that role until the policy or the table is corrected, and names every offending column. `wavehouse validate` cannot catch it — it never sees the ClickHouse schema |
 | 404 | `{"error":"unknown table: ..."}` | Table not found in the discovered schema |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
-| 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/csv; header=present, text/tab-separated-values, text/tab-separated-values; header=present"}` (declared variant: `Content-Type "text/plain": ingest requires one of …`; conflicting variant: `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of …`) | No `Content-Type`, an unsupported or unparseable one, a `header` value other than `present`/`absent`, a comma-bearing value that does not parse as a single media type, or repeated lines that disagree. Checked before the body is read |
+| 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/csv; header=present, text/csv; header=absent, text/tab-separated-values, text/tab-separated-values; header=present, text/tab-separated-values; header=absent"}` (declared variant: `Content-Type "text/plain": ingest requires one of …`; conflicting variant: `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of …`) | No `Content-Type`, an unsupported or unparseable one, a `header` value other than `present`/`absent`, a comma-bearing value that does not parse as a single media type, or repeated lines that disagree. Checked before the body is read |
 | 422 | `{"error":"validation engine declined: <message>"}` | **Per-record.** chtypes could not evaluate the record at all — the artifact declined the shape, rather than the data being wrong. A `check` clause that could not be evaluated lands here too (`validation engine declined: the insert check for column "x" could not be evaluated`) |
 | 500 | `{"error":"dedupe failed"}` / `{"error":"publish failed"}` | Deduplication backend or message-queue error |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Carries `Retry-After: 30` |
@@ -256,7 +255,15 @@ WaveHouse rewrites timestamps in neither direction. **Inbound**, any spelling Cl
 
 #### Positional formats (CSV / TSV)
 
-`text/csv` and `text/tab-separated-values` are **header-less and positional**. The fields are the table's **wire columns** — declaration order minus every `MATERIALIZED`, `ALIAS` and `EPHEMERAL` column — and a producer must send **every one of them, in that order**. `GET /v1/ops/schema?table={table}` returns the columns in `position` order; drop the three computed kinds and that is the field order.
+`text/csv` and `text/tab-separated-values` are **positional**; `header` is [RFC 4180 §3](https://www.rfc-editor.org/rfc/rfc4180#section-3)'s optional parameter, and WaveHouse maps it onto ClickHouse's own behavior three ways:
+
+| Content-Type | Reading |
+| --- | --- |
+| `text/csv; header=present` | `CSVWithNames`: a header line is required and columns are addressed by name — see [Header formats](#header-formats-headerpresent) |
+| `text/csv; header=absent` | `CSV`, strictly positional: header detection is off (`input_format_csv_detect_header=0`), so every line is a record |
+| `text/csv` (no `header` parameter) | ClickHouse's default `CSV`: header auto-detection stays on |
+
+`text/tab-separated-values` maps the same way, with `input_format_tsv_detect_header`. The auto-detection is ClickHouse's own heuristic, not WaveHouse's: send `header=absent` when a data row could spell the column names or you need the first line always read as a record. With no parameter, the positional fields are the table's **wire columns** — declaration order minus every `MATERIALIZED`, `ALIAS` and `EPHEMERAL` column — and a producer must send **every one of them, in that order**. `GET /v1/ops/schema?table={table}` returns the columns in `position` order; drop the three computed kinds and that is the field order.
 
 | Body | Outcome |
 | --- | --- |
@@ -264,11 +271,12 @@ WaveHouse rewrites timestamps in neither direction. **Inbound**, any spelling Cl
 | an empty field (CSV) or `\N` (TSV) | that column takes its `DEFAULT` |
 | too few fields | rejected, code **27** — ClickHouse's own message, e.g. `Cannot parse input: expected ',' before: …` |
 | too many fields | rejected, code **117** — `Expected end of line` |
-| a header line | **not a header**, even one naming every column — read as a data row, so it fails to parse (code 27) wherever a column cannot read its own name; the data rows after it still parse |
+| a header line, no `header` parameter | ClickHouse detects it and **consumes** it as a header: `total` and every `index` count data rows only |
+| a header line, `header=absent` | **not a header** — read as a data row, so it fails to parse (code 27) wherever a column cannot read its own name; the data rows after it still parse |
 
 The messages are ClickHouse's own and differ between ClickHouse lines; branch on the `code`. An empty **TSV** field is the empty string, not a default: `\N` is TSV's spelling for "take the default", and a `DateTime64` cannot read `""`.
 
-A real ClickHouse server would detect a first line that names the columns and skip it as a header (`input_format_csv_detect_header` / `input_format_tsv_detect_header`, on by default). WaveHouse switches that detection off for these two types: a guess can eat a data row that happens to spell the column names, and a positional producer declares no header. A positional producer cannot self-describe either, so a column-order change silently re-assigns values — pin it to the schema and re-check it after any `ALTER`, or send a header with `header=present`.
+A positional producer cannot self-describe, so a column-order change silently re-assigns values — pin it to the schema and re-check it after any `ALTER`, or send a header with `header=present`.
 
 ```bash
 curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
@@ -279,7 +287,7 @@ curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 
 #### Header formats (`header=present`)
 
-`text/csv; header=present` and `text/tab-separated-values; header=present` open with a header line naming the columns, and the fields are addressed by it rather than by position. `header` is [RFC 4180](https://www.rfc-editor.org/rfc/rfc4180#section-3)'s parameter for `text/csv`. IANA's `text/tab-separated-values` registration defines no parameters and makes the first line a header of field names, but a bare `text/tab-separated-values` stays header-less here, as it always has been — reading an existing producer's first record as a header would drop it — and takes the same `header=present` opt-in.
+`text/csv; header=present` and `text/tab-separated-values; header=present` open with a header line naming the columns, and the fields are addressed by it rather than by position. IANA's `text/tab-separated-values` registration defines no parameters, so `header` on TSV is WaveHouse's mirror of the CSV one.
 
 | Body | Outcome |
 | --- | --- |

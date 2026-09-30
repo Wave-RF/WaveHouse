@@ -72,9 +72,10 @@ func TestIngest_CSV(t *testing.T) {
 }
 
 // TestIngest_CSV_PositionalContract pins the three ways a producer gets the
-// positional contract wrong, each with ClickHouse's own code. A header line is
-// the one worth knowing: it is not a header, it is one record that fails to
-// parse, and the data rows around it still ingest.
+// positional contract wrong, each with ClickHouse's own code, under
+// `header=absent` (strictly positional, detection off). A header line there is
+// not a header: it is one record that fails to parse, and the data rows around
+// it still ingest.
 func TestIngest_CSV_PositionalContract(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -93,7 +94,7 @@ func TestIngest_CSV_PositionalContract(t *testing.T) {
 			pub := &testutil.MockPublisher{}
 			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
 			w := httptest.NewRecorder()
-			h.Handle(w, rawIngestRequest(t, "clicks", "text/csv", tt.body))
+			h.Handle(w, rawIngestRequest(t, "clicks", "text/csv; header=absent", tt.body))
 
 			require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 			resp := decodeBatchResult(t, w)
@@ -107,6 +108,58 @@ func TestIngest_CSV_PositionalContract(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIngest_BareCSV_AutoDetectsHeader: a `text/csv` with no header parameter
+// is ClickHouse's default CSV, which consumes a first line that spells the
+// column names as a header. The indices and total count only data rows; the
+// same body under header=absent rejects that line at index 1 (code 27); a bare
+// body with no header line ingests every row.
+func TestIngest_BareCSV_AutoDetectsHeader(t *testing.T) {
+	t.Parallel()
+	const header = "page,button,count,event_id,org_id\n"
+	const rows = "\"/a\",\"buy\",3,\"e1\",\"acme\"\n\"/b\",\"sell\",4,\"e2\",\"acme\"\n"
+
+	t.Run("bare consumes the header line", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
+		w := httptest.NewRecorder()
+		h.Handle(w, rawIngestRequest(t, "clicks", "text/csv", header+rows))
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		resp := decodeBatchResult(t, w)
+		assert.Equal(t, 2, resp.Total, "the detected header is not a record")
+		assert.Equal(t, 2, resp.Succeeded)
+		require.Len(t, pub.Messages, 2)
+		assert.Equal(t, "/a", publishedRow(t, pub.Messages[0].Data)["page"])
+	})
+
+	t.Run("header=absent rejects the header line", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
+		w := httptest.NewRecorder()
+		h.Handle(w, rawIngestRequest(t, "clicks", "text/csv; header=absent", header+rows))
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		resp := decodeBatchResult(t, w)
+		assert.Equal(t, 3, resp.Total)
+		assert.Equal(t, 2, resp.Succeeded)
+		assert.Equal(t, 27, resultAt(t, resp, 1).Code, "the first line is a record ClickHouse's positional reader refuses")
+		assert.Len(t, pub.Messages, 2)
+	})
+
+	t.Run("bare with no header line ingests every row", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
+		w := httptest.NewRecorder()
+		h.Handle(w, rawIngestRequest(t, "clicks", "text/csv", rows))
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		resp := decodeBatchResult(t, w)
+		assert.Equal(t, 2, resp.Total)
+		assert.Equal(t, 2, resp.Succeeded)
+		assert.Len(t, pub.Messages, 2)
+	})
 }
 
 // TestIngest_TSV is CSV's tab-separated twin, with the same positional contract

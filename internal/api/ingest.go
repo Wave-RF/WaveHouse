@@ -352,7 +352,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	st := &ingestRun{table: table, scope: scope, tbl: tbl, records: records, checkColumns: checkColumns, checkGuard: guard}
 	if records > 0 {
-		if abort := h.judge(ctx, st, format.wire(), body.Bytes(), preds); abort != nil {
+		if abort := h.judge(ctx, st, format, body.Bytes(), preds); abort != nil {
 			writeAbort(w, abort)
 			return
 		}
@@ -372,8 +372,8 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 // A Go-level failure is an unavailable handle (the type layer's outage) or ours,
 // and neither is the caller's record to fix. A body ClickHouse refused as a
 // whole is the caller's to fix, and is a 400 with its code.
-func (h *IngestHandler) judge(ctx context.Context, st *ingestRun, wire typelayer.Format, body []byte, preds []policy.Predicate) *requestAbort {
-	batch, err := st.tbl.Ingest(wire, body, preds...)
+func (h *IngestHandler) judge(ctx context.Context, st *ingestRun, format IngestFormat, body []byte, preds []policy.Predicate) *requestAbort {
+	batch, err := st.tbl.IngestWith(format.wire(), format.options(), body, preds...)
 	if err != nil {
 		var un *typelayer.Unavailable
 		if errors.As(err, &un) {

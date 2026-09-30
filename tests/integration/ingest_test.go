@@ -213,7 +213,7 @@ func TestIngest_CompactArray_OneBadRecord_TheOthersStillLand(t *testing.T) {
 	eventuallyRows(t, table, "user_id = 'a2'", 0)
 }
 
-// TestIngest_CSVBody_LandsInClickHouse: CSV is header-less and positional in
+// TestIngest_CSVBody_LandsInClickHouse: CSV is positional in
 // the table's declaration order. The end-to-end assertion is what makes the
 // positional contract real — a column-order bug would still answer 200.
 func TestIngest_CSVBody_LandsInClickHouse(t *testing.T) {
@@ -226,6 +226,39 @@ func TestIngest_CSVBody_LandsInClickHouse(t *testing.T) {
 
 	eventuallyRows(t, table, "user_id = 'c1' AND event_type = 'click' AND value = 7", 1)
 	eventuallyRows(t, table, "user_id = 'c2' AND event_type = 'view' AND value = 9", 1)
+}
+
+// TestIngest_BareCSVHeader_LandsInClickHouse: a bare `text/csv` is ClickHouse's
+// default CSV, so a first line spelling the column names is consumed as a
+// header and only the data rows land.
+func TestIngest_BareCSVHeader_LandsInClickHouse(t *testing.T) {
+	table := createTable(t, "user_id String, event_type String, value UInt32", "ORDER BY user_id")
+
+	status, body := postIngest(t, table, "text/csv",
+		"user_id,event_type,value\n\"d1\",\"click\",7\n", "", "")
+	require.Equal(t, http.StatusOK, status, "body=%v", body)
+	assert.EqualValues(t, 1, body["total"], "the detected header is not a record")
+	assert.EqualValues(t, 1, body["succeeded"])
+
+	eventuallyRows(t, table, "user_id = 'd1' AND value = 7", 1)
+	eventuallyRows(t, table, "user_id = 'user_id'", 0)
+}
+
+// TestIngest_CSVHeaderAbsent_LandsInClickHouse: `header=absent` is strictly
+// positional, so the same header line is one refused record (code 27) and
+// never reaches the table.
+func TestIngest_CSVHeaderAbsent_LandsInClickHouse(t *testing.T) {
+	table := createTable(t, "user_id String, event_type String, value UInt32", "ORDER BY user_id")
+
+	status, body := postIngest(t, table, "text/csv; header=absent",
+		"user_id,event_type,value\n\"a1\",\"click\",7\n", "", "")
+	require.Equal(t, http.StatusOK, status, "body=%v", body)
+	assert.EqualValues(t, 2, body["total"])
+	assert.EqualValues(t, 1, body["succeeded"])
+	assert.EqualValues(t, 1, body["failed"])
+
+	eventuallyRows(t, table, "user_id = 'a1' AND value = 7", 1)
+	eventuallyRows(t, table, "user_id = 'user_id'", 0)
 }
 
 // TestIngest_TSVBody_LandsInClickHouse is CSV's tab-separated twin, with a bad

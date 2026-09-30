@@ -352,7 +352,7 @@ describe("Ingest", () => {
       // `application/jsonlines`.
       const body = (await res.json()) as { error?: string };
       expect(body.error).toContain(
-        "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/csv; header=present, text/tab-separated-values, text/tab-separated-values; header=present",
+        "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/csv; header=present, text/csv; header=absent, text/tab-separated-values, text/tab-separated-values; header=present, text/tab-separated-values; header=absent",
       );
     }
   });
@@ -482,7 +482,7 @@ describe("Ingest", () => {
     }
   });
 
-  // CSV and TSV are new accepted formats. They are HEADER-LESS and positional
+  // CSV and TSV are new accepted formats. They are positional
   // in the table's declaration order — every wire column, in that order, with
   // an empty field meaning "take the DEFAULT". An end-to-end assertion is the
   // only one that catches a column-order bug: a mis-ordered body still answers
@@ -514,6 +514,26 @@ describe("Ingest", () => {
       expect(Number(r[0].duration_ms)).toBe(7);
       return true;
     }, 10_000);
+  });
+
+  // A bare text/csv is ClickHouse's default CSV: a first line that spells the
+  // column names is auto-detected as a header, so only the data row counts.
+  it("auto-detects a header line in bare CSV", async () => {
+    const id = testId();
+    const res = await fetch(`${WH_URL}/v1/ingest?table=${T.clicks}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}`,
+        "Content-Type": "text/csv",
+      },
+      body:
+        "event_id,page,user_id,session_id,referrer,country,duration_ms,received_timestamp\n" +
+        `"${id}","/csv-detect","u-d","s-d","","GB",7,\n`,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { total: number; succeeded: number };
+    expect(body.total).toBe(1);
+    expect(body.succeeded).toBe(1);
   });
 
   it("ingests a complete positional TSV row, and a short row is code 27", async () => {

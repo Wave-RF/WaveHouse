@@ -18,23 +18,33 @@ func InsertSettings() map[string]string {
 	}
 }
 
+// IngestOptions adjusts how IngestWith reads a body. The zero value is
+// ClickHouse's own behaviour.
+type IngestOptions struct {
+	// StrictPositional switches header auto-detection off for FormatCSV and
+	// FormatTSV (input_format_csv_detect_header / input_format_tsv_detect_header
+	// = 0), so every line is a record. By default ClickHouse consumes a first
+	// line that names the columns as a header (both settings are on by default;
+	// measured on the 26.6 server and artifact). Ignored for other formats.
+	StrictPositional bool
+}
+
 // parseSettings is what a body is parsed under: the insert pins, plus header
-// detection switched off for the positional pair. ClickHouse consumes a first
-// line that names the columns as a header even in plain CSV/TSV
-// (input_format_csv_detect_header / input_format_tsv_detect_header, on by
-// default; measured on the 26.6 server and artifact), which would silently eat
-// a data row that happens to spell the column names. A header is declared
-// instead, with a WithNames format. The worker inserts JSONCompactEachRow, so
-// neither setting has a real-INSERT twin to keep in step. ok is false for a
-// format Ingest does not parse.
-func parseSettings(format Format) (settings map[string]string, ok bool) {
+// detection off when the caller asked for strict positional CSV/TSV. The worker
+// inserts JSONCompactEachRow, so the detect_header settings have no real-INSERT
+// twin to keep in step. ok is false for a format Ingest does not parse.
+func parseSettings(format Format, opts IngestOptions) (settings map[string]string, ok bool) {
 	settings = InsertSettings()
 	switch format {
 	case FormatJSONEachRow, FormatCSVWithNames, FormatTSVWithNames:
 	case FormatCSV:
-		settings["input_format_csv_detect_header"] = "0"
+		if opts.StrictPositional {
+			settings["input_format_csv_detect_header"] = "0"
+		}
 	case FormatTSV:
-		settings["input_format_tsv_detect_header"] = "0"
+		if opts.StrictPositional {
+			settings["input_format_tsv_detect_header"] = "0"
+		}
 	default:
 		return nil, false
 	}
@@ -93,8 +103,10 @@ type Refusal struct {
 //
 //   - FormatJSONEachRow: newline-separated and name-addressed (an NDJSON body
 //     is byte-identical to this);
-//   - FormatCSV, FormatTSV: positional in declaration order with NO header
-//     line (a header is one failed record);
+//   - FormatCSV, FormatTSV: positional in declaration order. ClickHouse's
+//     header auto-detection applies (a first line naming the columns is
+//     consumed, not a record) unless IngestWith sets StrictPositional, where a
+//     header line is one failed record;
 //   - FormatCSVWithNames, FormatTSVWithNames: a first line naming the columns
 //     in any order. It is not a record, so Rows index the data lines; a column
 //     it omits takes its DEFAULT, and one it names that the schema lacks (or
@@ -122,7 +134,12 @@ type Refusal struct {
 // The returned error is for a Go-level failure only — every data verdict is in
 // the batch.
 func (t *Table) Ingest(format Format, body []byte, checks ...Predicate) (Batch, error) {
-	settings, ok := parseSettings(format)
+	return t.IngestWith(format, IngestOptions{}, body, checks...)
+}
+
+// IngestWith is Ingest with options; see IngestOptions.
+func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, checks ...Predicate) (Batch, error) {
+	settings, ok := parseSettings(format, opts)
 	if !ok {
 		return Batch{}, fmt.Errorf(
 			"typelayer: Ingest cannot parse format %d; use FormatJSONEachRow, FormatCSV, FormatTSV, FormatCSVWithNames or FormatTSVWithNames",

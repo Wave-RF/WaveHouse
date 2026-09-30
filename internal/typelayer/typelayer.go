@@ -35,8 +35,9 @@ type Format = chtypes.Format
 
 // The formats Ingest accepts. JSONEachRow is name-addressed (an NDJSON body is
 // the same format, byte for byte); CSV and TSV are positional in declaration
-// order with no header line; the WithNames pair open with a header line that
-// names the columns, in any order.
+// order, with ClickHouse's header auto-detection unless IngestOptions turns it
+// off; the WithNames pair open with a header line that names the columns, in
+// any order.
 const (
 	FormatJSONEachRow  = chtypes.JSONEachRow
 	FormatCSV          = chtypes.CSV
