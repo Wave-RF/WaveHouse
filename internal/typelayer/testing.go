@@ -14,8 +14,10 @@ import (
 const TestServerVersion = "26.6.3.62"
 
 // missingArtifact is what a developer without the artifact needs to read: the
-// exact command that installs it.
-const missingArtifact = "chtypes artifact for 26.6 not installed: run `go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.2.1 fetch 26.6`"
+// exact command that installs it, and where it lands.
+const missingArtifact = "chtypes artifact for 26.6 (ABI revision 6) not installed: run " +
+	"`go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.4.0 fetch 26.6`, " +
+	"which installs it under ~/.cache/chtypes/artifacts/abi6/<os>-<arch>"
 
 // TestEngine opens an Engine on the SDK's default search path and binds the
 // given tables at TestServerVersion in UTC. It skips the test when the artifact

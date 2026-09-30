@@ -113,9 +113,10 @@ func (r *Row) VisibleWithReason(preds []Predicate) (bool, string) {
 	return verdictBool(res.Verdicts[0])
 }
 
-// verdictBool maps one chtypes verdict onto (visible, reason). Only
-// VerdictTrue is visible, and the zero value is Decline, so an answer nobody
-// set withholds.
+// verdictBool maps one chtypes verdict onto (visible, reason) — for a stored
+// row's visibility and for an ingested record's insert check alike. Only
+// VerdictTrue is true, and the zero value is Decline, so an answer nobody set
+// withholds.
 func verdictBool(v chtypes.Verdict) (bool, string) {
 	switch v {
 	case chtypes.VerdictTrue:
@@ -129,92 +130,6 @@ func verdictBool(v chtypes.Verdict) (bool, string) {
 	default:
 		return false, ReasonDecline
 	}
-}
-
-// CheckVerdicts evaluates a role's insert check clauses against rows that have
-// already been exported. It is the ingest-side twin of Row.Visible: ONE
-// filter, AND-joined over every predicate, evaluated against ONE parse of the
-// payload.
-//
-// payload is a JSONCompactEachRow body — in practice Batch.Payload — and both
-// returned slices are index-aligned with its rows, which are index-aligned
-// with the batch's ACCEPTED records (NOT with Batch.Rows, which also holds the
-// records that did not parse). Call it on the SAME Table that produced the
-// payload: a positional body is only interpretable against the column shape it
-// was exported from, so a role's payload must be checked by the role's handle.
-//
-// Only chtypes.VerdictTrue is true; reasons carries "" for a passing row and
-// ReasonFilter / ReasonError / ReasonDecline otherwise, so a caller can keep
-// "the data says no" (403) apart from "we could not tell" (422, fail closed).
-//
-// No predicates means no check applies and every row passes. A predicate with
-// no Values matches nothing and short-circuits to all-false WITHOUT compiling
-// — an unresolvable claim must never reach the compiler. A Go-level failure
-// (an unavailable handle, a payload chtypes will not parse) is an error and
-// never a verdict.
-func (t *Table) CheckVerdicts(payload []byte, preds []Predicate) ([]bool, []string, error) {
-	if len(t.slots) == 0 {
-		return nil, nil, &Unavailable{Table: t.Name, Cause: t.cause}
-	}
-	n := countRecords(payload, 0)
-	if n == 0 {
-		return nil, nil, nil
-	}
-	if len(preds) == 0 {
-		verdicts := make([]bool, n)
-		for i := range verdicts {
-			verdicts[i] = true
-		}
-		return verdicts, make([]string, n), nil
-	}
-
-	expr, params, ok := t.render(preds)
-	if !ok {
-		v, r := uniformVerdict(n, ReasonFilter)
-		return v, r, nil
-	}
-
-	s := t.slot()
-	block, err := s.schema.ParseBlock(chtypes.JSONCompactEachRow, payload, InsertSettings())
-	if err != nil {
-		return nil, nil, err
-	}
-	defer block.Close()
-
-	filter := t.filterOn(s, expr, params)
-	if filter == nil {
-		v, r := uniformVerdict(n, ReasonDecline)
-		return v, r, nil
-	}
-	res, err := filter.Eval(block)
-	if err != nil || res.Outcome != chtypes.FilterOK {
-		v, r := uniformVerdict(n, ReasonDecline)
-		return v, r, nil
-	}
-	if len(res.Verdicts) != n {
-		// Index alignment is the whole contract here: a verdict attributed to
-		// the wrong row would approve one record on another record's answer.
-		t.log.Error("chtypes returned a verdict count that does not match the exported rows; withholding the batch",
-			"table", t.Name, "generation", t.Generation, "rows", n, "verdicts", len(res.Verdicts))
-		v, r := uniformVerdict(n, ReasonDecline)
-		return v, r, nil
-	}
-
-	verdicts := make([]bool, n)
-	reasons := make([]string, n)
-	for i, v := range res.Verdicts {
-		verdicts[i], reasons[i] = verdictBool(v)
-	}
-	return verdicts, reasons, nil
-}
-
-// uniformVerdict is the fail-closed answer: every row withheld for one reason.
-func uniformVerdict(n int, reason string) ([]bool, []string) {
-	reasons := make([]string, n)
-	for i := range reasons {
-		reasons[i] = reason
-	}
-	return make([]bool, n), reasons
 }
 
 // render builds the AND-joined expression and the parameter map.
@@ -240,21 +155,23 @@ func uniformVerdict(n int, reason string) ([]bool, []string) {
 // equal, on `=` and on `in` alike. Before this, a claim carrying any of those
 // bytes silently withheld rows the SQL path returned.
 //
-// Values are never interpolated, so a hostile claim is inert by construction.
-// Reports false when a predicate cannot be expressed, which fails closed
-// without compiling anything.
+// Identifiers are the library's own QuoteIdentifier spelling (see
+// declaredColumns). Values are never interpolated, so a hostile claim is inert
+// by construction. Reports false when a predicate cannot be expressed, which
+// fails closed without compiling anything.
 func (t *Table) render(preds []Predicate) (string, map[string]string, bool) {
 	var b strings.Builder
 	params := make(map[string]string, len(preds))
 	n := 0
 	for i, p := range preds {
-		if _, known := t.cols[p.Column]; !known || len(p.Values) == 0 {
+		ident, known := t.cols[p.Column]
+		if !known || len(p.Values) == 0 {
 			return "", nil, false
 		}
 		if i > 0 {
 			b.WriteString(" AND ")
 		}
-		b.WriteString(chsql.QuoteIdent(p.Column))
+		b.WriteString(ident)
 		switch p.Op {
 		case "=", "!=", ">", "<":
 			if len(p.Values) != 1 {

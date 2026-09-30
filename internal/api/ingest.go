@@ -140,22 +140,27 @@ type recordReject struct {
 // failure (500), a dedup backend error (500), a type layer that cannot answer
 // (503).
 //
-// One is not. An insert grant that resolved for the other operation is a 403 and
-// a caller/config bug — retrying cannot help. It aborts rather than rejecting
-// per record because the grant is resolved ONCE per request, so it is true for
-// every record or none; as a per-record reject a 10k batch would report 10k
-// independent permission failures for a single mis-wired grant.
+// Two are not, and retrying either unchanged cannot help:
+//   - An insert grant that resolved for the other operation is a 403 and a
+//     caller/config bug. It aborts rather than rejecting per record because the
+//     grant is resolved ONCE per request, so it is true for every record or
+//     none; as a per-record reject a 10k batch would report 10k independent
+//     permission failures for a single mis-wired grant.
+//   - A header-format body whose header ClickHouse refuses — a name the table
+//     or the role lacks, or a name given twice — is a 400 with ClickHouse's
+//     code (117). The header is not a record, and no record was read past it.
 type requestAbort struct {
 	Status     int
 	Message    string
+	Code       int    // ClickHouse's code, when its parser refused the body as a whole
 	RetryAfter string // non-empty → emit a Retry-After header (503 backpressure)
 }
 
 // ingestRun is one request's state after the body has been framed and ruled on: the
-// handle that produced the bytes, chtypes' verdict per record, and the check
-// verdicts over the accepted ones. Both response shapes read their records out
-// of it, so the single-object and batch paths cannot disagree about what a
-// record's outcome is — only about how it is rendered.
+// handle that produced the bytes and chtypes' verdict per record, its check
+// answer included. Both response shapes read their records out of it, so the
+// single-object and batch paths cannot disagree about what a record's outcome
+// is — only about how it is rendered.
 type ingestRun struct {
 	table, scope string
 	tbl          *typelayer.Table
@@ -164,18 +169,13 @@ type ingestRun struct {
 	// before chtypes has read it (an empty array is zero, anything else is at
 	// least one), then len(batch.Rows) once it has answered.
 	records int
-	// verdicts/reasons are index-aligned with the ACCEPTED records, not with
-	// batch.Rows, so they are read through the accepted cursor.
-	verdicts []bool
-	reasons  []string
-	// checkColumns names the check clauses the verdicts came from, for the
-	// rejection message. The filter is AND-joined over all of them, so a false
-	// verdict does not say which one failed — with one clause it does.
+	// checkColumns names the check clauses a record's check answer came from,
+	// for the rejection message. The filter is AND-joined over all of them, so
+	// a false verdict does not say which one failed — with one clause it does.
 	checkColumns []string
 	// checkGuard is the rejection every otherwise-acceptable record gets when
 	// the role's check clauses name columns no record can carry.
 	checkGuard *recordReject
-	accepted   int // cursor into verdicts/reasons
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -366,14 +366,14 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // judge asks ClickHouse's own parser for a verdict per record — ONE call for the
-// whole body, no chunking (AUDIT §A.9) — and then, when the role carries insert
-// check clauses, evaluates them as ONE compiled filter over the exported rows.
+// whole body, no chunking (AUDIT §A.9) — with the role's insert check clauses,
+// if any, compiled to ONE filter and answered by that same parse.
 //
-// Both are Go-level failures or data verdicts, never both: an unavailable handle
-// is the type layer's outage and anything else is ours, and neither is the
-// caller's record to fix.
+// A Go-level failure is an unavailable handle (the type layer's outage) or ours,
+// and neither is the caller's record to fix. A body ClickHouse refused as a
+// whole is the caller's to fix, and is a 400 with its code.
 func (h *IngestHandler) judge(ctx context.Context, st *ingestRun, wire typelayer.Format, body []byte, preds []policy.Predicate) *requestAbort {
-	batch, err := st.tbl.Ingest(wire, body)
+	batch, err := st.tbl.Ingest(wire, body, preds...)
 	if err != nil {
 		var un *typelayer.Unavailable
 		if errors.As(err, &un) {
@@ -383,27 +383,16 @@ func (h *IngestHandler) judge(ctx context.Context, st *ingestRun, wire typelayer
 		h.logger.ErrorContext(ctx, "record validation failed", "error", err, "table", st.table)
 		return &requestAbort{Status: http.StatusInternalServerError, Message: "validation failed"}
 	}
+	if r := batch.Refused; r != nil {
+		h.logger.WarnContext(ctx, "ingest body refused by the parser", "error", r.Message, "code", r.Code, "table", st.table)
+		return &requestAbort{Status: http.StatusBadRequest, Message: r.Message, Code: r.Code}
+	}
 	st.batch = batch
 	// chtypes' per-record answer is the record count: a JSON array sent as
 	// NDJSON is however many elements its reader took, a blank line is nothing.
 	// When it gave no per-record detail the padded batch is still index-shaped,
 	// so the same rule keeps every later index in range.
 	st.records = len(batch.Rows)
-
-	if len(preds) == 0 || len(batch.Payload) == 0 {
-		return nil
-	}
-	verdicts, reasons, err := st.tbl.CheckVerdicts(batch.Payload, preds)
-	if err != nil {
-		var un *typelayer.Unavailable
-		if errors.As(err, &un) {
-			h.logUnavailable(ctx, st.table, un.Cause)
-			return unavailableAbort(un.Cause)
-		}
-		h.logger.ErrorContext(ctx, "insert check evaluation failed", "error", err, "table", st.table)
-		return &requestAbort{Status: http.StatusInternalServerError, Message: "check evaluation failed"}
-	}
-	st.verdicts, st.reasons = verdicts, reasons
 	return nil
 }
 
@@ -412,7 +401,7 @@ func (h *IngestHandler) judge(ctx context.Context, st *ingestRun, wire typelayer
 //
 // The order is the one the type layer imposes and is a documented change: a
 // record that both fails to parse and violates a check clause now reports the
-// PARSE error, because the check runs over rows ClickHouse has already accepted.
+// PARSE error — chtypes answers the check only for a record it accepted.
 // Nothing is published either way, so no enforcement is lost (AUDIT §A.2).
 func (h *IngestHandler) resolveRecord(ctx context.Context, st *ingestRun, i int, now time.Time) (duplicate bool, reject *recordReject, abort *requestAbort) {
 	verdict := verdictAt(st.batch, i)
@@ -420,27 +409,13 @@ func (h *IngestHandler) resolveRecord(ctx context.Context, st *ingestRun, i int,
 		h.logVerdict(ctx, st.table, verdict)
 		return false, verdictReject(verdict), nil
 	}
-
-	// The payload cursor advances for every accepted record, whatever happens
-	// next: the check verdicts are index-aligned with the exported rows, so a
-	// record skipped here would shift every later record onto another's answer.
-	cursor := st.accepted
-	st.accepted++
-
 	if st.checkGuard != nil {
 		return false, st.checkGuard, nil
 	}
-	if st.verdicts != nil {
-		if cursor >= len(st.verdicts) {
-			// Fewer verdicts than exported rows: the type layer already logged
-			// the mismatch. Withhold rather than publish an unchecked row.
-			return false, checkReject(typelayer.ReasonDecline, st.checkColumns), nil
-		}
-		if !st.verdicts[cursor] {
-			h.logger.WarnContext(ctx, "check clause failed",
-				"columns", st.checkColumns, "reason", st.reasons[cursor], "table", st.table)
-			return false, checkReject(st.reasons[cursor], st.checkColumns), nil
-		}
+	if verdict.CheckReason != "" {
+		h.logger.WarnContext(ctx, "check clause failed", "columns", st.checkColumns,
+			"reason", verdict.CheckReason, "cause", verdict.Message, "table", st.table)
+		return false, checkReject(verdict.CheckReason, st.checkColumns), nil
 	}
 	return h.publishAccepted(ctx, st, verdict.Line, now)
 }
@@ -562,8 +537,8 @@ func (h *IngestHandler) insertShape(
 		switch v := checks[col].(type) {
 		case []any:
 			// An _in set. A nil/empty set is an unresolvable claim and matches
-			// nothing — CheckVerdicts short-circuits it to all-false without
-			// compiling anything (#224).
+			// nothing — Ingest fails every record's check without compiling
+			// anything (#224).
 			vals := make([]string, 0, len(v))
 			for _, e := range v {
 				s, ok := scalarString(e)
@@ -719,7 +694,7 @@ func writeAbort(w http.ResponseWriter, abort *requestAbort) {
 	if abort.RetryAfter != "" {
 		w.Header().Set("Retry-After", abort.RetryAfter)
 	}
-	writeJSONError(w, abort.Status, abort.Message)
+	writeJSONErrorCode(w, abort.Status, abort.Message, abort.Code)
 }
 
 // writeMaxBytesError writes a 413 if err is the inbound body-cap overflow and

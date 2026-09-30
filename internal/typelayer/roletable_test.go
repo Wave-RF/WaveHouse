@@ -97,9 +97,10 @@ func TestRoleTable_DefaultInjectsWhenAbsentAndLosesToASuppliedValue(t *testing.T
 }
 
 // TestRoleTable_LiteralEscaping: the injected value is the one thing in this
-// DDL that is SQL TEXT, so every spelling that could close the literal early
-// has to survive as data. The breakout attempt is the case that matters — it
-// must not add, remove or retype a single column.
+// DDL that is SQL TEXT, spelled by the library's QuoteLiteral, so every
+// spelling that could close the literal early has to survive as data. The
+// breakout attempt is the case that matters — it must not add, remove or
+// retype a single column.
 func TestRoleTable_LiteralEscaping(t *testing.T) {
 	eng := TestEngine(t, ordersTable())
 
@@ -111,12 +112,15 @@ func TestRoleTable_LiteralEscaping(t *testing.T) {
 		"ddl breakout":     `', x UInt8 DEFAULT '`,
 		"comment breakout": `' --`,
 		"empty":            "",
+		"nul":              "a\x00b",
+		"newline and tab":  "a\nb\tc",
+		"unicode":          "Ünï 日本",
 	} {
 		t.Run(name, func(t *testing.T) {
 			tbl := roleTableFor(t, eng, RoleShape{Defaults: map[string]string{"tenant": value}})
 
-			// The column set is the defensive check: an escape that closed the
-			// literal early would show up here, not as a mangled value.
+			// An escape that closed the literal early would show up here, as an
+			// extra or missing column, not as a mangled value.
 			assert.Equal(t, []string{"id", "tenant", "secret", "amount"}, tbl.WireColumns)
 			assert.Equal(t, []string{"id", "tenant", "secret", "amount"},
 				compiledColumnNames(tbl.slots[0].schema))
@@ -135,25 +139,9 @@ func TestRoleTable_LiteralEscaping(t *testing.T) {
 	}
 }
 
-func TestQuoteLiteral(t *testing.T) {
-	t.Parallel()
-	cases := map[string]string{
-		"":                     `''`,
-		"acme":                 `'acme'`,
-		"O'Brien":              `'O\'Brien'`,
-		`back\slash`:           `'back\\slash'`,
-		`x\'y`:                 `'x\\\'y'`,
-		`', x UInt8 DEFAULT '`: `'\', x UInt8 DEFAULT \''`,
-	}
-	for in, want := range cases {
-		assert.Equal(t, want, quoteLiteral(in), in)
-	}
-}
-
 // TestRoleTable_UnparseableLiteralFailsClosed: a literal the column's reader
-// cannot read is a compile refusal (ClickHouse code 6), which is the backstop
-// under the hand-written escaper. It must be Unavailable — a 503 — never a
-// handle that silently drops the injection.
+// cannot read is a compile refusal (ClickHouse code 6). It must be Unavailable
+// — a 503 — never a handle that silently drops the injection.
 func TestRoleTable_UnparseableLiteralFailsClosed(t *testing.T) {
 	eng := TestEngine(t, ordersTable())
 

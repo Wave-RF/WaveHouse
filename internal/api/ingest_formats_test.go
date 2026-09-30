@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
@@ -156,6 +158,146 @@ func TestIngest_CSV_EmptyBody(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, jsonErrorMessage(t, w), "empty csv body")
 	assert.Empty(t, pub.Messages)
+}
+
+// TestIngest_CSVWithNames: `text/csv; header=present` reads the first line as
+// the column names, in any order. The header is not a record, so indices
+// count data lines; a column the header omits takes its DEFAULT.
+func TestIngest_CSVWithNames(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
+
+	w := httptest.NewRecorder()
+	h.Handle(w, rawIngestRequest(t, "clicks", "text/csv; header=present",
+		"org_id,page,count\nacme,/a,3\nacme,/b,not-a-number\nbeta,/c,5\n"))
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 3, resp.Total, "the header line is not a record")
+	assert.Equal(t, 2, resp.Succeeded)
+	assert.True(t, resultAt(t, resp, 1).Ok)
+	assert.False(t, resultAt(t, resp, 2).Ok)
+	assert.NotZero(t, resultAt(t, resp, 2).Code, "a parser refusal carries ClickHouse's code")
+	assert.True(t, resultAt(t, resp, 3).Ok)
+	require.Len(t, pub.Messages, 2)
+	row := publishedRow(t, pub.Messages[0].Data)
+	assert.Equal(t, "/a", row["page"])
+	assert.Equal(t, float64(3), row["count"])
+	assert.Equal(t, "acme", row["org_id"])
+	assert.Equal(t, "", row["button"], "a column the header omits takes its DEFAULT")
+	assert.Equal(t, "/c", publishedRow(t, pub.Messages[1].Data)["page"])
+}
+
+// TestIngest_TSVWithNames is the tab-separated twin.
+func TestIngest_TSVWithNames(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
+
+	w := httptest.NewRecorder()
+	h.Handle(w, rawIngestRequest(t, "clicks", "text/tab-separated-values; header=present",
+		"count\tpage\n7\t/a\n"))
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 1, resp.Total)
+	assert.Equal(t, 1, resp.Succeeded)
+	require.Len(t, pub.Messages, 1)
+	assert.Equal(t, float64(7), publishedRow(t, pub.Messages[0].Data)["count"])
+}
+
+// TestIngest_WithNames_HeaderRefusals: a header ClickHouse refuses is a
+// verdict on the body, not on a record — a whole-request 400 with its own
+// code, and nothing published. A header alone is zero records.
+func TestIngest_WithNames_HeaderRefusals(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		ct, body, mention string
+	}{
+		"unknown column":  {"text/csv; header=present", "page,extra\n/a,1\n", "extra"},
+		"repeated column": {"text/csv; header=present", "page,page\n/a,/b\n", "page"},
+		"tsv unknown":     {"text/tab-separated-values; header=present", "page\textra\n/a\t1\n", "extra"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
+			w := httptest.NewRecorder()
+			h.Handle(w, rawIngestRequest(t, "clicks", tc.ct, tc.body))
+
+			require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
+			msg, code := errorAndCode(t, w)
+			assert.Equal(t, 117, code)
+			assert.Contains(t, msg, tc.mention)
+			assert.Empty(t, pub.Messages)
+		})
+	}
+
+	t.Run("header only", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
+		w := httptest.NewRecorder()
+		h.Handle(w, rawIngestRequest(t, "clicks", "text/csv; header=present", "page,count\n"))
+
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		assert.Equal(t, 0, decodeBatchResult(t, w).Total)
+		assert.Empty(t, pub.Messages)
+	})
+
+	t.Run("empty body names the format", func(t *testing.T) {
+		t.Parallel()
+		pub := &testutil.MockPublisher{}
+		h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
+		w := httptest.NewRecorder()
+		h.Handle(w, rawIngestRequest(t, "clicks", "text/csv; header=present", " \n"))
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, jsonErrorMessage(t, w), "empty csvwithnames body")
+	})
+}
+
+// TestIngest_WithNames_RoleProjection: the header is read against the ROLE's
+// compiled schema, so a denied column in it is ClickHouse's 117 for the whole
+// body, an `_eq` check column the header omits is filled by its injected
+// DEFAULT, and a record that supplies another value fails the check (403).
+func TestIngest_WithNames_RoleProjection(t *testing.T) {
+	t.Parallel()
+	required := "acme"
+	pub := &testutil.MockPublisher{}
+	h := newTestIngestHandler(t, testRegistry(t), pub, testutil.NopLogger())
+	h.PolicySource = policy.Static(&policy.Policy{Tables: map[string]policy.TablePolicy{
+		"clicks": {"writer": {Insert: &policy.InsertPermissions{
+			DenyColumns: []string{"count"},
+			Check:       map[string]policy.Filter{"org_id": {Eq: &required}},
+		}}},
+	}})
+	send := func(body string) *httptest.ResponseRecorder {
+		req := rawIngestRequest(t, "clicks", "text/csv; header=present", body)
+		req = req.WithContext(auth.WithRole(req.Context(), "writer"))
+		w := httptest.NewRecorder()
+		h.Handle(w, req)
+		return w
+	}
+
+	w := send("page,count\n/a,1\n")
+	require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
+	_, code := errorAndCode(t, w)
+	assert.Equal(t, 117, code)
+	assert.Empty(t, pub.Messages)
+
+	w = send("page,org_id\n/a,acme\n/b,evil\n")
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	resp := decodeBatchResult(t, w)
+	assert.True(t, resultAt(t, resp, 1).Ok)
+	assert.Contains(t, resultAt(t, resp, 2).Error, `check failed for column "org_id"`)
+
+	w = send("page\n/c\n")
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.True(t, resultAt(t, decodeBatchResult(t, w), 1).Ok)
+	require.Len(t, pub.Messages, 2)
+	assert.Equal(t, "acme", publishedRow(t, pub.Messages[1].Data)["org_id"], "the omitted check column took its injected DEFAULT")
 }
 
 // TestIngest_LargeBatch_IndicesStayContiguous guards the one thing removing the

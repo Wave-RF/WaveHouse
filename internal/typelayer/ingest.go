@@ -18,6 +18,29 @@ func InsertSettings() map[string]string {
 	}
 }
 
+// parseSettings is what a body is parsed under: the insert pins, plus header
+// detection switched off for the positional pair. ClickHouse consumes a first
+// line that names the columns as a header even in plain CSV/TSV
+// (input_format_csv_detect_header / input_format_tsv_detect_header, on by
+// default; measured on the 26.6 server and artifact), which would silently eat
+// a data row that happens to spell the column names. A header is declared
+// instead, with a WithNames format. The worker inserts JSONCompactEachRow, so
+// neither setting has a real-INSERT twin to keep in step. ok is false for a
+// format Ingest does not parse.
+func parseSettings(format Format) (settings map[string]string, ok bool) {
+	settings = InsertSettings()
+	switch format {
+	case FormatJSONEachRow, FormatCSVWithNames, FormatTSVWithNames:
+	case FormatCSV:
+		settings["input_format_csv_detect_header"] = "0"
+	case FormatTSV:
+		settings["input_format_tsv_detect_header"] = "0"
+	default:
+		return nil, false
+	}
+	return settings, true
+}
+
 // RowVerdict is one input record's answer, index-aligned with the records the
 // caller wrote into the body.
 type RowVerdict struct {
@@ -30,8 +53,16 @@ type RowVerdict struct {
 	// Declined marks "the validation engine could not answer", never "the data
 	// is bad". A caller must not turn it into a 400.
 	Declined bool
+	// CheckReason is why the insert checks given to Ingest did not admit an
+	// accepted record: ReasonFilter (the data says no), ReasonError or
+	// ReasonDecline (we could not tell). "" when they admitted it or there were
+	// none. A record with a CheckReason has no Line — only the rows the filter
+	// admits are exported — and Message may carry the predicate's own error.
+	CheckReason string
 	// Line is the record as ClickHouse's own JSONCompactEachRow writer
-	// serialized it, without the trailing newline. nil unless Accepted.
+	// serialized it, without the trailing newline. nil unless Accepted with no
+	// CheckReason. It is a sub-slice of the batch's exported bytes, so a caller
+	// that outlives the request must copy it.
 	Line []byte
 }
 
@@ -43,86 +74,159 @@ type Batch struct {
 	// has something index-shaped to report.
 	Rows     []RowVerdict
 	Answered bool
-	// Payload is the JSONCompactEachRow bytes chtypes exported for the
-	// ACCEPTED records — one line each, in input order, and every accepted
-	// RowVerdict.Line is a sub-slice of it. It is what CheckVerdicts is handed:
-	// that call's verdicts are index-aligned with these lines, which is to say
-	// with the accepted records, NOT with Rows. nil when nothing was exported.
-	//
-	// The bytes belong to chtypes and stay valid for as long as the Table is
-	// held; a caller that outlives the request must copy them.
-	Payload []byte
+	// Refused is ClickHouse's own refusal of a WithNames body as a whole — a
+	// header naming a column the schema does not have, or naming one twice —
+	// before any record was read. Rows is then empty; nil otherwise.
+	Refused *Refusal
+}
+
+// Refusal is ClickHouse's verdict on a body rather than on any one record.
+type Refusal struct {
+	Code    int
+	Message string
 }
 
 // Ingest asks ClickHouse's own parser whether each record in body would
 // insert, in ONE call, and exports the accepted rows as JSONCompactEachRow.
 //
-// format is how body is spelled and must be FormatJSONEachRow (newline-
-// separated, name-addressed — an NDJSON body is byte-identical to this),
-// FormatCSV or FormatTSV (positional, declaration order, and with NO header
-// line: a header is one skipped record with code 27). Any other format is a
-// programming error and returns an error without touching the data — a binding
-// must never declare a format it has not asked the artifact about.
+// format is how body is spelled:
+//
+//   - FormatJSONEachRow: newline-separated and name-addressed (an NDJSON body
+//     is byte-identical to this);
+//   - FormatCSV, FormatTSV: positional in declaration order with NO header
+//     line (a header is one failed record);
+//   - FormatCSVWithNames, FormatTSVWithNames: a first line naming the columns
+//     in any order. It is not a record, so Rows index the data lines; a column
+//     it omits takes its DEFAULT, and one it names that the schema lacks (or
+//     names twice) refuses the whole body (Batch.Refused, code 117).
+//
+// Any other format is a programming error and returns an error without
+// touching the data — a binding must never declare a format it has not asked
+// the artifact about.
+//
+// checks are a role's insert check clauses. They compile to ONE filter,
+// AND-joined, attached to the same parse (RowsExportWith, docs/guides/
+// filters.md "Exporting only the rows a filter admits"), so each record's
+// parse outcome and check answer come from one read of the body and only the
+// admitted records are exported. The parse outcome decides first: a record
+// chtypes did not accept reports its own error whatever the filter says (it
+// answers such a row 'd'). A predicate with no Values matches nothing and
+// never reaches the compiler; a filter that will not compile declines every
+// accepted record. The compiled filter is cached per (generation, expression,
+// values) on the handle it runs against.
 //
 // Document flags stay lean (verdicts and exported bytes only). The per-value
-// provenance DocValues would give costs 2.65× on this path (AUDIT §A.1) and
-// nothing here reads it.
+// provenance DocValues would give costs 2.65× on this path and nothing here
+// reads it.
 //
 // The returned error is for a Go-level failure only — every data verdict is in
 // the batch.
-func (t *Table) Ingest(format Format, body []byte) (Batch, error) {
-	switch format {
-	case FormatJSONEachRow, FormatCSV, FormatTSV:
-	default:
+func (t *Table) Ingest(format Format, body []byte, checks ...Predicate) (Batch, error) {
+	settings, ok := parseSettings(format)
+	if !ok {
 		return Batch{}, fmt.Errorf(
-			"typelayer: Ingest cannot parse format %d; use FormatJSONEachRow, FormatCSV or FormatTSV", int(format))
+			"typelayer: Ingest cannot parse format %d; use FormatJSONEachRow, FormatCSV, FormatTSV, FormatCSVWithNames or FormatTSVWithNames",
+			int(format))
 	}
 	if len(t.slots) == 0 {
 		return Batch{}, &Unavailable{Table: t.Name, Cause: t.cause}
 	}
-	res, err := t.slot().schema.RowsExport(format, body, InsertSettings(), chtypes.JSONCompactEachRow)
+	// The filter must be compiled on the handle the parse runs on: one from
+	// another handle rejects the whole call.
+	s := t.slot()
+	filter, uniform := t.checkFilter(s, checks)
+	res, err := export(s, format, body, settings, filter)
+	if err != nil && filter != nil {
+		// The cached filter was evicted and closed between lookup and use. Fail
+		// the checks closed, as an evaluation error would, not the request.
+		filter, uniform = nil, ReasonDecline
+		res, err = export(s, format, body, settings, nil)
+	}
 	if err != nil {
 		return Batch{}, err
 	}
 
-	// No bytes means nothing can be published, whatever the per-row detail
-	// says: decline the whole batch rather than accept rows we cannot forward.
+	// Only a fully accepted batch exports bytes. Gate on the outcome, never on
+	// RowsPassed, which counts the admitted rows of a rejected batch too.
+	if res.Outcome != chtypes.Accepted {
+		if len(res.Rows) == 0 && res.Outcome == chtypes.Rejected && res.ErrCode != 0 &&
+			(format == FormatCSVWithNames || format == FormatTSVWithNames) {
+			return Batch{Answered: true, Refused: &Refusal{Code: res.ErrCode, Message: res.ErrMsg}}, nil
+		}
+		return declineAll(countRecords(body, len(res.Rows)), firstNonEmpty(res.ExportDeclined, res.ErrMsg, res.Outcome.String())), nil
+	}
+	// Accepted but withheld (the full-arity guard, a serialization failure):
+	// nothing can be forwarded, whatever the per-row detail says.
 	if res.ExportDeclined != "" {
 		return declineAll(countRecords(body, len(res.Rows)), res.ExportDeclined), nil
-	}
-	if res.Outcome != chtypes.Accepted && len(res.Rows) == 0 {
-		msg := res.ErrMsg
-		if msg == "" {
-			msg = res.Outcome.String()
-		}
-		return declineAll(countRecords(body, 0), msg), nil
 	}
 
 	// chtypes answered per record, so its count is the record count: the
 	// verdicts are index-aligned with the records it read, and padding to the
 	// body's newline count would invent declined records out of blank lines
 	// and pretty-printed framing.
-	out := Batch{Rows: make([]RowVerdict, len(res.Rows)), Payload: res.Payload, Answered: true}
+	out := Batch{Rows: make([]RowVerdict, len(res.Rows)), Answered: true}
 	for i := range out.Rows {
-		out.Rows[i] = rowVerdict(res.Rows[i], span(res, i))
+		v := rowVerdict(res.Rows[i], span(res, i), filter != nil)
+		if v.Accepted && uniform != "" {
+			v.Line, v.CheckReason = nil, uniform
+		}
+		out.Rows[i] = v
 	}
 	return out, nil
 }
 
+// checkFilter resolves the check clauses to the filter attached to the parse,
+// or to the one answer every accepted record gets when no filter runs:
+// ReasonFilter for a predicate render cannot express (it matches nothing, like
+// the SQL path's `1 = 0`), ReasonDecline for one that will not compile.
+func (t *Table) checkFilter(s *schemaSlot, checks []Predicate) (*chtypes.LoadedFilter, string) {
+	if len(checks) == 0 {
+		return nil, ""
+	}
+	expr, params, ok := t.render(checks)
+	if !ok {
+		return nil, ReasonFilter
+	}
+	if f := t.filterOn(s, expr, params); f != nil {
+		return f, ""
+	}
+	return nil, ReasonDecline
+}
+
+// export is the one parse. With no filter RowsExportWith is RowsExport.
+func export(s *schemaSlot, format Format, body []byte, settings map[string]string, f *chtypes.LoadedFilter) (chtypes.BatchResult, error) {
+	if f == nil {
+		return s.schema.RowsExportWith(format, body, settings, chtypes.JSONCompactEachRow)
+	}
+	return s.schema.RowsExportWith(format, body, settings, chtypes.JSONCompactEachRow, chtypes.WithRowFilter(f))
+}
+
 // rowVerdict maps one chtypes RowResult. An unsupported setting is the engine
 // declining even when the row itself parsed, so it is checked before the
-// outcome.
-func rowVerdict(r chtypes.RowResult, line []byte) RowVerdict {
+// outcome, and the outcome before the filter's verdict.
+func rowVerdict(r chtypes.RowResult, line []byte, filtered bool) RowVerdict {
 	if len(r.UnsupportedSettings) > 0 {
 		return RowVerdict{Declined: true, Message: "chtypes does not support setting(s) " + joinQuoted(r.UnsupportedSettings)}
 	}
 	switch r.Outcome {
 	case chtypes.Accepted:
+		if filtered {
+			// A nil verdict is a row the filter never answered: it must not pass.
+			if r.Verdict == nil {
+				return RowVerdict{Accepted: true, CheckReason: ReasonDecline}
+			}
+			if ok, reason := verdictBool(*r.Verdict); !ok {
+				return RowVerdict{Accepted: true, CheckReason: reason, Message: r.VerdictErr}
+			}
+		}
 		if line == nil {
 			return RowVerdict{Declined: true, Message: "accepted but no bytes were exported for this row"}
 		}
 		return RowVerdict{Accepted: true, Line: line}
 	case chtypes.Skipped, chtypes.Rejected:
+		// ErrCode/ErrMsg, not VerdictCode/VerdictErr: chtypes answers such a row
+		// 'd', and on 26.6 leaves the verdict's own code and message empty.
 		return RowVerdict{Code: r.ErrCode, Message: r.ErrMsg}
 	case chtypes.Unsupported, chtypes.AcceptedPoisoned:
 		// AcceptedPoisoned holds a value no writer can honestly serialize, so
@@ -131,6 +235,15 @@ func rowVerdict(r chtypes.RowResult, line []byte) RowVerdict {
 	default:
 		return declinedVerdict(r)
 	}
+}
+
+func firstNonEmpty(s ...string) string {
+	for _, v := range s {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // declinedVerdict reports an outcome that is not a verdict about the data,
@@ -167,11 +280,10 @@ func declineAll(n int, msg string) Batch {
 // countRecords recovers the input record count when chtypes returned no
 // per-row detail, so the caller still gets an index-aligned answer. JSONEachRow
 // records are newline-separated and json.Marshal escapes any newline inside a
-// value, so counting lines is exact for the bodies this package is handed; the
-// same holds for the JSONCompactEachRow payload chtypes exports. A CSV field
-// may legally contain a raw newline, so for that format the fallback can
-// OVER-count, which produces extra declined verdicts — never an extra
-// acceptance.
+// value, so counting lines is exact for the bodies this package is handed. A
+// CSV field may legally contain a raw newline, and a WithNames header is a
+// line but not a record, so for those formats the fallback can OVER-count,
+// which produces extra declined verdicts — never an extra acceptance.
 func countRecords(body []byte, known int) int {
 	if known > 0 {
 		return known
