@@ -57,20 +57,21 @@ var helmVariable = regexp.MustCompile(`^<< *\$[A-Za-z0-9_]+ *>>$`)
 
 // ServerConfig renders the Helm values' config.merge block as a nats.conf
 // (the chart writes it as JSON too), each Secret-referenced password set to
-// Password(user), and JetStream on file storage under storeDir. The store's
-// limits are lifted: the manifests reserve a cluster's worth of bytes, which
-// a test machine does not have.
+// Password(user), and JetStream on file storage under storeDir with the
+// max_file_store the chart would set (FileStore). A server reserves what its
+// streams' max_bytes add up to against that, without writing it, so the
+// manifests that do not fit the shipped volume do not fit here either.
 func ServerConfig(valuesPath, storeDir string) ([]byte, error) {
 	raw, err := os.ReadFile(valuesPath) //nolint:gosec // G304: a shipped file or one a test wrote
 	if err != nil {
 		return nil, err
 	}
-	var values struct {
-		Config struct {
-			Merge map[string]any `yaml:"merge"`
-		} `yaml:"config"`
-	}
+	var values chartValues
 	if err := yaml.Unmarshal(raw, &values); err != nil {
+		return nil, fmt.Errorf("%s: %w", valuesPath, err)
+	}
+	store, err := values.fileStore()
+	if err != nil {
 		return nil, fmt.Errorf("%s: %w", valuesPath, err)
 	}
 	merge := values.Config.Merge
@@ -89,7 +90,7 @@ func ServerConfig(valuesPath, storeDir string) ([]byte, error) {
 		}
 	}
 	conf := map[string]any{"jetstream": map[string]any{
-		"store_dir": storeDir, "max_file_store": int64(1) << 50, "max_memory_store": int64(1) << 40,
+		"store_dir": storeDir, "max_file_store": fileStorePlaceholder, "max_memory_store": int64(1) << 40,
 	}}
 	for k, v := range merge {
 		conf[k] = v
@@ -102,7 +103,56 @@ func ServerConfig(valuesPath, storeDir string) ([]byte, error) {
 	if err := enc.Encode(conf); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	// Unquoted, as the chart writes it, so the server reads the size's suffix.
+	return bytes.Replace(buf.Bytes(), []byte(`"`+fileStorePlaceholder+`"`), []byte(store), 1), nil
+}
+
+const fileStorePlaceholder = "@max_file_store@"
+
+// chartValues is what ServerConfig reads of a NATS Helm values file.
+type chartValues struct {
+	Config struct {
+		JetStream struct {
+			FileStore struct {
+				MaxSize string `yaml:"maxSize"`
+				PVC     struct {
+					Size string `yaml:"size"`
+				} `yaml:"pvc"`
+			} `yaml:"fileStore"`
+		} `yaml:"jetstream"`
+		Merge map[string]any `yaml:"merge"`
+	} `yaml:"config"`
+}
+
+// storeSize is a Kubernetes quantity the NATS config parser reads the same.
+var storeSize = regexp.MustCompile(`^[0-9]+(|k|M|G|T|Ki|Mi|Gi|Ti)$`)
+
+// fileStore is the max_file_store the chart renders: fileStore.maxSize, else
+// the PVC's size.
+func (v chartValues) fileStore() (string, error) {
+	fs := v.Config.JetStream.FileStore
+	size := fs.MaxSize
+	if size == "" {
+		size = fs.PVC.Size
+	}
+	if !storeSize.MatchString(size) {
+		return "", fmt.Errorf("config.jetstream.fileStore: size %q is not a quantity the test server reads", size)
+	}
+	return size, nil
+}
+
+// FileStore is the max_file_store the NATS chart sets from the values at
+// valuesPath, as written there (100Gi).
+func FileStore(valuesPath string) (string, error) {
+	raw, err := os.ReadFile(valuesPath) //nolint:gosec // G304: a shipped file or one a test wrote
+	if err != nil {
+		return "", err
+	}
+	var values chartValues
+	if err := yaml.Unmarshal(raw, &values); err != nil {
+		return "", fmt.Errorf("%s: %w", valuesPath, err)
+	}
+	return values.fileStore()
 }
 
 // Manifests is a set of nack Stream, Consumer and KeyValue resources as the

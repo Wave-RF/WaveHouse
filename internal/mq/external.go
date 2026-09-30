@@ -127,6 +127,9 @@ type ExternalNATS struct {
 	historyMaxAge atomic.Int64
 	replayWindows atomic.Pointer[map[tenant.ID]time.Duration]
 
+	// perms is every publish the server refused the connection, which the
+	// topology check probes the user's shard durable permissions against.
+	perms      *natsPermissionWatch
 	connected  atomic.Bool
 	topologyOK atomic.Bool
 	// closing is set by Close, whose own disconnect is not worth a warning.
@@ -170,6 +173,7 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 	}
 	e := &ExternalNATS{
 		topo:       topo,
+		perms:      newNATSPermissionWatch(),
 		stoppers:   map[int]func(){},
 		loopDone:   make(chan struct{}),
 		connClosed: make(chan struct{}),
@@ -200,13 +204,18 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 	// Each check's requests end with the wait, not the client's API timeout.
 	bootCtx, cancel := context.WithTimeout(ctx, wait+time.Second)
 	defer cancel()
-	findings, err := awaitNATSTopology(bootCtx, e.js, topo, wait)
+	findings, err := awaitNATSTopology(bootCtx, e.js, topo, e.perms, wait)
 	if err == nil {
 		err = e.resolveStreams(bootCtx)
 	}
 	if err != nil {
 		if !e.nc.IsConnected() {
 			err = fmt.Errorf("%w: not connected to %s: %w", ErrUnavailable, redactURLs(cfg.URLs), errors.Join(e.nc.LastError(), err))
+		}
+		// A refused request only times out; name what the server refused,
+		// unless the findings already do.
+		if denied := e.perms.list(); len(denied) > 0 && !errors.Is(err, ErrTopology) {
+			err = fmt.Errorf("%w (the server refused publishes to %s: regenerate the user's permissions with wavehouse mq permissions)", err, strings.Join(denied, ", "))
 		}
 		e.nc.Close()
 		return nil, err
@@ -287,6 +296,17 @@ func (e *ExternalNATS) connectOptions(cfg NATSConfig) ([]nats.Option, error) {
 			close(e.connClosed)
 		}),
 		nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
+			// A refused consumer request is a topology fault the next check
+			// names; the others (a refused publish) surface where they fail.
+			if subj, first, ok := e.perms.record(err); ok && isConsumerAPI(subj) {
+				e.topologyOK.Store(false)
+				if !first {
+					return
+				}
+				slog.Error("mq: nats refused a consumer request: the wavehouse user's permissions do not match the topology; regenerate them with wavehouse mq permissions",
+					"component", "nats", "subject", subj)
+				return
+			}
 			subj := ""
 			if sub != nil {
 				subj = sub.Subject
@@ -411,7 +431,7 @@ func (e *ExternalNATS) recheck() {
 	}
 	ctx, cancel := context.WithTimeout(e.stopping, recheckTimeout)
 	defer cancel()
-	findings, err := verifyNATSTopology(ctx, e.js, e.topo)
+	findings, err := verifyNATSTopology(ctx, e.js, e.topo, e.perms)
 	if !e.nc.IsConnected() {
 		return
 	}

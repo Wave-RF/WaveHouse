@@ -500,7 +500,7 @@ func TestLeases_VerifierChecksTheBucket(t *testing.T) {
 			tc.mutate(tp)
 		}
 		require.NoError(t, f.create(t.Context(), tp), tc.name)
-		findings, err := verifyNATSTopology(t.Context(), js, tc.spec)
+		findings, err := verifyNATSTopology(t.Context(), js, tc.spec, nil)
 		require.NoError(t, err, tc.name)
 		found := false
 		for _, got := range findings {

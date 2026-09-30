@@ -30,7 +30,7 @@ func authFixture(t *testing.T, opts *natsserver.Options, admin ...nats.Option) *
 	t.Helper()
 	opts.Host, opts.Port, opts.NoSigs, opts.NoLog = "127.0.0.1", -1, true, true
 	opts.JetStream, opts.StoreDir = true, t.TempDir()
-	opts.JetStreamMaxStore, opts.JetStreamMaxMemory = 1<<50, 1<<50
+	opts.JetStreamMaxStore, opts.JetStreamMaxMemory = shippedFileStore(t), 1<<50
 	s, err := natsserver.NewServer(opts)
 	require.NoError(t, err)
 	s.Start()
