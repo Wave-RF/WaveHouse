@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -125,9 +126,10 @@ func TestEvaluate_FilterWithClaimTemplate(t *testing.T) {
 	claims := map[string]any{"org_id": "org-123"}
 	perms := Evaluate(p, "user", "clicks", "select", claims)
 	assert.True(t, perms.Allowed)
-	assert.Contains(t, perms.Select.WhereClause, "`org_id` = ?")
-	require.Len(t, perms.Select.WhereParams, 1)
-	assert.Equal(t, "org-123", perms.Select.WhereParams[0])
+	clause, params := perms.Select.WhereSQL(nil)
+	assert.Contains(t, clause, "`org_id` = ?")
+	require.Len(t, params, 1)
+	assert.Equal(t, "org-123", params[0])
 }
 
 func TestEvaluate_CheckClauses(t *testing.T) {
@@ -801,7 +803,7 @@ func TestFiltersToSQL_MultipleOperators(t *testing.T) {
 		"status": {Neq: &neqVal},
 		"count":  {Gt: &gtVal},
 	}
-	clauses, params := predicatesToSQL(resolvePredicates(filters, nil))
+	clauses, params := predicatesToSQL(resolvePredicates(filters, nil), nil)
 	assert.Len(t, clauses, 2)
 	assert.Len(t, params, 2)
 }
@@ -812,7 +814,7 @@ func TestFiltersToSQL_LtOperator(t *testing.T) {
 	filters := map[string]Filter{
 		"price": {Lt: &ltVal},
 	}
-	clauses, params := predicatesToSQL(resolvePredicates(filters, nil))
+	clauses, params := predicatesToSQL(resolvePredicates(filters, nil), nil)
 	require.Len(t, clauses, 1)
 	assert.Contains(t, clauses[0], "`price` < ?")
 	assert.Equal(t, "100", params[0])
@@ -842,7 +844,7 @@ func TestFiltersToSQL_UnresolvableClaim_FailsClosed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": tt.filter}, claims))
+			clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": tt.filter}, claims), nil)
 			require.Len(t, clauses, 1)
 			assert.Equal(t, "1 = 0", clauses[0])
 			assert.Empty(t, params)
@@ -879,7 +881,7 @@ func TestFiltersToSQL_StructuredClaim_FailsClosed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": tt.filter}, claims))
+			clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": tt.filter}, claims), nil)
 			require.Len(t, clauses, 1)
 			assert.Equal(t, "1 = 0", clauses[0])
 			assert.Empty(t, params)
@@ -894,7 +896,7 @@ func TestFiltersToSQL_StructuredClaim_FailsClosed(t *testing.T) {
 func TestFiltersToSQL_LiteralEmptyValue_Binds(t *testing.T) {
 	t.Parallel()
 	empty := ""
-	clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"status": {Eq: &empty}}, nil))
+	clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"status": {Eq: &empty}}, nil), nil)
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`status` = ?", clauses[0])
 	assert.Equal(t, []any{""}, params)
@@ -909,7 +911,7 @@ func TestFiltersToSQL_EmptyStringClaim_Binds(t *testing.T) {
 	t.Parallel()
 	neq := "{{ jwt.tenant_id }}"
 	claims := map[string]any{"tenant_id": ""}
-	clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": {Neq: &neq}}, claims))
+	clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": {Neq: &neq}}, claims), nil)
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`tenant_id` != ?", clauses[0])
 	assert.Equal(t, []any{""}, params)
@@ -923,7 +925,7 @@ func TestFiltersToSQL_InEmptyStringClaim_Binds(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.tenant_id }}"
 	claims := map[string]any{"tenant_id": ""}
-	clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": {In: &in}}, claims))
+	clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": {In: &in}}, claims), nil)
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`tenant_id` IN (?)", clauses[0])
 	assert.Equal(t, []any{""}, params)
@@ -939,7 +941,7 @@ func TestFiltersToSQL_InTemplateWithText_Binds(t *testing.T) {
 	t.Parallel()
 	in := "t-{{ jwt.tenant_id }}"
 	claims := map[string]any{"tenant_id": "x"}
-	clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": {In: &in}}, claims))
+	clauses, params := predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": {In: &in}}, claims), nil)
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`tenant_id` IN (?)", clauses[0])
 	assert.Equal(t, []any{"t-x"}, params)
@@ -975,8 +977,9 @@ func TestEvaluate_FilterUnresolvableClaim_FailsClosed(t *testing.T) {
 	}}
 	perms := Evaluate(p, "user", "clicks", "select", map[string]any{"role": "user"})
 	require.True(t, perms.Allowed)
-	assert.Equal(t, "1 = 0", perms.Select.WhereClause)
-	assert.Empty(t, perms.Select.WhereParams)
+	clause, params := perms.Select.WhereSQL(nil)
+	assert.Equal(t, "1 = 0", clause)
+	assert.Empty(t, params)
 }
 
 // TestValidate_RejectsBindUnsafeFilterColumn: a policy whose row-filter column
@@ -1057,7 +1060,7 @@ func TestFiltersToSQL_InArrayClaim(t *testing.T) {
 	in := "{{ jwt.tenants }}"
 	filters := map[string]Filter{"tenant_id": {In: &in}}
 	claims := map[string]any{"tenants": []any{"a", "b", "c"}}
-	clauses, params := predicatesToSQL(resolvePredicates(filters, claims))
+	clauses, params := predicatesToSQL(resolvePredicates(filters, claims), nil)
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`tenant_id` IN (?,?,?)", clauses[0])
 	assert.Equal(t, []any{"a", "b", "c"}, params)
@@ -1070,7 +1073,7 @@ func TestFiltersToSQL_InScalarClaim(t *testing.T) {
 	in := "{{ jwt.tenant }}"
 	filters := map[string]Filter{"tenant_id": {In: &in}}
 	claims := map[string]any{"tenant": "solo"}
-	clauses, params := predicatesToSQL(resolvePredicates(filters, claims))
+	clauses, params := predicatesToSQL(resolvePredicates(filters, claims), nil)
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`tenant_id` IN (?)", clauses[0])
 	assert.Equal(t, []any{"solo"}, params)
@@ -1099,7 +1102,7 @@ func TestFiltersToSQL_InNonScalarElement_FailsClosed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			clauses, params := predicatesToSQL(resolvePredicates(filters, map[string]any{"tenants": tt.tenants}))
+			clauses, params := predicatesToSQL(resolvePredicates(filters, map[string]any{"tenants": tt.tenants}), nil)
 			require.Len(t, clauses, 1)
 			assert.Equal(t, "1 = 0", clauses[0])
 			assert.Empty(t, params)
@@ -1116,7 +1119,7 @@ func TestFiltersToSQL_InNumericElements_BindCanonically(t *testing.T) {
 	in := "{{ jwt.tenants }}"
 	filters := map[string]Filter{"tenant_id": {In: &in}}
 	claims := map[string]any{"tenants": []any{json.Number("1.0"), json.Number("12345678901234567890"), "b"}}
-	clauses, params := predicatesToSQL(resolvePredicates(filters, claims))
+	clauses, params := predicatesToSQL(resolvePredicates(filters, claims), nil)
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`tenant_id` IN (?,?,?)", clauses[0])
 	assert.Equal(t, []any{"1", "12345678901234567890", "b"}, params)
@@ -1133,21 +1136,21 @@ func TestFiltersToSQL_NumericClaimBinding(t *testing.T) {
 	tmpl := "{{ jwt.tenant }}"
 	eq := map[string]Filter{"tenant_id": {Eq: &tmpl}}
 
-	clauses, params := predicatesToSQL(resolvePredicates(eq, map[string]any{"tenant": json.Number("10000000000000001")}))
+	clauses, params := predicatesToSQL(resolvePredicates(eq, map[string]any{"tenant": json.Number("10000000000000001")}), nil)
 	require.Equal(t, []string{"`tenant_id` = ?"}, clauses)
 	assert.Equal(t, []any{"10000000000000001"}, params, "json.Number binds exact digits")
 
-	clauses, params = predicatesToSQL(resolvePredicates(eq, map[string]any{"tenant": float64(1_000_000)}))
+	clauses, params = predicatesToSQL(resolvePredicates(eq, map[string]any{"tenant": float64(1_000_000)}), nil)
 	require.Equal(t, []string{"`tenant_id` = ?"}, clauses)
 	assert.Equal(t, []any{"1000000"}, params, "small float binds positionally, not 1e+06")
 
-	clauses, params = predicatesToSQL(resolvePredicates(eq, map[string]any{"tenant": float64(10000000000000001)}))
+	clauses, params = predicatesToSQL(resolvePredicates(eq, map[string]any{"tenant": float64(10000000000000001)}), nil)
 	assert.Equal(t, []string{"1 = 0"}, clauses, "lossy float64 claim matches no rows")
 	assert.Empty(t, params)
 
 	in := "{{ jwt.tenants }}"
 	clauses, params = predicatesToSQL(resolvePredicates(map[string]Filter{"tenant_id": {In: &in}},
-		map[string]any{"tenants": []any{"a", float64(1 << 60)}}))
+		map[string]any{"tenants": []any{"a", float64(1 << 60)}}), nil)
 	assert.Equal(t, []string{"1 = 0"}, clauses, "one poisoned element resolves the whole set empty")
 	assert.Empty(t, params)
 }
@@ -1187,8 +1190,9 @@ func TestRowFilter_UnresolvableClaim_NoRowsOnBothPaths(t *testing.T) {
 			}}
 			perms := Evaluate(p, "r", "t", "select", tt.claims)
 
-			assert.Equal(t, "1 = 0", perms.Select.WhereClause, "query path: constant-false predicate")
-			assert.Empty(t, perms.Select.WhereParams)
+			clause, params := perms.Select.WhereSQL(nil)
+			assert.Equal(t, "1 = 0", clause, "query path: constant-false predicate")
+			assert.Empty(t, params)
 			assert.True(t, perms.HasRowFilter(), "failed predicate must keep the stream on the per-subscriber path")
 
 			preds, ok := perms.Predicates()
@@ -1214,8 +1218,9 @@ func TestPredicates_IsTheSameResolutionAsTheWhereClause(t *testing.T) {
 	}}
 	perms := Evaluate(p, "r", "t", "select", map[string]any{"tenant": "acme"})
 
-	assert.Equal(t, "`tenant_id` = ?", perms.Select.WhereClause)
-	assert.Equal(t, []any{"acme"}, perms.Select.WhereParams)
+	clause, params := perms.Select.WhereSQL(nil)
+	assert.Equal(t, "`tenant_id` = ?", clause)
+	assert.Equal(t, []any{"acme"}, params)
 
 	preds, ok := perms.Predicates()
 	require.True(t, ok)
@@ -1240,7 +1245,7 @@ func TestFiltersToSQL_InEmptyClaim_FailsClosed(t *testing.T) {
 	for name, claims := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			clauses, params := predicatesToSQL(resolvePredicates(filters, claims))
+			clauses, params := predicatesToSQL(resolvePredicates(filters, claims), nil)
 			require.Len(t, clauses, 1)
 			assert.Equal(t, "1 = 0", clauses[0])
 			assert.Empty(t, params)
@@ -1249,8 +1254,8 @@ func TestFiltersToSQL_InEmptyClaim_FailsClosed(t *testing.T) {
 }
 
 // TestEvaluate_FilterInClause: end-to-end through Evaluate, an _in filter lands
-// in the role's WhereClause/WhereParams (exercising the bind-safe guard + IN
-// assembly), not just the resolvePredicates+predicatesToSQL pair below it.
+// in the role's WhereSQL (exercising the bind-safe guard + IN assembly), not
+// just the resolvePredicates+predicatesToSQL pair below it.
 func TestEvaluate_FilterInClause(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.app_metadata.tenant_ids }}"
@@ -1260,8 +1265,9 @@ func TestEvaluate_FilterInClause(t *testing.T) {
 	claims := map[string]any{"app_metadata": map[string]any{"tenant_ids": []any{"t1", "t2"}}}
 	perms := Evaluate(p, "user", "clicks", "select", claims)
 	require.True(t, perms.Allowed)
-	assert.Contains(t, perms.Select.WhereClause, "`tenant_id` IN (?,?)")
-	assert.Equal(t, []any{"t1", "t2"}, perms.Select.WhereParams)
+	clause, params := perms.Select.WhereSQL(nil)
+	assert.Contains(t, clause, "`tenant_id` IN (?,?)")
+	assert.Equal(t, []any{"t1", "t2"}, params)
 }
 
 // TestEvaluate_CheckInResolvesToSet: an _in check resolves to a []any set in
@@ -1696,4 +1702,43 @@ func TestEvaluate_OperatorLessFilterAndCheckDenyFailClosed(t *testing.T) {
 
 	insPerms := Evaluate(ins, "writer", "clicks", "insert", nil)
 	assert.False(t, insPerms.Allowed, "an operator-less check must deny, not drop the rule")
+}
+
+// TestWhereSQL_IntegerColumnsBindThroughTheStrictCast: given the column types,
+// a claim on an integer column binds as a chsql.IntParam carrying the bare
+// integer type (the query builder expands it to chsql.StrictInt), and a claim
+// on any other column binds as the plain string it always did. Without types
+// (nil) every claim is a plain string.
+func TestWhereSQL_IntegerColumnsBindThroughTheStrictCast(t *testing.T) {
+	t.Parallel()
+	types := map[string]string{"tenant": "Nullable(UInt64)", "org": "String", "n": "Int128"}
+	p := &Policy{Tables: map[string]TablePolicy{
+		"t": {"r": {Select: &SelectPermissions{Filter: map[string]Filter{
+			"tenant": {Eq: new("{{ jwt.tenant }}")},
+			"org":    {Neq: new("x")},
+			"n":      {In: new("{{ jwt.ns }}")},
+		}}}},
+	}}
+	claims := map[string]any{"tenant": "18446744073709551621", "ns": []any{"1", "-2"}}
+	perms := Evaluate(p, "r", "t", "select", claims)
+	require.True(t, perms.Allowed)
+
+	clause, params := perms.Select.WhereSQL(func(c string) string { return types[c] })
+	byClause := map[string][]any{}
+	i := 0
+	for part := range strings.SplitSeq(clause, " AND ") {
+		n := strings.Count(part, "?")
+		byClause[part] = params[i : i+n]
+		i += n
+	}
+	require.Equal(t, len(params), i, "every ? has exactly one param")
+	assert.Equal(t, []any{chsql.IntParam{Value: "18446744073709551621", Type: "UInt64"}}, byClause["`tenant` = ?"])
+	assert.Equal(t, []any{"x"}, byClause["`org` != ?"])
+	assert.Equal(t, []any{chsql.IntParam{Value: "1", Type: "Int128"}, chsql.IntParam{Value: "-2", Type: "Int128"}},
+		byClause["`n` IN (?,?)"])
+
+	_, untyped := perms.Select.WhereSQL(nil)
+	for _, v := range untyped {
+		assert.IsType(t, "", v, "no column types: every claim is a plain string")
+	}
 }

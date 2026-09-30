@@ -134,16 +134,17 @@ func verdictBool(v chtypes.Verdict) (bool, string) {
 
 // render builds the AND-joined expression and the parameter map.
 //
-// EVERY value binds as {pN:String}, whatever the column's declared type.
-// Measured (AUDIT §C.1, chtypes 26.6 cross-checked against a live 26.3
-// server): a String parameter reproduces the SQL path's answer on every
-// operator, every type and every hostile spelling — `u8 < '256'` is false
-// where a UInt64 binding over-admitted it, `u8 != '256'` is true, and a
-// spelling the column cannot read (`-1`, `1.5`, `007`) comes back as the
-// server's own code 53 at EVALUATION time, which withholds the row. Binding in
-// the column's own type wraps an out-of-domain integer; binding in the widest
-// integer type compares mathematically rather than in the column's domain.
-// String does neither, and needs no per-type table.
+// Every value binds as a {pN:String} parameter, whatever the column's declared
+// type — the same binding the SQL path uses, so both surfaces read a claim with
+// ClickHouse's own comparison-time coercion (AUDIT §C.1): a spelling the column
+// cannot read (`-1` on an unsigned column, `1.5`) is the server's own code 53
+// at evaluation, which withholds the row. A bare String binding still wraps an
+// integer value at or past 2^64 before comparing (and a 128/256-bit column at
+// its own width), so on an integer column the parameter is compared through
+// chsql.StrictInt instead: a claim that is not the canonical spelling of a
+// value the column can hold is NULL and matches nothing on any operator, and
+// an in-range claim answers exactly as the plain binding does. The query path
+// renders the same expression (policy.ResolvedSelect.WhereSQL).
 //
 // Every value is encoded with chsql.EscapeStringParam, the SAME encoding the
 // SQL path uses for its `{p:String}` parameters. The artifact reads a filter
@@ -163,34 +164,39 @@ func (t *Table) render(preds []Predicate) (string, map[string]string, bool) {
 	var b strings.Builder
 	params := make(map[string]string, len(preds))
 	n := 0
+	bind := func(col filterColumn, v string) {
+		name := fmt.Sprintf("p%d", n)
+		n++
+		params[name] = chsql.EscapeStringParam(v)
+		if col.intType != "" {
+			b.WriteString(chsql.StrictInt(name, col.intType))
+			return
+		}
+		fmt.Fprintf(&b, "{%s:String}", name)
+	}
 	for i, p := range preds {
-		ident, known := t.cols[p.Column]
+		col, known := t.cols[p.Column]
 		if !known || len(p.Values) == 0 {
 			return "", nil, false
 		}
 		if i > 0 {
 			b.WriteString(" AND ")
 		}
-		b.WriteString(ident)
+		b.WriteString(col.ident)
 		switch p.Op {
 		case "=", "!=", ">", "<":
 			if len(p.Values) != 1 {
 				return "", nil, false
 			}
-			name := fmt.Sprintf("p%d", n)
-			n++
-			params[name] = chsql.EscapeStringParam(p.Values[0])
-			fmt.Fprintf(&b, " %s {%s:String}", p.Op, name)
+			fmt.Fprintf(&b, " %s ", p.Op)
+			bind(col, p.Values[0])
 		case "in":
 			b.WriteString(" IN (")
 			for j, v := range p.Values {
 				if j > 0 {
 					b.WriteString(", ")
 				}
-				name := fmt.Sprintf("p%d", n)
-				n++
-				params[name] = chsql.EscapeStringParam(v)
-				fmt.Fprintf(&b, "{%s:String}", name)
+				bind(col, v)
 			}
 			b.WriteByte(')')
 		default:

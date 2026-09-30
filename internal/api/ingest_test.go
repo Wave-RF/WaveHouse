@@ -494,9 +494,10 @@ func TestIngest_Policy_CheckClause_NumericSpellingMatch(t *testing.T) {
 // reading in Go — a typed marker on the resolved clause plus a canonical
 // numeric re-render of the literal, both since deleted — so a static
 // `_eq: "1.0"` admitted an inserted number 1. The check is now ClickHouse's own
-// comparison against a {p:String} parameter, and `UInt64 = '1.0'` is the
-// server's code 53 TYPE_MISMATCH — a per-row VerdictError, which is a 422
-// because it means "we could not judge this", never "your payload was wrong".
+// comparison, and on an integer column the claim goes through the strict cast
+// (chsql.StrictInt): "1.0" is not the canonical spelling of a UInt64, so it
+// matches nothing and the record is refused as a failed check (403) — the
+// same answer as a claim past the column's range.
 //
 // The value is also what would have been injected into a record that omitted
 // the column, and `count UInt64 DEFAULT '1.0'` does not compile (code 6,
@@ -508,15 +509,16 @@ func TestIngest_Policy_CheckClause_NumericSpellingMatch(t *testing.T) {
 func TestIngest_Policy_CheckClause_StaticNumericSpelling(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
-		name string
-		body any
-		want int
+		name        string
+		body        any
+		want        int
+		checkFailed bool
 	}{
-		{"numeric reading", 1, http.StatusUnprocessableEntity},
+		{"numeric reading", 1, http.StatusForbidden, true},
 		// ClickHouse refuses the record before the check is ever consulted: the
 		// column is a UInt64 and the string "1.0" is not one. Parse errors
 		// precede check errors now (AUDIT §A.2).
-		{"literal spelling", "1.0", http.StatusBadRequest},
+		{"literal spelling", "1.0", http.StatusBadRequest, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -542,8 +544,8 @@ func TestIngest_Policy_CheckClause_StaticNumericSpelling(t *testing.T) {
 			h.Handle(w, req)
 
 			assert.Equal(t, tt.want, w.Code, "body=%s", w.Body.String())
-			assert.NotContains(t, w.Body.String(), "check failed",
-				"neither answer is the check saying no — one is a type mismatch, the other a parse refusal")
+			assert.Equal(t, tt.checkFailed, strings.Contains(w.Body.String(), "check failed"),
+				"the claim that does not fit is the check saying no; the parse refusal comes first")
 			assert.Empty(t, pub.Messages)
 		})
 	}

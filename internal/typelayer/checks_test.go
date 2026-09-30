@@ -146,10 +146,25 @@ func TestIngestChecks_FailsClosed(t *testing.T) {
 	})
 
 	t.Run("value the column cannot read", func(t *testing.T) {
+		// On an integer column the strict cast answers it: no record fits.
 		batch, err := tbl.Ingest(FormatJSONEachRow, []byte(checksBody),
 			Predicate{Column: "id", Op: "=", Values: []string{"abc"}})
 		require.NoError(t, err)
-		assert.Equal(t, []string{e, e, e, e}, checkReasons(t, batch),
+		assert.Equal(t, []string{f, f, f, f}, checkReasons(t, batch),
+			"an integer claim that does not fit the column is 'the data says no' (403)")
+
+		// On any other column the server's own reader throws.
+		eng := TestEngine(t, &discovery.TableSchema{Name: "ratios", Columns: []discovery.Column{
+			{Name: "id", Type: "UInt32", Position: 1},
+			{Name: "ratio", Type: "Float64", Position: 2},
+		}})
+		ratios, err := eng.Table("ratios")
+		require.NoError(t, err)
+		t.Cleanup(ratios.Release)
+		batch, err = ratios.Ingest(FormatJSONEachRow, []byte(`{"id":1,"ratio":0.5}`+"\n"+`{"id":2,"ratio":1}`+"\n"),
+			Predicate{Column: "ratio", Op: "=", Values: []string{"abc"}})
+		require.NoError(t, err)
+		assert.Equal(t, []string{e, e}, checkReasons(t, batch),
 			"a thrown predicate is 'we could not tell' (422), not 'the data says no' (403)")
 		assert.Contains(t, batch.Rows[0].Message, "abc", "the predicate's own error rides along for the log")
 	})
@@ -168,6 +183,53 @@ func TestIngestChecks_FailsClosed(t *testing.T) {
 		require.NoError(t, err, "a closed filter fails the checks, not the request")
 		assert.Equal(t, []string{ReasonDecline, ReasonDecline, ReasonDecline, ReasonDecline}, checkReasons(t, batch))
 	})
+}
+
+// TestIngestChecks_IntegerClaimThatDoesNotFitIsRefused: the insert check
+// compares an integer claim through the strict cast, so a claim the column
+// cannot hold refuses every record — including one whose value the plain
+// String binding would have wrapped the claim onto (2^64+5 → 5), and one filled
+// from the injected DEFAULT, which the compiler may itself wrap. A claim that
+// fits admits exactly as before.
+func TestIngestChecks_IntegerClaimThatDoesNotFitIsRefused(t *testing.T) {
+	eng := TestEngine(t, ordersTable())
+	const over = "18446744073709551621" // 2^64+5
+	body := []byte(`{"id":1}` + "\n" + `{"id":2,"amount":5}` + "\n" + `{"id":3,"amount":6}` + "\n")
+
+	t.Run("a claim past the column's range", func(t *testing.T) {
+		tbl := roleTableFor(t, eng, RoleShape{Defaults: map[string]string{"amount": over}})
+		batch, err := tbl.Ingest(FormatJSONEachRow, body, Predicate{Column: "amount", Op: "=", Values: []string{over}})
+		require.NoError(t, err)
+		assert.Equal(t, []string{ReasonFilter, ReasonFilter, ReasonFilter}, checkReasons(t, batch))
+	})
+
+	t.Run("a claim that fits", func(t *testing.T) {
+		tbl := roleTableFor(t, eng, RoleShape{Defaults: map[string]string{"amount": "5"}})
+		batch, err := tbl.Ingest(FormatJSONEachRow, body, Predicate{Column: "amount", Op: "=", Values: []string{"5"}})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"", "", ReasonFilter}, checkReasons(t, batch))
+		assert.Equal(t, `[1, "", "", 5]`, string(batch.Rows[0].Line))
+	})
+
+	t.Run("an _in set keeps only the elements that fit", func(t *testing.T) {
+		tbl := checksHandleFor(t, eng, "orders")
+		in := []byte(`{"id":1,"amount":5}` + "\n" + `{"id":2,"amount":0}` + "\n" +
+			`{"id":3,"amount":"18446744073709551615"}` + "\n" + `{"id":4,"amount":7}` + "\n")
+		batch, err := tbl.Ingest(FormatJSONEachRow, in, Predicate{
+			Column: "amount", Op: "in",
+			Values: []string{over, "007", "0", "115792089237316195423570985008687907853269984665640564039457584007913129639941", "+7"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{ReasonFilter, "", ReasonFilter, ReasonFilter}, checkReasons(t, batch))
+	})
+}
+
+func checksHandleFor(t *testing.T, eng *Engine, table string) *Table {
+	t.Helper()
+	tbl, err := eng.Table(table)
+	require.NoError(t, err)
+	t.Cleanup(tbl.Release)
+	return tbl
 }
 
 // TestIngestChecks_ParseOutcomeDecidesFirst pins a measured trap: under the

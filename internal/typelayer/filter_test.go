@@ -3,7 +3,9 @@ package typelayer
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -109,38 +111,165 @@ func TestVisible_StringBindingAcrossColumnFamilies(t *testing.T) {
 	}
 }
 
-// TestVisible_HostileSpellingsMatchTheServer pins the spellings the old typed
-// binding got wrong, measured against a live 26.3 server in AUDIT §C.1. A
-// value outside a sub-64-bit column's domain must NOT admit on any operator
-// (binding through UInt64 made `7 < '256'` true, which let the stream show a
-// row /v1/query hides), and a spelling the column cannot read at all is the
-// server's own code 53 at evaluation time, which withholds.
-func TestVisible_HostileSpellingsMatchTheServer(t *testing.T) {
+// TestVisible_HostileSpellingsMatchNothing: on an integer column a claim is
+// compared through the strict cast, so a value outside the column's domain, or
+// a spelling that is not its canonical form, matches nothing on EVERY operator
+// — `!=` included — and is answered false rather than thrown. On a
+// non-integer column the String binding is unchanged: a spelling the column's
+// reader refuses is still the server's own code 53, which withholds as an
+// error.
+func TestVisible_HostileSpellingsMatchNothing(t *testing.T) {
 	_, row := parsedRow(t)
 
-	answered := []struct {
-		pred Predicate
-		want bool
-	}{
-		{Predicate{Column: "id", Op: "=", Values: []string{"256"}}, false},
-		{Predicate{Column: "id", Op: "!=", Values: []string{"256"}}, true},
-		{Predicate{Column: "id", Op: "<", Values: []string{"256"}}, false},
-		{Predicate{Column: "id", Op: "<", Values: []string{"300"}}, false},
-		{Predicate{Column: "id", Op: ">", Values: []string{"300"}}, false},
-	}
-	for _, tc := range answered {
-		got, reason := row.VisibleWithReason([]Predicate{tc.pred})
-		assert.Equal(t, tc.want, got, "%s %s %v", tc.pred.Column, tc.pred.Op, tc.pred.Values)
-		assert.NotEqual(t, ReasonError, reason, "an out-of-domain constant is answered, not thrown")
+	for _, v := range []string{"256", "300", "-1", "1.5", "007", "+7", "7.0", "1e3", "abc", "", " 7", "18446744073709551623"} {
+		for _, op := range []string{"=", "!=", "<", ">", "in"} {
+			got, reason := row.VisibleWithReason([]Predicate{{Column: "id", Op: op, Values: []string{v}}})
+			assert.False(t, got, "id %s %q", op, v)
+			assert.Equal(t, ReasonFilter, reason, "id %s %q: answered, not thrown", op, v)
+		}
 	}
 
-	// Spellings the column's reader refuses: ClickHouse code 53, reported as a
-	// per-row error rather than a false, so the metric can tell them apart.
-	for _, v := range []string{"-1", "1.5", "007", "abc", ""} {
-		got, reason := row.VisibleWithReason([]Predicate{{Column: "id", Op: "=", Values: []string{v}}})
-		assert.False(t, got, "id = %q", v)
-		assert.Equal(t, ReasonError, reason, "id = %q", v)
+	for _, v := range []string{"abc", "1.5.5"} {
+		got, reason := row.VisibleWithReason([]Predicate{{Column: "ratio", Op: "=", Values: []string{v}}})
+		assert.False(t, got, "ratio = %q", v)
+		assert.Equal(t, ReasonError, reason, "ratio = %q", v)
 	}
+}
+
+// intsTable holds one column per integer width the strict cast has to cover.
+func intsTable() *discovery.TableSchema {
+	return &discovery.TableSchema{
+		Name: "ints",
+		Columns: []discovery.Column{
+			{Name: "u8", Type: "UInt8", Position: 1},
+			{Name: "u32", Type: "UInt32", Position: 2},
+			{Name: "u64", Type: "UInt64", Position: 3},
+			{Name: "i64", Type: "Int64", Position: 4},
+			{Name: "u128", Type: "UInt128", Position: 5},
+			{Name: "i128", Type: "Int128", Position: 6},
+			{Name: "u256", Type: "UInt256", Position: 7},
+			{Name: "i256", Type: "Int256", Position: 8},
+			{Name: "nu64", Type: "Nullable(UInt64)", IsNullable: true, Position: 9},
+		},
+	}
+}
+
+// intDomain is a column's [min, max].
+func intDomain(typ string) (*big.Int, *big.Int) {
+	bits := map[string]uint{"8": 8, "32": 32, "64": 64, "128": 128, "256": 256}
+	pow := func(n uint) *big.Int { return new(big.Int).Lsh(big.NewInt(1), n) }
+	signed := strings.HasPrefix(typ, "Int")
+	n := bits[strings.TrimPrefix(strings.TrimPrefix(typ, "U"), "Int")]
+	if signed {
+		return new(big.Int).Neg(pow(n - 1)), new(big.Int).Sub(pow(n-1), big.NewInt(1))
+	}
+	return big.NewInt(0), new(big.Int).Sub(pow(n), big.NewInt(1))
+}
+
+// TestVisible_IntegerClaimsMatchExactlyWhatFits drives every integer width
+// with the boundary claims that used to wrap (2^63, 2^64, 2^64+5, 2^127,
+// 2^128, 2^255, 2^256, 2^256+5, their negatives) and the non-canonical
+// spellings, on every operator, against rows holding 0, 5, the column's MIN
+// and MAX (and NULL). The answer must be the mathematical one when the claim
+// is the canonical spelling of a value the column can hold, and false
+// otherwise — never an over-admit, and never a thrown row.
+func TestVisible_IntegerClaimsMatchExactlyWhatFits(t *testing.T) {
+	eng := TestEngine(t, intsTable())
+	tbl, err := eng.Table("ints")
+	require.NoError(t, err)
+	t.Cleanup(tbl.Release)
+
+	pow := func(n uint) *big.Int { return new(big.Int).Lsh(big.NewInt(1), n) }
+	add := func(a *big.Int, d int64) *big.Int { return new(big.Int).Add(a, big.NewInt(d)) }
+	neg := func(a *big.Int) *big.Int { return new(big.Int).Neg(a) }
+	claims := []string{
+		"0", "5", "-1", "255", "256", "4294967295", "4294967296",
+		"007", "+5", "1.5", "5.0", "1e3", "abc", "", "-0",
+	}
+	for _, n := range []*big.Int{
+		pow(63), add(neg(pow(63)), -1), neg(pow(63)), add(pow(63), -1),
+		pow(64), add(pow(64), -1), add(pow(64), 5), pow(127), add(neg(pow(127)), -1), add(pow(127), -1),
+		pow(128), add(pow(128), -1), pow(255), add(pow(255), -1), neg(pow(255)), pow(256), add(pow(256), -1), add(pow(256), 5),
+	} {
+		claims = append(claims, n.String())
+	}
+
+	cols := intsTable().Columns
+	type stored struct {
+		vals map[string]*big.Int // nil value: NULL
+		row  *Row
+	}
+	var rows []stored
+	for _, label := range []string{"0", "5", "MIN", "MAX"} {
+		vals := map[string]*big.Int{}
+		line := make([]any, len(cols))
+		for i, c := range cols {
+			base := strings.TrimSuffix(strings.TrimPrefix(c.Type, "Nullable("), ")")
+			lo, hi := intDomain(base)
+			var v *big.Int
+			switch label {
+			case "0":
+				v = big.NewInt(0)
+			case "5":
+				v = big.NewInt(5)
+			case "MIN":
+				v = lo
+			case "MAX":
+				v = hi
+			}
+			if c.IsNullable && label == "MIN" {
+				line[i], vals[c.Name] = nil, nil
+				continue
+			}
+			line[i], vals[c.Name] = v.String(), v
+		}
+		b, err := json.Marshal(line)
+		require.NoError(t, err)
+		row, err := tbl.ParseRow(tbl.WireColumns, b)
+		require.NoError(t, err)
+		t.Cleanup(row.Close)
+		rows = append(rows, stored{vals: vals, row: row})
+	}
+
+	cells := 0
+	for _, c := range cols {
+		base := strings.TrimSuffix(strings.TrimPrefix(c.Type, "Nullable("), ")")
+		lo, hi := intDomain(base)
+		for _, claim := range claims {
+			v, isInt := new(big.Int).SetString(claim, 10)
+			fits := isInt && v.String() == claim && v.Cmp(lo) >= 0 && v.Cmp(hi) <= 0
+			for _, op := range []string{"=", "!=", "<", ">", "in"} {
+				for _, r := range rows {
+					cells++
+					stored := r.vals[c.Name]
+					want := false
+					if fits && stored != nil {
+						cmp := stored.Cmp(v)
+						want = map[string]bool{"=": cmp == 0, "in": cmp == 0, "!=": cmp != 0, "<": cmp < 0, ">": cmp > 0}[op]
+					}
+					got, reason := r.row.VisibleWithReason([]Predicate{{Column: c.Name, Op: op, Values: []string{claim}}})
+					if got != want || (!got && reason != ReasonFilter) {
+						t.Errorf("%s(%v) %s %q: got %v (%s), want %v", c.Type, stored, op, claim, got, reason, want)
+					}
+				}
+			}
+		}
+	}
+
+	// A multi-element _in list keeps the elements that fit and drops the rest,
+	// element by element: 2^64+5 must not wrap onto the row holding 5.
+	for _, c := range cols {
+		for _, r := range rows {
+			stored := r.vals[c.Name]
+			want := stored != nil && stored.Sign() == 0
+			got := r.row.Visible([]Predicate{{
+				Column: c.Name, Op: "in",
+				Values: []string{add(pow(64), 5).String(), "007", "0", add(pow(256), 5).String(), "abc"},
+			}})
+			assert.Equal(t, want, got, "%s(%v) IN (2^64+5, 007, 0, 2^256+5, abc)", c.Type, stored)
+		}
+	}
+	t.Logf("%d cells", cells)
 }
 
 // storedRow parses one row whose `tenant` column holds the given value, with
@@ -254,9 +383,10 @@ func TestVisible_FailsClosed(t *testing.T) {
 	})
 
 	t.Run("value the column cannot read", func(t *testing.T) {
-		// "abc" is not a UInt8. A String parameter compiles, so the refusal is
-		// the server's own per-row error rather than a compile failure.
+		// "abc" is not a UInt8 (the strict cast makes it NULL) nor a Float32
+		// (the server's own per-row error). Neither is a compile failure.
 		assert.False(t, row.Visible([]Predicate{{Column: "id", Op: "=", Values: []string{"abc"}}}))
+		assert.False(t, row.Visible([]Predicate{{Column: "ratio", Op: "=", Values: []string{"abc"}}}))
 	})
 
 	t.Run("type mismatch against the column", func(t *testing.T) {
@@ -276,9 +406,13 @@ func TestVisibleWithReason_LabelsTheCause(t *testing.T) {
 	assert.False(t, ok)
 	assert.Equal(t, ReasonFilter, reason)
 
-	ok, reason = row.VisibleWithReason([]Predicate{{Column: "id", Op: "=", Values: []string{"abc"}}})
+	ok, reason = row.VisibleWithReason([]Predicate{{Column: "ratio", Op: "=", Values: []string{"abc"}}})
 	assert.False(t, ok)
 	assert.Equal(t, ReasonError, reason, "a value the column's reader refuses throws on the row")
+
+	ok, reason = row.VisibleWithReason([]Predicate{{Column: "id", Op: "=", Values: []string{"abc"}}})
+	assert.False(t, ok)
+	assert.Equal(t, ReasonFilter, reason, "an integer claim that does not fit is answered false")
 
 	ok, reason = row.VisibleWithReason([]Predicate{{Column: "nosuch", Op: "=", Values: []string{"x"}}})
 	assert.False(t, ok)

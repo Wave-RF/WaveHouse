@@ -78,3 +78,74 @@ func TestEscapeStringParam(t *testing.T) {
 		})
 	}
 }
+
+func TestIntegerType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in     string
+		want   IntType
+		wantOK bool
+	}{
+		{"UInt8", "UInt8", true},
+		{"UInt16", "UInt16", true},
+		{"UInt32", "UInt32", true},
+		{"UInt64", "UInt64", true},
+		{"UInt128", "UInt128", true},
+		{"UInt256", "UInt256", true},
+		{"Int8", "Int8", true},
+		{"Int16", "Int16", true},
+		{"Int32", "Int32", true},
+		{"Int64", "Int64", true},
+		{"Int128", "Int128", true},
+		{"Int256", "Int256", true},
+		{"Nullable(UInt64)", "UInt64", true},
+		{"LowCardinality(UInt32)", "UInt32", true},
+		{"LowCardinality(Nullable(Int64))", "Int64", true},
+		{"Nullable(Int256)", "Int256", true},
+
+		{"String", "", false},
+		{"LowCardinality(String)", "", false},
+		{"Nullable(String)", "", false},
+		{"Bool", "", false},
+		{"Nullable(Bool)", "", false},
+		{"Decimal(18, 4)", "", false},
+		{"Decimal64(4)", "", false},
+		{"Float64", "", false},
+		{"Enum8('a' = 1, 'b' = 2)", "", false},
+		{"Enum16('x' = 1)", "", false},
+		{"UUID", "", false},
+		{"Date", "", false},
+		{"DateTime", "", false},
+		{"DateTime64(3, 'UTC')", "", false},
+		{"IPv4", "", false},
+		{"Array(UInt64)", "", false},
+		{"Map(String, UInt64)", "", false},
+		{"Tuple(UInt64)", "", false},
+		{"FixedString(8)", "", false},
+		// Not ClickHouse's canonical spelling, so not recognised: the column
+		// keeps the plain {p:String} form rather than a guessed one.
+		{"uint64", "", false},
+		{"BIGINT UNSIGNED", "", false},
+		{"Nullable(UInt64", "", false},
+		{"Nullable()", "", false},
+		{"", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			got, ok := IntegerType(tt.in)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("IntegerType(%q) = (%q, %v), want (%q, %v)", tt.in, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestStrictInt(t *testing.T) {
+	t.Parallel()
+	got := StrictInt("p3", "UInt64")
+	want := "if(toString(accurateCastOrNull({p3:String}, 'UInt64')) = {p3:String}, accurateCastOrNull({p3:String}, 'UInt64'), NULL)"
+	if got != want {
+		t.Errorf("StrictInt = %q\nwant        %q", got, want)
+	}
+}

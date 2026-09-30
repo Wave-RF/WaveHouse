@@ -1,6 +1,7 @@
 // Package chsql holds ClickHouse SQL helpers shared across packages that build
-// SQL: safe identifier quoting, and the encoding a value needs to survive a
-// `{p:String}` query parameter. It is dependency-free so internal/query,
+// SQL: safe identifier quoting, the encoding a value needs to survive a
+// `{p:String}` query parameter, and the strict cast an integer column's claims
+// are compared through. It is dependency-free so internal/query,
 // internal/policy and internal/typelayer can all use it without an import
 // cycle.
 package chsql
@@ -78,3 +79,77 @@ var EscapeStringParam = strings.NewReplacer(
 	"\n", `\n`,
 	"\r", `\r`,
 ).Replace
+
+// IntType is one of ClickHouse's integer type names, as IntegerType returns
+// it. It is a distinct type so StrictInt can only be handed a name from that
+// closed set, never text read off a schema.
+type IntType string
+
+// intTypes is the closed set IntegerType answers from. Bool is UInt8
+// underneath but compares as a boolean, and Enum/Decimal are not integers, so
+// none of them is here.
+var intTypes = map[string]IntType{
+	"UInt8": "UInt8", "UInt16": "UInt16", "UInt32": "UInt32", "UInt64": "UInt64",
+	"UInt128": "UInt128", "UInt256": "UInt256",
+	"Int8": "Int8", "Int16": "Int16", "Int32": "Int32", "Int64": "Int64",
+	"Int128": "Int128", "Int256": "Int256",
+}
+
+// IntegerType reports whether colType — a ClickHouse type as system.columns
+// and the chtypes library spell it — is an integer type, possibly wrapped in
+// Nullable(...) and/or LowCardinality(...), and returns the bare integer type.
+//
+// It only picks which expression form a policy claim is compared through
+// (StrictInt for an integer column, a plain {p:String} for everything else);
+// it models no ClickHouse semantics. The wrappers are stripped because
+// accurateCastOrNull to a LowCardinality type is refused by the server (code
+// 455) and the bare type answers identically on a Nullable column (measured
+// on 26.6.3.62 and the 26.6 chtypes artifact). A type it does not recognise
+// keeps the {p:String} form.
+func IntegerType(colType string) (IntType, bool) {
+	t := colType
+	for {
+		inner, ok := unwrap(t, "Nullable(")
+		if !ok {
+			inner, ok = unwrap(t, "LowCardinality(")
+		}
+		if !ok {
+			break
+		}
+		t = inner
+	}
+	it, ok := intTypes[t]
+	return it, ok
+}
+
+func unwrap(t, prefix string) (string, bool) {
+	if strings.HasPrefix(t, prefix) && strings.HasSuffix(t, ")") {
+		return t[len(prefix) : len(t)-1], true
+	}
+	return "", false
+}
+
+// StrictInt renders the round-trip strict cast an integer column compares a
+// claim bound as {param:String} against:
+//
+//	if(toString(accurateCastOrNull({p:String}, 'T')) = {p:String}, accurateCastOrNull({p:String}, 'T'), NULL)
+//
+// A bare {p:String} wraps a value at or past 2^64 on every integer column (and
+// a 128/256-bit column at its own width), and accurateCastOrNull alone still
+// wraps on [U]Int128/[U]Int256. The round trip turns every value that is not
+// the canonical spelling of an in-range integer into NULL, which no operator
+// admits, while an in-range canonical value compares exactly as before and
+// keeps the primary key in use. Measured identical on ClickHouse 26.6.3.62 and
+// the 26.6/25.8 chtypes artifacts.
+func StrictInt(param string, t IntType) string {
+	cast := "accurateCastOrNull({" + param + ":String}, '" + string(t) + "')"
+	return "if(toString(" + cast + ") = {" + param + ":String}, " + cast + ", NULL)"
+}
+
+// IntParam is a positional value the query builder binds through StrictInt
+// instead of as a bare {pN:String}: one parameter, referenced from the
+// expression the placeholder expands to.
+type IntParam struct {
+	Value string
+	Type  IntType
+}

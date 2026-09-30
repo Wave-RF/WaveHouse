@@ -187,9 +187,11 @@ func TestRender_QuotesIdentifiersAndBindsEveryValue(t *testing.T) {
 		Predicate{Column: "id", Op: "in", Values: []string{"1", "7"}},
 	)
 	// Every identifier is backticked by the library's own QuoteIdentifier,
-	// which always quotes. Every value binds as String whatever the column's
-	// declared type (id is UInt8 here), and is a bound parameter, never text.
-	assert.Equal(t, "`name` = {p0:String} AND `id` IN ({p1:String}, {p2:String})", expr)
+	// which always quotes. Every value is a bound {pN:String} parameter, never
+	// text; on an integer column (id is UInt8 here) each one is compared
+	// through the strict cast, element by element.
+	assert.Equal(t, "`name` = {p0:String} AND `id` IN ("+
+		chsql.StrictInt("p1", "UInt8")+", "+chsql.StrictInt("p2", "UInt8")+")", expr)
 	assert.Equal(t, map[string]string{"p0": "acme", "p1": "1", "p2": "7"}, params)
 
 	hostile := Predicate{Column: "name", Op: "=", Values: []string{"' OR 1=1 --"}}
@@ -197,6 +199,40 @@ func TestRender_QuotesIdentifiersAndBindsEveryValue(t *testing.T) {
 	assert.Equal(t, "`name` = {p0:String}", expr)
 	assert.Equal(t, "' OR 1=1 --", params["p0"])
 	assert.NotContains(t, expr, "OR 1=1")
+}
+
+// TestRender_IntegerColumnsBindThroughTheStrictCast: every operator on an
+// integer column (Nullable included, cast to the bare type) renders the same
+// chsql.StrictInt expression the query path renders; every other column keeps
+// the plain {pN:String} form.
+func TestRender_IntegerColumnsBindThroughTheStrictCast(t *testing.T) {
+	eng := TestEngine(t, eventsTable())
+	tbl, err := eng.Table("events")
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	for _, op := range []string{"=", "!=", ">", "<"} {
+		expr, params := renderExpr(t, tbl, Predicate{Column: "score", Op: op, Values: []string{"-4"}})
+		assert.Equal(t, "`score` "+op+" "+chsql.StrictInt("p0", "Int32"), expr, "Nullable(Int32) %s", op)
+		assert.Equal(t, map[string]string{"p0": "-4"}, params)
+
+		expr, _ = renderExpr(t, tbl, Predicate{Column: "id", Op: op, Values: []string{"7"}})
+		assert.Equal(t, "`id` "+op+" "+chsql.StrictInt("p0", "UInt8"), expr, "UInt8 %s", op)
+
+		for _, col := range []string{"name", "ts", "created"} {
+			expr, _ = renderExpr(t, tbl, Predicate{Column: col, Op: op, Values: []string{"x"}})
+			assert.Equal(t, "`"+col+"` "+op+" {p0:String}", expr, "%s %s", col, op)
+		}
+	}
+	expr, params := renderExpr(t, tbl, Predicate{Column: "score", Op: "in", Values: []string{"1", "2", "3"}})
+	assert.Equal(t, "`score` IN ("+chsql.StrictInt("p0", "Int32")+", "+chsql.StrictInt("p1", "Int32")+", "+
+		chsql.StrictInt("p2", "Int32")+")", expr)
+	assert.Equal(t, map[string]string{"p0": "1", "p1": "2", "p2": "3"}, params)
+
+	// The MATERIALIZED UInt16 column is declared too, so a filter over it is
+	// rendered the same way.
+	expr, _ = renderExpr(t, tbl, Predicate{Column: "id_plus", Op: "=", Values: []string{"8"}})
+	assert.Equal(t, "`id_plus` = "+chsql.StrictInt("p0", "UInt16"), expr)
 }
 
 // TestRender_QuotesEveryIdentifier: a column whose name is a reserved word is

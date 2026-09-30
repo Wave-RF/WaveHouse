@@ -424,3 +424,41 @@ func TestIngest_CheckIn_AbsentColumn_TestsTheTableDefault(t *testing.T) {
 		eventuallyRows(t, table, "user_id = 'n2' AND tenant = 'acme'", 1)
 	})
 }
+
+// TestIngest_IntegerCheckClaimThatDoesNotFit_IsRefused: an _eq check on an
+// integer column compares the claim through the strict cast. 2^64+5 does not
+// fit a UInt64, yet the plain String binding wrapped it onto 5 in the check —
+// and the injected DEFAULT wraps it onto 5 too — so a record used to land under
+// tenant 5. Now the check refuses it (403) and nothing is published, whether
+// the record omits the column or supplies the wrapped value itself. The same
+// policy with a claim that fits lands as before.
+func TestIngest_IntegerCheckClaimThatDoesNotFit_IsRefused(t *testing.T) {
+	table := createTable(t, "user_id String, tenant UInt64", "ORDER BY user_id")
+	tmpl := "{{ jwt.tenant }}"
+	withIngestPolicy(t, &policy.Policy{
+		AdminRole: "admin",
+		Tables: map[string]policy.TablePolicy{
+			table: {"writer": {Insert: &policy.InsertPermissions{
+				Check: map[string]policy.Filter{"tenant": {Eq: &tmpl}},
+			}}},
+		},
+	})
+	const over = `{"tenant":"18446744073709551621"}`
+
+	for _, rec := range []string{`{"user_id":"o1"}`, `{"user_id":"o2","tenant":5}`, `{"user_id":"o3","tenant":"18446744073709551621"}`} {
+		status, body := postIngest(t, table, "application/json", rec, "writer", over)
+		require.Equal(t, http.StatusForbidden, status, "%s: body=%v", rec, body)
+		assert.Contains(t, body["error"], "check failed", rec)
+	}
+
+	status, body := postIngest(t, table, "application/json", `{"user_id":"i1"}`, "writer", `{"tenant":"5"}`)
+	require.Equal(t, http.StatusOK, status, "body=%v", body)
+	status, body = postIngest(t, table, "application/json", `{"user_id":"i2","tenant":5}`, "writer", `{"tenant":"5"}`)
+	require.Equal(t, http.StatusOK, status, "body=%v", body)
+
+	// The admitted records were posted after the refused ones, so once they
+	// have landed a published refusal would have landed too.
+	eventuallyRows(t, table, "user_id IN ('i1', 'i2') AND tenant = 5", 2)
+	eventuallyRows(t, table, "user_id IN ('o1', 'o2', 'o3')", 0)
+	eventuallyRows(t, table, "1 = 1", 2)
+}

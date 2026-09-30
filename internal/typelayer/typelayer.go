@@ -25,6 +25,7 @@ import (
 
 	"github.com/wave-rf/chtypes/go/chtypes"
 
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 )
 
@@ -226,12 +227,10 @@ type Table struct {
 	// slots holds the identically-compiled handles; empty means unavailable.
 	slots []*schemaSlot
 	next  atomic.Uint64
-	// cols is every column the compiled schema declares, of every kind — what
-	// render tests a predicate's column against.
 	// cols maps every column the compiled schema declares, of every kind, to
-	// its identifier as the library quotes it — what render tests a
-	// predicate's column against, and what it writes.
-	cols  map[string]string
+	// how render writes a predicate over it — what render tests a predicate's
+	// column against.
+	cols  map[string]filterColumn
 	cause string // why slots is empty
 	sig   string
 	// lib and discovered are what a per-role recompile needs: the library the
@@ -302,7 +301,7 @@ func (e *Engine) Bind(serverVersion, serverTZ string, tables []*discovery.TableS
 		slots      []*schemaSlot
 		cause      string
 		wire       []string
-		cols       map[string]string
+		cols       map[string]filterColumn
 		discovered []discovery.Column
 	}
 
@@ -540,32 +539,44 @@ func wireColumns(ts *discovery.TableSchema) []string {
 	return out
 }
 
+// filterColumn is how render writes a predicate over one column.
+type filterColumn struct {
+	ident   string        // lib.QuoteIdentifier's spelling
+	intType chsql.IntType // "" unless the claim binds through chsql.StrictInt
+}
+
 // declaredColumns maps every column name the compiled schema knows, of every
 // kind, to its identifier as lib.QuoteIdentifier spells it (ClickHouse's own
-// backQuote, always quoted). It is the set render tests a predicate's column
+// backQuote, always quoted) and, for an integer column, the type its claims
+// are strictly cast to. It is the set render tests a predicate's column
 // against: answering "no such column" here keeps a misspelled policy from
 // costing a compile and a log line per generation, and on a ROLE table it is
 // what makes a filter over a denied column fail closed instead of compiling
 // against a column that is not there. Quoting once per compile keeps a C call
 // off render's per-event path. A non-empty second return is the cause.
-func declaredColumns(lib *chtypes.Library, schema *chtypes.LoadedSchema, fallback []discovery.Column) (map[string]string, string) {
-	var names []string
+func declaredColumns(lib *chtypes.Library, schema *chtypes.LoadedSchema, fallback []discovery.Column) (map[string]filterColumn, string) {
+	type named struct{ name, typ string }
+	var cols []named
 	if schema != nil && len(schema.Columns) > 0 {
 		for _, c := range schema.Columns {
-			names = append(names, c.Name)
+			cols = append(cols, named{c.Name, c.Type})
 		}
 	} else {
 		for _, c := range fallback {
-			names = append(names, c.Name)
+			cols = append(cols, named{c.Name, c.Type})
 		}
 	}
-	m := make(map[string]string, len(names))
-	for _, n := range names {
-		q, err := lib.QuoteIdentifier(n)
+	m := make(map[string]filterColumn, len(cols))
+	for _, c := range cols {
+		q, err := lib.QuoteIdentifier(c.name)
 		if err != nil {
-			return nil, fmt.Sprintf("cannot quote column %q: %s", n, err)
+			return nil, fmt.Sprintf("cannot quote column %q: %s", c.name, err)
 		}
-		m[n] = q
+		col := filterColumn{ident: q}
+		if it, ok := chsql.IntegerType(c.typ); ok {
+			col.intType = it
+		}
+		m[c.name] = col
 	}
 	return m, ""
 }

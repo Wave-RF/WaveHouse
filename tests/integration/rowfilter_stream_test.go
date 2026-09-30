@@ -9,27 +9,43 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Wave-RF/WaveHouse/internal/api"
+	"github.com/Wave-RF/WaveHouse/internal/auth"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
 // TestRowFilterStream_DifferentialAgainstClickHouse pins the stream/query
 // row-visibility agreement with ClickHouse itself as the oracle (the #381
 // review's storage-narrowing fail-open): for every column shape × insertable
-// payload × filter constant × operator, the stream's verdict must equal what a
-// structured query returns over the SAME stored row — `WHERE v <op> ?` with the
-// constant bound exactly as predicatesToSQL binds it. A constant ClickHouse
-// rejects with a type error means the role reads no rows on the query path, so
+// payload × filter constant × operator, the stream's verdict must equal what
+// the production /v1/query handler returns over the SAME stored row, with the
+// role's row filter rendered and bound exactly as production renders it. A
+// query ClickHouse rejects means the role reads no rows on the query path, so
 // the stream must withhold too.
+//
+// On an integer column both surfaces compare a claim through the strict cast
+// (chsql.StrictInt), so there is a second oracle as well: the admitted set
+// must be the mathematically correct one — the comparison itself when the
+// constant is the canonical spelling of a value the column can hold, and
+// nothing at all otherwise. Parity alone could not catch an over-admit both
+// surfaces share, and the plain String binding had one: a constant at or past
+// 2^64 wrapped on every integer width.
 //
 // Both sides now read the STORED row: the payload goes in over the worker's own
 // HTTP surface, comes back out as the positional JSONCompactEachRow line the
@@ -46,15 +62,11 @@ import (
 // not be bound at all. Binding every value as {p:String} (AUDIT §C.1) closed
 // both, so a divergence appearing here is a regression, not a known gap.
 func TestRowFilterStream_DifferentialAgainstClickHouse(t *testing.T) {
-	shapes := []struct {
-		name      string
-		ddl       string
-		payloads  []any
-		constants []string
-	}{
+	shapes := []diffShape{
 		{
-			name: "uint64",
-			ddl:  "UInt64",
+			name:    "uint64",
+			ddl:     "UInt64",
+			intType: "UInt64",
 			payloads: []any{
 				json.Number("16777217"),
 				json.Number("9007199254740993"), // 2^53+1: float64 would collapse it onto its neighbor
@@ -79,12 +91,14 @@ func TestRowFilterStream_DifferentialAgainstClickHouse(t *testing.T) {
 		{
 			name:      "int64",
 			ddl:       "Int64",
+			intType:   "Int64",
 			payloads:  []any{json.Number("-5"), json.Number("9007199254740993")},
 			constants: []string{"-4", "-5", "9007199254740992", "9223372036854775808"},
 		},
 		{
 			name:     "uint8",
 			ddl:      "UInt8",
+			intType:  "UInt8",
 			payloads: []any{json.Number("0"), json.Number("5"), json.Number("255")},
 			// "256"/"300" were excluded while the stream bound integers through
 			// the widest integer type and answered `5 < '256'` true where the
@@ -92,6 +106,16 @@ func TestRowFilterStream_DifferentialAgainstClickHouse(t *testing.T) {
 			// they are strict-parity constants — this is the pin for it.
 			constants: []string{"5", "255", "0", "-1", "256", "300"},
 		},
+		// The integer widths, with every boundary that used to wrap.
+		intShape("uint8_bounds", "UInt8", "UInt8"),
+		intShape("uint32_bounds", "UInt32", "UInt32"),
+		intShape("uint64_bounds", "UInt64", "UInt64"),
+		intShape("int64_bounds", "Int64", "Int64"),
+		intShape("uint128_bounds", "UInt128", "UInt128"),
+		intShape("int128_bounds", "Int128", "Int128"),
+		intShape("uint256_bounds", "UInt256", "UInt256"),
+		intShape("int256_bounds", "Int256", "Int256"),
+		intShape("nullable_uint64_bounds", "Nullable(UInt64)", "UInt64"),
 		{
 			name: "float32",
 			ddl:  "Float32",
@@ -162,6 +186,7 @@ func TestRowFilterStream_DifferentialAgainstClickHouse(t *testing.T) {
 	// the positional line the ingest path would publish for it.
 	type storedRow struct {
 		shape   string
+		intType string
 		table   string
 		id      uint32
 		payload any
@@ -182,7 +207,7 @@ func TestRowFilterStream_DifferentialAgainstClickHouse(t *testing.T) {
 			}
 			any_ = true
 			rows = append(rows, storedRow{
-				shape: sh.name, table: table, id: uint32(i), payload: payload,
+				shape: sh.name, intType: sh.intType, table: table, id: uint32(i), payload: payload,
 				columns: []string{"id", "v"},
 				line:    rowFilterStoredLine(t, table, uint32(i)),
 			})
@@ -198,18 +223,185 @@ func TestRowFilterStream_DifferentialAgainstClickHouse(t *testing.T) {
 	for _, sh := range shapes {
 		byShape[sh.name] = sh.constants
 	}
+	cells, mathCells := 0, 0
 	for _, r := range rows {
+		stored := rowFilterStoredInt(t, r.intType, r.line)
 		for _, constant := range byShape[r.shape] {
 			for _, op := range ops {
-				got := rowFilterStreamVerdict(t, eval, r.table, r.columns, r.line, op, constant)
-				want, sqlErr := rowFilterStoredVerdict(t, r.table, r.id, op, constant)
+				cells++
+				f := rowFilterLiteral(t, op, constant)
+				got := rowFilterStreamVerdict(t, eval, r.table, r.columns, r.line, f, nil)
+				want, sqlErr := rowFilterQueryVerdict(t, r.table, r.id, f, nil)
 				if got != want {
-					t.Errorf("%s: stored %v %s %q — stream says %v, ClickHouse says %v (query err: %v)",
+					t.Errorf("%s: stored %v %s %q — stream says %v, /v1/query says %v (query err: %v)",
 						r.shape, r.payload, op, constant, got, want, sqlErr)
+				}
+				if exact, ok := intExpected(r.intType, stored, op, constant); ok {
+					mathCells++
+					if want != exact || got != exact {
+						t.Errorf("%s: stored %v %s %q — admitted stream=%v query=%v, the mathematically correct answer is %v",
+							r.shape, r.payload, op, constant, got, want, exact)
+					}
+				}
+			}
+		}
+
+		// A multi-element _in from a claim array: each element is cast on its
+		// own, so the elements that fit decide and the rest drop out — 2^64+5
+		// must not wrap onto a row holding 5.
+		if r.intType != "" {
+			for _, set := range intInSets {
+				cells++
+				mathCells++
+				f := policy.Filter{In: new("{{ jwt.ids }}")}
+				claims := map[string]any{"ids": toAnys(set)}
+				got := rowFilterStreamVerdict(t, eval, r.table, r.columns, r.line, f, claims)
+				want, sqlErr := rowFilterQueryVerdict(t, r.table, r.id, f, claims)
+				exact := false
+				for _, c := range set {
+					if eq, ok := intExpected(r.intType, stored, "=", c); ok && eq {
+						exact = true
+					}
+				}
+				if got != want || want != exact {
+					t.Errorf("%s: stored %v IN %v — stream says %v, /v1/query says %v (query err: %v), correct is %v",
+						r.shape, r.payload, set, got, want, sqlErr, exact)
 				}
 			}
 		}
 	}
+	t.Logf("%d cells compared stream against /v1/query, %d of them also against the exact answer", cells, mathCells)
+}
+
+// Boundary constants for the integer shapes: each width's own edges, the
+// values that wrapped under the plain String binding, and spellings that are
+// not canonical.
+var intBoundaryConstants = func() []string {
+	p := func(n uint) *big.Int { return new(big.Int).Lsh(big.NewInt(1), n) }
+	add := func(a *big.Int, d int64) string { return new(big.Int).Add(a, big.NewInt(d)).String() }
+	neg := func(a *big.Int) *big.Int { return new(big.Int).Neg(a) }
+	return []string{
+		"0", "1", "5", "-1", "-5", "255", "256", "4294967295", "4294967296",
+		add(p(63), 0), add(p(63), -1), add(neg(p(63)), -1), add(neg(p(63)), 0),
+		add(p(64), 0), add(p(64), -1), add(p(64), 5),
+		add(p(127), 0), add(p(127), -1), add(neg(p(127)), -1), add(neg(p(127)), 0),
+		add(p(128), 0), add(p(128), -1),
+		add(p(255), 0), add(p(255), -1), add(neg(p(255)), -1), add(neg(p(255)), 0),
+		add(p(256), 0), add(p(256), -1), add(p(256), 5),
+		"007", "+5", "5.0", "1e3", "abc", "",
+	}
+}()
+
+// intInSets are claim arrays for the multi-element _in cases.
+var intInSets = [][]string{
+	{"18446744073709551621", "0"},                          // 2^64+5 must not wrap onto 5
+	{"5", "007", "abc"},                                    // the junk elements drop out, 5 still decides
+	{"-1", "340282366920938463463374607431768211456", "1"}, // 2^128
+	{"115792089237316195423570985008687907853269984665640564039457584007913129639941", "+5", "5.0"}, // 2^256+5
+}
+
+// diffShape is one column type under the differential. intType names the
+// bare integer type the column holds, "" for a non-integer column; it is
+// declared here rather than derived with chsql.IntegerType, so a regression in
+// that derivation shows up as a wrong answer instead of a skipped oracle.
+type diffShape struct {
+	name      string
+	ddl       string
+	intType   string
+	payloads  []any
+	constants []string
+}
+
+// intShape is a differential shape for one integer type: a row at each edge of
+// its domain (and a NULL for a Nullable column), filtered by every boundary
+// constant.
+func intShape(name, ddl, intType string) diffShape {
+	lo, hi := intDomain(intType)
+	payloads := []any{"0", "1", "5", hi.String()}
+	if lo.Sign() < 0 {
+		payloads = append(payloads, lo.String(), "-5")
+	}
+	if strings.HasPrefix(ddl, "Nullable(") {
+		payloads = append(payloads, nil)
+	}
+	return diffShape{name: name, ddl: ddl, intType: intType, payloads: payloads, constants: intBoundaryConstants}
+}
+
+// intDomain is an integer type's [min, max].
+func intDomain(name string) (*big.Int, *big.Int) {
+	bits, err := strconv.Atoi(strings.TrimPrefix(strings.TrimPrefix(name, "U"), "Int"))
+	if err != nil {
+		panic(name)
+	}
+	one := big.NewInt(1)
+	if strings.HasPrefix(name, "U") {
+		return big.NewInt(0), new(big.Int).Sub(new(big.Int).Lsh(one, uint(bits)), one)
+	}
+	half := new(big.Int).Lsh(one, uint(bits-1))
+	return new(big.Int).Neg(half), new(big.Int).Sub(half, one)
+}
+
+// rowFilterStoredInt reads the stored value back off the published line for an
+// integer column; nil for NULL or a non-integer column.
+func rowFilterStoredInt(t *testing.T, intType string, line []byte) *big.Int {
+	t.Helper()
+	if intType == "" {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.UseNumber()
+	var cols []any
+	require.NoError(t, dec.Decode(&cols))
+	require.Len(t, cols, 2)
+	var text string
+	switch v := cols[1].(type) {
+	case nil:
+		return nil
+	case json.Number:
+		text = v.String()
+	case string:
+		text = v
+	default:
+		t.Fatalf("stored integer came back as %T", v)
+	}
+	n, ok := new(big.Int).SetString(text, 10)
+	require.True(t, ok, "stored integer %q", text)
+	return n
+}
+
+// intExpected is the mathematically correct verdict for an integer column: a
+// constant that is not the canonical spelling of a value the column can hold
+// admits nothing, and a NULL row is never admitted. ok is false for a
+// non-integer column, which has no such oracle here.
+func intExpected(intType string, stored *big.Int, op, constant string) (bool, bool) {
+	if intType == "" {
+		return false, false
+	}
+	lo, hi := intDomain(intType)
+	v, ok := new(big.Int).SetString(constant, 10)
+	if !ok || v.String() != constant || v.Cmp(lo) < 0 || v.Cmp(hi) > 0 || stored == nil {
+		return false, true
+	}
+	cmp := stored.Cmp(v)
+	switch op {
+	case "=", "in":
+		return cmp == 0, true
+	case "!=":
+		return cmp != 0, true
+	case "<":
+		return cmp < 0, true
+	case ">":
+		return cmp > 0, true
+	}
+	panic(op)
+}
+
+func toAnys(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
 }
 
 // rowFilterEvaluator builds the production row evaluator over a type-layer
@@ -227,10 +419,8 @@ func rowFilterEvaluator(t *testing.T) stream.RowEvaluator {
 	return stream.NewRowEvaluator(eng, logger)
 }
 
-// rowFilterStreamVerdict resolves a one-operator literal filter through the full
-// production path (Evaluate → Prepare → Visible) and reports whether the stream
-// would deliver this stored row.
-func rowFilterStreamVerdict(t *testing.T, eval stream.RowEvaluator, table string, columns []string, line []byte, op, constant string) bool {
+// rowFilterLiteral is a one-operator filter on v with a literal constant.
+func rowFilterLiteral(t *testing.T, op, constant string) policy.Filter {
 	t.Helper()
 	f := policy.Filter{}
 	switch op {
@@ -249,10 +439,22 @@ func rowFilterStreamVerdict(t *testing.T, eval stream.RowEvaluator, table string
 	default:
 		t.Fatalf("unknown op %q", op)
 	}
-	p := &policy.Policy{Tables: map[string]policy.TablePolicy{
+	return f
+}
+
+// rowFilterPolicy grants role "r" a read of table filtered by f on v.
+func rowFilterPolicy(table string, f policy.Filter) *policy.Policy {
+	return &policy.Policy{AdminRole: "admin", Tables: map[string]policy.TablePolicy{
 		table: {"r": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"v": f}}}},
 	}}
-	perms := policy.Evaluate(p, "r", table, "select", nil)
+}
+
+// rowFilterStreamVerdict resolves the filter through the full production path
+// (Evaluate → Prepare → Visible) and reports whether the stream would deliver
+// this stored row.
+func rowFilterStreamVerdict(t *testing.T, eval stream.RowEvaluator, table string, columns []string, line []byte, f policy.Filter, claims map[string]any) bool {
+	t.Helper()
+	perms := policy.Evaluate(rowFilterPolicy(table, f), "r", table, "select", claims)
 	require.True(t, perms.Allowed)
 
 	view, err := eval.Prepare(table, columns, line)
@@ -264,24 +466,41 @@ func rowFilterStreamVerdict(t *testing.T, eval stream.RowEvaluator, table string
 	return visible
 }
 
-// rowFilterStoredVerdict asks ClickHouse whether the stored row satisfies the
-// predicate, with the constant bound as a positional parameter exactly like
-// predicatesToSQL emits it. A query error (a cast rejecting the constant's
-// spelling) means the role reads no rows on that path.
-func rowFilterStoredVerdict(t *testing.T, table string, id uint32, op, constant string) (bool, error) {
+// rowFilterQueryVerdict asks the production /v1/query handler, as role "r"
+// with claims, whether it returns the stored row: the row filter is rendered,
+// bound and sent to ClickHouse exactly as production does it. A query the
+// server rejects means the role reads no rows on that path.
+func rowFilterQueryVerdict(t *testing.T, table string, id uint32, f policy.Filter, claims map[string]any) (bool, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	var cnt uint64
-	pred := fmt.Sprintf("v %s ?", op)
-	if op == "in" {
-		pred = "v IN (?)"
+	e := env(t)
+	h := api.NewStructuredQueryHandler(
+		func() chconn.Target {
+			return chconn.Target{URL: e.chHTTPURL, Username: testCHUser, Password: testCHPassword, Database: testCHDatabase}
+		},
+		nil, e.registry, policy.Static(rowFilterPolicy(table, f)),
+		func() int { return 60 },
+		func() time.Duration { return 10 * time.Second },
+		nil, testutil.NopLogger(),
+	)
+	body, err := json.Marshal(map[string]any{
+		"columns": []string{"id"},
+		"filters": []any{map[string]any{"column": "id", "op": "eq", "value": id}},
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/v1/query?table="+table, bytes.NewReader(body))
+	ctx := auth.WithRole(req.Context(), "r")
+	if claims != nil {
+		ctx = auth.WithClaims(ctx, jwt.MapClaims(claims))
 	}
-	q := fmt.Sprintf("SELECT count() FROM %s WHERE id = ? AND %s", table, pred)
-	if err := sharedEnv.chConn.QueryRow(ctx, q, id, constant).Scan(&cnt); err != nil {
-		return false, err
+	rec := httptest.NewRecorder()
+	h.Handle(rec, req.WithContext(ctx))
+	if rec.Code != http.StatusOK {
+		return false, fmt.Errorf("HTTP %d: %s", rec.Code, rec.Body.String())
 	}
-	return cnt == 1, nil
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.LessOrEqual(t, len(out), 1, "id is unique per table")
+	return len(out) == 1, nil
 }
 
 // rowFilterStoredLine reads one stored row back as the positional
