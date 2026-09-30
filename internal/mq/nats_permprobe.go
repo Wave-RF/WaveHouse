@@ -7,6 +7,7 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,14 +49,16 @@ func (w *natsPermissionWatch) changes() <-chan struct{} {
 // publishViolation matches the server's report of a refused publish.
 var publishViolation = regexp.MustCompile(`(?i)permissions violation for publish to "([^"]+)"`)
 
-// record notes the subject of err when it reports a refused publish, and
-// returns it, and whether it is the first refusal of that subject.
+// record notes the subject of err when it reports a refused publish to a
+// JetStream API subject, and returns it, and whether it is the first refusal
+// of that subject. Only API subjects are kept: they are bounded by the
+// topology, where an ack's subject is new with every row.
 func (w *natsPermissionWatch) record(err error) (subject string, first, ok bool) {
 	if err == nil || !errors.Is(err, nats.ErrPermissionViolation) {
 		return "", false, false
 	}
 	m := publishViolation.FindStringSubmatch(err.Error())
-	if m == nil {
+	if m == nil || plainAPISubject(m[1]) == "" {
 		return "", false, false
 	}
 	w.mu.Lock()
@@ -70,11 +73,12 @@ func (w *natsPermissionWatch) record(err error) (subject string, first, ok bool)
 
 // deniedSince reports whether the server refused a publish to subject after
 // the refusal numbered since: permissions change, so an older refusal says
-// nothing about a new request.
+// nothing about a new request. A server in the subject's JetStream domain
+// maps it to the plain $JS.API form before it checks, and reports that one.
 func (w *natsPermissionWatch) deniedSince(subject string, since uint64) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.denied[subject] > since
+	return w.denied[subject] > since || w.denied[plainAPISubject(subject)] > since
 }
 
 // list is every subject the server refused, sorted.
@@ -84,17 +88,27 @@ func (w *natsPermissionWatch) list() []string {
 	return slices.Sorted(maps.Keys(w.denied))
 }
 
-// isConsumerAPI reports whether subject is a JetStream consumer API request
-// under any domain's prefix: $JS.API.CONSUMER.… or $JS.<domain>.API.CONSUMER.….
-func isConsumerAPI(subject string) bool {
+// plainAPISubject is a JetStream API subject in its plain form,
+// $JS.API.…, whether it came as that or as $JS.<domain>.API.…; "" for any
+// other subject.
+func plainAPISubject(subject string) string {
 	rest, ok := strings.CutPrefix(subject, "$JS.")
 	if !ok {
-		return false
+		return ""
 	}
 	if !strings.HasPrefix(rest, "API.") {
 		_, rest, _ = strings.Cut(rest, ".")
+		if !strings.HasPrefix(rest, "API.") {
+			return ""
+		}
 	}
-	return strings.HasPrefix(rest, "API.CONSUMER.")
+	return "$JS." + rest
+}
+
+// isConsumerAPI reports whether subject is a JetStream consumer API request
+// under any domain's prefix: $JS.API.CONSUMER.… or $JS.<domain>.API.CONSUMER.….
+func isConsumerAPI(subject string) bool {
+	return strings.HasPrefix(plainAPISubject(subject), "$JS.API.CONSUMER.")
 }
 
 // natsProbeWait bounds one permission probe. The server answers an allowed
@@ -166,10 +180,7 @@ func (v *topologyVerifier) probePermissions(ctx context.Context) error {
 			}
 		}
 	}, func(a, b result) int { return strings.Compare(a.subject, b.subject) })
-	hint := "wavehouse mq permissions --shards " + fmt.Sprint(v.t.Shards)
-	if opts.Domain != "" {
-		hint += " --js-domain " + opts.Domain
-	}
+	hint := "wavehouse mq permissions " + permissionFlags(v.t, opts.Domain)
 	var errs []error
 	denied := map[string]bool{}
 	for _, r := range sorted {
@@ -213,4 +224,26 @@ func (v *topologyVerifier) probeOne(ctx context.Context, nc *nats.Conn, subject 
 		case <-changed:
 		}
 	}
+}
+
+// permissionFlags is the `wavehouse mq permissions` command line for t under
+// domain: the shard count, then each other setting that is not its default.
+func permissionFlags(t NATSTopology, domain string) string {
+	flags := "--shards " + strconv.Itoa(t.Shards)
+	if t.Prefix != DefaultNATSSubjectPrefix {
+		flags += " --prefix " + t.Prefix
+	}
+	if t.IngestConsumer != DefaultNATSIngestConsumer {
+		flags += " --ingest-consumer " + t.IngestConsumer
+	}
+	if t.HistoryStream != t.streamName("HISTORY") {
+		flags += " --history-stream " + t.HistoryStream
+	}
+	if t.CoordBucket != "" && t.CoordBucket != DefaultNATSCoordBucket(t.Prefix) {
+		flags += " --coord-bucket " + t.CoordBucket
+	}
+	if domain != "" {
+		flags += " --js-domain " + domain
+	}
+	return flags
 }

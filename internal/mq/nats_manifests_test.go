@@ -175,3 +175,32 @@ func TestVerifyNATSTopology_ProbeIgnoresAnEarlierRefusal(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, replicaWarnings(findings), "findings: %v", findings)
 }
+
+// The watch keeps only JetStream API subjects, in either domain form: an
+// ack's subject is new with every row, so keeping those would grow without
+// bound.
+func TestNATSPermissionWatch_KeepsOnlyAPISubjects(t *testing.T) {
+	t.Parallel()
+	w := newNATSPermissionWatch()
+	refuse := func(subject string) bool {
+		_, _, ok := w.record(fmt.Errorf(`%w: Permissions Violation for Publish to "%s"`, nats.ErrPermissionViolation, subject))
+		return ok
+	}
+	assert.False(t, refuse("$JS.ACK.WH_INGEST_0.wh-ingest-0.1.2.3.4.5"))
+	assert.False(t, refuse("wh.hist.acme.t"))
+	assert.True(t, refuse("$JS.API.CONSUMER.MSG.NEXT.WH_INGEST_0.wh-ingest-9"))
+	assert.Len(t, w.list(), 1)
+	assert.True(t, w.deniedSince("$JS.hub.API.CONSUMER.MSG.NEXT.WH_INGEST_0.wh-ingest-9", 0), "a server in the domain reports the plain form")
+	assert.True(t, isConsumerAPI("$JS.hub.API.CONSUMER.UNPIN.S.d"))
+	assert.False(t, isConsumerAPI("$JS.hub.ACK.S.d"))
+}
+
+// The remedy a permission finding names regenerates the permissions for the
+// settings in force, not the defaults.
+func TestPermissionFlags(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "--shards 16", permissionFlags(NATSTopology{Shards: 16}.withDefaults(), ""))
+	assert.Equal(t, "--shards 4 --prefix acme --ingest-consumer acme-in --history-stream H --coord-bucket leases --js-domain hub",
+		permissionFlags(NATSTopology{Shards: 4, Prefix: "acme", IngestConsumer: "acme-in", HistoryStream: "H", CoordBucket: "leases"}.withDefaults(), "hub"))
+	assert.Equal(t, "--shards 4 --prefix acme", permissionFlags(NATSTopology{Shards: 4, Prefix: "acme", CoordBucket: "acme_coord"}.withDefaults(), ""))
+}

@@ -44,6 +44,25 @@ func TestNewNATS_RefusesPermissionsNarrowerThanTheShards(t *testing.T) {
 	assert.Equal(t, 4*8, countRequired(te.Findings))
 }
 
+// The same under a JetStream domain, on a server in it: the probe goes out
+// as $JS.hub.API.…, and the server refuses it under the plain form it maps
+// that to.
+func TestNewNATS_RefusesNarrowPermissionsUnderAJSDomain(t *testing.T) {
+	t.Parallel()
+	f := newNATSFixtureFrom(t, valuesWithPermissions(t, 8, "hub"), func(o *natsserver.Options) { o.JetStreamDomain = "hub" })
+	f.apply(t, generatedTopology(t, 4, 16))
+	_, err := NewNATS(t.Context(), NATSConfig{
+		URLs: []string{f.server.ClientURL()}, User: "wavehouse", PasswordFile: writeSecret(t, fixturePassword("wavehouse")),
+		Topology: NATSTopology{Partitions: 4, Shards: 16}, JSDomain: "hub", TopologyWait: time.Second,
+	})
+	require.ErrorIs(t, err, ErrTopology)
+	var te *TopologyError
+	require.ErrorAs(t, err, &te)
+	assert.Contains(t, err.Error(), "consumer WH_INGEST_3/wh-ingest-15: permissions")
+	assert.Contains(t, err.Error(), "wavehouse mq permissions --shards 16 --js-domain hub")
+	assert.Equal(t, 4*8, countRequired(te.Findings))
+}
+
 // A consumer request the server refuses after boot marks the topology
 // faulty at once, before the next re-check names it.
 func TestExternalNATS_RefusedConsumerRequestIsATopologyFault(t *testing.T) {
@@ -54,12 +73,12 @@ func TestExternalNATS_RefusedConsumerRequestIsATopologyFault(t *testing.T) {
 	require.NoError(t, e.nc.Publish("$JS.API.CONSUMER.MSG.NEXT.WH_INGEST_0.wh-ingest-9", nil))
 	require.Eventually(t, func() bool { return !e.topologyOK.Load() }, 5*time.Second, 10*time.Millisecond)
 
-	// A refused publish elsewhere is not a topology fault.
+	// A refused request to another API is not a topology fault.
 	g := shippedFixture(t)
 	e2 := g.broker(t, nil)
-	require.NoError(t, e2.nc.Publish("wh.hist.acme.t", nil))
+	require.NoError(t, e2.nc.Publish("$JS.API.STREAM.DELETE.WH_DLQ", nil))
 	require.NoError(t, e2.nc.Flush())
-	require.Eventually(t, func() bool { return e2.perms.deniedSince("wh.hist.acme.t", 0) }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return e2.perms.deniedSince("$JS.API.STREAM.DELETE.WH_DLQ", 0) }, 5*time.Second, 10*time.Millisecond)
 	assert.True(t, e2.topologyOK.Load())
 }
 
