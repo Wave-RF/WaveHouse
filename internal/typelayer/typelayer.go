@@ -3,11 +3,10 @@
 // server's own version line, and answers the questions the gateway would
 // otherwise have to re-derive in Go, with the server's own parser:
 //
-//   - "would this record insert?" — Table.Ingest
+//   - "would this record insert, and does it satisfy a role's insert check
+//     clauses?" — Table.Ingest
 //   - "does this stored row match a role's row filter?" — Table.ParseRow /
 //     Row.Visible
-//   - "which of these already-exported rows satisfy a role's insert check
-//     clauses?" — Table.CheckVerdicts
 //   - "what would this record insert for a role that may not write every
 //     column, and whose absent check columns must be filled?" —
 //     Engine.RoleTable
@@ -31,16 +30,19 @@ import (
 
 // Format is the wire format a body is parsed as. It is chtypes' own enum,
 // aliased so no other package has to import the SDK to name one; only the
-// three constants below are formats Ingest accepts.
+// constants below are formats Ingest accepts.
 type Format = chtypes.Format
 
 // The formats Ingest accepts. JSONEachRow is name-addressed (an NDJSON body is
 // the same format, byte for byte); CSV and TSV are positional in declaration
-// order with no header line.
+// order with no header line; the WithNames pair open with a header line that
+// names the columns, in any order.
 const (
-	FormatJSONEachRow = chtypes.JSONEachRow
-	FormatCSV         = chtypes.CSV
-	FormatTSV         = chtypes.TSV
+	FormatJSONEachRow  = chtypes.JSONEachRow
+	FormatCSV          = chtypes.CSV
+	FormatTSV          = chtypes.TSV
+	FormatCSVWithNames = chtypes.CSVWithNames
+	FormatTSVWithNames = chtypes.TSVWithNames
 )
 
 // processTZ guards the chtypes.Timezone package global across Engines.
@@ -130,9 +132,9 @@ func closeSlots(slots []*schemaSlot) {
 
 // Config is boot-tier: the registry directory is read once at process start.
 // "" means the SDK's own search path ($CHTYPES_REGISTRY, the per-user cache,
-// then the system directories) and loads nothing until a version is asked for;
-// an explicit directory is opened eagerly, so every artifact under it is
-// dlopen'd at boot (~120 MB resident each).
+// then the system directories); an explicit directory is searched first, then
+// the rest of that path. Either way a library is opened lazily, by the first
+// Bind for its line (~120 MB resident each).
 type Config struct {
 	RegistryDir string
 }
@@ -161,10 +163,16 @@ type Engine struct {
 	tables map[string]*Table
 }
 
-// NewEngine opens the registry. It fails only for a configuration error — an
-// explicit directory that is missing or holds no artifact, or an empty search
-// path when RegistryDir is "" — and returns the SDK's own message, which names
-// the directories it looked in.
+// NewEngine opens the registry, which reads manifests and opens no library. It
+// fails only when an explicit directory cannot be read or nothing on the search
+// path holds an artifact, and returns the SDK's own message, which names the
+// directories it looked in. Anything an artifact itself can be wrong about — a
+// missing line, a refused ABI revision, a truncated library — surfaces at the
+// first Bind for that line, as a global Unavailable.
+//
+// WithPreload is deliberately not used: it opens a library at construction,
+// and chtypes.Timezone must be set before that from the server's own zone,
+// which only discovery knows (see resolve).
 func NewEngine(cfg Config, logger *slog.Logger) (*Engine, error) {
 	reg, err := chtypes.NewRegistry(cfg.RegistryDir, chtypes.WithAutoFetch(false))
 	if err != nil {
@@ -234,7 +242,10 @@ type Table struct {
 	next  atomic.Uint64
 	// cols is every column the compiled schema declares, of every kind — what
 	// render tests a predicate's column against.
-	cols  map[string]struct{}
+	// cols maps every column the compiled schema declares, of every kind, to
+	// its identifier as the library quotes it — what render tests a
+	// predicate's column against, and what it writes.
+	cols  map[string]string
 	cause string // why slots is empty
 	sig   string
 	// lib and discovered are what a per-role recompile needs: the library the
@@ -305,7 +316,7 @@ func (e *Engine) Bind(serverVersion, serverTZ string, tables []*discovery.TableS
 		slots      []*schemaSlot
 		cause      string
 		wire       []string
-		cols       map[string]struct{}
+		cols       map[string]string
 		discovered []discovery.Column
 	}
 
@@ -329,11 +340,15 @@ func (e *Engine) Bind(serverVersion, serverTZ string, tables []*discovery.TableS
 		}
 		p := pending{name: ts.Name, sig: sig, discovered: ts.Columns}
 		p.slots, p.cause = compile(lib, ts)
+		if p.cause == "" {
+			p.wire = deriveWireColumns(p.slots[0].schema, wireColumns(ts))
+			if p.cols, p.cause = declaredColumns(lib, p.slots[0].schema, ts.Columns); p.cause != "" {
+				closeSlots(p.slots)
+				p.slots = nil
+			}
+		}
 		if p.cause != "" {
 			e.logger.Error("chtypes could not compile table schema", "table", ts.Name, "cause", p.cause)
-		} else {
-			p.wire = deriveWireColumns(p.slots[0].schema, wireColumns(ts))
-			p.cols = declaredColumns(p.slots[0].schema, ts.Columns)
 		}
 		fresh = append(fresh, p)
 	}
@@ -438,7 +453,7 @@ func compile(lib *chtypes.Library, ts *discovery.TableSchema) ([]*schemaSlot, st
 			Position:          c.Position,
 		})
 	}
-	ddl, err := chtypes.ReconstructDDL(cols)
+	ddl, err := lib.ReconstructDDL(cols)
 	if err != nil {
 		return nil, "cannot reconstruct column declarations: " + err.Error()
 	}
@@ -540,22 +555,32 @@ func wireColumns(ts *discovery.TableSchema) []string {
 	return out
 }
 
-// declaredColumns is every column name the compiled schema knows, of every
-// kind — the set render tests a predicate's column against. Answering "no such
-// column" here keeps a misspelled policy from costing a compile and a log line
-// per generation, and on a ROLE table it is what makes a filter over a denied
-// column fail closed instead of compiling against a column that is not there.
-func declaredColumns(schema *chtypes.LoadedSchema, fallback []discovery.Column) map[string]struct{} {
+// declaredColumns maps every column name the compiled schema knows, of every
+// kind, to its identifier as lib.QuoteIdentifier spells it (ClickHouse's own
+// backQuote, always quoted). It is the set render tests a predicate's column
+// against: answering "no such column" here keeps a misspelled policy from
+// costing a compile and a log line per generation, and on a ROLE table it is
+// what makes a filter over a denied column fail closed instead of compiling
+// against a column that is not there. Quoting once per compile keeps a C call
+// off render's per-event path. A non-empty second return is the cause.
+func declaredColumns(lib *chtypes.Library, schema *chtypes.LoadedSchema, fallback []discovery.Column) (map[string]string, string) {
+	var names []string
 	if schema != nil && len(schema.Columns) > 0 {
-		m := make(map[string]struct{}, len(schema.Columns))
 		for _, c := range schema.Columns {
-			m[c.Name] = struct{}{}
+			names = append(names, c.Name)
 		}
-		return m
+	} else {
+		for _, c := range fallback {
+			names = append(names, c.Name)
+		}
 	}
-	m := make(map[string]struct{}, len(fallback))
-	for _, c := range fallback {
-		m[c.Name] = struct{}{}
+	m := make(map[string]string, len(names))
+	for _, n := range names {
+		q, err := lib.QuoteIdentifier(n)
+		if err != nil {
+			return nil, fmt.Sprintf("cannot quote column %q: %s", n, err)
+		}
+		m[n] = q
 	}
-	return m
+	return m, ""
 }

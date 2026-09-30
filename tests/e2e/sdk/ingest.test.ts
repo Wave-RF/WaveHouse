@@ -352,7 +352,7 @@ describe("Ingest", () => {
       // `application/jsonlines`.
       const body = (await res.json()) as { error?: string };
       expect(body.error).toContain(
-        "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/tab-separated-values",
+        "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/csv; header=present, text/tab-separated-values, text/tab-separated-values; header=present",
       );
     }
   });
@@ -551,6 +551,68 @@ describe("Ingest", () => {
       );
       return r.length === 1 && r[0].page === "/tsv" && r[0].country === "GB";
     }, 10_000);
+  });
+
+  // `header=present` (RFC 4180's parameter, mirrored for TSV) selects the
+  // header formats: the first line names the columns in any order, it is not
+  // a record, and a column it omits takes its DEFAULT.
+  it("ingests CSV whose header names the columns in any order", async () => {
+    const id = testId();
+    const res = await fetch(`${WH_URL}/v1/ingest?table=${T.clicks}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}`,
+        "Content-Type": "text/csv; header=present",
+      },
+      body: `page,event_id,user_id,session_id\n/csv-names,${id},u-n,s-n\n`,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { total: number; succeeded: number };
+    expect(body.total).toBe(1);
+    expect(body.succeeded).toBe(1);
+
+    await waitForCondition(async (signal) => {
+      const r = await chQuery(
+        `SELECT page, user_id, country FROM default.${T.clicks} WHERE event_id = '${id}'`,
+        signal,
+      );
+      return (
+        r.length === 1 &&
+        r[0].page === "/csv-names" &&
+        r[0].user_id === "u-n" &&
+        r[0].country === "US"
+      );
+    }, 10_000);
+  });
+
+  it("ingests TSV with a header, and refuses an unknown header column with code 117", async () => {
+    const id = testId();
+    const auth = { Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}` };
+    const res = await fetch(`${WH_URL}/v1/ingest?table=${T.clicks}`, {
+      method: "POST",
+      headers: { ...auth, "Content-Type": "text/tab-separated-values; header=present" },
+      body: `session_id\tevent_id\tpage\tuser_id\ns-t\t${id}\t/tsv-names\tu-t\n`,
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { succeeded: number }).succeeded).toBe(1);
+    await waitForCondition(async (signal) => {
+      const r = await chQuery(
+        `SELECT page FROM default.${T.clicks} WHERE event_id = '${id}'`,
+        signal,
+      );
+      return r.length === 1 && r[0].page === "/tsv-names";
+    }, 10_000);
+
+    // A header ClickHouse refuses is a verdict on the body, not on a record.
+    const bad = await fetch(`${WH_URL}/v1/ingest?table=${T.clicks}`, {
+      method: "POST",
+      headers: { ...auth, "Content-Type": "text/csv; header=present" },
+      body: `event_id,nosuch\n${testId()},1\n`,
+    });
+    expect(bad.status).toBe(400);
+    const err = (await bad.json()) as { error?: string; code?: number };
+    expect(err.code).toBe(117);
+    expect(err.error).toContain("nosuch");
   });
 
   // CONTRACT CHANGE (AUDIT D3): an `_in` check has no single value to inject,

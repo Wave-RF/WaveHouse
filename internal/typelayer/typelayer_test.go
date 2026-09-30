@@ -2,11 +2,19 @@ package typelayer
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/wave-rf/chtypes/go/chtypes"
+
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 )
 
@@ -179,9 +187,8 @@ func TestRender_QuotesIdentifiersAndBindsEveryValue(t *testing.T) {
 		Predicate{Column: "name", Op: "=", Values: []string{"acme"}},
 		Predicate{Column: "id", Op: "in", Values: []string{"1", "7"}},
 	)
-	// Every identifier is backticked — chsql.QuoteIdent, the same rule the SQL
-	// path uses, rather than chtypes.QuoteIdentifier, which leaves reserved
-	// words like `all` bare. Every value binds as String whatever the column's
+	// Every identifier is backticked by the library's own QuoteIdentifier,
+	// which always quotes. Every value binds as String whatever the column's
 	// declared type (id is UInt8 here), and is a bound parameter, never text.
 	assert.Equal(t, "`name` = {p0:String} AND `id` IN ({p1:String}, {p2:String})", expr)
 	assert.Equal(t, map[string]string{"p0": "acme", "p1": "1", "p2": "7"}, params)
@@ -194,7 +201,8 @@ func TestRender_QuotesIdentifiersAndBindsEveryValue(t *testing.T) {
 }
 
 // TestRender_QuotesEveryIdentifier: a column whose name is a reserved word is
-// a syntax error unquoted, and chtypes.QuoteIdentifier would leave it bare.
+// a syntax error unquoted, so the always-quoting spelling is the one render
+// uses.
 func TestRender_QuotesEveryIdentifier(t *testing.T) {
 	reserved := &discovery.TableSchema{
 		Name:    "reserved",
@@ -304,4 +312,102 @@ func TestBind_HandlePoolPerTable(t *testing.T) {
 	defer tbl.Release()
 	assert.Equal(t, poolSize(), len(tbl.slots))
 	assert.NotSame(t, first, tbl.slots[0])
+}
+
+// compiledColumnNames is the column list a handle compiled to, in declaration
+// order.
+func compiledColumnNames(schema *chtypes.LoadedSchema) []string {
+	out := make([]string, 0, len(schema.Columns))
+	for _, c := range schema.Columns {
+		out = append(out, c.Name)
+	}
+	return out
+}
+
+// TestQuoteIdentifier_AgreesWithChsql: the stream (render, through the
+// library's QuoteIdentifier) and the SQL path (chsql.QuoteIdent, which has no
+// library to ask) must name the same column. They spell it byte for byte alike
+// except for five control characters, which ClickHouse's backQuote escapes and
+// chsql leaves raw; both spellings compile to the same column there, measured
+// through the library's own parser. NUL is the one real difference: the
+// library escapes it, while chsql's raw NUL cannot cross the C boundary and
+// fails to compile, which fails closed. Any other divergence fails here.
+func TestQuoteIdentifier_AgreesWithChsql(t *testing.T) {
+	eng := TestEngine(t, eventsTable())
+	lib := eng.lib
+	require.NotNil(t, lib)
+
+	compilesTo := func(spelling string) (string, error) {
+		s, err := lib.CompileDDL(spelling + " String")
+		if err != nil {
+			return "", err
+		}
+		defer s.Close()
+		require.Len(t, s.Columns, 1)
+		return s.Columns[0].Name, nil
+	}
+
+	corpus := []string{
+		"x", "a`b", `a\b`, "`", `\`, "\\`", "a\\`b", "it's", `"q"`, "", "null", "NULL", "all",
+		"select", "from", "where", "weird name", "n.a", "Ünï", "日本", "\xff\xfe", "1abc", "?", "--", "/*",
+	}
+	for c := range 256 {
+		corpus = append(corpus, "a"+string([]byte{byte(c)})+"b")
+	}
+	controlOnly := map[byte]bool{'\b': true, '\t': true, '\n': true, '\f': true, '\r': true}
+	for _, name := range corpus {
+		ours, err := lib.QuoteIdentifier(name)
+		require.NoError(t, err, "%q", name)
+		theirs := chsql.QuoteIdent(name)
+		if ours == theirs {
+			continue
+		}
+		switch {
+		case strings.ContainsRune(name, 0):
+			assert.NotContains(t, ours, "\x00", "the library escapes NUL")
+			_, err := compilesTo(theirs)
+			assert.Error(t, err, "a raw NUL cannot cross the C boundary")
+		case len(name) == 3 && controlOnly[name[1]]:
+			got, err := compilesTo(ours)
+			require.NoError(t, err, "%q", name)
+			assert.Equal(t, name, got, "%q", name)
+			got, err = compilesTo(theirs)
+			require.NoError(t, err, "%q", name)
+			assert.Equal(t, name, got, "%q", name)
+		default:
+			t.Errorf("chsql.QuoteIdent(%q) = %q but the library spells it %q", name, theirs, ours)
+		}
+	}
+}
+
+// TestNewEngine_OpensNoLibraryAtConstruction: the registry is lazy, so an
+// artifact that cannot load is not a boot failure; the first Bind for its line
+// reports the SDK's own error as a global Unavailable.
+func TestNewEngine_OpensNoLibraryAtConstruction(t *testing.T) {
+	TestEngine(t) // skips (or fails under WAVEHOUSE_TEST_REQUIRE_CHTYPES) without the real artifact
+
+	dir := t.TempDir()
+	line := filepath.Join(dir, "26.6")
+	require.NoError(t, os.MkdirAll(line, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(line, "manifest.json"),
+		[]byte(`{"library":"libchtypes.so","clickhouse_version":"26.6.8.7-stable","clickhouse_minor":"26.6"}`), 0o600))
+
+	eng, err := NewEngine(Config{RegistryDir: dir}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err, "a broken artifact is not a construction error")
+	t.Cleanup(eng.Close)
+
+	eng.Bind(TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	_, err = eng.Table("events")
+	require.Error(t, err)
+	require.True(t, IsUnavailable(err))
+	assert.Contains(t, err.Error(), line, "the SDK's message names the directory that failed")
+}
+
+// TestNewEngine_UnreadableDirectoryFailsAtConstruction: a directory somebody
+// named and that does not exist is a typo, reported at boot.
+func TestNewEngine_UnreadableDirectoryFailsAtConstruction(t *testing.T) {
+	t.Parallel()
+	_, err := NewEngine(Config{RegistryDir: filepath.Join(t.TempDir(), "nosuch")}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nosuch")
 }

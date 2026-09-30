@@ -1391,7 +1391,7 @@ func TestIngest_NDJSON_ErrorsTruncated(t *testing.T) {
 // spell the whole list out, and always need editing: api.md's body/Content-Type
 // table, architecture.md's "the four NDJSON spellings" count, and the ingest
 // entry in CHANGELOG.md.
-const wantAcceptedTypes = "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/tab-separated-values"
+const wantAcceptedTypes = "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/csv; header=present, text/tab-separated-values, text/tab-separated-values; header=present"
 
 // TestAcceptedTypesAreAllResolvable pins that the advertised list never grows
 // beyond what the resolver accepts — an entry added to acceptedContentTypes but
@@ -1472,6 +1472,24 @@ func TestIngestFormat(t *testing.T) {
 		{ct: "text/csv", want: FormatCSV},
 		{ct: "text/csv; charset=utf-8", want: FormatCSV},
 		{ct: "text/tab-separated-values", want: FormatTSV},
+		// RFC 4180 §3's header parameter is the one parameter that decides a
+		// format, and only for the positional pair. absent is the default
+		// spelled out; the value is matched case-insensitively.
+		{ct: "text/csv; header=present", want: FormatCSVWithNames},
+		{ct: "text/csv; charset=utf-8; header=present", want: FormatCSVWithNames},
+		{ct: "text/csv; header=PRESENT", want: FormatCSVWithNames},
+		{ct: "text/csv; header=absent", want: FormatCSV},
+		{ct: "text/tab-separated-values; header=present", want: FormatTSVWithNames},
+		{ct: "text/tab-separated-values; header=absent", want: FormatTSV},
+		{ct: "application/json; header=present", want: FormatJSON},
+		// A value that is neither is refused rather than guessed at, and so is a
+		// line whose parameters did not parse when it mentions a header: reading
+		// it as absent would ingest a declared header line as data.
+		{ct: "text/csv; header=yes", wantErr: true},
+		{ct: "text/csv; header=", wantErr: true},
+		{ct: "text/csv; charset; header=present", wantErr: true},
+		{ct: "text/csv; header=present; header=absent", wantErr: true},
+		{ct: "text/csv; charset", want: FormatCSV},
 		{ct: "text/plain", wantErr: true},
 		// Near misses for the positional pair, for the same reason as the JSON
 		// ones below: an exact-match lookup rewritten as a prefix test would

@@ -131,9 +131,10 @@ type ClickHouse struct {
 	// ChtypesRegistry names the chtypes artifact registry directory (see
 	// typelayer.Config.RegistryDir). Empty (the default) defers to the SDK's
 	// own search path — $CHTYPES_REGISTRY, the per-user cache, then the
-	// system dirs — and loads a line lazily; an explicit directory is opened
-	// eagerly, every artifact in it. deployments/Dockerfile therefore sets
-	// CHTYPES_REGISTRY rather than this field.
+	// system dirs; an explicit directory is searched first, then the rest of
+	// that path. Either way a library is opened lazily, on first use of its
+	// line. deployments/Dockerfile sets CHTYPES_REGISTRY rather than this
+	// field.
 	ChtypesRegistry string `yaml:"chtypes_registry" env:"WH_CHTYPES_REGISTRY"`
 }
 

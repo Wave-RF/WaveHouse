@@ -457,15 +457,17 @@ func TestTable_ConcurrentAcrossThePool(t *testing.T) {
 					row.Close()
 				}
 
-				batch, err := tbl.Ingest(FormatJSONEachRow,
-					[]byte(`{"id":7,"tenant":"acme","ts":"2026-01-15 10:30:00","amt":"12.50","big":-5,"ratio":0.1,"tags":["a"]}`+"\n"))
+				record := []byte(`{"id":7,"tenant":"acme","ts":"2026-01-15 10:30:00","amt":"12.50","big":-5,"ratio":0.1,"tags":["a"]}` + "\n")
+				batch, err := tbl.Ingest(FormatJSONEachRow, record)
 				assert.NoError(t, err)
 				assert.Len(t, batch.Rows, 1)
 
-				verdicts, _, err := tbl.CheckVerdicts([]byte(sampleRow+"\n"),
-					[]Predicate{{Column: "tenant", Op: "=", Values: []string{"acme"}}})
-				assert.NoError(t, err)
-				assert.Equal(t, []bool{true}, verdicts)
+				checked, err := tbl.Ingest(FormatJSONEachRow, record,
+					Predicate{Column: "tenant", Op: "=", Values: []string{"acme"}})
+				if assert.NoError(t, err) && assert.Len(t, checked.Rows, 1) {
+					assert.Empty(t, checked.Rows[0].CheckReason)
+					assert.NotNil(t, checked.Rows[0].Line)
+				}
 
 				tbl.Release()
 			}

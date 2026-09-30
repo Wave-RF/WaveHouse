@@ -86,7 +86,8 @@ func (s RoleShape) key(generation uint64) string {
 // simply absent from the compiled DDL, so a record naming it is refused
 // per-row with ClickHouse's own code 117 "Unknown field found while parsing
 // JSONEachRow format: x"; a Defaults column is declared DEFAULT '<literal>',
-// so an absent value is filled and a supplied one still wins.
+// quoted by the library's own QuoteLiteral, so an absent value is filled and a
+// supplied one still wins.
 //
 // The identity shape (no column restriction, no defaults) returns the base
 // table itself — no second handle, no cache entry.
@@ -157,13 +158,13 @@ func (t *Table) roleTable(shape RoleShape) (*Table, *Table, error) {
 }
 
 // compileRole builds and compiles the role's declaration list. It returns
-// (nil, cause) for every refusal, including the defensive column check.
+// (nil, cause) for every refusal.
 func (t *Table) compileRole(shape RoleShape) (*Table, string) {
-	cols, expected, wire, err := roleColumns(t.discovered, shape)
+	cols, wire, err := roleColumns(t.lib, t.discovered, shape)
 	if err != nil {
 		return nil, err.Error()
 	}
-	ddl, rerr := chtypes.ReconstructDDL(cols)
+	ddl, rerr := t.lib.ReconstructDDL(cols)
 	if rerr != nil {
 		return nil, "cannot reconstruct role column declarations: " + rerr.Error()
 	}
@@ -171,20 +172,10 @@ func (t *Table) compileRole(shape RoleShape) (*Table, string) {
 	if cause != "" {
 		return nil, cause
 	}
-
-	// Defensive: the Defaults values are the one thing in this DDL that is
-	// TEXT rather than structure, so verify the compiler saw the column set we
-	// meant. An escaping mistake that closed the literal early would show up
-	// here as an extra or missing column, and must never be able to reshape
-	// the table silently.
-	got := compiledColumnNames(slots[0].schema)
-	if got == nil {
+	declared, cause := declaredColumns(t.lib, slots[0].schema, nil)
+	if cause != "" {
 		closeSlots(slots)
-		return nil, "this chtypes artifact does not report compiled columns, so a per-role schema cannot be verified"
-	}
-	if !slices.Equal(got, expected) {
-		closeSlots(slots)
-		return nil, fmt.Sprintf("per-role schema compiled to columns %v, expected %v", got, expected)
+		return nil, cause
 	}
 
 	return &Table{
@@ -193,16 +184,17 @@ func (t *Table) compileRole(shape RoleShape) (*Table, string) {
 		WireColumns: deriveWireColumns(slots[0].schema, wire),
 		log:         t.log,
 		slots:       slots,
-		cols:        declaredColumns(slots[0].schema, nil),
+		cols:        declared,
 		lib:         t.lib,
 	}, ""
 }
 
 // roleColumns projects the table's discovered columns onto a shape. It returns
-// the declaration list, the full column name list the compile must produce,
-// and the wire column names (the declaration list minus the three kinds a
-// positional INSERT never carries).
-func roleColumns(src []discovery.Column, shape RoleShape) ([]chtypes.DiscoveredColumn, []string, []string, error) {
+// the declaration list and the wire column names (the declaration list minus
+// the three kinds a positional INSERT never carries). An injected value is
+// quoted by lib.QuoteLiteral, ClickHouse's own quoteString, so it reaches the
+// compiler as one string literal whatever bytes it holds.
+func roleColumns(lib *chtypes.Library, src []discovery.Column, shape RoleShape) ([]chtypes.DiscoveredColumn, []string, error) {
 	var allowed map[string]struct{}
 	if shape.Columns != nil {
 		allowed = make(map[string]struct{}, len(shape.Columns))
@@ -212,7 +204,6 @@ func roleColumns(src []discovery.Column, shape RoleShape) ([]chtypes.DiscoveredC
 	}
 
 	cols := make([]chtypes.DiscoveredColumn, 0, len(src))
-	expected := make([]string, 0, len(src))
 	wire := make([]string, 0, len(src))
 	kept := make(map[string]discovery.Column, len(src))
 	for _, c := range src {
@@ -231,13 +222,16 @@ func roleColumns(src []discovery.Column, shape RoleShape) ([]chtypes.DiscoveredC
 		}
 		if v, inject := shape.Defaults[c.Name]; inject {
 			if computed {
-				return nil, nil, nil, fmt.Errorf(
+				return nil, nil, fmt.Errorf(
 					"cannot inject a default into column %q: it is %s", c.Name, c.DefaultKind)
 			}
-			dc.DefaultKind, dc.DefaultExpression = "DEFAULT", quoteLiteral(v)
+			lit, err := lib.QuoteLiteral(v)
+			if err != nil {
+				return nil, nil, fmt.Errorf("cannot quote the default for column %q: %w", c.Name, err)
+			}
+			dc.DefaultKind, dc.DefaultExpression = "DEFAULT", lit
 		}
 		cols = append(cols, dc)
-		expected = append(expected, c.Name)
 		if !computed {
 			wire = append(wire, c.Name)
 		}
@@ -249,49 +243,11 @@ func roleColumns(src []discovery.Column, shape RoleShape) ([]chtypes.DiscoveredC
 	// the caller sent". Fail loudly instead.
 	for _, name := range slices.Sorted(maps.Keys(shape.Defaults)) {
 		if _, ok := kept[name]; !ok {
-			return nil, nil, nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"cannot inject a default into column %q: the role's schema does not carry it", name)
 		}
 	}
-	return cols, expected, wire, nil
-}
-
-// compiledColumnNames is the column list the handle actually compiled to, in
-// declaration order. nil when the artifact reports no columns at all.
-func compiledColumnNames(schema *chtypes.LoadedSchema) []string {
-	if schema == nil || len(schema.Columns) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(schema.Columns))
-	for _, c := range schema.Columns {
-		out = append(out, c.Name)
-	}
-	return out
-}
-
-// literalEscaper escapes a ClickHouse string literal exactly as ClickHouse's
-// own quoteString() does: a backslash becomes \\ and a single quote becomes \'.
-// Both replacements run in one left-to-right pass, so neither re-processes the
-// other's output.
-var literalEscaper = strings.NewReplacer(`\`, `\\`, `'`, `\'`)
-
-// quoteLiteral renders s as a single-quoted ClickHouse string literal.
-//
-// This is the ONE place in WaveHouse that turns a value into SQL text, and it
-// exists only because the chtypes SDK ships QuoteIdentifier but no literal
-// quoter, so a per-role DEFAULT clause has to be spelled by hand — precisely
-// the thing the SDK's own docs tell callers never to write. It is retired the
-// day chtypes FR I‑2 (per-call column value overrides / injected literals,
-// AUDIT §I‑2) lands: the value then goes to the library as a value and this
-// function, its test corpus and the defensive column check in compileRole all
-// go with it.
-//
-// The backstop, if this were ever wrong: a literal the compiler cannot parse
-// is a compile refusal (ClickHouse code 6) and compileRole re-reads the
-// compiled column list, so a botched escape fails closed rather than reshaping
-// the table.
-func quoteLiteral(s string) string {
-	return "'" + literalEscaper.Replace(s) + "'"
+	return cols, wire, nil
 }
 
 type roleEntry struct {

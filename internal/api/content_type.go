@@ -57,11 +57,19 @@ const (
 	// FormatCSV is header-less CSV, positional in the table's declaration
 	// order (see wireColumns): every wire column, in that order. A header line
 	// is not a header — it is one record that fails to parse, with ClickHouse's
-	// code 27.
+	// code 27; FormatCSVWithNames is how a header is declared.
 	FormatCSV
 	// FormatTSV is FormatCSV's tab-separated twin, with the same positional
 	// contract.
 	FormatTSV
+	// FormatCSVWithNames is CSV whose first line names the columns, in any
+	// order — `text/csv; header=present`, RFC 4180 §3's parameter. The header
+	// is not a record; a column it omits takes its DEFAULT, and a name the
+	// table (or the role's projection of it) lacks refuses the request with
+	// ClickHouse's code 117.
+	FormatCSVWithNames
+	// FormatTSVWithNames is FormatCSVWithNames' tab-separated twin.
+	FormatTSVWithNames
 )
 
 // String renders a format for error messages and logs.
@@ -75,6 +83,10 @@ func (f IngestFormat) String() string {
 		return "csv"
 	case FormatTSV:
 		return "tsv"
+	case FormatCSVWithNames:
+		return "csvwithnames"
+	case FormatTSVWithNames:
+		return "tsvwithnames"
 	default:
 		return "unknown"
 	}
@@ -89,6 +101,10 @@ func (f IngestFormat) wire() typelayer.Format {
 		return typelayer.FormatCSV
 	case FormatTSV:
 		return typelayer.FormatTSV
+	case FormatCSVWithNames:
+		return typelayer.FormatCSVWithNames
+	case FormatTSVWithNames:
+		return typelayer.FormatTSVWithNames
 	case FormatJSON, FormatNDJSON:
 		return typelayer.FormatJSONEachRow
 	default:
@@ -112,17 +128,29 @@ func (f IngestFormat) alwaysBatch() bool { return f != FormatJSON }
 // architecture.md all failed to name — and no test can close that direction by
 // enumeration, because the complement is unbounded. One table closes it by
 // construction.
+//
+// header is the `header` parameter an entry requires: "" matches a declaration
+// without one, or with header=absent; "present" matches only that. It is the
+// one parameter that decides a format, and only for the two media types that
+// list a "present" entry. RFC 4180 §3 defines it for text/csv. IANA's
+// text/tab-separated-values registration defines no parameters and makes the
+// first line a header of field names; bare TSV nevertheless stays header-less
+// here, as it always has been (reading an existing producer's first record as
+// a header would drop it), and TSV takes the same `header=present` opt-in.
 var acceptedContentTypes = []struct {
 	mediaType string
+	header    string
 	format    IngestFormat
 }{
-	{"application/json", FormatJSON},
-	{"application/x-ndjson", FormatNDJSON},
-	{"application/ndjson", FormatNDJSON},
-	{"application/jsonl", FormatNDJSON},
-	{"application/jsonlines", FormatNDJSON},
-	{"text/csv", FormatCSV},
-	{"text/tab-separated-values", FormatTSV},
+	{"application/json", "", FormatJSON},
+	{"application/x-ndjson", "", FormatNDJSON},
+	{"application/ndjson", "", FormatNDJSON},
+	{"application/jsonl", "", FormatNDJSON},
+	{"application/jsonlines", "", FormatNDJSON},
+	{"text/csv", "", FormatCSV},
+	{"text/csv", "present", FormatCSVWithNames},
+	{"text/tab-separated-values", "", FormatTSV},
+	{"text/tab-separated-values", "present", FormatTSVWithNames},
 }
 
 // supportedContentTypes is what the 415 body lists and the docs quote, derived
@@ -131,6 +159,9 @@ var supportedContentTypes = func() []string {
 	out := make([]string, len(acceptedContentTypes))
 	for i, a := range acceptedContentTypes {
 		out[i] = a.mediaType
+		if a.header != "" {
+			out[i] += "; header=" + a.header
+		}
 	}
 	return out
 }()
@@ -160,8 +191,10 @@ func resolveContentType(values []string) (IngestFormat, int, error) {
 	return f, -1, err
 }
 
-// ingestFormatOne resolves ONE header line, parsed per RFC 9110 §8.3. Only the
-// media type decides the format; no malformed parameter costs the request.
+// ingestFormatOne resolves ONE header line, parsed per RFC 9110 §8.3. The media
+// type decides the format, plus the `header` parameter for the two positional
+// types (see acceptedContentTypes); no other malformed parameter costs the
+// request.
 //
 // That rule needs two steps, because Go splits parse failures in a way the rule
 // does not. ErrInvalidMediaParameter leaves the media type parsed and returned,
@@ -176,8 +209,13 @@ func resolveContentType(values []string) (IngestFormat, int, error) {
 // member there reads an NDJSON body as one object, dropping every record past
 // it behind a 200. The error cannot distinguish that from a comma inside data,
 // so such a line is refused rather than guessed at (#563).
+//
+// The same caution applies to `header`: on a line whose parameters did not
+// parse, a header parameter cannot be read, and guessing "absent" would ingest
+// a declared header line as data. Such a line is refused when it mentions one;
+// a header value other than present/absent is refused too.
 func ingestFormatOne(v string) (IngestFormat, error) {
-	mediaType, _, err := mime.ParseMediaType(v)
+	mediaType, params, err := mime.ParseMediaType(v)
 	if err != nil {
 		if strings.ContainsRune(v, ',') {
 			return FormatJSON, errUnsupportedContentType
@@ -190,12 +228,36 @@ func ingestFormatOne(v string) (IngestFormat, error) {
 			mediaType = base
 		}
 	}
+	header := ""
+	if headerDecides(mediaType) {
+		if err != nil && strings.Contains(strings.ToLower(v), "header") {
+			return FormatJSON, errUnsupportedContentType
+		}
+		switch strings.ToLower(params["header"]) {
+		case "", "absent":
+		case "present":
+			header = "present"
+		default:
+			return FormatJSON, errUnsupportedContentType
+		}
+	}
 	for _, a := range acceptedContentTypes {
-		if a.mediaType == mediaType {
+		if a.mediaType == mediaType && a.header == header {
 			return a.format, nil
 		}
 	}
 	return FormatJSON, errUnsupportedContentType
+}
+
+// headerDecides reports whether the `header` parameter selects the format for
+// this media type — true only for a type with a header=present entry.
+func headerDecides(mediaType string) bool {
+	for _, a := range acceptedContentTypes {
+		if a.mediaType == mediaType && a.header != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // mediaTypePrefix is everything before the first ";" — the media type without

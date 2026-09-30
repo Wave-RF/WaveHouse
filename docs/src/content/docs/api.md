@@ -191,12 +191,14 @@ Validates a body of records against the ClickHouse schema for `{table}` and publ
 | `application/x-ndjson`, `application/ndjson`, `application/jsonl`, `application/jsonlines` | one object per line; always a batch |
 | `text/csv` | header-less, positional — see [Positional formats](#positional-formats-csv--tsv) |
 | `text/tab-separated-values` | header-less, positional |
+| `text/csv; header=present` | a header line naming the columns, in any order — see [Header formats](#header-formats-headerpresent) |
+| `text/tab-separated-values; header=present` | the same, tab-separated |
 | anything else, or none | `415`, listing the accepted types |
 
 The two JSON families are one format to ClickHouse; the declaration decides only how the body frames its records. The single thing the body still chooses is *arity within `application/json`*: the first non-whitespace byte picks an array (`[`) or a single object. Under a single-object body only the first object is read — concatenated objects after it are ignored, a `200` for one record; declare NDJSON for anything line-framed ([#561](https://github.com/Wave-RF/WaveHouse/issues/561)). The reverse now works: a JSON array declared `application/x-ndjson` ingests every element.
 
 :::note[What counts as a valid declaration]
-The header is parsed with Go's `mime.ParseMediaType` (RFC 9110 §8.3) and only the **media type** decides the format, so no malformed *parameter* costs the request — `application/json; charset`, `application/json;;`, a value left mid-quote, a name repeated with different values all read as `application/json`. Two things are refused instead. A malformed parameter on a line that **also contains a comma** is a `415`, because the comma may be a second declaration joined on and the error cannot tell that from a comma inside data ([#563](https://github.com/Wave-RF/WaveHouse/issues/563)) — so `application/json; profile="a,b"` is fine and `application/json; profile="a,b"; charset` is not. And `Content-Type` is a **singleton** field (§5.3 forbids repeating it), so repeated header *lines* are accepted only when they agree, while a comma-joined value is refused outright: §8.3 warns that picking a member of the resulting pseudo-list is itself an interoperability and security hazard.
+The header is parsed with Go's `mime.ParseMediaType` (RFC 9110 §8.3) and the **media type** decides the format, so no malformed *parameter* costs the request — `application/json; charset`, `application/json;;`, a value left mid-quote, a name repeated with different values all read as `application/json`. The one parameter that also decides a format is `header`, on `text/csv` and `text/tab-separated-values` only: `present` selects the header format, `absent` or no `header` at all the positional one, and any other value is a `415`. A line whose parameters did not parse and that mentions `header` is a `415` as well, because reading it as `absent` would ingest a declared header line as data. Two more things are refused. A malformed parameter on a line that **also contains a comma** is a `415`, because the comma may be a second declaration joined on and the error cannot tell that from a comma inside data ([#563](https://github.com/Wave-RF/WaveHouse/issues/563)) — so `application/json; profile="a,b"` is fine and `application/json; profile="a,b"; charset` is not. And `Content-Type` is a **singleton** field (§5.3 forbids repeating it), so repeated header *lines* are accepted only when they agree, while a comma-joined value is refused outright: §8.3 warns that picking a member of the resulting pseudo-list is itself an interoperability and security hazard.
 
 The 415 body quotes what you declared, bounded: at most **four distinct** header lines, each capped at 128 bytes and marked `…(truncated)` when cut, then `"…and N more"` counting every line not quoted, duplicates included. When declarations conflict, the one that actually disagreed is always quoted.
 :::
@@ -213,15 +215,16 @@ The ingest pipeline accepts only inserts. Every other mutation — `DELETE`, `UP
 - An omitted column, or an explicit `null` on one (WaveHouse pins `input_format_null_as_default`), takes its `DEFAULT` expression — evaluated by ClickHouse, including a volatile one like `now()` — or the type's implicit zero where none is declared, exactly as an `INSERT` naming fewer columns does.
 - A coercion ClickHouse would make it makes here (a numeric string into an `Int*`, `"true"` into a `Bool`, an out-of-range integer wrapping); anything it would refuse fails synchronously in the ingest response with its real code, rather than surfacing later in the DLQ. `Nullable()` and `LowCardinality()` wrappers are transparent.
 
-WaveHouse decides only policy: whether the role may insert at all, and whether the record satisfies the role's [`check` clauses](/access-control#insert-checks) — evaluated by the same compiled-filter engine as row-level security, against the row ClickHouse produced, so a check sees stored values rather than the payload's spelling. A record chtypes cannot evaluate at all — as opposed to accepting or rejecting it — is **declined** (`422`), which is not a data verdict.
+WaveHouse decides only policy: whether the role may insert at all, and whether the record satisfies the role's [`check` clauses](/access-control#insert-checks) — evaluated by the same compiled-filter engine as row-level security, in the same parse that validates the record and against the row ClickHouse produced, so a check sees stored values rather than the payload's spelling. A record ClickHouse refuses reports that refusal, never a check result. A record chtypes cannot evaluate at all — as opposed to accepting or rejecting it — is **declined** (`422`), which is not a data verdict.
 
 **Error responses.** Rows marked **per-record** are reported in `results` on a batch body (the request itself stays `200`) and become the response status on a single-object body; every other row fails the whole request.
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 400 | `{"code":<N>,"error":"<ClickHouse message>"}` | **Per-record.** ClickHouse's parser refused the record; `code` and message are its own. `117` is an unknown field — which now includes a column the role may not write, and any `MATERIALIZED`/`ALIAS`/`EPHEMERAL` column; `27`/`26` are unparseable input; `6` out of range |
+| 400 | `{"code":117,"error":"Unknown field found in format header: 'x' at position 1 …"}` | A `header=present` body whose header names a column the table — or the role's writable set — does not have, or names one twice. ClickHouse refuses the body before reading any record, so the whole request fails and nothing is published |
 | 400 | `{"error":"invalid request body"}` | The body could not be read at all — a malformed transfer encoding, or an upload cut off *in transit* |
-| 400 | `{"error":"empty body"}` (declared variants: `empty ndjson body`, `empty csv body`, `empty tsv body`) | The body holds no records |
+| 400 | `{"error":"empty body"}` (declared variants: `empty ndjson body`, `empty csv body`, `empty tsv body`, `empty csvwithnames body`, `empty tsvwithnames body`) | The body holds no bytes. A `header=present` body holding only its header line is a valid record-less batch (`200`, `total: 0`) |
 | 400 | `{"error":"invalid json: unterminated json array"}` | A body declared `application/json` opening with `[` whose brackets do not balance — truncated, or structurally broken. It cannot be salvaged per record, so the whole request fails |
 | 400 | `{"error":"missing dedupe id field \"event_id\""}` | **Per-record.** Only with `dedupe.require_id: true`, when the row carries no value for the configured `id_field`. With `require_id: false` (the default) the row is published un-deduped instead. Either way it is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total` |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason rather than silently falling back to `default_role`) |
@@ -230,7 +233,7 @@ WaveHouse decides only policy: whether the role may insert at all, and whether t
 | 403 | `{"error":"policy check references column \"x\", which table \"t\" does not have"}` (also `… which is materialized and cannot be inserted`, the same for `alias`, and `… which is ephemeral and is never stored`) | **Per-record.** A **policy misconfiguration**, not a bad request: the role's `check` names a column the table lacks, one ClickHouse computes, or an `EPHEMERAL` one. None can be enforced, so the check would have passed silently while enforcing nothing. It fires on every insert by that role until the policy or the table is corrected, and names every offending column. `wavehouse validate` cannot catch it — it never sees the ClickHouse schema |
 | 404 | `{"error":"unknown table: ..."}` | Table not found in the discovered schema |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
-| 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/tab-separated-values"}` (declared variant: `Content-Type "text/plain": ingest requires one of …`; conflicting variant: `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of …`) | No `Content-Type`, an unsupported or unparseable one, a comma-bearing value that does not parse as a single media type, or repeated lines that disagree. Checked before the body is read |
+| 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/csv; header=present, text/tab-separated-values, text/tab-separated-values; header=present"}` (declared variant: `Content-Type "text/plain": ingest requires one of …`; conflicting variant: `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of …`) | No `Content-Type`, an unsupported or unparseable one, a `header` value other than `present`/`absent`, a comma-bearing value that does not parse as a single media type, or repeated lines that disagree. Checked before the body is read |
 | 422 | `{"error":"validation engine declined: <message>"}` | **Per-record.** chtypes could not evaluate the record at all — the artifact declined the shape, rather than the data being wrong. A `check` clause that could not be evaluated lands here too (`validation engine declined: the insert check for column "x" could not be evaluated`) |
 | 500 | `{"error":"dedupe failed"}` / `{"error":"publish failed"}` | Deduplication backend or message-queue error |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Carries `Retry-After: 30` |
@@ -259,16 +262,38 @@ WaveHouse rewrites timestamps in neither direction. **Inbound**, any spelling Cl
 | --- | --- |
 | every field, in order | accepted |
 | an empty field (CSV) or `\N` (TSV) | that column takes its `DEFAULT` |
-| too few fields | rejected, code **27** — `Cannot parse input: expected end of row after 4 values, found 2` |
-| too many fields | rejected, code **117** |
-| a header line | **not a header** — one record that fails to parse, code 27; the data rows after it still parse |
+| too few fields | rejected, code **27** — ClickHouse's own message, e.g. `Cannot parse input: expected ',' before: …` |
+| too many fields | rejected, code **117** — `Expected end of line` |
+| a header line | **not a header**, even one naming every column — read as a data row, so it fails to parse (code 27) wherever a column cannot read its own name; the data rows after it still parse |
 
-An empty **TSV** field is the empty string, not a default: `\N` is TSV's spelling for "take the default", and a `DateTime64` cannot read `""`. There is no `CSVWithNames`/`TSVWithNames` — a positional producer cannot self-describe, so a column-order change silently re-assigns values. Pin the producer to the schema and re-check it after any `ALTER`.
+The messages are ClickHouse's own and differ between ClickHouse lines; branch on the `code`. An empty **TSV** field is the empty string, not a default: `\N` is TSV's spelling for "take the default", and a `DateTime64` cannot read `""`.
+
+A real ClickHouse server would detect a first line that names the columns and skip it as a header (`input_format_csv_detect_header` / `input_format_tsv_detect_header`, on by default). WaveHouse switches that detection off for these two types: a guess can eat a data row that happens to spell the column names, and a positional producer declares no header. A positional producer cannot self-describe either, so a column-order change silently re-assigns values — pin it to the schema and re-check it after any `ALTER`, or send a header with `header=present`.
 
 ```bash
 curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: text/csv" \
   --data-binary $'"/home","signup",42.5,\n"/about","nav",3,\n'
+# → {"total":2,"succeeded":2,"failed":0,"duplicates":0,"results":[{"index":1,"ok":true},{"index":2,"ok":true}]}
+```
+
+#### Header formats (`header=present`)
+
+`text/csv; header=present` and `text/tab-separated-values; header=present` open with a header line naming the columns, and the fields are addressed by it rather than by position. `header` is [RFC 4180](https://www.rfc-editor.org/rfc/rfc4180#section-3)'s parameter for `text/csv`. IANA's `text/tab-separated-values` registration defines no parameters and makes the first line a header of field names, but a bare `text/tab-separated-values` stays header-less here, as it always has been — reading an existing producer's first record as a header would drop it — and takes the same `header=present` opt-in.
+
+| Body | Outcome |
+| --- | --- |
+| a header naming the columns, in any order | the header is **not a record**: `total` and every `index` count data lines only |
+| a column the header omits | takes its `DEFAULT`, exactly as an omitted JSON field does — including a check clause's injected value |
+| a header name in a different case | matched case-insensitively, as ClickHouse does from 26.5 |
+| a header naming a column the table, or the role's writable set, lacks — or a name given twice | the whole request is a `400` with code **117**; nothing is published |
+| a bad data row | rejected per record with its code; the rows around it still ingest |
+| only the header line | a valid record-less batch: `200`, `total: 0` |
+
+```bash
+curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
+  -H "Content-Type: text/csv; header=present" \
+  --data-binary $'button,page\nsignup,/home\nnav,/about\n'
 # → {"total":2,"succeeded":2,"failed":0,"duplicates":0,"results":[{"index":1,"ok":true},{"index":2,"ok":true}]}
 ```
 
