@@ -789,11 +789,35 @@ func TestClaims_DifferingExtrasLeaveConfiguredUnitsAlone(t *testing.T) {
 		}
 		return true
 	}
-	require.Eventually(t, oneEach, 5*time.Second, 10*time.Millisecond, "%v", f.owners())
-	settled := len(f.eventLog())
+	// Settled once every process has joined and holds a share, not at the
+	// first moment each unit has one owner while members still arrive.
+	settledSplit := func() bool {
+		if !oneEach() {
+			return false
+		}
+		holders := map[string]bool{}
+		for _, u := range f.units {
+			holders[f.owners()[u][0]] = true
+		}
+		return len(holders) == len(procs)
+	}
+	require.Eventually(t, settledSplit, 5*time.Second, 10*time.Millisecond, "%v", f.owners())
+	before := f.eventLog()
 	time.Sleep(300 * time.Millisecond) // several ticks
 	assert.True(t, oneEach(), "%v", f.owners())
-	for _, e := range f.eventLog()[settled:] {
+	// A handover's release follows its stop once the rows settle, so one
+	// stopped before settling may be released after.
+	stopped := map[string]bool{}
+	for _, e := range before {
+		if proc, unit, ok := strings.Cut(e, " stop "); ok {
+			stopped[proc+" release "+unit] = true
+		}
+	}
+	for _, e := range f.eventLog()[len(before):] {
+		if stopped[e] {
+			delete(stopped, e)
+			continue
+		}
 		assert.NotContains(t, e, " S/u-", "a configured unit moved once settled: %s", e)
 	}
 	noFailure(t, procs...)
