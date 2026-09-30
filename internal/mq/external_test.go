@@ -205,7 +205,7 @@ func TestExternalNATS_PublishesWithoutSyncAlways(t *testing.T) {
 	require.NoError(t, e.Publish(t.Context(), topic, []byte("x")))
 	assert.Equal(t, uint64(1), f.streamMsgs(t, stream))
 
-	findings, err := verifyNATSTopology(t.Context(), e.js, e.topo)
+	findings, err := verifyNATSTopology(t.Context(), e.js, e.topo, e.perms)
 	require.NoError(t, err)
 	for _, got := range findings {
 		assert.Equal(t, FindingRecommended, got.Severity, "unexpected finding %v", got)
@@ -603,7 +603,7 @@ func TestExternalNATS_DuplicateWindowCoversEveryRetry(t *testing.T) {
 		tp.stream(t, shippedPartition(i)).Duplicates = 2 * topo.PublishTimeout
 	}
 	f.apply(t, tp)
-	findings, err := verifyNATSTopology(t.Context(), f.connect(t, "wavehouse"), topo)
+	findings, err := verifyNATSTopology(t.Context(), f.connect(t, "wavehouse"), topo, nil)
 	require.NoError(t, err)
 	n := 0
 	for _, fd := range findings {
@@ -728,7 +728,7 @@ func TestExternalNATS_LoweringNDrainsTheRemovedPartition(t *testing.T) { //nolin
 	e := f.broker(t, func(c *NATSConfig) { c.Topology.Partitions, c.Topology.Shards = 1, 2 })
 	_, extra := e.IngestUnits()
 	assert.Equal(t, []string{removed + "/wh-ingest-0", removed + "/wh-ingest-1"}, extra)
-	findings, err := verifyNATSTopology(t.Context(), e.js, e.topo)
+	findings, err := verifyNATSTopology(t.Context(), e.js, e.topo, e.perms)
 	require.NoError(t, err)
 	assert.True(t, slices.ContainsFunc(findings, func(got Finding) bool {
 		return got.Severity == FindingRecommended && got.Object == "consumer "+unit && strings.Contains(got.Problem, "drain its 5 rows")

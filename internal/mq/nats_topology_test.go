@@ -44,12 +44,12 @@ func TestVerifyNATSTopology_ShippedManifestsPass(t *testing.T) {
 	f := newNATSFixture(t)
 	f.apply(t, shippedTopology(t))
 	js := f.connect(t, "wavehouse")
-	findings, err := verifyNATSTopology(t.Context(), js, shippedSpec)
+	findings, err := verifyNATSTopology(t.Context(), js, shippedSpec, nil)
 	require.NoError(t, err)
 	assert.True(t, replicaWarnings(findings), "findings: %v", findings)
 
 	// With the lease bucket checked too: one more replica warning, its own.
-	findings, err = verifyNATSTopology(t.Context(), js, coordSpec)
+	findings, err = verifyNATSTopology(t.Context(), js, coordSpec, nil)
 	require.NoError(t, err)
 	require.Len(t, findings, shippedSpec.Partitions+3, "findings: %v", findings)
 	last := findings[len(findings)-1]
@@ -228,7 +228,7 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 				tc.mutate(t, tp)
 			}
 			require.NoError(t, f.create(t.Context(), tp))
-			findings, err := verifyNATSTopology(t.Context(), js, tc.spec)
+			findings, err := verifyNATSTopology(t.Context(), js, tc.spec, nil)
 			require.NoError(t, err)
 			found := false
 			for _, got := range findings {
@@ -302,7 +302,7 @@ func TestAwaitNATSTopology_WaitsForTheOperator(t *testing.T) {
 		created <- f.create(t.Context(), tp)
 	}()
 	start := time.Now()
-	findings, err := awaitNATSTopology(t.Context(), js, shippedSpec, 20*time.Second)
+	findings, err := awaitNATSTopology(t.Context(), js, shippedSpec, nil, 20*time.Second)
 	require.NoError(t, <-created)
 	require.NoError(t, err)
 	assert.True(t, replicaWarnings(findings), "findings: %v", findings)
@@ -319,7 +319,7 @@ func TestAwaitNATSTopology_ListsEveryFinding(t *testing.T) {
 	delete(tp.Consumers, "WH_INGEST_2")
 	f.apply(t, tp)
 
-	_, err := awaitNATSTopology(t.Context(), f.connect(t, "wavehouse"), shippedSpec, 300*time.Millisecond)
+	_, err := awaitNATSTopology(t.Context(), f.connect(t, "wavehouse"), shippedSpec, nil, 300*time.Millisecond)
 	require.ErrorIs(t, err, ErrTopology)
 	var terr *TopologyError
 	require.True(t, errors.As(err, &terr))
@@ -348,7 +348,7 @@ func TestAwaitNATSTopology_ContextEnds(t *testing.T) {
 	js := f.connect(t, "wavehouse")
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
-	_, err := awaitNATSTopology(ctx, js, shippedSpec, time.Minute)
+	_, err := awaitNATSTopology(ctx, js, shippedSpec, nil, time.Minute)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
@@ -380,9 +380,9 @@ func TestVerifyNATSTopology_RefusesAnImpossibleSpec(t *testing.T) {
 	t.Parallel()
 	f := newNATSFixture(t)
 	js := f.connect(t, "wavehouse")
-	_, err := verifyNATSTopology(t.Context(), js, NATSTopology{Prefix: "Bad.Prefix"})
+	_, err := verifyNATSTopology(t.Context(), js, NATSTopology{Prefix: "Bad.Prefix"}, nil)
 	require.Error(t, err)
-	_, err = verifyNATSTopology(t.Context(), js, NATSTopology{Partitions: -1})
+	_, err = verifyNATSTopology(t.Context(), js, NATSTopology{Partitions: -1}, nil)
 	require.Error(t, err)
 }
 
@@ -407,7 +407,7 @@ func TestNATSPermissions_MatchShippedValues(t *testing.T) {
 		} `yaml:"config"`
 	}
 	require.NoError(t, yaml.Unmarshal(raw, &values))
-	want := natsPermissions(NATSTopology{Shards: 8})
+	want := natsPermissions(NATSTopology{Shards: 8}, "")
 	found := false
 	for _, acc := range values.Config.Merge.Accounts {
 		for _, u := range acc.Users {
@@ -437,7 +437,7 @@ func TestWriteNATSManifests_RoundTrip(t *testing.T) {
 	f := newNATSFixture(t)
 	f.apply(t, loadNATSManifests(t, path))
 	spec.CoordBucket = DefaultNATSCoordBucket(spec.Prefix)
-	findings, err := verifyNATSTopology(t.Context(), f.admin, spec)
+	findings, err := verifyNATSTopology(t.Context(), f.admin, spec, nil)
 	require.NoError(t, err)
 	for _, got := range findings {
 		assert.Equal(t, "num_replicas", got.Field, "unexpected finding %v", got)

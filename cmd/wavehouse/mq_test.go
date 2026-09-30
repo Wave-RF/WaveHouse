@@ -11,6 +11,7 @@ import (
 
 // The shipped manifests are the generator's output for four partitions of eight shards.
 // Regenerate with: go run ./cmd/wavehouse mq manifests --partitions 4 --shards 8 > deployments/nats/jetstream.yaml
+// (the file store defaults to the shipped values' 100Gi PVC).
 func TestRunMQManifests_MatchesShipped(t *testing.T) {
 	want, err := os.ReadFile("../../deployments/nats/jetstream.yaml")
 	require.NoError(t, err)
@@ -36,6 +37,15 @@ func TestRunMQ_ExitCodes(t *testing.T) {
 		"bad coord bucket":  {[]string{"manifests", "--coord-bucket", "a.b"}, 1},
 		"negative lease":    {[]string{"manifests", "--dedupe-lease", "-1s"}, 2},
 		"defaults generate": {[]string{"manifests"}, 0},
+		"bad file store":    {[]string{"manifests", "--file-store", "100GB"}, 2},
+		"zero file store":   {[]string{"manifests", "--file-store", "0"}, 2},
+		"bad partition cap": {[]string{"manifests", "--partition-max-bytes", "lots"}, 2},
+		"over the store":    {[]string{"manifests", "--partitions", "6"}, 1},
+		"resized to fit":    {[]string{"manifests", "--partitions", "6", "--partition-max-bytes", "10Gi"}, 0},
+		"zero timeout":      {[]string{"manifests", "--publish-timeout", "0s"}, 2},
+		"bad consumer":      {[]string{"manifests", "--ingest-consumer", "a.b"}, 1},
+		"bad history":       {[]string{"manifests", "--history-stream", "A B"}, 1},
+		"bad js domain":     {[]string{"permissions", "--js-domain", "a.b"}, 1},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -75,4 +85,32 @@ func TestRunMQPermissions(t *testing.T) {
 	errOut.Reset()
 	assert.Equal(t, 1, runMQ([]string{"permissions", "--shards", "257"}, &out, &errOut))
 	assert.Contains(t, errOut.String(), "shards must be from 1 to 256")
+}
+
+// The names and publish timeout the config takes are flags too, and the
+// partitions' duplicate window covers every attempt at that timeout
+// (3 × 1m + 2 × 250ms).
+func TestRunMQManifests_NamesAndPublishTimeout(t *testing.T) {
+	var out, errOut bytes.Buffer
+	require.Equal(t, 0, runMQ([]string{"manifests", "--partitions", "1", "--shards", "1", "--ingest-consumer", "acme-ingest", "--history-stream", "ACME_REPLAY", "--publish-timeout", "1m"}, &out, &errOut), errOut.String())
+	for _, want := range []string{
+		"durableName: acme-ingest-0\n", "name: ACME_REPLAY\n", "duplicateWindow: 3m0.5s\n",
+		"--ingest-consumer acme-ingest --history-stream ACME_REPLAY --publish-timeout 1m0s",
+	} {
+		assert.Contains(t, out.String(), want)
+	}
+}
+
+// Under a JetStream domain the API and KV subjects come in the domain's form
+// as well as the plain one.
+func TestRunMQPermissions_JSDomain(t *testing.T) {
+	var out, errOut bytes.Buffer
+	require.Equal(t, 0, runMQ([]string{"permissions", "--shards", "1", "--js-domain", "hub"}, &out, &errOut), errOut.String())
+	for _, want := range []string{
+		"$JS.hub.API.CONSUMER.MSG.NEXT.*.wh-ingest-0", "$JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-0",
+		"$JS.hub.API.$KV.wh_coord.lease.>", "$JS.hub.API.DIRECT.GET.KV_wh_coord.$KV.wh_coord.lease.>", "$JS.hub.API.STREAM.CREATE.>",
+		"JetStream domain hub",
+	} {
+		assert.Contains(t, out.String(), want)
+	}
 }

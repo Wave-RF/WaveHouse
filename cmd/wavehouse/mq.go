@@ -50,14 +50,22 @@ func runMQManifests(args []string, stdout, stderr io.Writer) int {
 	shards := fs.Int("shards", mq.DefaultNATSShards, "shards of every partition, one durable each (mq.nats.shards)")
 	prefix := fs.String("prefix", mq.DefaultNATSSubjectPrefix, "subject prefix (mq.nats.subject_prefix)")
 	replicas := fs.Int("replicas", 3, "replicas for every stream and the lease bucket")
+	consumer := fs.String("ingest-consumer", mq.DefaultNATSIngestConsumer, "the shard durables' name prefix (mq.nats.ingest_consumer)")
+	history := fs.String("history-stream", "", "the history stream (mq.nats.history_stream); empty is <PREFIX>_HISTORY")
+	publishTimeout := fs.Duration("publish-timeout", mq.DefaultNATSPublishTimeout, "one publish attempt's bound (mq.nats.publish_timeout); the partitions' duplicate window covers every attempt")
 	bucket := fs.String("coord-bucket", "", "the lease KV bucket (coord.nats.bucket); empty is <prefix>_coord")
 	lease := fs.Duration("dedupe-lease", dedupe.DefaultLease, "the dedupe.lease the partitions' duplicate window must cover")
+	fileStore := fs.String("file-store", mq.FormatStoreSize(mq.DefaultNATSFileStore), "every server's JetStream max_file_store (the Helm chart's fileStore.maxSize, else its PVC size), which the streams' maxBytes must fit in")
+	partitionBytes := fs.String("partition-max-bytes", "", "each ingest partition's maxBytes; empty is 15% of --file-store")
 	fs.Usage = func() {
-		_, _ = fmt.Fprint(fs.Output(), `usage: wavehouse mq manifests [--partitions N] [--shards V] [--prefix wh] [--replicas 3] [--coord-bucket B] [--dedupe-lease 30s]
+		_, _ = fmt.Fprint(fs.Output(), `usage: wavehouse mq manifests [--partitions N] [--shards V] [--prefix wh] [--replicas 3] [--ingest-consumer wh-ingest] [--history-stream S] [--publish-timeout 5s] [--coord-bucket B] [--dedupe-lease 30s] [--file-store 100Gi] [--partition-max-bytes 15Gi]
 
 Print the nack (jetstream.nats.io/v1beta2) Stream, Consumer and KeyValue
 resources for the JetStream topology WaveHouse needs under mq.backend: nats
 and coord.backend: nats, as YAML for kubectl apply. WaveHouse never creates these itself; it checks them at boot.
+The streams' maxBytes are sized from --file-store: each partition 15%, the
+history 10% and the DLQ 5%, so four partitions leave a quarter of it spare.
+It refuses streams that together reserve more than --file-store.
 
 `)
 		fs.PrintDefaults()
@@ -85,9 +93,30 @@ and coord.backend: nats, as YAML for kubectl apply. WaveHouse never creates thes
 		_, _ = fmt.Fprintf(stderr, "wavehouse mq manifests: --replicas must be at least 1\n")
 		return 2
 	}
-	err := mq.WriteNATSManifests(stdout, mq.NATSManifestOptions{
-		Topology: mq.NATSTopology{Prefix: *prefix, Partitions: *partitions, Shards: *shards, CoordBucket: *bucket, DedupeLease: *lease},
-		Replicas: *replicas,
+	if *publishTimeout <= 0 {
+		_, _ = fmt.Fprintf(stderr, "wavehouse mq manifests: --publish-timeout must be positive\n")
+		return 2
+	}
+	store, err := positiveSize(*fileStore)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "wavehouse mq manifests: --file-store: %v\n", err)
+		return 2
+	}
+	var partitionMax int64
+	if *partitionBytes != "" {
+		if partitionMax, err = positiveSize(*partitionBytes); err != nil {
+			_, _ = fmt.Fprintf(stderr, "wavehouse mq manifests: --partition-max-bytes: %v\n", err)
+			return 2
+		}
+	}
+	err = mq.WriteNATSManifests(stdout, mq.NATSManifestOptions{
+		Topology: mq.NATSTopology{
+			Prefix: *prefix, Partitions: *partitions, Shards: *shards, IngestConsumer: *consumer, HistoryStream: *history,
+			PublishTimeout: *publishTimeout, CoordBucket: *bucket, DedupeLease: *lease,
+		},
+		Replicas:          *replicas,
+		FileStore:         store,
+		PartitionMaxBytes: partitionMax,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "wavehouse mq manifests: %v\n", err)
@@ -107,8 +136,9 @@ func runMQPermissions(args []string, stdout, stderr io.Writer) int {
 	consumer := fs.String("ingest-consumer", mq.DefaultNATSIngestConsumer, "the shard durables' name prefix (mq.nats.ingest_consumer)")
 	history := fs.String("history-stream", "", "the history stream (mq.nats.history_stream); empty is <PREFIX>_HISTORY")
 	bucket := fs.String("coord-bucket", "", "the lease KV bucket (coord.nats.bucket); empty is <prefix>_coord")
+	domain := fs.String("js-domain", "", "the JetStream domain WaveHouse connects to (mq.nats.js_domain); its API requests go to $JS.<domain>.API.>")
 	fs.Usage = func() {
-		_, _ = fmt.Fprint(fs.Output(), `usage: wavehouse mq permissions [--shards V] [--prefix wh] [--ingest-consumer wh-ingest] [--history-stream S] [--coord-bucket B]
+		_, _ = fmt.Fprint(fs.Output(), `usage: wavehouse mq permissions [--shards V] [--prefix wh] [--ingest-consumer wh-ingest] [--history-stream S] [--coord-bucket B] [--js-domain D]
 
 Print the permissions block for the wavehouse user of a NATS Helm values
 file (config.merge.accounts.<account>.users[]), for the topology that
@@ -134,10 +164,19 @@ wavehouse mq manifests prints with the same flags.
 	}
 	err := mq.WriteNATSPermissions(stdout, mq.NATSTopology{
 		Prefix: *prefix, Shards: *shards, IngestConsumer: *consumer, HistoryStream: *history, CoordBucket: *bucket,
-	})
+	}, *domain)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "wavehouse mq permissions: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// positiveSize reads a byte count of at least one byte (mq.ParseStoreSize).
+func positiveSize(s string) (int64, error) {
+	n, err := mq.ParseStoreSize(s)
+	if err == nil && n == 0 {
+		err = errors.New("must be positive")
+	}
+	return n, err
 }

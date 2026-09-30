@@ -65,7 +65,7 @@ const (
 	// shard's durable, and each shard is a consumer (a Raft group at R3).
 	MaxNATSShards             = 256
 	DefaultNATSIngestConsumer = "wh-ingest"
-	defaultNATSPublishTimeout = 5 * time.Second
+	DefaultNATSPublishTimeout = 5 * time.Second
 	defaultNATSAckWait        = 60 * time.Second
 	defaultNATSMaxAckPending  = 10_000
 	defaultNATSPrefetch       = 500
@@ -89,7 +89,7 @@ func (t NATSTopology) withDefaults() NATSTopology {
 		t.HistoryStream = t.streamName("HISTORY")
 	}
 	if t.PublishTimeout == 0 {
-		t.PublishTimeout = defaultNATSPublishTimeout
+		t.PublishTimeout = DefaultNATSPublishTimeout
 	}
 	if t.AckWait == 0 {
 		t.AckWait = defaultNATSAckWait
@@ -113,6 +113,13 @@ func (t NATSTopology) validate() error {
 	}
 	if t.Shards < 1 || t.Shards > MaxNATSShards {
 		return fmt.Errorf("shards must be from 1 to %d, got %d", MaxNATSShards, t.Shards)
+	}
+	// Both are one token of a JetStream API subject.
+	if !natsBucketName.MatchString(t.IngestConsumer) {
+		return fmt.Errorf("ingest consumer %q must be a name of [a-zA-Z0-9_-]", t.IngestConsumer)
+	}
+	if !natsBucketName.MatchString(t.HistoryStream) {
+		return fmt.Errorf("history stream %q must be a name of [a-zA-Z0-9_-]", t.HistoryStream)
 	}
 	if !natsBucketName.MatchString(t.coordBucket()) {
 		return fmt.Errorf("coord bucket %q must be a KV bucket name of [a-zA-Z0-9_-]", t.coordBucket())
@@ -254,6 +261,10 @@ type topologyVerifier struct {
 	js       jetstream.JetStream
 	t        NATSTopology
 	findings []Finding
+	// perms is the connection's refused publishes, nil to skip probing the
+	// user's permissions; probe is the shard durables found, to probe.
+	perms *natsPermissionWatch
+	probe []natsUnit
 }
 
 func (v *topologyVerifier) add(sev FindingSeverity, object, field, format string, args ...any) {
@@ -263,13 +274,15 @@ func (v *topologyVerifier) add(sev FindingSeverity, object, field, format string
 // verifyNATSTopology checks the operator's JetStream against t and returns
 // every finding at once. The error is for a check that could not run (the
 // server unreachable, a request refused); a missing stream or consumer is a
-// finding.
-func verifyNATSTopology(ctx context.Context, js jetstream.JetStream, t NATSTopology) ([]Finding, error) {
+// finding. With perms, the publishes the server refused js's connection, it
+// also probes that the connecting user may pull from and unpin every shard
+// durable (probePermissions).
+func verifyNATSTopology(ctx context.Context, js jetstream.JetStream, t NATSTopology, perms *natsPermissionWatch) ([]Finding, error) {
 	t = t.withDefaults()
 	if err := t.validate(); err != nil {
 		return nil, err
 	}
-	v := &topologyVerifier{js: js, t: t}
+	v := &topologyVerifier{js: js, t: t, perms: perms}
 	v.serverVersion(js.Conn().ConnectedServerVersion())
 
 	partitions := make([]string, t.Partitions)
@@ -297,6 +310,9 @@ func verifyNATSTopology(ctx context.Context, js jetstream.JetStream, t NATSTopol
 			return nil, err
 		}
 	}
+	if err := v.probePermissions(ctx); err != nil {
+		return nil, err
+	}
 	slices.SortStableFunc(v.findings, func(a, b Finding) int { return int(a.Severity) - int(b.Severity) })
 	return v.findings, nil
 }
@@ -305,11 +321,11 @@ func verifyNATSTopology(ctx context.Context, js jetstream.JetStream, t NATSTopol
 // wait runs out — on Kubernetes the operator's CRs roll out with the pods —
 // and then returns the warnings, or a *TopologyError with every finding of
 // the last check. A check that could not run is retried the same way.
-func awaitNATSTopology(ctx context.Context, js jetstream.JetStream, t NATSTopology, wait time.Duration) ([]Finding, error) {
+func awaitNATSTopology(ctx context.Context, js jetstream.JetStream, t NATSTopology, perms *natsPermissionWatch, wait time.Duration) ([]Finding, error) {
 	deadline := time.Now().Add(wait)
 	backoff := 250 * time.Millisecond
 	for {
-		findings, err := verifyNATSTopology(ctx, js, t)
+		findings, err := verifyNATSTopology(ctx, js, t, perms)
 		if err == nil && !hasRequired(findings) {
 			return findings, nil
 		}
@@ -507,6 +523,7 @@ func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, name
 	}
 	cfg := c.CachedInfo().Config
 	req := func(field, format string, args ...any) { v.add(FindingRequired, obj, field, format, args...) }
+	v.probe = append(v.probe, natsUnit{stream: stream, durable: name})
 
 	if cfg.AckPolicy != jetstream.AckExplicitPolicy {
 		req("ack_policy", "is %s; must be explicit", cfg.AckPolicy)

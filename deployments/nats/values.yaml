@@ -14,8 +14,16 @@
 # history stream (WH_HISTORY), shard durables (wh-ingest-<shard>) and lease
 # bucket (wh_coord), with 8 shards per partition as in jetstream.yaml: they
 # name every shard's durable, so regenerate them with
-# `wavehouse mq permissions --shards <V>`. A test keeps them in step with
-# WaveHouse, and the conformance tests connect with them verbatim.
+# `wavehouse mq permissions --shards <V>` (add --js-domain <D> when
+# mq.nats.js_domain is set). A test keeps them in step with WaveHouse, and the
+# conformance tests connect with them verbatim. WaveHouse refuses to boot when
+# they do not let it pull every shard's durable.
+#
+# The chart sets each server's max_file_store to fileStore.maxSize, else to
+# the PVC's size: 100Gi here. Every server holds a replica of every stream
+# and reserves its maxBytes against that, and jetstream.yaml is sized to
+# reserve 75Gi of it. Resize the two together: `wavehouse mq manifests
+# --file-store <size>` sizes the streams for another volume.
 config:
   cluster:
     enabled: true
@@ -69,7 +77,22 @@ config:
                   - $JS.API.CONSUMER.RESET.*.wh-ingest-5
                   - $JS.API.CONSUMER.RESET.*.wh-ingest-6
                   - $JS.API.CONSUMER.RESET.*.wh-ingest-7
-                  - $JS.ACK.>
+                  - $JS.ACK.*.wh-ingest-0.>
+                  - $JS.ACK.*.wh-ingest-1.>
+                  - $JS.ACK.*.wh-ingest-2.>
+                  - $JS.ACK.*.wh-ingest-3.>
+                  - $JS.ACK.*.wh-ingest-4.>
+                  - $JS.ACK.*.wh-ingest-5.>
+                  - $JS.ACK.*.wh-ingest-6.>
+                  - $JS.ACK.*.wh-ingest-7.>
+                  - $JS.ACK.*.*.*.wh-ingest-0.>
+                  - $JS.ACK.*.*.*.wh-ingest-1.>
+                  - $JS.ACK.*.*.*.wh-ingest-2.>
+                  - $JS.ACK.*.*.*.wh-ingest-3.>
+                  - $JS.ACK.*.*.*.wh-ingest-4.>
+                  - $JS.ACK.*.*.*.wh-ingest-5.>
+                  - $JS.ACK.*.*.*.wh-ingest-6.>
+                  - $JS.ACK.*.*.*.wh-ingest-7.>
                   - $JS.API.CONSUMER.CREATE.WH_HISTORY.>
                   - $JS.API.CONSUMER.MSG.NEXT.WH_HISTORY.>
                   - $JS.API.CONSUMER.DELETE.WH_HISTORY.>

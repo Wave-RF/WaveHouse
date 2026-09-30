@@ -354,8 +354,8 @@ With `mq.backend: nats`, WaveHouse's message queue is a NATS JetStream cluster y
    wavehouse mq manifests --partitions 4 --shards 32 --prefix wh --replicas 3 > jetstream.yaml
    ```
 
-   [`deployments/nats/jetstream.yaml`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/nats/jetstream.yaml) is its output for four partitions of eight shards (`--partitions 4 --shards 8`). `--coord-bucket <name>` names the lease bucket when `coord.nats.bucket` does. Its sizes (`maxBytes`, the history's `maxAge`, `maxMsgsPerSubject`) are starting points: tune them before you apply.
-3. **Generate the `wavehouse` user's permissions for the same V**, and replace the user's `permissions` block in `values.yaml` with the output (see [Permissions](#permissions)); the shipped values cover eight shards, and WaveHouse's boot check does not read permissions, so a shard they leave out would never be pulled:
+   [`deployments/nats/jetstream.yaml`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/nats/jetstream.yaml) is its output for four partitions of eight shards (`--partitions 4 --shards 8`). Pass the names and timeout you configure: `--ingest-consumer` for `mq.nats.ingest_consumer`, `--history-stream` for `mq.nats.history_stream`, `--publish-timeout` for `mq.nats.publish_timeout` (the partitions' duplicate window follows it), and `--coord-bucket` for `coord.nats.bucket`. The streams' byte limits are sized for the servers' file store, `--file-store` (see [Sizing the file store](#sizing-the-file-store)); the other sizes (the history's `maxAge`, `maxMsgsPerSubject`) are starting points: tune them before you apply.
+3. **Generate the `wavehouse` user's permissions for the same V**, and replace the user's `permissions` block in `values.yaml` with the output (see [Permissions](#permissions)). The shipped values cover eight shards. Boot probes every shard durable as the `wavehouse` user and refuses to start while the user may not pull from one, so permissions generated for a smaller V stop boot rather than leave shards unpulled:
 
    ```bash
    wavehouse mq permissions --shards 32 --prefix wh
@@ -367,7 +367,7 @@ With `mq.backend: nats`, WaveHouse's message queue is a NATS JetStream cluster y
 The generated manifests satisfy every required finding (pass `--dedupe-lease` when your `dedupe.lease` is not the default). Some you may meet when you write your own:
 
 - A partition must use `retention: workqueue` and republish to the history: `republish: {source: <prefix>.ingest.<p>.*.>, destination: <prefix>.hist.>}`, which drops the partition and shard tokens. The history must hold exactly `<prefix>.hist.>` and have no sources. `discard: old` is recommended for it, so a full history keeps the newest rows for SSE; either way it never holds up ingest.
-- A partition's `duplicate_window` must cover every attempt of one publish: three times `mq.nats.publish_timeout`, plus half a second. A publish that got no answer is retried with the same message id, so the partition stores it once.
+- A partition's `duplicate_window` must cover every attempt of one publish: three times `mq.nats.publish_timeout`, plus half a second. A publish that got no answer is retried with the same message id, so the partition stores it once. The generated `2m` covers the default `5s`; `wavehouse mq manifests --publish-timeout <timeout>` widens it for a longer timeout.
 - It must also cover [`dedupe.lease`](/configuration#dedupe) twice over, plus a second: the lease, the lease rounded up to whole seconds, and one more second (61s for the default 30s). With dedupe on, a publish whose outcome was unknown keeps its id claimed until the lease lapses, and a client obeying `Retry-After` republishes it as late as that under the same idempotency key; the partition drops the copy only while it still remembers the first. The shipped `2m` covers any lease up to `59s`; for a longer one, `wavehouse mq manifests --dedupe-lease <lease>` widens it.
 - A tenant with dedupe on whose finite [`dedupe.retention`](/settings-directory#deduplication), for the tenant or one of its tables, is shorter than the partitions' `duplicate_window` is logged at `WARN`, at boot and after every reload. An id re-sent after its retention but inside the window would be claimed again and then dropped by the partition, while the client is told it was accepted. The settings directory refuses a retention under `2m`, the embedded queue's window, but cannot see yours: keep retention at least as long as the window, or `"0"`.
 - Each shard durable needs `max_expires` unset or at least 5 seconds. WaveHouse's pulls wait at most a second today; the floor leaves room for longer ones, since the server refuses a pull that asks for more than `max_expires`.
@@ -375,6 +375,12 @@ The generated manifests satisfy every required finding (pass `--dedupe-lease` wh
 - Each shard durable must filter exactly its shard's subjects and use `pinned_client` in the group `wavehouse`, with a pinned TTL of at least 10 seconds. The server renews a pin only when its holder sends a new pull, so a shorter TTL lets a live holder that is at its share of held rows, or stopping, lose its pin between its 5-second renewals. A TTL of 15 seconds or more is recommended against: a dead holder's shard is received by another process only once its pin lapses.
 
 WaveHouse checks the topology again every five minutes and never repairs it. If you delete a partition, its publishes answer `503` with `Retry-After: 5`. If you delete one of the N×V configured shard durables (`wh-ingest-0` to `wh-ingest-<V−1>` on each of the N partitions), or the connection is closed for good (for example, its credentials are revoked), the ingest worker ends and the process exits, so that the orchestrator restarts it and the next boot names what is missing. An ingest worker that stayed up without its queue would leave the API accepting events that nothing writes.
+
+### Sizing the file store
+
+Each server reserves the `maxBytes` of every stream replica it holds against its JetStream file store, `max_file_store`, and refuses a stream that does not fit (JetStream error `10047`, insufficient storage resources). With three replicas on three servers every server holds a replica of every stream, so the streams' `maxBytes` together must fit in each server's store. The NATS Helm chart sets `max_file_store` to `config.jetstream.fileStore.maxSize`, else to the JetStream PVC's size: `100Gi` in the shipped [`values.yaml`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/nats/values.yaml).
+
+`wavehouse mq manifests --file-store <size>` (default `100Gi`) sizes the streams for that store: each partition gets 15% of it, the history 10% and the dead-letter stream 5%. The shipped four partitions reserve `75Gi` of the `100Gi`, leaving a quarter for what else the store holds (the Raft logs of a replicated stream, the lease bucket, the store's own overhead). A partition's size does not follow N, so lowering N never needs more store while the removed partitions drain. The generator refuses streams that together reserve more than `--file-store`: from six partitions at the defaults, set `--partition-max-bytes` or a larger store. If you change the PVC, pass its size as `--file-store` and apply the regenerated manifests.
 
 ### Durability
 
@@ -386,7 +392,7 @@ The two backends make a `200` from `POST /v1/ingest` durable in different ways:
 
 ### Permissions
 
-The `wavehouse` user in `values.yaml` has exactly what WaveHouse needs: it can publish to its subjects, read stream and consumer info and list consumer names, pull from, unpin and reset each shard durable, create, pull from and delete consumers on the history stream, and read and write the `lease.` keys in the lease bucket (a KV write is a publish to the key's subject, and a read is a direct get). It cannot create, change, purge or delete a stream or a bucket, nor create a durable on a partition, nor touch another key, nor publish to the history: only the partitions' republish writes `wh.hist.>`. The permissions are written for the default prefix `wh`, history stream `WH_HISTORY`, durables `wh-ingest-<s>` with eight shards, and bucket `wh_coord`. They name every shard's durable one by one, because a NATS wildcard is a whole token (`wh-ingest-*` names no durable), so print them for your settings with `wavehouse mq permissions --shards <V>` (and `--prefix`, `--ingest-consumer`, `--history-stream`, `--coord-bucket` as you set them), and paste the block into the user's entry. For two shards:
+The `wavehouse` user in `values.yaml` has exactly what WaveHouse needs: it can publish to its subjects, read stream and consumer info and list consumer names, pull from, unpin and reset each shard durable and ack the rows it delivers, create, pull from and delete consumers on the history stream, and read and write the `lease.` keys in the lease bucket (a KV write is a publish to the key's subject, and a read is a direct get). It cannot create, change, purge or delete a stream or a bucket, nor create a durable on a partition, nor ack for another consumer, nor touch another key, nor publish to the history: only the partitions' republish writes `wh.hist.>`. The permissions are written for the default prefix `wh`, history stream `WH_HISTORY`, durables `wh-ingest-<s>` with eight shards, and bucket `wh_coord`. They name every shard's durable one by one, because a NATS wildcard is a whole token (`wh-ingest-*` names no durable), so print them for your settings with `wavehouse mq permissions --shards <V>` (and `--prefix`, `--ingest-consumer`, `--history-stream`, `--coord-bucket` and `--js-domain` as you set them), and paste the block into the user's entry. For two shards:
 
 ```yaml
 publish:
@@ -394,7 +400,9 @@ publish:
           $JS.API.CONSUMER.INFO.*.*, $JS.API.CONSUMER.NAMES.*,
           $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-0, $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-1,
           $JS.API.CONSUMER.UNPIN.*.wh-ingest-0, $JS.API.CONSUMER.UNPIN.*.wh-ingest-1,
-          $JS.API.CONSUMER.RESET.*.wh-ingest-0, $JS.API.CONSUMER.RESET.*.wh-ingest-1, $JS.ACK.>,
+          $JS.API.CONSUMER.RESET.*.wh-ingest-0, $JS.API.CONSUMER.RESET.*.wh-ingest-1,
+          $JS.ACK.*.wh-ingest-0.>, $JS.ACK.*.wh-ingest-1.>,
+          $JS.ACK.*.*.*.wh-ingest-0.>, $JS.ACK.*.*.*.wh-ingest-1.>,
           $JS.API.CONSUMER.CREATE.WH_HISTORY.>, $JS.API.CONSUMER.MSG.NEXT.WH_HISTORY.>,
           $JS.API.CONSUMER.DELETE.WH_HISTORY.>, $KV.wh_coord.lease.>,
           $JS.API.DIRECT.GET.KV_wh_coord.$KV.wh_coord.lease.>]
@@ -403,6 +411,12 @@ publish:
 subscribe:
   allow: [_INBOX_wh.>]
 ```
+
+An ack goes to the subject the server delivered the row with, which names the stream and the consumer: `$JS.ACK.<stream>.<consumer>.…` by default, and `$JS.ACK.<domain>.<account hash>.<stream>.<consumer>.…` on a server with the `js_ack_fc_v2` feature flag. The two `$JS.ACK` entries per shard cover both layouts. WaveHouse's history consumers ack nothing.
+
+Boot checks the permissions against the topology: it sends each shard durable a pull request and an unpin request that the server rejects on their merits (a pull whose heartbeat is more than half its expiry, an unpin naming no priority group), so neither delivers a row nor moves a pin, and a `required` finding names every durable whose request the server refused, with the `wavehouse mq permissions` command to regenerate them. The check runs again every five minutes. A consumer request the server refuses at any other time is logged as an error and sets `wavehouse_mq_topology_ok` to `0` at once, until a check passes again. The reset permission is not probed, since a valid reset request moves the durable back to its ack floor; `wavehouse mq permissions` always grants it with the other two.
+
+**Under a JetStream domain** (`mq.nats.js_domain`), WaveHouse sends every JetStream API request and every lease write under `$JS.<domain>.API.`, including the pulls that keep a busy or stopping shard's pin. A server in that domain maps those subjects to the plain `$JS.API.…` before it checks permissions, while a server outside it, such as a leafnode WaveHouse connects through, checks them as sent. `wavehouse mq permissions --js-domain <domain>` allows and denies every such subject in both forms, so the same block works either way.
 
 WaveHouse's replies arrive under `_INBOX_<prefix>.>`, which is why the subscribe permission can be that narrow.
 
@@ -454,7 +468,7 @@ These gauges are exported through [OpenTelemetry or Prometheus](#observability) 
 | Gauge | Meaning |
 | --- | --- |
 | `wavehouse_mq_connected` | `1` while this process is connected to the cluster, else `0`. |
-| `wavehouse_mq_topology_ok` | `1` while the last check found every required stream, consumer and (under `coord.backend: nats`) the lease bucket, else `0`. It drops at once when a publish finds a partition deleted. |
+| `wavehouse_mq_topology_ok` | `1` while the last check found every required stream, consumer and (under `coord.backend: nats`) the lease bucket, and found that the `wavehouse` user may pull from and unpin every shard durable, else `0`. It drops at once when a publish finds a partition deleted, or when the server refuses a consumer request (see [Permissions](#permissions)). |
 | `wavehouse_mq_history_behind_seconds` | How far the history's newest row trails the newest row any partition stored, read every 30 seconds. A value that stays up or keeps growing means the history is not taking the rows the partitions republish, so SSE replay and live events miss them; it returns to about `0` with the next row the history takes, and rows missed before that are not counted. A missing history reads as the last value while `wavehouse_mq_topology_ok` goes to `0`. It never affects ingest. |
 
 The ingest processes export these for their shards:

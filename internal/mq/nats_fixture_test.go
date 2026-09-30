@@ -38,14 +38,25 @@ type natsFixture struct {
 // shut down by the test framework.
 func newNATSFixture(t *testing.T) *natsFixture {
 	t.Helper()
+	return newNATSFixtureFrom(t, natstest.ShippedValues(), nil)
+}
+
+// newNATSFixtureFrom starts a server configured from the Helm values at
+// valuesPath, with edit's changes to its options, shut down by the test
+// framework.
+func newNATSFixtureFrom(t *testing.T, valuesPath string, edit func(*natsserver.Options)) *natsFixture {
+	t.Helper()
 	dir := t.TempDir()
-	conf, err := natstest.ServerConfig(natstest.ShippedValues(), dir)
+	conf, err := natstest.ServerConfig(valuesPath, dir)
 	require.NoError(t, err)
 	confPath := filepath.Join(dir, "nats.conf")
 	require.NoError(t, os.WriteFile(confPath, conf, 0o600))
 	opts, err := natsserver.ProcessConfigFile(confPath)
 	require.NoError(t, err)
 	opts.Host, opts.Port, opts.NoSigs, opts.NoLog = "127.0.0.1", -1, true, true
+	if edit != nil {
+		edit(opts)
+	}
 
 	s, err := natsserver.NewServer(opts)
 	require.NoError(t, err)
@@ -76,6 +87,17 @@ func (f *natsFixture) connect(t *testing.T, user string, opts ...nats.Option) je
 // fixtureTopology is a set of stream and consumer configs to create, in
 // order: each stream, then its consumers.
 type fixtureTopology struct{ *natstest.Manifests }
+
+// shippedFileStore is the max_file_store the NATS chart sets from the
+// shipped values, in bytes.
+func shippedFileStore(t *testing.T) int64 {
+	t.Helper()
+	size, err := natstest.FileStore(natstest.ShippedValues())
+	require.NoError(t, err)
+	n, err := ParseStoreSize(size)
+	require.NoError(t, err)
+	return n
+}
 
 // shippedTopology is the shipped manifests (N=4) at one replica, which is
 // all a single server can hold.

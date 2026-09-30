@@ -111,6 +111,7 @@ exclude:
       # external broker is the same, covered by the integration suite.
       - ^internal/mq/nats_topology\.go$
       - ^internal/mq/nats_manifests\.go$
+      - ^internal/mq/nats_permprobe\.go$
       - ^internal/mq/subject_nats\.go$
       - ^internal/mq/external(_consumer)?\.go$
       - ^internal/mq/lease\.go$
