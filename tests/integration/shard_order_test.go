@@ -33,7 +33,10 @@ type insertLog struct {
 	mu      sync.Mutex
 	rows    map[string][]int
 	writers map[string][]string
-	total   int
+	// first and last are when each process's first and last insert of each
+	// table completed: proc → table → time.
+	first, last map[string]map[string]time.Time
+	total       int
 }
 
 // server is proc's ClickHouse. gate, when set, runs before an insert is
@@ -58,7 +61,16 @@ func (l *insertLog) server(t *testing.T, proc string, gate func(table string)) *
 		l.mu.Lock()
 		if l.rows == nil {
 			l.rows, l.writers = map[string][]int{}, map[string][]string{}
+			l.first, l.last = map[string]map[string]time.Time{}, map[string]map[string]time.Time{}
 		}
+		if l.first[proc] == nil {
+			l.first[proc], l.last[proc] = map[string]time.Time{}, map[string]time.Time{}
+		}
+		now := time.Now()
+		if _, ok := l.first[proc][table]; !ok {
+			l.first[proc][table] = now
+		}
+		l.last[proc][table] = now
 		l.rows[table] = append(l.rows[table], seqs...)
 		if w := l.writers[table]; len(w) == 0 || w[len(w)-1] != proc {
 			l.writers[table] = append(w, proc)
@@ -307,11 +319,17 @@ func closeOnce(ch chan struct{}) {
 // once and in order while a second process joins (half the units hand over)
 // and the first then stops cleanly (the rest move): the process giving a
 // unit up writes what it holds before the next owner receives anything.
+// The first process's ClickHouse takes longer than a batch window, so a
+// unit released before its rows were written would have the next owner's
+// rows land first. And a clean stop leaves nothing unsettled behind, so the
+// next owner binds its units at once rather than waiting to judge them
+// orphaned.
 func TestShardClaims_TableOrderAcrossHandoverAndStop(t *testing.T) {
 	srv := natstest.Start(t)
 	pub := shardBroker(t, srv.URL())
 	log := &insertLog{}
-	chA, chB := log.server(t, "proc-a", nil), log.server(t, "proc-b", nil)
+	chA := log.server(t, "proc-a", func(string) { time.Sleep(6 * time.Second) })
+	chB := log.server(t, "proc-b", nil)
 	const lease, tables = 3 * time.Second, 16
 	cfg := ingest.ClaimConfig{Every: 100 * time.Millisecond}
 
@@ -340,12 +358,13 @@ func TestShardClaims_TableOrderAcrossHandoverAndStop(t *testing.T) {
 
 	time.Sleep(3 * time.Second)
 	b := startWorkerProc(t, srv.URL(), "proc-b", lease, cfg, chB.URL)
-	time.Sleep(8 * time.Second) // membership moves, and each moved unit's rows are written first
+	time.Sleep(15 * time.Second) // membership moves, and each moved unit's rows are written first
 	stopping := time.Now()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	require.NoError(t, a.stop(stopCtx))
-	t.Logf("proc-a stopped cleanly in %s", time.Since(stopping).Round(10*time.Millisecond))
+	stopped := time.Now()
+	t.Logf("proc-a stopped cleanly in %s", stopped.Sub(stopping).Round(10*time.Millisecond))
 	time.Sleep(6 * time.Second)
 	close(quit)
 	publisher.Wait()
@@ -367,5 +386,22 @@ func TestShardClaims_TableOrderAcrossHandoverAndStop(t *testing.T) {
 	}
 	t.Logf("%d rows in each of %d tables; %d tables changed writer", rows, tables, moved)
 	assert.Positive(t, moved, "some table moved between the processes")
+
+	// The tables proc-a still wrote while stopping moved at the stop: proc-b's
+	// first write of each follows within its batch window (5s), not after a
+	// wait for the unit to count as orphaned (pinned_ttl, 10s) on top.
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	var gaps []time.Duration
+	for i := range tables {
+		table := "t" + strconv.Itoa(i)
+		if last, ok := log.last["proc-a"][table]; ok && !last.Before(stopping) {
+			gaps = append(gaps, log.first["proc-b"][table].Sub(stopped))
+		}
+	}
+	require.NotEmpty(t, gaps, "some tables moved at the stop")
+	slices.Sort(gaps)
+	t.Logf("%d tables moved at the stop; proc-b's first write of each came %s to %s after it", len(gaps), gaps[0].Round(10*time.Millisecond), gaps[len(gaps)-1].Round(10*time.Millisecond))
+	assert.Less(t, gaps[len(gaps)-1], 7*time.Second, "a unit the stop gave up waited to be judged orphaned")
 	noWorkerFailure(t, b)
 }

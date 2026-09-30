@@ -276,9 +276,7 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 		w.failed <- fmt.Errorf("ingest worker: start consumer: %w", err)
 		return
 	}
-	defer stop()
-	defer func() {
-		close(abandon)
+	nakLeft := func() {
 		for {
 			select {
 			case m := <-msgChan:
@@ -287,6 +285,14 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 				return
 			}
 		}
+	}
+	defer func() {
+		close(abandon)
+		nakLeft()
+		stop()
+		// A consumer that cannot halt may still have been handing one
+		// over; it has no units to give up, so after its stop is as good.
+		nakLeft()
 	}()
 
 	// flushCtx carries values (trace) but is never cancelled: a started flush must

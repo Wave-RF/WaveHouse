@@ -2471,3 +2471,123 @@ func TestTableBatcher_Add_HandsRowsBackWhileTheProbeIsOut(t *testing.T) {
 	assert.True(t, m.Naked.Load())
 	assert.GreaterOrEqual(t, time.Duration(m.NakDelay.Load()), retryBase/2)
 }
+
+// scriptedConsumer hands the worker's handler to the test and records, in
+// order, what became of each row and when the consumer was stopped.
+type scriptedConsumer struct {
+	mu      sync.Mutex
+	handler func(*mq.Message)
+	events  []string
+}
+
+func (c *scriptedConsumer) Consume(h func(*mq.Message), _ int) (func(), <-chan error, error) {
+	c.mu.Lock()
+	c.handler = h
+	c.mu.Unlock()
+	return func() { c.record("stop") }, make(chan error), nil
+}
+
+func (c *scriptedConsumer) record(e string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, e)
+}
+
+func (c *scriptedConsumer) log() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.events)
+}
+
+func (c *scriptedConsumer) deliver(t *testing.T, id string) {
+	t.Helper()
+	msg := mq.NewMessage(context.Background(), mq.Topic{Tenant: tenant.Default, Table: "events"},
+		makeEnvelope(t, "events", "", map[string]any{"id": id}), time.Now(),
+		func(context.Context) error { c.record("ack " + id); return nil },
+		func() error { c.record("ack " + id); return nil },
+		func() error { c.record("nak " + id); return nil })
+	c.mu.Lock()
+	h := c.handler
+	c.mu.Unlock()
+	h(msg)
+}
+
+// haltingConsumer is a scriptedConsumer that halts ahead of its stop, and
+// delivers one more row while halting, as a fetch in flight would.
+type haltingConsumer struct {
+	*scriptedConsumer
+	t *testing.T
+}
+
+func (c haltingConsumer) Halt() {
+	c.record("halt")
+	c.deliver(c.t, "late")
+}
+
+// scriptedWorker runs a worker over cons whose ClickHouse records each
+// insert on cons and then waits for gate, if set.
+func scriptedWorker(t *testing.T, cons mq.Consumer, rec func(string), gate func()) (cancel func(), done <-chan struct{}) {
+	t.Helper()
+	ch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		rec(fmt.Sprintf("insert %d", strings.Count(string(body), "\n")))
+		if gate != nil {
+			gate()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ch.Close)
+	w := &IngestWorker{
+		clients: chconn.NewHTTPClients(ingestHTTPClient),
+		cache:   &testutil.MockCache{},
+		target:  func(tenant.ID) chconn.Target { return chconn.Target{URL: ch.URL, Database: "db"} },
+		// Flushed only at the stop.
+		maxBatch: defaultMaxBatch,
+		maxWait:  time.Hour,
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	w.wg.Add(1)
+	go func() { w.dispatchLoop(ctx, cons); close(finished) }()
+	t.Cleanup(func() { stop(); <-finished })
+	return stop, finished
+}
+
+// Stopping halts the consumer before the final flush, writes what it still
+// delivered while halting, and stops it — giving its units up — only after.
+func TestIngestWorker_StopHaltsBeforeTheFlushAndStopsAfter(t *testing.T) {
+	t.Parallel()
+	cons := haltingConsumer{scriptedConsumer: &scriptedConsumer{}, t: t}
+	cancel, done := scriptedWorker(t, cons, cons.record, nil)
+	require.Eventually(t, func() bool { cons.mu.Lock(); defer cons.mu.Unlock(); return cons.handler != nil }, 5*time.Second, time.Millisecond)
+	cons.deliver(t, "a")
+	cons.deliver(t, "b")
+	cancel()
+	<-done
+	log := cons.log()
+	require.Len(t, log, 6, "%v", log)
+	require.Equal(t, "halt", log[0], "%v", log)
+	assert.Equal(t, "insert 3", log[1], "the row delivered while halting is written with the rest: %v", log)
+	assert.ElementsMatch(t, []string{"ack a", "ack b", "ack late"}, log[2:5])
+	assert.Equal(t, []string{"stop"}, log[5:], "stopped only after the flush: %v", log)
+}
+
+// A consumer that cannot halt may still deliver while the worker flushes:
+// those rows are NAKed, in the order they arrived, before its stop.
+func TestIngestWorker_StopNaksWhatArrivesAfterItStopsReading(t *testing.T) {
+	t.Parallel()
+	cons := &scriptedConsumer{}
+	flushing, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	cancel, done := scriptedWorker(t, cons, cons.record, func() { once.Do(func() { close(flushing) }); <-release })
+	require.Eventually(t, func() bool { cons.mu.Lock(); defer cons.mu.Unlock(); return cons.handler != nil }, 5*time.Second, time.Millisecond)
+	cons.deliver(t, "a")
+	cancel()
+	<-flushing
+	for _, id := range []string{"x", "y", "z"} {
+		cons.deliver(t, id)
+	}
+	close(release)
+	<-done
+	assert.Equal(t, []string{"insert 1", "ack a", "nak x", "nak y", "nak z", "stop"}, cons.log())
+}
