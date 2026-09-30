@@ -426,6 +426,7 @@ func TestExternalNATS_CreateConsumerChecksTheDurable(t *testing.T) {
 
 	_, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable, AckWait: time.Hour})
 	require.ErrorContains(t, err, "ack_wait")
+	require.ErrorIs(t, err, ErrConsumerMismatch)
 	_, err = e.CreateConsumer(t.Context(), ConsumerConfig{Durable: "someone-else"})
 	require.ErrorIs(t, err, ErrConsumerNotFound)
 	_, err = e.CreateConsumer(t.Context(), ConsumerConfig{Durable: DefaultNATSIngestConsumer, AckWait: time.Minute})
@@ -436,6 +437,10 @@ func TestExternalNATS_CreateConsumerChecksTheDurable(t *testing.T) {
 	require.ErrorIs(t, err, ErrConsumerNotFound)
 	_, err = f.admin.Consumer(t.Context(), shippedPartition(0), "wh-ingest-3")
 	require.ErrorIs(t, err, jetstream.ErrConsumerNotFound, "the broker must not recreate the durable")
+
+	require.NoError(t, f.admin.DeleteStream(t.Context(), shippedPartition(1)))
+	_, err = e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable, Units: []string{shippedPartition(1) + "/wh-ingest-0"}})
+	require.ErrorIs(t, err, ErrConsumerNotFound, "a durable whose stream is gone is gone")
 }
 
 // The shipped permissions refuse the wavehouse user everything that would
