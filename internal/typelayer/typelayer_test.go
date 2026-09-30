@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -326,57 +325,25 @@ func compiledColumnNames(schema *chtypes.LoadedSchema) []string {
 
 // TestQuoteIdentifier_AgreesWithChsql: the stream (render, through the
 // library's QuoteIdentifier) and the SQL path (chsql.QuoteIdent, which has no
-// library to ask) must name the same column. They spell it byte for byte alike
-// except for five control characters, which ClickHouse's backQuote escapes and
-// chsql leaves raw; both spellings compile to the same column there, measured
-// through the library's own parser. NUL is the one real difference: the
-// library escapes it, while chsql's raw NUL cannot cross the C boundary and
-// fails to compile, which fails closed. Any other divergence fails here.
+// library to ask) must spell every name byte for byte alike, so a divergence
+// fails here rather than in a customer's query.
 func TestQuoteIdentifier_AgreesWithChsql(t *testing.T) {
 	eng := TestEngine(t, eventsTable())
 	lib := eng.lib
 	require.NotNil(t, lib)
 
-	compilesTo := func(spelling string) (string, error) {
-		s, err := lib.CompileDDL(spelling + " String")
-		if err != nil {
-			return "", err
-		}
-		defer s.Close()
-		require.Len(t, s.Columns, 1)
-		return s.Columns[0].Name, nil
-	}
-
 	corpus := []string{
 		"x", "a`b", `a\b`, "`", `\`, "\\`", "a\\`b", "it's", `"q"`, "", "null", "NULL", "all",
 		"select", "from", "where", "weird name", "n.a", "Ünï", "日本", "\xff\xfe", "1abc", "?", "--", "/*",
+		"a\x00b", "\x00", "\\\n", "\n\\",
 	}
 	for c := range 256 {
-		corpus = append(corpus, "a"+string([]byte{byte(c)})+"b")
+		corpus = append(corpus, string([]byte{byte(c)}), "a"+string([]byte{byte(c)})+"b")
 	}
-	controlOnly := map[byte]bool{'\b': true, '\t': true, '\n': true, '\f': true, '\r': true}
 	for _, name := range corpus {
 		ours, err := lib.QuoteIdentifier(name)
 		require.NoError(t, err, "%q", name)
-		theirs := chsql.QuoteIdent(name)
-		if ours == theirs {
-			continue
-		}
-		switch {
-		case strings.ContainsRune(name, 0):
-			assert.NotContains(t, ours, "\x00", "the library escapes NUL")
-			_, err := compilesTo(theirs)
-			assert.Error(t, err, "a raw NUL cannot cross the C boundary")
-		case len(name) == 3 && controlOnly[name[1]]:
-			got, err := compilesTo(ours)
-			require.NoError(t, err, "%q", name)
-			assert.Equal(t, name, got, "%q", name)
-			got, err = compilesTo(theirs)
-			require.NoError(t, err, "%q", name)
-			assert.Equal(t, name, got, "%q", name)
-		default:
-			t.Errorf("chsql.QuoteIdent(%q) = %q but the library spells it %q", name, theirs, ours)
-		}
+		assert.Equal(t, ours, chsql.QuoteIdent(name), "name %q", name)
 	}
 }
 

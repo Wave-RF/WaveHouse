@@ -19,6 +19,7 @@ func TestQuoteIdent(t *testing.T) {
 		{"embedded backslash", `back\slash`, "`back\\\\slash`"},
 		{"backslash then backtick", "x\\`y", "`x\\\\\\`y`"},
 		{"star is just a name here", "*", "`*`"},
+		{"control characters as backQuote spells them", "a\x00\b\t\n\f\rb", "`a" + `\0\b\t\n\f\r` + "b`"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

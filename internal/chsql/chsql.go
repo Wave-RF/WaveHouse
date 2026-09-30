@@ -7,12 +7,15 @@ package chsql
 
 import "strings"
 
-// identEscaper escapes a ClickHouse identifier's special characters exactly as
-// ClickHouse's own backQuote() does (confirmed against SHOW CREATE TABLE on a
-// live server): a backslash becomes `\\` and a backtick becomes “ \` “. The
-// two replacements run in a single left-to-right pass, so neither re-processes
-// the other's output.
-var identEscaper = strings.NewReplacer(`\`, `\\`, "`", "\\`")
+// identEscaper is ClickHouse's backQuote() escaping, byte for byte as the
+// chtypes library's QuoteIdentifier returns it (measured over all 256 bytes;
+// typelayer's parity test pins it): `\\`, `\“, and `\0 \b \t \n \f \r`
+// for NUL and those control characters. One left-to-right pass, so no
+// replacement re-processes another's output.
+var identEscaper = strings.NewReplacer(
+	`\`, `\\`, "`", "\\`",
+	"\x00", `\0`, "\b", `\b`, "\t", `\t`, "\n", `\n`, "\f", `\f`, "\r", `\r`,
+)
 
 // QuoteIdent renders any value as a backtick-quoted ClickHouse identifier
 // (column, table, or alias). It is the single place an identifier becomes SQL
