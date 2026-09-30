@@ -1273,7 +1273,7 @@ func TestExternalNATS_BlockedHandlerOvershootBoundedByTheShare(t *testing.T) {
 	settled := delivered()
 	time.Sleep(11 * time.Second) // two more renewals
 	assert.Equal(t, settled, delivered(), "renewals past the bound take no rows")
-	// One in the handler, a share of 2 queued, 2 renewals' worth past it, and
-	// the handled row's slot once its ack_wait (10s) passes.
-	assert.LessOrEqual(t, settled, uint64(6))
+	// One in the handler, a share of 2 queued, and 2 renewals' worth past it;
+	// the handled row's expiry frees no room here, the queue being the cap.
+	assert.Equal(t, uint64(5), settled)
 }
