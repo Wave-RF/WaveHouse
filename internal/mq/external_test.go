@@ -845,13 +845,21 @@ func TestExternalNATS_ReleaseUnpinsOnlyItsOwnPin(t *testing.T) {
 	assert.Less(t, time.Since(released), 5*time.Second, "at once, not after the pinned ttl")
 }
 
+// quietAfter shortens how recently a unit must have been active to count
+// as someone's, the durable's pinned_ttl otherwise.
+func quietAfter(d time.Duration) func(*NATSConfig) {
+	return func(cfg *NATSConfig) { cfg.activeWithin = d }
+}
+
 // A unit whose holder is gone with rows unacked: ResetOrphaned leaves it
-// alone while a client still holds the pin, and once none does, redelivers
-// the held rows to the next owner at once, not after ack_wait.
+// alone while a client still holds the pin, or was active on it within the
+// window, and once neither, redelivers the held rows to the next owner at
+// once, not after ack_wait.
 func TestExternalNATS_ResetOrphaned(t *testing.T) {
 	t.Parallel()
 	f := shippedFixture(t)
-	a, b := f.broker(t, nil), f.broker(t, nil)
+	const quiet = time.Second
+	a, b := f.broker(t, nil), f.broker(t, quietAfter(quiet))
 	topic := Topic{Tenant: "acme", Table: "events"}
 	p, s := natsRoute(topic, 4, 8)
 	unit := shippedPartition(p) + "/" + natsShardDurable("wh-ingest", s)
@@ -870,6 +878,10 @@ func TestExternalNATS_ResetOrphaned(t *testing.T) {
 	st, err := f.admin.Stream(t.Context(), shippedPartition(p))
 	require.NoError(t, err)
 	require.NoError(t, st.UnpinConsumer(t.Context(), natsShardDurable("wh-ingest", s), natsPriorityGroup), "stands in for the pin lapsing")
+	reset, err = b.ResetOrphaned(t.Context(), unit)
+	require.ErrorIs(t, err, ErrUnitHeld, "no pin alone is no proof: it delivered just now")
+	assert.False(t, reset)
+	time.Sleep(quiet)
 	reset, err = b.ResetOrphaned(t.Context(), unit)
 	require.NoError(t, err)
 	require.True(t, reset)
@@ -927,8 +939,10 @@ func TestExternalNATS_WholeConsumerTakesOrphansOver(t *testing.T) {
 	st, err := f.admin.Stream(t.Context(), shippedPartition(p))
 	require.NoError(t, err)
 	require.NoError(t, st.UnpinConsumer(t.Context(), natsShardDurable("wh-ingest", s), natsPriorityGroup), "stands in for the pin lapsing")
+	const quiet = time.Second
+	time.Sleep(quiet) // and for its owner's silence since
 
-	b := f.broker(t, nil)
+	b := f.broker(t, quietAfter(quiet))
 	c, err := b.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable})
 	require.NoError(t, err)
 	got := make(chan string, 4)
@@ -990,4 +1004,87 @@ func TestExternalNATS_Unowned(t *testing.T) {
 	n, err = e.Unowned(t.Context())
 	require.NoError(t, err)
 	assert.Zero(t, n, "held by the consumer that received it")
+}
+
+// One unit's consume throughput: a backlog of rows on one shard, drained by
+// one consumer that acks each row as it arrives.
+func TestExternalNATS_MeasureUnitConsumeThroughput(t *testing.T) {
+	measure(t)
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "t"}
+	payload := make([]byte, 256)
+	const n = 20_000
+	var wg sync.WaitGroup
+	for w := range 32 {
+		wg.Go(func() {
+			for i := w; i < n; i += 32 {
+				assert.NoError(t, e.Publish(t.Context(), topic, payload))
+			}
+		})
+	}
+	wg.Wait()
+	p, s := natsRoute(topic, 4, 8)
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable, Units: []string{shippedPartition(p) + "/" + natsShardDurable("wh-ingest", s)}})
+	require.NoError(t, err)
+	var got atomic.Int64
+	done := make(chan struct{})
+	start := time.Now()
+	stop, _, err := c.Consume(func(m *Message) {
+		_ = m.Ack()
+		if got.Add(1) == n {
+			close(done)
+		}
+	}, 500)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Minute):
+		t.Fatalf("received %d of %d", got.Load(), n)
+	}
+	elapsed := time.Since(start)
+	t.Logf("one unit drained %d rows of %d bytes in %s: %.0f rows/s", n, len(payload), elapsed.Round(time.Millisecond), float64(n)/elapsed.Seconds())
+}
+
+// A shard durable deleted while its consumer's handler is busy and no pull
+// of it is waiting ends delivery with failed, not a silent stall: the next
+// pin-keeping pull gets no responders, and the durable is looked up.
+func TestExternalNATS_DurableDeletedWhileBusyEndsDelivery(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	stream, durable := shippedPartition(p), natsShardDurable("wh-ingest", s)
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{
+		Durable: workerDurable, Units: []string{stream + "/" + durable},
+		MaxHeld: func() int { return 2 },
+	})
+	require.NoError(t, err)
+	busy := make(chan struct{})
+	t.Cleanup(func() { close(busy) })
+	entered := make(chan struct{}, 8)
+	stop, failed, err := c.Consume(func(*Message) { entered <- struct{}{}; <-busy }, 16)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	for i := range 5 {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(strconv.Itoa(i))))
+	}
+	<-entered // the handler holds the first row; the unit is at its cap
+
+	require.Eventually(t, func() bool {
+		cons, err := f.admin.Consumer(t.Context(), stream, durable)
+		return err == nil && cons.CachedInfo().NumAckPending == 2 && cons.CachedInfo().NumWaiting == 0
+	}, 10*time.Second, 5*time.Millisecond, "a moment with no pull waiting")
+	require.NoError(t, f.admin.DeleteConsumer(t.Context(), stream, durable))
+	deleted := time.Now()
+	select {
+	case err := <-failed:
+		assert.ErrorIs(t, err, ErrDeliveryEnded)
+		assert.ErrorIs(t, err, ErrConsumerNotFound)
+		t.Logf("failed %s after the delete: %v", time.Since(deleted).Round(10*time.Millisecond), err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("a durable deleted under a busy handler stalled silently")
+	}
 }

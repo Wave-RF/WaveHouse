@@ -188,7 +188,7 @@ func (p *fakeProc) CreateConsumer(_ context.Context, cfg mq.ConsumerConfig) (mq.
 		return nil, errors.New("no such durable")
 	}
 	p.f.record(p.name, "create", u)
-	return &fakeUnitConsumer{p: p, unit: u, failed: make(chan error, 1)}, nil
+	return &fakeUnitConsumer{p: p, unit: u, failed: make(chan error, 1), maxHeld: cfg.MaxHeld}, nil
 }
 
 type fakeUnitConsumer struct {
@@ -197,6 +197,7 @@ type fakeUnitConsumer struct {
 	handler func(*mq.Message)
 	failed  chan error
 	running atomic.Bool
+	maxHeld func() int
 }
 
 func (c *fakeUnitConsumer) Consume(handler func(*mq.Message), _ int) (func(), <-chan error, error) {
@@ -352,7 +353,7 @@ func TestClaims_HandoverWaitsForDeliveredRows(t *testing.T) {
 		pending.Add(1)
 		require.True(t, f.deliver(u, nil))
 	}
-	require.Eventually(t, func() bool { return a.loop.held.count() == 4 }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return a.loop.held.Load() == 4 }, 5*time.Second, 10*time.Millisecond)
 	startClaims(t, f, c.Peer(), "b", ClaimConfig{}, nil)
 	require.Eventually(t, func() bool {
 		return slices.ContainsFunc(f.eventLog(), func(e string) bool { return strings.HasPrefix(e, "a stop ") })
@@ -364,7 +365,7 @@ func TestClaims_HandoverWaitsForDeliveredRows(t *testing.T) {
 	close(release)
 	pending.Wait()
 	require.Eventually(t, func() bool { return f.split("a", "b") }, 5*time.Second, 10*time.Millisecond)
-	assert.Zero(t, a.loop.held.count(), "every settled row gave its slot back")
+	assert.Zero(t, a.loop.held.Load(), "every settled row gave its slot back")
 }
 
 // A process that loses its membership lease gives every unit up.
@@ -407,6 +408,7 @@ func crash(t *testing.T, p *claimProc) {
 	l.stopOnce.Do(func() { // stop is then a no-op
 		l.stopped.Store(true)
 		l.cancel()
+		close(l.halting)
 		close(l.quit)
 		<-l.done
 		require.NoError(t, l.member.Resign(context.Background()))
@@ -514,75 +516,34 @@ func TestClaims_EndedDelivery(t *testing.T) {
 	})
 }
 
-// Rows delivered and unsettled across every unit stop at MaxHeld: a unit at
-// the cap waits, and resumes as rows settle.
-func TestClaims_HeldRowsCap(t *testing.T) {
+// Each unit's cap on rows delivered and unsettled is an even share of
+// MaxHeld over the units the process is assigned, never below two batches,
+// so one stuck unit cannot take the others' room; it follows the assignment.
+func TestClaims_UnitShareOfMaxHeld(t *testing.T) {
 	t.Parallel()
-	f := newFakeShards(8)
-	var received atomic.Int64
-	var mu sync.Mutex
-	var held []*mq.Message
-	p := startClaims(t, f, coord.NewLocal(), "a", ClaimConfig{MaxHeld: 5}, func(m *mq.Message) {
-		received.Add(1)
-		mu.Lock()
-		held = append(held, m)
-		mu.Unlock()
-	})
-	require.Eventually(t, func() bool { return f.split("a") }, 5*time.Second, 10*time.Millisecond)
-	for i := range 20 {
-		require.True(t, f.deliver(f.units[i%8], nil))
-	}
-	require.Eventually(t, func() bool { return received.Load() == 5 }, 5*time.Second, 10*time.Millisecond)
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, int64(5), received.Load(), "never above the cap")
-	assert.Equal(t, 5, p.loop.held.count())
+	assert.Equal(t, 5000, unitShare(10_000, 2))
+	assert.Equal(t, minUnitHeld, unitShare(10_000, 32), "never below two batches")
+	assert.Equal(t, 64, unitShare(64, 32), "nor above MaxHeld")
 
-	mu.Lock()
-	for _, m := range held[:3] {
-		require.NoError(t, m.Ack())
-	}
-	mu.Unlock()
-	require.Eventually(t, func() bool { return received.Load() == 8 }, 5*time.Second, 10*time.Millisecond, "settling three admits three")
-}
-
-// A batcher that holds rows until a timer flushes them never deadlocks
-// against the cap: each flush settles rows, which admits more.
-func TestClaims_HeldRowsCapDrainsThroughFlushes(t *testing.T) {
-	t.Parallel()
-	f := newFakeShards(4)
-	var mu sync.Mutex
-	var batch []*mq.Message
-	var acked atomic.Int64
-	startClaims(t, f, coord.NewLocal(), "a", ClaimConfig{MaxHeld: 10}, func(m *mq.Message) {
-		mu.Lock()
-		batch = append(batch, m)
-		mu.Unlock()
-	})
+	f, c := newFakeShards(8), coord.NewLocal()
+	a := startClaims(t, f, c, "a", ClaimConfig{MaxHeld: 8000}, nil)
 	require.Eventually(t, func() bool { return f.split("a") }, 5*time.Second, 10*time.Millisecond)
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() { // the batch timer: flush whatever is held every 20ms
-		tk := time.NewTicker(20 * time.Millisecond)
-		defer tk.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-tk.C:
-				mu.Lock()
-				flush := batch
-				batch = nil
-				mu.Unlock()
-				for _, m := range flush {
-					_ = m.Ack()
-				}
+	caps := func(proc string) map[int]int {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		out := map[int]int{}
+		for _, by := range f.consumers {
+			if cons, ok := by[proc]; ok && cons.running.Load() {
+				out[cons.maxHeld()]++
 			}
 		}
-	}()
-	for i := range 200 {
-		require.True(t, f.deliver(f.units[i%4], func() { acked.Add(1) }))
+		return out
 	}
-	require.Eventually(t, func() bool { return acked.Load() == 200 }, 10*time.Second, 10*time.Millisecond, "acked %d", acked.Load())
+	assert.Equal(t, map[int]int{1000: 8}, caps("a"), "8000 over 8 units")
+	startClaims(t, f, c.Peer(), "b", ClaimConfig{MaxHeld: 8000}, nil)
+	require.Eventually(t, func() bool { return f.split("a", "b") }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return a.loop.share.Load() == 2000 }, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, map[int]int{2000: 4}, caps("a"), "the units kept read the new share")
 }
 
 // Only the lowest live member counts the units without an owner.
@@ -665,14 +626,14 @@ func TestClaims_GaugesReport(t *testing.T) { //nolint:paralleltest // substitute
 }
 
 // A row the worker lets go of without the broker confirming it (an ack that
-// failed) frees its slot all the same: the broker redelivers it as a new row,
-// which takes a slot of its own.
+// failed) is no longer counted as held: the broker redelivers it as a new
+// row.
 func TestClaims_HeldRowsFreedOnAFailedSettle(t *testing.T) {
 	t.Parallel()
 	f := newFakeShards(2)
 	fail := errors.New("no answer")
 	var received atomic.Int64
-	p := startClaims(t, f, coord.NewLocal(), "a", ClaimConfig{MaxHeld: 3}, func(m *mq.Message) {
+	p := startClaims(t, f, coord.NewLocal(), "a", ClaimConfig{}, func(m *mq.Message) {
 		received.Add(1)
 		_ = m.Ack()
 	})
@@ -680,26 +641,26 @@ func TestClaims_HeldRowsFreedOnAFailedSettle(t *testing.T) {
 	for i := range 10 {
 		require.True(t, f.deliverFailing(f.units[i%2], fail))
 	}
-	require.Eventually(t, func() bool { return received.Load() == 10 }, 5*time.Second, 10*time.Millisecond, "no slot leaks: got %d", received.Load())
-	require.Eventually(t, func() bool { return p.loop.held.count() == 0 }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return received.Load() == 10 }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return p.loop.held.Load() == 0 }, 5*time.Second, 10*time.Millisecond)
 }
 
 // A row the worker never settles (it leaves some for the broker to
-// redeliver) frees its slot once the broker would redeliver it anyway.
+// redeliver) stops counting as held once the broker would redeliver it
+// anyway, so a handover does not wait on it past that.
 func TestClaims_HeldRowsExpire(t *testing.T) {
 	t.Parallel()
 	f := newFakeShards(1)
 	var received atomic.Int64
-	p := startClaims(t, f, coord.NewLocal(), "a", ClaimConfig{MaxHeld: 2, SlotExpiry: 200 * time.Millisecond}, func(*mq.Message) {
+	p := startClaims(t, f, coord.NewLocal(), "a", ClaimConfig{SlotExpiry: 200 * time.Millisecond}, func(*mq.Message) {
 		received.Add(1) // never settled
 	})
 	require.Eventually(t, func() bool { return f.split("a") }, 5*time.Second, 10*time.Millisecond)
 	for range 4 {
 		require.True(t, f.deliver(f.units[0], nil))
 	}
-	require.Eventually(t, func() bool { return received.Load() == 2 }, 5*time.Second, 10*time.Millisecond)
-	require.Eventually(t, func() bool { return received.Load() == 4 }, 5*time.Second, 10*time.Millisecond, "the expired slots admit the rest")
-	require.Eventually(t, func() bool { return p.loop.held.count() == 0 }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return received.Load() == 4 && p.loop.held.Load() == 4 }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return p.loop.held.Load() == 0 }, 5*time.Second, 10*time.Millisecond)
 }
 
 // A process whose membership lease ends under it takes a fresh one on its
@@ -744,15 +705,14 @@ func TestClaims_FirstTickResetsOnlyWhenAlone(t *testing.T) {
 }
 
 // stop cuts a handover short: it does not wait out Handover for rows the
-// worker will never settle, and a delivery waiting at the cap returns
-// without reaching the handler.
+// worker will never settle.
 func TestClaims_StopCutsHandoversShort(t *testing.T) {
 	t.Parallel()
 	f, c := newFakeShards(4), coord.NewLocal()
 	var received atomic.Int64
-	a := startClaims(t, f, c, "a", ClaimConfig{Handover: time.Minute, MaxHeld: 4}, func(*mq.Message) { received.Add(1) })
+	a := startClaims(t, f, c, "a", ClaimConfig{Handover: time.Minute}, func(*mq.Message) { received.Add(1) })
 	require.Eventually(t, func() bool { return f.split("a") }, 5*time.Second, 10*time.Millisecond)
-	for i := range 6 { // four fill the cap, two wait at it
+	for i := range 4 {
 		require.True(t, f.deliver(f.units[i%4], nil))
 	}
 	require.Eventually(t, func() bool { return received.Load() == 4 }, 5*time.Second, 10*time.Millisecond)
@@ -768,8 +728,6 @@ func TestClaims_StopCutsHandoversShort(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("stop waited out the handover")
 	}
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, int64(4), received.Load(), "the waiting deliveries never reached the handler")
 }
 
 // Membership slots are capped: a queue of many units still reads at most

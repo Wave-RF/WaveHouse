@@ -38,16 +38,20 @@ import (
 // of them. Views can differ for up to a lease: each process starts a
 // silent member's expiry clock when it first sees it.
 //
-// Handover. A unit no longer assigned here stops fetching, waits until the
-// rows it delivered are settled (bounded by Handover), then releases the
-// broker's pin, so the next owner receives at once. A clean stop releases
-// every unit after the worker has flushed.
+// Handover. A unit no longer assigned here stops fetching while keeping the
+// broker's pin, waits until the rows it delivered are settled (bounded by
+// Handover), then releases the pin, so the next owner receives at once and
+// only rows newer than the ones written here. A clean stop halts every unit
+// first (Halt), so the worker can flush what it holds, and releases them
+// after.
 //
 // Takeover. A unit whose owner in the previous tick's view is no longer a
 // member is reset to its ack floor before it is consumed (ResetOrphaned), so
 // the dead owner's unacked rows come back at once instead of after ack_wait.
-// While the dead owner's pin has not lapsed yet the unit waits, unbound, and
-// is tried again next tick, up to orphanWait. On a process's first tick,
+// The broker refuses the reset while the unit is pinned or was recently
+// active, so the membership view alone never resets a live owner's rows;
+// the unit then waits, unbound, and is tried again next tick, up to
+// orphanWait. On a process's first tick,
 // which has no previous view, only when it is the one live member: then
 // whatever holds rows unpinned is gone. That covers the only process
 // restarting after a clean stop, which resigned its lease. After a crash
@@ -57,18 +61,24 @@ import (
 // the takeover above once its lease has lapsed. Never after pulling: a
 // reset also redelivers the caller's own unacked rows.
 //
-// Memory. Rows delivered and not yet settled, across every unit this process
-// holds, are capped at MaxHeld: at the cap a unit's delivery waits, and the
-// broker keeps the rest.
+// Memory. Each unit may hold delivered and unsettled rows up to its share of
+// MaxHeld: an even share over the units this process is assigned, and never
+// less than minUnitHeld (or MaxHeld, if smaller), so one hot table still
+// fills whole batches. At its share a unit fetches nothing more, keeping its
+// pin, and the broker keeps the rest; a stuck unit never takes another
+// unit's share. The process holds at most max(MaxHeld, units × minUnitHeld).
 const (
 	memberLeasePrefix = "ingest.m"
 
-	defaultHandover     = 15 * time.Second
 	defaultUnownedEvery = 15 * time.Second
-	// settleQuiet is how long a unit given up must deliver nothing before its
-	// handover counts it settled: the rows it fetched ahead reach the worker
-	// in that time.
-	settleQuiet = 250 * time.Millisecond
+	// minUnitHeld is two of the worker's batches: one being written while
+	// the next fills.
+	minUnitHeld = 2 * defaultMaxBatch
+	// settlePoll is how often a handover checks its rows have settled.
+	settlePoll = 50 * time.Millisecond
+	// bindEscalate is how long a configured unit may fail to bind, for a
+	// reason that may pass, before each failure logs an error.
+	bindEscalate = time.Minute
 	// tickTimeout bounds one tick's requests.
 	tickTimeout = 10 * time.Second
 	// releaseWait bounds a lease resign or a unit's release.
@@ -92,10 +102,12 @@ type ClaimConfig struct {
 	// default coord.RetryPeriod.
 	Every time.Duration
 	// Handover bounds how long a unit given up waits for its delivered rows
-	// to settle before it is released; default 15s.
+	// to settle before it is released; default the worker's ack_wait, after
+	// which the broker redelivers them anyway.
 	Handover time.Duration
-	// MaxHeld caps the rows delivered and not yet settled across every unit
-	// this process holds; default the worker's maxAckPending.
+	// MaxHeld is the process's budget of rows delivered and not yet settled,
+	// shared out per unit (see Memory above); default the worker's
+	// maxAckPending.
 	MaxHeld int
 	// UnownedEvery is how often the lowest live member reads how many units
 	// have rows and no owner; default 15s.
@@ -128,7 +140,7 @@ func ClaimShards(q Queue, c coord.Coordinator, cfg ClaimConfig) (Queue, error) {
 		cfg.Every = coord.RetryPeriod
 	}
 	if cfg.Handover <= 0 {
-		cfg.Handover = defaultHandover
+		cfg.Handover = ackWait
 	}
 	if cfg.MaxHeld <= 0 {
 		cfg.MaxHeld = maxAckPending
@@ -179,17 +191,19 @@ type claimingConsumer struct {
 
 // Consume starts claiming. stop ends it, releasing every unit held and
 // resigning the membership lease; failed reports, exactly once, a configured
-// unit's delivery ending on its own or a unit that could not be bound.
+// unit's delivery ending on its own or a unit that could not be bound
+// because its durable or stream is gone or no longer fits.
 func (c *claimingConsumer) Consume(handler func(*mq.Message), prefetch int) (func(), <-chan error, error) {
 	configured, _ := c.q.sq.IngestUnits()
 	loopCtx, cancel := context.WithCancel(context.WithoutCancel(c.ctx))
 	l := &claimLoop{
 		q: c.q, ctx: loopCtx, cancel: cancel, cfg: c.cfg, handler: handler, prefetch: prefetch,
 		slots: min(len(configured), maxMembers), configured: map[string]bool{},
-		owned: map[string]*claim{}, releasing: map[string]struct{}{}, orphaned: map[string]time.Time{},
-		held:   newHeldRows(c.q.cfg.MaxHeld),
-		failed: make(chan error, 1), quit: make(chan struct{}), done: make(chan struct{}),
+		owned: map[string]*claim{}, releasing: map[string]*claim{}, orphaned: map[string]time.Time{},
+		unbound: map[string]time.Time{},
+		failed:  make(chan error, 1), halting: make(chan struct{}), quit: make(chan struct{}), done: make(chan struct{}),
 	}
+	l.share.Store(int64(c.q.cfg.MaxHeld))
 	for _, u := range configured {
 		l.configured[u] = true
 	}
@@ -202,9 +216,19 @@ func (c *claimingConsumer) Consume(handler func(*mq.Message), prefetch int) (fun
 	return l.stop, l.failed, nil
 }
 
-// claimLoop is one process's claims. member, owned, prev and lastUnowned
-// belong to the run goroutine (and to stop once it has exited); releasing
-// is shared with the handovers.
+// Halt implements mq.Halter: no unit is taken or given up any more, and every
+// unit stops fetching while keeping its pin; it returns once what they
+// fetched has reached the handler. stop, after the worker has flushed,
+// releases them.
+func (c *claimingConsumer) Halt() {
+	if l := c.loop.Load(); l != nil {
+		l.halt()
+	}
+}
+
+// claimLoop is one process's claims. member, owned, prev, unbound and
+// lastUnowned belong to the run goroutine (and to halt and stop once it has
+// exited); releasing is shared with the handovers.
 type claimLoop struct {
 	q          *claimingQueue
 	ctx        context.Context
@@ -222,14 +246,19 @@ type claimLoop struct {
 	prev       map[string]int // the previous tick's owners, nil before the first
 	// orphaned holds the units taken over from a dead owner that still wait
 	// for a reset, and since when.
-	orphaned    map[string]time.Time
+	orphaned map[string]time.Time
+	// unbound holds the configured units whose bind keeps failing, and since
+	// when.
+	unbound     map[string]time.Time
 	lastUnowned time.Time
 
 	mu        sync.Mutex
-	releasing map[string]struct{}
+	releasing map[string]*claim
 	handovers sync.WaitGroup
 
-	held *heldRows
+	// share is each unit's cap on rows delivered and unsettled, as of the
+	// last tick; held counts them across the units.
+	share, held atomic.Int64
 
 	ownedGauge, membersGauge, unownedGauge atomic.Int64
 	rankZero                               atomic.Bool
@@ -237,8 +266,9 @@ type claimLoop struct {
 
 	failed            chan error
 	reported, stopped atomic.Bool
-	quit, done        chan struct{}
-	stopOnce          sync.Once
+	// halting ends the ticks (halt); quit also cuts handovers short (stop).
+	halting, quit, done chan struct{}
+	haltOnce, stopOnce  sync.Once
 }
 
 // claim is one unit this process holds.
@@ -247,19 +277,23 @@ type claim struct {
 	cons     mq.Consumer
 	stopOnce sync.Once
 	stopFn   func()
-	// inflight counts rows delivered and not yet settled; last is when the
-	// latest was delivered (unix nanoseconds).
+	// inflight counts rows delivered and not yet settled.
 	inflight atomic.Int64
-	last     atomic.Int64
-	quit     chan struct{}
+	// halted closes once the unit has stopped fetching.
+	halted chan struct{}
 }
 
+// stop halts the unit's fetching, keeping its pin, and returns once what it
+// fetched has reached the handler, where the consumer can tell (mq.Halter).
 func (cl *claim) stop() {
 	cl.stopOnce.Do(func() {
-		close(cl.quit)
+		if h, ok := cl.cons.(mq.Halter); ok {
+			h.Halt()
+		}
 		if cl.stopFn != nil {
 			cl.stopFn()
 		}
+		close(cl.halted)
 	})
 }
 
@@ -270,7 +304,7 @@ func (l *claimLoop) run() {
 	for {
 		l.tick()
 		select {
-		case <-l.quit:
+		case <-l.halting:
 			return
 		case <-t.C:
 		}
@@ -308,6 +342,9 @@ func (l *claimLoop) tick() {
 				targets[u] = true
 			}
 		}
+	}
+	if len(targets) > 0 {
+		l.share.Store(int64(unitShare(l.q.cfg.MaxHeld, len(targets))))
 	}
 	l.giveUp(targets)
 	l.take(ctx, targets, len(targets), live)
@@ -400,7 +437,7 @@ func (l *claimLoop) giveUp(targets map[string]bool) {
 		cl := l.owned[u]
 		delete(l.owned, u)
 		l.mu.Lock()
-		l.releasing[u] = struct{}{}
+		l.releasing[u] = cl
 		l.mu.Unlock()
 		l.handovers.Go(func() { l.handOver(cl) })
 	}
@@ -424,7 +461,7 @@ func (l *claimLoop) take(ctx context.Context, targets map[string]bool, count int
 		if since, ok := l.orphaned[u]; ok {
 			switch reset, err := l.q.sq.ResetOrphaned(ctx, u); {
 			case errors.Is(err, mq.ErrUnitHeld) && time.Since(since) < orphanWait:
-				continue // the dead owner's pin has not lapsed yet
+				continue // its pin has not lapsed yet, or it was active too recently
 			case errors.Is(err, mq.ErrUnitHeld):
 			case err != nil:
 				l.warn("ingest: could not take over a shard's unsettled rows; they come back after ack_wait", err)
@@ -439,19 +476,32 @@ func (l *claimLoop) take(ctx context.Context, targets map[string]bool, count int
 				slog.Info("ingest: could not bind a shard durable outside the configured ones", "unit", u, "error", err)
 				continue
 			}
-			if errors.Is(err, mq.ErrConsumerNotFound) {
-				// Its durable is gone: the same end as a delivery the
-				// broker ends because the durable was deleted under it.
+			if errors.Is(err, mq.ErrConsumerNotFound) || errors.Is(err, mq.ErrConsumerMismatch) {
+				// Its durable or stream is gone, or the durable no longer
+				// fits: the same end as a delivery the broker ends because
+				// the durable was deleted under it.
 				l.fail(fmt.Errorf("shard %s: %w: %w", u, mq.ErrDeliveryEnded, err))
 				return
 			}
 			// Anything else (a request the server did not answer while a
 			// consumer leader moves) is tried again next tick; the unit
-			// shows as unowned meanwhile.
+			// shows as unowned meanwhile, and a failure that lasts logs an
+			// error.
 			claimEvents.Add(context.Background(), 1, eventAttr("bind_failed"))
-			l.warn("ingest: could not bind a shard; trying again next tick", fmt.Errorf("shard %s: %w", u, err))
+			since, ok := l.unbound[u]
+			if !ok {
+				since = time.Now()
+				l.unbound[u] = since
+			}
+			err = fmt.Errorf("shard %s: %w", u, err)
+			if unbound := time.Since(since); unbound >= bindEscalate && l.ctx.Err() == nil {
+				slog.Error("ingest: a shard has not been bound for a while; its rows wait", "unbound_for", unbound.Round(time.Second), "error", err)
+			} else {
+				l.warn("ingest: could not bind a shard; trying again next tick", err)
+			}
 			continue
 		}
+		delete(l.unbound, u)
 	}
 }
 
@@ -462,32 +512,35 @@ func (l *claimLoop) isReleasing(u string) bool {
 	return ok
 }
 
-// open binds unit u and starts delivering it, counting each row until it
-// settles and holding it against the process-wide cap.
+// unitShare is each of count units' cap on rows delivered and unsettled.
+func unitShare(maxHeld, count int) int {
+	return max(min(maxHeld, minUnitHeld), maxHeld/max(1, count))
+}
+
+// open binds unit u and starts delivering it, under the unit's share of
+// MaxHeld, counting each row until it settles.
 func (l *claimLoop) open(u string, count int) error {
 	cfg := l.cfg
 	cfg.Units = []string{u}
+	cfg.MaxHeld = func() int { return int(l.share.Load()) }
 	cons, err := l.q.sq.CreateConsumer(l.ctx, cfg)
 	if err != nil {
 		return err
 	}
-	cl := &claim{unit: u, cons: cons, quit: make(chan struct{})}
+	cl := &claim{unit: u, cons: cons, halted: make(chan struct{})}
 	share := l.prefetch
 	if share > 0 {
 		share = max(1, share/max(1, count))
 	}
 	stop, failed, err := cons.Consume(func(m *mq.Message) {
-		if !l.held.acquire(cl.quit, l.quit) {
-			return // stopping: the row is unsettled and comes back
-		}
 		cl.inflight.Add(1)
-		cl.last.Store(time.Now().UnixNano())
+		l.held.Add(1)
 		// The row leaves this process's hands at its first settle attempt,
 		// or, if the worker never makes one (it leaves some rows for the
 		// broker to redeliver), once the broker would redeliver it anyway.
 		letGo := sync.OnceFunc(func() {
 			cl.inflight.Add(-1)
-			l.held.release()
+			l.held.Add(-1)
 		})
 		expire := time.AfterFunc(l.q.cfg.SlotExpiry, letGo)
 		m.OnSettled(func() { expire.Stop(); letGo() })
@@ -515,22 +568,23 @@ func (l *claimLoop) watch(cl *claim, failed <-chan error) {
 				return
 			}
 			l.fail(fmt.Errorf("shard %s: %w", cl.unit, err))
-		case <-cl.quit:
+		case <-cl.halted:
 		case <-l.quit:
 		}
 	}()
 }
 
-// handOver stops fetching cl's unit, waits for what it delivered to settle,
-// bounded by Handover (or cut short by stop), and releases it.
+// handOver stops fetching cl's unit, keeping its pin, waits for what it
+// delivered to settle, bounded by Handover (or cut short by stop), and
+// releases it.
 func (l *claimLoop) handOver(cl *claim) {
 	began := time.Now()
 	cl.stop()
 	deadline := time.After(l.q.cfg.Handover)
-	poll := time.NewTicker(settleQuiet / 5)
+	poll := time.NewTicker(settlePoll)
 	defer poll.Stop()
 wait:
-	for cl.inflight.Load() > 0 || time.Since(time.Unix(0, cl.last.Load())) < settleQuiet {
+	for cl.inflight.Load() > 0 {
 		select {
 		case <-poll.C:
 		case <-deadline:
@@ -595,18 +649,35 @@ func (l *claimLoop) fail(err error) {
 	l.failed <- err
 }
 
-// stop ends the claims: every unit stops, is released, and the membership
-// lease is resigned, at once — the worker has flushed what it held before
-// calling it.
+// halt ends the ticks and halts every unit held or being handed over, at
+// once, returning when none will deliver again.
+func (l *claimLoop) halt() {
+	l.haltOnce.Do(func() {
+		close(l.halting)
+		<-l.done
+		var halts sync.WaitGroup
+		for _, cl := range l.owned {
+			halts.Go(cl.stop)
+		}
+		l.mu.Lock()
+		for _, cl := range l.releasing {
+			halts.Go(cl.stop)
+		}
+		l.mu.Unlock()
+		halts.Wait()
+	})
+}
+
+// stop ends the claims: every unit is halted, then released, and the
+// membership lease resigned, at once. The worker halts the claims and
+// flushes what it held before calling it, so each unit's next owner receives
+// only rows newer than the ones written here.
 func (l *claimLoop) stop() {
 	l.stopOnce.Do(func() {
 		l.stopped.Store(true)
 		l.cancel()
+		l.halt()
 		close(l.quit)
-		<-l.done
-		for _, cl := range l.owned {
-			cl.stop()
-		}
 		l.handovers.Wait()
 		// At once, so a broker that no longer answers costs one release's
 		// wait, not one per unit.
@@ -631,37 +702,6 @@ func (l *claimLoop) stop() {
 	})
 }
 
-// heldRows caps the rows this process holds delivered and unsettled.
-type heldRows struct {
-	slots chan struct{}
-}
-
-func newHeldRows(n int) *heldRows { return &heldRows{slots: make(chan struct{}, n)} }
-
-// acquire takes a slot, waiting while every one is taken, false if either
-// quit channel closes first.
-func (h *heldRows) acquire(a, b <-chan struct{}) bool {
-	select {
-	case h.slots <- struct{}{}:
-		return true
-	default:
-	}
-	heldWaits.Add(context.Background(), 1)
-	select {
-	case h.slots <- struct{}{}:
-		return true
-	case <-a:
-		return false
-	case <-b:
-		return false
-	}
-}
-
-// release frees the slot a row took; each row frees exactly one.
-func (h *heldRows) release() { <-h.slots }
-
-func (h *heldRows) count() int { return len(h.slots) }
-
 var (
 	claimEvents, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 		"wavehouse_ingest_shard_events_total",
@@ -671,10 +711,6 @@ var (
 		"wavehouse_ingest_shard_handover_seconds",
 		metric.WithDescription("Time from giving a shard up to releasing it: the drain of what it had delivered"),
 		metric.WithUnit("s"),
-	)
-	heldWaits, _ = otel.Meter("wavehouse-ingest").Int64Counter(
-		"wavehouse_ingest_rows_held_waits_total",
-		metric.WithDescription("Deliveries that waited because this process already held its cap of unsettled rows"),
 	)
 )
 
@@ -714,7 +750,7 @@ func registerClaimGauges(l *claimLoop) (metric.Registration, error) {
 	return meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		o.ObserveInt64(owned, l.ownedGauge.Load())
 		o.ObserveInt64(members, l.membersGauge.Load())
-		o.ObserveInt64(held, int64(l.held.count()))
+		o.ObserveInt64(held, l.held.Load())
 		if l.rankZero.Load() {
 			o.ObserveInt64(unowned, l.unownedGauge.Load())
 		}

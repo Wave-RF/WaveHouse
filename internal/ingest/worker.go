@@ -246,23 +246,29 @@ func waitOrDeadline(ctx context.Context, wg *sync.WaitGroup) error {
 // so a low-volume table can never strand another table's rows behind a shared
 // timer. It is the ONLY goroutine that watches ctx; tableLoops stop via
 // channel-close, which gives a deterministic drain with no abandoned messages.
+//
+// Stopping keeps each table's rows in order across the processes that share a
+// sharded queue: the consumer is halted first (mq.Halter), keeping its hold on
+// its units, and what it still delivers is routed like any other row; then
+// every table flushes; only then does the consumer's stop give the units up.
+// A delivery that arrives once this loop reads no more is NAKed at once,
+// before that stop, so it comes back ahead of anything newer rather than
+// after ack_wait.
 func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 	defer w.wg.Done()
 
 	msgChan := make(chan *mq.Message, w.maxBatch*2)
+	abandon := make(chan struct{})
 
 	// Pull consumer with a push-like callback (the client prefetches pullMaxMessages,
 	// shared by the tenants' queues). It runs on one delivery goroutine per tenant,
 	// so the handoff is a channel send, safe from all of them at once. Hand off to
 	// msgChan only, so a consume goroutine never blocks on flush work.
-	// The handoff also watches ctx: stop (deferred below) does not wait for a
-	// delivery already in the handler, so once this loop has stopped draining
-	// msgChan a full channel would otherwise pin a delivery goroutine
-	// forever. A message dropped here is unacked and simply redelivered.
 	stop, deliveryEnded, err := cons.Consume(func(msg *mq.Message) {
 		select {
 		case msgChan <- msg:
-		case <-ctx.Done():
+		case <-abandon:
+			nakAbandoned(msg)
 		}
 	}, pullMaxMessages)
 	if err != nil {
@@ -271,6 +277,17 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 		return
 	}
 	defer stop()
+	defer func() {
+		close(abandon)
+		for {
+			select {
+			case m := <-msgChan:
+				nakAbandoned(m)
+			default:
+				return
+			}
+		}
+	}()
 
 	// flushCtx carries values (trace) but is never cancelled: a started flush must
 	// finish so data already in ClickHouse gets acked rather than redelivered. It
@@ -302,51 +319,88 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 		w.ackWg.Wait()
 	}
 
+	// route hands a message to its table's loop. A tableLoop only blocks in
+	// its final drain, which starts after the last route, so the send waits
+	// at most for the loop to take the rows ahead of it.
+	route := func(m *mq.Message) {
+		pm, ok := w.parseMsg(flushCtx, m)
+		if !ok {
+			return // unreadable envelope: parked on the DLQ (or acked-and-dropped) in parseMsg
+		}
+		key := batchKey{tenant: pm.tenant, table: pm.tableName}
+		ch, exists := tableChans[key]
+		if !exists {
+			ch = make(chan parsedMsg, w.maxBatch)
+			tableChans[key] = ch
+
+			// TODO(#263): tableLoops are spawned per distinct tenant table and
+			// never reaped — they live for the process lifetime. Safe while
+			// tenants and table names are bounded (a settings folder per
+			// tenant, schema-validated tables, in-process publishers only,
+			// DontListen:true). Add idle-reaping + route/teardown coordination
+			// before remote/untrusted publishers can create unbounded cardinality.
+			table, in := pm.tableName, ch
+			tableWg.Go(func() { w.tableLoop(flushCtx, table, in) })
+		}
+		ch <- pm
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
+			haltRouting(cons, msgChan, route)
 			shutdown()
 			return
 		case err := <-deliveryEnded:
 			// The MQ gave up on the consumer: no message will arrive again, so
 			// waiting on msgChan would stall ingestion silently. Flush and ack
 			// what is already in hand — those rows are delivered and the
-			// publish path is not what broke — then fail loud. Messages still
-			// in msgChan are unacked and redelivered to the next consumer.
+			// publish path is not what broke — then fail loud.
 			slog.ErrorContext(ctx, "ingest consumer delivery ended; ingestion has stopped", "error", err)
+			haltRouting(cons, msgChan, route)
 			shutdown()
 			w.failed <- fmt.Errorf("ingest worker: %w", err)
 			return
 		case m := <-msgChan:
-			pm, ok := w.parseMsg(flushCtx, m)
-			if !ok {
-				continue // unreadable envelope: parked on the DLQ (or acked-and-dropped) in parseMsg
-			}
-			key := batchKey{tenant: pm.tenant, table: pm.tableName}
-			ch, exists := tableChans[key]
-			if !exists {
-				ch = make(chan parsedMsg, w.maxBatch)
-				tableChans[key] = ch
+			route(m)
+		}
+	}
+}
 
-				// TODO(#263): tableLoops are spawned per distinct tenant table and
-				// never reaped — they live for the process lifetime. Safe while
-				// tenants and table names are bounded (a settings folder per
-				// tenant, schema-validated tables, in-process publishers only,
-				// DontListen:true). Add idle-reaping + route/teardown coordination
-				// before remote/untrusted publishers can create unbounded cardinality.
-				table, in := pm.tableName, ch
-				tableWg.Go(func() { w.tableLoop(flushCtx, table, in) })
-			}
-			// Route to the table's loop, but stay responsive to shutdown if its
-			// channel is full (a busy tableLoop must not wedge teardown). A pm
-			// dropped here is unacked and simply redelivered.
+// haltRouting halts cons, if it can halt ahead of its stop, routing what it
+// still delivers until it has, then routes what msgChan still holds.
+func haltRouting(cons mq.Consumer, msgChan <-chan *mq.Message, route func(*mq.Message)) {
+	if h, ok := cons.(mq.Halter); ok {
+		halted := make(chan struct{})
+		go func() {
+			h.Halt()
+			close(halted)
+		}()
+	halting:
+		for {
 			select {
-			case ch <- pm:
-			case <-ctx.Done():
-				shutdown()
-				return
+			case m := <-msgChan:
+				route(m)
+			case <-halted:
+				break halting
 			}
 		}
+	}
+	for {
+		select {
+		case m := <-msgChan:
+			route(m)
+		default:
+			return
+		}
+	}
+}
+
+// nakAbandoned hands back a delivery the worker will not write: redelivered
+// at once, to whichever process owns its unit next.
+func nakAbandoned(m *mq.Message) {
+	if err := m.Nak(); err != nil {
+		slog.Debug("ingest: could not hand back an undelivered row; it comes back after the ack wait", "error", err)
 	}
 }
 
