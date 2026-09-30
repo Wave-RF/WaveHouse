@@ -65,8 +65,8 @@ import (
 // MaxHeld: an even share over the units this process is assigned, and never
 // less than minUnitHeld (or MaxHeld, if smaller), so one hot table still
 // fills whole batches. At its share a unit fetches only what keeps its pin
-// (the broker's: a row every few seconds while the worker keeps up, at most
-// about a dozen past the share), and the broker keeps the rest; a stuck unit
+// (the broker's: a row every few seconds, at most one ack_wait's worth past
+// the share), and the broker keeps the rest; a stuck unit
 // never takes another unit's share. The process holds about max(MaxHeld,
 // units × minUnitHeld) at most.
 const (

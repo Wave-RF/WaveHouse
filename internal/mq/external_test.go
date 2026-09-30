@@ -1152,10 +1152,10 @@ func TestExternalNATS_RedeliveryOrderKeptAtTheCap(t *testing.T) {
 	assert.Equal(t, []string{"0", "1", "2", "3"}, order, "redelivered in order across the renewals")
 }
 
-// A unit whose handler is blocked, at its cap, keeps its pin without taking
-// rows: nothing more is delivered while rows wait for the handler, however
-// long it stays blocked.
-func TestExternalNATS_BlockedHandlerKeepsThePinAndTakesNothing(t *testing.T) {
+// A unit whose handler is blocked, at its cap, keeps its pin, and takes no
+// more rows to renew it than one ack_wait's worth of renewals (shortened to
+// 10s, so 2 here); past that it renews without taking any.
+func TestExternalNATS_BlockedHandlerTakesABoundedOvershoot(t *testing.T) {
 	t.Parallel()
 	f := shippedFixture(t)
 	e := f.broker(t, nil)
@@ -1167,6 +1167,7 @@ func TestExternalNATS_BlockedHandlerKeepsThePinAndTakesNothing(t *testing.T) {
 		MaxHeld: func() int { return 2 },
 	})
 	require.NoError(t, err)
+	c.(*externalConsumer).parts[0].ackWait = 2 * renewEvery
 	busy := make(chan struct{})
 	entered := make(chan struct{}, 16)
 	stop, _, err := c.Consume(func(*Message) { entered <- struct{}{}; <-busy }, 16)
@@ -1182,11 +1183,17 @@ func TestExternalNATS_BlockedHandlerKeepsThePinAndTakesNothing(t *testing.T) {
 		require.NoError(t, err)
 		return pinnedClient(cons.CachedInfo()), cons.CachedInfo().Delivered.Consumer
 	}
-	require.Eventually(t, func() bool { _, d := state(); return d == 2 }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { _, d := state(); return d >= 2 }, 5*time.Second, 10*time.Millisecond)
 	pin, _ := state()
 	require.NotEmpty(t, pin)
-	time.Sleep(12 * time.Second) // past the 10s pinned ttl, two renewals and more
+	// The row in the handler stops counting at its ack_wait (10s here), as
+	// the server would redeliver it then, so one more is taken; after that
+	// nothing, however many renewals follow.
+	time.Sleep(16 * time.Second)
+	_, settled := state()
+	time.Sleep(11 * time.Second) // two more renewals
 	now, delivered := state()
 	assert.Equal(t, pin, now, "the pin was kept")
-	assert.Equal(t, uint64(2), delivered, "nothing taken while rows wait for the handler")
+	assert.Equal(t, settled, delivered, "renewals past the bound take no rows")
+	assert.LessOrEqual(t, delivered, uint64(5), "the cap of 2, one ack_wait (10s) of renewals at 5s, and the expired row's slot")
 }
