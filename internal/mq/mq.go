@@ -5,7 +5,8 @@
 // ingest queue, park a message on the dead-letter queue, replay since a time,
 // drop what is both written and expired — in the types below. How that maps to
 // subjects, streams, sequences, and consumers is the implementation's
-// (EmbeddedNATS), so a broker change lands here once. The behavior below is
+// (EmbeddedNATS, or ExternalNATS over an operator-owned cluster), so a broker
+// change lands here once. The behavior below is
 // what mqtest checks: every implementation passes its suite.
 package mq
 
@@ -239,9 +240,14 @@ type Subscriber interface {
 }
 
 // ConsumerConfig describes a durable, explicit-ack consumer of every event on
-// the ingest queue. Zero values take the broker's defaults.
+// the ingest queue, or of some of its units (see Sharded). Zero values take
+// the broker's defaults.
 type ConsumerConfig struct {
 	Durable string
+	// Units limits the consumer to these units of a Sharded broker's queue,
+	// by the names IngestUnits gives. Nil is every unit. A broker that does
+	// not implement Sharded refuses a non-nil Units.
+	Units []string
 	// AckWait is the redelivery timeout: a message not acked within it is
 	// delivered again.
 	AckWait time.Duration
@@ -250,7 +256,74 @@ type ConsumerConfig struct {
 	// pauses when its unacked messages hit it (backpressure), and no other
 	// unit's does.
 	MaxAckPending int
+	// MaxHeld, when set, caps the messages each unit of a Sharded broker's
+	// queue has delivered to this process and not yet had settled: at the
+	// cap the consumer fetches no more from that unit than it takes to keep
+	// its hold on the unit, until one settles. It is read before every fetch, so
+	// the cap may change while consuming. Nil is no cap but the broker's own.
+	// A broker that does not implement Sharded ignores it.
+	MaxHeld func() int
 }
+
+// Sharded is implemented by a broker whose ingest queue is split into units
+// that one consumer at a time owns: every event of one tenant table is in one
+// unit, and the broker lets exactly one puller receive from a unit at a time.
+// A broker that does not implement it is one queue every consumer shares.
+type Sharded interface {
+	// IngestUnits names the units: the configured ones, in a fixed order the
+	// same in every process, then any extra ones a lower unit count left
+	// holding rows, as last read, which are drained like the others.
+	IngestUnits() (configured, extra []string)
+	// ResetOrphaned redelivers at once what a unit's previous owner received
+	// and never settled, when no consumer holds the unit, none has received
+	// from it or settled a message of it for a while, and rows are awaiting
+	// a settlement; it reports whether it did, and ErrUnitHeld while a
+	// consumer holds the unit or was recently active on it. A missing hold
+	// alone is no proof the owner is gone. Call it only for a unit whose
+	// owner the caller has other evidence is dead (the membership view), and
+	// before consuming it, never while consuming it: a reset also redelivers
+	// what the caller itself holds.
+	ResetOrphaned(ctx context.Context, unit string) (bool, error)
+	// Unowned counts the units with rows waiting that no consumer holds and
+	// none has received from or settled a message of for a while: rows
+	// nobody is writing.
+	Unowned(ctx context.Context) (int, error)
+}
+
+// Releaser is implemented by a consumer of a Sharded broker's units. Release
+// gives the units up so that their next owner is served at once, rather than
+// once the broker judges this consumer gone: call it after Consume's stop,
+// once every message delivered has been settled. A unit this consumer never
+// held is left alone.
+type Releaser interface {
+	Release(ctx context.Context) error
+}
+
+// Halter is implemented by a Consumer that can stop fetching ahead of its
+// stop, so that its caller can write what it holds before the consumer lets
+// its units go. Halt returns once no handler invocation is running and none
+// will: everything already fetched has reached the handler. The consumer
+// keeps its hold on its units until stop, but not indefinitely: a Sharded
+// broker's for at least its ack wait after the halt has handed on what it
+// fetched.
+type Halter interface {
+	Halt()
+}
+
+// ErrUnitHeld is ResetOrphaned's answer while a consumer still holds the
+// unit, or has received from it or settled a message of it too recently to
+// be judged gone.
+var ErrUnitHeld = errors.New("unit held by a consumer")
+
+// ErrConsumerMismatch is CreateConsumer's answer when a consumer the broker's
+// operator owns no longer fits the ConsumerConfig: its ack_wait is shorter,
+// or its max_ack_pending unset.
+var ErrConsumerMismatch = errors.New("consumer does not match its config")
+
+// ErrUnitsUnsupported is CreateConsumer's answer to a ConsumerConfig naming
+// units on a broker that does not implement Sharded, or naming one it does
+// not have.
+var ErrUnitsUnsupported = errors.New("consumer units not supported")
 
 // Consumer is a live durable consumer created by ConsumerManager.
 type Consumer interface {
@@ -259,7 +332,8 @@ type Consumer interface {
 	// it: one per unit, so a tenant's messages arrive in order, one at a
 	// time, while different units' arrive concurrently — handler must be
 	// safe for that. A handler that blocks holds back its unit's delivery —
-	// that is the backpressure the ingest worker relies on. About prefetch
+	// that is the backpressure the ingest worker relies on; a Sharded
+	// broker's consumer keeps its hold on the unit meanwhile. About prefetch
 	// messages are fetched ahead across the units together: the units when
 	// delivery starts split it, and a queue joined later fetches ahead its
 	// share of it at that point, at least one message each (0 = the client
@@ -365,8 +439,8 @@ type Replayer interface {
 }
 
 // Broker is everything the process wiring needs from the MQ: every interface
-// above plus the lifecycle and the byte budgets. EmbeddedNATS is the one
-// implementation; internal/app depends on this, not on it.
+// above plus the lifecycle and the byte budgets. EmbeddedNATS and
+// ExternalNATS implement it; internal/app depends on this, not on either.
 type Broker interface {
 	Publisher
 	Subscriber

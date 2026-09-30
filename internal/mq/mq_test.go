@@ -2,10 +2,12 @@ package mq
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMessage_AckNak(t *testing.T) {
@@ -71,4 +73,40 @@ func TestWithHeader(t *testing.T) {
 	WithHeader("X-A", "2")(h)
 	WithHeader("X-B", "b")(h)
 	assert.Equal(t, Headers{"X-A": {"1", "2"}, "X-B": {"b"}}, h)
+}
+
+// OnSettled runs once, on the first settlement attempted, whichever of the
+// four it is and whether or not the broker confirms it: the consumer has let
+// go of the message either way. NakWithDelay without a delayed form falls
+// back through the wrapped Nak.
+func TestMessage_OnSettled(t *testing.T) {
+	t.Parallel()
+	fail := errors.New("no answer")
+	for name, settle := range map[string]func(*Message) error{
+		"double ack":     func(m *Message) error { return m.DoubleAck(context.Background()) },
+		"ack":            (*Message).Ack,
+		"nak":            (*Message).Nak,
+		"nak with delay": func(m *Message) error { return m.NakWithDelay(time.Second) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var calls, fired int
+			err := fail
+			cb := func() error { calls++; return err }
+			m := NewMessage(context.Background(), Topic{Tenant: "acme", Table: "t"}, nil, time.Now(),
+				func(context.Context) error { return cb() }, cb, cb)
+			m.OnSettled(func() { fired++ })
+			require.ErrorIs(t, settle(m), fail, "the broker's answer passes through")
+			assert.Equal(t, 1, fired, "a failed settlement counts: the message is let go")
+			err = nil
+			require.NoError(t, settle(m))
+			assert.Equal(t, 1, fired, "once")
+			assert.Equal(t, 2, calls, "every call reaches the broker")
+		})
+	}
+	m := NewMessage(context.Background(), Topic{Tenant: "acme", Table: "t"}, nil, time.Now(), nil, nil, nil)
+	fired := 0
+	m.OnSettled(func() { fired++ })
+	require.NoError(t, m.Ack())
+	assert.Equal(t, 1, fired, "a message without callbacks settles at once")
 }

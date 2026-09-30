@@ -124,6 +124,30 @@ func Conformance(t *testing.T, newPair Factory, opts ...Option) {
 		require.ErrorIs(t, err, coord.ErrHeld, "the term outlives the context it was taken under")
 	})
 
+	t.Run("held without campaigning", func(t *testing.T) {
+		a, b := pair(t)
+		oa, ok := a.(coord.Observer)
+		if !ok {
+			t.Skip("this backend does not observe leases")
+		}
+		ob := b.(coord.Observer)
+		held := func(o coord.Observer, name string) bool {
+			h, err := o.Held(t.Context(), name)
+			require.NoError(t, err)
+			return h
+		}
+		assert.False(t, held(oa, "lease"), "never taken")
+		term := acquire(t, a, "lease")
+		assert.True(t, held(oa, "lease"), "by its holder")
+		assert.True(t, held(ob, "lease"), "by another")
+		assert.True(t, held(ob, "lease"), "observing twice takes nothing")
+		assertOpen(t, term)
+		require.NoError(t, term.Resign(t.Context()))
+		assert.False(t, held(oa, "lease"), "resigned")
+		assert.False(t, held(ob, "lease"), "resigned, seen by another")
+		acquire(t, b, "lease")
+	})
+
 	t.Run("loss closes Done", func(t *testing.T) {
 		if o.lose == nil {
 			t.Skip("this backend never loses a live term")

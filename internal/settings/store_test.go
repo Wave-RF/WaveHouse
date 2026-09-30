@@ -65,6 +65,8 @@ func TestStore_DedupeFor_Cascade(t *testing.T) {
 			assert.Equal(t, tt.want, s.DedupeFor(tt.table))
 		})
 	}
+	// Only the overrides that name a retention are listed; "" is the default.
+	assert.Equal(t, map[string]time.Duration{"": 720 * time.Hour, "views": 24 * time.Hour, "audit": 0}, s.DedupeRetentions())
 }
 
 // A config.json without dedupe.retention keeps ids forever, and its table
@@ -81,6 +83,7 @@ func TestStore_DedupeFor_RetentionMissing(t *testing.T) {
 	assert.Equal(t, Dedupe{IDField: "event_id"}, s.DedupeFor("other"), "forever")
 	assert.Equal(t, Dedupe{IDField: "click_id"}, s.DedupeFor("clicks"), "inherits forever")
 	assert.Equal(t, Dedupe{IDField: "event_id", Retention: 24 * time.Hour}, s.DedupeFor("views"))
+	assert.Equal(t, map[string]time.Duration{"": 0, "views": 24 * time.Hour}, s.DedupeRetentions())
 }
 
 // TestStore_SeedIsValid pins that the shipped starter directory passes its
