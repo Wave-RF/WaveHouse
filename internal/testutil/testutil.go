@@ -36,6 +36,12 @@ func NewTestSchemaRegistry(t testing.TB, tables []*discovery.TableSchema) *disco
 	return reg
 }
 
+// NewSchemaConn is the mock connection NewTestSchemaRegistry discovers from,
+// for a test that builds the registry itself.
+func NewSchemaConn(tables []*discovery.TableSchema) driver.Conn {
+	return &schemaConn{tables: tables}
+}
+
 // TestServerVersion is the ClickHouse version NewTestSchemaRegistry's mock
 // connection reports, so a test can assert against ServerVersion() without
 // hardcoding the same literal twice.

@@ -554,7 +554,9 @@ func (h *throttledHTTP) Do(r *http.Request) (*http.Response, error) {
 
 // Through the real SDK stack at the default Timeout and MaxAttempts: a
 // throttled put is retried until its attempts run out, inside the call's
-// deadline, so the Reserve fails with the throttle as its cause.
+// deadline, so the Reserve fails with the throttle as its cause. The deadline
+// is read from the error, never from the wall clock, which a loaded machine
+// stretches past it around the call.
 func TestDynamo_ThrottledCallEndsOnItsLastAttempt(t *testing.T) {
 	t.Parallel()
 	h := &throttledHTTP{}
@@ -566,16 +568,13 @@ func TestDynamo_ThrottledCallEndsOnItsLastAttempt(t *testing.T) {
 	require.NoError(t, m.Apply(true))
 	calls := breakerTrips - 1
 	for range calls {
-		start := time.Now()
 		_, err := m.Reserve(t.Context(), keys("a"), time.Minute)
-		took := time.Since(start)
 		require.ErrorIs(t, err, ErrUnavailable)
 		var maxed *retry.MaxAttemptsError
 		require.ErrorAs(t, err, &maxed, "the attempts ran out, not the deadline")
 		var throttled *types.ProvisionedThroughputExceededException
 		require.ErrorAs(t, err, &throttled)
 		require.NotErrorIs(t, err, context.DeadlineExceeded)
-		assert.Less(t, took, d.cfg.Timeout)
 	}
 	assert.Equal(t, int64(calls*d.cfg.MaxAttempts), h.puts.Load())
 }

@@ -200,7 +200,8 @@ type SchemaRegistry struct {
 	// source supplies the tenant's connection and the database to discover
 	// from, read together once per Refresh, so a settings reload that moves
 	// the tenant to another pool or database is honored by the next refresh
-	// (the tenant's chconn.Pools entry in production).
+	// (the tenant's chconn.Pools entry in production, where a tenant moved
+	// to another address or database gets a fresh registry instead).
 	source Source
 	// tenant is whose tables the registry discovers.
 	tenant tenant.ID
