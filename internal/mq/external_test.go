@@ -1151,3 +1151,42 @@ func TestExternalNATS_RedeliveryOrderKeptAtTheCap(t *testing.T) {
 	assert.Equal(t, []string{"0", "1", "2", "3", "4", "5", "6", "7"}, first)
 	assert.Equal(t, []string{"0", "1", "2", "3"}, order, "redelivered in order across the renewals")
 }
+
+// A unit whose handler is blocked, at its cap, keeps its pin without taking
+// rows: nothing more is delivered while rows wait for the handler, however
+// long it stays blocked.
+func TestExternalNATS_BlockedHandlerKeepsThePinAndTakesNothing(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	stream, durable := shippedPartition(p), natsShardDurable("wh-ingest", s)
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{
+		Durable: workerDurable, Units: []string{stream + "/" + durable},
+		MaxHeld: func() int { return 2 },
+	})
+	require.NoError(t, err)
+	busy := make(chan struct{})
+	entered := make(chan struct{}, 16)
+	stop, _, err := c.Consume(func(*Message) { entered <- struct{}{}; <-busy }, 16)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	t.Cleanup(func() { close(busy) }) // first, so stop's cleanup is not left waiting
+	for i := range 10 {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(strconv.Itoa(i))))
+	}
+	<-entered
+	state := func() (string, uint64) {
+		cons, err := f.admin.Consumer(t.Context(), stream, durable)
+		require.NoError(t, err)
+		return pinnedClient(cons.CachedInfo()), cons.CachedInfo().Delivered.Consumer
+	}
+	require.Eventually(t, func() bool { _, d := state(); return d == 2 }, 5*time.Second, 10*time.Millisecond)
+	pin, _ := state()
+	require.NotEmpty(t, pin)
+	time.Sleep(12 * time.Second) // past the 10s pinned ttl, two renewals and more
+	now, delivered := state()
+	assert.Equal(t, pin, now, "the pin was kept")
+	assert.Equal(t, uint64(2), delivered, "nothing taken while rows wait for the handler")
+}

@@ -258,8 +258,8 @@ type ConsumerConfig struct {
 	MaxAckPending int
 	// MaxHeld, when set, caps the messages each unit of a Sharded broker's
 	// queue has delivered to this process and not yet had settled: at the
-	// cap the consumer fetches nothing more from that unit, and keeps its
-	// hold on the unit, until one settles. It is read before every fetch, so
+	// cap the consumer fetches no more from that unit than it takes to keep
+	// its hold on the unit, until one settles. It is read before every fetch, so
 	// the cap may change while consuming. Nil is no cap but the broker's own.
 	// A broker that does not implement Sharded ignores it.
 	MaxHeld func() int

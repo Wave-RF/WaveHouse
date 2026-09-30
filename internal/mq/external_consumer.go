@@ -105,9 +105,10 @@ func (e *ExternalNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (
 // however long the handler takes. A deliverer hands what was fetched to the
 // handler, in order. The puller fetches only as much as the unit's cap
 // (MaxHeld, and prefetch for what waits for the handler) leaves room for; at
-// the cap it renews the pin every renewEvery with a one-row fetch, and once
-// halted with pulls that deliver nothing (max_bytes 1: the server holds any
-// row back).
+// the cap it renews the pin every renewEvery with a one-row fetch while the
+// handler keeps up (at most one ack_wait's worth of renewals past the cap),
+// and otherwise, and once halted, with pulls that deliver nothing (max_bytes
+// 1: the server holds any row back).
 type externalConsumer struct {
 	e   *ExternalNATS
 	ctx context.Context
@@ -191,6 +192,20 @@ func (p *consumerPart) room() int {
 		n = min(n, p.maxHeld()-p.held)
 	}
 	return n
+}
+
+// mayOvershoot reports whether a unit at its cap may renew its pin by taking
+// one more row: only while the handler is keeping up (nothing queued for
+// it) and the rows so taken, each counted until it settles or its ack_wait
+// passes, stay within one ack_wait of renewals past the cap. Otherwise it
+// renews without taking a row.
+func (p *consumerPart) mayOvershoot() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.queue) > 0 || p.maxHeld == nil {
+		return false
+	}
+	return p.held-p.maxHeld() < max(1, int(p.ackWait/renewEvery))
 }
 
 func (p *consumerPart) enqueue(m jetstream.Msg) {
@@ -322,6 +337,12 @@ func (c *externalConsumer) pull(part *consumerPart) bool {
 		n := part.room()
 		if n <= 0 {
 			if !c.renewalDue(part) {
+				continue
+			}
+			if !part.mayOvershoot() {
+				if c.renew(part, *part.pin.Load()) {
+					return true
+				}
 				continue
 			}
 			// Renewed by taking one row past the cap: a pull that held a
