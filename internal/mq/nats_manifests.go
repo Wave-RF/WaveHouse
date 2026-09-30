@@ -240,7 +240,7 @@ func WriteNATSManifests(w io.Writer, o NATSManifestOptions) error {
 		return err
 	}
 	if o.PinnedTTL < minPinnedTTL {
-		return fmt.Errorf("pinned ttl %s must be at least %s, twice the pull expiry", o.PinnedTTL, minPinnedTTL)
+		return fmt.Errorf("pinned ttl %s must be at least %s, twice the time between pulls", o.PinnedTTL, minPinnedTTL)
 	}
 	if _, err := fmt.Fprintf(w, `# WaveHouse's JetStream topology as nack (jetstream.nats.io/v1beta2) resources:
 # %d ingest partition(s) with work-queue retention, each split into %d shards

@@ -50,8 +50,9 @@ type NATSConfig struct {
 	TopologyWait time.Duration
 
 	// recheckEvery and historyEvery override the periodic checks' intervals
-	// (tests).
-	recheckEvery, historyEvery time.Duration
+	// (tests), and activeWithin how recently a unit's durable must have
+	// delivered or had an ack to count as someone's (default its pinned_ttl).
+	recheckEvery, historyEvery, activeWithin time.Duration
 }
 
 // NATSTLS is the client side of TLS to the NATS servers.
@@ -106,6 +107,11 @@ type ExternalNATS struct {
 	topo NATSTopology
 	nc   *nats.Conn
 	js   jetstream.JetStream
+	// apiPrefix is the JetStream API's subject prefix, the domain's if set.
+	apiPrefix string
+	// activeWithin overrides each durable's pinned_ttl as the window
+	// recentlyActive reads (tests).
+	activeWithin time.Duration
 
 	// partitions is partition p's stream name, dlq the dead-letter stream's,
 	// both found by subject at boot; units is every partition's shard
@@ -169,10 +175,12 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 		return nil, errors.New("nats: no server URLs")
 	}
 	e := &ExternalNATS{
-		topo:       topo,
-		stoppers:   map[int]func(){},
-		loopDone:   make(chan struct{}),
-		connClosed: make(chan struct{}),
+		topo:         topo,
+		apiPrefix:    jetstream.DefaultAPIPrefix,
+		activeWithin: cfg.activeWithin,
+		stoppers:     map[int]func(){},
+		loopDone:     make(chan struct{}),
+		connClosed:   make(chan struct{}),
 	}
 	opts, err := e.connectOptions(cfg)
 	if err != nil {
@@ -184,6 +192,7 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 	}
 	e.connected.Store(e.nc.IsConnected())
 	if cfg.JSDomain != "" {
+		e.apiPrefix = "$JS." + cfg.JSDomain + ".API."
 		e.js, err = jetstream.NewWithDomain(e.nc, cfg.JSDomain)
 	} else {
 		e.js, err = jetstream.New(e.nc)
@@ -756,11 +765,13 @@ func (e *ExternalNATS) unit(name string) (natsUnit, bool, bool) {
 	return natsUnit{}, false, false
 }
 
-// ResetOrphaned implements Sharded. A pinned client holds the unit
-// (ErrUnitHeld). With nobody pinned and rows awaiting an ack, whoever received
-// them is gone: the reset
-// redelivers them from the ack floor at once, where the server would wait
-// out ack_wait. Rows already acked are not delivered again.
+// ResetOrphaned implements Sharded. A pinned client holds the unit, and one
+// that delivered or had an ack within the durable's pinned_ttl may still:
+// its pin can be gone for a moment (a consumer leader change releases it)
+// while it lives. Either is ErrUnitHeld. Otherwise, with rows awaiting an
+// ack, whoever received them is gone: the reset redelivers them from the ack
+// floor at once, where the server would wait out ack_wait. Rows already
+// acked are not delivered again.
 func (e *ExternalNATS) ResetOrphaned(ctx context.Context, name string) (bool, error) {
 	u, _, ok := e.unit(name)
 	if !ok {
@@ -777,6 +788,9 @@ func (e *ExternalNATS) ResetOrphaned(ctx context.Context, name string) (bool, er
 	if info.NumAckPending == 0 {
 		return false, nil
 	}
+	if e.recentlyActive(info) {
+		return false, fmt.Errorf("unit %s: %w: it delivered or had an ack within %s", name, ErrUnitHeld, e.activeWindow(info))
+	}
 	if _, err := e.js.ResetConsumer(ctx, u.stream, u.durable); err != nil {
 		return false, fmt.Errorf("reset %s: %w", name, e.apiError(err))
 	}
@@ -784,8 +798,9 @@ func (e *ExternalNATS) ResetOrphaned(ctx context.Context, name string) (bool, er
 }
 
 // Unowned implements Sharded: the units whose durable has rows pending or
-// awaiting an ack while no client holds its pin. A live owner keeps its pin
-// by pulling, so such a unit has nobody writing it.
+// awaiting an ack while no client holds its pin and none was active on it
+// within its pinned_ttl. A live owner keeps its pin by pulling, even with
+// nothing more to fetch, so such a unit has nobody writing it.
 func (e *ExternalNATS) Unowned(ctx context.Context) (int, error) {
 	units := slices.Clone(e.units)
 	if xs := e.extras.Load(); xs != nil {
@@ -801,11 +816,33 @@ func (e *ExternalNATS) Unowned(ctx context.Context) (int, error) {
 			return 0, fmt.Errorf("consumer %s: %w", u.id(), e.apiError(err))
 		}
 		info := c.CachedInfo()
-		if (info.NumPending > 0 || info.NumAckPending > 0) && pinnedClient(info) == "" {
+		if (info.NumPending > 0 || info.NumAckPending > 0) && pinnedClient(info) == "" && !e.recentlyActive(info) {
 			n++
 		}
 	}
 	return n, nil
+}
+
+// activeWindow is how recently a durable must have delivered or had an ack
+// to count as someone's: its pinned_ttl, the time the server gives a silent
+// pinned client before it unpins it.
+func (e *ExternalNATS) activeWindow(info *jetstream.ConsumerInfo) time.Duration {
+	if e.activeWithin > 0 {
+		return e.activeWithin
+	}
+	return max(info.Config.PinnedTTL, minPinnedTTL)
+}
+
+// recentlyActive reports whether a durable delivered a row, or its ack
+// floor moved, within its activeWindow, by the server's own clock.
+func (e *ExternalNATS) recentlyActive(info *jetstream.ConsumerInfo) bool {
+	window := e.activeWindow(info)
+	for _, last := range []*time.Time{info.Delivered.Last, info.AckFloor.Last} {
+		if last != nil && info.TimeStamp.Sub(*last) < window {
+			return true
+		}
+	}
+	return false
 }
 
 // pinnedClient is the pin id the server holds for WaveHouse's priority group
@@ -817,254 +854,6 @@ func pinnedClient(info *jetstream.ConsumerInfo) string {
 		}
 	}
 	return ""
-}
-
-// CreateConsumer finds the operator's shard durables — it never creates one
-// — and checks each against cfg: its ack_wait must cover cfg.AckWait and its
-// max_ack_pending must be set. cfg.Units picks the units (nil: every one,
-// the extras still draining included). A durable name that does not map to
-// the operator's is ErrConsumerNotFound; an extra whose durable is gone by
-// now is skipped.
-func (e *ExternalNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (Consumer, error) {
-	if _, ok := e.durable(cfg.Durable); !ok {
-		return nil, fmt.Errorf("consumer %q: %w: the ingest durables are %s-<shard>", cfg.Durable, ErrConsumerNotFound, e.topo.IngestConsumer)
-	}
-	names := cfg.Units
-	if names == nil {
-		configured, extra := e.IngestUnits()
-		names = slices.Concat(configured, extra)
-	}
-	c := &externalConsumer{e: e, ctx: ctx, whole: cfg.Units == nil, failed: make(chan error, 1)}
-	for _, name := range names {
-		u, extra, ok := e.unit(name)
-		if !ok {
-			return nil, fmt.Errorf("consumer unit %q: %w", name, ErrUnitsUnsupported)
-		}
-		// A handle of its own: the client keeps the pin id per handle.
-		h, err := e.js.Consumer(ctx, u.stream, u.durable)
-		switch {
-		case extra && (errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrStreamNotFound) ||
-			errors.Is(err, jetstream.ErrNotPullConsumer)):
-			continue // drained and deleted since it was listed
-		case errors.Is(err, jetstream.ErrConsumerNotFound):
-			return nil, fmt.Errorf("consumer %s: %w", name, ErrConsumerNotFound)
-		case err != nil:
-			return nil, fmt.Errorf("consumer %s: %w", name, e.apiError(err))
-		}
-		have := h.CachedInfo().Config
-		if have.AckWait < cfg.AckWait {
-			return nil, fmt.Errorf("consumer %s: ack_wait %s is shorter than the %s asked for", name, have.AckWait, cfg.AckWait)
-		}
-		if have.MaxAckPending <= 0 {
-			return nil, fmt.Errorf("consumer %s: max_ack_pending must be set", name)
-		}
-		if extra {
-			slog.Info("mq: draining a shard durable outside the configured ones", "component", "nats", "unit", name, "pending", h.CachedInfo().NumPending)
-		}
-		c.parts = append(c.parts, &consumerPart{unit: u, extra: extra, h: h})
-	}
-	return c, nil
-}
-
-// externalConsumer is the operator's shard durables it was created for.
-type externalConsumer struct {
-	e   *ExternalNATS
-	ctx context.Context
-	// whole is a consumer of every unit, the one a process with no claims
-	// runs: it takes orphaned units over itself, and releases them on stop.
-	whole  bool
-	parts  []*consumerPart
-	failed chan error
-	// reported and stopped keep failed to one error, none after stop.
-	reported, stopped atomic.Bool
-}
-
-type consumerPart struct {
-	unit natsUnit
-	// extra is outside the configured units: its delivery ending is the
-	// operator deleting it once drained, not a failure.
-	extra bool
-	h     jetstream.Consumer
-	// pin is the pin id of the last row this process received from the
-	// unit, "" before the first: whether, and as whom, it held the unit.
-	pin atomic.Pointer[string]
-}
-
-// Consume pulls every unit in the priority group, each on its own delivery
-// goroutine, so the server delivers a unit to one pinned puller at a time.
-// Prefetch is split between the configured units (at least one each), and an
-// extra gets a quarter share. A unit's delivery that the client ends on its
-// own — the durable deleted, the connection closed for good — is reported on
-// failed; an extra's is only logged. stop drains: what was fetched still
-// reaches handler, rather than going back to the server after ack_wait.
-func (c *externalConsumer) Consume(handler func(msg *Message), prefetch int) (func(), <-chan error, error) {
-	var (
-		mu      sync.Mutex
-		running []jetstream.ConsumeContext
-	)
-	stopAll := func() {
-		c.stopped.Store(true)
-		mu.Lock()
-		defer mu.Unlock()
-		for _, cc := range running {
-			cc.Drain()
-		}
-	}
-	own := 0
-	for _, part := range c.parts {
-		if !part.extra {
-			own++
-		}
-	}
-	if c.whole {
-		c.takeOver()
-	}
-	for _, part := range c.parts {
-		// The client calls this for passing conditions too, and stops the
-		// subscription itself on a terminal one: closing without our stop is
-		// what terminal means (see fanIn.run).
-		var lastErr atomic.Pointer[error]
-		opts := []jetstream.PullConsumeOpt{
-			jetstream.PullPriorityGroup(natsPriorityGroup),
-			jetstream.PullExpiry(natsPullExpiry),
-			jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
-				// Another puller holds the pin, or the consumer's leader
-				// moved: the client pulls again, and nothing is lost.
-				if errors.Is(err, jetstream.ErrPinIDMismatch) || errors.Is(err, jetstream.ErrConsumerLeadershipChanged) {
-					slog.Debug("mq: shard delivery paused", "component", "nats", "unit", part.unit.id(), "reason", err)
-					return
-				}
-				lastErr.Store(&err)
-				level := slog.LevelWarn
-				if part.extra {
-					level = slog.LevelInfo // expected once the operator deletes it
-				}
-				slog.Log(context.Background(), level, "mq: consumer reported an error", "component", "nats", "unit", part.unit.id(), "error", err)
-			}),
-		}
-		if prefetch > 0 {
-			share := max(1, prefetch/max(1, own))
-			if part.extra {
-				share = max(1, share/4)
-			}
-			opts = append(opts, jetstream.PullMaxMessages(share))
-		}
-		cc, err := part.h.Consume(func(m jetstream.Msg) {
-			if pin := m.Headers().Get(pinIDHeader); pin != "" {
-				part.pin.Store(&pin)
-			}
-			handler(c.e.wrapMsg(c.ctx, m, true))
-		}, opts...)
-		if err != nil {
-			stopAll()
-			return nil, nil, fmt.Errorf("consume %s: %w", part.unit.id(), err)
-		}
-		mu.Lock()
-		running = append(running, cc)
-		mu.Unlock()
-		go func() {
-			<-cc.Closed()
-			if c.stopped.Load() {
-				if c.whole {
-					c.releaseAfterDrain(part)
-				}
-				return
-			}
-			reason := ErrDeliveryEnded
-			if r := lastErr.Load(); r != nil {
-				reason = fmt.Errorf("%w: %w", ErrDeliveryEnded, *r)
-			}
-			if part.extra {
-				slog.Info("mq: stopped draining a shard durable outside the configured ones", "component", "nats", "unit", part.unit.id(), "reason", reason)
-				return
-			}
-			c.fail(fmt.Errorf("%s: %w", part.unit.id(), reason))
-		}()
-	}
-	untrack := c.e.track(stopAll)
-	return func() {
-		untrack()
-		stopAll()
-	}, c.failed, nil
-}
-
-// pinIDHeader carries, on a row the server delivered to the pinned puller,
-// that puller's pin id.
-const pinIDHeader = "Nats-Pin-Id"
-
-// takeOver resets every unit no one holds that has rows awaiting an ack,
-// before this consumer pulls it: whoever received them is gone.
-func (c *externalConsumer) takeOver() {
-	ctx, cancel := context.WithTimeout(c.ctx, recheckTimeout)
-	defer cancel()
-	for _, part := range c.parts {
-		if reset, err := c.e.ResetOrphaned(ctx, part.unit.id()); errors.Is(err, ErrUnitHeld) {
-			continue // another consumer holds it; the pin decides
-		} else if err != nil {
-			slog.Warn("mq: could not take over a shard's unsettled rows; they come back after ack_wait", "component", "nats", "unit", part.unit.id(), "error", err)
-		} else if reset {
-			slog.Info("mq: took over a shard's unsettled rows", "component", "nats", "unit", part.unit.id())
-		}
-	}
-}
-
-// releaseAfterDrain releases part once its drain has delivered what it
-// fetched. A whole consumer's handler has no settlement to wait for here,
-// and an unsettled row comes back to the next owner after ack_wait.
-func (c *externalConsumer) releaseAfterDrain(part *consumerPart) {
-	if c.e.nc.IsClosed() {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
-	defer cancel()
-	if err := c.e.release(ctx, part); err != nil {
-		slog.Debug("mq: could not release a shard; its pin lapses on its own", "component", "nats", "unit", part.unit.id(), "error", err)
-	}
-}
-
-// releaseTimeout bounds one unit's release.
-const releaseTimeout = 2 * time.Second
-
-// Release implements Releaser: each unit this consumer was last pinned on,
-// and whose pin the server still gives it, is unpinned.
-func (c *externalConsumer) Release(ctx context.Context) error {
-	var errs []error
-	for _, part := range c.parts {
-		errs = append(errs, c.e.release(ctx, part))
-	}
-	return errors.Join(errs...)
-}
-
-// release unpins part if this process still holds its pin. Checking first
-// keeps a process that never received from the unit, or lost the pin since,
-// from unpinning the real owner.
-func (e *ExternalNATS) release(ctx context.Context, part *consumerPart) error {
-	pin := part.pin.Load()
-	if pin == nil {
-		return nil
-	}
-	info, err := part.h.Info(ctx)
-	if err != nil {
-		return fmt.Errorf("consumer %s: %w", part.unit.id(), e.apiError(err))
-	}
-	if pinnedClient(info) != *pin {
-		return nil
-	}
-	s, err := e.js.Stream(ctx, part.unit.stream)
-	if err != nil {
-		return fmt.Errorf("stream %s: %w", part.unit.stream, e.apiError(err))
-	}
-	if err := s.UnpinConsumer(ctx, part.unit.durable, natsPriorityGroup); err != nil {
-		return fmt.Errorf("unpin %s: %w", part.unit.id(), e.apiError(err))
-	}
-	return nil
-}
-
-func (c *externalConsumer) fail(err error) {
-	if c.stopped.Load() || !c.reported.CompareAndSwap(false, true) {
-		return
-	}
-	c.failed <- err
 }
 
 // DeadLetterCounts counts tenant id's parked messages on the shared

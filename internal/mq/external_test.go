@@ -426,6 +426,7 @@ func TestExternalNATS_CreateConsumerChecksTheDurable(t *testing.T) {
 
 	_, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable, AckWait: time.Hour})
 	require.ErrorContains(t, err, "ack_wait")
+	require.ErrorIs(t, err, ErrConsumerMismatch)
 	_, err = e.CreateConsumer(t.Context(), ConsumerConfig{Durable: "someone-else"})
 	require.ErrorIs(t, err, ErrConsumerNotFound)
 	_, err = e.CreateConsumer(t.Context(), ConsumerConfig{Durable: DefaultNATSIngestConsumer, AckWait: time.Minute})
@@ -436,6 +437,10 @@ func TestExternalNATS_CreateConsumerChecksTheDurable(t *testing.T) {
 	require.ErrorIs(t, err, ErrConsumerNotFound)
 	_, err = f.admin.Consumer(t.Context(), shippedPartition(0), "wh-ingest-3")
 	require.ErrorIs(t, err, jetstream.ErrConsumerNotFound, "the broker must not recreate the durable")
+
+	require.NoError(t, f.admin.DeleteStream(t.Context(), shippedPartition(1)))
+	_, err = e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable, Units: []string{shippedPartition(1) + "/wh-ingest-0"}})
+	require.ErrorIs(t, err, ErrConsumerNotFound, "a durable whose stream is gone is gone")
 }
 
 // The shipped permissions refuse the wavehouse user everything that would
@@ -845,13 +850,21 @@ func TestExternalNATS_ReleaseUnpinsOnlyItsOwnPin(t *testing.T) {
 	assert.Less(t, time.Since(released), 5*time.Second, "at once, not after the pinned ttl")
 }
 
+// quietAfter shortens how recently a unit must have been active to count
+// as someone's, the durable's pinned_ttl otherwise.
+func quietAfter(d time.Duration) func(*NATSConfig) {
+	return func(cfg *NATSConfig) { cfg.activeWithin = d }
+}
+
 // A unit whose holder is gone with rows unacked: ResetOrphaned leaves it
-// alone while a client still holds the pin, and once none does, redelivers
-// the held rows to the next owner at once, not after ack_wait.
+// alone while a client still holds the pin, or was active on it within the
+// window, and once neither, redelivers the held rows to the next owner at
+// once, not after ack_wait.
 func TestExternalNATS_ResetOrphaned(t *testing.T) {
 	t.Parallel()
 	f := shippedFixture(t)
-	a, b := f.broker(t, nil), f.broker(t, nil)
+	const quiet = time.Second
+	a, b := f.broker(t, nil), f.broker(t, quietAfter(quiet))
 	topic := Topic{Tenant: "acme", Table: "events"}
 	p, s := natsRoute(topic, 4, 8)
 	unit := shippedPartition(p) + "/" + natsShardDurable("wh-ingest", s)
@@ -870,6 +883,10 @@ func TestExternalNATS_ResetOrphaned(t *testing.T) {
 	st, err := f.admin.Stream(t.Context(), shippedPartition(p))
 	require.NoError(t, err)
 	require.NoError(t, st.UnpinConsumer(t.Context(), natsShardDurable("wh-ingest", s), natsPriorityGroup), "stands in for the pin lapsing")
+	reset, err = b.ResetOrphaned(t.Context(), unit)
+	require.ErrorIs(t, err, ErrUnitHeld, "no pin alone is no proof: it delivered just now")
+	assert.False(t, reset)
+	time.Sleep(quiet)
 	reset, err = b.ResetOrphaned(t.Context(), unit)
 	require.NoError(t, err)
 	require.True(t, reset)
@@ -927,8 +944,10 @@ func TestExternalNATS_WholeConsumerTakesOrphansOver(t *testing.T) {
 	st, err := f.admin.Stream(t.Context(), shippedPartition(p))
 	require.NoError(t, err)
 	require.NoError(t, st.UnpinConsumer(t.Context(), natsShardDurable("wh-ingest", s), natsPriorityGroup), "stands in for the pin lapsing")
+	const quiet = time.Second
+	time.Sleep(quiet) // and for its owner's silence since
 
-	b := f.broker(t, nil)
+	b := f.broker(t, quietAfter(quiet))
 	c, err := b.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable})
 	require.NoError(t, err)
 	got := make(chan string, 4)
@@ -990,4 +1009,271 @@ func TestExternalNATS_Unowned(t *testing.T) {
 	n, err = e.Unowned(t.Context())
 	require.NoError(t, err)
 	assert.Zero(t, n, "held by the consumer that received it")
+}
+
+// One unit's consume throughput: a backlog of rows on one shard, drained by
+// one consumer that acks each row as it arrives.
+func TestExternalNATS_MeasureUnitConsumeThroughput(t *testing.T) {
+	measure(t)
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "t"}
+	payload := make([]byte, 256)
+	const n = 20_000
+	var wg sync.WaitGroup
+	for w := range 32 {
+		wg.Go(func() {
+			for i := w; i < n; i += 32 {
+				assert.NoError(t, e.Publish(t.Context(), topic, payload))
+			}
+		})
+	}
+	wg.Wait()
+	p, s := natsRoute(topic, 4, 8)
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable, Units: []string{shippedPartition(p) + "/" + natsShardDurable("wh-ingest", s)}})
+	require.NoError(t, err)
+	var got atomic.Int64
+	done := make(chan struct{})
+	start := time.Now()
+	stop, _, err := c.Consume(func(m *Message) {
+		_ = m.Ack()
+		if got.Add(1) == n {
+			close(done)
+		}
+	}, 500)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Minute):
+		t.Fatalf("received %d of %d", got.Load(), n)
+	}
+	elapsed := time.Since(start)
+	t.Logf("one unit drained %d rows of %d bytes in %s: %.0f rows/s", n, len(payload), elapsed.Round(time.Millisecond), float64(n)/elapsed.Seconds())
+}
+
+// A shard durable deleted while its consumer's handler is busy and no pull
+// of it is waiting ends delivery with failed, not a silent stall: the next
+// pin-keeping pull gets no responders, and the durable is looked up.
+func TestExternalNATS_DurableDeletedWhileBusyEndsDelivery(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	stream, durable := shippedPartition(p), natsShardDurable("wh-ingest", s)
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{
+		Durable: workerDurable, Units: []string{stream + "/" + durable},
+		MaxHeld: func() int { return 2 },
+	})
+	require.NoError(t, err)
+	busy := make(chan struct{})
+	t.Cleanup(func() { close(busy) })
+	entered := make(chan struct{}, 8)
+	stop, failed, err := c.Consume(func(*Message) { entered <- struct{}{}; <-busy }, 16)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	for i := range 5 {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(strconv.Itoa(i))))
+	}
+	<-entered // the handler holds the first row; the unit is at its cap
+
+	require.Eventually(t, func() bool {
+		cons, err := f.admin.Consumer(t.Context(), stream, durable)
+		return err == nil && cons.CachedInfo().NumAckPending == 2 && cons.CachedInfo().NumWaiting == 0
+	}, 10*time.Second, 5*time.Millisecond, "a moment with no pull waiting")
+	require.NoError(t, f.admin.DeleteConsumer(t.Context(), stream, durable))
+	deleted := time.Now()
+	select {
+	case err := <-failed:
+		assert.ErrorIs(t, err, ErrDeliveryEnded)
+		assert.ErrorIs(t, err, ErrConsumerNotFound)
+		t.Logf("failed %s after the delete: %v", time.Since(deleted).Round(10*time.Millisecond), err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("a durable deleted under a busy handler stalled silently")
+	}
+}
+
+// Rows NAKed with a delay that come due while their unit is at its cap come
+// back in order. A pin renewal that held a due row back would have the server
+// requeue it behind the others (measured with max_bytes-1 renewals: 2 3 0 1),
+// so at the cap the renewal takes the row instead.
+func TestExternalNATS_RedeliveryOrderKeptAtTheCap(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{
+		Durable: workerDurable,
+		Units:   []string{shippedPartition(p) + "/" + natsShardDurable("wh-ingest", s)}, MaxHeld: func() int { return 4 },
+	})
+	require.NoError(t, err)
+	var mu sync.Mutex
+	var got []string
+	var held []*Message
+	stop, _, err := c.Consume(func(m *Message) {
+		mu.Lock()
+		got = append(got, string(m.Data))
+		held = append(held, m)
+		mu.Unlock()
+	}, 16)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	for i := range 8 {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(strconv.Itoa(i))))
+	}
+	take := func(n int) []*Message {
+		require.Eventually(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(held) >= n }, 20*time.Second, 10*time.Millisecond)
+		mu.Lock()
+		defer mu.Unlock()
+		out := held[:n]
+		held = held[n:]
+		return out
+	}
+	for _, m := range take(4) { // 0..3 come due in 3s, while 4..7 fill the cap
+		require.NoError(t, m.NakWithDelay(3*time.Second))
+	}
+	later := take(4)
+	time.Sleep(14 * time.Second) // two renewals at least
+	for _, m := range later {
+		require.NoError(t, m.Ack())
+	}
+	redelivered := take(4)
+	var order []string
+	for _, m := range redelivered {
+		order = append(order, string(m.Data))
+		_ = m.Ack()
+	}
+	mu.Lock()
+	first := slices.Clone(got[:8])
+	mu.Unlock()
+	assert.Equal(t, []string{"0", "1", "2", "3", "4", "5", "6", "7"}, first)
+	assert.Equal(t, []string{"0", "1", "2", "3"}, order, "redelivered in order across the renewals")
+}
+
+// A unit whose handler is blocked, at its cap, keeps its pin, and takes no
+// more rows to renew it than one ack_wait's worth of renewals (shortened to
+// 10s, so 2 here); past that it renews without taking any.
+func TestExternalNATS_BlockedHandlerTakesABoundedOvershoot(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	stream, durable := shippedPartition(p), natsShardDurable("wh-ingest", s)
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{
+		Durable: workerDurable, Units: []string{stream + "/" + durable},
+		MaxHeld: func() int { return 2 },
+	})
+	require.NoError(t, err)
+	c.(*externalConsumer).parts[0].ackWait = 2 * renewEvery
+	busy := make(chan struct{})
+	entered := make(chan struct{}, 16)
+	stop, _, err := c.Consume(func(*Message) { entered <- struct{}{}; <-busy }, 16)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	t.Cleanup(func() { close(busy) }) // first, so stop's cleanup is not left waiting
+	for i := range 10 {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(strconv.Itoa(i))))
+	}
+	<-entered
+	state := func() (string, uint64) {
+		cons, err := f.admin.Consumer(t.Context(), stream, durable)
+		require.NoError(t, err)
+		return pinnedClient(cons.CachedInfo()), cons.CachedInfo().Delivered.Consumer
+	}
+	require.Eventually(t, func() bool { _, d := state(); return d >= 2 }, 5*time.Second, 10*time.Millisecond)
+	pin, _ := state()
+	require.NotEmpty(t, pin)
+	// The row in the handler stops counting at its ack_wait (10s here), as
+	// the server would redeliver it then, so one more is taken; after that
+	// nothing, however many renewals follow.
+	time.Sleep(18 * time.Second) // the last row-taking renewal is at about 15s
+	_, settled := state()
+	time.Sleep(11 * time.Second) // two more renewals
+	now, delivered := state()
+	assert.Equal(t, pin, now, "the pin was kept")
+	assert.Equal(t, settled, delivered, "renewals past the bound take no rows")
+	assert.Equal(t, uint64(5), delivered, "the cap of 2, one ack_wait (10s) of renewals at 5s, and the expired row's slot")
+}
+
+// A halted unit keeps its pin for its ack_wait counted from when what it
+// fetched has reached the handler, not from the halt: a slow drain does not
+// eat the time a handover then waits for those rows to settle.
+func TestExternalNATS_HaltKeepsThePinPastASlowDrain(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{
+		Durable: workerDurable,
+		Units:   []string{shippedPartition(p) + "/" + natsShardDurable("wh-ingest", s)},
+	})
+	require.NoError(t, err)
+	c.(*externalConsumer).parts[0].ackWait = 2 * renewEvery // 10s
+	release := make(chan struct{})
+	var once sync.Once
+	stop, _, err := c.Consume(func(*Message) { once.Do(func() { <-release }) }, 16)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	t.Cleanup(func() { closeOnceMQ(release) })
+	for i := range 3 {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(strconv.Itoa(i))))
+	}
+	require.Eventually(t, func() bool { return unitPin(t, f, topic) != "" }, 5*time.Second, 10*time.Millisecond)
+	pin := unitPin(t, f, topic)
+	halted := make(chan struct{})
+	go func() { c.(Halter).Halt(); close(halted) }()
+	time.Sleep(15 * time.Second) // the drain outlasts the ack_wait
+	closeOnceMQ(release)
+	<-halted
+	time.Sleep(10 * time.Second) // within ack_wait of the drain, past it from the halt
+	assert.Equal(t, pin, unitPin(t, f, topic), "the pin is kept for ack_wait after the drain")
+}
+
+func closeOnceMQ(ch chan struct{}) {
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
+}
+
+// The same bound holds where the prefetch share, not MaxHeld, is the cap: a
+// blocked unit's renewal rows stop one ack_wait of renewals past its share.
+func TestExternalNATS_BlockedHandlerOvershootBoundedByTheShare(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	stream, durable := shippedPartition(p), natsShardDurable("wh-ingest", s)
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{
+		Durable: workerDurable, Units: []string{stream + "/" + durable},
+		MaxHeld: func() int { return 1000 },
+	})
+	require.NoError(t, err)
+	c.(*externalConsumer).parts[0].ackWait = 2 * renewEvery
+	busy := make(chan struct{})
+	stop, _, err := c.Consume(func(*Message) { <-busy }, 2)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	t.Cleanup(func() { close(busy) })
+	for i := range 12 {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(strconv.Itoa(i))))
+	}
+	delivered := func() uint64 {
+		cons, err := f.admin.Consumer(t.Context(), stream, durable)
+		require.NoError(t, err)
+		return cons.CachedInfo().Delivered.Consumer
+	}
+	time.Sleep(16 * time.Second)
+	settled := delivered()
+	time.Sleep(11 * time.Second) // two more renewals
+	assert.Equal(t, settled, delivered(), "renewals past the bound take no rows")
+	// One in the handler, a share of 2 queued, and 2 renewals' worth past it;
+	// the handled row's expiry frees no room here, the queue being the cap.
+	assert.Equal(t, uint64(5), settled)
 }

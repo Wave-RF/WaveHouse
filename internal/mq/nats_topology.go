@@ -167,13 +167,18 @@ func (t NATSTopology) dedupeDuplicateWindow() time.Duration {
 // puller.
 const natsPriorityGroup = "wavehouse"
 
-// natsPullExpiry is how long one pull request of a shard waits. The server
-// renews a pin only when its holder sends a new pull, so a live idle owner
-// keeps its pin only while this is well under the durable's pinned TTL.
+// natsPullExpiry is the most time between two pulls of a shard that is at
+// its cap or halted, which are there to keep its pin (at the cap, taking one
+// row each for a while). Every pull itself waits a
+// second at most; boot still requires max_expires to allow a pull this long,
+// as headroom for longer pulls. The server renews a pin only when its
+// holder sends a new pull, so a live owner keeps its pin only while this is
+// well under the durable's pinned TTL.
 const natsPullExpiry = 5 * time.Second
 
-// minPinnedTTL is the shortest pinned TTL a shard durable may have: two pull
-// expiries, so a live owner re-pulls at least once before its pin lapses.
+// minPinnedTTL is the shortest pinned TTL a shard durable may have: twice
+// the time between pulls, so a live owner pulls at least once before its pin
+// lapses.
 const minPinnedTTL = 2 * natsPullExpiry
 
 // FindingSeverity says whether a finding stops WaveHouse from serving.
@@ -538,7 +543,7 @@ func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, name
 		req("inactive_threshold", "is %s; a durable must not expire", cfg.InactiveThreshold)
 	}
 	if cfg.MaxRequestExpires != 0 && cfg.MaxRequestExpires < natsPullExpiry {
-		req("max_expires", "is %s; must be unset or at least %s, WaveHouse's pull expiry, or the server refuses every pull", cfg.MaxRequestExpires, natsPullExpiry)
+		req("max_expires", "is %s; must be unset or at least %s, or the server may refuse WaveHouse's pulls", cfg.MaxRequestExpires, natsPullExpiry)
 	}
 	if cfg.MaxRequestBatch != 0 && cfg.MaxRequestBatch < t.Prefetch {
 		req("max_request_batch", "is %d; must be 0 or at least %d, the prefetch of a worker that owns this one shard", cfg.MaxRequestBatch, t.Prefetch)
@@ -554,7 +559,7 @@ func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, name
 	case cfg.PriorityPolicy != jetstream.PriorityPolicyPinned:
 	case cfg.PinnedTTL < minPinnedTTL:
 		// The server renews a pin only on a new pull from its holder.
-		req("priority_timeout", "is %s; must be at least %s, twice WaveHouse's %s pull expiry, or a live idle owner loses its pin", cfg.PinnedTTL, minPinnedTTL, natsPullExpiry)
+		req("priority_timeout", "is %s; must be at least %s, twice the %s between WaveHouse's pulls of a shard at its cap, or a live owner loses its pin", cfg.PinnedTTL, minPinnedTTL, natsPullExpiry)
 	case cfg.PinnedTTL >= defaultLeaseDuration:
 		v.add(FindingRecommended, obj, "priority_timeout", "is %s; keep it under %s, the lease after which the other processes count a dead holder gone, so its pin has lapsed by then", cfg.PinnedTTL, defaultLeaseDuration)
 	}

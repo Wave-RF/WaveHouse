@@ -256,6 +256,13 @@ type ConsumerConfig struct {
 	// pauses when its unacked messages hit it (backpressure), and no other
 	// unit's does.
 	MaxAckPending int
+	// MaxHeld, when set, caps the messages each unit of a Sharded broker's
+	// queue has delivered to this process and not yet had settled: at the
+	// cap the consumer fetches no more from that unit than it takes to keep
+	// its hold on the unit, until one settles. It is read before every fetch, so
+	// the cap may change while consuming. Nil is no cap but the broker's own.
+	// A broker that does not implement Sharded ignores it.
+	MaxHeld func() int
 }
 
 // Sharded is implemented by a broker whose ingest queue is split into units
@@ -268,14 +275,18 @@ type Sharded interface {
 	// holding rows, as last read, which are drained like the others.
 	IngestUnits() (configured, extra []string)
 	// ResetOrphaned redelivers at once what a unit's previous owner received
-	// and never settled, when no consumer holds the unit and rows are
-	// awaiting a settlement, and reports whether it did; ErrUnitHeld while a
-	// consumer still holds it. Call it before consuming a unit taken over
-	// from an owner that died, never while consuming it: a reset also
-	// redelivers what the caller itself holds.
+	// and never settled, when no consumer holds the unit, none has received
+	// from it or settled a message of it for a while, and rows are awaiting
+	// a settlement; it reports whether it did, and ErrUnitHeld while a
+	// consumer holds the unit or was recently active on it. A missing hold
+	// alone is no proof the owner is gone. Call it only for a unit whose
+	// owner the caller has other evidence is dead (the membership view), and
+	// before consuming it, never while consuming it: a reset also redelivers
+	// what the caller itself holds.
 	ResetOrphaned(ctx context.Context, unit string) (bool, error)
-	// Unowned counts the units with rows waiting that no consumer holds:
-	// rows nobody is writing.
+	// Unowned counts the units with rows waiting that no consumer holds and
+	// none has received from or settled a message of for a while: rows
+	// nobody is writing.
 	Unowned(ctx context.Context) (int, error)
 }
 
@@ -288,8 +299,26 @@ type Releaser interface {
 	Release(ctx context.Context) error
 }
 
-// ErrUnitHeld is ResetOrphaned's answer while a consumer still holds the unit.
+// Halter is implemented by a Consumer that can stop fetching ahead of its
+// stop, so that its caller can write what it holds before the consumer lets
+// its units go. Halt returns once no handler invocation is running and none
+// will: everything already fetched has reached the handler. The consumer
+// keeps its hold on its units until stop, but not indefinitely: a Sharded
+// broker's for at least its ack wait after the halt has handed on what it
+// fetched.
+type Halter interface {
+	Halt()
+}
+
+// ErrUnitHeld is ResetOrphaned's answer while a consumer still holds the
+// unit, or has received from it or settled a message of it too recently to
+// be judged gone.
 var ErrUnitHeld = errors.New("unit held by a consumer")
+
+// ErrConsumerMismatch is CreateConsumer's answer when a consumer the broker's
+// operator owns no longer fits the ConsumerConfig: its ack_wait is shorter,
+// or its max_ack_pending unset.
+var ErrConsumerMismatch = errors.New("consumer does not match its config")
 
 // ErrUnitsUnsupported is CreateConsumer's answer to a ConsumerConfig naming
 // units on a broker that does not implement Sharded, or naming one it does
@@ -303,7 +332,8 @@ type Consumer interface {
 	// it: one per unit, so a tenant's messages arrive in order, one at a
 	// time, while different units' arrive concurrently — handler must be
 	// safe for that. A handler that blocks holds back its unit's delivery —
-	// that is the backpressure the ingest worker relies on. About prefetch
+	// that is the backpressure the ingest worker relies on; a Sharded
+	// broker's consumer keeps its hold on the unit meanwhile. About prefetch
 	// messages are fetched ahead across the units together: the units when
 	// delivery starts split it, and a queue joined later fetches ahead its
 	// share of it at that point, at least one message each (0 = the client
