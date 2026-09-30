@@ -286,9 +286,8 @@ func TestIngest_RefusesAFormatItCannotParse(t *testing.T) {
 	}
 }
 
-// TestIngest_PositionalFormats: CSV and TSV are declaration-order positional
-// with no header line, which is why the format has to be a parameter rather
-// than a constant.
+// TestIngest_PositionalFormats: CSV and TSV are declaration-order positional;
+// header detection is ClickHouse's default and StrictPositional switches it off.
 func TestIngest_PositionalFormats(t *testing.T) {
 	tbl := checksHandle(t)
 
@@ -304,11 +303,10 @@ func TestIngest_PositionalFormats(t *testing.T) {
 	require.True(t, tsv.Rows[0].Accepted, tsv.Rows[0].Message)
 	assert.Equal(t, `[1, "acme", "a"]`, string(tsv.Rows[0].Line))
 
-	// A header line is one failed record with ClickHouse's own code 27, even
-	// one that names every column. The server would consume that line as a
-	// header (input_format_*_detect_header is on by default); parseSettings
-	// switches detection off, because a guessed header eats a data row that
-	// happens to spell the column names. The WithNames formats declare one.
+	// With StrictPositional a header line is one failed record with ClickHouse's
+	// own code 27, even one that names every column; by default ClickHouse
+	// consumes it as a header (input_format_*_detect_header is on by default),
+	// so the same body is one data row.
 	for name, body := range map[string][]byte{
 		"csv": []byte("id,tenant,kind\n1,acme,a\n"),
 		"tsv": []byte("id\ttenant\tkind\n1\tacme\ta\n"),
@@ -317,12 +315,17 @@ func TestIngest_PositionalFormats(t *testing.T) {
 		if name == "tsv" {
 			format = FormatTSV
 		}
-		header, err := tbl.Ingest(format, body)
+		strict, err := tbl.IngestWith(format, IngestOptions{StrictPositional: true}, body)
 		require.NoError(t, err)
-		require.Len(t, header.Rows, 2, name)
-		assert.False(t, header.Rows[0].Accepted, name)
-		assert.Equal(t, 27, header.Rows[0].Code, name)
-		assert.True(t, header.Rows[1].Accepted, name)
+		require.Len(t, strict.Rows, 2, name)
+		assert.False(t, strict.Rows[0].Accepted, name)
+		assert.Equal(t, 27, strict.Rows[0].Code, name)
+		assert.True(t, strict.Rows[1].Accepted, name)
+
+		detected, err := tbl.Ingest(format, body)
+		require.NoError(t, err)
+		require.Len(t, detected.Rows, 1, name)
+		assert.True(t, detected.Rows[0].Accepted, name)
 	}
 }
 

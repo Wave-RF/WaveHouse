@@ -1391,7 +1391,7 @@ func TestIngest_NDJSON_ErrorsTruncated(t *testing.T) {
 // spell the whole list out, and always need editing: api.md's body/Content-Type
 // table, architecture.md's "the four NDJSON spellings" count, and the ingest
 // entry in CHANGELOG.md.
-const wantAcceptedTypes = "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/csv; header=present, text/tab-separated-values, text/tab-separated-values; header=present"
+const wantAcceptedTypes = "application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/csv; header=present, text/csv; header=absent, text/tab-separated-values, text/tab-separated-values; header=present, text/tab-separated-values; header=absent"
 
 // TestAcceptedTypesAreAllResolvable pins that the advertised list never grows
 // beyond what the resolver accepts — an entry added to acceptedContentTypes but
@@ -1473,14 +1473,15 @@ func TestIngestFormat(t *testing.T) {
 		{ct: "text/csv; charset=utf-8", want: FormatCSV},
 		{ct: "text/tab-separated-values", want: FormatTSV},
 		// RFC 4180 §3's header parameter is the one parameter that decides a
-		// format, and only for the positional pair. absent is the default
-		// spelled out; the value is matched case-insensitively.
+		// format, and only for the CSV/TSV pair: present, absent and no parameter
+		// are three different readings. The value is matched case-insensitively.
 		{ct: "text/csv; header=present", want: FormatCSVWithNames},
 		{ct: "text/csv; charset=utf-8; header=present", want: FormatCSVWithNames},
 		{ct: "text/csv; header=PRESENT", want: FormatCSVWithNames},
-		{ct: "text/csv; header=absent", want: FormatCSV},
+		{ct: "text/csv; header=absent", want: FormatCSVPositional},
+		{ct: "text/csv; charset=utf-8; header=ABSENT", want: FormatCSVPositional},
 		{ct: "text/tab-separated-values; header=present", want: FormatTSVWithNames},
-		{ct: "text/tab-separated-values; header=absent", want: FormatTSV},
+		{ct: "text/tab-separated-values; header=absent", want: FormatTSVPositional},
 		{ct: "application/json; header=present", want: FormatJSON},
 		// A value that is neither is refused rather than guessed at, and so is a
 		// line whose parameters did not parse when it mentions a header: reading

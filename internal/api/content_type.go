@@ -54,13 +54,12 @@ const (
 	// from FormatJSON survives only so a declared-NDJSON body is always a
 	// batch and never has its arity sniffed.
 	FormatNDJSON
-	// FormatCSV is header-less CSV, positional in the table's declaration
-	// order (see wireColumns): every wire column, in that order. A header line
-	// is not a header — it is one record that fails to parse, with ClickHouse's
-	// code 27; FormatCSVWithNames is how a header is declared.
+	// FormatCSV is bare `text/csv`: positional in the table's declaration
+	// order (see wireColumns), under ClickHouse's own header auto-detection — a
+	// first line that spells the column names is consumed as a header, not a
+	// record.
 	FormatCSV
-	// FormatTSV is FormatCSV's tab-separated twin, with the same positional
-	// contract.
+	// FormatTSV is FormatCSV's tab-separated twin.
 	FormatTSV
 	// FormatCSVWithNames is CSV whose first line names the columns, in any
 	// order — `text/csv; header=present`, RFC 4180 §3's parameter. The header
@@ -70,6 +69,12 @@ const (
 	FormatCSVWithNames
 	// FormatTSVWithNames is FormatCSVWithNames' tab-separated twin.
 	FormatTSVWithNames
+	// FormatCSVPositional is `text/csv; header=absent`: strictly positional,
+	// detection off, so a header line is one record that fails to parse with
+	// ClickHouse's code 27.
+	FormatCSVPositional
+	// FormatTSVPositional is FormatCSVPositional's tab-separated twin.
+	FormatTSVPositional
 )
 
 // String renders a format for error messages and logs.
@@ -87,6 +92,10 @@ func (f IngestFormat) String() string {
 		return "csvwithnames"
 	case FormatTSVWithNames:
 		return "tsvwithnames"
+	case FormatCSVPositional:
+		return "csv"
+	case FormatTSVPositional:
+		return "tsv"
 	default:
 		return "unknown"
 	}
@@ -97,9 +106,9 @@ func (f IngestFormat) String() string {
 // newline-framed array are all the same input to ClickHouse's own reader.
 func (f IngestFormat) wire() typelayer.Format {
 	switch f {
-	case FormatCSV:
+	case FormatCSV, FormatCSVPositional:
 		return typelayer.FormatCSV
-	case FormatTSV:
+	case FormatTSV, FormatTSVPositional:
 		return typelayer.FormatTSV
 	case FormatCSVWithNames:
 		return typelayer.FormatCSVWithNames
@@ -110,6 +119,12 @@ func (f IngestFormat) wire() typelayer.Format {
 	default:
 		return typelayer.FormatJSONEachRow
 	}
+}
+
+// options are the parse options the format adds to wire(): header detection is
+// off exactly for the header=absent pair.
+func (f IngestFormat) options() typelayer.IngestOptions {
+	return typelayer.IngestOptions{StrictPositional: f == FormatCSVPositional || f == FormatTSVPositional}
 }
 
 // alwaysBatch reports whether this format's response is the per-record batch
@@ -130,13 +145,13 @@ func (f IngestFormat) alwaysBatch() bool { return f != FormatJSON }
 // construction.
 //
 // header is the `header` parameter an entry requires: "" matches a declaration
-// without one, or with header=absent; "present" matches only that. It is the
-// one parameter that decides a format, and only for the two media types that
-// list a "present" entry. RFC 4180 §3 defines it for text/csv. IANA's
-// text/tab-separated-values registration defines no parameters and makes the
-// first line a header of field names; bare TSV nevertheless stays header-less
-// here, as it always has been (reading an existing producer's first record as
-// a header would drop it), and TSV takes the same `header=present` opt-in.
+// without one; "present" and "absent" match only that value. It is the one
+// parameter that decides a format, and only for the two media types that list
+// non-empty entries. RFC 4180 §3 defines it for text/csv, and it maps onto
+// ClickHouse's own behaviour three ways: present is the WithNames format,
+// absent is strictly positional (detection off), and none leaves ClickHouse's
+// default header auto-detection on. text/tab-separated-values takes the same
+// mapping (IANA defines no parameters for it).
 var acceptedContentTypes = []struct {
 	mediaType string
 	header    string
@@ -149,8 +164,10 @@ var acceptedContentTypes = []struct {
 	{"application/jsonlines", "", FormatNDJSON},
 	{"text/csv", "", FormatCSV},
 	{"text/csv", "present", FormatCSVWithNames},
+	{"text/csv", "absent", FormatCSVPositional},
 	{"text/tab-separated-values", "", FormatTSV},
 	{"text/tab-separated-values", "present", FormatTSVWithNames},
+	{"text/tab-separated-values", "absent", FormatTSVPositional},
 }
 
 // supportedContentTypes is what the 415 body lists and the docs quote, derived
@@ -192,7 +209,7 @@ func resolveContentType(values []string) (IngestFormat, int, error) {
 }
 
 // ingestFormatOne resolves ONE header line, parsed per RFC 9110 §8.3. The media
-// type decides the format, plus the `header` parameter for the two positional
+// type decides the format, plus the `header` parameter for the two CSV-family
 // types (see acceptedContentTypes); no other malformed parameter costs the
 // request.
 //
@@ -211,7 +228,7 @@ func resolveContentType(values []string) (IngestFormat, int, error) {
 // so such a line is refused rather than guessed at (#563).
 //
 // The same caution applies to `header`: on a line whose parameters did not
-// parse, a header parameter cannot be read, and guessing "absent" would ingest
+// parse, a header parameter cannot be read, and guessing "none" would ingest
 // a declared header line as data. Such a line is refused when it mentions one;
 // a header value other than present/absent is refused too.
 func ingestFormatOne(v string) (IngestFormat, error) {
@@ -234,9 +251,9 @@ func ingestFormatOne(v string) (IngestFormat, error) {
 			return FormatJSON, errUnsupportedContentType
 		}
 		switch strings.ToLower(params["header"]) {
-		case "", "absent":
-		case "present":
-			header = "present"
+		case "":
+		case "present", "absent":
+			header = strings.ToLower(params["header"])
 		default:
 			return FormatJSON, errUnsupportedContentType
 		}
@@ -250,7 +267,7 @@ func ingestFormatOne(v string) (IngestFormat, error) {
 }
 
 // headerDecides reports whether the `header` parameter selects the format for
-// this media type — true only for a type with a header=present entry.
+// this media type — true only for a type with header-qualified entries.
 func headerDecides(mediaType string) bool {
 	for _, a := range acceptedContentTypes {
 		if a.mediaType == mediaType && a.header != "" {
