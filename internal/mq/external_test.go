@@ -1189,13 +1189,13 @@ func TestExternalNATS_BlockedHandlerTakesABoundedOvershoot(t *testing.T) {
 	// The row in the handler stops counting at its ack_wait (10s here), as
 	// the server would redeliver it then, so one more is taken; after that
 	// nothing, however many renewals follow.
-	time.Sleep(16 * time.Second)
+	time.Sleep(18 * time.Second) // the last row-taking renewal is at about 15s
 	_, settled := state()
 	time.Sleep(11 * time.Second) // two more renewals
 	now, delivered := state()
 	assert.Equal(t, pin, now, "the pin was kept")
 	assert.Equal(t, settled, delivered, "renewals past the bound take no rows")
-	assert.LessOrEqual(t, delivered, uint64(5), "the cap of 2, one ack_wait (10s) of renewals at 5s, and the expired row's slot")
+	assert.Equal(t, uint64(5), delivered, "the cap of 2, one ack_wait (10s) of renewals at 5s, and the expired row's slot")
 }
 
 // A halted unit keeps its pin for its ack_wait counted from when what it
