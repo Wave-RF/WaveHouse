@@ -38,8 +38,9 @@ prometheus:
 clickhouse:
   password: ""
   # Explicit chtypes artifact registry directory. Empty (default) defers to
-  # the SDK's own search path ($CHTYPES_REGISTRY, ~/.cache/chtypes/artifacts,
-  # system dirs) — set this only to point at a non-default location.
+  # the SDK's own search path ($CHTYPES_REGISTRY, the per-user cache
+  # ~/.cache/chtypes/artifacts/abi6/<os>-<arch>, system dirs) — set this
+  # only to point at a non-default location.
   chtypes_registry: ""
 
 # In-process L1 cache size. The query time-bucket

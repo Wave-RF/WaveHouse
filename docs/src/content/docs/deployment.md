@@ -106,29 +106,31 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:vX.Y.Z \
 
 ## chtypes artifacts
 
-**What it is.** WaveHouse validates ingest data, coerces types, substitutes `DEFAULT`s, and evaluates row-level security by running ClickHouse's own parser in-process, through [chtypes](https://github.com/wave-rf/chtypes) (`internal/typelayer`, `github.com/wave-rf/chtypes/go` v0.2.1). The parser itself ships as a shared library (`libchtypes.so` / `.dylib`) built per **ClickHouse minor line** (e.g. `26.6`) and per platform — WaveHouse loads the artifact matching the connected server's minor version at boot; there is no nearest-version fallback. If the connected server's line has no matching artifact, or the server's reported timezone changes after boot, ingest and streaming for the affected tables fail closed with `503` / a withheld row — see [API → Ingest error responses](/api#error-responses) and [Access Control → Where each rule is enforced](/access-control#where-each-rule-is-enforced).
+**What it is.** WaveHouse validates ingest data, coerces types, substitutes `DEFAULT`s, and evaluates row-level security by running ClickHouse's own parser in-process, through [chtypes](https://github.com/wave-rf/chtypes) (`internal/typelayer`, `github.com/wave-rf/chtypes/go` v0.4.0). The parser itself ships as a shared library (`libchtypes.so` / `.dylib`) built per **ClickHouse minor line** (e.g. `26.6`) and per platform — WaveHouse loads the artifact matching the connected server's minor version at boot; there is no nearest-version fallback. If the connected server's line has no matching artifact, or the server's reported timezone changes after boot, ingest and streaming for the affected tables fail closed with `503` / a withheld row — see [API → Ingest error responses](/api#error-responses) and [Access Control → Where each rule is enforced](/access-control#where-each-rule-is-enforced).
 
-**Where it lives.** WaveHouse looks for the artifact in a registry directory, in order: an explicit `clickhouse.chtypes_registry` (`WH_CHTYPES_REGISTRY`) if set, then chtypes' own default search path — `$CHTYPES_REGISTRY`, the per-user cache `~/.cache/chtypes/artifacts/<os>-<arch>`, then the system directories `/usr/local/share/chtypes/artifacts/<platform>` and `/opt/chtypes/artifacts/<platform>`. WaveHouse does not autofetch on a miss in production — an unmatched line is a boot-time or refresh-time failure, not a background download.
+**Where it lives.** WaveHouse looks for the artifact in a registry directory, in order: an explicit `clickhouse.chtypes_registry` (`WH_CHTYPES_REGISTRY`) if set, then chtypes' own default search path — `$CHTYPES_REGISTRY`, the per-user cache `~/.cache/chtypes/artifacts/abi6/<os>-<arch>` (one directory per SDK ABI revision, so an older SDK's downloads are never picked up), then the system directories `/usr/local/share/chtypes/artifacts/<platform>` and `/opt/chtypes/artifacts/<platform>`. WaveHouse does not autofetch on a miss in production — an unmatched line is a boot-time or refresh-time failure, not a background download.
 
-**Size.** Each artifact is roughly 160–290 MB on disk; a running process holding several loaded versions (e.g. across a rolling ClickHouse upgrade) costs roughly 120 MB of resident memory per loaded version.
+**Size.** Each artifact is roughly 160–290 MB on disk; a running process holding several loaded versions (e.g. across a rolling ClickHouse upgrade) costs roughly 120 MB of resident memory per loaded version (the chtypes multi-version guide's figure; a library is opened on first use of its line, not at registry construction).
 
 **Docker images** ship the artifact(s) baked in: the image build fetches whatever `chtypes.lock` names (see below), so a container never needs network access to ClickHouse's artifact store at runtime. `WH_CHTYPES_REGISTRY` (default `/opt/chtypes/artifacts`) points at the directory inside the image.
 
 **Release archives and `go install` / building from source** do not carry or fetch an artifact — only the Docker images bake one in. See the [README's `go install` caveat](https://github.com/Wave-RF/WaveHouse#c-go-install-binary-no-docker). Fetch one yourself before first run:
 
 ```bash
-scripts/fetch-chtypes.sh   # wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.2.1 fetch --frozen --lock chtypes.lock 26.6
+scripts/fetch-chtypes.sh   # wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.4.0 fetch --frozen --lock chtypes.lock 26.6
 ```
 
 or, for a line not in the repo's lock file:
 
 ```bash
-go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.2.1 fetch <your-clickhouse-minor-version>
+go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.4.0 fetch <your-clickhouse-minor-version>
 ```
 
 ### Pinning with `chtypes.lock`
 
-`chtypes.lock`, checked in at the repo root, records the exact artifact file and SHA-256 per platform/line the project builds and tests against. CI restores from it with `--frozen` (refusing anything the lock doesn't name) rather than fetching the rolling artifact release, so a pipeline never silently starts testing a new build. Refresh it deliberately — `go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.2.1 fetch --lock chtypes.lock <line>` — and commit the result; don't regenerate it implicitly.
+`chtypes.lock`, checked in at the repo root, records the exact artifact file and SHA-256 per platform/line the project builds and tests against. CI restores from it with `--frozen` (refusing anything the lock doesn't name) rather than fetching the rolling artifact release, so a pipeline never silently starts testing a new build. Refresh it deliberately — `go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.4.0 fetch --lock chtypes.lock --platform <os-arch> <line>`, once per platform (`darwin-arm64`, `linux-amd64`, `linux-arm64`), without `--frozen` — and commit the result; don't regenerate it implicitly.
+
+A lock is specific to the SDK's ABI revision (6 at v0.4.0): the fetcher never selects a build from another revision, so after an SDK bump that changes the revision, `--frozen` fails (`CHTYPES_ARTIFACT_PINNED` or `CHTYPES_ARTIFACT_UNPUBLISHED`) until the lock is regenerated the same way, and the CI cache key and path (`abi6`) move with it.
 
 ## Releases
 

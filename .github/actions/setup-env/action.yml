@@ -44,7 +44,7 @@
 #      lockfile + astro.config.mjs. Speeds up warm `astro check` /
 #      `astro build` — unchanged content skips the parse + transform
 #      pipeline. See #132.
-#   7. chtypes artifact cache (~/.cache/chtypes/artifacts) keyed on
+#   7. chtypes artifact cache (~/.cache/chtypes/artifacts/abi6) keyed on
 #      chtypes.lock — the pinned ClickHouse-version .so/.dylib the SDK
 #      dlopens. Measured for today's one pinned line (26.6, linux-amd64):
 #      316 MiB of libchtypes.so on disk, ~65 MiB as a stored archive, and
@@ -195,14 +195,21 @@ runs:
     # changes its contents. runner.arch is in the key on principle (all CI
     # runners are ubuntu-latest amd64 today; a future arm64 runner must not
     # restore amd64 .so files into its search path).
+    #
+    # The SDK's default fetch dir is revision-scoped:
+    # ~/.cache/chtypes/artifacts/abi<R>/<os>-<arch>. The path and the key
+    # prefix both name the ABI revision (6 at SDK v0.4.0), so a cache saved
+    # by an older SDK is never restored into the search path. When the SDK's
+    # ABI revision changes, bump `abi6` in both places and re-lock (see
+    # docs/development.md).
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: ${{ inputs.chtypes == 'true' }}
       id: chtypes-cache
       with:
-        path: ~/.cache/chtypes/artifacts
-        key: chtypes-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('chtypes.lock') }}
+        path: ~/.cache/chtypes/artifacts/abi6
+        key: chtypes-abi6-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('chtypes.lock') }}
         restore-keys: |
-          chtypes-v1-${{ runner.os }}-${{ runner.arch }}-
+          chtypes-abi6-${{ runner.os }}-${{ runner.arch }}-
 
     # Runs on both cache hit and miss: scripts/fetch-chtypes.sh --frozen is
     # cheap on a hit (a manifest check against chtypes.lock, not a
