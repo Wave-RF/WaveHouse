@@ -244,6 +244,51 @@ func TestIngest_TSVBody_LandsInClickHouse(t *testing.T) {
 	eventuallyRows(t, table, "user_id = 't2'", 0)
 }
 
+// TestIngest_CSVWithNamesBody_LandsInClickHouse: `text/csv; header=present`
+// addresses the columns by the header, in any order. The header is not a
+// record, a column it omits takes the table's own DEFAULT, and a bad row is
+// salvaged like any other. Asserted in the table, not only in the response.
+func TestIngest_CSVWithNamesBody_LandsInClickHouse(t *testing.T) {
+	table := createTable(t, "user_id String, event_type String, value UInt32 DEFAULT 42", "ORDER BY user_id")
+
+	status, body := postIngest(t, table, "text/csv; header=present",
+		"event_type,user_id\nclick,h1\nview,h2\n", "", "")
+	require.Equal(t, http.StatusOK, status, "body=%v", body)
+	assert.EqualValues(t, 2, body["total"], "the header line is not a record")
+	assert.EqualValues(t, 2, body["succeeded"])
+
+	eventuallyRows(t, table, "user_id = 'h1' AND event_type = 'click' AND value = 42", 1)
+	eventuallyRows(t, table, "user_id = 'h2' AND event_type = 'view' AND value = 42", 1)
+}
+
+// TestIngest_TSVWithNamesBody_LandsInClickHouse is the tab-separated twin, with
+// a bad row beside a good one.
+func TestIngest_TSVWithNamesBody_LandsInClickHouse(t *testing.T) {
+	table := createTable(t, "user_id String, event_type String, value UInt32", "ORDER BY user_id")
+
+	status, body := postIngest(t, table, "text/tab-separated-values; header=present",
+		"value\tuser_id\tevent_type\n5\tn1\tclick\nnope\tn2\tview\n", "", "")
+	require.Equal(t, http.StatusOK, status, "body=%v", body)
+	assert.EqualValues(t, 1, body["succeeded"])
+	assert.EqualValues(t, 1, body["failed"])
+
+	eventuallyRows(t, table, "user_id = 'n1' AND value = 5", 1)
+	eventuallyRows(t, table, "user_id = 'n2'", 0)
+}
+
+// TestIngest_WithNamesUnknownHeader_Is400WithCode117: a header naming a column
+// the table does not have is ClickHouse's own refusal of the body, before any
+// record — a whole-request 400 carrying its code, and nothing stored.
+func TestIngest_WithNamesUnknownHeader_Is400WithCode117(t *testing.T) {
+	table := createTable(t, "user_id String, value UInt32", "ORDER BY user_id")
+
+	status, body := postIngest(t, table, "text/csv; header=present", "user_id,nosuch\nu1,1\n", "", "")
+	require.Equal(t, http.StatusBadRequest, status, "body=%v", body)
+	assert.EqualValues(t, 117, body["code"])
+	assert.Contains(t, body["error"], "nosuch")
+	eventuallyRows(t, table, "1", 0)
+}
+
 // TestIngest_DeniedColumn_IsClickHouseCode117 is decision D1 end to end: column
 // policy is answered by compiling the ROLE's own schema without the denied
 // columns, so a record naming one is ClickHouse's per-record UNKNOWN_FIELD —
