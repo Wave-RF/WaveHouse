@@ -168,7 +168,8 @@ func (t NATSTopology) dedupeDuplicateWindow() time.Duration {
 const natsPriorityGroup = "wavehouse"
 
 // natsPullExpiry is the most time between two pulls of a shard that is at
-// its cap or halted, which only renew its pin. Every pull itself waits a
+// its cap or halted, which are there to keep its pin (at the cap, taking one
+// row each for a while). Every pull itself waits a
 // second at most; boot still requires max_expires to allow a pull this long,
 // as headroom for longer pulls. The server renews a pin only when its
 // holder sends a new pull, so a live owner keeps its pin only while this is

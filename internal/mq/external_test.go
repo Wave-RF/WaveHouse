@@ -1197,3 +1197,46 @@ func TestExternalNATS_BlockedHandlerTakesABoundedOvershoot(t *testing.T) {
 	assert.Equal(t, settled, delivered, "renewals past the bound take no rows")
 	assert.LessOrEqual(t, delivered, uint64(5), "the cap of 2, one ack_wait (10s) of renewals at 5s, and the expired row's slot")
 }
+
+// A halted unit keeps its pin for its ack_wait counted from when what it
+// fetched has reached the handler, not from the halt: a slow drain does not
+// eat the time a handover then waits for those rows to settle.
+func TestExternalNATS_HaltKeepsThePinPastASlowDrain(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{
+		Durable: workerDurable,
+		Units:   []string{shippedPartition(p) + "/" + natsShardDurable("wh-ingest", s)},
+	})
+	require.NoError(t, err)
+	c.(*externalConsumer).parts[0].ackWait = 2 * renewEvery // 10s
+	release := make(chan struct{})
+	var once sync.Once
+	stop, _, err := c.Consume(func(*Message) { once.Do(func() { <-release }) }, 16)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	t.Cleanup(func() { closeOnceMQ(release) })
+	for i := range 3 {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(strconv.Itoa(i))))
+	}
+	require.Eventually(t, func() bool { return unitPin(t, f, topic) != "" }, 5*time.Second, 10*time.Millisecond)
+	pin := unitPin(t, f, topic)
+	halted := make(chan struct{})
+	go func() { c.(Halter).Halt(); close(halted) }()
+	time.Sleep(15 * time.Second) // the drain outlasts the ack_wait
+	closeOnceMQ(release)
+	<-halted
+	time.Sleep(10 * time.Second) // within ack_wait of the drain, past it from the halt
+	assert.Equal(t, pin, unitPin(t, f, topic), "the pin is kept for ack_wait after the drain")
+}
+
+func closeOnceMQ(ch chan struct{}) {
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
+}

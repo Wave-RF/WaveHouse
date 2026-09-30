@@ -196,7 +196,8 @@ func (p *consumerPart) room() int {
 
 // mayOvershoot reports whether a unit at its cap may renew its pin by taking
 // one more row: while the rows so taken, each counted until it settles or its
-// ack_wait passes, stay under one ack_wait of renewals past the cap. Past
+// ack_wait passes, stay under one ack_wait of renewals past the cap, both
+// MaxHeld and the prefetch share of rows waiting for the handler. Past
 // that it renews without taking a row, which can reorder due redeliveries
 // (see renewRequest), rather than hold more.
 func (p *consumerPart) mayOvershoot() bool {
@@ -205,7 +206,8 @@ func (p *consumerPart) mayOvershoot() bool {
 	if p.maxHeld == nil {
 		return false
 	}
-	return p.held-p.maxHeld() < max(1, int(p.ackWait/renewEvery))
+	k := max(1, int(p.ackWait/renewEvery))
+	return p.held-p.maxHeld() < k && len(p.queue)-p.share < k
 }
 
 func (p *consumerPart) enqueue(m jetstream.Msg) {
@@ -419,13 +421,22 @@ func (c *externalConsumer) pause(part *consumerPart, d time.Duration) {
 
 // hold keeps a halted unit's pin, so that no other process receives from it
 // while this one writes what it holds, until Release, Close, the pin is lost,
-// or the durable's ack_wait has passed: by then the server redelivers what
-// this process still holds anyway.
+// or the durable's ack_wait has passed since what it fetched reached the
+// handler, and one renewal more, so that a caller's own wait of ack_wait from
+// then (a handover's) ends before the renewals do. By then the server
+// redelivers what this process still holds anyway.
 func (c *externalConsumer) hold(part *consumerPart) {
-	until := time.Now().Add(part.ackWait)
+	var until time.Time
 	for {
+		if until.IsZero() {
+			select {
+			case <-part.drained:
+				until = time.Now().Add(part.ackWait + renewEvery)
+			default:
+			}
+		}
 		pin := part.pin.Load()
-		if pin == nil || !time.Now().Before(until) {
+		if pin == nil || (!until.IsZero() && !time.Now().Before(until)) {
 			return
 		}
 		t := time.NewTimer(max(0, time.Until(part.lastPull.Add(renewEvery))))
@@ -604,8 +615,9 @@ func (c *externalConsumer) Release(ctx context.Context) error {
 // The check and the unpin are two requests, and the unpin names no pin id:
 // if the pin moved to another client between them, that client is unpinned
 // and pins again with its next pull. A halted unit renews its pin until its
-// release returns, so the pin cannot lapse in between; only a consumer leader
-// change there (which releases the pin itself) opens that window.
+// release returns, if that comes within ack_wait of the halt's drain (a
+// handover's bound), so the pin cannot lapse in between; only a consumer
+// leader change there (which releases the pin itself) opens that window.
 func (e *ExternalNATS) release(ctx context.Context, part *consumerPart) error {
 	pin := part.pin.Load()
 	if pin == nil {
