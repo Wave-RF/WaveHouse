@@ -1240,3 +1240,40 @@ func closeOnceMQ(ch chan struct{}) {
 		close(ch)
 	}
 }
+
+// The same bound holds where the prefetch share, not MaxHeld, is the cap: a
+// blocked unit's renewal rows stop one ack_wait of renewals past its share.
+func TestExternalNATS_BlockedHandlerOvershootBoundedByTheShare(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	stream, durable := shippedPartition(p), natsShardDurable("wh-ingest", s)
+	c, err := e.CreateConsumer(t.Context(), ConsumerConfig{
+		Durable: workerDurable, Units: []string{stream + "/" + durable},
+		MaxHeld: func() int { return 1000 },
+	})
+	require.NoError(t, err)
+	c.(*externalConsumer).parts[0].ackWait = 2 * renewEvery
+	busy := make(chan struct{})
+	stop, _, err := c.Consume(func(*Message) { <-busy }, 2)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	t.Cleanup(func() { close(busy) })
+	for i := range 12 {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(strconv.Itoa(i))))
+	}
+	delivered := func() uint64 {
+		cons, err := f.admin.Consumer(t.Context(), stream, durable)
+		require.NoError(t, err)
+		return cons.CachedInfo().Delivered.Consumer
+	}
+	time.Sleep(16 * time.Second)
+	settled := delivered()
+	time.Sleep(11 * time.Second) // two more renewals
+	assert.Equal(t, settled, delivered(), "renewals past the bound take no rows")
+	// One in the handler, a share of 2 queued, 2 renewals' worth past it, and
+	// the handled row's slot once its ack_wait (10s) passes.
+	assert.LessOrEqual(t, settled, uint64(6))
+}

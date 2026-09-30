@@ -262,7 +262,8 @@ func (p *consumerPart) next() (jetstream.Msg, bool) {
 // reported on failed; an extra's is only logged. stop halts every unit
 // without waiting (Halt waits); a consumer of every unit then releases each
 // once it has handed on what it fetched, while one of chosen units keeps
-// renewing their pins until Release, or for at most a durable's ack_wait.
+// renewing their pins until Release, or until a durable's ack_wait and one
+// renewal have passed since its halt handed on what it fetched.
 func (c *externalConsumer) Consume(handler func(msg *Message), prefetch int) (func(), <-chan error, error) {
 	own := 0
 	for _, part := range c.parts {

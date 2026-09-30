@@ -304,7 +304,8 @@ type Releaser interface {
 // its units go. Halt returns once no handler invocation is running and none
 // will: everything already fetched has reached the handler. The consumer
 // keeps its hold on its units until stop, but not indefinitely: a Sharded
-// broker's for its ack wait after the halt has handed on what it fetched.
+// broker's for at least its ack wait after the halt has handed on what it
+// fetched.
 type Halter interface {
 	Halt()
 }
