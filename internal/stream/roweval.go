@@ -39,9 +39,11 @@ const (
 	// like every answer that is not a definite true.
 	ReasonDecline = typelayer.ReasonDecline
 	// ReasonUnavailable: no compiled schema can answer for this tenant's table
-	// — the tenant is not bound yet, its server line has no artifact, a compile
-	// refusal, or no engine wired at all. Nothing about the row; every
-	// row-filtered subscriber of the table is affected until it is fixed.
+	// — the tenant is not bound yet, its server line has no artifact, its server
+	// zone differs from the one this process opened that line with, the table's
+	// schema did not compile, or no engine is wired at all. Nothing about the
+	// row; every row-filtered subscriber of the table is affected until it is
+	// fixed.
 	ReasonUnavailable = "unavailable"
 	// ReasonDrift: the event's column list names a column the table's current
 	// generation does not export (dropped or renamed since), or names one twice,
@@ -190,7 +192,7 @@ func (e *withheldError) Error() string { return e.err.Error() }
 func (e *withheldError) Unwrap() error { return e.err }
 
 // classifyPrepare names WHY no view could be prepared. The causes are
-// operationally different — a missing artifact or an unbound tenant is an
+// operationally different — an unavailable table (see ReasonUnavailable) is an
 // estate problem, drift is a schema change in flight — and they are
 // indistinguishable in the metric without the label.
 func classifyPrepare(err error) error {

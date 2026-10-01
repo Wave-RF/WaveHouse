@@ -81,9 +81,9 @@ type IngestHandler struct {
 	window int
 
 	// noticeMu guards noticeLast, the last time each rate-limited notice was
-	// logged. A tenant the type layer cannot serve, or a policy whose injected
-	// literal will not compile, is a standing condition: one line per request
-	// would bury the rest of the log under it.
+	// logged. A tenant or table the type layer cannot serve, or a policy whose
+	// injected literal will not compile, is a standing condition: one line per
+	// request would bury the rest of the log under it.
 	noticeMu   sync.Mutex
 	noticeLast map[string]time.Time
 }
@@ -318,10 +318,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A tenant the type layer cannot judge is refused before the body is read,
-	// like a schema not discovered yet: nothing in the body can change the
-	// answer, so there is no reason to buffer up to 16 MiB of it. The handle is
-	// not held across the read — a slow upload must not hold off a rebind.
+	// A tenant or table the type layer cannot judge is refused before the body
+	// is read, like a schema not discovered yet: nothing in the body can change
+	// the answer, so there is no reason to buffer up to 16 MiB of it. The handle
+	// is not held across the read — a slow upload must not hold off a rebind.
 	if abort := h.typesReady(ctx, store.Tenant(), table); abort != nil {
 		writeAbort(w, abort)
 		return
@@ -775,11 +775,12 @@ func (h *IngestHandler) typesFailed(ctx context.Context, id tenant.ID, table str
 }
 
 // unavailableAbort is the 503 for a type layer that cannot judge the tenant's
-// table: a missing artifact for its ClickHouse line, a server zone this process
-// cannot serve, a table that did not compile, or a tenant not bound yet. The
-// body stays generic — the cause can name server paths and other tenants'
-// zones, and is the operator's to read in the log. Retry-After is the schema
-// hint's: the tenant's next schema refresh is what binds it again.
+// table: a tenant not bound yet, a missing artifact for its ClickHouse line, a
+// server zone this process cannot serve, or a table that did not compile (or,
+// a wiring fault, no type layer at all). The body stays generic — the cause can
+// name server paths and other tenants' zones, and is the operator's to read in
+// the log. Retry-After is the schema hint's: the tenant's next schema refresh
+// is what binds it again, and what compiles a failed table again.
 func unavailableAbort() *requestAbort {
 	return &requestAbort{
 		Status:     http.StatusServiceUnavailable,
@@ -789,8 +790,9 @@ func unavailableAbort() *requestAbort {
 }
 
 // logUnavailable emits at most one line per tenant and table per minute. A
-// missing artifact or a timezone mismatch persists until an operator acts, so
-// the per-request line says nothing the first one didn't.
+// missing artifact, a timezone mismatch or a table that does not compile
+// persists until an operator acts, so the per-request line says nothing the
+// first one didn't.
 func (h *IngestHandler) logUnavailable(ctx context.Context, id tenant.ID, table, cause string) {
 	if h.noticeDue("unavailable:" + id.String() + "/" + table) {
 		slog.ErrorContext(ctx, "ingest type layer unavailable", "tenant", id, "table", table, "cause", cause)

@@ -394,9 +394,9 @@ func (a *App) readConns(s *settings.Store) int {
 // the search path refuses boot: an API process could judge nothing. Opening
 // reads manifests only; a ClickHouse line's library is opened by the first
 // tenant bound to it, from that tenant's discovery (wireDiscovery), and a
-// tenant whose line or zone this process cannot serve is unavailable on its
-// own. Released after schema discovery, whose loops bind it, and so after
-// the HTTP drain.
+// tenant or table this process cannot serve is unavailable on its own
+// (typelayer.Unavailable lists why). Released after schema discovery, whose
+// loops bind it, and so after the HTTP drain.
 func (a *App) wireTypes() error {
 	eng, err := typelayer.NewEngine(typelayer.Config{RegistryDir: a.cfg.ClickHouse.ChtypesRegistry})
 	if err != nil {

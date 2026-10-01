@@ -29,7 +29,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 scripts/fetch-chtypes.sh   # wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.5.2 fetch --frozen --lock chtypes.lock 26.8
 ```
 
-It lands in the default local cache (`~/.cache/chtypes/artifacts/abi6/<os>-<arch>`, one directory per SDK ABI revision) and is 160–300 MB — expect the first run to take a minute or two. Without it the API process refuses to boot (`make dev`, `make test-e2e`, and the app that `make test-integration` and `make ci` start), and the unit tests that need the engine skip; set `WAVEHOUSE_TEST_REQUIRE_CHTYPES=1` (CI does) to make a missing artifact fail those tests instead. A `503` on ingest, with row-filtered stream rows withheld, is what a process that did find an artifact answers for a ClickHouse line the artifact does not cover.
+It lands in the default local cache (`~/.cache/chtypes/artifacts/abi6/<os>-<arch>`, one directory per SDK ABI revision) and is 160–300 MB — expect the first run to take a minute or two. Without it the API process refuses to boot (`make dev`, `make test-e2e`, and the app that `make test-integration` and `make ci` start), and the unit tests that need the engine skip; set `WAVEHOUSE_TEST_REQUIRE_CHTYPES=1` (CI does) to make a missing artifact fail those tests instead. A process that did find an artifact answers ingest with `503`, and withholds row-filtered stream rows, for a ClickHouse line the artifact does not cover; that cause and the others are listed in [Deployment → chtypes artifacts](/deployment#chtypes-artifacts).
 
 ### Auto-installed by `make tools`
 

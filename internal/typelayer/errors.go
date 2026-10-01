@@ -12,9 +12,10 @@ import (
 // and to "withhold" on the stream, so it must stay distinguishable from a
 // ClickHouse rejection.
 //
-// It is always about one tenant: a missing artifact for the tenant's server
-// line, a server zone this process cannot adopt, or a table that did not
-// compile leaves every other tenant answering.
+// It is always about one tenant, or one of its tables: a tenant not bound
+// yet, a missing artifact for the tenant's server line, a server zone this
+// process cannot adopt, or a table that did not compile (that table alone)
+// leaves every other tenant answering.
 type Unavailable struct {
 	Tenant tenant.ID
 	// Table is "" when the cause covers the tenant's every table.

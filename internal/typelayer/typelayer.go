@@ -70,10 +70,11 @@ type Config struct {
 // that tenant's successful refreshes (Bind), and the tenant's teardown drops
 // it (Forget).
 //
-// Tenants are independent: a tenant whose server line has no artifact, whose
-// server zone this process cannot adopt, or whose table does not compile is
-// Unavailable on its own, and every other tenant keeps answering. Two tenants
-// on the same server and database still compile separate handles.
+// Tenants are independent: a tenant that is not bound yet, has no artifact for
+// its server line, or reports a server zone this process cannot adopt is
+// Unavailable on its own, a table that does not compile is Unavailable alone,
+// and every other tenant keeps answering. Two tenants on the same server and
+// database still compile separate handles.
 type Engine struct {
 	reg *chtypes.Registry
 
@@ -187,12 +188,13 @@ func (e *Engine) Table(id tenant.ID, name string) (*Table, error) {
 }
 
 // Bind resolves the library for the tenant's serverVersion and (re)compiles a
-// handle per table, keeping every table whose columns and library are
+// handle per table, keeping every compiled table whose columns and library are
 // unchanged. It is called synchronously from discovery's refresh hook, so it
 // must never be fatal: a failure is recorded as a cause — per table for a
 // compile refusal, tenant-wide for a missing artifact or a zone mismatch —
-// and surfaces as *Unavailable from Table. A table the tenant no longer has
-// is closed; a tenant whose line resolves again is answering again.
+// and surfaces as *Unavailable from Table. A table whose compile was refused
+// is compiled again at every Bind; a table the tenant no longer has is closed;
+// a tenant whose line resolves again is answering again.
 //
 // serverTZ is the server's default zone name as ClickHouse reports it; ""
 // means UTC, chtypes' own default, never the host's zone.

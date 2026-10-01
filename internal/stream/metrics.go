@@ -92,13 +92,14 @@ func (m *Metrics) FrameDropped(kind string) {
 // tell "no matching rows" from "a misconfigured filter withholding everything",
 // and by reason (a Reason* constant, a closed set) so the cases that are a FAULT
 // rather than a filter verdict are visible on their own: `unavailable` means the
-// type layer has no compiled schema for the tenant's table, so every
-// row-filtered subscriber is dark until it does; `drift` means events arrive
-// under a column list the table's current generation cannot read; `error` means
-// ClickHouse raised evaluating the predicate over the row, or the type layer
-// refused to parse the event at all; and `decline` means no verdict was reached
-// — a filter that does not compile, a row that does not parse, or a filter on a
-// column the inserting role did not write. Only `filter` is a policy decision.
+// type layer has no compiled schema for the tenant's table (ReasonUnavailable
+// lists why), so every row-filtered subscriber is dark until it does; `drift`
+// means events arrive under a column list the table's current generation cannot
+// read; `error` means ClickHouse raised evaluating the predicate over the row, or
+// the type layer refused to parse the event at all; and `decline` means no
+// verdict was reached — a filter that does not compile, a row that does not
+// parse, or a filter on a column the inserting role did not write. Only `filter`
+// is a policy decision.
 func (m *Metrics) RowWithheld(table, role, reason string) {
 	if m == nil {
 		return
