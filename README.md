@@ -25,7 +25,7 @@
 
 <p align="center">
   <a href="https://wavehouse.dev"><strong>Docs</strong></a> ·
-  <a href="#-quick-start"><strong>Quick start</strong></a> ·
+  <a href="#quick-start-guide"><strong>Quick start</strong></a> ·
   <a href="https://wavehouse.dev/why-wavehouse"><strong>Why WaveHouse</strong></a> ·
   <a href="https://github.com/Wave-RF/WaveHouse/discussions"><strong>Discussions</strong></a>
 </p>
