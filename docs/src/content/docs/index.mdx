@@ -60,7 +60,7 @@ import { cloudLink } from '../../config/outbound';
 
 ## Why WaveHouse exists
 
-ClickHouse is a phenomenal OLAP database, but pointing a frontend straight at it comes with sharp edges: custom APIs, Kafka queues to avoid "too many parts" errors, replacing-merge logic for deduplication. WaveHouse abstracts all of that into a single, deployable binary so you stop interacting with ClickHouse directly.
+ClickHouse is a phenomenal OLAP database, but pointing a frontend straight at it comes with sharp edges: custom APIs, Kafka queues to avoid "too many parts" errors, replacing-merge logic for deduplication. WaveHouse abstracts all of that into a single, deployable process so you stop interacting with ClickHouse directly.
 
 <div class="wh-versus not-content">
   <div class="wh-versus__col wh-versus__col--pain">
@@ -88,7 +88,7 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 
 <CardGrid>
  <Card title="Schema-aware validation" icon="approve-check">
-  WaveHouse discovers your ClickHouse schemas via `system.columns` and validates every ingest against the real schema — unknown fields, type mismatches, and null violations are rejected at the edge.
+  WaveHouse discovers your ClickHouse schemas via `system.columns` and validates every ingest against the real schema — unknown fields and values ClickHouse cannot parse are rejected at the edge.
  </Card>
  <Card title="Async buffered ingest" icon="rocket">
   Writes land in a durable NATS JetStream WAL and return `200 OK` instantly. A background worker batch-flushes to ClickHouse — never drop a packet.
@@ -180,11 +180,11 @@ curl -N "http://localhost:8080/v1/stream?table=clicks"
 
 WaveHouse is fail-closed, so the standalone stack ships a permissive trial policy (a non-admin `public` role that can read/write the demo tables, in the bind-mounted settings directory) — then it's five minutes from `git clone` to a live event stream. See [Getting Started](/getting-started).
 
-**How it ships:** one `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external dependency is ClickHouse.** Same binary on a laptop, in Docker, or on a production host.
+**How it ships:** one `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external service is ClickHouse**; the process also loads one local file, the [chtypes artifact](/deployment#chtypes-artifacts) for your ClickHouse line, which the Docker images carry. Same binary on a laptop, in Docker, or on a production host.
 
 ## Or skip the ops entirely
 
-Self-hosting WaveHouse is deliberately boring — one binary, one dependency. But *that one dependency* is a ClickHouse cluster somebody has to size, upgrade, back up, and keep alive at 3am.
+Self-hosting WaveHouse is deliberately boring — one process, one service dependency. But *that one dependency* is a ClickHouse cluster somebody has to size, upgrade, back up, and keep alive at 3am.
 
 <CloudCta
   variant="band"

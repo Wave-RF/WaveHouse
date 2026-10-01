@@ -37,8 +37,8 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 403 | `clickhouse.access_denied` | No | ClickHouse's user lacks a grant the statement needs |
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
 | 500 / 502 | `clickhouse.unknown` | Yes | ClickHouse failed with no verdict (no exception code, no recognizable transport error); `502` on `wh.sql` |
-| 502 | `clickhouse.misconfigured` | No | ClickHouse refused WaveHouse's own credentials or database, or the route to it is wrong (a redirect, or a `4xx` other than `408`/`413`/`429`, with no exception code) — an operator fix |
-| 502 | `clickhouse.response_too_large` | No | A raw-SQL (`wh.sql`) response over the 64 MiB cap |
+| 502 | `clickhouse.misconfigured` | No | ClickHouse refused WaveHouse's own credentials or database, a read ran under a `readonly=1` profile and was refused as a write, or the route to it is wrong (a redirect, or a `4xx` other than `408`/`413`/`429`, with no exception code) — an operator fix |
+| 502 | `clickhouse.response_too_large` | No | A response over the 64 MiB cap, on any query path (structured query, pipe or `wh.sql`) |
 | 503 | `clickhouse.unavailable` | Yes | ClickHouse is down, unreachable or overloaded; `Retry-After: 5`, honored between attempts |
 | 503 | `HTTP_503` | Yes | Service unavailable, a tenant whose settings folder was rejected, a schema not discovered yet, a tenant on no ClickHouse pool, a tenant whose ClickHouse line the type layer cannot serve (`ingest validation is unavailable`, `Retry-After: 5`), a dedupe store that cannot answer (`dedupe store unavailable`, `Retry-After: 5`), a token sent while that tenant's JWKS has not been fetched yet (`token verifier not ready`, `Retry-After: 30`), or a record whose dedupe id another request is still publishing (`a request with the same dedupe id is in flight`, `Retry-After`: the server's dedupe lease, 30 s by default). REST calls auto-retry, honoring `Retry-After` when the response carries one — so each attempt on those last two causes waits that long; a stream re-dials on its own jittered backoff instead |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
@@ -147,7 +147,7 @@ Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev serve
 | `--out`, `-o` | Output .d.ts file path | `./wavehouse.d.ts` |
 | `--auth`, `-a` | Bearer token (if auth required) | — |
 
-The generated row type is the **read** shape, and computed columns are where it and the server disagree. An `EPHEMERAL` column declares a default, so codegen emits it, yet no query can ever return it — the type says readable where only the write is real. `MATERIALIZED` and `ALIAS` columns declare defaults too, so they are emitted as optional, but supplying any of the three on `insert` is a `400` carrying ClickHouse's own code 117 (`Unknown field found while parsing JSONEachRow format: x`), and the type will not catch it. Omit computed columns; the server fills them in.
+The generated row type is the **read** shape, and computed columns are where it and the server disagree. An `EPHEMERAL` column declares a default, so codegen emits it, yet no query can ever return it — the type says readable where only the write is real. `MATERIALIZED` and `ALIAS` columns declare defaults too, so they are emitted as optional, but supplying either on `insert` is a `400` carrying ClickHouse's own code 117 (`Unknown field found while parsing JSONEachRow format: x`), and the type will not catch it. An `EPHEMERAL` value is accepted on a JSON `insert` and feeds the defaults that read it, but is never stored or returned. Omit computed columns; the server fills them in.
 
 **Example output:**
 

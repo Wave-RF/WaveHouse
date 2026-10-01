@@ -33,7 +33,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # Bake the pinned chtypes artifact(s) into the image so the container has no
 # runtime network dependency and no first-request download stall. chtypes.lock
-# is this repo's pin (schema-1, exact file + sha256 per platform/line);
+# is this repo's pin (schema 2, exact file + sha256 per platform/line);
 # scripts/fetch-chtypes.sh wraps the SDK's own CLI with --frozen, which
 # refuses anything the lock doesn't name. `go run <module>@<version>`
 # resolves and builds the SDK's CLI straight from its module proxy — it
