@@ -274,18 +274,19 @@ describe("Query", () => {
     }
   });
 
-  // ClickHouse refuses an RFC 3339 String against a DateTime column, so the
-  // builder rewrites one on DateTime and DateTime64 columns; a timestamp read
-  // back from /v1/query, in ClickHouse's own spelling, filters as it is.
+  // ClickHouse parses a filter value on a DateTime column itself, so RFC 3339
+  // with any offset is an exact instant, a zone-less value reads in the
+  // column's own zone, and a timestamp read back from /v1/query, in
+  // ClickHouse's own spelling, filters as it is.
   it("filters DateTime and DateTime64 columns by RFC 3339 and by the spelling it returns", async () => {
     const admin = adminClient();
     const t = `ts_${testId().replace(/-/g, "_")}`;
 
     await chQuery(
-      `CREATE TABLE IF NOT EXISTS default.\`${t}\` (id String, at DateTime('UTC'), at3 DateTime64(3, 'UTC')) ENGINE = Memory`,
+      `CREATE TABLE IF NOT EXISTS default.\`${t}\` (id String, at DateTime('UTC'), at3 DateTime64(3, 'UTC'), atk DateTime('Asia/Tokyo')) ENGINE = Memory`,
     );
     await chQuery(
-      `INSERT INTO default.\`${t}\` VALUES ('r1', '2026-01-15 10:30:00', '2026-01-15 10:30:00.123'), ('r2', '2026-01-16 00:00:00', '2026-01-16 00:00:00.000')`,
+      `INSERT INTO default.\`${t}\` VALUES ('r1', '2026-01-15 10:30:00', '2026-01-15 10:30:00.123', '2026-01-15 19:30:00'), ('r2', '2026-01-16 00:00:00', '2026-01-16 00:00:00.000', '2026-01-16 09:00:00')`,
     );
     await admin.schema.refresh();
 
@@ -310,15 +311,33 @@ describe("Query", () => {
       };
       expect(await ids("at", "=", "2026-01-15T10:30:00Z")).toEqual(["r1"]);
       expect(await ids("at", ">=", "2026-01-15T12:00:00+02:00")).toEqual(["r1", "r2"]);
+      expect(await ids("at", ">", "2026-01-15T10:30:00.5Z")).toEqual(["r2"]);
       expect(await ids("at3", "=", "2026-01-15T10:30:00.123Z")).toEqual(["r1"]);
       expect(await ids("at", "in", ["2026-01-16T00:00:00Z"])).toEqual(["r2"]);
+      // A Tokyo column: the same instant whatever the spelling, and a
+      // zone-less value in Tokyo's own time.
+      expect(await ids("atk", "=", "2026-01-15T10:30:00Z")).toEqual(["r1"]);
+      expect(await ids("atk", "=", "2026-01-15 19:30:00")).toEqual(["r1"]);
+      expect(await ids("atk", "in", ["2026-01-16T09:00:00+09:00"])).toEqual(["r2"]);
 
-      const back = await wh.from(t).select("id", "at", "at3").where("id", "=", "r1").fetch();
+      const back = await wh.from(t).select("id", "at", "at3", "atk").where("id", "=", "r1").fetch();
       expect(back.error).toBeNull();
-      const row = back.data![0] as { at: string; at3: string };
+      const row = back.data![0] as { at: string; at3: string; atk: string };
       expect(row.at).toBe("2026-01-15 10:30:00");
+      expect(row.atk).toBe("2026-01-15 19:30:00");
       expect(await ids("at", "=", row.at)).toEqual(["r1"]);
       expect(await ids("at3", "=", row.at3)).toEqual(["r1"]);
+      expect(await ids("atk", "=", row.atk)).toEqual(["r1"]);
+
+      // An in list far past the 128 KiB a ClickHouse query parameter takes
+      // still reaches ClickHouse whole; only the 1 MiB request body bounds it.
+      const many = Array.from(
+        { length: 20_000 },
+        (_, i) => `2027-01-01T00:00:${String(i % 60).padStart(2, "0")}.${i}Z`,
+      );
+      expect(await ids("at3", "in", [...many, "2026-01-15T10:30:00.123Z"])).toEqual(["r1"]);
+      const names = Array.from({ length: 30_000 }, (_, i) => `no-such-id-${i}`);
+      expect(await ids("id", "in", [...names, "r2"])).toEqual(["r2"]);
     } finally {
       await setPolicy(currentPolicy);
       await chQuery(`DROP TABLE IF EXISTS default.\`${t}\``);
