@@ -26,7 +26,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 `internal/typelayer` loads a per-ClickHouse-version shared library at start to run ingest validation and row-level security through ClickHouse's own parser (see [Deployment → chtypes artifacts](/deployment#chtypes-artifacts)). It is not source code and `make tools` does not fetch it for you — pull it once with:
 
 ```bash
-scripts/fetch-chtypes.sh   # wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.4.0 fetch --frozen --lock chtypes.lock 26.6
+scripts/fetch-chtypes.sh   # wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.5.1 fetch --frozen --lock chtypes.lock 26.8
 ```
 
 It lands in the default local cache (`~/.cache/chtypes/artifacts/abi6/<os>-<arch>`, one directory per SDK ABI revision) and is 160–290 MB — expect the first run to take a minute or two. Without it, `make dev` / `make test` / `make test-e2e` fail closed (a `503` on ingest, every stream row withheld) until a matching artifact exists for the ClickHouse line the tests or your local server run against.
