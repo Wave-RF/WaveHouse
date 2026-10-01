@@ -4,14 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
+	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
@@ -259,26 +261,12 @@ func TestStructuredQuery_NilPolicyFailsClosed(t *testing.T) {
 
 // ─── #223: column allowlist is a hard cap on every read, end-to-end ──────────
 
-// sqlCapturingConn records the SQL (and bound args) the handler hands to
-// ClickHouse so tests can assert the generated query without a live database.
-// Query returns an empty result set (the handler marshals it to []); these
-// tests assert on the SQL string, args, and HTTP status, not on rows. lastSQL
-// stays empty when the request is rejected before execution — which is itself
-// the assertion for denied paths.
-type sqlCapturingConn struct {
-	driver.Conn
-	lastSQL  string
-	lastArgs []any
-}
-
-func (c *sqlCapturingConn) Query(_ context.Context, sql string, args ...any) (driver.Rows, error) {
-	c.lastSQL = sql
-	c.lastArgs = args
-	return &chainEmptyRows{}, nil
-}
-
-// sensitiveSchema has a column (payload, user_id) that restrictive policies hide.
-func newCapturingHandler(t *testing.T, conn driver.Conn, p *policy.Policy) *StructuredQueryHandler {
+// newCapturingHandler is a handler over a schema with columns (payload,
+// user_id) that restrictive policies hide, reading through ch — which records
+// the SQL and bound values it is sent and answers with no rows unless told
+// otherwise. ch.sql() stays empty when a request is rejected before
+// execution, which is itself the assertion for the denied paths.
+func newCapturingHandler(t *testing.T, ch *fakeCH, p *policy.Policy) *StructuredQueryHandler {
 	t.Helper()
 	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
 		{
@@ -291,7 +279,9 @@ func newCapturingHandler(t *testing.T, conn driver.Conn, p *policy.Policy) *Stru
 			},
 		},
 	})
-	return NewStructuredQueryHandler(fixedConn(conn), nil, fixedRegistry(reg), staticPolicy(p), func(*settings.Store) int { return 60 }, func(*settings.Store) time.Duration { return 5 * time.Second }, nil)
+	h := NewStructuredQueryHandler(ch.target, nil, fixedRegistry(reg), staticPolicy(p), func(*settings.Store) int { return 60 }, func(*settings.Store) time.Duration { return 5 * time.Second }, nil)
+	h.ch = ch.reader()
+	return h
 }
 
 func viewerRequest(t *testing.T, sq query.StructuredQuery) *http.Request {
@@ -315,17 +305,17 @@ func policyWithViewer(perms policy.SelectPermissions) *policy.Policy {
 // payload/user_id never reach ClickHouse — let alone the client.
 func TestStructuredQuery_SelectAll_RestrictedRoleGetsAllowedProjection(t *testing.T) {
 	t.Parallel()
-	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page", "ts"}}))
+	ch := &fakeCH{}
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page", "ts"}}))
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{SelectAll: true})))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
-	assert.Equal(t, "SELECT `page`, `ts` FROM `clicks` LIMIT 10000", conn.lastSQL)
-	assert.NotContains(t, conn.lastSQL, "*")
-	assert.NotContains(t, conn.lastSQL, "payload")
-	assert.NotContains(t, conn.lastSQL, "user_id")
+	assert.Equal(t, "SELECT `page`, `ts` FROM `clicks` LIMIT 10000", ch.sql())
+	assert.NotContains(t, ch.sql(), "*")
+	assert.NotContains(t, ch.sql(), "payload")
+	assert.NotContains(t, ch.sql(), "user_id")
 }
 
 // TestStructuredQuery_RowFilterAndMaxRows_ReachClickHouse pins the handler seam
@@ -338,8 +328,8 @@ func TestStructuredQuery_SelectAll_RestrictedRoleGetsAllowedProjection(t *testin
 func TestStructuredQuery_RowFilterAndMaxRows_ReachClickHouse(t *testing.T) {
 	t.Parallel()
 	eq := "{{ jwt.org_id }}"
-	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{
+	ch := &fakeCH{}
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{
 		Filter:  map[string]policy.Filter{"user_id": {Eq: &eq}},
 		MaxRows: 100,
 	}))
@@ -354,8 +344,8 @@ func TestStructuredQuery_RowFilterAndMaxRows_ReachClickHouse(t *testing.T) {
 	h.Handle(w, withTenant(r.WithContext(ctx)))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
-	assert.Equal(t, "SELECT `page` FROM `clicks` WHERE (`user_id` = ?) AND `page` = ? LIMIT 100", conn.lastSQL)
-	assert.Equal(t, []any{"org-1", "/home"}, conn.lastArgs)
+	assert.Equal(t, "SELECT `page` FROM `clicks` WHERE (`user_id` = {p0:String}) AND `page` = {p1:String} LIMIT 100", ch.sql())
+	assert.Equal(t, []string{"org-1", "/home"}, ch.params())
 }
 
 // TestStructuredQuery_OmittedColumns_ReturnsNothing pins safe-by-default: a request
@@ -364,30 +354,30 @@ func TestStructuredQuery_RowFilterAndMaxRows_ReachClickHouse(t *testing.T) {
 // simply leaving columns out.
 func TestStructuredQuery_OmittedColumns_ReturnsNothing(t *testing.T) {
 	t.Parallel()
-	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page", "ts"}}))
+	ch := &fakeCH{}
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page", "ts"}}))
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{})))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	assert.JSONEq(t, "[]", w.Body.String())
-	assert.Empty(t, conn.lastSQL, "an empty projection must not reach ClickHouse")
+	assert.Empty(t, ch.sql(), "an empty projection must not reach ClickHouse")
 }
 
 // TestStructuredQuery_SelectAll_DenyListExpands: select_all under a deny-list
 // (empty allow) expands to the non-denied columns, never a raw SELECT *.
 func TestStructuredQuery_SelectAll_DenyListExpands(t *testing.T) {
 	t.Parallel()
-	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{DenyColumns: []string{"payload"}}))
+	ch := &fakeCH{}
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{DenyColumns: []string{"payload"}}))
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{SelectAll: true})))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
-	assert.Equal(t, "SELECT `page`, `user_id`, `ts` FROM `clicks` LIMIT 10000", conn.lastSQL)
-	assert.NotContains(t, conn.lastSQL, "payload")
+	assert.Equal(t, "SELECT `page`, `user_id`, `ts` FROM `clicks` LIMIT 10000", ch.sql())
+	assert.NotContains(t, ch.sql(), "payload")
 }
 
 // TestStructuredQuery_LiteralStarColumn_Unknown: columns:["*"] is a literal column
@@ -395,14 +385,14 @@ func TestStructuredQuery_SelectAll_DenyListExpands(t *testing.T) {
 // column — the all-columns wildcard is select_all.
 func TestStructuredQuery_LiteralStarColumn_Unknown(t *testing.T) {
 	t.Parallel()
-	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
+	ch := &fakeCH{}
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{Columns: []string{"*"}})))
 
 	require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
-	assert.Empty(t, conn.lastSQL)
+	assert.Empty(t, ch.sql())
 }
 
 // TestStructuredQuery_UnrestrictedRoleKeepsSelectStar proves the common case is
@@ -410,14 +400,14 @@ func TestStructuredQuery_LiteralStarColumn_Unknown(t *testing.T) {
 // columns and admin convenience preserved; no behavior change off the hot path).
 func TestStructuredQuery_UnrestrictedRoleKeepsSelectStar(t *testing.T) {
 	t.Parallel()
-	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
+	ch := &fakeCH{}
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{SelectAll: true})))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
-	assert.Equal(t, "SELECT * FROM `clicks` LIMIT 10000", conn.lastSQL)
+	assert.Equal(t, "SELECT * FROM `clicks` LIMIT 10000", ch.sql())
 }
 
 // TestStructuredQuery_DeniedColumnInAnyClause_Returns403 is the regression for
@@ -456,15 +446,15 @@ func TestStructuredQuery_DeniedColumnInAnyClause_Returns403(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			conn := &sqlCapturingConn{}
-			h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page", "ts"}}))
+			ch := &fakeCH{}
+			h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page", "ts"}}))
 
 			w := httptest.NewRecorder()
 			h.Handle(w, withTenant(viewerRequest(t, tt.sq)))
 
 			assert.Equal(t, http.StatusForbidden, w.Code, "body=%s", w.Body.String())
 			assert.Contains(t, w.Body.String(), "not allowed")
-			assert.Empty(t, conn.lastSQL, "a denied query must never reach ClickHouse")
+			assert.Empty(t, ch.sql(), "a denied query must never reach ClickHouse")
 			testutil.AssertJSONErrorResponse(t, w)
 		})
 	}
@@ -475,14 +465,14 @@ func TestStructuredQuery_DeniedColumnInAnyClause_Returns403(t *testing.T) {
 // a fail-open SELECT *.
 func TestStructuredQuery_NoReadableColumns_Returns403(t *testing.T) {
 	t.Parallel()
-	conn := &sqlCapturingConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"nonexistent"}}))
+	ch := &fakeCH{}
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"nonexistent"}}))
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{SelectAll: true})))
 
 	assert.Equal(t, http.StatusForbidden, w.Code, "body=%s", w.Body.String())
-	assert.Empty(t, conn.lastSQL)
+	assert.Empty(t, ch.sql())
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
@@ -491,10 +481,10 @@ func TestStructuredQuery_NoReadableColumns_Returns403(t *testing.T) {
 // and must get only that role's columns, not every column.
 func TestStructuredQuery_UnauthenticatedUsesDefaultRoleProjection(t *testing.T) {
 	t.Parallel()
-	conn := &sqlCapturingConn{}
+	ch := &fakeCH{}
 	p := policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"page"}})
 	p.DefaultRole = "viewer" // public access resolves to the restricted viewer role
-	h := newCapturingHandler(t, conn, p)
+	h := newCapturingHandler(t, ch, p)
 
 	// No role on the context — a tokenless request.
 	r := structuredQueryRequest(t, "clicks", query.StructuredQuery{SelectAll: true, Limit: 2})
@@ -502,8 +492,8 @@ func TestStructuredQuery_UnauthenticatedUsesDefaultRoleProjection(t *testing.T) 
 	h.Handle(w, withTenant(r))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
-	assert.Equal(t, "SELECT `page` FROM `clicks` LIMIT 2", conn.lastSQL)
-	assert.NotContains(t, conn.lastSQL, "payload")
+	assert.Equal(t, "SELECT `page` FROM `clicks` LIMIT 2", ch.sql())
+	assert.NotContains(t, ch.sql(), "payload")
 }
 
 // TestStructuredQuery_CacheKeyIsolatesColumnVisibility pins the cache-isolation
@@ -521,17 +511,149 @@ func TestStructuredQuery_CacheKeyIsolatesColumnVisibility(t *testing.T) {
 		},
 	}}
 	sqlFor := func(role string) string {
-		conn := &sqlCapturingConn{}
-		h := newCapturingHandler(t, conn, p)
+		ch := &fakeCH{}
+		h := newCapturingHandler(t, ch, p)
 		r := structuredQueryRequest(t, "clicks", query.StructuredQuery{SelectAll: true})
 		r = r.WithContext(auth.WithClaims(auth.WithRole(r.Context(), role), jwt.MapClaims{}))
 		w := httptest.NewRecorder()
 		h.Handle(w, withTenant(r))
 		require.Equal(t, http.StatusOK, w.Code, "role=%s body=%s", role, w.Body.String())
-		return conn.lastSQL
+		return ch.sql()
 	}
 	viewerSQL, auditorSQL := sqlFor("viewer"), sqlFor("auditor")
 	assert.NotEqual(t, viewerSQL, auditorSQL)
 	assert.NotEqual(t, queryCacheKey(tenant.Default, viewerSQL, nil), queryCacheKey(tenant.Default, auditorSQL, nil),
 		"roles with different column visibility must not share a cache key")
+}
+
+// TestStructuredQuery_ResourceCapsReachTheWire pins that the role's caps are
+// sent as ClickHouse settings on the read's URL (#316). The integration suite
+// proves ClickHouse honours them; this proves they are sent at all, which is
+// the half that silently regresses.
+func TestStructuredQuery_ResourceCapsReachTheWire(t *testing.T) {
+	t.Parallel()
+	ch := &fakeCH{}
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{
+		AllowColumns:   []string{"page"},
+		MaxRows:        50,
+		MaxRowsToRead:  1234,
+		MaxMemoryUsage: 1 << 20,
+	}))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{SelectAll: true})))
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, "50", ch.setting("max_result_rows"))
+	assert.Equal(t, "throw", ch.setting("result_overflow_mode"))
+	assert.Equal(t, "1234", ch.setting("max_rows_to_read"))
+	assert.Equal(t, "throw", ch.setting("read_overflow_mode"))
+	assert.Equal(t, "1048576", ch.setting("max_memory_usage"))
+	assert.Equal(t, "2", ch.setting("readonly"), "a structured query is a read")
+}
+
+// TestStructuredQuery_TimeBoundReachesClickHouse: every read carries
+// max_execution_time — the role's time cap when it is the tighter budget,
+// query_timeout otherwise — so ClickHouse stops a query nobody waits for and
+// says which limit stopped it. The handler's query_timeout is 5s.
+func TestStructuredQuery_TimeBoundReachesClickHouse(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		capMilli policy.Millis
+		want     string
+	}{
+		{"no cap is query_timeout", 0, "5"},
+		{"a tighter cap", 500, "0.5"},
+		{"a looser cap is query_timeout", 10000, "5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ch := &fakeCH{}
+			h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}, MaxExecutionTime: tc.capMilli}))
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{Columns: []string{"page"}})))
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.Equal(t, tc.want, ch.setting("max_execution_time"))
+		})
+	}
+}
+
+// TestStructuredQuery_ServesClickHouseBytes pins the response path end to end:
+// ClickHouse's own JSON rendering is what the caller gets and what the cache
+// stores, with no re-marshal in between, and the second read is served from
+// the cache byte-for-byte under X-Cache: HIT.
+func TestStructuredQuery_ServesClickHouseBytes(t *testing.T) {
+	t.Parallel()
+	// A body only ClickHouse would produce: keys in SELECT order, a Decimal
+	// as a bare number with its digits, and a DateTime in ClickHouse's own
+	// spelling. A round trip through map[string]any would reorder the keys.
+	const row = `{"page":"/home","amount":12.50,"ts":"2026-01-15 10:30:00"}`
+	ch := &fakeCH{answer: answerRows(row + "\n")}
+	c, err := cache.NewLocal(1 << 20)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
+	h.Cache = c
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{SelectAll: true})))
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, "MISS", w.Header().Get("X-Cache"))
+	assert.Equal(t, "["+row+"]", w.Body.String())
+
+	c.Wait()
+	hit := httptest.NewRecorder()
+	h.Handle(hit, withTenant(viewerRequest(t, query.StructuredQuery{SelectAll: true})))
+	assert.Equal(t, "HIT", hit.Header().Get("X-Cache"))
+	assert.Equal(t, w.Body.String(), hit.Body.String(), "a cache hit must be byte-identical to the miss")
+	assert.Equal(t, int32(1), ch.reads.Load())
+}
+
+// TestStructuredQuery_FilterValuesKeepTheirDigits: a filter value reaches
+// ClickHouse as the text the caller wrote — a decimal's trailing zero, an
+// integer past 2^53 — not as a float64's rendering of it.
+func TestStructuredQuery_FilterValuesKeepTheirDigits(t *testing.T) {
+	t.Parallel()
+	ch := &fakeCH{}
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/query?table=clicks",
+		strings.NewReader(`{"columns":["page"],"filters":[{"column":"payload","op":"eq","value":12.50},{"column":"user_id","op":"in","value":[9007199254740993]}]}`))
+	r = r.WithContext(auth.WithClaims(auth.WithRole(r.Context(), "viewer"), jwt.MapClaims{}))
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(r))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, []string{"12.50", "['9007199254740993']"}, ch.params())
+}
+
+// TestStructuredQuery_UnbindableFilterValueIs400: a filter value with no
+// honest binding — a JSON null, or an `in` list too large for ClickHouse's
+// HTTP interface to take — is the caller's malformed query, a 400 before
+// anything reaches ClickHouse, rather than a server error after.
+func TestStructuredQuery_UnbindableFilterValueIs400(t *testing.T) {
+	t.Parallel()
+	huge := make([]any, 0, 20000)
+	for i := range 20000 {
+		huge = append(huge, fmt.Sprintf("v%d", i))
+	}
+	for _, tc := range []struct {
+		name   string
+		filter query.Filter
+		want   string
+	}{
+		{"null value", query.Filter{Column: "page", Op: "eq", Value: nil}, "must not be null"},
+		{"oversized in list", query.Filter{Column: "page", Op: "in", Value: huge}, "split a long in list"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ch := &fakeCH{}
+			h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{Columns: []string{"page"}, Filters: []query.Filter{tc.filter}})))
+			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			assert.Contains(t, w.Body.String(), tc.want)
+			testutil.AssertJSONErrorResponse(t, w)
+			assert.Empty(t, ch.sql(), "an unbindable query must never reach ClickHouse")
+		})
+	}
 }

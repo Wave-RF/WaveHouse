@@ -1,6 +1,7 @@
 package query
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -136,8 +137,15 @@ func TestBuild_InFilter(t *testing.T) {
 	}
 	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
-	assert.Contains(t, result.SQL, "`page` IN (?,?)")
-	assert.Len(t, result.Params, 2)
+	// One placeholder for the whole list, bound as one Array(String).
+	assert.Contains(t, result.SQL, "`page` IN ?")
+	require.Len(t, result.Params, 1)
+	assert.Equal(t, []any{"/home", "/about"}, result.Params[0])
+
+	sql, params, err := result.NamedParams()
+	require.NoError(t, err)
+	assert.Contains(t, sql, "`page` IN {p0:Array(String)}")
+	assert.Equal(t, []string{`['/home','/about']`}, params)
 }
 
 func TestBuild_OrderBy(t *testing.T) {
@@ -542,6 +550,58 @@ func TestBuild_FilterWithTimestampValue(t *testing.T) {
 	strVal, isString := result.Params[0].(string)
 	assert.True(t, isString, "timestamp filter value should be coerced to formatted string, got %T", result.Params[0])
 	assert.Equal(t, "2026-04-02 16:02:07.666", strVal)
+
+	sql, params, err := result.NamedParams()
+	require.NoError(t, err)
+	assert.Contains(t, sql, "`received_timestamp` < {p0:String}")
+	assert.Equal(t, []string{"2026-04-02 16:02:07.666"}, params)
+}
+
+// TestBuild_TimestampRewriteIsForDateTimeColumnsOnly: an RFC3339 value is
+// rewritten only where the schema types the column DateTime or DateTime64 —
+// wrapped or not, scalar or inside an `in` list. The same text on any other
+// column is the caller's own value and reaches ClickHouse as written.
+func TestBuild_TimestampRewriteIsForDateTimeColumnsOnly(t *testing.T) {
+	t.Parallel()
+	schema := &discovery.TableSchema{Name: "events", Columns: []discovery.Column{
+		{Name: "dt", Type: "DateTime"},
+		{Name: "dtz", Type: "DateTime('Europe/Berlin')"},
+		{Name: "dt64", Type: "Nullable(DateTime64(3, 'UTC'))"},
+		{Name: "lc", Type: "LowCardinality(Nullable(DateTime))"},
+		{Name: "label", Type: "String"},
+		{Name: "day", Type: "Date"},
+	}}
+	const rfc = "2026-04-02T16:02:07.666Z"
+	const ch = "2026-04-02 16:02:07.666"
+	tests := []struct {
+		column string
+		value  any
+		want   any
+	}{
+		{"dt", rfc, ch},
+		{"dtz", rfc, ch},
+		{"dt64", rfc, ch},
+		{"lc", rfc, ch},
+		{"dt", "2026-04-02 16:02:07", "2026-04-02 16:02:07"},
+		{"label", rfc, rfc},
+		{"day", rfc, rfc},
+		{"dt64", []any{rfc, "2026-04-02 16:02:07"}, []any{ch, "2026-04-02 16:02:07"}},
+		{"label", []any{rfc}, []any{rfc}},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s %v", tt.column, tt.value), func(t *testing.T) {
+			t.Parallel()
+			op := "eq"
+			if _, ok := tt.value.([]any); ok {
+				op = "in"
+			}
+			sq := &StructuredQuery{SelectAll: true, Filters: []Filter{{Column: tt.column, Op: op, Value: tt.value}}}
+			result, err := Build("events", sq, schema, nil, 0, DefaultMaxRows)
+			require.NoError(t, err)
+			require.Len(t, result.Params, 1)
+			assert.Equal(t, tt.want, result.Params[0])
+		})
+	}
 }
 
 func TestBuild_TableNameWithBacktick(t *testing.T) {
@@ -1001,4 +1061,129 @@ func TestBuild_InsertResolvedGrantIsRejected(t *testing.T) {
 	res, err := Build("clicks", &StructuredQuery{Columns: []string{"page"}}, testSchema(), selectResolved, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.NotNil(t, res)
+}
+
+// TestNamedParams pins the ClickHouse binding rule: every positional `?`
+// becomes a named parameter, every scalar binds as String and every list as
+// Array(String), in the order the WHERE assembly emitted them.
+func TestNamedParams(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		sql        string
+		params     []any
+		wantSQL    string
+		wantParams []string
+	}{
+		{
+			name:       "no parameters",
+			sql:        "SELECT `page` FROM `clicks` LIMIT 10",
+			wantSQL:    "SELECT `page` FROM `clicks` LIMIT 10",
+			wantParams: nil,
+		},
+		{
+			name:       "policy predicate keeps its leading position",
+			sql:        "SELECT `page` FROM `clicks` WHERE (`org_id` = ?) AND `page` = ? LIMIT 100",
+			params:     []any{"org-1", "/home"},
+			wantSQL:    "SELECT `page` FROM `clicks` WHERE (`org_id` = {p0:String}) AND `page` = {p1:String} LIMIT 100",
+			wantParams: []string{"org-1", "/home"},
+		},
+		{
+			name:       "list binds as one Array(String)",
+			sql:        "SELECT * FROM `t` WHERE `page` IN ? LIMIT 10",
+			params:     []any{[]any{"/a", "/b"}},
+			wantSQL:    "SELECT * FROM `t` WHERE `page` IN {p0:Array(String)} LIMIT 10",
+			wantParams: []string{`['/a','/b']`},
+		},
+		{
+			name:   "numbers keep the caller's own digits",
+			sql:    "SELECT * FROM `t` WHERE `a` = ? AND `b` = ? AND `c` = ? LIMIT 10",
+			params: []any{json.Number("12.50"), json.Number("9007199254740993"), true},
+			wantSQL: "SELECT * FROM `t` WHERE `a` = {p0:String} AND `b` = {p1:String} " +
+				"AND `c` = {p2:String} LIMIT 10",
+			wantParams: []string{"12.50", "9007199254740993", "true"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sql, params, err := (&BuildResult{SQL: tt.sql, Params: tt.params}).NamedParams()
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantSQL, sql)
+			assert.Equal(t, tt.wantParams, params)
+		})
+	}
+}
+
+// TestNamedParams_Encoding pins the two escapings a ClickHouse query parameter
+// needs, which are NOT the same and must not be applied to each other's
+// values. Measured on 26.6.3.62 (the version the integration suite pins):
+//
+//   - a scalar `{p:String}` is read by the escaped-text reader, so a raw
+//     backslash is taken as the start of an escape sequence ("a\b" came back
+//     holding a backspace) and a raw tab or newline ends the field outright
+//     (code 457, a 500 for the caller);
+//   - an `Array(String)` value is an array literal whose elements are quoted,
+//     so a raw tab or newline rides through untouched and only the quote and
+//     the backslash need encoding.
+//
+// Both encodings round-trip every case below byte for byte against a live
+// server; getting either wrong is silent data loss, not an error.
+func TestNamedParams_Encoding(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		value     any
+		wantParam string
+	}{
+		{"plain", "hello", "hello"},
+		{"single quote needs nothing", "it's", "it's"},
+		{"backslash", `a\b`, `a\\b`},
+		{"windows path", `C:\Users\x`, `C:\\Users\\x`},
+		{"tab", "a\tb", `a\tb`},
+		{"newline", "a\nb", `a\nb`},
+		{"carriage return", "a\rb", `a\rb`},
+		{"a literal backslash-n", `a\nb`, `a\\nb`},
+		{"like pattern", "%foo%", "%foo%"},
+		{"list quotes and backslashes", []any{`it's`, `a\b`, "a\tb"}, "['it\\'s','a\\\\b','a\tb']"},
+		{"list containment attempt", []any{`']) OR 1=1 --`}, `['\']) OR 1=1 --']`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, params, err := (&BuildResult{SQL: "SELECT ?", Params: []any{tt.value}}).NamedParams()
+			require.NoError(t, err)
+			require.Len(t, params, 1)
+			assert.Equal(t, tt.wantParam, params[0])
+		})
+	}
+}
+
+// TestNamedParams_Rejects covers the values and shapes that have no honest
+// binding. A JSON null is the notable one: the driver quietly turned it into
+// `col = NULL` (never true), where an empty String parameter would compare
+// against the empty string — a different question, so it is refused (→ 400).
+func TestNamedParams_Rejects(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		sql     string
+		params  []any
+		wantErr string
+	}{
+		{"null value", "SELECT ?", []any{nil}, "must not be null"},
+		{"object value", "SELECT ?", []any{map[string]any{"k": "v"}}, "unsupported filter value type"},
+		{"nested list", "SELECT ?", []any{[]any{[]any{"a"}}}, "nested list"},
+		{"more values than placeholders", "SELECT 1", []any{"a"}, "only 0 placeholders"},
+		{"more placeholders than values", "SELECT ?, ?", []any{"a"}, "more placeholders"},
+		{"placeholder with no values", "SELECT ?", nil, "no bound values"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := (&BuildResult{SQL: tt.sql, Params: tt.params}).NamedParams()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }

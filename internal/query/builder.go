@@ -1,6 +1,7 @@
 package query
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -20,7 +21,10 @@ import (
 // misconfigured to 0.
 const DefaultMaxRows = 10000
 
-// BuildResult holds the generated SQL and bound parameters.
+// BuildResult holds the generated SQL and its bound values. The SQL carries
+// positional `?` placeholders, one per entry in Params, in left-to-right
+// order. NamedParams turns that pair into the named-parameter form
+// ClickHouse's HTTP interface takes.
 type BuildResult struct {
 	SQL    string
 	Params []any
@@ -43,7 +47,7 @@ type BuildResult struct {
 // Every identifier that reaches the SQL — columns, the table, aggregation
 // aliases — is backtick-quoted via chsql.QuoteIdent, so the builder accepts any
 // name ClickHouse accepts while remaining injection-safe. Values stay positional
-// `?` parameters bound by the driver.
+// `?` parameters, which NamedParams turns into ClickHouse named parameters.
 //
 // Projection rules: SelectAll requests every readable column (expanded to the
 // role's allow/deny set); an explicit Columns list projects exactly those (where
@@ -101,7 +105,7 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 	// predicate is emitted structurally, in the same assembly as every other
 	// clause; policy SQL is never spliced into rendered text afterward, which is
 	// what let a crafted identifier swallow the predicate (#322).
-	whereParts, whereParams, err := buildWhere(q.Filters, q.TimeRange, bucketSeconds)
+	whereParts, whereParams, err := buildWhere(q.Filters, q.TimeRange, schema, bucketSeconds)
 	if err != nil {
 		return nil, fmt.Errorf("building WHERE clause: %w", err)
 	}
@@ -234,7 +238,7 @@ func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, per
 		}
 		// The alias is backtick-quoted by aggregationExpr, so any legal ClickHouse
 		// name is safe against injection. The lone refusal is a '?', which would
-		// break clickhouse-go's positional value binding.
+		// shift the positional-to-named parameter rewrite (see NamedParams).
 		if chsql.BindUnsafe(a.Alias) {
 			return fmt.Errorf("unsupported aggregation alias (contains '?'): %s", a.Alias)
 		}
@@ -255,7 +259,7 @@ func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, per
 			// (ORDER BY an aggregation's AS name). Aliases carry no column policy;
 			// the aggregation that defines them was authorized above. The name is
 			// backtick-quoted when emitted, so any content is safe except a '?'
-			// (would break value binding, as for aliases).
+			// (would shift the parameter rewrite, as for aliases).
 			if chsql.BindUnsafe(o.Column) {
 				return fmt.Errorf("unsupported order column (contains '?'): %s", o.Column)
 			}
@@ -307,12 +311,12 @@ func resolveProjection(q *StructuredQuery, schema *discovery.TableSchema, perms 
 	}
 }
 
-func buildWhere(filters []Filter, timeRange *TimeRange, bucketSeconds int) ([]string, []any, error) {
+func buildWhere(filters []Filter, timeRange *TimeRange, schema *discovery.TableSchema, bucketSeconds int) ([]string, []any, error) {
 	var parts []string
 	var params []any
 
 	for _, f := range filters {
-		clause, p, err := filterToSQL(f)
+		clause, p, err := filterToSQL(f, isDateTimeColumn(schema, f.Column))
 		if err != nil {
 			return nil, nil, fmt.Errorf("filter on column %q: %w", f.Column, err)
 		}
@@ -346,9 +350,12 @@ func buildWhere(filters []Filter, timeRange *TimeRange, bucketSeconds int) ([]st
 	return parts, params, nil
 }
 
-func filterToSQL(f Filter) (string, []any, error) {
+func filterToSQL(f Filter, dateTime bool) (string, []any, error) {
 	col := chsql.QuoteIdent(f.Column)
-	val := coerceFilterValue(f.Value)
+	val := f.Value
+	if dateTime {
+		val = coerceFilterValue(val)
+	}
 	switch strings.ToLower(f.Op) {
 	case "eq":
 		return col + " = ?", []any{val}, nil
@@ -365,10 +372,18 @@ func filterToSQL(f Filter) (string, []any, error) {
 	case "like":
 		return col + " LIKE ?", []any{val}, nil
 	case "in":
+		// One placeholder for the whole list, bound as one Array(String)
+		// parameter rather than a parameter per element, so a long list
+		// costs one query-string field.
 		if vals, ok := f.Value.([]any); ok && len(vals) > 0 {
-			placeholders := strings.Repeat("?,", len(vals))
-			placeholders = placeholders[:len(placeholders)-1]
-			return fmt.Sprintf("%s IN (%s)", col, placeholders), vals, nil
+			if dateTime {
+				coerced := make([]any, len(vals))
+				for i, v := range vals {
+					coerced[i] = coerceFilterValue(v)
+				}
+				vals = coerced
+			}
+			return col + " IN ?", []any{vals}, nil
 		}
 		return "", nil, fmt.Errorf("invalid value for 'in' operator")
 	default:
@@ -376,11 +391,13 @@ func filterToSQL(f Filter) (string, []any, error) {
 	}
 }
 
-// coerceFilterValue converts string values that look like RFC3339 timestamps
-// to ClickHouse-compatible DateTime strings preserving sub-second precision.
-// The clickhouse-go driver's time.Time formatting uses toDateTime() (second
-// precision), which loses milliseconds needed for DateTime64 cursor comparisons.
-// Returning a formatted string lets ClickHouse parse it with full precision.
+// coerceFilterValue rewrites a filter value on a DateTime or DateTime64 column
+// that is an RFC3339 timestamp into ClickHouse's own DateTime spelling, in
+// UTC, keeping its sub-second digits. ClickHouse reads a String compared
+// against such a column with its basic parser, which refuses the RFC3339
+// spelling: measured on 24.8.14.39 and 26.6.3.62, a `T`, a `Z` or an offset
+// is TYPE_MISMATCH on DateTime, and on DateTime64 too on 24.8 and inside an
+// `in` list on both. The rewritten spelling parses on every one of them.
 //
 // A value that isn't a timestamp (a plain string, a number, etc.) is a valid
 // non-temporal filter value, so the parse "failure" is just the expected
@@ -442,8 +459,8 @@ func expandDayWeek(s string) string {
 // (which the builder surfaces as a 400) rather than returned unchanged: passing
 // a raw string to ClickHouse surfaces as an opaque DateTime parse error (#285).
 //
-// The output deliberately matches coerceFilterValue's format rather than RFC3339:
-// a bare "…T…Z" string is rejected by DateTime64 columns.
+// The output deliberately matches coerceFilterValue's format rather than
+// RFC3339, which ClickHouse refuses on a DateTime column (see there).
 func resolveTimeValue(val string, bucketSeconds int) (string, error) {
 	// Try a relative duration first (e.g., "1h", "30m", "7d", "2w"). Go's
 	// time.ParseDuration only understands units up to hours, so day/week
@@ -466,6 +483,27 @@ func bucketTime(t time.Time, bucketSeconds int) time.Time {
 	}
 	d := time.Duration(bucketSeconds) * time.Second
 	return t.Truncate(d)
+}
+
+// isDateTimeColumn reports whether the schema types column as DateTime or
+// DateTime64, possibly Nullable or LowCardinality.
+func isDateTimeColumn(schema *discovery.TableSchema, column string) bool {
+	c, ok := schema.Lookup(column)
+	if !ok {
+		return false
+	}
+	t := c.Type
+	for {
+		switch {
+		case strings.HasPrefix(t, "Nullable(") && strings.HasSuffix(t, ")"):
+			t = t[len("Nullable(") : len(t)-1]
+			continue
+		case strings.HasPrefix(t, "LowCardinality(") && strings.HasSuffix(t, ")"):
+			t = t[len("LowCardinality(") : len(t)-1]
+			continue
+		}
+		return strings.HasPrefix(t, "DateTime")
+	}
 }
 
 func schemaColumnSet(schema *discovery.TableSchema) map[string]bool {
@@ -514,3 +552,154 @@ func isValidAggFn(fn string) bool {
 	}
 	return false
 }
+
+// ─── ClickHouse named-parameter binding ─────────────────────────────────────
+
+// NamedParams rewrites the positional `?` placeholders in the built SQL into
+// ClickHouse named parameters and renders each bound value as the text
+// ClickHouse will read it back from. It returns the rewritten SQL and the
+// values for `param_p0` … `param_pN-1`, positionally.
+//
+// Every scalar binds as `{pN:String}` and every list as `{pN:Array(String)}`.
+// String is not a weaker binding than the column's own type: ClickHouse
+// converts the parameter to the column's type for the comparison, so
+// `UInt8 = {p:String}` with "256" is false and with "1.5" is a type error,
+// matching what the server answers for the same literal.
+//
+// The rewrite is a left-to-right scan for `?`, which is exact for this SQL and
+// only for this SQL: Build never renders a value or a string literal, and
+// chsql.BindUnsafe rejects a `?` in any identifier it quotes.
+func (r *BuildResult) NamedParams() (string, []string, error) {
+	if len(r.Params) == 0 {
+		if strings.Contains(r.SQL, "?") {
+			return "", nil, fmt.Errorf("query has placeholders but no bound values")
+		}
+		return r.SQL, nil, nil
+	}
+
+	params := make([]string, 0, len(r.Params))
+	var b strings.Builder
+	b.Grow(len(r.SQL) + len(r.Params)*12)
+
+	rest := r.SQL
+	for i, v := range r.Params {
+		q := strings.IndexByte(rest, '?')
+		if q < 0 {
+			return "", nil, fmt.Errorf("query has %d bound values but only %d placeholders", len(r.Params), i)
+		}
+		text, placeholder, err := chParamValue("p"+strconv.Itoa(i), v)
+		if err != nil {
+			return "", nil, err
+		}
+		b.WriteString(rest[:q])
+		b.WriteString(placeholder)
+		params = append(params, text)
+		rest = rest[q+1:]
+	}
+	if strings.Contains(rest, "?") {
+		return "", nil, fmt.Errorf("query has more placeholders than the %d bound values", len(r.Params))
+	}
+	b.WriteString(rest)
+	return b.String(), params, nil
+}
+
+// chParamValue renders one bound value as its ClickHouse query-parameter text
+// and the SQL its placeholder becomes, for the parameter called name.
+func chParamValue(name string, v any) (text, placeholder string, err error) {
+	if vals, ok := v.([]any); ok {
+		lit, err := chArrayLiteral(vals)
+		if err != nil {
+			return "", "", err
+		}
+		return lit, "{" + name + ":Array(String)}", nil
+	}
+	raw, err := chScalarText(v)
+	if err != nil {
+		return "", "", err
+	}
+	return escapeStringParam(raw), "{" + name + ":String}", nil
+}
+
+// chScalarText is one scalar's value as plain text, before any encoding —
+// what the caller means, not what the wire needs.
+func chScalarText(v any) (string, error) {
+	switch val := v.(type) {
+	case string:
+		return val, nil
+	case json.Number:
+		// The caller's own digits, not a float64 round-trip: 12.50 stays
+		// "12.50" and an integer past 2^53 keeps every digit.
+		return val.String(), nil
+	case bool:
+		return strconv.FormatBool(val), nil
+	case float64:
+		return strconv.FormatFloat(val, 'f', -1, 64), nil
+	case int:
+		return strconv.Itoa(val), nil
+	case int64:
+		return strconv.FormatInt(val, 10), nil
+	case uint64:
+		return strconv.FormatUint(val, 10), nil
+	case nil:
+		// `col = NULL` is never true in SQL, so a null used to answer "no
+		// rows"; an empty String parameter would instead compare against the
+		// empty string, which is a different question. Refuse it (→ 400)
+		// rather than answer a question the caller did not ask.
+		return "", fmt.Errorf("filter value must not be null")
+	default:
+		return "", fmt.Errorf("unsupported filter value type %T", v)
+	}
+}
+
+// chArrayLiteral renders a list as the `['a','b']` text an Array(String)
+// query parameter is parsed from. A nested list has no place inside an `in`
+// list, and the elements take quoteCHElement's encoding INSTEAD of the
+// scalar one, not on top of it.
+func chArrayLiteral(vals []any) (string, error) {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, v := range vals {
+		if _, isList := v.([]any); isList {
+			return "", fmt.Errorf("nested list in an 'in' value")
+		}
+		text, err := chScalarText(v)
+		if err != nil {
+			return "", err
+		}
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(quoteCHElement(text))
+	}
+	b.WriteByte(']')
+	return b.String(), nil
+}
+
+// quoteCHElement wraps one already-rendered value as a single-quoted element
+// of an Array(String) parameter literal. That literal is read as a quoted
+// value rather than an escaped field — a raw tab or newline inside the quotes
+// round-trips untouched — so only the quote and the backslash need encoding,
+// and the scalar encoding must NOT be applied on top of it.
+func quoteCHElement(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('\'')
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' || s[i] == '\'' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(s[i])
+	}
+	b.WriteByte('\'')
+	return b.String()
+}
+
+// escapeStringParam encodes one value for a `{p:String}` query parameter,
+// which ClickHouse reads with its escaped-text reader: a raw backslash starts
+// an escape sequence and a raw tab or newline ends the field.
+var escapeStringParam = strings.NewReplacer(
+	`\`, `\\`,
+	"\t", `\t`,
+	"\n", `\n`,
+	"\r", `\r`,
+).Replace
