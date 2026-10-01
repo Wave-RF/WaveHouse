@@ -36,6 +36,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
 const (
@@ -347,7 +348,9 @@ func (a *App) wireClickHouse() error {
 // registry, see wireClickHouse): its pool's connection and the database that
 // pool was opened for — never the adopted document's, which a refused move
 // would pair with the pool the tenant kept, discovering a database its
-// queries and inserts do not use.
+// queries and inserts do not use. A tenant on no pool yields an untyped nil
+// connection — never a nil *Manager inside a non-nil driver.Conn, which
+// would pass a nil check and panic on use.
 func (a *App) discoverySource(id tenant.ID) discovery.Source {
 	return func() (driver.Conn, string) {
 		m := a.pools.For(id)
@@ -371,6 +374,34 @@ func (a *App) registryFor(s *settings.Store) *discovery.SchemaRegistry {
 // queryTimeout is the tenant's deadline for a call on the query paths, a
 // per-call setting rather than a property of the pool it shares.
 func queryTimeout(s *settings.Store) time.Duration { return s.ClickHouse().QueryTimeout }
+
+// maxOpenConns is the tenant's clickhouse.max_open_conns, which also caps the
+// HTTP connections its pipes and structured queries hold.
+func maxOpenConns(s *settings.Store) int { return s.ClickHouse().MaxOpenConns }
+
+// wireTypes opens the type layer: the process's one chtypes registry, which
+// ingest judges every record with and the stream hub evaluates row filters
+// with. Both are API work, so only an API process opens it — an ingest-only
+// or sweeper-only process boots with no artifact installed, the worker
+// needing only the static typelayer.InsertSettings. No artifact anywhere on
+// the search path refuses boot: an API process could judge nothing. Opening
+// reads manifests only; a ClickHouse line's library is opened by the first
+// tenant bound to it, from that tenant's discovery (wireDiscovery), and a
+// tenant whose line or zone this process cannot serve is unavailable on its
+// own. Released after schema discovery, whose loops bind it, and so after
+// the HTTP drain.
+func (a *App) wireTypes() error {
+	eng, err := typelayer.NewEngine(typelayer.Config{RegistryDir: a.cfg.ClickHouse.ChtypesRegistry})
+	if err != nil {
+		return fmt.Errorf("type layer: %w — an api-role process judges ingest and row filters with a chtypes artifact: install one (scripts/fetch-chtypes.sh), or name its directory in clickhouse.chtypes_registry", err)
+	}
+	a.types, a.bindings = eng, newTypeBindings(eng)
+	a.add(component{name: "type layer", close: func(context.Context) error {
+		eng.Close()
+		return nil
+	}})
+	return nil
+}
 
 // wireDiscovery builds one schema registry per served tenant, each with a
 // refresh loop of its own (discoveries), and the boot state /livez reports:
@@ -410,7 +441,10 @@ func (a *App) wireDiscovery(ctx context.Context) {
 	}
 	d := newDiscoveries(a.stopCtx,
 		func(id tenant.ID, _ *settings.Store) *discovery.SchemaRegistry {
-			return discovery.NewSchemaRegistry(a.discoverySource(id), id, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
+			reg := discovery.NewSchemaRegistry(a.discoverySource(id), id, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
+			// Before the first refresh, so "loaded" implies "bound".
+			a.bindings.attach(id, reg)
+			return reg
 		},
 		func(id tenant.ID, err error) {
 			slog.Warn("schema discovery retry failed", "tenant", id, "error", err)
@@ -433,7 +467,8 @@ func (a *App) wireDiscovery(ctx context.Context) {
 			loaded = true
 			slog.Info("schema discovery succeeded after retry, /livez now 200", "tenant", id)
 			a.bootState.Set(nil)
-		})
+		},
+		a.bindings.detach)
 	a.discoveries = d
 	if nested {
 		a.bootState.Set(noTenantLoaded)
@@ -758,6 +793,9 @@ func (a *App) wireSweeper() {
 func (a *App) wireStreaming() {
 	a.sseMetrics = stream.NewMetrics()
 	a.hub = stream.NewHub(perTenant(a.tenants, (*settings.Store).Policy), a.discoveries.For, a.sseMetrics)
+	// Row filters are evaluated by ClickHouse's own parser and expression
+	// engine over the published row, the answer the query path gives.
+	a.hub.RowEvaluator = stream.NewRowEvaluator(a.types)
 	a.tenants.AfterAdopt(func([]tenant.ID) { a.hub.Prune(a.served) })
 
 	// Hub bridge: MQ → broadcast to connected SSE clients. The Hub decodes and
@@ -984,6 +1022,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	ingestHandler.Dedup = func(s *settings.Store) dedupe.Deduplicator { return a.dedup.For(s.Tenant()) }
 	ingestHandler.DedupeSettings = (*settings.Store).DedupeFor
 	ingestHandler.DedupeLease = a.cfg.Dedupe.Lease
+	ingestHandler.Types = a.types
 
 	// Readiness pings every open pool at once and is ready at the first
 	// answer: one tenant's ClickHouse outage is not the process's.
@@ -999,8 +1038,14 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	closing := make(chan struct{})
 	streamHandler.Closing = closing
 
+	// Pipes and structured queries run over the tenant's HTTP target, where
+	// ClickHouse renders the rows itself, holding at most the tenant's
+	// max_open_conns connections to it between them.
 	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.chTargetFor, a.cache, queryTimeout)
 	pipesHandler.Tenants = a.tenants
+	pipesHandler.MaxConns = maxOpenConns
+	structuredQueryHandler := api.NewStructuredQueryHandler(a.chTargetFor, a.cache, a.registryFor, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, queryTimeout, (*settings.Store).DefaultMaxRows)
+	structuredQueryHandler.MaxConns = maxOpenConns
 
 	schemaHandler := api.NewSchemaHandler(a.registryFor)
 	schemaHandler.Tenants = a.tenants
@@ -1020,7 +1065,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Schema:          schemaHandler,
 		DLQ:             api.NewDLQHandler(a.mq),
 		Pipes:           pipesHandler,
-		StructuredQuery: api.NewStructuredQueryHandler(a.chTargetFor, a.cache, a.registryFor, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, queryTimeout, (*settings.Store).DefaultMaxRows),
+		StructuredQuery: structuredQueryHandler,
 
 		AuthMW:       authMW,
 		Tenants:      a.tenants,

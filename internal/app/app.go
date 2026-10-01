@@ -46,6 +46,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
 // BuildInfo is the ldflags-stamped identity of the binary, served by
@@ -101,6 +102,11 @@ type App struct {
 	pools       *chconn.Pools
 	bootState   *api.BootState
 	discoveries *discoveries
+	// types is the type layer ingest judges records with and the hub
+	// evaluates row filters with, and bindings what keeps each tenant's
+	// compiled tables in step with its registry. API role only.
+	types    *typelayer.Engine
+	bindings *typeBindings
 	// dedup is one store per tenant, each following its own folder's switch,
 	// and dedupeStats the figures of the one Pebble instance they share.
 	dedup       *dedupe.Stores
@@ -177,8 +183,8 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	}
 	slog.Info("process roles", "roles", a.cfg.Roles, "instance_id", a.cfg.InstanceID)
 	// What each role wires; config.Validate refused a set these cannot serve.
-	// The API's discovery, dedupe, auth verifiers, hub bridge and keepalive
-	// wheel are per process: every API process runs its own.
+	// The API's type layer, discovery, dedupe, auth verifiers, hub bridge and
+	// keepalive wheel are per process: every API process runs its own.
 	apiRole, ingestRole := a.cfg.Has(config.RoleAPI), a.cfg.Has(config.RoleIngest)
 	if apiRole || ingestRole {
 		if err := a.wireClickHouse(); err != nil {
@@ -186,6 +192,9 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 		}
 	}
 	if apiRole {
+		if err := a.wireTypes(); err != nil {
+			return nil, err
+		}
 		a.wireDiscovery(ctx)
 		if err := a.wireDedupe(ctx); err != nil {
 			return nil, err
@@ -345,3 +354,8 @@ func (a *App) Registry() *discovery.SchemaRegistry {
 // MQ is the broker, for a harness that publishes straight onto the ingest
 // queue.
 func (a *App) MQ() mq.Broker { return a.mq }
+
+// Types is the type layer, bound from every tenant's discovery, for a harness
+// that evaluates rows the way the stream hub does; nil in a process without
+// the api role.
+func (a *App) Types() *typelayer.Engine { return a.types }
