@@ -68,8 +68,9 @@ const queryTypesRow = `(
 // change and belongs in the CHANGELOG.
 //
 // ClickHouse renders the body (FORMAT JSONEachRow under the reader's pinned
-// output settings): keys in SELECT order, Decimal as a JSON number. Measured
-// identical on 26.6.3.62 and 26.8.7.19.
+// output settings): keys in SELECT order, Decimal as a JSON number, DateTime
+// as RFC 3339 in UTC at the column's scale (date_time_output_format=iso).
+// Measured on 26.8.15.10.
 func TestQuery_TypeRendering_Pin(t *testing.T) {
 	e := env(t)
 

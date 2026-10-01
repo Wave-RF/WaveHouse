@@ -91,8 +91,8 @@ func TestTypelayerWire_PublishedRowIsTheStoredRow(t *testing.T) {
 	// And spot-check that these really are the coerced values, not the
 	// producer's spellings passed through.
 	require.Len(t, wire, 7)
-	assert.Equal(t, "2026-06-21 04:00:00", wire[1], "offset applied, rendered in the column's zone")
-	assert.Equal(t, "2026-06-21 04:00:00.123", wire[2], "ticks at the column's precision")
+	assert.Equal(t, "2026-06-21T04:00:00Z", wire[1], "offset applied, rendered as RFC 3339 in UTC")
+	assert.Equal(t, "2026-06-21T04:00:00.123Z", wire[2], "ticks at the column's precision")
 	assert.EqualValues(t, 0, wire[4], "256 into a UInt8 wraps — the stored truth")
 }
 
@@ -148,13 +148,15 @@ func firstDataRow(t *testing.T, body interface{ Read([]byte) (int, error) }) ([]
 }
 
 // selectJSONCompactRow reads one row back through ClickHouse's HTTP interface in
-// JSONCompactEachRow — the same writer that produced the published row, so the
-// two renderings are comparable without a second interpretation step.
+// JSONCompactEachRow under the DateTime spelling the export pins — the same
+// writer and settings that produced the published row, so the two renderings
+// are comparable without a second interpretation step.
 func selectJSONCompactRow(t *testing.T, chHTTPURL, query string) []any {
 	t.Helper()
 	q := url.Values{}
 	q.Set("database", testCHDatabase)
 	q.Set("query", query+" FORMAT JSONCompactEachRow")
+	q.Set("date_time_output_format", "iso")
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, chHTTPURL+"?"+q.Encode(), nil)
 	require.NoError(t, err)

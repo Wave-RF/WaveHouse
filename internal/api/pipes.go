@@ -32,9 +32,8 @@ type PipesHandler struct {
 	// (chconn.Pools.Target in production); the zero Target is a tenant on no
 	// pool, a 503.
 	Target func(*settings.Store) chconn.Target
-	// MaxConns caps the tenant's concurrent reads
-	// ((*settings.Store).ClickHouse().MaxOpenConns in production); nil or
-	// non-positive is defaultReadConns.
+	// MaxConns caps the concurrent reads on the tenant's pool (its native
+	// pool's size in production); nil or non-positive is defaultReadConns.
 	MaxConns func(*settings.Store) int
 	Cache    cache.Cache
 	sf       singleflight.Group

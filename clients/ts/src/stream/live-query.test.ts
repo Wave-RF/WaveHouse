@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createClient } from "../client.js";
 import type { FetchLike, Result, StreamEvent, StreamStatus } from "../types.js";
+import type { StreamController } from "./controller.js";
+import { LiveQuery } from "./live-query.js";
 
 /**
  * `liveQuery()` opens the stream and runs the REST backfill in the same tick,
@@ -116,5 +118,46 @@ describe("liveQuery auth ordering", () => {
     expect(f.urls).toHaveLength(0);
 
     lq.close();
+  });
+});
+
+describe("liveQuery backfill seam", () => {
+  it("drops buffered events the last row covers, comparing instants", async () => {
+    // The envelope's timestamp carries up to nine trimmed fraction digits; the
+    // row's DateTime64(3) column renders `….123Z`. As strings, `…00Z` sorts
+    // after `…00.123Z` and `….123456789Z` before it; as instants at the
+    // coarser precision, both are covered and only later events pass.
+    let push: ((e: StreamEvent) => void) | undefined;
+    const stream = {
+      subscribe(sub: { next: (e: StreamEvent) => void }) {
+        push = sub.next;
+        return () => {};
+      },
+      close() {},
+    } as unknown as StreamController;
+    let resolve: ((r: Result<Record<string, unknown>[]>) => void) | undefined;
+    const backfill = new Promise<Result<Record<string, unknown>[]>>((r) => {
+      resolve = r;
+    });
+    const delivered: string[] = [];
+    new LiveQuery(stream, () => backfill, { next: (e) => delivered.push(e.timestamp) }, []);
+
+    for (const timestamp of [
+      "2026-03-24T12:00:00Z",
+      "2026-03-24T12:00:00.123456789Z",
+      "2026-03-24T12:00:00.124Z",
+      "2026-03-24T12:00:01Z",
+    ]) {
+      push?.({ table: "clicks", timestamp, data: {} });
+    }
+    resolve?.({
+      ok: true,
+      data: [{ received_timestamp: "2026-03-24T12:00:00.123Z" }],
+      error: null,
+    });
+    await backfill;
+    await Promise.resolve();
+
+    expect(delivered).toEqual(["2026-03-24T12:00:00.124Z", "2026-03-24T12:00:01Z"]);
   });
 });

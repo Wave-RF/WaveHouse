@@ -2590,10 +2590,9 @@ func publishedRow(t *testing.T, payload []byte) map[string]any {
 // TestIngest_TimestampsCanonicalized is the #372 contract, now satisfied by
 // construction: whatever spelling a producer uses, the published payload — the
 // one copy SSE subscribers, the ClickHouse insert and the DLQ all consume —
-// carries the instant as ClickHouse's OWN writer renders it. That is
-// "2026-06-21 04:00:00" in the column's zone, not RFC 3339 with a Z: the row is
-// the server's rendering of the stored value, so the SSE frame and a
-// /v1/query row cannot disagree.
+// carries the instant as ClickHouse's OWN writer renders it, under the same
+// date_time_output_format=iso the query paths pin: RFC 3339 in UTC at the
+// column's scale, so the SSE frame and a /v1/query row cannot disagree.
 func TestIngest_TimestampsCanonicalized(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
@@ -2609,10 +2608,10 @@ func TestIngest_TimestampsCanonicalized(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	data := publishedData(t, pub)
-	assert.Equal(t, "2026-06-21 04:00:00", data["ts"])
+	assert.Equal(t, "2026-06-21T04:00:00Z", data["ts"])
 	// Sub-second digits are the column's precision, zeros and all — the server
 	// does not trim them the way the old canonicalizer did.
-	assert.Equal(t, "2026-06-21 04:00:00.500", data["ts_ms"])
+	assert.Equal(t, "2026-06-21T04:00:00.500Z", data["ts_ms"])
 	assert.Equal(t, "e", data["name"], "non-timestamp columns untouched")
 }
 
@@ -2626,7 +2625,7 @@ func TestIngest_AutoInjectedLiteralTimestampCanonicalized(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := newTestIngestHandler(t, tsRegistry(t), pub)
-	staticTS := "2026-06-21T04:00:00Z"
+	staticTS := "2026-06-21T06:00:00+02:00"
 	h.PolicySource = staticPolicy(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"events": {
@@ -2648,7 +2647,7 @@ func TestIngest_AutoInjectedLiteralTimestampCanonicalized(t *testing.T) {
 	h.Handle(w, withTenant(req))
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "2026-06-21 04:00:00", publishedData(t, pub)["ts"],
+	assert.Equal(t, "2026-06-21T04:00:00Z", publishedData(t, pub)["ts"],
 		"auto-injected literal must be parsed, not published in its policy spelling")
 }
 
@@ -2703,8 +2702,8 @@ func TestIngest_Batch_MixedTimestampSpellings(t *testing.T) {
 		spellings = append(spellings, publishedRow(t, msg.Data)["ts"].(string))
 	}
 	assert.Equal(t, []string{
-		"2026-06-21 04:00:00", // RFC 3339 in
-		"2026-06-21 04:00:00", // Unix seconds in — same instant, same rendering
+		"2026-06-21T04:00:00Z", // RFC 3339 in
+		"2026-06-21T04:00:00Z", // Unix seconds in — same instant, same rendering
 	}, spellings)
 }
 

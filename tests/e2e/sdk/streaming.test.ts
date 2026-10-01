@@ -135,9 +135,9 @@ describe("Streaming", () => {
 
         await waitForCondition(() => receivedEvents.some((e) => e.data?.event_id === id), 10_000);
         const frame = receivedEvents.find((e) => e.data?.event_id === id);
-        // The column's own rendering: "YYYY-MM-DD hh:mm:ss.SSS" in its zone
-        // (DateTime64(3) here), not RFC 3339 with a Z.
-        expect(frame?.data.received_timestamp).toBe("2026-06-21 04:00:00.123");
+        // RFC 3339 in UTC at the column's scale (DateTime64(3) here), the
+        // spelling /v1/query renders too.
+        expect(frame?.data.received_timestamp).toBe("2026-06-21T04:00:00.123Z");
 
         // The ClickHouse insert is async behind the stream event — poll the query
         // path until the row lands, then compare the two renderings.

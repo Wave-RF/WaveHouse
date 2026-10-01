@@ -216,8 +216,8 @@ func TestCHReader_ResponseShape(t *testing.T) {
 			// The bytes are ClickHouse's: key order, a decimal's digits and a
 			// timestamp's spelling all pass through untouched.
 			name: "rows are copied, not re-encoded",
-			body: "{\"z\":1,\"a\":12.50,\"ts\":\"2026-01-15 10:30:00.120\"}\n",
-			want: `[{"z":1,"a":12.50,"ts":"2026-01-15 10:30:00.120"}]`,
+			body: "{\"z\":1,\"a\":12.50,\"ts\":\"2026-01-15T10:30:00.120Z\"}\n",
+			want: `[{"z":1,"a":12.50,"ts":"2026-01-15T10:30:00.120Z"}]`,
 		},
 	}
 	for _, tt := range tests {
@@ -255,6 +255,9 @@ func TestCHReader_Request(t *testing.T) {
 	for name, want := range chReadSettingsFixed {
 		assert.Equal(t, want, got.query.Get(name), name)
 	}
+	// Pinned here rather than read from the map: the SSE wire (typelayer's
+	// export) and the SDK compare against this spelling.
+	assert.Equal(t, "iso", got.query.Get("date_time_output_format"), "DateTime as RFC 3339 in UTC")
 	assert.Equal(t, "2", got.query.Get("readonly"))
 	assert.Equal(t, "warehouse", got.query.Get("database"))
 	assert.Equal(t, []string{"/home", `a\tb`}, ch.params())
@@ -391,21 +394,40 @@ func TestCHReader_Errors(t *testing.T) {
 	})
 }
 
-// TestCHReader_ClientsPerCap: a tenant's reads share one transport per
-// connection cap, capped at that many connections per server; no cap is
-// defaultReadConns, and two caps never share a transport.
-func TestCHReader_ClientsPerCap(t *testing.T) {
+// TestCHReader_ClientsPerPool: reads share a transport — and so a cap — only
+// within one pool: the same server, credentials, database, TLS config and
+// cap, the tuple a native pool is keyed by. Two tenants on one plain-HTTP
+// server that differ in database or user each get their own cap; no cap is
+// defaultReadConns.
+func TestCHReader_ClientsPerPool(t *testing.T) {
 	t.Parallel()
 	r := newCHReader(readerHTTPClient)
-	target := chconn.Target{URL: fakeCHURL}
 	maxConns := func(c *http.Client) int { return c.Transport.(*http.Transport).MaxConnsPerHost }
+	acme := chconn.Target{URL: fakeCHURL, Username: "acme", Password: "pw", Database: "acme"}
 
-	assert.Equal(t, defaultReadConns, maxConns(r.client(target, 0)))
-	assert.Same(t, r.client(target, 0), r.client(target, defaultReadConns))
-	assert.Equal(t, 7, maxConns(r.client(target, 7)))
-	assert.Same(t, r.client(target, 7), r.client(target, 7))
-	assert.NotSame(t, r.client(target, 7), r.client(target, 8))
-	assert.Equal(t, 7, r.client(target, 7).Transport.(*http.Transport).MaxIdleConnsPerHost)
+	same := acme
+	assert.Same(t, r.client(acme, 7), r.client(same, 7), "an identical tuple shares the pool's cap")
+	assert.Equal(t, 7, maxConns(r.client(acme, 7)))
+	assert.Equal(t, 7, r.client(acme, 7).Transport.(*http.Transport).MaxIdleConnsPerHost)
+
+	otherDB, otherUser, otherPassword := acme, acme, acme
+	otherDB.Database = "globex"
+	otherUser.Username = "globex"
+	otherPassword.Password = "rotated"
+	otherServer := acme
+	otherServer.URL = "http://clickhouse-2.test:8123"
+	withTLS := acme
+	withTLS.TLS = &tls.Config{ServerName: "clickhouse.test"}
+	for name, other := range map[string]chconn.Target{
+		"database": otherDB, "user": otherUser, "password": otherPassword, "server": otherServer, "tls": withTLS,
+	} {
+		assert.NotSame(t, r.client(acme, 7), r.client(other, 7), "another %s is another pool", name)
+		assert.Equal(t, 7, maxConns(r.client(other, 7)), name)
+	}
+	assert.NotSame(t, r.client(acme, 7), r.client(acme, 8), "another cap is another client")
+
+	assert.Equal(t, defaultReadConns, maxConns(r.client(acme, 0)))
+	assert.Same(t, r.client(acme, 0), r.client(acme, defaultReadConns))
 }
 
 // TestCHReader_ConnectionCapHolds: past the cap, a read waits for a
@@ -451,6 +473,41 @@ func TestCHReader_ConnectionCapHolds(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, 1, peak)
+}
+
+// TestCHReader_TenantsOnOneServerKeepTheirOwnCap: one tenant holding every
+// connection its cap allows does not hold up another tenant's read on the same
+// server — the cross-tenant starvation a per-server cap would cause.
+func TestCHReader_TenantsOnOneServerKeepTheirOwnCap(t *testing.T) {
+	t.Parallel()
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
+		if req.URL.Query().Get("database") == "acme" {
+			entered <- struct{}{}
+			<-release
+		}
+	}))
+	t.Cleanup(srv.Close)
+	// Before srv.Close on a failure too, which waits for acme's request.
+	var unblock sync.Once
+	defer unblock.Do(func() { close(release) })
+
+	r := newCHReader(readerHTTPClient)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		_, err := r.do(context.Background(), chconn.Target{URL: srv.URL, Database: "acme"}, 1, chRequest{sql: "SELECT 1"})
+		assert.NoError(t, err)
+	})
+	<-entered
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := r.do(ctx, chconn.Target{URL: srv.URL, Database: "globex"}, 1, chRequest{sql: "SELECT 1"})
+	require.NoError(t, err, "another tenant's read waited on acme's connection")
+
+	unblock.Do(func() { close(release) })
+	wg.Wait()
 }
 
 // TestCheckRequestSize: a scalar is refused when its percent-encoded form

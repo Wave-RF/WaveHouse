@@ -240,9 +240,9 @@ describe("Query", () => {
   // The value SPELLING is part of the SDK contract, and none of the suite
   // tables can show it: they are all String/UInt32/DateTime64. A Decimal
   // arrives as a JSON number (`wavehouse codegen` types it as one), and a
-  // DateTime64 keeps ClickHouse's own `YYYY-MM-DD HH:MM:SS.fff` spelling
-  // rather than ISO-8601 — the same bytes the stream carries (#372).
-  it("renders a Decimal as a number and a DateTime64 in ClickHouse's spelling", async () => {
+  // DateTime64 as RFC 3339 in UTC at the column's scale, `.000Z` and all —
+  // the same bytes the stream carries (#372).
+  it("renders a Decimal as a number and a DateTime64 as RFC 3339 UTC", async () => {
     const admin = adminClient();
     const t = `types_${testId().replace(/-/g, "_")}`;
 
@@ -267,7 +267,7 @@ describe("Query", () => {
       const row = result.data![0] as Record<string, unknown>;
       expect(typeof row.amount).toBe("number");
       expect(row.amount).toBe(12.5);
-      expect(row.at).toBe("2026-01-15 10:30:00.123");
+      expect(row.at).toBe("2026-01-15T10:30:00.123Z");
     } finally {
       await setPolicy(currentPolicy);
       await chQuery(`DROP TABLE IF EXISTS default.\`${t}\``);
@@ -276,8 +276,8 @@ describe("Query", () => {
 
   // ClickHouse parses a filter value on a DateTime column itself, so RFC 3339
   // with any offset is an exact instant, a zone-less value reads in the
-  // column's own zone, and a timestamp read back from /v1/query, in
-  // ClickHouse's own spelling, filters as it is.
+  // column's own zone, and a timestamp read back from /v1/query — RFC 3339 in
+  // UTC, whatever the column's zone — filters as it is.
   it("filters DateTime and DateTime64 columns by RFC 3339 and by the spelling it returns", async () => {
     const admin = adminClient();
     const t = `ts_${testId().replace(/-/g, "_")}`;
@@ -323,8 +323,9 @@ describe("Query", () => {
       const back = await wh.from(t).select("id", "at", "at3", "atk").where("id", "=", "r1").fetch();
       expect(back.error).toBeNull();
       const row = back.data![0] as { at: string; at3: string; atk: string };
-      expect(row.at).toBe("2026-01-15 10:30:00");
-      expect(row.atk).toBe("2026-01-15 19:30:00");
+      expect(row.at).toBe("2026-01-15T10:30:00Z");
+      expect(row.at3).toBe("2026-01-15T10:30:00.123Z");
+      expect(row.atk).toBe("2026-01-15T10:30:00Z");
       expect(await ids("at", "=", row.at)).toEqual(["r1"]);
       expect(await ids("at3", "=", row.at3)).toEqual(["r1"]);
       expect(await ids("atk", "=", row.atk)).toEqual(["r1"]);
