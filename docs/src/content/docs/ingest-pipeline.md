@@ -59,7 +59,7 @@ flowchart LR
 Note the embedded broker's stream is **dual-use**: it is both the durable buffer feeding the worker and the replay buffer that SSE clients gap-fill from. That is why a custom sweeper exists there instead of plain work-queue auto-deletion; `mq.backend: nats` splits the two roles instead, with work-queue partitions and a separate history stream (see [Scaling out](#scaling-to-multiple-instances)).
 
 :::note[Omitted columns take their real DEFAULT, not `null`]
-The batch that reaches `insertToClickHouse` is not assembled from the request body — it is the bytes `Table.Ingest` returned for each accepted record, produced by ClickHouse's own writer. An omitted field's `DEFAULT` (or the type's implicit zero) was evaluated before that line existed, so a `Nullable(T) DEFAULT …` column takes its default exactly as an `INSERT` naming fewer columns would. Verified on ClickHouse 26.6.3.
+The batch that reaches `insertToClickHouse` is not assembled from the request body — it is the bytes `IngestWith` returned for each accepted record, produced by ClickHouse's own writer. An omitted field's `DEFAULT` (or the type's implicit zero) was evaluated before that line existed, so a `Nullable(T) DEFAULT …` column takes its default exactly as an `INSERT` naming fewer columns would. Verified on ClickHouse 26.8.
 :::
 
 :::note[Insert settings pinned]
