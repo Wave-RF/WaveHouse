@@ -3,6 +3,7 @@ package typelayer
 import (
 	"bytes"
 	"strconv"
+	"strings"
 )
 
 // Counting the records a body holds, independently of chtypes.
@@ -33,9 +34,11 @@ import (
 //     wider one; measured), as is a non-empty tail with no newline. A CSV
 //     newline inside a double-quoted field, a quote opening after spaces or
 //     tabs included, is not a terminator; a quote anywhere else is a literal.
-//     A TSV newline escaped by a backslash is not one either. The header line
-//     of a WithNames body is not a record; under header auto-detection see
-//     detectedHeaderRows.
+//     A TSV newline escaped by a backslash is not one either. A CSV line ends
+//     at LF, CRLF or LF CR; a TSV one at LF alone (an LF CR leaves the CR to
+//     open the next record). The header line of a WithNames body is not a
+//     record; under header auto-detection see detectedHeaderRows. For a
+//     leading UTF-8 byte order mark see bomFloor.
 func recordFloor(format Format, opts IngestOptions, body []byte, wire []string, types map[string]string) int {
 	switch format {
 	case FormatJSONEachRow:
@@ -44,6 +47,58 @@ func recordFloor(format Format, opts IngestOptions, body []byte, wire []string, 
 	default:
 		return 0
 	}
+	if bytes.HasPrefix(body, utf8BOM) {
+		return bomFloor(format, opts, body, wire, types)
+	}
+	return lineFloor(format, opts, body, wire, types)
+}
+
+// utf8BOM is the UTF-8 byte order mark.
+var utf8BOM = []byte("\xEF\xBB\xBF")
+
+// bomFloor is the floor of a CSV or TSV body led by a UTF-8 byte order mark.
+// Measured on 26.8.15.10, ClickHouse always skips the mark in a WithNames
+// body; in a positional one (bare or header=absent) the first wire column's
+// type decides. String and FixedString, bare or inside Nullable or
+// LowCardinality, keep it as the start of the value, as do Array(String) and
+// Map(String, …); UUID, DateTime, numbers, Enum, IPv4 and Array(UInt8) skip
+// it. So
+// `BOM id,page,n` is a detected header on a UUID- or DateTime-first table and
+// a record on a String-first one, and a quote right after the mark opens a
+// field only where it was skipped.
+//
+// A WithNames body is counted without the mark and one whose first column is
+// a stringType with it. Every other first column takes the lower of the two readings, so the
+// floor holds whichever one ClickHouse makes for a type not measured here.
+func bomFloor(format Format, opts IngestOptions, body []byte, wire []string, types map[string]string) int {
+	skipped := lineFloor(format, opts, body[len(utf8BOM):], wire, types)
+	if format == FormatCSVWithNames || format == FormatTSVWithNames {
+		return skipped
+	}
+	kept := lineFloor(format, opts, body, wire, types)
+	if len(wire) > 0 && stringType(types[wire[0]]) {
+		return kept
+	}
+	return min(skipped, kept)
+}
+
+// stringType reports whether t is String or FixedString, bare or inside
+// Nullable or LowCardinality.
+func stringType(t string) bool {
+	for {
+		if inner, ok := strings.CutPrefix(t, "Nullable("); ok {
+			t = strings.TrimSuffix(inner, ")")
+		} else if inner, ok := strings.CutPrefix(t, "LowCardinality("); ok {
+			t = strings.TrimSuffix(inner, ")")
+		} else {
+			return t == "String" || strings.HasPrefix(t, "FixedString(")
+		}
+	}
+}
+
+// lineFloor is recordFloor for a CSV or TSV body: its records less the header
+// lines ClickHouse reads as one.
+func lineFloor(format Format, opts IngestOptions, body []byte, wire []string, types map[string]string) int {
 	csv := format == FormatCSV || format == FormatCSVWithNames
 	var n int
 	var first, second []byte
@@ -102,9 +157,10 @@ func jsonObjects(b []byte) int {
 // csvRecords counts ClickHouse's CSV records in b and returns the first two,
 // without their terminators. A double quote opens a quoted field only where a
 // field starts (leading spaces and tabs aside); inside one, `""` is a quote and
-// a newline is data. ClickHouse reads the same body the same way (measured,
-// including a quote after leading whitespace, a quote mid-field and a CRLF
-// inside quotes).
+// a newline is data. A CR right after a terminating LF belongs to it: LF CR is
+// one line end to ClickHouse, like CRLF. ClickHouse reads the same body the
+// same way (measured, including a quote after leading whitespace, a quote
+// mid-field, a CRLF inside quotes and LF CR line ends).
 func csvRecords(b []byte) (n int, first, second []byte) {
 	start := 0
 	inQuote, fieldStart := false, true
@@ -129,6 +185,9 @@ func csvRecords(b []byte) (n int, first, second []byte) {
 		case ' ', '\t':
 		case '\n':
 			n, first, second = takeRecord(n, first, second, b[start:i])
+			if i+1 < len(b) && b[i+1] == '\r' {
+				i++
+			}
 			start, fieldStart = i+1, true
 		default:
 			fieldStart = false
@@ -140,9 +199,10 @@ func csvRecords(b []byte) (n int, first, second []byte) {
 	return n, first, second
 }
 
-// tsvRecords is csvRecords for TSV: no quoting, and a newline after an odd run
-// of backslashes is an escaped newline inside a field (measured: `a\` + LF is
-// one value, `a\\` + LF ends the record).
+// tsvRecords is csvRecords for TSV: no quoting, a newline after an odd run of
+// backslashes is an escaped newline inside a field (measured: `a\` + LF is one
+// value, `a\\` + LF ends the record), and a CR after an LF is not part of the
+// line end — it is the first byte of the next record (measured).
 func tsvRecords(b []byte) (n int, first, second []byte) {
 	start, run := 0, 0
 	for i, c := range b {

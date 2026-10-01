@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 )
@@ -23,8 +24,10 @@ import (
 //
 // The scan is string- and escape-aware, so a comma or a bracket inside a value
 // is untouched, and it runs ONLY when the declared format is the JSON family and
-// the first non-whitespace byte is '['. It must not run on anything else: a bare
-// object's own commas are at depth 1 and rewriting them destroys the record
+// the first non-whitespace byte is '[' (see firstNonSpace: a leading byte order
+// mark and form feeds count as whitespace there, so they do here too, and stay
+// in place for ClickHouse's reader to skip). It must not run on anything else: a
+// bare object's own commas are at depth 1 and rewriting them destroys the record
 // (measured).
 //
 // Three substitutions, all in place and all the same length:
@@ -60,11 +63,15 @@ func reframeArray(b []byte) (elements int, err error) {
 	sawValue, closed := false, false
 	element := false // a value since the opening bracket or the last depth-1 comma
 	inStr, esc := false, false
-	for i := range b {
+	start := 0
+	if bytes.HasPrefix(b, utf8BOM) {
+		start = len(utf8BOM)
+	}
+	for i := start; i < len(b); i++ {
 		c := b[i]
 		if closed {
 			switch c {
-			case ' ', '\t':
+			case ' ', '\t', '\f', '\v':
 			case '\n', '\r':
 				b[i] = ' '
 			default:
@@ -110,7 +117,7 @@ func reframeArray(b []byte) (elements int, err error) {
 			element = false
 		case c == '\n' || c == '\r':
 			b[i] = ' '
-		case c == ' ' || c == '\t':
+		case isJSONSpace(c):
 		default:
 			sawValue = sawValue || depth >= 1
 			element = element || depth >= 1

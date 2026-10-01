@@ -343,13 +343,15 @@ func span(res chtypes.BatchResult, i int) []byte {
 
 // floor is recordFloor for body against this handle's columns: header
 // auto-detection compares a first line with the wire columns and a second with
-// their compiled types. Skipped when the caller has an exact count.
+// their compiled types, and the first column's type decides whether a leading
+// byte order mark is read as framing. Skipped when the caller has an exact
+// count.
 func (t *Table) floor(s *schemaSlot, format Format, opts IngestOptions, body []byte) int {
 	if opts.Records > 0 {
 		return 0
 	}
 	var types map[string]string
-	if (format == FormatCSV || format == FormatTSV) && !opts.StrictPositional {
+	if format == FormatCSV || format == FormatTSV {
 		types = make(map[string]string, len(s.schema.Columns))
 		for _, c := range s.schema.Columns {
 			types[c.Name] = c.Type

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"mime"
@@ -286,20 +287,36 @@ func mediaTypePrefix(v string) string {
 	return base
 }
 
-// firstNonSpace returns the body's first non-whitespace byte. ok is false when
-// there is none within the sniff window — the same bound the streaming reader
-// used, kept so a body of leading whitespace longer than the window still reads
-// as empty rather than changing meaning now that the whole body is in memory.
+// firstNonSpace returns the body's first non-whitespace byte, read the way
+// ClickHouse's JSON reader reads the start of a body: a UTF-8 byte order mark
+// is skipped at the very start (and only there), and whitespace is all six
+// ASCII spaces, form feed and vertical tab included. Reading `\f[` or a
+// BOM-led array as a single object published element 0 behind a 200 and
+// dropped the rest. ok is false when there is no such byte within the sniff
+// window — the same bound the streaming reader used, kept so a body of leading
+// whitespace longer than the window still reads as empty rather than changing
+// meaning now that the whole body is in memory.
 func firstNonSpace(body []byte) (byte, bool) {
-	for _, c := range body[:min(len(body), maxSniffBytes)] {
-		switch c {
-		case ' ', '\t', '\n', '\r':
-			continue
-		default:
+	window := body[:min(len(body), maxSniffBytes)]
+	for _, c := range bytes.TrimPrefix(window, utf8BOM) {
+		if !isJSONSpace(c) {
 			return c, true
 		}
 	}
 	return 0, false
+}
+
+// utf8BOM is the UTF-8 byte order mark.
+var utf8BOM = []byte("\xEF\xBB\xBF")
+
+// isJSONSpace reports whether ClickHouse's JSON reader skips c between values:
+// the six ASCII whitespace bytes.
+func isJSONSpace(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', '\f', '\v':
+		return true
+	}
+	return false
 }
 
 // emptyBodyMessage tailors the empty-body 400 message to the declared format so

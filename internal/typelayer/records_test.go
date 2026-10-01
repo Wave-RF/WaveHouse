@@ -13,12 +13,24 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
-const recUUID = "61f0c404-5cb3-11e7-907b-a6006ad3dba0"
+const (
+	recUUID = "61f0c404-5cb3-11e7-907b-a6006ad3dba0"
+	bom     = "\xEF\xBB\xBF"
+)
 
-// uuidTables are a UUID-first table for the positional formats and a
-// name-addressed one whose omitted id takes a constant DEFAULT.
+// uuidTables are a UUID-first table for the positional formats, a
+// name-addressed one whose omitted id takes a constant DEFAULT, and two more
+// first-column types a leading byte order mark is measured against.
 func uuidTables() []*discovery.TableSchema {
 	return []*discovery.TableSchema{
+		{Name: "stamps", Columns: []discovery.Column{
+			{Name: "ts", Type: "DateTime", Position: 1},
+			{Name: "page", Type: "String", Position: 2},
+		}},
+		{Name: "batches", Columns: []discovery.Column{
+			{Name: "ns", Type: "Array(UInt8)", Position: 1},
+			{Name: "page", Type: "String", Position: 2},
+		}},
 		{Name: "pings", Columns: []discovery.Column{
 			{Name: "id", Type: "UUID", Position: 1},
 			{Name: "page", Type: "String", Position: 2},
@@ -67,6 +79,11 @@ func TestIngest_ShortAnswerIsDeclinedWhole(t *testing.T) {
 		{"a blank CSV line", pings, FormatCSV, IngestOptions{StrictPositional: true}, recUUID + ",/a,1\n\n" + recUUID + ",/b,2\n", 3},
 		{"a CSVWithNames types line", pings, FormatCSVWithNames, IngestOptions{}, "id,page,n\nUUID,String,UInt8\n" + recUUID + ",/b,2\n", 2},
 		{"TSV", pings, FormatTSV, IngestOptions{}, "zzz\t/a\t1\n" + recUUID + "\t/b\t2\n" + recUUID + "\t/c\t3\n", 3},
+		{"a byte order mark before bare CSV", pings, FormatCSV, IngestOptions{}, bom + "zzz,/a,1\n" + recUUID + ",/b,2\n" + recUUID + ",/c,3\n", 3},
+		// A String first column keeps the mark as its value, so this names
+		// line is no header to ClickHouse: it is a record whose id is `id`.
+		{"a marked header a String-first table reads as a record", visits, FormatCSV, IngestOptions{}, bom + "page,id\n/a," + recUUID + "\n/b," + recUUID + "\n", 3},
+		{"a marked TSV header a String-first table reads as a record", visits, FormatTSV, IngestOptions{}, bom + "page\tid\n/a\t" + recUUID + "\n/b\t" + recUUID + "\n", 3},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			batch, err := tt.tbl.IngestWith(tt.format, tt.opts, []byte(tt.body))
@@ -97,8 +114,9 @@ func TestIngest_WholeAnswersAreNotMiscounted(t *testing.T) {
 		t.Cleanup(tbl.Release)
 		return tbl
 	}
-	visits, pings := table("visits"), table("pings")
+	visits, pings, stamps, batches := table("visits"), table("pings"), table("stamps"), table("batches")
 	r := recUUID + ",/r,1\n"
+	ts := "2024-01-01 00:00:00"
 	for _, tt := range []struct {
 		name   string
 		tbl    *Table
@@ -126,6 +144,21 @@ func TestIngest_WholeAnswersAreNotMiscounted(t *testing.T) {
 		{"a detected TSV header with an escape", pings, FormatTSV, IngestOptions{}, "i\\x64\tpage\tn\n" + recUUID + "\t/r\t1\n", 1},
 		{"a CSVWithNames header", pings, FormatCSVWithNames, IngestOptions{}, "page,id\n/a," + recUUID + "\n/b," + recUUID + "\n", 2},
 		{"a header with no records", pings, FormatCSV, IngestOptions{}, "id,page,n\n", 0},
+		// ClickHouse skips a leading byte order mark unless the first column
+		// is a string type, so the names line after it is a detected header.
+		{"a byte order mark before a detected header", pings, FormatCSV, IngestOptions{}, bom + "id,page,n\n" + r + r, 2},
+		{"a byte order mark before a DateTime-first header", stamps, FormatCSV, IngestOptions{}, bom + "ts,page\n" + ts + ",/a\n" + ts + ",/b\n", 2},
+		{"a byte order mark before a detected TSV header", pings, FormatTSV, IngestOptions{}, bom + "id\tpage\tn\n" + recUUID + "\t/a\t1\n" + recUUID + "\t/b\t2\n", 2},
+		{"a byte order mark before a CSVWithNames header", visits, FormatCSVWithNames, IngestOptions{}, bom + "\"page\",id\n\"/a\nx\"," + recUUID + "\n", 1},
+		{"a byte order mark before a quoted newline", batches, FormatCSV, IngestOptions{StrictPositional: true}, bom + "\"[1,\n2]\",/a\n[3],/b\n", 2},
+		// A String first column keeps it: the quote after it is a literal, so
+		// its newline ends a record — three records, as ClickHouse reads them.
+		{"a byte order mark a String first column keeps", visits, FormatCSV, IngestOptions{StrictPositional: true}, bom + "\"/a\nx\"," + recUUID + "\n/b," + recUUID + "\n", 3},
+		{"LF CR line ends", pings, FormatCSV, IngestOptions{StrictPositional: true}, recUUID + ",/a,1\n\r" + recUUID + ",/b,2\n\r", 2},
+		{"LF CR after a detected header", visits, FormatCSV, IngestOptions{}, "page,id\n\r/a," + recUUID + "\n\r/b," + recUUID + "\n\r", 2},
+		{"LF CR after a CSVWithNames header", visits, FormatCSVWithNames, IngestOptions{}, "page,id\n\r/a," + recUUID + "\n\r/b," + recUUID + "\n\r", 2},
+		// TSV has no LF CR line end: the CR opens the next record.
+		{"a TSV CR after LF", visits, FormatTSV, IngestOptions{StrictPositional: true}, "/a\t" + recUUID + "\n\r/b\t" + recUUID + "\n", 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			batch, err := tt.tbl.IngestWith(tt.format, tt.opts, []byte(tt.body))
@@ -178,6 +211,10 @@ func TestCSVRecords(t *testing.T) {
 		{"a\"b\nc\",1\n", 2, "a\"b", "c\",1"},
 		{"'a\nb',1\n", 2, "'a", "b',1"},
 		{"a\r\nb\r\n", 2, "a\r", "b\r"},
+		{"a\n\rb\n\r", 2, "a", "b"},
+		{"a\n\r\nb\n", 3, "a", ""},
+		{"a\n\r\rb\n", 2, "a", "\rb"},
+		{"\"x\n\ry\"\n\rb", 2, "\"x\n\ry\"", "b"},
 		{"\"never closed\nstill quoted", 1, "\"never closed\nstill quoted", ""},
 	} {
 		n, first, second := csvRecords([]byte(tt.body))
@@ -197,6 +234,7 @@ func TestTSVRecords(t *testing.T) {
 		"a\\\\\\\nb\nc\n": 2,
 		"a\n\nb":          3,
 		"\"a\nb\"\n":      2,
+		"a\n\rb\n\r":      3,
 	} {
 		n, _, _ := tsvRecords([]byte(body))
 		assert.Equal(t, want, n, "%q", body)
@@ -252,6 +290,48 @@ func TestRecordFloor(t *testing.T) {
 	assert.Equal(t, 0, recordFloor(FormatCSVWithNames, IngestOptions{}, nil, wire, types))
 	assert.Equal(t, 2, recordFloor(FormatJSONEachRow, IngestOptions{}, []byte("{}\n{}\n"), nil, nil))
 	assert.Equal(t, 0, recordFloor(chtypes.JSONCompactEachRow, IngestOptions{}, []byte("[1]\n"), nil, nil), "a format Ingest does not parse")
+}
+
+// TestRecordFloor_ByteOrderMark: a leading mark is counted the way ClickHouse
+// reads it — skipped under a header, kept as a String first column's value —
+// and as the lower of the two readings before any other first column.
+func TestRecordFloor_ByteOrderMark(t *testing.T) {
+	t.Parallel()
+	wire := []string{"id", "page", "n"}
+	typed := func(first string) map[string]string {
+		return map[string]string{"id": first, "page": "String", "n": "UInt8"}
+	}
+	header := []byte(bom + "id,page,n\na\nb\n")
+	for _, tt := range []struct {
+		first string
+		want  int
+	}{
+		{"UUID", 2},
+		{"Nullable(UUID)", 2},
+		{"String", 3},
+		{"FixedString(36)", 3},
+		{"Nullable(String)", 3},
+		{"LowCardinality(String)", 3},
+		{"LowCardinality(Nullable(String))", 3},
+		{"Array(String)", 2}, // keeps the mark too; the lower reading
+		{"", 2},
+	} {
+		assert.Equal(t, tt.want, recordFloor(FormatCSV, IngestOptions{}, header, wire, typed(tt.first)), tt.first)
+		assert.Equal(t, tt.want, recordFloor(FormatTSV, IngestOptions{}, []byte(strings.ReplaceAll(string(header), ",", "\t")), wire, typed(tt.first)), "TSV "+tt.first)
+	}
+	assert.Equal(t, 2, recordFloor(FormatCSVWithNames, IngestOptions{}, header, wire, typed("String")), "a header always skips it")
+
+	// A quote right after the mark opens a field only where the mark is
+	// skipped; the lower reading holds where that is not known.
+	quoted := []byte(bom + "\"a\nb\",x\nc\n")
+	assert.Equal(t, 2, recordFloor(FormatCSV, IngestOptions{StrictPositional: true}, quoted, wire, typed("UUID")))
+	assert.Equal(t, 3, recordFloor(FormatCSV, IngestOptions{StrictPositional: true}, quoted, wire, typed("String")))
+	// Here the skipped reading is the higher one (`"""` opens a field only
+	// without the mark), and a non-string first column takes the lower.
+	raised := []byte(bom + "\"\"\",\"\n\"")
+	assert.Equal(t, 1, recordFloor(FormatCSV, IngestOptions{StrictPositional: true}, raised, wire, typed("UUID")))
+	assert.Equal(t, 1, recordFloor(FormatCSV, IngestOptions{StrictPositional: true}, raised, wire, typed("String")))
+	assert.Equal(t, 0, recordFloor(FormatCSV, IngestOptions{StrictPositional: true}, []byte(bom), wire, typed("UUID")))
 }
 
 func TestMiscount(t *testing.T) {

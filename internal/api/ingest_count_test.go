@@ -16,9 +16,17 @@ const testUUID = "61f0c404-5cb3-11e7-907b-a6006ad3dba0"
 
 // uuidRegistry holds the two tables a malformed UUID takes records from:
 // visits as a producer writes it (the id generated when omitted), and pings
-// with the id first, for the positional formats.
+// with the id first, for the positional formats. stamps is DateTime-first, a
+// first column that skips a leading byte order mark like UUID does.
 func uuidRegistry(t *testing.T) *discovery.SchemaRegistry {
 	return testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
+		{
+			Name: "stamps",
+			Columns: []discovery.Column{
+				{Name: "ts", Type: "DateTime", Position: 1},
+				{Name: "page", Type: "String", Position: 2},
+			},
+		},
 		{
 			Name: "visits",
 			Columns: []discovery.Column{
@@ -55,6 +63,10 @@ func TestIngest_ShortAnswerDeclinesTheWholeBatch(t *testing.T) {
 		{"a header=absent CSV body", "pings", "text/csv; header=absent", "zzz,/a,1\n" + testUUID + ",/b,2\n" + testUUID + ",/c,3\n"},
 		{"a header=present CSV body", "pings", "text/csv; header=present", "id,page,n\nzzz,/a,1\n" + testUUID + ",/b,2\n" + testUUID + ",/c,3\n"},
 		{"a TSV body", "pings", "text/tab-separated-values", "zzz\t/a\t1\n" + testUUID + "\t/b\t2\n" + testUUID + "\t/c\t3\n"},
+		{"a byte-order-marked CSV body", "pings", "text/csv", utf8BOMString + "zzz,/a,1\n" + testUUID + ",/b,2\n" + testUUID + ",/c,3\n"},
+		// A String first column keeps the mark, so ClickHouse reads this
+		// names line as a record whose id is `id`, which takes /a with it.
+		{"a byte-order-marked header a String-first table reads as a record", "visits", "text/csv", utf8BOMString + "page,id\n/a," + testUUID + "\n/b," + testUUID + "\n"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -125,6 +137,16 @@ func TestIngest_CountedBodiesKeepPerRecordVerdicts(t *testing.T) {
 		{"a detected subset header", "pings", "text/csv", "page,id\n/a," + u + "\n", 1, 1},
 		{"a detected TSV header", "pings", "text/tab-separated-values", "id\tpage\tn\n" + u + "\t/a\t1\n", 1, 1},
 		{"CRLF line endings", "pings", "text/csv; header=absent", u + ",/a,1\r\n" + u + ",/b,2\r\n", 2, 2},
+		{"LF CR line endings", "pings", "text/csv; header=absent", u + ",/a,1\n\r" + u + ",/b,2\n\r", 2, 2},
+		{"LF CR line endings after a detected header", "pings", "text/csv", "id,page,n\n\r" + u + ",/a,1\n\r" + u + ",/b,2\n\r", 2, 2},
+		// ClickHouse skips a leading byte order mark before a UUID or
+		// DateTime first column, so the names line after it is a header.
+		{"a byte order mark before a detected header", "pings", "text/csv", utf8BOMString + "id,page,n\n" + u + ",/a,1\n" + u + ",/b,2\n", 2, 2},
+		{"a byte order mark before a DateTime-first header", "stamps", "text/csv", utf8BOMString + "ts,page\n2024-01-01 00:00:00,/a\n2024-01-02 00:00:00,/b\n", 2, 2},
+		{"a byte order mark before a detected TSV header", "pings", "text/tab-separated-values", utf8BOMString + "id\tpage\tn\n" + u + "\t/a\t1\n" + u + "\t/b\t2\n", 2, 2},
+		{"a byte order mark before a quoted newline", "visits", "text/csv; header=present", utf8BOMString + "\"page\",id\n\"/a\nx\"," + u + "\n/b," + u + "\n", 2, 2},
+		{"a byte order mark before a header=absent body", "pings", "text/csv; header=absent", utf8BOMString + u + ",/a,1\n" + u + ",/b,2\n", 2, 2},
+		{"a byte order mark before an NDJSON body", "pings", "application/x-ndjson", utf8BOMString + "{\"page\":\"/a\"}\n{\"page\":\"/b\"}\n", 2, 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -143,6 +165,69 @@ func TestIngest_CountedBodiesKeepPerRecordVerdicts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// utf8BOMString is a UTF-8 byte order mark, as an editor or a spreadsheet
+// export leads a file with it.
+const utf8BOMString = "\xEF\xBB\xBF"
+
+// TestIngest_JSONArrayLedByAMarkOrAFormFeed is the regression guard for a
+// silent loss: the array-or-object byte skipped only space, tab, CR and LF, so
+// an array led by a byte order mark or a form feed took the single-object path
+// and published element 0 behind `200 {"ok":true}`. ClickHouse's JSON reader
+// skips the mark at the start and all six ASCII whitespace bytes, so these are
+// arrays: every element is answered and published.
+func TestIngest_JSONArrayLedByAMarkOrAFormFeed(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, body string }{
+		{"a byte order mark", utf8BOMString + `[{"page":"/a"},{"page":"/b"},{"page":"/c"}]`},
+		{"a form feed", "\f" + `[{"page":"/a"},{"page":"/b"},{"page":"/c"}]`},
+		{"a vertical tab", "\v" + `[{"page":"/a"},{"page":"/b"},{"page":"/c"}]`},
+		{"a pretty-printed, marked array", utf8BOMString + "\n[\n  {\"page\": \"/a\"},\n\f  {\"page\": \"/b\"},\n  {\"page\": \"/c\"}\v\n]\f\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := newTestIngestHandler(t, uuidRegistry(t), pub)
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(rawIngestRequest(t, "pings", "application/json", tt.body)))
+
+			require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+			resp := decodeBatchResult(t, w)
+			assert.Equal(t, 3, resp.Total, "the batch response, not the single-object one")
+			assert.Equal(t, 3, resp.Succeeded)
+			require.Len(t, pub.Messages, 3, "every element is published")
+			for i, page := range []string{"/a", "/b", "/c"} {
+				assert.Equal(t, page, publishedRow(t, pub.Messages[i].Data)["page"])
+			}
+		})
+	}
+}
+
+// TestIngest_MarkedSingleObjectAndEmptyBodies: a single object led by a mark is
+// still one object, and a body that is only a mark and whitespace is empty.
+func TestIngest_MarkedSingleObjectAndEmptyBodies(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := newTestIngestHandler(t, uuidRegistry(t), pub)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(rawIngestRequest(t, "pings", "application/json", utf8BOMString+"\f"+`{"page":"/a"}`)))
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.JSONEq(t, `{"ok":true}`, w.Body.String())
+	require.Len(t, pub.Messages, 1)
+
+	for _, tt := range []struct{ contentType, message string }{
+		{"application/json", "empty body"},
+		{"application/x-ndjson", "empty ndjson body"},
+		{"text/csv", "empty csv body"},
+	} {
+		w := httptest.NewRecorder()
+		h.Handle(w, withTenant(rawIngestRequest(t, "pings", tt.contentType, utf8BOMString+" \f\v\n")))
+		require.Equal(t, http.StatusBadRequest, w.Code, "%s: body=%s", tt.contentType, w.Body.String())
+		assert.Equal(t, tt.message, jsonErrorMessage(t, w), tt.contentType)
+	}
+	assert.Len(t, pub.Messages, 1, "nothing more is published")
 }
 
 // TestIngest_EmptyArrayElementIsInvalidJSON: a leading, doubled or trailing

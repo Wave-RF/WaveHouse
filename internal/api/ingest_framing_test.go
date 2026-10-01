@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -92,6 +93,21 @@ func TestReframeArray(t *testing.T) {
 			want:  " {\"a\":1}    \t",
 			count: 1, ok: true,
 		},
+		{
+			name:  "a leading byte order mark stays for ClickHouse to skip",
+			body:  "\xEF\xBB\xBF[{\"a\":1},{\"a\":2}]",
+			want:  "\xEF\xBB\xBF {\"a\":1}\n{\"a\":2} ",
+			count: 2, ok: true,
+		},
+		{
+			name:  "form feeds and vertical tabs are layout",
+			body:  "\f[\v{\"a\":1},\f{\"a\":2}\v]\f\v",
+			want:  "\f \v{\"a\":1}\n\f{\"a\":2}\v \f\v",
+			count: 2, ok: true,
+		},
+		{name: "an array of layout alone is empty", body: "[\f\v ]", want: " \f\v  ", count: 0, ok: true},
+		{name: "a form feed is no element", body: "[{\"a\":1},\f]", err: errEmptyElement},
+		{name: "a byte order mark after the array is content", body: "[{\"a\":1}]\xEF\xBB\xBF", err: errAfterArray},
 		{name: "a truncated array does not balance", body: `[{"a":1}`, err: errUnterminatedArray},
 		{name: "a trailing comma cut off does not balance", body: `[{"a":1},`, err: errUnterminatedArray},
 		{name: "a bare open bracket does not balance", body: `[`, err: errUnterminatedArray},
@@ -139,6 +155,30 @@ func TestReframeArray_DestroysWhatItMustNotSee(t *testing.T) {
 	_, _ = reframeArray(ndjson)
 	assert.NotContains(t, string(ndjson), `{"a":1,"b":2}`,
 		"an NDJSON body is destroyed too — same reason, same gate")
+}
+
+// TestFirstNonSpace: the array-or-object byte is found the way ClickHouse's
+// JSON reader starts a body — a byte order mark skipped at the very start only,
+// and all six ASCII whitespace bytes skipped.
+func TestFirstNonSpace(t *testing.T) {
+	t.Parallel()
+	for body, want := range map[string]byte{
+		"[":                         '[',
+		" \t\r\n\f\v[":              '[',
+		"\xEF\xBB\xBF[":             '[',
+		"\xEF\xBB\xBF\f\n {":        '{',
+		" \xEF\xBB\xBF[":            0xEF, // a mark after layout is not skipped, by ClickHouse either
+		"\xEF\xBB\xBF\xEF\xBB\xBF[": 0xEF,
+		"\xEF\xBBx":                 0xEF,
+	} {
+		got, ok := firstNonSpace([]byte(body))
+		assert.True(t, ok, "%q", body)
+		assert.Equal(t, want, got, "%q", body)
+	}
+	for _, body := range []string{"", " \f\v\r\n\t", "\xEF\xBB\xBF", "\xEF\xBB\xBF\n", strings.Repeat(" ", maxSniffBytes) + "["} {
+		_, ok := firstNonSpace([]byte(body))
+		assert.False(t, ok, "%q reads as empty", body)
+	}
 }
 
 func TestCellAt(t *testing.T) {
