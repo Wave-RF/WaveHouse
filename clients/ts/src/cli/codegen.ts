@@ -21,6 +21,8 @@ interface CliArgs {
   url: string;
   out: string;
   auth?: string;
+  tenant?: string;
+  operatorKey?: string;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -39,15 +41,31 @@ function parseArgs(argv: string[]): CliArgs {
       case "-a":
         args.auth = argv[++i];
         break;
+      case "--tenant":
+      case "-t":
+        // Non-empty is the only client-side check; the server refuses a bad
+        // id, and it refuses an empty ?tenant= rather than reading it as
+        // absent, so an empty value would never mean "tenant 0".
+        args.tenant = argv[++i];
+        if (!args.tenant) throw new Error("--tenant needs a tenant id");
+        break;
+      case "--operator-key":
+      case "-k":
+        args.operatorKey = argv[++i];
+        break;
       case "--help":
       case "-h":
         console.log(`wavehouse codegen — Generate TypeScript types from WaveHouse schema
 
 Options:
-  --url, -u   WaveHouse base URL (default: http://localhost:8080)
-  --out, -o   Output file path   (default: ./wavehouse.d.ts)
-  --auth, -a  Bearer token for authenticated endpoints
-  --help, -h  Show this help`);
+  --url, -u           WaveHouse base URL (default: http://localhost:8080)
+  --out, -o           Output file path   (default: ./wavehouse.d.ts)
+  --auth, -a          Bearer token for authenticated endpoints
+  --operator-key, -k  Operator key, sent as X-Operator-Key (the credential a
+                      nested settings directory's /v1/ops/* routes admit)
+  --tenant, -t        Tenant whose schema to read, sent as ?tenant=
+                      (default: tenant 0)
+  --help, -h          Show this help`);
         process.exit(0);
     }
   }
@@ -180,11 +198,26 @@ function isTableSchema(value: unknown): value is TableSchema {
   );
 }
 
-async function fetchSchemas(url: string, auth?: string): Promise<TableSchema[]> {
-  const headers: Record<string, string> = {};
-  if (auth) headers.Authorization = `Bearer ${auth}`;
+interface FetchOptions {
+  /** Bearer token, sent as `Authorization: Bearer <token>`. */
+  auth?: string;
+  /** Operator key, sent as `X-Operator-Key`; independent of `auth`. */
+  operatorKey?: string;
+  /** Tenant to read, sent as `?tenant=`; absent reads tenant 0. */
+  tenant?: string;
+}
 
-  const res = await fetch(resolveURL(url, "/v1/ops/schema").toString(), { headers });
+async function fetchSchemas(url: string, opts: FetchOptions = {}): Promise<TableSchema[]> {
+  const headers: Record<string, string> = {};
+  if (opts.auth) headers.Authorization = `Bearer ${opts.auth}`;
+  if (opts.operatorKey) headers["X-Operator-Key"] = opts.operatorKey;
+
+  const target = resolveURL(
+    url,
+    "/v1/ops/schema",
+    opts.tenant ? { tenant: opts.tenant } : undefined,
+  );
+  const res = await fetch(target.toString(), { headers });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Schema fetch failed (${res.status}): ${text}`);
@@ -247,7 +280,11 @@ async function main() {
   const args = parseArgs(process.argv);
 
   console.log(`Fetching schema from ${args.url}...`);
-  const schemas = await fetchSchemas(args.url, args.auth);
+  const schemas = await fetchSchemas(args.url, {
+    auth: args.auth,
+    operatorKey: args.operatorKey,
+    tenant: args.tenant,
+  });
 
   if (schemas.length === 0) {
     console.warn("No tables found. Is WaveHouse running with tables in ClickHouse?");
@@ -268,7 +305,7 @@ async function main() {
 
 // Exported for unit tests; the package entry point (src/index.ts) does not
 // re-export the CLI.
-export { chTypeToTS, fetchSchemas, generateTypes };
+export { chTypeToTS, fetchSchemas, generateTypes, parseArgs };
 
 // Run only when invoked as a script (the `wavehouse-codegen` bin or tsx), not
 // when imported by tests. realpath the argv side: npm bin shims are symlinks,
