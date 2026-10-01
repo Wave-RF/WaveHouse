@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -173,22 +175,11 @@ func TestRowFilterStream_DifferentialAgainstClickHouse(t *testing.T) {
 		},
 	}
 
-	// One row under test per (shape, payload): the table it lives in, its id, and
-	// the positional line the ingest path would publish for it.
-	type storedRow struct {
-		shape   string
-		intType string
-		table   string
-		id      uint32
-		payload any
-		columns []string
-		line    []byte
-	}
-	var rows []storedRow
-
-	// One policy for the whole corpus: on each shape's table, a role per
-	// (constant, operator) cell filtering v by that one predicate, and on an
-	// integer table one more whose _in reads a claim array.
+	// One row under test per (shape, payload), and one policy for the whole
+	// corpus: on each shape's table, a role per (constant, operator) cell
+	// filtering v by that one predicate, and on an integer table one more whose
+	// _in reads a claim array.
+	var rows []diffRow
 	tables := map[string]policy.TablePolicy{}
 	for _, sh := range shapes {
 		table := createTable(t, "id UInt32, v "+sh.ddl, "ORDER BY id")
@@ -213,10 +204,10 @@ func TestRowFilterStream_DifferentialAgainstClickHouse(t *testing.T) {
 				continue
 			}
 			anyStored = true
-			rows = append(rows, storedRow{
+			line := rowFilterStoredLine(t, table, uint32(i))
+			rows = append(rows, diffRow{
 				shape: sh.name, intType: sh.intType, table: table, id: uint32(i), payload: payload,
-				columns: []string{"id", "v"},
-				line:    rowFilterStoredLine(t, table, uint32(i)),
+				columns: []string{"id", "v"}, line: line, stored: rowFilterStoredInt(t, sh.intType, line),
 			})
 		}
 		require.True(t, anyStored, "corpus for %s must contain insertable payloads", sh.name)
@@ -224,67 +215,96 @@ func TestRowFilterStream_DifferentialAgainstClickHouse(t *testing.T) {
 	p := policy.Policy{Tables: tables}
 	withPolicy(t, p)
 
-	// The hub's evaluator over the app's type layer, which createTable's
-	// refreshes already bound.
-	require.NotNil(t, env(t).types, "the api role wires a type layer")
-	eval := stream.NewRowEvaluator(env(t).types)
-
+	// Every cell, row by row: each of the shape's (constant, operator) roles, and
+	// on an integer column each claim array under the _in role.
 	byShape := map[string][]string{}
 	for _, sh := range shapes {
 		byShape[sh.name] = sh.constants
 	}
-	cells, mathCells, admitted := 0, 0, 0
-	for _, r := range rows {
-		stored := rowFilterStoredInt(t, r.intType, r.line)
+	var cells []diffCell
+	for ri, r := range rows {
 		for i, constant := range byShape[r.shape] {
 			for _, op := range diffOps {
-				cells++
-				role := cellRole(i, op)
-				got := rowFilterStreamVerdict(t, eval, &p, role, r.table, r.columns, r.line, nil)
-				want, sqlErr := rowFilterQueryVerdict(t, r.table, r.id, role, nil)
-				if want {
-					admitted++
-				}
-				if got != want {
-					t.Errorf("%s: stored %v %s %q — stream says %v, /v1/query says %v (query err: %v)",
-						r.shape, r.payload, op.sql, constant, got, want, sqlErr)
-				}
-				if exact, ok := intExpected(r.intType, stored, op.sql, constant); ok {
-					mathCells++
-					if want != exact || got != exact {
-						t.Errorf("%s: stored %v %s %q — admitted stream=%v query=%v, the mathematically correct answer is %v",
-							r.shape, r.payload, op.sql, constant, got, want, exact)
-					}
-				}
+				cells = append(cells, diffCell{row: ri, role: cellRole(i, op), op: op.sql, constant: constant})
 			}
 		}
-
-		// A multi-element _in from a claim array: each element is cast on its
-		// own, so the elements that fit decide and the rest drop out — 2^64+5
-		// must not wrap onto a row holding 5.
 		if r.intType != "" {
 			for _, set := range intInSets {
-				cells++
-				mathCells++
-				claims := map[string]any{"ids": toAnys(set)}
-				got := rowFilterStreamVerdict(t, eval, &p, claimInRole, r.table, r.columns, r.line, claims)
-				want, sqlErr := rowFilterQueryVerdict(t, r.table, r.id, claimInRole, claims)
-				exact := false
-				for _, c := range set {
-					if eq, ok := intExpected(r.intType, stored, "=", c); ok && eq {
-						exact = true
-					}
+				cells = append(cells, diffCell{row: ri, role: claimInRole, claims: map[string]any{"ids": toAnys(set)}, set: set})
+			}
+		}
+	}
+
+	// The hub's evaluator over the app's type layer, which createTable's
+	// refreshes already bound.
+	require.NotNil(t, env(t).types, "the api role wires a type layer")
+	got := rowFilterStreamVerdicts(t, stream.NewRowEvaluator(env(t).types), &p, rows, cells)
+	want, sqlErrs := rowFilterQueryVerdicts(t, rows, cells)
+
+	mathCells, admitted := 0, 0
+	for i, c := range cells {
+		r := rows[c.row]
+		if c.set != nil {
+			// A multi-element _in from a claim array: each element is cast on its
+			// own, so the elements that fit decide and the rest drop out — 2^64+5
+			// must not wrap onto a row holding 5.
+			mathCells++
+			exact := false
+			for _, v := range c.set {
+				if eq, ok := intExpected(r.intType, r.stored, "=", v); ok && eq {
+					exact = true
 				}
-				if got != want || want != exact {
-					t.Errorf("%s: stored %v IN %v — stream says %v, /v1/query says %v (query err: %v), correct is %v",
-						r.shape, r.payload, set, got, want, sqlErr, exact)
-				}
+			}
+			if got[i] != want[i] || want[i] != exact {
+				t.Errorf("%s: stored %v IN %v — stream says %v, /v1/query says %v (query err: %v), correct is %v",
+					r.shape, r.payload, c.set, got[i], want[i], sqlErrs[i], exact)
+			}
+			continue
+		}
+		if want[i] {
+			admitted++
+		}
+		if got[i] != want[i] {
+			t.Errorf("%s: stored %v %s %q — stream says %v, /v1/query says %v (query err: %v)",
+				r.shape, r.payload, c.op, c.constant, got[i], want[i], sqlErrs[i])
+		}
+		if exact, ok := intExpected(r.intType, r.stored, c.op, c.constant); ok {
+			mathCells++
+			if want[i] != exact || got[i] != exact {
+				t.Errorf("%s: stored %v %s %q — admitted stream=%v query=%v, the mathematically correct answer is %v",
+					r.shape, r.payload, c.op, c.constant, got[i], want[i], exact)
 			}
 		}
 	}
 	// A harness that answered "no row" everywhere would agree with itself.
 	require.Positive(t, admitted, "some cell must admit its row on the query path")
-	t.Logf("%d cells compared stream against /v1/query (%d admitted), %d of them also against the exact answer", cells, admitted, mathCells)
+	t.Logf("%d cells compared stream against /v1/query (%d admitted), %d of them also against the exact answer", len(cells), admitted, mathCells)
+}
+
+// diffRow is one row under test: the table it lives in, its id, the
+// positional line the ingest path would publish for it, and on an integer
+// column the value stored (nil for NULL).
+type diffRow struct {
+	shape   string
+	intType string
+	table   string
+	id      uint32
+	payload any
+	columns []string
+	line    []byte
+	stored  *big.Int
+}
+
+// diffCell is one comparison: a stored row read as one role. A constant cell
+// names its operator and constant; a claim-array cell runs as claimInRole with
+// set as the ids claim.
+type diffCell struct {
+	row      int // index into the rows
+	role     string
+	claims   map[string]any
+	op       string
+	constant string
+	set      []string
 }
 
 // diffOp is one operator under the differential: its SQL spelling, for the
@@ -326,46 +346,139 @@ func rowFilterGrant(t *testing.T, op diffOp, constant string) policy.RolePermiss
 	return policy.RolePermissions{Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"v": f}}}
 }
 
-// rowFilterStreamVerdict resolves role's grant through the full production
-// path (Evaluate → Prepare → Visible) and reports whether the stream would
-// deliver this stored row.
-func rowFilterStreamVerdict(t *testing.T, eval stream.RowEvaluator, p *policy.Policy, role, table string, columns []string, line []byte, claims map[string]any) bool {
+// rowFilterStreamVerdicts is the stream's verdict on each cell, reached the
+// way the hub reaches it for an event: the row is prepared ONCE — the parse is
+// per event — and each cell's grant, resolved through the full production path
+// (Evaluate → Visible), is asked of that one view, as each subscriber's is.
+// cells come row by row.
+func rowFilterStreamVerdicts(t *testing.T, eval stream.RowEvaluator, p *policy.Policy, rows []diffRow, cells []diffCell) []bool {
 	t.Helper()
-	perms := policy.Evaluate(p, role, table, "select", claims)
-	require.True(t, perms.Allowed)
-
-	view, err := eval.Prepare(tenant.Default, table, columns, line)
-	if err != nil {
-		return false // withheld: no view, no row
+	got := make([]bool, len(cells))
+	for start := 0; start < len(cells); {
+		r := rows[cells[start].row]
+		end := start
+		for end < len(cells) && cells[end].row == cells[start].row {
+			end++
+		}
+		view, err := eval.Prepare(tenant.Default, r.table, r.columns, r.line)
+		for i := start; i < end; i++ {
+			perms := policy.Evaluate(p, cells[i].role, r.table, "select", cells[i].claims)
+			require.True(t, perms.Allowed)
+			if err == nil { // withheld otherwise: no view, no row
+				got[i], _ = view.Visible(perms)
+			}
+		}
+		if err == nil {
+			view.Close()
+		}
+		start = end
 	}
-	defer view.Close()
-	visible, _ := view.Visible(perms)
-	return visible
+	return got
 }
 
-// rowFilterQueryVerdict asks the production /v1/query, as role with claims,
-// whether it returns the stored row. A query ClickHouse rejects means the role
-// reads no rows on that path; any other failure is the harness's and fails the
-// test, so a broken token or policy cannot pass as "withheld on both".
-func rowFilterQueryVerdict(t *testing.T, table string, id uint32, role string, claims map[string]any) (bool, error) {
+// diffQueryWorkers is how many /v1/query requests the differential keeps in
+// flight: below the suite tenant's max_open_conns (10), so none of them waits
+// on the server's own ClickHouse pool. One at a time, the round trips were
+// most of a minute of the suite.
+const diffQueryWorkers = 8
+
+// rowFilterQueryVerdicts asks the production /v1/query, for every cell, whether
+// it returns the stored row to the cell's role with the cell's claims, and
+// returns each answer with ClickHouse's rejection when there was one. A query
+// ClickHouse rejects means the role reads no rows on that path; any other
+// failure is the harness's and fails the test, so a broken token or policy
+// cannot pass as "withheld on both". The cells are independent reads, so they
+// go diffQueryWorkers at a time over one pool of keep-alive connections.
+func rowFilterQueryVerdicts(t *testing.T, rows []diffRow, cells []diffCell) ([]bool, []error) {
 	t.Helper()
+	// Tokens are minted here, on the test's goroutine, one per role and claim set.
+	auth := make([]string, len(cells))
+	minted := map[string]string{}
+	for i, c := range cells {
+		key := c.role + "\x00" + strings.Join(c.set, "\x00")
+		if _, ok := minted[key]; !ok {
+			minted[key] = bearer(t, c.role, c.claims)
+		}
+		auth[i] = minted[key]
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxConnsPerHost, transport.MaxIdleConnsPerHost = diffQueryWorkers, diffQueryWorkers
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+
+	want := make([]bool, len(cells))
+	sqlErrs := make([]error, len(cells))
+	harnessErrs := make([]error, len(cells))
+	var next atomic.Int64
+	var broken atomic.Bool
+	var wg sync.WaitGroup
+	for range diffQueryWorkers {
+		wg.Go(func() {
+			for !broken.Load() {
+				i := int(next.Add(1) - 1)
+				if i >= len(cells) {
+					return
+				}
+				want[i], sqlErrs[i], harnessErrs[i] = rowFilterQueryVerdict(client, rows[cells[i].row], auth[i])
+				if harnessErrs[i] != nil {
+					broken.Store(true)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	for i, err := range harnessErrs {
+		if err != nil {
+			t.Fatalf("role %s on %s: %v", cells[i].role, rows[cells[i].row].table, err)
+		}
+	}
+	return want, sqlErrs
+}
+
+// rowFilterQueryVerdict is one cell's /v1/query: whether r comes back, the
+// rejection when ClickHouse refused the query, or the harness failure.
+func rowFilterQueryVerdict(client *http.Client, r diffRow, authorization string) (visible bool, rejected, harness error) {
 	body, err := json.Marshal(map[string]any{
 		"columns": []string{"id"},
-		"filters": []any{map[string]any{"column": "id", "op": "eq", "value": id}},
+		"filters": []any{map[string]any{"column": "id", "op": "eq", "value": r.id}},
 	})
-	require.NoError(t, err)
-	got := postJSONAs(t, env(t).baseURL+"/v1/query?table="+url.QueryEscape(table), string(body), bearer(t, role, claims))
-	switch {
-	case got.status == http.StatusOK:
-	case got.status == http.StatusBadRequest && got.Code == "clickhouse.rejected":
-		return false, fmt.Errorf("HTTP %d: %s", got.status, got.raw)
-	default:
-		t.Fatalf("role %s on %s: HTTP %d: %s", role, table, got.status, got.raw)
+	if err != nil {
+		return false, nil, err
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		sharedEnv.baseURL+"/v1/query?table="+url.QueryEscape(r.table), bytes.NewReader(body))
+	if err != nil {
+		return false, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authorization)
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, nil, err
+	}
+	if resp.StatusCode == http.StatusBadRequest {
+		var refusal queryError
+		if json.Unmarshal(raw, &refusal) == nil && refusal.Code == "clickhouse.rejected" {
+			return false, fmt.Errorf("HTTP %d: %s", resp.StatusCode, raw), nil
+		}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, raw)
 	}
 	var out []map[string]any
-	require.NoError(t, json.Unmarshal([]byte(got.raw), &out))
-	require.LessOrEqual(t, len(out), 1, "id is unique per table")
-	return len(out) == 1, nil
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return false, nil, fmt.Errorf("decode %s: %w", raw, err)
+	}
+	if len(out) > 1 {
+		return false, nil, fmt.Errorf("id is unique per table, yet %d rows came back: %s", len(out), raw)
+	}
+	return len(out) == 1, nil, nil
 }
 
 // Boundary constants for the integer shapes: each width's own edges, the

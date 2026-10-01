@@ -30,6 +30,7 @@ import (
 // so one end-to-end identity check is the whole remaining claim. Deliberately
 // one test, not a corpus.
 func TestTypelayerWire_PublishedRowIsTheStoredRow(t *testing.T) {
+	t.Parallel() // a table of its own: see eventuallyRows
 	e := env(t)
 	ctx := context.Background()
 	before := time.Now().UTC().Add(-time.Minute)

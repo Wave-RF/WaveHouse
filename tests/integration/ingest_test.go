@@ -163,6 +163,10 @@ func postIngest(t *testing.T, table, contentType, body, authorization string) (i
 // rows matching where to be want. A want of 0 holds only once something posted
 // later has landed, so the tests asserting an absence post a record that
 // lands after the refused ones and wait for it first.
+//
+// Each wait is most of the worker's batch window, idle, so the tests here
+// that wait run in parallel: each writes and reads a table of its own, and a
+// policy it adopts grants on that table alone (withPolicy holds the union).
 func eventuallyRows(t *testing.T, table, where string, want uint64) {
 	t.Helper()
 	ctx := context.Background()
@@ -181,6 +185,7 @@ func eventuallyRows(t *testing.T, table, where string, want uint64) {
 // newlines in place, which restores per-record salvage. Asserted in the table,
 // not only in the response.
 func TestIngest_CompactArray_OneBadRecord_TheOthersStillLand(t *testing.T) {
+	t.Parallel()
 	table := createTable(t, "user_id String, value UInt32", "ORDER BY user_id")
 
 	status, body := postIngest(t, table, "application/json",
@@ -198,6 +203,7 @@ func TestIngest_CompactArray_OneBadRecord_TheOthersStillLand(t *testing.T) {
 // assertion is what makes the positional contract real: a column-order bug
 // would still answer 200.
 func TestIngest_CSVBody_LandsInClickHouse(t *testing.T) {
+	t.Parallel()
 	table := createTable(t, "user_id String, event_type String, value UInt32", "ORDER BY user_id")
 
 	status, body := postIngest(t, table, "text/csv", "\"c1\",\"click\",7\n\"c2\",\"view\",9\n", "")
@@ -211,6 +217,7 @@ func TestIngest_CSVBody_LandsInClickHouse(t *testing.T) {
 // A bare text/csv is ClickHouse's default CSV, so a first line spelling the
 // column names is consumed as a header and only the data rows land.
 func TestIngest_BareCSVHeader_LandsInClickHouse(t *testing.T) {
+	t.Parallel()
 	table := createTable(t, "user_id String, event_type String, value UInt32", "ORDER BY user_id")
 
 	status, body := postIngest(t, table, "text/csv", "user_id,event_type,value\n\"d1\",\"click\",7\n", "")
@@ -225,6 +232,7 @@ func TestIngest_BareCSVHeader_LandsInClickHouse(t *testing.T) {
 // header=absent is strictly positional, so the same header line is one
 // refused record and never reaches the table.
 func TestIngest_CSVHeaderAbsent_LandsInClickHouse(t *testing.T) {
+	t.Parallel()
 	table := createTable(t, "user_id String, event_type String, value UInt32", "ORDER BY user_id")
 
 	status, body := postIngest(t, table, "text/csv; header=absent", "user_id,event_type,value\n\"a1\",\"click\",7\n", "")
@@ -240,6 +248,7 @@ func TestIngest_CSVHeaderAbsent_LandsInClickHouse(t *testing.T) {
 // TSV is CSV's tab-separated twin, with a bad row beside a good one, so
 // per-record salvage is covered for the positional formats too.
 func TestIngest_TSVBody_LandsInClickHouse(t *testing.T) {
+	t.Parallel()
 	table := createTable(t, "user_id String, event_type String, value UInt32", "ORDER BY user_id")
 
 	status, body := postIngest(t, table, "text/tab-separated-values", "t1\tclick\t5\nt2\tview\tnope\n", "")
@@ -255,6 +264,7 @@ func TestIngest_TSVBody_LandsInClickHouse(t *testing.T) {
 // the header is not a record, a column it omits takes the table's own
 // DEFAULT, and a bad row is salvaged like any other.
 func TestIngest_CSVWithNamesBody_LandsInClickHouse(t *testing.T) {
+	t.Parallel()
 	table := createTable(t, "user_id String, event_type String, value UInt32 DEFAULT 42", "ORDER BY user_id")
 
 	status, body := postIngest(t, table, "text/csv; header=present", "event_type,user_id\nclick,h1\nview,h2\n", "")
@@ -269,6 +279,7 @@ func TestIngest_CSVWithNamesBody_LandsInClickHouse(t *testing.T) {
 // The tab-separated twin of the header=present case, with a bad row beside a
 // good one.
 func TestIngest_TSVWithNamesBody_LandsInClickHouse(t *testing.T) {
+	t.Parallel()
 	table := createTable(t, "user_id String, event_type String, value UInt32", "ORDER BY user_id")
 
 	status, body := postIngest(t, table, "text/tab-separated-values; header=present",
@@ -285,6 +296,7 @@ func TestIngest_TSVWithNamesBody_LandsInClickHouse(t *testing.T) {
 // refusal of the body, before any record: a whole-request 400 carrying its
 // code, and nothing stored.
 func TestIngest_WithNamesUnknownHeader_Is400WithCode117(t *testing.T) {
+	t.Parallel()
 	table := createTable(t, "user_id String, value UInt32", "ORDER BY user_id")
 
 	status, body := postIngest(t, table, "text/csv; header=present", "user_id,nosuch\nu1,1\n", "")
@@ -305,6 +317,7 @@ func TestIngest_WithNamesUnknownHeader_Is400WithCode117(t *testing.T) {
 // writing without it still lands, the column taking the table's default
 // rather than any value of the caller's.
 func TestIngest_DeniedColumn_IsClickHouseCode117(t *testing.T) {
+	t.Parallel()
 	table := createTable(t, "user_id String, secret String", "ORDER BY user_id")
 	withPolicy(t, policy.Policy{Tables: map[string]policy.TablePolicy{
 		table: {"writer": {Insert: &policy.InsertPermissions{DenyColumns: []string{"secret"}}}},
@@ -326,6 +339,7 @@ func TestIngest_DeniedColumn_IsClickHouseCode117(t *testing.T) {
 // record's own value when it matches, and refuses one that does not (403,
 // nothing stored).
 func TestIngest_AutoInject_FillsAnAbsentCheckColumn(t *testing.T) {
+	t.Parallel()
 	table := createTable(t, "user_id String, tenant String", "ORDER BY user_id")
 	tmpl := "{{ jwt.tenant }}"
 	withPolicy(t, policy.Policy{Tables: map[string]policy.TablePolicy{
@@ -350,6 +364,7 @@ func TestIngest_AutoInject_FillsAnAbsentCheckColumn(t *testing.T) {
 // is judged on the TABLE's default rather than refused for the absence. Both
 // directions, because the outcome is entirely what the default happens to be.
 func TestIngest_CheckIn_AbsentColumn_TestsTheTableDefault(t *testing.T) {
+	t.Parallel()
 	tmpl := "{{ jwt.tenants }}"
 	policyFor := func(table string) policy.Policy {
 		return policy.Policy{Tables: map[string]policy.TablePolicy{
@@ -359,6 +374,7 @@ func TestIngest_CheckIn_AbsentColumn_TestsTheTableDefault(t *testing.T) {
 	claims := map[string]any{"tenants": []any{"acme", "globex"}}
 
 	t.Run("a default outside the set is refused", func(t *testing.T) {
+		t.Parallel()
 		table := createTable(t, "user_id String, tenant String", "ORDER BY user_id")
 		withPolicy(t, policyFor(table))
 		writer := bearer(t, "writer", claims)
@@ -372,6 +388,7 @@ func TestIngest_CheckIn_AbsentColumn_TestsTheTableDefault(t *testing.T) {
 	})
 
 	t.Run("a default inside the set is admitted", func(t *testing.T) {
+		t.Parallel()
 		table := createTable(t, "user_id String, tenant String DEFAULT 'acme'", "ORDER BY user_id")
 		withPolicy(t, policyFor(table))
 		status, body := postIngest(t, table, "application/json", `{"user_id":"n3"}`, bearer(t, "writer", claims))
@@ -388,6 +405,7 @@ func TestIngest_CheckIn_AbsentColumn_TestsTheTableDefault(t *testing.T) {
 // supplies the wrapped value itself; the same policy with a claim that fits
 // lands as before.
 func TestIngest_IntegerCheckClaimThatDoesNotFit_IsRefused(t *testing.T) {
+	t.Parallel()
 	table := createTable(t, "user_id String, tenant UInt64", "ORDER BY user_id")
 	tmpl := "{{ jwt.tenant }}"
 	withPolicy(t, policy.Policy{Tables: map[string]policy.TablePolicy{

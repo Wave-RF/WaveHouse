@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -95,9 +96,17 @@ func env(t *testing.T) *testEnv {
 // (or sequentially-run) tests don't collide on table state.
 var tableCounter atomic.Uint64
 
+// createMu serializes createTable's create-and-refresh.
+var createMu sync.Mutex
+
 // createTable creates a uniquely-named ClickHouse table for the calling test
 // and registers cleanup to drop it. The schema registry is refreshed after
 // creation so the API discovers the new table. Returns the table name.
+//
+// Parallel tests create tables concurrently, and two overlapping refreshes
+// publish in the order they finish, not the order they read system.columns:
+// an older snapshot landing last would drop the newer table from the
+// registry. createMu makes each create-and-refresh one step.
 //
 // Pass the column DDL fragment without the wrapping `()` — for example:
 //
@@ -114,6 +123,8 @@ func createTable(t *testing.T, columns, tableOpts string) string {
 		"CREATE TABLE IF NOT EXISTS %s (%s) ENGINE = MergeTree() %s",
 		name, columns, tableOpts,
 	)
+	createMu.Lock()
+	defer createMu.Unlock()
 	if err := sharedEnv.chConn.Exec(ctx, stmt); err != nil {
 		t.Fatalf("create test table %s: %v", name, err)
 	}
@@ -179,7 +190,7 @@ func setup() (int, func()) {
 		fmt.Fprintf(os.Stderr, "integration setup: settings: %v\n", err)
 		return 1, cleanup
 	}
-	cleanups.push(func() { _ = os.RemoveAll(settingsDir) })
+	cleanups.push(func() { removeTestSettings(settingsDir) })
 
 	// The wired app on a harness listener: the same construction the binary
 	// uses (embedded NATS in-process, the ingest worker, sweeper, hub bridge,
@@ -263,17 +274,26 @@ func setup() (int, func()) {
 // of its own (withPolicy) and sends a token for the role (bearer). The stream
 // budget is shrunk to 1 GiB like the e2e fixture so the scratch directory
 // stays small.
+//
+// The directory sits in a scratch parent of its own, removed with it
+// (removeTestSettings): the settings watcher watches the parent too, and
+// where fsnotify is kqueue (macOS) watching the shared temp directory opens
+// and rescans every entry in it, on every change any process makes there.
 func writeTestSettings(ch *chInstance) (string, error) {
 	files, err := tenantSettings(ch, testCHDatabase)
 	if err != nil {
 		return "", err
 	}
-	dir := mustTempDir()
+	dir := filepath.Join(mustTempDir(), "settings")
 	if err := writeSettingsFiles(dir, files); err != nil {
 		return "", err
 	}
 	return dir, nil
 }
+
+// removeTestSettings removes a directory writeTestSettings made, with its
+// scratch parent.
+func removeTestSettings(dir string) { _ = os.RemoveAll(filepath.Dir(dir)) }
 
 // tenantSettings is one tenant's four files: the seed with the ClickHouse
 // block pointed at the testcontainer's database, and the dev-style policy.
@@ -308,38 +328,78 @@ func tenantSettings(ch *chInstance, database string) (map[string][]byte, error) 
 	return files, nil
 }
 
-// withPolicy adopts p as the shared app's access-control policy for the
-// calling test, the way an operator changes one: policies.json rewritten,
-// with roles.json declaring every role it grants, then a reload through the
-// ops route. The suite's default policy is restored when the test ends.
+// withPolicy adds p's table grants to the shared app's access-control policy
+// for the calling test, the way an operator changes one: policies.json
+// rewritten, with roles.json declaring every role it grants, then a reload
+// through the ops route. The grants come out again when the test ends.
 // default_role and admin_role stay the admin role, so unauthenticated
 // requests keep running as a privileged caller and a restricted role is
-// reached with a token for it (bearer). Not for parallel tests: there is one
-// shared policy.
+// reached with a token for it (bearer).
+//
+// Only p.Tables is adopted, and its tables must be the test's own: the
+// adopted policy is the union of the grants every running test holds, so
+// parallel tests can each hold some without replacing another's.
 func withPolicy(t *testing.T, p policy.Policy) {
 	t.Helper()
-	p.DefaultRole, p.AdminRole = "admin", "admin"
-	roles := map[string]bool{"admin": true}
-	for _, grants := range p.Tables {
-		for role := range grants {
-			roles[role] = true
+	policyMu.Lock()
+	defer policyMu.Unlock()
+	for holder, grants := range heldGrants {
+		for table := range p.Tables {
+			if _, taken := grants[table]; taken && holder != t {
+				t.Fatalf("withPolicy: %s already holds grants on %s", holder.Name(), table)
+			}
 		}
 	}
-	rolesDoc, err := json.Marshal(settings.RolesFile{Roles: slices.Sorted(maps.Keys(roles))})
-	if err != nil {
-		t.Fatalf("roles.json: %v", err)
-	}
-	policyDoc, err := json.Marshal(p)
-	if err != nil {
-		t.Fatalf("policies.json: %v", err)
-	}
-	// The roles go in before the policy granting them and come out after it,
-	// so the directory watcher, which may reload between the two files, only
-	// ever sees a valid pair.
-	adoptSettings(t, settingsFile{settings.FileRoles, rolesDoc}, settingsFile{settings.FilePolicies, policyDoc})
+	heldGrants[t] = p.Tables
+	adoptHeldGrants(t, true)
 	t.Cleanup(func() {
-		adoptSettings(t, settingsFile{settings.FilePolicies, defaultPolicies}, settingsFile{settings.FileRoles, defaultRoles})
+		policyMu.Lock()
+		defer policyMu.Unlock()
+		delete(heldGrants, t)
+		adoptHeldGrants(t, false)
 	})
+}
+
+// heldGrants is each running test's withPolicy grants; policyMu serializes
+// the adoptions of their union.
+var (
+	policyMu   sync.Mutex
+	heldGrants = map[*testing.T]map[string]policy.TablePolicy{}
+)
+
+// adoptHeldGrants adopts the union of heldGrants, or the suite's default
+// policy when none is held. Under policyMu. A role goes in before the policy
+// granting it and comes out after it (grow says which this is), so the
+// directory watcher, which may reload between the two files, only ever sees
+// a valid pair.
+func adoptHeldGrants(t *testing.T, grow bool) {
+	t.Helper()
+	rolesDoc, policyDoc := defaultRoles, defaultPolicies
+	if len(heldGrants) > 0 {
+		p := policy.Policy{DefaultRole: "admin", AdminRole: "admin", Tables: map[string]policy.TablePolicy{}}
+		roles := map[string]bool{"admin": true}
+		for _, grants := range heldGrants {
+			for table, perms := range grants {
+				p.Tables[table] = perms
+				for role := range perms {
+					roles[role] = true
+				}
+			}
+		}
+		var err error
+		if rolesDoc, err = json.Marshal(settings.RolesFile{Roles: slices.Sorted(maps.Keys(roles))}); err != nil {
+			t.Fatalf("roles.json: %v", err)
+		}
+		if policyDoc, err = json.Marshal(p); err != nil {
+			t.Fatalf("policies.json: %v", err)
+		}
+	}
+	rolesFile, policyFile := settingsFile{settings.FileRoles, rolesDoc}, settingsFile{settings.FilePolicies, policyDoc}
+	if grow {
+		adoptSettings(t, rolesFile, policyFile)
+	} else {
+		adoptSettings(t, policyFile, rolesFile)
+	}
 }
 
 // settingsFile is one file of the settings directory and its new content.
@@ -469,6 +529,17 @@ func startClickHouse(ctx context.Context) (*chInstance, error) {
 		Image:        "clickhouse/clickhouse-server:26.8.15.10",
 		ExposedPorts: []string{"9000/tcp", "8123/tcp"},
 		Env:          map[string]string{"CLICKHOUSE_PASSWORD": testCHPassword},
+		// The tests that stop ClickHouse mid-run stop it as an outage, and the
+		// server would otherwise outlast their stop timeout: on SIGTERM, 26.8
+		// waits for its idle client connections to close, which takes a
+		// native one its 10 s poll interval and an HTTP keep-alive one its
+		// 30 s keep-alive timeout. Measured with one idle native connection, a
+		// stop took 13 s (5 s on 26.6) and with this setting 1 s.
+		Files: []testcontainers.ContainerFile{{
+			Reader:            strings.NewReader("<clickhouse><shutdown_wait_unfinished>1</shutdown_wait_unfinished></clickhouse>"),
+			ContainerFilePath: "/etc/clickhouse-server/config.d/test_shutdown.xml",
+			FileMode:          0o644,
+		}},
 		WaitingFor: wait.ForAll(
 			wait.ForListeningPort("9000/tcp"),
 			wait.ForHTTP("/ping").WithPort("8123/tcp").WithStatusCodeMatcher(func(status int) bool {

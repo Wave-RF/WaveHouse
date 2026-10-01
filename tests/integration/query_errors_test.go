@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -121,7 +120,7 @@ func TestQueryErrors_ClickHouseDown(t *testing.T) {
 
 	settingsDir, err := writeTestSettings(ch)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(settingsDir) })
+	t.Cleanup(func() { removeTestSettings(settingsDir) })
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
