@@ -121,19 +121,21 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:dev \
 
 Swap in `:vX.Y.Z` and `release.yml` for a release image. Pin the signer either way. `--repo` alone accepts an attestation from any workflow in the repo.
 
+The published images bake the chtypes artifact for ClickHouse 26.8 only. Against any other ClickHouse line, bind-mount a directory holding that line's artifact and set `WH_CHTYPES_REGISTRY` to it (see [chtypes artifacts](https://wavehouse.dev/deployment#chtypes-artifacts)).
+
 ### C. `go install` (binary, no Docker)
 
 ```bash
 go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 ```
 
-`go install` compiles from source with cgo enabled (requires a C toolchain and glibc — Linux amd64/arm64 or macOS arm64) but does not fetch the [chtypes artifact](https://wavehouse.dev/deployment#chtypes-artifacts) WaveHouse loads at start. Fetch it once before the first run:
+`go install` compiles from source with cgo enabled (requires a C toolchain, and on Linux glibc 2.34 or later — Linux amd64/arm64 or macOS arm64) but does not fetch the [chtypes artifact](https://wavehouse.dev/deployment#chtypes-artifacts) WaveHouse loads at start. Fetch it once before the first run:
 
 ```bash
 go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.5.2 fetch <your-clickhouse-minor-version>
 ```
 
-This downloads 160–290 MB into the default local cache (`~/.cache/chtypes/artifacts/abi6/<os>-<arch>`, one directory per SDK ABI revision); point `WH_CHTYPES_REGISTRY` elsewhere if you keep it somewhere else.
+(From a checkout, `scripts/fetch-chtypes.sh` fetches the build pinned in `chtypes.lock`.) This downloads 160–290 MB into the default local cache (`~/.cache/chtypes/artifacts/abi6/<os>-<arch>`, one directory per SDK ABI revision); point `WH_CHTYPES_REGISTRY` elsewhere if you keep it somewhere else.
 
 ```bash
 wavehouse bootstrap ./settings   # starter settings directory, every key at its default

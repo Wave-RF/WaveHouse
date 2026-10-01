@@ -162,22 +162,22 @@ The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate 
 
 ### ClickHouse
 
-Only the secret and the connection ceiling are boot config. The wiring — native address, HTTP port and scheme, database, username, query timeout, TLS, headers, pool sizes — is the settings directory's [`clickhouse` block](/settings-directory#clickhouse), where a change re-dials without a restart.
+Only the secret, the connection ceiling and the chtypes artifact directory are boot config. The wiring — native address, HTTP port and scheme, database, username, query timeout, TLS, headers, pool sizes — is the settings directory's [`clickhouse` block](/settings-directory#clickhouse), where a change re-dials without a restart.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password, combined with the settings directory's `clickhouse.username` on every (re)connect. A secret, so it never lives in a tracked JSON file; rotating it is a restart. |
-| `clickhouse.max_total_conns` | `WH_CH_MAX_TOTAL_CONNS` | `0` | Ceiling on the native ClickHouse connections the process holds open: the `max_open_conns` of the open pools — one per distinct connection tuple among the served tenants, see [the settings directory](/settings-directory#clickhouse) — must not add up to more. Pools above it at boot refuse to start, naming the sum and the ceiling; on a reload a pool resized above it is refused and keeps its size, and a new pool that would cross it is not opened — its tenants keep the pool they had, or have none — both logged (the reload itself still reports `adopted`) and retried by the next reload. `0` is no ceiling. Capacity is sized once per process, which is why it is boot config rather than a settings key. |
+| `clickhouse.max_total_conns` | `WH_CH_MAX_TOTAL_CONNS` | `0` | Ceiling on the native ClickHouse connections the process holds open: the `max_open_conns` of the open pools — one per distinct connection tuple among the served tenants, see [the settings directory](/settings-directory#clickhouse) — must not add up to more. Pools above it at boot refuse to start, naming the sum and the ceiling; on a reload a pool resized above it is refused and keeps its size, and a new pool that would cross it is not opened — its tenants keep the pool they had, or have none — both logged (the reload itself still reports `adopted`) and retried by the next reload. `0` is no ceiling. Capacity is sized once per process, which is why it is boot config rather than a settings key. It counts native connections only: the HTTP reader behind structured queries and pipes is capped separately, per pool identity (URL, user, database and TLS settings), by that pool's `max_open_conns`. |
 | `clickhouse.chtypes_registry` | `WH_CHTYPES_REGISTRY` | *(empty)* | Directory holding the chtypes artifacts (one `<minor>/` per ClickHouse line). Empty defers to the chtypes search path — `$CHTYPES_REGISTRY`, `~/.cache/chtypes/artifacts/abi6/<os>-<arch>`, then the system directories. Either way a library is opened lazily, on first use of its line; an explicit directory is searched first, then the rest of the path. Boot-tier: changing it is a restart. See [chtypes artifacts](/deployment#chtypes-artifacts). |
 
 ### ClickHouse user access
 
 The ClickHouse user WaveHouse connects as (the settings directory's `clickhouse.username`) needs these, and nothing about the tables themselves has to be exposed to anyone else:
 
-- **`SELECT` on the tenant's tables.** Structured queries, read pipes and the stream's replay read through it.
+- **`SELECT` on the tenant's tables.** Structured queries and read pipes read through it.
 - **`INSERT` on the tenant's tables, for the ingest worker.** The worker writes each batch with `INSERT … FORMAT JSONCompactEachRow` over the HTTP interface. A process that only serves reads never inserts, but the same user is used by every process, so grant it wherever any process ingests.
 - **Read access to `system.columns` and `system.tables`**, plus `SELECT timezone()` and `SELECT version()`, which need no grant. Schema discovery reads the columns, their `DEFAULT`/`MATERIALIZED` kinds and each table's DDL, and records the server's version and time zone; the version picks the [chtypes artifact](/deployment#chtypes-artifacts) and the zone is the one the in-process parser reads bare timestamps in. ClickHouse lists only the tables a user holds a grant on, so a table the user cannot see is a table WaveHouse does not know.
-- **A profile that lets it change per-query settings.** WaveHouse sends settings with every query: reads carry `readonly=2` together with `max_execution_time`, `wait_end_of_query`, `http_write_exception_in_output_format`, `cancel_http_readonly_queries_on_client_close` and the JSON/date rendering settings, and the ingest worker's `INSERT` carries `date_time_input_format`, `input_format_null_as_default` and `async_insert=0`. A profile with `readonly=1` (or a `<constraints>` entry that pins any of these) makes ClickHouse refuse them: a read answers `502 clickhouse.misconfigured` (the `READONLY` refusal), and the worker's batches fail. Use `readonly=0`, or `readonly=2` for a user that only ever reads: `readonly=2` still forbids the ingest worker's `INSERT`.
+- **A profile that lets it change per-query settings.** WaveHouse sends settings with every query: reads carry `readonly=2` together with `max_execution_time`, `wait_end_of_query`, `http_write_exception_in_output_format`, `cancel_http_readonly_queries_on_client_close` and the JSON/date rendering settings, and the ingest worker's `INSERT` carries `date_time_input_format`, `input_format_null_as_default` and `async_insert=0`. A profile with `readonly=1` (or a `<constraints>` entry that pins any of these) makes ClickHouse refuse them: a read refused with `READONLY` answers `502 clickhouse.misconfigured`, a `<constraints>` entry that a setting violates is refused as `400 clickhouse.rejected`, and the worker's batches fail. Use `readonly=0`, or `readonly=2` for a user that only ever reads: `readonly=2` still forbids the ingest worker's `INSERT`.
 - **Whatever else the statements you hand it need.** A [pipe that writes](/pipes#pipes-that-write) and the admin-only raw SQL endpoint `/v1/ops/query` run as this user too, so a pipe that runs `ALTER` needs the grant for it, and a missing grant is `403 clickhouse.access_denied`.
 
 ### Server-side resource limits
@@ -348,6 +348,7 @@ clickhouse:
   password: ""           # addr, ports, database, username, query_timeout, tls,
                          # headers and pool sizes are settings (config.json)
   max_total_conns: 0     # ceiling on open native connections; 0 = none
+  chtypes_registry: ""    # chtypes artifact directory; empty = the SDK's search path
 
 mq:
   backend: embedded      # in-process NATS JetStream under <data_dir>/nats
@@ -449,6 +450,8 @@ WH_SERVER_SHUTDOWN_TIMEOUT=10
 
 WH_CH_PASSWORD=
 WH_CH_MAX_TOTAL_CONNS=0
+# chtypes artifact directory; empty = the SDK's search path
+WH_CHTYPES_REGISTRY=
 
 WH_MQ_BACKEND=embedded
 # With WH_MQ_BACKEND=nats (read only then):

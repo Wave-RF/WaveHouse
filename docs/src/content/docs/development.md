@@ -13,7 +13,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 
 | Tool | Required version | Why | Install |
 | ---- | ---------------- | --- | ------- |
-| **Go** | 1.27+ (matches `go.mod`) | Compiles `cmd/wavehouse` with cgo enabled (needed by chtypes' dlopen shim — a C toolchain and glibc must be present); also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
+| **Go** | 1.27+ (matches `go.mod`) | Compiles `cmd/wavehouse` with cgo enabled (needed by chtypes' dlopen shim — a C toolchain, and on Linux glibc 2.34 or later, must be present); also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
 | **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse and a Redis via testcontainers (no compose file), the integration suite also dynamodb-local, and the integration suite also runs the shared cache backend against Redis, Valkey, Dragonfly (pulled from `docker.dragonflydb.io`) and a one-node Redis Cluster | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
@@ -29,13 +29,13 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 scripts/fetch-chtypes.sh   # wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.5.2 fetch --frozen --lock chtypes.lock 26.8
 ```
 
-It lands in the default local cache (`~/.cache/chtypes/artifacts/abi6/<os>-<arch>`, one directory per SDK ABI revision) and is 160–290 MB — expect the first run to take a minute or two. Without it, `make dev` / `make test` / `make test-e2e` fail closed (a `503` on ingest, every stream row withheld) until a matching artifact exists for the ClickHouse line the tests or your local server run against.
+It lands in the default local cache (`~/.cache/chtypes/artifacts/abi6/<os>-<arch>`, one directory per SDK ABI revision) and is 160–290 MB — expect the first run to take a minute or two. Without it the API process refuses to boot (`make dev`, `make test-e2e`), and the unit tests that need the engine skip; set `WAVEHOUSE_TEST_REQUIRE_CHTYPES=1` (CI does) to make a missing artifact fail those tests instead. A `503` on ingest, with row-filtered stream rows withheld, is what a process that did find an artifact answers for a ClickHouse line the artifact does not cover.
 
 ### Auto-installed by `make tools`
 
 Run `make tools` once after cloning to populate everything that doesn't have to be on your PATH:
 
-- **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
+- **`golangci-lint` v2.13.2** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
 - **`misspell` v0.8.0, `shellcheck` v0.11.0, `actionlint` v1.7.12** → installed to `.bin/<os>_<arch>/`; they back `make lint-prose`, `make lint-sh`, and `make lint-gha`. `make tools` also points `core.hooksPath` at `.githooks/`, which is what installs the pre-commit and pre-push gates.
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
 - **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.

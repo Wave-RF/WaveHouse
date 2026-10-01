@@ -136,7 +136,7 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    subgraph single["WAVEHOUSE: 1 BINARY + CLICKHOUSE"]
+    subgraph single["WAVEHOUSE: 1 PROCESS + CLICKHOUSE"]
         direction TB
         Cs2["Clients"]:::neutral
         Cs2 <--> WHone["WaveHouse<br/>embedded NATS · cache · auth ·<br/>streaming · DLQ · dedup"]:::wh
@@ -186,7 +186,7 @@ Tinybird wins on "zero ops to start." WaveHouse wins on "own your data plane and
 
 | Concern | Direct ClickHouse | Kafka + ClickHouse (DIY) | Tinybird | **WaveHouse** |
 | ------- | ----------------- | ----------------------- | -------- | ------------- |
-| Single-binary deployment | — | — | N/A (SaaS) | ✓ |
+| Single-process deployment | — | — | N/A (SaaS) | ✓ |
 | Self-hosted | ✓ | ✓ | ✗ | ✓ |
 | Handles N-row inserts safely | ✗ merge blowup | ✓ via Kafka | ✓ | ✓ native |
 | Schema validation at the edge | ✗ | Custom | ✓ | ✓ (discovers schema) |

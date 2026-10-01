@@ -76,13 +76,13 @@ WH_SERVER_PORT=9090 \
 docker build -f deployments/Dockerfile -t wavehouse:latest .
 ```
 
-This builds the runtime image `wavehouse:latest`. (The published `ghcr.io` images are built by GoReleaser from `deployments/Dockerfile.goreleaser`, not this command — see Registry below.)
+This builds the runtime image `wavehouse:latest`. (The published `ghcr.io` images are built by the release workflows with `docker buildx` from `deployments/Dockerfile.goreleaser`, not this command — see Registry below.)
 
 All images use multi-stage builds (`golang:1.27-bookworm` glibc builder → `gcr.io/distroless/cc-debian12` runtime — cgo needs glibc, so the previous Alpine/musl builder and `distroless/static` runtime no longer work) for minimal attack surface. The build also fetches the [chtypes artifact(s)](#chtypes-artifacts) pinned in `chtypes.lock` into the image.
 
 ### Registry
 
-Production images are published to GitHub Container Registry via GoReleaser:
+Production images are published to GitHub Container Registry by the release workflows:
 
 ```text
 ghcr.io/wave-rf/wavehouse:<tag>
@@ -112,18 +112,18 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:vX.Y.Z \
 
 **Which processes load it.** Only processes with the `api` role — the ones that serve ingest and the stream. A process that runs only the ingest worker or the sweeper loads no artifact and boots without one installed. An API process refuses to start when no artifact is installed at all.
 
-**What a mismatch does.** A tenant whose ClickHouse line has no installed artifact is refused on its own — ingest answers `503` (`Retry-After: 5`) and the stream withholds its rows with reason `unavailable` — while every other tenant keeps working; it recovers at the next schema refresh once an artifact is installed. The same holds for the server time zone: the library reads its time zone once, when a line is first opened, so one process serves **one server time zone per ClickHouse line**. A tenant whose server reports a different zone from the one this process already opened that line with is refused the same way, with the cause in the server log; run such tenants in a separate process, or align the servers' `timezone` setting. See [API → Ingest error responses](/api#error-responses) and [Access Control → Where each rule is enforced](/access-control#where-each-rule-is-enforced).
+**What a mismatch does.** A tenant whose ClickHouse line has no installed artifact is refused on its own — ingest answers `503` (`Retry-After: 5`) and a stream whose role has a row `filter` withholds its rows with reason `unavailable` — while every other tenant keeps working; it recovers at the next schema refresh once an artifact is installed. The same holds for the server time zone: the library reads its time zone once, when a line is first opened, so one process serves **one server time zone per ClickHouse line**. A tenant whose server reports a different zone from the one this process already opened that line with is refused the same way, with the cause in the server log; run such tenants in a separate process, or align the servers' `timezone` setting. See [API → Ingest error responses](/api#error-responses) and [Access Control → Where each rule is enforced](/access-control#where-each-rule-is-enforced).
 
 **Where it lives.** WaveHouse looks for the artifact in a registry directory, in order: an explicit `clickhouse.chtypes_registry` (`WH_CHTYPES_REGISTRY`) if set, then chtypes' own default search path — `$CHTYPES_REGISTRY`, the per-user cache `~/.cache/chtypes/artifacts/abi6/<os>-<arch>` (one directory per SDK ABI revision, so an older SDK's downloads are never picked up), then the system directories `/usr/local/share/chtypes/artifacts/<platform>` and `/opt/chtypes/artifacts/<platform>`. WaveHouse does not autofetch on a miss in production — an unmatched line is a boot-time or refresh-time failure, not a background download.
 
 **Size.** Each artifact is roughly 160–290 MB on disk; a running process holding several loaded versions (e.g. across a rolling ClickHouse upgrade) costs roughly 120 MB of resident memory per loaded version (the chtypes multi-version guide's figure; a library is opened on first use of its line, not at registry construction).
 
-**Docker images** ship the artifact(s) baked in: the image build fetches whatever `chtypes.lock` names (see below), so a container never needs network access to ClickHouse's artifact store at runtime. `WH_CHTYPES_REGISTRY` (default `/opt/chtypes/artifacts`) points at the directory inside the image.
+**Docker images** ship the artifact(s) baked in: the image build fetches whatever `chtypes.lock` names (see below), so a container never needs network access to chtypes' artifact store at runtime. The image sets `CHTYPES_REGISTRY=/opt/chtypes/artifacts` (the SDK's own variable); set `WH_CHTYPES_REGISTRY` only to point at a bind-mounted directory instead. **The published images support ClickHouse 26.8 only**: they bake the lines `chtypes.lock` names, and a server on any other line answers every tenant on it `503` (with row-filtered streams withholding their rows) behind a generic body. For another line, fetch its artifact (below), mount the directory into the container and set `WH_CHTYPES_REGISTRY` to the mount path.
 
-**Release archives and `go install` / building from source** do not carry or fetch an artifact — only the Docker images bake one in. See the [README's `go install` caveat](https://github.com/Wave-RF/WaveHouse#c-go-install-binary-no-docker). Fetch one yourself before first run:
+**Release archives and `go install` / building from source** do not carry or fetch an artifact — only the Docker images bake one in. See the [README's `go install` caveat](https://github.com/Wave-RF/WaveHouse#c-go-install-binary-no-docker). Fetch one yourself before first run. Both routes below run the chtypes command with `go run`, which needs Go 1.27 and a C compiler; a release archive has neither `scripts/fetch-chtypes.sh` nor the lock file, so use the second form there, or fetch from a checkout and copy the directory to the host:
 
 ```bash
-scripts/fetch-chtypes.sh   # wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.5.2 fetch --frozen --lock chtypes.lock 26.8
+scripts/fetch-chtypes.sh   # from a checkout; wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.5.2 fetch --frozen --lock chtypes.lock 26.8
 ```
 
 or, for a line not in the repo's lock file:
@@ -170,12 +170,14 @@ All configuration can be set via environment variables. This is the recommended 
 Key variables for production:
 
 ```bash
-# ClickHouse: only the password and the connection ceiling are env. The
+# ClickHouse: only the password, the connection ceiling and the chtypes
+# artifact directory are env. The
 # address, HTTP port/scheme, database, user, TLS, headers and pool sizes are
 # clickhouse.* in the settings directory's config.json.
 WH_CH_PASSWORD=<clickhouse-password>
 # Ceiling on open native ClickHouse connections; 0 = none
 # WH_CH_MAX_TOTAL_CONNS=0
+# WH_CHTYPES_REGISTRY=   # empty unless you bind-mount the artifacts (see chtypes artifacts)
 
 # Auth secrets (the JWT middleware always runs — set a secret, or auth.jwks_url
 # in the settings directory, to validate tokens; without one, every request
@@ -643,7 +645,7 @@ For local development, `docker compose -f deployments/compose/dependencies.yaml 
 
 WaveHouse uses a **Bring Your Own Schema** model. You create your tables in ClickHouse with whatever columns and engines you need. WaveHouse discovers the schemas automatically via `system.columns` and validates ingest data against them — see [Schema Validation](/api#post-v1ingesttabletable--ingest-data) for the rules a record must satisfy.
 
-Five schema-design consequences are worth knowing before you write the DDL. A `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` column is never part of a published row: WaveHouse's ingest validation runs ClickHouse's own parser in-process (via [chtypes](#chtypes-artifacts)), and a record that names one is rejected with ClickHouse's own code (117) rather than published; a policy `check` naming one is refused outright. An omitted column — on any table — takes its `DEFAULT` expression, or the type's implicit zero value where none is declared, evaluated by that same parser before the row is published; there is no longer a positional-encoding quirk that stores `NULL` on a `Nullable(T) DEFAULT …` column instead — see [the journey of one event](/ingest-pipeline#the-journey-of-one-event) for detail. Rows retried after a ClickHouse outage reach ClickHouse out of ingest order, so a table whose engine picks a winner by insert order — a `ReplacingMergeTree` without a version column, a `CollapsingMergeTree` — needs a version column the producer sets in the record (`ReplacingMergeTree(ver)`, `VersionedCollapsingMergeTree`), not an insert-time `DEFAULT now64()` like the example's `received_timestamp`. And a retry after an insert whose outcome WaveHouse could not see (a timeout, a dropped connection) can land its rows twice on any engine — the example's plain `MergeTree` included, and a `VersionedCollapsingMergeTree` then keeps a state row its one cancel cannot remove — so a table that must not count a row twice needs a `ReplacingMergeTree` keyed on an id the producer sets, read with `FINAL` (it removes a duplicate only when parts merge; a [pipe](/pipes) can say `FINAL`, a structured query never adds it), or reads that tolerate duplicates, such as `uniqExact(id)`. `dedupe.enabled` does not prevent this: it drops a repeated publish at the HTTP edge, and this duplicate is made after the queue. See [When ClickHouse cannot take an insert](/ingest-pipeline#when-clickhouse-cannot-take-an-insert).
+Five schema-design consequences are worth knowing before you write the DDL. A `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` column is never part of a published row: WaveHouse's ingest validation runs ClickHouse's own parser in-process (via [chtypes](#chtypes-artifacts)), and a record that names a `MATERIALIZED` or `ALIAS` one is rejected with ClickHouse's own code (117) rather than published, while an `EPHEMERAL` value is accepted where the format names columns (the JSON family, `…WithNames`) and feeds the `DEFAULT`s that read it without being stored or published; a policy `check` naming any of the three is refused outright. An omitted column — on any table — takes its `DEFAULT` expression, or the type's implicit zero value where none is declared, evaluated by that same parser before the row is published; there is no longer a positional-encoding quirk that stores `NULL` on a `Nullable(T) DEFAULT …` column instead — see [the journey of one event](/ingest-pipeline#the-journey-of-one-event) for detail. Rows retried after a ClickHouse outage reach ClickHouse out of ingest order, so a table whose engine picks a winner by insert order — a `ReplacingMergeTree` without a version column, a `CollapsingMergeTree` — needs a version column the producer sets in the record (`ReplacingMergeTree(ver)`, `VersionedCollapsingMergeTree`), not an insert-time `DEFAULT now64()` like the example's `received_timestamp`. And a retry after an insert whose outcome WaveHouse could not see (a timeout, a dropped connection) can land its rows twice on any engine — the example's plain `MergeTree` included, and a `VersionedCollapsingMergeTree` then keeps a state row its one cancel cannot remove — so a table that must not count a row twice needs a `ReplacingMergeTree` keyed on an id the producer sets, read with `FINAL` (it removes a duplicate only when parts merge; a [pipe](/pipes) can say `FINAL`, a structured query never adds it), or reads that tolerate duplicates, such as `uniqExact(id)`. `dedupe.enabled` does not prevent this: it drops a repeated publish at the HTTP edge, and this duplicate is made after the queue. See [When ClickHouse cannot take an insert](/ingest-pipeline#when-clickhouse-cannot-take-an-insert).
 
 Example table:
 
@@ -754,9 +756,8 @@ The streaming surface loses something too, more quietly. SSE gap-fill (`?since=`
 
 **The upgrade does not carry the old queue over at all.** Boot deletes the earlier build's queue and dead-letter queue (`WAVEHOUSE`, `WAVEHOUSE_DLQ`) and everything in them, logging a `WARN` with each one's message count: an event the old build had not yet inserted, and a row it had already parked, do not survive the upgrade. Draining first keeps the events not yet inserted; a row already parked is lost with the queue, since the earlier build offers no way to read one back (`GET /v1/ops/dlq/stats` returns counts only).
 
-Three audits belong **before** the drain, because none of them announces itself afterwards:
+Two audits belong **before** the drain, because none of them announces itself afterwards:
 
-- **The wire envelope's `row` is positional** (`columns` names each slot), so a message from before this migration and one from after it look the same shape-wise; what changed underneath is how an omitted field is resolved into that slot — see [the ingest note](/ingest-pipeline#the-journey-of-one-event) for the current behavior.
 - **Policy `check` blocks are now validated against the table.** A `check` naming a column the table lacks, one it computes (`MATERIALIZED`/`ALIAS`), or an `EPHEMERAL` one is a per-record `403` on *every* insert by that role. `wavehouse validate` cannot catch it — it never sees the ClickHouse schema — so audit them against their tables first. See [Access control → Insert checks](/access-control#insert-checks).
 - **Every `WH_*` variable the binary does not bind refuses boot.** The old binary ignored a variable it did not read; the new one names every unbound one and exits before it opens the queue, so a pod spec or compose file that still carries one comes back from the upgrade as a container that will not start. Diff the environment against the [Configuration Reference](/configuration) first: a `WH_*` variable that is not in its tables is unbound, and whatever it used to configure now lives in the [settings directory](/settings-directory) or is gone. A Kubernetes Service in the pod's namespace named `wh` or `wh-*` counts too: it injects link variables under the `WH_` prefix (`WH_SERVICE_HOST` and `WH_PORT` for `wh`, `WH_FOO_SERVICE_HOST` and `WH_FOO_PORT` for `wh-foo`), so set `enableServiceLinks: false` on the pod spec.
 

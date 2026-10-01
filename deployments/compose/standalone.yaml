@@ -25,8 +25,9 @@ services:
       WH_DATA_DIR: /app/data
       # ClickHouse wiring (addr, ports, database, user, tls, headers, pool
       # sizes) is in ./settings/config.json — the settings directory below —
-      # where it hot-reloads. Only the password (a secret) and the connection
-      # ceiling are env; the bundled ClickHouse has no password.
+      # where it hot-reloads. Only the password (a secret), the connection
+      # ceiling and the chtypes artifact directory (below) are env; the
+      # bundled ClickHouse has no password.
       # WH_CH_PASSWORD: ""
       # WH_CH_MAX_TOTAL_CONNS: "0"
       # deployments/Dockerfile bakes the pinned chtypes artifacts
