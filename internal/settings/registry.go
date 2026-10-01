@@ -34,7 +34,11 @@ import (
 //     served and a removed one is forgotten, the last one too. A finding about
 //     the directory itself (a loose file, an unreadable directory, a changed
 //     shape) rejects the reload whole and leaves every tenant as it was; at
-//     Open it refuses boot.
+//     Open it refuses boot. So does a nested directory that would serve no
+//     tenant at Open — every folder rejected, or none named by a tenant id,
+//     as a fresh volume holding only lost+found is — since a server serving
+//     no tenant is what a wrong mount looks like, not what anyone meant; on
+//     reload the same tree drops every tenant and keeps running (#599).
 type Registry struct {
 	dir    string
 	nested bool
@@ -83,10 +87,11 @@ func (e entry) adopt(id tenant.ID, doc *Document) entry {
 }
 
 // Open validates dir and returns a Registry serving it. A rejected directory
-// — flat and invalid, or of either shape with a finding about the directory
-// itself — returns a nil Registry with the findings: the caller (boot)
-// refuses to start. A nested directory with a rejected tenant folder still
-// opens; that tenant alone is not served.
+// — flat and invalid, of either shape with a finding about the directory
+// itself, or nested with no tenant to serve — returns a nil Registry with
+// the findings: the caller (boot) refuses to start. A nested directory with
+// a rejected tenant folder beside a valid one still opens; the rejected
+// tenant alone is not served.
 func Open(dir string) (*Registry, []Finding) {
 	r := newRegistry(map[tenant.ID]entry{})
 	r.dir = dir
@@ -193,6 +198,11 @@ func (r *Registry) reload(trigger string, boot bool) (findings []Finding, adopte
 	tree, findings := r.validate(boot)
 	switch {
 	case tree == nil:
+	case boot && tree.Nested && !tree.serves():
+		// Boot only: on reload the same tree is every folder gone or broken,
+		// which drops every tenant and keeps running (see Registry).
+		findings = append(findings, Finding{Severity: SeverityError, Message: "no tenant to serve — a nested settings directory boots only with a tenant folder that validates"})
+		tree = nil
 	case boot:
 		r.nested = tree.Nested
 	case tree.Nested != r.nested:
