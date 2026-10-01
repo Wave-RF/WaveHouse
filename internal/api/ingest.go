@@ -362,14 +362,14 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	batchShape := format.alwaysBatch() || first == '['
 	records := 1
 	if format == FormatJSON && first == '[' {
-		n, framed := reframeArray(body.Bytes())
-		if !framed {
-			// Brackets that do not balance: a truncated upload or a structural
-			// syntax error. Neither can be salvaged per record, and reporting the
-			// records that did arrive as a complete batch is the failure this
-			// refusal exists to prevent.
-			slog.WarnContext(ctx, "ingest read error", "error", "unterminated json array", "table", table)
-			writeJSONError(w, http.StatusBadRequest, "invalid json: unterminated json array")
+		n, err := reframeArray(body.Bytes())
+		if err != nil {
+			// Brackets that do not balance — a truncated upload or a structural
+			// syntax error — or a tail after the array. None can be salvaged per
+			// record, and reporting what did frame as a complete batch is the
+			// failure this refusal exists to prevent.
+			slog.WarnContext(ctx, "ingest read error", "error", err.Error(), "table", table)
+			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}
 		records = n

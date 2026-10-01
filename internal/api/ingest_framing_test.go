@@ -20,6 +20,7 @@ func TestReframeArray(t *testing.T) {
 		want  string
 		count int
 		ok    bool
+		err   error // the refusal when !ok
 	}{
 		{
 			name:  "compact array becomes one record per line",
@@ -85,20 +86,32 @@ func TestReframeArray(t *testing.T) {
 			// only to keep them separate so the objects around them survive.
 			count: 3, ok: true,
 		},
-		{name: "a truncated array does not balance", body: `[{"a":1}`, ok: false},
-		{name: "a trailing comma cut off does not balance", body: `[{"a":1},`, ok: false},
-		{name: "a bare open bracket does not balance", body: `[`, ok: false},
-		{name: "a cut-off element does not balance", body: `[{"a":1},{"b`, ok: false},
-		{name: "a structural syntax error does not balance", body: `[{"a":1}, {bad]`, ok: false},
+		{
+			name:  "whitespace after the array is layout",
+			body:  "[{\"a\":1}] \r\n\t",
+			want:  " {\"a\":1}  \r\n\t",
+			count: 1, ok: true,
+		},
+		{name: "a truncated array does not balance", body: `[{"a":1}`, err: errUnterminatedArray},
+		{name: "a trailing comma cut off does not balance", body: `[{"a":1},`, err: errUnterminatedArray},
+		{name: "a bare open bracket does not balance", body: `[`, err: errUnterminatedArray},
+		{name: "a cut-off element does not balance", body: `[{"a":1},{"b`, err: errUnterminatedArray},
+		{name: "a structural syntax error does not balance", body: `[{"a":1}, {bad]`, err: errUnterminatedArray},
+		{name: "an array closed by a brace does not balance", body: `[{"a":1}}`, err: errUnterminatedArray},
+		{name: "an object after the array is not a record of it", body: `[{"page":"a"},{"page":"b"}] {"page":"c","x":1}`, err: errAfterArray},
+		{name: "a second array after the first", body: `[{"a":1}][{"a":2}]`, err: errAfterArray},
+		{name: "a stray closing bracket after the array", body: `[{"a":1}]]`, err: errAfterArray},
+		{name: "any other byte after the array", body: "[{\"a\":1}]\nx", err: errAfterArray},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			b := []byte(tt.body)
-			count, ok := reframeArray(b)
-			require.Equal(t, tt.ok, ok, "balance")
+			count, err := reframeArray(b)
 			if !tt.ok {
+				require.ErrorIs(t, err, tt.err)
 				return
 			}
+			require.NoError(t, err)
 			assert.Equal(t, tt.count, count, "element count")
 			assert.Equal(t, tt.want, string(b), "rewritten body")
 		})
@@ -113,12 +126,12 @@ func TestReframeArray_DestroysWhatItMustNotSee(t *testing.T) {
 	t.Parallel()
 
 	obj := []byte(`{"a":1,"b":2}`)
-	reframeArray(obj)
+	_, _ = reframeArray(obj) // the damage, not the verdict, is what this pins
 	assert.Equal(t, "{\"a\":1\n\"b\":2}", string(obj),
 		"a bare object's own commas are at depth 1 — the handler must never send one here")
 
 	ndjson := []byte("{\"a\":1,\"b\":2}\n{\"a\":3,\"b\":4}\n")
-	reframeArray(ndjson)
+	_, _ = reframeArray(ndjson)
 	assert.NotContains(t, string(ndjson), `{"a":1,"b":2}`,
 		"an NDJSON body is destroyed too — same reason, same gate")
 }

@@ -2287,6 +2287,34 @@ func TestIngest_JSONArray_Truncated_Fatal(t *testing.T) {
 	}
 }
 
+// TestIngest_JSONArray_TrailingContent_Fatal: bytes after the array's closing
+// ']' are not records of it. Framed as more records they would be published
+// (a trailing object, its commas rewritten as separators); the whole request
+// fails instead, like an unbalanced array, and nothing is published. Trailing
+// whitespace is layout and still ingests.
+func TestIngest_JSONArray_TrailingContent_Fatal(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := newTestIngestHandler(t, testRegistry(t), pub)
+
+	for _, body := range []string{
+		`[{"page":"a"},{"page":"b"}] {"page":"c"}`,
+		`[{"page":"a"}] {"page":"c","button":"x"}`,
+		`[{"page":"a"}][{"page":"b"}]`,
+	} {
+		w := httptest.NewRecorder()
+		h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "application/json", body)))
+		assert.Equal(t, http.StatusBadRequest, w.Code, "%s: body=%s", body, w.Body.String())
+		assert.Equal(t, "invalid json: content after the closing ']' of the json array", jsonErrorMessage(t, w), body)
+	}
+	assert.Empty(t, pub.Messages)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "application/json", "[{\"page\":\"a\"}]\n\n")))
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Len(t, pub.Messages, 1)
+}
+
 func TestIngest_JSONArray_Empty(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
