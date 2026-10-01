@@ -21,6 +21,16 @@ type Tree struct {
 	Tenants map[tenant.ID]TenantResult
 }
 
+// serves reports whether the tree holds a tenant with a document to serve.
+func (t *Tree) serves() bool {
+	for _, res := range t.Tenants {
+		if res.Doc != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // TenantResult is one tenant's share of a validation pass.
 type TenantResult struct {
 	Doc      *Document

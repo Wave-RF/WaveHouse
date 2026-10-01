@@ -221,15 +221,47 @@ func TestOpen_NestedRejectedFolder(t *testing.T) {
 	assert.Equal(t, 222, globex.DefaultMaxRows())
 }
 
-// A nested root whose every folder is rejected still opens: nothing is
-// served, and a reload of the fixed folders brings the tenants up.
-func TestOpen_NestedEveryFolderRejected(t *testing.T) {
+// A nested root that would serve no tenant refuses boot with the findings
+// (#599): a server serving no tenant is what a wrong mount looks like. The
+// rule is boot's alone — TestRegistry_NestedReloadRemovesTheLastTenant pins
+// that a reload to the same tree drops every tenant and keeps running.
+func TestOpen_NestedNoTenantRefusesBoot(t *testing.T) {
 	t.Parallel()
-	reg, findings := Open(writeTree(t, map[string]map[string]string{"acme": brokenFiles()}))
-	require.NotNil(t, reg)
-	assert.True(t, HasErrors(findings))
-	_, ok := reg.For("acme")
-	assert.False(t, ok)
+	t.Run("every folder rejected", func(t *testing.T) {
+		t.Parallel()
+		reg, findings := Open(writeTree(t, map[string]map[string]string{"acme": brokenFiles(), "globex": brokenFiles()}))
+		assert.Nil(t, reg)
+		assert.Contains(t, findingStrings(findings), "error: acme/config.json: query.default_max_rows: must be >= 1")
+		assert.Contains(t, findingStrings(findings), "error: globex/config.json: query.default_max_rows: must be >= 1")
+		assert.Contains(t, findingStrings(findings), "error: no tenant to serve — a nested settings directory boots only with a tenant folder that validates")
+	})
+
+	// A fresh volume whose only entry is lost+found, or a parent directory
+	// mounted by mistake: folders, none named by a tenant id.
+	t.Run("no folder named by a tenant id", func(t *testing.T) {
+		t.Parallel()
+		reg, findings := Open(writeTree(t, map[string]map[string]string{"lost+found": nil}))
+		assert.Nil(t, reg)
+		assert.Contains(t, findingStrings(findings), "error: lost+found: folder name is not a tenant id")
+		assert.Contains(t, findingStrings(findings), "error: no tenant to serve — a nested settings directory boots only with a tenant folder that validates")
+	})
+
+	// One tenant to serve is enough: the broken folder and the stray one are
+	// findings, and the tenant beside them is served.
+	t.Run("one valid folder beside the rest opens", func(t *testing.T) {
+		t.Parallel()
+		reg, findings := Open(writeTree(t, map[string]map[string]string{"acme": maxRowsFiles(111), "globex": brokenFiles(), "lost+found": nil}))
+		require.NotNil(t, reg, "findings: %s", findingStrings(findings))
+		assert.True(t, HasErrors(findings))
+		assert.NotContains(t, findingStrings(findings), "error: no tenant to serve — a nested settings directory boots only with a tenant folder that validates")
+		acme, ok := reg.For("acme")
+		require.True(t, ok)
+		assert.Equal(t, 111, acme.DefaultMaxRows())
+		_, known := reg.Resolve("globex")
+		assert.True(t, known, "rejected, not unknown")
+		_, known = reg.Resolve("lost+found")
+		assert.False(t, known, "a folder that is not a tenant id is skipped, not a tenant")
+	})
 }
 
 // A finding about the root itself refuses boot in either shape.
