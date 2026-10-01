@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -47,9 +49,9 @@ func withMsg(recs []map[string]any, msg string) []map[string]any {
 // TestBind_SDKZoneRefusalIsThatTenantsUnavailable: a second Engine (its own
 // registry) asks for a line this process already opened in UTC, in another
 // zone, before its registry has resolved the line. The SDK refuses the open
-// itself, with an untyped error; the tenant gets the same zone cause the
-// Engine's own check gives, with the SDK's words kept, and the first Engine's
-// tenant keeps answering.
+// itself (ErrInitConflict); the tenant gets the same zone cause the Engine's
+// own check gives, with the SDK's words kept, and the first Engine's tenant
+// keeps answering.
 func TestBind_SDKZoneRefusalIsThatTenantsUnavailable(t *testing.T) {
 	first := TestEngine(t, eventsTable()) // the line is open in UTC from here on
 
@@ -70,6 +72,53 @@ func TestBind_SDKZoneRefusalIsThatTenantsUnavailable(t *testing.T) {
 	second.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	answers(t, second, tenant.Default)
 	answers(t, first, tenant.Default)
+}
+
+// TestBind_UnstatableLibraryIsThatTenantsUnavailable: an artifact whose
+// library path cannot be stat'ed (here a dangling symlink) is refused by the
+// SDK before any dlopen. That refusal is the tenant's Unavailable in the SDK's
+// words, naming the path, and it is not reported as a zone conflict although
+// the line is open in another zone in this process. Once the path names the
+// installed library, the same image is refused in another zone and served in
+// its own.
+func TestBind_UnstatableLibraryIsThatTenantsUnavailable(t *testing.T) {
+	first := TestEngine(t, eventsTable()) // the line is open in UTC from here on
+	installed := boundLib(first, tenant.Default)
+	require.NotNil(t, installed)
+
+	// The explicit directory is searched first, so its copy of the test line
+	// shadows the installed one.
+	dir := t.TempDir()
+	line := filepath.Join(dir, testLine)
+	require.NoError(t, os.MkdirAll(line, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(line, "manifest.json"),
+		fmt.Appendf(nil, `{"library":"libchtypes.dylib","clickhouse_version":%q,"clickhouse_minor":%q}`,
+			TestServerVersion+"-lts", testLine), 0o600))
+	link := filepath.Join(line, "libchtypes.dylib")
+	require.NoError(t, os.Symlink(filepath.Join(dir, "gone"), link))
+
+	eng, err := NewEngine(Config{RegistryDir: dir})
+	require.NoError(t, err)
+	t.Cleanup(eng.Close)
+
+	eng.Bind("tokyo", TestServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	u := unavailable(t, eng, "tokyo")
+	assert.Empty(t, u.Table)
+	assert.Contains(t, u.Cause, link)
+	assert.Contains(t, u.Cause, "no such file or directory")
+	assert.NotContains(t, u.Cause, "one timezone per ClickHouse version line")
+
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, os.Symlink(installed.Path, link))
+
+	eng.Bind("tokyo", TestServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	u = unavailable(t, eng, "tokyo")
+	assert.Contains(t, u.Cause, `"UTC"`, "a symlink to the open library is the same image")
+	assert.Contains(t, u.Cause, "one timezone per ClickHouse version line")
+
+	eng.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	answers(t, eng, tenant.Default)
+	assert.Same(t, installed, boundLib(eng, tenant.Default))
 }
 
 // TestBind_ZoneRecordIsKeyedOnTheLibrary: the record names the library the

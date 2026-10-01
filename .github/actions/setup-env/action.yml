@@ -198,7 +198,7 @@ runs:
     #
     # The SDK's default fetch dir is revision-scoped:
     # ~/.cache/chtypes/artifacts/abi<R>/<os>-<arch>. The path and the key
-    # prefix both name the ABI revision (6 at SDK v0.5.1), so a cache saved
+    # prefix both name the ABI revision (6 at SDK v0.5.2), so a cache saved
     # by an older SDK is never restored into the search path. When the SDK's
     # ABI revision changes, bump `abi6` in both places and re-lock (see
     # docs/development.md).

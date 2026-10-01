@@ -43,7 +43,7 @@ if [ "$(go env CGO_ENABLED 2>/dev/null || echo 0)" != "1" ]; then
 fi
 
 # Bump together with go.mod's `require github.com/wave-rf/chtypes/go` line.
-CHTYPES_SDK_VERSION="v0.5.1"
+CHTYPES_SDK_VERSION="v0.5.2"
 CHTYPES_CLI="github.com/wave-rf/chtypes/go/cmd/chtypes@${CHTYPES_SDK_VERSION}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
