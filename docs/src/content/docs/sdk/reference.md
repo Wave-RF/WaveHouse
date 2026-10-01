@@ -147,7 +147,7 @@ Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev serve
 | `--out`, `-o` | Output .d.ts file path | `./wavehouse.d.ts` |
 | `--auth`, `-a` | Bearer token (if auth required) | — |
 
-The generated row type is the **read** shape, and computed columns are where it and the server disagree. An `EPHEMERAL` column declares a default, so codegen emits it, yet no query can ever return it — the type says readable where only the write is real. `MATERIALIZED` and `ALIAS` columns declare defaults too, so they are emitted as optional, but supplying either on `insert` is a `400` carrying ClickHouse's own code 117 (`Unknown field found while parsing JSONEachRow format: x`), and the type will not catch it. An `EPHEMERAL` value is accepted on a JSON `insert` and feeds the defaults that read it, but is never stored or returned. Omit computed columns; the server fills them in.
+The generated row type is the **read** shape, and computed columns are where it and the server disagree. An `EPHEMERAL` column declares a default, so codegen emits it, yet no query can ever return it — the type says readable where only the write is real. `MATERIALIZED` and `ALIAS` columns declare defaults too, so they are emitted as optional, but supplying either on `insert` is a `400` carrying ClickHouse's own code 117 (`Unknown field found while parsing JSONEachRow format: x`), and the type will not catch it. An `EPHEMERAL` value is accepted on a JSON `insert` when the role may write the column, a `DEFAULT` column reads it and no `MATERIALIZED` or `ALIAS` column does; it feeds that default and is never stored or returned. Otherwise it is a `400` with code 117, like an unknown column. Omit computed columns; the server fills them in.
 
 **Example output:**
 
