@@ -128,7 +128,7 @@ Boot logs each of these at `WARN` rather than refusing. The first two are right 
 
 ### Process roles
 
-By default one process does all the work. `roles` splits it, so that the API and the background workers can run in separate processes, for example one Kubernetes Deployment per role (see [Deployment](/deployment#one-deployment-per-role)). The binary and its entry point are the same for every role; only this key differs.
+By default one process does all the work. `roles` splits it, so that the API and the background workers can run in separate processes, for example one Kubernetes Deployment per role (see [Deployment](/deployment#one-deployment-per-role)). The binary and its entry point are the same for every role; only this key differs. Only a process running the `api` role loads the [chtypes artifact](/deployment#chtypes-artifacts); an ingest-only or sweeper-only process needs none installed.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
@@ -168,6 +168,7 @@ Only the secret and the connection ceiling are boot config. The wiring — nativ
 | --- | --- | ------- | ----------- |
 | `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password, combined with the settings directory's `clickhouse.username` on every (re)connect. A secret, so it never lives in a tracked JSON file; rotating it is a restart. |
 | `clickhouse.max_total_conns` | `WH_CH_MAX_TOTAL_CONNS` | `0` | Ceiling on the native ClickHouse connections the process holds open: the `max_open_conns` of the open pools — one per distinct connection tuple among the served tenants, see [the settings directory](/settings-directory#clickhouse) — must not add up to more. Pools above it at boot refuse to start, naming the sum and the ceiling; on a reload a pool resized above it is refused and keeps its size, and a new pool that would cross it is not opened — its tenants keep the pool they had, or have none — both logged (the reload itself still reports `adopted`) and retried by the next reload. `0` is no ceiling. Capacity is sized once per process, which is why it is boot config rather than a settings key. |
+| `clickhouse.chtypes_registry` | `WH_CHTYPES_REGISTRY` | *(empty)* | Directory holding the chtypes artifacts (one `<minor>/` per ClickHouse line). Empty defers to the chtypes search path — `$CHTYPES_REGISTRY`, `~/.cache/chtypes/artifacts/abi6/<os>-<arch>`, then the system directories. Either way a library is opened lazily, on first use of its line; an explicit directory is searched first, then the rest of the path. Boot-tier: changing it is a restart. See [chtypes artifacts](/deployment#chtypes-artifacts). |
 
 ### Server-side resource limits
 
