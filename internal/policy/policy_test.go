@@ -480,12 +480,12 @@ func TestResolveTemplate_MultipleTemplates(t *testing.T) {
 }
 
 // TestCanonicalScalar pins the one rule every bound value flows through — claim
-// templates, _in elements, and the ingest check comparison alike. The canonical
-// form is exact at every width and precision (integers via big.Int, fractions
-// and exponents via canonicalDecimal — never a float64 round-trip, which would
-// collapse "1e-400" to "0" and round wide decimals onto their neighbors), and
-// a literal or exact form past the 100-digit bound fails closed in both
-// directions.
+// templates and _in elements, for row filters and insert checks alike. The
+// canonical form is exact at every width and precision (integers via big.Int,
+// fractions and exponents via canonicalDecimal — never a float64 round-trip,
+// which would collapse "1e-400" to "0" and round wide decimals onto their
+// neighbors), and a literal or exact form past the 100-digit bound fails closed
+// in both directions.
 func TestCanonicalScalar(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -525,10 +525,10 @@ func TestCanonicalScalar(t *testing.T) {
 		// allocating a gigabyte-scale expansion before the length check runs.
 		{"zero mantissa with out-of-range exponent", json.Number("0e201"), "", false},
 		// The 100-digit literal bound: big.Int work is superlinear in digit
-		// count and the ingest path hands this function client-controlled
-		// literals, so anything longer fails closed before any parsing. The
-		// bound counts digits, not bytes — sign and exponent markers ride free —
-		// so two spellings of one value pass or fail together.
+		// count and a claim's value is whatever the token carries, so anything
+		// longer fails closed before any parsing. The bound counts digits, not
+		// bytes — sign and exponent markers ride free — so two spellings of one
+		// value pass or fail together.
 		{"100-digit integer at the bound stays exact", json.Number(strings.Repeat("9", 100)), strings.Repeat("9", 100), true},
 		{"101-digit literal has no canonical form", json.Number(strings.Repeat("9", 101)), "", false},
 		{"digit bound ignores sign and exponent bytes", json.Number("-1e99"), "-1" + strings.Repeat("0", 99), true},
@@ -978,8 +978,8 @@ func TestEvaluate_FilterUnresolvableClaim_FailsClosed(t *testing.T) {
 }
 
 // TestValidate_RejectsBindUnsafeFilterColumn: a policy whose row-filter column
-// contains '?' is refused at write time — it would shift clickhouse-go's
-// positional value binding when interpolated into the WHERE clause.
+// contains '?' is refused at write time — it would shift the builder's
+// positional `?` binding when interpolated into the WHERE clause.
 func TestValidate_RejectsBindUnsafeFilterColumn(t *testing.T) {
 	t.Parallel()
 	eq := "{{ jwt.org }}"

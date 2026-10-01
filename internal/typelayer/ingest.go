@@ -316,11 +316,12 @@ func declineAll(n int, msg string) Batch {
 
 // countRecords recovers the input record count when chtypes returned no
 // per-row detail, so the caller still gets an index-aligned answer. JSONEachRow
-// records are newline-separated and json.Marshal escapes any newline inside a
-// value, so counting lines is exact for the bodies this package is handed. A
-// CSV field may legally contain a raw newline, and a WithNames header is a
-// line but not a record, so for those formats the fallback can OVER-count,
-// which produces extra declined verdicts — never an extra acceptance.
+// records are newline-separated and a raw newline inside a JSON string is
+// illegal, so counting lines is exact for compact NDJSON and a re-framed array.
+// A blank line, a pretty-printed object's inner lines, a CSV field holding a
+// raw newline and a WithNames header each add a line that is no record, so the
+// fallback can OVER-count, which produces extra declined verdicts — never an
+// extra acceptance.
 func countRecords(body []byte, known int) int {
 	if known > 0 {
 		return known

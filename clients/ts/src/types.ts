@@ -307,18 +307,19 @@ export interface InsertRecordResult {
   error?: string;
   /**
    * ClickHouse's own numeric error code, present only when the server's parser
-   * is what refused the record — 117 unknown field, 27 unparseable value, 6 out
-   * of range. Absent for a gateway rejection (a failed policy check, a missing
+   * is what refused the record — 117 unknown field, 27 or 6 a value the column
+   * cannot read. Absent for a gateway rejection (a failed policy check, a missing
    * dedupe id), so `exception_code !== undefined` means "ClickHouse answered".
    * The same name carries it on a whole-request error body, beside the string
    * `code` class (reachable as `error.details`).
    *
    * 117 also covers **a column the caller's role may not write**. Column policy
-   * is enforced by compiling the role's own schema without the denied columns,
-   * so naming one is an unknown field to the parser rather than a separate
-   * gateway refusal: a `400` with this code, where it used to be a
-   * `403 column "x" not allowed for insert`. The message is ClickHouse's own and
-   * does not reveal whether the column exists.
+   * is enforced by compiling the role's own schema, where a denied column is
+   * re-declared as computed (`MATERIALIZED` of its default), so naming one is an
+   * unknown field to the parser rather than a separate gateway refusal: a `400`
+   * with this code, where it used to be a `403 column "x" not allowed for
+   * insert`. The message is ClickHouse's own and does not reveal whether the
+   * column exists.
    */
   exception_code?: number;
 }

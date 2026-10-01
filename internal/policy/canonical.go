@@ -18,10 +18,10 @@ import (
 
 // maxCanonicalDigits bounds both a numeric literal's digit count and its
 // exact decimal expansion. Big-integer parsing is superlinear in digit count
-// and the ingest check path hands CanonicalScalar client-controlled literals
-// (CWE-400), and a short exponent literal can hide a wide expansion ("1e-150"
-// is six characters with a 152-character exact form). 100 digits is far past
-// any real id — uint256 is 78.
+// and a claim's value is whatever the token carries (CWE-400), and a short
+// exponent literal can hide a wide expansion ("1e-150" is six characters with
+// a 152-character exact form). 100 digits is far past any real id — uint256
+// is 78.
 const maxCanonicalDigits = 100
 
 // CanonicalScalar renders a decoded JSON value as the canonical string the
@@ -32,25 +32,24 @@ const maxCanonicalDigits = 100
 // fmt.Sprint's "map[…]"/"[…]" rendering would let _neq/_lt match essentially
 // every row; the one legitimate structured shape, a bare-claim _in array, is
 // unpacked by resolveInValues before its elements reach here. A json.Number
-// (jwt.WithJSONNumber on claims, UseNumber on ingest payloads) binds in
-// canonical decimal form, not the token's spelling: "1", "1.0", and "1e3" are
-// one JSON value, and a numeric ClickHouse column rejects '1.0'/'1e3' as a
-// per-query TYPE_MISMATCH error. The canonical form is exact at every width
-// and precision — integer literals via big.Int, fractions and exponents via
-// canonicalDecimal, never a float64 round-trip that could bind a value the
-// token doesn't carry ("1e-400" fails closed rather than collapsing to "0").
-// A literal, or an exact form, past maxCanonicalDigits likewise has no
-// canonical form and fails closed (1e400, 1e-400). Claim resolution and the
-// insert-check comparison's two sides (internal/api) all route through this
-// one function, so what a read filter binds and what a write check accepts
+// (jwt.WithJSONNumber on claims) binds in canonical decimal form, not the
+// token's spelling: "1", "1.0", and "1e3" are one JSON value, and a numeric
+// ClickHouse column rejects '1.0'/'1e3' as a per-query TYPE_MISMATCH error. The
+// canonical form is exact at every width and precision — integer literals via
+// big.Int, fractions and exponents via canonicalDecimal, never a float64
+// round-trip that could bind a value the token doesn't carry ("1e-400" fails
+// closed rather than collapsing to "0"). A literal, or an exact form, past
+// maxCanonicalDigits likewise has no canonical form and fails closed (1e400,
+// 1e-400). Claim resolution routes every filter and check value through this
+// one function, so what a read filter binds and what a write check requires
 // can't drift.
 func CanonicalScalar(v any) (string, bool) {
 	switch val := v.(type) {
 	case nil, map[string]any, []any:
 		return "", false
 	case json.Number:
-		// The digit bound guards the superlinear big.Int parse on the
-		// client-controlled ingest path. It counts digits, not bytes — a sign,
+		// The digit bound guards the superlinear big.Int parse of a
+		// token-supplied value. It counts digits, not bytes — a sign,
 		// point, or exponent marker doesn't feed the big parse — so "-1e99"
 		// binds exactly like its written-out form, matching the "one JSON
 		// value" contract below (only at the bound's very edge can the exact-form

@@ -125,8 +125,8 @@ func columnNames(cols []Column) []string {
 
 // Lookup returns the named column and whether the table declares it. Matching
 // is exact, as ClickHouse's own column resolution is. Linear over Columns, which
-// is the right shape for the per-record call sites: schemas are small and the
-// caller asks about one or two columns.
+// is the right shape for its call sites: schemas are small and the caller asks
+// about one or two columns.
 //
 // It returns the Column rather than a bool because "does the table have it" is
 // rarely the whole question — a caller on the ingest path also has to know
@@ -231,13 +231,12 @@ func (sr *SchemaRegistry) OnRefresh(hook RefreshHook) {
 	sr.onRefresh = append(sr.onRefresh, hook)
 }
 
-// Refresh rebuilds the in-memory schema cache: it discovers the server's default
-// time zone and version, queries system.columns, attaches each table's DDL from
-// system.tables, precomputes timestamp column specs, and then runs the
-// OnRefresh hooks before marking the registry loaded. A refresh that started
-// before the one whose snapshot is already published returns nil without
-// publishing: the published refresh started later, so it saw everything
-// committed before this one started.
+// Refresh rebuilds the in-memory schema cache: it discovers the server's
+// default time zone and version, queries system.columns, attaches each table's
+// DDL from system.tables, and then runs the OnRefresh hooks before marking the
+// registry loaded. A refresh that started before the one whose snapshot is
+// already published returns nil without publishing: the published refresh
+// started later, so it saw everything committed before this one started.
 func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
 	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")

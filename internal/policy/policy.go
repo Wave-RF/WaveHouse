@@ -253,7 +253,7 @@ func evaluateSelect(perms *SelectPermissions, claims map[string]any) *ResolvedPe
 	}
 
 	// Resolve filters into WHERE clause. A bind-unsafe filter column can't be
-	// emitted safely — a '?' in it would shift clickhouse-go's positional value
+	// emitted safely — a '?' in it would shift the builder's positional `?`
 	// binding, including this RLS filter's own bound value — so deny the role
 	// fail-closed rather than drop the predicate (which would widen row access)
 	// or emit a mis-bound query. validateSelectPerms rejects such a policy at
@@ -860,8 +860,8 @@ func validateSelectPerms(table, role string, perms *SelectPermissions) error {
 		return fmt.Errorf("table %q, op %q, role %q: max_memory_usage must be non-negative", table, op, role)
 	}
 	// Filter column names are interpolated into SQL (backtick-quoted) at query
-	// time, so a '?' in one would shift clickhouse-go's positional value
-	// binding. Refuse such a policy at write time, mirroring the query builder's
+	// time, so a '?' in one would shift the builder's positional `?` binding.
+	// Refuse such a policy at write time, mirroring the query builder's
 	// chsql.BindUnsafe guard on caller-supplied columns.
 	for col, f := range perms.Filter {
 		if chsql.BindUnsafe(col) {

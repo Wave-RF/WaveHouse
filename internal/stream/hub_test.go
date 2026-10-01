@@ -214,8 +214,9 @@ func TestPairRow_Verdict(t *testing.T) {
 func rawEventCols(tb testing.TB, table, ts string, cols []string, data map[string]any) []byte {
 	tb.Helper()
 	// The positional line the ingest path publishes: one cell per column, in
-	// order, a column the record omits as null. Built here rather than through a
-	// production encoder because the wire shape is what these tests pin.
+	// order. A column data omits is written as null here, where production
+	// carries the value ClickHouse filled in; the hub forwards cells as they
+	// are, and the wire shape is what these tests pin.
 	var buf bytes.Buffer
 	buf.WriteByte('[')
 	for i, c := range cols {
@@ -1110,12 +1111,12 @@ func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
 		"the wire frame carries the exact digits, not a float64 rounding")
 }
 
-// TestHub_RowFilter_TimestampInstantMatch: the wire carries ClickHouse's own
-// rendering of a DateTime, and policy authors write the same zone-less spelling
-// the query path wants. The filter compares them as instants because the row is
-// parsed into the column's real storage before the predicate runs, so a
-// different spelling of the same instant still matches; an operand the parser
-// can't read withholds the row rather than guessing at it.
+// TestHub_RowFilter_TimestampInstantMatch: policy authors write the zone-less
+// spelling the query path wants, while the wire carries ClickHouse's RFC 3339
+// rendering. The filter compares them as instants because the row is parsed
+// into the column's real storage before the predicate runs, so any spelling of
+// the same instant matches; an operand the parser can't read withholds the row
+// rather than guessing at it.
 func TestHub_RowFilter_TimestampInstantMatch(t *testing.T) {
 	t.Parallel()
 	p := &policy.Policy{
@@ -1136,7 +1137,7 @@ func TestHub_RowFilter_TimestampInstantMatch(t *testing.T) {
 
 	hub.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"created_at": "2026-06-21 04:00:00", "page": "/a"}))
 	f, cols, _ := recvEvent(t, sub)
-	assert.NotEmpty(t, f.Data, "the wire rendering matches the zone-less constant")
+	assert.NotEmpty(t, f.Data, "a row in the constant's own spelling matches")
 
 	// A different spelling of the same instant matches too: the comparison is
 	// between parsed instants, not between bytes.

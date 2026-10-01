@@ -422,8 +422,9 @@ describe("Ingest", () => {
 
   // CONTRACT CHANGE: a column the caller's role may not write is no longer a
   // gateway 403 `column "x" not allowed for insert`. Column policy is enforced
-  // by compiling the role's own schema WITHOUT the denied columns, so naming one
-  // is ClickHouse's own per-record UNKNOWN_FIELD — a 400 with
+  // by compiling the role's own schema, where a denied column is re-declared
+  // MATERIALIZED of its default, so naming one is ClickHouse's own per-record
+  // UNKNOWN_FIELD — a 400 with
   // `exception_code: 117`, whose message does not say whether the column exists.
   it("refuses a denied insert column with ClickHouse's code 117", async () => {
     const currentPolicy = readPolicyFile();
@@ -491,7 +492,7 @@ describe("Ingest", () => {
 
   // CSV and TSV are new accepted formats. They are positional
   // in the table's declaration order — every wire column, in that order, with
-  // an empty field meaning "take the DEFAULT". An end-to-end assertion is the
+  // an empty CSV field meaning "take the DEFAULT". An end-to-end assertion is the
   // only one that catches a column-order bug: a mis-ordered body still answers
   // 200.
   it("ingests a complete positional CSV row end to end", async () => {
@@ -546,9 +547,10 @@ describe("Ingest", () => {
   it("ingests a complete positional TSV row, and a short row is code 27", async () => {
     const id = testId();
     // TSV spells "take the DEFAULT" as ClickHouse's own \\N (null, which
-    // input_format_null_as_default turns into the column default). An EMPTY TSV
-    // field is the empty string, which a DateTime64 cannot read — unlike CSV,
-    // where an empty field IS the default.
+    // input_format_null_as_default turns into the default of a non-Nullable
+    // column like received_timestamp; a Nullable one would store null). An
+    // EMPTY TSV field is the empty string, which a DateTime64 cannot read —
+    // unlike CSV, where an empty field IS the default.
     const res = await fetch(`${WH_URL}/v1/ingest?table=${T.clicks}`, {
       method: "POST",
       headers: {

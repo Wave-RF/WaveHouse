@@ -768,9 +768,9 @@ func TestIngest_Policy_CheckClause_NullValue_StoredValueIsWhatIsChecked(t *testi
 
 	// With a claim that DOES resolve, an explicit null takes the INJECTED value
 	// rather than the table's own default: null_as_default resolves it against
-	// the ROLE's compiled schema, whose DEFAULT is the claim. A null on a checked
-	// column therefore behaves exactly like omitting it, and can never carry
-	// another tenant's value — the property that matters.
+	// the ROLE's compiled schema, whose DEFAULT is the claim. A null on a
+	// non-Nullable checked column therefore behaves exactly like omitting it, and
+	// can never carry another tenant's value — the property that matters.
 	pub2 := &testutil.MockPublisher{}
 	h2 := newTestIngestHandler(t, testRegistry(t), pub2)
 	h2.PolicySource = h.PolicySource
@@ -2600,8 +2600,8 @@ func publishedData(t *testing.T, pub *testutil.MockPublisher) map[string]any {
 }
 
 // publishedRow decodes one published envelope and zips its row by column name.
-// A column the record omitted rides as an explicit null, exactly as it does on
-// the wire, so a caller can tell "absent" from "present and null" only by value.
+// A column the record omitted rides with the value ClickHouse filled in (its
+// DEFAULT, or the type's default), exactly as it does on the wire.
 func publishedRow(t *testing.T, payload []byte) map[string]any {
 	t.Helper()
 	var evt ingest.EventMessage
