@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -541,7 +542,8 @@ func TestOnRefresh_HooksRunInRegistrationOrder(t *testing.T) {
 
 // TestOnRefresh_OverlappingRefreshesDoNotInterleaveHooks: the manual refresh
 // can overlap the auto-refresh loop. Each refresh's publish and hooks run as
-// one step, so a hook never runs concurrently with another refresh's hook.
+// one step, so a hook never runs concurrently with another refresh's hook. A
+// refresh that finishes after a later-started one published runs none.
 func TestOnRefresh_OverlappingRefreshesDoNotInterleaveHooks(t *testing.T) {
 	t.Parallel()
 	conn := &fakeConn{columns: []fakeColumn{{table: "events", name: "id", chType: "UInt64", position: 1}}}
@@ -568,8 +570,67 @@ func TestOnRefresh_OverlappingRefreshesDoNotInterleaveHooks(t *testing.T) {
 	for range refreshes {
 		require.NoError(t, <-errs)
 	}
-	assert.Equal(t, int32(refreshes), calls.Load())
+	assert.GreaterOrEqual(t, calls.Load(), int32(1))
+	assert.LessOrEqual(t, calls.Load(), int32(refreshes))
 	assert.Equal(t, int32(1), maxInHook.Load(), "hooks of overlapping refreshes must not interleave")
+}
+
+// gatedConn is a fakeConn whose system.columns query announces that it has
+// started, then waits for release.
+type gatedConn struct {
+	*fakeConn
+	reading chan<- struct{}
+	release <-chan struct{}
+}
+
+func (c gatedConn) Query(ctx context.Context, q string, args ...any) (driver.Rows, error) {
+	if strings.Contains(q, "system.columns") {
+		c.reading <- struct{}{}
+		<-c.release
+	}
+	return c.fakeConn.Query(ctx, q, args...)
+}
+
+// TestRefresh_OlderSnapshotFinishingLastIsNotPublished: a refresh that read
+// the database before a table was created (the loop) finishes after one that
+// started later and saw the table (a manual refresh). The newer snapshot
+// stays published, and the hook is never handed the older one, so the table
+// does not drop out of the registry or the type layer until the next refresh.
+func TestRefresh_OlderSnapshotFinishingLastIsNotPublished(t *testing.T) {
+	t.Parallel()
+	events := fakeColumn{table: "events", name: "id", chType: "UInt64", position: 1}
+	created := fakeColumn{table: "created", name: "id", chType: "UInt64", position: 1}
+	reading, release := make(chan struct{}), make(chan struct{})
+	older := gatedConn{fakeConn: &fakeConn{columns: []fakeColumn{events}}, reading: reading, release: release}
+	newer := &fakeConn{columns: []fakeColumn{created, events}}
+
+	sources := []driver.Conn{older, newer}
+	var sourced atomic.Int32
+	sr := NewSchemaRegistry(func() (driver.Conn, string) { return sources[sourced.Add(1)-1], "test" },
+		tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	var hooked [][]string
+	sr.OnRefresh(func(_, _ string, tables []*TableSchema) {
+		names := make([]string, 0, len(tables))
+		for _, ts := range tables {
+			names = append(names, ts.Name)
+		}
+		slices.Sort(names)
+		hooked = append(hooked, names)
+	})
+
+	olderDone := make(chan error, 1)
+	go func() { olderDone <- sr.Refresh(context.Background()) }()
+	<-reading // the older refresh has started and is reading system.columns
+
+	require.NoError(t, sr.Refresh(context.Background()))
+	require.NotNil(t, sr.Get("created"))
+
+	close(release)
+	require.NoError(t, <-olderDone, "a superseded refresh is not a failure")
+
+	assert.NotNil(t, sr.Get("created"), "the older snapshot must not replace the newer one")
+	assert.Equal(t, [][]string{{"created", "events"}}, hooked, "the hook only ever sees the newer snapshot")
+	assert.True(t, sr.Loaded())
 }
 
 // TestRefresh_WarnsOnceForTablesWithoutDDL: the two scans are not one

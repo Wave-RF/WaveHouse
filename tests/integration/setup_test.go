@@ -96,17 +96,11 @@ func env(t *testing.T) *testEnv {
 // (or sequentially-run) tests don't collide on table state.
 var tableCounter atomic.Uint64
 
-// createMu serializes createTable's create-and-refresh.
-var createMu sync.Mutex
-
 // createTable creates a uniquely-named ClickHouse table for the calling test
 // and registers cleanup to drop it. The schema registry is refreshed after
 // creation so the API discovers the new table. Returns the table name.
-//
-// Parallel tests create tables concurrently, and two overlapping refreshes
-// publish in the order they finish, not the order they read system.columns:
-// an older snapshot landing last would drop the newer table from the
-// registry. createMu makes each create-and-refresh one step.
+// Parallel tests create tables concurrently: the registry never lets a
+// refresh that started before this one replace what this one published.
 //
 // Pass the column DDL fragment without the wrapping `()` — for example:
 //
@@ -123,8 +117,6 @@ func createTable(t *testing.T, columns, tableOpts string) string {
 		"CREATE TABLE IF NOT EXISTS %s (%s) ENGINE = MergeTree() %s",
 		name, columns, tableOpts,
 	)
-	createMu.Lock()
-	defer createMu.Unlock()
 	if err := sharedEnv.chConn.Exec(ctx, stmt); err != nil {
 		t.Fatalf("create test table %s: %v", name, err)
 	}

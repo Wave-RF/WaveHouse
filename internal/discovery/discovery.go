@@ -224,11 +224,19 @@ type SchemaRegistry struct {
 	// onRefresh are the hooks a successful Refresh runs with what it
 	// published; registered before the first Refresh, guarded by mu.
 	onRefresh []RefreshHook
-	// publishMu orders a Refresh's publish, its hooks and the loaded flag, so
-	// two overlapping refreshes (the loop and a manual one) run their hooks in
-	// the order they published and a hook never sees a snapshot older than
-	// the one it is replacing.
-	publishMu sync.Mutex
+	// readGen numbers refreshes in the order they start, before any read.
+	readGen atomic.Uint64
+	// publishMu makes a Refresh's publish, its hooks and the loaded flag one
+	// step, and guards publishedGen, the readGen of the snapshot published
+	// last. A refresh publishes only if it started after that one, so when
+	// two overlap (the loop and a manual one) and the one that started first
+	// finishes last, its snapshot — possibly read before a table the other
+	// saw was created — is dropped rather than replacing the other's. Hooks
+	// therefore run one refresh at a time, in start order, and are never
+	// handed a snapshot from a refresh that started before the one whose
+	// snapshot they are replacing.
+	publishMu    sync.Mutex
+	publishedGen uint64
 }
 
 // RefreshHook is told what a successful Refresh published: the server's
@@ -264,7 +272,8 @@ func NewSchemaRegistry(source Source, id tenant.ID, refreshInterval func(tenant.
 // layer binds here). Hooks run synchronously on the refreshing goroutine, in
 // registration order, and must be registered before the first Refresh. A
 // failed Refresh runs none: the previous schemas stay, and so does whatever
-// the hooks built from them.
+// the hooks built from them. Neither does a Refresh that a later-started one
+// has already published past.
 func (sr *SchemaRegistry) OnRefresh(hook RefreshHook) {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
@@ -274,11 +283,19 @@ func (sr *SchemaRegistry) OnRefresh(hook RefreshHook) {
 // Refresh rebuilds the in-memory schema cache: it discovers the server's default
 // time zone and version, queries system.columns, attaches each table's DDL from
 // system.tables, precomputes timestamp column specs, and then runs the
-// OnRefresh hooks before marking the registry loaded.
+// OnRefresh hooks before marking the registry loaded. A refresh that started
+// before the one whose snapshot is already published returns nil without
+// publishing: the published refresh started later, so it saw everything
+// committed before this one started.
 func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
 	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
 	defer span.End()
+
+	// Taken before the first read, so a refresh that starts after a table is
+	// created has a higher generation than every refresh that could have
+	// read the database without it.
+	gen := sr.readGen.Add(1)
 
 	// One connection and one database per refresh, read together: a reload
 	// that moves the tenant to another pool or database applies to the NEXT
@@ -370,6 +387,11 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 
 	sr.publishMu.Lock()
 	defer sr.publishMu.Unlock()
+	if gen < sr.publishedGen {
+		slog.DebugContext(ctx, "schema refresh superseded by a later one; not published", "tenant", sr.tenant)
+		return nil
+	}
+	sr.publishedGen = gen
 	sr.mu.Lock()
 	sr.tables = tables
 	sr.serverVersion = serverVersion
