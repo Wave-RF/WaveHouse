@@ -57,6 +57,9 @@ exclude:
     # internal/mq/natstest/ stands up NATS as an operator deploys it, for
     # tests outside internal/mq; test code, like mqtest.
     - ^internal/mq/natstest/
+    # internal/typelayer/typelayertest/ opens a test Engine on the locked
+    # chtypes artifact for other packages' tests; test code, like mqtest.
+    - ^internal/typelayer/typelayertest/
     - ^tests/
     # scripts/ holds Go helpers (cov, orchestrator) that drive the build but
     # aren't part of the shipped binary; they show up in `-coverpkg=./...`
