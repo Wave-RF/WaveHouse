@@ -209,6 +209,11 @@ type ingestRun struct {
 	// before chtypes has read it (an empty array is zero, anything else is at
 	// least one), then len(batch.Rows) once it has answered.
 	records int
+	// framed is a JSON array's element count — the one body whose framing
+	// gives WaveHouse an exact record count before chtypes reads it — and 0
+	// for every other body. chtypes answering any other number declines the
+	// whole body (typelayer.IngestOptions.Records).
+	framed int
 	// checkColumns names the check clauses a record's check answer came from,
 	// for the rejection message. The filter is AND-joined over all of them, so
 	// a false verdict does not say which one failed — with one clause it does.
@@ -375,12 +380,18 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		records = n
 	}
+	framed := 0
+	if format == FormatJSON && first == '[' {
+		framed = records
+	}
 	// Otherwise a single-object body is one record, and a line-framed body has
 	// at least the record its first byte starts. Concatenated objects after a
 	// single object are neither answered nor published, as they always have
 	// been (declare NDJSON to batch them, #561), but chtypes still parses
 	// them, so one cut off mid-record can turn the answer into a decline. The
-	// real count is chtypes' own, taken once it has answered.
+	// real count is chtypes' own once it has answered — held to a floor the
+	// type layer counts in the body itself, so a short answer is a decline,
+	// never a short batch.
 
 	guard := h.policyCheckGuard(ctx, table, role, schema, perms)
 	shape, preds, checkColumns, abort := h.insertShape(ctx, table, role, schema, perms, guard)
@@ -391,7 +402,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	run := &ingestRun{
 		store: store, table: table, scope: scope, now: now,
-		records: records, checkColumns: checkColumns, checkGuard: guard,
+		records: records, framed: framed, checkColumns: checkColumns, checkGuard: guard,
 	}
 	if records > 0 {
 		if abort := h.judge(ctx, run, shape, format, body.Bytes(), preds); abort != nil {
@@ -443,7 +454,9 @@ func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelay
 	if abort != nil {
 		return abort
 	}
-	batch, err := tbl.IngestWith(format.wire(), format.options(), body, preds...)
+	opts := format.options()
+	opts.Records = run.framed
+	batch, err := tbl.IngestWith(format.wire(), opts, body, preds...)
 	run.wire = slices.Clone(tbl.WireColumns)
 	tbl.Release()
 	if err != nil {
@@ -457,11 +470,19 @@ func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelay
 		slog.WarnContext(ctx, "ingest body refused by the parser", "error", r.Message, "exception_code", r.Code, "table", run.table)
 		return &requestAbort{Status: http.StatusBadRequest, Message: r.Message, Code: codeCHRejected, ExceptionCode: r.Code}
 	}
+	if m := batch.Miscount; m != nil {
+		// Every record is answered declined (422) and nothing is published;
+		// logged once here because the cause is the batch's, not any record's.
+		slog.ErrorContext(ctx, "chtypes answered a different number of records than the body holds; declining the whole batch",
+			"counted", m.Counted, "exact", m.Exact, "verdicts", m.Verdicts,
+			"table", run.table, "format", format.String())
+	}
 	run.batch = batch
-	// chtypes' per-record answer is the record count: a JSON array sent as
-	// NDJSON is however many elements its reader took, a blank line is nothing.
-	// When it gave no per-record detail the padded batch is still index-shaped,
-	// so the same rule keeps every later index in range.
+	// The type layer's answer is the record count: chtypes' own verdicts when
+	// they account for every record in the body, or one declined verdict per
+	// counted record when they do not or chtypes gave no per-record detail.
+	// A JSON array sent as NDJSON is however many elements its reader took,
+	// a blank NDJSON line is nothing.
 	run.records = len(batch.Rows)
 	return nil
 }

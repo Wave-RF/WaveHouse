@@ -26,7 +26,7 @@ const { data } = await clicks.fetch({ limit: 50, signal: controller.signal });
 
 ### `.insert(data, opts?)`
 
-Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table={table}`. An **array** is serialized to NDJSON (one record per line) and sent as a single `application/x-ndjson` request, so a bad record no longer fails or hides the rest of the batch — per-record outcomes come back in the result.
+Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table={table}`. An **array** is serialized to NDJSON (one record per line) and sent as a single `application/x-ndjson` request, so a bad record does not fail the rest of the batch — per-record outcomes come back in the result. The exception is a body ClickHouse's reader cannot get through record by record (a short `UUID` that takes the records after it with it, for one): it is declined whole, every record a `422` and nothing inserted ([Batch Ingest](/api#batch-ingest)).
 
 ```ts
 // Single row → { ok: true } (or { ok: true, duplicate: true } when dedup skips it)

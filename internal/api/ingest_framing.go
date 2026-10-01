@@ -36,24 +36,29 @@ import (
 //     past it. JSONEachRow needs no brackets, so removing them costs nothing and
 //     makes every position salvageable, first and last included;
 //   - every other newline outside a string, before or after the brackets too,
-//     becomes a space. Not cosmetic: when chtypes declines a whole batch
-//     without per-record detail, the type layer counts the body's lines to
-//     answer each record, so a pretty-printed array would come back with one
-//     phantom declined record per line of layout. This leaves exactly
-//     elements-1 newlines, so that count stays right.
+//     becomes a space, leaving exactly elements-1 newlines. Not cosmetic:
+//     ClickHouse's reader resumes after a bad record at the next newline, so
+//     a layout newline inside an element would resume it mid-element.
 //
 // A raw newline inside a string is illegal JSON, so leaving those alone costs
 // nothing and keeps the caller's bytes the caller's.
 //
+// The element count is exact, and it is what the type layer holds chtypes'
+// answer to: any other number of verdicts declines the whole body
+// (typelayer.IngestOptions.Records).
+//
 // An error is a whole-request 400, and nothing is published from a body we
 // cannot frame: errUnterminatedArray when the brackets do not balance — a
-// truncated upload, or a structural syntax error — and errAfterArray when
+// truncated upload, or a structural syntax error — errEmptyElement for a
+// leading, doubled or trailing comma, which frames as a blank line that is no
+// record to ClickHouse and so would break the count, and errAfterArray when
 // anything but whitespace follows the array's closing ']'. That tail is not a
 // record of the array, and framing it as more records would publish what the
 // caller never put in the batch.
 func reframeArray(b []byte) (elements int, err error) {
 	depth, commas := 0, 0
 	sawValue, closed := false, false
+	element := false // a value since the opening bracket or the last depth-1 comma
 	inStr, esc := false, false
 	for i := range b {
 		c := b[i]
@@ -75,9 +80,11 @@ func reframeArray(b []byte) (elements int, err error) {
 		case c == '"':
 			inStr = !inStr
 			sawValue = sawValue || depth >= 1
+			element = element || depth >= 1
 		case inStr:
 		case c == '[' || c == '{':
 			sawValue = sawValue || depth >= 1
+			element = element || depth >= 1
 			depth++
 			if c == '[' && depth == 1 {
 				b[i] = ' '
@@ -88,17 +95,25 @@ func reframeArray(b []byte) (elements int, err error) {
 				if c != ']' {
 					return 0, errUnterminatedArray // the array's '[' closed by a '}'
 				}
+				if sawValue && !element {
+					return 0, errEmptyElement // `[{…},]`
+				}
 				b[i] = ' '
 				closed = true
 			}
 		case c == ',' && depth == 1:
+			if !element {
+				return 0, errEmptyElement // `[,{…}]`, `[{…},,{…}]`
+			}
 			b[i] = '\n'
 			commas++
+			element = false
 		case c == '\n' || c == '\r':
 			b[i] = ' '
 		case c == ' ' || c == '\t':
 		default:
 			sawValue = sawValue || depth >= 1
+			element = element || depth >= 1
 		}
 	}
 	if depth != 0 || inStr {
@@ -110,10 +125,11 @@ func reframeArray(b []byte) (elements int, err error) {
 	return commas + 1, nil
 }
 
-// The two ways reframeArray refuses a body, each the tail of the caller's
+// The three ways reframeArray refuses a body, each the tail of the caller's
 // "invalid json: …" 400.
 var (
 	errUnterminatedArray = errors.New("unterminated json array")
+	errEmptyElement      = errors.New("empty element in the json array (a leading, doubled or trailing comma)")
 	errAfterArray        = errors.New("content after the closing ']' of the json array")
 )
 

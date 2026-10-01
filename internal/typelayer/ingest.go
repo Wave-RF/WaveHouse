@@ -28,6 +28,11 @@ type IngestOptions struct {
 	// measured on the 26.6 and 26.8 servers and artifacts). Ignored for other
 	// formats.
 	StrictPositional bool
+	// Records is the caller's own exact count of the records in body, when its
+	// framing gives one (a JSON array's elements), and 0 otherwise. chtypes
+	// answering any other number declines the whole body; without it the type
+	// layer counts a floor itself (see recordFloor).
+	Records int
 }
 
 // parseSettings is what a body is parsed under: the insert pins, plus header
@@ -89,15 +94,29 @@ type RowVerdict struct {
 // Batch holds one verdict per input record, in input order.
 type Batch struct {
 	// Rows holds one verdict per record chtypes read, in input order. When
-	// Answered is false chtypes gave no per-record detail (the whole batch was
-	// declined) and Rows is padded to the body's line count so a caller still
-	// has something index-shaped to report.
+	// Answered is false the whole batch was declined — chtypes gave no
+	// per-record detail, or answered fewer records than the body holds
+	// (Miscount) — and Rows holds one declined verdict per record counted in
+	// the body, so a caller still has something index-shaped to report.
 	Rows     []RowVerdict
 	Answered bool
 	// Refused is ClickHouse's own refusal of a WithNames body as a whole — a
 	// header naming a column the schema does not have, or naming one twice —
 	// before any record was read. Rows is then empty; nil otherwise.
 	Refused *Refusal
+	// Miscount is set when chtypes answered a different number of records than
+	// the body holds: fewer than the type layer's own floor, or other than the
+	// caller's exact count (IngestOptions.Records). The batch is then declined
+	// whole — Answered false, one declined verdict per counted record — so a
+	// record chtypes never read cannot go unreported. nil otherwise.
+	Miscount *Miscount
+}
+
+// Miscount is how far chtypes' answer fell from the body's own count.
+type Miscount struct {
+	Counted  int  // records in the body: the caller's exact count, or a floor
+	Verdicts int  // verdicts chtypes returned
+	Exact    bool // Counted is IngestOptions.Records rather than a floor
 }
 
 // Refusal is ClickHouse's verdict on a body rather than on any one record.
@@ -136,6 +155,10 @@ type Refusal struct {
 // never reaches the compiler; a filter that will not compile declines every
 // accepted record. The compiled filter is cached per (generation, expression,
 // values) on the handle it runs against.
+//
+// The verdicts account for every record or for none: when chtypes answers
+// fewer records than the body holds (recordFloor), the whole body is declined
+// (Batch.Miscount) rather than returned short.
 //
 // Document flags stay lean (verdicts and exported bytes only). The per-value
 // provenance DocValues would give costs 2.65× on this path and nothing here
@@ -187,18 +210,27 @@ func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, check
 			(format == FormatCSVWithNames || format == FormatTSVWithNames) {
 			return Batch{Answered: true, Refused: &Refusal{Code: res.ErrCode, Message: res.ErrMsg}}, nil
 		}
-		return declineAll(countRecords(body, len(res.Rows)), firstNonEmpty(res.ExportDeclined, res.ErrMsg, res.Outcome.String())), nil
+		n := declineCount(opts.Records, len(res.Rows), t.floor(s, format, opts, body), body)
+		return declineAll(n, firstNonEmpty(res.ExportDeclined, res.ErrMsg, res.Outcome.String())), nil
 	}
 	// Accepted but withheld (the full-arity guard, a serialization failure):
 	// nothing can be forwarded, whatever the per-row detail says.
 	if res.ExportDeclined != "" {
-		return declineAll(countRecords(body, len(res.Rows)), res.ExportDeclined), nil
+		n := declineCount(opts.Records, len(res.Rows), t.floor(s, format, opts, body), body)
+		return declineAll(n, res.ExportDeclined), nil
 	}
 
-	// chtypes answered per record, so its count is the record count: the
-	// verdicts are index-aligned with the records it read, and padding to the
-	// body's newline count would invent declined records out of blank lines
-	// and pretty-printed framing.
+	// chtypes answered per record, and its verdicts are index-aligned with the
+	// records it read — which is every record only if it read as many as the
+	// body holds. Fewer means its reader took some records with another (see
+	// recordFloor), and reporting the short batch would drop them without a
+	// word: decline the body whole instead. More is checked only against an
+	// exact count, because a floor is no ceiling.
+	if m := miscount(opts.Records, len(res.Rows), t.floor(s, format, opts, body)); m != nil {
+		b := declineAll(m.Counted, m.message(res.Rows))
+		b.Miscount = m
+		return b, nil
+	}
 	out := Batch{Rows: make([]RowVerdict, len(res.Rows)), Answered: true}
 	for i := range out.Rows {
 		v := rowVerdict(res.Rows[i], span(res, i), filter != nil)
@@ -309,6 +341,64 @@ func span(res chtypes.BatchResult, i int) []byte {
 	return bytes.TrimSuffix(res.Payload[s.Off:s.Off+s.Len], []byte("\n"))
 }
 
+// floor is recordFloor for body against this handle's columns: header
+// auto-detection compares a first line with the wire columns and a second with
+// their compiled types. Skipped when the caller has an exact count.
+func (t *Table) floor(s *schemaSlot, format Format, opts IngestOptions, body []byte) int {
+	if opts.Records > 0 {
+		return 0
+	}
+	var types map[string]string
+	if (format == FormatCSV || format == FormatTSV) && !opts.StrictPositional {
+		types = make(map[string]string, len(s.schema.Columns))
+		for _, c := range s.schema.Columns {
+			types[c.Name] = c.Type
+		}
+	}
+	return recordFloor(format, opts, body, t.WireColumns, types)
+}
+
+// miscount compares chtypes' verdict count with the body's: exact (the
+// caller's count, any difference) or a floor (fewer only). nil when they agree.
+func miscount(exact, verdicts, floor int) *Miscount {
+	switch {
+	case exact > 0 && verdicts != exact:
+		return &Miscount{Counted: exact, Verdicts: verdicts, Exact: true}
+	case exact == 0 && verdicts < floor:
+		return &Miscount{Counted: floor, Verdicts: verdicts}
+	}
+	return nil
+}
+
+// message is every declined record's error: the two counts, and the first
+// record chtypes refused, which is where the records went missing — the
+// verdicts before it are aligned with the body, so its index is the caller's.
+func (m *Miscount) message(rows []chtypes.RowResult) string {
+	holds := "at least "
+	if m.Exact {
+		holds = ""
+	}
+	msg := fmt.Sprintf("the body holds %s%d records but chtypes answered %d, so the batch is declined whole rather than reported short",
+		holds, m.Counted, m.Verdicts)
+	for i, r := range rows {
+		if r.Outcome == chtypes.Rejected || r.Outcome == chtypes.Skipped {
+			return msg + fmt.Sprintf("; record %d was refused (code %d: %s) and its reader may have taken the records after it", i+1, r.ErrCode, r.ErrMsg)
+		}
+	}
+	return msg
+}
+
+// declineCount is how many records a whole-batch decline answers: the caller's
+// exact count when it has one, else the larger of chtypes' own count and the
+// floor — chtypes may have stopped short of the body's end — and the body's
+// line count when neither saw a record.
+func declineCount(exact, verdicts, floor int, body []byte) int {
+	if exact > 0 {
+		return exact
+	}
+	return countRecords(body, max(verdicts, floor))
+}
+
 func declineAll(n int, msg string) Batch {
 	b := Batch{Rows: make([]RowVerdict, n)}
 	for i := range b.Rows {
@@ -317,14 +407,12 @@ func declineAll(n int, msg string) Batch {
 	return b
 }
 
-// countRecords recovers the input record count when chtypes returned no
-// per-row detail, so the caller still gets an index-aligned answer. JSONEachRow
-// records are newline-separated and a raw newline inside a JSON string is
-// illegal, so counting lines is exact for compact NDJSON and a re-framed array.
-// A blank line, a pretty-printed object's inner lines, a CSV field holding a
-// raw newline and a WithNames header each add a line that is no record, so the
-// fallback can OVER-count, which produces extra declined verdicts — never an
-// extra acceptance.
+// countRecords is the record count of a declined batch: known when anything
+// counted a record, else the body's line count, so the caller still gets an
+// index-shaped answer. A blank line, a pretty-printed object's inner lines, a
+// CSV field holding a raw newline and a WithNames header each add a line that
+// is no record, so the fallback can OVER-count, which produces extra declined
+// verdicts — never an extra acceptance.
 func countRecords(body []byte, known int) int {
 	if known > 0 {
 		return known

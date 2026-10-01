@@ -98,9 +98,11 @@ export class TableRef<Row = Record<string, unknown>> {
    *
    * A single object is sent as a JSON `POST /v1/ingest`. An **array** is
    * serialized to NDJSON (one record per line) and sent as a single
-   * `application/x-ndjson` request: a bad record no longer fails or hides the
-   * rest of the batch — per-record outcomes come back in the result
-   * (`failed` / `results`), and `ok` is true only when every record succeeded.
+   * `application/x-ndjson` request: a bad record does not fail the rest of
+   * the batch — per-record outcomes come back in the result (`failed` /
+   * `results`), and `ok` is true only when every record succeeded. A body the
+   * server's parser cannot read record by record is declined whole: every
+   * record fails with `validation engine declined: …` and none is inserted.
    *
    * The array path sends one request regardless of size, so it is bound by the
    * server's 16 MiB request-body cap (an over-cap array is a `413` with nothing
