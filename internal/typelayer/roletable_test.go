@@ -2,6 +2,7 @@ package typelayer
 
 import (
 	"encoding/json"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -284,14 +285,35 @@ func TestRoleTable_BoundedUnderTenantValueChurn(t *testing.T) {
 	assert.Equal(t, `[1, "acme", "", 5]`, string(batch.Rows[0].Line))
 }
 
-// TestRoleTable_HasItsOwnHandlePool: a role shape holds its own single handle,
-// not the base table's pool (256 shapes x the pool would be unbounded memory).
-func TestRoleTable_HasItsOwnHandlePool(t *testing.T) {
+// TestRoleTable_PoolGrowsUnderContentionToALowerCap: a role shape has its own
+// pool, not the base table's. A quiet shape holds one handle; concurrent
+// inserts through it grow the pool like a base table's — one handle would
+// serialize the role's whole ingest — but only to min(GOMAXPROCS, 4), since a
+// table holds up to roleCacheSize shapes.
+func TestRoleTable_PoolGrowsUnderContentionToALowerCap(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(8))
 	eng := testEngine(t, ordersTable())
 	tbl := roleTableFor(t, eng, RoleShape{Defaults: map[string]string{"tenant": "acme"}})
-	assert.Len(t, tbl.pool.list(), roleHandles)
-	assert.Equal(t, int64(roleHandles), tbl.pool.limit.Load(), "a role shape never grows past its one handle")
 	assert.Nil(t, tbl.roles, "a projection is never itself projected")
+
+	p := tbl.pool
+	require.Len(t, p.list(), 1, "a quiet shape holds one handle")
+	assert.Equal(t, int64(maxRolePoolSize), p.limit.Load(), "capped below the base table's %d", maxPoolSize)
+
+	held := make([]*schemaSlot, 0, maxRolePoolSize+1)
+	for range maxRolePoolSize + 1 {
+		held = append(held, p.acquire())
+	}
+	assert.Len(t, p.list(), maxRolePoolSize, "busy handles grow the pool to its cap and no further")
+	for _, s := range held {
+		p.release(s)
+	}
+
+	// The grown handles answer like the first: the injected default included.
+	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"id":1,"amount":5}`+"\n"))
+	require.NoError(t, err)
+	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
+	assert.Equal(t, `[1, "acme", "", 5]`, string(batch.Rows[0].Line))
 }
 
 func (c *roleCache) len() int {

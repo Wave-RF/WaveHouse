@@ -20,19 +20,27 @@ import (
 // process-wide serialization gate never beats one thread (0.83-1.0x). A
 // compiled handle costs ~40 KiB (~96 KiB warm). That cost multiplies by
 // tables and by tenants, so a pool starts at one handle and grows only when
-// every handle it has is busy (see pool.acquire). Role tables keep one handle
-// (roleHandles): hot tenants already spread over distinct role handles, and
-// 256 shapes x 8 warm handles would be ~200 MiB. An earlier darwin run showed
+// every handle it has is busy (see pool.acquire). An earlier darwin run showed
 // a flat curve, so treat the size as hardware-dependent and re-measure it on
 // the deployment hardware.
 const maxPoolSize = 8
 
-// roleHandles is the handle count of a role-shape table.
-const roleHandles = 1
+// maxRolePoolSize caps a role-shape table's pool. Every insert of a
+// column-restricted or check-injecting role runs on its shape's handles, so
+// one handle would serialize that role's whole ingest; but a table holds up to
+// roleCacheSize shapes, and 256 x 8 warm handles would be ~200 MiB where
+// 256 x 4 is half that. Like a base table, a shape grows past one handle only
+// under contention, so a quiet shape keeps one.
+const maxRolePoolSize = 4
 
 // poolSize is how many identical handles one base-table shape may grow to.
 func poolSize() int {
 	return max(min(runtime.GOMAXPROCS(0), maxPoolSize), 1)
+}
+
+// rolePoolSize is how many identical handles one role shape may grow to.
+func rolePoolSize() int {
+	return max(min(runtime.GOMAXPROCS(0), maxRolePoolSize), 1)
 }
 
 // compileSettings is the fixed parsing profile every table handle is compiled
