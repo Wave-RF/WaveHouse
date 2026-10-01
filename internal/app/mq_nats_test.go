@@ -46,7 +46,7 @@ func TestNew_NATSBackend(t *testing.T) {
 	_, ok := a.MQ().(*mq.ExternalNATS)
 	require.True(t, ok, "mq.backend: nats wires mq.ExternalNATS, got %T", a.MQ())
 	assert.Equal(t, []string{
-		"clickhouse", "schema discovery", "dedupe", "mq", "cache", "coord",
+		"clickhouse", "type layer", "schema discovery", "dedupe", "mq", "cache", "coord",
 		"hub bridge", "keepalive", "ingest worker",
 		"auth", "sighup", "settings watcher", "http server",
 	}, componentNames(a))
@@ -102,7 +102,7 @@ func TestNew_NATSUnreachable(t *testing.T) {
 	guardGlobals(t)
 	cfg := natsConfig(t, "nats://"+closedAddr(t))
 	cfg.MQ.NATS.TopologyWait = time.Millisecond
-	_, err := New(t.Context(), Options{Config: cfg})
+	_, err := newForTest(t.Context(), t, Options{Config: cfg})
 	require.ErrorIs(t, err, mq.ErrUnavailable)
 	assert.ErrorContains(t, err, "mq open")
 }
@@ -114,7 +114,7 @@ func TestNew_NATSTopologyMissing(t *testing.T) {
 	guardGlobals(t)
 	cfg := natsConfig(t, srv.URL())
 	cfg.MQ.NATS.TopologyWait = time.Millisecond
-	_, err := New(t.Context(), Options{Config: cfg})
+	_, err := newForTest(t.Context(), t, Options{Config: cfg})
 	require.ErrorIs(t, err, mq.ErrTopology)
 	assert.ErrorContains(t, err, "dead-letter stream")
 }

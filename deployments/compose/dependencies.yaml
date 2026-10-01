@@ -11,10 +11,11 @@ name: wavehouse-dev
 
 services:
   clickhouse:
-    # Pinned to match tests/integration/setup_test.go (26.8 changed numeric
-    # DateTime64 parsing; see the comment there) so the dev server behaves
-    # like the one the tests assert against.
-    image: clickhouse/clickhouse-server:26.6.3.62
+    # Pinned to match tests/integration/setup_test.go, so the dev server
+    # behaves like the one the tests assert against, and to a ClickHouse line
+    # chtypes.lock has an artifact for: the type layer answers with the
+    # artifact matching the server's own version.
+    image: clickhouse/clickhouse-server:26.8.15.10
     ports:
       - "8123:8123"
       - "9000:9000"

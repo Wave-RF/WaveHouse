@@ -438,9 +438,8 @@ func newFakeRegistry(t *testing.T, errs []error) (*SchemaRegistry, *fakeConn) {
 }
 
 // TestRefresh_UnresolvableServerTimezone_NotFatal: an unresolvable server zone
-// degrades to pass-through canonicalization (#372), never a failed refresh,
-// and the registry still publishes the name verbatim: whoever consumes it
-// decides what an unusable zone means.
+// is never a failed refresh, and the registry still publishes the name
+// verbatim: whoever consumes it decides what an unusable zone means.
 func TestRefresh_UnresolvableServerTimezone_NotFatal(t *testing.T) {
 	t.Parallel()
 	conn := &fakeConn{tz: "Not/AZone"}

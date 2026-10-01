@@ -106,11 +106,13 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:vX.Y.Z \
 
 ## chtypes artifacts
 
-**What it is.** WaveHouse validates ingest data, coerces types, substitutes `DEFAULT`s, and evaluates row-level security by running ClickHouse's own parser in-process, through [chtypes](https://github.com/wave-rf/chtypes) (`github.com/wave-rf/chtypes/go` v0.4.0). The parser itself ships as a shared library (`libchtypes.so` / `.dylib`) built per **ClickHouse minor line** (e.g. `26.6`) and per platform. There is no nearest-version fallback: each tenant's table set is compiled from its own schema refresh against the artifact matching that tenant's ClickHouse server, and a library is opened lazily, the first time a tenant on that line is bound.
+**What it is.** WaveHouse validates ingest data, coerces types, substitutes `DEFAULT`s, and evaluates row-level security by running ClickHouse's own parser in-process, through [chtypes](https://github.com/wave-rf/chtypes) (`github.com/wave-rf/chtypes/go` v0.5.1). The parser itself ships as a shared library (`libchtypes.so` / `.dylib`) built per **ClickHouse minor line** (e.g. `26.8`) and per platform. There is no nearest-version fallback: each tenant's table set is compiled from its own schema refresh against the artifact matching that tenant's ClickHouse server, and a library is opened lazily, the first time a tenant on that line is bound.
+
+**The line this build is tested on.** The repository pins ClickHouse **26.8** (`chtypes.lock` names the 26.8.15.10 build, and the compose files and the integration suite run `clickhouse/clickhouse-server:26.8.15.10`). The type layer inherits ClickHouse's own parsing rules, so they are the connected server's: for instance, 26.8 reads a bare JSON number in a `DateTime64` column as epoch **seconds**, so an epoch-millisecond number clamps to `9999-12-31` — WaveHouse stores what the server would.
 
 **Which processes load it.** Only processes with the `api` role — the ones that serve ingest and the stream. A process that runs only the ingest worker or the sweeper loads no artifact and boots without one installed. An API process refuses to start when no artifact is installed at all.
 
-**What a mismatch does.** A tenant whose ClickHouse line has no installed artifact is refused on its own — ingest answers `503` (`Retry-After: 5`) and the stream withholds its rows with reason `unavailable` — while every other tenant keeps working; it recovers at the next schema refresh once an artifact is installed. The same holds for the server time zone: the library reads its time zone once, when a line is first opened, so one process serves **one server time zone per ClickHouse line**. A tenant whose server reports a different zone from the one this process already opened that line with is refused the same way, with a message naming both zones; run such tenants in a separate process, or align the servers' `timezone` setting. See [API → Ingest error responses](/api#error-responses) and [Access Control → Where each rule is enforced](/access-control#where-each-rule-is-enforced).
+**What a mismatch does.** A tenant whose ClickHouse line has no installed artifact is refused on its own — ingest answers `503` (`Retry-After: 5`) and the stream withholds its rows with reason `unavailable` — while every other tenant keeps working; it recovers at the next schema refresh once an artifact is installed. The same holds for the server time zone: the library reads its time zone once, when a line is first opened, so one process serves **one server time zone per ClickHouse line**. A tenant whose server reports a different zone from the one this process already opened that line with is refused the same way, with the cause in the server log; run such tenants in a separate process, or align the servers' `timezone` setting. See [API → Ingest error responses](/api#error-responses) and [Access Control → Where each rule is enforced](/access-control#where-each-rule-is-enforced).
 
 **Where it lives.** WaveHouse looks for the artifact in a registry directory, in order: an explicit `clickhouse.chtypes_registry` (`WH_CHTYPES_REGISTRY`) if set, then chtypes' own default search path — `$CHTYPES_REGISTRY`, the per-user cache `~/.cache/chtypes/artifacts/abi6/<os>-<arch>` (one directory per SDK ABI revision, so an older SDK's downloads are never picked up), then the system directories `/usr/local/share/chtypes/artifacts/<platform>` and `/opt/chtypes/artifacts/<platform>`. WaveHouse does not autofetch on a miss in production — an unmatched line is a boot-time or refresh-time failure, not a background download.
 
@@ -121,20 +123,20 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:vX.Y.Z \
 **Release archives and `go install` / building from source** do not carry or fetch an artifact — only the Docker images bake one in. See the [README's `go install` caveat](https://github.com/Wave-RF/WaveHouse#c-go-install-binary-no-docker). Fetch one yourself before first run:
 
 ```bash
-scripts/fetch-chtypes.sh   # wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.4.0 fetch --frozen --lock chtypes.lock 26.6
+scripts/fetch-chtypes.sh   # wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.5.1 fetch --frozen --lock chtypes.lock 26.8
 ```
 
 or, for a line not in the repo's lock file:
 
 ```bash
-go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.4.0 fetch <your-clickhouse-minor-version>
+go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.5.1 fetch <your-clickhouse-minor-version>
 ```
 
 ### Pinning with `chtypes.lock`
 
-`chtypes.lock`, checked in at the repo root, records the exact artifact file and SHA-256 per platform/line the project builds and tests against. CI restores from it with `--frozen` (refusing anything the lock doesn't name) rather than fetching the rolling artifact release, so a pipeline never silently starts testing a new build. Refresh it deliberately — `go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.4.0 fetch --lock chtypes.lock --platform <os-arch> <line>`, once per platform (`darwin-arm64`, `linux-amd64`, `linux-arm64`), without `--frozen` — and commit the result; don't regenerate it implicitly.
+`chtypes.lock`, checked in at the repo root, records the exact artifact file and SHA-256 per platform/line the project builds and tests against. CI restores from it with `--frozen` (refusing anything the lock doesn't name) rather than fetching the rolling artifact release, so a pipeline never silently starts testing a new build. Refresh it deliberately — `go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.5.1 fetch --lock chtypes.lock --platform <os-arch> <line>`, once per platform (`darwin-arm64`, `linux-amd64`, `linux-arm64`), without `--frozen` — and commit the result; don't regenerate it implicitly.
 
-A lock is specific to the SDK's ABI revision (6 at v0.4.0): the fetcher never selects a build from another revision, so after an SDK bump that changes the revision, `--frozen` fails (`CHTYPES_ARTIFACT_PINNED` or `CHTYPES_ARTIFACT_UNPUBLISHED`) until the lock is regenerated the same way, and the CI cache key and path (`abi6`) move with it.
+A lock is specific to the SDK's ABI revision (6 at v0.5.1): the fetcher never selects a build from another revision, so after an SDK bump that changes the revision, `--frozen` fails (`CHTYPES_ARTIFACT_PINNED` or `CHTYPES_ARTIFACT_UNPUBLISHED`) until the lock is regenerated the same way, and the CI cache key and path (`abi6`) move with it.
 
 ## Releases
 

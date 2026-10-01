@@ -20,6 +20,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -838,20 +839,20 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	q.Set("database", t.Database)
 	q.Set("param_target_table", tableName)
 	q.Set("query", fmt.Sprintf("INSERT INTO {target_table:Identifier} (%s) FORMAT JSONCompactEachRow", strings.Join(quoted, ", ")))
-	q.Set("date_time_input_format", "best_effort")
-	// A field the record omitted rides as an explicit null in its column's slot,
-	// because a positional row has one value per column and no way to say
-	// "absent". For a NON-nullable column with a default this setting turns that
-	// null back into the default, matching what omitting the key did under
-	// JSONEachRow. It is already the server default (verified on 26.6.3), so
-	// this is belt-and-braces for a server configured otherwise.
-	//
-	// TRANSITIONAL DIVERGENCE, and it is NOT what this setting controls: on a
-	// NULLABLE column an explicit null is stored as NULL whatever the setting
-	// says — only an ABSENT key ever took the default. So a `Nullable(T) DEFAULT
-	// …` column now stores NULL where it previously took its default. Verified
-	// on 26.6.3: omitted key → default; explicit null → NULL at both settings.
-	q.Set("input_format_null_as_default", "1")
+	// The parsing settings are the ones the API judged these rows under
+	// (typelayer), not literals of the worker's own: a setting the two did not
+	// share would ask the server a question chtypes never answered. Each row
+	// is ClickHouse's own export of its record, DEFAULTs already evaluated, so
+	// parsing it again under the same settings stores the values judged.
+	for k, v := range typelayer.InsertSettings() {
+		q.Set(k, v)
+	}
+	// Synchronous: the worker acks a message only once its row is in, so an
+	// async buffer would ack rows still in flight. Not a parsing setting, so
+	// chtypes never sees it. insert_deduplicate stays at the server default:
+	// idempotency is the gateway's (internal/dedupe), and a Replicated
+	// engine's block-hash dedupe is the operator's choice for their engine.
+	q.Set("async_insert", "0")
 
 	req, err := http.NewRequestWithContext(ctx, "POST", t.URL+"?"+q.Encode(), &buf)
 	if err != nil {

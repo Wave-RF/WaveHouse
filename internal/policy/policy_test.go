@@ -127,9 +127,10 @@ func TestEvaluate_FilterWithClaimTemplate(t *testing.T) {
 	claims := map[string]any{"org_id": "org-123"}
 	perms := Evaluate(p, "user", "clicks", "select", claims)
 	assert.True(t, perms.Allowed)
-	assert.Contains(t, perms.Select.WhereClause, "`org_id` = ?")
-	require.Len(t, perms.Select.WhereParams, 1)
-	assert.Equal(t, "org-123", perms.Select.WhereParams[0])
+	where, whereParams := perms.Select.WhereSQL(nil)
+	assert.Contains(t, where, "`org_id` = ?")
+	require.Len(t, whereParams, 1)
+	assert.Equal(t, "org-123", whereParams[0])
 }
 
 func TestEvaluate_CheckClauses(t *testing.T) {
@@ -149,28 +150,6 @@ func TestEvaluate_CheckClauses(t *testing.T) {
 	assert.True(t, perms.Allowed)
 	require.Contains(t, perms.Insert.CheckClauses, "org_id")
 	assert.Equal(t, "org-456", perms.Insert.CheckClauses["org_id"])
-}
-
-// TestEvaluate_CheckClauses_StaticLiteralTyped: a placeholder-free check
-// value is wrapped as LiteralValue — the marker that lets the ingest
-// comparison accept its numeric reading — while a claim-derived value (above)
-// stays a plain string, so a string-typed claim can never gain that reading.
-func TestEvaluate_CheckClauses_StaticLiteralTyped(t *testing.T) {
-	t.Parallel()
-	eqVal := "1.0"
-	p := &Policy{
-		Tables: map[string]TablePolicy{
-			"clicks": {
-				"user": {Insert: &InsertPermissions{Check: map[string]Filter{
-					"count": {Eq: &eqVal},
-				}}},
-			},
-		},
-	}
-	perms := Evaluate(p, "user", "clicks", "insert", map[string]any{})
-	assert.True(t, perms.Allowed)
-	require.Contains(t, perms.Insert.CheckClauses, "count")
-	assert.Equal(t, LiteralValue("1.0"), perms.Insert.CheckClauses["count"])
 }
 
 func TestEvaluate_AggregationLimits(t *testing.T) {
@@ -471,8 +450,7 @@ func TestResolveTemplate(t *testing.T) {
 		// A static literal binds exactly as written even when it spells a JSON
 		// number: canonicalizing it here would move read filters on String
 		// columns (`_neq: "1.0"` on a version column would stop excluding rows
-		// storing "1.0"). The insert-check comparison accepts the numeric
-		// reading at compare time instead (CanonicalNumericLiteral).
+		// storing "1.0"). The insert check judges the literal in ClickHouse.
 		{"numeric-spelled literal binds as written", "1.0", "1.0", true},
 		{"exponent-spelled literal binds as written", "1e400", "1e400", true},
 	}
@@ -572,41 +550,6 @@ func TestCanonicalScalar(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got, ok := CanonicalScalar(tt.v)
-			assert.Equal(t, tt.want, got)
-			assert.Equal(t, tt.ok, ok)
-		})
-	}
-}
-
-// TestCanonicalNumericLiteral pins the numeric reading of a policy-authored
-// check literal: only spellings JSON itself can produce canonicalize — the
-// json.Valid gate rejects big.Int-acceptable forms like "+5" and "007" that
-// no decoded claim or payload value ever carries, so the check comparison's
-// second reading can't accept a spelling the first side can't produce.
-func TestCanonicalNumericLiteral(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		lit  string
-		want string
-		ok   bool
-	}{
-		{"float spelling of an integer", "1.0", "1", true},
-		{"exponent spelling", "25e-4", "0.0025", true},
-		{"negative fraction", "-2.50", "-2.5", true},
-		{"integer passes through", "7", "7", true},
-		{"leading plus is not JSON", "+5", "", false},
-		{"leading zero is not JSON", "007", "", false},
-		{"whitespace-padded number is not a bare literal", " 5", "", false},
-		{"non-numeric literal", "org-123", "", false},
-		{"boolean literal is valid JSON but not a number", "true", "", false},
-		{"empty literal", "", "", false},
-		{"no canonical form past the bound", "1e400", "", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, ok := CanonicalNumericLiteral(tt.lit)
 			assert.Equal(t, tt.want, got)
 			assert.Equal(t, tt.ok, ok)
 		})
@@ -1029,8 +972,9 @@ func TestEvaluate_FilterUnresolvableClaim_FailsClosed(t *testing.T) {
 	}}
 	perms := Evaluate(p, "user", "clicks", "select", map[string]any{"role": "user"})
 	require.True(t, perms.Allowed)
-	assert.Equal(t, "1 = 0", perms.Select.WhereClause)
-	assert.Empty(t, perms.Select.WhereParams)
+	where, whereParams := perms.Select.WhereSQL(nil)
+	assert.Equal(t, "1 = 0", where)
+	assert.Empty(t, whereParams)
 }
 
 // TestValidate_RejectsBindUnsafeFilterColumn: a policy whose row-filter column
@@ -1181,7 +1125,7 @@ func TestResolveFilters_InNumericElements_BindCanonically(t *testing.T) {
 // exact digits; a float64 below 2^53 binds positionally (never the "1e+06"
 // spelling ClickHouse integer columns reject); a float64 at or past 2^53 lost
 // its digits at decode, so the predicate renders `1 = 0` — matching no rows, the
-// same verdict RowVisible reaches in memory — alone or as one _in element.
+// same verdict the type layer reaches — alone or as one _in element.
 func TestResolveFilters_NumericClaimBinding(t *testing.T) {
 	t.Parallel()
 	tmpl := "{{ jwt.tenant }}"
@@ -1204,36 +1148,6 @@ func TestResolveFilters_NumericClaimBinding(t *testing.T) {
 		map[string]any{"tenants": []any{"a", float64(1 << 60)}})
 	assert.Equal(t, []string{"1 = 0"}, clauses, "one poisoned element resolves the whole set empty")
 	assert.Empty(t, params)
-}
-
-// TestCompareCanonicalDecimals pins the digit-string ordering over canonical
-// forms — the comparison twin of canonicalDecimal, exact at any width, never a
-// float round-trip. Each pair is asserted in both directions.
-func TestCompareCanonicalDecimals(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		a, b string
-		want int
-	}{
-		{"0", "0", 0},
-		{"1", "2", -1},
-		{"9", "100", -1},
-		{"-1", "1", -1},
-		{"-2", "-1", -1},
-		{"-100", "-9", -1},
-		{"1.5", "1.5", 0},
-		{"1.05", "1.5", -1},
-		{"0.5", "0.55", -1},
-		{"2", "2.5", -1},
-		{"-1.5", "-1", -1},
-		{"0.0025", "0.003", -1},
-		{"12345678901234567890", "12345678901234567891", -1},
-		{"9007199254740992", "9007199254740993", -1},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.want, compareCanonicalDecimals(tt.a, tt.b), "%s vs %s", tt.a, tt.b)
-		assert.Equal(t, -tt.want, compareCanonicalDecimals(tt.b, tt.a), "%s vs %s reversed", tt.b, tt.a)
-	}
 }
 
 // TestResolveFilters_InEmptyClaim_FailsClosed: an empty set makes the predicate
@@ -1263,7 +1177,7 @@ func TestResolveFilters_InEmptyClaim_FailsClosed(t *testing.T) {
 }
 
 // TestEvaluate_FilterInClause: end-to-end through Evaluate, an _in filter lands
-// in the role's WhereClause/WhereParams (exercising the bind-safe guard + IN
+// in the role's WhereSQL (exercising the bind-safe guard + IN
 // assembly), not just the resolveFilters unit.
 func TestEvaluate_FilterInClause(t *testing.T) {
 	t.Parallel()
@@ -1274,8 +1188,9 @@ func TestEvaluate_FilterInClause(t *testing.T) {
 	claims := map[string]any{"app_metadata": map[string]any{"tenant_ids": []any{"t1", "t2"}}}
 	perms := Evaluate(p, "user", "clicks", "select", claims)
 	require.True(t, perms.Allowed)
-	assert.Contains(t, perms.Select.WhereClause, "`tenant_id` IN (?,?)")
-	assert.Equal(t, []any{"t1", "t2"}, perms.Select.WhereParams)
+	where, whereParams := perms.Select.WhereSQL(nil)
+	assert.Contains(t, where, "`tenant_id` IN (?,?)")
+	assert.Equal(t, []any{"t1", "t2"}, whereParams)
 }
 
 // TestEvaluate_CheckInResolvesToSet: an _in check resolves to a []any set in
@@ -1550,14 +1465,10 @@ func TestEvaluate_UnresolvedSideFailsClosed(t *testing.T) {
 	assert.False(t, ins.IsAggregationAllowed("count"))
 	assert.True(t, ins.HasRowFilter(),
 		"the GATE must not report 'no filter' — that sends the caller down the "+
-			"whole-bucket fast path where RowVisible is never consulted")
-	assert.False(t, ins.RowVisible(map[string]any{"tenant_id": "acme"}, nil),
-		"an unresolved read side must not admit every row")
+			"whole-bucket fast path")
 
 	// The select-resolved grant still evaluates its row filter normally.
 	assert.True(t, sel.HasRowFilter())
-	assert.True(t, sel.RowVisible(map[string]any{"tenant_id": "acme"}, nil))
-	assert.False(t, sel.RowVisible(map[string]any{"tenant_id": "globex"}, nil))
 }
 
 // TestHandBuiltPermissions_PresentSidesKeepPlainReading: a value assembled by
@@ -1571,7 +1482,6 @@ func TestHandBuiltPermissions_PresentSidesKeepPlainReading(t *testing.T) {
 	assert.True(t, rp.IsColumnAllowed("anything", true))
 	assert.True(t, rp.IsAggregationAllowed("count"))
 	assert.False(t, rp.RestrictsColumns())
-	assert.True(t, rp.RowVisible(map[string]any{"a": 1}, nil))
 	// An EMPTY insert side has no checks and is resolved — not the same answer as
 	// a nil one below. A slip to `rp.Insert != nil && len(...) > 0` would break
 	// exactly here.
@@ -1593,10 +1503,9 @@ func TestHandBuiltPermissions_NilSideDenies(t *testing.T) {
 	assert.False(t, insertOnly.IsAggregationAllowed("count"))
 	assert.True(t, insertOnly.RestrictsColumns(), "an unresolved read side restricts everything")
 	// HasRowFilter says YES on an unresolved read side on purpose: it routes the
-	// hub onto the per-subscriber path where RowVisible denies, instead of the
-	// no-filter fast path that never consults RowVisible at all.
+	// hub onto the per-subscriber path, which denies, instead of the no-filter
+	// fast path.
 	assert.True(t, insertOnly.HasRowFilter(), "must not take the no-filter fast path")
-	assert.False(t, insertOnly.RowVisible(map[string]any{"a": 1}, nil), "and the per-row check denies")
 	assert.Empty(t, insertOnly.AllowedProjection([]string{"a", "b"}))
 
 	_, insertChecksOK := insertOnly.CheckClauses()
@@ -1674,7 +1583,7 @@ func TestEvaluate_OperatorLessFilterAndCheckDenyFailClosed(t *testing.T) {
 	// `"tenant_id": {}` survives a strict decode — every Filter operator is
 	// omitempty — and then matches no case in either resolver, so the declared
 	// restriction resolves to nothing. Before this was refused, the policy below
-	// validated clean and RowVisible answered true for every tenant.
+	// validated clean and every tenant could read.
 	sel := &Policy{Tables: map[string]TablePolicy{
 		"clicks": {"viewer": {Select: &SelectPermissions{
 			AllowColumns: []string{"*"},
@@ -1700,7 +1609,6 @@ func TestEvaluate_OperatorLessFilterAndCheckDenyFailClosed(t *testing.T) {
 	selPerms := Evaluate(sel, "viewer", "clicks", "select", nil)
 	assert.False(t, selPerms.Allowed, "an operator-less filter must deny, not read as unrestricted")
 	assert.True(t, selPerms.HasRowFilter(), "a denied grant gates every row")
-	assert.False(t, selPerms.RowVisible(map[string]any{"tenant_id": "someone-else"}, nil))
 
 	insPerms := Evaluate(ins, "writer", "clicks", "insert", nil)
 	assert.False(t, insPerms.Allowed, "an operator-less check must deny, not drop the rule")
@@ -1757,7 +1665,7 @@ func TestPredicates_UnresolvableClaim_NoValuesOnBothPaths(t *testing.T) {
 	}
 }
 
-// TestPredicates_IsTheSameResolutionAsTheWhereClause: the two read surfaces are
+// TestPredicates_IsTheSameResolutionAsTheWhereSQL: the two read surfaces are
 // rendered from ONE resolvePredicates call, so the predicates handed to the
 // stream carry exactly the values bound into the query's WHERE — in the same
 // order. A second resolution, even of the same policy, is what #457 was about.
@@ -1773,8 +1681,6 @@ func TestPredicates_IsTheSameResolutionAsTheWhereClause(t *testing.T) {
 	clause, params := perms.Select.WhereSQL(nil)
 	assert.Equal(t, "`tenant_id` = ?", clause)
 	assert.Equal(t, []any{"acme"}, params)
-	assert.Equal(t, perms.Select.WhereClause, clause, "WhereSQL(nil) is the WhereClause rendering")
-	assert.Equal(t, perms.Select.WhereParams, params)
 
 	preds, ok := perms.Predicates()
 	require.True(t, ok)

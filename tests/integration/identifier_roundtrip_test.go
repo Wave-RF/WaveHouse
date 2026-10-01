@@ -15,9 +15,10 @@ package tests
 // identifiers client-side or delegates to server-side {name:Identifier} params.
 //
 // Fixtures are created with chQuoteIdent — an INDEPENDENT quoter that mirrors
-// ClickHouse's own backQuote() (escape backslash, then backtick, each with a
-// backslash). Using a different routine than the production builder is the point:
-// a bug in the builder cannot hide by "agreeing" with an identical bug here.
+// ClickHouse's own backQuote() byte for byte (backslash and backtick escaped,
+// and NUL, \b, \t, \n, \f, \r as their escape sequences). Using a different
+// routine than the production builder is the point: a bug in the builder
+// cannot hide by "agreeing" with an identical bug here.
 
 import (
 	"context"
@@ -34,11 +35,39 @@ import (
 )
 
 // chQuoteIdent quotes a ClickHouse identifier the way the server's backQuote()
-// does: escape backslash, then backtick, each with a leading backslash, and wrap
-// in backticks. This is the test's trusted oracle for CREATING fixtures with
-// arbitrary names — it is intentionally not the routine under test.
+// does, so a fixture's DDL is what ClickHouse itself would write for the name:
+// backslash and backtick get a leading backslash, the control characters
+// backQuote spells as escapes become them, and the result is wrapped in
+// backticks. This is the test's trusted oracle for CREATING fixtures with
+// arbitrary names — it is intentionally not the routine under test, and is
+// written byte by byte rather than as a replacer table so it shares no shape
+// with it.
 func chQuoteIdent(name string) string {
-	return "`" + strings.NewReplacer(`\`, `\\`, "`", "\\`").Replace(name) + "`"
+	var b strings.Builder
+	b.WriteByte('`')
+	for i := 0; i < len(name); i++ {
+		switch c := name[i]; c {
+		case '\\', '`':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		case 0:
+			b.WriteString(`\0`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	b.WriteByte('`')
+	return b.String()
 }
 
 // chQuoteString renders a ClickHouse single-quoted string literal for a
@@ -134,6 +163,7 @@ func TestIntegration_WeirdColumnNamesRoundTrip(t *testing.T) {
 		"tick`col",   // embedded backtick
 		`back\slash`, // embedded backslash — raw escaping drops it
 		`dq"col`,     // embedded double quote
+		"tab\tcol",   // a control character backQuote writes as an escape
 	}
 	for i, col := range weirdCols {
 		t.Run(col, func(t *testing.T) {

@@ -16,10 +16,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -36,13 +38,26 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/mq/natstest"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
 const (
 	testCHPassword = "test"
 	testCHDatabase = "default"
 	testCHUser     = "default"
+	// testOperatorKey is the shared app's operator key: the settings reload
+	// route takes it whatever policy is adopted.
+	testOperatorKey = "it-shared-operator-key"
+)
+
+// The suite's default roles.json and policies.json: default_role is the admin
+// role, so a plain unauthenticated request runs as a privileged caller.
+var (
+	defaultRoles    = []byte(`{"roles": ["admin"]}`)
+	defaultPolicies = []byte(`{"default_role": "admin"}`)
 )
 
 // testEnv holds the shared infrastructure available to every test.
@@ -53,6 +68,12 @@ type testEnv struct {
 	embeddedMQ mq.Broker
 	baseURL    string // the wired API server, e.g. http://127.0.0.1:41234
 	registry   *discovery.SchemaRegistry
+	// types is the wired app's type layer, bound from the default tenant's
+	// discovery by the app's own refresh hook.
+	types *typelayer.Engine
+	// settingsDir is the shared app's settings directory, which withPolicy
+	// rewrites and reloads.
+	settingsDir string
 	// dynamoEndpoint is dynamodb-local, for the DynamoDB dedupe backend's
 	// tests; the wired app does not use it.
 	dynamoEndpoint string
@@ -177,13 +198,19 @@ func setup() (int, func()) {
 		DataDir:    dataDir,
 		Server:     config.Server{ShutdownTimeout: 10},
 		ClickHouse: config.ClickHouse{Password: testCHPassword},
-		MQ:         config.MQ{Backend: config.MQEmbedded},
-		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 30}, // 1 GB
-		Dedupe:     config.Dedupe{Backend: config.DedupePebble},
-		Coord:      config.Coord{Backend: config.CoordLocal},
-		Roles:      config.AllRoles(),
-		Settings:   config.Settings{Dir: settingsDir},
+		// The JWT secret the suite mints tokens with (bearer), for the tests
+		// that run as a restricted role under a policy of their own.
+		Auth:     config.Auth{JWTSecret: testutil.TestJWTSecret, OperatorKey: testOperatorKey},
+		MQ:       config.MQ{Backend: config.MQEmbedded},
+		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 30}, // 1 GB
+		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
+		Coord:    config.Coord{Backend: config.CoordLocal},
+		Roles:    config.AllRoles(),
+		Settings: config.Settings{Dir: settingsDir},
 	}
+	// The api role opens the type layer, which needs the chtypes artifact for
+	// the container's ClickHouse line (scripts/fetch-chtypes.sh): without it
+	// app.New refuses, naming where it looked.
 	a, err := app.New(ctx, app.Options{Config: cfg, Listener: ln})
 	if err != nil {
 		_ = ln.Close()
@@ -219,6 +246,9 @@ func setup() (int, func()) {
 		embeddedMQ: a.MQ(),
 		baseURL:    baseURL,
 		registry:   a.Registry(),
+		types:      a.Types(),
+
+		settingsDir: settingsDir,
 
 		dynamoEndpoint: endpoint,
 	}
@@ -229,9 +259,10 @@ func setup() (int, func()) {
 // pointed at the testcontainer and a dev-style policy: default_role is the
 // admin role, so the suite's plain unauthenticated requests exercise
 // functionality as a privileged caller and can hit admin-gated endpoints
-// without minting JWTs. Auth enforcement is covered by the internal/auth
-// unit tests and the e2e SDK suite. The stream budget is shrunk to 1 GiB
-// like the e2e fixture so the scratch directory stays small.
+// without minting JWTs. A test that needs a restricted role adopts a policy
+// of its own (withPolicy) and sends a token for the role (bearer). The stream
+// budget is shrunk to 1 GiB like the e2e fixture so the scratch directory
+// stays small.
 func writeTestSettings(ch *chInstance) (string, error) {
 	files, err := tenantSettings(ch, testCHDatabase)
 	if err != nil {
@@ -272,9 +303,90 @@ func tenantSettings(ch *chInstance, database string) (map[string][]byte, error) 
 	if files[settings.FileConfig], err = json.MarshalIndent(doc, "", "  "); err != nil {
 		return nil, err
 	}
-	files[settings.FileRoles] = []byte(`{"roles": ["admin"]}`)
-	files[settings.FilePolicies] = []byte(`{"default_role": "admin"}`)
+	files[settings.FileRoles] = defaultRoles
+	files[settings.FilePolicies] = defaultPolicies
 	return files, nil
+}
+
+// withPolicy adopts p as the shared app's access-control policy for the
+// calling test, the way an operator changes one: policies.json rewritten,
+// with roles.json declaring every role it grants, then a reload through the
+// ops route. The suite's default policy is restored when the test ends.
+// default_role and admin_role stay the admin role, so unauthenticated
+// requests keep running as a privileged caller and a restricted role is
+// reached with a token for it (bearer). Not for parallel tests: there is one
+// shared policy.
+func withPolicy(t *testing.T, p policy.Policy) {
+	t.Helper()
+	p.DefaultRole, p.AdminRole = "admin", "admin"
+	roles := map[string]bool{"admin": true}
+	for _, grants := range p.Tables {
+		for role := range grants {
+			roles[role] = true
+		}
+	}
+	rolesDoc, err := json.Marshal(settings.RolesFile{Roles: slices.Sorted(maps.Keys(roles))})
+	if err != nil {
+		t.Fatalf("roles.json: %v", err)
+	}
+	policyDoc, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("policies.json: %v", err)
+	}
+	// The roles go in before the policy granting them and come out after it,
+	// so the directory watcher, which may reload between the two files, only
+	// ever sees a valid pair.
+	adoptSettings(t, settingsFile{settings.FileRoles, rolesDoc}, settingsFile{settings.FilePolicies, policyDoc})
+	t.Cleanup(func() {
+		adoptSettings(t, settingsFile{settings.FilePolicies, defaultPolicies}, settingsFile{settings.FileRoles, defaultRoles})
+	})
+}
+
+// settingsFile is one file of the settings directory and its new content.
+type settingsFile struct {
+	name string
+	data []byte
+}
+
+// adoptSettings writes files, in order, into the shared app's settings
+// directory and reloads it, failing the test unless the reload adopts them.
+// Each file is renamed into place, so the directory watcher never reads one
+// half-written.
+func adoptSettings(t *testing.T, files ...settingsFile) {
+	t.Helper()
+	e := env(t)
+	for _, f := range files {
+		tmp := filepath.Join(filepath.Dir(e.settingsDir), filepath.Base(e.settingsDir)+"."+f.name+".tmp")
+		if err := os.WriteFile(tmp, f.data, 0o600); err != nil {
+			t.Fatalf("write %s: %v", f.name, err)
+		}
+		if err := os.Rename(tmp, filepath.Join(e.settingsDir, f.name)); err != nil {
+			t.Fatalf("install %s: %v", f.name, err)
+		}
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, e.baseURL+"/v1/ops/settings/reload", nil)
+	if err != nil {
+		t.Fatalf("reload request: %v", err)
+	}
+	req.Header.Set("X-Operator-Key", testOperatorKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("settings reload not adopted: %d %s", resp.StatusCode, body)
+	}
+}
+
+// bearer is an Authorization header value carrying a token for role, signed
+// with the shared app's JWT secret, with claims beside the role claim.
+func bearer(t *testing.T, role string, claims map[string]any) string {
+	t.Helper()
+	all := map[string]any{"role": role}
+	maps.Copy(all, claims)
+	return "Bearer " + testutil.MakeJWT(t, all)
 }
 
 // writeSettingsFiles writes one tenant's files into dir.
@@ -350,11 +462,11 @@ func (c *chInstance) httpURL() string    { return fmt.Sprintf("http://%s:%s", c.
 // race; the dominant flake mode tracked in #70.
 func startClickHouse(ctx context.Context) (*chInstance, error) {
 	chReq := testcontainers.ContainerRequest{
-		// Pinned: 26.8 reads bare numbers in DateTime64 columns as epoch seconds,
-		// not ticks at column precision — CanonicalizeTimestamps still models the
-		// pre-26.8 rule (TestTimestampCanonicalization_DifferentialAgainstClickHouse
-		// catches the divergence). Bump the pin together with the canonicalizer (#536).
-		Image:        "clickhouse/clickhouse-server:26.6.3.62",
+		// Pinned to a line chtypes.lock has an artifact for: the type layer
+		// answers with the artifact matching the server's own version, so
+		// bumping the line means locking that line's artifact too (#536).
+		// deployments/compose pins the same image.
+		Image:        "clickhouse/clickhouse-server:26.8.15.10",
 		ExposedPorts: []string{"9000/tcp", "8123/tcp"},
 		Env:          map[string]string{"CLICKHOUSE_PASSWORD": testCHPassword},
 		WaitingFor: wait.ForAll(

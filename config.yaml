@@ -45,12 +45,18 @@ prometheus:
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
 
-# Only the password and the connection ceiling are boot config; addr,
-# http_port, http_scheme, database, username, query_timeout, tls, headers and
-# the pool sizes are the settings directory's clickhouse block.
+# Only the password, the connection ceiling and the chtypes artifact directory
+# are boot config; addr, http_port, http_scheme, database, username,
+# query_timeout, tls, headers and the pool sizes are the settings directory's
+# clickhouse block.
 clickhouse:
   password: ""
   max_total_conns: 0 # ceiling on open native connections across pools; 0 = none
+  # chtypes artifact directory, read by api-role processes only. Empty (the
+  # default) defers to the SDK's search path: $CHTYPES_REGISTRY, the per-user
+  # cache ~/.cache/chtypes/artifacts/abi6/<os>-<arch>, then the system
+  # directories. Set it only to point at a non-default location.
+  chtypes_registry: ""
 
 # Each layer's implementation, chosen at boot. Every layer defaults to its
 # in-process backend; mq and coord also take nats, cache redis, dedupe dynamodb.
