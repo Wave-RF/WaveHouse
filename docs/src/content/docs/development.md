@@ -69,6 +69,7 @@ This is the fastest way to get a fully functional local environment:
 git clone https://github.com/Wave-RF/WaveHouse.git
 cd WaveHouse
 make tools
+scripts/fetch-chtypes.sh   # once per machine (see above)
 
 # 2. Start ClickHouse (the only external dependency)
 docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
@@ -245,9 +246,16 @@ curl -s -X POST http://localhost:8080/v1/ops/query \
 # set "enabled": true under "dedupe" in ./settings/config.json
 ```
 
-The key hot-reloads, so once the server is running you can toggle it by editing `config.json` — no restart. Records dedupe on their `event_id` field by default; the same file overrides the field globally or per table (see [Settings Directory — Deduplication](/settings-directory#deduplication)).
+The key hot-reloads, so once the server is running you can toggle it by editing `config.json` — no restart. Records dedupe on their `event_id` column by default; the same file overrides the column globally or per table (see [Settings Directory — Deduplication](/settings-directory#deduplication)).
 
-Then include the dedup field in your ingest body:
+The Quick Start `clicks` table has no `event_id` column, and a record naming a column the table lacks is refused (code 117), so add one first; ingest sees it after the next schema refresh (60 seconds by default):
+
+```bash
+docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
+  clickhouse-client --query "ALTER TABLE clicks ADD COLUMN IF NOT EXISTS event_id String"
+```
+
+Then include it in your ingest body:
 
 ```bash
 curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
