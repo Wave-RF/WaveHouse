@@ -388,10 +388,12 @@ Client POST /v1/ops/query
       response shape stays "always an array."
     → Error: returns 4xx/5xx + plain-text error message + the
       X-ClickHouse-Exception-Code header. The handler classes it by
-      that code (chconn.Classify), not by the HTTP status ClickHouse
-      uses for nearly everything: bad SQL → 400, a missing grant →
-      403, bad credentials → 502, an outage → 503 — with the trimmed
-      message, a `code` and `retryable` in the JSON error envelope.
+      that code (chconn.Classify), not by ClickHouse's HTTP status,
+      which does not say which kind of failure it was (on 26.8 a
+      syntax error is 400, an unknown table 404, a TIMEOUT_EXCEEDED
+      408): bad SQL → 400, a missing grant → 403, bad credentials →
+      502, an outage → 503 — with the trimmed message, a `code` and
+      `retryable` in the JSON error envelope.
   → Response carries Cache-Control: no-store so no downstream layer
     (browser, CDN, corp proxy) caches the result.
 ```

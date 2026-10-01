@@ -188,9 +188,9 @@ WH_CH_PASSWORD=<clickhouse-password>
 # resolves to the policy default_role). role_claim is a settings key too.
 WH_AUTH_JWT_SECRET=<strong-random-secret>
 # Optional non-JWT operator credential (Authorization: Operator <key>, or the
-# X-Operator-Key alias): full-access
-# admin for break-glass, honored even when no policy is adopted. Treat it
-# as an admin secret — inject from your secret store, serve only over TLS.
+# X-Operator-Key alias) for break-glass: /v1/ops/* always, and the whole data
+# plane while a policy is adopted (with none, data-plane requests are denied
+# like anyone else's). Treat it as an admin secret — inject from your secret store, serve only over TLS.
 WH_AUTH_OPERATOR_KEY=<strong-random-operator-key>
 
 # Optional shared query cache for several instances (see Multiple instances

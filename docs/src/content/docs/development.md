@@ -173,7 +173,7 @@ These are the small targets behind `make dev` — useful directly when you want 
 
 ### Running with observability
 
-WaveHouse natively exports standard OpenTelemetry (OTLP) data — with no `OTEL_EXPORTER_OTLP_ENDPOINT` set, to `localhost:4317`, where these dashboards listen. Export is off by default (`otel.enabled: false` in `config.yaml`): the E2E fixture turns it on, so `make test-e2e` needs nothing, while for `make dev` set `otel.enabled: true` in `.config.local.yaml` or run `WH_OTEL_ENABLED=true make dev`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
+WaveHouse natively exports standard OpenTelemetry (OTLP) data. These dashboards listen for plaintext OTLP on `localhost:4317`; the OpenTelemetry SDK's unset default dials that port over TLS, which they reject, so point it there explicitly with `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317`. Export is off by default (`otel.enabled: false` in `config.yaml`): the E2E fixture turns it on and sets that endpoint, so `make test-e2e` needs nothing, while `make dev` needs both — `otel.enabled: true` in `.config.local.yaml` (or `WH_OTEL_ENABLED=true`) plus the endpoint variable, as in `WH_OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 make dev`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
 
 You run these in a separate terminal tab alongside `make dev` or your test suites (`make test-e2e`).
 
@@ -188,7 +188,7 @@ They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear
 **Typical Workflow:**
 
 1. Open Tab 1: run `make obs-aspire` (UI opens automatically)
-2. Open Tab 2: run `WH_OTEL_ENABLED=true make dev` (or `make test-e2e`)
+2. Open Tab 2: run `WH_OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 make dev` (or `make test-e2e`)
 3. View traces, metrics, and logs flowing into the UI instantly. No accounts or auth tokens required.
 
 ### Using the SDK against `make dev`
