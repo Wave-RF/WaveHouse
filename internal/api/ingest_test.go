@@ -256,7 +256,9 @@ func TestIngest_MissingRequiredColumn_TakesTheDefault(t *testing.T) {
 // columns the exported row actually carries — declaration order minus
 // MATERIALIZED, ALIAS and EPHEMERAL. The old envelope used InsertableColumns,
 // which counts EPHEMERAL in, so a table with one announced a column the row did
-// not have. Supplying one is the server's own 117.
+// not have. raw is an EPHEMERAL column no DEFAULT reads, so a record may not
+// supply it: the server's own 117 (see TestIngest_EphemeralColumnFeedsItsDefault
+// for one a DEFAULT reads).
 func TestIngest_ComputedColumns_AreNotOnTheWire(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
@@ -275,7 +277,7 @@ func TestIngest_ComputedColumns_AreNotOnTheWire(t *testing.T) {
 	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/a", "raw": "x"})))
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	_, code := errorAndCode(t, w)
-	assert.Equal(t, 117, code, "a record naming an EPHEMERAL column is refused per record, with ClickHouse's code")
+	assert.Equal(t, 117, code, "a record naming an EPHEMERAL column no DEFAULT reads is refused per record, with ClickHouse's code")
 }
 
 // TestIngest_Batch_PerRecordCodes: a batch reports each refused record's own
@@ -449,9 +451,9 @@ func TestIngest_Policy_ColumnDenied(t *testing.T) {
 	h.Handle(w, withTenant(req))
 
 	// CONTRACT CHANGE: column policy is answered by compiling the role's own
-	// schema WITHOUT the denied columns, so the refusal is ClickHouse's
-	// per-record code 117 — a 400, not the gateway's 403. It no longer confirms
-	// whether the column exists at all.
+	// schema with each denied column declared MATERIALIZED, which no INSERT may
+	// name, so the refusal is ClickHouse's per-record code 117 — a 400, not the
+	// gateway's 403. It no longer confirms whether the column exists at all.
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	msg, code := errorAndCode(t, w)
 	assert.Contains(t, msg, "button")
@@ -1108,8 +1110,8 @@ func TestIngest_Policy_DenyColumns(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(req))
 
-	// CONTRACT CHANGE, as for AllowColumns: a denied column is absent from the
-	// role's compiled schema, so naming it is ClickHouse's code 117.
+	// CONTRACT CHANGE, as for AllowColumns: a denied column is one the role's
+	// compiled schema lets no INSERT name, so naming it is ClickHouse's code 117.
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	msg, code := errorAndCode(t, w)
 	assert.Contains(t, msg, "count")
@@ -3146,12 +3148,12 @@ func computedRegistry(t testing.TB) *discovery.SchemaRegistry {
 }
 
 // TestIngest_CheckOnEphemeralColumn_Rejected: an EPHEMERAL column is the case
-// IsInsertable alone does not catch. It IS insertable — the row carries a slot
-// for it and the INSERT accepts it — so the check appears enforceable. But
-// ClickHouse never stores an ephemeral column and no query can read one back
-// (SELECT is code 16, NO_SUCH_COLUMN_IN_TABLE), so the constraint is
-// unverifiable the moment the insert returns. A check that provably does
-// nothing is worse than a refused one: it reads as tenant isolation and is not.
+// IsInsertable alone does not catch. It IS insertable — an INSERT may name it —
+// so the check appears enforceable. But ClickHouse never stores an ephemeral
+// column and no query can read one back (SELECT is code 16,
+// NO_SUCH_COLUMN_IN_TABLE), so the constraint is unverifiable the moment the
+// insert returns. A check that provably does nothing is worse than a refused
+// one: it reads as tenant isolation and is not.
 func TestIngest_CheckOnEphemeralColumn_Rejected(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}

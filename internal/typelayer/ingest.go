@@ -153,13 +153,17 @@ func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, check
 	// another handle rejects the whole call.
 	s := t.pool.acquire()
 	defer t.pool.release(s)
+	var columns []string
+	if format != FormatCSV && format != FormatTSV {
+		columns = t.inputs // see inputColumns; positional formats map to WireColumns
+	}
 	filter, uniform := t.checkFilter(s, checks)
-	res, err := export(s, format, body, settings, filter)
+	res, err := export(s, format, body, settings, columns, filter)
 	if err != nil && filter != nil {
 		// The cached filter was evicted and closed between lookup and use. Fail
 		// the checks closed, as an evaluation error would, not the request.
 		filter, uniform = nil, ReasonDecline
-		res, err = export(s, format, body, settings, nil)
+		res, err = export(s, format, body, settings, columns, nil)
 	}
 	if err != nil {
 		return Batch{}, err
@@ -215,12 +219,17 @@ func (t *Table) checkFilter(s *schemaSlot, checks []Predicate) (*chtypes.LoadedF
 	return nil, ReasonDecline
 }
 
-// export is the one parse. With no filter RowsExportWith is RowsExport.
-func export(s *schemaSlot, format Format, body []byte, settings map[string]string, f *chtypes.LoadedFilter) (chtypes.BatchResult, error) {
-	if f == nil {
-		return s.schema.RowsExportWith(format, body, settings, chtypes.JSONCompactEachRow)
+// export is the one parse, with columns as the INSERT column list (nil: none).
+// With no filter RowsExportWith is RowsExport.
+func export(s *schemaSlot, format Format, body []byte, settings map[string]string, columns []string, f *chtypes.LoadedFilter) (chtypes.BatchResult, error) {
+	opts := make([]chtypes.RowsOption, 0, 2)
+	if columns != nil {
+		opts = append(opts, chtypes.WithColumns(columns))
 	}
-	return s.schema.RowsExportWith(format, body, settings, chtypes.JSONCompactEachRow, chtypes.WithRowFilter(f))
+	if f != nil {
+		opts = append(opts, chtypes.WithRowFilter(f))
+	}
+	return s.schema.RowsExportWith(format, body, settings, chtypes.JSONCompactEachRow, opts...)
 }
 
 // rowVerdict maps one chtypes RowResult. An unsupported setting is the engine

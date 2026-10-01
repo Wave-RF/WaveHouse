@@ -9,7 +9,6 @@ import (
 	"maps"
 	"math"
 	"net/http"
-	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -169,7 +168,7 @@ type recordReject struct {
 // store that cannot answer (503) or fails (500), an id another request holds
 // (503), a type layer that cannot judge the tenant's table (503).
 //
-// Two are not, and retrying either unchanged cannot help:
+// Three are not, and retrying any of them unchanged cannot help:
 //   - An insert grant that resolved for the other operation is a 403 and a
 //     caller/config bug. It aborts rather than rejecting per record because the
 //     grant is resolved ONCE per request, so it is true for every record or
@@ -179,12 +178,17 @@ type recordReject struct {
 //     or the role lacks, or a name given twice — is a 400 with the
 //     clickhouse.rejected class and ClickHouse's own code (117). The header is
 //     not a record, and no record was read past it.
+//   - A role whose projection of the table does not compile is a 500 marked
+//     not retryable (see roleRefusedAbort).
 type requestAbort struct {
 	Status        int
 	Message       string
 	Code          string // the error class, when one applies (codeCHRejected)
 	ExceptionCode int    // ClickHouse's code, when its parser refused the body as a whole
 	RetryAfter    string // non-empty → emit a Retry-After header
+	// Retryable, when set, overrides what a client reads off the status: the
+	// SDK retries every 5xx unless the body says otherwise.
+	Retryable *bool
 }
 
 // ingestRun is one request after its body has been ruled on: chtypes' verdict
@@ -566,17 +570,23 @@ func (r *batchResult) add(rec *pendingRecord) {
 // table ClickHouse itself will enforce, plus the predicates the check clauses
 // become.
 //
-// Columns is the allow/deny decision, answered by omitting the denied columns
-// from the compiled schema: a record naming one is then refused per row with
-// ClickHouse's own code 117 rather than by a Go walk over the record's keys.
-// nil means the role may write every column, which compiles to no second
-// handle at all.
+// Columns is the allow/deny decision, answered by the compiled schema: a
+// column the role may not write is one no INSERT may name, so a record naming
+// it is refused per row with ClickHouse's own code 117 rather than by a Go walk
+// over the record's keys. nil means the role may write every column, which
+// compiles to no second handle at all.
 //
 // Defaults is the `_eq` auto-inject: the required value becomes the column's
 // DEFAULT, so a record that omits it is filled and a record that supplies one
 // still wins, and is then tested by the filter. An `_in` check has no single
 // value to inject, so the column keeps the TABLE's own default and the filter
 // tests that.
+//
+// An `_eq` column joins Columns even when the role may not otherwise write
+// it: the check is what makes a value there legitimate — an absent one takes
+// the claim, a supplied one passes only if it equals the claim — and the
+// published row must carry it, or the server would store the column's own
+// default instead of the value the policy requires.
 func (h *IngestHandler) insertShape(
 	ctx context.Context,
 	table, role string,
@@ -647,6 +657,9 @@ func (h *IngestHandler) insertShape(
 				shape.Defaults = make(map[string]string, len(cols))
 			}
 			shape.Defaults[col] = s
+			if shape.Columns != nil && !slices.Contains(shape.Columns, col) {
+				shape.Columns = append(shape.Columns, col)
+			}
 			preds = append(preds, policy.Predicate{Column: col, Op: "=", Values: []string{s}})
 		}
 	}
@@ -658,10 +671,10 @@ func (h *IngestHandler) insertShape(
 // table's own compiled handle instead of a second one.
 //
 // Every column is asked through IsColumnAllowed so the allow/deny precedence
-// stays in the one place that owns it; the computed kinds are included for the
-// same reason, and typelayer keeps them whatever this list says (they are the
-// server's to compute, and a MATERIALIZED expression over a dropped column would
-// not compile at all).
+// stays in the one place that owns it, the computed kinds included. typelayer
+// declares every column whatever this list says — a denied one MATERIALIZED,
+// so no record may name it and every expression over it still compiles — and
+// reads the list for which columns a record may supply.
 func allowedInsertColumns(schema *discovery.TableSchema, perms *policy.ResolvedPermissions) []string {
 	allowed := make([]string, 0, len(schema.Columns))
 	for _, c := range schema.Columns {
@@ -678,34 +691,25 @@ func allowedInsertColumns(schema *discovery.TableSchema, perms *policy.ResolvedP
 // scalarString renders a check clause's required value as the string the filter
 // binds. Every filter parameter binds as {pN:String} whatever the column's
 // declared type, so this is the only conversion the check path needs.
-//
-// The reflect.Kind test rather than a type switch is deliberate: policy marks a
-// placeholder-free check value with its own string-kinded named type, which
-// existed only for a Go-side numeric re-reading ClickHouse now answers. Naming
-// the type here would keep it alive; asking for its kind works across its
-// removal.
 func scalarString(v any) (string, bool) {
-	if s, ok := v.(string); ok {
-		return s, true
-	}
-	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.String {
-		return rv.String(), true
-	}
-	return "", false
+	s, ok := v.(string)
+	return s, ok
 }
 
-// roleTable resolves the compiled handle for this role's projection, or the 503
-// every record of this request gets instead. The type layer being down is an
-// outage, never a verdict about the data: a caller must be able to retry the
-// same body unchanged.
+// roleTable resolves the compiled handle for this role's projection, or the
+// abort every record of this request gets instead. The type layer being down
+// is an outage, never a verdict about the data: a caller must be able to retry
+// the same body unchanged (503). A projection that does not compile is a
+// standing condition of the role's policy and the table's schema, not an
+// outage (roleRefusedAbort).
 //
 // An injected literal the column cannot read (`count UInt64 DEFAULT 'abc'`) is a
-// compile refusal, ClickHouse code 6 — measured. That must not become a 503 for
-// a policy that is simply unsatisfiable, so the shape is retried without its
-// defaults: the check filter then judges the record as sent, which fails closed
+// compile refusal, ClickHouse code 6 — measured. That must not refuse every
+// insert for a policy that is simply unsatisfiable, so a refused shape is
+// retried without its defaults: if that compiles, the defaults were the
+// problem, and the check filter judges each record as sent, which fails closed
 // (an absent column takes the table default and the filter refuses it). The
-// type layer logs the refusal once per generation and shape; this adds one
+// type layer logs each refusal once per generation and shape; this adds one
 // rate-limited line saying what was done about it.
 func (h *IngestHandler) roleTable(ctx context.Context, id tenant.ID, table string, shape typelayer.RoleShape) (*typelayer.Table, *requestAbort) {
 	if h.Types == nil {
@@ -716,17 +720,44 @@ func (h *IngestHandler) roleTable(ctx context.Context, id tenant.ID, table strin
 	if err == nil {
 		return tbl, nil
 	}
-	if len(shape.Defaults) > 0 {
+	if _, refused := errors.AsType[*typelayer.RoleRefused](err); refused && len(shape.Defaults) > 0 {
 		bare := typelayer.RoleShape{Columns: shape.Columns}
-		if t, bareErr := h.Types.RoleTable(id, table, bare); bareErr == nil {
+		t, bareErr := h.Types.RoleTable(id, table, bare)
+		if bareErr == nil {
 			if h.noticeDue("inject:" + id.String() + "/" + table) {
-				slog.WarnContext(ctx, "insert check value cannot be injected as a column default; records omitting it will fail the check",
+				slog.WarnContext(ctx, "the role's schema does not compile with its insert check values as column defaults; "+
+					"serving it without them, so records omitting those columns fail the check",
 					"tenant", id, "table", table, "columns", slices.Sorted(maps.Keys(shape.Defaults)), "cause", err.Error())
 			}
 			return t, nil
 		}
+		err = bareErr // the refusal that stands without the defaults
+	}
+	if refused, ok := errors.AsType[*typelayer.RoleRefused](err); ok {
+		if h.noticeDue("refused:" + id.String() + "/" + table) {
+			slog.ErrorContext(ctx, "ingest refused: the role's insert permissions do not compile against this table",
+				"tenant", id, "table", table, "cause", refused.Cause)
+		}
+		return nil, roleRefusedAbort()
 	}
 	return nil, h.typesFailed(ctx, id, table, err)
+}
+
+// roleRefusedAbort is the answer for a role whose projection of the table does
+// not compile. It is a 500 marked not retryable rather than the 503 an outage
+// gets, and carries no Retry-After: the refusal follows from the role's policy
+// and the table's schema and is cached for the schema generation, so the same
+// request fails the same way until an operator changes one of them, and a
+// retry hint would only invite a client to hammer it. The body stays generic
+// like the 503's — the cause names columns and ClickHouse internals, and is
+// the operator's to read in the log.
+func roleRefusedAbort() *requestAbort {
+	retryable := false
+	return &requestAbort{
+		Status:    http.StatusInternalServerError,
+		Message:   "this role's insert permissions cannot be enforced on this table",
+		Retryable: &retryable,
+	}
 }
 
 // typesFailed maps a type layer failure to the request's 503, logging its
@@ -787,7 +818,9 @@ func writeAbort(w http.ResponseWriter, abort *requestAbort) {
 	if abort.RetryAfter != "" {
 		w.Header().Set("Retry-After", abort.RetryAfter)
 	}
-	writeJSONErrorBody(w, abort.Status, errorBody{Error: abort.Message, Code: abort.Code, ExceptionCode: abort.ExceptionCode})
+	writeJSONErrorBody(w, abort.Status, errorBody{
+		Error: abort.Message, Code: abort.Code, ExceptionCode: abort.ExceptionCode, Retryable: abort.Retryable,
+	})
 }
 
 // writeMaxBytesError writes a 413 if err is the inbound body-cap overflow and
@@ -812,8 +845,9 @@ func writeMaxBytesError(w http.ResponseWriter, err error, limit int64) bool {
 //
 // It is not redundant now that the compiled schema answers column policy: a
 // Defaults entry for a column the shape cannot carry is a COMPILE refusal, so
-// without this guard a mis-wired policy would be a 503 naming a ClickHouse
-// internal rather than a 403 naming the column the operator has to fix.
+// without this guard a mis-wired policy would be a generic 500 (logged with a
+// ClickHouse internal) rather than a 403 naming the column the operator has to
+// fix.
 //
 // Evaluated here rather than per record because the condition is a property of
 // (table, role, policy) and is identical for every record in the request. Doing
@@ -856,12 +890,13 @@ func (h *IngestHandler) policyCheckGuard(
 			reasons = append(reasons, fmt.Sprintf("%q of table %q, which is %s and cannot be inserted",
 				col, table, strings.ToLower(schemaCol.DefaultKind)))
 		case schemaCol.DefaultKind == "EPHEMERAL":
-			// Insertable, so the row DOES carry a slot for it — but ClickHouse
-			// never stores an ephemeral column and no query can read one back, so
-			// the constraint is unverifiable the moment the insert returns.
-			// Accepting a check that provably does nothing is worse than refusing
-			// it. An operator wanting this should check the DEFAULT column derived
-			// from the ephemeral one, which is stored and therefore enforceable.
+			// A record may supply it — its value feeds the DEFAULT columns over
+			// it — but ClickHouse never stores it, the published row carries no
+			// slot for it, and no query can read it back, so the constraint is
+			// unverifiable the moment the insert returns. Accepting a check that
+			// provably does nothing is worse than refusing it. An operator
+			// wanting this should check the DEFAULT column derived from the
+			// ephemeral one, which is stored and therefore enforceable.
 			slog.ErrorContext(ctx, "policy check references an ephemeral column, which is never stored",
 				"column", col, "table", table, "role", role)
 			reasons = append(reasons, fmt.Sprintf("%q of table %q, which is ephemeral and is never stored",

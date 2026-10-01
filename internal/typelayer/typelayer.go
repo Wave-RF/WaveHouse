@@ -18,6 +18,7 @@ package typelayer
 import (
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 
@@ -319,12 +320,13 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 	// Compile outside every lock: a handle costs milliseconds and Table()
 	// readers are on the request path.
 	type pending struct {
-		ts    *discovery.TableSchema
-		sig   string
-		pool  *pool
-		cause string
-		wire  []string
-		cols  map[string]filterColumn
+		ts     *discovery.TableSchema
+		sig    string
+		pool   *pool
+		cause  string
+		wire   []string
+		inputs []string
+		cols   map[string]filterColumn
 	}
 
 	s.mu.RLock()
@@ -349,10 +351,12 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 			}
 		}
 		p := pending{ts: ts, sig: sig}
-		p.pool, p.cause = compile(lib, ts)
+		decl := discoveredColumns(ts.Columns)
+		p.pool, p.cause = compile(lib, decl)
 		if p.cause == "" {
 			schema := p.pool.first().schema
-			p.wire = deriveWireColumns(schema, wireColumns(ts))
+			p.wire = deriveWireColumns(schema, WireColumnsOf(ts))
+			p.inputs = inputColumns(lib, decl, p.wire, nil)
 			if p.cols, p.cause = declaredColumns(lib, schema, ts.Columns); p.cause != "" {
 				p.pool.close()
 				p.pool = nil
@@ -374,7 +378,7 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 			// Nobody holds a pointer to a new table yet, so it is filled before
 			// it is published rather than swapped.
 			t = &Table{Name: p.ts.Name, tenant: s.id, Generation: 1, roles: newRoleCache(roleCacheSize)}
-			t.install(p.pool, p.cause, p.wire, p.cols, p.sig, lib, p.ts.Columns)
+			t.install(p.pool, p.cause, p.wire, p.inputs, p.cols, p.sig, lib, p.ts.Columns)
 			added[p.ts.Name] = t
 			continue
 		}
@@ -382,7 +386,7 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 		old := t.detachLocked()
 		t.Generation++
 		t.roles = newRoleCache(old.roles.capacity())
-		t.install(p.pool, p.cause, p.wire, p.cols, p.sig, lib, p.ts.Columns)
+		t.install(p.pool, p.cause, p.wire, p.inputs, p.cols, p.sig, lib, p.ts.Columns)
 		t.mu.Unlock()
 		old.close()
 	}
@@ -441,6 +445,9 @@ type Table struct {
 
 	tenant tenant.ID
 	mu     sync.RWMutex
+	// inputs is the INSERT column list a name-addressed body is parsed with
+	// (see inputColumns); nil parses with no list, which reads WireColumns.
+	inputs []string
 	// pool holds the identically-compiled handles; nil means unavailable.
 	pool *pool
 	// cols maps every column the compiled schema declares, of every kind, to
@@ -470,11 +477,11 @@ func (t *Table) answers(sig string) bool {
 
 // install sets a freshly compiled shape. The caller holds t.mu exclusively,
 // or is the only goroutine that can see t.
-func (t *Table) install(p *pool, cause string, wire []string, cols map[string]filterColumn, sig string,
+func (t *Table) install(p *pool, cause string, wire, inputs []string, cols map[string]filterColumn, sig string,
 	lib *chtypes.Library, discovered []discovery.Column,
 ) {
 	t.pool, t.cause = p, cause
-	t.WireColumns, t.cols, t.sig = wire, cols, sig
+	t.WireColumns, t.inputs, t.cols, t.sig = wire, inputs, cols, sig
 	t.lib, t.discovered = lib, discovered
 }
 
@@ -517,22 +524,32 @@ func (t *Table) close(cause string) {
 // compiled on contention. The engine and TTL clauses are deliberately not
 // declared: chtypes declines engines it cannot model, and neither affects the
 // insert verdicts or filter semantics this package asks for.
-func compile(lib *chtypes.Library, ts *discovery.TableSchema) (*pool, string) {
-	cols := make([]chtypes.DiscoveredColumn, 0, len(ts.Columns))
-	for _, c := range ts.Columns {
-		cols = append(cols, chtypes.DiscoveredColumn{
-			Name:              c.Name,
-			Type:              c.Type,
-			DefaultKind:       c.DefaultKind,
-			DefaultExpression: c.DefaultExpression,
-			Position:          c.Position,
-		})
-	}
+func compile(lib *chtypes.Library, cols []chtypes.DiscoveredColumn) (*pool, string) {
 	ddl, err := lib.ReconstructDDL(cols)
 	if err != nil {
 		return nil, "cannot reconstruct column declarations: " + err.Error()
 	}
 	return newPool(lib, ddl, poolSize())
+}
+
+// discoveredColumns is a table's columns as chtypes' DDL reconstruction takes
+// them.
+func discoveredColumns(src []discovery.Column) []chtypes.DiscoveredColumn {
+	cols := make([]chtypes.DiscoveredColumn, 0, len(src))
+	for _, c := range src {
+		cols = append(cols, discoveredColumn(c))
+	}
+	return cols
+}
+
+func discoveredColumn(c discovery.Column) chtypes.DiscoveredColumn {
+	return chtypes.DiscoveredColumn{
+		Name:              c.Name,
+		Type:              c.Type,
+		DefaultKind:       c.DefaultKind,
+		DefaultExpression: c.DefaultExpression,
+		Position:          c.Position,
+	}
 }
 
 // signature is the column shape a handle was compiled from. An unchanged
@@ -579,8 +596,12 @@ func deriveWireColumns(schema *chtypes.LoadedSchema, fallback []string) []string
 	return out
 }
 
-// wireColumns is deriveWireColumns' discovery-side fallback.
-func wireColumns(ts *discovery.TableSchema) []string {
+// WireColumnsOf is the wire column list of a discovered table — what a
+// full-width envelope's Columns carry — computed from discovery alone, for a
+// caller that holds no compiled handle (the stream's connect-time schema
+// frame). It is deriveWireColumns' fallback, and answered identically to the
+// handle on every artifact measured.
+func WireColumnsOf(ts *discovery.TableSchema) []string {
 	out := make([]string, 0, len(ts.Columns))
 	for _, c := range ts.Columns {
 		switch c.DefaultKind {
@@ -590,6 +611,97 @@ func wireColumns(ts *discovery.TableSchema) []string {
 		}
 	}
 	return out
+}
+
+// inputColumns is the INSERT column list a name-addressed body (JSONEachRow,
+// CSVWithNames, TSVWithNames) is parsed with: the wire columns plus every
+// EPHEMERAL column a record may supply, in declaration order. nil when no
+// EPHEMERAL column qualifies — the body is then parsed with no list, which
+// reads exactly the wire columns. writable reports whether the role may
+// supply a column; nil means every column.
+//
+// Listing an EPHEMERAL column is what lets a record supply it at all. With no
+// list, ClickHouse's readers know only the stored columns and refuse it as an
+// unknown field (117). Listed, its value is read and is in scope for the
+// DEFAULT expressions over it, which chtypes computes and exports, while the
+// value itself is never exported (measured on the 26.8 artifact). Positional
+// CSV and TSV never get the list: their fields map to the wire columns by
+// position, and an extra slot would shift every field after it.
+//
+// An EPHEMERAL column qualifies only when a DEFAULT expression reads it and
+// no expression the server computes does:
+//
+//   - The worker inserts the exported row, so ClickHouse computes each
+//     MATERIALIZED column itself, with every EPHEMERAL column at its own
+//     default. A value one of those reads would be silently ignored, so the
+//     column stays unlisted and a record naming it is refused instead.
+//   - A DEFAULT is the only place an ephemeral value can go. And listing one
+//     no DEFAULT reads makes the 26.8 artifact reject, with no code, every
+//     record that omits it whenever the table computes any column (measured):
+//     an unread column would cost every record its verdict to accept a value
+//     that changes nothing.
+func inputColumns(lib *chtypes.Library, cols []chtypes.DiscoveredColumn, wire []string, writable func(string) bool) []string {
+	var ephemeral []string
+	for _, c := range cols {
+		if c.DefaultKind == "EPHEMERAL" && (writable == nil || writable(c.Name)) &&
+			readBy(lib, cols, c.Name, "DEFAULT") && !readBy(lib, cols, c.Name, "MATERIALIZED", "ALIAS", "EPHEMERAL") {
+			ephemeral = append(ephemeral, c.Name)
+		}
+	}
+	if len(ephemeral) == 0 {
+		return nil
+	}
+	listed := make(map[string]bool, len(wire)+len(ephemeral))
+	for _, n := range wire {
+		listed[n] = true
+	}
+	for _, n := range ephemeral {
+		listed[n] = true
+	}
+	out := make([]string, 0, len(listed))
+	for _, c := range cols {
+		if listed[c.Name] {
+			out = append(out, c.Name)
+		}
+	}
+	return out
+}
+
+// readBy reports whether an expression of one of kinds reads column name,
+// asking the compiler rather than parsing SQL in Go: the declaration list is
+// compiled without name, every other kind's expression dropped, so a
+// reference to name fails the compile. Any refusal counts as a read. It
+// compiles only when a column of those kinds has an expression at all.
+func readBy(lib *chtypes.Library, cols []chtypes.DiscoveredColumn, name string, kinds ...string) bool {
+	probe := make([]chtypes.DiscoveredColumn, 0, len(cols))
+	reads := false
+	for _, c := range cols {
+		switch {
+		case c.Name == name:
+			continue
+		case c.DefaultExpression == "":
+		case slices.Contains(kinds, c.DefaultKind):
+			reads = true
+		case c.DefaultKind == "EPHEMERAL":
+			c.DefaultExpression = "" // still EPHEMERAL, at its type's default
+		default:
+			c.DefaultKind, c.DefaultExpression = "", ""
+		}
+		probe = append(probe, c)
+	}
+	if !reads {
+		return false
+	}
+	ddl, err := lib.ReconstructDDL(probe)
+	if err != nil {
+		return true
+	}
+	s, err := lib.CompileDDL(ddl, chtypes.WithCompileSettings(compileSettings))
+	if err != nil {
+		return true
+	}
+	s.Close()
+	return false
 }
 
 // filterColumn is how render writes a predicate over one column.
@@ -603,10 +715,11 @@ type filterColumn struct {
 // backQuote, always quoted) and, for an integer column, the type its claims
 // are strictly cast to. It is the set render tests a predicate's column
 // against: answering "no such column" here keeps a misspelled policy from
-// costing a compile and a log line per generation, and on a ROLE table it is
-// what makes a filter over a denied column fail closed instead of compiling
-// against a column that is not there. Quoting once per compile keeps a C call
-// off render's per-event path. A non-empty second return is the cause.
+// costing a compile and a log line per generation. On a ROLE table a column
+// the role may not write is declared too (MATERIALIZED, see roleColumns), so a
+// check over it tests the value the server will store. Quoting once per
+// compile keeps a C call off render's per-event path. A non-empty second
+// return is the cause.
 func declaredColumns(lib *chtypes.Library, schema *chtypes.LoadedSchema, fallback []discovery.Column) (map[string]filterColumn, string) {
 	type named struct{ name, typ string }
 	var cols []named

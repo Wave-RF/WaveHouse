@@ -3,6 +3,7 @@ package typelayer
 import (
 	"container/list"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -28,21 +29,25 @@ const roleCacheSize = 256
 // the same shape share one compiled handle.
 //
 // Columns is the set of columns the role may write. nil means "every column"
-// and is the identity shape; a non-nil, EMPTY slice means "no column", which
-// compiles to nothing and fails closed. Order is irrelevant — the DDL always
-// follows the table's own declaration order — and a name the table does not
-// have is ignored. Columns the role cannot supply anyway (MATERIALIZED, ALIAS,
-// EPHEMERAL) are always kept: dropping one would change what the server
-// computes, and a MATERIALIZED expression over a dropped column would not
-// compile at all.
+// and is the identity shape. Order is irrelevant — the DDL always follows the
+// table's own declaration order — and a name the table does not have is
+// ignored. A column the role may not write stays declared, re-declared
+// MATERIALIZED with what the server stores when an INSERT omits it (its own
+// DEFAULT expression, or its type's default): a record naming it is then
+// refused like any column no INSERT may name (117), it is never on the wire,
+// and every expression reading it still compiles and sees the value the
+// server will store. A shape that leaves the role no plain or DEFAULT column
+// to write is refused: it would publish rows with no columns. MATERIALIZED
+// and ALIAS columns are declared as the table declares them; an EPHEMERAL one
+// too, and a record may supply it only if the role may write it (and only
+// where inputColumns lists it).
 //
 // Defaults maps a column to a literal value injected when a record omits it,
 // rendered into the column's DEFAULT clause. A value the record DOES supply
 // still wins (measured on the 26.6 and 26.8 artifacts; see
 // TestRoleTable_DefaultInjectsWhenAbsentAndLosesToASuppliedValue). Every key
-// must name a column the shape
-// keeps and must be an ordinary column (no DEFAULT, or a plain DEFAULT) —
-// anything else is a programming error and returns an error rather than
+// must name a column the role may write and must be an ordinary column (no
+// DEFAULT, or a plain DEFAULT) — anything else is refused rather than
 // silently reshaping the table.
 type RoleShape struct {
 	Columns  []string
@@ -53,6 +58,11 @@ type RoleShape struct {
 // already answer, in which case no second handle is compiled.
 func (s RoleShape) identity() bool {
 	return s.Columns == nil && len(s.Defaults) == 0
+}
+
+// writable reports whether the role may supply column name.
+func (s RoleShape) writable(name string) bool {
+	return s.Columns == nil || slices.Contains(s.Columns, name)
 }
 
 // key is the cache key: the generation that owns the schema plus a canonical
@@ -87,8 +97,8 @@ func (s RoleShape) key(generation uint64) string {
 // handle stays alive and stable until it does.
 //
 // The shape is answered by ClickHouse's own parser rather than by a Go walk
-// over the record's keys: a column the role may not write is
-// simply absent from the compiled DDL, so a record naming it is refused
+// over the record's keys: a column the role may not write is declared
+// MATERIALIZED, which no INSERT may name, so a record naming it is refused
 // per-row with ClickHouse's own code 117 "Unknown field found while parsing
 // JSONEachRow format: x"; a Defaults column is declared DEFAULT '<literal>',
 // quoted by the library's own QuoteLiteral, so an absent value is filled and a
@@ -98,8 +108,9 @@ func (s RoleShape) key(generation uint64) string {
 // table itself — no second handle, no cache entry.
 //
 // A shape that does not compile is cached as a negative entry and reported as
-// *Unavailable, so a broken policy costs one compile and one log line per
-// generation rather than one per request.
+// *RoleRefused, so a broken policy costs one compile and one log line per
+// generation rather than one per request. An error from resolving the base
+// table itself is Table's *Unavailable.
 func (e *Engine) RoleTable(id tenant.ID, table string, shape RoleShape) (*Table, error) {
 	base, err := e.Table(id, table)
 	if err != nil {
@@ -134,7 +145,7 @@ func (t *Table) roleTable(shape RoleShape) (*Table, *Table, error) {
 		c.order.MoveToFront(el)
 		e := el.Value.(*roleEntry)
 		if e.table == nil {
-			return nil, nil, &Unavailable{Tenant: t.tenant, Table: t.Name, Cause: e.cause}
+			return nil, nil, &RoleRefused{Tenant: t.tenant, Table: t.Name, Cause: e.cause}
 		}
 		// Taken while the base read lock is still held, so a rebind cannot be
 		// closing this projection underneath us.
@@ -156,7 +167,7 @@ func (t *Table) roleTable(shape RoleShape) (*Table, *Table, error) {
 		evicted = c.evictOldestLocked()
 	}
 	if rt == nil {
-		return nil, evicted, &Unavailable{Tenant: t.tenant, Table: t.Name, Cause: cause}
+		return nil, evicted, &RoleRefused{Tenant: t.tenant, Table: t.Name, Cause: cause}
 	}
 	rt.mu.RLock()
 	return rt, evicted, nil
@@ -183,77 +194,99 @@ func (t *Table) compileRole(shape RoleShape) (*Table, string) {
 		p.close()
 		return nil, cause
 	}
+	wire = deriveWireColumns(schema, wire)
 
 	return &Table{
 		Name:        t.Name,
 		Generation:  t.Generation,
-		WireColumns: deriveWireColumns(schema, wire),
+		WireColumns: wire,
 		tenant:      t.tenant,
 		pool:        p,
 		cols:        declared,
+		inputs:      inputColumns(t.lib, cols, wire, shape.writable),
 		lib:         t.lib,
 	}, ""
 }
 
 // roleColumns projects the table's discovered columns onto a shape. It returns
-// the declaration list and the wire column names (the declaration list minus
-// the three kinds a positional INSERT never carries). An injected value is
+// the declaration list and the wire column names (the plain and DEFAULT
+// columns the role may write — what RowsExport emits). An injected value is
 // quoted by lib.QuoteLiteral, ClickHouse's own quoteString, so it reaches the
 // compiler as one string literal whatever bytes it holds.
+//
+// A column the role may not write is re-declared MATERIALIZED rather than
+// dropped. Dropped, every DEFAULT, MATERIALIZED or ALIAS expression reading it
+// would stop compiling, and the whole role would be refused for a column it
+// never asked to write. MATERIALIZED with what the server stores when the
+// worker's INSERT omits it keeps it off the wire and unnamable (117), and
+// keeps what those expressions compute here equal to what the server will
+// store.
 func roleColumns(lib *chtypes.Library, src []discovery.Column, shape RoleShape) ([]chtypes.DiscoveredColumn, []string, error) {
-	var allowed map[string]struct{}
-	if shape.Columns != nil {
-		allowed = make(map[string]struct{}, len(shape.Columns))
-		for _, c := range shape.Columns {
-			allowed[c] = struct{}{}
-		}
-	}
-
 	cols := make([]chtypes.DiscoveredColumn, 0, len(src))
 	wire := make([]string, 0, len(src))
-	kept := make(map[string]discovery.Column, len(src))
+	declared := make(map[string]struct{}, len(src))
 	for _, c := range src {
-		computed := c.DefaultKind == "MATERIALIZED" || c.DefaultKind == "ALIAS" || c.DefaultKind == "EPHEMERAL"
-		if allowed != nil && !computed {
-			if _, ok := allowed[c.Name]; !ok {
-				continue
-			}
-		}
-		dc := chtypes.DiscoveredColumn{
-			Name:              c.Name,
-			Type:              c.Type,
-			DefaultKind:       c.DefaultKind,
-			DefaultExpression: c.DefaultExpression,
-			Position:          c.Position,
-		}
-		if v, inject := shape.Defaults[c.Name]; inject {
-			if computed {
+		declared[c.Name] = struct{}{}
+		dc := discoveredColumn(c)
+		v, inject := shape.Defaults[c.Name]
+		switch {
+		case c.DefaultKind == "MATERIALIZED" || c.DefaultKind == "ALIAS" || c.DefaultKind == "EPHEMERAL":
+			if inject {
 				return nil, nil, fmt.Errorf(
 					"cannot inject a default into column %q: it is %s", c.Name, c.DefaultKind)
 			}
-			lit, err := lib.QuoteLiteral(v)
-			if err != nil {
-				return nil, nil, fmt.Errorf("cannot quote the default for column %q: %w", c.Name, err)
+		case !shape.writable(c.Name):
+			// A default the role may not write cannot be expressed, and
+			// dropping it would turn "force this value" into "whatever the
+			// server defaults to". Fail loudly instead.
+			if inject {
+				return nil, nil, fmt.Errorf(
+					"cannot inject a default into column %q: the role may not write it", c.Name)
 			}
-			dc.DefaultKind, dc.DefaultExpression = "DEFAULT", lit
-		}
-		cols = append(cols, dc)
-		if !computed {
+			expr, err := storedDefault(lib, c)
+			if err != nil {
+				return nil, nil, err
+			}
+			dc.DefaultKind, dc.DefaultExpression = "MATERIALIZED", expr
+		default:
+			if inject {
+				lit, err := lib.QuoteLiteral(v)
+				if err != nil {
+					return nil, nil, fmt.Errorf("cannot quote the default for column %q: %w", c.Name, err)
+				}
+				dc.DefaultKind, dc.DefaultExpression = "DEFAULT", lit
+			}
 			wire = append(wire, c.Name)
 		}
-		kept[c.Name] = c
+		cols = append(cols, dc)
 	}
 
-	// A default for a column this shape does not carry cannot be expressed,
-	// and silently dropping it would turn "force this value" into "whatever
-	// the caller sent". Fail loudly instead.
 	for _, name := range slices.Sorted(maps.Keys(shape.Defaults)) {
-		if _, ok := kept[name]; !ok {
+		if _, ok := declared[name]; !ok {
 			return nil, nil, fmt.Errorf(
-				"cannot inject a default into column %q: the role's schema does not carry it", name)
+				"cannot inject a default into column %q: the table does not have it", name)
 		}
 	}
+	if len(wire) == 0 {
+		return nil, nil, errors.New("the role may write no plain or DEFAULT column of this table, so it has no row to publish")
+	}
 	return cols, wire, nil
+}
+
+// storedDefault is an expression for what ClickHouse stores in column c when an
+// INSERT omits it: its own DEFAULT expression, or its type's default value
+// (defaultValueOfTypeName, ClickHouse's own answer, measured to compile for
+// every type family the 26.8 artifact accepts, Nullable and LowCardinality
+// included).
+func storedDefault(lib *chtypes.Library, c discovery.Column) (string, error) {
+	if c.DefaultKind == "DEFAULT" && c.DefaultExpression != "" {
+		return c.DefaultExpression, nil
+	}
+	typ, err := lib.QuoteLiteral(c.Type)
+	if err != nil {
+		return "", fmt.Errorf("cannot quote the type of column %q: %w", c.Name, err)
+	}
+	return "defaultValueOfTypeName(" + typ + ")", nil
 }
 
 type roleEntry struct {

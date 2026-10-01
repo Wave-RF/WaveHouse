@@ -12,6 +12,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
 // Hub fans live events out to SSE subscribers. Column projection is serialized ONCE
@@ -521,12 +522,13 @@ func (h *Hub) SubscribeSchemaFrame(id tenant.ID, table, role string, sub *Subscr
 			return Frame{}, false
 		}
 	}
-	// The insertable subset, matching what a full-width envelope carries — a
-	// computed column never appears in a published row, so announcing it here
-	// would guarantee a drift re-announcement on the very first event. An
-	// envelope from a role that may write fewer columns carries fewer, and is
-	// announced again when it arrives, like any other change of list.
-	_, projected := projectIndices(schema.InsertableColumnNames(), perms)
+	// The wire columns, exactly what a full-width envelope carries — a
+	// MATERIALIZED, ALIAS or EPHEMERAL column never appears in a published
+	// row, so announcing one here would guarantee a drift re-announcement on
+	// the very first event. An envelope from a role that may write fewer
+	// columns carries fewer, and is announced again when it arrives, like any
+	// other change of list.
+	_, projected := projectIndices(typelayer.WireColumnsOf(schema), perms)
 	sig := schemaSignature(table, projected)
 	if !sub.needsSchema(sig) {
 		return Frame{}, false // already announced (a live event beat us here)
