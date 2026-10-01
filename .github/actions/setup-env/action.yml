@@ -211,9 +211,9 @@ runs:
         restore-keys: |
           chtypes-abi6-${{ runner.os }}-${{ runner.arch }}-
 
-    # Runs on both cache hit and miss: scripts/fetch-chtypes.sh (always a
-    # --frozen fetch against chtypes.lock) is cheap on a hit (a manifest check against chtypes.lock, not a
-    # re-download — see the script) and it is what turns a restored-but-
+    # Runs on both cache hit and miss: scripts/fetch-chtypes.sh always fetches
+    # frozen against chtypes.lock, is cheap on a hit (a manifest check, not a
+    # re-download — see the script), and is what turns a restored-but-
     # unverified cache entry back into a hash-checked one every run.
     - name: Fetch pinned chtypes artifact
       if: ${{ inputs.chtypes == 'true' }}

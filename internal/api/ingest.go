@@ -375,11 +375,12 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		records = n
 	}
-	// Otherwise a single-object body is one record (concatenated objects after
-	// it are neither answered nor published, as they always have been — declare
-	// NDJSON to batch them, #561; chtypes still parses them, so one cut off
-	// mid-record can turn the answer into a decline), and a line-framed body has at least the record its first byte
-	// starts. The real count is chtypes' own, taken once it has answered.
+	// Otherwise a single-object body is one record, and a line-framed body has
+	// at least the record its first byte starts. Concatenated objects after a
+	// single object are neither answered nor published, as they always have
+	// been (declare NDJSON to batch them, #561), but chtypes still parses
+	// them, so one cut off mid-record can turn the answer into a decline. The
+	// real count is chtypes' own, taken once it has answered.
 
 	guard := h.policyCheckGuard(ctx, table, role, schema, perms)
 	shape, preds, checkColumns, abort := h.insertShape(ctx, table, role, schema, perms, guard)

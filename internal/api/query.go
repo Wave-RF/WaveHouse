@@ -296,8 +296,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		// The status ClickHouse sends does not say which kind of failure it
 		// was (on 26.8 a syntax error is 400, an unknown table 404, a
 		// TIMEOUT_EXCEEDED 408); the exception code it sends with it does
-		// (#403). The message is
-		// ClickHouse's own text, verbatim.
+		// (#403). The message is ClickHouse's own text, verbatim.
 		chErr := chconn.NewHTTPError(&http.Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: io.NopCloser(bytes.NewReader(body))})
 		msg := strings.TrimSpace(string(body))
 		if msg == "" {

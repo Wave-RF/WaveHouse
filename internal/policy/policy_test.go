@@ -442,8 +442,9 @@ func TestResolveTemplate(t *testing.T) {
 		{"large integer claim binds exactly", "{{ jwt.big }}", "12345678901234567890", true},
 		// Numeric claims bind in canonical decimal form, not the token's
 		// spelling — bound verbatim, "1.0"/"1e3" would match nothing on an
-		// integer column, which reads only the canonical spelling. A magnitude only JSON can hold fails
-		// closed like any other unresolvable claim.
+		// integer column, which reads only the canonical spelling. A
+		// magnitude only JSON can hold fails closed like any other
+		// unresolvable claim.
 		{"float spelling binds canonically", "{{ jwt.price }}", "1", true},
 		{"exponent spelling binds canonically", "{{ jwt.exp3 }}", "1000", true},
 		{"beyond-float64 number fails closed", "{{ jwt.huge }}", "", false},
