@@ -89,7 +89,7 @@ func TestReframeArray(t *testing.T) {
 		{
 			name:  "whitespace after the array is layout",
 			body:  "[{\"a\":1}] \r\n\t",
-			want:  " {\"a\":1}  \r\n\t",
+			want:  " {\"a\":1}    \t",
 			count: 1, ok: true,
 		},
 		{name: "a truncated array does not balance", body: `[{"a":1}`, err: errUnterminatedArray},

@@ -35,11 +35,12 @@ import (
 //     closing bracket shares that record's line and the reader cannot resync
 //     past it. JSONEachRow needs no brackets, so removing them costs nothing and
 //     makes every position salvageable, first and last included;
-//   - every other newline outside a string becomes a space. Not cosmetic: when
-//     chtypes declines a whole batch without per-record detail, the type layer
-//     counts the body's lines to answer each record, so a pretty-printed array
-//     would come back with one phantom declined record per line of layout.
-//     This leaves exactly elements-1 newlines, so that count stays right.
+//   - every other newline outside a string, before or after the brackets too,
+//     becomes a space. Not cosmetic: when chtypes declines a whole batch
+//     without per-record detail, the type layer counts the body's lines to
+//     answer each record, so a pretty-printed array would come back with one
+//     phantom declined record per line of layout. This leaves exactly
+//     elements-1 newlines, so that count stays right.
 //
 // A raw newline inside a string is illegal JSON, so leaving those alone costs
 // nothing and keeps the caller's bytes the caller's.
@@ -57,7 +58,11 @@ func reframeArray(b []byte) (elements int, err error) {
 	for i := range b {
 		c := b[i]
 		if closed {
-			if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			switch c {
+			case ' ', '\t':
+			case '\n', '\r':
+				b[i] = ' '
+			default:
 				return 0, errAfterArray
 			}
 			continue

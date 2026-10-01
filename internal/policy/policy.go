@@ -356,9 +356,9 @@ func (rp *ResolvedPermissions) HasRowFilter() bool {
 // canonical form — see resolveTemplate/CanonicalScalar).
 //
 // It is exported because the stream path evaluates it outside this package
-// (Predicates). The values are bound as typed parameters there, exactly as they
-// are bound as query parameters here — neither surface ever splices one into
-// expression text.
+// (Predicates). The values are bound as {pN:String} parameters there, exactly
+// as they are bound here — neither surface ever splices one into expression
+// text.
 type Predicate struct {
 	Column string
 	Op     string
