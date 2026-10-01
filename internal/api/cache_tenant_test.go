@@ -11,11 +11,11 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
@@ -26,31 +26,14 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
-// countingConn answers every query with an empty result set and counts them,
-// so a test can tell a cache hit (no query) from a miss (one query).
-type countingConn struct {
-	driver.Conn
-	queries atomic.Int32
-}
-
-func (c *countingConn) Query(context.Context, string, ...any) (driver.Rows, error) {
-	c.queries.Add(1)
-	return &chainEmptyRows{}, nil
-}
-
-// gatedConn holds every query open until release is closed and reports each
-// one as it starts, so a test can hold requests in flight together and count
-// the queries they became.
-type gatedConn struct {
-	driver.Conn
-	entered chan struct{} // one send per query as it starts
-	release chan struct{} // closed to let every query finish
-}
-
-func (c *gatedConn) Query(context.Context, string, ...any) (driver.Rows, error) {
-	c.entered <- struct{}{}
-	<-c.release
-	return &chainEmptyRows{}, nil
+// gatedCH is a fakeCH that holds every query open until release is closed
+// and reports each one on entered as it starts, so a test can hold requests
+// in flight together and count the queries they became.
+func gatedCH(entered, release chan struct{}) *fakeCH {
+	return &fakeCH{answer: func(http.ResponseWriter, *chSeen) {
+		entered <- struct{}{}
+		<-release
+	}}
 }
 
 // cachedRoutes are the two read paths that cache and coalesce, each with a
@@ -61,16 +44,16 @@ var cachedRoutes = []struct{ name, path, body string }{
 }
 
 // cachedRouter is the real router over tenants, both cached read paths wired
-// to conn and c. Every request resolves to the viewer role, which may read
+// to ch and c. Every request resolves to the viewer role, which may read
 // clicks.page and run top_pages.
-func cachedRouter(t *testing.T, tenants *settings.Registry, conn driver.Conn, c cache.Cache) http.Handler {
+func cachedRouter(t *testing.T, tenants *settings.Registry, ch *fakeCH, c cache.Cache) http.Handler {
 	t.Helper()
-	return cachedRouterOver(t, tenants, fixedConn(conn), c)
+	return cachedRouterOver(t, tenants, ch.target, ch, c)
 }
 
-// cachedRouterOver is cachedRouter with the tenant's connection chosen per
-// request by connFor.
-func cachedRouterOver(t *testing.T, tenants *settings.Registry, connFor func(*settings.Store) driver.Conn, c cache.Cache) http.Handler {
+// cachedRouterOver is cachedRouter with the tenant's ClickHouse target chosen
+// per request by targetFor.
+func cachedRouterOver(t *testing.T, tenants *settings.Registry, targetFor func(*settings.Store) chconn.Target, ch *fakeCH, c cache.Cache) http.Handler {
 	t.Helper()
 	reg := testRegistry(t)
 	viewer := staticPolicy(&policy.Policy{
@@ -78,11 +61,15 @@ func cachedRouterOver(t *testing.T, tenants *settings.Registry, connFor func(*se
 		Tables:      map[string]policy.TablePolicy{"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}}},
 	})
 	timeout := func(*settings.Store) time.Duration { return 5 * time.Second }
+	sq := NewStructuredQueryHandler(targetFor, c, fixedRegistry(reg), viewer, func(*settings.Store) int { return 60 }, timeout, nil)
+	sq.ch = ch.reader()
+	pipesHandler := NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), viewer, targetFor, c, timeout)
+	pipesHandler.ch = ch.reader()
 	return NewRouter(Dependencies{
 		Tenants:         tenants,
 		Ingest:          NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
-		StructuredQuery: NewStructuredQueryHandler(connFor, c, fixedRegistry(reg), viewer, func(*settings.Store) int { return 60 }, timeout, nil),
-		Pipes:           NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), viewer, connFor, c, timeout),
+		StructuredQuery: sq,
+		Pipes:           pipesHandler,
 		Query:           &QueryHandler{},
 		SSE:             NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:          &HealthHandler{},
@@ -123,12 +110,12 @@ func TestNewRouter_CacheIsKeyedByTenant(t *testing.T) {
 	l1, err := cache.NewLocal(1 << 20)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l1.Close() })
-	conn := &countingConn{}
-	router := cachedRouter(t, tenants, conn, l1)
+	ch := &fakeCH{}
+	router := cachedRouter(t, tenants, ch, l1)
 
 	for _, route := range cachedRoutes {
 		t.Run(route.name, func(t *testing.T) {
-			before := conn.queries.Load()
+			before := ch.reads.Load()
 			// Ristretto admits asynchronously: settle after each request so the
 			// next one reads what the last one stored.
 			xcache := func(id tenant.ID) string {
@@ -141,7 +128,7 @@ func TestNewRouter_CacheIsKeyedByTenant(t *testing.T) {
 			assert.Equal(t, "HIT", xcache("acme"))
 			assert.Equal(t, "MISS", xcache("globex"), "a tenant must never be served another tenant's cached result")
 			assert.Equal(t, "HIT", xcache("globex"))
-			assert.Equal(t, before+2, conn.queries.Load(), "one query per tenant")
+			assert.Equal(t, before+2, ch.reads.Load(), "one query per tenant")
 		})
 	}
 }
@@ -154,12 +141,12 @@ func TestNewRouter_FlatDirectoryCacheStillHits(t *testing.T) {
 	l1, err := cache.NewLocal(1 << 20)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l1.Close() })
-	conn := &countingConn{}
-	router := cachedRouter(t, testTenants(), conn, l1)
+	ch := &fakeCH{}
+	router := cachedRouter(t, testTenants(), ch, l1)
 
 	for _, route := range cachedRoutes {
 		t.Run(route.name, func(t *testing.T) {
-			before := conn.queries.Load()
+			before := ch.reads.Load()
 			xcache := func(id tenant.ID) string {
 				w := serveAs(t, router, route.path, route.body, id)
 				require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
@@ -169,7 +156,7 @@ func TestNewRouter_FlatDirectoryCacheStillHits(t *testing.T) {
 			assert.Equal(t, "MISS", xcache(""))
 			assert.Equal(t, "HIT", xcache(""))
 			assert.Equal(t, "HIT", xcache(tenant.Default))
-			assert.Equal(t, before+1, conn.queries.Load())
+			assert.Equal(t, before+1, ch.reads.Load())
 		})
 	}
 }
@@ -178,7 +165,7 @@ func TestNewRouter_FlatDirectoryCacheStillHits(t *testing.T) {
 // one tenant. The singleflight key is the tenant-led cache key, so two
 // tenants' identical requests in flight together are two queries: neither
 // waits on, or receives, the other's result. Under synctest the count is
-// exact: Wait returns once every request is either inside Query or parked on
+// exact: Wait returns once every request is either inside ClickHouse or parked on
 // another's flight, with no sleep to race.
 func TestCachedRoutes_SingleflightIsPerTenant(t *testing.T) {
 	tenants := nestedTenants(t, map[string]string{"acme": fullConfig(100), "globex": fullConfig(200)})
@@ -194,8 +181,8 @@ func TestCachedRoutes_SingleflightIsPerTenant(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(route.name+", "+tt.name, func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
-					conn := &gatedConn{entered: make(chan struct{}, len(tt.tenants)), release: make(chan struct{})}
-					router := cachedRouter(t, tenants, conn, nil)
+					entered, release := make(chan struct{}, len(tt.tenants)), make(chan struct{})
+					router := cachedRouter(t, tenants, gatedCH(entered, release), nil)
 					var wg sync.WaitGroup
 					for _, id := range tt.tenants {
 						wg.Go(func() {
@@ -204,28 +191,13 @@ func TestCachedRoutes_SingleflightIsPerTenant(t *testing.T) {
 						})
 					}
 					synctest.Wait()
-					assert.Equal(t, tt.wantQueries, len(conn.entered), "queries in flight once every request is blocked")
-					close(conn.release)
+					assert.Equal(t, tt.wantQueries, len(entered), "queries in flight once every request is blocked")
+					close(release)
 					wg.Wait()
 				})
 			})
 		}
 	}
-}
-
-// bumpingConn runs bump inside the first query only, as an insert that lands
-// while ClickHouse is still reading would.
-type bumpingConn struct {
-	driver.Conn
-	bump    func()
-	queries atomic.Int32
-}
-
-func (c *bumpingConn) Query(context.Context, string, ...any) (driver.Rows, error) {
-	if c.queries.Add(1) == 1 {
-		c.bump()
-	}
-	return &chainEmptyRows{}, nil
 }
 
 // #382: a result is filed under the versions read before its query ran, so
@@ -246,8 +218,15 @@ func TestCachedRoutes_BumpDuringQueryOrphansTheFill(t *testing.T) {
 			l1, err := cache.NewLocal(1 << 20)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = l1.Close() })
-			conn := &bumpingConn{bump: func() { require.NoError(t, bumps[route.name](t.Context(), l1)) }}
-			router := cachedRouter(t, testTenants(), conn, l1)
+			// The bump lands inside the first query only, as an insert that
+			// lands while ClickHouse is still reading would.
+			ch := &fakeCH{}
+			ch.answer = func(http.ResponseWriter, *chSeen) {
+				if ch.reads.Load() == 1 {
+					require.NoError(t, bumps[route.name](t.Context(), l1))
+				}
+			}
+			router := cachedRouter(t, testTenants(), ch, l1)
 			xcache := func() string {
 				w := serveAs(t, router, route.path, route.body, "")
 				require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
@@ -257,7 +236,7 @@ func TestCachedRoutes_BumpDuringQueryOrphansTheFill(t *testing.T) {
 			assert.Equal(t, "MISS", xcache())
 			assert.Equal(t, "MISS", xcache(), "the fill of a query a bump overtook is orphaned")
 			assert.Equal(t, "HIT", xcache())
-			assert.Equal(t, int32(2), conn.queries.Load())
+			assert.Equal(t, int32(2), ch.reads.Load())
 		})
 	}
 }
@@ -274,19 +253,19 @@ func TestCachedRoutes_ReloadAsThePoolIsTakenOrphansTheFill(t *testing.T) {
 			l1, err := cache.NewLocal(1 << 20)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = l1.Close() })
-			conn := &countingConn{}
+			ch := &fakeCH{}
 			var taken atomic.Int32
 			var noPool atomic.Bool
-			connFor := func(*settings.Store) driver.Conn {
+			targetFor := func(s *settings.Store) chconn.Target {
 				if noPool.Load() {
-					return nil
+					return chconn.Target{}
 				}
 				if taken.Add(1) == 1 {
 					require.NoError(t, l1.InvalidateTenant(t.Context(), tenant.Default))
 				}
-				return conn
+				return ch.target(s)
 			}
-			router := cachedRouterOver(t, testTenants(), connFor, l1)
+			router := cachedRouterOver(t, testTenants(), targetFor, ch, l1)
 			xcache := func() string {
 				w := serveAs(t, router, route.path, route.body, "")
 				require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
@@ -296,7 +275,7 @@ func TestCachedRoutes_ReloadAsThePoolIsTakenOrphansTheFill(t *testing.T) {
 			assert.Equal(t, "MISS", xcache())
 			assert.Equal(t, "MISS", xcache(), "the fill of a query on the pool a reload replaced is orphaned")
 			assert.Equal(t, "HIT", xcache())
-			assert.Equal(t, int32(2), conn.queries.Load())
+			assert.Equal(t, int32(2), ch.reads.Load())
 
 			noPool.Store(true)
 			w := serveAs(t, router, route.path, route.body, "")
@@ -322,9 +301,11 @@ func TestStructuredQuery_RawTableNameMeetsTheInsertsBump(t *testing.T) {
 	l1, err := cache.NewLocal(1 << 20)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l1.Close() })
-	h := NewStructuredQueryHandler(fixedConn(&countingConn{}), l1, fixedRegistry(testutil.NewTestSchemaRegistry(t, schemas)),
+	ch := &fakeCH{}
+	h := NewStructuredQueryHandler(ch.target, l1, fixedRegistry(testutil.NewTestSchemaRegistry(t, schemas)),
 		staticPolicy(&policy.Policy{DefaultRole: "viewer", Tables: grants}), func(*settings.Store) int { return 60 },
 		func(*settings.Store) time.Duration { return 5 * time.Second }, nil)
+	h.ch = ch.reader()
 
 	for _, table := range tables {
 		xcache := func() string {

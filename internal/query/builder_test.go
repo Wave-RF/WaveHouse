@@ -1,6 +1,7 @@
 package query
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -136,8 +137,15 @@ func TestBuild_InFilter(t *testing.T) {
 	}
 	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
-	assert.Contains(t, result.SQL, "`page` IN (?,?)")
-	assert.Len(t, result.Params, 2)
+	// One placeholder for the whole list, bound as one Array(String).
+	assert.Contains(t, result.SQL, "`page` IN ?")
+	require.Len(t, result.Params, 1)
+	assert.Equal(t, []any{"/home", "/about"}, result.Params[0])
+
+	sql, params, err := result.NamedParams()
+	require.NoError(t, err)
+	assert.Contains(t, sql, "`page` IN {p0:Array(String)}")
+	assert.Equal(t, []string{`['/home','/about']`}, params)
 }
 
 func TestBuild_OrderBy(t *testing.T) {
@@ -178,10 +186,18 @@ func TestBuild_TimeRange(t *testing.T) {
 	assert.Len(t, result.Params, 1)
 }
 
-// permsWithFilter returns resolved permissions carrying a row-filter predicate,
-// shaped exactly as policy.Evaluate emits one (quoted column, positional '?').
+// permsWithFilter returns resolved permissions carrying a row-filter predicate
+// on org_id (a String column), resolved by policy.Evaluate itself.
 func permsWithFilter() *policy.ResolvedPermissions {
-	return &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{WhereClause: "`org_id` = ?", WhereParams: []any{"org-1"}}}
+	return permsFiltering(map[string]policy.Filter{"org_id": {Eq: new("org-1")}}, nil)
+}
+
+// permsFiltering resolves a read grant carrying filter for role "r" on clicks.
+func permsFiltering(filter map[string]policy.Filter, claims map[string]any) *policy.ResolvedPermissions {
+	p := &policy.Policy{Tables: map[string]policy.TablePolicy{
+		"clicks": {"r": {Select: &policy.SelectPermissions{Filter: filter}}},
+	}}
+	return policy.Evaluate(p, "r", "clicks", "select", claims)
 }
 
 // TestBuild_PolicyPredicate pins the structural emission of the row-level-
@@ -257,6 +273,147 @@ func TestBuild_PolicyPredicate_SurvivesCraftedIdentifiers(t *testing.T) {
 			assert.Equal(t, []any{"org-1"}, result.Params)
 		})
 	}
+}
+
+// TestBuild_PolicyPredicate_IntegerColumnsBindThroughTheStrictCast pins the
+// query path's half of the integer-claim rule: a policy claim compared against
+// an integer column (any width, Nullable or LowCardinality) renders as
+// chsql.StrictInt over ONE {pN:String} parameter, on every operator and on
+// each element of an _in list, while every other column keeps the plain
+// {pN:String} form. The typelayer renders the same expression for the stream
+// and the insert check.
+func TestBuild_PolicyPredicate_IntegerColumnsBindThroughTheStrictCast(t *testing.T) {
+	t.Parallel()
+	schema := &discovery.TableSchema{Name: "clicks", Columns: []discovery.Column{
+		{Name: "page", Type: "String"},
+		{Name: "u64", Type: "UInt64"},
+		{Name: "i8", Type: "Int8"},
+		{Name: "nu256", Type: "Nullable(UInt256)"},
+		{Name: "lci32", Type: "LowCardinality(Nullable(Int32))"},
+		{Name: "org_id", Type: "String"},
+		{Name: "amount", Type: "Decimal(18, 4)"},
+		{Name: "flag", Type: "Bool"},
+	}}
+	e := func(p, typ string) string {
+		c := "accurateCastOrNull({" + p + ":String}, '" + typ + "')"
+		return "if(toString(" + c + ") = {" + p + ":String}, " + c + ", NULL)"
+	}
+	tests := []struct {
+		name       string
+		column     string
+		filter     policy.Filter
+		claims     map[string]any
+		wantWhere  string
+		wantParams []string
+	}{
+		{
+			"eq on UInt64", "u64",
+			policy.Filter{Eq: new("{{ jwt.t }}")},
+			map[string]any{"t": "5"},
+			"`u64` = " + e("p0", "UInt64"),
+			[]string{"5"},
+		},
+		{
+			"neq on Int8", "i8",
+			policy.Filter{Neq: new("-3")},
+			nil,
+			"`i8` != " + e("p0", "Int8"),
+			[]string{"-3"},
+		},
+		{
+			"gt on Nullable(UInt256) casts to the bare type", "nu256",
+			policy.Filter{Gt: new("7")},
+			nil,
+			"`nu256` > " + e("p0", "UInt256"),
+			[]string{"7"},
+		},
+		{
+			"lt on LowCardinality(Nullable(Int32)) casts to the bare type", "lci32",
+			policy.Filter{Lt: new("9")},
+			nil,
+			"`lci32` < " + e("p0", "Int32"),
+			[]string{"9"},
+		},
+		{
+			"in on UInt64 casts each element", "u64",
+			policy.Filter{In: new("{{ jwt.ts }}")},
+			map[string]any{"ts": []any{"5", "18446744073709551621", "007"}},
+			"`u64` IN (" + e("p0", "UInt64") + "," + e("p1", "UInt64") + "," + e("p2", "UInt64") + ")",
+			[]string{"5", "18446744073709551621", "007"},
+		},
+		{
+			"a claim needing escape is encoded once", "u64",
+			policy.Filter{Eq: new("{{ jwt.t }}")},
+			map[string]any{"t": `a\b`},
+			"`u64` = " + e("p0", "UInt64"),
+			[]string{`a\\b`},
+		},
+		{
+			"eq on String keeps the plain form", "org_id",
+			policy.Filter{Eq: new("acme")},
+			nil,
+			"`org_id` = {p0:String}",
+			[]string{"acme"},
+		},
+		{
+			"in on String keeps the plain form", "org_id",
+			policy.Filter{In: new("{{ jwt.ts }}")},
+			map[string]any{"ts": []any{"a", "b"}},
+			"`org_id` IN ({p0:String},{p1:String})",
+			[]string{"a", "b"},
+		},
+		{
+			"Decimal keeps the plain form", "amount",
+			policy.Filter{Gt: new("1.50")},
+			nil,
+			"`amount` > {p0:String}",
+			[]string{"1.50"},
+		},
+		{
+			"Bool keeps the plain form", "flag",
+			policy.Filter{Eq: new("true")},
+			nil,
+			"`flag` = {p0:String}",
+			[]string{"true"},
+		},
+		{
+			"an unresolvable claim still fails closed", "u64",
+			policy.Filter{Eq: new("{{ jwt.absent }}")},
+			nil,
+			"1 = 0", nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			perms := permsFiltering(map[string]policy.Filter{tt.column: tt.filter}, tt.claims)
+			res, err := Build("clicks", &StructuredQuery{Columns: []string{"page"}}, schema, perms, 0, DefaultMaxRows)
+			require.NoError(t, err)
+			sql, params, err := res.NamedParams()
+			require.NoError(t, err)
+			assert.Equal(t, "SELECT `page` FROM `clicks` WHERE ("+tt.wantWhere+") LIMIT 10000", sql)
+			assert.Equal(t, tt.wantParams, params)
+		})
+	}
+}
+
+// TestBuild_PolicyPredicate_CallerFiltersKeepThePlainForm: the strict cast is
+// for policy claims only. A caller's own filter on an integer column binds as
+// before — it can only narrow what the policy already admits.
+func TestBuild_PolicyPredicate_CallerFiltersKeepThePlainForm(t *testing.T) {
+	t.Parallel()
+	perms := permsFiltering(map[string]policy.Filter{"count": {Eq: new("5")}}, nil)
+	sq := &StructuredQuery{Columns: []string{"page"}, Filters: []Filter{
+		{Column: "count", Op: "gt", Value: json.Number("1")},
+		{Column: "count", Op: "in", Value: []any{json.Number("1"), json.Number("2")}},
+	}}
+	res, err := Build("clicks", sq, testSchema(), perms, 0, DefaultMaxRows)
+	require.NoError(t, err)
+	sql, params, err := res.NamedParams()
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT `page` FROM `clicks` WHERE (`count` = "+chsql.StrictInt("p0", "UInt64")+
+		") AND `count` > {p1:String} AND `count` IN {p2:Array(String)} LIMIT 10000", sql)
+	assert.Equal(t, []string{"5", "1", "['1','2']"}, params)
 }
 
 // TestBuild_PolicyMaxRows pins the role's max_rows cap folded into Build's LIMIT
@@ -542,6 +699,58 @@ func TestBuild_FilterWithTimestampValue(t *testing.T) {
 	strVal, isString := result.Params[0].(string)
 	assert.True(t, isString, "timestamp filter value should be coerced to formatted string, got %T", result.Params[0])
 	assert.Equal(t, "2026-04-02 16:02:07.666", strVal)
+
+	sql, params, err := result.NamedParams()
+	require.NoError(t, err)
+	assert.Contains(t, sql, "`received_timestamp` < {p0:String}")
+	assert.Equal(t, []string{"2026-04-02 16:02:07.666"}, params)
+}
+
+// TestBuild_TimestampRewriteIsForDateTimeColumnsOnly: an RFC3339 value is
+// rewritten only where the schema types the column DateTime or DateTime64 —
+// wrapped or not, scalar or inside an `in` list. The same text on any other
+// column is the caller's own value and reaches ClickHouse as written.
+func TestBuild_TimestampRewriteIsForDateTimeColumnsOnly(t *testing.T) {
+	t.Parallel()
+	schema := &discovery.TableSchema{Name: "events", Columns: []discovery.Column{
+		{Name: "dt", Type: "DateTime"},
+		{Name: "dtz", Type: "DateTime('Europe/Berlin')"},
+		{Name: "dt64", Type: "Nullable(DateTime64(3, 'UTC'))"},
+		{Name: "lc", Type: "LowCardinality(Nullable(DateTime))"},
+		{Name: "label", Type: "String"},
+		{Name: "day", Type: "Date"},
+	}}
+	const rfc = "2026-04-02T16:02:07.666Z"
+	const ch = "2026-04-02 16:02:07.666"
+	tests := []struct {
+		column string
+		value  any
+		want   any
+	}{
+		{"dt", rfc, ch},
+		{"dtz", rfc, ch},
+		{"dt64", rfc, ch},
+		{"lc", rfc, ch},
+		{"dt", "2026-04-02 16:02:07", "2026-04-02 16:02:07"},
+		{"label", rfc, rfc},
+		{"day", rfc, rfc},
+		{"dt64", []any{rfc, "2026-04-02 16:02:07"}, []any{ch, "2026-04-02 16:02:07"}},
+		{"label", []any{rfc}, []any{rfc}},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s %v", tt.column, tt.value), func(t *testing.T) {
+			t.Parallel()
+			op := "eq"
+			if _, ok := tt.value.([]any); ok {
+				op = "in"
+			}
+			sq := &StructuredQuery{SelectAll: true, Filters: []Filter{{Column: tt.column, Op: op, Value: tt.value}}}
+			result, err := Build("events", sq, schema, nil, 0, DefaultMaxRows)
+			require.NoError(t, err)
+			require.Len(t, result.Params, 1)
+			assert.Equal(t, tt.want, result.Params[0])
+		})
+	}
 }
 
 func TestBuild_TableNameWithBacktick(t *testing.T) {
@@ -573,8 +782,8 @@ func TestBuild_InvalidColumns(t *testing.T) {
 			sq: &StructuredQuery{
 				Columns: []string{"page"},
 				// A non-schema order column is allowed as an alias reference and
-				// backtick-quoted; only a '?' (which clickhouse-go's binder would
-				// miscount) is rejected.
+				// backtick-quoted; only a '?' (which the positional-to-named rewrite
+				// would miscount) is rejected.
 				OrderBy: []OrderClause{{Column: "we?ird", Dir: "asc"}},
 			},
 			wantErr: "unsupported order column",
@@ -855,7 +1064,7 @@ func TestBuild_AggregationAliasQuotedAndContained(t *testing.T) {
 }
 
 // TestBuild_RejectsBindUnsafeAlias keeps the one alias rejection that remains: a
-// '?' would be miscounted by clickhouse-go's positional value binder.
+// '?' would be miscounted by the positional-to-named parameter rewrite.
 func TestBuild_RejectsBindUnsafeAlias(t *testing.T) {
 	t.Parallel()
 	sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "we?ird"}}}
@@ -1001,4 +1210,129 @@ func TestBuild_InsertResolvedGrantIsRejected(t *testing.T) {
 	res, err := Build("clicks", &StructuredQuery{Columns: []string{"page"}}, testSchema(), selectResolved, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.NotNil(t, res)
+}
+
+// TestNamedParams pins the ClickHouse binding rule: every positional `?`
+// becomes a named parameter, every scalar binds as String and every list as
+// Array(String), in the order the WHERE assembly emitted them.
+func TestNamedParams(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		sql        string
+		params     []any
+		wantSQL    string
+		wantParams []string
+	}{
+		{
+			name:       "no parameters",
+			sql:        "SELECT `page` FROM `clicks` LIMIT 10",
+			wantSQL:    "SELECT `page` FROM `clicks` LIMIT 10",
+			wantParams: nil,
+		},
+		{
+			name:       "policy predicate keeps its leading position",
+			sql:        "SELECT `page` FROM `clicks` WHERE (`org_id` = ?) AND `page` = ? LIMIT 100",
+			params:     []any{"org-1", "/home"},
+			wantSQL:    "SELECT `page` FROM `clicks` WHERE (`org_id` = {p0:String}) AND `page` = {p1:String} LIMIT 100",
+			wantParams: []string{"org-1", "/home"},
+		},
+		{
+			name:       "list binds as one Array(String)",
+			sql:        "SELECT * FROM `t` WHERE `page` IN ? LIMIT 10",
+			params:     []any{[]any{"/a", "/b"}},
+			wantSQL:    "SELECT * FROM `t` WHERE `page` IN {p0:Array(String)} LIMIT 10",
+			wantParams: []string{`['/a','/b']`},
+		},
+		{
+			name:   "numbers keep the caller's own digits",
+			sql:    "SELECT * FROM `t` WHERE `a` = ? AND `b` = ? AND `c` = ? LIMIT 10",
+			params: []any{json.Number("12.50"), json.Number("9007199254740993"), true},
+			wantSQL: "SELECT * FROM `t` WHERE `a` = {p0:String} AND `b` = {p1:String} " +
+				"AND `c` = {p2:String} LIMIT 10",
+			wantParams: []string{"12.50", "9007199254740993", "true"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sql, params, err := (&BuildResult{SQL: tt.sql, Params: tt.params}).NamedParams()
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantSQL, sql)
+			assert.Equal(t, tt.wantParams, params)
+		})
+	}
+}
+
+// TestNamedParams_Encoding pins the two escapings a ClickHouse query parameter
+// needs, which are NOT the same and must not be applied to each other's
+// values. Measured on 26.6.3.62 (the version the integration suite pins):
+//
+//   - a scalar `{p:String}` is read by the escaped-text reader, so a raw
+//     backslash is taken as the start of an escape sequence ("a\b" came back
+//     holding a backspace) and a raw tab or newline ends the field outright
+//     (code 457, a 500 for the caller);
+//   - an `Array(String)` value is an array literal whose elements are quoted,
+//     so a raw tab or newline rides through untouched and only the quote and
+//     the backslash need encoding.
+//
+// Both encodings round-trip every case below byte for byte against a live
+// server; getting either wrong is silent data loss, not an error.
+func TestNamedParams_Encoding(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		value     any
+		wantParam string
+	}{
+		{"plain", "hello", "hello"},
+		{"single quote needs nothing", "it's", "it's"},
+		{"backslash", `a\b`, `a\\b`},
+		{"windows path", `C:\Users\x`, `C:\\Users\\x`},
+		{"tab", "a\tb", `a\tb`},
+		{"newline", "a\nb", `a\nb`},
+		{"carriage return", "a\rb", `a\rb`},
+		{"a literal backslash-n", `a\nb`, `a\\nb`},
+		{"like pattern", "%foo%", "%foo%"},
+		{"list quotes and backslashes", []any{`it's`, `a\b`, "a\tb"}, "['it\\'s','a\\\\b','a\tb']"},
+		{"list containment attempt", []any{`']) OR 1=1 --`}, `['\']) OR 1=1 --']`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, params, err := (&BuildResult{SQL: "SELECT ?", Params: []any{tt.value}}).NamedParams()
+			require.NoError(t, err)
+			require.Len(t, params, 1)
+			assert.Equal(t, tt.wantParam, params[0])
+		})
+	}
+}
+
+// TestNamedParams_Rejects covers the values and shapes that have no honest
+// binding. A JSON null is the notable one: it used to bind as `col = NULL`
+// (never true), where an empty String parameter would compare
+// against the empty string — a different question, so it is refused (→ 400).
+func TestNamedParams_Rejects(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		sql     string
+		params  []any
+		wantErr string
+	}{
+		{"null value", "SELECT ?", []any{nil}, "must not be null"},
+		{"object value", "SELECT ?", []any{map[string]any{"k": "v"}}, "unsupported filter value type"},
+		{"nested list", "SELECT ?", []any{[]any{[]any{"a"}}}, "nested list"},
+		{"more values than placeholders", "SELECT 1", []any{"a"}, "only 0 placeholders"},
+		{"more placeholders than values", "SELECT ?, ?", []any{"a"}, "more placeholders"},
+		{"placeholder with no values", "SELECT ?", nil, "no bound values"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := (&BuildResult{SQL: tt.sql, Params: tt.params}).NamedParams()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }

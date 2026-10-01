@@ -289,7 +289,8 @@ func (a *App) wireObservability(ctx context.Context) {
 // had, or on none when they had none; both logged, and retried by the next
 // reload. Reachability surfaces
 // where it already does (schema discovery retries, /readyz, query errors).
-// Every consumer resolves its tenant's pool per call (chConn, chTargetFor).
+// Every consumer resolves its tenant's pool per call (chTargetFor,
+// discoverySource).
 func (a *App) wireClickHouse() error {
 	members := func() []chconn.Member {
 		var ms []chconn.Member
@@ -340,17 +341,6 @@ func (a *App) wireClickHouse() error {
 	return nil
 }
 
-// chConn is the connection of tenant id, or an untyped nil when the tenant
-// is on no pool — never a nil *Manager inside a non-nil driver.Conn, which
-// would pass a nil check and panic on use.
-func (a *App) chConn(id tenant.ID) driver.Conn {
-	m := a.pools.For(id)
-	if m == nil {
-		return nil
-	}
-	return m
-}
-
 // discoverySource is what tenant id's schema registry discovers from, read
 // per refresh so a reload that repoints the tenant applies to the next one
 // (a move to another address or database starts the tenant over on a fresh
@@ -371,8 +361,6 @@ func (a *App) discoverySource(id tenant.ID) discovery.Source {
 // The store-keyed getters the handlers take: each resolves the request
 // tenant's pool or registry per call, so a reload that repoints the tenant
 // applies to the next request.
-
-func (a *App) chConnFor(s *settings.Store) driver.Conn { return a.chConn(s.Tenant()) }
 
 func (a *App) chTargetFor(s *settings.Store) chconn.Target { return a.pools.Target(s.Tenant()) }
 
@@ -1011,7 +999,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	closing := make(chan struct{})
 	streamHandler.Closing = closing
 
-	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.chConnFor, a.cache, queryTimeout)
+	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.chTargetFor, a.cache, queryTimeout)
 	pipesHandler.Tenants = a.tenants
 
 	schemaHandler := api.NewSchemaHandler(a.registryFor)
@@ -1032,7 +1020,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Schema:          schemaHandler,
 		DLQ:             api.NewDLQHandler(a.mq),
 		Pipes:           pipesHandler,
-		StructuredQuery: api.NewStructuredQueryHandler(a.chConnFor, a.cache, a.registryFor, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, queryTimeout, (*settings.Store).DefaultMaxRows),
+		StructuredQuery: api.NewStructuredQueryHandler(a.chTargetFor, a.cache, a.registryFor, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, queryTimeout, (*settings.Store).DefaultMaxRows),
 
 		AuthMW:       authMW,
 		Tenants:      a.tenants,

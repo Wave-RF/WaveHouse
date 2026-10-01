@@ -1,97 +1,16 @@
 package api
 
 import (
-	"context"
-	"fmt"
-	"reflect"
 	"strings"
-	"time"
 	"unicode/utf8"
-
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/Wave-RF/WaveHouse/internal/settings"
-	"github.com/google/uuid"
 )
 
-// connOf is conn's answer for store — the tenant's pool — and nil for an
-// unwired source or a tenant on no pool. The nil is untyped: a nil *Manager
-// inside a non-nil driver.Conn would pass a nil check and panic on use.
-func connOf(conn func(*settings.Store) driver.Conn, store *settings.Store) driver.Conn {
-	if conn == nil {
-		return nil
-	}
-	return conn(store)
-}
-
-// timeoutOf is timeout's answer for store, zero for an unwired source.
-func timeoutOf(timeout func(*settings.Store) time.Duration, store *settings.Store) time.Duration {
-	if timeout == nil {
-		return 0
-	}
-	return timeout(store)
-}
-
-// executeCHQuery runs sql against the native-protocol driver conn,
-// classifying by leading SQL verb to pick the Exec-vs-Query path —
-// clickhouse-go's driver.Query() errors on statements that return no
-// result set, so the dispatch is correctness, not optimisation. Returns
-// a row-array suitable for JSON marshalling; mutations marshal to `[]`,
-// preserving the "always-an-array" response shape callers depend on.
-//
-// Used by the structured-query and pipes handlers — those are the cached
-// read paths that need explicit Query/Exec dispatch and per-row scanning.
-// The raw-SQL endpoint (/v1/ops/query) proxies straight to ClickHouse
-// over HTTP and never calls this; see internal/api/query.go.
-func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []any) ([]map[string]any, error) {
-	if IsMutation(sql) {
-		if err := conn.Exec(ctx, sql, params...); err != nil {
-			return nil, fmt.Errorf("clickhouse exec: %w", err)
-		}
-		return []map[string]any{}, nil
-	}
-
-	rows, err := conn.Query(ctx, sql, params...)
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse query: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	columns := rows.ColumnTypes()
-	// Initialize as empty (not nil) so a zero-row result marshals to `[]`,
-	// not `null`. SDK consumers do `data!.length` on the response; a `null`
-	// crashes the client on every empty fetch.
-	results := []map[string]any{}
-
-	for rows.Next() {
-		valPtrs := make([]any, len(columns))
-		for i, col := range columns {
-			valPtrs[i] = reflect.New(col.ScanType()).Interface()
-		}
-		if err := rows.Scan(valPtrs...); err != nil {
-			return nil, fmt.Errorf("scan clickhouse row: %w", err)
-		}
-		row := make(map[string]any)
-		for i, col := range columns {
-			row[col.Name()] = reflect.ValueOf(valPtrs[i]).Elem().Interface()
-		}
-		results = append(results, transformRow(row))
-	}
-	// rows.Next() returns false both when iteration completes successfully
-	// AND when the driver hits an error mid-stream (network drop, decode
-	// failure on a row past the first). Without this check, a partial
-	// result set silently masquerades as a complete one.
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate clickhouse rows: %w", err)
-	}
-	return results, nil
-}
-
 // mutationVerbs is a set of SQL leading keywords that don't return a result
-// set — anything that mutates schema or data. Routed through Exec rather
-// than Query (see executeCHQuery). Sourced from the ClickHouse statement
+// set — anything that mutates schema or data. A pipe led by one runs as a
+// write (PipesHandler.executeWrite). Sourced from the ClickHouse statement
 // reference: DML, DDL, role/privilege management, and runtime control
 // (SYSTEM/KILL/SET). Read-only verbs (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/
-// EXISTS) intentionally fall through to the default Query path.
+// EXISTS) intentionally fall through to the read path.
 var mutationVerbs = map[string]struct{}{
 	"INSERT":   {},
 	"UPDATE":   {},
@@ -114,16 +33,17 @@ var mutationVerbs = map[string]struct{}{
 	"SYSTEM":   {},
 }
 
-// IsMutation reports whether sql's leading statement is a non-SELECT — i.e.
-// one that returns no result set and must go through Exec, not Query.
-// Leading whitespace and comments are skipped as ClickHouse's lexer skips
-// them, then the first bareword is matched whole, case-insensitively, against
-// mutationVerbs. After a WITH list ClickHouse parses only SELECT, a FROM-first
-// SELECT or INSERT INTO, so a WITH-led statement is a write exactly when it
-// holds INSERT INTO at the top level (hasTopLevelInsertInto). An
-// `EXECUTE AS <user>` prefix is looked through to the statement it runs. A
-// write classified as a read goes through Query, which runs it and then fails
-// the call, so a client that retries the error writes again.
+// IsMutation reports whether sql's leading statement is a non-SELECT — one
+// that returns no result set and may change something, so a pipe running it
+// is never cached or coalesced (#386). Leading whitespace and comments are
+// skipped as ClickHouse's lexer skips them, then the first bareword is matched
+// whole, case-insensitively, against mutationVerbs. After a WITH list
+// ClickHouse parses only SELECT, a FROM-first SELECT or INSERT INTO, so a
+// WITH-led statement is a write exactly when it holds INSERT INTO at the top
+// level (hasTopLevelInsertInto). An `EXECUTE AS <user>` prefix is looked
+// through to the statement it runs. A write classified as a read runs under
+// readonly=2, so ClickHouse refuses it rather than running it and having its
+// empty result cached.
 func IsMutation(sql string) bool {
 	s := stripLeadingSQLComments(sql)
 	if rest, ok := skipExecuteAs(s); ok {
@@ -430,24 +350,4 @@ func skipQuoted(s string, i int) int {
 		}
 	}
 	return len(s)
-}
-
-// transformRow converts ClickHouse-specific types to JSON-friendly values.
-func transformRow(row map[string]any) map[string]any {
-	for k, v := range row {
-		switch val := v.(type) {
-		case uuid.UUID:
-			row[k] = val.String()
-		case [16]byte:
-			row[k] = uuid.UUID(val).String()
-		case time.Time:
-			row[k] = val.UTC().Format(time.RFC3339Nano)
-		case *time.Time:
-			// Nullable(DateTime…) scans as a pointer; NULL stays nil (JSON null).
-			if val != nil {
-				row[k] = val.UTC().Format(time.RFC3339Nano)
-			}
-		}
-	}
-	return row
 }
