@@ -39,7 +39,8 @@ func IsUnavailable(err error) bool {
 }
 
 // ErrColumnsDrift is returned by ParseRow when the envelope's column list is
-// not the one the current compiled handle exports. A positional row is only
-// interpretable against the generation that produced it, so a mismatch means
-// the event predates a schema change and must be withheld rather than guessed.
+// not an INSERT column list the current compiled handle accepts: it names a
+// column the handle does not export, or names one twice. The event predates a
+// schema change (or was not written by this gateway) and must be withheld
+// rather than read under guessed positions.
 var ErrColumnsDrift = errors.New("row columns do not match the table's wire columns")

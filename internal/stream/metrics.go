@@ -45,7 +45,7 @@ func NewMetrics() *Metrics {
 	dropped, _ := meter.Int64Counter("wavehouse_sse_dropped_frames_total",
 		metric.WithDescription("SSE frames dropped to a full subscriber queue (slow consumer)"))
 	withheld, _ := meter.Int64Counter("wavehouse_sse_rows_withheld_total",
-		metric.WithDescription("Event rows withheld from a subscriber by the role's row-level-security filter (including fail-closed evaluations)"))
+		metric.WithDescription("Event rows withheld from a subscriber by the role's row-level-security filter, labelled by why (including fail-closed evaluations)"))
 	return &Metrics{active: active, duration: duration, frames: frames, bytes: bytes, dropped: dropped, withheld: withheld}
 }
 
@@ -89,11 +89,22 @@ func (m *Metrics) FrameDropped(kind string) {
 // RowWithheld records one event row withheld from one subscriber (live or replay)
 // by the role's row-level-security filter, including fail-closed evaluations.
 // Labeled by table and role (policy-bounded, not data-bounded) so an operator can
-// tell "no matching rows" from "a misconfigured filter withholding everything".
-func (m *Metrics) RowWithheld(table, role string) {
+// tell "no matching rows" from "a misconfigured filter withholding everything",
+// and by reason (a Reason* constant, a closed set) so the cases that are a FAULT
+// rather than a filter verdict are visible on their own: `unavailable` means the
+// type layer has no compiled schema for the tenant's table, so every
+// row-filtered subscriber is dark until it does; `drift` means events arrive
+// under a column list the table's current generation cannot read; `error` means
+// ClickHouse raised evaluating the predicate over the row; and `decline` means
+// no verdict was reached — a filter that does not compile, a row that does not
+// parse, or a filter on a column the inserting role did not write. Only
+// `filter` is a policy decision.
+func (m *Metrics) RowWithheld(table, role, reason string) {
 	if m == nil {
 		return
 	}
-	m.withheld.Add(context.Background(), 1,
-		metric.WithAttributes(attribute.String("table", table), attribute.String("role", role)))
+	m.withheld.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("table", table),
+		attribute.String("role", role),
+		attribute.String("reason", reason)))
 }

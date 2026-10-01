@@ -1,23 +1,22 @@
 package api
 
 import (
+	"strconv"
 	"time"
-
-	"github.com/ClickHouse/clickhouse-go/v2"
 )
 
-// chQueryLimits is the per-request resource budget a single read runs under,
-// taken from the role's resolved policy caps. A zero field means "no limit" for
-// that dimension and is omitted from the settings. Server-wide backstops are
-// ClickHouse's job (settings profiles / quotas), not WaveHouse's — so an admin,
-// whose policy resolves to no caps, sends no settings here and is bounded only
-// by ClickHouse's own config.
+// chQueryLimits is the per-request budget a single read runs under: the
+// role's resolved policy caps, and the time bound every read carries. A zero
+// field means "no limit" for that dimension and is omitted from the settings.
+// Server-wide backstops are ClickHouse's job (settings profiles / quotas), not
+// WaveHouse's — so an admin, whose policy resolves to no caps, is bounded only
+// by its query timeout and ClickHouse's own config.
 type chQueryLimits struct {
 	// ExecutionTime is the wall-clock budget, emitted as max_execution_time in
 	// fractional seconds, so ClickHouse itself stops the query and says so
-	// (TIMEOUT_EXCEEDED). The query context carries no deadline when this is
-	// set (cancelAfter): clickhouse-go would otherwise overwrite the setting
-	// with deadline+5s for any deadline over 1s.
+	// (TIMEOUT_EXCEEDED). Cancelling the HTTP request cannot interrupt a
+	// server-side phase already running, so the bound reaches ClickHouse as a
+	// setting rather than only as the request's deadline.
 	ExecutionTime time.Duration
 	// MaxResultRows caps rows RETURNED (max_result_rows + result_overflow_mode=
 	// throw) — defense-in-depth behind the SQL LIMIT the structured builder
@@ -31,29 +30,32 @@ type chQueryLimits struct {
 	MaxMemoryBytes int64
 }
 
-// chReadSettings builds the per-query ClickHouse Settings that enforce a read's
-// resource budget SERVER-SIDE, so it can't outrun the budget during a
-// server-side scan / merge / aggregation phase (#316). Without these, the only
-// budget reaching ClickHouse is whatever clickhouse-go derives from the context
-// deadline — which never bounds memory or rows scanned. Returns nil when no cap
-// applies, so the caller can skip wrapping the context.
-func chReadSettings(l chQueryLimits) clickhouse.Settings {
-	settings := clickhouse.Settings{}
+// chReadSettings builds the per-query ClickHouse settings that enforce a
+// read's budget SERVER-SIDE, so it can't outrun the budget during a
+// server-side scan / merge / aggregation phase (#316); the request's deadline
+// alone never bounds memory or rows scanned. Returns nil when no limit
+// applies.
+//
+// The values are text because they ride on the HTTP interface's query
+// string, in the numeric spellings ClickHouse expects: max_execution_time in
+// fractional seconds, the rest as plain integers.
+func chReadSettings(l chQueryLimits) map[string]string {
+	settings := map[string]string{}
 	if l.ExecutionTime > 0 {
 		// Fractional seconds — ClickHouse accepts them, preserving a sub-second
 		// cap that a whole-second representation would round away.
-		settings["max_execution_time"] = l.ExecutionTime.Seconds()
+		settings["max_execution_time"] = strconv.FormatFloat(l.ExecutionTime.Seconds(), 'f', -1, 64)
 	}
 	if l.MaxResultRows > 0 {
-		settings["max_result_rows"] = l.MaxResultRows
+		settings["max_result_rows"] = strconv.Itoa(l.MaxResultRows)
 		settings["result_overflow_mode"] = "throw"
 	}
 	if l.MaxRowsToRead > 0 {
-		settings["max_rows_to_read"] = l.MaxRowsToRead
+		settings["max_rows_to_read"] = strconv.FormatInt(l.MaxRowsToRead, 10)
 		settings["read_overflow_mode"] = "throw"
 	}
 	if l.MaxMemoryBytes > 0 {
-		settings["max_memory_usage"] = l.MaxMemoryBytes
+		settings["max_memory_usage"] = strconv.FormatInt(l.MaxMemoryBytes, 10)
 	}
 	if len(settings) == 0 {
 		return nil
