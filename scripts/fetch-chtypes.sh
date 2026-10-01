@@ -14,7 +14,7 @@
 # A line not in the lock, or a lock/registry mismatch, is a hard failure.
 #
 # Usage: scripts/fetch-chtypes.sh [<line> ...] [--platform <os-arch>] [--dest <dir>]
-#   <line>      ClickHouse minor line(s) to fetch, e.g. 26.6. Defaults to
+#   <line>      ClickHouse minor line(s) to fetch, e.g. 26.8. Defaults to
 #               every line this repo needs today (LOCK_LINES below).
 #   --platform  os-arch pair to fetch for (default: host platform, chosen
 #               by the SDK's own HostPlatform()). Pass linux-amd64 /
@@ -43,7 +43,7 @@ if [ "$(go env CGO_ENABLED 2>/dev/null || echo 0)" != "1" ]; then
 fi
 
 # Bump together with go.mod's `require github.com/wave-rf/chtypes/go` line.
-CHTYPES_SDK_VERSION="v0.4.0"
+CHTYPES_SDK_VERSION="v0.5.1"
 CHTYPES_CLI="github.com/wave-rf/chtypes/go/cmd/chtypes@${CHTYPES_SDK_VERSION}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -51,11 +51,13 @@ LOCK_FILE="${REPO_ROOT}/chtypes.lock"
 
 # Lines every deployment of this repo needs today. The e2e harness
 # (tests/integration/setup_test.go, scripts/orchestrator) and dev compose
-# both pin ClickHouse 26.6.3.62; chtypes resolves by MINOR line (26.6),
-# never nearest, so this is "26.6", not the exact patch. Widening
-# this list is how a new line gets adopted: fetch it, add it here, commit
-# the updated lock.
-LOCK_LINES=(26.6)
+# pin ClickHouse 26.8.15.10, the same patch as the locked 26.8.15.10-lts
+# build. A line request installs the newest patch the lock pins for that
+# line, and the gateway asks the registry for the line, never a nearest
+# line, so this is "26.8", not the exact patch. Widening this list is how a
+# new line gets adopted: fetch it with --lock, add it here, commit the
+# updated lock.
+LOCK_LINES=(26.8)
 
 platform=""
 dest=""

@@ -1,17 +1,20 @@
 {
-  "schema": 1,
+  "schema": 2,
   "artifacts": {
-    "darwin-arm64/26.6": {
-      "file": "chtypes-26.6.8.7-stable-darwin-arm64-b1790767905.tar.gz",
-      "sha256": "11df5c31e638990c595670d6b92e9e8382a7216fcba433ae0f6fbe5a325ab8f6"
+    "darwin-arm64/26.8.15.10-lts": {
+      "file": "chtypes-26.8.15.10-lts-darwin-arm64-b1790845279.tar.gz",
+      "sha256": "eec0b34d810e285aba244aa3b869637f0c1fa14755d11f7f74c069571890bd43",
+      "abi_revision": 6
     },
-    "linux-amd64/26.6": {
-      "file": "chtypes-26.6.8.7-stable-linux-amd64-b1790767905.tar.gz",
-      "sha256": "2fcbe729ae110507af22d35a19c290c97c1fae9f036aa2183841331b8ec9770e"
+    "linux-amd64/26.8.15.10-lts": {
+      "file": "chtypes-26.8.15.10-lts-linux-amd64-b1790845279.tar.gz",
+      "sha256": "25182defe11b2932182bce50aec203e003f721c505cb684b9a6725eeec956a1e",
+      "abi_revision": 6
     },
-    "linux-arm64/26.6": {
-      "file": "chtypes-26.6.8.7-stable-linux-arm64-b1790767905.tar.gz",
-      "sha256": "c85effdb5512aac0e012304249b09c86b516f53b401613f251222267453351d3"
+    "linux-arm64/26.8.15.10-lts": {
+      "file": "chtypes-26.8.15.10-lts-linux-arm64-b1790845279.tar.gz",
+      "sha256": "a9513cbb2aca868ffd16c97f097a530bef5dc8d5c8c11433159a882179d12254",
+      "abi_revision": 6
     }
   }
 }

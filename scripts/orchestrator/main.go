@@ -143,9 +143,9 @@ func run() error {
 	log.Println("→ starting ClickHouse testcontainer (clean state per run)...")
 	ch, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			// Pinned to match tests/integration/setup_test.go (26.8 changed
-			// numeric DateTime64 parsing; see the comment there).
-			Image:        "clickhouse/clickhouse-server:26.6.3.62",
+			// Pinned to the patch chtypes.lock's artifact is built from, and to
+			// match tests/integration/setup_test.go.
+			Image:        "clickhouse/clickhouse-server:26.8.15.10",
 			ExposedPorts: []string{"9000/tcp", "8123/tcp"},
 			WaitingFor:   wait.ForListeningPort("9000/tcp").WithStartupTimeout(60 * time.Second),
 			Env: map[string]string{
