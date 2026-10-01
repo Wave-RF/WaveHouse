@@ -252,7 +252,7 @@ Compare claims against `String` or `UUID` columns (tenant ids, org ids, user ids
 
 On an integer column (`UInt8` through `UInt256`, `Int8` through `Int256`, `Nullable` included) the claim must still fit the column's type, and is compared through a strict cast: a claim that is not the canonical spelling of a value the column can hold — out of range such as `18446744073709551616` (2^64), or spelled `007` or `+5` — matches no rows on any operator, and an insert `check` refuses the record with `403`. It never wraps onto another value.
 
-On a timestamp column (`Date`, `DateTime`, `DateTime64`) the claim is parsed the way ClickHouse parses a string compared with that type. A claim without a UTC offset is read in the server's time zone, and one carrying an offset such as `2026-01-01T00:00:00Z` is accepted only on ClickHouse 26.5 and later — earlier lines refuse the comparison.
+On a timestamp column (`Date`, `DateTime`, `DateTime64`) the claim is compared the way ClickHouse compares a string with that type. Write it as `YYYY-MM-DD hh:mm:ss[.fff]` with no offset: it is read in the column's time zone, or the server's when the column declares none. A claim in RFC 3339 form such as `2026-01-01T00:00:00Z` is refused on a `DateTime` column (ClickHouse code 53, measured on 24.8 and 26.8) rather than matched, so for timestamps use the zone-less form, or compare claims against a String or UUID column instead.
 
 Prefer identity columns over time columns, and express time windows in the query instead.
 :::
