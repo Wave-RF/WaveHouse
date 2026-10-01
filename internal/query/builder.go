@@ -1,7 +1,6 @@
 package query
 
 import (
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -23,8 +22,8 @@ const DefaultMaxRows = 10000
 
 // BuildResult holds the generated SQL and its bound values. The SQL carries
 // positional `?` placeholders, one per entry in Params, in left-to-right
-// order. NamedParams turns that pair into the named-parameter form
-// ClickHouse's HTTP interface takes.
+// order. Bind turns that pair into the form ClickHouse's HTTP interface
+// takes.
 type BuildResult struct {
 	SQL    string
 	Params []any
@@ -47,7 +46,8 @@ type BuildResult struct {
 // Every identifier that reaches the SQL — columns, the table, aggregation
 // aliases — is backtick-quoted via chsql.QuoteIdent, so the builder accepts any
 // name ClickHouse accepts while remaining injection-safe. Values stay positional
-// `?` parameters, which NamedParams turns into ClickHouse named parameters.
+// `?` parameters, which Bind turns into ClickHouse query parameters and
+// external tables.
 //
 // Projection rules: SelectAll requests every readable column (expanded to the
 // role's allow/deny set); an explicit Columns list projects exactly those (where
@@ -240,7 +240,7 @@ func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, per
 		}
 		// The alias is backtick-quoted by aggregationExpr, so any legal ClickHouse
 		// name is safe against injection. The lone refusal is a '?', which would
-		// shift the positional-to-named parameter rewrite (see NamedParams).
+		// shift the positional-to-named parameter rewrite (see Bind).
 		if chsql.BindUnsafe(a.Alias) {
 			return fmt.Errorf("unsupported aggregation alias (contains '?'): %s", a.Alias)
 		}
@@ -316,9 +316,10 @@ func resolveProjection(q *StructuredQuery, schema *discovery.TableSchema, perms 
 func buildWhere(filters []Filter, timeRange *TimeRange, schema *discovery.TableSchema, bucketSeconds int) ([]string, []any, error) {
 	var parts []string
 	var params []any
+	typeOf := columnType(schema)
 
 	for _, f := range filters {
-		clause, p, err := filterToSQL(f, isDateTimeColumn(schema, f.Column))
+		clause, p, err := filterToSQL(f, conversionFor(typeOf(f.Column)))
 		if err != nil {
 			return nil, nil, fmt.Errorf("filter on column %q: %w", f.Column, err)
 		}
@@ -332,12 +333,13 @@ func buildWhere(filters []Filter, timeRange *TimeRange, schema *discovery.TableS
 
 	if timeRange != nil && timeRange.Column != "" && timeRange.Since != "" {
 		col := chsql.QuoteIdent(timeRange.Column)
+		conv := conversionFor(typeOf(timeRange.Column))
 		sinceTime, err := resolveTimeValue(timeRange.Since, bucketSeconds)
 		if err != nil {
 			return nil, nil, fmt.Errorf("time_range since: %w", err)
 		}
 		parts = append(parts, fmt.Sprintf("%s >= ?", col))
-		params = append(params, sinceTime)
+		params = append(params, conv.scalar(sinceTime))
 
 		if timeRange.Until != "" {
 			untilTime, err := resolveTimeValue(timeRange.Until, bucketSeconds)
@@ -345,84 +347,42 @@ func buildWhere(filters []Filter, timeRange *TimeRange, schema *discovery.TableS
 				return nil, nil, fmt.Errorf("time_range until: %w", err)
 			}
 			parts = append(parts, fmt.Sprintf("%s <= ?", col))
-			params = append(params, untilTime)
+			params = append(params, conv.scalar(untilTime))
 		}
 	}
 
 	return parts, params, nil
 }
 
-func filterToSQL(f Filter, dateTime bool) (string, []any, error) {
+// filterToSQL renders one caller filter. conv is how ClickHouse turns the
+// bound String into the column's type: a Date or DateTime column parses it
+// explicitly, and an `in` list is read from an external table (see Bind).
+// like compares text, so its value is never converted.
+func filterToSQL(f Filter, conv conversion) (string, []any, error) {
 	col := chsql.QuoteIdent(f.Column)
-	val := f.Value
-	if dateTime {
-		val = coerceFilterValue(val)
-	}
 	switch strings.ToLower(f.Op) {
 	case "eq":
-		return col + " = ?", []any{val}, nil
+		return col + " = ?", []any{conv.scalar(f.Value)}, nil
 	case "neq":
-		return col + " != ?", []any{val}, nil
+		return col + " != ?", []any{conv.scalar(f.Value)}, nil
 	case "gt":
-		return col + " > ?", []any{val}, nil
+		return col + " > ?", []any{conv.scalar(f.Value)}, nil
 	case "gte":
-		return col + " >= ?", []any{val}, nil
+		return col + " >= ?", []any{conv.scalar(f.Value)}, nil
 	case "lt":
-		return col + " < ?", []any{val}, nil
+		return col + " < ?", []any{conv.scalar(f.Value)}, nil
 	case "lte":
-		return col + " <= ?", []any{val}, nil
+		return col + " <= ?", []any{conv.scalar(f.Value)}, nil
 	case "like":
-		return col + " LIKE ?", []any{val}, nil
+		return col + " LIKE ?", []any{f.Value}, nil
 	case "in":
-		// One placeholder for the whole list, bound as one Array(String)
-		// parameter rather than a parameter per element, so a long list
-		// costs one query-string field.
 		if vals, ok := f.Value.([]any); ok && len(vals) > 0 {
-			if dateTime {
-				coerced := make([]any, len(vals))
-				for i, v := range vals {
-					coerced[i] = coerceFilterValue(v)
-				}
-				vals = coerced
-			}
-			return col + " IN ?", []any{vals}, nil
+			return col + " IN ?", []any{listParam{Values: vals, Conv: conv}}, nil
 		}
 		return "", nil, fmt.Errorf("invalid value for 'in' operator")
 	default:
 		return "", nil, fmt.Errorf("unsupported operator: %s", f.Op)
 	}
-}
-
-// coerceFilterValue rewrites a filter value on a DateTime or DateTime64 column
-// that is an RFC3339 timestamp into ClickHouse's own DateTime spelling, in
-// UTC, keeping its sub-second digits. ClickHouse reads a String compared
-// against such a column with its basic parser, which refuses the RFC3339
-// spelling: measured on 24.8.14.39 and 26.6.3.62, a `T`, a `Z` or an offset
-// is TYPE_MISMATCH on DateTime, and on DateTime64 too on 24.8 and inside an
-// `in` list on both. The rewritten spelling parses on every one of them.
-//
-// A value that isn't a timestamp (a plain string, a number, etc.) is a valid
-// non-temporal filter value, so the parse "failure" is just the expected
-// non-timestamp case — pass it through unchanged rather than treat it as an error.
-func coerceFilterValue(v any) any {
-	s, ok := v.(string)
-	if !ok {
-		return v
-	}
-	// RFC3339Nano parses both fractional and whole-second RFC3339 input.
-	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
-		return formatClickHouseTime(t)
-	}
-	return v
-}
-
-// clickHouseDateTimeLayout renders a time in ClickHouse's native DateTime text
-// format. The fractional ".999999999" preserves sub-second precision when
-// present and drops trailing zeros, so a whole-second time has no decimal point.
-const clickHouseDateTimeLayout = "2006-01-02 15:04:05.999999999"
-
-func formatClickHouseTime(t time.Time) string {
-	return t.UTC().Format(clickHouseDateTimeLayout)
 }
 
 // dayWeekRe matches a duration component with a day ("d") or week ("w") unit —
@@ -453,27 +413,25 @@ func expandDayWeek(s string) string {
 }
 
 // resolveTimeValue parses an RFC3339 timestamp or a relative duration like "1h",
-// "30m", "7d" or "2w" and renders it as a ClickHouse DateTime literal (see
-// formatClickHouseTime). When bucketSeconds > 0, timestamps are bucketed
-// (truncated) to the nearest boundary.
+// "30m", "7d" or "2w" and renders the instant as RFC 3339 in UTC, which the
+// column's conversion parses exactly whatever the column's zone. When
+// bucketSeconds > 0, timestamps are bucketed (truncated) to the nearest
+// boundary.
 //
 // A value that is neither a duration nor a timestamp is rejected with an error
 // (which the builder surfaces as a 400) rather than returned unchanged: passing
 // a raw string to ClickHouse surfaces as an opaque DateTime parse error (#285).
-//
-// The output deliberately matches coerceFilterValue's format rather than
-// RFC3339, which ClickHouse refuses on a DateTime column (see there).
 func resolveTimeValue(val string, bucketSeconds int) (string, error) {
 	// Try a relative duration first (e.g., "1h", "30m", "7d", "2w"). Go's
 	// time.ParseDuration only understands units up to hours, so day/week
 	// suffixes are pre-expanded to hours.
 	if d, err := time.ParseDuration(expandDayWeek(val)); err == nil {
-		return formatClickHouseTime(bucketTime(time.Now().UTC().Add(-d), bucketSeconds)), nil
+		return bucketTime(time.Now().UTC().Add(-d), bucketSeconds).Format(time.RFC3339Nano), nil
 	}
 	// Try an absolute timestamp (RFC3339Nano accepts fractional and whole-second
 	// input); normalise to UTC before bucketing.
 	if t, err := time.Parse(time.RFC3339Nano, val); err == nil {
-		return formatClickHouseTime(bucketTime(t.UTC(), bucketSeconds)), nil
+		return bucketTime(t.UTC(), bucketSeconds).Format(time.RFC3339Nano), nil
 	}
 	return "", fmt.Errorf("invalid time value %q: want an RFC3339 timestamp or a relative duration such as \"1h\", \"30m\", \"7d\", \"2w\"", val)
 }
@@ -493,27 +451,6 @@ func columnType(schema *discovery.TableSchema) func(string) string {
 	return func(col string) string {
 		c, _ := schema.Lookup(col)
 		return c.Type
-	}
-}
-
-// isDateTimeColumn reports whether the schema types column as DateTime or
-// DateTime64, possibly Nullable or LowCardinality.
-func isDateTimeColumn(schema *discovery.TableSchema, column string) bool {
-	c, ok := schema.Lookup(column)
-	if !ok {
-		return false
-	}
-	t := c.Type
-	for {
-		switch {
-		case strings.HasPrefix(t, "Nullable(") && strings.HasSuffix(t, ")"):
-			t = t[len("Nullable(") : len(t)-1]
-			continue
-		case strings.HasPrefix(t, "LowCardinality(") && strings.HasSuffix(t, ")"):
-			t = t[len("LowCardinality(") : len(t)-1]
-			continue
-		}
-		return strings.HasPrefix(t, "DateTime")
 	}
 }
 
@@ -562,152 +499,4 @@ func isValidAggFn(fn string) bool {
 		return true
 	}
 	return false
-}
-
-// ─── ClickHouse named-parameter binding ─────────────────────────────────────
-
-// NamedParams rewrites the positional `?` placeholders in the built SQL into
-// ClickHouse named parameters and renders each bound value as the text
-// ClickHouse will read it back from. It returns the rewritten SQL and the
-// values for `param_p0` … `param_pN-1`, positionally.
-//
-// Every scalar binds as `{pN:String}` and every list as `{pN:Array(String)}`
-// — one rule, shared with the row filters the type layer compiles. String is
-// not a weaker binding than the column's own type: ClickHouse converts the
-// parameter to the column's type for the comparison, so `UInt8 = {p:String}`
-// with "256" is false and with "1.5" is a type error, matching what the
-// server answers for the same literal. The exception is a policy claim on an
-// integer column (a chsql.IntParam): its placeholder expands to
-// chsql.StrictInt over the one `{pN:String}` parameter, because the plain
-// form wraps a value at or past 2^64.
-//
-// The rewrite is a left-to-right scan for `?`, which is exact for this SQL and
-// only for this SQL: Build never renders a value or a string literal, and
-// chsql.BindUnsafe rejects a `?` in any identifier it quotes.
-func (r *BuildResult) NamedParams() (string, []string, error) {
-	if len(r.Params) == 0 {
-		if strings.Contains(r.SQL, "?") {
-			return "", nil, fmt.Errorf("query has placeholders but no bound values")
-		}
-		return r.SQL, nil, nil
-	}
-
-	params := make([]string, 0, len(r.Params))
-	var b strings.Builder
-	b.Grow(len(r.SQL) + len(r.Params)*12)
-
-	rest := r.SQL
-	for i, v := range r.Params {
-		q := strings.IndexByte(rest, '?')
-		if q < 0 {
-			return "", nil, fmt.Errorf("query has %d bound values but only %d placeholders", len(r.Params), i)
-		}
-		text, placeholder, err := chParamValue("p"+strconv.Itoa(i), v)
-		if err != nil {
-			return "", nil, err
-		}
-		b.WriteString(rest[:q])
-		b.WriteString(placeholder)
-		params = append(params, text)
-		rest = rest[q+1:]
-	}
-	if strings.Contains(rest, "?") {
-		return "", nil, fmt.Errorf("query has more placeholders than the %d bound values", len(r.Params))
-	}
-	b.WriteString(rest)
-	return b.String(), params, nil
-}
-
-// chParamValue renders one bound value as its ClickHouse query-parameter text
-// and the SQL its placeholder becomes, for the parameter called name.
-func chParamValue(name string, v any) (text, placeholder string, err error) {
-	switch val := v.(type) {
-	case []any:
-		lit, err := chArrayLiteral(val)
-		if err != nil {
-			return "", "", err
-		}
-		return lit, "{" + name + ":Array(String)}", nil
-	case chsql.IntParam:
-		return chsql.EscapeStringParam(val.Value), chsql.StrictInt(name, val.Type), nil
-	}
-	raw, err := chScalarText(v)
-	if err != nil {
-		return "", "", err
-	}
-	return chsql.EscapeStringParam(raw), "{" + name + ":String}", nil
-}
-
-// chScalarText is one scalar's value as plain text, before any encoding —
-// what the caller means, not what the wire needs.
-func chScalarText(v any) (string, error) {
-	switch val := v.(type) {
-	case string:
-		return val, nil
-	case json.Number:
-		// The caller's own digits, not a float64 round-trip: 12.50 stays
-		// "12.50" and an integer past 2^53 keeps every digit.
-		return val.String(), nil
-	case bool:
-		return strconv.FormatBool(val), nil
-	case float64:
-		return strconv.FormatFloat(val, 'f', -1, 64), nil
-	case int:
-		return strconv.Itoa(val), nil
-	case int64:
-		return strconv.FormatInt(val, 10), nil
-	case uint64:
-		return strconv.FormatUint(val, 10), nil
-	case nil:
-		// `col = NULL` is never true in SQL, so a null used to answer "no
-		// rows"; an empty String parameter would instead compare against the
-		// empty string, which is a different question. Refuse it (→ 400)
-		// rather than answer a question the caller did not ask.
-		return "", fmt.Errorf("filter value must not be null")
-	default:
-		return "", fmt.Errorf("unsupported filter value type %T", v)
-	}
-}
-
-// chArrayLiteral renders a list as the `['a','b']` text an Array(String)
-// query parameter is parsed from. A nested list has no place inside an `in`
-// list, and the elements take quoteCHElement's encoding INSTEAD of
-// chsql.EscapeStringParam's, not on top of it.
-func chArrayLiteral(vals []any) (string, error) {
-	var b strings.Builder
-	b.WriteByte('[')
-	for i, v := range vals {
-		if _, isList := v.([]any); isList {
-			return "", fmt.Errorf("nested list in an 'in' value")
-		}
-		text, err := chScalarText(v)
-		if err != nil {
-			return "", err
-		}
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(quoteCHElement(text))
-	}
-	b.WriteByte(']')
-	return b.String(), nil
-}
-
-// quoteCHElement wraps one already-rendered value as a single-quoted element
-// of an Array(String) parameter literal. That literal is read as a quoted
-// value rather than an escaped field — a raw tab or newline inside the quotes
-// round-trips untouched — so only the quote and the backslash need encoding,
-// and chsql.EscapeStringParam's encoding must NOT be applied on top of it.
-func quoteCHElement(s string) string {
-	var b strings.Builder
-	b.Grow(len(s) + 2)
-	b.WriteByte('\'')
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' || s[i] == '\'' {
-			b.WriteByte('\\')
-		}
-		b.WriteByte(s[i])
-	}
-	b.WriteByte('\'')
-	return b.String()
 }

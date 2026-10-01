@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 )
 
@@ -46,12 +50,35 @@ type chSeen struct {
 	sql    string
 	query  url.Values
 	header http.Header
+	// fields and files are a multipart body's form fields and file parts, in
+	// the order they arrived; sql is then its query field.
+	fields [][2]string
+	files  []query.Table
 }
 
 func (f *fakeCH) RoundTrip(r *http.Request) (*http.Response, error) {
 	body, _ := io.ReadAll(r.Body)
 	_ = r.Body.Close()
 	seen := &chSeen{sql: string(body), query: r.URL.Query(), header: r.Header.Clone()}
+	if mt, params, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err == nil && mt == "multipart/form-data" {
+		seen.sql = ""
+		mr := multipart.NewReader(strings.NewReader(string(body)), params["boundary"])
+		for {
+			part, err := mr.NextPart()
+			if err != nil {
+				break
+			}
+			data, _ := io.ReadAll(part)
+			if part.FileName() != "" {
+				seen.files = append(seen.files, query.Table{Name: part.FormName(), Data: data})
+				continue
+			}
+			seen.fields = append(seen.fields, [2]string{part.FormName(), string(data)})
+			if part.FormName() == "query" {
+				seen.sql = string(data)
+			}
+		}
+	}
 	f.mu.Lock()
 	f.seen = append(f.seen, seen)
 	f.mu.Unlock()
@@ -100,20 +127,35 @@ func (f *fakeCH) sql() string {
 }
 
 // params are the most recent request's bound values in placeholder order:
-// what {p0:…}, {p1:…}, … received.
+// what {p0:…}, {p1:…}, … received, skipping a position bound as a table.
 func (f *fakeCH) params() []string {
 	s := f.last()
 	if s == nil {
 		return nil
 	}
-	var out []string
-	for i := 0; ; i++ {
-		v, ok := s.query["param_p"+strconv.Itoa(i)]
-		if !ok {
-			return out
+	var positions []int
+	for k := range s.query {
+		if n, ok := strings.CutPrefix(k, "param_p"); ok {
+			i, err := strconv.Atoi(n)
+			if err == nil {
+				positions = append(positions, i)
+			}
 		}
-		out = append(out, v[0])
 	}
+	slices.Sort(positions)
+	var out []string
+	for _, i := range positions {
+		out = append(out, s.query.Get("param_p"+strconv.Itoa(i)))
+	}
+	return out
+}
+
+// tables are the external tables of the most recent request.
+func (f *fakeCH) tables() []query.Table {
+	if s := f.last(); s != nil {
+		return s.files
+	}
+	return nil
 }
 
 // setting is one query-string setting of the most recent request.
@@ -201,20 +243,21 @@ func TestCHReader_Request(t *testing.T) {
 		Headers: map[string]string{"X-Proxy-Token": "t", "X-ClickHouse-User": "spoofed"},
 	}
 	_, err := ch.reader().do(t.Context(), target, 0, chRequest{
-		sql:      "SELECT * FROM `t` WHERE `a` = {p0:String} AND `b` IN {p1:Array(String)}",
-		params:   []string{"/home", "['x','y']"},
+		sql:      "SELECT * FROM `t` WHERE `a` = {p0:String} AND `b` = {p1:String}",
+		params:   []query.Param{{Name: "p0", Value: "/home"}, {Name: "p1", Value: `a\tb`}},
 		settings: map[string]string{"max_rows_to_read": "1", "read_overflow_mode": "throw"},
 	})
 	require.NoError(t, err)
 
 	got := ch.last()
-	assert.Equal(t, "SELECT * FROM `t` WHERE `a` = {p0:String} AND `b` IN {p1:Array(String)}", got.sql)
+	assert.Equal(t, "SELECT * FROM `t` WHERE `a` = {p0:String} AND `b` = {p1:String}", got.sql)
+	assert.Equal(t, "text/plain; charset=utf-8", got.header.Get("Content-Type"))
 	for name, want := range chReadSettingsFixed {
 		assert.Equal(t, want, got.query.Get(name), name)
 	}
 	assert.Equal(t, "2", got.query.Get("readonly"))
 	assert.Equal(t, "warehouse", got.query.Get("database"))
-	assert.Equal(t, []string{"/home", "['x','y']"}, ch.params())
+	assert.Equal(t, []string{"/home", `a\tb`}, ch.params())
 	assert.Equal(t, "1", got.query.Get("max_rows_to_read"))
 	assert.Equal(t, "throw", got.query.Get("read_overflow_mode"))
 	assert.Equal(t, "u", got.header.Get("X-ClickHouse-User"))
@@ -226,6 +269,41 @@ func TestCHReader_Request(t *testing.T) {
 	assert.False(t, ch.last().query.Has("readonly"), "a write must not be sent read-only")
 	assert.Equal(t, int32(1), ch.reads.Load())
 	assert.Equal(t, int32(1), ch.writes.Load())
+}
+
+// TestCHReader_ExternalTables pins the request that carries `in` lists: a
+// multipart form whose query field is the statement, each table described by
+// its _structure and _format fields before any file part — ClickHouse reads
+// a part as it arrives — and then the tables' bytes untouched. The scalars
+// and every setting stay on the query string.
+func TestCHReader_ExternalTables(t *testing.T) {
+	t.Parallel()
+	ch := &fakeCH{}
+	sql := "SELECT * FROM `t` WHERE `a` = {p0:String} AND `b` IN (SELECT v FROM _p1) AND `c` IN (SELECT v FROM _p2)"
+	tables := []query.Table{{Name: "_p1", Data: []byte("\x01x\x02yz")}, {Name: "_p2", Data: []byte{}}}
+	_, err := ch.reader().do(t.Context(), chconn.Target{URL: fakeCHURL, Database: "warehouse"}, 0, chRequest{
+		sql:    sql,
+		params: []query.Param{{Name: "p0", Value: "/home"}},
+		tables: tables,
+	})
+	require.NoError(t, err)
+
+	got := ch.last()
+	mt, _, err := mime.ParseMediaType(got.header.Get("Content-Type"))
+	require.NoError(t, err)
+	assert.Equal(t, "multipart/form-data", mt)
+	assert.Equal(t, [][2]string{
+		{"query", sql},
+		{"_p1_structure", query.TableStructure},
+		{"_p1_format", query.TableFormat},
+		{"_p2_structure", query.TableStructure},
+		{"_p2_format", query.TableFormat},
+	}, got.fields)
+	assert.Equal(t, tables, got.files)
+	assert.Equal(t, []string{"/home"}, ch.params())
+	assert.Equal(t, "2", got.query.Get("readonly"))
+	assert.Equal(t, "warehouse", got.query.Get("database"))
+	assert.False(t, got.query.Has("query"), "the statement must not ride on the request line")
 }
 
 // TestCHReader_Errors covers every way a read fails, each typed so
@@ -375,27 +453,45 @@ func TestCHReader_ConnectionCapHolds(t *testing.T) {
 	assert.Equal(t, 1, peak)
 }
 
-// TestCheckParamSizes: a bound value is refused when its percent-encoded form
+// TestCheckRequestSize: a scalar is refused when its percent-encoded form
 // passes ClickHouse's per-field limit — measured to the byte, 131072 read and
-// 132096 refused — and all of them together when they pass what the request
-// line holds.
-func TestCheckParamSizes(t *testing.T) {
+// 131073 refused — and all of them together when they pass what the request
+// line holds; a statement with an `in` list when it passes the form field it
+// travels in. An `in` list itself is never refused, whatever its size.
+func TestCheckRequestSize(t *testing.T) {
 	t.Parallel()
-	assert.NoError(t, checkParamSizes(nil))
-	assert.NoError(t, checkParamSizes([]string{strings.Repeat("a", chMaxFieldBytes)}))
-	err := checkParamSizes([]string{strings.Repeat("a", chMaxFieldBytes+1)})
+	scalars := func(vals ...string) *query.Bound {
+		b := &query.Bound{SQL: "SELECT 1"}
+		for i, v := range vals {
+			b.Params = append(b.Params, query.Param{Name: "p" + strconv.Itoa(i), Value: v})
+		}
+		return b
+	}
+	assert.NoError(t, checkRequestSize(&query.Bound{}))
+	assert.NoError(t, checkRequestSize(scalars(strings.Repeat("a", chMaxFieldBytes))))
+	err := checkRequestSize(scalars(strings.Repeat("a", chMaxFieldBytes+1)))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "in list")
+	assert.Contains(t, err.Error(), "filter value too large")
 	// The encoded size counts: a quote is three bytes on the wire.
-	require.Error(t, checkParamSizes([]string{strings.Repeat("'", chMaxFieldBytes/3+1)}))
+	require.Error(t, checkRequestSize(scalars(strings.Repeat("'", chMaxFieldBytes/3+1))))
 
 	under := strings.Repeat("a", chMaxFieldBytes)
 	var many []string
 	for range (chMaxURIBytes - chURIHeadroom) / chMaxFieldBytes {
 		many = append(many, under)
 	}
-	assert.NoError(t, checkParamSizes(many))
-	require.Error(t, checkParamSizes(append(many, under)))
+	assert.NoError(t, checkRequestSize(scalars(many...)))
+	require.Error(t, checkRequestSize(scalars(append(many, under)...)))
+
+	huge := &query.Bound{SQL: "SELECT 1 WHERE c IN (SELECT v FROM _p0)", Tables: []query.Table{{Name: "_p0", Data: make([]byte, 4<<20)}}}
+	assert.NoError(t, checkRequestSize(huge), "an in list has no size cap")
+	long := &query.Bound{SQL: strings.Repeat(" ", chMaxFieldBytes), Tables: huge.Tables}
+	assert.NoError(t, checkRequestSize(long))
+	long.SQL += " "
+	err = checkRequestSize(long)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "query too large")
+	assert.NoError(t, checkRequestSize(&query.Bound{SQL: long.SQL}), "without a table the statement is the body, not a field")
 }
 
 // chExceptionBody is ClickHouse's own refusal text for code.
