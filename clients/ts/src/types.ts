@@ -292,9 +292,9 @@ export type Schemas = Record<string, TableSchema>;
 // --- Insert result ---
 
 /**
- * A per-record outcome from a batch (array / NDJSON) insert. Mirrors the
- * single-object response shape plus the record's position. Exactly one of
- * `ok` / `duplicate` / `error` is set.
+ * A per-record outcome from a batch (array / NDJSON / CSV / TSV) insert.
+ * Mirrors the single-object response shape plus the record's position. Exactly
+ * one of `ok` / `duplicate` / `error` is set.
  */
 export interface InsertRecordResult {
   /** 1-based index of the record within the submitted batch. */
@@ -305,6 +305,22 @@ export interface InsertRecordResult {
   duplicate?: boolean;
   /** Set (with `ok`/`duplicate` absent) when the record was rejected. */
   error?: string;
+  /**
+   * ClickHouse's own numeric error code, present only when the server's parser
+   * is what refused the record — 117 unknown field, 27 unparseable value, 6 out
+   * of range. Absent for a gateway rejection (a failed policy check, a missing
+   * dedupe id), so `exception_code !== undefined` means "ClickHouse answered".
+   * The same name carries it on a whole-request error body, beside the string
+   * `code` class (reachable as `error.details`).
+   *
+   * 117 also covers **a column the caller's role may not write**. Column policy
+   * is enforced by compiling the role's own schema without the denied columns,
+   * so naming one is an unknown field to the parser rather than a separate
+   * gateway refusal: a `400` with this code, where it used to be a
+   * `403 column "x" not allowed for insert`. The message is ClickHouse's own and
+   * does not reveal whether the column exists.
+   */
+  exception_code?: number;
 }
 
 export interface InsertResult {
@@ -320,7 +336,7 @@ export interface InsertResult {
   failed?: number;
   /** Batch insert: records skipped by dedup. */
   duplicates?: number;
-  /** Batch insert: per-record outcomes, each `{index, ok|duplicate|error}` (may be truncated for very large batches; the counts stay authoritative). */
+  /** Batch insert: per-record outcomes, each `{index, ok|duplicate|error, exception_code?}` (may be truncated for very large batches; the counts stay authoritative). */
   results?: InsertRecordResult[];
 }
 

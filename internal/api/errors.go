@@ -23,10 +23,17 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 
 // errorBody is the error envelope. Code and Retryable are set where the
 // handler knows them (writeCHError); a bare {"error": …} otherwise.
+//
+// ExceptionCode is ClickHouse's own numeric error code, set only where
+// ClickHouse's parser is what refused (ingest: 117 unknown field, 27
+// unparseable value, …). Zero is omitted, so its presence always means
+// ClickHouse answered — a gateway rejection never carries one. Code stays the
+// string class.
 type errorBody struct {
-	Error     string `json:"error"`
-	Code      string `json:"code,omitempty"`
-	Retryable *bool  `json:"retryable,omitempty"`
+	Error         string `json:"error"`
+	Code          string `json:"code,omitempty"`
+	ExceptionCode int    `json:"exception_code,omitempty"`
+	Retryable     *bool  `json:"retryable,omitempty"`
 }
 
 func writeJSONErrorBody(w http.ResponseWriter, status int, body errorBody) {
