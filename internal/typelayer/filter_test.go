@@ -424,21 +424,92 @@ func TestVisibleWithReason_LabelsTheCause(t *testing.T) {
 	assert.Nil(t, tbl.filterOn(row.slot, "notAFunction(`tenant`) = {p0:String}", map[string]string{"p0": "x"}))
 }
 
-// TestParseRow_ColumnsDriftIsAnError: a positional row is only interpretable
-// against the generation that produced it.
+// TestParseRow_ColumnsDriftIsAnError: a column list no INSERT into this
+// generation could name is drift, not a parse attempt. A row whose list is
+// fine but whose values do not fit it is not drift: the block holds the row's
+// refusal and every predicate over it withholds (measured on the 26.6
+// artifact: ParseBlock reports no call-level error for a malformed row).
 func TestParseRow_ColumnsDriftIsAnError(t *testing.T) {
 	eng := TestEngine(t, rowsTable())
 	tbl, err := eng.Table(tenant.Default, "rows")
 	require.NoError(t, err)
 	defer tbl.Release()
 
-	_, err = tbl.ParseRow([]string{"id", "tenant"}, []byte(sampleRow))
-	require.ErrorIs(t, err, ErrColumnsDrift)
+	for name, cols := range map[string][]string{
+		"unknown column":       {"id", "dropped"},
+		"case differs":         {"id", "Tenant"},
+		"repeated column":      {"id", "id"},
+		"empty list":           {},
+		"nil list":             nil,
+		"full list, one extra": append(append([]string(nil), tbl.WireColumns...), "extra"),
+	} {
+		_, err = tbl.ParseRow(cols, []byte(`[7, "x"]`))
+		require.ErrorIs(t, err, ErrColumnsDrift, name)
+	}
 
-	reordered := append([]string(nil), tbl.WireColumns...)
-	reordered[0], reordered[1] = reordered[1], reordered[0]
-	_, err = tbl.ParseRow(reordered, []byte(sampleRow))
-	require.ErrorIs(t, err, ErrColumnsDrift, "same names in a different order is still drift")
+	row, err := tbl.ParseRow([]string{"id", "tenant"}, []byte(sampleRow))
+	require.NoError(t, err, "a valid list with a bad row is not drift")
+	defer row.Close()
+	ok, reason := row.VisibleWithReason([]Predicate{{Column: "id", Op: "=", Values: []string{"7"}}})
+	assert.False(t, ok, "seven fields under a two-column list do not parse, so nothing matches")
+	assert.Equal(t, ReasonDecline, reason)
+}
+
+// defaultsTable has the column kinds an INSERT column list interacts with: a
+// literal DEFAULT, a Nullable column with a DEFAULT, and a DEFAULT computed
+// from another column.
+func defaultsTable() *discovery.TableSchema {
+	return &discovery.TableSchema{
+		Name: "events",
+		Columns: []discovery.Column{
+			{Name: "id", Type: "UInt32", Position: 1},
+			{Name: "tenant", Type: "String", Position: 2},
+			{Name: "region", Type: "String", Position: 3, DefaultKind: "DEFAULT", DefaultExpression: "'eu'"},
+			{Name: "note", Type: "Nullable(String)", Position: 4, DefaultKind: "DEFAULT", DefaultExpression: "'n/a'"},
+			{Name: "next", Type: "UInt32", Position: 5, DefaultKind: "DEFAULT", DefaultExpression: "id + 1"},
+		},
+	}
+}
+
+// TestParseRow_ColumnSubsetTakesTheServersDefaults: a narrower list, in any
+// order, parses as the INSERT naming those columns would store the row. Every
+// unlisted column holds its DEFAULT — a Nullable one too, which a null-padded
+// full-width row would have stored as NULL — and a DEFAULT over a listed
+// column is computed from the listed value.
+func TestParseRow_ColumnSubsetTakesTheServersDefaults(t *testing.T) {
+	eng := TestEngine(t, defaultsTable())
+	tbl, err := eng.Table(tenant.Default, "events")
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	for name, tc := range map[string]struct {
+		cols []string
+		line string
+	}{
+		"declaration order": {[]string{"id", "tenant"}, `[5, "acme"]`},
+		"permuted":          {[]string{"tenant", "id"}, `["acme", 5]`},
+	} {
+		row, err := tbl.ParseRow(tc.cols, []byte(tc.line))
+		require.NoError(t, err, name)
+		for _, p := range []Predicate{
+			{Column: "id", Op: "=", Values: []string{"5"}},
+			{Column: "tenant", Op: "=", Values: []string{"acme"}},
+			{Column: "region", Op: "=", Values: []string{"eu"}},
+			{Column: "note", Op: "=", Values: []string{"n/a"}},
+			{Column: "next", Op: "=", Values: []string{"6"}},
+		} {
+			ok, reason := row.VisibleWithReason([]Predicate{p})
+			assert.True(t, ok, "%s: %s %s %v: %s", name, p.Column, p.Op, p.Values, reason)
+		}
+		row.Close()
+	}
+
+	// The full list still takes the no-list path and reads every field.
+	row, err := tbl.ParseRow(tbl.WireColumns, []byte(`[5, "acme", "us", null, 9]`))
+	require.NoError(t, err)
+	defer row.Close()
+	assert.True(t, row.Visible([]Predicate{{Column: "region", Op: "=", Values: []string{"us"}}}))
+	assert.True(t, row.Visible([]Predicate{{Column: "next", Op: "=", Values: []string{"9"}}}))
 }
 
 func TestParseRow_AcceptsALineWithOrWithoutNewline(t *testing.T) {
