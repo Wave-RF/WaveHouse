@@ -285,7 +285,9 @@ func writeTestSettings(ch *chInstance) (string, error) {
 
 // removeTestSettings removes a directory writeTestSettings made, with its
 // scratch parent.
-func removeTestSettings(dir string) { _ = os.RemoveAll(filepath.Dir(dir)) }
+func removeTestSettings(dir string) {
+	_ = os.RemoveAll(filepath.Dir(dir)) //nolint:gosec // G703: dir is <os.MkdirTemp>/settings from writeTestSettings
+}
 
 // tenantSettings is one tenant's four files: the seed with the ClickHouse
 // block pointed at the testcontainer's database, and the dev-style policy.
