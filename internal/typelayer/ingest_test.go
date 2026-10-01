@@ -171,6 +171,34 @@ func TestInsertSettings_BestEffortDateTime(t *testing.T) {
 	assert.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
 }
 
+// TestIngest_DateTimeExportsAsRFC3339UTC: the exported row — what is published
+// to the stream and inserted by the worker — spells every DateTime as RFC 3339
+// in UTC at the column's scale, whatever the input spelling or the column's
+// zone, as the query paths render it; Date and Date32 keep their own form.
+func TestIngest_DateTimeExportsAsRFC3339UTC(t *testing.T) {
+	eng := TestEngine(t, &discovery.TableSchema{Name: "times", Columns: []discovery.Column{
+		{Name: "dt", Type: "DateTime", Position: 1},
+		{Name: "dt3", Type: "DateTime64(3)", Position: 2},
+		{Name: "dt6", Type: "DateTime64(6)", Position: 3},
+		{Name: "dtz", Type: "DateTime('Asia/Tokyo')", Position: 4},
+		{Name: "dt3z", Type: "DateTime64(3, 'America/New_York')", Position: 5},
+		{Name: "d", Type: "Date", Position: 6},
+		{Name: "d32", Type: "Date32", Position: 7},
+	}})
+	tbl, err := eng.Table(tenant.Default, "times")
+	require.NoError(t, err)
+	t.Cleanup(tbl.Release)
+
+	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"dt":"2026-03-24 12:00:00","dt3":"2026-03-24T14:00:00+02:00",`+
+		`"dt6":"2026-03-24 12:00:00.123456","dtz":"2026-03-24 21:00:00","dt3z":"2026-03-24 08:00:00.12",`+
+		`"d":"2026-03-24","d32":"1960-01-02"}`+"\n"))
+	require.NoError(t, err)
+	require.Len(t, batch.Rows, 1)
+	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
+	assert.Equal(t, `["2026-03-24T12:00:00Z", "2026-03-24T12:00:00.000Z", "2026-03-24T12:00:00.123456Z", `+
+		`"2026-03-24T12:00:00Z", "2026-03-24T12:00:00.120Z", "2026-03-24", "1960-01-02"]`, string(batch.Rows[0].Line))
+}
+
 func TestInsertSettings_ReturnsAFreshMap(t *testing.T) {
 	t.Parallel()
 	a := InsertSettings()

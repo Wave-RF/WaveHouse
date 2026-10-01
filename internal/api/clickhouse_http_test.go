@@ -216,8 +216,8 @@ func TestCHReader_ResponseShape(t *testing.T) {
 			// The bytes are ClickHouse's: key order, a decimal's digits and a
 			// timestamp's spelling all pass through untouched.
 			name: "rows are copied, not re-encoded",
-			body: "{\"z\":1,\"a\":12.50,\"ts\":\"2026-01-15 10:30:00.120\"}\n",
-			want: `[{"z":1,"a":12.50,"ts":"2026-01-15 10:30:00.120"}]`,
+			body: "{\"z\":1,\"a\":12.50,\"ts\":\"2026-01-15T10:30:00.120Z\"}\n",
+			want: `[{"z":1,"a":12.50,"ts":"2026-01-15T10:30:00.120Z"}]`,
 		},
 	}
 	for _, tt := range tests {
@@ -255,6 +255,9 @@ func TestCHReader_Request(t *testing.T) {
 	for name, want := range chReadSettingsFixed {
 		assert.Equal(t, want, got.query.Get(name), name)
 	}
+	// Pinned here rather than read from the map: the SSE wire (typelayer's
+	// export) and the SDK compare against this spelling.
+	assert.Equal(t, "iso", got.query.Get("date_time_output_format"), "DateTime as RFC 3339 in UTC")
 	assert.Equal(t, "2", got.query.Get("readonly"))
 	assert.Equal(t, "warehouse", got.query.Get("database"))
 	assert.Equal(t, []string{"/home", `a\tb`}, ch.params())

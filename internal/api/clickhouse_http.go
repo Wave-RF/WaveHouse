@@ -22,7 +22,7 @@ import (
 // every cached read's key (queryCacheKey), so two builds that render rows
 // differently never serve each other's entries from a shared cache during a
 // rolling deploy. Change it with any change to the rendering settings below.
-const chRendering = "JSONEachRow/1"
+const chRendering = "JSONEachRow/2"
 
 // chReadSettingsFixed go on every request the cached read paths send, ahead
 // of the role's caps.
@@ -31,9 +31,13 @@ const chRendering = "JSONEachRow/1"
 // DateTime64's scale, an Enum's name and an IPv6's compression are the
 // server's own. Every knob that changes the bytes is pinned rather than
 // inherited, because a tenant's server or profile may set any of them:
-// 64-bit integers and decimals as bare numbers, NaN and Inf as null,
-// DateTime as `YYYY-MM-DD hh:mm:ss[.fff]` (the spelling the SSE wire carries,
-// #372), and a named tuple as an object.
+// 64-bit integers and decimals as bare numbers, NaN and Inf as null, a named
+// tuple as an object, and DateTime as RFC 3339 in UTC,
+// `YYYY-MM-DDThh:mm:ss[.fff]Z` with the column's scale, whatever the column's
+// or the server's zone — the spelling the SSE wire carries (typelayer's
+// export pins the same), so neither a client nor the cache needs to know the
+// server's zone (#372). Date and Date32 are unaffected. Measured on
+// 26.8.15.10.
 //
 // Failure: wait_end_of_query buffers the result server-side until the query
 // has finished, and http_write_exception_in_output_format=0 keeps an
@@ -57,7 +61,7 @@ var chReadSettingsFixed = map[string]string{
 	"output_format_json_quote_64bit_integers":      "0",
 	"output_format_json_quote_decimals":            "0",
 	"output_format_json_quote_denormals":           "0",
-	"date_time_output_format":                      "simple",
+	"date_time_output_format":                      "iso",
 	"output_format_json_named_tuples_as_objects":   "1",
 }
 

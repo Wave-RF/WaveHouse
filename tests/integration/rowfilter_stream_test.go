@@ -622,6 +622,8 @@ func rowFilterStoredLine(t *testing.T, table string, id uint32) []byte {
 	q.Set("param_target_table", table)
 	q.Set("param_id", fmt.Sprint(id))
 	q.Set("query", "SELECT * FROM {target_table:Identifier} WHERE id = {id:UInt32} FORMAT JSONCompactEachRow")
+	// The DateTime spelling a published row carries (typelayer's export).
+	q.Set("date_time_output_format", "iso")
 	body := rowFilterCH(t, http.MethodGet, q, nil)
 	line := strings.TrimRight(string(body), "\n")
 	require.NotEmpty(t, line, "stored row must come back")
