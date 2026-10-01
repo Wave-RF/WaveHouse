@@ -65,6 +65,7 @@ func registryOf(id tenant.ID, table string) *discovery.SchemaRegistry {
 // retired; its retirement forgets the tenant, and a refresh that outlives it
 // binds nothing.
 func TestTypeBindings_TheOwnerBindsUntilRetired(t *testing.T) {
+	t.Parallel()
 	rec := &recordingBinder{}
 	b := newTypeBindings(rec)
 	reg := registryOf("acme", "a")
@@ -85,6 +86,7 @@ func TestTypeBindings_TheOwnerBindsUntilRetired(t *testing.T) {
 // tables never stay bound over the new one's. A late detach of the retired
 // registry leaves the successor's binding alone.
 func TestTypeBindings_RetiredMidBindNeverOutlivesTheSuccessor(t *testing.T) {
+	t.Parallel()
 	rec := &recordingBinder{}
 	b := newTypeBindings(rec)
 	old, successor := registryOf("acme", "old_db"), registryOf("acme", "new_db")
@@ -120,6 +122,7 @@ func TestTypeBindings_RetiredMidBindNeverOutlivesTheSuccessor(t *testing.T) {
 
 // Tenants bind independently: one tenant's retirement forgets only its own.
 func TestTypeBindings_TenantsAreIndependent(t *testing.T) {
+	t.Parallel()
 	rec := &recordingBinder{}
 	b := newTypeBindings(rec)
 	acme, globex := registryOf("acme", "a"), registryOf("globex", "g")
@@ -136,6 +139,7 @@ func TestTypeBindings_TenantsAreIndependent(t *testing.T) {
 // drop retires (a tenant moved to another database) and the one a reconcile
 // retires (a tenant no longer served).
 func TestDiscoveries_ReportEveryRetiredRegistry(t *testing.T) {
+	t.Parallel()
 	type retired struct {
 		id  tenant.ID
 		reg *discovery.SchemaRegistry
