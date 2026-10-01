@@ -254,7 +254,7 @@ The policy engine authorizes mutations by inspecting the columns being written. 
 
 **What ClickHouse decides, and what WaveHouse decides.** Everything about a *value* is ClickHouse's:
 
-- A field the role may not write is indistinguishable from one the table does not have: both are code **117**, `Unknown field found while parsing JSONEachRow format: x`. So are `MATERIALIZED` and `ALIAS` columns — neither is ever part of a published row. An `EPHEMERAL` column is accepted as input only where the format names its columns (the JSON family and the `…WithNames` formats), the role may write it, a `DEFAULT` column reads it, and no `MATERIALIZED`, `ALIAS` or other `EPHEMERAL` column reads it; its value feeds that `DEFAULT` and is never stored, selected or published. Any other `EPHEMERAL` column is refused like an unknown one (code **117**): ClickHouse computes `MATERIALIZED` columns at insert time from the published row, which never carries the ephemeral value, so accepting it there would drop it silently. A positional CSV or TSV body (no header, or `header=absent`) carries the wire columns only.
+- A field the role may not write is indistinguishable from one the table does not have: both are code **117**, `Unknown field found while parsing JSONEachRow format: x`. So are `MATERIALIZED` and `ALIAS` columns — neither is ever part of a published row. (An `_eq` [insert check](/access-control#insert-checks) on a column the role may not write is the one exception: it accepts exactly the required value, and the row carries it.) An `EPHEMERAL` column is accepted as input only where the format names its columns (the JSON family and the `…WithNames` formats), the role may write it, a `DEFAULT` column reads it, and no `MATERIALIZED`, `ALIAS` or other `EPHEMERAL` column reads it; its value feeds that `DEFAULT` and is never stored, selected or published. Any other `EPHEMERAL` column is refused like an unknown one (code **117**): ClickHouse computes `MATERIALIZED` columns at insert time from the published row, which never carries the ephemeral value, so accepting it there would drop it silently. A positional CSV or TSV body (no header, or `header=absent`) carries the wire columns only.
 - An omitted column, or an explicit `null` on one (WaveHouse pins `input_format_null_as_default`), takes its `DEFAULT` expression — evaluated by ClickHouse, including a volatile one like `now()` — or the type's implicit zero where none is declared, exactly as an `INSERT` naming fewer columns does.
 - A coercion ClickHouse would make it makes here (a numeric string into an `Int*`, `"true"` into a `Bool`, an out-of-range integer wrapping); anything it would refuse fails synchronously in the ingest response with its real code, rather than surfacing later in the DLQ. `Nullable()` and `LowCardinality()` wrappers are transparent.
 
@@ -321,7 +321,7 @@ WaveHouse rewrites timestamps in neither direction. **Inbound**, any spelling Cl
 | `text/csv; header=absent` | `CSV`, strictly positional: header detection is off (`input_format_csv_detect_header=0`), so every line is a record |
 | `text/csv` (no `header` parameter) | ClickHouse's default `CSV`: header auto-detection stays on |
 
-`text/tab-separated-values` maps the same way, with `input_format_tsv_detect_header`. The auto-detection is ClickHouse's own heuristic, not WaveHouse's: send `header=absent` when a data row could spell the column names or you need the first line always read as a record. With no parameter, the positional fields are the table's **wire columns** — declaration order minus every `MATERIALIZED`, `ALIAS` and `EPHEMERAL` column — and a producer must send **every one of them, in that order**. `GET /v1/ops/schema?table={table}` returns the columns in `position` order; drop the three kinds and that is the field order. Only `header=present` can name an `EPHEMERAL` column, and only one that meets the [conditions above](#post-v1ingesttabletable--ingest-data).
+`text/tab-separated-values` maps the same way, with `input_format_tsv_detect_header`. The auto-detection is ClickHouse's own heuristic, not WaveHouse's: send `header=absent` when a data row could spell the column names or you need the first line always read as a record. With no parameter, the positional fields are the table's **wire columns** — declaration order minus every `MATERIALIZED`, `ALIAS` and `EPHEMERAL` column, and, for a role with column restrictions, minus every column it may not write (an `_eq`-checked column stays) — and a producer must send **every one of them, in that order**. `GET /v1/ops/schema?table={table}` returns the columns in `position` order; drop the three kinds and that is the field order. Only `header=present` can name an `EPHEMERAL` column, and only one that meets the [conditions above](#post-v1ingesttabletable--ingest-data).
 
 | Body | Outcome |
 | --- | --- |
@@ -421,7 +421,7 @@ A `200` is returned whenever the body was read and the records were processed �
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
 :::caution[At-least-once on retry]
-A batch aborted partway — a `503` or `500` after some leading records were already published — re-publishes those leading records when the whole batch is retried. Records are published in windows of 256, in order: a dedupe failure drops the open window unpublished, so what an aborted batch published is the windows before it, plus, after a publish failure, the records of its window before the failing one. Failures decided before any record is processed are not in this class: a `413`, a `415`, the `400 invalid request body` of an upload cut off in transit, and the unterminated-array `400` all publish nothing and are safe to retry as-is (once split, for a `413`). Enable deduplication if duplicate suppression matters — the single-object path has the same at-least-once property, and the SDK retries both on `503`.
+A batch aborted partway — a `503` or `500` after some leading records were already published — re-publishes those leading records when the whole batch is retried. Records are published in windows of 256, in order: a dedupe failure drops the open window unpublished, so what an aborted batch published is the windows before it, plus, after a publish failure, the records of its window before the failing one. Failures decided before any record is processed are not in this class: a `413`, a `415`, the `400 invalid request body` of an upload cut off in transit, the unterminated-array `400` and the `400 invalid json: content after the closing ']' of the json array` all publish nothing and are safe to retry as-is (once split, for a `413`). Enable deduplication if duplicate suppression matters — the single-object path has the same at-least-once property, and the SDK retries both on `503`.
 :::
 
 ---
@@ -663,10 +663,10 @@ event: schema
 data: {"table_name":"clicks","columns":["page","button","score","received_timestamp"]}
 
 id: 2026-03-24T12:00:00.123Z
-data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","row":["/home","signup",42.5,"2026-03-24 11:59:58.512"]}
+data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","row":["/home","signup",42.5,"2026-03-24T11:59:58.512Z"]}
 
 id: 2026-03-24T12:00:01.456Z
-data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","row":["/pricing","cta",7,"2026-03-24 12:00:01.456"]}
+data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","row":["/pricing","cta",7,"2026-03-24T12:00:01.456Z"]}
 ```
 
 A raw consumer must keep the most recent announced column list and zip each `row` against it; a value the record did not carry arrives as `null` in its slot rather than being omitted, so positions never shift. **Check arity before zipping:** drop a `row` whose length disagrees with the last announced list rather than zipping it, because the announcement is not guaranteed in one case — a connection that gap-fills across a column change may receive live rows with no fresh announcement until the columns next change or it reconnects ([#543](https://github.com/Wave-RF/WaveHouse/issues/543)). An arity check covers an added or removed column; a *same-length* change (a `RENAME COLUMN`, or a drop paired with an add) it cannot see, and reconnecting is what resynchronizes. Separately, a replay spanning a server upgrade across the v2 ingest envelope silently omits the pre-upgrade events — see [Upgrading across the v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope). The TypeScript SDK does this for you and still yields row objects — `.stream()` and `.liveQuery()` are unchanged. The announcement is **per connection**, so a client that joins mid-stream is told the columns before it is sent a row, and a reconnect is told again.
@@ -888,7 +888,7 @@ The message format used on NATS JetStream between ingest and the batch consumer:
   "received_timestamp": "2026-03-24T12:00:00.123456789Z",
   "format": "JSONCompactEachRow",
   "columns": ["page", "button", "score", "received_timestamp"],
-  "row": ["/home", "signup", 42.5, "2026-03-24 12:00:00.123"]
+  "row": ["/home", "signup", 42.5, "2026-03-24T12:00:00.123Z"]
 }
 ```
 

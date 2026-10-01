@@ -158,6 +158,7 @@ You'll need **Go 1.27+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pn
 
 ```bash
 make tools    # one-time bootstrap
+scripts/fetch-chtypes.sh   # once per machine: the chtypes artifact (160–290 MB)
 docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
 make dev      # hot-reload on .go save
 ```
