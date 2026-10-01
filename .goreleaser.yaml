@@ -1,21 +1,61 @@
 version: 2
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GoReleaser is now ONLY the compiler. It is invoked once per native runner as
+# `goreleaser build --single-target`, and everything downstream of the binary —
+# archives, checksums, the GitHub Release, the multi-arch GHCR image — is done
+# by .github/workflows/release.yml. This file therefore contains `builds:` and
+# nothing else.
+#
+# Why, measured rather than assumed (2026-09-16, this tree at the cgo switch):
+#
+#   cgo means each target needs a C toolchain that can target that OS/ABI, and
+#   for darwin that means real Apple SDK headers. In golang:1.27-bookworm
+#   (linux/amd64 — the shape of `ubuntu-latest`):
+#
+#     linux/amd64, ambient gcc 12.2              OK   44,931,216 B  max GLIBC_2.34
+#     linux/arm64, apt gcc-aarch64-linux-gnu     OK   41,400,592 B  max GLIBC_2.34
+#     linux/arm64, zig cc aarch64-linux-gnu.2.17 OK   51,094,216 B  max GLIBC_2.17,
+#                                                but NEEDED libresolv/libdl/
+#                                                libpthread and `-s` ignored
+#     darwin/arm64, zig cc -target aarch64-macos FAILS, with AND without
+#                                                `-tags netgo,osusergo`:
+#
+#       # github.com/prometheus/client_golang/prometheus
+#       process_collector_mem_cgo_darwin.c:18:10: fatal error:
+#           'mach/mach_vm.h' file not found
+#
+#   That is a *compile* failure inside a dependency's own C file, not the
+#   `-lresolv` *link* failure recorded earlier — netgo/osusergo cannot help,
+#   because the build never reaches the linker. client_golang's darwin process
+#   collector switches on `cgo` with no opt-out tag, and zig ships no Mach
+#   headers. Supplying them needs an Apple SDK, which cannot be fetched on a
+#   GitHub-hosted Linux runner. So: no darwin cross-compile, at all.
+#
+#   The two GoReleaser features that solve this natively — split/merge
+#   (`goreleaser continue --merge`) and `builder: prebuilt` — are Pro-only, and
+#   `goreleaser release --skip=` accepts no `build` value in OSS (checked
+#   against v2.18.1, whose accepted set is announce, archive, aur, aur-source,
+#   before, chocolatey, docker, flatpak, homebrew, iru, ko, makeself, mcp,
+#   nfpm, nix, notarize, publish, sbom, scoop, sign, snapcraft, srpm, validate,
+#   winget). There is therefore no OSS way to have GoReleaser assemble a
+#   release from binaries built elsewhere — hence the split above.
+# ─────────────────────────────────────────────────────────────────────────────
+
 # GoReleaser defaults ProjectName to the repo directory name — "WaveHouse" —
 # which is the only place the product's display casing leaked into an artifact
 # identifier: archives built as `WaveHouse_linux_amd64.tar.gz` while the binary
 # inside, the GHCR image, and the npm package are all lowercase `wavehouse`.
 # Asset URLs are permanent once a release is published, so this is pinned
-# rather than inherited.
+# rather than inherited. release.yml names its archives from this same value.
 project_name: wavehouse
 
-# GoReleaser's tag detection — which tag it is releasing, and which one the
-# release notes are diffed from — walks git history without caring which tag
-# family it lands on. This repo has several: `v*` for the server and
-# `clients/<lang>/v*` for each client SDK. Without this, cutting `v0.1.0` after
-# an SDK release describes the server release as "everything since
-# clients/ts/v0.1.0" — verified: `previous=clients/ts/v0.1.0 current=v0.1.0`.
-# Ignoring the client families makes the built-in detection correct, which is
-# why no workflow needs to pass GORELEASER_PREVIOUS_TAG.
+# GoReleaser's tag detection — which tag it is building from — walks git
+# history without caring which tag family it lands on. This repo has several:
+# `v*` for the server and `clients/<lang>/v*` for each client SDK. Without
+# this, a snapshot build cut after an SDK release stamps itself from
+# `clients/ts/v0.1.0`. release.yml applies the same rule to the release notes
+# by deriving `--notes-start-tag` from `git describe --match 'v*'`.
 git:
   ignore_tags:
     - "clients/*"
@@ -24,114 +64,36 @@ builds:
   - id: wavehouse
     main: ./cmd/wavehouse
     binary: wavehouse
+    # cgo is unconditional: the chtypes binding dlopens the per-version
+    # artifact, so CGO_ENABLED=1 on every target (dlfcn only — no C library
+    # linked, no header). The platform set follows from that artifact, not
+    # from Go: Windows and FreeBSD are dropped
+    # (chtypes publishes no artifact for either) along with darwin/amd64 (no
+    # artifact either — only darwin-arm64, linux-amd64, linux-arm64 exist at
+    # https://artifacts.wavehouse.dev/artifacts/index.json). goos x goarch is
+    # a cross product, hence the explicit `ignore` to drop darwin/amd64
+    # rather than a matrix that only ever had one cell per OS.
     env:
-      - CGO_ENABLED=0
-    goos: [linux, darwin, windows, freebsd]
+      - CGO_ENABLED=1
+    # `--single-target` builds the runner's own GOOS/GOARCH *regardless of what
+    # is set here*, so on the release path these three keys are a declaration
+    # rather than a driver: they are the supported set, and the `build`
+    # matrices in release.yml / publish-dev.yml / goreleaser-validate.yml must
+    # mirror them. Keep them accurate — `goreleaser check` validates this
+    # file's schema, nothing validates that a workflow matrix agrees with it,
+    # and a plain `goreleaser build` with no flag would still try (and fail) to
+    # cross-compile all three.
+    #
+    # There are deliberately NO `overrides:` with CC/CXX any more: every target
+    # is compiled by a native toolchain on its own runner, so the ambient `cc`
+    # is always the right one.
+    goos: [linux, darwin]
     goarch: [amd64, arm64]
+    ignore:
+      - goos: darwin
+        goarch: amd64
     ldflags:
       - -s -w
       - -X main.Version={{.Version}}
       - -X main.BuildTime={{.Date}}
       - -X main.GitCommit={{.ShortCommit}}
-
-checksum:
-  name_template: "checksums.txt"
-
-archives:
-  - name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
-    # Windows gets .zip; everything else keeps GoReleaser's tar.gz default.
-    # Windows has shipped bsdtar since 10 1803, so a .tar.gz is *openable* —
-    # but not from Explorer, which still only double-clicks into .zip. The
-    # convention costs nothing and this is the first release whose asset
-    # names people will script against.
-    format_overrides:
-      - goos: windows
-        formats: [zip]
-    # Narrowed from GoReleaser's default, which also globs CHANGELOG* — 324 KB
-    # of development history in every one of the eight archives, for a file
-    # that is a click away on GitHub and whose contents are the release notes
-    # the download page already shows.
-    # NOTICE is not optional: the repo is Apache-2.0 and §4(d) makes every
-    # redistributor of these archives inherit an attribution obligation they
-    # cannot satisfy from a tarball carrying only LICENSE. GoReleaser's default
-    # glob never included it either, so this hunk is the moment to fix it —
-    # archive contents are effectively permanent once published.
-    files:
-      - LICENSE*
-      - NOTICE*
-      - README*
-
-# Suppress the GitHub Release on dev pushes. publish-dev.yml sets
-# WAVEHOUSE_DEV=1 + a synthetic tag so it can reuse this same pipeline;
-# we don't want a release entry on the repo for every push to main.
-# Real tag releases (release.yml) leave WAVEHOUSE_DEV unset → defaults
-# to "0" → the field evaluates to "false" → release runs normally.
-# `envOrDefault` is required because goreleaser templates fail strict
-# on missing env vars; bare `.Env.WAVEHOUSE_DEV` would error on the
-# release path.
-release:
-  disable: '{{ eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}'
-  # `auto` marks the GitHub Release as a pre-release whenever the tag
-  # carries a prerelease identifier (v0.1.0-alpha.1 → yes; v0.1.0 → no).
-  # GoReleaser's default is a flat `false`, which would have published the
-  # first alpha as a full stable release — and GitHub's "Latest release"
-  # badge keys off exactly this field.
-  prerelease: auto
-
-dockers_v2:
-  - dockerfile: deployments/Dockerfile.goreleaser
-    ids:
-      - wavehouse
-    images:
-      - "ghcr.io/wave-rf/wavehouse"
-    # Every build gets an immutable reference plus one moving pointer.
-    #
-    #   immutable  release: :{{ .Tag }} (e.g. :v1.2.3)
-    #              dev:     :dev-<full sha>   (matches cleanup-ghcr.yml's
-    #                                          `^dev-[0-9a-f]+$` regex)
-    #   moving     release: the channel release.yml derived from the tag via
-    #                       scripts/ci/release-channel.sh — :latest for a
-    #                       stable tag, :alpha/:beta/:rc/:next for a
-    #                       prerelease
-    #              dev:     :dev (rolling, follows main)
-    #
-    # The channel indirection is why `v1.3.0-rc.1` can't take :latest away
-    # from a shipped `v1.2.0`. The dev branch stays an explicit literal
-    # rather than leaning on WAVEHOUSE_CHANNEL's default: a push to main that
-    # forgot to set the env var must never be able to publish :latest.
-    tags:
-      - '{{ if eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}dev-{{ .FullCommit }}{{ else }}{{ .Tag }}{{ end }}'
-      - '{{ if eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}dev{{ else }}{{ envOrDefault "WAVEHOUSE_CHANNEL" "latest" }}{{ end }}'
-    platforms:
-      - linux/amd64
-      - linux/arm64
-    labels:
-      "org.opencontainers.image.title": '{{ if eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}WaveHouse (dev){{ else }}WaveHouse{{ end }}'
-      "org.opencontainers.image.description": '{{ if eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}Schema-aware real-time API gateway for ClickHouse — rolling dev build from main{{ else }}Schema-aware real-time API gateway for ClickHouse{{ end }}'
-      "org.opencontainers.image.url": "https://github.com/Wave-RF/WaveHouse"
-      "org.opencontainers.image.source": "{{ .GitURL }}"
-      "org.opencontainers.image.version": "{{ .Version }}"
-      "org.opencontainers.image.revision": "{{ .FullCommit }}"
-      "org.opencontainers.image.created": "{{ .Date }}"
-
-changelog:
-  # The changelog pipe is NOT skipped by `release.disable` — only by
-  # `--snapshot` or this key (verified: a run with `release.disable: true`
-  # still logs "generating changelog"). Left on, `github-native` would make
-  # publish-dev.yml POST /releases/generate-notes on every push to main — an
-  # endpoint needing `contents: write`, which that workflow deliberately does
-  # not grant — to build a body that is then discarded, for a synthetic tag
-  # that exists only on the runner. goreleaser-validate.yml cannot catch it
-  # either, since `build --snapshot` skips this pipe entirely.
-  disable: '{{ eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}'
-  # Delegate the release body to GitHub's own "generate release notes" — the
-  # grouped, linked, per-PR list you get from the Releases UI button, with
-  # authors and a New Contributors section. `use: git` built the body from raw
-  # commit subjects instead: nearly the same content (main is squash-merged, so
-  # each subject IS a PR title) but no links, no authors, and no grouping.
-  #
-  # Categorization and exclusions move to .github/release.yml with this. The
-  # `sort` and `filters` keys that used to live here are gone rather than left
-  # in place: github-native renders the body on GitHub's side, so GoReleaser
-  # never sees the commits and both would be silently dead config.
-  use: github-native

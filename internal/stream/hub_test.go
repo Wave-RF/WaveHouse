@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer/typelayertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -63,11 +65,10 @@ func rawEvent(tb testing.TB, table, ts string, data map[string]any) []byte {
 }
 
 // TestBroadcast_DuplicateColumnWithheld: an envelope whose columns name one
-// column twice cannot be paired — the name-keyed map would keep the last value
-// and silently drop the first, and that map is what a row-level filter is
-// evaluated against, so a duplicate could decide visibility on a value the row
-// never carried. Withheld from every role rather than delivered under a guessed
-// reading, the same as a length mismatch.
+// column twice cannot be paired — the client zips the announced list against
+// the positional row, so two positions under one name are indistinguishable to
+// it, and no INSERT may name a column twice. Withheld from every role rather
+// than delivered under a guessed reading, the same as a length mismatch.
 //
 // A nil policy store (passthrough, no filtering) and a positive control are
 // both load-bearing: with a restrictive policy the row would be withheld for
@@ -170,10 +171,12 @@ func TestEventView_UnknownFormatWithheld(t *testing.T) {
 }
 
 // TestPairRow_Verdict enumerates the shapes that cannot be paired. Each one has
-// to fail closed: a row-filter is evaluated against the name-keyed map, so a
-// value read under the wrong name decides visibility on data the row never
-// carried. The pairable case is the control that keeps the other seven honest —
-// a pairRow that rejected everything would satisfy them alone.
+// to fail closed: the announced column list is what the client zips the
+// positional row against, and it is also the list the type layer reads the row
+// under, so a shape where the two cannot be lined up would decide visibility —
+// and label values — on data the row never carried. The pairable case is the
+// control that keeps the other seven honest: a pairRow that rejected everything
+// would satisfy them alone.
 func TestPairRow_Verdict(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -197,11 +200,10 @@ func TestPairRow_Verdict(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			cells, byName, ok := pairRow(tt.cols, json.RawMessage(tt.row))
+			cells, ok := pairRow(tt.cols, json.RawMessage(tt.row))
 			assert.Equal(t, tt.ok, ok)
 			if !tt.ok {
 				assert.Nil(t, cells, "an unpairable envelope yields no cells to splice into a frame")
-				assert.Nil(t, byName, "and no map for a row-filter to read")
 			}
 		})
 	}
@@ -211,12 +213,27 @@ func TestPairRow_Verdict(t *testing.T) {
 // declaration order or publish a column the record omits.
 func rawEventCols(tb testing.TB, table, ts string, cols []string, data map[string]any) []byte {
 	tb.Helper()
-	schema := make([]discovery.Column, len(cols))
+	// The positional line the ingest path publishes: one cell per column, in
+	// order. A column data omits is written as null here, where production
+	// carries the value ClickHouse filled in; the hub forwards cells as they
+	// are, and the wire shape is what these tests pin.
+	var buf bytes.Buffer
+	buf.WriteByte('[')
 	for i, c := range cols {
-		schema[i] = discovery.Column{Name: c, Position: uint64(i + 1)}
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		v, ok := data[c]
+		if !ok {
+			buf.WriteString("null")
+			continue
+		}
+		b, err := json.Marshal(v)
+		require.NoError(tb, err)
+		buf.Write(b)
 	}
-	row, err := ingest.EncodeCompactRow(schema, data)
-	require.NoError(tb, err)
+	buf.WriteByte(']')
+	row := json.RawMessage(buf.Bytes())
 	raw, err := json.Marshal(ingest.EventMessage{
 		TableName:         table,
 		ReceivedTimestamp: ts,
@@ -459,6 +476,40 @@ func TestHub_ProjectsPerRole_DistinctRolesGetDistinctFrames(t *testing.T) {
 	assert.NotEqual(t, fv.Data, fe.Data, "distinct role projections produce distinct bytes")
 }
 
+// chtypesTable declares a table the way discovery would, numbering the columns
+// in the order given.
+func chtypesTable(name string, cols ...discovery.Column) *discovery.TableSchema {
+	for i := range cols {
+		cols[i].Position = uint64(i + 1)
+	}
+	return &discovery.TableSchema{Name: name, Columns: cols}
+}
+
+// col is chtypesTable's shorthand for an ordinary stored column.
+func col(name, chType string) discovery.Column {
+	return discovery.Column{Name: name, Type: chType}
+}
+
+// chtypesHub is a Hub whose row filtering is decided the way production decides
+// it: by the type layer, against the real ClickHouse artifact, with the
+// tables bound for the default tenant. Every row-filter test goes through this
+// rather than a stub, because the verdicts under test ARE ClickHouse's —
+// storage-domain narrowing, instant equality across spellings, exactness past
+// 2^53 — and a stub could only restate what the test already believes.
+func chtypesHub(tb testing.TB, store PolicySource, metric *Metrics, tables ...*discovery.TableSchema) *Hub {
+	tb.Helper()
+	hub := NewHub(store, nil, metric)
+	hub.RowEvaluator = NewRowEvaluator(typelayertest.TestEngine(tb, tables...))
+	return hub
+}
+
+// clicksTable is the table the row-filter tests publish into: the readable
+// column, one the viewer role may not select, and the filtered one.
+// Declaration order matches the order rawEvent publishes (sorted by name).
+func clicksTable() *discovery.TableSchema {
+	return chtypesTable("clicks", col("page", "String"), col("secret", "String"), col("tenant_id", "String"))
+}
+
 // rowFilterPolicy scopes role "viewer" to column "page" only, and to rows whose
 // tenant_id equals the caller's {{ jwt.tenant }} claim. The filter keys on tenant_id
 // — a column viewer may NOT select — so it also exercises the rule that row
@@ -484,7 +535,7 @@ func rowFilterPolicy() *policy.Policy {
 // matching the constant-false predicate the query path binds for it.
 func TestHub_RowFilter_PerSubscriberIsolation(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(staticPolicy(rowFilterPolicy()), nil, nil)
+	hub := chtypesHub(t, staticPolicy(rowFilterPolicy()), nil, clicksTable())
 	topic := topicOf("clicks")
 
 	acme := NewSubscriber(jwtClaims(t, map[string]any{"tenant": "acme"}), nil)
@@ -506,7 +557,9 @@ func TestHub_RowFilter_PerSubscriberIsolation(t *testing.T) {
 	// Unresolvable claim ⇒ no rows on the stream, matching the query path (#457).
 	assertNoFrame(t, noTenant)
 
-	// A globex row reaches only the globex subscriber.
+	// A globex row reaches only the globex subscriber. Its envelope carries no
+	// "secret" — the shape a role that may not write that column publishes —
+	// and is evaluated all the same.
 	hub.Broadcast(topic, rawEvent(t, "clicks", "2026-06-26T00:00:01Z",
 		map[string]any{"tenant_id": "globex", "page": "/g"}))
 	_, _, grow := recvEvent(t, globex)
@@ -528,7 +581,8 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"tenant_id": {Eq: new("{{ jwt.org.tenant }}")}}}}},
 		},
 	}
-	hub := NewHub(staticPolicy(p), nil, nil)
+	tenantTable := chtypesTable("clicks", col("page", "String"), col("tenant_id", "String"))
+	hub := chtypesHub(t, staticPolicy(p), nil, tenantTable)
 	topic := topicOf("clicks")
 
 	org := map[string]any{"tenant": "globex"}
@@ -554,7 +608,7 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"tenant_id": {In: new("{{ jwt.tenants }}")}}}}},
 		},
 	}
-	inHub := NewHub(staticPolicy(inPolicy), nil, nil)
+	inHub := chtypesHub(t, staticPolicy(inPolicy), nil, tenantTable)
 	tenants := []any{"globex"}
 	inSub := NewSubscriber(map[string]any{"tenants": tenants}, nil)
 	inHub.Add(topic, "viewer", inSub)
@@ -571,10 +625,12 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 }
 
 // TestHub_RowFilter_MissingColumn_FailsClosed: an event that lacks the filtered
-// column can't be proven visible, so it is withheld rather than leaked.
+// column can't be proven visible, so it is withheld rather than leaked. The
+// control proves the withholding is the absent column's doing, not a silent
+// hub: the same subscriber gets the next event, which carries it.
 func TestHub_RowFilter_MissingColumn_FailsClosed(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(staticPolicy(rowFilterPolicy()), nil, nil)
+	hub := chtypesHub(t, staticPolicy(rowFilterPolicy()), nil, clicksTable())
 	topic := topicOf("clicks")
 
 	acme := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
@@ -583,6 +639,11 @@ func TestHub_RowFilter_MissingColumn_FailsClosed(t *testing.T) {
 	hub.Broadcast(topic, rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
 		map[string]any{"page": "/a"})) // no tenant_id
 	assertNoFrame(t, acme)
+
+	hub.Broadcast(topic, rawEvent(t, "clicks", "2026-06-26T00:00:01Z",
+		map[string]any{"page": "/b", "tenant_id": "acme"}))
+	_, _, row := recvEvent(t, acme)
+	assert.Equal(t, "/b", row["page"])
 }
 
 // TestHub_RowFilter_SharedProjectionAcrossSameClaims: the column projection is still
@@ -591,7 +652,7 @@ func TestHub_RowFilter_MissingColumn_FailsClosed(t *testing.T) {
 // per-subscriber, not the serialization.
 func TestHub_RowFilter_SharedProjectionAcrossSameClaims(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(staticPolicy(rowFilterPolicy()), nil, nil)
+	hub := chtypesHub(t, staticPolicy(rowFilterPolicy()), nil, clicksTable())
 	topic := topicOf("clicks")
 
 	a := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
@@ -609,27 +670,21 @@ func TestHub_RowFilter_SharedProjectionAcrossSameClaims(t *testing.T) {
 	assert.Same(t, &fa.Data[0], &fb.Data[0], "one serialization shared across same-role subscribers")
 }
 
-// TestHub_RowFilter_NumericOrdering_SchemaInformed drives the registry-backed path:
-// with a numeric column type in the schema, an `amount > 100` filter compares
-// numerically, so amount=9 is withheld (a lexicographic "9" > "100" comparison would
-// have leaked it) and amount=250 is delivered. Without a registry the same ordering
-// filter has no type to trust and withholds every row — fail closed, never the
-// lexicographic leak (the schemaless window is real: boot-time discovery failure
-// retries in the background while the server serves).
-func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
+// TestHub_RowFilter_NumericOrdering drives the type-layer path: on a UInt64
+// column an `amount > 100` filter compares the way ClickHouse compares, so
+// amount=9 is withheld (a lexicographic "9" > "100" would have leaked it) and
+// amount=250 is delivered. With no type layer wired there is nothing that can
+// answer the question at all, so every row is withheld — fail closed, never the
+// lexicographic leak.
+func TestHub_RowFilter_NumericOrdering(t *testing.T) {
 	t.Parallel()
-	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
-		{Name: "clicks", Columns: []discovery.Column{
-			{Name: "amount", Type: "UInt64"},
-			{Name: "page", Type: "String"},
-		}},
-	})
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"amount": {Gt: new("100")}}}}},
 		},
 	}
-	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
+	hub := chtypesHub(t, staticPolicy(p), nil,
+		chtypesTable("clicks", col("amount", "UInt64"), col("page", "String")))
 	topic := topicOf("clicks")
 
 	sub := NewSubscriber(nil, nil) // constant filter value ⇒ no claims needed
@@ -642,34 +697,31 @@ func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 	_, _, row := recvEvent(t, sub)
 	assert.Equal(t, float64(250), row["amount"])
 
-	// Same policy, no schema registry: an ordering predicate can't be proven either
-	// way, so both rows are withheld — including the one the schema-informed path
-	// delivers above.
-	noSchema := NewHub(staticPolicy(p), nil, nil)
+	// Same policy, no type layer: an ordering predicate can't be answered either
+	// way, so both rows are withheld — including the one the wired path delivers.
+	noEngine := NewHub(staticPolicy(p), nil, nil)
 	blind := NewSubscriber(nil, nil)
-	noSchema.Add(topic, "viewer", blind)
-	noSchema.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"amount": float64(9), "page": "/a"}))
-	noSchema.Broadcast(topic, rawEvent(t, "clicks", "t2", map[string]any{"amount": float64(250), "page": "/b"}))
+	noEngine.Add(topic, "viewer", blind)
+	noEngine.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"amount": float64(9), "page": "/a"}))
+	noEngine.Broadcast(topic, rawEvent(t, "clicks", "t2", map[string]any{"amount": float64(250), "page": "/b"}))
 	assertNoFrame(t, blind)
 }
 
-// TestHub_RowFilter_FloatNarrowing_SchemaInformed drives storage-domain
-// narrowing end-to-end through the registry: on a Float32 column, payload
-// 16777217 stores as 16777216, so a `_gt: "16777216"` filter must withhold the
-// event — the query path's WHERE over the stored row is false, and delivering
-// the pre-narrowing payload was the ordering fail-open raised in review. A
-// Float32-representable greater value still delivers.
-func TestHub_RowFilter_FloatNarrowing_SchemaInformed(t *testing.T) {
+// TestHub_RowFilter_FloatNarrowing drives storage-domain narrowing end-to-end:
+// on a Float32 column, payload 16777217 stores as 16777216, so a
+// `_gt: "16777216"` filter must withhold the event — the query path's WHERE over
+// the stored row is false, and delivering the pre-narrowing payload was the
+// ordering fail-open raised in review. A Float32-representable greater value
+// still delivers. The row is parsed into the column's real storage before
+// anything is compared.
+func TestHub_RowFilter_FloatNarrowing(t *testing.T) {
 	t.Parallel()
-	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
-		{Name: "clicks", Columns: []discovery.Column{{Name: "score", Type: "Float32"}}},
-	})
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"score": {Gt: new("16777216")}}}}},
 		},
 	}
-	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
+	hub := chtypesHub(t, staticPolicy(p), nil, chtypesTable("clicks", col("score", "Float32")))
 	topic := topicOf("clicks")
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
@@ -680,6 +732,43 @@ func TestHub_RowFilter_FloatNarrowing_SchemaInformed(t *testing.T) {
 	hub.Broadcast(topic, rawEvent(t, "clicks", "t2", map[string]any{"score": json.Number("16777218")}))
 	_, _, row := recvEvent(t, sub)
 	assert.Equal(t, float64(16777218), row["score"])
+}
+
+// TestHub_RowFilter_Float32EqualityBindsInTheColumnsWidth: the constant has to
+// be read in the COLUMN's float domain, not the widest one. A Float32 column
+// stores 0.1 as 0.100000001490116…, which is not Float64's 0.1 — so binding the
+// constant as Float64 would make `= "0.1"` withhold the row and `!= "0.1"`
+// ADMIT it, on a row /v1/query returns.
+func TestHub_RowFilter_Float32EqualityBindsInTheColumnsWidth(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		filter    policy.Filter
+		delivered bool
+	}{
+		{"equality matches the stored Float32", policy.Filter{Eq: new("0.1")}, true},
+		{"inequality does not", policy.Filter{Neq: new("0.1")}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := &policy.Policy{Tables: map[string]policy.TablePolicy{
+				"clicks": {"viewer": {Select: &policy.SelectPermissions{
+					Filter: map[string]policy.Filter{"score": tt.filter},
+				}}},
+			}}
+			hub := chtypesHub(t, staticPolicy(p), nil, chtypesTable("clicks", col("score", "Float32")))
+			sub := NewSubscriber(nil, nil)
+			hub.Add(topicOf("clicks"), "viewer", sub)
+
+			hub.Broadcast(topicOf("clicks"), rawEvent(t, "clicks", "t", map[string]any{"score": json.Number("0.1")}))
+			if tt.delivered {
+				f, _, _ := recvEvent(t, sub)
+				assert.NotEmpty(t, f.Data)
+			} else {
+				assertNoFrame(t, sub)
+			}
+		})
+	}
 }
 
 func TestHub_TopicIsolation(t *testing.T) {
@@ -891,7 +980,7 @@ func TestHub_ReplayProjector_ReadsPolicyPerEvent(t *testing.T) {
 // gap-fill event is projected only when the connection's claims satisfy the filter.
 func TestHub_ReplayProjector_RowFilter(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(staticPolicy(rowFilterPolicy()), nil, nil)
+	hub := chtypesHub(t, staticPolicy(rowFilterPolicy()), nil, clicksTable())
 	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
 		map[string]any{"tenant_id": "acme", "page": "/a", "secret": "x"})
 
@@ -907,8 +996,8 @@ func TestHub_ReplayProjector_RowFilter(t *testing.T) {
 		assert.NotContains(t, row, "secret", "denied column stripped on replay too")
 
 		// The projector is reusable across a replay loop: a second event through the
-		// same closure (cached column kinds) projects identically — and does NOT
-		// re-announce a column list the connection already has.
+		// same closure projects identically — and does NOT re-announce a column
+		// list the connection already has.
 		again := project(raw)
 		require.Len(t, again, 1, "the column list is announced once per connection")
 		assert.Equal(t, frames[1].Data, again[0].Data)
@@ -954,9 +1043,9 @@ func TestHub_ConcurrentAddRemoveBroadcast_Race(t *testing.T) {
 // racing silently on a security decision.
 func TestHub_ConcurrentRowFilteredBroadcast_Race(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(staticPolicy(rowFilterPolicy()), nil, nil)
+	hub := chtypesHub(t, staticPolicy(rowFilterPolicy()), nil, clicksTable())
 	topic := topicOf("clicks")
-	raw := rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "acme", "page": "/a"})
+	raw := rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "acme", "page": "/a", "secret": "x"})
 
 	var wg sync.WaitGroup
 	for range 4 { // broadcasters: per-subscriber claims evaluation on every event
@@ -984,26 +1073,23 @@ func TestHub_ConcurrentRowFilteredBroadcast_Race(t *testing.T) {
 }
 
 // TestHub_RowFilter_BigIntegerExact: a bare JSON integer past 2^53 must keep its
-// exact digits through the hub's decode (UseNumber), or the row filter compares a
+// exact digits all the way to the comparison, or the row filter compares a
 // lossily-rounded value: tenant 10000000000000001's row would falsely equal a
 // tenant claim of 10000000000000000 — float64 collapses the neighbors — and be
 // delivered cross-tenant on the stream while the query path (ClickHouse stores the
-// exact digits ingest forwarded) excludes it. The raw payload is hand-built —
+// exact digits ingest forwarded) excludes it. The row bytes go to ClickHouse's
+// own parser untouched and the claim is compared through the strict integer
+// cast, so no Go float is on the path at all. The raw payload is hand-built —
 // marshaling a Go float64 would already have destroyed the value this test is about.
 func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
 	t.Parallel()
-	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
-		{Name: "clicks", Columns: []discovery.Column{
-			{Name: "tenant_id", Type: "UInt64"},
-			{Name: "page", Type: "String"},
-		}},
-	})
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}}}}},
 		},
 	}
-	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
+	hub := chtypesHub(t, staticPolicy(p), nil,
+		chtypesTable("clicks", col("page", "String"), col("tenant_id", "UInt64")))
 	topic := topicOf("clicks")
 
 	// Claims come from real signed tokens through the production middleware, so a
@@ -1025,44 +1111,44 @@ func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
 		"the wire frame carries the exact digits, not a float64 rounding")
 }
 
-// TestHub_RowFilter_TimestampInstantMatch: since #402, ingest canonicalizes
-// DateTime/DateTime64 payload values to RFC 3339 UTC before publish, while policy
-// authors write the ClickHouse-friendly zone-less spelling the query path wants.
-// The row filter compares the two as instants through the discovery grammar (one
-// parser shared with canonicalization), so the spellings agree; an operand the
-// grammar can't read withholds the row.
+// TestHub_RowFilter_TimestampInstantMatch: policy authors write the zone-less
+// spelling every server's query path reads alike, while the wire carries
+// ClickHouse's RFC 3339 rendering. The filter compares them as instants because the row is parsed
+// into the column's real storage before the predicate runs, so any spelling of
+// the same instant matches; an operand the parser can't read withholds the row
+// rather than guessing at it.
 func TestHub_RowFilter_TimestampInstantMatch(t *testing.T) {
 	t.Parallel()
-	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
-		{Name: "clicks", Columns: []discovery.Column{
-			{Name: "created_at", Type: "DateTime"},
-			{Name: "page", Type: "String"},
-		}},
-	})
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				// Zone-less constant, read in the column's zone (UTC here) on both
-				// surfaces — the one spelling that works for the query path's SQL too.
+				// surfaces, whatever the server's cast_string_to_date_time_mode.
 				"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"created_at": {Eq: new("2026-06-21 04:00:00")}}}},
 			},
 		},
 	}
-	hub := NewHub(staticPolicy(p), fixedRegistry(reg), nil)
+	hub := chtypesHub(t, staticPolicy(p), nil,
+		chtypesTable("clicks", col("created_at", "DateTime"), col("page", "String")))
 	topic := topicOf("clicks")
 
 	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
 
-	// The canonical wire spelling ingest publishes: same instant, different bytes.
-	hub.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"created_at": "2026-06-21T04:00:00Z", "page": "/a"}))
-	f, _, _ := recvEvent(t, sub)
-	assert.NotEmpty(t, f.Data, "canonical payload matches the zone-less constant as an instant")
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"created_at": "2026-06-21 04:00:00", "page": "/a"}))
+	f, cols, _ := recvEvent(t, sub)
+	assert.NotEmpty(t, f.Data, "a row in the constant's own spelling matches")
 
-	hub.Broadcast(topic, rawEvent(t, "clicks", "t2", map[string]any{"created_at": "2026-06-21T04:00:01Z", "page": "/a"}))
+	// A different spelling of the same instant matches too: the comparison is
+	// between parsed instants, not between bytes.
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t2", map[string]any{"created_at": "2026-06-21T04:00:00Z", "page": "/a"}))
+	f, _ = recvEventCols(t, sub, cols)
+	assert.NotEmpty(t, f.Data)
+
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t3", map[string]any{"created_at": "2026-06-21 04:00:01", "page": "/a"}))
 	assertNoFrame(t, sub)
 
-	hub.Broadcast(topic, rawEvent(t, "clicks", "t3", map[string]any{"created_at": "not a timestamp", "page": "/a"}))
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t4", map[string]any{"created_at": "not a timestamp", "page": "/a"}))
 	assertNoFrame(t, sub)
 }
 
@@ -1082,34 +1168,50 @@ func TestHub_RowFilterWithheldIncrementsMetric(t *testing.T) {
 		otel.SetMeterProvider(savedMP)
 	})
 
-	hub := NewHub(staticPolicy(rowFilterPolicy()), nil, NewMetrics())
+	hub := chtypesHub(t, staticPolicy(rowFilterPolicy()), NewMetrics(), clicksTable())
 	topic := topicOf("clicks")
 	acme := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
 	globex := NewSubscriber(map[string]any{"tenant": "globex"}, nil)
 	hub.Add(topic, "viewer", acme)
 	hub.Add(topic, "viewer", globex)
 
-	raw := rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "acme", "page": "/a"})
+	raw := rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "acme", "page": "/a", "secret": "x"})
 	hub.Broadcast(topic, raw) // delivered to acme, withheld from globex → 1
 
 	frames := hub.ReplayProjector(tenant.Default, "viewer", NewSubscriber(map[string]any{"tenant": "globex"}, nil))(raw)
 	require.Empty(t, frames) // replay withhold → 2
 
+	// A column the table does not have: a FAULT, not a filter verdict, and the
+	// label is the only thing that says so. It withholds from BOTH subscribers
+	// — nothing about this row is readable — → 4.
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t", map[string]any{"page": "/a", "tenant_id": "acme", "dropped": "x"}))
+
+	// An envelope without the filtered column (the inserting role does not
+	// write it): no verdict for either subscriber → 6.
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t", map[string]any{"page": "/a"}))
+
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
-	assert.Equal(t, int64(2), sumByName(rm, "wavehouse_sse_rows_withheld_total"))
+	assert.Equal(t, int64(6), sumByName(rm, "wavehouse_sse_rows_withheld_total"))
+	assert.Equal(t, int64(2), sumByNameAttr(rm, "wavehouse_sse_rows_withheld_total", "reason", ReasonFilter),
+		"the two claim mismatches are ordinary filtering")
+	assert.Equal(t, int64(2), sumByNameAttr(rm, "wavehouse_sse_rows_withheld_total", "reason", ReasonDrift),
+		"drift must be distinguishable from a policy decision")
+	assert.Equal(t, int64(2), sumByNameAttr(rm, "wavehouse_sse_rows_withheld_total", "reason", ReasonDecline),
+		"a filter over a column the event does not carry is no verdict at all")
 	f, _, _ := recvEvent(t, acme)
 	assert.NotEmpty(t, f.Data, "the entitled subscriber still gets the event")
 	assertNoFrame(t, globex)
 }
 
 // BenchmarkBroadcast_RowFilteredFanout measures the per-subscriber cost a
-// row-filtered role pays on the delivery hot path (#294/#353 vs #319): each
-// subscriber's claims run through policy.Evaluate + RowVisible per event, where an
-// unfiltered role shares one projection bucket-wide. Half the subscribers share the
-// event's tenant (row visible), half don't (row withheld); either way each pays the
-// per-subscriber evaluation, which is the cost under measurement. See #435 for the
-// memoization follow-up this benchmark exists to arbitrate.
+// row-filtered role pays on the delivery hot path (#294/#353 vs #319): the row is
+// parsed once per event, then each subscriber's claims run through
+// policy.Evaluate and one compiled-predicate evaluation, where an unfiltered role
+// shares one projection bucket-wide. Half the subscribers share the event's
+// tenant (row visible), half don't (row withheld); either way each pays the
+// per-subscriber evaluation, which is the cost under measurement. See #435 for
+// the memoization follow-up this benchmark exists to arbitrate.
 func BenchmarkBroadcast_RowFilteredFanout(b *testing.B) {
 	topic := topicOf("clicks")
 	raw := rawEvent(b, "clicks", "2026-06-26T00:00:00Z",
@@ -1117,7 +1219,7 @@ func BenchmarkBroadcast_RowFilteredFanout(b *testing.B) {
 
 	for _, n := range []int{100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("subscribers=%d", n), func(b *testing.B) {
-			hub := NewHub(staticPolicy(rowFilterPolicy()), nil, nil)
+			hub := chtypesHub(b, staticPolicy(rowFilterPolicy()), nil, clicksTable())
 			subs := make([]*Subscriber, n)
 			for i := range n {
 				tenant := "acme"
@@ -1219,6 +1321,30 @@ func sumByNameKind(rm metricdata.ResourceMetrics, name, kind string) int64 {
 		}
 	}
 	return 0
+}
+
+// sumByNameAttr sums one counter's data points restricted to a single attribute
+// value — the withheld counter's "reason" is a closed set, and the point of the
+// label is that a fault does not read as a filter verdict.
+func sumByNameAttr(rm metricdata.ResourceMetrics, name, key, want string) int64 {
+	var total int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				continue
+			}
+			for _, dp := range sum.DataPoints {
+				if v, found := dp.Attributes.Value(attribute.Key(key)); found && v.AsString() == want {
+					total += dp.Value
+				}
+			}
+		}
+	}
+	return total
 }
 
 // sumByName totals all datapoints of an Int64 sum instrument across kinds.
@@ -1461,28 +1587,34 @@ func TestHub_SchemaFrame_DroppedAnnouncementDropsItsRow(t *testing.T) {
 
 // TestHub_SubscribeSchemaFrame_ExcludesComputedColumns: the connect-time
 // announcement comes from the registry while every event's list comes from the
-// envelope, which carries only insertable columns. If the two disagreed, the
-// very first event would force a pointless drift re-announcement.
+// envelope, which carries the type layer's wire columns — no MATERIALIZED,
+// ALIAS or EPHEMERAL column. If the two disagreed, the very first event would
+// force a pointless drift re-announcement. The envelope side is read off a
+// compiled handle, as ingest builds it, not written down here.
 func TestHub_SubscribeSchemaFrame_ExcludesComputedColumns(t *testing.T) {
 	t.Parallel()
-	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
-		{Name: "clicks", Columns: []discovery.Column{
-			{Name: "page", Type: "String"},
-			{Name: "digest", Type: "String", DefaultKind: "MATERIALIZED", HasDefault: true},
-			{Name: "country", Type: "String"},
-		}},
-	})
-	hub := NewHub(nil, fixedRegistry(reg), nil)
+	table := &discovery.TableSchema{Name: "clicks", Columns: []discovery.Column{
+		{Name: "page", Type: "String", Position: 1},
+		{Name: "digest", Type: "String", DefaultKind: "MATERIALIZED", DefaultExpression: "upper(page)", HasDefault: true, Position: 2},
+		{Name: "raw", Type: "String", DefaultKind: "EPHEMERAL", HasDefault: true, Position: 3},
+		{Name: "country", Type: "String", Position: 4},
+	}}
+	tbl, err := typelayertest.TestEngine(t, table).Table(tenant.Default, "clicks")
+	require.NoError(t, err)
+	envelope := tbl.WireColumns
+	tbl.Release()
 
+	hub := NewHub(nil, fixedRegistry(testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{table})), nil)
 	sub := NewSubscriber(nil, nil)
 	f, ok := hub.SubscribeSchemaFrame(tenant.Default, "clicks", "public", sub)
 	require.True(t, ok)
 	cols := frameColumns(t, f)
+	assert.Equal(t, envelope, cols)
 	assert.Equal(t, []string{"page", "country"}, cols)
 
 	// The first event announces nothing new, because the lists agree.
 	hub.Add(topicOf("clicks"), "public", sub)
-	hub.Broadcast(topicOf("clicks"), rawEventCols(t, "clicks", "t1", cols,
+	hub.Broadcast(topicOf("clicks"), rawEventCols(t, "clicks", "t1", envelope,
 		map[string]any{"page": "/a", "country": "US"}))
 	_, row := recvEventCols(t, sub, cols)
 	assert.Equal(t, "/a", row["page"])
@@ -1495,7 +1627,7 @@ func fixedRegistry(reg *discovery.SchemaRegistry) RegistrySource {
 
 // TestHub_RegistrySourceYieldingNilIsNoSchema: a tenant with no registry —
 // not served, or its registry not built yet — reads exactly like a hub with
-// no registry at all: nothing to announce, every column opaque.
+// no registry at all: nothing to announce.
 func TestHub_RegistrySourceYieldingNilIsNoSchema(t *testing.T) {
 	t.Parallel()
 	var asked []tenant.ID
@@ -1505,7 +1637,8 @@ func TestHub_RegistrySourceYieldingNilIsNoSchema(t *testing.T) {
 	}, nil)
 	_, ok := hub.SubscribeSchemaFrame("acme", "clicks", "viewer", NewSubscriber(nil, nil))
 	assert.False(t, ok)
-	assert.Nil(t, hub.columnSpecs("globex", "clicks"))
+	_, ok = hub.SubscribeSchemaFrame("globex", "clicks", "viewer", NewSubscriber(nil, nil))
+	assert.False(t, ok)
 	assert.Equal(t, []tenant.ID{"acme", "globex"}, asked, "the source is asked for the tenant the lookup names")
 }
 

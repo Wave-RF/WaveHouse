@@ -26,7 +26,7 @@ const { data } = await clicks.fetch({ limit: 50, signal: controller.signal });
 
 ### `.insert(data, opts?)`
 
-Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table={table}`. An **array** is serialized to NDJSON (one record per line) and sent as a single `application/x-ndjson` request, so a bad record no longer fails or hides the rest of the batch — per-record outcomes come back in the result.
+Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table={table}`. An **array** is serialized to NDJSON (one record per line) and sent as a single `application/x-ndjson` request, so a bad record does not fail the rest of the batch — per-record outcomes come back in the result. The exception is a body ClickHouse's reader cannot get through record by record (a short `UUID` that takes the records after it with it, for one): it is declined whole, every record a `422` and nothing inserted ([Batch Ingest](/api#batch-ingest)).
 
 ```ts
 // Single row → { ok: true } (or { ok: true, duplicate: true } when dedup skips it)
@@ -40,9 +40,9 @@ const { data } = await clicks.insert([
 // data: { ok, total, succeeded, failed, duplicates, results? }
 ```
 
-For an array insert, `data.ok` is `true` only when every record succeeded (`failed === 0`). Inspect `data.failed` and `data.results` (each `{ index, ok|duplicate|error }`, 1-based `index`) for partial failures — the call's top-level `error` is reserved for whole-request failures (network, `404` unknown table, `403` forbidden, `503` backpressure). An empty array is a no-op and sends no request. The array path sends one request regardless of size, so it is bound by the same 16 MiB [request-body cap](/reverse-proxy#request-body-size-limits); bounded-concurrency chunking of very large arrays is tracked in [#196](https://github.com/Wave-RF/WaveHouse/issues/196).
+For an array insert, `data.ok` is `true` only when every record succeeded (`failed === 0`). Inspect `data.failed` and `data.results` (each `{ index, ok|duplicate|error, exception_code? }`, 1-based `index`, `exception_code` being ClickHouse's own error code on a parser rejection) for partial failures — the call's top-level `error` is reserved for whole-request failures (network, `404` unknown table, `403` forbidden, `503` backpressure). An empty array is a no-op and sends no request. The array path sends one request regardless of size, so it is bound by the same 16 MiB [request-body cap](/reverse-proxy#request-body-size-limits); bounded-concurrency chunking of very large arrays is tracked in [#196](https://github.com/Wave-RF/WaveHouse/issues/196).
 
-> `POST /v1/ingest` also accepts a raw JSON array or a single object directly, so non-SDK clients can send whichever shape is convenient — but the `Content-Type` is **required** and decides the format (`application/json` or `application/x-ndjson`); a request without one is rejected with `415`. The SDK always sets it. See the [API reference](/api#post-v1ingesttabletable--ingest-data).
+> `POST /v1/ingest` also accepts a raw JSON array or a single object directly, and positional `text/csv` / `text/tab-separated-values` bodies (add `; header=present` to send a header line of column names, or `; header=absent` to turn ClickHouse's header auto-detection off), so non-SDK clients can send whichever shape is convenient — but the `Content-Type` is **required** and decides the format; a request without one is rejected with `415`. The SDK always sets it. See the [API reference](/api#post-v1ingesttabletable--ingest-data).
 
 ### `.insertNDJSON(source, opts?)`
 

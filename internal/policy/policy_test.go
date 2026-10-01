@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 )
 
 // ptr returns a pointer to v — the Filter operator fields are *string so a
@@ -125,9 +127,10 @@ func TestEvaluate_FilterWithClaimTemplate(t *testing.T) {
 	claims := map[string]any{"org_id": "org-123"}
 	perms := Evaluate(p, "user", "clicks", "select", claims)
 	assert.True(t, perms.Allowed)
-	assert.Contains(t, perms.Select.WhereClause, "`org_id` = ?")
-	require.Len(t, perms.Select.WhereParams, 1)
-	assert.Equal(t, "org-123", perms.Select.WhereParams[0])
+	where, whereParams := perms.Select.WhereSQL(nil)
+	assert.Contains(t, where, "`org_id` = ?")
+	require.Len(t, whereParams, 1)
+	assert.Equal(t, "org-123", whereParams[0])
 }
 
 func TestEvaluate_CheckClauses(t *testing.T) {
@@ -147,28 +150,6 @@ func TestEvaluate_CheckClauses(t *testing.T) {
 	assert.True(t, perms.Allowed)
 	require.Contains(t, perms.Insert.CheckClauses, "org_id")
 	assert.Equal(t, "org-456", perms.Insert.CheckClauses["org_id"])
-}
-
-// TestEvaluate_CheckClauses_StaticLiteralTyped: a placeholder-free check
-// value is wrapped as LiteralValue — the marker that lets the ingest
-// comparison accept its numeric reading — while a claim-derived value (above)
-// stays a plain string, so a string-typed claim can never gain that reading.
-func TestEvaluate_CheckClauses_StaticLiteralTyped(t *testing.T) {
-	t.Parallel()
-	eqVal := "1.0"
-	p := &Policy{
-		Tables: map[string]TablePolicy{
-			"clicks": {
-				"user": {Insert: &InsertPermissions{Check: map[string]Filter{
-					"count": {Eq: &eqVal},
-				}}},
-			},
-		},
-	}
-	perms := Evaluate(p, "user", "clicks", "insert", map[string]any{})
-	assert.True(t, perms.Allowed)
-	require.Contains(t, perms.Insert.CheckClauses, "count")
-	assert.Equal(t, LiteralValue("1.0"), perms.Insert.CheckClauses["count"])
 }
 
 func TestEvaluate_AggregationLimits(t *testing.T) {
@@ -460,17 +441,17 @@ func TestResolveTemplate(t *testing.T) {
 		{"boolean claim binds", "{{ jwt.is_admin }}", "true", true},
 		{"large integer claim binds exactly", "{{ jwt.big }}", "12345678901234567890", true},
 		// Numeric claims bind in canonical decimal form, not the token's
-		// spelling — "1.0"/"1e3" error as TYPE_MISMATCH against a numeric
-		// column if bound verbatim. A magnitude only JSON can hold fails
-		// closed like any other unresolvable claim.
+		// spelling — bound verbatim, "1.0"/"1e3" would match nothing on an
+		// integer column, which reads only the canonical spelling. A
+		// magnitude only JSON can hold fails closed like any other
+		// unresolvable claim.
 		{"float spelling binds canonically", "{{ jwt.price }}", "1", true},
 		{"exponent spelling binds canonically", "{{ jwt.exp3 }}", "1000", true},
 		{"beyond-float64 number fails closed", "{{ jwt.huge }}", "", false},
 		// A static literal binds exactly as written even when it spells a JSON
 		// number: canonicalizing it here would move read filters on String
 		// columns (`_neq: "1.0"` on a version column would stop excluding rows
-		// storing "1.0"). The insert-check comparison accepts the numeric
-		// reading at compare time instead (CanonicalNumericLiteral).
+		// storing "1.0"). The insert check judges the literal in ClickHouse.
 		{"numeric-spelled literal binds as written", "1.0", "1.0", true},
 		{"exponent-spelled literal binds as written", "1e400", "1e400", true},
 	}
@@ -500,12 +481,12 @@ func TestResolveTemplate_MultipleTemplates(t *testing.T) {
 }
 
 // TestCanonicalScalar pins the one rule every bound value flows through — claim
-// templates, _in elements, and the ingest check comparison alike. The canonical
-// form is exact at every width and precision (integers via big.Int, fractions
-// and exponents via canonicalDecimal — never a float64 round-trip, which would
-// collapse "1e-400" to "0" and round wide decimals onto their neighbors), and
-// a literal or exact form past the 100-digit bound fails closed in both
-// directions.
+// templates and _in elements, for row filters and insert checks alike. The
+// canonical form is exact at every width and precision (integers via big.Int,
+// fractions and exponents via canonicalDecimal — never a float64 round-trip,
+// which would collapse "1e-400" to "0" and round wide decimals onto their
+// neighbors), and a literal or exact form past the 100-digit bound fails closed
+// in both directions.
 func TestCanonicalScalar(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -545,10 +526,10 @@ func TestCanonicalScalar(t *testing.T) {
 		// allocating a gigabyte-scale expansion before the length check runs.
 		{"zero mantissa with out-of-range exponent", json.Number("0e201"), "", false},
 		// The 100-digit literal bound: big.Int work is superlinear in digit
-		// count and the ingest path hands this function client-controlled
-		// literals, so anything longer fails closed before any parsing. The
-		// bound counts digits, not bytes — sign and exponent markers ride free —
-		// so two spellings of one value pass or fail together.
+		// count and a claim's value is whatever the token carries, so anything
+		// longer fails closed before any parsing. The bound counts digits, not
+		// bytes — sign and exponent markers ride free — so two spellings of one
+		// value pass or fail together.
 		{"100-digit integer at the bound stays exact", json.Number(strings.Repeat("9", 100)), strings.Repeat("9", 100), true},
 		{"101-digit literal has no canonical form", json.Number(strings.Repeat("9", 101)), "", false},
 		{"digit bound ignores sign and exponent bytes", json.Number("-1e99"), "-1" + strings.Repeat("0", 99), true},
@@ -570,41 +551,6 @@ func TestCanonicalScalar(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got, ok := CanonicalScalar(tt.v)
-			assert.Equal(t, tt.want, got)
-			assert.Equal(t, tt.ok, ok)
-		})
-	}
-}
-
-// TestCanonicalNumericLiteral pins the numeric reading of a policy-authored
-// check literal: only spellings JSON itself can produce canonicalize — the
-// json.Valid gate rejects big.Int-acceptable forms like "+5" and "007" that
-// no decoded claim or payload value ever carries, so the check comparison's
-// second reading can't accept a spelling the first side can't produce.
-func TestCanonicalNumericLiteral(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		lit  string
-		want string
-		ok   bool
-	}{
-		{"float spelling of an integer", "1.0", "1", true},
-		{"exponent spelling", "25e-4", "0.0025", true},
-		{"negative fraction", "-2.50", "-2.5", true},
-		{"integer passes through", "7", "7", true},
-		{"leading plus is not JSON", "+5", "", false},
-		{"leading zero is not JSON", "007", "", false},
-		{"whitespace-padded number is not a bare literal", " 5", "", false},
-		{"non-numeric literal", "org-123", "", false},
-		{"boolean literal is valid JSON but not a number", "true", "", false},
-		{"empty literal", "", "", false},
-		{"no canonical form past the bound", "1e400", "", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, ok := CanonicalNumericLiteral(tt.lit)
 			assert.Equal(t, tt.want, got)
 			assert.Equal(t, tt.ok, ok)
 		})
@@ -1027,13 +973,14 @@ func TestEvaluate_FilterUnresolvableClaim_FailsClosed(t *testing.T) {
 	}}
 	perms := Evaluate(p, "user", "clicks", "select", map[string]any{"role": "user"})
 	require.True(t, perms.Allowed)
-	assert.Equal(t, "1 = 0", perms.Select.WhereClause)
-	assert.Empty(t, perms.Select.WhereParams)
+	where, whereParams := perms.Select.WhereSQL(nil)
+	assert.Equal(t, "1 = 0", where)
+	assert.Empty(t, whereParams)
 }
 
 // TestValidate_RejectsBindUnsafeFilterColumn: a policy whose row-filter column
-// contains '?' is refused at write time — it would shift clickhouse-go's
-// positional value binding when interpolated into the WHERE clause.
+// contains '?' is refused at write time — it would shift the builder's
+// positional `?` binding when interpolated into the WHERE clause.
 func TestValidate_RejectsBindUnsafeFilterColumn(t *testing.T) {
 	t.Parallel()
 	eq := "{{ jwt.org }}"
@@ -1179,7 +1126,7 @@ func TestResolveFilters_InNumericElements_BindCanonically(t *testing.T) {
 // exact digits; a float64 below 2^53 binds positionally (never the "1e+06"
 // spelling ClickHouse integer columns reject); a float64 at or past 2^53 lost
 // its digits at decode, so the predicate renders `1 = 0` — matching no rows, the
-// same verdict RowVisible reaches in memory — alone or as one _in element.
+// same verdict the type layer reaches — alone or as one _in element.
 func TestResolveFilters_NumericClaimBinding(t *testing.T) {
 	t.Parallel()
 	tmpl := "{{ jwt.tenant }}"
@@ -1202,36 +1149,6 @@ func TestResolveFilters_NumericClaimBinding(t *testing.T) {
 		map[string]any{"tenants": []any{"a", float64(1 << 60)}})
 	assert.Equal(t, []string{"1 = 0"}, clauses, "one poisoned element resolves the whole set empty")
 	assert.Empty(t, params)
-}
-
-// TestCompareCanonicalDecimals pins the digit-string ordering over canonical
-// forms — the comparison twin of canonicalDecimal, exact at any width, never a
-// float round-trip. Each pair is asserted in both directions.
-func TestCompareCanonicalDecimals(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		a, b string
-		want int
-	}{
-		{"0", "0", 0},
-		{"1", "2", -1},
-		{"9", "100", -1},
-		{"-1", "1", -1},
-		{"-2", "-1", -1},
-		{"-100", "-9", -1},
-		{"1.5", "1.5", 0},
-		{"1.05", "1.5", -1},
-		{"0.5", "0.55", -1},
-		{"2", "2.5", -1},
-		{"-1.5", "-1", -1},
-		{"0.0025", "0.003", -1},
-		{"12345678901234567890", "12345678901234567891", -1},
-		{"9007199254740992", "9007199254740993", -1},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.want, compareCanonicalDecimals(tt.a, tt.b), "%s vs %s", tt.a, tt.b)
-		assert.Equal(t, -tt.want, compareCanonicalDecimals(tt.b, tt.a), "%s vs %s reversed", tt.b, tt.a)
-	}
 }
 
 // TestResolveFilters_InEmptyClaim_FailsClosed: an empty set makes the predicate
@@ -1261,7 +1178,7 @@ func TestResolveFilters_InEmptyClaim_FailsClosed(t *testing.T) {
 }
 
 // TestEvaluate_FilterInClause: end-to-end through Evaluate, an _in filter lands
-// in the role's WhereClause/WhereParams (exercising the bind-safe guard + IN
+// in the role's WhereSQL (exercising the bind-safe guard + IN
 // assembly), not just the resolveFilters unit.
 func TestEvaluate_FilterInClause(t *testing.T) {
 	t.Parallel()
@@ -1272,8 +1189,9 @@ func TestEvaluate_FilterInClause(t *testing.T) {
 	claims := map[string]any{"app_metadata": map[string]any{"tenant_ids": []any{"t1", "t2"}}}
 	perms := Evaluate(p, "user", "clicks", "select", claims)
 	require.True(t, perms.Allowed)
-	assert.Contains(t, perms.Select.WhereClause, "`tenant_id` IN (?,?)")
-	assert.Equal(t, []any{"t1", "t2"}, perms.Select.WhereParams)
+	where, whereParams := perms.Select.WhereSQL(nil)
+	assert.Contains(t, where, "`tenant_id` IN (?,?)")
+	assert.Equal(t, []any{"t1", "t2"}, whereParams)
 }
 
 // TestEvaluate_CheckInResolvesToSet: an _in check resolves to a []any set in
@@ -1548,14 +1466,10 @@ func TestEvaluate_UnresolvedSideFailsClosed(t *testing.T) {
 	assert.False(t, ins.IsAggregationAllowed("count"))
 	assert.True(t, ins.HasRowFilter(),
 		"the GATE must not report 'no filter' — that sends the caller down the "+
-			"whole-bucket fast path where RowVisible is never consulted")
-	assert.False(t, ins.RowVisible(map[string]any{"tenant_id": "acme"}, nil),
-		"an unresolved read side must not admit every row")
+			"whole-bucket fast path")
 
 	// The select-resolved grant still evaluates its row filter normally.
 	assert.True(t, sel.HasRowFilter())
-	assert.True(t, sel.RowVisible(map[string]any{"tenant_id": "acme"}, nil))
-	assert.False(t, sel.RowVisible(map[string]any{"tenant_id": "globex"}, nil))
 }
 
 // TestHandBuiltPermissions_PresentSidesKeepPlainReading: a value assembled by
@@ -1569,7 +1483,6 @@ func TestHandBuiltPermissions_PresentSidesKeepPlainReading(t *testing.T) {
 	assert.True(t, rp.IsColumnAllowed("anything", true))
 	assert.True(t, rp.IsAggregationAllowed("count"))
 	assert.False(t, rp.RestrictsColumns())
-	assert.True(t, rp.RowVisible(map[string]any{"a": 1}, nil))
 	// An EMPTY insert side has no checks and is resolved — not the same answer as
 	// a nil one below. A slip to `rp.Insert != nil && len(...) > 0` would break
 	// exactly here.
@@ -1591,10 +1504,9 @@ func TestHandBuiltPermissions_NilSideDenies(t *testing.T) {
 	assert.False(t, insertOnly.IsAggregationAllowed("count"))
 	assert.True(t, insertOnly.RestrictsColumns(), "an unresolved read side restricts everything")
 	// HasRowFilter says YES on an unresolved read side on purpose: it routes the
-	// hub onto the per-subscriber path where RowVisible denies, instead of the
-	// no-filter fast path that never consults RowVisible at all.
+	// hub onto the per-subscriber path, which denies, instead of the no-filter
+	// fast path.
 	assert.True(t, insertOnly.HasRowFilter(), "must not take the no-filter fast path")
-	assert.False(t, insertOnly.RowVisible(map[string]any{"a": 1}, nil), "and the per-row check denies")
 	assert.Empty(t, insertOnly.AllowedProjection([]string{"a", "b"}))
 
 	_, insertChecksOK := insertOnly.CheckClauses()
@@ -1672,7 +1584,7 @@ func TestEvaluate_OperatorLessFilterAndCheckDenyFailClosed(t *testing.T) {
 	// `"tenant_id": {}` survives a strict decode — every Filter operator is
 	// omitempty — and then matches no case in either resolver, so the declared
 	// restriction resolves to nothing. Before this was refused, the policy below
-	// validated clean and RowVisible answered true for every tenant.
+	// validated clean and every tenant could read.
 	sel := &Policy{Tables: map[string]TablePolicy{
 		"clicks": {"viewer": {Select: &SelectPermissions{
 			AllowColumns: []string{"*"},
@@ -1698,8 +1610,170 @@ func TestEvaluate_OperatorLessFilterAndCheckDenyFailClosed(t *testing.T) {
 	selPerms := Evaluate(sel, "viewer", "clicks", "select", nil)
 	assert.False(t, selPerms.Allowed, "an operator-less filter must deny, not read as unrestricted")
 	assert.True(t, selPerms.HasRowFilter(), "a denied grant gates every row")
-	assert.False(t, selPerms.RowVisible(map[string]any{"tenant_id": "someone-else"}, nil))
 
 	insPerms := Evaluate(ins, "writer", "clicks", "insert", nil)
 	assert.False(t, insPerms.Allowed, "an operator-less check must deny, not drop the rule")
+}
+
+// TestPredicates_UnresolvableClaim_NoValuesOnBothPaths pins the #457 fail-closed
+// rule on BOTH read surfaces at once, through the accessors the type layer
+// reads: a filter template whose claim the token doesn't carry renders the
+// constant-false predicate on the query path (WhereSQL) AND yields a predicate
+// with NO values on the stream path (Predicates), which the type layer
+// refuses without compiling anything. One Evaluate resolution drives both, so a
+// claim-less token can never see zero rows on /v1/query yet every row on
+// /v1/stream. HasRowFilter must stay true for the failed predicate — dropping it
+// would put the role back on the unfiltered once-per-role fast path, the exact
+// fail-open this test exists to prevent.
+func TestPredicates_UnresolvableClaim_NoValuesOnBothPaths(t *testing.T) {
+	t.Parallel()
+	noTenant := map[string]any{"role": "user"} // validly signed token, no tenant claim
+	tests := []struct {
+		name   string
+		filter map[string]Filter
+		claims map[string]any
+	}{
+		{"_eq", map[string]Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}}, noTenant},
+		{"_neq, the leak direction", map[string]Filter{"tenant_id": {Neq: new("{{ jwt.tenant }}")}}, noTenant},
+		{"_gt", map[string]Filter{"tenant_id": {Gt: new("{{ jwt.tenant }}")}}, noTenant},
+		{"_in with surrounding text", map[string]Filter{"tenant_id": {In: new("t-{{ jwt.tenant }}")}}, noTenant},
+		{
+			"object claim in a scalar slot",
+			map[string]Filter{"tenant_id": {Eq: new("{{ jwt.meta }}")}},
+			map[string]any{"meta": map[string]any{"tenant": "acme"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := &Policy{Tables: map[string]TablePolicy{
+				"t": {"r": {Select: &SelectPermissions{Filter: tt.filter}}},
+			}}
+			perms := Evaluate(p, "r", "t", "select", tt.claims)
+
+			clause, params := perms.Select.WhereSQL(nil)
+			assert.Equal(t, "1 = 0", clause, "query path: constant-false predicate")
+			assert.Empty(t, params)
+			assert.True(t, perms.HasRowFilter(), "failed predicate must keep the stream on the per-subscriber path")
+
+			preds, ok := perms.Predicates()
+			require.True(t, ok, "a resolved read side answers with its predicates")
+			require.Len(t, preds, 1, "the failed predicate is present, not dropped")
+			assert.Equal(t, "tenant_id", preds[0].Column)
+			assert.Empty(t, preds[0].Values,
+				"stream path: no values to bind, which matches no row without compiling anything")
+		})
+	}
+}
+
+// TestPredicates_IsTheSameResolutionAsTheWhereSQL: the two read surfaces are
+// rendered from ONE resolvePredicates call, so the predicates handed to the
+// stream carry exactly the values bound into the query's WHERE — in the same
+// order. A second resolution, even of the same policy, is what #457 was about.
+func TestPredicates_IsTheSameResolutionAsTheWhereClause(t *testing.T) {
+	t.Parallel()
+	p := &Policy{Tables: map[string]TablePolicy{
+		"t": {"r": {Select: &SelectPermissions{Filter: map[string]Filter{
+			"tenant_id": {Eq: new("{{ jwt.tenant }}")},
+		}}}},
+	}}
+	perms := Evaluate(p, "r", "t", "select", map[string]any{"tenant": "acme"})
+
+	clause, params := perms.Select.WhereSQL(nil)
+	assert.Equal(t, "`tenant_id` = ?", clause)
+	assert.Equal(t, []any{"acme"}, params)
+
+	preds, ok := perms.Predicates()
+	require.True(t, ok)
+	assert.Equal(t, []Predicate{{Column: "tenant_id", Op: "=", Values: []string{"acme"}}}, preds)
+}
+
+// TestPredicates_OrderIsStableAcrossEvaluations: a filter over several
+// columns resolves to the same predicate order (and so the same rendered text)
+// on every Evaluate, so neither the stream's filter cache nor the query cache
+// splits one filter into one entry per map iteration order.
+func TestPredicates_OrderIsStableAcrossEvaluations(t *testing.T) {
+	t.Parallel()
+	p := &Policy{Tables: map[string]TablePolicy{
+		"t": {"r": {Select: &SelectPermissions{Filter: map[string]Filter{
+			"c": {Eq: new("{{ jwt.c }}")},
+			"a": {Eq: new("{{ jwt.a }}")},
+			"b": {Eq: new("{{ jwt.b }}")},
+			"d": {Eq: new("{{ jwt.d }}")},
+		}}}},
+	}}
+	claims := map[string]any{"a": "1", "b": "2", "c": "3", "d": "4"}
+	first := Evaluate(p, "r", "t", "select", claims)
+	wantPreds, ok := first.Predicates()
+	require.True(t, ok)
+	assert.Equal(t, []string{"a", "b", "c", "d"}, []string{wantPreds[0].Column, wantPreds[1].Column, wantPreds[2].Column, wantPreds[3].Column})
+	wantSQL, _ := first.Select.WhereSQL(nil)
+	for range 200 {
+		perms := Evaluate(p, "r", "t", "select", claims)
+		preds, _ := perms.Predicates()
+		require.Equal(t, wantPreds, preds)
+		sql, _ := perms.Select.WhereSQL(nil)
+		require.Equal(t, wantSQL, sql)
+	}
+}
+
+// TestPredicates_FailsClosedWhereNoRowMayBeAdmitted: a denied grant and an
+// INSERT-resolved grant refuse the row question rather than answer "no
+// predicates"; a nil receiver (no policy) and a resolved, unfiltered read side
+// admit every row.
+func TestPredicates_FailsClosedWhereNoRowMayBeAdmitted(t *testing.T) {
+	t.Parallel()
+	var none *ResolvedPermissions
+	preds, ok := none.Predicates()
+	assert.True(t, ok, "no policy: nothing to filter by")
+	assert.Empty(t, preds)
+
+	_, ok = (&ResolvedPermissions{Allowed: false}).Predicates()
+	assert.False(t, ok, "a denied grant admits no row")
+
+	_, ok = (&ResolvedPermissions{Allowed: true, Insert: &ResolvedInsert{}}).Predicates()
+	assert.False(t, ok, "an unresolved read side admits no row")
+
+	preds, ok = (&ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{}}).Predicates()
+	assert.True(t, ok)
+	assert.Empty(t, preds, "a resolved but unfiltered read side admits every row")
+}
+
+// TestWhereSQL_IntegerColumnsBindThroughTheStrictCast: given the column types,
+// a claim on an integer column binds as a chsql.IntParam carrying the bare
+// integer type (the query builder expands it to chsql.StrictInt), and a claim
+// on any other column binds as the plain string it always did. Without types
+// (nil) every claim is a plain string.
+func TestWhereSQL_IntegerColumnsBindThroughTheStrictCast(t *testing.T) {
+	t.Parallel()
+	types := map[string]string{"tenant": "Nullable(UInt64)", "org": "String", "n": "Int128"}
+	p := &Policy{Tables: map[string]TablePolicy{
+		"t": {"r": {Select: &SelectPermissions{Filter: map[string]Filter{
+			"tenant": {Eq: new("{{ jwt.tenant }}")},
+			"org":    {Neq: new("x")},
+			"n":      {In: new("{{ jwt.ns }}")},
+		}}}},
+	}}
+	claims := map[string]any{"tenant": "18446744073709551621", "ns": []any{"1", "-2"}}
+	perms := Evaluate(p, "r", "t", "select", claims)
+	require.True(t, perms.Allowed)
+
+	clause, params := perms.Select.WhereSQL(func(c string) string { return types[c] })
+	byClause := map[string][]any{}
+	i := 0
+	for part := range strings.SplitSeq(clause, " AND ") {
+		n := strings.Count(part, "?")
+		byClause[part] = params[i : i+n]
+		i += n
+	}
+	require.Equal(t, len(params), i, "every ? has exactly one param")
+	assert.Equal(t, []any{chsql.IntParam{Value: "18446744073709551621", Type: "UInt64"}}, byClause["`tenant` = ?"])
+	assert.Equal(t, []any{"x"}, byClause["`org` != ?"])
+	assert.Equal(t, []any{chsql.IntParam{Value: "1", Type: "Int128"}, chsql.IntParam{Value: "-2", Type: "Int128"}},
+		byClause["`n` IN (?,?)"])
+
+	_, untyped := perms.Select.WhereSQL(nil)
+	for _, v := range untyped {
+		assert.IsType(t, "", v, "no column types: every claim is a plain string")
+	}
 }

@@ -539,9 +539,9 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 
 	t.Run("admin reaches handler", func(t *testing.T) {
 		t.Parallel()
-		// nil driver.Conn would panic inside executeQuery, but the handler
-		// returns 400 before that on a missing body — which is enough to
-		// confirm the gate let the request through.
+		// A zero QueryHandler has no target getter and would panic past the
+		// body check, but the handler returns 400 before that on a missing
+		// body — which is enough to confirm the gate let the request through.
 		rec := post("admin")
 		assert.NotEqual(t, http.StatusNotFound, rec.Code, "admin must reach the handler")
 		assert.NotEqual(t, http.StatusForbidden, rec.Code, "admin must not be 403'd")

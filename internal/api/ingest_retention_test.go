@@ -52,7 +52,7 @@ func TestIngest_Dedup_CommitsWithTheAdoptedRetention(t *testing.T) {
 		{Name: "users", Columns: []discovery.Column{{Name: "event_id", Type: "String"}}},
 	})
 	dedup := testutil.NewMockDeduplicator()
-	h := NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{})
+	h := newTestIngestHandler(t, reg, &testutil.MockPublisher{})
 	h.Dedup = staticDedup(dedup)
 	h.DedupeSettings = (*settings.Store).DedupeFor
 	ingest := func(table, id string) {
@@ -83,7 +83,7 @@ func TestIngest_Dedup_CommitsWithTheAdoptedRetention(t *testing.T) {
 func TestIngest_Dedup_ReloadMidWindowCommitsEachRetention(t *testing.T) {
 	t.Parallel()
 	dedup := testutil.NewMockDeduplicator()
-	h := NewIngestHandler(fixedRegistry(testRegistry(t)), &testutil.MockPublisher{})
+	h := newTestIngestHandler(t, testRegistry(t), &testutil.MockPublisher{})
 	h.Dedup = staticDedup(dedup)
 	var calls atomic.Int32
 	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {

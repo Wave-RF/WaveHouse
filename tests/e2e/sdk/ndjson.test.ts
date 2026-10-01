@@ -122,7 +122,11 @@ describe("NDJSON ingest", () => {
     expect(result.data?.failed).toBe(1);
     const failed = result.data?.results?.find((r) => r.error);
     expect(failed?.index).toBe(2);
-    expect(failed?.error).toContain("invalid json");
+    // CONTRACT CHANGE: the message is ClickHouse's own parse refusal, carrying
+    // its exception_code, where it used to be the Go decoder's flat
+    // "invalid json".
+    expect(typeof failed?.exception_code).toBe("number");
+    expect(failed?.error).toBeTruthy();
 
     await waitForCondition(async (signal) => {
       const r = await chQuery(
@@ -131,6 +135,66 @@ describe("NDJSON ingest", () => {
       );
       return r.length === 1;
     }, 10_000);
+  });
+
+  // The compact-array regression guard on the wire: a SINGLE-LINE JSON array
+  // with one bad record used to lose the whole batch — chtypes rejects it
+  // outright and exports no bytes, so the records that parsed perfectly went
+  // with it.
+  // Ingest rewrites the array's depth-1 commas to newlines in place, which
+  // restores #195's promise that one bad record never obscures the rest.
+  it("salvages the good records of a compact JSON array with one bad record", async () => {
+    const runId = testId();
+    const good = [`${runId}-a`, `${runId}-c`];
+    const body =
+      "[" +
+      [
+        { event_id: good[0], page: "/a", user_id: `user-${runId}`, session_id: `s-${runId}` },
+        {
+          event_id: `${runId}-b`,
+          page: "/b",
+          user_id: `user-${runId}`,
+          session_id: `s-${runId}`,
+          totally_fake_field: "nope",
+        },
+        { event_id: good[1], page: "/c", user_id: `user-${runId}`, session_id: `s-${runId}` },
+      ]
+        .map((r) => JSON.stringify(r))
+        .join(",") +
+      "]";
+    // Deliberately one line: JSON.stringify of the array would be too, but
+    // spelling it out is what makes the framing the subject of the test.
+    expect(body.includes("\n")).toBe(false);
+
+    const res = await fetch(`${WH_URL}/v1/ingest?table=${T.clicks}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${makeJWT({ sub: "test-viewer", role: "viewer", tenant_id: "acme" })}`,
+      },
+      body,
+    });
+    expect(res.status).toBe(200);
+    const parsed = (await res.json()) as {
+      total: number;
+      succeeded: number;
+      failed: number;
+      results: Array<{ index: number; exception_code?: number }>;
+    };
+    expect(parsed).toMatchObject({ total: 3, succeeded: 2, failed: 1 });
+    expect(parsed.results[1].exception_code).toBe(117);
+
+    await waitForCondition(async (signal) => {
+      const r = await chQuery<{ event_id: string }>(
+        `SELECT event_id FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
+        signal,
+      );
+      return r.length === 2;
+    }, 10_000);
+    const inCH = await chQuery<{ event_id: string }>(
+      `SELECT event_id FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
+    );
+    expect(inCH.map((r) => r.event_id).sort()).toEqual([...good].sort());
   });
 
   it("accepts a raw JSON array body (Content-Type: application/json) and lands every row", async () => {

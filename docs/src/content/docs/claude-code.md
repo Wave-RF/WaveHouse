@@ -15,7 +15,7 @@ If you're new to Claude Code itself, the [official docs](https://code.claude.com
 
 2. **Authenticate**: log in to your Max subscription — Claude Code prompts you on first run.
 
-3. **Bootstrap the repo**: `make tools`. This installs Go tools, pnpm deps, and **also configures git hooks** (`git config core.hooksPath .githooks`). Without this step, the team's pre-commit / pre-push gates won't fire.
+3. **Bootstrap the repo**: `make tools`. This installs Go tools, pnpm deps, and **also configures git hooks** (`git config core.hooksPath .githooks`). Without this step, the team's pre-commit / pre-push gates won't fire. Then run `scripts/fetch-chtypes.sh` once per machine: the chtypes artifact the API process and the test suites need, which `make tools` does not fetch.
 
 4. **Optional — worktrunk**: install [worktrunk](https://worktrunk.dev) for parallel-agent worktree management. The team's project hooks live in `.config/wt.toml`.
 
@@ -139,7 +139,7 @@ User-specific worktrunk config goes in `~/.config/worktrunk/config.toml`; the co
 
 **We use `gh` CLI as the canonical GitHub access path**, not a GitHub MCP server. Reasons:
 
-- `gh` is already a hard dev requirement
+- Most contributors already use `gh`
 - Works identically in Claude Code, terminal, and shell scripts
 - No extra auth / approval / npx cold-start
 

@@ -64,7 +64,10 @@ printf '%s==> Building %s...%s\n' "$CYAN" "$label" "$RESET"
 start=$(date +%s)
 # build_flags may be empty; use the ${arr[@]+"${arr[@]}"} idiom so the empty
 # expansion is silent under `set -u` on bash 3.2 (macOS default).
-CGO_ENABLED=0 go build \
+#
+# CGO_ENABLED=1 is unconditional: the chtypes SDK's dlopen path needs cgo for
+# dlfcn (no C library to link against, no header).
+CGO_ENABLED=1 go build \
 	-tags="${TAGS:-}" \
 	${build_flags[@]+"${build_flags[@]}"} \
 	-ldflags="$ldflags" \

@@ -1,3 +1,4 @@
+import type { FilterOp } from "@wavehouse/sdk";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   adminClient,
@@ -234,6 +235,129 @@ describe("Query", () => {
     } finally {
       await chQuery(`DROP TABLE IF EXISTS default.\`${noTsTable}\``);
     }
+  });
+
+  // The value SPELLING is part of the SDK contract, and none of the suite
+  // tables can show it: they are all String/UInt32/DateTime64. A Decimal
+  // arrives as a JSON number (`wavehouse codegen` types it as one), and a
+  // DateTime64 as RFC 3339 in UTC at the column's scale, `.000Z` and all —
+  // the same bytes the stream carries (#372).
+  it("renders a Decimal as a number and a DateTime64 as RFC 3339 UTC", async () => {
+    const admin = adminClient();
+    const t = `types_${testId().replace(/-/g, "_")}`;
+
+    await chQuery(
+      `CREATE TABLE IF NOT EXISTS default.\`${t}\` (id String, amount Decimal(10, 2), at DateTime64(3)) ENGINE = Memory`,
+    );
+    await chQuery(`INSERT INTO default.\`${t}\` VALUES ('r1', 12.50, '2026-01-15 10:30:00.123')`);
+    await admin.schema.refresh();
+
+    const currentPolicy = readPolicyFile();
+    await setPolicy({
+      tables: {
+        ...currentPolicy.tables,
+        [t]: { viewer: { select: { allow_columns: ["*"] } } },
+      },
+    });
+
+    try {
+      const result = await wh.from(t).selectAll().fetch();
+      expect(result.error).toBeNull();
+      expect(result.data).toHaveLength(1);
+      const row = result.data![0] as Record<string, unknown>;
+      expect(typeof row.amount).toBe("number");
+      expect(row.amount).toBe(12.5);
+      expect(row.at).toBe("2026-01-15T10:30:00.123Z");
+    } finally {
+      await setPolicy(currentPolicy);
+      await chQuery(`DROP TABLE IF EXISTS default.\`${t}\``);
+    }
+  });
+
+  // ClickHouse parses a filter value on a DateTime column itself, so RFC 3339
+  // with any offset is an exact instant, a zone-less value reads in the
+  // column's own zone, and a timestamp read back from /v1/query — RFC 3339 in
+  // UTC, whatever the column's zone — filters as it is.
+  it("filters DateTime and DateTime64 columns by RFC 3339 and by the spelling it returns", async () => {
+    const admin = adminClient();
+    const t = `ts_${testId().replace(/-/g, "_")}`;
+
+    await chQuery(
+      `CREATE TABLE IF NOT EXISTS default.\`${t}\` (id String, at DateTime('UTC'), at3 DateTime64(3, 'UTC'), atk DateTime('Asia/Tokyo')) ENGINE = Memory`,
+    );
+    await chQuery(
+      `INSERT INTO default.\`${t}\` VALUES ('r1', '2026-01-15 10:30:00', '2026-01-15 10:30:00.123', '2026-01-15 19:30:00'), ('r2', '2026-01-16 00:00:00', '2026-01-16 00:00:00.000', '2026-01-16 09:00:00')`,
+    );
+    await admin.schema.refresh();
+
+    const currentPolicy = readPolicyFile();
+    await setPolicy({
+      tables: {
+        ...currentPolicy.tables,
+        [t]: { viewer: { select: { allow_columns: ["*"] } } },
+      },
+    });
+
+    try {
+      const ids = async (column: string, op: FilterOp, value: unknown) => {
+        const result = await wh
+          .from(t)
+          .select("id")
+          .where(column, op, value)
+          .orderBy("id", "asc")
+          .fetch();
+        expect(result.error).toBeNull();
+        return (result.data as { id: string }[]).map((r) => r.id);
+      };
+      expect(await ids("at", "=", "2026-01-15T10:30:00Z")).toEqual(["r1"]);
+      expect(await ids("at", ">=", "2026-01-15T12:00:00+02:00")).toEqual(["r1", "r2"]);
+      expect(await ids("at", ">", "2026-01-15T10:30:00.5Z")).toEqual(["r2"]);
+      expect(await ids("at3", "=", "2026-01-15T10:30:00.123Z")).toEqual(["r1"]);
+      expect(await ids("at", "in", ["2026-01-16T00:00:00Z"])).toEqual(["r2"]);
+      // A Tokyo column: the same instant whatever the spelling, and a
+      // zone-less value in Tokyo's own time.
+      expect(await ids("atk", "=", "2026-01-15T10:30:00Z")).toEqual(["r1"]);
+      expect(await ids("atk", "=", "2026-01-15 19:30:00")).toEqual(["r1"]);
+      expect(await ids("atk", "in", ["2026-01-16T09:00:00+09:00"])).toEqual(["r2"]);
+
+      const back = await wh.from(t).select("id", "at", "at3", "atk").where("id", "=", "r1").fetch();
+      expect(back.error).toBeNull();
+      const row = back.data![0] as { at: string; at3: string; atk: string };
+      expect(row.at).toBe("2026-01-15T10:30:00Z");
+      expect(row.at3).toBe("2026-01-15T10:30:00.123Z");
+      expect(row.atk).toBe("2026-01-15T10:30:00Z");
+      expect(await ids("at", "=", row.at)).toEqual(["r1"]);
+      expect(await ids("at3", "=", row.at3)).toEqual(["r1"]);
+      expect(await ids("atk", "=", row.atk)).toEqual(["r1"]);
+
+      // An in list far past the 128 KiB a ClickHouse query parameter takes
+      // still reaches ClickHouse whole; only the 1 MiB request body bounds it.
+      const many = Array.from(
+        { length: 20_000 },
+        (_, i) => `2027-01-01T00:00:${String(i % 60).padStart(2, "0")}.${i}Z`,
+      );
+      expect(await ids("at3", "in", [...many, "2026-01-15T10:30:00.123Z"])).toEqual(["r1"]);
+      const names = Array.from({ length: 30_000 }, (_, i) => `no-such-id-${i}`);
+      expect(await ids("id", "in", [...names, "r2"])).toEqual(["r2"]);
+    } finally {
+      await setPolicy(currentPolicy);
+      await chQuery(`DROP TABLE IF EXISTS default.\`${t}\``);
+    }
+  });
+
+  it("refuses a null filter value with a 400", async () => {
+    const jwt = makeJWT({ sub: "test-viewer", role: "viewer", tenant_id: "acme" });
+    const res = await fetch(`${WH_URL}/v1/query?table=${encodeURIComponent(T.clicks)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({
+        columns: ["event_id"],
+        filters: [{ column: "page", op: "eq", value: null }],
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("must not be null");
   });
 
   it("rejects queries to unauthorized tables (403)", async () => {

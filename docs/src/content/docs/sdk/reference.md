@@ -25,7 +25,7 @@ if (error?.code === 'ABORTED') {
 
 The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no global `fetch` and no `options.fetch` (see [Runtime support](/sdk#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and on a stream is reported as a retryable `SSE_AUTH_ERROR`. One more exception escapes an SDK call synchronously, though it is yours rather than ours: your own `status` handler throwing on the first `.subscribe()` or `.liveQuery()`, described under *If your own callback throws* below.
 
-`code` and `retryable` are the server's own when its error body carries them — a failed ClickHouse query does, with codes like `clickhouse.rejected` and `clickhouse.unavailable` ([the full list](/api#clickhouse-errors-on-the-query-paths)). Otherwise `code` is `HTTP_<status>` and a `5xx` is retryable. One exception to the table below: a [pipe that writes](/pipes#pipes-that-write) answers every ClickHouse failure `retryable: false` with no `Retry-After`, `clickhouse.unavailable` and `clickhouse.unknown` included, so the SDK returns it on the first attempt.
+`code` and `retryable` are the server's own when its error body carries them — a failed ClickHouse query does, with codes like `clickhouse.rejected` and `clickhouse.unavailable` ([the full list](/api#clickhouse-errors-on-the-query-paths)). Otherwise `code` is `HTTP_<status>` and a `5xx` is retryable. One exception to the table below: a [pipe that writes](/pipes#pipes-that-write) answers every ClickHouse failure `retryable: false` with no `Retry-After`, `clickhouse.unavailable` and `clickhouse.unknown` included, so the SDK returns it on the first attempt. An ingest `500` that carries `retryable: false` (a role whose insert permissions cannot be enforced on the table) is likewise returned on the first attempt.
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
@@ -33,14 +33,15 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 401 | `HTTP_401` | No | On REST, a present-but-invalid or expired JWT that a gate then denied. **WaveHouse itself** never returns `401` for a *missing* token — that resolves to `default_role`, and a denial is `403`. On a stream it is always from something in front, since `/v1/stream` is ungated |
 | 403 | `HTTP_403` | No | Insufficient permissions |
 | 404 | `HTTP_404` | No | Table, pipe, or tenant not found |
+| 422 | `HTTP_422` | No | Ingest only: the validation engine could not judge a record (`validation engine declined: …`), or an insert check could not be evaluated. It says neither that the data is bad nor that it was accepted; a single-object insert answers it as the call's error, a batch as a per-record `error` with no `exception_code`. The SDK does not retry it |
 | 400 | `clickhouse.rejected` / `clickhouse.limit_exceeded` | No | ClickHouse refused the query (bad SQL, an unknown column, a type mismatch) or it outran a limit — including the role's own caps |
 | 403 | `clickhouse.access_denied` | No | ClickHouse's user lacks a grant the statement needs |
-| 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
+| 500 | `HTTP_500` | Yes, unless the body says `retryable: false` | Server error (retried per `maxRetries`) |
 | 500 / 502 | `clickhouse.unknown` | Yes | ClickHouse failed with no verdict (no exception code, no recognizable transport error); `502` on `wh.sql` |
-| 502 | `clickhouse.misconfigured` | No | ClickHouse refused WaveHouse's own credentials or database, or the route to it is wrong (a redirect, or a `4xx` other than `408`/`413`/`429`, with no exception code) — an operator fix |
-| 502 | `clickhouse.response_too_large` | No | A raw-SQL (`wh.sql`) response over the 64 MiB cap |
+| 502 | `clickhouse.misconfigured` | No | ClickHouse refused WaveHouse's own credentials or database, a read ran under a `readonly=1` profile and was refused as a write, or the route to it is wrong (a redirect, or a `4xx` other than `408`/`413`/`429`, with no exception code) — an operator fix |
+| 502 | `clickhouse.response_too_large` | No | A response over the 64 MiB cap, on any query path (structured query, pipe or `wh.sql`) |
 | 503 | `clickhouse.unavailable` | Yes | ClickHouse is down, unreachable or overloaded; `Retry-After: 5`, honored between attempts |
-| 503 | `HTTP_503` | Yes | Service unavailable, a tenant whose settings folder was rejected, a schema not discovered yet, a tenant on no ClickHouse pool, a dedupe store that cannot answer (`dedupe store unavailable`, `Retry-After: 5`), a token sent while that tenant's JWKS has not been fetched yet (`token verifier not ready`, `Retry-After: 30`), or a record whose dedupe id another request is still publishing (`a request with the same dedupe id is in flight`, `Retry-After`: the server's dedupe lease, 30 s by default). REST calls auto-retry, honoring `Retry-After` when the response carries one — so each attempt on those last two causes waits that long; a stream re-dials on its own jittered backoff instead |
+| 503 | `HTTP_503` | Yes | Service unavailable, a tenant whose settings folder was rejected, a schema not discovered yet, a tenant on no ClickHouse pool, a tenant or table the type layer cannot serve (`ingest validation is unavailable`, `Retry-After: 5`; [causes](/deployment#chtypes-artifacts)), a dedupe store that cannot answer (`dedupe store unavailable`, `Retry-After: 5`), a token sent while that tenant's JWKS has not been fetched yet (`token verifier not ready`, `Retry-After: 30`), or a record whose dedupe id another request is still publishing (`a request with the same dedupe id is in flight`, `Retry-After`: the server's dedupe lease, 30 s by default). REST calls auto-retry, honoring `Retry-After` when the response carries one — so each attempt on those last two causes waits that long; a stream re-dials on its own jittered backoff instead |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `AbortSignal` |
 | 0 | `SSE_CONNECT_ERROR` | No | Stream could not be started (e.g. a non-absolute `baseURL`) |
@@ -147,7 +148,7 @@ Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev serve
 | `--out`, `-o` | Output .d.ts file path | `./wavehouse.d.ts` |
 | `--auth`, `-a` | Bearer token (if auth required) | — |
 
-The generated row type is the **read** shape — with one exception running the other way: an `EPHEMERAL` column declares a default, so codegen emits it too, yet no query can ever return it. There the type says readable where only the write is real. A `MATERIALIZED` or `ALIAS` column declares a default, so it is emitted as optional — but supplying one on `insert` is a `400` (`column "x" of table "t" is materialized and cannot be inserted`), and the type will not catch it. Omit computed columns; the server fills them in.
+The generated row type is the **read** shape, and computed columns are where it and the server disagree. An `EPHEMERAL` column declares a default, so codegen emits it, yet no query can ever return it — the type says readable where only the write is real. `MATERIALIZED` and `ALIAS` columns declare defaults too, so they are emitted as optional, but supplying either on `insert` is a `400` carrying ClickHouse's own code 117 (`Unknown field found while parsing JSONEachRow format: x`), and the type will not catch it. An `EPHEMERAL` value is accepted on a JSON `insert` when the role may write the column, a `DEFAULT` column reads it and no `MATERIALIZED`, `ALIAS` or other `EPHEMERAL` column does; it feeds that default and is never stored or returned. Otherwise it is a `400` with code 117, like an unknown column. Omit computed columns; the server fills them in.
 
 **Example output:**
 
@@ -172,7 +173,7 @@ export interface ClicksRow {
 | ClickHouse Type | TypeScript Type |
 |----------------|-----------------|
 | `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Enum*`, `IPv4/6` | `string` |
-| `UInt*`, `Int*`, `Float*`, `Decimal*` | `number` |
+| `UInt*`, `Int*`, `Float*`, `Decimal*` | `number` — 64-bit and wider integers and `Decimal*` come back as JSON numbers, not strings, so `JSON.parse` rounds a value past 2^53 — store an id that large as a `String` column to keep every digit; a `Float*` NaN or infinity comes back as `null` from queries and pipes, and as a string (`"nan"`, `"inf"`, `"-inf"`) on a stream |
 | `Bool` | `boolean` |
 | `Nullable(T)` | `T \| null` |
 | `Array(T)` | `T[]` |

@@ -1,6 +1,6 @@
 ---
 title: Real-time API gateway for ClickHouse
-description: The open-source real-time API gateway for ClickHouse — schema-aware ingest, async batching, real-time streaming, and tiered query caching in a single binary.
+description: The open-source real-time API gateway for ClickHouse — schema-aware ingest, async batching, real-time streaming, and tiered query caching in one binary.
 template: splash
 # Homepage-only structured data: lets Google/GitHub attach the canonical
 # SoftwareSourceCode + Organization entities to the project's root URL.
@@ -10,10 +10,10 @@ head:
     attrs:
       type: application/ld+json
     content: |
-      {"@context":"https://schema.org","@graph":[{"@type":"Organization","@id":"https://wave-rf.com/#org","name":"Wave RF","url":"https://wave-rf.com","email":"hello@wave-rf.com","sameAs":["https://github.com/Wave-RF"]},{"@type":"SoftwareSourceCode","@id":"https://wavehouse.dev/#project","name":"WaveHouse","description":"The open-source real-time API gateway for ClickHouse — schema-aware ingest, async batching, real-time streaming, and tiered query caching in a single binary.","codeRepository":"https://github.com/Wave-RF/WaveHouse","programmingLanguage":["Go","TypeScript"],"license":"https://opensource.org/license/apache-2.0/","image":"https://wavehouse.dev/og.png","url":"https://wavehouse.dev","author":{"@id":"https://wave-rf.com/#org"}}]}
+      {"@context":"https://schema.org","@graph":[{"@type":"Organization","@id":"https://wave-rf.com/#org","name":"Wave RF","url":"https://wave-rf.com","email":"hello@wave-rf.com","sameAs":["https://github.com/Wave-RF"]},{"@type":"SoftwareSourceCode","@id":"https://wavehouse.dev/#project","name":"WaveHouse","description":"The open-source real-time API gateway for ClickHouse — schema-aware ingest, async batching, real-time streaming, and tiered query caching in one binary.","codeRepository":"https://github.com/Wave-RF/WaveHouse","programmingLanguage":["Go","TypeScript"],"license":"https://opensource.org/license/apache-2.0/","image":"https://wavehouse.dev/og.png","url":"https://wavehouse.dev","author":{"@id":"https://wave-rf.com/#org"}}]}
 hero:
   title: WaveHouse
-  tagline: The open-source real-time API gateway for ClickHouse. Schema-aware ingest, async batching, real-time streaming, and tiered query caching — in a single binary.
+  tagline: The open-source real-time API gateway for ClickHouse. Schema-aware ingest, async batching, real-time streaming, and tiered query caching — in one binary.
   actions:
     - text: Read the docs
       link: /getting-started
@@ -60,7 +60,7 @@ import { cloudLink } from '../../config/outbound';
 
 ## Why WaveHouse exists
 
-ClickHouse is a phenomenal OLAP database, but pointing a frontend straight at it comes with sharp edges: custom APIs, Kafka queues to avoid "too many parts" errors, replacing-merge logic for deduplication. WaveHouse abstracts all of that into a single, deployable binary so you stop interacting with ClickHouse directly.
+ClickHouse is a phenomenal OLAP database, but pointing a frontend straight at it comes with sharp edges: custom APIs, Kafka queues to avoid "too many parts" errors, replacing-merge logic for deduplication. WaveHouse abstracts all of that into a single, deployable process so you stop interacting with ClickHouse directly.
 
 <div class="wh-versus not-content">
   <div class="wh-versus__col wh-versus__col--pain">
@@ -88,7 +88,7 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 
 <CardGrid>
  <Card title="Schema-aware validation" icon="approve-check">
-  WaveHouse discovers your ClickHouse schemas via `system.columns` and validates every ingest against the real schema — unknown fields, type mismatches, and null violations are rejected at the edge.
+  WaveHouse discovers your ClickHouse schemas via `system.columns` and validates every ingest against the real schema — unknown fields and values ClickHouse cannot parse are rejected at the edge.
  </Card>
  <Card title="Async buffered ingest" icon="rocket">
   Writes land in a durable NATS JetStream WAL and return `200 OK` instantly. A background worker batch-flushes to ClickHouse — never drop a packet.
@@ -180,11 +180,11 @@ curl -N "http://localhost:8080/v1/stream?table=clicks"
 
 WaveHouse is fail-closed, so the standalone stack ships a permissive trial policy (a non-admin `public` role that can read/write the demo tables, in the bind-mounted settings directory) — then it's five minutes from `git clone` to a live event stream. See [Getting Started](/getting-started).
 
-**How it ships:** one `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external dependency is ClickHouse.** Same binary on a laptop, in Docker, or on a production host.
+**How it ships:** one `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external service is ClickHouse**; the process also loads one local file, the [chtypes artifact](/deployment#chtypes-artifacts) for your ClickHouse line, which the Docker images carry. Same binary on a laptop, in Docker, or on a production host.
 
 ## Or skip the ops entirely
 
-Self-hosting WaveHouse is deliberately boring — one binary, one dependency. But *that one dependency* is a ClickHouse cluster somebody has to size, upgrade, back up, and keep alive at 3am.
+Self-hosting WaveHouse is deliberately boring — one process, one service dependency. But *that one dependency* is a ClickHouse cluster somebody has to size, upgrade, back up, and keep alive at 3am.
 
 <CloudCta
   variant="band"
@@ -220,7 +220,7 @@ Self-hosting WaveHouse is deliberately boring — one binary, one dependency. Bu
 
 <div class="wh-closer not-content">
   <p class="wh-closer__title">WaveHouse is <span class="wh-closer__alpha">alpha</span> — and built entirely in the open.</p>
-  <p class="wh-closer__sub">Apache-2.0-licensed, single binary, no vendor lock-in — self-host it forever, or let us run it on <a href={cloudLink("homepage-closer")} target="_blank" rel="noopener">WaveHouse Cloud</a>. We ship with honest expectations — see the <a href="https://github.com/Wave-RF/WaveHouse/blob/main/SUPPORT.md" target="_blank" rel="noopener noreferrer">support cadence</a> and <a href="https://github.com/Wave-RF/WaveHouse/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">security policy</a>. Kick the tires and tell us where it breaks.</p>
+  <p class="wh-closer__sub">Apache-2.0-licensed, one binary, no vendor lock-in — self-host it forever, or let us run it on <a href={cloudLink("homepage-closer")} target="_blank" rel="noopener">WaveHouse Cloud</a>. We ship with honest expectations — see the <a href="https://github.com/Wave-RF/WaveHouse/blob/main/SUPPORT.md" target="_blank" rel="noopener noreferrer">support cadence</a> and <a href="https://github.com/Wave-RF/WaveHouse/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">security policy</a>. Kick the tires and tell us where it breaks.</p>
   <div class="wh-closer__actions">
     <LinkButton href="/getting-started" icon="right-arrow">Get started in five minutes</LinkButton>
     <LinkButton href="https://github.com/Wave-RF/WaveHouse" variant="secondary" icon="external">Star on GitHub</LinkButton>

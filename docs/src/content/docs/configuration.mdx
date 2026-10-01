@@ -9,7 +9,7 @@ sidebar:
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
-WaveHouse is configured via a YAML file with environment variable overrides. All environment variables use the `WH_` prefix.
+WaveHouse is configured via a YAML file with environment variable overrides. All WaveHouse environment variables use the `WH_` prefix (the OpenTelemetry SDK's `OTEL_*` and the chtypes SDK's `CHTYPES_*` are read by those libraries).
 
 ## Loading Order
 
@@ -128,7 +128,7 @@ Boot logs each of these at `WARN` rather than refusing. The first two are right 
 
 ### Process roles
 
-By default one process does all the work. `roles` splits it, so that the API and the background workers can run in separate processes, for example one Kubernetes Deployment per role (see [Deployment](/deployment#one-deployment-per-role)). The binary and its entry point are the same for every role; only this key differs.
+By default one process does all the work. `roles` splits it, so that the API and the background workers can run in separate processes, for example one Kubernetes Deployment per role (see [Deployment](/deployment#one-deployment-per-role)). The binary and its entry point are the same for every role; only this key differs. Only a process running the `api` role loads the [chtypes artifact](/deployment#chtypes-artifacts); an ingest-only or sweeper-only process needs none installed.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
@@ -137,7 +137,7 @@ By default one process does all the work. `roles` splits it, so that the API and
 
 | Role | Runs |
 | --- | --- |
-| `api` | The HTTP API, and what answers it: schema discovery, the token verifiers and their JWKS refresh, the dedupe stores, and the SSE hub with its bridge off the queue and its keepalive wheel. Every API process runs its own set of these, and each API process receives every event for its own SSE clients. |
+| `api` | The HTTP API, and what answers it: the chtypes type layer (ingest validation and row filters), schema discovery, the token verifiers and their JWKS refresh, the dedupe stores, and the SSE hub with its bridge off the queue and its keepalive wheel. Every API process runs its own set of these, and each API process receives every event for its own SSE clients. |
 | `ingest` | The ingest worker, which writes the queue to ClickHouse. Under `mq.backend=nats` the ingest processes share the queue's shards out through membership leases in `coord.nats.bucket`, one process per shard at a time, so a table's rows are written by one process. |
 | `sweeper` | The sweeper, which purges messages that are written and older than their tenant's gap window. It runs under the `sweeper` lease, on `mq.backend=embedded` only. Under `mq.backend=nats` your streams' retention does its work, so it is not wired there, and a process whose only role is `sweeper` is refused (below). A tenant whose gap window is longer than the history stream keeps is checked by the API processes instead, at boot and after each reload, with one warning per tenant and window. |
 
@@ -162,12 +162,23 @@ The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate 
 
 ### ClickHouse
 
-Only the secret and the connection ceiling are boot config. The wiring — native address, HTTP port and scheme, database, username, query timeout, TLS, headers, pool sizes — is the settings directory's [`clickhouse` block](/settings-directory#clickhouse), where a change re-dials without a restart.
+Only the secret, the connection ceiling and the chtypes artifact directory are boot config. The wiring — native address, HTTP port and scheme, database, username, query timeout, TLS, headers, pool sizes — is the settings directory's [`clickhouse` block](/settings-directory#clickhouse), where a change re-dials without a restart.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password, combined with the settings directory's `clickhouse.username` on every (re)connect. A secret, so it never lives in a tracked JSON file; rotating it is a restart. |
-| `clickhouse.max_total_conns` | `WH_CH_MAX_TOTAL_CONNS` | `0` | Ceiling on the native ClickHouse connections the process holds open: the `max_open_conns` of the open pools — one per distinct connection tuple among the served tenants, see [the settings directory](/settings-directory#clickhouse) — must not add up to more. Pools above it at boot refuse to start, naming the sum and the ceiling; on a reload a pool resized above it is refused and keeps its size, and a new pool that would cross it is not opened — its tenants keep the pool they had, or have none — both logged (the reload itself still reports `adopted`) and retried by the next reload. `0` is no ceiling. Capacity is sized once per process, which is why it is boot config rather than a settings key. |
+| `clickhouse.max_total_conns` | `WH_CH_MAX_TOTAL_CONNS` | `0` | Ceiling on the native ClickHouse connections the process holds open: the `max_open_conns` of the open pools — one per distinct connection tuple among the served tenants, see [the settings directory](/settings-directory#clickhouse) — must not add up to more. Pools above it at boot refuse to start, naming the sum and the ceiling; on a reload a pool resized above it is refused and keeps its size, and a new pool that would cross it is not opened — its tenants keep the pool they had, or have none — both logged (the reload itself still reports `adopted`) and retried by the next reload. `0` is no ceiling. Capacity is sized once per process, which is why it is boot config rather than a settings key. It counts native connections only: the HTTP reader behind structured queries and pipes is capped separately, one cap per connection tuple (URL, user, password, database, TLS), at the largest `max_open_conns` among the tenants sharing it. |
+| `clickhouse.chtypes_registry` | `WH_CHTYPES_REGISTRY` | *(empty)* | Directory holding the chtypes artifacts (one `<minor>/` per ClickHouse line). Empty defers to the chtypes search path — `$CHTYPES_REGISTRY`, `~/.cache/chtypes/artifacts/abi6/<os>-<arch>`, then the system directories. Either way a library is opened lazily, on first use of its line; an explicit directory is searched first, then the rest of the path. A directory set here that does not exist or cannot be read refuses boot in a process with the `api` role. Boot-tier: changing it is a restart. See [chtypes artifacts](/deployment#chtypes-artifacts). |
+
+### ClickHouse user access
+
+The ClickHouse user WaveHouse connects as (the settings directory's `clickhouse.username`) needs these, and nothing about the tables themselves has to be exposed to anyone else:
+
+- **`SELECT` on the tenant's tables.** Structured queries and read pipes read through it.
+- **`INSERT` on the tenant's tables, for the ingest worker.** The worker writes each batch with `INSERT … FORMAT JSONCompactEachRow` over the HTTP interface. A process that only serves reads never inserts, but the same user is used by every process, so grant it wherever any process ingests.
+- **Read access to `system.columns` and `system.tables`**, plus `SELECT timezone()` and `SELECT version()`, which need no grant. Schema discovery reads the columns, their `DEFAULT`/`MATERIALIZED` kinds and each table's DDL, and records the server's version and time zone; the version picks the [chtypes artifact](/deployment#chtypes-artifacts) and the zone is the one the in-process parser reads bare timestamps in. ClickHouse lists only the tables a user holds a grant on, so a table the user cannot see is a table WaveHouse does not know.
+- **A profile that lets it change per-query settings.** WaveHouse sends settings with every query: reads carry `readonly=2` together with `max_execution_time`, `wait_end_of_query`, `http_write_exception_in_output_format`, `cancel_http_readonly_queries_on_client_close` and the JSON/date rendering settings, and the ingest worker's `INSERT` carries `date_time_input_format`, `input_format_null_as_default` and `async_insert=0`. A profile with `readonly=1` (or a `<constraints>` entry that pins any of these) makes ClickHouse refuse them: a read refused with `READONLY` answers `502 clickhouse.misconfigured`, a `<constraints>` entry that a setting violates is refused as `400 clickhouse.rejected`, and the worker's inserts are refused too: under `readonly=1` or `readonly=2` (code 164) its rows stay queued and are retried until the tenant's queue budget fills, and under a constraint that pins one of its settings (code 452) every row fails its row-by-row retry and is parked on the DLQ. Use `readonly=0`, or `readonly=2` for a user that only ever reads: `readonly=2` still forbids the ingest worker's `INSERT`.
+- **Whatever else the statements you hand it need.** A [pipe that writes](/pipes#pipes-that-write) and the admin-only raw SQL endpoint `/v1/ops/query` run as this user too, so a pipe that runs `ALTER` needs the grant for it, and a missing grant is `403 clickhouse.access_denied`.
 
 ### Server-side resource limits
 
@@ -208,7 +219,7 @@ Set the backstop on the profile of the ClickHouse user WaveHouse connects as (th
 What a caller sees when one of these trips: a row or byte limit is `400 clickhouse.limit_exceeded`; a server-wide time, memory or quota limit is `503 clickhouse.unavailable` (retryable, so the SDK retries it — except on a [pipe that writes](/pipes#pipes-that-write), which is never retryable), since WaveHouse cannot tell it from server pressure — except on `/v1/query` for a role that sets its own `max_memory_usage`, where every memory-limit error is read as that cap and answered `400 clickhouse.limit_exceeded`. See [ClickHouse errors on the query paths](/api#clickhouse-errors-on-the-query-paths).
 
 :::caution[How the two layers compose]
-WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so they **compose** with the ClickHouse profile — a per-role cap *tightens* within the profile's ceiling, and a `<constraints>` block bounds how far any setting can move. But if the profile marks a setting `readonly` (or `<constraints>` disallows changing it), ClickHouse will **reject** WaveHouse's per-query override and the query fails. So keep the settings WaveHouse manages (`max_memory_usage`, `max_execution_time`, `max_rows_to_read`, `max_result_rows`) **changeable** for its user — use a `<max>` constraint, not `readonly`, if you want a hard ceiling.
+WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so they **compose** with the ClickHouse profile — a per-role cap *tightens* within the profile's ceiling, and a `<constraints>` block bounds how far any setting can move. But if the profile marks a setting `readonly` (or `<constraints>` disallows changing it), ClickHouse will **reject** WaveHouse's per-query override and the query fails. So keep every setting WaveHouse sends **changeable** for its user — the per-role caps (`max_memory_usage`, `max_execution_time`, `max_rows_to_read`, `max_result_rows`) and the fixed read and insert settings listed under [ClickHouse user access](#clickhouse-user-access) — and use a `<max>` constraint, not `readonly`, if you want a hard ceiling.
 :::
 
 ### Message Queue (NATS)
@@ -258,7 +269,7 @@ Only the secrets are boot config, shared by every tenant. The verifier wiring �
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `auth.jwt_secret` | `WH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. Set this (or the settings directory's `auth.jwks_url`) so presented tokens are verified; see [Access Control](/access-control). Shared by every tenant; ignored for any tenant whose `jwks_url` is set. |
-| `auth.operator_key` | `WH_AUTH_OPERATOR_KEY` | *(empty)* | Non-JWT operator credential. A request presenting it — in an `Authorization: Operator <key>` header, or the `X-Operator-Key` alias — is authorized as a full-access platform operator (the whole data plane *and* the `/v1/ops/*` management surface), independent of the JWT verifier, and it is honored even when no policy is adopted (break-glass). Empty disables it. Treat it as an admin secret. See below and [Access Control](/access-control). |
+| `auth.operator_key` | `WH_AUTH_OPERATOR_KEY` | *(empty)* | Non-JWT operator credential. A request presenting it — in an `Authorization: Operator <key>` header, or the `X-Operator-Key` alias — is authorized as a full-access platform operator — the `/v1/ops/*` management surface always, and the entire data plane while a policy is adopted (with none, its data-plane requests are denied like anyone else's) — independent of the JWT verifier, so it still reaches `POST /v1/ops/settings/reload` when no policy is adopted (break-glass). Empty disables it. Treat it as an admin secret. See below and [Access Control](/access-control). |
 
 WaveHouse accepts only the signing algorithms matching the active verifier — `HS256`/`HS384`/`HS512` for the HMAC secret, or the asymmetric family (`RS*`/`ES*`/`PS*`/`EdDSA`) for JWKS — and validates the token's `alg` before any key is used, so your IdP must sign with one of these and `alg: none` is always rejected.
 
@@ -337,6 +348,7 @@ clickhouse:
   password: ""           # addr, ports, database, username, query_timeout, tls,
                          # headers and pool sizes are settings (config.json)
   max_total_conns: 0     # ceiling on open native connections; 0 = none
+  chtypes_registry: ""    # chtypes artifact directory; empty = the SDK's search path
 
 mq:
   backend: embedded      # in-process NATS JetStream under <data_dir>/nats
@@ -438,6 +450,8 @@ WH_SERVER_SHUTDOWN_TIMEOUT=10
 
 WH_CH_PASSWORD=
 WH_CH_MAX_TOTAL_CONNS=0
+# chtypes artifact directory; empty = the SDK's search path
+WH_CHTYPES_REGISTRY=
 
 WH_MQ_BACKEND=embedded
 # With WH_MQ_BACKEND=nats (read only then):
