@@ -131,19 +131,26 @@ type Server struct {
 	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT"`
 }
 
-// ClickHouse holds the password and the connection ceiling. The wiring —
-// address, HTTP port and scheme, database, username, query timeout, TLS,
-// headers, pool size — is the settings directory's `clickhouse` block
-// (hot-reloadable: a change swaps the connection). The password stays here
-// because secrets don't belong in a tracked JSON file; it is combined with
-// the adopted wiring on every (re)connect. The ceiling stays here because
-// it is capacity, sized once per process, not wiring.
+// ClickHouse holds the password, the connection ceiling and the chtypes
+// artifact directory. The wiring — address, HTTP port and scheme, database,
+// username, query timeout, TLS, headers, pool size — is the settings
+// directory's `clickhouse` block (hot-reloadable: a change swaps the
+// connection). The password stays here because secrets don't belong in a
+// tracked JSON file; it is combined with the adopted wiring on every
+// (re)connect. The ceiling and the artifact directory stay here because each
+// is read once per process: capacity, and the registry the type layer opens
+// at boot.
 type ClickHouse struct {
 	Password string `yaml:"password" env:"WH_CH_PASSWORD"`
 	// MaxTotalConns caps the native connections the process may hold open
 	// across its pools: the settings directory's clickhouse.max_open_conns
 	// must not exceed it. 0, the default, is no ceiling.
 	MaxTotalConns int `yaml:"max_total_conns" env:"WH_CH_MAX_TOTAL_CONNS"`
+	// ChtypesRegistry is the chtypes artifact directory the type layer
+	// searches first (typelayer.Config.RegistryDir). Empty, the default, is
+	// the SDK's own search path: $CHTYPES_REGISTRY, the per-user cache, then
+	// the system directories. Only a process with the api role reads it.
+	ChtypesRegistry string `yaml:"chtypes_registry" env:"WH_CHTYPES_REGISTRY"`
 }
 
 // Auth holds the authentication secrets. The verifier wiring — `jwks_url`,
