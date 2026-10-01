@@ -137,7 +137,7 @@ func (d *discoveries) adopt(id tenant.ID, reg *discovery.SchemaRegistry) {
 // start runs reg's loop: the boot retry until the first success, skipped
 // for a registry already loaded, then the periodic refresh.
 func (d *discoveries) start(id tenant.ID, reg *discovery.SchemaRegistry) *tenantDiscovery {
-	ctx, cancel := context.WithCancel(d.ctx) //nolint:gosec // G118: held on the tenantDiscovery, called by reconcile or close
+	ctx, cancel := context.WithCancel(d.ctx)
 	td := &tenantDiscovery{id: id, registry: reg, cancel: cancel, done: make(chan struct{})}
 	go func() {
 		defer close(td.done)
