@@ -119,8 +119,10 @@ func (e *Engine) RoleTable(id tenant.ID, table string, shape RoleShape) (*Table,
 	if shape.identity() {
 		return base, nil // still read-locked; the caller's Release covers it
 	}
-	rt, evicted, err := base.roleTable(shape)
-	base.Release()
+	rt, evicted, err := func() (*Table, *Table, error) {
+		defer base.Release() // a panicking compile must not leave a rebind waiting
+		return base.roleTable(shape)
+	}()
 	// Closed after the cache lock and the base read lock are both gone: it
 	// waits for the evicted shape's own readers, which are requests in flight.
 	if evicted != nil {
@@ -135,33 +137,54 @@ func (e *Engine) RoleTable(id tenant.ID, table string, shape RoleShape) (*Table,
 // roleTable is RoleTable's cache half, run under the base table's read lock.
 // It returns the projection read-locked, plus the entry its insertion evicted
 // (to be closed by the caller, outside the cache lock).
+//
+// A miss compiles outside the cache lock, which every role lookup on the
+// table needs: a compile takes ~100 µs, and the shape key carries claim
+// values, so a table whose roles inject one value per end user misses on
+// every request once it has more users than roleCacheSize, and after every
+// rebind. Misses on different shapes therefore compile in parallel, while
+// concurrent misses on one shape wait for the first one's compile rather
+// than repeat it. The base read lock stays held throughout, so a rebind
+// waits for a compile in flight instead of closing the cache under it.
 func (t *Table) roleTable(shape RoleShape) (*Table, *Table, error) {
 	key := shape.key(t.Generation)
 	c := t.roles
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if el, hit := c.index[key]; hit {
-		c.order.MoveToFront(el)
-		e := el.Value.(*roleEntry)
-		if e.table == nil {
-			return nil, nil, &RoleRefused{Tenant: t.tenant, Table: t.Name, Cause: e.cause}
+	for {
+		if el, hit := c.index[key]; hit {
+			rt, err := t.hitLocked(el)
+			c.mu.Unlock()
+			return rt, nil, err
 		}
-		// Taken while the base read lock is still held, so a rebind cannot be
-		// closing this projection underneath us.
-		e.table.mu.RLock()
-		return e.table, nil, nil
+		f := c.inflight[key]
+		if f == nil {
+			break
+		}
+		f.waiters++
+		c.mu.Unlock()
+		<-f.done
+		// Landed, or withdrawn by a panic. Look again; a shape evicted in the
+		// meantime is compiled afresh below.
+		c.mu.Lock()
 	}
+	f := &roleFlight{done: make(chan struct{})}
+	c.inflight[key] = f
+	c.mu.Unlock()
 
-	rt, cause := t.compileRole(shape)
+	rt, cause := c.compileFlight(t, shape, key, f)
 	if cause != "" {
 		slog.Error("chtypes could not compile a per-role schema; every insert for this role fails closed",
 			"tenant", t.tenant, "table", t.Name, "generation", t.Generation,
 			"allowed_columns", shape.Columns, "default_columns", slices.Sorted(maps.Keys(shape.Defaults)),
 			"cause", cause)
 	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	el := c.order.PushFront(&roleEntry{key: key, table: rt, cause: cause})
 	c.index[key] = el
+	delete(c.inflight, key)
+	close(f.done)
 	var evicted *Table
 	if c.order.Len() > c.cap {
 		evicted = c.evictOldestLocked()
@@ -169,8 +192,43 @@ func (t *Table) roleTable(shape RoleShape) (*Table, *Table, error) {
 	if rt == nil {
 		return nil, evicted, &RoleRefused{Tenant: t.tenant, Table: t.Name, Cause: cause}
 	}
+	// Under the cache lock, like a hit: nothing can have evicted it yet.
 	rt.mu.RLock()
 	return rt, evicted, nil
+}
+
+// hitLocked answers a cached entry. The caller holds the cache lock and the
+// base read lock.
+func (t *Table) hitLocked(el *list.Element) (*Table, error) {
+	t.roles.order.MoveToFront(el)
+	e := el.Value.(*roleEntry)
+	if e.table == nil {
+		return nil, &RoleRefused{Tenant: t.tenant, Table: t.Name, Cause: e.cause}
+	}
+	// Taken under the cache lock, while the entry is still indexed, so no
+	// eviction is closing it; and under the base read lock, so no rebind is.
+	// Neither close has started, so this never waits.
+	e.table.mu.RLock()
+	return e.table, nil
+}
+
+// compileFlight runs the compile for flight f, which this lookup registered.
+// If the compile panics, f is withdrawn before the panic propagates, so its
+// waiters wake, find neither an entry nor a flight, and compile for
+// themselves rather than park forever.
+func (c *roleCache) compileFlight(t *Table, shape RoleShape, key string, f *roleFlight) (*Table, string) {
+	landed := false
+	defer func() {
+		if !landed {
+			c.mu.Lock()
+			delete(c.inflight, key)
+			close(f.done)
+			c.mu.Unlock()
+		}
+	}()
+	rt, cause := c.compile(t, shape)
+	landed = true
+	return rt, cause
 }
 
 // compileRole builds and compiles the role's declaration list. It returns
@@ -303,10 +361,31 @@ type roleCache struct {
 	cap   int
 	order *list.List // front = most recently used
 	index map[string]*list.Element
+	// inflight holds the shapes being compiled, outside mu, by a lookup that
+	// missed (see Table.roleTable).
+	inflight map[string]*roleFlight
+	// compile builds a shape's projection: Table.compileRole, which a test
+	// may wrap to hold one compile open.
+	compile func(*Table, RoleShape) (*Table, string)
+}
+
+// roleFlight is one shape's compile in progress. done is closed, under the
+// cache lock, once the shape's entry is in the cache or the compile panicked.
+type roleFlight struct {
+	done chan struct{}
+	// waiters counts the lookups that parked on done; written under the
+	// cache lock, read by tests.
+	waiters int
 }
 
 func newRoleCache(capacity int) *roleCache {
-	return &roleCache{cap: capacity, order: list.New(), index: make(map[string]*list.Element)}
+	return &roleCache{
+		cap:      capacity,
+		order:    list.New(),
+		index:    make(map[string]*list.Element),
+		inflight: make(map[string]*roleFlight),
+		compile:  (*Table).compileRole,
+	}
 }
 
 // capacity is the cache's bound, for a rebind's fresh cache; roleCacheSize
