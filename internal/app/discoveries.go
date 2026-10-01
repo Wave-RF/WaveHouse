@@ -37,6 +37,9 @@ type discoveries struct {
 	// and onLoaded the first success: what /livez is driven by.
 	onAttempt func(tenant.ID, error)
 	onLoaded  func(tenant.ID)
+	// onRetire, when set, is told each registry a reload retires, under mu
+	// and the reload lock: what it does must not wait on I/O.
+	onRetire func(tenant.ID, *discovery.SchemaRegistry)
 
 	mu  sync.Mutex // serializes reconcile, drop, adopt and close
 	cur atomic.Pointer[map[tenant.ID]*tenantDiscovery]
@@ -54,8 +57,8 @@ type tenantDiscovery struct {
 	done     chan struct{}
 }
 
-func newDiscoveries(ctx context.Context, build func(tenant.ID, *settings.Store) *discovery.SchemaRegistry, onAttempt func(tenant.ID, error), onLoaded func(tenant.ID)) *discoveries {
-	d := &discoveries{ctx: ctx, build: build, onAttempt: onAttempt, onLoaded: onLoaded}
+func newDiscoveries(ctx context.Context, build func(tenant.ID, *settings.Store) *discovery.SchemaRegistry, onAttempt func(tenant.ID, error), onLoaded func(tenant.ID), onRetire func(tenant.ID, *discovery.SchemaRegistry)) *discoveries {
+	d := &discoveries{ctx: ctx, build: build, onAttempt: onAttempt, onLoaded: onLoaded, onRetire: onRetire}
 	d.cur.Store(&map[tenant.ID]*tenantDiscovery{})
 	return d
 }
@@ -96,6 +99,9 @@ func (d *discoveries) reconcile(tenants *settings.Registry) {
 // the retired loops that have ended since. Under mu.
 func (d *discoveries) retire(td *tenantDiscovery) {
 	td.cancel()
+	if d.onRetire != nil {
+		d.onRetire(td.id, td.registry)
+	}
 	d.retired = append(slices.DeleteFunc(d.retired, func(r *tenantDiscovery) bool {
 		select {
 		case <-r.done:

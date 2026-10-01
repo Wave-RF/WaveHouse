@@ -175,7 +175,7 @@ func TestNew_DynamoDBDedupeTableMissing(t *testing.T) {
 		guardGlobals(t)
 		cfg := testConfig(t, writeSettings(t, dedupeOn))
 		dynamoConfig(t, cfg, false)
-		_, err := New(t.Context(), Options{Config: cfg})
+		_, err := newForTest(t.Context(), t, Options{Config: cfg})
 		require.ErrorContains(t, err, "dedupe open")
 		require.ErrorContains(t, err, "ResourceNotFoundException")
 		require.NotErrorIs(t, err, dedupe.ErrUnavailable)
@@ -185,7 +185,7 @@ func TestNew_DynamoDBDedupeTableMissing(t *testing.T) {
 		cfg := testConfig(t, dir)
 		dynamoConfig(t, cfg, false)
 		logs := bootLogged(t)
-		a, err := New(t.Context(), Options{Config: cfg})
+		a, err := newForTest(t.Context(), t, Options{Config: cfg})
 		require.NoError(t, err)
 		t.Cleanup(func() { assert.NoError(t, a.Close(context.Background())) })
 		assert.Contains(t, logs.String(), `level=ERROR msg="dedupe: dynamodb table is misconfigured`)
@@ -367,7 +367,7 @@ func TestNew_DynamoDBDedupeRefusesNoRegion(t *testing.T) {
 			cfg.Dedupe.DynamoDB.Region = ""
 			t.Setenv("AWS_REGION", "")
 			t.Setenv("AWS_DEFAULT_REGION", "")
-			_, err := New(t.Context(), Options{Config: cfg})
+			_, err := newForTest(t.Context(), t, Options{Config: cfg})
 			require.ErrorContains(t, err, "dynamodb region is not set")
 		})
 	}
