@@ -26,7 +26,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
-	"github.com/Wave-RF/WaveHouse/internal/typelayer"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer/typelayertest"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,7 +55,7 @@ func testRegistry(t testing.TB) *discovery.SchemaRegistry {
 func newTestIngestHandler(t testing.TB, reg *discovery.SchemaRegistry, pub mq.Publisher) *IngestHandler {
 	t.Helper()
 	h := NewIngestHandler(fixedRegistry(reg), pub)
-	h.Types = typelayer.TestEngine(t, reg.List()...)
+	h.Types = typelayertest.TestEngine(t, reg.List()...)
 	return h
 }
 
@@ -64,7 +64,7 @@ func newTestIngestHandler(t testing.TB, reg *discovery.SchemaRegistry, pub mq.Pu
 // tenant.Default.
 func bindTenants(h *IngestHandler, reg *discovery.SchemaRegistry, ids ...tenant.ID) {
 	for _, id := range ids {
-		h.Types.Bind(id, typelayer.TestServerVersion, "UTC", reg.List())
+		h.Types.Bind(id, typelayertest.TestServerVersion, "UTC", reg.List())
 	}
 }
 

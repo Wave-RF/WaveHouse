@@ -35,7 +35,7 @@ const checksBody = `{"id":1,"tenant":"acme","kind":"a"}` + "\n" +
 
 func checksHandle(t *testing.T) *Table {
 	t.Helper()
-	eng := TestEngine(t, checksTable())
+	eng := testEngine(t, checksTable())
 	tbl, err := eng.Table(tenant.Default, "checks")
 	require.NoError(t, err)
 	t.Cleanup(tbl.Release)
@@ -155,7 +155,7 @@ func TestIngestChecks_FailsClosed(t *testing.T) {
 			"an integer claim that does not fit the column is 'the data says no' (403)")
 
 		// On any other column the server's own reader throws.
-		eng := TestEngine(t, &discovery.TableSchema{Name: "ratios", Columns: []discovery.Column{
+		eng := testEngine(t, &discovery.TableSchema{Name: "ratios", Columns: []discovery.Column{
 			{Name: "id", Type: "UInt32", Position: 1},
 			{Name: "ratio", Type: "Float64", Position: 2},
 		}})
@@ -193,7 +193,7 @@ func TestIngestChecks_FailsClosed(t *testing.T) {
 // from the injected DEFAULT, which the compiler may itself wrap. A claim that
 // fits admits exactly as before.
 func TestIngestChecks_IntegerClaimThatDoesNotFitIsRefused(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 	const over = "18446744073709551621" // 2^64+5
 	body := []byte(`{"id":1}` + "\n" + `{"id":2,"amount":5}` + "\n" + `{"id":3,"amount":6}` + "\n")
 
@@ -332,8 +332,8 @@ func TestIngestChecks_OnTheWithNamesFormats(t *testing.T) {
 }
 
 func TestIngest_UnavailableTable(t *testing.T) {
-	eng := TestEngine(t, checksTable())
-	eng.Bind(tenant.Default, TestServerVersion, "UTC", nil)
+	eng := testEngine(t, checksTable())
+	eng.Bind(tenant.Default, testServerVersion, "UTC", nil)
 
 	_, err := eng.Table(tenant.Default, "checks")
 	require.Error(t, err)
@@ -461,7 +461,7 @@ func TestIngest_WithNamesFormats(t *testing.T) {
 // Only when parallel-shared is ~GOMAXPROCS× worse than serial does a pool have
 // anything to win, and parallel-pooled is then the size of the win.
 func BenchmarkIngest_HandlePool(b *testing.B) {
-	eng := TestEngine(b, checksTable())
+	eng := testEngine(b, checksTable())
 	tbl, err := eng.Table(tenant.Default, "checks")
 	require.NoError(b, err)
 	defer tbl.Release()

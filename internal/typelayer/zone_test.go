@@ -53,12 +53,12 @@ func withMsg(recs []map[string]any, msg string) []map[string]any {
 // own check gives, with the SDK's words kept, and the first Engine's tenant
 // keeps answering.
 func TestBind_SDKZoneRefusalIsThatTenantsUnavailable(t *testing.T) {
-	first := TestEngine(t, eventsTable()) // the line is open in UTC from here on
+	first := testEngine(t, eventsTable()) // the line is open in UTC from here on
 
 	second, err := NewEngine(Config{})
 	require.NoError(t, err)
 	t.Cleanup(second.Close)
-	second.Bind("tokyo", TestServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	second.Bind("tokyo", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
 
 	u := unavailable(t, second, "tokyo")
 	assert.Empty(t, u.Table)
@@ -69,7 +69,7 @@ func TestBind_SDKZoneRefusalIsThatTenantsUnavailable(t *testing.T) {
 
 	// The refusal is the tenant's, not the registry's: the same Engine serves a
 	// tenant in the line's zone.
-	second.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	second.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	answers(t, second, tenant.Default)
 	answers(t, first, tenant.Default)
 }
@@ -82,7 +82,7 @@ func TestBind_SDKZoneRefusalIsThatTenantsUnavailable(t *testing.T) {
 // installed library, the same image is refused in another zone and served in
 // its own.
 func TestBind_UnstatableLibraryIsThatTenantsUnavailable(t *testing.T) {
-	first := TestEngine(t, eventsTable()) // the line is open in UTC from here on
+	first := testEngine(t, eventsTable()) // the line is open in UTC from here on
 	installed := boundLib(first, tenant.Default)
 	require.NotNil(t, installed)
 
@@ -93,7 +93,7 @@ func TestBind_UnstatableLibraryIsThatTenantsUnavailable(t *testing.T) {
 	require.NoError(t, os.MkdirAll(line, 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(line, "manifest.json"),
 		fmt.Appendf(nil, `{"library":"libchtypes.dylib","clickhouse_version":%q,"clickhouse_minor":%q}`,
-			TestServerVersion+"-lts", testLine), 0o600))
+			testServerVersion+"-lts", testLine), 0o600))
 	link := filepath.Join(line, "libchtypes.dylib")
 	require.NoError(t, os.Symlink(filepath.Join(dir, "gone"), link))
 
@@ -101,7 +101,7 @@ func TestBind_UnstatableLibraryIsThatTenantsUnavailable(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(eng.Close)
 
-	eng.Bind("tokyo", TestServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("tokyo", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
 	u := unavailable(t, eng, "tokyo")
 	assert.Empty(t, u.Table)
 	assert.Contains(t, u.Cause, link)
@@ -111,12 +111,12 @@ func TestBind_UnstatableLibraryIsThatTenantsUnavailable(t *testing.T) {
 	require.NoError(t, os.Remove(link))
 	require.NoError(t, os.Symlink(installed.Path, link))
 
-	eng.Bind("tokyo", TestServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("tokyo", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
 	u = unavailable(t, eng, "tokyo")
 	assert.Contains(t, u.Cause, `"UTC"`, "a symlink to the open library is the same image")
 	assert.Contains(t, u.Cause, "one timezone per ClickHouse version line")
 
-	eng.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	answers(t, eng, tenant.Default)
 	assert.Same(t, installed, boundLib(eng, tenant.Default))
 }
@@ -124,7 +124,7 @@ func TestBind_UnstatableLibraryIsThatTenantsUnavailable(t *testing.T) {
 // TestBind_ZoneRecordIsKeyedOnTheLibrary: the record names the library the
 // SDK opened, by path, with the zone it was opened in.
 func TestBind_ZoneRecordIsKeyedOnTheLibrary(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 	lib := boundLib(eng, tenant.Default)
 	require.NotNil(t, lib)
 
@@ -139,11 +139,11 @@ func TestBind_ZoneRecordIsKeyedOnTheLibrary(t *testing.T) {
 // server is logged when the tenant's library changes, not on every refresh,
 // and a server on another patch of the line is a warning.
 func TestBind_LogsTheLibraryOncePerTenant(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 	logs := logtest.Capture(t, slog.LevelInfo)
 
-	eng.Bind("exact", TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
-	eng.Bind("exact", TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("exact", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("exact", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	otherPatch := testLine + ".1.1"
 	eng.Bind("other", otherPatch, "UTC", []*discovery.TableSchema{eventsTable()})
 	answers(t, eng, "other")
@@ -152,8 +152,8 @@ func TestBind_LogsTheLibraryOncePerTenant(t *testing.T) {
 	exact := withMsg(recs, "chtypes library bound")
 	require.Len(t, exact, 1, "one record for the tenant's first bind, none for the refresh")
 	assert.Equal(t, "exact", exact[0]["tenant"])
-	assert.Equal(t, TestServerVersion, exact[0]["server_version"])
-	assert.Equal(t, TestServerVersion+"-lts", exact[0]["chtypes_version"])
+	assert.Equal(t, testServerVersion, exact[0]["server_version"])
+	assert.Equal(t, testServerVersion+"-lts", exact[0]["chtypes_version"])
 
 	other := withMsg(recs, "chtypes library bound from another patch of the server's line; verdicts follow the artifact's patch")
 	require.Len(t, other, 1)
@@ -171,12 +171,12 @@ var sdkWarnedPatches atomic.Int64
 // The Engine itself asks for lines, which never warn; this asks the registry
 // for an uninstalled patch directly to make the SDK speak.
 func TestNewEngine_SDKWarningsGoToTheLog(t *testing.T) {
-	eng := TestEngine(t)
+	eng := testEngine(t)
 	logs := logtest.Capture(t, slog.LevelInfo)
 
 	patch := fmt.Sprintf("%s.0.%d", testLine, sdkWarnedPatches.Add(1))
 	openedZones.mu.Lock()
-	chtypes.SetDefaultTimezone("UTC") // the zone TestEngine opened the line in
+	chtypes.SetDefaultTimezone("UTC") // the zone testEngine opened the line in
 	res, err := eng.reg.Resolve(chtypes.Version(patch))
 	openedZones.mu.Unlock()
 	require.NoError(t, err)

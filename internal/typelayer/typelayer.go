@@ -268,9 +268,10 @@ func (e *Engine) Close() {
 	e.retiring.Wait()
 }
 
-// tenantCause is the tenant-wide cause Table would report, "" when the tenant
-// is bound and answering, for TestEngine.
-func (e *Engine) tenantCause(id tenant.ID) string {
+// TenantCause is the tenant-wide cause every Table of tenant id would report,
+// "" when the tenant is bound and answering. A table-level cause (a table
+// that did not compile) is not tenant-wide and is not reported here.
+func (e *Engine) TenantCause(id tenant.ID) string {
 	e.mu.RLock()
 	set := e.tenants[id]
 	e.mu.RUnlock()

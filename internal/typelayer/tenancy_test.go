@@ -44,11 +44,11 @@ func unavailable(t *testing.T, eng *Engine, id tenant.ID) *Unavailable {
 // naming both zones; the first tenant, and a third in the line's own zone,
 // keep answering.
 func TestBind_TenantsOnOneLineWithDifferentZones(t *testing.T) {
-	eng := TestEngine(t, eventsTable()) // tenant.Default, UTC
+	eng := testEngine(t, eventsTable()) // tenant.Default, UTC
 
-	eng.Bind("berlin", TestServerVersion, "Europe/Berlin", []*discovery.TableSchema{eventsTable()})
-	eng.Bind("utc", TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
-	eng.Bind("unnamed", TestServerVersion, "", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("berlin", testServerVersion, "Europe/Berlin", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("unnamed", testServerVersion, "", []*discovery.TableSchema{eventsTable()})
 
 	u := unavailable(t, eng, "berlin")
 	assert.Empty(t, u.Table, "the cause covers every table of the tenant")
@@ -69,12 +69,12 @@ func TestBind_TenantsOnOneLineWithDifferentZones(t *testing.T) {
 // TestBind_ZoneRefusalClearsWhenTheZoneMatchesAgain: the refusal is about the
 // zone the server reports now, not a sticky mark on the tenant.
 func TestBind_ZoneRefusalClearsWhenTheZoneMatchesAgain(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
-	eng.Bind("moved", TestServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	eng := testEngine(t, eventsTable())
+	eng.Bind("moved", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
 	u := unavailable(t, eng, "moved")
 	assert.Contains(t, u.Cause, `"Asia/Tokyo"`)
 
-	eng.Bind("moved", TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("moved", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	answers(t, eng, "moved")
 }
 
@@ -82,7 +82,7 @@ func TestBind_ZoneRefusalClearsWhenTheZoneMatchesAgain(t *testing.T) {
 // artifact covers is refused with the SDK's own message; every other tenant
 // answers, and the tenant answers once its line resolves.
 func TestBind_MissingLineIsThatTenantOnly(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 
 	eng.Bind("old", "1.2.3.4", "UTC", []*discovery.TableSchema{eventsTable()})
 	u := unavailable(t, eng, "old")
@@ -90,14 +90,14 @@ func TestBind_MissingLineIsThatTenantOnly(t *testing.T) {
 
 	answers(t, eng, tenant.Default)
 
-	eng.Bind("old", TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("old", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	answers(t, eng, "old")
 }
 
 // TestTable_UnboundTenantIsUnavailable: a tenant discovery has not bound yet
 // is a 503, never a 404 — the table may well exist.
 func TestTable_UnboundTenantIsUnavailable(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 	u := unavailable(t, eng, "nobody")
 	assert.Equal(t, causeUnbound, u.Cause)
 }
@@ -106,8 +106,8 @@ func TestTable_UnboundTenantIsUnavailable(t *testing.T) {
 // not share a handle (sharing is a separate decision), and one tenant's
 // rebind leaves the other's generation alone.
 func TestBind_TenantsCompileSeparateHandles(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
-	eng.Bind("other", TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng := testEngine(t, eventsTable())
+	eng.Bind("other", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 
 	a, err := eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
@@ -120,7 +120,7 @@ func TestBind_TenantsCompileSeparateHandles(t *testing.T) {
 
 	changed := eventsTable()
 	changed.Columns = append(changed.Columns, discovery.Column{Name: "extra", Type: "String", Position: 8})
-	eng.Bind("other", TestServerVersion, "UTC", []*discovery.TableSchema{changed})
+	eng.Bind("other", testServerVersion, "UTC", []*discovery.TableSchema{changed})
 
 	a, err = eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
@@ -140,8 +140,8 @@ func TestBind_TenantsCompileSeparateHandles(t *testing.T) {
 // that moment; its handles close once the holder lets go; and another
 // tenant's handles are untouched throughout.
 func TestForget_ClosesOnlyThatTenantAndDoesNotBlock(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
-	eng.Bind("gone", TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng := testEngine(t, eventsTable())
+	eng.Bind("gone", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 
 	held, err := eng.Table("gone", "events")
 	require.NoError(t, err)
@@ -190,21 +190,21 @@ func TestForget_ClosesOnlyThatTenantAndDoesNotBlock(t *testing.T) {
 	answers(t, eng, tenant.Default)
 
 	// A later Bind brings the tenant back on fresh handles.
-	eng.Bind("gone", TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("gone", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	answers(t, eng, "gone")
 }
 
 // TestClose_WaitsForForgetAndRefusesAfterwards: shutdown leaves no teardown
 // running, and nothing answers or binds after it.
 func TestClose_WaitsForForgetAndRefusesAfterwards(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
-	eng.Bind("a", TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng := testEngine(t, eventsTable())
+	eng.Bind("a", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	eng.Forget("a")
 	eng.Close()
 
 	u := unavailable(t, eng, tenant.Default)
 	assert.Equal(t, causeClosed, u.Cause)
-	eng.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	u = unavailable(t, eng, tenant.Default)
 	assert.Equal(t, causeClosed, u.Cause)
 	eng.Forget(tenant.Default) // no-op, no panic
@@ -214,7 +214,7 @@ func TestClose_WaitsForForgetAndRefusesAfterwards(t *testing.T) {
 // every handle busy compiles one more, up to the limit; past it, calls share
 // a busy handle; and an idle handle is reused rather than grown past.
 func TestPool_GrowsLazilyToItsLimit(t *testing.T) {
-	eng := TestEngine(t, rowsTable())
+	eng := testEngine(t, rowsTable())
 	tbl, err := eng.Table(tenant.Default, "rows")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -257,7 +257,7 @@ func TestPool_GrowsLazilyToItsLimit(t *testing.T) {
 // handle rather than wait for a compile), never past its limit; holding Rows
 // while more arrive grows it to exactly the limit.
 func TestTable_PoolGrowsUnderConcurrentHolders(t *testing.T) {
-	eng := TestEngine(t, rowsTable())
+	eng := testEngine(t, rowsTable())
 	tbl, err := eng.Table(tenant.Default, "rows")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -306,7 +306,7 @@ func TestTable_PoolGrowsUnderConcurrentHolders(t *testing.T) {
 // request that holds a projection and then looks the base table up is not
 // deadlocked against the rebind waiting for that projection.
 func TestBind_HeldRoleTableDoesNotBlockBaseLookups(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 	rt, err := eng.RoleTable(tenant.Default, "orders", RoleShape{Columns: []string{"id", "tenant"}})
 	require.NoError(t, err)
 
@@ -314,7 +314,7 @@ func TestBind_HeldRoleTableDoesNotBlockBaseLookups(t *testing.T) {
 	changed.Columns[3].Type = "UInt32"
 	bound := make(chan struct{})
 	go func() {
-		eng.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{changed})
+		eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{changed})
 		close(bound)
 	}()
 
@@ -346,7 +346,7 @@ func TestBind_HeldRoleTableDoesNotBlockBaseLookups(t *testing.T) {
 // safe; every answer is either a verdict or an Unavailable, never a panic or
 // a hang.
 func TestEngine_ConcurrentBindTableForget(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 	ids := []tenant.ID{"t0", "t1", "t2", "t3"}
 	schemas := func(i int) []*discovery.TableSchema {
 		ts := eventsTable()
@@ -363,7 +363,7 @@ func TestEngine_ConcurrentBindTableForget(t *testing.T) {
 				id := ids[(g+i)%len(ids)]
 				switch (g + i) % 4 {
 				case 0, 1:
-					eng.Bind(id, TestServerVersion, "UTC", schemas(i))
+					eng.Bind(id, testServerVersion, "UTC", schemas(i))
 				case 2:
 					eng.Forget(id)
 				default:
@@ -385,7 +385,7 @@ func TestEngine_ConcurrentBindTableForget(t *testing.T) {
 	eng.retiring.Wait()
 
 	for _, id := range ids {
-		eng.Bind(id, TestServerVersion, "UTC", schemas(0))
+		eng.Bind(id, testServerVersion, "UTC", schemas(0))
 		answers(t, eng, id)
 	}
 	answers(t, eng, tenant.Default)

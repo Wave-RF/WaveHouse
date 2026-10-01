@@ -15,7 +15,7 @@ import (
 
 func ingestTable(t *testing.T) *Table {
 	t.Helper()
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 	tbl, err := eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
 	t.Cleanup(tbl.Release)
@@ -105,7 +105,7 @@ func TestIngest_ComputedColumnsAreRejectedPerRecord(t *testing.T) {
 			{Name: "a", Type: "UInt8", DefaultKind: "ALIAS", DefaultExpression: "id + 2", HasDefault: true, Position: 4},
 		},
 	}
-	eng := TestEngine(t, schema)
+	eng := testEngine(t, schema)
 	tbl, err := eng.Table(tenant.Default, "computed")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -234,7 +234,7 @@ func gatedTable() *discovery.TableSchema {
 // every record is refused (455 and 44 on the 26.6 and 26.8 artifacts), which
 // is what this table got on every call before.
 func TestIngest_TypeGatedColumnsInsertAndFilter(t *testing.T) {
-	eng := TestEngine(t, gatedTable())
+	eng := testEngine(t, gatedTable())
 	tbl, err := eng.Table(tenant.Default, "gated")
 	require.NoError(t, err)
 	defer tbl.Release()

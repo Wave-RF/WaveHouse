@@ -37,7 +37,7 @@ func roleTableFor(t *testing.T, eng *Engine, shape RoleShape) *Table {
 // TestRoleTable_IdentityShapeIsTheBaseTable: a role that may write everything
 // and injects nothing costs no second compile and no cache entry.
 func TestRoleTable_IdentityShapeIsTheBaseTable(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	base, err := eng.Table(tenant.Default, "orders")
 	require.NoError(t, err)
@@ -56,7 +56,7 @@ func TestRoleTable_IdentityShapeIsTheBaseTable(t *testing.T) {
 // naming it is ClickHouse's own per-row code 117 rather than a Go key walk's
 // 403 — and the exported row carries the ROLE's column list.
 func TestRoleTable_DeniedColumnIsAbsentFromTheSchema(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 	tbl := roleTableFor(t, eng, RoleShape{Columns: []string{"id", "tenant", "amount"}})
 
 	assert.Equal(t, []string{"id", "tenant", "amount"}, tbl.WireColumns)
@@ -80,7 +80,7 @@ func TestRoleTable_DeniedColumnIsAbsentFromTheSchema(t *testing.T) {
 // the 26.6 and 26.8 artifacts: DEFAULT '<claim>' fills a column the record
 // omits, and a value the record DOES supply still wins.
 func TestRoleTable_DefaultInjectsWhenAbsentAndLosesToASuppliedValue(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 	tbl := roleTableFor(t, eng, RoleShape{Defaults: map[string]string{"tenant": "acme"}})
 
 	assert.Equal(t, []string{"id", "tenant", "secret", "amount"}, tbl.WireColumns)
@@ -103,7 +103,7 @@ func TestRoleTable_DefaultInjectsWhenAbsentAndLosesToASuppliedValue(t *testing.T
 // breakout attempt is the case that matters — it must not add, remove or
 // retype a single column.
 func TestRoleTable_LiteralEscaping(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	for name, value := range map[string]string{
 		"apostrophe":       "O'Brien",
@@ -144,7 +144,7 @@ func TestRoleTable_LiteralEscaping(t *testing.T) {
 // cannot read is a compile refusal (ClickHouse code 6). It must be Unavailable
 // — a 503 — never a handle that silently drops the injection.
 func TestRoleTable_UnparseableLiteralFailsClosed(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	_, err := eng.RoleTable(tenant.Default, "orders", RoleShape{Defaults: map[string]string{"amount": "abc"}})
 	require.Error(t, err)
@@ -156,7 +156,7 @@ func TestRoleTable_UnparseableLiteralFailsClosed(t *testing.T) {
 // does not carry cannot be expressed. Dropping it silently would turn "force
 // this value" into "whatever the caller sent".
 func TestRoleTable_ContradictoryShapeIsAnError(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	_, err := eng.RoleTable(tenant.Default, "orders", RoleShape{
 		Columns:  []string{"id", "amount"},
@@ -179,7 +179,7 @@ func TestRoleTable_DefaultIntoAComputedColumnIsRefused(t *testing.T) {
 		Name: "double", Type: "UInt64", HasDefault: true,
 		DefaultKind: "MATERIALIZED", DefaultExpression: "amount * 2", Position: 5,
 	})
-	eng := TestEngine(t, ts)
+	eng := testEngine(t, ts)
 
 	_, err := eng.RoleTable(tenant.Default, "orders", RoleShape{Defaults: map[string]string{"double": "1"}})
 	require.Error(t, err)
@@ -196,7 +196,7 @@ func TestRoleTable_DefaultIntoAComputedColumnIsRefused(t *testing.T) {
 // handle (a compile per request is the thing this cache exists to stop), a
 // different shape must not, and a rebind must invalidate both.
 func TestRoleTable_CachedPerShapeAndGeneration(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	shape := RoleShape{Columns: []string{"tenant", "id", "amount"}, Defaults: map[string]string{"tenant": "acme"}}
 	role := func(s RoleShape) *Table {
@@ -228,7 +228,7 @@ func TestRoleTable_CachedPerShapeAndGeneration(t *testing.T) {
 	// A rebind closes every projection; the next lookup compiles a fresh one.
 	changed := ordersTable()
 	changed.Columns[3].Type = "UInt32"
-	eng.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{changed})
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{changed})
 
 	after := role(shape)
 	assert.NotSame(t, first, after)
@@ -238,7 +238,7 @@ func TestRoleTable_CachedPerShapeAndGeneration(t *testing.T) {
 // TestRoleTable_NegativeEntryStopsRecompiling: a shape that will not compile
 // costs one compile and one log line per generation, like filterCache.
 func TestRoleTable_NegativeEntryStopsRecompiling(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	for range 3 {
 		_, err := eng.RoleTable(tenant.Default, "orders", RoleShape{Defaults: map[string]string{"amount": "abc"}})
@@ -254,7 +254,7 @@ func TestRoleTable_NegativeEntryStopsRecompiling(t *testing.T) {
 // tenant claims and are baked into compiled handles, so the cache must be
 // bounded exactly like filterCache.
 func TestRoleTable_BoundedUnderTenantValueChurn(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	base, err := eng.Table(tenant.Default, "orders")
 	require.NoError(t, err)
@@ -287,7 +287,7 @@ func TestRoleTable_BoundedUnderTenantValueChurn(t *testing.T) {
 // TestRoleTable_HasItsOwnHandlePool: a role shape holds its own single handle,
 // not the base table's pool (256 shapes x the pool would be unbounded memory).
 func TestRoleTable_HasItsOwnHandlePool(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 	tbl := roleTableFor(t, eng, RoleShape{Defaults: map[string]string{"tenant": "acme"}})
 	assert.Len(t, tbl.pool.list(), roleHandles)
 	assert.Equal(t, int64(roleHandles), tbl.pool.limit.Load(), "a role shape never grows past its one handle")

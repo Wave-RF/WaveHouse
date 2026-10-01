@@ -40,7 +40,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
-	"github.com/Wave-RF/WaveHouse/internal/typelayer"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer/typelayertest"
 )
 
 // None of these tests run in parallel: New installs a process-wide default
@@ -148,7 +148,7 @@ func newApp(t *testing.T, cfg *config.Config, opts Options) *App {
 func newForTest(ctx context.Context, t *testing.T, opts Options) (*App, error) {
 	t.Helper()
 	if opts.Config != nil && opts.Config.Has(config.RoleAPI) {
-		typelayer.SkipWithoutArtifact(t)
+		typelayertest.SkipWithoutArtifact(t)
 	}
 	return New(ctx, opts)
 }

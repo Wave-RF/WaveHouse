@@ -198,7 +198,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # WAVEHOUSE_TEST_REQUIRE_CHTYPES=1: typelayer.TestEngine t.Fatal()s instead of
+    # WAVEHOUSE_TEST_REQUIRE_CHTYPES=1: typelayertest.TestEngine t.Fatal()s instead of
     # t.Skip()ing when the pinned artifact isn't installed — CI must never
     # silently skip the chtypes-backed tests it has the artifact for.
     env:

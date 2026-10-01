@@ -13,6 +13,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/typelayer"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer/typelayertest"
 )
 
 // recordingEvaluator answers every row the same way and counts what the Hub
@@ -268,8 +269,8 @@ func TestWithheldReason_ClassifiesTypeLayerErrors(t *testing.T) {
 // judged normally.
 func TestEngineEvaluator_TenantsAreIndependent(t *testing.T) {
 	t.Parallel()
-	eng := typelayer.TestEngine(t, clicksTable())
-	eng.Bind("acme", typelayer.TestServerVersion, "UTC", []*discovery.TableSchema{clicksTable()})
+	eng := typelayertest.TestEngine(t, clicksTable())
+	eng.Bind("acme", typelayertest.TestServerVersion, "UTC", []*discovery.TableSchema{clicksTable()})
 	eval := NewRowEvaluator(eng)
 	cols := []string{"page", "secret", "tenant_id"}
 	row := json.RawMessage(`["/a","x","acme"]`)
@@ -376,7 +377,7 @@ func TestHub_RowFilter_FilterOnAbsentColumnWithholds(t *testing.T) {
 			Filter: map[string]policy.Filter{"region": {Eq: new("eu")}},
 		}}},
 	}}
-	eng := typelayer.TestEngine(t, roleWidthTable())
+	eng := typelayertest.TestEngine(t, roleWidthTable())
 	hub := NewHub(staticPolicy(p), nil, nil)
 	hub.RowEvaluator = NewRowEvaluator(eng)
 	sub := NewSubscriber(nil, nil)
@@ -408,7 +409,7 @@ func TestHub_RowFilter_UnknownColumnIsDrift(t *testing.T) {
 	t.Parallel()
 	p := rowFilterPolicy()
 	p.Tables["clicks"]["public"] = policy.RolePermissions{Select: &policy.SelectPermissions{}}
-	eng := typelayer.TestEngine(t, roleWidthTable())
+	eng := typelayertest.TestEngine(t, roleWidthTable())
 	hub := NewHub(staticPolicy(p), nil, nil)
 	hub.RowEvaluator = NewRowEvaluator(eng)
 	acme := NewSubscriber(map[string]any{"tenant": "acme"}, nil)

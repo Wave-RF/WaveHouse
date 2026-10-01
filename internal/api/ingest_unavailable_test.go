@@ -18,7 +18,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
-	"github.com/Wave-RF/WaveHouse/internal/typelayer"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer/typelayertest"
 )
 
 // The type layer judges every record, so there is no Go-side comparison left
@@ -61,7 +61,7 @@ func TestIngest_UndiscoveredTable_Unavailable(t *testing.T) {
 	buf := logtest.Capture(t, slog.LevelError)
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
-	h.Types = typelayer.TestEngine(t) // bound to NO tables
+	h.Types = typelayertest.TestEngine(t) // bound to NO tables
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home"})))
@@ -82,8 +82,8 @@ func TestIngest_UnboundTenant_RefusedBeforeTheBodyIsRead(t *testing.T) {
 	reg := testRegistry(t)
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(fixedRegistry(reg), pub)
-	h.Types = typelayer.TestEngine(t) // tenant.Default only, and no tables
-	h.Types.Bind("globex", typelayer.TestServerVersion, "UTC", reg.List())
+	h.Types = typelayertest.TestEngine(t) // tenant.Default only, and no tables
+	h.Types.Bind("globex", typelayertest.TestServerVersion, "UTC", reg.List())
 
 	acme, ok := tenants.For("acme")
 	require.True(t, ok)

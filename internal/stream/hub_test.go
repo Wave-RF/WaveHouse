@@ -22,7 +22,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
-	"github.com/Wave-RF/WaveHouse/internal/typelayer"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer/typelayertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -498,7 +498,7 @@ func col(name, chType string) discovery.Column {
 func chtypesHub(tb testing.TB, store PolicySource, metric *Metrics, tables ...*discovery.TableSchema) *Hub {
 	tb.Helper()
 	hub := NewHub(store, nil, metric)
-	hub.RowEvaluator = NewRowEvaluator(typelayer.TestEngine(tb, tables...))
+	hub.RowEvaluator = NewRowEvaluator(typelayertest.TestEngine(tb, tables...))
 	return hub
 }
 

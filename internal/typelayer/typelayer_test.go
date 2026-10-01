@@ -34,7 +34,7 @@ func eventsTable() *discovery.TableSchema {
 }
 
 func TestBind_CompilesAndExposesWireColumns(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 
 	tbl, err := eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
@@ -47,7 +47,7 @@ func TestBind_CompilesAndExposesWireColumns(t *testing.T) {
 }
 
 func TestTable_UnknownTableIsUnavailable(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 	_, err := eng.Table(tenant.Default, "nosuch")
 	require.Error(t, err)
 	assert.True(t, IsUnavailable(err))
@@ -58,7 +58,7 @@ func TestTable_UnknownTableIsUnavailable(t *testing.T) {
 // same columns must not invalidate handles or cached filters, and one that
 // discovers a new column must.
 func TestBind_GenerationBumpsOnlyOnSignatureChange(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 
 	generation := func() uint64 {
 		tbl, err := eng.Table(tenant.Default, "events")
@@ -68,12 +68,12 @@ func TestBind_GenerationBumpsOnlyOnSignatureChange(t *testing.T) {
 	}
 	require.Equal(t, uint64(1), generation())
 
-	eng.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	assert.Equal(t, uint64(1), generation(), "identical columns keep the handle")
 
 	changed := eventsTable()
 	changed.Columns = append(changed.Columns, discovery.Column{Name: "extra", Type: "String", Position: 8})
-	eng.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{changed})
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{changed})
 
 	tbl, err := eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
@@ -85,8 +85,8 @@ func TestBind_GenerationBumpsOnlyOnSignatureChange(t *testing.T) {
 // TestBind_DroppedTableBecomesUnavailable: a table that leaves the database
 // must stop answering rather than serve a handle for a schema that is gone.
 func TestBind_DroppedTableBecomesUnavailable(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
-	eng.Bind(tenant.Default, TestServerVersion, "UTC", nil)
+	eng := testEngine(t, eventsTable())
+	eng.Bind(tenant.Default, testServerVersion, "UTC", nil)
 
 	_, err := eng.Table(tenant.Default, "events")
 	require.Error(t, err)
@@ -97,7 +97,7 @@ func TestBind_DroppedTableBecomesUnavailable(t *testing.T) {
 // every directory it searched — that is the whole diagnostic, so it is passed
 // through verbatim.
 func TestBind_MissingArtifact_UnavailableWithSDKMessage(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 
 	eng.Bind(tenant.Default, "1.2.3.4", "UTC", []*discovery.TableSchema{eventsTable()})
 	_, err := eng.Table(tenant.Default, "events")
@@ -107,7 +107,7 @@ func TestBind_MissingArtifact_UnavailableWithSDKMessage(t *testing.T) {
 	assert.Contains(t, err.Error(), "Looked in:")
 
 	// Rebinding a version that does resolve clears the tenant's cause.
-	eng.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	tbl, err := eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
 	tbl.Release()
@@ -118,9 +118,9 @@ func TestBind_MissingArtifact_UnavailableWithSDKMessage(t *testing.T) {
 // be adopted in-process. Every table of that tenant must stop answering,
 // loudly.
 func TestBind_TimezoneMismatchIsTenantWideAndNamesBothZones(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 
-	eng.Bind(tenant.Default, TestServerVersion, "Europe/Berlin", []*discovery.TableSchema{eventsTable()})
+	eng.Bind(tenant.Default, testServerVersion, "Europe/Berlin", []*discovery.TableSchema{eventsTable()})
 	_, err := eng.Table(tenant.Default, "events")
 	require.Error(t, err)
 	require.True(t, IsUnavailable(err))
@@ -136,7 +136,7 @@ func TestBind_CompileRefusalIsPerTable(t *testing.T) {
 		Name:    "broken",
 		Columns: []discovery.Column{{Name: "x", Type: "NotAType(9)", Position: 1}},
 	}
-	eng := TestEngine(t, eventsTable(), broken)
+	eng := testEngine(t, eventsTable(), broken)
 
 	good, err := eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
@@ -177,7 +177,7 @@ func renderExpr(t *testing.T, tbl *Table, preds ...Predicate) (string, map[strin
 }
 
 func TestRender_QuotesIdentifiersAndBindsEveryValue(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 	tbl, err := eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -206,7 +206,7 @@ func TestRender_QuotesIdentifiersAndBindsEveryValue(t *testing.T) {
 // chsql.StrictInt expression the query path renders; every other column keeps
 // the plain {pN:String} form.
 func TestRender_IntegerColumnsBindThroughTheStrictCast(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 	tbl, err := eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -243,7 +243,7 @@ func TestRender_QuotesEveryIdentifier(t *testing.T) {
 		Name:    "reserved",
 		Columns: []discovery.Column{{Name: "all", Type: "String", Position: 1}},
 	}
-	eng := TestEngine(t, reserved)
+	eng := testEngine(t, reserved)
 	tbl, err := eng.Table(tenant.Default, "reserved")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -257,7 +257,7 @@ func TestRender_BackticksAnIdentifierThatNeedsIt(t *testing.T) {
 		Name:    "odd",
 		Columns: []discovery.Column{{Name: "weird name", Type: "String", Position: 1}},
 	}
-	eng := TestEngine(t, odd)
+	eng := testEngine(t, odd)
 	tbl, err := eng.Table(tenant.Default, "odd")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -267,7 +267,7 @@ func TestRender_BackticksAnIdentifierThatNeedsIt(t *testing.T) {
 }
 
 func TestRender_RefusesWhatItCannotExpress(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 	tbl, err := eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -312,7 +312,7 @@ func TestBind_WireColumnsComeFromTheCompiledHandle(t *testing.T) {
 			{Name: "eph", Type: "UInt8", DefaultKind: "EPHEMERAL", Position: 5},
 		},
 	}
-	eng := TestEngine(t, kinds)
+	eng := testEngine(t, kinds)
 	tbl, err := eng.Table(tenant.Default, "kinds")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -331,7 +331,7 @@ func TestBind_WireColumnsComeFromTheCompiledHandle(t *testing.T) {
 // TestBind_HandlePoolPerTable: every table gets a pool of one handle, and a
 // rebind replaces all of it.
 func TestBind_HandlePoolPerTable(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 	tbl, err := eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
 	assert.Len(t, tbl.pool.list(), 1)
@@ -340,7 +340,7 @@ func TestBind_HandlePoolPerTable(t *testing.T) {
 
 	changed := eventsTable()
 	changed.Columns[0].Type = "UInt16"
-	eng.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{changed})
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{changed})
 
 	tbl, err = eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
@@ -364,7 +364,7 @@ func compiledColumnNames(schema *chtypes.LoadedSchema) []string {
 // library to ask) must spell every name byte for byte alike, so a divergence
 // fails here rather than in a customer's query.
 func TestQuoteIdentifier_AgreesWithChsql(t *testing.T) {
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 	lib := boundLib(eng, tenant.Default)
 	require.NotNil(t, lib)
 
@@ -387,7 +387,7 @@ func TestQuoteIdentifier_AgreesWithChsql(t *testing.T) {
 // artifact that cannot load is not a boot failure; the first Bind for its line
 // reports the SDK's own error as that tenant's Unavailable.
 func TestNewEngine_OpensNoLibraryAtConstruction(t *testing.T) {
-	TestEngine(t) // skips (or fails under WAVEHOUSE_TEST_REQUIRE_CHTYPES) without the real artifact
+	testEngine(t) // skips (or fails under WAVEHOUSE_TEST_REQUIRE_CHTYPES) without the real artifact
 
 	// The explicit directory is searched first, so its broken copy of the test
 	// line shadows the working one in the per-user cache.
@@ -396,13 +396,13 @@ func TestNewEngine_OpensNoLibraryAtConstruction(t *testing.T) {
 	require.NoError(t, os.MkdirAll(line, 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(line, "manifest.json"),
 		fmt.Appendf(nil, `{"library":"libchtypes.so","clickhouse_version":%q,"clickhouse_minor":%q}`,
-			TestServerVersion+"-lts", testLine), 0o600))
+			testServerVersion+"-lts", testLine), 0o600))
 
 	eng, err := NewEngine(Config{RegistryDir: dir})
 	require.NoError(t, err, "a broken artifact is not a construction error")
 	t.Cleanup(eng.Close)
 
-	eng.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	tbl, err := eng.Table(tenant.Default, "events")
 	if err == nil {
 		tbl.Release() // so the failure below is reported instead of Close deadlocking on it
