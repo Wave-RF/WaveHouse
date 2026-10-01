@@ -46,7 +46,7 @@
 #      pipeline. See #132.
 #   7. chtypes artifact cache (~/.cache/chtypes/artifacts/abi6) keyed on
 #      chtypes.lock — the pinned ClickHouse-version .so/.dylib the SDK
-#      dlopens. Measured for today's one pinned line (26.6, linux-amd64):
+#      dlopens. Measured for the 26.6 line (linux-amd64), pinned before 26.8:
 #      316 MiB of libchtypes.so on disk, ~65 MiB as a stored archive, and
 #      85 MiB over the wire on a MISS (the upstream .tar.gz). Fetched via
 #      scripts/fetch-chtypes.sh (--frozen: refuses anything the lock

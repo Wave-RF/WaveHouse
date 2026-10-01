@@ -2602,7 +2602,7 @@ func TestIngest_TimestampsCanonicalized(t *testing.T) {
 	req := ingestRequest(t, "events", map[string]any{
 		"name":  "e",
 		"ts":    "2026-06-21 04:00:00", // zone-less ClickHouse-native form
-		"ts_ms": 1782014400500,         // integer number = ClickHouse ticks at the column scale (ms here)
+		"ts_ms": 1782014400.5,          // a JSON number is epoch seconds on 26.8; the fraction is sub-second
 	})
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(req))
