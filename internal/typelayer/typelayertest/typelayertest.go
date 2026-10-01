@@ -1,4 +1,8 @@
-package typelayer
+// Package typelayertest opens a typelayer.Engine on the locked chtypes
+// artifact for tests in other packages, and skips a test that needs one when
+// it is not installed. It is test-only: nothing the wavehouse binary links
+// imports it, so the testing package stays out of production builds.
+package typelayertest
 
 import (
 	"fmt"
@@ -12,6 +16,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
 // TestServerVersion is the ClickHouse version TestEngine binds to — the patch
@@ -36,7 +41,7 @@ const missingArtifact = "chtypes artifact for " + testLine + " (ABI revision 6) 
 // line is not on the SDK's search path — or fails it when
 // WAVEHOUSE_TEST_REQUIRE_CHTYPES=1. It opens no library. A test that boots
 // anything constructing an Engine (the API process role) calls it first, since
-// NewEngine refuses to start without an artifact.
+// typelayer.NewEngine refuses to start without an artifact.
 func SkipWithoutArtifact(t testing.TB) {
 	t.Helper()
 	if cause := artifactMissing(); cause != "" {
@@ -70,22 +75,24 @@ func artifactMissing() string {
 // given tables for tenant.Default at TestServerVersion in UTC. It skips the
 // test when the artifact is absent or does not load (fails it under
 // WAVEHOUSE_TEST_REQUIRE_CHTYPES=1), and closes the Engine when the test ends.
-func TestEngine(t testing.TB, tables ...*discovery.TableSchema) *Engine {
+func TestEngine(t testing.TB, tables ...*discovery.TableSchema) *typelayer.Engine {
 	t.Helper()
 	SkipWithoutArtifact(t)
-	eng, err := NewEngine(Config{})
+	eng, err := typelayer.NewEngine(typelayer.Config{})
 	if err != nil {
 		skipUnlessRequired(t, err.Error())
 	}
 	t.Cleanup(eng.Close)
 
 	eng.Bind(tenant.Default, TestServerVersion, "UTC", tables)
-	if cause := eng.tenantCause(tenant.Default); cause != "" {
+	if cause := eng.TenantCause(tenant.Default); cause != "" {
 		skipUnlessRequired(t, cause)
 	}
 	return eng
 }
 
+// skipUnlessRequired skips t because the artifact cannot serve it, naming the command that
+// installs it — or fails t under WAVEHOUSE_TEST_REQUIRE_CHTYPES=1.
 func skipUnlessRequired(t testing.TB, cause string) {
 	t.Helper()
 	if os.Getenv(RequireEnv) == "1" {

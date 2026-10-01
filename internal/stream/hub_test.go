@@ -22,7 +22,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
-	"github.com/Wave-RF/WaveHouse/internal/typelayer"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer/typelayertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -498,7 +498,7 @@ func col(name, chType string) discovery.Column {
 func chtypesHub(tb testing.TB, store PolicySource, metric *Metrics, tables ...*discovery.TableSchema) *Hub {
 	tb.Helper()
 	hub := NewHub(store, nil, metric)
-	hub.RowEvaluator = NewRowEvaluator(typelayer.TestEngine(tb, tables...))
+	hub.RowEvaluator = NewRowEvaluator(typelayertest.TestEngine(tb, tables...))
 	return hub
 }
 
@@ -1586,28 +1586,34 @@ func TestHub_SchemaFrame_DroppedAnnouncementDropsItsRow(t *testing.T) {
 
 // TestHub_SubscribeSchemaFrame_ExcludesComputedColumns: the connect-time
 // announcement comes from the registry while every event's list comes from the
-// envelope, which carries only insertable columns. If the two disagreed, the
-// very first event would force a pointless drift re-announcement.
+// envelope, which carries the type layer's wire columns — no MATERIALIZED,
+// ALIAS or EPHEMERAL column. If the two disagreed, the very first event would
+// force a pointless drift re-announcement. The envelope side is read off a
+// compiled handle, as ingest builds it, not written down here.
 func TestHub_SubscribeSchemaFrame_ExcludesComputedColumns(t *testing.T) {
 	t.Parallel()
-	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
-		{Name: "clicks", Columns: []discovery.Column{
-			{Name: "page", Type: "String"},
-			{Name: "digest", Type: "String", DefaultKind: "MATERIALIZED", HasDefault: true},
-			{Name: "country", Type: "String"},
-		}},
-	})
-	hub := NewHub(nil, fixedRegistry(reg), nil)
+	table := &discovery.TableSchema{Name: "clicks", Columns: []discovery.Column{
+		{Name: "page", Type: "String", Position: 1},
+		{Name: "digest", Type: "String", DefaultKind: "MATERIALIZED", DefaultExpression: "upper(page)", HasDefault: true, Position: 2},
+		{Name: "raw", Type: "String", DefaultKind: "EPHEMERAL", HasDefault: true, Position: 3},
+		{Name: "country", Type: "String", Position: 4},
+	}}
+	tbl, err := typelayertest.TestEngine(t, table).Table(tenant.Default, "clicks")
+	require.NoError(t, err)
+	envelope := tbl.WireColumns
+	tbl.Release()
 
+	hub := NewHub(nil, fixedRegistry(testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{table})), nil)
 	sub := NewSubscriber(nil, nil)
 	f, ok := hub.SubscribeSchemaFrame(tenant.Default, "clicks", "public", sub)
 	require.True(t, ok)
 	cols := frameColumns(t, f)
+	assert.Equal(t, envelope, cols)
 	assert.Equal(t, []string{"page", "country"}, cols)
 
 	// The first event announces nothing new, because the lists agree.
 	hub.Add(topicOf("clicks"), "public", sub)
-	hub.Broadcast(topicOf("clicks"), rawEventCols(t, "clicks", "t1", cols,
+	hub.Broadcast(topicOf("clicks"), rawEventCols(t, "clicks", "t1", envelope,
 		map[string]any{"page": "/a", "country": "US"}))
 	_, row := recvEventCols(t, sub, cols)
 	assert.Equal(t, "/a", row["page"])

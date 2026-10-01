@@ -38,6 +38,25 @@ func IsUnavailable(err error) bool {
 	return errors.As(err, &u)
 }
 
+// RoleRefused reports that a role's projection of a table does not compile,
+// while the table itself does. Only Engine.RoleTable returns it.
+//
+// Unlike Unavailable it is a standing condition: it follows from the role's
+// insert policy and the table's schema, and the refusal is cached for the
+// schema generation, so the same request fails the same way until an operator
+// changes one of them. A caller must not answer it with a retry hint.
+type RoleRefused struct {
+	Tenant tenant.ID
+	Table  string
+	// Cause is the operator-facing reason: ClickHouse's own compile refusal,
+	// or the shape the role asked for that cannot be expressed.
+	Cause string
+}
+
+func (e *RoleRefused) Error() string {
+	return fmt.Sprintf("chtypes cannot compile the role's schema for tenant %q table %q: %s", e.Tenant, e.Table, e.Cause)
+}
+
 // ErrColumnsDrift is returned by ParseRow when the envelope's column list is
 // not an INSERT column list the current compiled handle accepts: it names a
 // column the handle does not export, or names one twice. The event predates a

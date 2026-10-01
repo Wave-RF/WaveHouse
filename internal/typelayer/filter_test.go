@@ -38,7 +38,7 @@ const sampleRow = `[7, "acme", "2026-01-15 10:30:00", "12.50", -5, 0.1, ["a"]]`
 
 func parsedRow(t *testing.T) (*Table, *Row) {
 	t.Helper()
-	eng := TestEngine(t, rowsTable())
+	eng := testEngine(t, rowsTable())
 	tbl, err := eng.Table(tenant.Default, "rows")
 	require.NoError(t, err)
 	t.Cleanup(tbl.Release)
@@ -175,7 +175,7 @@ func intDomain(typ string) (*big.Int, *big.Int) {
 // is the canonical spelling of a value the column can hold, and false
 // otherwise — never an over-admit, and never a thrown row.
 func TestVisible_IntegerClaimsMatchExactlyWhatFits(t *testing.T) {
-	eng := TestEngine(t, intsTable())
+	eng := testEngine(t, intsTable())
 	tbl, err := eng.Table(tenant.Default, "ints")
 	require.NoError(t, err)
 	t.Cleanup(tbl.Release)
@@ -296,7 +296,7 @@ func storedRow(t *testing.T, tbl *Table, tenant string) *Row {
 // for all of them, so the two read surfaces disagreed. With the encoding they
 // agree.
 func TestVisible_EscapedStringParamsMatchTheStoredValue(t *testing.T) {
-	eng := TestEngine(t, rowsTable())
+	eng := testEngine(t, rowsTable())
 	tbl, err := eng.Table(tenant.Default, "rows")
 	require.NoError(t, err)
 	t.Cleanup(tbl.Release)
@@ -430,7 +430,7 @@ func TestVisibleWithReason_LabelsTheCause(t *testing.T) {
 // refusal and every predicate over it withholds (measured on the 26.6
 // artifact: ParseBlock reports no call-level error for a malformed row).
 func TestParseRow_ColumnsDriftIsAnError(t *testing.T) {
-	eng := TestEngine(t, rowsTable())
+	eng := testEngine(t, rowsTable())
 	tbl, err := eng.Table(tenant.Default, "rows")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -477,7 +477,7 @@ func defaultsTable() *discovery.TableSchema {
 // full-width row would have stored as NULL — and a DEFAULT over a listed
 // column is computed from the listed value.
 func TestParseRow_ColumnSubsetTakesTheServersDefaults(t *testing.T) {
-	eng := TestEngine(t, defaultsTable())
+	eng := testEngine(t, defaultsTable())
 	tbl, err := eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -513,7 +513,7 @@ func TestParseRow_ColumnSubsetTakesTheServersDefaults(t *testing.T) {
 }
 
 func TestParseRow_AcceptsALineWithOrWithoutNewline(t *testing.T) {
-	eng := TestEngine(t, rowsTable())
+	eng := testEngine(t, rowsTable())
 	tbl, err := eng.Table(tenant.Default, "rows")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -576,7 +576,7 @@ func TestFilterCache_BoundedUnderTenantValueChurn(t *testing.T) {
 // makes the cache not a DoS, and it must be a bound on the TABLE — a pool of
 // handles must not multiply it.
 func TestFilterCache_BudgetIsSplitAcrossTheHandlePool(t *testing.T) {
-	eng := TestEngine(t, rowsTable())
+	eng := testEngine(t, rowsTable())
 	tbl, err := eng.Table(tenant.Default, "rows")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -595,7 +595,7 @@ func TestFilterCache_BudgetIsSplitAcrossTheHandlePool(t *testing.T) {
 // TestFilterCache_GenerationInvalidatesEntries: a filter only answers for the
 // schema handle it was compiled against, so a rebind must not reuse one.
 func TestFilterCache_GenerationInvalidatesEntries(t *testing.T) {
-	eng := TestEngine(t, rowsTable())
+	eng := testEngine(t, rowsTable())
 
 	visible := func() bool {
 		tbl, err := eng.Table(tenant.Default, "rows")
@@ -612,7 +612,7 @@ func TestFilterCache_GenerationInvalidatesEntries(t *testing.T) {
 	// over it are rebuilt, while the wire arity stays the same.
 	changed := rowsTable()
 	changed.Columns[0].Type = "UInt16"
-	eng.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{changed})
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{changed})
 	assert.True(t, visible(), "a rebind recompiles rather than reusing a freed handle")
 }
 
@@ -645,7 +645,7 @@ func TestVisible_ConcurrentSubscribers(t *testing.T) {
 // safe; a slot chosen per call rather than per Row would show up here as a
 // filter and a block on different handles.
 func TestTable_ConcurrentAcrossThePool(t *testing.T) {
-	eng := TestEngine(t, rowsTable())
+	eng := testEngine(t, rowsTable())
 
 	const goroutines = 16
 	var wg sync.WaitGroup

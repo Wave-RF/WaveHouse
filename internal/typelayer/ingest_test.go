@@ -15,7 +15,7 @@ import (
 
 func ingestTable(t *testing.T) *Table {
 	t.Helper()
-	eng := TestEngine(t, eventsTable())
+	eng := testEngine(t, eventsTable())
 	tbl, err := eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
 	t.Cleanup(tbl.Release)
@@ -93,8 +93,10 @@ func TestIngest_OverflowIsStoredTruth(t *testing.T) {
 }
 
 // TestIngest_ComputedColumnsAreRejectedPerRecord: a record naming a
-// MATERIALIZED, ALIAS or EPHEMERAL column gets ClickHouse's own 117 and the
-// rest of the batch still gets verdicts — no WaveHouse-side guard needed.
+// MATERIALIZED or ALIAS column gets ClickHouse's own 117 and the rest of the
+// batch still gets verdicts — no WaveHouse-side guard needed. An EPHEMERAL
+// column is the one non-stored kind a record may name: its value feeds the
+// DEFAULT over it and is never exported.
 func TestIngest_ComputedColumnsAreRejectedPerRecord(t *testing.T) {
 	schema := &discovery.TableSchema{
 		Name: "computed",
@@ -103,9 +105,10 @@ func TestIngest_ComputedColumnsAreRejectedPerRecord(t *testing.T) {
 			{Name: "e", Type: "UInt8", DefaultKind: "EPHEMERAL", HasDefault: true, Position: 2},
 			{Name: "d", Type: "UInt8", DefaultKind: "DEFAULT", DefaultExpression: "e + 1", HasDefault: true, Position: 3},
 			{Name: "a", Type: "UInt8", DefaultKind: "ALIAS", DefaultExpression: "id + 2", HasDefault: true, Position: 4},
+			{Name: "m", Type: "UInt32", DefaultKind: "MATERIALIZED", DefaultExpression: "id * 2", HasDefault: true, Position: 5},
 		},
 	}
-	eng := TestEngine(t, schema)
+	eng := testEngine(t, schema)
 	tbl, err := eng.Table(tenant.Default, "computed")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -117,20 +120,107 @@ func TestIngest_ComputedColumnsAreRejectedPerRecord(t *testing.T) {
 		`{"id":2,"e":5}`,
 		`{"id":3,"a":9}`,
 		`{"id":4,"d":7}`,
+		`{"id":5,"m":1}`,
 	}, "\n") + "\n"
 	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(body))
 	require.NoError(t, err)
-	require.Len(t, batch.Rows, 4)
+	require.Len(t, batch.Rows, 5)
 
-	assert.True(t, batch.Rows[0].Accepted)
-	assert.Equal(t, 117, batch.Rows[1].Code)
-	assert.Contains(t, batch.Rows[1].Message, "e")
+	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
+	assert.Equal(t, "[1, 1]", string(batch.Rows[0].Line), "an absent EPHEMERAL takes its own default")
+	require.True(t, batch.Rows[1].Accepted, batch.Rows[1].Message)
+	assert.Equal(t, "[2, 6]", string(batch.Rows[1].Line), "the EPHEMERAL value feeds the DEFAULT and is not exported")
 	assert.Equal(t, 117, batch.Rows[2].Code)
 	assert.Contains(t, batch.Rows[2].Message, "a")
-	assert.True(t, batch.Rows[3].Accepted)
+	require.True(t, batch.Rows[3].Accepted, batch.Rows[3].Message)
 	// ClickHouse's writer separates cells with ", " — the worker inserts these
 	// bytes verbatim, so nothing may re-render them.
 	assert.Equal(t, "[4, 7]", string(batch.Rows[3].Line))
+	assert.Equal(t, 117, batch.Rows[4].Code)
+	assert.Contains(t, batch.Rows[4].Message, "m")
+}
+
+// TestIngest_EphemeralInputFollowsTheFormat: the formats that name their
+// columns accept an EPHEMERAL one; positional CSV/TSV map their fields to the
+// wire columns, so an ephemeral slot is not one of them.
+func TestIngest_EphemeralInputFollowsTheFormat(t *testing.T) {
+	schema := &discovery.TableSchema{
+		Name: "eph",
+		Columns: []discovery.Column{
+			{Name: "page", Type: "String", Position: 1},
+			{Name: "ip", Type: "String", DefaultKind: "EPHEMERAL", DefaultExpression: "''", HasDefault: true, Position: 2},
+			{Name: "ip_len", Type: "UInt64", DefaultKind: "DEFAULT", DefaultExpression: "length(ip)", HasDefault: true, Position: 3},
+		},
+	}
+	eng := testEngine(t, schema)
+	tbl, err := eng.Table(tenant.Default, "eph")
+	require.NoError(t, err)
+	defer tbl.Release()
+	require.Equal(t, []string{"page", "ip_len"}, tbl.WireColumns)
+
+	for _, tc := range []struct {
+		name   string
+		format Format
+		body   string
+		want   string
+	}{
+		{"JSONEachRow", FormatJSONEachRow, `{"page":"/a","ip":"1.2.3.4"}` + "\n", `["\/a", 7]`},
+		{"CSVWithNames", FormatCSVWithNames, "page,ip\n/a,1.2.3.4\n", `["\/a", 7]`},
+		{"TSVWithNames", FormatTSVWithNames, "ip\tpage\n1.2.3.4\t/a\n", `["\/a", 7]`},
+		{"CSV is the wire columns", FormatCSV, "/a,3\n", `["\/a", 3]`},
+		{"TSV is the wire columns", FormatTSV, "/a\t3\n", `["\/a", 3]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			batch, err := tbl.Ingest(tc.format, []byte(tc.body))
+			require.NoError(t, err)
+			require.Nil(t, batch.Refused)
+			require.Len(t, batch.Rows, 1)
+			require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
+			assert.Equal(t, tc.want, string(batch.Rows[0].Line))
+		})
+	}
+
+	// A positional body has no slot for the ephemeral column: a third field is
+	// an error, not ip.
+	batch, err := tbl.IngestWith(FormatCSV, IngestOptions{StrictPositional: true}, []byte("/a,1.2.3.4,7\n"))
+	require.NoError(t, err)
+	require.Len(t, batch.Rows, 1)
+	assert.False(t, batch.Rows[0].Accepted)
+}
+
+// TestIngest_EphemeralAServerExpressionReadsIsRefused: the server computes a
+// MATERIALIZED column itself from the inserted row, which never carries an
+// ephemeral value, so an EPHEMERAL column one reads would be silently ignored
+// there — even though a DEFAULT reads it too. It is refused instead (117),
+// while another EPHEMERAL column of the same table that only a DEFAULT reads
+// is still accepted.
+func TestIngest_EphemeralAServerExpressionReadsIsRefused(t *testing.T) {
+	schema := &discovery.TableSchema{
+		Name: "eph",
+		Columns: []discovery.Column{
+			{Name: "id", Type: "UInt32", Position: 1},
+			{Name: "e", Type: "UInt8", DefaultKind: "EPHEMERAL", HasDefault: true, Position: 2},
+			{Name: "m", Type: "UInt16", DefaultKind: "MATERIALIZED", DefaultExpression: "e * 2", HasDefault: true, Position: 3},
+			{Name: "de", Type: "UInt16", DefaultKind: "DEFAULT", DefaultExpression: "e + 1", HasDefault: true, Position: 4},
+			{Name: "f", Type: "UInt8", DefaultKind: "EPHEMERAL", HasDefault: true, Position: 5},
+			{Name: "d", Type: "UInt16", DefaultKind: "DEFAULT", DefaultExpression: "f + 1", HasDefault: true, Position: 6},
+			{Name: "md", Type: "UInt16", DefaultKind: "MATERIALIZED", DefaultExpression: "d * 2", HasDefault: true, Position: 7},
+		},
+	}
+	eng := testEngine(t, schema)
+	tbl, err := eng.Table(tenant.Default, "eph")
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"id":1,"e":5}`+"\n"+`{"id":2,"f":5}`+"\n"))
+	require.NoError(t, err)
+	require.Len(t, batch.Rows, 2)
+	assert.Equal(t, 117, batch.Rows[0].Code, "e feeds a MATERIALIZED column the server computes without it")
+	assert.Contains(t, batch.Rows[0].Message, "e")
+	// md reads d, which travels on the wire already computed from f, so the
+	// server's md agrees with this one: f is accepted.
+	require.True(t, batch.Rows[1].Accepted, batch.Rows[1].Message)
+	assert.Equal(t, "[2, 1, 6]", string(batch.Rows[1].Line))
 }
 
 // TestInsertSettings_AreAllSupported: every setting typelayer passes must be one
@@ -262,7 +352,7 @@ func gatedTable() *discovery.TableSchema {
 // every record is refused (455 and 44 on the 26.6 and 26.8 artifacts), which
 // is what this table got on every call before.
 func TestIngest_TypeGatedColumnsInsertAndFilter(t *testing.T) {
-	eng := TestEngine(t, gatedTable())
+	eng := testEngine(t, gatedTable())
 	tbl, err := eng.Table(tenant.Default, "gated")
 	require.NoError(t, err)
 	defer tbl.Release()
@@ -304,4 +394,53 @@ func TestIngest_TypeGatedColumnsInsertAndFilter(t *testing.T) {
 		assert.NotEqual(t, chtypes.Accepted, res.Outcome, "%s without the gates", ts.Type)
 		assert.Contains(t, []int{44, 455}, res.ErrCode, "%s without the gates: %s", ts.Type, res.ErrMsg)
 	}
+}
+
+// TestIngest_EphemeralNoDefaultReadsStaysUnlisted: an EPHEMERAL column is
+// listed only when a DEFAULT reads it. Listing one nothing reads makes the
+// artifact reject, with no code, every record that omits it in a table that
+// computes any column, so it stays refused (117) — its value would change
+// nothing — and records omitting the listed ones still get verdicts.
+func TestIngest_EphemeralNoDefaultReadsStaysUnlisted(t *testing.T) {
+	schema := &discovery.TableSchema{
+		Name: "eph",
+		Columns: []discovery.Column{
+			{Name: "id", Type: "UInt32", Position: 1},
+			{Name: "e1", Type: "UInt8", DefaultKind: "EPHEMERAL", HasDefault: true, Position: 2},
+			{Name: "e2", Type: "String", DefaultKind: "EPHEMERAL", DefaultExpression: "'zz'", HasDefault: true, Position: 3},
+			{Name: "unread", Type: "String", DefaultKind: "EPHEMERAL", DefaultExpression: "''", HasDefault: true, Position: 4},
+			{Name: "d1", Type: "UInt16", DefaultKind: "DEFAULT", DefaultExpression: "e1 + 1", HasDefault: true, Position: 5},
+			{Name: "d2", Type: "UInt64", DefaultKind: "DEFAULT", DefaultExpression: "length(e2)", HasDefault: true, Position: 6},
+			{Name: "m", Type: "UInt64", DefaultKind: "MATERIALIZED", DefaultExpression: "id * 2", HasDefault: true, Position: 7},
+		},
+	}
+	eng := testEngine(t, schema)
+	tbl, err := eng.Table(tenant.Default, "eph")
+	require.NoError(t, err)
+	defer tbl.Release()
+	require.Equal(t, []string{"id", "d1", "d2"}, tbl.WireColumns)
+
+	body := strings.Join([]string{
+		`{"id":1}`,
+		`{"id":2,"e1":5}`,
+		`{"id":3,"e2":"abc"}`,
+		`{"id":4,"e1":5,"e2":"abc"}`,
+		`{"id":5,"unread":"x"}`,
+	}, "\n") + "\n"
+	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(body))
+	require.NoError(t, err)
+	require.Len(t, batch.Rows, 5)
+	for i, want := range []string{"[1, 1, 2]", "[2, 6, 2]", "[3, 1, 3]", "[4, 6, 3]"} {
+		require.True(t, batch.Rows[i].Accepted, "record %d: %s", i+1, batch.Rows[i].Message)
+		assert.Equal(t, want, string(batch.Rows[i].Line), "record %d", i+1)
+	}
+	assert.Equal(t, 117, batch.Rows[4].Code)
+	assert.Contains(t, batch.Rows[4].Message, "unread")
+
+	// A header that leaves a listed EPHEMERAL column out is the same omission.
+	batch, err = tbl.Ingest(FormatCSVWithNames, []byte("id,e1\n6,5\n"))
+	require.NoError(t, err)
+	require.Nil(t, batch.Refused)
+	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
+	assert.Equal(t, "[6, 6, 2]", string(batch.Rows[0].Line))
 }

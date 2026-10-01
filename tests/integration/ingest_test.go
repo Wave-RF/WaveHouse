@@ -311,11 +311,11 @@ func TestIngest_WithNamesUnknownHeader_Is400WithCode117(t *testing.T) {
 	eventuallyRows(t, table, "1", 1)
 }
 
-// A column the role may not write is not in the schema its records are
-// parsed against, so a record naming one is ClickHouse's per-record refusal —
-// 400 with code 117 — where it used to be the gateway's 403. The same role
-// writing without it still lands, the column taking the table's default
-// rather than any value of the caller's.
+// A column the role may not write is one no INSERT may name in the schema its
+// records are parsed against, so a record naming one is ClickHouse's
+// per-record refusal — 400 with code 117 — where it used to be the gateway's
+// 403. The same role writing without it still lands, the column taking the
+// table's default rather than any value of the caller's.
 func TestIngest_DeniedColumn_IsClickHouseCode117(t *testing.T) {
 	t.Parallel()
 	table := createTable(t, "user_id String, secret String", "ORDER BY user_id")
@@ -333,6 +333,75 @@ func TestIngest_DeniedColumn_IsClickHouseCode117(t *testing.T) {
 	require.Equal(t, http.StatusOK, status, "body=%v", body)
 	eventuallyRows(t, table, "user_id = 'd2' AND secret = ''", 1)
 	eventuallyRows(t, table, "user_id = 'd1'", 0)
+}
+
+// Denying a column that DEFAULT and MATERIALIZED expressions read leaves the
+// role able to insert, and what lands is what the server computes with the
+// denied column at its own default: the DEFAULT column the role writes is
+// computed at the gateway from that same default, so the two agree.
+func TestIngest_DeniedColumnReadByExpressions_StoresTheServersValues(t *testing.T) {
+	t.Parallel()
+	table := createTable(t,
+		"user_id String, ip String DEFAULT '0.0.0.0', ip_len UInt64 DEFAULT length(ip), "+
+			"ip_hash UInt64 MATERIALIZED cityHash64(ip)",
+		"ORDER BY user_id")
+	withPolicy(t, policy.Policy{Tables: map[string]policy.TablePolicy{
+		table: {"writer": {Insert: &policy.InsertPermissions{DenyColumns: []string{"ip"}}}},
+	}})
+	writer := bearer(t, "writer", nil)
+
+	status, body := postIngest(t, table, "application/json", `{"user_id":"m1"}`, writer)
+	require.Equal(t, http.StatusOK, status, "body=%v", body)
+	status, body = postIngest(t, table, "application/json", `{"user_id":"m2","ip":"1.2.3.4"}`, writer)
+	require.Equal(t, http.StatusBadRequest, status, "body=%v", body)
+	assert.EqualValues(t, 117, body["exception_code"])
+
+	eventuallyRows(t, table, "user_id = 'm1' AND ip = '0.0.0.0' AND ip_len = 7 AND ip_hash = cityHash64('0.0.0.0')", 1)
+	eventuallyRows(t, table, "user_id = 'm2'", 0)
+}
+
+// An _eq check on a column the role may not otherwise write stamps it: a
+// record omitting it lands with the claim, one supplying the claim lands, and
+// one supplying anything else is refused.
+func TestIngest_AutoInject_StampsAColumnTheRoleMayNotWrite(t *testing.T) {
+	t.Parallel()
+	table := createTable(t, "user_id String, org_id String", "ORDER BY user_id")
+	tmpl := "{{ jwt.org_id }}"
+	withPolicy(t, policy.Policy{Tables: map[string]policy.TablePolicy{
+		table: {"writer": {Insert: &policy.InsertPermissions{
+			AllowColumns: []string{"user_id"},
+			Check:        map[string]policy.Filter{"org_id": {Eq: &tmpl}},
+		}}},
+	}})
+	writer := bearer(t, "writer", map[string]any{"org_id": "acme"})
+
+	status, body := postIngest(t, table, "application/json", `{"user_id":"s1"}`, writer)
+	require.Equal(t, http.StatusOK, status, "absent → stamped; body=%v", body)
+	status, body = postIngest(t, table, "application/json", `{"user_id":"s2","org_id":"acme"}`, writer)
+	require.Equal(t, http.StatusOK, status, "supplied and matching; body=%v", body)
+	status, body = postIngest(t, table, "application/json", `{"user_id":"s3","org_id":"other"}`, writer)
+	require.Equal(t, http.StatusForbidden, status, "supplied and not matching; body=%v", body)
+
+	eventuallyRows(t, table, "user_id IN ('s1', 's2') AND org_id = 'acme'", 2)
+	eventuallyRows(t, table, "user_id = 's3'", 0)
+}
+
+// An EPHEMERAL column's value feeds the DEFAULT over it, in the formats that
+// name their columns, and the stored row holds what that DEFAULT computed.
+func TestIngest_EphemeralColumn_FeedsTheStoredDefault(t *testing.T) {
+	t.Parallel()
+	table := createTable(t, "user_id String, raw String EPHEMERAL '', raw_len UInt64 DEFAULT length(raw)", "ORDER BY user_id")
+
+	status, body := postIngest(t, table, "application/json", `{"user_id":"e1","raw":"abcd"}`, "")
+	require.Equal(t, http.StatusOK, status, "body=%v", body)
+	status, body = postIngest(t, table, "text/csv; header=present", "raw,user_id\nabcdef,e2\n", "")
+	require.Equal(t, http.StatusOK, status, "body=%v", body)
+	status, body = postIngest(t, table, "application/json", `{"user_id":"e3"}`, "")
+	require.Equal(t, http.StatusOK, status, "body=%v", body)
+
+	eventuallyRows(t, table, "user_id = 'e1' AND raw_len = 4", 1)
+	eventuallyRows(t, table, "user_id = 'e2' AND raw_len = 6", 1)
+	eventuallyRows(t, table, "user_id = 'e3' AND raw_len = 0", 1)
 }
 
 // An _eq check fills a record that omits its column from the claim, keeps a

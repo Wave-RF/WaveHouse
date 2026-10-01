@@ -1,6 +1,9 @@
 package api
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+)
 
 // Framing: everything ingest reads out of the bytes it handles, the request
 // body and the rows ClickHouse exported from it. It is deliberately small —
@@ -40,15 +43,24 @@ import "encoding/json"
 // A raw newline inside a string is illegal JSON, so leaving those alone costs
 // nothing and keeps the caller's bytes the caller's.
 //
-// ok is false when the brackets do not balance — a truncated upload, or a
-// structural syntax error — which is a whole-request 400. Nothing is published
-// from a body we cannot frame.
-func reframeArray(b []byte) (elements int, ok bool) {
+// An error is a whole-request 400, and nothing is published from a body we
+// cannot frame: errUnterminatedArray when the brackets do not balance — a
+// truncated upload, or a structural syntax error — and errAfterArray when
+// anything but whitespace follows the array's closing ']'. That tail is not a
+// record of the array, and framing it as more records would publish what the
+// caller never put in the batch.
+func reframeArray(b []byte) (elements int, err error) {
 	depth, commas := 0, 0
-	sawValue := false
+	sawValue, closed := false, false
 	inStr, esc := false, false
 	for i := range b {
 		c := b[i]
+		if closed {
+			if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+				return 0, errAfterArray
+			}
+			continue
+		}
 		switch {
 		case esc:
 			esc = false
@@ -66,8 +78,12 @@ func reframeArray(b []byte) (elements int, ok bool) {
 			}
 		case c == ']' || c == '}':
 			depth--
-			if c == ']' && depth == 0 {
+			if depth == 0 {
+				if c != ']' {
+					return 0, errUnterminatedArray // the array's '[' closed by a '}'
+				}
 				b[i] = ' '
+				closed = true
 			}
 		case c == ',' && depth == 1:
 			b[i] = '\n'
@@ -80,13 +96,20 @@ func reframeArray(b []byte) (elements int, ok bool) {
 		}
 	}
 	if depth != 0 || inStr {
-		return 0, false
+		return 0, errUnterminatedArray
 	}
 	if !sawValue {
-		return 0, true // `[]`, possibly with whitespace inside
+		return 0, nil // `[]`, possibly with whitespace inside
 	}
-	return commas + 1, true
+	return commas + 1, nil
 }
+
+// The two ways reframeArray refuses a body, each the tail of the caller's
+// "invalid json: …" 400.
+var (
+	errUnterminatedArray = errors.New("unterminated json array")
+	errAfterArray        = errors.New("content after the closing ']' of the json array")
+)
 
 // cellAt returns the k-th top-level cell of one JSONCompactEachRow line — a
 // `[v0, v1, …]` array as ClickHouse's own writer produced it — without decoding

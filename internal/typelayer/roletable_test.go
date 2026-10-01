@@ -2,6 +2,8 @@ package typelayer
 
 import (
 	"encoding/json"
+	"errors"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -37,7 +39,7 @@ func roleTableFor(t *testing.T, eng *Engine, shape RoleShape) *Table {
 // TestRoleTable_IdentityShapeIsTheBaseTable: a role that may write everything
 // and injects nothing costs no second compile and no cache entry.
 func TestRoleTable_IdentityShapeIsTheBaseTable(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	base, err := eng.Table(tenant.Default, "orders")
 	require.NoError(t, err)
@@ -51,15 +53,17 @@ func TestRoleTable_IdentityShapeIsTheBaseTable(t *testing.T) {
 	assert.Equal(t, 0, base.roles.len())
 }
 
-// TestRoleTable_DeniedColumnIsAbsentFromTheSchema: a column the role may not
-// write is simply not in the compiled DDL, so a record
-// naming it is ClickHouse's own per-row code 117 rather than a Go key walk's
-// 403 — and the exported row carries the ROLE's column list.
-func TestRoleTable_DeniedColumnIsAbsentFromTheSchema(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+// TestRoleTable_DeniedColumnIsUnnamableAndOffTheWire: a column the role may
+// not write is declared MATERIALIZED, so a record naming it is ClickHouse's
+// own per-row code 117 rather than a Go key walk's 403 — and the exported row
+// carries the ROLE's column list.
+func TestRoleTable_DeniedColumnIsUnnamableAndOffTheWire(t *testing.T) {
+	eng := testEngine(t, ordersTable())
 	tbl := roleTableFor(t, eng, RoleShape{Columns: []string{"id", "tenant", "amount"}})
 
 	assert.Equal(t, []string{"id", "tenant", "amount"}, tbl.WireColumns)
+	assert.Equal(t, []string{"id", "tenant", "secret", "amount"}, compiledColumnNames(tbl.pool.first().schema),
+		"still declared, so an expression or check over it compiles")
 
 	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(
 		`{"id":1,"tenant":"acme","amount":5}`+"\n"+
@@ -80,7 +84,7 @@ func TestRoleTable_DeniedColumnIsAbsentFromTheSchema(t *testing.T) {
 // the 26.6 and 26.8 artifacts: DEFAULT '<claim>' fills a column the record
 // omits, and a value the record DOES supply still wins.
 func TestRoleTable_DefaultInjectsWhenAbsentAndLosesToASuppliedValue(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 	tbl := roleTableFor(t, eng, RoleShape{Defaults: map[string]string{"tenant": "acme"}})
 
 	assert.Equal(t, []string{"id", "tenant", "secret", "amount"}, tbl.WireColumns)
@@ -103,7 +107,7 @@ func TestRoleTable_DefaultInjectsWhenAbsentAndLosesToASuppliedValue(t *testing.T
 // breakout attempt is the case that matters — it must not add, remove or
 // retype a single column.
 func TestRoleTable_LiteralEscaping(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	for name, value := range map[string]string{
 		"apostrophe":       "O'Brien",
@@ -141,22 +145,125 @@ func TestRoleTable_LiteralEscaping(t *testing.T) {
 }
 
 // TestRoleTable_UnparseableLiteralFailsClosed: a literal the column's reader
-// cannot read is a compile refusal (ClickHouse code 6). It must be Unavailable
-// — a 503 — never a handle that silently drops the injection.
+// cannot read is a compile refusal (ClickHouse code 6). It must be a
+// RoleRefused — never a handle that silently drops the injection, and never an
+// Unavailable, which a caller answers with a retry hint.
 func TestRoleTable_UnparseableLiteralFailsClosed(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	_, err := eng.RoleTable(tenant.Default, "orders", RoleShape{Defaults: map[string]string{"amount": "abc"}})
 	require.Error(t, err)
-	assert.True(t, IsUnavailable(err))
-	assert.Contains(t, err.Error(), "orders")
+	refused, ok := errors.AsType[*RoleRefused](err)
+	require.True(t, ok, "%T: %v", err, err)
+	assert.False(t, IsUnavailable(err))
+	assert.Equal(t, "orders", refused.Table)
+	assert.Contains(t, refused.Cause, "code 6")
+}
+
+// TestRoleTable_DeniedColumnAnExpressionReadsStillCompiles: dropping a denied
+// column would leave every expression over it uncompilable and refuse the
+// whole role. Re-declared MATERIALIZED with what the server stores when the
+// worker omits it, the role compiles, and a DEFAULT column the role DOES write
+// is computed from the same value the server would use — its own DEFAULT, or
+// its type's default.
+func TestRoleTable_DeniedColumnAnExpressionReadsStillCompiles(t *testing.T) {
+	ts := &discovery.TableSchema{
+		Name: "visits",
+		Columns: []discovery.Column{
+			{Name: "page", Type: "String", Position: 1},
+			{Name: "ip", Type: "String", HasDefault: true, DefaultKind: "DEFAULT", DefaultExpression: "'0.0.0.0'", Position: 2},
+			{Name: "ip_hash", Type: "UInt64", HasDefault: true, DefaultKind: "MATERIALIZED", DefaultExpression: "cityHash64(ip)", Position: 3},
+			{Name: "ip_len", Type: "UInt64", HasDefault: true, DefaultKind: "DEFAULT", DefaultExpression: "length(ip)", Position: 4},
+			{Name: "n", Type: "Nullable(UInt8)", IsNullable: true, Position: 5},
+			{Name: "n_set", Type: "UInt8", HasDefault: true, DefaultKind: "DEFAULT", DefaultExpression: "isNotNull(n)", Position: 6},
+		},
+	}
+	eng := testEngine(t, ts)
+	tbl, err := eng.RoleTable(tenant.Default, "visits", RoleShape{Columns: []string{"page", "ip_len", "n_set"}})
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	assert.Equal(t, []string{"page", "ip_len", "n_set"}, tbl.WireColumns)
+	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(
+		`{"page":"/home"}`+"\n"+`{"page":"/a","ip":"1.2.3.4"}`+"\n"+`{"page":"/b","n":1}`+"\n"))
+	require.NoError(t, err)
+	require.Len(t, batch.Rows, 3)
+	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
+	assert.Equal(t, `["\/home", 7, 0]`, string(batch.Rows[0].Line), "length('0.0.0.0'), and n at its type default NULL")
+	assert.Equal(t, 117, batch.Rows[1].Code)
+	assert.Contains(t, batch.Rows[1].Message, "ip")
+	assert.Equal(t, 117, batch.Rows[2].Code)
+	assert.Contains(t, batch.Rows[2].Message, "n")
+
+	// A check over a denied column tests what the server will store there.
+	check, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"page":"/home"}`+"\n"+`{"page":"/b"}`+"\n"),
+		Predicate{Column: "ip", Op: "=", Values: []string{"0.0.0.0"}})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"", ""}, checkReasons(t, check))
+	check, err = tbl.Ingest(FormatJSONEachRow, []byte(`{"page":"/home"}`+"\n"),
+		Predicate{Column: "ip", Op: "=", Values: []string{"1.2.3.4"}})
+	require.NoError(t, err)
+	assert.Equal(t, []string{ReasonFilter}, checkReasons(t, check))
+}
+
+// TestRoleTable_ShapeWithNothingToWriteIsRefused: a role that may write no
+// plain or DEFAULT column would publish rows with no columns at all.
+func TestRoleTable_ShapeWithNothingToWriteIsRefused(t *testing.T) {
+	ts := ordersTable()
+	ts.Columns = append(ts.Columns, discovery.Column{
+		Name: "double", Type: "UInt64", HasDefault: true,
+		DefaultKind: "MATERIALIZED", DefaultExpression: "amount * 2", Position: 5,
+	})
+	eng := testEngine(t, ts)
+
+	for _, cols := range [][]string{{}, {"double"}, {"nosuch"}} {
+		_, err := eng.RoleTable(tenant.Default, "orders", RoleShape{Columns: cols})
+		refused, ok := errors.AsType[*RoleRefused](err)
+		require.True(t, ok, "%v: %T %v", cols, err, err)
+		assert.Contains(t, refused.Cause, "no plain or DEFAULT column")
+	}
+}
+
+// TestRoleTable_EphemeralFollowsTheRoleColumns: a record may supply an
+// EPHEMERAL column only when the role may write it. Denied, it is still
+// declared — the DEFAULT over it compiles and takes its own default — and a
+// record naming it is refused.
+func TestRoleTable_EphemeralFollowsTheRoleColumns(t *testing.T) {
+	ts := &discovery.TableSchema{
+		Name: "eph",
+		Columns: []discovery.Column{
+			{Name: "page", Type: "String", Position: 1},
+			{Name: "secret", Type: "String", Position: 2},
+			{Name: "ip", Type: "String", DefaultKind: "EPHEMERAL", HasDefault: true, Position: 3},
+			{Name: "ip_len", Type: "UInt64", DefaultKind: "DEFAULT", DefaultExpression: "length(ip)", HasDefault: true, Position: 4},
+		},
+	}
+	eng := testEngine(t, ts)
+	body := []byte(`{"page":"/a","ip":"1.2.3.4"}` + "\n")
+
+	allowed, err := eng.RoleTable(tenant.Default, "eph", RoleShape{Columns: []string{"page", "ip", "ip_len"}})
+	require.NoError(t, err)
+	batch, err := allowed.Ingest(FormatJSONEachRow, body)
+	allowed.Release()
+	require.NoError(t, err)
+	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
+	assert.Equal(t, `["\/a", 7]`, string(batch.Rows[0].Line))
+
+	denied, err := eng.RoleTable(tenant.Default, "eph", RoleShape{Columns: []string{"page", "ip_len"}})
+	require.NoError(t, err)
+	batch, err = denied.Ingest(FormatJSONEachRow, append(body, `{"page":"/b"}`+"\n"...))
+	denied.Release()
+	require.NoError(t, err)
+	assert.Equal(t, 117, batch.Rows[0].Code)
+	require.True(t, batch.Rows[1].Accepted, batch.Rows[1].Message)
+	assert.Equal(t, `["\/b", 0]`, string(batch.Rows[1].Line))
 }
 
 // TestRoleTable_ContradictoryShapeIsAnError: a default for a column the shape
 // does not carry cannot be expressed. Dropping it silently would turn "force
 // this value" into "whatever the caller sent".
 func TestRoleTable_ContradictoryShapeIsAnError(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	_, err := eng.RoleTable(tenant.Default, "orders", RoleShape{
 		Columns:  []string{"id", "amount"},
@@ -179,24 +286,24 @@ func TestRoleTable_DefaultIntoAComputedColumnIsRefused(t *testing.T) {
 		Name: "double", Type: "UInt64", HasDefault: true,
 		DefaultKind: "MATERIALIZED", DefaultExpression: "amount * 2", Position: 5,
 	})
-	eng := TestEngine(t, ts)
+	eng := testEngine(t, ts)
 
 	_, err := eng.RoleTable(tenant.Default, "orders", RoleShape{Defaults: map[string]string{"double": "1"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MATERIALIZED")
 
 	// A computed column is kept whatever the allow-list says: dropping it would
-	// change what the server computes.
+	// change what the server computes. So is a denied one, MATERIALIZED.
 	tbl := roleTableFor(t, eng, RoleShape{Columns: []string{"id", "amount"}})
 	assert.Equal(t, []string{"id", "amount"}, tbl.WireColumns)
-	assert.Equal(t, []string{"id", "amount", "double"}, compiledColumnNames(tbl.pool.first().schema))
+	assert.Equal(t, []string{"id", "tenant", "secret", "amount", "double"}, compiledColumnNames(tbl.pool.first().schema))
 }
 
 // TestRoleTable_CachedPerShapeAndGeneration: the same shape must reuse the
 // handle (a compile per request is the thing this cache exists to stop), a
 // different shape must not, and a rebind must invalidate both.
 func TestRoleTable_CachedPerShapeAndGeneration(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	shape := RoleShape{Columns: []string{"tenant", "id", "amount"}, Defaults: map[string]string{"tenant": "acme"}}
 	role := func(s RoleShape) *Table {
@@ -228,7 +335,7 @@ func TestRoleTable_CachedPerShapeAndGeneration(t *testing.T) {
 	// A rebind closes every projection; the next lookup compiles a fresh one.
 	changed := ordersTable()
 	changed.Columns[3].Type = "UInt32"
-	eng.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{changed})
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{changed})
 
 	after := role(shape)
 	assert.NotSame(t, first, after)
@@ -238,7 +345,7 @@ func TestRoleTable_CachedPerShapeAndGeneration(t *testing.T) {
 // TestRoleTable_NegativeEntryStopsRecompiling: a shape that will not compile
 // costs one compile and one log line per generation, like filterCache.
 func TestRoleTable_NegativeEntryStopsRecompiling(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	for range 3 {
 		_, err := eng.RoleTable(tenant.Default, "orders", RoleShape{Defaults: map[string]string{"amount": "abc"}})
@@ -254,7 +361,7 @@ func TestRoleTable_NegativeEntryStopsRecompiling(t *testing.T) {
 // tenant claims and are baked into compiled handles, so the cache must be
 // bounded exactly like filterCache.
 func TestRoleTable_BoundedUnderTenantValueChurn(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+	eng := testEngine(t, ordersTable())
 
 	base, err := eng.Table(tenant.Default, "orders")
 	require.NoError(t, err)
@@ -284,14 +391,35 @@ func TestRoleTable_BoundedUnderTenantValueChurn(t *testing.T) {
 	assert.Equal(t, `[1, "acme", "", 5]`, string(batch.Rows[0].Line))
 }
 
-// TestRoleTable_HasItsOwnHandlePool: a role shape holds its own single handle,
-// not the base table's pool (256 shapes x the pool would be unbounded memory).
-func TestRoleTable_HasItsOwnHandlePool(t *testing.T) {
-	eng := TestEngine(t, ordersTable())
+// TestRoleTable_PoolGrowsUnderContentionToALowerCap: a role shape has its own
+// pool, not the base table's. A quiet shape holds one handle; concurrent
+// inserts through it grow the pool like a base table's — one handle would
+// serialize the role's whole ingest — but only to min(GOMAXPROCS, 4), since a
+// table holds up to roleCacheSize shapes.
+func TestRoleTable_PoolGrowsUnderContentionToALowerCap(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(8))
+	eng := testEngine(t, ordersTable())
 	tbl := roleTableFor(t, eng, RoleShape{Defaults: map[string]string{"tenant": "acme"}})
-	assert.Len(t, tbl.pool.list(), roleHandles)
-	assert.Equal(t, int64(roleHandles), tbl.pool.limit.Load(), "a role shape never grows past its one handle")
 	assert.Nil(t, tbl.roles, "a projection is never itself projected")
+
+	p := tbl.pool
+	require.Len(t, p.list(), 1, "a quiet shape holds one handle")
+	assert.Equal(t, int64(4), p.limit.Load(), "min(GOMAXPROCS=8, 4): capped below the base table's 8")
+
+	held := make([]*schemaSlot, 0, 5)
+	for range 5 {
+		held = append(held, p.acquire())
+	}
+	assert.Len(t, p.list(), 4, "busy handles grow the pool to its cap and no further")
+	for _, s := range held {
+		p.release(s)
+	}
+
+	// The grown handles answer like the first: the injected default included.
+	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"id":1,"amount":5}`+"\n"))
+	require.NoError(t, err)
+	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
+	assert.Equal(t, `[1, "acme", "", 5]`, string(batch.Rows[0].Line))
 }
 
 func (c *roleCache) len() int {
