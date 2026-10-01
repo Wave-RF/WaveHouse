@@ -6,14 +6,15 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 )
 
@@ -60,13 +61,15 @@ var chReadSettingsFixed = map[string]string{
 	"output_format_json_named_tuples_as_objects":   "1",
 }
 
-// ClickHouse's own limits on the HTTP interface's query string, at their
-// defaults: http_max_field_value_size per field and http_max_uri_size for the
-// whole request line. Both count the percent-encoded text. Measured on
-// 24.8.14.39 and 26.6.3.62: a 131072-byte value is read and a 132096-byte one
-// is refused with code 1000 ("Field value too long"), and a 1 MiB value with
-// a codeless 400 — answers chFailureOf would read as an outage and a
-// misconfiguration rather than as a request that is too large.
+// ClickHouse's own limits on the HTTP interface's fields, at their defaults:
+// http_max_field_value_size per field — a query-string parameter, counted
+// percent-encoded, or a multipart form field — and http_max_uri_size for the
+// whole request line. Measured on 24.8.14.39 and 26.8.15.10: a 131072-byte
+// query-string value is read and a 131073-byte one is refused with code 1000
+// ("Field value too long"), as is a 200 KiB form field, and a 1 MiB value
+// with a codeless 400 — answers chFailureOf would read as an outage and a
+// misconfiguration rather than as a request that is too large. An external
+// table has no such limit: a 1.2 MiB one was read whole.
 const (
 	chMaxFieldBytes = 128 << 10
 	chMaxURIBytes   = 1 << 20
@@ -82,10 +85,15 @@ const defaultReadConns = 100
 // chRequest is one statement for ClickHouse's HTTP interface.
 type chRequest struct {
 	sql string
-	// params supply param_p0 … param_pN-1, positionally, for the {pN:…}
-	// placeholders query.BuildResult.NamedParams emitted, already encoded
-	// for ClickHouse's parameter reader.
-	params []string
+	// params supply param_<Name> for the {<Name>:String} placeholders
+	// query.BuildResult.Bind emitted, already encoded for ClickHouse's
+	// parameter reader. They ride on the query string.
+	params []query.Param
+	// tables are the external tables the statement's `in` lists read. With
+	// any, the request is multipart/form-data: the statement moves from the
+	// body into the query form field, one field per table describes it, and
+	// each table is a file part.
+	tables []query.Table
 	// settings are per-query ClickHouse settings (chReadSettings).
 	settings map[string]string
 	// write runs the statement without readonly=2: a write pipe. Everything
@@ -184,12 +192,16 @@ func (c *chReader) do(ctx context.Context, target chconn.Target, conns int, req 
 	for k, v := range req.settings {
 		q.Set(k, v)
 	}
-	for i, p := range req.params {
-		q.Set("param_p"+strconv.Itoa(i), p)
+	for _, p := range req.params {
+		q.Set("param_"+p.Name, p.Value)
 	}
 	u.RawQuery = q.Encode()
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), strings.NewReader(req.sql))
+	reqBody, contentType, err := chRequestBody(req)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse request: %w", err)
 	}
@@ -198,7 +210,7 @@ func (c *chReader) do(ctx context.Context, target chconn.Target, conns int, req 
 	for name, value := range target.Headers {
 		httpReq.Header.Set(name, value)
 	}
-	httpReq.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	httpReq.Header.Set("Content-Type", contentType)
 	if target.Username != "" {
 		httpReq.Header.Set("X-ClickHouse-User", target.Username)
 	}
@@ -243,6 +255,41 @@ func (c *chReader) do(ctx context.Context, target chconn.Target, conns int, req 
 	return rows, nil
 }
 
+// chRequestBody is req's body and its content type: the statement as plain
+// text, or — when it reads external tables — a multipart form carrying the
+// statement, each table's structure and format, and then the tables. The
+// descriptions go first because ClickHouse reads a table's part as it
+// arrives, with what it has been told about it so far.
+func chRequestBody(req chRequest) (io.Reader, string, error) {
+	if len(req.tables) == 0 {
+		return strings.NewReader(req.sql), "text/plain; charset=utf-8", nil
+	}
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	fields := [][2]string{{"query", req.sql}}
+	for _, t := range req.tables {
+		fields = append(fields, [2]string{t.Name + "_structure", query.TableStructure}, [2]string{t.Name + "_format", query.TableFormat})
+	}
+	for _, f := range fields {
+		if err := w.WriteField(f[0], f[1]); err != nil {
+			return nil, "", err
+		}
+	}
+	for _, t := range req.tables {
+		part, err := w.CreateFormFile(t.Name, t.Name)
+		if err != nil {
+			return nil, "", err
+		}
+		if _, err := part.Write(t.Data); err != nil {
+			return nil, "", err
+		}
+	}
+	if err := w.Close(); err != nil {
+		return nil, "", err
+	}
+	return &buf, w.FormDataContentType(), nil
+}
+
 // jsonEachRowArray frames ClickHouse's newline-delimited JSONEachRow output as
 // the JSON array the read endpoints return, copying the rows through
 // untouched. A JSONEachRow row is one JSON object on one line — a newline in
@@ -273,23 +320,43 @@ func jsonEachRowArray(body []byte) (rows, tail []byte) {
 	return append(out, ']'), nil
 }
 
-// checkParamSizes refuses bound values the HTTP interface would refuse: each
-// one past ClickHouse's per-field limit, or all of them past what the request
-// line holds. A long `in` list is the usual cause, and the caller is the one
-// who can split it.
-func checkParamSizes(params []string) error {
+// checkRequestSize refuses a bound query the HTTP interface would refuse,
+// at ClickHouse's own limits, so the caller gets a 400 naming the limit
+// rather than code 1000 classed as an outage. A scalar value rides on the
+// query string, each one capped and all of them together bounded by the
+// request line; with an `in` list the statement rides in one form field.
+// An `in` list itself has no cap: its table is read whole.
+func checkRequestSize(b *query.Bound) error {
 	total := 0
-	for _, p := range params {
-		n := len(url.QueryEscape(p))
+	for _, p := range b.Params {
+		n := len(url.QueryEscape(p.Value))
 		if n > chMaxFieldBytes {
-			return fmt.Errorf("filter value too large: %d bytes once encoded, over the %d ClickHouse's HTTP interface takes; split a long in list across queries", n, chMaxFieldBytes)
+			return fmt.Errorf("filter value too large: %d bytes once encoded, over the %d ClickHouse's HTTP interface takes for one value; an in list has no such limit", n, chMaxFieldBytes)
 		}
 		total += n
 	}
 	if total > chMaxURIBytes-chURIHeadroom {
-		return fmt.Errorf("filter values too large: %d bytes once encoded, over the %d ClickHouse's HTTP interface takes; split long in lists across queries", total, chMaxURIBytes-chURIHeadroom)
+		return fmt.Errorf("filter values too large: %d bytes once encoded, over the %d ClickHouse's HTTP interface takes for all of them; an in list has no such limit", total, chMaxURIBytes-chURIHeadroom)
+	}
+	if len(b.Tables) > 0 && len(b.SQL) > chMaxFieldBytes {
+		return fmt.Errorf("query too large: %d bytes of SQL, over the %d ClickHouse's HTTP interface takes in the form field a query with an in list travels in; use fewer filters", len(b.SQL), chMaxFieldBytes)
 	}
 	return nil
+}
+
+// cacheValues are b's bound values as the cache key takes them: each
+// parameter's value, then each table's bytes, exactly as they go on the wire.
+// The statement, hashed alongside, names every parameter and table, so the
+// split between the two is never ambiguous.
+func cacheValues(b *query.Bound) []string {
+	out := make([]string, 0, len(b.Params)+len(b.Tables))
+	for _, p := range b.Params {
+		out = append(out, p.Value)
+	}
+	for _, t := range b.Tables {
+		out = append(out, string(t.Data))
+	}
+	return out
 }
 
 // targetOf is target's answer for store — the tenant's HTTP wiring — and the
