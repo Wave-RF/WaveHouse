@@ -48,16 +48,27 @@ type Row struct {
 }
 
 // ParseRow parses one JSONCompactEachRow line, with or without its trailing
-// newline. columns must be the generation's wire columns exactly: a positional
-// row is uninterpretable against any other order, so a mismatch is
-// ErrColumnsDrift rather than a guess.
+// newline, whose k-th field belongs to the k-th name in columns: the column
+// list the ingest worker's INSERT names for the same line.
+//
+// columns is the generation's wire columns, or any duplicate-free subset of
+// them in any order, because a role that may write only some columns publishes
+// only those. The parse names that list (chtypes.WithColumns, the INSERT
+// column list), so an unlisted column holds what the server stores for it: its
+// DEFAULT, computed with the listed values in scope. A name the generation
+// does not export (a column dropped since, a computed column, a typo), a
+// repeated name or an empty list is ErrColumnsDrift: no INSERT could store
+// that row in this table.
 func (t *Table) ParseRow(columns []string, row []byte) (*Row, error) {
 	if t.pool == nil {
 		return nil, &Unavailable{Tenant: t.tenant, Table: t.Name, Cause: t.cause}
 	}
+	var opts []chtypes.RowOption
 	if !slices.Equal(columns, t.WireColumns) {
-		return nil, fmt.Errorf("%w: event carries %v, generation %d exports %v",
-			ErrColumnsDrift, columns, t.Generation, t.WireColumns)
+		if err := t.insertableList(columns); err != nil {
+			return nil, err
+		}
+		opts = []chtypes.RowOption{chtypes.WithColumns(columns)}
 	}
 	body := row
 	if n := len(body); n == 0 || body[n-1] != '\n' {
@@ -68,12 +79,41 @@ func (t *Table) ParseRow(columns []string, row []byte) (*Row, error) {
 	// serialization the pool exists to avoid.
 	p := t.pool
 	s := p.acquire()
-	block, err := s.schema.ParseBlock(chtypes.JSONCompactEachRow, body, InsertSettings())
+	block, err := s.schema.ParseBlock(chtypes.JSONCompactEachRow, body, InsertSettings(), opts...)
 	if err != nil {
 		p.release(s)
 		return nil, err
 	}
 	return &Row{table: t, pool: p, slot: s, block: block}, nil
+}
+
+// insertableList reports why columns cannot be an INSERT column list over
+// this generation's wire columns, nil when it can. Checked here rather than
+// left to the server's own refusal (codes 16 and 15) so a caller can tell
+// drift from a row that does not parse.
+func (t *Table) insertableList(columns []string) error {
+	drift := func(why string) error {
+		return fmt.Errorf("%w: event carries %v (%s), generation %d exports %v",
+			ErrColumnsDrift, columns, why, t.Generation, t.WireColumns)
+	}
+	if len(columns) == 0 {
+		return drift("no columns")
+	}
+	listed := make(map[string]bool, len(t.WireColumns))
+	for _, c := range t.WireColumns {
+		listed[c] = false
+	}
+	for _, c := range columns {
+		seen, known := listed[c]
+		switch {
+		case !known:
+			return drift(fmt.Sprintf("%q is not one of them", c))
+		case seen:
+			return drift(fmt.Sprintf("%q is repeated", c))
+		}
+		listed[c] = true
+	}
+	return nil
 }
 
 // Close frees the parsed block and gives its handle back. Required: the C
