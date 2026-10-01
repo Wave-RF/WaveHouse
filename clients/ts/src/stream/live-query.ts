@@ -1,3 +1,4 @@
+import { compareInstants } from "../timestamp.js";
 import type { QueryFilter, Result, StreamEvent, StreamSubscriber } from "../types.js";
 import type { StreamController } from "./controller.js";
 
@@ -78,7 +79,7 @@ export class LiveQuery<T = Record<string, unknown>> {
       this._buffering = false;
       for (const event of this._buffer) {
         if (this._closed) break;
-        if (lastTimestamp && event.timestamp <= lastTimestamp) {
+        if (lastTimestamp && !isAfter(event.timestamp, lastTimestamp)) {
           continue; // already covered by the fetch
         }
         this._subscriber.next(event);
@@ -99,4 +100,16 @@ export class LiveQuery<T = Record<string, unknown>> {
     this._unsubStream?.();
     this._stream.close();
   }
+}
+
+/**
+ * Whether an event's timestamp is past the backfill boundary. Compared as
+ * instants at the coarser of the two precisions: the envelope carries up to
+ * nanoseconds, a `DateTime64(3)` row milliseconds, so an event in the row's
+ * own millisecond is covered by it. Two values that are not both timestamps
+ * fall back to string order.
+ */
+function isAfter(timestamp: string, boundary: string): boolean {
+  const order = compareInstants(timestamp, boundary, "coarsest");
+  return order === undefined ? timestamp > boundary : order > 0;
 }
