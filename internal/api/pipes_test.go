@@ -8,12 +8,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
@@ -368,7 +366,7 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 
 	safeHandle(h.Execute, w, withTenant(r))
 
-	// Should pass param binding — will fail later at executeQuery (nil conn).
+	// Should pass param binding — failing later at the unwired target.
 	assert.NotEqual(t, http.StatusBadRequest, w.Code)
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }
@@ -422,7 +420,7 @@ func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
 
 	safeHandle(h.Execute, w, withTenant(r))
 
-	// Should pass param binding — will fail at executeQuery (nil conn).
+	// Should pass param binding — failing later at the unwired target.
 	assert.NotEqual(t, http.StatusBadRequest, w.Code)
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }
@@ -452,7 +450,8 @@ func TestPipesHandler_Execute_NoAllowedRoles_NonAdminDenied(t *testing.T) {
 }
 
 // TestPipesHandler_Execute_ArrayParamBinds: an array body param renders into an
-// IN list and passes binding (failing only later at the nil ClickHouse conn).
+// IN list and passes binding (failing only later at the unwired ClickHouse
+// target).
 func TestPipesHandler_Execute_ArrayParamBinds(t *testing.T) {
 	t.Parallel()
 	store := staticPipes(
@@ -471,7 +470,8 @@ func TestPipesHandler_Execute_ArrayParamBinds(t *testing.T) {
 
 	safeHandle(h.Execute, w, withTenant(r))
 
-	// Binding succeeded — the only failure left is the nil conn, never a 400.
+	// Binding succeeded — the only failure left is the unwired target, never a
+	// 400.
 	assert.NotEqual(t, http.StatusBadRequest, w.Code)
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }
@@ -517,30 +517,6 @@ func TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed(t *testing.T) {
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }
 
-// writeConn counts Exec and Query calls, and every Exec returns err. With
-// gate set, every Exec reports itself on entered and holds until gate is
-// closed, so a test can hold requests in flight together.
-type writeConn struct {
-	driver.Conn
-	execs, queries atomic.Int32
-	entered, gate  chan struct{}
-	err            error
-}
-
-func (c *writeConn) Exec(context.Context, string, ...any) error {
-	c.execs.Add(1)
-	if c.gate != nil {
-		c.entered <- struct{}{}
-		<-c.gate
-	}
-	return c.err
-}
-
-func (c *writeConn) Query(context.Context, string, ...any) (driver.Rows, error) {
-	c.queries.Add(1)
-	return &chainEmptyRows{}, nil
-}
-
 // pipeCallAs runs the pipe name as the writer role and returns the recorder.
 func pipeCallAs(t *testing.T, h *PipesHandler, name string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -550,13 +526,16 @@ func pipeCallAs(t *testing.T, h *PipesHandler, name string) *httptest.ResponseRe
 	return w
 }
 
-func writerPipesHandler(t *testing.T, conn driver.Conn, c cache.Cache, queries ...*pipes.NamedQuery) *PipesHandler {
+// writerPipesHandler serves queries to the writer role, through ch.
+func writerPipesHandler(t *testing.T, ch *fakeCH, c cache.Cache, queries ...*pipes.NamedQuery) *PipesHandler {
 	t.Helper()
 	for _, q := range queries {
 		q.AllowedRoles = []string{"writer"}
 	}
 	timeout := func(*settings.Store) time.Duration { return 5 * time.Second }
-	return NewPipesHandler(staticPipes(queries...), staticPolicy(&policy.Policy{}), fixedConn(conn), c, timeout)
+	h := NewPipesHandler(staticPipes(queries...), staticPolicy(&policy.Policy{}), ch.target, c, timeout)
+	h.ch = ch.reader()
+	return h
 }
 
 // #386: a pipe that writes executes on every call. Served from the cache, a
@@ -574,8 +553,8 @@ func TestPipesHandler_Execute_MutationRunsEveryCall(t *testing.T) {
 			l1, err := cache.NewLocal(1 << 20)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = l1.Close() })
-			conn := &writeConn{}
-			h := writerPipesHandler(t, conn, l1, &pipes.NamedQuery{Name: "log", SQL: sql})
+			ch := &fakeCH{}
+			h := writerPipesHandler(t, ch, l1, &pipes.NamedQuery{Name: "log", SQL: sql})
 
 			for range 3 {
 				w := pipeCallAs(t, h, "log")
@@ -585,20 +564,21 @@ func TestPipesHandler_Execute_MutationRunsEveryCall(t *testing.T) {
 				assert.JSONEq(t, `[]`, w.Body.String())
 				l1.Wait()
 			}
-			assert.Equal(t, int32(3), conn.execs.Load(), "every call must reach ClickHouse")
-			assert.Zero(t, conn.queries.Load())
+			assert.Equal(t, int32(3), ch.writes.Load(), "every call must reach ClickHouse, not read-only")
+			assert.Zero(t, ch.reads.Load())
 		})
 	}
 }
 
 // Identical mutation calls in flight together are each executed: coalescing
 // them would run one write for all of them. Under synctest, Wait returns once
-// every request is inside Exec or parked on another's flight.
+// every request is inside ClickHouse or parked on another's flight.
 func TestPipesHandler_Execute_ConcurrentMutationsNotCoalesced(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const calls = 3
-		conn := &writeConn{entered: make(chan struct{}, calls), gate: make(chan struct{})}
-		h := writerPipesHandler(t, conn, nil, &pipes.NamedQuery{Name: "log", SQL: "INSERT INTO audit_log VALUES ({{msg}}, now())"})
+		entered, gate := make(chan struct{}, calls), make(chan struct{})
+		ch := gatedCH(entered, gate)
+		h := writerPipesHandler(t, ch, nil, &pipes.NamedQuery{Name: "log", SQL: "INSERT INTO audit_log VALUES ({{msg}}, now())"})
 		var wg sync.WaitGroup
 		for range calls {
 			wg.Go(func() {
@@ -607,10 +587,10 @@ func TestPipesHandler_Execute_ConcurrentMutationsNotCoalesced(t *testing.T) {
 			})
 		}
 		synctest.Wait()
-		assert.Len(t, conn.entered, calls, "writes in flight once every request is blocked")
-		close(conn.gate)
+		assert.Len(t, entered, calls, "writes in flight once every request is blocked")
+		close(gate)
 		wg.Wait()
-		assert.Equal(t, int32(calls), conn.execs.Load())
+		assert.Equal(t, int32(calls), ch.writes.Load())
 	})
 }
 
@@ -621,8 +601,8 @@ func TestPipesHandler_Execute_ReadPipeStaysCached(t *testing.T) {
 	l1, err := cache.NewLocal(1 << 20)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l1.Close() })
-	conn := &writeConn{}
-	h := writerPipesHandler(t, conn, l1, &pipes.NamedQuery{Name: "recent", SQL: "SELECT * FROM insert_log WHERE msg = {{msg}}"})
+	ch := &fakeCH{}
+	h := writerPipesHandler(t, ch, l1, &pipes.NamedQuery{Name: "recent", SQL: "SELECT * FROM insert_log WHERE msg = {{msg}}"})
 
 	for _, want := range []string{"MISS", "HIT", "HIT"} {
 		w := pipeCallAs(t, h, "recent")
@@ -630,6 +610,40 @@ func TestPipesHandler_Execute_ReadPipeStaysCached(t *testing.T) {
 		assert.Equal(t, want, w.Header().Get("X-Cache"))
 		l1.Wait()
 	}
-	assert.Equal(t, int32(1), conn.queries.Load())
-	assert.Zero(t, conn.execs.Load())
+	assert.Equal(t, int32(1), ch.reads.Load())
+	assert.Zero(t, ch.writes.Load())
+}
+
+// What a pipe sends ClickHouse: the bound SQL as the body, its query timeout
+// as max_execution_time, and readonly=2 on a read — the statement IsMutation
+// reads as a write is the one sent without it.
+func TestPipesHandler_Execute_RequestSettings(t *testing.T) {
+	t.Parallel()
+	ch := &fakeCH{}
+	h := writerPipesHandler(t, ch, nil,
+		&pipes.NamedQuery{Name: "recent", SQL: "SELECT * FROM log WHERE msg = {{msg}}"},
+		&pipes.NamedQuery{Name: "log", SQL: "INSERT INTO log VALUES ({{msg}})"},
+	)
+
+	require.Equal(t, http.StatusOK, pipeCallAs(t, h, "recent").Code)
+	assert.Equal(t, "SELECT * FROM log WHERE msg = 'hello'", ch.sql())
+	assert.Equal(t, "2", ch.setting("readonly"))
+	assert.Equal(t, "5", ch.setting("max_execution_time"))
+	assert.Empty(t, ch.setting("max_result_rows"), "a pipe carries no role caps")
+
+	require.Equal(t, http.StatusOK, pipeCallAs(t, h, "log").Code)
+	assert.Equal(t, "INSERT INTO log VALUES ('hello')", ch.sql())
+	assert.False(t, ch.last().query.Has("readonly"))
+	assert.Equal(t, "5", ch.setting("max_execution_time"))
+}
+
+// TestPipesHandler_Execute_ServesClickHouseBytes: a pipe's response is
+// ClickHouse's own rendering, rows framed as an array.
+func TestPipesHandler_Execute_ServesClickHouseBytes(t *testing.T) {
+	t.Parallel()
+	ch := &fakeCH{answer: answerRows("{\"page\":\"/a\",\"n\":1}\n{\"page\":\"/b\",\"n\":2}\n")}
+	h := writerPipesHandler(t, ch, nil, &pipes.NamedQuery{Name: "top", SQL: "SELECT page, n FROM t"})
+	w := pipeCallAs(t, h, "top")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, `[{"page":"/a","n":1},{"page":"/b","n":2}]`, w.Body.String())
 }
