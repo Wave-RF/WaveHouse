@@ -2,7 +2,9 @@ package policy
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
@@ -380,7 +382,10 @@ func resolvePredicates(filters map[string]Filter, claims map[string]any) []Predi
 		}
 		return Predicate{Column: col, Op: op, Values: []string{v}}
 	}
-	for col, f := range filters {
+	// Sorted, so the same filter always renders the same text: the stream's
+	// compiled-filter cache and the query cache both key on it.
+	for _, col := range slices.Sorted(maps.Keys(filters)) {
+		f := filters[col]
 		if f.Eq != nil {
 			preds = append(preds, scalar(col, "=", *f.Eq))
 		}

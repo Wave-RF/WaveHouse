@@ -1688,6 +1688,35 @@ func TestPredicates_IsTheSameResolutionAsTheWhereClause(t *testing.T) {
 	assert.Equal(t, []Predicate{{Column: "tenant_id", Op: "=", Values: []string{"acme"}}}, preds)
 }
 
+// TestPredicates_OrderIsStableAcrossEvaluations: a filter over several
+// columns resolves to the same predicate order (and so the same rendered text)
+// on every Evaluate, so neither the stream's filter cache nor the query cache
+// splits one filter into one entry per map iteration order.
+func TestPredicates_OrderIsStableAcrossEvaluations(t *testing.T) {
+	t.Parallel()
+	p := &Policy{Tables: map[string]TablePolicy{
+		"t": {"r": {Select: &SelectPermissions{Filter: map[string]Filter{
+			"c": {Eq: new("{{ jwt.c }}")},
+			"a": {Eq: new("{{ jwt.a }}")},
+			"b": {Eq: new("{{ jwt.b }}")},
+			"d": {Eq: new("{{ jwt.d }}")},
+		}}}},
+	}}
+	claims := map[string]any{"a": "1", "b": "2", "c": "3", "d": "4"}
+	first := Evaluate(p, "r", "t", "select", claims)
+	wantPreds, ok := first.Predicates()
+	require.True(t, ok)
+	assert.Equal(t, []string{"a", "b", "c", "d"}, []string{wantPreds[0].Column, wantPreds[1].Column, wantPreds[2].Column, wantPreds[3].Column})
+	wantSQL, _ := first.Select.WhereSQL(nil)
+	for range 200 {
+		perms := Evaluate(p, "r", "t", "select", claims)
+		preds, _ := perms.Predicates()
+		require.Equal(t, wantPreds, preds)
+		sql, _ := perms.Select.WhereSQL(nil)
+		require.Equal(t, wantSQL, sql)
+	}
+}
+
 // TestPredicates_FailsClosedWhereNoRowMayBeAdmitted: a denied grant and an
 // INSERT-resolved grant refuse the row question rather than answer "no
 // predicates"; a nil receiver (no policy) and a resolved, unfiltered read side
