@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 )
 
 // ptr returns a pointer to v — the Filter operator fields are *string so a
@@ -1702,4 +1704,140 @@ func TestEvaluate_OperatorLessFilterAndCheckDenyFailClosed(t *testing.T) {
 
 	insPerms := Evaluate(ins, "writer", "clicks", "insert", nil)
 	assert.False(t, insPerms.Allowed, "an operator-less check must deny, not drop the rule")
+}
+
+// TestPredicates_UnresolvableClaim_NoValuesOnBothPaths pins the #457 fail-closed
+// rule on BOTH read surfaces at once, through the accessors the type layer
+// reads: a filter template whose claim the token doesn't carry renders the
+// constant-false predicate on the query path (WhereSQL) AND yields a predicate
+// with NO values on the stream path (Predicates), which the type layer
+// refuses without compiling anything. One Evaluate resolution drives both, so a
+// claim-less token can never see zero rows on /v1/query yet every row on
+// /v1/stream. HasRowFilter must stay true for the failed predicate — dropping it
+// would put the role back on the unfiltered once-per-role fast path, the exact
+// fail-open this test exists to prevent.
+func TestPredicates_UnresolvableClaim_NoValuesOnBothPaths(t *testing.T) {
+	t.Parallel()
+	noTenant := map[string]any{"role": "user"} // validly signed token, no tenant claim
+	tests := []struct {
+		name   string
+		filter map[string]Filter
+		claims map[string]any
+	}{
+		{"_eq", map[string]Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}}, noTenant},
+		{"_neq, the leak direction", map[string]Filter{"tenant_id": {Neq: new("{{ jwt.tenant }}")}}, noTenant},
+		{"_gt", map[string]Filter{"tenant_id": {Gt: new("{{ jwt.tenant }}")}}, noTenant},
+		{"_in with surrounding text", map[string]Filter{"tenant_id": {In: new("t-{{ jwt.tenant }}")}}, noTenant},
+		{
+			"object claim in a scalar slot",
+			map[string]Filter{"tenant_id": {Eq: new("{{ jwt.meta }}")}},
+			map[string]any{"meta": map[string]any{"tenant": "acme"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := &Policy{Tables: map[string]TablePolicy{
+				"t": {"r": {Select: &SelectPermissions{Filter: tt.filter}}},
+			}}
+			perms := Evaluate(p, "r", "t", "select", tt.claims)
+
+			clause, params := perms.Select.WhereSQL(nil)
+			assert.Equal(t, "1 = 0", clause, "query path: constant-false predicate")
+			assert.Empty(t, params)
+			assert.True(t, perms.HasRowFilter(), "failed predicate must keep the stream on the per-subscriber path")
+
+			preds, ok := perms.Predicates()
+			require.True(t, ok, "a resolved read side answers with its predicates")
+			require.Len(t, preds, 1, "the failed predicate is present, not dropped")
+			assert.Equal(t, "tenant_id", preds[0].Column)
+			assert.Empty(t, preds[0].Values,
+				"stream path: no values to bind, which matches no row without compiling anything")
+		})
+	}
+}
+
+// TestPredicates_IsTheSameResolutionAsTheWhereClause: the two read surfaces are
+// rendered from ONE resolvePredicates call, so the predicates handed to the
+// stream carry exactly the values bound into the query's WHERE — in the same
+// order. A second resolution, even of the same policy, is what #457 was about.
+func TestPredicates_IsTheSameResolutionAsTheWhereClause(t *testing.T) {
+	t.Parallel()
+	p := &Policy{Tables: map[string]TablePolicy{
+		"t": {"r": {Select: &SelectPermissions{Filter: map[string]Filter{
+			"tenant_id": {Eq: new("{{ jwt.tenant }}")},
+		}}}},
+	}}
+	perms := Evaluate(p, "r", "t", "select", map[string]any{"tenant": "acme"})
+
+	clause, params := perms.Select.WhereSQL(nil)
+	assert.Equal(t, "`tenant_id` = ?", clause)
+	assert.Equal(t, []any{"acme"}, params)
+	assert.Equal(t, perms.Select.WhereClause, clause, "WhereSQL(nil) is the WhereClause rendering")
+	assert.Equal(t, perms.Select.WhereParams, params)
+
+	preds, ok := perms.Predicates()
+	require.True(t, ok)
+	assert.Equal(t, []Predicate{{Column: "tenant_id", Op: "=", Values: []string{"acme"}}}, preds)
+}
+
+// TestPredicates_FailsClosedWhereNoRowMayBeAdmitted: a denied grant and an
+// INSERT-resolved grant refuse the row question rather than answer "no
+// predicates"; a nil receiver (no policy) and a resolved, unfiltered read side
+// admit every row.
+func TestPredicates_FailsClosedWhereNoRowMayBeAdmitted(t *testing.T) {
+	t.Parallel()
+	var none *ResolvedPermissions
+	preds, ok := none.Predicates()
+	assert.True(t, ok, "no policy: nothing to filter by")
+	assert.Empty(t, preds)
+
+	_, ok = (&ResolvedPermissions{Allowed: false}).Predicates()
+	assert.False(t, ok, "a denied grant admits no row")
+
+	_, ok = (&ResolvedPermissions{Allowed: true, Insert: &ResolvedInsert{}}).Predicates()
+	assert.False(t, ok, "an unresolved read side admits no row")
+
+	preds, ok = (&ResolvedPermissions{Allowed: true, Select: &ResolvedSelect{}}).Predicates()
+	assert.True(t, ok)
+	assert.Empty(t, preds, "a resolved but unfiltered read side admits every row")
+}
+
+// TestWhereSQL_IntegerColumnsBindThroughTheStrictCast: given the column types,
+// a claim on an integer column binds as a chsql.IntParam carrying the bare
+// integer type (the query builder expands it to chsql.StrictInt), and a claim
+// on any other column binds as the plain string it always did. Without types
+// (nil) every claim is a plain string.
+func TestWhereSQL_IntegerColumnsBindThroughTheStrictCast(t *testing.T) {
+	t.Parallel()
+	types := map[string]string{"tenant": "Nullable(UInt64)", "org": "String", "n": "Int128"}
+	p := &Policy{Tables: map[string]TablePolicy{
+		"t": {"r": {Select: &SelectPermissions{Filter: map[string]Filter{
+			"tenant": {Eq: new("{{ jwt.tenant }}")},
+			"org":    {Neq: new("x")},
+			"n":      {In: new("{{ jwt.ns }}")},
+		}}}},
+	}}
+	claims := map[string]any{"tenant": "18446744073709551621", "ns": []any{"1", "-2"}}
+	perms := Evaluate(p, "r", "t", "select", claims)
+	require.True(t, perms.Allowed)
+
+	clause, params := perms.Select.WhereSQL(func(c string) string { return types[c] })
+	byClause := map[string][]any{}
+	i := 0
+	for part := range strings.SplitSeq(clause, " AND ") {
+		n := strings.Count(part, "?")
+		byClause[part] = params[i : i+n]
+		i += n
+	}
+	require.Equal(t, len(params), i, "every ? has exactly one param")
+	assert.Equal(t, []any{chsql.IntParam{Value: "18446744073709551621", Type: "UInt64"}}, byClause["`tenant` = ?"])
+	assert.Equal(t, []any{"x"}, byClause["`org` != ?"])
+	assert.Equal(t, []any{chsql.IntParam{Value: "1", Type: "Int128"}, chsql.IntParam{Value: "-2", Type: "Int128"}},
+		byClause["`n` IN (?,?)"])
+
+	_, untyped := perms.Select.WhereSQL(nil)
+	for _, v := range untyped {
+		assert.IsType(t, "", v, "no column types: every claim is a plain string")
+	}
 }

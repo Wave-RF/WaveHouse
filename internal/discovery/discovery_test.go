@@ -438,12 +438,176 @@ func newFakeRegistry(t *testing.T, errs []error) (*SchemaRegistry, *fakeConn) {
 }
 
 // TestRefresh_UnresolvableServerTimezone_NotFatal: an unresolvable server zone
-// degrades to pass-through canonicalization (#372), never a failed refresh.
+// degrades to pass-through canonicalization (#372), never a failed refresh,
+// and the registry still publishes the name verbatim: whoever consumes it
+// decides what an unusable zone means.
 func TestRefresh_UnresolvableServerTimezone_NotFatal(t *testing.T) {
 	t.Parallel()
 	conn := &fakeConn{tz: "Not/AZone"}
 	sr := NewSchemaRegistry(sourceOf(conn), tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
 	require.NoError(t, sr.Refresh(context.Background()))
+	assert.Equal(t, "Not/AZone", sr.ServerTimezone())
+}
+
+// TestServerTimezone_EmptyBeforeRefresh: nothing is published until a refresh
+// succeeds, so a consumer cannot mistake "not probed yet" for UTC.
+func TestServerTimezone_EmptyBeforeRefresh(t *testing.T) {
+	t.Parallel()
+	sr, _ := newFakeRegistry(t, nil)
+	assert.Empty(t, sr.ServerTimezone())
+	require.NoError(t, sr.Refresh(context.Background()))
+	assert.Equal(t, "UTC", sr.ServerTimezone())
+}
+
+// TestOnRefresh_FiresAfterSwapWithPublishedSchemas: the hook is what binds the
+// type layer, so it must see the version, the zone and the same schemas Get()
+// now returns — not the ones from before the swap.
+func TestOnRefresh_FiresAfterSwapWithPublishedSchemas(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{
+		tz:      "Europe/Berlin",
+		version: "26.6.3.62",
+		columns: []fakeColumn{{table: "events", name: "id", chType: "UInt64", position: 1}},
+	}
+	sr := NewSchemaRegistry(sourceOf(conn), tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+
+	var gotVersion, gotTZ string
+	var gotTables []*TableSchema
+	calls := 0
+	sr.OnRefresh(func(version, tz string, tables []*TableSchema) {
+		calls++
+		gotVersion, gotTZ, gotTables = version, tz, tables
+		assert.NotNil(t, sr.Get("events"), "hook must run after the swap")
+		assert.Equal(t, "Europe/Berlin", sr.ServerTimezone(), "the zone is published with the schemas")
+	})
+
+	require.NoError(t, sr.Refresh(context.Background()))
+	assert.Equal(t, 1, calls)
+	assert.Equal(t, "26.6.3.62", gotVersion)
+	assert.Equal(t, "Europe/Berlin", gotTZ)
+	require.Len(t, gotTables, 1)
+	assert.Equal(t, "events", gotTables[0].Name)
+	assert.Equal(t, []string{"id"}, gotTables[0].InsertableColumnNames(), "hook sees the memoized schema")
+}
+
+// TestOnRefresh_RunsBeforeLoaded: "loaded" must imply "bound", so on the first
+// refresh a Lookup racing the hook still answers ErrNotLoaded (a 503 with
+// Retry-After) rather than handing out a schema the type layer has not
+// compiled yet.
+func TestOnRefresh_RunsBeforeLoaded(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{columns: []fakeColumn{{table: "events", name: "id", chType: "UInt64", position: 1}}}
+	sr := NewSchemaRegistry(sourceOf(conn), tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+
+	var loadedDuringHook []bool
+	sr.OnRefresh(func(string, string, []*TableSchema) {
+		loadedDuringHook = append(loadedDuringHook, sr.Loaded())
+		_, err := sr.Lookup("events")
+		if !sr.Loaded() {
+			assert.ErrorIs(t, err, ErrNotLoaded)
+		}
+	})
+
+	require.NoError(t, sr.Refresh(context.Background()))
+	assert.True(t, sr.Loaded())
+	require.NoError(t, sr.Refresh(context.Background()))
+	assert.Equal(t, []bool{false, true}, loadedDuringHook,
+		"first refresh: not loaded until the hook returns; later refreshes stay loaded")
+}
+
+// TestOnRefresh_NotFiredOnFailure: a failed refresh keeps the previous cache,
+// so rebinding off a half-read registry would compile the wrong thing.
+func TestOnRefresh_NotFiredOnFailure(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{versionErr: errors.New("server gone")}
+	sr := NewSchemaRegistry(sourceOf(conn), tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	fired := false
+	sr.OnRefresh(func(string, string, []*TableSchema) { fired = true })
+	require.Error(t, sr.Refresh(context.Background()))
+	assert.False(t, fired)
+	assert.False(t, sr.Loaded())
+}
+
+// TestOnRefresh_HooksRunInRegistrationOrder: more than one consumer may hang
+// off a registry, and each sees the same publish.
+func TestOnRefresh_HooksRunInRegistrationOrder(t *testing.T) {
+	t.Parallel()
+	sr, _ := newFakeRegistry(t, nil)
+	var order []int
+	sr.OnRefresh(func(string, string, []*TableSchema) { order = append(order, 1) })
+	sr.OnRefresh(func(string, string, []*TableSchema) { order = append(order, 2) })
+	require.NoError(t, sr.Refresh(context.Background()))
+	assert.Equal(t, []int{1, 2}, order)
+}
+
+// TestOnRefresh_OverlappingRefreshesDoNotInterleaveHooks: the manual refresh
+// can overlap the auto-refresh loop. Each refresh's publish and hooks run as
+// one step, so a hook never runs concurrently with another refresh's hook.
+func TestOnRefresh_OverlappingRefreshesDoNotInterleaveHooks(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{columns: []fakeColumn{{table: "events", name: "id", chType: "UInt64", position: 1}}}
+	sr := NewSchemaRegistry(sourceOf(conn), tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	var inHook, maxInHook, calls atomic.Int32
+	sr.OnRefresh(func(string, string, []*TableSchema) {
+		n := inHook.Add(1)
+		for {
+			m := maxInHook.Load()
+			if n <= m || maxInHook.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		time.Sleep(time.Millisecond)
+		calls.Add(1)
+		inHook.Add(-1)
+	})
+
+	const refreshes = 8
+	errs := make(chan error, refreshes)
+	for range refreshes {
+		go func() { errs <- sr.Refresh(context.Background()) }()
+	}
+	for range refreshes {
+		require.NoError(t, <-errs)
+	}
+	assert.Equal(t, int32(refreshes), calls.Load())
+	assert.Equal(t, int32(1), maxInHook.Load(), "hooks of overlapping refreshes must not interleave")
+}
+
+// TestRefresh_WarnsOnceForTablesWithoutDDL: the two scans are not one
+// snapshot, so a table can be discovered without its CREATE statement. That
+// is one warning per refresh naming every such table, not one per table.
+func TestRefresh_WarnsOnceForTablesWithoutDDL(t *testing.T) {
+	conn := &fakeConn{
+		columns: []fakeColumn{
+			{table: "a", name: "id", chType: "UInt64", position: 1},
+			{table: "b", name: "id", chType: "UInt64", position: 1},
+			{table: "c", name: "id", chType: "UInt64", position: 1},
+		},
+		tables: [][2]string{{"a", "CREATE TABLE test.a (id UInt64) ENGINE = Memory"}},
+	}
+	buf := logtest.Capture(t, slog.LevelWarn)
+	sr := NewSchemaRegistry(sourceOf(conn), tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	require.NoError(t, sr.Refresh(context.Background()))
+
+	out := buf.String()
+	assert.Equal(t, 1, strings.Count(out, "tables discovered without DDL"), out)
+	assert.Contains(t, out, `"b"`)
+	assert.Contains(t, out, `"c"`)
+	assert.NotContains(t, out, `"a"`)
+	assert.Equal(t, "CREATE TABLE test.a (id UInt64) ENGINE = Memory", sr.Get("a").DDL)
+}
+
+// TestRefresh_NoWarningWhenEveryTableHasDDL: the warning is for the race, not
+// for every refresh.
+func TestRefresh_NoWarningWhenEveryTableHasDDL(t *testing.T) {
+	conn := &fakeConn{
+		columns: []fakeColumn{{table: "a", name: "id", chType: "UInt64", position: 1}},
+		tables:  [][2]string{{"a", "CREATE TABLE test.a (id UInt64) ENGINE = Memory"}},
+	}
+	buf := logtest.Capture(t, slog.LevelWarn)
+	sr := NewSchemaRegistry(sourceOf(conn), tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	require.NoError(t, sr.Refresh(context.Background()))
+	assert.NotContains(t, buf.String(), "without DDL")
 }
 
 // TestRefresh_RowsIterationError_Fails: rows.Next() returns false on a
