@@ -247,8 +247,44 @@ func TestPool_GrowsLazilyToItsLimit(t *testing.T) {
 	assert.Len(t, p.list(), 3)
 	p.release(e)
 	for _, s := range p.list() {
-		assert.Equal(t, p.perSlot, s.filters.cap, "every grown slot gets the split filter budget")
+		assert.Equal(t, filterCacheSize, s.filters.cap, "every grown slot gets the whole filter budget")
 	}
+}
+
+// TestPool_PrefersTheLowestIdleSlot: a filter answers only on the slot it
+// was compiled on, so a serial run of calls must keep landing on one slot
+// (and compile each filter once) rather than rotate through the pool and
+// compile it on every slot. A busy slot is skipped, not waited for.
+func TestPool_PrefersTheLowestIdleSlot(t *testing.T) {
+	eng := testEngine(t, rowsTable())
+	tbl, err := eng.Table(tenant.Default, "rows")
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	p, cause := newPool(tbl.lib, tbl.pool.ddl, 3)
+	require.Empty(t, cause)
+	t.Cleanup(p.close)
+	grown := []*schemaSlot{p.acquire(), p.acquire(), p.acquire()}
+	for _, s := range grown {
+		p.release(s)
+	}
+	slots := p.list()
+	require.Len(t, slots, 3)
+
+	for range 10 {
+		s := p.acquire()
+		assert.Same(t, slots[0], s, "a serial caller stays on the first slot")
+		p.release(s)
+	}
+
+	busy := p.acquire()
+	require.Same(t, slots[0], busy)
+	for range 5 {
+		s := p.acquire()
+		assert.Same(t, slots[1], s, "the lowest idle slot, past the busy one")
+		p.release(s)
+	}
+	p.release(busy)
 }
 
 // TestTable_PoolGrowsUnderConcurrentHolders drives growth through the public

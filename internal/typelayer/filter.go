@@ -15,11 +15,23 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
 
-// filterCacheSize bounds the compiled filters held per table. A filter handle
-// is identified by (expression, bound values), and the values come from tenant
-// claims, so an unbounded cache is a memory/CPU denial of service. The budget
-// is split across the handle pool's limit (see newPool), so this is the
-// table's total, not each slot's.
+// filterCacheSize bounds the compiled filters each handle of a table holds. A
+// filter handle is identified by (expression, bound values), and the values
+// come from tenant claims, so an unbounded cache is a memory/CPU denial of
+// service.
+//
+// The bound is per slot, not a table budget split across the pool: a filter
+// answers only on the handle it was compiled against, so the slot an
+// evaluation lands on must hold the whole working set, and a split would
+// shrink it as the host's cores grow (512 a slot in a pool of 8). Per table
+// that makes the bound the pool's limit times this. A one-clause filter costs
+// ~10 KiB resident and a two-clause one with a three-value IN ~27 KiB (each
+// measured as 4096 compiled on one handle of the 26.8 artifact, darwin arm64):
+// ~43 MiB for a slot of one-clause filters, ~340 MiB for a full pool of 8,
+// reached only with 4096 distinct pairs live on the table and evaluations
+// landing on all 8 handles. A handle past the first exists only under
+// contention, and pool.acquire keeps a serial stream of evaluations on one
+// slot, so a quiet table stays at one slot's figure.
 const filterCacheSize = 4096
 
 // Predicate is one resolved row-filter clause. Values are the canonical strings
@@ -153,6 +165,11 @@ func (r *Row) VisibleWithReason(preds []Predicate) (bool, string) {
 	if filter == nil {
 		return false, ReasonDecline
 	}
+	// Another call on this slot can evict and close the filter between the
+	// lookup and this Eval. The SDK's Eval and Close take the same schema
+	// lock and Eval checks for a closed filter under it, so Eval answers
+	// "filter is closed" instead of touching freed memory, and that error
+	// withholds the row like any decline: fail closed.
 	res, err := filter.Eval(r.block)
 	if err != nil || res.Outcome != chtypes.FilterOK || len(res.Verdicts) == 0 {
 		return false, ReasonDecline

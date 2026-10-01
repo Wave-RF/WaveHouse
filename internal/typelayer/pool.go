@@ -108,9 +108,8 @@ func closeSlots(slots []*schemaSlot) {
 // only closed under that Table's write lock or once nothing can reach it, so
 // growth and close never overlap.
 type pool struct {
-	lib     *chtypes.Library
-	ddl     string
-	perSlot int // filter-cache capacity of each slot
+	lib *chtypes.Library
+	ddl string
 	// limit is the most slots the pool will hold; lowered to the current size
 	// if a growth compile is ever refused, so a refusal costs one compile.
 	limit atomic.Int64
@@ -124,14 +123,9 @@ type pool struct {
 
 // newPool compiles a pool's first handle. A refusal is the whole shape's: the
 // handles are interchangeable by construction, so there is no half-pool.
-//
-// The per-table filter budget is SPLIT across the pool's limit rather than
-// multiplied by it: values are tenant-controlled and baked into a compiled
-// handle, so the bound that makes the cache not-a-DoS has to be a bound on
-// the table.
 func newPool(lib *chtypes.Library, ddl string, limit int) (*pool, string) {
 	limit = max(limit, 1)
-	p := &pool{lib: lib, ddl: ddl, perSlot: max(filterCacheSize/limit, 1)}
+	p := &pool{lib: lib, ddl: ddl}
 	p.limit.Store(int64(limit))
 	first, err := p.compile()
 	if err != nil {
@@ -146,7 +140,7 @@ func (p *pool) compile() (*schemaSlot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &schemaSlot{schema: schema, filters: newFilterCache(p.perSlot)}, nil
+	return &schemaSlot{schema: schema, filters: newFilterCache(filterCacheSize)}, nil
 }
 
 // list is the current slots, oldest first.
@@ -156,17 +150,22 @@ func (p *pool) list() []*schemaSlot { return *p.slots.Load() }
 func (p *pool) first() *schemaSlot { return p.list()[0] }
 
 // acquire picks the slot one call (or one parsed Row) runs on and marks it
-// busy until release. An idle slot is taken first; when every slot is busy and
-// the pool is below its limit, the caller compiles one more and takes it; a
-// caller that cannot grow the pool shares a busy slot, whose handle serializes
-// the two calls. Growing on contention rather than at Bind is what keeps a
-// quiet table, of a quiet tenant, at one handle.
+// busy until release. The lowest idle slot is taken first; when every slot is
+// busy and the pool is below its limit, the caller compiles one more and
+// takes it; a caller that cannot grow the pool shares a busy slot, whose
+// handle serializes the two calls. Growing on contention rather than at Bind
+// is what keeps a quiet table, of a quiet tenant, at one handle.
+//
+// The LOWEST idle slot rather than a rotating one, because a filter answers
+// only on the slot it was compiled on: a serial run of calls — a tenant's
+// stream evaluating every subscriber's filter, event after event — stays on
+// one slot and compiles each filter once, where rotating would compile it on
+// every slot and keep a copy in each slot's cache. Copies then grow with real
+// contention rather than with the pool's size.
 func (p *pool) acquire() *schemaSlot {
 	slots := p.list()
-	n := uint64(len(slots))
-	start := p.next.Add(1) % n
-	for i := range n {
-		if s := slots[(start+i)%n]; s.busy.CompareAndSwap(0, 1) {
+	for _, s := range slots {
+		if s.busy.CompareAndSwap(0, 1) {
 			return s
 		}
 	}
@@ -177,7 +176,9 @@ func (p *pool) acquire() *schemaSlot {
 			return s
 		}
 	}
-	s := slots[start]
+	// Every slot busy and the pool full: share one, rotating so the sharing
+	// spreads.
+	s := slots[p.next.Add(1)%uint64(len(slots))]
 	s.busy.Add(1)
 	return s
 }

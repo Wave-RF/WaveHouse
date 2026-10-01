@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/wave-rf/chtypes/go/chtypes"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
@@ -572,23 +575,47 @@ func TestFilterCache_BoundedUnderTenantValueChurn(t *testing.T) {
 	assert.True(t, row.Visible([]Predicate{{Column: "tenant", Op: "=", Values: []string{"acme"}}}))
 }
 
-// TestFilterCache_BudgetIsSplitAcrossTheHandlePool: the 4096 bound is what
-// makes the cache not a DoS, and it must be a bound on the TABLE — a pool of
-// handles must not multiply it.
-func TestFilterCache_BudgetIsSplitAcrossTheHandlePool(t *testing.T) {
+// TestFilterCache_EverySlotHoldsTheWholeBudget: a filter answers only on its
+// own handle, so the slot an evaluation lands on must hold the whole working
+// set. Every slot of a grown pool is bounded by filterCacheSize itself, not
+// by a share of it, and one slot holds more distinct filters than an
+// eight-way split gave it (512) without recompiling any of them.
+func TestFilterCache_EverySlotHoldsTheWholeBudget(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(maxPoolSize))
 	eng := testEngine(t, rowsTable())
 	tbl, err := eng.Table(tenant.Default, "rows")
 	require.NoError(t, err)
 	defer tbl.Release()
 
-	// The pool starts at one handle and may grow to its limit; the budget
-	// holds at the limit, not just at today's size.
 	p := tbl.pool
 	assert.Len(t, p.list(), 1, "one handle after Bind; the rest are compiled on contention")
-	assert.Equal(t, int64(poolSize()), p.limit.Load())
-	assert.LessOrEqual(t, p.perSlot*poolSize(), filterCacheSize)
+	held := make([]*schemaSlot, 0, maxPoolSize)
+	for range maxPoolSize {
+		held = append(held, p.acquire())
+	}
+	for _, s := range held {
+		p.release(s)
+	}
+	require.Len(t, p.list(), maxPoolSize)
 	for _, s := range p.list() {
-		assert.Equal(t, p.perSlot, s.filters.cap)
+		assert.Equal(t, filterCacheSize, s.filters.cap)
+	}
+
+	s := p.first()
+	filter := func(i int) *chtypes.LoadedFilter {
+		expr, params, ok := tbl.render([]Predicate{{Column: "tenant", Op: "=", Values: []string{"user-" + strconv.Itoa(i)}}})
+		require.True(t, ok)
+		return tbl.filterOn(s, expr, params)
+	}
+	n := filterCacheSize/maxPoolSize + 1
+	compiled := make([]*chtypes.LoadedFilter, n)
+	for i := range compiled {
+		compiled[i] = filter(i)
+		require.NotNil(t, compiled[i])
+	}
+	assert.Equal(t, n, s.filters.len())
+	for i, f := range compiled {
+		assert.Same(t, f, filter(i), "filter %d is still cached, not recompiled", i)
 	}
 }
 
@@ -641,7 +668,7 @@ func TestVisible_ConcurrentSubscribers(t *testing.T) {
 
 // TestTable_ConcurrentAcrossThePool exercises every entry point on one table
 // from many goroutines at once. Under -race it is the pin that the pool's
-// round-robin, the per-slot filter caches and the shared block parsing are
+// slot choice, the per-slot filter caches and the shared block parsing are
 // safe; a slot chosen per call rather than per Row would show up here as a
 // filter and a block on different handles.
 func TestTable_ConcurrentAcrossThePool(t *testing.T) {
@@ -683,4 +710,51 @@ func TestTable_ConcurrentAcrossThePool(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// BenchmarkVisible_ClaimChurn is the stream's fan-out: one parsed event, then
+// one evaluation per subscriber, each subscriber's claim a distinct filter,
+// on a pool grown to its limit. The event's handle must hold the whole set:
+// subscribers=600 is past the 512 a slot got when the table's budget was
+// split across a pool of 8, and inside filterCacheSize.
+func BenchmarkVisible_ClaimChurn(b *testing.B) {
+	eng := testEngine(b, rowsTable())
+	tbl, err := eng.Table(tenant.Default, "rows")
+	require.NoError(b, err)
+	defer tbl.Release()
+
+	// Grow the pool to its limit, as a busy table's would be.
+	p := tbl.pool
+	held := make([]*schemaSlot, 0, poolSize())
+	for range poolSize() {
+		held = append(held, p.acquire())
+	}
+	for _, s := range held {
+		p.release(s)
+	}
+
+	for _, n := range []int{64, 600} {
+		preds := make([][]Predicate, n)
+		for i := range preds {
+			preds[i] = []Predicate{{Column: "tenant", Op: "=", Values: []string{"user-" + strconv.Itoa(i)}}}
+		}
+		event := func(b *testing.B) {
+			row, err := tbl.ParseRow(tbl.WireColumns, []byte(sampleRow))
+			if err != nil {
+				b.Fatal(err)
+			}
+			for _, pred := range preds {
+				row.Visible(pred)
+			}
+			row.Close()
+		}
+		b.Run(fmt.Sprintf("subscribers=%d", n), func(b *testing.B) {
+			event(b) // compiles the set on the slot a serial event lands on
+			b.ResetTimer()
+			for range b.N {
+				event(b)
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*n), "ns/eval")
+		})
+	}
 }
