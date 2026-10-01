@@ -944,9 +944,15 @@ func TestShortestKeepalive(t *testing.T) {
 		assert.Equal(t, 3, buckets)
 	})
 
+	// Only a reload reaches this: boot refuses a nested directory with no
+	// tenant to serve.
 	t.Run("no tenant served falls back to the wheel's defaults", func(t *testing.T) {
 		t.Parallel()
-		period, buckets := shortestKeepalive(open(t, writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery})))
+		root := writeNestedSettings(t, map[string]map[string]any{"acme": keepalive(30, 3)})
+		tenants := open(t, root)
+		rewriteSettings(t, filepath.Join(root, "acme"), invalidQuery)
+		tenants.Reload("test")
+		period, buckets := shortestKeepalive(tenants)
 		assert.Zero(t, period)
 		assert.Zero(t, buckets)
 	})
@@ -996,13 +1002,14 @@ func TestGapWindows(t *testing.T) {
 
 	t.Run("a folder rejected since boot keeps everything", func(t *testing.T) {
 		t.Parallel()
-		root := writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery})
+		// globex is what lets boot open the directory at all.
+		root := writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery, "globex": gapWindow(30)})
 		tenants := open(t, root)
-		assert.Equal(t, map[tenant.ID]time.Duration{"acme": keepEverything}, gapWindows(tenants))
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": keepEverything, "globex": 30 * time.Minute}, gapWindows(tenants))
 
 		rewriteSettings(t, filepath.Join(root, "acme"), gapWindow(15))
 		tenants.Reload("test")
-		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute}, gapWindows(tenants),
+		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "globex": 30 * time.Minute}, gapWindows(tenants),
 			"its own window once its folder validates")
 	})
 }

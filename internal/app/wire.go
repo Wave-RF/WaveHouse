@@ -58,7 +58,8 @@ func withoutContext(release func() error) func(context.Context) error {
 // `wavehouse bootstrap` writes the seed. A
 // *reload* of an invalid directory merely keeps the previous snapshot. A
 // nested directory (one folder per tenant, #583) fails closed per tenant
-// instead, at boot and on reload alike: see settings.Registry.
+// instead, at boot and on reload alike, except that at boot one that would
+// serve no tenant refuses to start too: see settings.Registry.
 //
 // The access-control policy and the named pipes (policies.json / pipes.json)
 // are read per request off the adopted snapshot, so a reload applies to the
