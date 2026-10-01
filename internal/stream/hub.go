@@ -314,21 +314,6 @@ func (h *Hub) rowAdmitted(p *policy.Policy, role string, ev *eventView, claims m
 	return true
 }
 
-// NumericSpecOf renders discovery's storage classification as the Go row-filter
-// evaluator's storage model. The Hub no longer uses it — row filtering is the
-// type layer's — and it is kept only for the tests/integration oracle that
-// still calls it, until that test and the Go evaluator are removed together.
-func NumericSpecOf(st discovery.NumericStorage) policy.NumericSpec {
-	switch {
-	case st.Integer:
-		return policy.NumericSpec{Family: policy.NumericInteger, Bits: st.IntBits, Unsigned: st.Unsigned}
-	case st.FloatBits != 0:
-		return policy.NumericSpec{Family: policy.NumericFloat, Bits: st.FloatBits}
-	default:
-		return policy.NumericSpec{Family: policy.NumericDecimal, Precision: st.Precision, Scale: st.Scale}
-	}
-}
-
 // eventView is one published event decoded once per Broadcast: cells, the raw
 // JSON value at each envelope column position, sliced positionally into the
 // outgoing frame so a value's bytes are never re-encoded. The row-filter reads

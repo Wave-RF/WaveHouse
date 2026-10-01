@@ -59,12 +59,6 @@ type Column struct {
 	// carries the ordinal itself so a caller holding a lone Column still knows
 	// where it sits.
 	Position uint64 `json:"position"`
-
-	// tsSpec is a DateTime/DateTime64 column's canonicalization spec, resolved
-	// once at schema build (Refresh). nil for non-timestamp columns, hand-built
-	// Column literals, and unresolvable zones — CanonicalizeTimestamps passes
-	// those through untouched (fail-open, #372).
-	tsSpec *timestampSpec
 }
 
 // TableSchema holds the discovered schema for one ClickHouse table. Columns is
@@ -299,8 +293,8 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		return fmt.Errorf("%w for tenant %s", ErrNoConnection, sr.tenant)
 	}
 
-	// ClickHouse interprets zone-less timestamp strings in the server's default
-	// zone; canonicalization applies the same rule so the instant never changes (#372).
+	// The server's default zone, kept with the schemas so the type layer can
+	// check it against the zone its library was opened with.
 	var tzName string
 	if err := conn.QueryRow(ctx, "SELECT timezone()").Scan(&tzName); err != nil {
 		return fmt.Errorf("query server timezone: %w", err)
@@ -315,16 +309,6 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	var serverVersion string
 	if err := conn.QueryRow(ctx, "SELECT version()").Scan(&serverVersion); err != nil {
 		return fmt.Errorf("query server version: %w", err)
-	}
-
-	var serverTZ *time.Location
-	if loc, err := loadLocation(tzName); err == nil {
-		serverTZ = loc
-	} else {
-		// Unresolvable — warn, not fatal, and no UTC fallback (that could move
-		// instants). A nil server zone means zone-less values pass through.
-		slog.WarnContext(ctx, "cannot resolve server timezone; zone-less timestamps will pass through un-canonicalized",
-			"timezone", tzName, "error", err)
 	}
 
 	rows, err := conn.Query(ctx,
@@ -377,7 +361,6 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	var noDDL []string
 	published := make([]*TableSchema, 0, len(tables))
 	for _, ts := range tables {
-		resolveTimestampSpecs(ctx, ts, serverTZ)
 		ts.cacheInsertable()
 		published = append(published, ts)
 		if ts.DDL == "" {

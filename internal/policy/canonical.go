@@ -9,28 +9,12 @@ import (
 	"strings"
 )
 
-// This file is the policy engine's ONE rendering layer for comparison operands:
-// every value a row-filter or insert-check compares — a JWT claim, a
-// policy-authored literal, an ingested payload value — is rendered here before
-// any comparison or SQL bind, so the two read surfaces can't disagree on what a
-// value "is". Three entry points, one per operand source:
-//
-//	CanonicalScalar         — decoded claim values (Evaluate's template resolution)
-//	                          and the insert-check comparison's two sides (internal/api)
-//	CanonicalNumericLiteral — policy-authored literals ("1.0" → "1"), behind the
-//	                          json.Valid grammar gate
-//	numericCanonical        — ingested payload values on the stream's row-filter
-//	                          path (string / json.Number / float64), routed through
-//	                          the two above
-//
-// All three converge on one canonical decimal form (canonicalDecimal, bounded
-// by maxCanonicalDigits): exact at any width, positional (never an exponent —
+// CanonicalScalar is the policy engine's one rendering for comparison operands
+// that come from a JWT claim: every value a row-filter binds is rendered here
+// before any SQL bind, so the read surfaces can't disagree on what a value
+// "is". It renders exact canonical decimal form (canonicalDecimal, bounded by
+// maxCanonicalDigits): exact at any width, positional (never an exponent —
 // "1e-3" renders as "0.001"), no leading/trailing zeros, "-0" folded to "0".
-// Those invariants are what numeric.go's digit-string comparison
-// (compareCanonicalDecimals) and storage-domain narrowing (NumericSpec.compare)
-// rely on. scalarString is the deliberate exception: the raw byte rendering for
-// ColumnText/ColumnOpaque comparison, where the payload's own spelling IS the
-// compared value.
 
 // maxCanonicalDigits bounds both a numeric literal's digit count and its
 // exact decimal expansion. Big-integer parsing is superlinear in digit count
@@ -39,16 +23,6 @@ import (
 // is six characters with a 152-character exact form). 100 digits is far past
 // any real id — uint256 is 78.
 const maxCanonicalDigits = 100
-
-// maxNumericOperandChars is the O(1) length pre-gate on numeric comparison
-// operands, checked before ANY scan of the value. It is verdict-preserving: a
-// JSON number literal carries at most four non-digit bytes (a sign, a decimal
-// point, an exponent marker and its sign), so anything longer already fails
-// the canonical digit bound (maxCanonicalDigits) — but proving that inside the
-// canonical gate costs a full json.Valid pass plus a digit count over a
-// client-controlled value, per subscriber per event on the fan-out goroutine.
-// The gate refuses first, without reading the bytes.
-const maxNumericOperandChars = maxCanonicalDigits + 4
 
 // CanonicalScalar renders a decoded JSON value as the canonical string the
 // policy layer binds and compares, reporting ok=false for values with no such
@@ -110,30 +84,6 @@ func CanonicalScalar(v any) (string, bool) {
 	default:
 		return fmt.Sprint(val), true
 	}
-}
-
-// LiteralValue marks an insert-check required value the policy author wrote
-// as a placeholder-free literal (Evaluate). A literal carries no JSON type —
-// "1.0" means the number 1 to a numeric column and the three-character text
-// to a String column — so the check comparison (internal/api) accepts its
-// numeric reading as well as its spelling. The type is the gate: a
-// claim-derived value is never wrapped, so a string-typed claim keeps strict
-// canonical equality and can't gain a numeric reading it didn't have. Only
-// CheckClauses carries this type; read filters bind plain strings.
-type LiteralValue string
-
-// CanonicalNumericLiteral renders a policy-authored literal that spells a
-// JSON number in canonical decimal form ("1.0" → "1"), reporting ok=false for
-// everything else. The json.Valid gate keeps this to spellings JSON itself
-// can produce: big.Int would also take "+5" or "007", readings no decoded
-// claim or payload value ever has. It canonicalizes nothing at resolve time —
-// the literal still binds and auto-injects exactly as written; only the check
-// comparison consults this second reading.
-func CanonicalNumericLiteral(s string) (string, bool) {
-	if !json.Valid([]byte(s)) {
-		return "", false
-	}
-	return CanonicalScalar(json.Number(s))
 }
 
 // canonicalDecimal renders a non-integer JSON number literal (one carrying a
@@ -208,66 +158,4 @@ func canonicalDecimal(lit string) (string, bool) {
 		return "", false
 	}
 	return sign + out, true
-}
-
-// numericCanonical renders a payload value as the canonical decimal form the
-// numeric comparison consumes, ok=false for anything that is not a number a
-// ClickHouse numeric column could have stored: booleans, structured values and
-// null, spellings outside the JSON number grammar ("Inf", "NaN", "0x1f",
-// "007"), values whose exact digits were lost upstream (float64 at/past 2^53),
-// and anything past the canonical digit bound. String and json.Number inputs
-// take the claim side's own gates (CanonicalNumericLiteral / CanonicalScalar),
-// so the payload and constant sides can never disagree on what counts as a
-// number or how it is spelled.
-func numericCanonical(v any) (string, bool) {
-	switch x := v.(type) {
-	case string:
-		if len(x) > maxNumericOperandChars {
-			return "", false
-		}
-		return CanonicalNumericLiteral(x)
-	case json.Number:
-		if len(x) > maxNumericOperandChars {
-			return "", false
-		}
-		return CanonicalScalar(x)
-	case float64:
-		// CanonicalScalar applies the 2^53 exactness guard and renders
-		// positionally; the literal gate then re-canonicalizes the one
-		// rendering FormatFloat emits that canonical form forbids ("-0").
-		s, ok := CanonicalScalar(x)
-		if !ok {
-			return "", false
-		}
-		return CanonicalNumericLiteral(s)
-	default:
-		return "", false
-	}
-}
-
-// scalarString renders a JSON-decoded scalar as the exact BYTES compared under
-// ColumnText and ColumnOpaque — deliberately the payload's raw spelling, never
-// a canonical form: a String column stores the payload text verbatim, so byte
-// comparison against it must use that spelling (canonicalizing "1.0" to "1"
-// here would move equality away from what ClickHouse stores). Numeric coercion
-// deliberately does NOT live here — the ColumnNumeric arm routes both operands
-// through the claim side's canonical machinery (numericCanonical). Non-scalars
-// (arrays, objects, null) return ok=false so the predicate fails closed rather
-// than guessing. The float64 case serves callers that decoded without
-// UseNumber (the stream itself always does); -1 precision emits the shortest
-// round-trip form without an exponent, so integer IDs read back as "123", not
-// "1.23e+02".
-func scalarString(v any) (string, bool) {
-	switch x := v.(type) {
-	case string:
-		return x, true
-	case json.Number:
-		return string(x), true
-	case float64:
-		return strconv.FormatFloat(x, 'f', -1, 64), true
-	case bool:
-		return strconv.FormatBool(x), true
-	default:
-		return "", false
-	}
 }
