@@ -164,11 +164,11 @@ func TestIngest_EphemeralInputFollowsTheFormat(t *testing.T) {
 		body   string
 		want   string
 	}{
-		{"JSONEachRow", FormatJSONEachRow, `{"page":"/a","ip":"1.2.3.4"}` + "\n", `["\/a", 7]`},
-		{"CSVWithNames", FormatCSVWithNames, "page,ip\n/a,1.2.3.4\n", `["\/a", 7]`},
-		{"TSVWithNames", FormatTSVWithNames, "ip\tpage\n1.2.3.4\t/a\n", `["\/a", 7]`},
-		{"CSV is the wire columns", FormatCSV, "/a,3\n", `["\/a", 3]`},
-		{"TSV is the wire columns", FormatTSV, "/a\t3\n", `["\/a", 3]`},
+		{"JSONEachRow", FormatJSONEachRow, `{"page":"/a","ip":"1.2.3.4"}` + "\n", `["/a", 7]`},
+		{"CSVWithNames", FormatCSVWithNames, "page,ip\n/a,1.2.3.4\n", `["/a", 7]`},
+		{"TSVWithNames", FormatTSVWithNames, "ip\tpage\n1.2.3.4\t/a\n", `["/a", 7]`},
+		{"CSV is the wire columns", FormatCSV, "/a,3\n", `["/a", 3]`},
+		{"TSV is the wire columns", FormatTSV, "/a\t3\n", `["/a", 3]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			batch, err := tbl.Ingest(tc.format, []byte(tc.body))
@@ -287,6 +287,37 @@ func TestIngest_DateTimeExportsAsRFC3339UTC(t *testing.T) {
 	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
 	assert.Equal(t, `["2026-03-24T12:00:00Z", "2026-03-24T12:00:00.000Z", "2026-03-24T12:00:00.123456Z", `+
 		`"2026-03-24T12:00:00Z", "2026-03-24T12:00:00.120Z", "2026-03-24", "1960-01-02"]`, string(batch.Rows[0].Line))
+}
+
+// TestIngest_ForwardSlashExportsUnescaped: the exported row leaves `/` as is
+// wherever the writer puts a string — a value, an array element, a map key, a
+// named tuple's field name — where the writer's default is `\/`, as the query
+// paths render it. An insert check on the same parse changes nothing.
+func TestIngest_ForwardSlashExportsUnescaped(t *testing.T) {
+	eng := testEngine(t, &discovery.TableSchema{Name: "paths", Columns: []discovery.Column{
+		{Name: "s", Type: "String", Position: 1},
+		{Name: "lc", Type: "LowCardinality(String)", Position: 2},
+		{Name: "arr", Type: "Array(String)", Position: 3},
+		{Name: "m", Type: "Map(String, String)", Position: 4},
+		{Name: "t", Type: "Tuple(`n/m` String)", Position: 5},
+	}})
+	tbl, err := eng.Table(tenant.Default, "paths")
+	require.NoError(t, err)
+	t.Cleanup(tbl.Release)
+
+	body := []byte(`{"s":"/home","lc":"a/b","arr":["c/d"],"m":{"k/1":"v/2"},"t":{"n/m":"x/y"}}` + "\n")
+	const want = `["/home", "a/b", ["c/d"], {"k/1":"v/2"}, {"n/m":"x/y"}]`
+	for name, checks := range map[string][]Predicate{
+		"no checks":  nil,
+		"with check": {{Column: "s", Op: "=", Values: []string{"/home"}}},
+	} {
+		batch, err := tbl.Ingest(FormatJSONEachRow, body, checks...)
+		require.NoError(t, err, name)
+		require.Len(t, batch.Rows, 1, name)
+		require.True(t, batch.Rows[0].Accepted, "%s: %s", name, batch.Rows[0].Message)
+		require.Empty(t, batch.Rows[0].CheckReason, name)
+		assert.Equal(t, want, string(batch.Rows[0].Line), name)
+	}
 }
 
 func TestInsertSettings_ReturnsAFreshMap(t *testing.T) {

@@ -22,22 +22,26 @@ import (
 // every cached read's key (queryCacheKey), so two builds that render rows
 // differently never serve each other's entries from a shared cache during a
 // rolling deploy. Change it with any change to the rendering settings below.
-const chRendering = "JSONEachRow/2"
+const chRendering = "JSONEachRow/3"
 
 // chReadSettingsFixed go on every request the cached read paths send, ahead
 // of the role's caps.
 //
 // Rendering: ClickHouse renders the rows, so a Decimal's spelling, a
 // DateTime64's scale, an Enum's name and an IPv6's compression are the
-// server's own. Every knob that changes the bytes is pinned rather than
-// inherited, because a tenant's server or profile may set any of them:
-// 64-bit integers and decimals as bare numbers, NaN and Inf as null, a named
-// tuple as an object, and DateTime as RFC 3339 in UTC,
-// `YYYY-MM-DDThh:mm:ss[.fff]Z` with the column's scale, whatever the column's
-// or the server's zone — the spelling the SSE wire carries (typelayer's
-// export pins the same), so neither a client nor the cache needs to know the
-// server's zone (#372). Date and Date32 are unaffected. Measured on
-// 26.8.15.10.
+// server's own. These knobs are pinned rather than inherited, because a
+// tenant's server or profile may set any of them: 64-bit integers and
+// decimals as bare numbers, NaN and Inf as null, a named tuple as an object,
+// `/` left unescaped (`"/home"`, where ClickHouse's default writes
+// `"\/home"`), and DateTime as RFC 3339 in UTC, `YYYY-MM-DDThh:mm:ss[.fff]Z`
+// with the column's scale, whatever the column's or the server's zone. The
+// SSE wire spells `/` and DateTime the same way (typelayer's export pins
+// both), so neither a client nor the cache needs to know the server's zone
+// (#372). Date and Date32 are unaffected. Measured on 26.8.15.10. A profile
+// can still change the bytes through a knob not pinned here, such as
+// output_format_decimal_trailing_zeros, output_format_json_array_of_rows or
+// output_format_trim_fixed_string (measured on 26.8.15.10; the last is
+// unknown to 24.8, where sending it would fail every read).
 //
 // Failure: wait_end_of_query buffers the result server-side until the query
 // has finished, and http_write_exception_in_output_format=0 keeps an
@@ -52,7 +56,7 @@ const chRendering = "JSONEachRow/2"
 // rather than letting it run on after nobody waits for it.
 //
 // Every one of these is known to ClickHouse 24.8 and later (measured on
-// 24.8.14.39 and 26.6.3.62).
+// 24.8.14.39 and 26.8.15.10).
 var chReadSettingsFixed = map[string]string{
 	"default_format":                               "JSONEachRow",
 	"wait_end_of_query":                            "1",
@@ -61,6 +65,7 @@ var chReadSettingsFixed = map[string]string{
 	"output_format_json_quote_64bit_integers":      "0",
 	"output_format_json_quote_decimals":            "0",
 	"output_format_json_quote_denormals":           "0",
+	"output_format_json_escape_forward_slashes":    "0",
 	"date_time_output_format":                      "iso",
 	"output_format_json_named_tuples_as_objects":   "1",
 }

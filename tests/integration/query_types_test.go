@@ -44,13 +44,14 @@ const queryTypesDDL = `
 // reach ClickHouse without passing through a driver's own type mapping —
 // the pin must describe ClickHouse's storage, not clickhouse-go's encoder.
 // i64/u64 sit past 2^53 so the pin also records how 64-bit integers are
-// spelled; fs is shorter than its FixedString(4) so the NUL padding shows.
+// spelled; s carries a `/` so it records that one is not escaped; fs is
+// shorter than its FixedString(4) so the NUL padding shows.
 const queryTypesRow = `(
 	-8, -16, -32, -9007199254740993,
 	8, 16, 32, 18446744073709551615,
 	0.1, 0.1,
 	12.50, 1.500,
-	'hello', 'lc', 'ab',
+	'hello/world', 'lc', 'ab',
 	toUUID('11111111-2222-3333-4444-555555555555'), 'a', true,
 	'10.0.0.1', '::1',
 	'2026-01-15', '2026-01-15 10:30:00', '2026-01-15 10:30:00.123',
@@ -68,9 +69,10 @@ const queryTypesRow = `(
 // change and belongs in the CHANGELOG.
 //
 // ClickHouse renders the body (FORMAT JSONEachRow under the reader's pinned
-// output settings): keys in SELECT order, Decimal as a JSON number, DateTime
-// as RFC 3339 in UTC at the column's scale (date_time_output_format=iso).
-// Measured on 26.8.15.10.
+// output settings): keys in SELECT order, Decimal as a JSON number, `/`
+// unescaped (output_format_json_escape_forward_slashes=0), DateTime as RFC
+// 3339 in UTC at the column's scale (date_time_output_format=iso). Measured
+// on 26.8.15.10.
 func TestQuery_TypeRendering_Pin(t *testing.T) {
 	e := env(t)
 
@@ -100,4 +102,15 @@ func TestQuery_TypeRendering_Pin(t *testing.T) {
 	require.Equal(t, strings.TrimRight(string(want), "\n"), body,
 		"the /v1/query type-rendering contract changed — re-record deliberately "+
 			"with WAVEHOUSE_UPDATE_PIN=1 and document the diff")
+}
+
+// TestOpsQuery_SlashRendering: the raw SQL proxy spells `/` as /v1/query
+// does, not as ClickHouse's default `\/`.
+func TestOpsQuery_SlashRendering(t *testing.T) {
+	e := env(t)
+
+	got := postJSON(t, e.baseURL+"/v1/ops/query", `{"sql":"SELECT '/home' AS p"}`)
+	require.Equal(t, http.StatusOK, got.status, "body: %s", got.raw)
+	require.Contains(t, got.raw, `"/home"`)
+	require.NotContains(t, got.raw, `\/`)
 }

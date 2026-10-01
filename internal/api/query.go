@@ -48,7 +48,8 @@ type QueryHandler struct {
 	// target resolves the tenant's ClickHouse HTTP wiring per request
 	// (chconn.Pools.Target in production): the base URL (e.g.
 	// `http://localhost:8123`) the handler appends query-string params
-	// (`default_format`, `database`, `date_time_output_format`) to and POSTs
+	// (`default_format`, `database`, `date_time_output_format`,
+	// `output_format_json_escape_forward_slashes`) to and POSTs
 	// the SQL against, plus the credentials and database; the zero Target is
 	// a tenant on no pool, a 503. queryTimeout bounds each proxied query.
 	// Funcs, not values, so a settings reload applies to the next request.
@@ -226,6 +227,10 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// re-parse ClickHouse's default `YYYY-MM-DD HH:MM:SS`. Matches the prior
 	// handler's RFC3339Nano output close enough for downstream callers.
 	q.Set("date_time_output_format", "iso")
+	// `/` as `/`, as /v1/query and pipes spell it (chReadSettingsFixed), not
+	// ClickHouse's default `\/`. A SETTINGS clause in the SQL still wins over
+	// the URL (measured on 26.8.15.10).
+	q.Set("output_format_json_escape_forward_slashes", "0")
 	if target.Database != "" {
 		q.Set("database", target.Database)
 	}

@@ -35,13 +35,16 @@ type IngestOptions struct {
 // inserts JSONCompactEachRow, so the detect_header settings have no real-INSERT
 // twin to keep in step. ok is false for a format Ingest does not parse.
 //
-// The export renders DateTime as RFC 3339 in UTC (`…T…Z`, the column's scale),
-// the spelling the query paths pin too, so a published row reads the same as a
-// queried one and carries its instant whatever the zone; the worker's
-// best_effort INSERT stores that exact instant. Measured on 26.8.15.10.
+// The export renders DateTime as RFC 3339 in UTC (`…T…Z`, the column's scale)
+// and leaves `/` unescaped (`"/home"`, where the writer's default is
+// `"\/home"`), the spellings the query paths pin too, so a published row spells
+// a timestamp and a `/` as a queried one does, and carries its instant whatever
+// the zone; the worker's best_effort INSERT stores that exact instant. Measured
+// on 26.8.15.10.
 func parseSettings(format Format, opts IngestOptions) (settings map[string]string, ok bool) {
 	settings = InsertSettings()
 	settings["date_time_output_format"] = "iso"
+	settings["output_format_json_escape_forward_slashes"] = "0"
 	switch format {
 	case FormatJSONEachRow, FormatCSVWithNames, FormatTSVWithNames:
 	case FormatCSV:

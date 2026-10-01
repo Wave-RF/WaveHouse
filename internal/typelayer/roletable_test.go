@@ -194,7 +194,7 @@ func TestRoleTable_DeniedColumnAnExpressionReadsStillCompiles(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, batch.Rows, 3)
 	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
-	assert.Equal(t, `["\/home", 7, 0]`, string(batch.Rows[0].Line), "length('0.0.0.0'), and n at its type default NULL")
+	assert.Equal(t, `["/home", 7, 0]`, string(batch.Rows[0].Line), "length('0.0.0.0'), and n at its type default NULL")
 	assert.Equal(t, 117, batch.Rows[1].Code)
 	assert.Contains(t, batch.Rows[1].Message, "ip")
 	assert.Equal(t, 117, batch.Rows[2].Code)
@@ -252,7 +252,7 @@ func TestRoleTable_EphemeralFollowsTheRoleColumns(t *testing.T) {
 	allowed.Release()
 	require.NoError(t, err)
 	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
-	assert.Equal(t, `["\/a", 7]`, string(batch.Rows[0].Line))
+	assert.Equal(t, `["/a", 7]`, string(batch.Rows[0].Line))
 
 	denied, err := eng.RoleTable(tenant.Default, "eph", RoleShape{Columns: []string{"page", "ip_len"}})
 	require.NoError(t, err)
@@ -261,7 +261,7 @@ func TestRoleTable_EphemeralFollowsTheRoleColumns(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 117, batch.Rows[0].Code)
 	require.True(t, batch.Rows[1].Accepted, batch.Rows[1].Message)
-	assert.Equal(t, `["\/b", 0]`, string(batch.Rows[1].Line))
+	assert.Equal(t, `["/b", 0]`, string(batch.Rows[1].Line))
 }
 
 // TestRoleTable_ContradictoryShapeIsAnError: a default for a column the shape

@@ -152,9 +152,9 @@ func TestCellAt(t *testing.T) {
 	assert.False(t, ok, "an unterminated row yields nothing")
 }
 
-// TestEventIDAt: the id is the STORED value, a string cell is JSON-decoded
-// because ClickHouse's writer escapes "/" as "\/" — Go's own string-literal
-// unquoting refuses that — and a null cell is no id at all.
+// TestEventIDAt: the id is the STORED value, a string cell is JSON-decoded —
+// JSON's escapes, "\/" included, which Go's own string-literal unquoting
+// refuses — and a null cell is no id at all.
 func TestEventIDAt(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -164,7 +164,7 @@ func TestEventIDAt(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{"a quoted string is decoded", `["\/a", "evt-1", 0]`, 1, "evt-1", true},
+		{"a quoted string is decoded", `["/a", "evt-1", 0]`, 1, "evt-1", true},
 		{"a slash escape survives", `["\/a\/b", 0]`, 0, "/a/b", true},
 		{"a number is its digits", `["x", 18446744073709551615]`, 1, "18446744073709551615", true},
 		{"an empty string is no id", `["x", ""]`, 1, "", false},

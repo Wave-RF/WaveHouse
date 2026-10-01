@@ -208,8 +208,9 @@ func eventIDAt(line []byte, idx int) (string, bool) {
 	}
 	if cell[0] == '"' {
 		// One scalar string, not the record: the cell is JSON-encoded by
-		// ClickHouse's own writer (it escapes "/" as "\/"), so Go's own
-		// string-literal unquoting would refuse it.
+		// ClickHouse's own writer, so it is JSON-decoded. Go's own
+		// string-literal unquoting reads a different escape grammar (it
+		// refuses JSON's "\/", for one).
 		var s string
 		if err := json.Unmarshal(cell, &s); err != nil || s == "" {
 			return "", false

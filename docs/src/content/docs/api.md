@@ -433,7 +433,7 @@ A batch aborted partway — a `503` or `500` after some leading records were alr
 
 ### `POST /v1/ops/query` — Query ClickHouse
 
-Executes a SQL statement directly against ClickHouse. **WaveHouse proxies the SQL string verbatim to ClickHouse's HTTP interface** — any statement ClickHouse accepts works, including arbitrary DDL/DML/SYSTEM verbs and inline FORMAT directives. One statement per request: ClickHouse's HTTP interface refuses multi-statement input (`SELECT 1; TRUNCATE t` is `Code: 62 … Multi-statements are not allowed`, answered `400 clickhouse.rejected`), so send each statement as its own request. Read queries return a JSON array of result rows; mutations/DDL return HTTP 200 with `[]` on success. The proxy does not ask ClickHouse to hold its answer until the statement ends, so a statement that fails after ClickHouse began streaming a large result comes back `200` with ClickHouse's partial output followed by its exception text, which is not valid JSON: treat a body that does not parse as a failure. The request body is capped at 16 MiB. DateTime columns are ISO-8601 formatted via the upstream `date_time_output_format=iso` setting — the same server-side rendering `/v1/query`, pipes and the stream use, so a `DateTime64(3)` whole-second value returns `.000Z` on all of them; other types are returned as ClickHouse renders them under `FORMAT JSON`.
+Executes a SQL statement directly against ClickHouse. **WaveHouse proxies the SQL string verbatim to ClickHouse's HTTP interface** — any statement ClickHouse accepts works, including arbitrary DDL/DML/SYSTEM verbs and inline FORMAT directives. One statement per request: ClickHouse's HTTP interface refuses multi-statement input (`SELECT 1; TRUNCATE t` is `Code: 62 … Multi-statements are not allowed`, answered `400 clickhouse.rejected`), so send each statement as its own request. Read queries return a JSON array of result rows; mutations/DDL return HTTP 200 with `[]` on success. The proxy does not ask ClickHouse to hold its answer until the statement ends, so a statement that fails after ClickHouse began streaming a large result comes back `200` with ClickHouse's partial output followed by its exception text, which is not valid JSON: treat a body that does not parse as a failure. The request body is capped at 16 MiB. DateTime columns are ISO-8601 formatted via the upstream `date_time_output_format=iso` setting — the same server-side rendering `/v1/query`, pipes and the stream use, so a `DateTime64(3)` whole-second value returns `.000Z` on all of them — and `/` is left unescaped (`output_format_json_escape_forward_slashes=0`, as on those paths) unless the statement's own `SETTINGS` clause says otherwise; other types are returned as ClickHouse renders them under `FORMAT JSON`.
 
 :::note[Inline `FORMAT` overrides the JSON envelope]
 ClickHouse's inline `FORMAT` clause (e.g. `SELECT 1 FORMAT CSV` or `… FORMAT Pretty`) takes precedence over the URL-level `default_format=JSON` setting. When the SQL contains an explicit `FORMAT`, the proxy forwards ClickHouse's raw response body (CSV, Pretty, TSV, …) and passes through the upstream `Content-Type` header — `text/csv`, `text/tab-separated-values`, etc. — so consumers see the right MIME type. The "extract the `data` array" behavior only applies when ClickHouse returned the `FORMAT JSON` envelope, which is the default.
@@ -466,7 +466,7 @@ An optional `?tenant=<id>` names the [tenant](/deployment#the-nested-settings-di
 | `sql` | string | Yes | SQL forwarded verbatim to ClickHouse's HTTP interface. |
 
 :::note[No parameter binding on this endpoint (yet)]
-The earlier handler accepted a `params` array bound to `?` placeholders; the HTTP proxy doesn't. ClickHouse's native named-param syntax (`WHERE id = {id:UInt32}` with `param_id=42` on the URL query string) is *not* forwarded today either — the proxy only sets `default_format`, `date_time_output_format`, and `database` on the upstream URL, and the request body is `{"sql": "..."}` with no escape hatch for query-string params. The current contract is "send raw SQL, get rows back": inline literals into the SQL for now. For safe binding from user-supplied input, use the structured query endpoint (`POST /v1/query?table={table}`) — that's its job.
+The earlier handler accepted a `params` array bound to `?` placeholders; the HTTP proxy doesn't. ClickHouse's native named-param syntax (`WHERE id = {id:UInt32}` with `param_id=42` on the URL query string) is *not* forwarded today either — the proxy only sets `default_format`, `date_time_output_format`, `output_format_json_escape_forward_slashes`, and `database` on the upstream URL, and the request body is `{"sql": "..."}` with no escape hatch for query-string params. The current contract is "send raw SQL, get rows back": inline literals into the SQL for now. For safe binding from user-supplied input, use the structured query endpoint (`POST /v1/query?table={table}`) — that's its job.
 :::
 
 **Response:**
@@ -575,6 +575,7 @@ JSON array of result rows, **rendered by ClickHouse**: the query runs over its H
 | `DateTime`, `DateTime64` | `"2026-06-21T04:00:00.123Z"` — RFC 3339 in UTC whatever zone the column declares; byte-identical to the [SSE stream](#get-v1stream--server-sent-events-stream) for the same row (see [Timestamp rendering](#timestamp-rendering)) |
 | `Decimal*` | a JSON **number** (`12.5`), not a string |
 | `Int64`/`UInt64` past 2^53 | an unquoted number — still lossy in a JavaScript `number`; read it as text if you need every digit |
+| `String` | `/` as `/` (`"/home"`): WaveHouse pins `output_format_json_escape_forward_slashes=0`, where ClickHouse's default writes `"\/home"` |
 | `FixedString(n)` | a string padded to `n` bytes with `\u0000` |
 | `Enum*` | the name, not the ordinal |
 | `Nullable(T)` | `null` for a SQL `NULL` |
@@ -674,13 +675,13 @@ event: schema
 data: {"table_name":"clicks","columns":["page","button","score","received_timestamp"]}
 
 id: 2026-03-24T12:00:00.123Z
-data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","row":["\/home","signup",42.5,"2026-03-24T11:59:58.512Z"]}
+data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","row":["/home","signup",42.5,"2026-03-24T11:59:58.512Z"]}
 
 id: 2026-03-24T12:00:01.456Z
-data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","row":["\/pricing","cta",7,"2026-03-24T12:00:01.456Z"]}
+data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","row":["/pricing","cta",7,"2026-03-24T12:00:01.456Z"]}
 ```
 
-String values are ClickHouse's JSON rendering, which escapes `/` as `\/` — valid JSON that any parser reads back as `/`.
+A `/` in a string arrives as `/`, not as the `\/` ClickHouse's JSON writer produces by default: WaveHouse pins `output_format_json_escape_forward_slashes=0` on the export that produces these rows and on `/v1/query`, pipes and `/v1/ops/query`.
 
 A raw consumer must keep the most recent announced column list and zip each `row` against it; a column the record omitted still has its slot, holding its evaluated `DEFAULT` (or the type's default — `null` only on a `Nullable` column with none), so positions never shift. **Check arity before zipping:** drop a `row` whose length disagrees with the last announced list rather than zipping it, because the announcement is not guaranteed in one case — a connection that gap-fills across a column change may receive live rows with no fresh announcement until the columns next change or it reconnects ([#543](https://github.com/Wave-RF/WaveHouse/issues/543)). An arity check covers an added or removed column; a *same-length* change (a `RENAME COLUMN`, or a drop paired with an add) it cannot see, and reconnecting is what resynchronizes. Separately, a replay spanning a server upgrade across the v2 ingest envelope silently omits the pre-upgrade events — see [Upgrading across the v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope). The TypeScript SDK does this for you: `.stream()` and `.liveQuery()` zip each row into an object. The announcement is **per connection**, so a client that joins mid-stream is told the columns before it is sent a row, and a reconnect is told again.
 

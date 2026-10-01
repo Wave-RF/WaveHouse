@@ -258,6 +258,7 @@ func TestCHReader_Request(t *testing.T) {
 	// Pinned here rather than read from the map: the SSE wire (typelayer's
 	// export) and the SDK compare against this spelling.
 	assert.Equal(t, "iso", got.query.Get("date_time_output_format"), "DateTime as RFC 3339 in UTC")
+	assert.Equal(t, "0", got.query.Get("output_format_json_escape_forward_slashes"), `"/home", not ClickHouse's default "\/home"`)
 	assert.Equal(t, "2", got.query.Get("readonly"))
 	assert.Equal(t, "warehouse", got.query.Get("database"))
 	assert.Equal(t, []string{"/home", `a\tb`}, ch.params())
