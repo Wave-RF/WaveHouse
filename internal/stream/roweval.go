@@ -26,13 +26,17 @@ const (
 	// author's to fix: a stored value the expression cannot read, or a filter
 	// constant the column's type cannot read (a claim rendering as "abc"
 	// against a Decimal column answers code 53 per row, against a Float one
-	// 72; an integer column's strict cast answers false instead).
+	// 72; an integer column's strict cast answers false instead). It is also
+	// classifyPrepare's label for a Prepare failure that is neither
+	// ReasonUnavailable nor ReasonDrift: the type layer refusing the parse call
+	// as a whole.
 	ReasonError = typelayer.ReasonError
 	// ReasonDecline: no verdict was reached. The expression would not compile
 	// for this generation, chtypes would not answer for the row (one that does
-	// not parse lands here), or the predicate reads a column the event does not
-	// carry (see engineRowView.Visible). Withheld, like every answer that is not
-	// a definite true.
+	// not parse lands here, not in Prepare's error: see
+	// TestEngineEvaluator_UnreadableRowIsDeclined), or the predicate reads a
+	// column the event does not carry (see engineRowView.Visible). Withheld,
+	// like every answer that is not a definite true.
 	ReasonDecline = typelayer.ReasonDecline
 	// ReasonUnavailable: no compiled schema can answer for this tenant's table
 	// — the tenant is not bound yet, its server line has no artifact, a compile

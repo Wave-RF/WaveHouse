@@ -95,10 +95,10 @@ func (m *Metrics) FrameDropped(kind string) {
 // type layer has no compiled schema for the tenant's table, so every
 // row-filtered subscriber is dark until it does; `drift` means events arrive
 // under a column list the table's current generation cannot read; `error` means
-// ClickHouse raised evaluating the predicate over the row; and `decline` means
-// no verdict was reached — a filter that does not compile, a row that does not
-// parse, or a filter on a column the inserting role did not write. Only
-// `filter` is a policy decision.
+// ClickHouse raised evaluating the predicate over the row, or the type layer
+// refused to parse the event at all; and `decline` means no verdict was reached
+// — a filter that does not compile, a row that does not parse, or a filter on a
+// column the inserting role did not write. Only `filter` is a policy decision.
 func (m *Metrics) RowWithheld(table, role, reason string) {
 	if m == nil {
 		return

@@ -259,8 +259,38 @@ func TestWithheldReason_ClassifiesTypeLayerErrors(t *testing.T) {
 		WithheldReason(classifyPrepare(&typelayer.Unavailable{Tenant: tenant.Default, Table: "clicks", Cause: "no artifact"})))
 	assert.Equal(t, ReasonDrift,
 		WithheldReason(classifyPrepare(fmt.Errorf("wrapped: %w", typelayer.ErrColumnsDrift))))
-	assert.Equal(t, ReasonError, WithheldReason(classifyPrepare(errors.New("unparseable row"))))
+	assert.Equal(t, ReasonError, WithheldReason(classifyPrepare(errors.New("the parse call was refused"))))
 	assert.Equal(t, ReasonError, WithheldReason(errors.New("an evaluator that names no reason")))
+}
+
+// TestEngineEvaluator_UnreadableRowIsDeclined: a row the type layer cannot
+// read is not a Prepare failure. Prepare succeeds, the filter does not answer
+// for the row, and the withhold is labelled decline, whatever the shape: a
+// value the column cannot read, a short row, a truncated array, an object, not
+// JSON at all (measured on the 26.8 artifact). The hub refuses the last four
+// before Prepare, as they do not pair with the column list; they are here to
+// pin the label.
+func TestEngineEvaluator_UnreadableRowIsDeclined(t *testing.T) {
+	t.Parallel()
+	eval := NewRowEvaluator(typelayertest.TestEngine(t,
+		chtypesTable("clicks", col("page", "UInt32"), col("secret", "String"), col("tenant_id", "String"))))
+	cols := []string{"page", "secret", "tenant_id"}
+	perms := policy.Evaluate(filteredPolicy(), "viewer", "clicks", "select", map[string]any{"tenant": "acme"})
+
+	view, err := eval.Prepare(tenant.Default, "clicks", cols, json.RawMessage(`[1,"x","acme"]`))
+	require.NoError(t, err)
+	visible, reason := view.Visible(perms)
+	view.Close()
+	require.True(t, visible, "control: a readable row is judged: %s", reason)
+
+	for _, row := range []string{`["abc","x","acme"]`, `[-1,"x","acme"]`, `[1,"x"]`, `[1,"x","acme"`, `{"page":1}`, `not json`} {
+		view, err := eval.Prepare(tenant.Default, "clicks", cols, json.RawMessage(row))
+		require.NoError(t, err, row)
+		visible, reason := view.Visible(perms)
+		view.Close()
+		assert.False(t, visible, row)
+		assert.Equal(t, ReasonDecline, reason, row)
+	}
 }
 
 // TestEngineEvaluator_TenantsAreIndependent: the production evaluator resolves

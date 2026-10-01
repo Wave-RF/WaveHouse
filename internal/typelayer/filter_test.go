@@ -430,8 +430,8 @@ func TestVisibleWithReason_LabelsTheCause(t *testing.T) {
 // TestParseRow_ColumnsDriftIsAnError: a column list no INSERT into this
 // generation could name is drift, not a parse attempt. A row whose list is
 // fine but whose values do not fit it is not drift: the block holds the row's
-// refusal and every predicate over it withholds (measured on the 26.6
-// artifact: ParseBlock reports no call-level error for a malformed row).
+// refusal and every predicate over it withholds (measured on the 26.6 and
+// 26.8 artifacts: ParseBlock reports no call-level error for a malformed row).
 func TestParseRow_ColumnsDriftIsAnError(t *testing.T) {
 	eng := testEngine(t, rowsTable())
 	tbl, err := eng.Table(tenant.Default, "rows")
