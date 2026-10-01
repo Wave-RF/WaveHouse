@@ -80,7 +80,10 @@ const (
 	// genuinely-large results, or the structured query endpoint with its
 	// DefaultMaxRows cap). The cap is here as a safety net against a
 	// runaway SELECT exhausting the API server's RAM; admin-only doesn't
-	// mean operators won't accidentally OOM themselves.
+	// mean operators won't accidentally OOM themselves. The structured query
+	// and pipes buffer under the same cap (chReader), and a pipe has no row
+	// limit to keep it under: past it, every path answers 502
+	// clickhouse.response_too_large.
 	maxCHResponseBytes = 64 << 20 // 64 MiB
 
 	// maxRequestBodyBytes caps the inbound SQL request body. 16 MiB is well
