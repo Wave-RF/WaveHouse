@@ -781,11 +781,12 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 		-tags="integration $(TAGS)" -timeout 480s -coverpkg=./... -race -count=1 \
 		./tests/integration/... ./internal/mq/natsspike/... ./internal/cache/... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
-	@# internal/mq's integration-tagged tests (the external NATS broker) run
-	@# alone: its untagged tests are the unit suite's.
+	@# The integration-tagged tests of internal/mq (the external NATS broker)
+	@# and internal/api (the read path's filters against a ClickHouse in a
+	@# non-UTC zone) run alone: their untagged tests are the unit suite's.
 	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
 		-tags="integration $(TAGS)" -timeout 240s -coverpkg=./... -race -count=1 \
-		-run '^Test(ExternalNATS|NewNATS|NATSPermissions_Refuse|Leases)' ./internal/mq $(ARGS) \
+		-run '^Test(ExternalNATS|NewNATS|NATSPermissions_Refuse|Leases|Integration_)' ./internal/mq ./internal/api $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
 	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render integration; fi
 
