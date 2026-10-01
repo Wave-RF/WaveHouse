@@ -110,8 +110,8 @@ type chReader struct {
 	build func(tlsCfg *tls.Config, conns int) *http.Client
 
 	mu sync.Mutex
-	// clients holds one set of clients per connection cap.
-	clients map[int]*chconn.HTTPClients
+	// clients holds one client per pool (readerPool).
+	clients map[readerPool]*http.Client
 
 	// maxResponseBytes optionally overrides maxCHResponseBytes. Test-only
 	// seam for the cap-overflow path; not a production knob.
@@ -119,7 +119,20 @@ type chReader struct {
 }
 
 func newCHReader(build func(tlsCfg *tls.Config, conns int) *http.Client) *chReader {
-	return &chReader{build: build, clients: map[int]*chconn.HTTPClients{}}
+	return &chReader{build: build, clients: map[readerPool]*http.Client{}}
+}
+
+// readerPool is what one client's connections are shared by: the server, the
+// credentials and the database — the tuple a native pool is keyed by — the
+// TLS config, and the cap. Tenants naming the same tuple share one cap, as
+// they share one native pool; a tenant on another database or user on the
+// same server gets a cap of its own. The set grows with the pools ever read
+// through, not with requests: a client whose pool is gone keeps only its
+// transport, whose idle connections time out on their own.
+type readerPool struct {
+	url, username, password, database string
+	tls                               *tls.Config
+	conns                             int
 }
 
 // sharedCHReader serves both cached read handlers, so a tenant's reads share
@@ -128,10 +141,9 @@ func newCHReader(build func(tlsCfg *tls.Config, conns int) *http.Client) *chRead
 var sharedCHReader = newCHReader(readerHTTPClient)
 
 // readerHTTPClient is the read paths' client: net/http's default transport
-// with the target's TLS config and at most conns connections per server.
-// Tenants on one server with the same cap share it, as tenants on one tuple
-// share a pool; a read that finds every connection busy waits for one until
-// its deadline. Like the proxy's client it has no Timeout — every request
+// with the target's TLS config and at most conns connections to the server,
+// one per pool (readerPool); a read that finds every connection busy waits
+// for one until its deadline. Like the proxy's client it has no Timeout — every request
 // carries a deadline — and does not chase redirects: the target is operator
 // config, and ClickHouse does not redirect in normal operation.
 func readerHTTPClient(tlsCfg *tls.Config, conns int) *http.Client {
@@ -147,19 +159,27 @@ func readerHTTPClient(tlsCfg *tls.Config, conns int) *http.Client {
 	}
 }
 
-// client returns the client for target under a cap of conns connections.
+// client returns the client for target's pool under a cap of conns
+// connections.
 func (c *chReader) client(target chconn.Target, conns int) *http.Client {
 	if conns <= 0 {
 		conns = defaultReadConns
 	}
-	c.mu.Lock()
-	clients, ok := c.clients[conns]
-	if !ok {
-		clients = chconn.NewHTTPClients(func(tlsCfg *tls.Config) *http.Client { return c.build(tlsCfg, conns) })
-		c.clients[conns] = clients
+	key := readerPool{
+		url: target.URL, username: target.Username, password: target.Password, database: target.Database,
+		tls: target.TLS, conns: conns,
 	}
-	c.mu.Unlock()
-	return clients.For(target)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if cl, ok := c.clients[key]; ok {
+		return cl
+	}
+	// A copy of the TLS config, never the target's own: net/http appends its
+	// HTTP/2 protocols to NextProtos in place when a transport first dials,
+	// which would race the driver's handshakes on the shared config.
+	cl := c.build(target.TLS.Clone(), conns)
+	c.clients[key] = cl
+	return cl
 }
 
 // chResponseTooLargeError is a response past the read paths' buffer cap. The

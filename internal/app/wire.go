@@ -375,9 +375,16 @@ func (a *App) registryFor(s *settings.Store) *discovery.SchemaRegistry {
 // per-call setting rather than a property of the pool it shares.
 func queryTimeout(s *settings.Store) time.Duration { return s.ClickHouse().QueryTimeout }
 
-// maxOpenConns is the tenant's clickhouse.max_open_conns, which also caps the
-// HTTP connections its pipes and structured queries hold.
-func maxOpenConns(s *settings.Store) int { return s.ClickHouse().MaxOpenConns }
+// readConns caps the HTTP connections the pipes and structured queries of the
+// tenants on one pool hold between them: the pool's size, the largest
+// clickhouse.max_open_conns among them (as the native pool is sized), or the
+// tenant's own when it is on no pool.
+func (a *App) readConns(s *settings.Store) int {
+	if m := a.pools.For(s.Tenant()); m != nil {
+		return m.Sizes().MaxOpenConns
+	}
+	return s.ClickHouse().MaxOpenConns
+}
 
 // wireTypes opens the type layer: the process's one chtypes registry, which
 // ingest judges every record with and the stream hub evaluates row filters
@@ -1039,13 +1046,13 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	streamHandler.Closing = closing
 
 	// Pipes and structured queries run over the tenant's HTTP target, where
-	// ClickHouse renders the rows itself, holding at most the tenant's
-	// max_open_conns connections to it between them.
+	// ClickHouse renders the rows itself, holding at most its pool's size in
+	// connections between them.
 	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.chTargetFor, a.cache, queryTimeout)
 	pipesHandler.Tenants = a.tenants
-	pipesHandler.MaxConns = maxOpenConns
+	pipesHandler.MaxConns = a.readConns
 	structuredQueryHandler := api.NewStructuredQueryHandler(a.chTargetFor, a.cache, a.registryFor, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, queryTimeout, (*settings.Store).DefaultMaxRows)
-	structuredQueryHandler.MaxConns = maxOpenConns
+	structuredQueryHandler.MaxConns = a.readConns
 
 	schemaHandler := api.NewSchemaHandler(a.registryFor)
 	schemaHandler.Tenants = a.tenants
