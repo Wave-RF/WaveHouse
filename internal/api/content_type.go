@@ -1,54 +1,19 @@
 package api
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"mime"
 	"slices"
 	"strings"
+
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
-const (
-	// maxNDJSONLineBytes caps a single NDJSON record so one pathological line
-	// can't force an unbounded read buffer. 10 MiB is far above any realistic
-	// flat ingest record; a line larger than this aborts the whole request.
-	maxNDJSONLineBytes = 10 << 20 // 10 MiB
-
-	// maxSniffBytes bounds how far the arity peek looks for the first
-	// non-whitespace byte. Far beyond any reasonable amount of leading
-	// whitespace; a body that is only whitespace within this window is treated
-	// as empty.
-	maxSniffBytes = 512
-)
-
-// recordReader yields ingest records one at a time from a request body. Each
-// concrete reader covers one wire format (single JSON object, JSON array,
-// NDJSON, and — later — CSV), so the handler stays format-agnostic and new
-// formats / transports (streaming uploads) slot in behind this one interface.
-//
-// Next returns io.EOF at the clean end of the body. A *recordSyntaxError is a
-// recoverable per-record decode failure — the framing let the reader resync, so
-// the handler records it and continues. Any other non-EOF error is fatal to the
-// request.
-type recordReader interface {
-	Next() (map[string]any, error)
-}
-
-// recordSyntaxError marks a per-record decode failure the reader recovered from
-// (the framing let it skip to the next record). The batch handler turns it into
-// a recordResult error; it carries no HTTP status because the decode layer sits
-// below the validation/permission layer that owns status codes.
-type recordSyntaxError struct{ msg string }
-
-func (e *recordSyntaxError) Error() string { return e.msg }
-
-// errEmptyBody is returned by newRecordReader when the body has no content (no
-// non-whitespace byte within the sniff window). The handler maps it to a 400.
-var errEmptyBody = errors.New("empty body")
+// maxSniffBytes bounds how far the arity peek looks for the first
+// non-whitespace byte. Far beyond any reasonable amount of leading whitespace;
+// a body that is only whitespace within this window is treated as empty.
+const maxSniffBytes = 512
 
 // errUnsupportedContentType is returned when the request declares no
 // Content-Type, one whose media type is not in the accepted list, several that
@@ -69,25 +34,47 @@ var errConflictingContentType = errors.New("conflicting content type")
 
 // IngestFormat is the wire format of an ingest request body. It comes from the
 // request's declared Content-Type and nothing else: the body never overrides
-// what the client said it sent, so a caller can always tell how their bytes
-// will be read without knowing what the first one happens to be.
+// what the client said it sent, so a caller can always tell how their bytes will
+// be read without knowing what the first one happens to be.
+//
+// It is NOT the same thing as the chtypes format the parser is handed — see
+// wire(). The two JSON families are one format to ClickHouse and two formats
+// here, because they differ in how a body frames its records, which is what
+// decides the response shape and how many records the request contains.
 type IngestFormat int
 
 const (
 	// FormatJSON is the application/json family: one flat object, or a
 	// top-level array of them. Which of the two is the body's own business —
 	// the first non-whitespace byte picks it — because both are the same
-	// format, differing only in arity.
+	// format to the parser, differing only in arity.
 	FormatJSON IngestFormat = iota
-	// FormatNDJSON is newline-delimited JSON: one flat object per line. A line
-	// that is not a JSON object is a per-record error, never a reason to
-	// re-read the body as something else.
+	// FormatNDJSON is newline-delimited JSON: one flat object per line. Byte
+	// for byte the same format ClickHouse calls JSONEachRow; the distinction
+	// from FormatJSON survives only so a declared-NDJSON body is always a
+	// batch and never has its arity sniffed.
 	FormatNDJSON
-	// FormatCSV plugs in here once ingest reads CSV: add the media types to
-	// acceptedContentTypes, which advertises them in the 415 automatically, and
-	// the reader to newRecordReader. Do NOT add them in ingestFormatOne — it
-	// resolves by scanning that one table, and a second list is the drift this
-	// arrangement exists to prevent.
+	// FormatCSV is bare `text/csv`: positional in the table's wire columns
+	// (declaration order minus MATERIALIZED, ALIAS and EPHEMERAL), under
+	// ClickHouse's own header auto-detection — a first line that spells the
+	// column names is consumed as a header, not a record.
+	FormatCSV
+	// FormatTSV is FormatCSV's tab-separated twin.
+	FormatTSV
+	// FormatCSVWithNames is CSV whose first line names the columns, in any
+	// order — `text/csv; header=present`, RFC 4180 §3's parameter. The header
+	// is not a record; a column it omits takes its DEFAULT, and a name the
+	// table (or the role's projection of it) lacks refuses the request with
+	// ClickHouse's code 117.
+	FormatCSVWithNames
+	// FormatTSVWithNames is FormatCSVWithNames' tab-separated twin.
+	FormatTSVWithNames
+	// FormatCSVPositional is `text/csv; header=absent`: strictly positional,
+	// detection off, so a header line is one record that fails to parse with
+	// ClickHouse's code 27.
+	FormatCSVPositional
+	// FormatTSVPositional is FormatCSVPositional's tab-separated twin.
+	FormatTSVPositional
 )
 
 // String renders a format for error messages and logs.
@@ -97,10 +84,53 @@ func (f IngestFormat) String() string {
 		return "json"
 	case FormatNDJSON:
 		return "ndjson"
+	case FormatCSV:
+		return "csv"
+	case FormatTSV:
+		return "tsv"
+	case FormatCSVWithNames:
+		return "csvwithnames"
+	case FormatTSVWithNames:
+		return "tsvwithnames"
+	case FormatCSVPositional:
+		return "csv"
+	case FormatTSVPositional:
+		return "tsv"
 	default:
 		return "unknown"
 	}
 }
+
+// wire is the format chtypes parses the body as. Both JSON families collapse
+// onto JSONEachRow: an NDJSON body, a bare object, concatenated objects and a
+// newline-framed array are all the same input to ClickHouse's own reader.
+func (f IngestFormat) wire() typelayer.Format {
+	switch f {
+	case FormatCSV, FormatCSVPositional:
+		return typelayer.FormatCSV
+	case FormatTSV, FormatTSVPositional:
+		return typelayer.FormatTSV
+	case FormatCSVWithNames:
+		return typelayer.FormatCSVWithNames
+	case FormatTSVWithNames:
+		return typelayer.FormatTSVWithNames
+	case FormatJSON, FormatNDJSON:
+		return typelayer.FormatJSONEachRow
+	default:
+		return typelayer.FormatJSONEachRow
+	}
+}
+
+// options are the parse options the format adds to wire(): header detection is
+// off exactly for the header=absent pair.
+func (f IngestFormat) options() typelayer.IngestOptions {
+	return typelayer.IngestOptions{StrictPositional: f == FormatCSVPositional || f == FormatTSVPositional}
+}
+
+// alwaysBatch reports whether this format's response is the per-record batch
+// shape whatever the body holds. Only the JSON family has an arity question,
+// and the first non-whitespace byte answers it (see firstNonSpace).
+func (f IngestFormat) alwaysBatch() bool { return f != FormatJSON }
 
 // acceptedContentTypes maps every media type ingest reads to the format it
 // selects, in the order the 415 body advertises them. The first entry of each
@@ -113,15 +143,31 @@ func (f IngestFormat) String() string {
 // architecture.md all failed to name — and no test can close that direction by
 // enumeration, because the complement is unbounded. One table closes it by
 // construction.
+//
+// header is the `header` parameter an entry requires: "" matches a declaration
+// without one; "present" and "absent" match only that value. It is the one
+// parameter that decides a format, and only for the two media types that list
+// non-empty entries. RFC 4180 §3 defines it for text/csv, and it maps onto
+// ClickHouse's own behaviour three ways: present is the WithNames format,
+// absent is strictly positional (detection off), and none leaves ClickHouse's
+// default header auto-detection on. text/tab-separated-values takes the same
+// mapping (IANA defines no parameters for it).
 var acceptedContentTypes = []struct {
 	mediaType string
+	header    string
 	format    IngestFormat
 }{
-	{"application/json", FormatJSON},
-	{"application/x-ndjson", FormatNDJSON},
-	{"application/ndjson", FormatNDJSON},
-	{"application/jsonl", FormatNDJSON},
-	{"application/jsonlines", FormatNDJSON},
+	{"application/json", "", FormatJSON},
+	{"application/x-ndjson", "", FormatNDJSON},
+	{"application/ndjson", "", FormatNDJSON},
+	{"application/jsonl", "", FormatNDJSON},
+	{"application/jsonlines", "", FormatNDJSON},
+	{"text/csv", "", FormatCSV},
+	{"text/csv", "present", FormatCSVWithNames},
+	{"text/csv", "absent", FormatCSVPositional},
+	{"text/tab-separated-values", "", FormatTSV},
+	{"text/tab-separated-values", "present", FormatTSVWithNames},
+	{"text/tab-separated-values", "absent", FormatTSVPositional},
 }
 
 // supportedContentTypes is what the 415 body lists and the docs quote, derived
@@ -130,133 +176,12 @@ var supportedContentTypes = func() []string {
 	out := make([]string, len(acceptedContentTypes))
 	for i, a := range acceptedContentTypes {
 		out[i] = a.mediaType
+		if a.header != "" {
+			out[i] += "; header=" + a.header
+		}
 	}
 	return out
 }()
-
-// errUnterminatedArray marks a JSON array body that ended before its closing
-// ']' (a truncated / cut-off upload). It is deliberately NOT io.EOF so the
-// batch loop fails the whole request (400) instead of treating the records that
-// did arrive as a complete, successful batch.
-var errUnterminatedArray = errors.New("unterminated json array")
-
-// objectReader decodes exactly one flat JSON object — the single-object ingest
-// path. A second Next returns io.EOF. Trailing bytes after the first object are
-// ignored (matching the historical single-object behavior), so the response
-// shape never depends on what follows the object.
-type objectReader struct {
-	dec  *json.Decoder
-	done bool
-}
-
-func (o *objectReader) Next() (map[string]any, error) {
-	if o.done {
-		return nil, io.EOF
-	}
-	o.done = true
-	var m map[string]any
-	if err := o.dec.Decode(&m); err != nil {
-		return nil, err // fatal: handler maps this to 400 invalid json
-	}
-	return m, nil
-}
-
-// arrayReader streams the elements of a top-level JSON array. A wrong-typed
-// element (a scalar/array where an object was expected) yields a
-// *json.UnmarshalTypeError, which leaves the decoder in sync — recoverable, so
-// it becomes a per-record error and iteration continues. A *json.SyntaxError
-// desyncs the decoder and is returned as fatal.
-type arrayReader struct {
-	dec     *json.Decoder
-	started bool
-	done    bool
-}
-
-func (a *arrayReader) Next() (map[string]any, error) {
-	if a.done {
-		return nil, io.EOF
-	}
-	if !a.started {
-		if _, err := a.dec.Token(); err != nil { // consume the opening '['
-			a.done = true
-			return nil, err
-		}
-		a.started = true
-	}
-	if !a.dec.More() {
-		a.done = true
-		// More() reports false not only at a clean ']', but also on a read error
-		// and on a truncated array (EOF before ']'), swallowing both — which
-		// would let dropped records masquerade as a complete partial-200 insert.
-		// Read the closing token to tell the cases apart: only a ']' ends the
-		// batch; a missing or non-']' close means the upload was cut off (→ 400,
-		// via errUnterminatedArray, which is NOT io.EOF) and fails the whole
-		// request.
-		//
-		// The body-cap case no longer reaches here — the handler buffers the
-		// whole body first, so a cap overflow is a 413 before any reader exists,
-		// and this operates on an in-memory slice that cannot fail a read.
-		tok, err := a.dec.Token()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil, errUnterminatedArray
-			}
-			return nil, err
-		}
-		if d, ok := tok.(json.Delim); !ok || d != ']' {
-			return nil, errUnterminatedArray
-		}
-		return nil, io.EOF
-	}
-	var m map[string]any
-	if err := a.dec.Decode(&m); err != nil {
-		if _, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
-			// Decoder stayed in sync past the bad element — recoverable.
-			return nil, &recordSyntaxError{"record must be a JSON object"}
-		}
-		// Syntax/read error: the decoder is desynced, the rest of the array is
-		// unrecoverable. Don't try to read the closing ']'.
-		a.done = true
-		if errors.Is(err, io.EOF) {
-			// More() said an element followed (e.g. after a trailing comma) but
-			// the stream ended — a truncated array, not a clean close. Map to a
-			// fatal error rather than the io.EOF the batch loop treats as "done".
-			return nil, errUnterminatedArray
-		}
-		return nil, err
-	}
-	return m, nil
-}
-
-// lineReader yields one record per non-blank line of an NDJSON body. It recovers
-// from both type and syntax errors per line (the newline reframes the next
-// record), so a single malformed line never blocks the rest of the batch.
-type lineReader struct {
-	sc *bufio.Scanner
-}
-
-func (l *lineReader) Next() (map[string]any, error) {
-	for l.sc.Scan() {
-		line := bytes.TrimSpace(l.sc.Bytes())
-		if len(line) == 0 {
-			continue // skip blank lines between records
-		}
-		var m map[string]any
-		dec := json.NewDecoder(bytes.NewReader(line))
-		dec.UseNumber()
-		if err := dec.Decode(&m); err != nil {
-			return nil, &recordSyntaxError{"invalid json"}
-		}
-		return m, nil
-	}
-	if err := l.sc.Err(); err != nil {
-		// A line exceeding maxNDJSONLineBytes (bufio.ErrTooLong) — the scanner
-		// can't resume, so fail the request. Not the body cap: that trips in the
-		// handler before this reader is built.
-		return nil, err
-	}
-	return nil, io.EOF
-}
 
 // resolveContentType resolves the Content-Type header set to the format ingest
 // reads the body as. Content-Type is a singleton field (RFC 9110 §8.3) and §5.3
@@ -283,8 +208,10 @@ func resolveContentType(values []string) (IngestFormat, int, error) {
 	return f, -1, err
 }
 
-// ingestFormatOne resolves ONE header line, parsed per RFC 9110 §8.3. Only the
-// media type decides the format; no malformed parameter costs the request.
+// ingestFormatOne resolves ONE header line, parsed per RFC 9110 §8.3. The media
+// type decides the format, plus the `header` parameter for the two CSV-family
+// types (see acceptedContentTypes); no other malformed parameter costs the
+// request.
 //
 // That rule needs two steps, because Go splits parse failures in a way the rule
 // does not. ErrInvalidMediaParameter leaves the media type parsed and returned,
@@ -299,8 +226,13 @@ func resolveContentType(values []string) (IngestFormat, int, error) {
 // member there reads an NDJSON body as one object, dropping every record past
 // it behind a 200. The error cannot distinguish that from a comma inside data,
 // so such a line is refused rather than guessed at (#563).
+//
+// The same caution applies to `header`: on a line whose parameters did not
+// parse, a header parameter cannot be read, and guessing "none" would ingest
+// a declared header line as data. Such a line is refused when it mentions one;
+// a header value other than present/absent is refused too.
 func ingestFormatOne(v string) (IngestFormat, error) {
-	mediaType, _, err := mime.ParseMediaType(v)
+	mediaType, params, err := mime.ParseMediaType(v)
 	if err != nil {
 		if strings.ContainsRune(v, ',') {
 			return FormatJSON, errUnsupportedContentType
@@ -313,12 +245,36 @@ func ingestFormatOne(v string) (IngestFormat, error) {
 			mediaType = base
 		}
 	}
+	header := ""
+	if headerDecides(mediaType) {
+		if err != nil && strings.Contains(strings.ToLower(v), "header") {
+			return FormatJSON, errUnsupportedContentType
+		}
+		switch strings.ToLower(params["header"]) {
+		case "":
+		case "present", "absent":
+			header = strings.ToLower(params["header"])
+		default:
+			return FormatJSON, errUnsupportedContentType
+		}
+	}
 	for _, a := range acceptedContentTypes {
-		if a.mediaType == mediaType {
+		if a.mediaType == mediaType && a.header == header {
 			return a.format, nil
 		}
 	}
 	return FormatJSON, errUnsupportedContentType
+}
+
+// headerDecides reports whether the `header` parameter selects the format for
+// this media type — true only for a type with header-qualified entries.
+func headerDecides(mediaType string) bool {
+	for _, a := range acceptedContentTypes {
+		if a.mediaType == mediaType && a.header != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // mediaTypePrefix is everything before the first ";" — the media type without
@@ -327,40 +283,6 @@ func ingestFormatOne(v string) (IngestFormat, error) {
 func mediaTypePrefix(v string) string {
 	base, _, _ := strings.Cut(v, ";")
 	return base
-}
-
-// newRecordReader picks a reader for an already-resolved format over an
-// already-buffered body, looking at the bytes only to choose arity within the
-// JSON family ('[' → array, else → single object). The declared format is
-// authoritative: an NDJSON body is read as NDJSON whatever its first byte, so a
-// line that isn't a JSON object fails as a per-record error rather than silently
-// re-framing the whole request. batch is false only for the single-object path;
-// true for array/NDJSON.
-//
-// It takes the format rather than a Content-Type on purpose: resolving here as
-// well as in the handler would put one rule in two places, which is how the
-// joined and repeated paths came to disagree before. The only error this can
-// return is errEmptyBody. The caller resolves the format with resolveContentType
-// (which owns the 415) and is expected to have bounded the body via
-// http.MaxBytesReader before buffering it.
-func newRecordReader(format IngestFormat, body []byte) (rr recordReader, batch bool, err error) {
-	first, ok := firstNonSpace(body)
-	if !ok {
-		return nil, false, errEmptyBody
-	}
-
-	if format == FormatNDJSON {
-		sc := bufio.NewScanner(bytes.NewReader(body))
-		sc.Buffer(make([]byte, 0, 64*1024), maxNDJSONLineBytes)
-		return &lineReader{sc: sc}, true, nil
-	}
-
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	if first == '[' {
-		return &arrayReader{dec: dec}, true, nil
-	}
-	return &objectReader{dec: dec}, false, nil
 }
 
 // firstNonSpace returns the body's first non-whitespace byte. ok is false when
@@ -382,10 +304,10 @@ func firstNonSpace(body []byte) (byte, bool) {
 // emptyBodyMessage tailors the empty-body 400 message to the declared format so
 // an NDJSON caller still gets the familiar "empty ndjson body".
 func emptyBodyMessage(format IngestFormat) string {
-	if format == FormatNDJSON {
-		return "empty ndjson body"
+	if format == FormatJSON {
+		return "empty body"
 	}
-	return "empty body"
+	return "empty " + format.String() + " body"
 }
 
 // Bounds on what a caller-supplied Content-Type may cost us when echoed back.

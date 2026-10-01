@@ -237,7 +237,7 @@ func TestIngest_Windows_OutcomesStayInOrder(t *testing.T) {
 			assert.Equal(t, []recordResult{
 				{Index: 1, Ok: true},
 				{Index: 2, Duplicate: true},
-				{Index: 3, Error: resp.Results[2].Error},
+				{Index: 3, Error: resp.Results[2].Error, ExceptionCode: 117},
 				{Index: 4, Ok: true},
 				{Index: 5, Duplicate: true},
 				{Index: 6, Ok: true},
@@ -394,7 +394,7 @@ func pebbleBatchHandler(tb testing.TB, window int) (*IngestHandler, *countingDed
 	require.NoError(tb, store.Apply(true))
 	tb.Cleanup(func() { _ = store.Close() })
 	counted := &countingDedup{Deduplicator: store}
-	h := NewIngestHandler(fixedRegistry(testRegistry(tb)), &testutil.MockPublisher{})
+	h := newTestIngestHandler(tb, testRegistry(tb), &testutil.MockPublisher{})
 	h.Dedup = staticDedup(counted)
 	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
 		return settings.Dedupe{Enabled: true, IDField: "event_id"}
