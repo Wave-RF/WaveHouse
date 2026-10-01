@@ -389,18 +389,24 @@ func TestQuoteIdentifier_AgreesWithChsql(t *testing.T) {
 func TestNewEngine_OpensNoLibraryAtConstruction(t *testing.T) {
 	TestEngine(t) // skips (or fails under WAVEHOUSE_TEST_REQUIRE_CHTYPES) without the real artifact
 
+	// The explicit directory is searched first, so its broken copy of the test
+	// line shadows the working one in the per-user cache.
 	dir := t.TempDir()
-	line := filepath.Join(dir, "26.6")
+	line := filepath.Join(dir, testLine)
 	require.NoError(t, os.MkdirAll(line, 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(line, "manifest.json"),
-		[]byte(`{"library":"libchtypes.so","clickhouse_version":"26.6.8.7-stable","clickhouse_minor":"26.6"}`), 0o600))
+		fmt.Appendf(nil, `{"library":"libchtypes.so","clickhouse_version":%q,"clickhouse_minor":%q}`,
+			TestServerVersion+"-lts", testLine), 0o600))
 
 	eng, err := NewEngine(Config{RegistryDir: dir})
 	require.NoError(t, err, "a broken artifact is not a construction error")
 	t.Cleanup(eng.Close)
 
 	eng.Bind(tenant.Default, TestServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
-	_, err = eng.Table(tenant.Default, "events")
+	tbl, err := eng.Table(tenant.Default, "events")
+	if err == nil {
+		tbl.Release() // so the failure below is reported instead of Close deadlocking on it
+	}
 	require.Error(t, err)
 	require.True(t, IsUnavailable(err))
 	assert.Contains(t, err.Error(), line, "the SDK's message names the directory that failed")

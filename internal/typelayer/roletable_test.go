@@ -77,8 +77,8 @@ func TestRoleTable_DeniedColumnIsAbsentFromTheSchema(t *testing.T) {
 }
 
 // TestRoleTable_DefaultInjectsWhenAbsentAndLosesToASuppliedValue, measured on
-// the 26.6 artifact: DEFAULT '<claim>' fills a column the record omits, and a
-// value the record DOES supply still wins.
+// the 26.6 and 26.8 artifacts: DEFAULT '<claim>' fills a column the record
+// omits, and a value the record DOES supply still wins.
 func TestRoleTable_DefaultInjectsWhenAbsentAndLosesToASuppliedValue(t *testing.T) {
 	eng := TestEngine(t, ordersTable())
 	tbl := roleTableFor(t, eng, RoleShape{Defaults: map[string]string{"tenant": "acme"}})

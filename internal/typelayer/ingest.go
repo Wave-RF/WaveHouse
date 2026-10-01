@@ -25,7 +25,8 @@ type IngestOptions struct {
 	// FormatTSV (input_format_csv_detect_header / input_format_tsv_detect_header
 	// = 0), so every line is a record. By default ClickHouse consumes a first
 	// line that names the columns as a header (both settings are on by default;
-	// measured on the 26.6 server and artifact). Ignored for other formats.
+	// measured on the 26.6 and 26.8 servers and artifacts). Ignored for other
+	// formats.
 	StrictPositional bool
 }
 
@@ -165,7 +166,9 @@ func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, check
 	}
 
 	// Only a fully accepted batch exports bytes. Gate on the outcome, never on
-	// RowsPassed, which counts the admitted rows of a rejected batch too.
+	// RowsPassed or ExportDeclined: older artifact builds (every 26.6 build)
+	// count the admitted rows of a rejected batch and leave ExportDeclined
+	// empty when it rejects with no rows, and the outcome is right on both.
 	if res.Outcome != chtypes.Accepted {
 		if len(res.Rows) == 0 && res.Outcome == chtypes.Rejected && res.ErrCode != 0 &&
 			(format == FormatCSVWithNames || format == FormatTSVWithNames) {
@@ -244,7 +247,8 @@ func rowVerdict(r chtypes.RowResult, line []byte, filtered bool) RowVerdict {
 		return RowVerdict{Accepted: true, Line: line}
 	case chtypes.Skipped, chtypes.Rejected:
 		// ErrCode/ErrMsg, not VerdictCode/VerdictErr: chtypes answers such a row
-		// 'd', and on 26.6 leaves the verdict's own code and message empty.
+		// 'd', and older artifact builds (every 26.6 build) leave the verdict's
+		// own code and message empty, where ErrCode/ErrMsg are set on every build.
 		return RowVerdict{Code: r.ErrCode, Message: r.ErrMsg}
 	case chtypes.Unsupported, chtypes.AcceptedPoisoned:
 		// AcceptedPoisoned holds a value no writer can honestly serialize, so

@@ -37,7 +37,7 @@ const roleCacheSize = 256
 //
 // Defaults maps a column to a literal value injected when a record omits it,
 // rendered into the column's DEFAULT clause. A value the record DOES supply
-// still wins (measured on the 26.6 artifact; see
+// still wins (measured on the 26.6 and 26.8 artifacts; see
 // TestRoleTable_DefaultInjectsWhenAbsentAndLosesToASuppliedValue). Every key
 // must name a column the shape
 // keeps and must be an ordinary column (no DEFAULT, or a plain DEFAULT) —

@@ -40,9 +40,28 @@ func poolSize() int {
 // skip-and-continue so every record gets its own verdict; skip_unknown_fields=0
 // makes an unknown field a real per-row rejection (ClickHouse code 117) instead
 // of silent data loss. Neither is ever forwarded to the real INSERT.
+//
+// The type gates admit the column types ClickHouse refuses to create by
+// default. Every table compiled here already exists on the server, so its
+// CREATE passed these gates there; without them chtypes refuses every record
+// of, say, a LowCardinality(UInt64) table with code 455, which the server
+// would insert. A gate name the loaded line does not know fails the compile
+// with code 115 (allow_experimental_qbit_type does on 25.8), so the list holds
+// only names measured accepted on 25.8, 26.6 and 26.8.
 var compileSettings = map[string]string{
 	"input_format_allow_errors_ratio":  "1",
 	"input_format_skip_unknown_fields": "0",
+
+	"allow_suspicious_low_cardinality_types": "1",
+	"allow_suspicious_fixed_string_types":    "1",
+	"allow_suspicious_variant_types":         "1",
+	"allow_experimental_json_type":           "1",
+	"allow_experimental_variant_type":        "1",
+	"allow_experimental_dynamic_type":        "1",
+	"allow_experimental_time_time64_type":    "1",
+	"allow_experimental_bfloat16_type":       "1",
+	"allow_experimental_object_type":         "1",
+	"allow_experimental_nlp_functions":       "1",
 }
 
 // schemaSlot is one compiled handle plus the filters compiled against it. A
