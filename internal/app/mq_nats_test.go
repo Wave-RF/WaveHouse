@@ -38,6 +38,7 @@ func natsConfig(t *testing.T, url string) *config.Config {
 // consumes the operator's durable; the operator deleting it ends the worker,
 // and with it Run, naming the component.
 func TestNew_NATSBackend(t *testing.T) {
+	t.Parallel()
 	srv := natstest.Start(t)
 	cfg := natsConfig(t, srv.URL())
 	cfg.Roles = []config.Role{config.RoleAPI, config.RoleIngest}
@@ -99,6 +100,7 @@ func TestNew_NATSWiresNoSweeper(t *testing.T) { //nolint:paralleltest // capture
 
 // A cluster never reached within topology_wait refuses boot as unavailable.
 func TestNew_NATSUnreachable(t *testing.T) {
+	t.Parallel()
 	guardGlobals(t)
 	cfg := natsConfig(t, "nats://"+closedAddr(t))
 	cfg.MQ.NATS.TopologyWait = time.Millisecond
@@ -109,6 +111,7 @@ func TestNew_NATSUnreachable(t *testing.T) {
 
 // The operator's topology missing a piece refuses boot with the finding.
 func TestNew_NATSTopologyMissing(t *testing.T) {
+	t.Parallel()
 	srv := natstest.Start(t)
 	require.NoError(t, srv.Operator.JetStream().DeleteStream(t.Context(), "WH_DLQ"))
 	guardGlobals(t)

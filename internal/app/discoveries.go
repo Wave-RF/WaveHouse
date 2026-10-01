@@ -40,6 +40,9 @@ type discoveries struct {
 	// onRetire, when set, is told each registry a reload retires, under mu
 	// and the reload lock: what it does must not wait on I/O.
 	onRetire func(tenant.ID, *discovery.SchemaRegistry)
+	// backoff and maxBackoff bound a loop's retry before its first success
+	// (RetryRefresh's jittered backoff), read under mu as each loop starts.
+	backoff, maxBackoff time.Duration
 
 	mu  sync.Mutex // serializes reconcile, drop, adopt and close
 	cur atomic.Pointer[map[tenant.ID]*tenantDiscovery]
@@ -58,7 +61,10 @@ type tenantDiscovery struct {
 }
 
 func newDiscoveries(ctx context.Context, build func(tenant.ID, *settings.Store) *discovery.SchemaRegistry, onAttempt func(tenant.ID, error), onLoaded func(tenant.ID), onRetire func(tenant.ID, *discovery.SchemaRegistry)) *discoveries {
-	d := &discoveries{ctx: ctx, build: build, onAttempt: onAttempt, onLoaded: onLoaded, onRetire: onRetire}
+	d := &discoveries{
+		ctx: ctx, build: build, onAttempt: onAttempt, onLoaded: onLoaded, onRetire: onRetire,
+		backoff: 2 * time.Second, maxBackoff: 60 * time.Second,
+	}
 	d.cur.Store(&map[tenant.ID]*tenantDiscovery{})
 	return d
 }
@@ -141,14 +147,15 @@ func (d *discoveries) adopt(id tenant.ID, reg *discovery.SchemaRegistry) {
 }
 
 // start runs reg's loop: the boot retry until the first success, skipped
-// for a registry already loaded, then the periodic refresh.
+// for a registry already loaded, then the periodic refresh. Under mu.
 func (d *discoveries) start(id tenant.ID, reg *discovery.SchemaRegistry) *tenantDiscovery {
 	ctx, cancel := context.WithCancel(d.ctx)
 	td := &tenantDiscovery{id: id, registry: reg, cancel: cancel, done: make(chan struct{})}
+	backoff, maxBackoff := d.backoff, d.maxBackoff
 	go func() {
 		defer close(td.done)
 		if !reg.Loaded() {
-			err := reg.RetryRefresh(ctx, 2*time.Second, 60*time.Second, func(err error) { d.onAttempt(id, err) })
+			err := reg.RetryRefresh(ctx, backoff, maxBackoff, func(err error) { d.onAttempt(id, err) })
 			if err != nil {
 				// ctx cancelled before success — the process is stopping, or
 				// the tenant is no longer served.
