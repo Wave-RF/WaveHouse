@@ -1051,8 +1051,11 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.chTargetFor, a.cache, queryTimeout)
 	pipesHandler.Tenants = a.tenants
 	pipesHandler.MaxConns = a.readConns
+	chReader := api.NewCHReader()
+	pipesHandler.SetReader(chReader)
 	structuredQueryHandler := api.NewStructuredQueryHandler(a.chTargetFor, a.cache, a.registryFor, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, queryTimeout, (*settings.Store).DefaultMaxRows)
 	structuredQueryHandler.MaxConns = a.readConns
+	structuredQueryHandler.SetReader(chReader)
 
 	schemaHandler := api.NewSchemaHandler(a.registryFor)
 	schemaHandler.Tenants = a.tenants

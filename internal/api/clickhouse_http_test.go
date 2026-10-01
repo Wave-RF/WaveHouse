@@ -556,3 +556,20 @@ func TestCheckRequestSize(t *testing.T) {
 func chExceptionBody(code int32, msg string) string {
 	return fmt.Sprintf("Code: %d. DB::Exception: %s. (version 26.6.3.62 (official build))\n", code, msg)
 }
+
+// TestCHReader_HandlersShareOnlyWhenGiven: a handler built alone has a private
+// reader, SetReader makes two handlers share one, and no package-level reader
+// exists to share by accident.
+func TestCHReader_HandlersShareOnlyWhenGiven(t *testing.T) {
+	sq := NewStructuredQueryHandler(nil, nil, nil, nil, nil, nil, nil)
+	ph := NewPipesHandler(nil, nil, nil, nil, nil)
+	if sq.ch == nil || ph.ch == nil || sq.ch == ph.ch {
+		t.Fatalf("unwired handlers must each own a private reader: %p %p", sq.ch, ph.ch)
+	}
+	r := NewCHReader()
+	sq.SetReader(r)
+	ph.SetReader(r)
+	if sq.ch != r || ph.ch != r {
+		t.Fatal("SetReader did not install the shared reader")
+	}
+}

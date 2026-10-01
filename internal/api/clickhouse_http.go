@@ -144,10 +144,14 @@ type readerPool struct {
 	conns                             int
 }
 
-// sharedCHReader serves both cached read handlers, so a tenant's reads share
-// one connection cap whichever route they come in by, as they shared its
-// native pool.
-var sharedCHReader = newCHReader(readerHTTPClient)
+// CHReader is the read client the structured-query and pipes handlers run
+// their ClickHouse reads through. Give one to both (SetReader) so a tenant's
+// reads share one connection cap whichever route they come in by, as they
+// shared its native pool; a handler built without one has a private reader.
+type CHReader = chReader
+
+// NewCHReader returns a reader over net/http with a client per pool.
+func NewCHReader() *CHReader { return newCHReader(readerHTTPClient) }
 
 // readerHTTPClient is the read paths' client: net/http's default transport
 // with the target's TLS config and at most conns connections to the server,

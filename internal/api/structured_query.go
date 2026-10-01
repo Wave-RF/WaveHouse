@@ -65,7 +65,7 @@ func NewStructuredQueryHandler(
 ) *StructuredQueryHandler {
 	return &StructuredQueryHandler{
 		Target:         target,
-		ch:             sharedCHReader,
+		ch:             NewCHReader(),
 		Cache:          c,
 		Registry:       registry,
 		PolicySource:   policyStore,
@@ -74,6 +74,10 @@ func NewStructuredQueryHandler(
 		defaultMaxRows: defaultMaxRows,
 	}
 }
+
+// SetReader replaces the handler's private reader with a shared one. Call it
+// before serving.
+func (h *StructuredQueryHandler) SetReader(r *CHReader) { h.ch = r }
 
 func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	store, ok := requestStore(w, r)

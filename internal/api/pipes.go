@@ -52,8 +52,12 @@ type PipesHandler struct {
 }
 
 func NewPipesHandler(source func(*settings.Store) pipes.Source, policySource PolicySource, target func(*settings.Store) chconn.Target, c cache.Cache, queryTimeout func(*settings.Store) time.Duration) *PipesHandler {
-	return &PipesHandler{Source: source, PolicySource: policySource, Target: target, Cache: c, ch: sharedCHReader, queryTimeout: queryTimeout}
+	return &PipesHandler{Source: source, PolicySource: policySource, Target: target, Cache: c, ch: NewCHReader(), queryTimeout: queryTimeout}
 }
+
+// SetReader replaces the handler's private reader with a shared one. Call it
+// before serving.
+func (h *PipesHandler) SetReader(r *CHReader) { h.ch = r }
 
 // List returns all named queries of the ?tenant= (admin endpoint).
 func (h *PipesHandler) List(w http.ResponseWriter, r *http.Request) {
