@@ -63,7 +63,7 @@ func parseSettings(format Format, opts IngestOptions) (settings map[string]strin
 type RowVerdict struct {
 	Accepted bool
 	// Code is ClickHouse's own error code when the record was refused (27, 117,
-	// 6 …) and 0 otherwise. Declined verdicts carry no code: chtypes did not
+	// 41 …) and 0 otherwise. Declined verdicts carry no code: chtypes did not
 	// answer, so there is nothing to attribute to the data.
 	Code    int
 	Message string

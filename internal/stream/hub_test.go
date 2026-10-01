@@ -1112,8 +1112,8 @@ func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
 }
 
 // TestHub_RowFilter_TimestampInstantMatch: policy authors write the zone-less
-// spelling the query path wants, while the wire carries ClickHouse's RFC 3339
-// rendering. The filter compares them as instants because the row is parsed
+// spelling every server's query path reads alike, while the wire carries
+// ClickHouse's RFC 3339 rendering. The filter compares them as instants because the row is parsed
 // into the column's real storage before the predicate runs, so any spelling of
 // the same instant matches; an operand the parser can't read withholds the row
 // rather than guessing at it.
@@ -1123,7 +1123,7 @@ func TestHub_RowFilter_TimestampInstantMatch(t *testing.T) {
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
 				// Zone-less constant, read in the column's zone (UTC here) on both
-				// surfaces — the one spelling that works for the query path's SQL too.
+				// surfaces, whatever the server's cast_string_to_date_time_mode.
 				"viewer": {Select: &policy.SelectPermissions{Filter: map[string]policy.Filter{"created_at": {Eq: new("2026-06-21 04:00:00")}}}},
 			},
 		},

@@ -33,8 +33,9 @@ const maxCanonicalDigits = 100
 // every row; the one legitimate structured shape, a bare-claim _in array, is
 // unpacked by resolveInValues before its elements reach here. A json.Number
 // (jwt.WithJSONNumber on claims) binds in canonical decimal form, not the
-// token's spelling: "1", "1.0", and "1e3" are one JSON value, and a numeric
-// ClickHouse column rejects '1.0'/'1e3' as a per-query TYPE_MISMATCH error. The
+// token's spelling: "1", "1.0", and "1e3" are one JSON value, and an integer
+// column reads only the canonical spelling ('1.0'/'1e3' match nothing through
+// the strict cast, and are TYPE_MISMATCH compared directly). The
 // canonical form is exact at every width and precision — integer literals via
 // big.Int, fractions and exponents via canonicalDecimal, never a float64
 // round-trip that could bind a value the token doesn't carry ("1e-400" fails

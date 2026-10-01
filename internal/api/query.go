@@ -32,11 +32,9 @@ import (
 // Why a proxy instead of clickhouse-go's native Query/Exec:
 //   - ClickHouse classifies statements natively, so any single statement
 //     (arbitrary DDL/DML verbs, current and future) and inline FORMAT
-//     directives all just work without WaveHouse-side parsing.
-//     Multi-statement input (`SELECT 1; TRUNCATE t`) also works when
-//     the upstream ClickHouse has multi-query enabled, which is the
-//     default in recent versions; older or restrictively-configured
-//     servers may reject the second statement with a clear error.
+//     directives all just work without WaveHouse-side parsing. The HTTP
+//     interface takes one statement per request: `SELECT 1; TRUNCATE t` is
+//     refused with code 62 (measured on 26.8.15.10).
 //   - There is no IsMutation heuristic to maintain — no leading-verb table,
 //     no comment stripper, no CTE-aware paren scanner, no class of bug
 //     where a future ClickHouse verb routes the wrong way.
@@ -295,9 +293,10 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		// ClickHouse answers most errors with HTTP 500 — bad SQL, a missing
-		// grant, an unknown table alike — so the status says nothing; the
-		// exception code it sends with it does (#403). The message is
+		// The status ClickHouse sends does not say which kind of failure it
+		// was (on 26.8 a syntax error is 400, an unknown table 404, a
+		// TIMEOUT_EXCEEDED 408); the exception code it sends with it does
+		// (#403). The message is
 		// ClickHouse's own text, verbatim.
 		chErr := chconn.NewHTTPError(&http.Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: io.NopCloser(bytes.NewReader(body))})
 		msg := strings.TrimSpace(string(body))

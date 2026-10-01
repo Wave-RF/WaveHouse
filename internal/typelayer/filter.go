@@ -186,8 +186,8 @@ func verdictBool(v chtypes.Verdict) (bool, string) {
 // ClickHouse's own comparison-time coercion (a typed parameter disagreed with
 // the server on UInt8, Int64 and Float32 columns; the String binding matched
 // it on every column family measured): a spelling the column cannot read
-// (`abc` on a Float32 column) is the server's own code 53 at evaluation,
-// which withholds the row. A bare String binding still wraps an
+// (`abc` on a Float32 column, the server's own code 72; on a Decimal, 53)
+// errors at evaluation, which withholds the row. A bare String binding still wraps an
 // integer value at or past 2^64 before comparing (and a 128/256-bit column at
 // its own width), so on an integer column the parameter is compared through
 // chsql.StrictInt instead: a claim that is not the canonical spelling of a

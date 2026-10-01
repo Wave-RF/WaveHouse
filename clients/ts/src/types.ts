@@ -307,11 +307,15 @@ export interface InsertRecordResult {
   error?: string;
   /**
    * ClickHouse's own numeric error code, present only when the server's parser
-   * is what refused the record — 117 unknown field, 27 or 6 a value the column
-   * cannot read. Absent for a gateway rejection (a failed policy check, a missing
-   * dedupe id), so `exception_code !== undefined` means "ClickHouse answered".
-   * The same name carries it on a whole-request error body, beside the string
-   * `code` class (reachable as `error.details`).
+   * is what refused the record — 117 unknown field, 27 or 26 input it cannot
+   * parse, or a type-specific code such as 41 for a `DateTime` (an out-of-range
+   * integer is not refused: it wraps). Absent for a gateway rejection (a failed
+   * policy check, a missing dedupe id, a `422` decline), so
+   * `exception_code !== undefined` means "ClickHouse answered".
+   * A single-object insert's refusal carries the same name in its error body,
+   * reachable as `error.details.exception_code` (the SDK's `error.code` is then
+   * `HTTP_400`); so does a header-format body refused as a whole, which also
+   * carries the string `code` class `clickhouse.rejected`.
    *
    * 117 also covers **a column the caller's role may not write**. Column policy
    * is enforced by compiling the role's own schema, where a denied column is

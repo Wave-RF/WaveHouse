@@ -117,8 +117,8 @@ func TestVisible_StringBindingAcrossColumnFamilies(t *testing.T) {
 // a spelling that is not its canonical form, matches nothing on EVERY operator
 // — `!=` included — and is answered false rather than thrown. On a
 // non-integer column the String binding is unchanged: a spelling the column's
-// reader refuses is still the server's own code 53, which withholds as an
-// error.
+// reader refuses is still the server's own error (code 72 on this Float32
+// column), which withholds as an error.
 func TestVisible_HostileSpellingsMatchNothing(t *testing.T) {
 	_, row := parsedRow(t)
 

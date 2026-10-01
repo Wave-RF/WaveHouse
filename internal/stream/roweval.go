@@ -24,8 +24,9 @@ const (
 	// ReasonError: ClickHouse evaluated the predicate over this row and raised.
 	// Either side of the comparison can cause it, and both are the policy
 	// author's to fix: a stored value the expression cannot read, or a filter
-	// constant the column's type cannot read (a claim rendering as "abc" or
-	// "1.5" against a numeric column answers code 53 per row).
+	// constant the column's type cannot read (a claim rendering as "abc"
+	// against a Decimal column answers code 53 per row, against a Float one
+	// 72; an integer column's strict cast answers false instead).
 	ReasonError = typelayer.ReasonError
 	// ReasonDecline: no verdict was reached. The expression would not compile
 	// for this generation, chtypes would not answer for the row (one that does

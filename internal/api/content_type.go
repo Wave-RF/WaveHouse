@@ -70,8 +70,9 @@ const (
 	// FormatTSVWithNames is FormatCSVWithNames' tab-separated twin.
 	FormatTSVWithNames
 	// FormatCSVPositional is `text/csv; header=absent`: strictly positional,
-	// detection off, so a header line is one record that fails to parse with
-	// ClickHouse's code 27.
+	// detection off, so a header line is one record that fails to parse, with
+	// the code of the column that cannot read its own name (27 for an integer,
+	// 72 for a float).
 	FormatCSVPositional
 	// FormatTSVPositional is FormatCSVPositional's tab-separated twin.
 	FormatTSVPositional

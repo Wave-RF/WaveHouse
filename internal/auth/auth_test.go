@@ -189,9 +189,9 @@ func TestMiddleware_LargeIntegerClaim_ExactThroughPolicy(t *testing.T) {
 
 // TestMiddleware_NumericClaimSpelling_BindsCanonically: json.Number keeps the
 // token's literal spelling, so without normalization the bound filter value
-// would depend on how the IdP spelled the number — and a numeric ClickHouse
-// column rejects '1.0'/'1e3' as a TYPE_MISMATCH error on every query for that
-// role. The claims ride a real signed token (a json.Number claim value
+// would depend on how the IdP spelled the number — and an integer column
+// reads only the canonical spelling, so '1.0'/'1e3' would match nothing for
+// that role. The claims ride a real signed token (a json.Number claim value
 // marshals verbatim into the payload) so the exact parser configuration is
 // what's under test, per the note on the large-integer test above.
 func TestMiddleware_NumericClaimSpelling_BindsCanonically(t *testing.T) {

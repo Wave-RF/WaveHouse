@@ -243,9 +243,10 @@ func sqlString(s string) string {
 //   - a value on a Date or DateTime column binds the same way and expands to
 //     the parse its conversion names, so ClickHouse reads the caller's own
 //     spelling — an RFC 3339 instant, or a zone-less time in the column's
-//     zone — instead of Go rewriting it. Compared directly, ClickHouse
-//     refuses RFC 3339 on DateTime and DateTime64 (TYPE_MISMATCH on
-//     24.8.14.39 and 26.8.15.10).
+//     zone — instead of Go rewriting it. Compared directly, RFC 3339 is
+//     read only under cast_string_to_date_time_mode=best_effort: the
+//     default on 26.8.15.10, but 24.8.14.39 refused it on DateTime and
+//     DateTime64 (TYPE_MISMATCH), as a server set to basic still does.
 //   - a policy claim on an integer column (chsql.IntParam) expands to
 //     chsql.StrictInt over its one {pN:String}, because the plain form wraps
 //     a value at or past 2^64.

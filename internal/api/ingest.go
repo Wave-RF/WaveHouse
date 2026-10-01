@@ -140,7 +140,8 @@ type recordResult struct {
 	Error     string `json:"error,omitempty"`
 	// ExceptionCode is ClickHouse's own error code when the record was refused
 	// by the server's parser (117 unknown field — which includes a column the
-	// role may not write, 27 unparseable value, 6 out of range). Absent for a
+	// role may not write, 27 unparseable value, 41 a bad DateTime; an
+	// out-of-range integer wraps rather than refusing). Absent for a
 	// gateway rejection — a failed check clause is our verdict, not
 	// ClickHouse's, and must not be dressed as one.
 	ExceptionCode int `json:"exception_code,omitempty"`
@@ -375,8 +376,9 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		records = n
 	}
 	// Otherwise a single-object body is one record (concatenated objects after
-	// it are ignored, as they always have been — declare NDJSON to batch them,
-	// #561), and a line-framed body has at least the record its first byte
+	// it are neither answered nor published, as they always have been — declare
+	// NDJSON to batch them, #561; chtypes still parses them, so one cut off
+	// mid-record can turn the answer into a decline), and a line-framed body has at least the record its first byte
 	// starts. The real count is chtypes' own, taken once it has answered.
 
 	guard := h.policyCheckGuard(ctx, table, role, schema, perms)
