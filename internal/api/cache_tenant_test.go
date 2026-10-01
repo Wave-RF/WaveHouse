@@ -165,7 +165,7 @@ func TestNewRouter_FlatDirectoryCacheStillHits(t *testing.T) {
 // one tenant. The singleflight key is the tenant-led cache key, so two
 // tenants' identical requests in flight together are two queries: neither
 // waits on, or receives, the other's result. Under synctest the count is
-// exact: Wait returns once every request is either inside Query or parked on
+// exact: Wait returns once every request is either inside ClickHouse or parked on
 // another's flight, with no sleep to race.
 func TestCachedRoutes_SingleflightIsPerTenant(t *testing.T) {
 	tenants := nestedTenants(t, map[string]string{"acme": fullConfig(100), "globex": fullConfig(200)})

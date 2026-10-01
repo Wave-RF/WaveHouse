@@ -186,10 +186,18 @@ func TestBuild_TimeRange(t *testing.T) {
 	assert.Len(t, result.Params, 1)
 }
 
-// permsWithFilter returns resolved permissions carrying a row-filter predicate,
-// shaped exactly as policy.Evaluate emits one (quoted column, positional '?').
+// permsWithFilter returns resolved permissions carrying a row-filter predicate
+// on org_id (a String column), resolved by policy.Evaluate itself.
 func permsWithFilter() *policy.ResolvedPermissions {
-	return &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{WhereClause: "`org_id` = ?", WhereParams: []any{"org-1"}}}
+	return permsFiltering(map[string]policy.Filter{"org_id": {Eq: new("org-1")}}, nil)
+}
+
+// permsFiltering resolves a read grant carrying filter for role "r" on clicks.
+func permsFiltering(filter map[string]policy.Filter, claims map[string]any) *policy.ResolvedPermissions {
+	p := &policy.Policy{Tables: map[string]policy.TablePolicy{
+		"clicks": {"r": {Select: &policy.SelectPermissions{Filter: filter}}},
+	}}
+	return policy.Evaluate(p, "r", "clicks", "select", claims)
 }
 
 // TestBuild_PolicyPredicate pins the structural emission of the row-level-
@@ -265,6 +273,147 @@ func TestBuild_PolicyPredicate_SurvivesCraftedIdentifiers(t *testing.T) {
 			assert.Equal(t, []any{"org-1"}, result.Params)
 		})
 	}
+}
+
+// TestBuild_PolicyPredicate_IntegerColumnsBindThroughTheStrictCast pins the
+// query path's half of the integer-claim rule: a policy claim compared against
+// an integer column (any width, Nullable or LowCardinality) renders as
+// chsql.StrictInt over ONE {pN:String} parameter, on every operator and on
+// each element of an _in list, while every other column keeps the plain
+// {pN:String} form. The typelayer renders the same expression for the stream
+// and the insert check.
+func TestBuild_PolicyPredicate_IntegerColumnsBindThroughTheStrictCast(t *testing.T) {
+	t.Parallel()
+	schema := &discovery.TableSchema{Name: "clicks", Columns: []discovery.Column{
+		{Name: "page", Type: "String"},
+		{Name: "u64", Type: "UInt64"},
+		{Name: "i8", Type: "Int8"},
+		{Name: "nu256", Type: "Nullable(UInt256)"},
+		{Name: "lci32", Type: "LowCardinality(Nullable(Int32))"},
+		{Name: "org_id", Type: "String"},
+		{Name: "amount", Type: "Decimal(18, 4)"},
+		{Name: "flag", Type: "Bool"},
+	}}
+	e := func(p, typ string) string {
+		c := "accurateCastOrNull({" + p + ":String}, '" + typ + "')"
+		return "if(toString(" + c + ") = {" + p + ":String}, " + c + ", NULL)"
+	}
+	tests := []struct {
+		name       string
+		column     string
+		filter     policy.Filter
+		claims     map[string]any
+		wantWhere  string
+		wantParams []string
+	}{
+		{
+			"eq on UInt64", "u64",
+			policy.Filter{Eq: new("{{ jwt.t }}")},
+			map[string]any{"t": "5"},
+			"`u64` = " + e("p0", "UInt64"),
+			[]string{"5"},
+		},
+		{
+			"neq on Int8", "i8",
+			policy.Filter{Neq: new("-3")},
+			nil,
+			"`i8` != " + e("p0", "Int8"),
+			[]string{"-3"},
+		},
+		{
+			"gt on Nullable(UInt256) casts to the bare type", "nu256",
+			policy.Filter{Gt: new("7")},
+			nil,
+			"`nu256` > " + e("p0", "UInt256"),
+			[]string{"7"},
+		},
+		{
+			"lt on LowCardinality(Nullable(Int32)) casts to the bare type", "lci32",
+			policy.Filter{Lt: new("9")},
+			nil,
+			"`lci32` < " + e("p0", "Int32"),
+			[]string{"9"},
+		},
+		{
+			"in on UInt64 casts each element", "u64",
+			policy.Filter{In: new("{{ jwt.ts }}")},
+			map[string]any{"ts": []any{"5", "18446744073709551621", "007"}},
+			"`u64` IN (" + e("p0", "UInt64") + "," + e("p1", "UInt64") + "," + e("p2", "UInt64") + ")",
+			[]string{"5", "18446744073709551621", "007"},
+		},
+		{
+			"a claim needing escape is encoded once", "u64",
+			policy.Filter{Eq: new("{{ jwt.t }}")},
+			map[string]any{"t": `a\b`},
+			"`u64` = " + e("p0", "UInt64"),
+			[]string{`a\\b`},
+		},
+		{
+			"eq on String keeps the plain form", "org_id",
+			policy.Filter{Eq: new("acme")},
+			nil,
+			"`org_id` = {p0:String}",
+			[]string{"acme"},
+		},
+		{
+			"in on String keeps the plain form", "org_id",
+			policy.Filter{In: new("{{ jwt.ts }}")},
+			map[string]any{"ts": []any{"a", "b"}},
+			"`org_id` IN ({p0:String},{p1:String})",
+			[]string{"a", "b"},
+		},
+		{
+			"Decimal keeps the plain form", "amount",
+			policy.Filter{Gt: new("1.50")},
+			nil,
+			"`amount` > {p0:String}",
+			[]string{"1.50"},
+		},
+		{
+			"Bool keeps the plain form", "flag",
+			policy.Filter{Eq: new("true")},
+			nil,
+			"`flag` = {p0:String}",
+			[]string{"true"},
+		},
+		{
+			"an unresolvable claim still fails closed", "u64",
+			policy.Filter{Eq: new("{{ jwt.absent }}")},
+			nil,
+			"1 = 0", nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			perms := permsFiltering(map[string]policy.Filter{tt.column: tt.filter}, tt.claims)
+			res, err := Build("clicks", &StructuredQuery{Columns: []string{"page"}}, schema, perms, 0, DefaultMaxRows)
+			require.NoError(t, err)
+			sql, params, err := res.NamedParams()
+			require.NoError(t, err)
+			assert.Equal(t, "SELECT `page` FROM `clicks` WHERE ("+tt.wantWhere+") LIMIT 10000", sql)
+			assert.Equal(t, tt.wantParams, params)
+		})
+	}
+}
+
+// TestBuild_PolicyPredicate_CallerFiltersKeepThePlainForm: the strict cast is
+// for policy claims only. A caller's own filter on an integer column binds as
+// before — it can only narrow what the policy already admits.
+func TestBuild_PolicyPredicate_CallerFiltersKeepThePlainForm(t *testing.T) {
+	t.Parallel()
+	perms := permsFiltering(map[string]policy.Filter{"count": {Eq: new("5")}}, nil)
+	sq := &StructuredQuery{Columns: []string{"page"}, Filters: []Filter{
+		{Column: "count", Op: "gt", Value: json.Number("1")},
+		{Column: "count", Op: "in", Value: []any{json.Number("1"), json.Number("2")}},
+	}}
+	res, err := Build("clicks", sq, testSchema(), perms, 0, DefaultMaxRows)
+	require.NoError(t, err)
+	sql, params, err := res.NamedParams()
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT `page` FROM `clicks` WHERE (`count` = "+chsql.StrictInt("p0", "UInt64")+
+		") AND `count` > {p1:String} AND `count` IN {p2:Array(String)} LIMIT 10000", sql)
+	assert.Equal(t, []string{"5", "1", "['1','2']"}, params)
 }
 
 // TestBuild_PolicyMaxRows pins the role's max_rows cap folded into Build's LIMIT
@@ -633,8 +782,8 @@ func TestBuild_InvalidColumns(t *testing.T) {
 			sq: &StructuredQuery{
 				Columns: []string{"page"},
 				// A non-schema order column is allowed as an alias reference and
-				// backtick-quoted; only a '?' (which clickhouse-go's binder would
-				// miscount) is rejected.
+				// backtick-quoted; only a '?' (which the positional-to-named rewrite
+				// would miscount) is rejected.
 				OrderBy: []OrderClause{{Column: "we?ird", Dir: "asc"}},
 			},
 			wantErr: "unsupported order column",
@@ -915,7 +1064,7 @@ func TestBuild_AggregationAliasQuotedAndContained(t *testing.T) {
 }
 
 // TestBuild_RejectsBindUnsafeAlias keeps the one alias rejection that remains: a
-// '?' would be miscounted by clickhouse-go's positional value binder.
+// '?' would be miscounted by the positional-to-named parameter rewrite.
 func TestBuild_RejectsBindUnsafeAlias(t *testing.T) {
 	t.Parallel()
 	sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "we?ird"}}}
@@ -1160,8 +1309,8 @@ func TestNamedParams_Encoding(t *testing.T) {
 }
 
 // TestNamedParams_Rejects covers the values and shapes that have no honest
-// binding. A JSON null is the notable one: the driver quietly turned it into
-// `col = NULL` (never true), where an empty String parameter would compare
+// binding. A JSON null is the notable one: it used to bind as `col = NULL`
+// (never true), where an empty String parameter would compare
 // against the empty string — a different question, so it is refused (→ 400).
 func TestNamedParams_Rejects(t *testing.T) {
 	t.Parallel()

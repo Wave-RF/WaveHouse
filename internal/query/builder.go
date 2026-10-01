@@ -119,13 +119,15 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 	//   - aggregations only → validateAndAuthorizeColumns → IsAggregationAllowed
 	//
 	// All three fail closed on a nil Select; all three are pinned by
-	// TestBuild_InsertResolvedGrantIsRejected. The bare read is the backstop if
+	// TestBuild_InsertResolvedGrantIsRejected. The bare call is the backstop if
 	// that ordering changes — it would panic rather than skip the filter. Do NOT
 	// add a `perms.Select != nil` guard: it would emit an unfiltered query, the
 	// silent widening the pointer shape exists to prevent.
-	if perms != nil && perms.Select.WhereClause != "" {
-		whereParts = append([]string{"(" + perms.Select.WhereClause + ")"}, whereParts...)
-		params = append(params, perms.Select.WhereParams...)
+	if perms != nil {
+		if clause, rowParams := perms.Select.WhereSQL(columnType(schema)); clause != "" {
+			whereParts = append([]string{"(" + clause + ")"}, whereParts...)
+			params = append(params, rowParams...)
+		}
 	}
 	params = append(params, whereParams...)
 	if len(whereParts) > 0 {
@@ -485,6 +487,15 @@ func bucketTime(t time.Time, bucketSeconds int) time.Time {
 	return t.Truncate(d)
 }
 
+// columnType looks a column's ClickHouse type up in the discovered schema, so
+// the row filter can bind an integer column's claims through the strict cast.
+func columnType(schema *discovery.TableSchema) func(string) string {
+	return func(col string) string {
+		c, _ := schema.Lookup(col)
+		return c.Type
+	}
+}
+
 // isDateTimeColumn reports whether the schema types column as DateTime or
 // DateTime64, possibly Nullable or LowCardinality.
 func isDateTimeColumn(schema *discovery.TableSchema, column string) bool {
@@ -560,11 +571,15 @@ func isValidAggFn(fn string) bool {
 // ClickHouse will read it back from. It returns the rewritten SQL and the
 // values for `param_p0` … `param_pN-1`, positionally.
 //
-// Every scalar binds as `{pN:String}` and every list as `{pN:Array(String)}`.
-// String is not a weaker binding than the column's own type: ClickHouse
-// converts the parameter to the column's type for the comparison, so
-// `UInt8 = {p:String}` with "256" is false and with "1.5" is a type error,
-// matching what the server answers for the same literal.
+// Every scalar binds as `{pN:String}` and every list as `{pN:Array(String)}`
+// — one rule, shared with the row filters the type layer compiles. String is
+// not a weaker binding than the column's own type: ClickHouse converts the
+// parameter to the column's type for the comparison, so `UInt8 = {p:String}`
+// with "256" is false and with "1.5" is a type error, matching what the
+// server answers for the same literal. The exception is a policy claim on an
+// integer column (a chsql.IntParam): its placeholder expands to
+// chsql.StrictInt over the one `{pN:String}` parameter, because the plain
+// form wraps a value at or past 2^64.
 //
 // The rewrite is a left-to-right scan for `?`, which is exact for this SQL and
 // only for this SQL: Build never renders a value or a string literal, and
@@ -606,18 +621,21 @@ func (r *BuildResult) NamedParams() (string, []string, error) {
 // chParamValue renders one bound value as its ClickHouse query-parameter text
 // and the SQL its placeholder becomes, for the parameter called name.
 func chParamValue(name string, v any) (text, placeholder string, err error) {
-	if vals, ok := v.([]any); ok {
-		lit, err := chArrayLiteral(vals)
+	switch val := v.(type) {
+	case []any:
+		lit, err := chArrayLiteral(val)
 		if err != nil {
 			return "", "", err
 		}
 		return lit, "{" + name + ":Array(String)}", nil
+	case chsql.IntParam:
+		return chsql.EscapeStringParam(val.Value), chsql.StrictInt(name, val.Type), nil
 	}
 	raw, err := chScalarText(v)
 	if err != nil {
 		return "", "", err
 	}
-	return escapeStringParam(raw), "{" + name + ":String}", nil
+	return chsql.EscapeStringParam(raw), "{" + name + ":String}", nil
 }
 
 // chScalarText is one scalar's value as plain text, before any encoding —
@@ -653,8 +671,8 @@ func chScalarText(v any) (string, error) {
 
 // chArrayLiteral renders a list as the `['a','b']` text an Array(String)
 // query parameter is parsed from. A nested list has no place inside an `in`
-// list, and the elements take quoteCHElement's encoding INSTEAD of the
-// scalar one, not on top of it.
+// list, and the elements take quoteCHElement's encoding INSTEAD of
+// chsql.EscapeStringParam's, not on top of it.
 func chArrayLiteral(vals []any) (string, error) {
 	var b strings.Builder
 	b.WriteByte('[')
@@ -679,7 +697,7 @@ func chArrayLiteral(vals []any) (string, error) {
 // of an Array(String) parameter literal. That literal is read as a quoted
 // value rather than an escaped field — a raw tab or newline inside the quotes
 // round-trips untouched — so only the quote and the backslash need encoding,
-// and the scalar encoding must NOT be applied on top of it.
+// and chsql.EscapeStringParam's encoding must NOT be applied on top of it.
 func quoteCHElement(s string) string {
 	var b strings.Builder
 	b.Grow(len(s) + 2)
@@ -693,13 +711,3 @@ func quoteCHElement(s string) string {
 	b.WriteByte('\'')
 	return b.String()
 }
-
-// escapeStringParam encodes one value for a `{p:String}` query parameter,
-// which ClickHouse reads with its escaped-text reader: a raw backslash starts
-// an escape sequence and a raw tab or newline ends the field.
-var escapeStringParam = strings.NewReplacer(
-	`\`, `\\`,
-	"\t", `\t`,
-	"\n", `\n`,
-	"\r", `\r`,
-).Replace

@@ -366,7 +366,7 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 
 	safeHandle(h.Execute, w, withTenant(r))
 
-	// Should pass param binding — will fail later at executeQuery (nil conn).
+	// Should pass param binding — failing later at the unwired target.
 	assert.NotEqual(t, http.StatusBadRequest, w.Code)
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }
@@ -420,7 +420,7 @@ func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
 
 	safeHandle(h.Execute, w, withTenant(r))
 
-	// Should pass param binding — will fail at executeQuery (nil conn).
+	// Should pass param binding — failing later at the unwired target.
 	assert.NotEqual(t, http.StatusBadRequest, w.Code)
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }
@@ -572,7 +572,7 @@ func TestPipesHandler_Execute_MutationRunsEveryCall(t *testing.T) {
 
 // Identical mutation calls in flight together are each executed: coalescing
 // them would run one write for all of them. Under synctest, Wait returns once
-// every request is inside Exec or parked on another's flight.
+// every request is inside ClickHouse or parked on another's flight.
 func TestPipesHandler_Execute_ConcurrentMutationsNotCoalesced(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const calls = 3
