@@ -116,14 +116,36 @@ type tenantSet struct {
 // first Bind for that line, as that tenant's Unavailable.
 //
 // WithPreload is deliberately not used: it opens a library at construction,
-// and chtypes.Timezone must be set before that from a server's own zone,
-// which only discovery knows (see openLine).
+// and a library's zone must come from a server's own zone, which only
+// discovery knows (see openLine).
 func NewEngine(cfg Config) (*Engine, error) {
-	reg, err := chtypes.NewRegistry(cfg.RegistryDir, chtypes.WithAutoFetch(false))
+	reg, err := chtypes.NewRegistry(cfg.RegistryDir,
+		chtypes.WithAutoFetch(false),
+		chtypes.WithFetchOptions(chtypes.FetchOptions{Progress: sdkLog{}}))
 	if err != nil {
 		return nil, err
 	}
 	return &Engine{reg: reg, tenants: make(map[tenant.ID]*tenantSet)}, nil
+}
+
+// sdkLog carries what the SDK would otherwise print raw on stderr — its
+// warning when a requested patch is not installed and another patch of the
+// line answers instead — into the process log, one record per line.
+type sdkLog struct{}
+
+func (sdkLog) Write(p []byte) (int, error) {
+	for line := range strings.SplitSeq(string(p), "\n") {
+		msg := strings.TrimPrefix(strings.TrimSpace(line), "chtypes: ")
+		if msg == "" {
+			continue
+		}
+		if warning, ok := strings.CutPrefix(msg, "WARNING: "); ok {
+			slog.Warn("chtypes SDK warning", "message", warning)
+		} else {
+			slog.Info("chtypes SDK", "message", msg)
+		}
+	}
+	return len(p), nil
 }
 
 // Table returns tenant id's current compiled handle for a table, read-locked.
@@ -311,6 +333,9 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 	}
 	libChanged := s.lib != lib
 	s.mu.RUnlock()
+	if libChanged {
+		logLibrary(s.id, serverVersion, lib)
+	}
 
 	fresh := make([]pending, 0, len(tables))
 	keep := make(map[string]struct{}, len(tables))
@@ -379,6 +404,19 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 	for _, t := range dropped {
 		t.close(causeDropped)
 	}
+}
+
+// logLibrary records, once each time a tenant's library changes, which
+// artifact answers for the tenant's server. A server on another patch of the
+// line is answered by the line's artifact, and patches can differ.
+func logLibrary(id tenant.ID, serverVersion string, lib *chtypes.Library) {
+	attrs := []any{"tenant", id, "server_version", serverVersion, "chtypes_version", string(lib.Version)}
+	if samePatch(lib.Version, serverVersion) {
+		slog.Info("chtypes library bound", attrs...)
+		return
+	}
+	slog.Warn("chtypes library bound from another patch of the server's line; verdicts follow the artifact's patch",
+		attrs...)
 }
 
 // Table is one compiled shape: a pool of identical schema handles plus the

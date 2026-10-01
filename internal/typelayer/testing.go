@@ -14,12 +14,13 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
-// TestServerVersion is the ClickHouse version TestEngine binds to — a real
-// 26.6 patch release, so the registry resolves the 26.6 artifact line.
-const TestServerVersion = "26.6.3.62"
+// TestServerVersion is the ClickHouse version TestEngine binds to — the patch
+// the locked 26.8 artifact is built from, so its line resolves to that
+// artifact and the bound library is an exact match for the server.
+const TestServerVersion = "26.8.15.10"
 
 // testLine is TestServerVersion's version line, the one artifact tests need.
-const testLine = "26.6"
+const testLine = "26.8"
 
 // RequireEnv set to "1" turns every artifact skip into a failure. CI sets it,
 // so a runner with a broken artifact cache fails loudly instead of quietly

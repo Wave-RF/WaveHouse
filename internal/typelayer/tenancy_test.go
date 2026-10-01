@@ -38,7 +38,7 @@ func unavailable(t *testing.T, eng *Engine, id tenant.ID) *Unavailable {
 	return u
 }
 
-// TestBind_TenantsOnOneLineWithDifferentZones: the process opened the 26.6
+// TestBind_TenantsOnOneLineWithDifferentZones: the process opened the test
 // line in UTC, so a second tenant on that line whose server reports another
 // zone cannot be served by this process. It alone is refused, with a cause
 // naming both zones; the first tenant, and a third in the line's own zone,

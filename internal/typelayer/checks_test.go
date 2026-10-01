@@ -27,7 +27,7 @@ func checksTable() *discovery.TableSchema {
 }
 
 // checksBody is four records whose verdicts under the cases below were
-// measured on the 26.6 artifact.
+// measured on the 26.6 and 26.8 artifacts.
 const checksBody = `{"id":1,"tenant":"acme","kind":"a"}` + "\n" +
 	`{"id":2,"tenant":"acme","kind":"a"}` + "\n" +
 	`{"id":3,"tenant":"evil","kind":"a"}` + "\n" +
@@ -236,9 +236,10 @@ func checksHandleFor(t *testing.T, eng *Engine, table string) *Table {
 // TestIngestChecks_ParseOutcomeDecidesFirst pins a measured trap: under the
 // compile profile's allow_errors_ratio a record that does not parse is
 // skipped, and chtypes answers it 'd' beside that outcome — with the verdict's
-// own code and message EMPTY on 26.6. It must report its parse error (a 400
-// with code 27), never a check decline (a 422), and never shift a neighbour
-// onto its answer.
+// own code and message EMPTY on older artifact builds (every 26.6 build; the
+// 26.8 build fills them). It must report its parse error (a 400 with code 27,
+// read from ErrCode, which every build sets), never a check decline (a 422),
+// and never shift a neighbour onto its answer.
 func TestIngestChecks_ParseOutcomeDecidesFirst(t *testing.T) {
 	tbl := checksHandle(t)
 	body := []byte(strings.Join([]string{
@@ -249,8 +250,8 @@ func TestIngestChecks_ParseOutcomeDecidesFirst(t *testing.T) {
 	}, "\n") + "\n")
 	preds := []Predicate{{Column: "tenant", Op: "=", Values: []string{"acme"}}}
 
-	// The trap itself, at the SDK: a skipped row's verdict is 'd' with no
-	// verdict code, and its error is only in ErrCode/ErrMsg.
+	// The trap itself, at the SDK: a skipped row's verdict is 'd', and its
+	// error is in ErrCode/ErrMsg on every build.
 	s := tbl.pool.first()
 	expr, params, ok := tbl.render(preds)
 	require.True(t, ok)
@@ -283,11 +284,12 @@ func TestIngestChecks_ParseOutcomeDecidesFirst(t *testing.T) {
 }
 
 // TestIngestChecks_RejectedBatchExportsNothing pins the other measured trap:
-// RowsPassed counts the admitted rows of a batch whose own outcome is
-// rejected, and such a batch exports no bytes. It is reachable here — an
-// NDJSON-declared single-line array is not reframed (only the JSON family's
-// arrays are), and one bad element rejects it whole. Every record must be
-// declined; none may be published on the strength of RowsPassed.
+// on older artifact builds (every 26.6 build) RowsPassed counts the admitted
+// rows of a batch whose own outcome is rejected (the 26.8 build reports 0),
+// and such a batch exports no bytes. It is reachable here — an NDJSON-declared
+// single-line array is not reframed (only the JSON family's arrays are), and
+// one bad element rejects it whole. Every record must be declined; none may
+// be published on the strength of RowsPassed.
 func TestIngestChecks_RejectedBatchExportsNothing(t *testing.T) {
 	tbl := checksHandle(t)
 	body := []byte(`[{"id":1,"tenant":"acme","kind":"a"},{"id":"x","tenant":"acme","kind":"a"},{"id":3,"tenant":"acme","kind":"a"}]`)
@@ -300,8 +302,8 @@ func TestIngestChecks_RejectedBatchExportsNothing(t *testing.T) {
 		chtypes.WithRowFilter(tbl.filterOn(s, expr, params)))
 	require.NoError(t, err)
 	require.Equal(t, chtypes.Rejected, res.Outcome)
-	require.Positive(t, res.RowsPassed, "the trap: an admitted row is counted in a rejected batch")
 	require.Empty(t, res.Payload)
+	t.Logf("RowsPassed of the rejected batch: %d", res.RowsPassed)
 
 	batch, err := tbl.Ingest(FormatJSONEachRow, body, preds...)
 	require.NoError(t, err)
@@ -393,10 +395,10 @@ func TestIngest_PositionalFormats(t *testing.T) {
 }
 
 // TestIngest_WithNamesFormats pins the header formats as measured on the 26.6
-// artifact: the header line is not a record (Rows index the data lines), it
-// names the columns in any order, a column it omits takes its DEFAULT, and a
-// name the schema lacks or a repeated name refuses the body whole with
-// ClickHouse's own 117.
+// and 26.8 artifacts: the header line is not a record (Rows index the data
+// lines), it names the columns in any order, a column it omits takes its
+// DEFAULT, and a name the schema lacks or a repeated name refuses the body
+// whole with ClickHouse's own 117.
 func TestIngest_WithNamesFormats(t *testing.T) {
 	tbl := checksHandle(t)
 

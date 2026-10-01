@@ -7,6 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/wave-rf/chtypes/go/chtypes"
+
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
@@ -209,4 +211,69 @@ func TestCountRecords(t *testing.T) {
 	assert.Equal(t, 2, countRecords([]byte("{}\n{}\n"), 0))
 	assert.Equal(t, 2, countRecords([]byte("{}\n{}"), 0))
 	assert.Equal(t, 5, countRecords([]byte("{}\n{}"), 5), "chtypes' own count wins when it has one")
+}
+
+// gatedTable has one column of each type ClickHouse refuses to create unless a
+// type gate is set. Such a table exists on a server only because its CREATE
+// passed the gate there.
+func gatedTable() *discovery.TableSchema {
+	return &discovery.TableSchema{
+		Name: "gated",
+		Columns: []discovery.Column{
+			{Name: "c", Type: "LowCardinality(UInt64)", Position: 1},
+			{Name: "fs", Type: "FixedString(300)", Position: 2},
+			{Name: "v", Type: "Variant(UInt32, Int64)", Position: 3},
+		},
+	}
+}
+
+// TestIngest_TypeGatedColumnsInsertAndFilter: the compile profile carries the
+// type gates, so a table with a LowCardinality(UInt64), a FixedString wider
+// than 256 or a Variant of similar types accepts its records and answers its
+// filters. The control compiles the same declarations without the gates:
+// every record is refused (455 and 44 on the 26.6 and 26.8 artifacts), which
+// is what this table got on every call before.
+func TestIngest_TypeGatedColumnsInsertAndFilter(t *testing.T) {
+	eng := TestEngine(t, gatedTable())
+	tbl, err := eng.Table(tenant.Default, "gated")
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	body := []byte(`{"c":5,"fs":"a","v":1}` + "\n" + `{"c":7,"fs":"b","v":2}` + "\n")
+	batch, err := tbl.Ingest(FormatJSONEachRow, body)
+	require.NoError(t, err)
+	require.Len(t, batch.Rows, 2)
+	for i, r := range batch.Rows {
+		assert.True(t, r.Accepted, "record %d: %d %s", i, r.Code, r.Message)
+	}
+
+	isFive := Predicate{Column: "c", Op: "=", Values: []string{"5"}}
+	batch, err = tbl.Ingest(FormatJSONEachRow, body, isFive)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"", ReasonFilter}, checkReasons(t, batch), "the insert check answers t, f")
+
+	stored, err := tbl.Ingest(FormatJSONEachRow, body)
+	require.NoError(t, err)
+	for i, want := range []bool{true, false} {
+		row, err := tbl.ParseRow(tbl.WireColumns, stored.Rows[i].Line)
+		require.NoError(t, err)
+		visible, reason := row.VisibleWithReason([]Predicate{isFive})
+		row.Close()
+		assert.Equal(t, want, visible, "stored row %d: %s", i, reason)
+	}
+
+	for _, ts := range gatedTable().Columns {
+		ddl, err := tbl.lib.ReconstructDDL([]chtypes.DiscoveredColumn{{Name: ts.Name, Type: ts.Type, Position: 1}})
+		require.NoError(t, err)
+		ungated, err := tbl.lib.CompileDDL(ddl, chtypes.WithCompileSettings(map[string]string{
+			"input_format_allow_errors_ratio":  "1",
+			"input_format_skip_unknown_fields": "0",
+		}))
+		require.NoError(t, err, ts.Type)
+		res, err := ungated.Rows(FormatJSONEachRow, []byte(`{"`+ts.Name+`":5}`+"\n"), InsertSettings())
+		ungated.Close()
+		require.NoError(t, err, ts.Type)
+		assert.NotEqual(t, chtypes.Accepted, res.Outcome, "%s without the gates", ts.Type)
+		assert.Contains(t, []int{44, 455}, res.ErrCode, "%s without the gates: %s", ts.Type, res.ErrMsg)
+	}
 }
