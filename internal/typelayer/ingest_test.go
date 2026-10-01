@@ -320,6 +320,30 @@ func TestIngest_ForwardSlashExportsUnescaped(t *testing.T) {
 	}
 }
 
+// TestIngest_NaNAndInfinityExportAsStrings: the export spells a Float NaN or
+// infinity as a JSON string, the spelling the worker's INSERT stores as that
+// value (a null would store the column's default), so the stream carries
+// strings where /v1/query renders null. The export does not read
+// output_format_json_quote_denormals, so it cannot be pinned to agree.
+func TestIngest_NaNAndInfinityExportAsStrings(t *testing.T) {
+	eng := testEngine(t, &discovery.TableSchema{Name: "floats", Columns: []discovery.Column{
+		{Name: "f", Type: "Float64", Position: 1},
+		{Name: "g", Type: "Nullable(Float32)", Position: 2},
+	}})
+	tbl, err := eng.Table(tenant.Default, "floats")
+	require.NoError(t, err)
+	t.Cleanup(tbl.Release)
+
+	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"f":"nan","g":"inf"}`+"\n"+`{"f":"-inf","g":null}`+"\n"))
+	require.NoError(t, err)
+	require.Len(t, batch.Rows, 2)
+	for _, r := range batch.Rows {
+		require.True(t, r.Accepted, r.Message)
+	}
+	assert.Equal(t, `["nan", "inf"]`, string(batch.Rows[0].Line))
+	assert.Equal(t, `["-inf", null]`, string(batch.Rows[1].Line))
+}
+
 func TestInsertSettings_ReturnsAFreshMap(t *testing.T) {
 	t.Parallel()
 	a := InsertSettings()

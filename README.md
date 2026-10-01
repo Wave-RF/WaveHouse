@@ -129,7 +129,7 @@ The published images bake the chtypes artifact for ClickHouse 26.8 only. Against
 go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 ```
 
-`go install` compiles from source with cgo enabled (requires a C toolchain, and on Linux glibc 2.34 or later — Linux amd64/arm64 or macOS arm64) but does not fetch the [chtypes artifact](https://wavehouse.dev/deployment#chtypes-artifacts) WaveHouse needs: the server refuses to boot without one. Fetch it once before the first run:
+`go install` compiles from source with cgo enabled (requires a C toolchain — Linux amd64/arm64 or macOS arm64; on Linux it links against the build host's glibc, where the prebuilt binaries need 2.34 or later) but does not fetch the [chtypes artifact](https://wavehouse.dev/deployment#chtypes-artifacts) WaveHouse needs: the server refuses to boot without one. Fetch it once before the first run:
 
 ```bash
 go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.5.2 fetch <your-clickhouse-minor-version>

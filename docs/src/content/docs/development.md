@@ -13,7 +13,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 
 | Tool | Required version | Why | Install |
 | ---- | ---------------- | --- | ------- |
-| **Go** | 1.27+ (matches `go.mod`) | Compiles `cmd/wavehouse` with cgo enabled (needed by chtypes' dlopen shim — a C toolchain, and on Linux glibc 2.34 or later, must be present); also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
+| **Go** | 1.27+ (matches `go.mod`) | Compiles `cmd/wavehouse` with cgo enabled (needed by chtypes' dlopen shim — a C toolchain must be present; on Linux the binary links against the build host's glibc, where the prebuilt release binaries need 2.34 or later); also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
 | **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse and a Redis via testcontainers (no compose file), the integration suite also dynamodb-local, and the integration suite also runs the shared cache backend against Redis, Valkey, Dragonfly (pulled from `docker.dragonflydb.io`) and a one-node Redis Cluster | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
@@ -71,7 +71,7 @@ cd WaveHouse
 make tools
 scripts/fetch-chtypes.sh   # once per machine (see above)
 
-# 2. Start ClickHouse (the only external dependency)
+# 2. Start ClickHouse (the only external service)
 docker compose -f deployments/compose/dependencies.yaml up -d --wait clickhouse
 
 # 3. Create a table in ClickHouse
