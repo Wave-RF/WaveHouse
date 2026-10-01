@@ -78,7 +78,7 @@ Independently, every `required` declared parameter must be supplied regardless o
 
 ### How a value becomes SQL
 
-Bound values are **inlined directly into the SQL string** (not sent as positional driver parameters — that lets a parameter sit anywhere ClickHouse allows a literal, including `LIMIT`). Inlining is type-aware and escaped, and a string brings its own quotes, so **write each placeholder bare, never inside quotes** — `WHERE id = {{id}}`, not `WHERE id = '{{id}}'`:
+Bound values are **inlined directly into the SQL string** (not sent as ClickHouse query parameters — inlining lets a placeholder sit anywhere ClickHouse allows a literal, including `LIMIT`). Inlining is type-aware and escaped, and a string brings its own quotes, so **write each placeholder bare, never inside quotes** — `WHERE id = {{id}}`, not `WHERE id = '{{id}}'`:
 
 | Supplied value | Rendered as | Note |
 | -------------- | ----------- | ---- |
@@ -169,12 +169,13 @@ curl -X POST http://localhost:8080/v1/pipes/top_pages \
   -d '{"start_date": "2024-01-01", "limit": 20}'
 ```
 
-The response is a JSON array of rows. Results flow through the query cache (in-process by default, or a Redis shared by every instance with [`cache.backend: redis`](/configuration#cache)) with singleflight coalescing, so concurrent identical calls hit ClickHouse once; an `X-Cache: HIT` or `X-Cache: MISS` header tells you which path served the response. A [pipe that writes](#pipes-that-write) skips both and answers `X-Cache: BYPASS`.
+The response is a JSON array of rows. Results flow through the query cache (in-process by default, or a Redis shared by every instance with [`cache.backend: redis`](/configuration#cache)) with singleflight coalescing, so concurrent identical calls hit ClickHouse once; an `X-Cache: HIT` or `X-Cache: MISS` header tells you which path served the response. A [pipe that writes](#pipes-that-write) skips both and answers `X-Cache: BYPASS`. Don't give a pipe's SQL its own `FORMAT` clause: WaveHouse asks ClickHouse for `JSONEachRow` and frames the lines into the response array, so any other format fails every call with `500 clickhouse.unknown`.
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 404 | `{"error":"pipe not found"}` | No pipe registered under that name |
-| 403 | `{"error":"forbidden"}` | Caller's role isn't in `allowed_roles` (and isn't admin) |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid or expired token was supplied and the pipe's allowlist then denied the request |
+| 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | Caller's role isn't in `allowed_roles` (and isn't admin) |
 | 400 | `{"error":"missing required parameter: x"}` | A required parameter wasn't supplied |
 | 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL form — a JSON object (directly, or nested in an array). An empty array is likewise rejected (`array parameter must not be empty`). |
 

@@ -23,13 +23,13 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 
 ### The chtypes artifact — fetch it once per machine
 
-`internal/typelayer` loads a per-ClickHouse-version shared library at start to run ingest validation and row-level security through ClickHouse's own parser (see [Deployment → chtypes artifacts](/deployment#chtypes-artifacts)). It is not source code and `make tools` does not fetch it for you — pull it once with:
+`internal/typelayer` uses a per-ClickHouse-version shared library — looked for at start (an API process refuses to boot with none installed) and opened the first time a tenant on that ClickHouse line is bound — to run ingest validation and row-level security through ClickHouse's own parser (see [Deployment → chtypes artifacts](/deployment#chtypes-artifacts)). It is not source code and `make tools` does not fetch it for you — pull it once with:
 
 ```bash
 scripts/fetch-chtypes.sh   # wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.5.2 fetch --frozen --lock chtypes.lock 26.8
 ```
 
-It lands in the default local cache (`~/.cache/chtypes/artifacts/abi6/<os>-<arch>`, one directory per SDK ABI revision) and is 160–290 MB — expect the first run to take a minute or two. Without it the API process refuses to boot (`make dev`, `make test-e2e`, and the app that `make test-integration` and `make ci` start), and the unit tests that need the engine skip; set `WAVEHOUSE_TEST_REQUIRE_CHTYPES=1` (CI does) to make a missing artifact fail those tests instead. A `503` on ingest, with row-filtered stream rows withheld, is what a process that did find an artifact answers for a ClickHouse line the artifact does not cover.
+It lands in the default local cache (`~/.cache/chtypes/artifacts/abi6/<os>-<arch>`, one directory per SDK ABI revision) and is 160–300 MB — expect the first run to take a minute or two. Without it the API process refuses to boot (`make dev`, `make test-e2e`, and the app that `make test-integration` and `make ci` start), and the unit tests that need the engine skip; set `WAVEHOUSE_TEST_REQUIRE_CHTYPES=1` (CI does) to make a missing artifact fail those tests instead. A `503` on ingest, with row-filtered stream rows withheld, is what a process that did find an artifact answers for a ClickHouse line the artifact does not cover.
 
 ### Auto-installed by `make tools`
 
@@ -72,7 +72,7 @@ make tools
 scripts/fetch-chtypes.sh   # once per machine (see above)
 
 # 2. Start ClickHouse (the only external dependency)
-docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
+docker compose -f deployments/compose/dependencies.yaml up -d --wait clickhouse
 
 # 3. Create a table in ClickHouse
 docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
@@ -102,7 +102,7 @@ WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 On first run `make dev` seeds the gitignored `./settings` directory with `wavehouse bootstrap` and copies in the compose stack's trial policy (`deployments/compose/settings/policies.json` + `roles.json` — the `public` role: read/write `clicks`/`events`, no token). WaveHouse is otherwise fail-closed (the bootstrap seed ships no policy), so a `./settings` you emptied by hand denies every request until you put a policy back. Edits to any file in `./settings` hot-reload without a restart.
 
-The tokenless data-plane calls work (create a `clicks` table first — see the [Getting Started](/getting-started) walkthrough):
+The tokenless data-plane calls work (against the `clicks` table from step 3 of the [Quick Start](#quick-start) above):
 
 ```bash
 # Ingest an event
@@ -167,13 +167,13 @@ These are the small targets behind `make dev` — useful directly when you want 
 | `make deps-logs` | `docker compose logs -f clickhouse` (Ctrl+C detaches; container keeps running). |
 | `make deps-shell` | Drop into a `clickhouse-client` REPL on the running container. |
 | `make deps-wipe` | Stop ClickHouse **and destroy its data volume**. Use when you want a clean schema. |
-| `make clean-all` | Nuclear option — every `make` artifact + dev/E2E containers + volumes + `data/`. |
+| `make clean-all` | Nuclear option — every `make` artifact + the dev Compose containers and volumes + `data/`. |
 
 **Stopping `make dev`**: `Ctrl+C` stops air, which propagates SIGINT to WaveHouse for a graceful shutdown (NATS JetStream flush, etc.). ClickHouse stays up — re-running `make dev` is fast because the volume is preserved. Use `make deps-down` or `make deps-wipe` to stop ClickHouse explicitly.
 
 ### Running with observability
 
-WaveHouse natively exports standard OpenTelemetry (OTLP) data to `127.0.0.1:4317`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
+WaveHouse natively exports standard OpenTelemetry (OTLP) data — with no `OTEL_EXPORTER_OTLP_ENDPOINT` set, to `localhost:4317`, where these dashboards listen. Export is off by default (`otel.enabled: false` in `config.yaml`): the E2E fixture turns it on, so `make test-e2e` needs nothing, while for `make dev` set `otel.enabled: true` in `.config.local.yaml` or run `WH_OTEL_ENABLED=true make dev`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
 
 You run these in a separate terminal tab alongside `make dev` or your test suites (`make test-e2e`).
 
@@ -188,7 +188,7 @@ They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear
 **Typical Workflow:**
 
 1. Open Tab 1: run `make obs-aspire` (UI opens automatically)
-2. Open Tab 2: run `make dev` (or `make test-e2e`)
+2. Open Tab 2: run `WH_OTEL_ENABLED=true make dev` (or `make test-e2e`)
 3. View traces, metrics, and logs flowing into the UI instantly. No accounts or auth tokens required.
 
 ### Using the SDK against `make dev`
@@ -370,7 +370,7 @@ Shared test utilities live in `internal/testutil/`. The packages log through `sl
 ### Adding New Tests
 
 - **Unit test for `internal/foo/`** → create `internal/foo/foo_test.go` (same package).
-- **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`). A test of one package against its own external server — the shared cache backend against Redis, Valkey and Dragonfly containers — lives beside the package instead (`internal/cache/redis_integration_test.go`, same build tag), and the package is listed in the `test-integration` target.
+- **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`). A test of one package against its own external server — the shared cache backend against Redis, Valkey and Dragonfly containers — lives beside the package instead (`internal/cache/redis_integration_test.go`, same build tag), and the package is listed in the `test-integration` target. In `internal/api` and `internal/mq` that target picks tagged tests by name (`-run '^Test(ExternalNATS|NewNATS|NATSPermissions_Refuse|Leases|Integration_)'`), so name a new one `TestIntegration_*` in `internal/api`, or extend the pattern.
 - **E2E test via SDK** → add a `tests/e2e/sdk/*.test.ts` file. These tests exercise the full pipeline (ingest → ClickHouse → query) through the TypeScript SDK. Run with `make test-e2e`.
 - **Test helpers** → add to `internal/testutil/` (Go) or `tests/e2e/sdk/helpers.ts` (E2E).
 
@@ -397,14 +397,15 @@ The orchestrator always provisions its own stack — fresh ClickHouse and Redis 
 
 ```bash
 docker compose -f deployments/compose/dependencies.yaml --profile redis up -d
-WH_CONFIG=tests/e2e/fixtures/config.yaml WH_CACHE_REDIS_ADDRS=localhost:6379 go run ./cmd/wavehouse
+mkdir -p tmp/e2e-settings && cp tests/e2e/fixtures/settings/*.json tmp/e2e-settings/
+WH_CONFIG=tests/e2e/fixtures/config.yaml WH_SETTINGS_DIR=tmp/e2e-settings WH_CACHE_REDIS_ADDRS=localhost:6379 go run ./cmd/wavehouse
 ```
 
-The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `settings.dir` is relative to the working directory. The fixture's settings directory (policy, pipes, and tunables) points at ClickHouse on `localhost:9000`; if yours isn't there, edit `clickhouse.addr` / `http_port` in `tests/e2e/fixtures/settings/config.json` (the orchestrator patches them itself for its testcontainer).
+The suite writes policy and pipes into the server's settings directory, so give it a scratch copy, never the tracked fixture. The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the relative paths above resolve against the working directory. The fixture's settings (policy, pipes, and tunables) point at ClickHouse on `localhost:9000`; if yours isn't there, edit `clickhouse.addr` / `http_port` in the copy's `config.json` (the orchestrator patches its own copy for its testcontainer).
 
 Prefixing the variable to `make dev` does **not** work: that recipe pins `WH_CONFIG=.config.local.yaml` inline, which overrides anything inherited from the environment.
 
-Then set `CLICKHOUSE_URL` / `WAVEHOUSE_URL` and run `pnpm test` from `tests/e2e/sdk/`; teardown is a no-op on that path, so your stack survives between iterations.
+Then, from `tests/e2e/sdk/`, run `CLICKHOUSE_URL=http://localhost:8123 WAVEHOUSE_URL=http://localhost:8080 WAVEHOUSE_SETTINGS_DIR=$(git rev-parse --show-toplevel)/tmp/e2e-settings pnpm test`; teardown is a no-op on that path, so your stack survives between iterations.
 
 If a previous run was killed (harness timeout, stop button, `SIGKILL`), it can leave a `wavehouse-cov` behind. That process shares `tmp/data` and `tmp/wavehouse-cov.log` with the next run and will corrupt it, so the orchestrator kills any leftover before starting and says so.
 
@@ -475,11 +476,11 @@ WaveHouse/
 │   ├── auth/               # JWT/JWKS authentication middleware
 │   ├── cache/              # Query cache: Ristretto L1 + the tenant-led version index; the Redis-compatible shared backend
 │   ├── chconn/             # ClickHouse pools, one per connection tuple (reconciled on settings reload)
-│   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
+│   ├── chsql/              # Shared ClickHouse SQL helpers (identifier quoting, bind-safety, {p:String} value encoding, the strict integer-claim cast)
 │   ├── config/             # YAML + env var configuration
 │   ├── coord/              # Leases with fencing tokens (in-process Local, RunElected, coordtest suite)
 │   ├── dedupe/             # Optional deduplication (Reserve/Commit/Release; Pebble or DynamoDB)
-│   ├── discovery/          # ClickHouse schema introspection + validation
+│   ├── discovery/          # ClickHouse schema introspection (system.columns/system.tables, server version + timezone)
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper + shard claims
 │   ├── keyenc/             # One escaping for composite keys (NATS subject tokens, cache keys, dedupe keys)
 │   ├── mq/                 # MQ boundary: the only NATS/JetStream importer
@@ -490,20 +491,23 @@ WaveHouse/
 │   ├── settings/           # Settings directory: validate, adopted snapshot, reload
 │   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
 │   ├── tenant/             # Tenant id: type, grammar, reserved default, request header name
-│   └── testutil/           # Shared test helpers and mocks (cachetest suite)
+│   ├── testutil/           # Shared test helpers and mocks (cachetest suite)
+│   └── typelayer/          # In-process ClickHouse parser (chtypes): ingest validation, insert checks, row-filter compilation
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)
 │   └── e2e/                # E2E suite (orchestrator + ClickHouse and Redis testcontainers)
-│       ├── fixtures/       # ClickHouse DDL + config and settings-directory fixtures
+│       ├── fixtures/       # Server config + settings-directory fixtures (tables come from sdk/tables.ts)
 │       └── sdk/            # E2E specs driven through the TypeScript SDK (Vitest)
 ├── clients/                # Client SDKs
 │   └── ts/                 # TypeScript SDK (@wavehouse/sdk, pnpm workspace)
 ├── deployments/
-│   ├── compose/            # Docker Compose files (standalone.yaml, dependencies.yaml)
+│   ├── compose/            # Docker Compose files (standalone.yaml, dependencies.yaml) + settings/ (trial settings directory)
+│   ├── nats/               # External NATS JetStream topology (nack CRs + Helm values)
 │   ├── Dockerfile          # Runtime image
 │   └── Dockerfile.goreleaser  # Release image (built by GoReleaser)
-├── scripts/                # E2E orchestrator, cov tool, CI/hook helpers
+├── scripts/                # E2E orchestrator, cov tool, chtypes fetcher, CI/hook helpers
 ├── docs/                   # Documentation
+├── chtypes.lock            # Pinned chtypes artifacts (scripts/fetch-chtypes.sh)
 ├── config.yaml             # Default configuration file
 ├── Makefile                # Build, test, lint, deploy targets
 ├── .golangci.yml           # Linter configuration
@@ -513,7 +517,7 @@ WaveHouse/
 
 ## Code Conventions
 
-- **Strict Go formatting**: Use `gofumpt` (a stricter superset of `gofmt`, enforced by CI). Run `make fmt` to format.
+- **Strict Go formatting**: Use `gofumpt` (a stricter superset of `gofmt`, enforced by CI). `make fmt` checks it; `make fix` applies it.
 - **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces so implementations can be swapped behind a stable contract.
 - **Package boundaries**: The `internal/` directory ensures packages are private to this module.
 - **Error handling**: Return errors to callers. Use `slog` for structured logging, through the default logger (`slog.InfoContext(ctx, …)` and its siblings) — constructors don't take a `*slog.Logger`; tests silence or capture it with `internal/testutil/logtest`.
@@ -571,7 +575,7 @@ Run `make help` to see all targets. Key ones:
 | **Cleanup** (tiered — compose explicitly for partial resets) | |
 | `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`, `docs/.dev-dist/`) |
 | `make clean-test` | Test outputs only (`tmp/` — coverage data, logs, NATS state) |
-| `make clean-tools` | Installed tools and pnpm deps (`.bin/`, `node_modules/`) |
+| `make clean-tools` | Installed tools and the workspace members' pnpm deps (`.bin/`, `clients/ts`, `tests/e2e/sdk` and `docs` `node_modules/`) |
 | `make clean-all` | Full reset: above + `data/` + Docker volumes |
 
 All test targets accept `ARGS="..."` for pass-through `go test` flags. Build targets accept `TAGS="..."` for Go build tags. `V=1` switches to verbose `gotestsum` output.
@@ -607,7 +611,7 @@ PRs are grouped per config to reduce noise. The npm config is pointed at the wor
 
 The GitHub Actions config names **two** directories. `directory: /` reaches `.github/workflows/` but does not descend into `.github/actions/*/action.yml`, so the `setup-env` composite action — which owns every cache in `ci.yml` — was invisible to Dependabot, and its pins went stale against upstream and diverged from `publish-npm.yml`, which Dependabot *does* track and which doesn't call `setup-env`. Listing its directory under `directories:` brings it into the same weekly group; **adding a composite action means adding its directory there**, because nothing else catches the drift.
 
-`typescript` majors are held back (`ignore: version-update:semver-major`) because `tsup` vendors a `rollup-plugin-dts` that crashes on TypeScript 7 during `clients/ts`'s `prepare` script — i.e. inside `pnpm install`, which takes every Node job down at once. See the comment in `.github/dependabot.yml` for the condition that lets it be removed.
+`typescript` majors are held back (`ignore: version-update:semver-major`) because `tsup` vendors a `rollup-plugin-dts` that crashes on TypeScript 7 during `clients/ts`'s `prepare` script — i.e. inside `pnpm install`, which takes every Node job down at once. See the comment in `.github/dependabot.yml` for the condition that lets it be removed. `eventsource-parser` majors are held back too: v4 drops the CJS build the SDK's `require` entry needs ([#492](https://github.com/Wave-RF/WaveHouse/issues/492)).
 
 **No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
 

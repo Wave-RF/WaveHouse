@@ -33,6 +33,7 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 401 | `HTTP_401` | No | On REST, a present-but-invalid or expired JWT that a gate then denied. **WaveHouse itself** never returns `401` for a *missing* token — that resolves to `default_role`, and a denial is `403`. On a stream it is always from something in front, since `/v1/stream` is ungated |
 | 403 | `HTTP_403` | No | Insufficient permissions |
 | 404 | `HTTP_404` | No | Table, pipe, or tenant not found |
+| 422 | `HTTP_422` | No | Ingest only: the validation engine could not judge a record (`validation engine declined: …`), or an insert check could not be evaluated. It says neither that the data is bad nor that it was accepted; a single-object insert answers it as the call's error, a batch as a per-record `error` with no `exception_code`. The SDK does not retry it |
 | 400 | `clickhouse.rejected` / `clickhouse.limit_exceeded` | No | ClickHouse refused the query (bad SQL, an unknown column, a type mismatch) or it outran a limit — including the role's own caps |
 | 403 | `clickhouse.access_denied` | No | ClickHouse's user lacks a grant the statement needs |
 | 500 | `HTTP_500` | Yes, unless the body says `retryable: false` | Server error (retried per `maxRetries`) |
@@ -172,7 +173,7 @@ export interface ClicksRow {
 | ClickHouse Type | TypeScript Type |
 |----------------|-----------------|
 | `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Enum*`, `IPv4/6` | `string` |
-| `UInt*`, `Int*`, `Float*`, `Decimal*` | `number` — `Decimal*` comes back as a JSON number, not a string |
+| `UInt*`, `Int*`, `Float*`, `Decimal*` | `number` — 64-bit and wider integers and `Decimal*` come back as JSON numbers, not strings, so `JSON.parse` rounds a value past 2^53 — store an id that large as a `String` column to keep every digit; a `Float*` NaN or infinity comes back as `null` |
 | `Bool` | `boolean` |
 | `Nullable(T)` | `T \| null` |
 | `Array(T)` | `T[]` |
