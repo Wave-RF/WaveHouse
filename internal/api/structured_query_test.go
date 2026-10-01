@@ -623,26 +623,24 @@ func TestStructuredQuery_FilterValuesKeepTheirDigits(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(r))
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	assert.Equal(t, []string{"12.50", "['9007199254740993']"}, ch.params())
+	assert.Equal(t, []string{"12.50"}, ch.params())
+	assert.Equal(t, []query.Table{{Name: "_p1", Data: append([]byte{16}, "9007199254740993"...)}}, ch.tables())
 }
 
 // TestStructuredQuery_UnbindableFilterValueIs400: a filter value with no
-// honest binding — a JSON null, or an `in` list too large for ClickHouse's
-// HTTP interface to take — is the caller's malformed query, a 400 before
-// anything reaches ClickHouse, rather than a server error after.
+// honest binding — a JSON null, or a scalar too large for ClickHouse's HTTP
+// interface to take — is the caller's malformed query, a 400 before anything
+// reaches ClickHouse, rather than a server error after.
 func TestStructuredQuery_UnbindableFilterValueIs400(t *testing.T) {
 	t.Parallel()
-	huge := make([]any, 0, 20000)
-	for i := range 20000 {
-		huge = append(huge, fmt.Sprintf("v%d", i))
-	}
 	for _, tc := range []struct {
 		name   string
 		filter query.Filter
 		want   string
 	}{
 		{"null value", query.Filter{Column: "page", Op: "eq", Value: nil}, "must not be null"},
-		{"oversized in list", query.Filter{Column: "page", Op: "in", Value: huge}, "split a long in list"},
+		{"null in an in list", query.Filter{Column: "page", Op: "in", Value: []any{"a", nil}}, "must not be null"},
+		{"oversized scalar", query.Filter{Column: "page", Op: "eq", Value: strings.Repeat("a", chMaxFieldBytes+1)}, "filter value too large"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -656,4 +654,47 @@ func TestStructuredQuery_UnbindableFilterValueIs400(t *testing.T) {
 			assert.Empty(t, ch.sql(), "an unbindable query must never reach ClickHouse")
 		})
 	}
+}
+
+// TestStructuredQuery_LargeInListReachesClickHouse: an `in` list far past
+// ClickHouse's 128 KiB parameter limit — the realistic victim of that limit —
+// reaches ClickHouse whole, as an external table, alongside the request's
+// scalars on the query string. Only the 1 MiB request body bounds it.
+func TestStructuredQuery_LargeInListReachesClickHouse(t *testing.T) {
+	t.Parallel()
+	const n = 60000
+	huge := make([]any, 0, n)
+	for i := range n {
+		huge = append(huge, fmt.Sprintf("v%d", i))
+	}
+	ch := &fakeCH{}
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{Columns: []string{"page"}, Filters: []query.Filter{
+		{Column: "user_id", Op: "eq", Value: "u1"},
+		{Column: "page", Op: "in", Value: huge},
+	}})))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "SELECT `page` FROM `clicks` WHERE `user_id` = {p0:String} AND `page` IN (SELECT v FROM _p1) LIMIT 10000", ch.sql())
+	assert.Equal(t, []string{"u1"}, ch.params())
+	tables := ch.tables()
+	require.Len(t, tables, 1)
+	assert.Equal(t, "_p1", tables[0].Name)
+	assert.Greater(t, len(tables[0].Data), chMaxFieldBytes*3, "the list must not be capped at a query parameter's size")
+}
+
+// TestStructuredQuery_TimestampFilterParsesInClickHouse: a filter value on a
+// DateTime column reaches ClickHouse as the caller wrote it, under the parse
+// that reads it in the column's zone.
+func TestStructuredQuery_TimestampFilterParsesInClickHouse(t *testing.T) {
+	t.Parallel()
+	ch := &fakeCH{}
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{Columns: []string{"page"}, Filters: []query.Filter{
+		{Column: "ts", Op: "gte", Value: "2026-06-21T04:00:00.5+09:00"},
+	}})))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "SELECT `page` FROM `clicks` WHERE `ts` >= parseDateTime64BestEffort({p0:String}, 8) LIMIT 10000", ch.sql())
+	assert.Equal(t, []string{"2026-06-21T04:00:00.5+09:00"}, ch.params())
 }

@@ -67,12 +67,6 @@ func BindUnsafe(name string) bool {
 // compare equal. Encoding `\` → `\\`, tab → `\t`, newline → `\n`, CR → `\r`
 // round-trips every value byte for byte on both surfaces, including an
 // embedded NUL.
-//
-// An Array(String) parameter takes a DIFFERENT rule and must NOT be run
-// through this one: its elements are read as QUOTED values, where a raw tab or
-// newline rides through untouched and only `'` and `\` need escaping.
-// Applying both encodings is corruption — `a\b` becomes `a\\b`. See
-// quoteCHElement in internal/query.
 var EscapeStringParam = strings.NewReplacer(
 	`\`, `\\`,
 	"\t", `\t`,

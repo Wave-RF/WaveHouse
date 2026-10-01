@@ -171,13 +171,14 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Bind the built SQL for ClickHouse's HTTP interface: positional `?`
-	// placeholders become {pN:String} / {pN:Array(String)} named parameters
-	// and each value becomes the text ClickHouse reads it back from. A value
-	// with no text form (a JSON null, an object), or one too large for the
-	// HTTP interface to take, is a malformed query, not a server fault.
-	chSQL, chParams, err := result.NamedParams()
+	// placeholders become {pN:String} query parameters, and `in` lists
+	// external tables, each value the text ClickHouse reads it back from. A
+	// value with no text form (a JSON null, an object), or a query too large
+	// for the HTTP interface to take, is a malformed query, not a server
+	// fault.
+	bound, err := result.Bind()
 	if err == nil {
-		err = checkParamSizes(chParams)
+		err = checkRequestSize(bound)
 	}
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -188,7 +189,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// the singleflight key too. Keyed on what reaches ClickHouse, so two
 	// requests that differ only in a spelling the binding erases share an
 	// entry and two that differ in the bytes sent never do.
-	cacheKey := queryCacheKey(store.Tenant(), chSQL, chParams)
+	cacheKey := queryCacheKey(store.Tenant(), bound.SQL, cacheValues(bound))
 
 	// TODO: impl scope
 	scope := ""
@@ -265,7 +266,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		start := time.Now()
 		// ClickHouse's own JSON rendering of the rows, stored and served
 		// verbatim — no per-row scan, no re-marshal.
-		data, err := h.ch.do(queryCtx, target, conns, chRequest{sql: chSQL, params: chParams, settings: chSettings})
+		data, err := h.ch.do(queryCtx, target, conns, chRequest{sql: bound.SQL, params: bound.Params, tables: bound.Tables, settings: chSettings})
 		if err != nil {
 			return nil, err
 		}
