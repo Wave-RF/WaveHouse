@@ -266,7 +266,7 @@ func TestInsertSettings_BestEffortDateTime(t *testing.T) {
 // in UTC at the column's scale, whatever the input spelling or the column's
 // zone, as the query paths render it; Date and Date32 keep their own form.
 func TestIngest_DateTimeExportsAsRFC3339UTC(t *testing.T) {
-	eng := TestEngine(t, &discovery.TableSchema{Name: "times", Columns: []discovery.Column{
+	eng := testEngine(t, &discovery.TableSchema{Name: "times", Columns: []discovery.Column{
 		{Name: "dt", Type: "DateTime", Position: 1},
 		{Name: "dt3", Type: "DateTime64(3)", Position: 2},
 		{Name: "dt6", Type: "DateTime64(6)", Position: 3},
