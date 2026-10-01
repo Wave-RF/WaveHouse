@@ -115,13 +115,10 @@ type ResolvedPermissions struct {
 type ResolvedSelect struct {
 	AllowColumns []string
 	DenyColumns  []string
-	WhereClause  string
-	WhereParams  []any
-	// rowFilter is the same row-level-security predicate as WhereClause/WhereParams,
-	// kept in resolved form so the stream path can evaluate it against the row
-	// (Predicates, RowVisible) while the query path renders it to SQL (WhereSQL).
-	// Both derive from one resolvePredicates call in Evaluate, so the two read
-	// surfaces can't drift (#457).
+	// rowFilter is the row-level-security predicate in resolved form: the query
+	// path renders it to SQL (WhereSQL) and the stream path hands it to the type
+	// layer (Predicates). Both derive from one resolvePredicates call in
+	// Evaluate, so the two read surfaces can't drift (#457).
 	rowFilter           []Predicate
 	AllowedAggregations []string
 	DeniedAggregations  []string
@@ -268,17 +265,9 @@ func evaluateSelect(perms *SelectPermissions, claims map[string]any) *ResolvedPe
 				return &ResolvedPermissions{Allowed: false}
 			}
 		}
-		// Resolve the row-filter once into predicates, then render both read surfaces
-		// from that single source so they can't drift: the query path binds them into
-		// a SQL WHERE here; the stream path evaluates the same predicates in memory
-		// (ResolvedPermissions.RowVisible).
-		preds := resolvePredicates(perms.Filter, claims)
-		resolved.Select.rowFilter = preds
-		clauses, params := predicatesToSQL(preds, nil)
-		if len(clauses) > 0 {
-			resolved.Select.WhereClause = strings.Join(clauses, " AND ")
-			resolved.Select.WhereParams = params
-		}
+		// Resolve the row-filter once into predicates; both read surfaces render
+		// from that single source (WhereSQL, Predicates) so they can't drift.
+		resolved.Select.rowFilter = resolvePredicates(perms.Filter, claims)
 	}
 
 	return resolved
@@ -321,15 +310,8 @@ func evaluateInsert(perms *InsertPermissions, claims map[string]any) *ResolvedPe
 			case f.Eq != nil:
 				// Deliberate asymmetry with the read path: an unresolvable check claim
 				// still resolves to "" and is auto-injected as the required value (#463).
-				// A placeholder-free value is marked LiteralValue so the check
-				// comparison can accept its numeric reading; a claim-derived value
-				// stays a plain string and keeps strict canonical equality.
 				v, _ := resolveTemplate(*f.Eq, claims)
-				if !claimTemplateRe.MatchString(*f.Eq) {
-					resolved.Insert.CheckClauses[col] = LiteralValue(v)
-				} else {
-					resolved.Insert.CheckClauses[col] = v
-				}
+				resolved.Insert.CheckClauses[col] = v
 			case f.In != nil:
 				// A []any value marks a set-membership check (vs a scalar required
 				// value); ingest enforces "inserted value must be one of these".
@@ -339,6 +321,29 @@ func evaluateInsert(perms *InsertPermissions, claims map[string]any) *ResolvedPe
 	}
 
 	return resolved
+}
+
+// HasRowFilter reports whether this role/table entry carries a row-level-security
+// predicate. The stream fan-out uses it to decide whether an event can be projected
+// once for a whole role bucket (no filter) or must be checked per subscriber against
+// that subscriber's claims (filter present). A nil receiver (no policy applies) has
+// no filter.
+//
+// It answers YES for a denied grant and for one whose read side was never
+// resolved, neither of which has a predicate to speak of. That is deliberate:
+// this is the GATE in front of the per-subscriber check, and a "no filter"
+// answer sends the caller down the deliver-to-the-whole-bucket fast path where
+// that check is never consulted. Saying yes forces the per-subscriber path,
+// where the check denies. Same shape and same reason as RestrictsColumns, which
+// guards the builder's SELECT * expansion.
+func (rp *ResolvedPermissions) HasRowFilter() bool {
+	if rp == nil {
+		return false
+	}
+	if !rp.Allowed || rp.Select == nil {
+		return true
+	}
+	return len(rp.Select.rowFilter) > 0
 }
 
 // Predicate is one row-filter comparison with its claim templates already
@@ -488,9 +493,7 @@ func toStrings(vals []any) []string {
 // with no placeholders — including a literal "" — is always ok, and binds
 // exactly as written: canonicalizing a numeric-spelled literal here would
 // silently move read filters on String columns (`_neq: "1.0"` on a version
-// column is a different predicate than `_neq: "1"`); the insert-check
-// comparison instead accepts a literal's numeric reading at compare time
-// (CanonicalNumericLiteral).
+// column is a different predicate than `_neq: "1"`).
 func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
 	ok := true
 	resolved := claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
@@ -866,7 +869,7 @@ func validateSelectPerms(table, role string, perms *SelectPermissions) error {
 		}
 		// An entry naming no operator resolves to no predicate, so the row-level
 		// restriction the author declared would silently not apply — Evaluate would
-		// answer HasRowFilter() false and RowVisible true for every row. Refuse it
+		// answer HasRowFilter() false and read every row. Refuse it
 		// here; the resolver's matching deny is defense-in-depth.
 		if !f.hasOperator() {
 			return fmt.Errorf("table %q, op %q, role %q: filter column %q sets no operator — use _eq, _neq, _gt, _lt, or _in", table, op, role, col)

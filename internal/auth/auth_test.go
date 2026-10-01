@@ -182,8 +182,9 @@ func TestMiddleware_LargeIntegerClaim_ExactThroughPolicy(t *testing.T) {
 	}}
 	perms := policy.Evaluate(p, "viewer", "clicks", "select", c.claims)
 	require.True(t, perms.Allowed)
-	assert.Equal(t, "`tenant_id` = ?", perms.Select.WhereClause)
-	assert.Equal(t, []any{"1234567890123456789"}, perms.Select.WhereParams)
+	where, whereParams := perms.Select.WhereSQL(nil)
+	assert.Equal(t, "`tenant_id` = ?", where)
+	assert.Equal(t, []any{"1234567890123456789"}, whereParams)
 }
 
 // TestMiddleware_NumericClaimSpelling_BindsCanonically: json.Number keeps the
@@ -216,7 +217,8 @@ func TestMiddleware_NumericClaimSpelling_BindsCanonically(t *testing.T) {
 			}}
 			perms := policy.Evaluate(p, "viewer", "clicks", "select", c.claims)
 			require.True(t, perms.Allowed)
-			assert.Equal(t, []any{tt.want}, perms.Select.WhereParams)
+			_, whereParams := perms.Select.WhereSQL(nil)
+			assert.Equal(t, []any{tt.want}, whereParams)
 		})
 	}
 }

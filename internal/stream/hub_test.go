@@ -490,7 +490,7 @@ func col(name, chType string) discovery.Column {
 }
 
 // chtypesHub is a Hub whose row filtering is decided the way production decides
-// it: by the type layer, against the real ClickHouse 26.6 artifact, with the
+// it: by the type layer, against the real ClickHouse artifact, with the
 // tables bound for the default tenant. Every row-filter test goes through this
 // rather than a stub, because the verdicts under test ARE ClickHouse's —
 // storage-domain narrowing, instant equality across spellings, exactness past
