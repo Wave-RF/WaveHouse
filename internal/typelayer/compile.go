@@ -41,8 +41,8 @@ var compileSettings = map[string]string{
 // compiled is one table shape's handle: a schema every goroutine shares, the
 // filters compiled over it, and its columns as the compiler declared them.
 // Calls on one handle run concurrently and Close waits for the calls inside
-// it, so nothing here takes a lock around a call. More handles per table would
-// not help ingest on Linux, where Rows is serialized per process
+// it, so nothing here takes a lock around a call. One handle per table is shared
+// by all requests; ingest scaling on the 1.0 artifact is limited upstream
 // (Wave-RF/chtypes#456).
 type compiled struct {
 	schema  *chtypes.Schema
