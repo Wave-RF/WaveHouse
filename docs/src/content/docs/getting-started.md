@@ -23,7 +23,7 @@ cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 ```
 
-The first `up` builds the WaveHouse image from source — a cgo compile plus a download of the pinned chtypes artifact, a few hundred MB — so expect several minutes once; later starts reuse the image.
+The first `up` builds the WaveHouse image from source — a cgo compile plus a download of the pinned chtypes artifact (40–50 MB) — so expect several minutes once; later starts reuse the image.
 
 The stack bind-mounts `deployments/compose/settings/` as WaveHouse's [settings directory](/settings-directory) — the hot-reloadable configuration, ClickHouse address included — so there is nothing to seed; edit those files and the running container picks the change up.
 

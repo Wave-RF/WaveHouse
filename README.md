@@ -135,7 +135,7 @@ go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 go run github.com/wave-rf/chtypes/go/cmd/chtypes@v1.0.1 fetch <your-clickhouse-minor-version>
 ```
 
-(From a checkout, `scripts/fetch-chtypes.sh` fetches the build pinned in `chtypes.lock`.) This downloads about 300 MB into the default local cache (`~/.cache/chtypes/v1`, or `$CHTYPES_CACHE`); point `WH_CHTYPES_REGISTRY` at the layout directory if you keep it somewhere else.
+(From a checkout, `scripts/fetch-chtypes.sh` fetches the build pinned in `chtypes.lock`.) This is a 40–50 MB download that unpacks to roughly 300–340 MB (303 MiB measured on darwin-arm64) in the default local cache (`~/.cache/chtypes/v1`, or `$CHTYPES_CACHE`); point `WH_CHTYPES_REGISTRY` at the layout directory if you keep it somewhere else.
 
 ```bash
 wavehouse bootstrap ./settings   # starter settings directory, every key at its default
@@ -158,7 +158,7 @@ You'll need **Go 1.27+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pn
 
 ```bash
 make tools    # one-time bootstrap
-scripts/fetch-chtypes.sh   # once per machine: the chtypes artifact (about 300 MB)
+scripts/fetch-chtypes.sh   # once per machine: the chtypes artifact (a 40–50 MB download, roughly 300–340 MB on disk)
 docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
 make dev      # hot-reload on .go save
 ```

@@ -40,7 +40,9 @@ const (
 	ReasonDecline = typelayer.ReasonDecline
 	// ReasonUnavailable: no compiled schema can answer for this tenant's table
 	// — the tenant is not bound yet, its server line has no artifact, its server
-	// zone differs from the one this process opened that line with, the table's
+	// zone name is not one WaveHouse recognizes, or its zone differs from the
+	// process's image zone and the table has a zone-less DateTime beside an
+	// expression, the table's
 	// schema did not compile, or no engine is wired at all. Nothing about the
 	// row; every row-filtered subscriber of the table is affected until it is
 	// fixed.
