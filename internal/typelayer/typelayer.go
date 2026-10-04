@@ -81,8 +81,10 @@ var systemLayouts = []string{"/usr/local/share/chtypes/v1", "/opt/chtypes/v1"}
 // its server line, or reports a zone chtypes cannot serve is Unavailable on
 // its own, a table that does not compile (or that its server zone keeps from
 // being served, see zoneCause) is Unavailable alone, and every other tenant
-// keeps answering. Two tenants on the same server and database still compile
-// separate handles.
+// keeps answering. The one exception is a failed first open: chtypes 1.0.1
+// then refuses every tenant in another zone until one in the latched zone is
+// served (Wave-RF/chtypes#458, see openFirst). Two tenants
+// on the same server and database still compile separate handles.
 type Engine struct {
 	reg *chtypes.Registry
 
