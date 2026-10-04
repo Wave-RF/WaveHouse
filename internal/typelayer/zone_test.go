@@ -3,10 +3,12 @@ package typelayer
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -124,7 +126,7 @@ func TestVersionLine(t *testing.T) {
 
 func TestSessionZone(t *testing.T) {
 	t.Parallel()
-	require.Equal(t, testImageZone(), imageZone(), "TestMain commits the image zone")
+	require.Equal(t, "UTC", imageZone(), "TestMain commits the image zone")
 	assert.Empty(t, sessionZone(imageZone()), "the image zone needs no session zone")
 	assert.Equal(t, "Asia/Tokyo", sessionZone("Asia/Tokyo"))
 	assert.Equal(t, "Etc/UTC", sessionZone("Etc/UTC"), "zones compare by name, as chtypes does")
@@ -355,8 +357,8 @@ func TestRoleTable_ZoneRuleCoversTheProjection(t *testing.T) {
 	rt.Release()
 }
 
-// TestBind_UnknownZoneIsThatTenantsUnavailable: a server zone this host's
-// zoneinfo does not know fails every call of that tenant, so the tenant is
+// TestBind_UnknownZoneIsThatTenantsUnavailable: a server zone name WaveHouse
+// does not recognise could not serve any call of that tenant, so the tenant is
 // refused at the bind, alone.
 func TestBind_UnknownZoneIsThatTenantsUnavailable(t *testing.T) {
 	eng := testEngine(t, eventsTable())
@@ -368,57 +370,48 @@ func TestBind_UnknownZoneIsThatTenantsUnavailable(t *testing.T) {
 	answers(t, eng, tenant.Default)
 }
 
-// imageZoneEnv names the image zone TestMain commits, or "unset" for none; a
-// subprocess test sets it, since the image zone is fixed once per process.
-const imageZoneEnv = "WAVEHOUSE_TEST_IMAGE_ZONE"
+// imageZoneEnv=imageUnset starts this test binary with no image zone
+// committed, which only a fresh process has.
+const (
+	imageZoneEnv = "WAVEHOUSE_TEST_IMAGE_ZONE"
+	imageUnset   = "unset"
+)
 
-func testImageZone() string {
-	if z := os.Getenv(imageZoneEnv); z != "" {
-		return z
-	}
-	return "UTC"
-}
-
-// inSubprocess runs test alone in a fresh process of this test binary, with
-// imageZoneEnv set to zone, and fails t if it does not pass.
-func inSubprocess(t *testing.T, test, zone string) {
-	t.Helper()
+// TestImage_DerivedFromTheFirstTenantServed runs each image-zone case in a
+// process of its own with no image zone committed, so the zone is derived
+// through Bind as production derives it, never hand-set.
+func TestImage_DerivedFromTheFirstTenantServed(t *testing.T) {
 	if os.Getenv(imageZoneEnv) != "" {
 		t.Skip("already the subprocess")
 	}
 	testEngine(t) // skips without the artifact
-
-	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^"+test+"$", "-test.v") //nolint:gosec // G204: this test binary, a test name
-	cmd.Env = append(os.Environ(), imageZoneEnv+"="+zone)
-	out, err := cmd.CombinedOutput()
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		t.Fatalf("subprocess failed:\n%s", out)
+	for _, test := range []string{
+		"TestImageUnset_FirstTenantSetsTheZone",
+		"TestImageUnset_MissingArtifactCommitsNothing",
+		"TestImageUnset_UnknownZoneCommitsNothing",
+		"TestImageUnset_FailedOpenCommitsNothing",
+		"TestImageUnset_ConcurrentFirstBindsCommitOnce",
+	} {
+		t.Run(test, func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^"+test+"$", "-test.v") //nolint:gosec // G204: this test binary, a test name
+			cmd.Env = append(os.Environ(), imageZoneEnv+"="+imageUnset)
+			out, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				t.Fatalf("subprocess failed:\n%s", out)
+			}
+			require.NoError(t, err)
+			require.Contains(t, string(out), "--- PASS: "+test, string(out))
+		})
 	}
-	require.NoError(t, err)
-	require.Contains(t, string(out), "--- PASS: "+test, string(out))
 }
 
-// TestImage_FirstTenantInAnotherZone re-runs TestImage_ZoneOfTheFirstTenant in
-// a process whose image zone is Asia/Tokyo: the first bound tenant's zone, as
-// production commits it.
-func TestImage_FirstTenantInAnotherZone(t *testing.T) {
-	inSubprocess(t, "TestImage_ZoneOfTheFirstTenant", "Asia/Tokyo")
-}
-
-// TestImage_UnknownFirstZone re-runs TestImage_UnknownZoneFallsBackToUTC in a
-// process that has committed no image zone yet.
-func TestImage_UnknownFirstZone(t *testing.T) {
-	inSubprocess(t, "TestImage_UnknownZoneFallsBackToUTC", "unset")
-}
-
-// TestImage_UnknownZoneFallsBackToUTC runs only in the subprocess: a first
-// tenant whose zone this host does not know must not become the image zone,
-// which would make chtypes refuse every open for every tenant. The image is
-// UTC, that tenant alone is refused, and the next tenant answers.
-func TestImage_UnknownZoneFallsBackToUTC(t *testing.T) {
-	if os.Getenv(imageZoneEnv) != "unset" {
-		t.Skip("runs in the subprocess TestImage_UnknownFirstZone starts")
+// unsetImage skips t outside the subprocess, and there returns an engine with
+// no tenant bound and no image zone committed.
+func unsetImage(t *testing.T) *Engine {
+	t.Helper()
+	if os.Getenv(imageZoneEnv) != imageUnset {
+		t.Skip("runs in a subprocess TestImage_DerivedFromTheFirstTenantServed starts")
 	}
 	require.Empty(t, imageZone())
 	eng, err := NewEngine(Config{})
@@ -426,30 +419,20 @@ func TestImage_UnknownZoneFallsBackToUTC(t *testing.T) {
 		skipWithoutArtifact(t, err.Error())
 	}
 	t.Cleanup(eng.Close)
-
-	eng.Bind("nowhere", testServerVersion, "Mars/Olympus_Mons", []*discovery.TableSchema{eventsTable()})
-	assert.Equal(t, "UTC", imageZone())
-	u := unavailable(t, eng, "nowhere")
-	assert.Contains(t, u.Cause, `"Mars/Olympus_Mons"`)
-
-	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
-	answers(t, eng, tenant.Default)
+	return eng
 }
 
-// TestImage_ZoneOfTheFirstTenant runs only in the subprocess: a Tokyo image
-// serves a Tokyo tenant exactly, expressions included, and a UTC tenant is now
-// the one in another zone.
-func TestImage_ZoneOfTheFirstTenant(t *testing.T) {
-	if os.Getenv(imageZoneEnv) == "" {
-		t.Skip("runs in the subprocess TestImage_FirstTenantInAnotherZone starts")
-	}
-	require.Equal(t, "Asia/Tokyo", imageZone())
-	eng := testEngine(t) // binds tenant.Default in UTC, with no tables
+// TestImageUnset_FirstTenantSetsTheZone: the first tenant served sets the image
+// zone, so a Tokyo image serves a Tokyo tenant exactly, expressions included,
+// and a UTC tenant is now the one in another zone.
+func TestImageUnset_FirstTenantSetsTheZone(t *testing.T) {
+	eng := unsetImage(t)
 	tables := []*discovery.TableSchema{zonedTable(), eventsTable()}
 	eng.Bind("tokyo", testServerVersion, "Asia/Tokyo", tables)
-	eng.Bind("utc", testServerVersion, "UTC", tables)
-
+	require.Equal(t, "Asia/Tokyo", imageZone())
 	answers(t, eng, "tokyo")
+
+	eng.Bind("utc", testServerVersion, "UTC", tables)
 	u := unavailable(t, eng, "utc")
 	assert.Equal(t, "events", u.Table)
 	assert.Contains(t, u.Cause, `"UTC"`)
@@ -465,5 +448,104 @@ func TestImage_ZoneOfTheFirstTenant(t *testing.T) {
 		require.Len(t, batch.Rows, 1)
 		require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
 		assert.Equal(t, want, string(batch.Rows[0].Line), "tenant %s", id)
+	}
+}
+
+// TestImageUnset_MissingArtifactCommitsNothing: a first tenant whose line has
+// no installed artifact keeps its artifact cause and commits nothing, so the
+// next tenant served sets the zone, and its DateTime DEFAULT now() table
+// answers.
+func TestImageUnset_MissingArtifactCommitsNothing(t *testing.T) {
+	eng := unsetImage(t)
+	eng.Bind("old", "1.2.3.4", "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	u := unavailable(t, eng, "old")
+	assert.Contains(t, u.Cause, "no installed artifact for ClickHouse 1.2")
+	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactMissing))
+	require.Empty(t, imageZone())
+
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{eventsTable(), zonedTable()})
+	require.Equal(t, "UTC", imageZone())
+	answers(t, eng, tenant.Default)
+	zonedTableOf(t, eng, tenant.Default)
+}
+
+// TestImageUnset_UnknownZoneCommitsNothing: a first tenant whose zone name
+// WaveHouse does not recognise is refused alone and commits nothing, so the
+// next tenant served sets its own zone.
+func TestImageUnset_UnknownZoneCommitsNothing(t *testing.T) {
+	eng := unsetImage(t)
+	eng.Bind("nowhere", testServerVersion, "Mars/Olympus_Mons", []*discovery.TableSchema{eventsTable()})
+	u := unavailable(t, eng, "nowhere")
+	assert.Contains(t, u.Cause, `"Mars/Olympus_Mons"`)
+	require.Empty(t, imageZone())
+
+	eng.Bind("tokyo", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	require.Equal(t, "Asia/Tokyo", imageZone())
+	answers(t, eng, "tokyo")
+}
+
+// TestImageUnset_FailedOpenCommitsNothing: a first open that fails keeps the
+// artifact's own cause and commits nothing. chtypes 1.0.1 latches Setup at
+// that open anyway, so a tenant in another zone is refused naming
+// Wave-RF/chtypes#458, and one in the failed open's zone sets it. Once chtypes
+// latches only a successful open, the UTC tenant is served instead: update
+// this case with that bump.
+func TestImageUnset_FailedOpenCommitsNothing(t *testing.T) {
+	eng := unsetImage(t)
+	broken, err := NewEngine(Config{CacheDir: corruptCopy(t)})
+	require.NoError(t, err)
+	t.Cleanup(broken.Close)
+	broken.Bind("broken", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	u := unavailable(t, broken, "broken")
+	assert.Contains(t, u.Cause, "[CHTYPES_ARTIFACT_")
+	require.Empty(t, imageZone())
+
+	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	u = unavailable(t, eng, "utc")
+	assert.Empty(t, u.Table, "the cause covers every table of the tenant")
+	assert.Contains(t, u.Cause, `"UTC"`)
+	assert.Contains(t, u.Cause, "Wave-RF/chtypes#458")
+	require.Empty(t, imageZone())
+
+	eng.Bind("tokyo", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	require.Equal(t, "Asia/Tokyo", imageZone())
+	answers(t, eng, "tokyo")
+}
+
+// TestImageUnset_ConcurrentFirstBindsCommitOnce: first binds racing commit the
+// image zone exactly once, to a servable tenant's zone, and no servable tenant
+// meets a refused setup.
+func TestImageUnset_ConcurrentFirstBindsCommitOnce(t *testing.T) {
+	eng := unsetImage(t)
+	logs := logtest.Capture(t, slog.LevelInfo)
+	type bind struct {
+		id          tenant.ID
+		version, tz string
+		servable    bool
+	}
+	var binds []bind
+	for i := range 4 {
+		binds = append(binds,
+			bind{tenant.ID(fmt.Sprintf("tokyo%d", i)), testServerVersion, "Asia/Tokyo", true},
+			bind{tenant.ID(fmt.Sprintf("utc%d", i)), testServerVersion, "UTC", true},
+			bind{tenant.ID(fmt.Sprintf("old%d", i)), "1.2.3.4", "Europe/Berlin", false},
+			bind{tenant.ID(fmt.Sprintf("nowhere%d", i)), testServerVersion, "Mars/Olympus_Mons", false},
+		)
+	}
+	var wg sync.WaitGroup
+	for _, b := range binds {
+		wg.Go(func() { eng.Bind(b.id, b.version, b.tz, []*discovery.TableSchema{zonedTable()}) })
+	}
+	wg.Wait()
+
+	assert.Contains(t, []string{"Asia/Tokyo", "UTC"}, imageZone())
+	assert.Len(t, withMsg(logRecords(t, logs), "chtypes image zone committed"), 1)
+	for _, b := range binds {
+		if b.servable {
+			assert.Empty(t, eng.TenantCause(b.id), "tenant %s", b.id)
+			zonedTableOf(t, eng, b.id)
+		} else {
+			assert.NotEmpty(t, eng.TenantCause(b.id), "tenant %s", b.id)
+		}
 	}
 }

@@ -1,8 +1,11 @@
 package typelayer
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -18,53 +21,99 @@ import (
 // rest: how a body's rows parse into instants, and a filter's WHERE, which
 // answers in the zone the filter was created in.
 //
-// The image zone is the first bound tenant's server zone, so a single-zone
-// deployment is exact; UTC if this host's zoneinfo does not know that zone,
-// since chtypes would then refuse every open, for every tenant, for the life
-// of the process. Every other tenant's calls carry its server zone as
-// session_timezone, the same zone on a filter's create as on every parse it is
-// evaluated against (Table.zoneOpts): chtypes declines a batch whose filter
-// was created in another zone. What session_timezone does not reach is an
-// expression over a zone-less DateTime column, so such a table is unavailable
-// for that tenant (zoneCause) until chtypes binds a zone per schema
-// (Wave-RF/chtypes#419).
+// The image zone is the server zone of the first tenant chtypes serves, so a
+// single-zone deployment is exact. A tenant that cannot be served commits
+// nothing (a zone name not recognised, no installed artifact for its line, or
+// a first open that fails), so the next servable tenant sets the zone. Every
+// other tenant's calls carry its server zone as session_timezone, the same
+// zone on a filter's create as on every parse it is evaluated against
+// (Table.zoneOpts): chtypes declines a batch whose filter was created in
+// another zone. What session_timezone does not reach is an expression over a
+// zone-less DateTime column, so such a table is unavailable for that tenant
+// (zoneCause) until chtypes binds a zone per schema (Wave-RF/chtypes#419).
 
+// image is the committed image zone, "" until the first open under it
+// succeeds; mu serializes that first open.
 var image struct {
 	mu   sync.Mutex
-	set  bool
 	zone string
-	err  error
 }
 
-// openLine resolves the library for serverVersion's line, committing tz as the
-// process's image zone if no tenant has yet. A non-empty cause is why the
-// tenant cannot be served: a zone this host does not know, the setup refused,
-// or no loadable artifact for the line (the SDK's own message, with its
-// CHTYPES_ARTIFACT_* code).
+// openLine resolves the library for serverVersion's line. A non-empty cause is
+// why the tenant cannot be served: a zone name WaveHouse does not recognise,
+// chtypes refusing the zone, or no loadable artifact for the line (the SDK's
+// own message, with its CHTYPES_ARTIFACT_* code).
 func openLine(reg *chtypes.Registry, serverVersion, tz string) (*chtypes.Library, string) {
-	known := knownZone(tz)
-	candidate := tz
-	if !known {
-		candidate = "UTC"
-	}
-	zone, err := setupImage(candidate)
-	if err != nil {
-		return nil, fmt.Sprintf("chtypes refused this process's image zone %q: %s", zone, err)
-	}
-	if !known {
-		return nil, fmt.Sprintf("ClickHouse reports server timezone %q, which this host's zoneinfo does not know, "+
+	if !knownZone(tz) {
+		return nil, fmt.Sprintf("ClickHouse reports server timezone %q, which is not a zone name WaveHouse recognises, "+
 			"so no row of this tenant can be read in it", tz)
 	}
-	lib, err := reg.For(versionLine(serverVersion))
+	line := versionLine(serverVersion)
+	if lib, cause, first := openFirst(reg, line, tz); first {
+		return lib, cause
+	}
+	lib, err := reg.For(line)
 	if err != nil {
 		return nil, err.Error()
 	}
 	return lib, ""
 }
 
-// knownZone reports whether this host's zoneinfo, which chtypes reads zone
-// names from, knows tz. Nothing in the binary embeds a zone database
-// (time/tzdata), so time's own lookup reads the same files.
+// openFirst is openLine while no image zone is committed (first is false once
+// one is). The zone is committed only once a library has opened under it:
+// a tenant with no installed artifact on this platform for its line never
+// reaches Setup, and an open that fails leaves the image uncommitted, the
+// tenant unavailable. chtypes 1.0.1 latches Setup even when that open fails,
+// so a later tenant in another zone is then refused (Wave-RF/chtypes#458).
+func openFirst(reg *chtypes.Registry, line, tz string) (lib *chtypes.Library, cause string, first bool) {
+	image.mu.Lock()
+	defer image.mu.Unlock()
+	if image.zone != "" {
+		return nil, "", false
+	}
+	if cause := installedCause(reg, line); cause != "" {
+		return nil, cause, true
+	}
+	if err := chtypes.Setup(chtypes.SetupOptions{Timezone: tz}); err != nil {
+		return nil, fmt.Sprintf("ClickHouse reports server timezone %q, which chtypes refused as this process's "+
+			"image zone after an earlier open failed (Wave-RF/chtypes#458): %s", tz, err), true
+	}
+	lib, err := reg.For(line)
+	var artifact *chtypes.ArtifactError
+	switch {
+	case errors.As(err, &artifact):
+		return nil, err.Error(), true
+	case err != nil:
+		return nil, fmt.Sprintf("ClickHouse reports server timezone %q, and chtypes could not open a library in it: %s",
+			tz, err), true
+	}
+	image.zone = tz
+	slog.Info("chtypes image zone committed", "zone", tz)
+	return lib, "", true
+}
+
+// installedCause is the artifact-missing cause when no install record on this
+// platform answers line, matched as For matches one (a component prefix of its
+// version), and "" when one does. It reads install records and opens nothing.
+func installedCause(reg *chtypes.Registry, line string) string {
+	installed, err := reg.Installed()
+	if err != nil {
+		return err.Error()
+	}
+	platform := runtime.GOOS + "-" + runtime.GOARCH
+	if slices.ContainsFunc(installed, func(r chtypes.Resolved) bool {
+		return r.Platform == platform && (r.Version == line || strings.HasPrefix(r.Version, line+"."))
+	}) {
+		return ""
+	}
+	return fmt.Sprintf("chtypes: no installed artifact for ClickHouse %s (%s) [%s]", line, platform, chtypes.CodeArtifactMissing)
+}
+
+// knownZone reports whether tz is a zone name Go's time package knows, which
+// turns a garbage name away before it reaches chtypes. chtypes carries its own
+// zone data and Setup does not validate a name, so a zone Go knows and chtypes
+// does not passes here and fails at the first open instead
+// (Wave-RF/chtypes#458).
 func knownZone(tz string) bool {
 	if tz == "" || tz == "Local" {
 		return false
@@ -73,20 +122,7 @@ func knownZone(tz string) bool {
 	return err == nil
 }
 
-// setupImage commits the image zone once per process and returns it.
-func setupImage(tz string) (string, error) {
-	image.mu.Lock()
-	defer image.mu.Unlock()
-	if !image.set {
-		image.set = true
-		image.zone = tz
-		image.err = chtypes.Setup(chtypes.SetupOptions{Timezone: tz})
-		slog.Info("chtypes image zone committed", "zone", tz)
-	}
-	return image.zone, image.err
-}
-
-// imageZone is the committed image zone, "" before the first bind.
+// imageZone is the committed image zone, "" before the first open.
 func imageZone() string {
 	image.mu.Lock()
 	defer image.mu.Unlock()
@@ -134,7 +170,7 @@ func zoneCause(session string, cols []colDecl) string {
 	}
 	return fmt.Sprintf(
 		"ClickHouse reports server timezone %q, but this process reads zone-less DateTime columns in %q, and this table "+
-			"declares one (%q) alongside DEFAULT, MATERIALIZED or ALIAS expressions, which would compute in the wrong zone; "+
+			"declares one (%q) alongside DEFAULT, MATERIALIZED, ALIAS or EPHEMERAL expressions, which would compute in the wrong zone; "+
 			"serve this tenant from a process whose first tenant is in %q (Wave-RF/chtypes#419)",
 		session, imageZone(), zoneless, session)
 }

@@ -13,10 +13,10 @@ import (
 // ClickHouse rejection.
 //
 // It is always about one tenant, or one of its tables: a tenant not bound
-// yet, a missing artifact for the tenant's server line, a table that did not
-// compile, or a table whose zone-less DateTime expressions this process cannot
-// compute in its server's zone (that table alone) leaves every other tenant
-// answering.
+// yet, a missing artifact for the tenant's server line, a server zone chtypes
+// cannot serve, a table that did not compile, or a table whose zone-less
+// DateTime expressions this process cannot compute in its server's zone (that
+// table alone) leaves every other tenant answering.
 type Unavailable struct {
 	Tenant tenant.ID
 	// Table is "" when the cause covers the tenant's every table.
