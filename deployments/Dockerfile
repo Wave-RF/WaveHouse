@@ -3,7 +3,7 @@
 #
 # bookworm (glibc), not alpine (musl): the chtypes SDK's dlopen path needs
 # cgo (dlfcn), and the image the SDK builds its own artifacts against — plus
-# the artifact's own glibc floor (2.17, 2.29 for the 24.8/25.3 lines) — is
+# the artifact's own glibc floor — is
 # glibc, not musl. The non-alpine golang image bundles gcc out of the box,
 # unlike alpine (which needs an explicit apk add build-base for cgo).
 FROM golang:1.27-bookworm AS builder
@@ -81,8 +81,8 @@ ENV WH_SETTINGS_DIR=/app/settings
 # /opt/chtypes/v1 is one of the SDK's read-only system search directories, so
 # no env or WaveHouse config is needed to find what the image baked in (the
 # loader only reads it; nothing is written at load). WH_CHTYPES_REGISTRY
-# (internal/config) is for an operator who wants to point at a different,
-# bind-mounted v1 layout instead.
+# (internal/config) is for an operator who wants to add a bind-mounted v1
+# layout: it is searched first and this one stays on the path.
 
 COPY --from=builder --chown=nonroot:nonroot /app /app
 COPY --from=builder --chown=nonroot:nonroot /opt/chtypes /opt/chtypes

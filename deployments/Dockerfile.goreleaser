@@ -75,8 +75,8 @@ ENV WH_SETTINGS_DIR=/app/settings
 # /opt/chtypes/v1 is one of the SDK's read-only system search directories, so
 # no env or WaveHouse config is needed to find what the image baked in (the
 # loader only reads it; nothing is written at load). WH_CHTYPES_REGISTRY
-# (internal/config) is for an operator who wants to point at a different,
-# bind-mounted v1 layout instead.
+# (internal/config) is for an operator who wants to add a bind-mounted v1
+# layout: it is searched first and this one stays on the path.
 
 # Pre-created state directories owned by the nonroot user (UID 65532) so
 # the binary can mkdir under /app/data without a volume mount, and so

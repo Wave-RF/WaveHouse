@@ -42,7 +42,7 @@ LOCK_FILE="${REPO_ROOT}/chtypes.lock"
 
 # Lines every deployment of this repo needs today. The e2e harness
 # (tests/integration/setup_test.go, scripts/orchestrator) and dev compose
-# pin ClickHouse 26.8.15.10, the same patch as the locked 26.8.15.10-lts
+# pin ClickHouse 26.8.15.10, the same patch as the locked 26.8.15.10
 # build. A line request installs the newest patch the lock pins for that
 # line, and the gateway asks the registry for the line, never a nearest
 # line, so this is "26.8", not the exact patch. Widening this list is how a
