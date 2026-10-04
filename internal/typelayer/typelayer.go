@@ -154,9 +154,9 @@ func NewEngine(cfg Config) (*Engine, error) {
 // checkLayout refuses an explicit directory that cannot be read, or that holds
 // a chtypes 0.x registry (<line>/manifest.json) and no v1 layout: a 0.x
 // artifact never loads under v1, and an empty answer would hide why. Reading
-// covers each install record in it: the SDK skips one it cannot read, so a
-// layout mounted without read access for this user would boot on the system
-// layouts alone. A readable layout with nothing for this platform is not
+// covers each install record in it, whether or not oci-layout exists: the SDK
+// skips one it cannot read, so a layout mounted without read access for this
+// user would boot on the system layouts alone. A readable layout with nothing for this platform is not
 // refused, since the system layouts are searched after it.
 func checkLayout(dir string) error {
 	unreadable := func(err error) error {
@@ -170,7 +170,6 @@ func checkLayout(dir string) error {
 			return fmt.Errorf("chtypes: %s is a chtypes 0.x registry directory; chtypes v1 reads an OCI layout "+
 				"(fetch the artifact with the v1 chtypes CLI, which writes one)", dir)
 		}
-		return nil
 	} else if err != nil {
 		return unreadable(err)
 	}

@@ -18,7 +18,8 @@ import (
 // CREATE passed these gates there; without them chtypes refuses every record
 // of, say, a LowCardinality(UInt64) table with code 455, which the server
 // would insert. A gate name the loaded line does not know fails the compile
-// with code 115 (allow_experimental_qbit_type is one), so the list holds only
+// with code 115 (allow_experimental_qbit_type did on 25.8, which chtypes 1.0
+// does not publish), so the list holds only
 // names measured accepted on all four chtypes 1.0 lines (26.3.38.2, 26.7.19.5,
 // 26.8.15.10 and 26.9.8.3).
 var compileSettings = map[string]string{

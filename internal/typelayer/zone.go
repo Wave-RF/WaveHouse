@@ -11,6 +11,10 @@ import (
 	"time"
 
 	"github.com/wave-rf/chtypes/go/chtypes"
+
+	// knownZone checks names against Go's zone database; embed it so that is
+	// deliberate and the host needs no tzdata.
+	_ "time/tzdata"
 )
 
 // This file is the one place the zone rule lives.

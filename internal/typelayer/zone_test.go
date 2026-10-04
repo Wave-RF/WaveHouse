@@ -498,6 +498,7 @@ func TestImageUnset_FailedOpenCommitsNothing(t *testing.T) {
 	broken.Bind("broken", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
 	u := unavailable(t, broken, "broken")
 	assert.Contains(t, u.Cause, "[CHTYPES_ARTIFACT_")
+	assert.NotContains(t, u.Cause, "server timezone", "an artifact failure is not reported as a zone problem")
 	require.Empty(t, imageZone())
 
 	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})

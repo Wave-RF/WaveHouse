@@ -515,6 +515,12 @@ func TestCheckLayout_UnreadableInstallRecordRefuses(t *testing.T) {
 	err := checkLayout(dir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot read the artifact directory "+dir)
+
+	// The SDK lists records without oci-layout, so the scan does not need it.
+	require.NoError(t, os.Remove(filepath.Join(dir, "oci-layout")))
+	err = checkLayout(dir)
+	require.Error(t, err, "no oci-layout")
+	assert.Contains(t, err.Error(), "cannot read the artifact directory "+dir)
 }
 
 // TestNewEngine_V0RegistryIsNamedAsOne: a chtypes 0.x registry directory never

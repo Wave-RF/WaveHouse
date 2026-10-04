@@ -38,14 +38,14 @@ const (
 	// column the event does not carry (see engineRowView.Visible). Withheld,
 	// like every answer that is not a definite true.
 	ReasonDecline = typelayer.ReasonDecline
-	// ReasonUnavailable: no compiled schema can answer for this tenant's table
-	// — the tenant is not bound yet, its server line has no artifact, its server
-	// zone name is not one WaveHouse recognizes, or its zone differs from the
-	// process's image zone and the table has a zone-less DateTime beside an
-	// expression, the table's
-	// schema did not compile, or no engine is wired at all. Nothing about the
-	// row; every row-filtered subscriber of the table is affected until it is
-	// fixed.
+	// ReasonUnavailable: no compiled schema can answer for this tenant's table.
+	// The tenant is not bound yet, its server line has no artifact, its server
+	// zone cannot be served (including, until a chtypes 1.0.x patch, a zone
+	// chtypes refuses because another tenant's first open failed in a different
+	// zone: Wave-RF/chtypes#458, tenant-wide), the table's schema did not compile, its zone-less DateTime
+	// sits beside an expression in a tenant whose zone differs from the image
+	// zone, or no engine is wired at all. Nothing about the row; every
+	// row-filtered subscriber of the table is affected until it is fixed.
 	ReasonUnavailable = "unavailable"
 	// ReasonDrift: the event's column list names a column the table's current
 	// generation does not export (dropped or renamed since), or names one twice,
