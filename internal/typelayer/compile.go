@@ -19,9 +19,8 @@ import (
 // of, say, a LowCardinality(UInt64) table with code 455, which the server
 // would insert. A gate name the loaded line does not know fails the compile
 // with code 115 (allow_experimental_qbit_type did on 25.8, which chtypes 1.0
-// does not publish), so the list holds only
-// names measured accepted on all four chtypes 1.0 lines (26.3.38.2, 26.7.19.5,
-// 26.8.15.10 and 26.9.8.3).
+// does not publish), so the list holds only names measured accepted on all
+// four chtypes 1.0 lines (26.3.38.2, 26.7.19.5, 26.8.15.10 and 26.9.8.3).
 var compileSettings = map[string]string{
 	"input_format_allow_errors_ratio":  "1",
 	"input_format_skip_unknown_fields": "0",
@@ -41,9 +40,9 @@ var compileSettings = map[string]string{
 // compiled is one table shape's handle: a schema every goroutine shares, the
 // filters compiled over it, and its columns as the compiler declared them.
 // Calls on one handle run concurrently and Close waits for the calls inside
-// it, so nothing here takes a lock around a call. One handle per table is shared
-// by all requests; ingest scaling on the 1.0 artifact is limited upstream
-// (Wave-RF/chtypes#456).
+// it, so nothing here takes a lock around a call. One handle per table shape is
+// shared by all requests; ingest scaling on the 1.0 artifact is limited
+// upstream (Wave-RF/chtypes#456).
 type compiled struct {
 	schema  *chtypes.Schema
 	filters *filterCache
