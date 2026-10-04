@@ -121,7 +121,7 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:dev \
 
 Swap in `:vX.Y.Z` and `release.yml` for a release image. Pin the signer either way. `--repo` alone accepts an attestation from any workflow in the repo.
 
-The published images bake the chtypes artifact for ClickHouse 26.8 only. Against any other ClickHouse line, bind-mount a directory holding that line's artifact for the container's platform, readable by the image's user, and set `WH_CHTYPES_REGISTRY` to it (see [chtypes artifacts](https://wavehouse.dev/deployment#chtypes-artifacts)).
+The published images bake the chtypes artifact for ClickHouse 26.8 only (chtypes 1.0 publishes 26.3, 26.7, 26.8 and 26.9; any other line is unavailable). Against another published line, bind-mount a v1 artifact layout holding that line's artifact for the container's platform, readable by the image's user, and set `WH_CHTYPES_REGISTRY` to it (see [chtypes artifacts](https://wavehouse.dev/deployment#chtypes-artifacts)).
 
 ### C. `go install` (binary, no Docker)
 
@@ -132,10 +132,10 @@ go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 `go install` compiles from source with cgo enabled (requires a C toolchain — Linux amd64/arm64 or macOS arm64; on Linux it links against the build host's glibc, where the prebuilt binaries need 2.34 or later) but does not fetch the [chtypes artifact](https://wavehouse.dev/deployment#chtypes-artifacts) WaveHouse needs: the server refuses to boot without one. Fetch it once before the first run:
 
 ```bash
-go run github.com/wave-rf/chtypes/go/cmd/chtypes@v0.5.2 fetch <your-clickhouse-minor-version>
+go run github.com/wave-rf/chtypes/go/cmd/chtypes@v1.0.1 fetch <your-clickhouse-minor-version>
 ```
 
-(From a checkout, `scripts/fetch-chtypes.sh` fetches the build pinned in `chtypes.lock`.) This downloads 160–300 MB into the default local cache (`~/.cache/chtypes/artifacts/abi6/<os>-<arch>`, one directory per SDK ABI revision); point `WH_CHTYPES_REGISTRY` elsewhere if you keep it somewhere else.
+(From a checkout, `scripts/fetch-chtypes.sh` fetches the build pinned in `chtypes.lock`.) This downloads about 300 MB into the default local cache (`~/.cache/chtypes/v1`, or `$CHTYPES_CACHE`); point `WH_CHTYPES_REGISTRY` at the layout directory if you keep it somewhere else.
 
 ```bash
 wavehouse bootstrap ./settings   # starter settings directory, every key at its default
@@ -158,7 +158,7 @@ You'll need **Go 1.27+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pn
 
 ```bash
 make tools    # one-time bootstrap
-scripts/fetch-chtypes.sh   # once per machine: the chtypes artifact (160–300 MB)
+scripts/fetch-chtypes.sh   # once per machine: the chtypes artifact (about 300 MB)
 docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
 make dev      # hot-reload on .go save
 ```
