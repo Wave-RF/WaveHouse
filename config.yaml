@@ -52,10 +52,12 @@ prometheus:
 clickhouse:
   password: ""
   max_total_conns: 0 # ceiling on open native connections across pools; 0 = none
-  # chtypes artifact directory, read by api-role processes only. Empty (the
-  # default) defers to the SDK's search path: $CHTYPES_REGISTRY, the per-user
-  # cache ~/.cache/chtypes/artifacts/abi6/<os>-<arch>, then the system
-  # directories. Set it only to point at a non-default location.
+  # chtypes v1 artifact layout directory (CHTYPES_CACHE semantics: the layout
+  # itself, as `chtypes fetch --cache <dir>` writes it), read by api-role
+  # processes only. Empty (the default) defers to the SDK's search path: the
+  # per-user cache ~/.cache/chtypes/v1, then the read-only system directories
+  # /usr/local/share/chtypes/v1 and /opt/chtypes/v1. Set it only to point at a
+  # non-default location.
   chtypes_registry: ""
 
 # Each layer's implementation, chosen at boot. Every layer defaults to its

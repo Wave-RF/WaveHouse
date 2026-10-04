@@ -35,8 +35,9 @@ RUN mkdir -p /app/data /app/settings && chown -R 65532:65532 /app
 # Fetches the pinned chtypes artifact for THIS image's target platform (not
 # necessarily the builder's — buildx may emulate or cross-fetch). Built
 # natively on $BUILDPLATFORM like `layout` above: no compiled Go code
-# crosses an arch boundary here, just an HTTPS download + sha256 check via
-# the SDK CLI's own --platform flag, so QEMU emulation would buy nothing.
+# crosses an arch boundary here, just an OCI download + digest and signature
+# check via the SDK CLI's own --platform flag, so QEMU emulation would buy
+# nothing.
 # Needs chtypes.lock + scripts/fetch-chtypes.sh + scripts/_colors.sh at their
 # normal repo-relative paths. The build context is assembled by the workflow
 # rather than being the repo root, so those three are copied into it
@@ -45,7 +46,9 @@ RUN mkdir -p /app/data /app/settings && chown -R 65532:65532 /app
 #
 # This stage is also the pipeline's chtypes.lock check: `--frozen` refuses any
 # artifact the lock does not name, so an upstream republish of a pinned line
-# fails the build here rather than silently baking a different library.
+# fails the build here rather than silently baking a different library. The
+# layer blob (the compressed .so, ~50 MB) is dropped after unpacking: the
+# loader reads the unpacked tree and its verified.json, never the blob.
 FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS chtypes-fetch
 ARG TARGETPLATFORM
 WORKDIR /src
@@ -54,8 +57,12 @@ COPY scripts/fetch-chtypes.sh scripts/_colors.sh ./scripts/
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     plat="$(echo "$TARGETPLATFORM" | tr / -)"; \
-    mkdir -p /opt/chtypes/artifacts && \
-    scripts/fetch-chtypes.sh --platform "$plat" --dest /opt/chtypes/artifacts
+    mkdir -p /opt/chtypes/v1 && \
+    scripts/fetch-chtypes.sh --platform "$plat" --cache /opt/chtypes/v1 && \
+    for v in /opt/chtypes/v1/unpacked/sha256/*/verified.json; do \
+      l="$(sed -n 's/.*"layer":"sha256:\([0-9a-f]*\)".*/\1/p' "$v")"; \
+      if [ -n "$l" ]; then rm -f "/opt/chtypes/v1/blobs/sha256/$l"; fi; \
+    done
 
 FROM gcr.io/distroless/cc-debian12
 
@@ -65,11 +72,11 @@ ARG TARGETPLATFORM
 WORKDIR /app
 USER nonroot:nonroot
 ENV WH_SETTINGS_DIR=/app/settings
-# The SDK's own registry search path reads this directly — no
-# WaveHouse config change is needed to find what the image already baked
-# in. WH_CHTYPES_REGISTRY (internal/config) is for an operator who wants to
-# point at a different, bind-mounted registry directory instead.
-ENV CHTYPES_REGISTRY=/opt/chtypes/artifacts
+# /opt/chtypes/v1 is one of the SDK's read-only system search directories, so
+# no env or WaveHouse config is needed to find what the image baked in (the
+# loader only reads it; nothing is written at load). WH_CHTYPES_REGISTRY
+# (internal/config) is for an operator who wants to point at a different,
+# bind-mounted v1 layout instead.
 
 # Pre-created state directories owned by the nonroot user (UID 65532) so
 # the binary can mkdir under /app/data without a volume mount, and so

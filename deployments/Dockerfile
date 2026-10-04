@@ -33,17 +33,22 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # Bake the pinned chtypes artifact(s) into the image so the container has no
 # runtime network dependency and no first-request download stall. chtypes.lock
-# is this repo's pin (schema 2, exact file + sha256 per platform/line);
+# is this repo's pin (schema 3, OCI digests per line and platform);
 # scripts/fetch-chtypes.sh wraps the SDK's own CLI with --frozen, which
-# refuses anything the lock doesn't name. `go run <module>@<version>`
-# resolves and builds the SDK's CLI straight from its module proxy — it
-# needs no entry in THIS repo's go.mod/go.sum, so this works even before
-# `go mod tidy` has picked up the chtypes/go dependency.
+# refuses anything the lock doesn't name. The fetch lands in a v1 artifact
+# layout with a signed, verified statement (verified.json) per build, which
+# the runtime loader requires. The layer blob (the compressed copy of the .so,
+# ~50 MB) is only needed to re-unpack; the loader and `chtypes verify` read the
+# unpacked tree, so it is dropped to keep the image small.
 COPY chtypes.lock ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    mkdir -p /opt/chtypes/artifacts && \
-    scripts/fetch-chtypes.sh --dest /opt/chtypes/artifacts
+    mkdir -p /opt/chtypes/v1 && \
+    scripts/fetch-chtypes.sh --cache /opt/chtypes/v1 && \
+    for v in /opt/chtypes/v1/unpacked/sha256/*/verified.json; do \
+      l="$(sed -n 's/.*"layer":"sha256:\([0-9a-f]*\)".*/\1/p' "$v")"; \
+      if [ -n "$l" ]; then rm -f "/opt/chtypes/v1/blobs/sha256/$l"; fi; \
+    done
 
 # Create the parent state and settings directories owned by the nonroot
 # user (UID 65532 in distroless). The binary creates `nats/` and `pebble/`
@@ -73,11 +78,11 @@ FROM gcr.io/distroless/cc-debian12
 WORKDIR /app
 USER nonroot:nonroot
 ENV WH_SETTINGS_DIR=/app/settings
-# The SDK's own registry search path reads this directly — no
-# WaveHouse config change is needed to find what the image already baked
-# in. WH_CHTYPES_REGISTRY (internal/config) is for an operator who wants to
-# point at a different, bind-mounted registry directory instead.
-ENV CHTYPES_REGISTRY=/opt/chtypes/artifacts
+# /opt/chtypes/v1 is one of the SDK's read-only system search directories, so
+# no env or WaveHouse config is needed to find what the image baked in (the
+# loader only reads it; nothing is written at load). WH_CHTYPES_REGISTRY
+# (internal/config) is for an operator who wants to point at a different,
+# bind-mounted v1 layout instead.
 
 COPY --from=builder --chown=nonroot:nonroot /app /app
 COPY --from=builder --chown=nonroot:nonroot /opt/chtypes /opt/chtypes

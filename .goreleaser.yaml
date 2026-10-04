@@ -69,8 +69,8 @@ builds:
     # linked, no header). The platform set follows from that artifact, not
     # from Go: Windows and FreeBSD are dropped
     # (chtypes publishes no artifact for either) along with darwin/amd64 (no
-    # artifact either — only darwin-arm64, linux-amd64, linux-arm64 exist at
-    # https://artifacts.wavehouse.dev/artifacts/index.json). goos x goarch is
+    # artifact either — only darwin-arm64, linux-amd64, linux-arm64 are
+    # published to https://registry.wavehouse.dev/chtypes/v1). goos x goarch is
     # a cross product, hence the explicit `ignore` to drop darwin/amd64
     # rather than a matrix that only ever had one cell per OS.
     env:

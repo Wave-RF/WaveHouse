@@ -44,14 +44,11 @@
 #      lockfile + astro.config.mjs. Speeds up warm `astro check` /
 #      `astro build` — unchanged content skips the parse + transform
 #      pipeline. See #132.
-#   7. chtypes artifact cache (~/.cache/chtypes/artifacts/abi6) keyed on
-#      chtypes.lock — the pinned ClickHouse-version .so/.dylib the SDK
-#      dlopens. Measured for the 26.6 line (linux-amd64), pinned before 26.8:
-#      316 MiB of libchtypes.so on disk, ~65 MiB as a stored archive, and
-#      85 MiB over the wire on a MISS (the upstream .tar.gz). Fetched via
-#      scripts/fetch-chtypes.sh (--frozen: refuses anything the lock
-#      doesn't name), which the CLI makes idempotent even on a cache hit
-#      (a lightweight manifest check, not a re-download). Go test jobs
+#   7. chtypes artifact cache (~/.cache/chtypes/v1) keyed on chtypes.lock —
+#      the pinned ClickHouse-version .so/.dylib the SDK dlopens. Measured for
+#      the 26.8 line (linux-amd64): ~340 MiB on disk (289 MiB unpacked .so,
+#      49 MiB compressed layer). Fetched via scripts/fetch-chtypes.sh:
+#      --offline on a hit (zero requests), --frozen on a miss. Go test jobs
 #      that dial chtypes need this; see .github/workflows/README.md.
 name: Setup CI environment
 description: Caches (restore + automatic post-job save) and toolchains for WaveHouse CI
@@ -190,35 +187,35 @@ runs:
         restore-keys: |
           golangci-${{ runner.os }}-
 
-    # chtypes artifact cache — keyed on chtypes.lock (not go.mod/go.sum):
-    # the pinned file+sha256 per platform/line is the only thing that
-    # changes its contents. runner.arch is in the key on principle (all CI
-    # runners are ubuntu-latest amd64 today; a future arm64 runner must not
-    # restore amd64 .so files into its search path).
-    #
-    # The SDK's default fetch dir is revision-scoped:
-    # ~/.cache/chtypes/artifacts/abi<R>/<os>-<arch>. The path and the key
-    # prefix both name the ABI revision (6 at SDK v0.5.2), so a cache saved
-    # by an older SDK is never restored into the search path. When the SDK's
-    # ABI revision changes, bump `abi6` in both places and re-lock (see
-    # docs/development.md).
+    # chtypes artifact cache (the v1 OCI layout) — keyed on chtypes.lock (not
+    # go.mod/go.sum): the pinned digests are the only thing that changes its
+    # contents. runner.arch is in the key on principle (all CI runners are
+    # ubuntu-latest amd64 today; a future arm64 runner must not restore amd64
+    # .so files). No restore-keys: a layout restored from another lock must
+    # never be trusted by the --offline fetch below. The `v1` in path and key is
+    # the artifact layout version; a new one is a new path and a fresh key.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: ${{ inputs.chtypes == 'true' }}
       id: chtypes-cache
       with:
-        path: ~/.cache/chtypes/artifacts/abi6
-        key: chtypes-abi6-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('chtypes.lock') }}
-        restore-keys: |
-          chtypes-abi6-${{ runner.os }}-${{ runner.arch }}-
+        path: ~/.cache/chtypes/v1
+        key: chtypes-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('chtypes.lock') }}
 
-    # Runs on both cache hit and miss: scripts/fetch-chtypes.sh always fetches
-    # frozen against chtypes.lock, is cheap on a hit (a manifest check, not a
-    # re-download — see the script), and is what turns a restored-but-
-    # unverified cache entry back into a hash-checked one every run.
+    # Hit: --offline reads the restored cache only (zero requests) and still
+    # checks it against chtypes.lock. Miss: --frozen downloads exactly the
+    # locked digests. TODO(Wave-RF/chtypes#414, 1.1): a warm --frozen will make
+    # no requests; drop the split and always run --frozen.
     - name: Fetch pinned chtypes artifact
       if: ${{ inputs.chtypes == 'true' }}
       shell: bash
-      run: scripts/fetch-chtypes.sh
+      env:
+        HIT: ${{ steps.chtypes-cache.outputs.cache-hit }}
+      run: |
+        if [ "$HIT" = "true" ]; then
+          scripts/fetch-chtypes.sh --offline
+        else
+          scripts/fetch-chtypes.sh
+        fi
 
     # No actions/setup-go: it spends ~9s/job downloading + extracting a
     # toolchain the runner can already provide. The image's preinstalled

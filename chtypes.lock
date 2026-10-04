@@ -1,20 +1,34 @@
 {
-  "schema": 2,
-  "artifacts": {
-    "darwin-arm64/26.8.15.10-lts": {
-      "file": "chtypes-26.8.15.10-lts-darwin-arm64-b1790845279.tar.gz",
-      "sha256": "eec0b34d810e285aba244aa3b869637f0c1fa14755d11f7f74c069571890bd43",
-      "abi_revision": 6
-    },
-    "linux-amd64/26.8.15.10-lts": {
-      "file": "chtypes-26.8.15.10-lts-linux-amd64-b1790845279.tar.gz",
-      "sha256": "25182defe11b2932182bce50aec203e003f721c505cb684b9a6725eeec956a1e",
-      "abi_revision": 6
-    },
-    "linux-arm64/26.8.15.10-lts": {
-      "file": "chtypes-26.8.15.10-lts-linux-arm64-b1790845279.tar.gz",
-      "sha256": "a9513cbb2aca868ffd16c97f097a530bef5dc8d5c8c11433159a882179d12254",
-      "abi_revision": 6
+  "schema": 3,
+  "abi": 1,
+  "platforms": [
+    "linux-amd64",
+    "linux-arm64",
+    "darwin-arm64"
+  ],
+  "requests": {
+    "26.8": {
+      "darwin-arm64": {
+        "version": "26.8.15.10",
+        "build": "20261003.231921",
+        "manifest": "sha256:21335ad35898526340842a008265f7f83f6f80104a0905ee5331870c83d9cf8e",
+        "layer": "sha256:3a2d89b7ba0cdf3a65873800fccd8d89ed0cd9abaa99cc79e1ced0794e54c7c8",
+        "bundle": "sha256:0a40d830bb59e04b117bf96d043192c7e5d7d886f0b76f757e950667c8108187"
+      },
+      "linux-amd64": {
+        "version": "26.8.15.10",
+        "build": "20261003.231921",
+        "manifest": "sha256:15f8042f241d0ec3b36f1a2d6d743104ca01ba9e04bfce1b2f24922d48236ade",
+        "layer": "sha256:b553677dcd2a95fe45dd8a74e184b561dd2757bf92d77a3038cbd0d225e8c5a9",
+        "bundle": "sha256:f360f1f1c2e430358296de3d97a4cb645925bb57089333a2dd1f32db959804c0"
+      },
+      "linux-arm64": {
+        "version": "26.8.15.10",
+        "build": "20261003.231921",
+        "manifest": "sha256:27ad82a9fdca0c75c12da41c96c404c2330fc579c0476f40b3c16f4caf4f5a1f",
+        "layer": "sha256:25b0c93a50cc5154debe05ce5f3171b68a6d97fb6abf40a700bba7d91355d59c",
+        "bundle": "sha256:04e0765d5a4584875f3ee5b14dbe066dc16075b26228da4b15de9cd123a3369c"
+      }
     }
   }
 }
