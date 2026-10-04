@@ -40,7 +40,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 10, cfg.Server.ShutdownTimeout)
 	assert.Equal(t, "", cfg.ClickHouse.Password)
 	assert.Equal(t, 0, cfg.ClickHouse.MaxTotalConns, "no connection ceiling by default")
-	assert.Empty(t, cfg.ClickHouse.ChtypesRegistry, "the SDK's own search path by default")
+	assert.Empty(t, cfg.ClickHouse.ChtypesRegistry, "the SDK's own cache by default")
 	assert.Empty(t, cfg.Auth.OperatorKey, "operator key is empty by default (feature off)")
 	assert.Equal(t, "./data", cfg.DataDir)
 	assert.False(t, cfg.OTel.Enabled)
@@ -60,7 +60,7 @@ server:
 clickhouse:
   password: "ch-pass"
   max_total_conns: 40
-  chtypes_registry: /opt/chtypes/artifacts
+  chtypes_registry: /opt/chtypes/v1
 auth:
   jwt_secret: "test-secret"
   operator_key: "op-key"
@@ -74,7 +74,7 @@ auth:
 	assert.Equal(t, 9090, cfg.Server.Port)
 	assert.Equal(t, "ch-pass", cfg.ClickHouse.Password)
 	assert.Equal(t, 40, cfg.ClickHouse.MaxTotalConns)
-	assert.Equal(t, "/opt/chtypes/artifacts", cfg.ClickHouse.ChtypesRegistry)
+	assert.Equal(t, "/opt/chtypes/v1", cfg.ClickHouse.ChtypesRegistry)
 	assert.Equal(t, "test-secret", cfg.Auth.JWTSecret)
 	assert.Equal(t, "op-key", cfg.Auth.OperatorKey)
 }

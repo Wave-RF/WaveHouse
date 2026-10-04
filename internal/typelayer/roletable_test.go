@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -67,7 +66,7 @@ func TestRoleTable_DeniedColumnIsUnnamableAndOffTheWire(t *testing.T) {
 	tbl := roleTableFor(t, eng, RoleShape{Columns: []string{"id", "tenant", "amount"}})
 
 	assert.Equal(t, []string{"id", "tenant", "amount"}, tbl.WireColumns)
-	assert.Equal(t, []string{"id", "tenant", "secret", "amount"}, compiledColumnNames(tbl.pool.first().schema),
+	assert.Equal(t, []string{"id", "tenant", "secret", "amount"}, compiledColumnNames(tbl.c.desc),
 		"still declared, so an expression or check over it compiles")
 
 	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(
@@ -133,7 +132,7 @@ func TestRoleTable_LiteralEscaping(t *testing.T) {
 			// extra or missing column, not as a mangled value.
 			assert.Equal(t, []string{"id", "tenant", "secret", "amount"}, tbl.WireColumns)
 			assert.Equal(t, []string{"id", "tenant", "secret", "amount"},
-				compiledColumnNames(tbl.pool.first().schema))
+				compiledColumnNames(tbl.c.desc))
 
 			batch, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"id":1,"amount":5}`+"\n"))
 			require.NoError(t, err)
@@ -301,7 +300,7 @@ func TestRoleTable_DefaultIntoAComputedColumnIsRefused(t *testing.T) {
 	// change what the server computes. So is a denied one, MATERIALIZED.
 	tbl := roleTableFor(t, eng, RoleShape{Columns: []string{"id", "amount"}})
 	assert.Equal(t, []string{"id", "amount"}, tbl.WireColumns)
-	assert.Equal(t, []string{"id", "tenant", "secret", "amount", "double"}, compiledColumnNames(tbl.pool.first().schema))
+	assert.Equal(t, []string{"id", "tenant", "secret", "amount", "double"}, compiledColumnNames(tbl.c.desc))
 }
 
 // TestRoleTable_CachedPerShapeAndGeneration: the same shape must reuse the
@@ -396,31 +395,21 @@ func TestRoleTable_BoundedUnderTenantValueChurn(t *testing.T) {
 	assert.Equal(t, `[1, "acme", "", 5]`, string(batch.Rows[0].Line))
 }
 
-// TestRoleTable_PoolGrowsUnderContentionToALowerCap: a role shape has its own
-// pool, not the base table's. A quiet shape holds one handle; concurrent
-// inserts through it grow the pool like a base table's — one handle would
-// serialize the role's whole ingest — but only to min(GOMAXPROCS, 4), since a
-// table holds up to roleCacheSize shapes.
-func TestRoleTable_PoolGrowsUnderContentionToALowerCap(t *testing.T) {
-	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(8))
+// TestRoleTable_HasItsOwnHandle: a role shape compiles one handle of its own,
+// not the base table's, and is never itself projected.
+func TestRoleTable_HasItsOwnHandle(t *testing.T) {
 	eng := testEngine(t, ordersTable())
+	base, err := eng.Table(tenant.Default, "orders")
+	require.NoError(t, err)
+	baseHandle := base.c
+	base.Release()
+
 	tbl := roleTableFor(t, eng, RoleShape{Defaults: map[string]string{"tenant": "acme"}})
 	assert.Nil(t, tbl.roles, "a projection is never itself projected")
+	require.NotNil(t, tbl.c)
+	assert.NotSame(t, baseHandle, tbl.c)
+	assert.Equal(t, base.zone, tbl.zone, "the projection takes the base table's zone")
 
-	p := tbl.pool
-	require.Len(t, p.list(), 1, "a quiet shape holds one handle")
-	assert.Equal(t, int64(4), p.limit.Load(), "min(GOMAXPROCS=8, 4): capped below the base table's 8")
-
-	held := make([]*schemaSlot, 0, 5)
-	for range 5 {
-		held = append(held, p.acquire())
-	}
-	assert.Len(t, p.list(), 4, "busy handles grow the pool to its cap and no further")
-	for _, s := range held {
-		p.release(s)
-	}
-
-	// The grown handles answer like the first: the injected default included.
 	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"id":1,"amount":5}`+"\n"))
 	require.NoError(t, err)
 	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)

@@ -75,9 +75,9 @@ func TestNew_RolesChooseTheComponents(t *testing.T) {
 // the static insert settings — and an API process refuses to start, naming
 // where it looked.
 func TestNew_OnlyTheAPIRoleNeedsTheArtifact(t *testing.T) {
-	// No explicit directory, no $CHTYPES_REGISTRY, an empty per-user cache,
-	// and no fetch on demand.
-	t.Setenv("CHTYPES_REGISTRY", "")
+	// No explicit directory, no $CHTYPES_CACHE, an empty per-user cache, and
+	// no fetch on demand.
+	t.Setenv("CHTYPES_CACHE", "")
 	t.Setenv("CHTYPES_AUTOFETCH", "")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	if _, err := typelayer.NewEngine(typelayer.Config{}); err == nil {
@@ -103,7 +103,7 @@ func TestNew_OnlyTheAPIRoleNeedsTheArtifact(t *testing.T) {
 		cfg := testConfig(t, writeSettings(t, nil))
 		cfg.Roles = []config.Role{config.RoleAPI}
 		a, err := New(t.Context(), Options{Config: cfg})
-		require.ErrorContains(t, err, "type layer: chtypes: no version artifacts on the registry search path")
+		require.ErrorContains(t, err, "type layer: chtypes: no artifact installed for")
 		assert.Nil(t, a)
 	})
 }

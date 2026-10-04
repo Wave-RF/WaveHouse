@@ -71,11 +71,11 @@ func TestIngest_UndiscoveredTable_Unavailable(t *testing.T) {
 }
 
 // TestIngest_UnboundTenant_RefusedBeforeTheBodyIsRead: a tenant the type layer
-// has not bound — its discovery has not refreshed, its line has no artifact, its
-// zone differs from the one this process opened the line in — is refused on its
-// own, with the schema refresh's Retry-After, and decided before the body is
-// read, like a schema not discovered yet. Another tenant on the same engine
-// keeps ingesting, and the body never names the tenant or the cause.
+// has not bound — its discovery has not refreshed, or its line has no
+// artifact — is refused on its own, with the schema refresh's Retry-After, and
+// decided before the body is read, like a schema not discovered yet. Another
+// tenant on the same engine keeps ingesting, and the body never names the
+// tenant or the cause.
 func TestIngest_UnboundTenant_RefusedBeforeTheBodyIsRead(t *testing.T) {
 	t.Parallel()
 	tenants := nestedTenants(t, map[string]string{"acme": fullConfig(100), "globex": fullConfig(100)})

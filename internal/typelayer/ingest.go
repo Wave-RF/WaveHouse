@@ -44,12 +44,15 @@ type IngestOptions struct {
 // and leaves `/` unescaped (`"/home"`, where the writer's default is
 // `"\/home"`), the spellings the query paths pin too, so a published row spells
 // a timestamp and a `/` as a queried one does, and carries its instant whatever
-// the zone; the worker's best_effort INSERT stores that exact instant. Measured
-// on 26.8.15.10.
+// the zone; the worker's best_effort INSERT stores that exact instant. A Float
+// NaN or infinity is a string ("nan", "inf", "-inf"), which the INSERT stores
+// as that value: the export's default renders null, which would store the
+// column's default. Measured on 26.8.15.10.
 func parseSettings(format Format, opts IngestOptions) (settings map[string]string, ok bool) {
 	settings = InsertSettings()
 	settings["date_time_output_format"] = "iso"
 	settings["output_format_json_escape_forward_slashes"] = "0"
+	settings["output_format_json_quote_denormals"] = "1"
 	switch format {
 	case FormatJSONEachRow, FormatCSVWithNames, FormatTSVWithNames:
 	case FormatCSV:
@@ -146,23 +149,23 @@ type Refusal struct {
 // the artifact about.
 //
 // checks are a role's insert check clauses. They compile to ONE filter,
-// AND-joined, attached to the same parse (RowsExportWith; the chtypes SDK's
-// filters guide, "Exporting only the rows a filter admits"), so each record's
+// AND-joined, attached to the same parse (Rows with WithRowFilter; the chtypes
+// SDK's filters guide, "Exporting only the rows a filter admits"), so each record's
 // parse outcome and check answer come from one read of the body and only the
 // admitted records are exported. The parse outcome decides first: a record
 // chtypes did not accept reports its own error whatever the filter says (it
 // answers such a row 'd'). A predicate with no Values matches nothing and
 // never reaches the compiler; a filter that will not compile declines every
 // accepted record. The compiled filter is cached per (generation, expression,
-// values) on the handle it runs against.
+// values) on the table.
 //
 // The verdicts account for every record or for none: when chtypes answers
 // fewer records than the body holds (recordFloor), the whole body is declined
 // (Batch.Miscount) rather than returned short.
 //
-// Document flags stay lean (verdicts and exported bytes only). The per-value
-// provenance DocValues would give costs 2.65× on this path and nothing here
-// reads it.
+// Document flags stay lean (verdicts and exported bytes only), passed
+// explicitly: chtypes' default, every group, costs 5.6× on this path and
+// nothing here reads the per-value provenance it adds.
 //
 // The returned error is for a Go-level failure only — every data verdict is in
 // the batch.
@@ -178,24 +181,20 @@ func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, check
 			"typelayer: Ingest cannot parse format %d; use FormatJSONEachRow, FormatCSV, FormatTSV, FormatCSVWithNames or FormatTSVWithNames",
 			int(format))
 	}
-	if t.pool == nil {
+	if t.c == nil {
 		return Batch{}, &Unavailable{Tenant: t.tenant, Table: t.Name, Cause: t.cause}
 	}
-	// The filter must be compiled on the handle the parse runs on: one from
-	// another handle rejects the whole call.
-	s := t.pool.acquire()
-	defer t.pool.release(s)
 	var columns []string
 	if format != FormatCSV && format != FormatTSV {
 		columns = t.inputs // see inputColumns; positional formats map to WireColumns
 	}
-	filter, uniform := t.checkFilter(s, checks)
-	res, err := export(s, format, body, settings, columns, filter)
+	filter, uniform := t.checkFilter(checks)
+	res, err := t.export(format, body, settings, columns, filter)
 	if err != nil && filter != nil {
 		// The cached filter was evicted and closed between lookup and use. Fail
 		// the checks closed, as an evaluation error would, not the request.
 		filter, uniform = nil, ReasonDecline
-		res, err = export(s, format, body, settings, columns, nil)
+		res, err = t.export(format, body, settings, columns, nil)
 	}
 	if err != nil {
 		return Batch{}, err
@@ -208,15 +207,15 @@ func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, check
 	if res.Outcome != chtypes.Accepted {
 		if len(res.Rows) == 0 && res.Outcome == chtypes.Rejected && res.ErrCode != 0 &&
 			(format == FormatCSVWithNames || format == FormatTSVWithNames) {
-			return Batch{Answered: true, Refused: &Refusal{Code: res.ErrCode, Message: res.ErrMsg}}, nil
+			return Batch{Answered: true, Refused: &Refusal{Code: int(res.ErrCode), Message: res.ErrMsg}}, nil
 		}
-		n := declineCount(opts.Records, len(res.Rows), t.floor(s, format, opts, body), body)
-		return declineAll(n, firstNonEmpty(res.ExportDeclined, res.ErrMsg, res.Outcome.String())), nil
+		n := declineCount(opts.Records, len(res.Rows), t.floor(format, opts, body), body)
+		return declineAll(n, firstNonEmpty(res.ExportDeclined, res.ErrMsg, string(res.Outcome))), nil
 	}
 	// Accepted but withheld (the full-arity guard, a serialization failure):
 	// nothing can be forwarded, whatever the per-row detail says.
 	if res.ExportDeclined != "" {
-		n := declineCount(opts.Records, len(res.Rows), t.floor(s, format, opts, body), body)
+		n := declineCount(opts.Records, len(res.Rows), t.floor(format, opts, body), body)
 		return declineAll(n, res.ExportDeclined), nil
 	}
 
@@ -226,7 +225,7 @@ func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, check
 	// recordFloor), and reporting the short batch would drop them without a
 	// word: decline the body whole instead. More is checked only against an
 	// exact count, because a floor is no ceiling.
-	if m := miscount(opts.Records, len(res.Rows), t.floor(s, format, opts, body)); m != nil {
+	if m := miscount(opts.Records, len(res.Rows), t.floor(format, opts, body)); m != nil {
 		b := declineAll(m.Counted, m.message(res.Rows))
 		b.Miscount = m
 		return b, nil
@@ -246,7 +245,7 @@ func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, check
 // or to the one answer every accepted record gets when no filter runs:
 // ReasonFilter for a predicate render cannot express (it matches nothing, like
 // the SQL path's `1 = 0`), ReasonDecline for one that will not compile.
-func (t *Table) checkFilter(s *schemaSlot, checks []Predicate) (*chtypes.LoadedFilter, string) {
+func (t *Table) checkFilter(checks []Predicate) (*chtypes.Filter, string) {
 	if len(checks) == 0 {
 		return nil, ""
 	}
@@ -254,23 +253,33 @@ func (t *Table) checkFilter(s *schemaSlot, checks []Predicate) (*chtypes.LoadedF
 	if !ok {
 		return nil, ReasonFilter
 	}
-	if f := t.filterOn(s, expr, params); f != nil {
+	if f := t.filterFor(expr, params); f != nil {
 		return f, ""
 	}
 	return nil, ReasonDecline
 }
 
-// export is the one parse, with columns as the INSERT column list (nil: none).
-// With no filter RowsExportWith is RowsExport.
-func export(s *schemaSlot, format Format, body []byte, settings map[string]string, columns []string, f *chtypes.LoadedFilter) (chtypes.BatchResult, error) {
-	opts := make([]chtypes.RowsOption, 0, 2)
+// leanDocs asks a batch for its verdicts and exported bytes only.
+const leanDocs = chtypes.DocFlags(0)
+
+// export is the one parse, with columns as the INSERT column list (nil: none),
+// in the table's zone (zoneOpts) — the zone f was compiled in.
+func (t *Table) export(format Format, body []byte, settings map[string]string, columns []string, f *chtypes.Filter) (chtypes.BatchResult, error) {
+	opts := []chtypes.RowsOption{
+		chtypes.WithSettings(settings),
+		chtypes.WithExport(chtypes.JSONCompactEachRow),
+		chtypes.WithDocFlags(leanDocs),
+	}
+	for _, z := range t.zoneOpts() {
+		opts = append(opts, z)
+	}
 	if columns != nil {
 		opts = append(opts, chtypes.WithColumns(columns))
 	}
 	if f != nil {
 		opts = append(opts, chtypes.WithRowFilter(f))
 	}
-	return s.schema.RowsExportWith(format, body, settings, chtypes.JSONCompactEachRow, opts...)
+	return t.c.schema.Rows(format, body, opts...)
 }
 
 // rowVerdict maps one chtypes RowResult. An unsupported setting is the engine
@@ -299,7 +308,7 @@ func rowVerdict(r chtypes.RowResult, line []byte, filtered bool) RowVerdict {
 		// ErrCode/ErrMsg, not VerdictCode/VerdictErr: chtypes answers such a row
 		// 'd', and older artifact builds (every 26.6 build) leave the verdict's
 		// own code and message empty, where ErrCode/ErrMsg are set on every build.
-		return RowVerdict{Code: r.ErrCode, Message: r.ErrMsg}
+		return RowVerdict{Code: int(r.ErrCode), Message: r.ErrMsg}
 	case chtypes.Unsupported, chtypes.AcceptedPoisoned:
 		// AcceptedPoisoned holds a value no writer can honestly serialize, so
 		// like Unsupported it yields no bytes and is not a data verdict.
@@ -323,7 +332,7 @@ func firstNonEmpty(s ...string) string {
 func declinedVerdict(r chtypes.RowResult) RowVerdict {
 	msg := r.ErrMsg
 	if msg == "" {
-		msg = r.Outcome.String()
+		msg = string(r.Outcome)
 	}
 	return RowVerdict{Declined: true, Message: msg}
 }
@@ -334,8 +343,8 @@ func span(res chtypes.BatchResult, i int) []byte {
 	if i >= len(res.Spans) {
 		return nil
 	}
-	s := res.Spans[i]
-	if s.Len <= 0 || s.Off < 0 || s.Off+s.Len > len(res.Payload) {
+	s, n := res.Spans[i], uint64(len(res.Payload))
+	if s.Len == 0 || s.Off > n || s.Len > n-s.Off {
 		return nil
 	}
 	return bytes.TrimSuffix(res.Payload[s.Off:s.Off+s.Len], []byte("\n"))
@@ -346,14 +355,14 @@ func span(res chtypes.BatchResult, i int) []byte {
 // their compiled types, and the first column's type decides whether a leading
 // byte order mark is read as framing. Skipped when the caller has an exact
 // count.
-func (t *Table) floor(s *schemaSlot, format Format, opts IngestOptions, body []byte) int {
+func (t *Table) floor(format Format, opts IngestOptions, body []byte) int {
 	if opts.Records > 0 {
 		return 0
 	}
 	var types map[string]string
 	if format == FormatCSV || format == FormatTSV {
-		types = make(map[string]string, len(s.schema.Columns))
-		for _, c := range s.schema.Columns {
+		types = make(map[string]string, len(t.c.desc))
+		for _, c := range t.c.desc {
 			types[c.Name] = c.Type
 		}
 	}

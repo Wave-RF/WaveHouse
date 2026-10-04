@@ -7,6 +7,7 @@ package typelayertest
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -34,11 +35,12 @@ const RequireEnv = "WAVEHOUSE_TEST_REQUIRE_CHTYPES"
 
 // missingArtifact is what a developer without the artifact needs to read: the
 // exact command that installs it.
-const missingArtifact = "chtypes artifact for " + testLine + " (ABI revision 6) not installed: run " +
-	"`scripts/fetch-chtypes.sh`, which installs the build chtypes.lock pins into the SDK's per-user cache"
+const missingArtifact = "chtypes v1 artifact for " + testLine + " not installed: run " +
+	"`scripts/fetch-chtypes.sh`, which installs the build chtypes.lock pins into the SDK's per-user cache " +
+	"(~/.cache/chtypes/v1, or $CHTYPES_CACHE)"
 
-// SkipWithoutArtifact skips t when the chtypes artifact for TestServerVersion's
-// line is not on the SDK's search path — or fails it when
+// SkipWithoutArtifact skips t when no chtypes artifact for TestServerVersion's
+// line is installed for this host — or fails it when
 // WAVEHOUSE_TEST_REQUIRE_CHTYPES=1. It opens no library. A test that boots
 // anything constructing an Engine (the API process role) calls it first, since
 // typelayer.NewEngine refuses to start without an artifact.
@@ -55,24 +57,33 @@ var artifactProbe struct {
 }
 
 // artifactMissing reports why the test line's artifact is not available, ""
-// when it is. Probed once per test binary: it reads manifests only.
+// when it is. Probed once per test binary: it reads install records only.
 func artifactMissing() string {
 	artifactProbe.once.Do(func() {
-		reg, err := chtypes.NewRegistry("", chtypes.WithAutoFetch(false))
+		reg, err := chtypes.NewRegistry(chtypes.WithAutoFetch(false))
 		if err != nil {
 			artifactProbe.cause = err.Error()
 			return
 		}
-		if !slices.Contains(reg.Versions(), testLine) {
-			artifactProbe.cause = fmt.Sprintf("no %s artifact on the registry search path (looked in: %s)",
-				testLine, strings.Join(reg.SearchPath(), ", "))
+		installed, err := reg.Installed()
+		if err != nil {
+			artifactProbe.cause = err.Error()
+			return
+		}
+		platform := runtime.GOOS + "-" + runtime.GOARCH
+		if !slices.ContainsFunc(installed, func(r chtypes.Resolved) bool {
+			return r.Platform == platform && strings.HasPrefix(r.Version, testLine+".")
+		}) {
+			artifactProbe.cause = fmt.Sprintf("no %s artifact installed for %s", testLine, platform)
 		}
 	})
 	return artifactProbe.cause
 }
 
-// TestEngine opens an Engine on the SDK's default search path and binds the
-// given tables for tenant.Default at TestServerVersion in UTC. It skips the
+// TestEngine opens an Engine on the SDK's default layouts and binds the given
+// tables for tenant.Default at TestServerVersion in UTC. The first bind in a
+// process fixes its image zone, so a test binary that binds here first runs a
+// UTC image. It skips the
 // test when the artifact is absent or does not load (fails it under
 // WAVEHOUSE_TEST_REQUIRE_CHTYPES=1), and closes the Engine when the test ends.
 func TestEngine(t testing.TB, tables ...*discovery.TableSchema) *typelayer.Engine {

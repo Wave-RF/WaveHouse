@@ -8,6 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/wave-rf/chtypes/go/chtypes"
+
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
@@ -38,24 +40,26 @@ func unavailable(t *testing.T, eng *Engine, id tenant.ID) *Unavailable {
 	return u
 }
 
-// TestBind_TenantsOnOneLineWithDifferentZones: the process opened the test
-// line in UTC, so a second tenant on that line whose server reports another
-// zone cannot be served by this process. It alone is refused, with a cause
-// naming both zones; the first tenant, and a third in the line's own zone,
-// keep answering.
+// TestBind_TenantsOnOneLineWithDifferentZones: tenants on one line in
+// different zones share its library. The one in another zone than the image's
+// is refused only the table whose expressions read a zone-less DateTime (the
+// events fixture's `created DEFAULT now()`), with a cause naming both zones;
+// its other tables, and every table of the tenants in the image zone, answer.
 func TestBind_TenantsOnOneLineWithDifferentZones(t *testing.T) {
-	eng := testEngine(t, eventsTable()) // tenant.Default, UTC
+	tables := []*discovery.TableSchema{eventsTable(), zonedTable()}
+	eng := testEngine(t, tables...) // tenant.Default, UTC
 
-	eng.Bind("berlin", testServerVersion, "Europe/Berlin", []*discovery.TableSchema{eventsTable()})
-	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
-	eng.Bind("unnamed", testServerVersion, "", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("berlin", testServerVersion, "Europe/Berlin", tables)
+	eng.Bind("utc", testServerVersion, "UTC", tables)
+	eng.Bind("unnamed", testServerVersion, "", tables)
 
+	assert.Empty(t, eng.TenantCause("berlin"), "the zone is not tenant-wide")
 	u := unavailable(t, eng, "berlin")
-	assert.Empty(t, u.Table, "the cause covers every table of the tenant")
+	assert.Equal(t, "events", u.Table)
 	assert.Contains(t, u.Cause, `"Europe/Berlin"`)
 	assert.Contains(t, u.Cause, `"UTC"`)
-	assert.Contains(t, u.Cause, "one timezone per ClickHouse version line")
 	assert.Contains(t, u.Error(), "berlin")
+	zonedTableOf(t, eng, "berlin")
 
 	answers(t, eng, tenant.Default)
 	answers(t, eng, "utc")
@@ -86,7 +90,7 @@ func TestBind_MissingLineIsThatTenantOnly(t *testing.T) {
 
 	eng.Bind("old", "1.2.3.4", "UTC", []*discovery.TableSchema{eventsTable()})
 	u := unavailable(t, eng, "old")
-	assert.Contains(t, u.Cause, "Looked in:", "the SDK's message names every directory searched")
+	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactMissing), "the SDK's own message and code")
 
 	answers(t, eng, tenant.Default)
 
@@ -114,7 +118,7 @@ func TestBind_TenantsCompileSeparateHandles(t *testing.T) {
 	b, err := eng.Table("other", "events")
 	require.NoError(t, err)
 	assert.NotSame(t, a, b)
-	assert.NotSame(t, a.pool.first(), b.pool.first())
+	assert.NotSame(t, a.c, b.c)
 	a.Release()
 	b.Release()
 
@@ -183,7 +187,7 @@ func TestForget_ClosesOnlyThatTenantAndDoesNotBlock(t *testing.T) {
 		t.Fatal("teardown did not finish after the holder released")
 	}
 	held.mu.RLock()
-	assert.Nil(t, held.pool, "the forgotten tenant's handles are closed")
+	assert.Nil(t, held.c, "the forgotten tenant's handles are closed")
 	assert.Equal(t, causeRetired, held.cause)
 	held.mu.RUnlock()
 
@@ -208,133 +212,6 @@ func TestClose_WaitsForForgetAndRefusesAfterwards(t *testing.T) {
 	u = unavailable(t, eng, tenant.Default)
 	assert.Equal(t, causeClosed, u.Cause)
 	eng.Forget(tenant.Default) // no-op, no panic
-}
-
-// TestPool_GrowsLazilyToItsLimit: one handle after Bind; a call that finds
-// every handle busy compiles one more, up to the limit; past it, calls share
-// a busy handle; and an idle handle is reused rather than grown past.
-func TestPool_GrowsLazilyToItsLimit(t *testing.T) {
-	eng := testEngine(t, rowsTable())
-	tbl, err := eng.Table(tenant.Default, "rows")
-	require.NoError(t, err)
-	defer tbl.Release()
-
-	p, cause := newPool(tbl.lib, tbl.pool.ddl, 3)
-	require.Empty(t, cause)
-	t.Cleanup(p.close)
-	require.Len(t, p.list(), 1)
-
-	a := p.acquire()
-	assert.Len(t, p.list(), 1, "an idle handle is taken, not grown past")
-	b := p.acquire()
-	assert.Len(t, p.list(), 2, "every handle busy: grow")
-	c := p.acquire()
-	assert.Len(t, p.list(), 3)
-	d := p.acquire()
-	assert.Len(t, p.list(), 3, "at the limit, a call shares a busy handle")
-	assert.NotSame(t, a, b)
-	assert.NotSame(t, b, c)
-	assert.Contains(t, []*schemaSlot{a, b, c}, d)
-	assert.Equal(t, int32(2), d.busy.Load())
-
-	for _, s := range []*schemaSlot{a, b, c, d} {
-		p.release(s)
-	}
-	for _, s := range p.list() {
-		assert.Zero(t, s.busy.Load())
-	}
-	e := p.acquire()
-	assert.Len(t, p.list(), 3)
-	p.release(e)
-	for _, s := range p.list() {
-		assert.Equal(t, filterCacheSize, s.filters.cap, "every grown slot gets the whole filter budget")
-	}
-}
-
-// TestPool_PrefersTheLowestIdleSlot: a filter answers only on the slot it
-// was compiled on, so a serial run of calls must keep landing on one slot
-// (and compile each filter once) rather than rotate through the pool and
-// compile it on every slot. A busy slot is skipped, not waited for.
-func TestPool_PrefersTheLowestIdleSlot(t *testing.T) {
-	eng := testEngine(t, rowsTable())
-	tbl, err := eng.Table(tenant.Default, "rows")
-	require.NoError(t, err)
-	defer tbl.Release()
-
-	p, cause := newPool(tbl.lib, tbl.pool.ddl, 3)
-	require.Empty(t, cause)
-	t.Cleanup(p.close)
-	grown := []*schemaSlot{p.acquire(), p.acquire(), p.acquire()}
-	for _, s := range grown {
-		p.release(s)
-	}
-	slots := p.list()
-	require.Len(t, slots, 3)
-
-	for range 10 {
-		s := p.acquire()
-		assert.Same(t, slots[0], s, "a serial caller stays on the first slot")
-		p.release(s)
-	}
-
-	busy := p.acquire()
-	require.Same(t, slots[0], busy)
-	for range 5 {
-		s := p.acquire()
-		assert.Same(t, slots[1], s, "the lowest idle slot, past the busy one")
-		p.release(s)
-	}
-	p.release(busy)
-}
-
-// TestTable_PoolGrowsUnderConcurrentHolders drives growth through the public
-// path: a parsed Row keeps its handle busy until Close. A burst of concurrent
-// parses grows the pool (a caller that loses the race to grow shares a busy
-// handle rather than wait for a compile), never past its limit; holding Rows
-// while more arrive grows it to exactly the limit.
-func TestTable_PoolGrowsUnderConcurrentHolders(t *testing.T) {
-	eng := testEngine(t, rowsTable())
-	tbl, err := eng.Table(tenant.Default, "rows")
-	require.NoError(t, err)
-	defer tbl.Release()
-	require.Len(t, tbl.pool.list(), 1, "one handle after Bind")
-	limit := int(tbl.pool.limit.Load())
-
-	parse := func() *Row {
-		row, err := tbl.ParseRow(tbl.WireColumns, []byte(sampleRow))
-		require.NoError(t, err)
-		return row
-	}
-
-	burst := make([]*Row, limit+2)
-	var wg sync.WaitGroup
-	for i := range burst {
-		wg.Go(func() {
-			row, err := tbl.ParseRow(tbl.WireColumns, []byte(sampleRow))
-			if assert.NoError(t, err) {
-				burst[i] = row
-			}
-		})
-	}
-	wg.Wait()
-	assert.LessOrEqual(t, len(tbl.pool.list()), limit, "never past the limit")
-
-	held := append([]*Row(nil), burst...)
-	for range limit {
-		held = append(held, parse())
-	}
-	assert.Len(t, tbl.pool.list(), limit, "sustained holders grow it to exactly the limit")
-
-	// Every held Row still answers on its own handle.
-	for _, r := range held {
-		require.NotNil(t, r)
-		assert.True(t, r.Visible([]Predicate{{Column: "tenant", Op: "=", Values: []string{"acme"}}}))
-		r.Close()
-		r.Close() // a second Close is a no-op, not a double release
-	}
-	for _, s := range tbl.pool.list() {
-		assert.Zero(t, s.busy.Load(), "every handle given back")
-	}
 }
 
 // TestBind_HeldRoleTableDoesNotBlockBaseLookups: a rebind detaches the old

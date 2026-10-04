@@ -1,6 +1,7 @@
 package typelayer
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -323,25 +324,32 @@ func TestIngest_ForwardSlashExportsUnescaped(t *testing.T) {
 // TestIngest_NaNAndInfinityExportAsStrings: the export spells a Float NaN or
 // infinity as a JSON string, the spelling the worker's INSERT stores as that
 // value (a null would store the column's default), so the stream carries
-// strings where /v1/query renders null. The export does not read
-// output_format_json_quote_denormals, so it cannot be pinned to agree.
+// strings where /v1/query renders null. The export reads
+// output_format_json_quote_denormals, whose default renders null, so
+// parseSettings pins it on.
 func TestIngest_NaNAndInfinityExportAsStrings(t *testing.T) {
 	eng := testEngine(t, &discovery.TableSchema{Name: "floats", Columns: []discovery.Column{
 		{Name: "f", Type: "Float64", Position: 1},
 		{Name: "g", Type: "Nullable(Float32)", Position: 2},
+		{Name: "h", Type: "Float32", Position: 3},
+		{Name: "i", Type: "Nullable(Float64)", Position: 4},
 	}})
 	tbl, err := eng.Table(tenant.Default, "floats")
 	require.NoError(t, err)
 	t.Cleanup(tbl.Release)
 
-	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"f":"nan","g":"inf"}`+"\n"+`{"f":"-inf","g":null}`+"\n"))
+	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(
+		`{"f":"nan","g":"inf","h":"-inf","i":"nan"}`+"\n"+
+			`{"f":"-inf","g":null,"h":"nan","i":"inf"}`+"\n"+
+			`{"f":"inf","g":"-inf","h":"inf","i":"-inf"}`+"\n"))
 	require.NoError(t, err)
-	require.Len(t, batch.Rows, 2)
+	require.Len(t, batch.Rows, 3)
 	for _, r := range batch.Rows {
 		require.True(t, r.Accepted, r.Message)
 	}
-	assert.Equal(t, `["nan", "inf"]`, string(batch.Rows[0].Line))
-	assert.Equal(t, `["-inf", null]`, string(batch.Rows[1].Line))
+	assert.Equal(t, `["nan", "inf", "-inf", "nan"]`, string(batch.Rows[0].Line))
+	assert.Equal(t, `["-inf", null, "nan", "inf"]`, string(batch.Rows[1].Line))
+	assert.Equal(t, `["inf", "-inf", "inf", "-inf"]`, string(batch.Rows[2].Line))
 }
 
 func TestInsertSettings_ReturnsAFreshMap(t *testing.T) {
@@ -404,8 +412,9 @@ func gatedTable() *discovery.TableSchema {
 // type gates, so a table with a LowCardinality(UInt64), a FixedString wider
 // than 256 or a Variant of similar types accepts its records and answers its
 // filters. The control compiles the same declarations without the gates:
-// every record is refused (455 and 44 on the 26.6 and 26.8 artifacts), which
-// is what this table got on every call before.
+// every record is refused (455 and 44), which is what this table got on every
+// call before. The v1 26.8 artifact accepts FixedString(300) ungated; its gate
+// stays, harmless.
 func TestIngest_TypeGatedColumnsInsertAndFilter(t *testing.T) {
 	eng := testEngine(t, gatedTable())
 	tbl, err := eng.Table(tenant.Default, "gated")
@@ -436,18 +445,31 @@ func TestIngest_TypeGatedColumnsInsertAndFilter(t *testing.T) {
 	}
 
 	for _, ts := range gatedTable().Columns {
-		ddl, err := tbl.lib.ReconstructDDL([]chtypes.DiscoveredColumn{{Name: ts.Name, Type: ts.Type, Position: 1}})
+		if ts.Name == "fs" {
+			continue
+		}
+		stmt, err := createTable(tbl.lib, []colDecl{{Name: ts.Name, Type: ts.Type}})
 		require.NoError(t, err)
-		ungated, err := tbl.lib.CompileDDL(ddl, chtypes.WithCompileSettings(map[string]string{
+		ungated, err := tbl.lib.CompileTable(stmt, chtypes.WithSettings(map[string]string{
 			"input_format_allow_errors_ratio":  "1",
 			"input_format_skip_unknown_fields": "0",
 		}))
+		var se *chtypes.SchemaError
+		if errors.As(err, &se) {
+			// Refused at the compile rather than per record: still the gate.
+			assert.Contains(t, []int32{44, 455}, se.ChCode, "%s without the gates: %s", ts.Type, se.Message)
+			continue
+		}
 		require.NoError(t, err, ts.Type)
-		res, err := ungated.Rows(FormatJSONEachRow, []byte(`{"`+ts.Name+`":5}`+"\n"), InsertSettings())
-		ungated.Close()
+		res, err := ungated.Rows(FormatJSONEachRow, []byte(`{"`+ts.Name+`":5}`+"\n"), chtypes.WithSettings(InsertSettings()))
+		_ = ungated.Close()
 		require.NoError(t, err, ts.Type)
 		assert.NotEqual(t, chtypes.Accepted, res.Outcome, "%s without the gates", ts.Type)
-		assert.Contains(t, []int{44, 455}, res.ErrCode, "%s without the gates: %s", ts.Type, res.ErrMsg)
+		code := res.ErrCode
+		if len(res.Rows) > 0 && code == 0 {
+			code = res.Rows[0].ErrCode
+		}
+		assert.Contains(t, []int32{44, 455}, code, "%s without the gates: %s", ts.Type, res.ErrMsg)
 	}
 }
 

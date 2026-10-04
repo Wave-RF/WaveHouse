@@ -146,10 +146,12 @@ type ClickHouse struct {
 	// across its pools: the settings directory's clickhouse.max_open_conns
 	// must not exceed it. 0, the default, is no ceiling.
 	MaxTotalConns int `yaml:"max_total_conns" env:"WH_CH_MAX_TOTAL_CONNS"`
-	// ChtypesRegistry is the chtypes artifact directory the type layer
-	// searches first (typelayer.Config.RegistryDir). Empty, the default, is
-	// the SDK's own search path: $CHTYPES_REGISTRY, the per-user cache, then
-	// the system directories. Only a process with the api role reads it.
+	// ChtypesRegistry is the chtypes v1 OCI layout directory the type layer
+	// reads artifacts from (typelayer.Config.CacheDir), with CHTYPES_CACHE
+	// semantics: the layout itself, not a parent. Empty, the default, is the
+	// per-user cache ($CHTYPES_CACHE, else ~/.cache/chtypes/v1). Either way
+	// /usr/local/share/chtypes/v1 and /opt/chtypes/v1 are read after it. Only
+	// a process with the api role reads it.
 	ChtypesRegistry string `yaml:"chtypes_registry" env:"WH_CHTYPES_REGISTRY"`
 }
 

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -41,7 +43,7 @@ func TestBind_CompilesAndExposesWireColumns(t *testing.T) {
 	defer tbl.Release()
 
 	assert.Equal(t, uint64(1), tbl.Generation)
-	// MATERIALIZED never crosses the wire: RowsExport does not serialize it and
+	// MATERIALIZED never crosses the wire: the export does not serialize it and
 	// the envelope's column list must match the exported line's arity.
 	assert.Equal(t, []string{"id", "name", "ts", "tags", "score", "created"}, tbl.WireColumns)
 }
@@ -94,8 +96,8 @@ func TestBind_DroppedTableBecomesUnavailable(t *testing.T) {
 }
 
 // TestBind_MissingArtifact_UnavailableWithSDKMessage: the SDK's own text names
-// every directory it searched — that is the whole diagnostic, so it is passed
-// through verbatim.
+// the line, the platform and the artifact code — that is the whole diagnostic,
+// so it is passed through verbatim.
 func TestBind_MissingArtifact_UnavailableWithSDKMessage(t *testing.T) {
 	eng := testEngine(t, eventsTable())
 
@@ -103,8 +105,8 @@ func TestBind_MissingArtifact_UnavailableWithSDKMessage(t *testing.T) {
 	_, err := eng.Table(tenant.Default, "events")
 	require.Error(t, err)
 	require.True(t, IsUnavailable(err))
-	assert.Contains(t, err.Error(), "no artifact for ClickHouse 1.2")
-	assert.Contains(t, err.Error(), "Looked in:")
+	assert.Contains(t, err.Error(), "no installed artifact for ClickHouse 1.2")
+	assert.Contains(t, err.Error(), string(chtypes.CodeArtifactMissing))
 
 	// Rebinding a version that does resolve clears the tenant's cause.
 	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
@@ -113,20 +115,34 @@ func TestBind_MissingArtifact_UnavailableWithSDKMessage(t *testing.T) {
 	tbl.Release()
 }
 
-// TestBind_TimezoneMismatchIsTenantWideAndNamesBothZones: chtypes reads its
-// Timezone global once per library open, so a server that changes zone cannot
-// be adopted in-process. Every table of that tenant must stop answering,
-// loudly.
-func TestBind_TimezoneMismatchIsTenantWideAndNamesBothZones(t *testing.T) {
-	eng := testEngine(t, eventsTable())
+// TestBind_ZoneRefusalIsPerTableAndNamesBothZones: a tenant in another zone
+// than the image's is served, except a table whose expressions would compute
+// over a zone-less DateTime in the image zone. That table alone stops
+// answering, loudly, and a rebind back into the image zone serves it again.
+func TestBind_ZoneRefusalIsPerTableAndNamesBothZones(t *testing.T) {
+	plain := &discovery.TableSchema{Name: "plain", Columns: []discovery.Column{
+		{Name: "id", Type: "UInt8", Position: 1},
+		{Name: "ts", Type: "DateTime", Position: 2},
+	}}
+	eng := testEngine(t, eventsTable(), plain)
 
-	eng.Bind(tenant.Default, testServerVersion, "Europe/Berlin", []*discovery.TableSchema{eventsTable()})
+	eng.Bind(tenant.Default, testServerVersion, "Europe/Berlin", []*discovery.TableSchema{eventsTable(), plain})
+	assert.Empty(t, eng.TenantCause(tenant.Default), "the zone is not tenant-wide")
 	_, err := eng.Table(tenant.Default, "events")
 	require.Error(t, err)
 	require.True(t, IsUnavailable(err))
-	assert.Contains(t, err.Error(), "Europe/Berlin")
-	assert.Contains(t, err.Error(), "UTC")
-	assert.Contains(t, err.Error(), "restart")
+	assert.Contains(t, err.Error(), `"Europe/Berlin"`)
+	assert.Contains(t, err.Error(), `"UTC"`)
+	assert.Contains(t, err.Error(), "Wave-RF/chtypes#419")
+
+	tbl, err := eng.Table(tenant.Default, "plain")
+	require.NoError(t, err, "a zone-less DateTime with no expression over it is read in the tenant's zone")
+	tbl.Release()
+
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{eventsTable(), plain})
+	tbl, err = eng.Table(tenant.Default, "events")
+	require.NoError(t, err)
+	tbl.Release()
 }
 
 // TestBind_CompileRefusalIsPerTable: one undeclarable table must not take the
@@ -153,7 +169,8 @@ func TestSignatureDistinguishesEveryField(t *testing.T) {
 	base := &discovery.TableSchema{Columns: []discovery.Column{
 		{Name: "a", Type: "UInt8", DefaultKind: "DEFAULT", DefaultExpression: "1", Position: 1},
 	}}
-	sig := signature(base)
+	sig := signature(base, "UTC")
+	assert.NotEqual(t, sig, signature(base, "Asia/Tokyo"), "the zone is part of the signature")
 	for _, mutate := range []func(c *discovery.Column){
 		func(c *discovery.Column) { c.Name = "b" },
 		func(c *discovery.Column) { c.Type = "UInt16" },
@@ -163,7 +180,7 @@ func TestSignatureDistinguishesEveryField(t *testing.T) {
 	} {
 		other := &discovery.TableSchema{Columns: []discovery.Column{base.Columns[0]}}
 		mutate(&other.Columns[0])
-		assert.NotEqual(t, sig, signature(other))
+		assert.NotEqual(t, sig, signature(other, "UTC"))
 	}
 }
 
@@ -298,7 +315,7 @@ func TestFilterCache_EvictsAndClosesOldest(t *testing.T) {
 }
 
 // TestBind_WireColumnsComeFromTheCompiledHandle: the wire list is read off
-// LoadedSchema.Columns, so it is a property of the handle that produced the
+// Schema.Describe, so it is a property of the handle that produced the
 // bytes rather than a second derivation from discovery that could drift from
 // it. All four default kinds are present so the filter is exercised whole.
 func TestBind_WireColumnsComeFromTheCompiledHandle(t *testing.T) {
@@ -318,7 +335,7 @@ func TestBind_WireColumnsComeFromTheCompiledHandle(t *testing.T) {
 	defer tbl.Release()
 
 	assert.Equal(t, []string{"id", "plain"}, tbl.WireColumns)
-	assert.Equal(t, []string{"id", "plain", "mat", "ali", "eph"}, compiledColumnNames(tbl.pool.first().schema),
+	assert.Equal(t, []string{"id", "plain", "mat", "ali", "eph"}, compiledColumnNames(tbl.c.desc),
 		"every declared column is known to the handle, of every kind")
 	// render tests against the handle's own column set, not the wire list: a
 	// filter may name a MATERIALIZED column.
@@ -328,14 +345,14 @@ func TestBind_WireColumnsComeFromTheCompiledHandle(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// TestBind_HandlePoolPerTable: every table gets a pool of one handle, and a
-// rebind replaces all of it.
-func TestBind_HandlePoolPerTable(t *testing.T) {
+// TestBind_OneHandlePerTable: every table gets one handle, and a rebind
+// replaces it.
+func TestBind_OneHandlePerTable(t *testing.T) {
 	eng := testEngine(t, eventsTable())
 	tbl, err := eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
-	assert.Len(t, tbl.pool.list(), 1)
-	first := tbl.pool.first()
+	require.NotNil(t, tbl.c)
+	first := tbl.c
 	tbl.Release()
 
 	changed := eventsTable()
@@ -345,15 +362,18 @@ func TestBind_HandlePoolPerTable(t *testing.T) {
 	tbl, err = eng.Table(tenant.Default, "events")
 	require.NoError(t, err)
 	defer tbl.Release()
-	assert.Len(t, tbl.pool.list(), 1)
-	assert.NotSame(t, first, tbl.pool.first())
+	require.NotNil(t, tbl.c)
+	assert.NotSame(t, first, tbl.c)
+	_, err = first.schema.Describe()
+	var ue *chtypes.UsageError
+	assert.ErrorAs(t, err, &ue, "the replaced handle is closed")
 }
 
 // compiledColumnNames is the column list a handle compiled to, in declaration
 // order.
-func compiledColumnNames(schema *chtypes.LoadedSchema) []string {
-	out := make([]string, 0, len(schema.Columns))
-	for _, c := range schema.Columns {
+func compiledColumnNames(desc []chtypes.Column) []string {
+	out := make([]string, 0, len(desc))
+	for _, c := range desc {
 		out = append(out, c.Name)
 	}
 	return out
@@ -383,24 +403,51 @@ func TestQuoteIdentifier_AgreesWithChsql(t *testing.T) {
 	}
 }
 
+// corruptLayout is a v1 layout whose install record for the test line is the
+// real one, verbatim, beside a library that is not one: what a truncated
+// download or a bad disk leaves.
+func corruptLayout(t *testing.T) string {
+	t.Helper()
+	testEngine(t) // skips (or fails under WAVEHOUSE_TEST_REQUIRE_CHTYPES) without the real artifact
+	reg, err := chtypes.NewRegistry(chtypes.WithAutoFetch(false))
+	require.NoError(t, err)
+	installed, err := reg.Installed()
+	require.NoError(t, err)
+	var good *chtypes.Resolved
+	for i, r := range installed {
+		if r.Platform == runtime.GOOS+"-"+runtime.GOARCH && strings.HasPrefix(r.Version, testLine+".") {
+			good = &installed[i]
+		}
+	}
+	require.NotNil(t, good)
+	rel, err := filepath.Rel(good.Dir, good.LibraryPath)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	entry := filepath.Join(dir, "unpacked", "sha256", filepath.Base(good.Dir))
+	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(entry, rel)), 0o750))
+	for _, name := range []string{"verified.json", "manifest.json"} {
+		b, err := os.ReadFile(filepath.Join(good.Dir, name)) //nolint:gosec // G304: the SDK's own install record
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(entry, name), b, 0o600)) //nolint:gosec // G703: rooted in t.TempDir()
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(entry, rel), []byte("not a library"), 0o600))
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(good.Dir))), "oci-layout"))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "oci-layout"), b, 0o600)) //nolint:gosec // G703: rooted in t.TempDir()
+	return dir
+}
+
 // TestNewEngine_OpensNoLibraryAtConstruction: the registry is lazy, so an
 // artifact that cannot load is not a boot failure; the first Bind for its line
 // reports the SDK's own error as that tenant's Unavailable.
 func TestNewEngine_OpensNoLibraryAtConstruction(t *testing.T) {
-	testEngine(t) // skips (or fails under WAVEHOUSE_TEST_REQUIRE_CHTYPES) without the real artifact
+	dir := corruptLayout(t)
 
-	// The explicit directory is searched first, so its broken copy of the test
-	// line shadows the working one in the per-user cache.
-	dir := t.TempDir()
-	line := filepath.Join(dir, testLine)
-	require.NoError(t, os.MkdirAll(line, 0o750))
-	require.NoError(t, os.WriteFile(filepath.Join(line, "manifest.json"),
-		fmt.Appendf(nil, `{"library":"libchtypes.so","clickhouse_version":%q,"clickhouse_minor":%q}`,
-			testServerVersion+"-lts", testLine), 0o600))
-
-	eng, err := NewEngine(Config{RegistryDir: dir})
+	eng, err := NewEngine(Config{CacheDir: dir})
 	require.NoError(t, err, "a broken artifact is not a construction error")
 	t.Cleanup(eng.Close)
+	assert.Empty(t, eng.reg.Libraries(), "construction opens no library")
 
 	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	tbl, err := eng.Table(tenant.Default, "events")
@@ -409,16 +456,41 @@ func TestNewEngine_OpensNoLibraryAtConstruction(t *testing.T) {
 	}
 	require.Error(t, err)
 	require.True(t, IsUnavailable(err))
-	assert.Contains(t, err.Error(), line, "the SDK's message names the directory that failed")
+	assert.Contains(t, err.Error(), dir, "the SDK's message names the library that failed")
+	assert.Contains(t, err.Error(), "[CHTYPES_ARTIFACT_", "with the SDK's artifact code")
 }
 
 // TestNewEngine_UnreadableDirectoryFailsAtConstruction: a directory somebody
 // named and that does not exist is a typo, reported at boot.
 func TestNewEngine_UnreadableDirectoryFailsAtConstruction(t *testing.T) {
 	t.Parallel()
-	_, err := NewEngine(Config{RegistryDir: filepath.Join(t.TempDir(), "nosuch")})
+	_, err := NewEngine(Config{CacheDir: filepath.Join(t.TempDir(), "nosuch")})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nosuch")
+}
+
+// TestNewEngine_V0RegistryIsNamedAsOne: a chtypes 0.x registry directory never
+// loads under v1, and an empty answer would hide why.
+func TestNewEngine_V0RegistryIsNamedAsOne(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, testLine), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, testLine, "manifest.json"), []byte(`{}`), 0o600))
+	_, err := NewEngine(Config{CacheDir: dir})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "0.x registry")
+}
+
+// TestNewEngine_NoArtifactFailsAtConstruction: an API process with nothing to
+// judge with refuses to boot, naming where it looked.
+func TestNewEngine_NoArtifactFailsAtConstruction(t *testing.T) {
+	dir := t.TempDir()
+	_, err := NewEngine(Config{CacheDir: dir})
+	if err == nil {
+		t.Skip("a chtypes artifact is installed in a system layout, so this host has no layout set without one")
+	}
+	assert.Contains(t, err.Error(), "no artifact installed for "+runtime.GOOS+"-"+runtime.GOARCH)
+	assert.Contains(t, err.Error(), dir)
 }
 
 // boundLib is the library a tenant's handles were compiled against.

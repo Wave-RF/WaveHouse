@@ -16,8 +16,12 @@
 package typelayer
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -56,25 +60,28 @@ const (
 	causeClosed  = "type layer closed"
 )
 
-// Config is boot-tier: the registry directory is read once at process start.
-// "" means the SDK's own search path ($CHTYPES_REGISTRY, the per-user cache,
-// then the system directories); an explicit directory is searched first, then
-// the rest of that path. Either way a library is opened lazily, by the first
-// Bind for its line (~120 MB resident each).
+// Config is boot-tier, read once at process start. CacheDir is a chtypes v1
+// artifact layout, the directory itself (CHTYPES_CACHE semantics); "" means
+// $CHTYPES_CACHE, else ${XDG_CACHE_HOME:-~/.cache}/chtypes/v1. The read-only
+// system layouts (systemLayouts) are searched after it either way. A library
+// is opened lazily, by the first Bind for its line (~120 MB resident each).
 type Config struct {
-	RegistryDir string
+	CacheDir string
 }
+
+// systemLayouts are the read-only layouts the SDK searches after the cache.
+var systemLayouts = []string{"/usr/local/share/chtypes/v1", "/opt/chtypes/v1"}
 
 // Engine is the process's one chtypes registry plus every tenant's compiled
 // tables. It is opened once at boot; discovery rebinds a tenant after each of
 // that tenant's successful refreshes (Bind), and the tenant's teardown drops
 // it (Forget).
 //
-// Tenants are independent: a tenant that is not bound yet, has no artifact for
-// its server line, or reports a server zone this process cannot adopt is
-// Unavailable on its own, a table that does not compile is Unavailable alone,
-// and every other tenant keeps answering. Two tenants on the same server and
-// database still compile separate handles.
+// Tenants are independent: a tenant that is not bound yet or has no artifact
+// for its server line is Unavailable on its own, a table that does not compile
+// (or that its server zone keeps from being served, see zoneCause) is
+// Unavailable alone, and every other tenant keeps answering. Two tenants on
+// the same server and database still compile separate handles.
 type Engine struct {
 	reg *chtypes.Registry
 
@@ -110,44 +117,73 @@ type tenantSet struct {
 	tables map[string]*Table
 }
 
-// NewEngine opens the registry, which reads manifests and opens no library. It
-// fails only when an explicit directory cannot be read or nothing on the search
-// path holds an artifact, and returns the SDK's own message, which names the
-// directories it looked in. Anything an artifact itself can be wrong about — a
-// missing line, a refused ABI revision, a truncated library — surfaces at the
-// first Bind for that line, as that tenant's Unavailable.
+// NewEngine opens the registry, which reads the fetch layer's install records
+// and opens no library. It fails only when an explicit directory cannot be read
+// or is a chtypes 0.x registry, or when no layout searched holds an artifact
+// for this host, naming the layouts it looked in. Anything an artifact itself
+// can be wrong about — a missing line, a refused ABI, a truncated library —
+// surfaces at the first Bind for that line, as that tenant's Unavailable.
 //
 // WithPreload is deliberately not used: it opens a library at construction,
-// and a library's zone must come from a server's own zone, which only
+// and the process's image zone must come from a server's own zone, which only
 // discovery knows (see openLine).
 func NewEngine(cfg Config) (*Engine, error) {
-	reg, err := chtypes.NewRegistry(cfg.RegistryDir,
-		chtypes.WithAutoFetch(false),
-		chtypes.WithFetchOptions(chtypes.FetchOptions{Progress: sdkLog{}}))
+	if cfg.CacheDir != "" {
+		if err := checkLayout(cfg.CacheDir); err != nil {
+			return nil, err
+		}
+	}
+	reg, err := chtypes.NewRegistry(chtypes.WithAutoFetch(false),
+		chtypes.WithFetchOptions(chtypes.FetchOptions{CacheDir: cfg.CacheDir}))
 	if err != nil {
 		return nil, err
+	}
+	installed, err := reg.Installed()
+	if err != nil {
+		return nil, err
+	}
+	platform := runtime.GOOS + "-" + runtime.GOARCH
+	if !slices.ContainsFunc(installed, func(r chtypes.Resolved) bool { return r.Platform == platform }) {
+		return nil, fmt.Errorf("chtypes: no artifact installed for %s (looked in: %s)",
+			platform, strings.Join(append([]string{cacheRoot(cfg.CacheDir)}, systemLayouts...), ", "))
 	}
 	return &Engine{reg: reg, tenants: make(map[tenant.ID]*tenantSet)}, nil
 }
 
-// sdkLog carries what the SDK would otherwise print raw on stderr — its
-// warning when a requested patch is not installed and another patch of the
-// line answers instead — into the process log, one record per line.
-type sdkLog struct{}
-
-func (sdkLog) Write(p []byte) (int, error) {
-	for line := range strings.SplitSeq(string(p), "\n") {
-		msg := strings.TrimPrefix(strings.TrimSpace(line), "chtypes: ")
-		if msg == "" {
-			continue
-		}
-		if warning, ok := strings.CutPrefix(msg, "WARNING: "); ok {
-			slog.Warn("chtypes SDK warning", "message", warning)
-		} else {
-			slog.Info("chtypes SDK", "message", msg)
-		}
+// checkLayout refuses an explicit directory that cannot be read, or that holds
+// a chtypes 0.x registry (<line>/manifest.json) and no v1 layout: a 0.x
+// artifact never loads under v1, and an empty answer would hide why.
+func checkLayout(dir string) error {
+	if _, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("chtypes: cannot read the artifact directory: %w", err)
 	}
-	return len(p), nil
+	if _, err := os.Stat(filepath.Join(dir, "oci-layout")); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if v0, _ := filepath.Glob(filepath.Join(dir, "*", "manifest.json")); len(v0) > 0 {
+		return fmt.Errorf("chtypes: %s is a chtypes 0.x registry directory; chtypes v1 reads an OCI layout "+
+			"(fetch the artifact with the v1 chtypes CLI, which writes one)", dir)
+	}
+	return nil
+}
+
+// cacheRoot is the cache layout the SDK reads for dir, in its own precedence.
+func cacheRoot(dir string) string {
+	if dir != "" {
+		return dir
+	}
+	if env := os.Getenv("CHTYPES_CACHE"); env != "" {
+		return env
+	}
+	base := os.Getenv("XDG_CACHE_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "${XDG_CACHE_HOME:-~/.cache}/chtypes/v1"
+		}
+		base = filepath.Join(home, ".cache")
+	}
+	return filepath.Join(base, "chtypes", "v1")
 }
 
 // Table returns tenant id's current compiled handle for a table, read-locked.
@@ -179,7 +215,7 @@ func (e *Engine) Table(id tenant.ID, name string) (*Table, error) {
 		return nil, &Unavailable{Tenant: id, Table: name, Cause: "no compiled schema (table not discovered)"}
 	}
 	t.mu.RLock()
-	if t.pool == nil {
+	if t.c == nil {
 		cause := t.cause
 		t.mu.RUnlock()
 		return nil, &Unavailable{Tenant: id, Table: name, Cause: cause}
@@ -188,16 +224,18 @@ func (e *Engine) Table(id tenant.ID, name string) (*Table, error) {
 }
 
 // Bind resolves the library for the tenant's serverVersion and (re)compiles a
-// handle per table, keeping every compiled table whose columns and library are
-// unchanged. It is called synchronously from discovery's refresh hook, so it
-// must never be fatal: a failure is recorded as a cause — per table for a
-// compile refusal, tenant-wide for a missing artifact or a zone mismatch —
-// and surfaces as *Unavailable from Table. A table whose compile was refused
+// handle per table, keeping every compiled table whose columns, zone and
+// library are unchanged. It is called synchronously from discovery's refresh
+// hook, so it must never be fatal: a failure is recorded as a cause — per
+// table for a compile refusal or a zone the table cannot be read in,
+// tenant-wide for a missing artifact — and surfaces as *Unavailable from
+// Table. A table whose compile was refused
 // is compiled again at every Bind; a table the tenant no longer has is closed;
 // a tenant whose line resolves again is answering again.
 //
 // serverTZ is the server's default zone name as ClickHouse reports it; ""
-// means UTC, chtypes' own default, never the host's zone.
+// means UTC, chtypes' own default, never the host's zone. The first tenant
+// bound in the process fixes the image zone (see zone.go).
 func (e *Engine) Bind(id tenant.ID, serverVersion, serverTZ string, tables []*discovery.TableSchema) {
 	for {
 		set := e.tenantForBind(id)
@@ -324,7 +362,7 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 	type pending struct {
 		ts     *discovery.TableSchema
 		sig    string
-		pool   *pool
+		c      *compiled
 		cause  string
 		wire   []string
 		inputs []string
@@ -342,26 +380,28 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 		logLibrary(s.id, serverVersion, lib)
 	}
 
+	session := sessionZone(tz)
 	fresh := make([]pending, 0, len(tables))
 	keep := make(map[string]struct{}, len(tables))
 	for _, ts := range tables {
 		keep[ts.Name] = struct{}{}
-		sig := signature(ts)
+		sig := signature(ts, tz)
 		if !libChanged {
 			if old, exists := current[ts.Name]; exists && old.answers(sig) {
-				continue // same columns, same library: the handle still answers
+				continue // same columns, zone and library: the handle still answers
 			}
 		}
 		p := pending{ts: ts, sig: sig}
-		decl := discoveredColumns(ts.Columns)
-		p.pool, p.cause = compile(lib, decl)
+		decl := declsOf(ts.Columns)
+		if p.cause = zoneCause(session, decl); p.cause == "" {
+			p.c, p.cause = compileColumns(lib, decl)
+		}
 		if p.cause == "" {
-			schema := p.pool.first().schema
-			p.wire = deriveWireColumns(schema, WireColumnsOf(ts))
+			p.wire = wireColumns(p.c.desc)
 			p.inputs = inputColumns(lib, decl, p.wire, nil)
-			if p.cols, p.cause = declaredColumns(lib, schema, ts.Columns); p.cause != "" {
-				p.pool.close()
-				p.pool = nil
+			if p.cols, p.cause = declaredColumns(lib, p.c.desc); p.cause != "" {
+				p.c.close()
+				p.c = nil
 			}
 		}
 		if p.cause != "" {
@@ -380,7 +420,7 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 			// Nobody holds a pointer to a new table yet, so it is filled before
 			// it is published rather than swapped.
 			t = &Table{Name: p.ts.Name, tenant: s.id, Generation: 1, roles: newRoleCache(roleCacheSize)}
-			t.install(p.pool, p.cause, p.wire, p.inputs, p.cols, p.sig, lib, p.ts.Columns)
+			t.install(p.c, p.cause, p.wire, p.inputs, p.cols, p.sig, lib, p.ts.Columns, tz)
 			added[p.ts.Name] = t
 			continue
 		}
@@ -388,7 +428,7 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 		old := t.detachLocked()
 		t.Generation++
 		t.roles = newRoleCache(old.roles.capacity())
-		t.install(p.pool, p.cause, p.wire, p.inputs, p.cols, p.sig, lib, p.ts.Columns)
+		t.install(p.c, p.cause, p.wire, p.inputs, p.cols, p.sig, lib, p.ts.Columns, tz)
 		t.mu.Unlock()
 		old.close()
 	}
@@ -417,8 +457,15 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 // artifact answers for the tenant's server. A server on another patch of the
 // line is answered by the line's artifact, and patches can differ.
 func logLibrary(id tenant.ID, serverVersion string, lib *chtypes.Library) {
-	attrs := []any{"tenant", id, "server_version", serverVersion, "chtypes_version", string(lib.Version)}
-	if samePatch(lib.Version, serverVersion) {
+	if res := lib.Resolved(); res != nil {
+		if _, seen := warnedLibs.LoadOrStore(lib, true); !seen {
+			for _, w := range res.Warnings {
+				slog.Warn("chtypes SDK warning", "chtypes_version", lib.Version, "message", w)
+			}
+		}
+	}
+	attrs := []any{"tenant", id, "server_version", serverVersion, "chtypes_version", lib.Version}
+	if lib.Version == strings.TrimPrefix(strings.TrimSpace(serverVersion), "v") {
 		slog.Info("chtypes library bound", attrs...)
 		return
 	}
@@ -426,8 +473,11 @@ func logLibrary(id tenant.ID, serverVersion string, lib *chtypes.Library) {
 		attrs...)
 }
 
-// Table is one compiled shape: a pool of identical schema handles plus the
-// caches built over them. Fields are written only under the exclusive lock a
+// warnedLibs is the libraries whose fetch warnings were logged: once each.
+var warnedLibs sync.Map
+
+// Table is one compiled shape: one schema handle every request shares, plus
+// the caches built over it. Fields are written only under the exclusive lock a
 // rebind takes, so a holder of a Release-pending read lock sees a consistent
 // set.
 //
@@ -439,10 +489,10 @@ type Table struct {
 	Name       string
 	Generation uint64
 	// WireColumns is declaration order minus MATERIALIZED/ALIAS/EPHEMERAL —
-	// exactly the columns RowsExport emits, and therefore exactly what the
+	// exactly the columns the export emits, and therefore exactly what the
 	// message envelope's Columns must carry. It is read off the COMPILED handle
-	// (LoadedSchema.Columns), not recomputed from discovery, so it is a
-	// property of the thing that produced the bytes.
+	// (Schema.Describe), not recomputed from discovery, so it is a property of
+	// the thing that produced the bytes.
 	WireColumns []string
 
 	tenant tenant.ID
@@ -450,16 +500,20 @@ type Table struct {
 	// inputs is the INSERT column list a name-addressed body is parsed with
 	// (see inputColumns); nil parses with no list, which reads WireColumns.
 	inputs []string
-	// pool holds the identically-compiled handles; nil means unavailable.
-	pool *pool
+	// c is the compiled handle; nil means unavailable.
+	c *compiled
+	// zone is the tenant's server zone, and session the session_timezone
+	// every call for this table carries (sessionZone; "" for none). See
+	// zoneOpts.
+	zone, session string
 	// cols maps every column the compiled schema declares, of every kind, to
 	// how render writes a predicate over it — what render tests a predicate's
 	// column against.
 	cols  map[string]filterColumn
-	cause string // why pool is nil
+	cause string // why c is nil
 	sig   string
 	// lib and discovered are what a per-role recompile needs: the library the
-	// handles came from, and the column list the DDL was built from.
+	// handle came from, and the column list its CREATE was built from.
 	lib        *chtypes.Library
 	discovered []discovery.Column
 	// roles caches per-role projections of this table; nil on a role Table,
@@ -474,32 +528,44 @@ func (t *Table) Release() { t.mu.RUnlock() }
 func (t *Table) answers(sig string) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return t.sig == sig && t.pool != nil
+	return t.sig == sig && t.c != nil
 }
 
 // install sets a freshly compiled shape. The caller holds t.mu exclusively,
 // or is the only goroutine that can see t.
-func (t *Table) install(p *pool, cause string, wire, inputs []string, cols map[string]filterColumn, sig string,
-	lib *chtypes.Library, discovered []discovery.Column,
+func (t *Table) install(c *compiled, cause string, wire, inputs []string, cols map[string]filterColumn, sig string,
+	lib *chtypes.Library, discovered []discovery.Column, zone string,
 ) {
-	t.pool, t.cause = p, cause
+	t.c, t.cause = c, cause
 	t.WireColumns, t.inputs, t.cols, t.sig = wire, inputs, cols, sig
 	t.lib, t.discovered = lib, discovered
+	t.zone, t.session = zone, sessionZone(zone)
+}
+
+// zoneOpts is the per-call zone of every filter create and every parse for
+// this table, the one place either takes it from: chtypes declines a batch
+// whose filter was created in another zone, so the two must never differ.
+// Empty when the table's zone is the image zone.
+func (t *Table) zoneOpts() []chtypes.SettingsOption {
+	if t.session == "" {
+		return nil
+	}
+	return []chtypes.SettingsOption{chtypes.WithSessionTimezone(t.session)}
 }
 
 // detached is what a table held before a swap or a close: closed once the
 // table's own lock is released, so its holders never wait behind it.
 type detached struct {
-	pool  *pool
+	c     *compiled
 	roles *roleCache
 }
 
-// detachLocked takes the handles and the role projections off the table. The
-// caller holds t.mu exclusively — so no request is using a slot of the
-// detached pool — and closes the result after unlocking.
+// detachLocked takes the handle and the role projections off the table. The
+// caller holds t.mu exclusively — so no request is using the detached handle
+// — and closes the result after unlocking.
 func (t *Table) detachLocked() detached {
-	d := detached{pool: t.pool, roles: t.roles}
-	t.pool, t.roles = nil, nil
+	d := detached{c: t.c, roles: t.roles}
+	t.c, t.roles = nil, nil
 	return d
 }
 
@@ -508,7 +574,7 @@ func (d detached) close() {
 	if d.roles != nil {
 		d.roles.closeAll()
 	}
-	d.pool.close()
+	d.c.close()
 }
 
 // close tears every handle down, waiting for this shape's readers first; a
@@ -521,71 +587,33 @@ func (t *Table) close(cause string) {
 	d.close()
 }
 
-// compile reconstructs the column-declaration list chtypes wants (not a CREATE
-// TABLE) and compiles the table's first handle; the rest of its pool is
-// compiled on contention. The engine and TTL clauses are deliberately not
-// declared: chtypes declines engines it cannot model, and neither affects the
-// insert verdicts or filter semantics this package asks for.
-func compile(lib *chtypes.Library, cols []chtypes.DiscoveredColumn) (*pool, string) {
-	ddl, err := lib.ReconstructDDL(cols)
-	if err != nil {
-		return nil, "cannot reconstruct column declarations: " + err.Error()
-	}
-	return newPool(lib, ddl, poolSize())
-}
-
-// discoveredColumns is a table's columns as chtypes' DDL reconstruction takes
-// them.
-func discoveredColumns(src []discovery.Column) []chtypes.DiscoveredColumn {
-	cols := make([]chtypes.DiscoveredColumn, 0, len(src))
-	for _, c := range src {
-		cols = append(cols, discoveredColumn(c))
-	}
-	return cols
-}
-
-func discoveredColumn(c discovery.Column) chtypes.DiscoveredColumn {
-	return chtypes.DiscoveredColumn{
-		Name:              c.Name,
-		Type:              c.Type,
-		DefaultKind:       c.DefaultKind,
-		DefaultExpression: c.DefaultExpression,
-		Position:          c.Position,
-	}
-}
-
-// signature is the column shape a handle was compiled from. An unchanged
-// signature keeps the handle and the generation, so a refresh that discovers
-// nothing new costs no compiles and invalidates no cached filter.
-func signature(ts *discovery.TableSchema) string {
+// signature is the column shape and zone a handle was compiled for. An
+// unchanged signature keeps the handle and the generation, so a refresh that
+// discovers nothing new costs no compiles and invalidates no cached filter; a
+// zone change is a new generation, so no filter or role shape built under the
+// old zone survives it.
+func signature(ts *discovery.TableSchema, tz string) string {
 	var b strings.Builder
 	for _, c := range ts.Columns {
 		fmt.Fprintf(&b, "%d\x1f%s\x1f%s\x1f%s\x1f%s\x1e",
 			c.Position, c.Name, c.Type, c.DefaultKind, c.DefaultExpression)
 	}
+	b.WriteString(tz)
 	return b.String()
 }
 
-// deriveWireColumns is what RowsExport emits, read off the compiled handle:
+// wireColumns is what the export emits, read off the compiled handle:
 // declaration order minus the three kinds a positional INSERT never carries.
 // MATERIALIZED and ALIAS are computed by the server; EPHEMERAL is insert-only
-// and never stored.
-//
-// Taking it from LoadedSchema.Columns rather than recomputing it from
-// discovery makes the wire list a property of the handle that produced the
-// bytes, which is what ParseRow's drift check actually wants. An artifact
-// without column introspection reports no Columns at all; the fallback is then
-// the discovery-side computation, which answered identically on every
-// artifact measured.
-func deriveWireColumns(schema *chtypes.LoadedSchema, fallback []string) []string {
-	if schema == nil || len(schema.Columns) == 0 {
-		return fallback
-	}
-	out := make([]string, 0, len(schema.Columns))
-	for _, c := range schema.Columns {
+// and never stored. Taking it from the handle rather than from discovery makes
+// the wire list a property of the handle that produced the bytes, which is
+// what ParseRow's drift check actually wants.
+func wireColumns(desc []chtypes.Column) []string {
+	out := make([]string, 0, len(desc))
+	for _, c := range desc {
 		switch c.DefaultKind {
 		case chtypes.KindMaterialized, chtypes.KindAlias, chtypes.KindEphemeral:
-			// Never serialized by RowsExport.
+			// Never serialized by the export.
 		case chtypes.KindNone, chtypes.KindDefault:
 			out = append(out, c.Name)
 		default:
@@ -601,8 +629,7 @@ func deriveWireColumns(schema *chtypes.LoadedSchema, fallback []string) []string
 // WireColumnsOf is the wire column list of a discovered table — what a
 // full-width envelope's Columns carry — computed from discovery alone, for a
 // caller that holds no compiled handle (the stream's connect-time schema
-// frame). It is deriveWireColumns' fallback, and answered identically to the
-// handle on every artifact measured.
+// frame). It answered identically to the handle on every artifact measured.
 func WireColumnsOf(ts *discovery.TableSchema) []string {
 	out := make([]string, 0, len(ts.Columns))
 	for _, c := range ts.Columns {
@@ -642,7 +669,7 @@ func WireColumnsOf(ts *discovery.TableSchema) []string {
 //     record that omits it whenever the table computes any column (measured):
 //     an unread column would cost every record its verdict to accept a value
 //     that changes nothing.
-func inputColumns(lib *chtypes.Library, cols []chtypes.DiscoveredColumn, wire []string, writable func(string) bool) []string {
+func inputColumns(lib *chtypes.Library, cols []colDecl, wire []string, writable func(string) bool) []string {
 	var ephemeral []string
 	for _, c := range cols {
 		if c.DefaultKind == "EPHEMERAL" && (writable == nil || writable(c.Name)) &&
@@ -670,12 +697,12 @@ func inputColumns(lib *chtypes.Library, cols []chtypes.DiscoveredColumn, wire []
 }
 
 // readBy reports whether an expression of one of kinds reads column name,
-// asking the compiler rather than parsing SQL in Go: the declaration list is
-// compiled without name, every other kind's expression dropped, so a
-// reference to name fails the compile. Any refusal counts as a read. It
-// compiles only when a column of those kinds has an expression at all.
-func readBy(lib *chtypes.Library, cols []chtypes.DiscoveredColumn, name string, kinds ...string) bool {
-	probe := make([]chtypes.DiscoveredColumn, 0, len(cols))
+// asking the compiler rather than parsing SQL in Go: the table is compiled
+// without name, every other kind's expression dropped, so a reference to name
+// fails the compile. Any refusal counts as a read. It compiles only when a
+// column of those kinds has an expression at all.
+func readBy(lib *chtypes.Library, cols []colDecl, name string, kinds ...string) bool {
+	probe := make([]colDecl, 0, len(cols))
 	reads := false
 	for _, c := range cols {
 		switch {
@@ -694,15 +721,15 @@ func readBy(lib *chtypes.Library, cols []chtypes.DiscoveredColumn, name string, 
 	if !reads {
 		return false
 	}
-	ddl, err := lib.ReconstructDDL(probe)
+	stmt, err := createTable(lib, probe)
 	if err != nil {
 		return true
 	}
-	s, err := lib.CompileDDL(ddl, chtypes.WithCompileSettings(compileSettings))
+	s, err := lib.CompileTable(stmt, chtypes.WithSettings(compileSettings))
 	if err != nil {
 		return true
 	}
-	s.Close()
+	_ = s.Close()
 	return false
 }
 
@@ -722,29 +749,18 @@ type filterColumn struct {
 // check over it tests the value the server will store. Quoting once per
 // compile keeps a C call off render's per-event path. A non-empty second
 // return is the cause.
-func declaredColumns(lib *chtypes.Library, schema *chtypes.LoadedSchema, fallback []discovery.Column) (map[string]filterColumn, string) {
-	type named struct{ name, typ string }
-	var cols []named
-	if schema != nil && len(schema.Columns) > 0 {
-		for _, c := range schema.Columns {
-			cols = append(cols, named{c.Name, c.Type})
-		}
-	} else {
-		for _, c := range fallback {
-			cols = append(cols, named{c.Name, c.Type})
-		}
-	}
-	m := make(map[string]filterColumn, len(cols))
-	for _, c := range cols {
-		q, err := lib.QuoteIdentifier(c.name)
+func declaredColumns(lib *chtypes.Library, desc []chtypes.Column) (map[string]filterColumn, string) {
+	m := make(map[string]filterColumn, len(desc))
+	for _, c := range desc {
+		q, err := lib.QuoteIdentifier(c.Name)
 		if err != nil {
-			return nil, fmt.Sprintf("cannot quote column %q: %s", c.name, err)
+			return nil, fmt.Sprintf("cannot quote column %q: %s", c.Name, err)
 		}
 		col := filterColumn{ident: q}
-		if it, ok := chsql.IntegerType(c.typ); ok {
+		if it, ok := chsql.IntegerType(c.Type); ok {
 			col.intType = it
 		}
-		m[c.name] = col
+		m[c.Name] = col
 	}
 	return m, ""
 }

@@ -260,8 +260,8 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		return fmt.Errorf("%w for tenant %s", ErrNoConnection, sr.tenant)
 	}
 
-	// The server's default zone, kept with the schemas so the type layer can
-	// check it against the zone its library was opened with.
+	// The server's default zone, kept with the schemas so the type layer reads
+	// the tenant's rows and filters in it.
 	var tzName string
 	if err := conn.QueryRow(ctx, "SELECT timezone()").Scan(&tzName); err != nil {
 		return fmt.Errorf("query server timezone: %w", err)

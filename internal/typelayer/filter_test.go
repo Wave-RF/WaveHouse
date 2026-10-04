@@ -4,11 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -371,15 +372,15 @@ func TestVisible_FailsClosed(t *testing.T) {
 	_, row := parsedRow(t)
 
 	t.Run("unknown column", func(t *testing.T) {
-		before := row.slot.filters.len()
+		before := row.table.c.filters.len()
 		assert.False(t, row.Visible([]Predicate{{Column: "nosuch", Op: "=", Values: []string{"x"}}}))
-		assert.Equal(t, before, row.slot.filters.len(), "an unknown column must not reach the compiler")
+		assert.Equal(t, before, row.table.c.filters.len(), "an unknown column must not reach the compiler")
 	})
 
 	t.Run("empty values", func(t *testing.T) {
-		before := row.slot.filters.len()
+		before := row.table.c.filters.len()
 		assert.False(t, row.Visible([]Predicate{{Column: "tenant", Op: "in", Values: nil}}))
-		assert.Equal(t, before, row.slot.filters.len(), "an unresolvable claim must not reach the compiler")
+		assert.Equal(t, before, row.table.c.filters.len(), "an unresolvable claim must not reach the compiler")
 	})
 
 	t.Run("unsupported operator", func(t *testing.T) {
@@ -424,7 +425,7 @@ func TestVisibleWithReason_LabelsTheCause(t *testing.T) {
 
 	// A filter that will not compile is the decline case; render never emits
 	// one, so it is reached through the compiler directly.
-	assert.Nil(t, tbl.filterOn(row.slot, "notAFunction(`tenant`) = {p0:String}", map[string]string{"p0": "x"}))
+	assert.Nil(t, tbl.filterFor("notAFunction(`tenant`) = {p0:String}", map[string]string{"p0": "x"}))
 }
 
 // TestParseRow_ColumnsDriftIsAnError: a column list no INSERT into this
@@ -530,22 +531,21 @@ func TestParseRow_AcceptsALineWithOrWithoutNewline(t *testing.T) {
 }
 
 // TestFilterCache_CompilesOncePerPredicateSet: the cache is what keeps a
-// per-subscriber fan-out from recompiling on every event. One Row stays on one
-// handle, so the count is that slot's.
+// per-subscriber fan-out from recompiling on every event.
 func TestFilterCache_CompilesOncePerPredicateSet(t *testing.T) {
 	_, row := parsedRow(t)
-	require.Equal(t, 0, row.slot.filters.len())
+	require.Equal(t, 0, row.table.c.filters.len())
 
 	pred := []Predicate{{Column: "tenant", Op: "=", Values: []string{"acme"}}}
 	for range 5 {
 		assert.True(t, row.Visible(pred))
 	}
-	assert.Equal(t, 1, row.slot.filters.len())
+	assert.Equal(t, 1, row.table.c.filters.len())
 
 	// A different bound value is a different compiled handle: values are baked
 	// in at compile time.
 	assert.False(t, row.Visible([]Predicate{{Column: "tenant", Op: "=", Values: []string{"beta"}}}))
-	assert.Equal(t, 2, row.slot.filters.len())
+	assert.Equal(t, 2, row.table.c.filters.len())
 }
 
 // TestFilterCache_NegativeEntryStopsRecompiling: a broken expression must cost
@@ -553,70 +553,65 @@ func TestFilterCache_CompilesOncePerPredicateSet(t *testing.T) {
 func TestFilterCache_NegativeEntryStopsRecompiling(t *testing.T) {
 	tbl, row := parsedRow(t)
 	for range 3 {
-		assert.Nil(t, tbl.filterOn(row.slot, "notAFunction(`tenant`) = {p0:String}", map[string]string{"p0": "x"}))
+		assert.Nil(t, tbl.filterFor("notAFunction(`tenant`) = {p0:String}", map[string]string{"p0": "x"}))
 	}
-	assert.Equal(t, 1, row.slot.filters.len())
+	assert.Equal(t, 1, row.table.c.filters.len())
 }
 
 // TestFilterCache_BoundedUnderTenantValueChurn: the bound values come from
 // tenant claims, so an unbounded cache is a denial of service. Eviction closes
 // the handle it drops, against the real library.
 func TestFilterCache_BoundedUnderTenantValueChurn(t *testing.T) {
-	_, row := parsedRow(t)
-	row.slot.filters = newFilterCache(8)
+	tbl, row := parsedRow(t)
+	tbl.c.filters = newFilterCache(8)
 
 	for i := range 40 {
 		pred := []Predicate{{Column: "tenant", Op: "=", Values: []string{strconv.Itoa(i)}}}
 		assert.False(t, row.Visible(pred))
 	}
-	assert.Equal(t, 8, row.slot.filters.len())
+	assert.Equal(t, 8, row.table.c.filters.len())
 
 	// The surviving handles still answer after their neighbours were closed.
 	assert.True(t, row.Visible([]Predicate{{Column: "tenant", Op: "=", Values: []string{"acme"}}}))
 }
 
-// TestFilterCache_EverySlotHoldsTheWholeBudget: a filter answers only on its
-// own handle, so the slot an evaluation lands on must hold the whole working
-// set. Every slot of a grown pool is bounded by filterCacheSize itself, not
-// by a share of it, and one slot holds more distinct filters than an
-// eight-way split gave it (512) without recompiling any of them.
-func TestFilterCache_EverySlotHoldsTheWholeBudget(t *testing.T) {
-	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(maxPoolSize))
-	eng := testEngine(t, rowsTable())
-	tbl, err := eng.Table(tenant.Default, "rows")
-	require.NoError(t, err)
-	defer tbl.Release()
+// TestFilterCache_MissCompilesOutsideTheLock: one cache serves every
+// evaluation on a table, so a compile in flight must not stall a hit, and
+// concurrent misses on one key compile it once.
+func TestFilterCache_MissCompilesOutsideTheLock(t *testing.T) {
+	tbl, row := parsedRow(t)
+	hit := []Predicate{{Column: "tenant", Op: "=", Values: []string{"acme"}}}
+	require.True(t, row.Visible(hit)) // cached
 
-	p := tbl.pool
-	assert.Len(t, p.list(), 1, "one handle after Bind; the rest are compiled on contention")
-	held := make([]*schemaSlot, 0, maxPoolSize)
-	for range maxPoolSize {
-		held = append(held, p.acquire())
+	c := tbl.c.filters
+	entered, release := make(chan struct{}), make(chan struct{})
+	var compiles atomic.Int32
+	c.compile = func(t *Table, expr string, params map[string]string) *chtypes.Filter {
+		if compiles.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return (*Table).compileFilter(t, expr, params)
 	}
-	for _, s := range held {
-		p.release(s)
+	miss := []Predicate{{Column: "tenant", Op: "=", Values: []string{"held"}}}
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Go(func() { assert.False(t, row.Visible(miss)) })
 	}
-	require.Len(t, p.list(), maxPoolSize)
-	for _, s := range p.list() {
-		assert.Equal(t, filterCacheSize, s.filters.cap)
-	}
+	<-entered
 
-	s := p.first()
-	filter := func(i int) *chtypes.LoadedFilter {
-		expr, params, ok := tbl.render([]Predicate{{Column: "tenant", Op: "=", Values: []string{"user-" + strconv.Itoa(i)}}})
-		require.True(t, ok)
-		return tbl.filterOn(s, expr, params)
+	answered := make(chan bool)
+	go func() { answered <- row.Visible(hit) }()
+	select {
+	case ok := <-answered:
+		assert.True(t, ok, "a hit answers while a miss compiles")
+	case <-time.After(10 * time.Second):
+		t.Fatal("a hit waited behind a compile in flight")
 	}
-	n := filterCacheSize/maxPoolSize + 1
-	compiled := make([]*chtypes.LoadedFilter, n)
-	for i := range compiled {
-		compiled[i] = filter(i)
-		require.NotNil(t, compiled[i])
-	}
-	assert.Equal(t, n, s.filters.len())
-	for i, f := range compiled {
-		assert.Same(t, f, filter(i), "filter %d is still cached, not recompiled", i)
-	}
+	close(release)
+	wg.Wait()
+	assert.Equal(t, int32(1), compiles.Load(), "concurrent misses on one key compile it once")
+	assert.Equal(t, 2, c.len())
 }
 
 // TestFilterCache_GenerationInvalidatesEntries: a filter only answers for the
@@ -650,8 +645,7 @@ func (c *filterCache) len() int {
 }
 
 // TestVisible_ConcurrentSubscribers: the hub evaluates K filters against one
-// parsed block; one LoadedSchema serializes them internally, so this must be
-// safe rather than merely fast.
+// parsed block from many goroutines at once.
 func TestVisible_ConcurrentSubscribers(t *testing.T) {
 	_, row := parsedRow(t)
 
@@ -666,13 +660,19 @@ func TestVisible_ConcurrentSubscribers(t *testing.T) {
 	}
 }
 
-// TestTable_ConcurrentAcrossThePool exercises every entry point on one table
-// from many goroutines at once. Under -race it is the pin that the pool's
-// slot choice, the per-slot filter caches and the shared block parsing are
-// safe; a slot chosen per call rather than per Row would show up here as a
-// filter and a block on different handles.
-func TestTable_ConcurrentAcrossThePool(t *testing.T) {
+// TestTable_ConcurrentOnOneHandle exercises every entry point on one table
+// from many goroutines at once, all on its one handle with no lock around a
+// call. Under -race it is the pin that the shared handle, its filter cache and
+// the parsed blocks are safe, and that no call compiles a handle of its own.
+func TestTable_ConcurrentOnOneHandle(t *testing.T) {
 	eng := testEngine(t, rowsTable())
+	lib := boundLib(eng, tenant.Default)
+	schemas := func() uint64 {
+		live, err := lib.LiveHandles()
+		require.NoError(t, err)
+		return live["chs_schema"]
+	}
+	before := schemas()
 
 	const goroutines = 16
 	var wg sync.WaitGroup
@@ -710,28 +710,18 @@ func TestTable_ConcurrentAcrossThePool(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	assert.Equal(t, before, schemas(), "every call ran on the table's one handle")
 }
 
 // BenchmarkVisible_ClaimChurn is the stream's fan-out: one parsed event, then
-// one evaluation per subscriber, each subscriber's claim a distinct filter,
-// on a pool grown to its limit. The event's handle must hold the whole set:
-// subscribers=600 is past the 512 a slot got when the table's budget was
-// split across a pool of 8, and inside filterCacheSize.
+// one evaluation per subscriber, each subscriber's claim a distinct filter.
+// The table's cache must hold the whole set; both sizes are inside
+// filterCacheSize.
 func BenchmarkVisible_ClaimChurn(b *testing.B) {
 	eng := testEngine(b, rowsTable())
 	tbl, err := eng.Table(tenant.Default, "rows")
 	require.NoError(b, err)
 	defer tbl.Release()
-
-	// Grow the pool to its limit, as a busy table's would be.
-	p := tbl.pool
-	held := make([]*schemaSlot, 0, poolSize())
-	for range poolSize() {
-		held = append(held, p.acquire())
-	}
-	for _, s := range held {
-		p.release(s)
-	}
 
 	for _, n := range []int{64, 600} {
 		preds := make([][]Predicate, n)
@@ -749,7 +739,7 @@ func BenchmarkVisible_ClaimChurn(b *testing.B) {
 			row.Close()
 		}
 		b.Run(fmt.Sprintf("subscribers=%d", n), func(b *testing.B) {
-			event(b) // compiles the set on the slot a serial event lands on
+			event(b) // compiles the set
 			b.ResetTimer()
 			for range b.N {
 				event(b)

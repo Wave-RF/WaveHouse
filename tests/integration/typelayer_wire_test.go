@@ -96,6 +96,55 @@ func TestTypelayerWire_PublishedRowIsTheStoredRow(t *testing.T) {
 	assert.EqualValues(t, 0, wire[4], "256 into a UInt8 wraps — the stored truth")
 }
 
+// TestTypelayerWire_NaNAndInfinitySurviveTheInsert: a Float NaN or infinity is
+// published as a string ("nan", "inf", "-inf"), and the worker's INSERT of
+// that row stores the value itself. A null there would store the column's
+// default (0, or NULL on a Nullable column) with nothing refused.
+func TestTypelayerWire_NaNAndInfinitySurviveTheInsert(t *testing.T) {
+	t.Parallel() // a table of its own: see eventuallyRows
+	e := env(t)
+	ctx := context.Background()
+	before := time.Now().UTC().Add(-time.Minute)
+
+	table := createTable(t,
+		"k String, f64 Float64, f32 Float32, nf64 Nullable(Float64), nf32 Nullable(Float32)",
+		"ORDER BY k",
+	)
+	body := `[{"k":"a","f64":"nan","f32":"inf","nf64":"-inf","nf32":"nan"},` +
+		`{"k":"b","f64":"-inf","f32":"nan","nf64":"inf","nf32":"-inf"},` +
+		`{"k":"c","f64":"inf","f32":"-inf","nf64":"nan","nf32":"inf"}]`
+	resp, err := http.Post(e.baseURL+"/v1/ingest?table="+url.QueryEscape(table), "application/json", strings.NewReader(body))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	require.Eventually(t, func() bool {
+		var count uint64
+		err := e.chConn.QueryRow(ctx, fmt.Sprintf("SELECT count() FROM %s", table)).Scan(&count)
+		return err == nil && count == 3
+	}, 30*time.Second, 250*time.Millisecond, "rows never landed")
+
+	rows, err := e.chConn.Query(ctx, fmt.Sprintf(
+		"SELECT k, toString(f64), toString(f32), toString(nf64), toString(nf32) FROM %s ORDER BY k", table))
+	require.NoError(t, err)
+	defer rows.Close()
+	var stored [][5]string
+	for rows.Next() {
+		var r [5]string
+		require.NoError(t, rows.Scan(&r[0], &r[1], &r[2], &r[3], &r[4]))
+		stored = append(stored, r)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, [][5]string{
+		{"a", "nan", "inf", "-inf", "nan"},
+		{"b", "-inf", "nan", "inf", "-inf"},
+		{"c", "inf", "-inf", "nan", "inf"},
+	}, stored, "the stored values are the NaN and infinities sent, not the columns' defaults")
+
+	wire := publishedWireRow(t, e.baseURL, table, before)
+	assert.Equal(t, []any{"a", "nan", "inf", "-inf", "nan"}, wire, "published as strings, never null")
+}
+
 // publishedWireRow replays the table's SSE stream from before the insert, so
 // the test reads the published bytes without racing the publish.
 func publishedWireRow(t *testing.T, serverURL, table string, since time.Time) []any {

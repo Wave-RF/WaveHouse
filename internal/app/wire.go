@@ -391,17 +391,17 @@ func (a *App) readConns(s *settings.Store) int {
 // ingest judges every record with and the stream hub evaluates row filters
 // with. Both are API work, so only an API process opens it — an ingest-only
 // or sweeper-only process boots with no artifact installed, the worker
-// needing only the static typelayer.InsertSettings. No artifact anywhere on
-// the search path refuses boot: an API process could judge nothing. Opening
-// reads manifests only; a ClickHouse line's library is opened by the first
-// tenant bound to it, from that tenant's discovery (wireDiscovery), and a
-// tenant or table this process cannot serve is unavailable on its own
-// (typelayer.Unavailable lists why). Released after schema discovery, whose
-// loops bind it, and so after the HTTP drain.
+// needing only the static typelayer.InsertSettings. No artifact installed for
+// this host refuses boot: an API process could judge nothing. Opening reads
+// the fetch layer's install records only; a ClickHouse line's library is
+// opened by the first tenant bound to it, from that tenant's discovery
+// (wireDiscovery), and a tenant or table this process cannot serve is
+// unavailable on its own (typelayer.Unavailable lists why). Released after
+// schema discovery, whose loops bind it, and so after the HTTP drain.
 func (a *App) wireTypes() error {
-	eng, err := typelayer.NewEngine(typelayer.Config{RegistryDir: a.cfg.ClickHouse.ChtypesRegistry})
+	eng, err := typelayer.NewEngine(typelayer.Config{CacheDir: a.cfg.ClickHouse.ChtypesRegistry})
 	if err != nil {
-		return fmt.Errorf("type layer: %w — an api-role process judges ingest and row filters with a chtypes artifact: install one (scripts/fetch-chtypes.sh), or name its directory in clickhouse.chtypes_registry", err)
+		return fmt.Errorf("type layer: %w — an api-role process judges ingest and row filters with a chtypes artifact: install one (scripts/fetch-chtypes.sh), or name its v1 layout directory in clickhouse.chtypes_registry", err)
 	}
 	a.types, a.bindings = eng, newTypeBindings(eng)
 	a.add(component{name: "type layer", close: func(context.Context) error {

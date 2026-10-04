@@ -111,7 +111,7 @@ func TestIngestChecks_NoPredicatesPassesEveryRow(t *testing.T) {
 	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(checksBody))
 	require.NoError(t, err)
 	assert.Equal(t, []string{"", "", "", ""}, checkReasons(t, batch))
-	assert.Equal(t, 0, tbl.pool.first().filters.len(), "no filter is compiled without checks")
+	assert.Equal(t, 0, tbl.c.filters.len(), "no filter is compiled without checks")
 }
 
 func TestIngestChecks_EmptyBody(t *testing.T) {
@@ -126,7 +126,7 @@ func TestIngestChecks_EmptyBody(t *testing.T) {
 // withholds, and an unresolvable claim never reaches the compiler.
 func TestIngestChecks_FailsClosed(t *testing.T) {
 	tbl := checksHandle(t)
-	compiled := func() int { return tbl.pool.first().filters.len() }
+	compiled := func() int { return tbl.c.filters.len() }
 	const f, e = ReasonFilter, ReasonError
 
 	t.Run("empty values", func(t *testing.T) {
@@ -174,11 +174,9 @@ func TestIngestChecks_FailsClosed(t *testing.T) {
 		preds := []Predicate{{Column: "tenant", Op: "=", Values: []string{"closed"}}}
 		expr, params, ok := tbl.render(preds)
 		require.True(t, ok)
-		for _, s := range tbl.pool.list() { // whichever slot the request lands on
-			f := tbl.filterOn(s, expr, params)
-			require.NotNil(t, f)
-			f.Close() // what an eviction racing this request does
-		}
+		f := tbl.filterFor(expr, params)
+		require.NotNil(t, f)
+		require.NoError(t, f.Close()) // what an eviction racing this request does
 
 		batch, err := tbl.Ingest(FormatJSONEachRow, []byte(checksBody), preds...)
 		require.NoError(t, err, "a closed filter fails the checks, not the request")
@@ -252,19 +250,17 @@ func TestIngestChecks_ParseOutcomeDecidesFirst(t *testing.T) {
 
 	// The trap itself, at the SDK: a skipped row's verdict is 'd', and its
 	// error is in ErrCode/ErrMsg on every build.
-	s := tbl.pool.first()
 	expr, params, ok := tbl.render(preds)
 	require.True(t, ok)
-	res, err := s.schema.RowsExportWith(FormatJSONEachRow, body, InsertSettings(), chtypes.JSONCompactEachRow,
-		chtypes.WithRowFilter(tbl.filterOn(s, expr, params)))
+	res, err := tbl.export(FormatJSONEachRow, body, InsertSettings(), nil, tbl.filterFor(expr, params))
 	require.NoError(t, err)
 	require.Len(t, res.Rows, 4)
 	require.Equal(t, chtypes.Skipped, res.Rows[1].Outcome)
 	require.NotNil(t, res.Rows[1].Verdict)
 	assert.Equal(t, chtypes.VerdictDecline, *res.Rows[1].Verdict)
-	assert.Equal(t, 27, res.Rows[1].ErrCode)
-	assert.Equal(t, 2, res.RowsPassed)
-	assert.Equal(t, 1, res.RowsCut, "a skipped row is 'd' but not counted as cut")
+	assert.Equal(t, int32(27), res.Rows[1].ErrCode)
+	assert.Equal(t, uint64(2), res.RowsPassed)
+	assert.Equal(t, uint64(1), res.RowsCut, "a skipped row is 'd' but not counted as cut")
 
 	batch, err := tbl.Ingest(FormatJSONEachRow, body, preds...)
 	require.NoError(t, err)
@@ -295,11 +291,9 @@ func TestIngestChecks_RejectedBatchExportsNothing(t *testing.T) {
 	body := []byte(`[{"id":1,"tenant":"acme","kind":"a"},{"id":"x","tenant":"acme","kind":"a"},{"id":3,"tenant":"acme","kind":"a"}]`)
 	preds := []Predicate{{Column: "tenant", Op: "=", Values: []string{"acme"}}}
 
-	s := tbl.pool.first()
 	expr, params, ok := tbl.render(preds)
 	require.True(t, ok)
-	res, err := s.schema.RowsExportWith(FormatJSONEachRow, body, InsertSettings(), chtypes.JSONCompactEachRow,
-		chtypes.WithRowFilter(tbl.filterOn(s, expr, params)))
+	res, err := tbl.export(FormatJSONEachRow, body, InsertSettings(), nil, tbl.filterFor(expr, params))
 	require.NoError(t, err)
 	require.Equal(t, chtypes.Rejected, res.Outcome)
 	require.Empty(t, res.Payload)
@@ -448,19 +442,11 @@ func TestIngest_WithNamesFormats(t *testing.T) {
 	assert.True(t, b.Rows[0].Accepted, b.Rows[0].Message)
 }
 
-// BenchmarkIngest_HandlePool is the standing evidence behind maxPoolSize (re-run it on deployment hardware).
-// Three arms, identical work, only the concurrency and the handle differ:
-//
-//   - serial: one goroutine, one handle — the cost of a call with no contention
-//   - parallel-shared: GOMAXPROCS goroutines, ONE handle
-//   - parallel-pooled: GOMAXPROCS goroutines, the whole pool
-//
-// Read it this way: if parallel-shared's ns/op is not meaningfully better than
-// serial's, RowsExport is not parallelizing at all and a pool of handles
-// cannot help — which is what darwin shows, while Linux scales (see maxPoolSize).
-// Only when parallel-shared is ~GOMAXPROCS× worse than serial does a pool have
-// anything to win, and parallel-pooled is then the size of the win.
-func BenchmarkIngest_HandlePool(b *testing.B) {
+// BenchmarkIngest_OneHandle measures how one table's single shared handle
+// scales: identical work, serial and from GOMAXPROCS goroutines at once. Read
+// parallel's ns/op against serial's: the ratio is how much of the host's cores
+// one table's ingest can use (re-run it on deployment hardware).
+func BenchmarkIngest_OneHandle(b *testing.B) {
 	eng := testEngine(b, checksTable())
 	tbl, err := eng.Table(tenant.Default, "checks")
 	require.NoError(b, err)
@@ -471,49 +457,22 @@ func BenchmarkIngest_HandlePool(b *testing.B) {
 		body.WriteString(`{"id":` + strconv.Itoa(i) + `,"tenant":"acme","kind":"a"}` + "\n")
 	}
 	raw := []byte(body.String())
-
-	// Identical work on both arms — only the handle choice differs.
-	export := func(b *testing.B, pick func() *schemaSlot) {
-		b.Helper()
-		b.ResetTimer()
-		b.RunParallel(func(pb *testing.PB) {
-			for pb.Next() {
-				if _, err := pick().schema.RowsExport(
-					FormatJSONEachRow, raw, InsertSettings(), chtypes.JSONCompactEachRow); err != nil {
-					b.Fatal(err)
-				}
-			}
-		})
-	}
+	settings, _ := parseSettings(FormatJSONEachRow, IngestOptions{})
 
 	b.Run("serial", func(b *testing.B) {
-		s := tbl.pool.first()
-		b.ResetTimer()
 		for range b.N {
-			if _, err := s.schema.RowsExport(
-				FormatJSONEachRow, raw, InsertSettings(), chtypes.JSONCompactEachRow); err != nil {
+			if _, err := tbl.export(FormatJSONEachRow, raw, settings, nil, nil); err != nil {
 				b.Fatal(err)
 			}
 		}
 	})
-	b.Run("parallel-shared", func(b *testing.B) {
-		export(b, func() *schemaSlot { return tbl.pool.first() })
-	})
-	b.Run("parallel-pooled", func(b *testing.B) {
-		// Every slot the pool may grow to, so the arm measures the whole pool
-		// rather than whatever the lazy growth has reached so far.
-		p := tbl.pool
-		held := make([]*schemaSlot, 0, poolSize())
-		for range poolSize() {
-			held = append(held, p.acquire())
-		}
-		for _, s := range held {
-			p.release(s)
-		}
-		export(b, func() *schemaSlot {
-			s := p.acquire()
-			p.release(s)
-			return s
+	b.Run("parallel", func(b *testing.B) {
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				if _, err := tbl.export(FormatJSONEachRow, raw, settings, nil, nil); err != nil {
+					b.Fatal(err)
+				}
+			}
 		})
 	})
 }

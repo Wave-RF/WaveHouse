@@ -20,9 +20,21 @@ const (
 	testLine          = "26.8"
 )
 
-// testEngine opens an Engine on the SDK's default search path and binds
-// tables for tenant.Default at testServerVersion in UTC, skipping the test
-// when the artifact is absent or does not load — failing it under
+// TestMain commits the image zone before any test binds, so the zone every
+// test reads in does not depend on which test happens to bind first: UTC,
+// unless the subprocess of TestImage_FirstTenantInAnotherZone names another.
+func TestMain(m *testing.M) {
+	if zone := testImageZone(); zone != "unset" {
+		if _, err := setupImage(zone); err != nil {
+			panic(err)
+		}
+	}
+	os.Exit(m.Run())
+}
+
+// testEngine opens an Engine on the SDK's default layouts and binds tables
+// for tenant.Default at testServerVersion in UTC, skipping the test when the
+// artifact is absent or does not load — failing it under
 // WAVEHOUSE_TEST_REQUIRE_CHTYPES=1.
 func testEngine(t testing.TB, tables ...*discovery.TableSchema) *Engine {
 	t.Helper()

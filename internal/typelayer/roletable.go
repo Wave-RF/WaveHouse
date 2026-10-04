@@ -20,8 +20,7 @@ import (
 // roleCacheSize bounds the per-role shapes held per table. A shape's Defaults
 // values come from tenant claims and are baked into the compiled handle, so an
 // unbounded cache is a memory and CPU denial of service — the same reason
-// filterCache is bounded. Each entry holds one compiled handle, and grows to
-// rolePoolSize only under contention.
+// filterCache is bounded. Each entry holds one compiled handle.
 const roleCacheSize = 256
 
 // RoleShape is the projection of a table a role may insert through. It is the
@@ -231,35 +230,36 @@ func (c *roleCache) compileFlight(t *Table, shape RoleShape, key string, f *role
 	return rt, cause
 }
 
-// compileRole builds and compiles the role's declaration list. It returns
-// (nil, cause) for every refusal.
+// compileRole builds and compiles the role's table. It returns (nil, cause)
+// for every refusal. The projection takes the base table's zone, so its calls
+// carry the same session zone.
 func (t *Table) compileRole(shape RoleShape) (*Table, string) {
-	cols, wire, err := roleColumns(t.lib, t.discovered, shape)
+	cols, _, err := roleColumns(t.lib, t.discovered, shape)
 	if err != nil {
 		return nil, err.Error()
 	}
-	ddl, rerr := t.lib.ReconstructDDL(cols)
-	if rerr != nil {
-		return nil, "cannot reconstruct role column declarations: " + rerr.Error()
+	if cause := zoneCause(t.session, cols); cause != "" {
+		return nil, cause
 	}
-	p, cause := newPool(t.lib, ddl, rolePoolSize())
+	c, cause := compileColumns(t.lib, cols)
 	if cause != "" {
 		return nil, cause
 	}
-	schema := p.first().schema
-	declared, cause := declaredColumns(t.lib, schema, nil)
+	declared, cause := declaredColumns(t.lib, c.desc)
 	if cause != "" {
-		p.close()
+		c.close()
 		return nil, cause
 	}
-	wire = deriveWireColumns(schema, wire)
+	wire := wireColumns(c.desc)
 
 	return &Table{
 		Name:        t.Name,
 		Generation:  t.Generation,
 		WireColumns: wire,
 		tenant:      t.tenant,
-		pool:        p,
+		c:           c,
+		zone:        t.zone,
+		session:     t.session,
 		cols:        declared,
 		inputs:      inputColumns(t.lib, cols, wire, shape.writable),
 		lib:         t.lib,
@@ -268,7 +268,7 @@ func (t *Table) compileRole(shape RoleShape) (*Table, string) {
 
 // roleColumns projects the table's discovered columns onto a shape. It returns
 // the declaration list and the wire column names (the plain and DEFAULT
-// columns the role may write — what RowsExport emits). An injected value is
+// columns the role may write — what the export emits). An injected value is
 // quoted by lib.QuoteLiteral, ClickHouse's own quoteString, so it reaches the
 // compiler as one string literal whatever bytes it holds.
 //
@@ -279,13 +279,13 @@ func (t *Table) compileRole(shape RoleShape) (*Table, string) {
 // worker's INSERT omits it keeps it off the wire and unnamable (117), and
 // keeps what those expressions compute here equal to what the server will
 // store.
-func roleColumns(lib *chtypes.Library, src []discovery.Column, shape RoleShape) ([]chtypes.DiscoveredColumn, []string, error) {
-	cols := make([]chtypes.DiscoveredColumn, 0, len(src))
+func roleColumns(lib *chtypes.Library, src []discovery.Column, shape RoleShape) ([]colDecl, []string, error) {
+	cols := make([]colDecl, 0, len(src))
 	wire := make([]string, 0, len(src))
 	declared := make(map[string]struct{}, len(src))
 	for _, c := range src {
 		declared[c.Name] = struct{}{}
-		dc := discoveredColumn(c)
+		dc := declsOf([]discovery.Column{c})[0]
 		v, inject := shape.Defaults[c.Name]
 		switch {
 		case c.DefaultKind == "MATERIALIZED" || c.DefaultKind == "ALIAS" || c.DefaultKind == "EPHEMERAL":
@@ -301,18 +301,18 @@ func roleColumns(lib *chtypes.Library, src []discovery.Column, shape RoleShape) 
 				return nil, nil, fmt.Errorf(
 					"cannot inject a default into column %q: the role may not write it", c.Name)
 			}
-			expr, err := storedDefault(lib, c)
+			expr, origin, err := storedDefault(lib, c)
 			if err != nil {
 				return nil, nil, err
 			}
-			dc.DefaultKind, dc.DefaultExpression = "MATERIALIZED", expr
+			dc.DefaultKind, dc.DefaultExpression, dc.origin = "MATERIALIZED", expr, origin
 		default:
 			if inject {
 				lit, err := lib.QuoteLiteral(v)
 				if err != nil {
 					return nil, nil, fmt.Errorf("cannot quote the default for column %q: %w", c.Name, err)
 				}
-				dc.DefaultKind, dc.DefaultExpression = "DEFAULT", lit
+				dc.DefaultKind, dc.DefaultExpression, dc.origin = "DEFAULT", lit, exprLiteral
 			}
 			wire = append(wire, c.Name)
 		}
@@ -335,16 +335,16 @@ func roleColumns(lib *chtypes.Library, src []discovery.Column, shape RoleShape) 
 // INSERT omits it: its own DEFAULT expression, or its type's default value
 // (defaultValueOfTypeName, ClickHouse's own answer, measured to compile for
 // every type family the 26.8 artifact accepts, Nullable and LowCardinality
-// included).
-func storedDefault(lib *chtypes.Library, c discovery.Column) (string, error) {
+// included). The second return is who wrote the expression (see zoneCause).
+func storedDefault(lib *chtypes.Library, c discovery.Column) (string, exprOrigin, error) {
 	if c.DefaultKind == "DEFAULT" && c.DefaultExpression != "" {
-		return c.DefaultExpression, nil
+		return c.DefaultExpression, exprServer, nil
 	}
 	typ, err := lib.QuoteLiteral(c.Type)
 	if err != nil {
-		return "", fmt.Errorf("cannot quote the type of column %q: %w", c.Name, err)
+		return "", exprServer, fmt.Errorf("cannot quote the type of column %q: %w", c.Name, err)
 	}
-	return "defaultValueOfTypeName(" + typ + ")", nil
+	return "defaultValueOfTypeName(" + typ + ")", exprTypeDefault, nil
 }
 
 type roleEntry struct {

@@ -797,8 +797,8 @@ func (h *IngestHandler) typesFailed(ctx context.Context, id tenant.ID, table str
 
 // unavailableAbort is the 503 for a type layer that cannot judge the tenant's
 // table: a tenant not bound yet, a missing artifact for its ClickHouse line, a
-// server zone this process cannot serve, or a table that did not compile (or,
-// a wiring fault, no type layer at all). The body stays generic — the cause can
+// table whose expressions this process cannot compute in the server's zone,
+// or a table that did not compile (or, a wiring fault, no type layer at all). The body stays generic — the cause can
 // name server paths and other tenants' zones, and is the operator's to read in
 // the log. Retry-After is the schema hint's: the tenant's next schema refresh
 // is what binds it again, and what compiles a failed table again.

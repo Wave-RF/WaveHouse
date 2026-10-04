@@ -15,23 +15,13 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
 
-// filterCacheSize bounds the compiled filters each handle of a table holds. A
-// filter handle is identified by (expression, bound values), and the values
-// come from tenant claims, so an unbounded cache is a memory/CPU denial of
-// service.
-//
-// The bound is per slot, not a table budget split across the pool: a filter
-// answers only on the handle it was compiled against, so the slot an
-// evaluation lands on must hold the whole working set, and a split would
-// shrink it as the host's cores grow (512 a slot in a pool of 8). Per table
-// that makes the bound the pool's limit times this. A one-clause filter costs
-// ~10 KiB resident and a two-clause one with a three-value IN ~27 KiB (each
-// measured as 4096 compiled on one handle of the 26.8 artifact, darwin arm64):
-// ~43 MiB for a slot of one-clause filters, ~340 MiB for a full pool of 8,
-// reached only with 4096 distinct pairs live on the table and evaluations
-// landing on all 8 handles. A handle past the first exists only under
-// contention, and pool.acquire keeps a serial stream of evaluations on one
-// slot, so a quiet table stays at one slot's figure.
+// filterCacheSize bounds the compiled filters a table holds. A filter handle
+// is identified by (expression, bound values), and the values come from tenant
+// claims, so an unbounded cache is a memory/CPU denial of service. A
+// one-clause filter costs ~10 KiB resident and a two-clause one with a
+// three-value IN ~27 KiB (each measured as 4096 compiled on one handle of the
+// 26.8 artifact, darwin arm64): ~43 MiB for a table full of one-clause
+// filters, reached only with 4096 distinct pairs live on it.
 const filterCacheSize = 4096
 
 // Predicate is one resolved row-filter clause. Values are the canonical strings
@@ -51,12 +41,10 @@ const (
 // filters against the result.
 //
 // The Table it came from must stay held (not Released) until Close, and Close
-// is required: the Row keeps its handle busy until then.
+// is required: it frees the parsed block.
 type Row struct {
 	table *Table
-	pool  *pool
-	slot  *schemaSlot
-	block *chtypes.LoadedBlock
+	block *chtypes.Block
 }
 
 // ParseRow parses one JSONCompactEachRow line, with or without its trailing
@@ -72,31 +60,28 @@ type Row struct {
 // repeated name or an empty list is ErrColumnsDrift: no INSERT could store
 // that row in this table.
 func (t *Table) ParseRow(columns []string, row []byte) (*Row, error) {
-	if t.pool == nil {
+	if t.c == nil {
 		return nil, &Unavailable{Tenant: t.tenant, Table: t.Name, Cause: t.cause}
 	}
-	var opts []chtypes.RowOption
+	opts := []chtypes.BlockOption{chtypes.WithSettings(InsertSettings())}
+	for _, z := range t.zoneOpts() {
+		opts = append(opts, z)
+	}
 	if !slices.Equal(columns, t.WireColumns) {
 		if err := t.insertableList(columns); err != nil {
 			return nil, err
 		}
-		opts = []chtypes.RowOption{chtypes.WithColumns(columns)}
+		opts = append(opts, chtypes.WithColumns(columns))
 	}
 	body := row
 	if n := len(body); n == 0 || body[n-1] != '\n' {
 		body = append(append(make([]byte, 0, n+1), body...), '\n')
 	}
-	// The block and every filter evaluated against it stay on ONE handle: a
-	// cross-handle Eval takes both handles' locks and hands back exactly the
-	// serialization the pool exists to avoid.
-	p := t.pool
-	s := p.acquire()
-	block, err := s.schema.ParseBlock(chtypes.JSONCompactEachRow, body, InsertSettings(), opts...)
+	block, err := t.c.schema.ParseBlock(chtypes.JSONCompactEachRow, body, opts...)
 	if err != nil {
-		p.release(s)
 		return nil, err
 	}
-	return &Row{table: t, pool: p, slot: s, block: block}, nil
+	return &Row{table: t, block: block}, nil
 }
 
 // insertableList reports why columns cannot be an INSERT column list over
@@ -128,13 +113,11 @@ func (t *Table) insertableList(columns []string) error {
 	return nil
 }
 
-// Close frees the parsed block and gives its handle back. Required: the C
-// layer does not refcount. A second Close is a no-op.
+// Close frees the parsed block. A second Close is a no-op.
 func (r *Row) Close() {
 	if r.block != nil {
-		r.block.Close()
+		_ = r.block.Close()
 		r.block = nil
-		r.pool.release(r.slot)
 	}
 }
 
@@ -161,15 +144,14 @@ func (r *Row) VisibleWithReason(preds []Predicate) (bool, string) {
 		return false, ReasonFilter
 	}
 
-	filter := r.table.filterOn(r.slot, expr, params)
+	filter := r.table.filterFor(expr, params)
 	if filter == nil {
 		return false, ReasonDecline
 	}
-	// Another call on this slot can evict and close the filter between the
-	// lookup and this Eval. The SDK's Eval and Close take the same schema
-	// lock and Eval checks for a closed filter under it, so Eval answers
-	// "filter is closed" instead of touching freed memory, and that error
-	// withholds the row like any decline: fail closed.
+	// Another call on this table can evict and close the filter between the
+	// lookup and this Eval. A Close waits for an Eval already inside the
+	// filter, and an Eval after it is a *UsageError, which withholds the row
+	// like any decline: fail closed.
 	res, err := filter.Eval(r.block)
 	if err != nil || res.Outcome != chtypes.FilterOK || len(res.Verdicts) == 0 {
 		return false, ReasonDecline
@@ -272,31 +254,80 @@ func (t *Table) render(preds []Predicate) (string, map[string]string, bool) {
 	return b.String(), params, true
 }
 
-// filterOn returns the compiled handle for this expression and parameter set
-// on ONE slot, compiling it at most once per (slot, generation). A compile
-// failure is cached as a negative entry so a broken policy costs one compile
-// and one log line, not one per event.
-func (t *Table) filterOn(s *schemaSlot, expr string, params map[string]string) *chtypes.LoadedFilter {
+// filterFor returns the compiled handle for this expression and parameter set,
+// compiling it at most once per generation. A compile failure is cached as a
+// negative entry so a broken policy costs one compile and one log line, not
+// one per event.
+//
+// A miss compiles outside the cache lock, which every evaluation on the table
+// needs: a compile takes ~100 µs, and a hit must not wait behind one.
+// Concurrent misses on one key wait for the first one's compile rather than
+// repeat it; misses on different keys compile in parallel.
+func (t *Table) filterFor(expr string, params map[string]string) *chtypes.Filter {
 	key := cacheKey(t.Generation, expr, params)
-	c := s.filters
+	c := t.c.filters
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if el, hit := c.index[key]; hit {
-		c.order.MoveToFront(el)
-		return el.Value.(*filterEntry).filter
+	for {
+		if el, hit := c.index[key]; hit {
+			c.order.MoveToFront(el)
+			f := el.Value.(*filterEntry).filter
+			c.mu.Unlock()
+			return f
+		}
+		done := c.inflight[key]
+		if done == nil {
+			break
+		}
+		c.mu.Unlock()
+		<-done // landed, or withdrawn by a panic: look again
+		c.mu.Lock()
 	}
+	done := make(chan struct{})
+	c.inflight[key] = done
+	c.mu.Unlock()
 
-	f, err := s.schema.CompileFilter(expr, chtypes.WithFilterParams(params))
-	if err != nil {
-		f = nil
-		slog.Error("row filter will not compile; withholding every row for it",
-			"tenant", t.tenant, "table", t.Name, "generation", t.Generation, "expr", expr, "error", err)
-	}
+	landed := false
+	defer func() {
+		if !landed {
+			c.mu.Lock()
+			delete(c.inflight, key)
+			close(done)
+			c.mu.Unlock()
+		}
+	}()
+	f := c.compile(t, expr, params)
+	landed = true
+
+	c.mu.Lock()
 	el := c.order.PushFront(&filterEntry{key: key, filter: f})
 	c.index[key] = el
+	delete(c.inflight, key)
+	close(done)
+	var evicted *chtypes.Filter
 	if c.order.Len() > c.cap {
-		c.evictOldestLocked()
+		evicted = c.evictOldestLocked()
+	}
+	c.mu.Unlock()
+	// Outside the lock: Close waits for the evaluations inside that filter.
+	if evicted != nil {
+		_ = evicted.Close()
+	}
+	return f
+}
+
+// compileFilter compiles one filter in the table's zone (zoneOpts), nil when
+// it will not compile.
+func (t *Table) compileFilter(expr string, params map[string]string) *chtypes.Filter {
+	opts := []chtypes.FilterOption{chtypes.WithFilterParams(params)}
+	for _, z := range t.zoneOpts() {
+		opts = append(opts, z)
+	}
+	f, err := t.c.schema.CompileFilter(expr, opts...)
+	if err != nil {
+		slog.Error("row filter will not compile; withholding every row for it",
+			"tenant", t.tenant, "table", t.Name, "generation", t.Generation, "expr", expr, "error", err)
+		return nil
 	}
 	return f
 }
@@ -313,7 +344,7 @@ func cacheKey(generation uint64, expr string, params map[string]string) string {
 
 type filterEntry struct {
 	key    string
-	filter *chtypes.LoadedFilter // nil: this expression does not compile
+	filter *chtypes.Filter // nil: this expression does not compile
 }
 
 type filterCache struct {
@@ -321,34 +352,44 @@ type filterCache struct {
 	cap   int
 	order *list.List // front = most recently used
 	index map[string]*list.Element
+	// inflight holds the keys being compiled, outside mu, by a lookup that
+	// missed; the channel closes once the entry lands.
+	inflight map[string]chan struct{}
+	// compile is Table.compileFilter, which a test may wrap to hold one
+	// compile open.
+	compile func(t *Table, expr string, params map[string]string) *chtypes.Filter
 }
 
 func newFilterCache(capacity int) *filterCache {
-	return &filterCache{cap: capacity, order: list.New(), index: make(map[string]*list.Element)}
+	return &filterCache{
+		cap: capacity, order: list.New(),
+		index: make(map[string]*list.Element), inflight: make(map[string]chan struct{}),
+		compile: (*Table).compileFilter,
+	}
 }
 
-func (c *filterCache) evictOldestLocked() {
+// evictOldestLocked drops the least recently used entry and returns the filter
+// the caller must close once it has released the lock.
+func (c *filterCache) evictOldestLocked() *chtypes.Filter {
 	el := c.order.Back()
 	if el == nil {
-		return
+		return nil
 	}
 	c.order.Remove(el)
 	e := el.Value.(*filterEntry)
 	delete(c.index, e.key)
-	if e.filter != nil {
-		e.filter.Close()
-	}
+	return e.filter
 }
 
-// closeAll drops every handle. Called before the schema is closed so no freed
-// pointer survives in the index; the schema would close them anyway, but not
-// the map holding them.
+// closeAll drops every handle, so no closed filter survives in the index.
+// Called once the cache is detached from its table, so no lookup can reach
+// it.
 func (c *filterCache) closeAll() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for el := c.order.Front(); el != nil; el = el.Next() {
 		if f := el.Value.(*filterEntry).filter; f != nil {
-			f.Close()
+			_ = f.Close()
 		}
 	}
 	c.order.Init()
