@@ -32,7 +32,10 @@ func answers(t *testing.T, eng *Engine, id tenant.ID) {
 // the tenant as a whole, and returns it.
 func unavailable(t *testing.T, eng *Engine, id tenant.ID) *Unavailable {
 	t.Helper()
-	_, err := eng.Table(id, "events")
+	tbl, err := eng.Table(id, "events")
+	if err == nil {
+		tbl.Release() // so the failure below is reported instead of Close deadlocking on it
+	}
 	require.Error(t, err, "tenant %s", id)
 	var u *Unavailable
 	require.ErrorAs(t, err, &u)

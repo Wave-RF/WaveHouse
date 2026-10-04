@@ -78,7 +78,7 @@ var systemLayouts = []string{"/usr/local/share/chtypes/v1", "/opt/chtypes/v1"}
 // it (Forget).
 //
 // Tenants are independent: a tenant that is not bound yet, has no artifact for
-// its server line, or reports a zone this host does not know is Unavailable on
+// its server line, or reports a zone chtypes cannot serve is Unavailable on
 // its own, a table that does not compile (or that its server zone keeps from
 // being served, see zoneCause) is Unavailable alone, and every other tenant
 // keeps answering. Two tenants on the same server and database still compile
@@ -153,17 +153,43 @@ func NewEngine(cfg Config) (*Engine, error) {
 
 // checkLayout refuses an explicit directory that cannot be read, or that holds
 // a chtypes 0.x registry (<line>/manifest.json) and no v1 layout: a 0.x
-// artifact never loads under v1, and an empty answer would hide why.
+// artifact never loads under v1, and an empty answer would hide why. Reading
+// covers each install record in it: the SDK skips one it cannot read, so a
+// layout mounted without read access for this user would boot on the system
+// layouts alone. A readable layout with nothing for this platform is not
+// refused, since the system layouts are searched after it.
 func checkLayout(dir string) error {
-	if _, err := os.Stat(dir); err != nil {
-		return fmt.Errorf("chtypes: cannot read the artifact directory: %w", err)
+	unreadable := func(err error) error {
+		return fmt.Errorf("chtypes: cannot read the artifact directory %s: %w", dir, err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "oci-layout")); err == nil || !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.ReadDir(dir); err != nil {
+		return unreadable(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "oci-layout")); errors.Is(err, os.ErrNotExist) {
+		if v0, _ := filepath.Glob(filepath.Join(dir, "*", "manifest.json")); len(v0) > 0 {
+			return fmt.Errorf("chtypes: %s is a chtypes 0.x registry directory; chtypes v1 reads an OCI layout "+
+				"(fetch the artifact with the v1 chtypes CLI, which writes one)", dir)
+		}
 		return nil
+	} else if err != nil {
+		return unreadable(err)
 	}
-	if v0, _ := filepath.Glob(filepath.Join(dir, "*", "manifest.json")); len(v0) > 0 {
-		return fmt.Errorf("chtypes: %s is a chtypes 0.x registry directory; chtypes v1 reads an OCI layout "+
-			"(fetch the artifact with the v1 chtypes CLI, which writes one)", dir)
+	root := filepath.Join(dir, "unpacked", "sha256")
+	entries, err := os.ReadDir(root)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return unreadable(err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		// A pre-seeded entry has no record yet; anything else is unreadable.
+		f, err := os.Open(filepath.Join(root, e.Name(), "verified.json")) //nolint:gosec // G304: the SDK's own install record
+		if err == nil {
+			_ = f.Close()
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return unreadable(err)
+		}
 	}
 	return nil
 }
@@ -229,14 +255,14 @@ func (e *Engine) Table(id tenant.ID, name string) (*Table, error) {
 // library are unchanged. It is called synchronously from discovery's refresh
 // hook, so it must never be fatal: a failure is recorded as a cause — per
 // table for a compile refusal or a zone the table cannot be read in,
-// tenant-wide for a missing artifact or a zone this host does not know — and
+// tenant-wide for a missing artifact or a zone chtypes cannot serve — and
 // surfaces as *Unavailable from Table. A table whose compile was refused
 // is compiled again at every Bind; a table the tenant no longer has is closed;
 // a tenant whose line resolves again is answering again.
 //
 // serverTZ is the server's default zone name as ClickHouse reports it; ""
 // means UTC, chtypes' own default, never the host's zone. The first tenant
-// bound in the process fixes the image zone (see zone.go).
+// served in the process fixes the image zone (see zone.go).
 func (e *Engine) Bind(id tenant.ID, serverVersion, serverTZ string, tables []*discovery.TableSchema) {
 	for {
 		set := e.tenantForBind(id)

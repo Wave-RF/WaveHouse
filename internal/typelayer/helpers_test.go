@@ -8,6 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/wave-rf/chtypes/go/chtypes"
+
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
@@ -20,12 +22,17 @@ const (
 	testLine          = "26.8"
 )
 
-// TestMain commits the image zone before any test binds, so the zone every
-// test reads in does not depend on which test happens to bind first: UTC,
-// unless the subprocess of TestImage_FirstTenantInAnotherZone names another.
+// TestMain commits a UTC image zone before any test binds, so the zone every
+// test reads in does not depend on which test happens to bind first. The
+// subprocesses of TestImage_DerivedFromTheFirstTenantServed commit none, and
+// derive it through Bind as production does.
 func TestMain(m *testing.M) {
-	if zone := testImageZone(); zone != "unset" {
-		if _, err := setupImage(zone); err != nil {
+	if os.Getenv(imageZoneEnv) != imageUnset {
+		image.mu.Lock()
+		err := chtypes.Setup(chtypes.SetupOptions{Timezone: "UTC"})
+		image.zone = "UTC"
+		image.mu.Unlock()
+		if err != nil {
 			panic(err)
 		}
 	}

@@ -409,6 +409,13 @@ func TestQuoteIdentifier_AgreesWithChsql(t *testing.T) {
 func corruptLayout(t *testing.T) string {
 	t.Helper()
 	testEngine(t) // skips (or fails under WAVEHOUSE_TEST_REQUIRE_CHTYPES) without the real artifact
+	return corruptCopy(t)
+}
+
+// corruptCopy is corruptLayout without the skip, which binds a tenant: for a
+// process that must not commit an image zone before the test does.
+func corruptCopy(t *testing.T) string {
+	t.Helper()
 	reg, err := chtypes.NewRegistry(chtypes.WithAutoFetch(false))
 	require.NoError(t, err)
 	installed, err := reg.Installed()
@@ -467,6 +474,47 @@ func TestNewEngine_UnreadableDirectoryFailsAtConstruction(t *testing.T) {
 	_, err := NewEngine(Config{CacheDir: filepath.Join(t.TempDir(), "nosuch")})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nosuch")
+}
+
+// TestNewEngine_UnlistableDirectoryFailsAtConstruction: an explicit directory
+// this user cannot list refuses boot, naming it, rather than leaving the
+// system layouts to serve alone.
+func TestNewEngine_UnlistableDirectoryFailsAtConstruction(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root lists a mode-000 directory")
+	}
+	dir := filepath.Join(t.TempDir(), "locked")
+	require.NoError(t, os.Mkdir(dir, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: restoring a test directory for its removal
+	_, err := NewEngine(Config{CacheDir: dir})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot read the artifact directory "+dir)
+}
+
+// TestCheckLayout_UnreadableInstallRecordRefuses: the SDK skips an install
+// record it cannot read, so checkLayout refuses one. A readable layout with no
+// install, or with a pre-seeded entry that has no record yet, is not refused:
+// the system layouts are searched after it.
+func TestCheckLayout_UnreadableInstallRecordRefuses(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 directory")
+	}
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "oci-layout"), []byte(`{"imageLayoutVersion":"1.0.0"}`), 0o600))
+	require.NoError(t, checkLayout(dir), "an empty layout")
+	entry := filepath.Join(dir, "unpacked", "sha256", "0123")
+	require.NoError(t, os.MkdirAll(entry, 0o750))
+	require.NoError(t, checkLayout(dir), "a pre-seeded entry")
+	require.NoError(t, os.WriteFile(filepath.Join(entry, "verified.json"), []byte(`{}`), 0o600))
+	require.NoError(t, checkLayout(dir), "a readable record")
+
+	require.NoError(t, os.Chmod(entry, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(entry, 0o750) }) //nolint:gosec // G302: restoring a test directory for its removal
+	err := checkLayout(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot read the artifact directory "+dir)
 }
 
 // TestNewEngine_V0RegistryIsNamedAsOne: a chtypes 0.x registry directory never
