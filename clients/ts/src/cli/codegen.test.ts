@@ -88,6 +88,34 @@ describe("fetchSchemas", () => {
     expect(init.headers.Authorization).toBeUndefined();
   });
 
+  it("follows redirects while the request carries no credential", async () => {
+    fetchSpy.mockResolvedValue(new Response("[]", { status: 200 }));
+
+    await fetchSchemas("http://localhost:8080", { tenant: "acme" });
+
+    const [, init] = fetchSpy.mock.calls[0];
+    expect(init.redirect).toBe("follow");
+  });
+
+  // fetch drops Authorization on a cross-origin hop and re-sends every other
+  // header, so a followed redirect would hand X-Operator-Key to its target.
+  it.each([
+    ["the operator key", { operatorKey: "op-key" }],
+    ["a bearer token", { auth: "tok" }],
+  ])("refuses a redirect instead of following it with %s", async (_desc, credential) => {
+    fetchSpy.mockResolvedValue(
+      new Response(null, { status: 302, headers: { Location: "https://elsewhere.example/" } }),
+    );
+
+    await expect(fetchSchemas("http://localhost:8080", credential)).rejects.toThrow(
+      /redirected \(302\) to https:\/\/elsewhere\.example\//,
+    );
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [, init] = fetchSpy.mock.calls[0];
+    expect(init.redirect).toBe("manual");
+  });
+
   it("rejects a non-array body instead of generating garbage", async () => {
     fetchSpy.mockResolvedValue(
       new Response(JSON.stringify({ clicks: wireSchemas[1] }), { status: 200 }),
@@ -144,12 +172,41 @@ describe("parseArgs", () => {
     });
   });
 
-  it.each([["--tenant"], ["--tenant", ""], ["-t"]])(
-    "refuses an empty tenant id (%s) instead of sending it",
-    (...flags) => {
-      expect(() => parseArgs(argv(...flags))).toThrow(/--tenant/);
+  // Each flag that takes a value, with its alias.
+  const valueFlags = [
+    ["--url", "-u"],
+    ["--out", "-o"],
+    ["--auth", "-a"],
+    ["--tenant", "-t"],
+    ["--operator-key", "-k"],
+  ];
+  const everyFlag = [...valueFlags.flat(), "--help", "-h"];
+
+  // An unset shell variable is how a flag loses its value: quoted it leaves
+  // "", unquoted it lets the flag after it slide into the value's place
+  // (`--operator-key --tenant acme` would send "--tenant" as the key).
+  it.each(valueFlags)(
+    "refuses %s (%s) with no value, an empty one, or a flag in its place",
+    (long, short) => {
+      const needsValue = new RegExp(`^${long} needs `);
+      for (const flag of [long, short]) {
+        expect(() => parseArgs(argv(flag))).toThrow(needsValue);
+        expect(() => parseArgs(argv(flag, ""))).toThrow(needsValue);
+        for (const next of everyFlag) {
+          expect(() => parseArgs(argv(flag, next, "v"))).toThrow(needsValue);
+        }
+      }
     },
   );
+
+  it("takes a value that starts with a dash, since only a flag is refused", () => {
+    // Both are legal: the tenant grammar allows "-" anywhere, and a base64url
+    // operator key starts with one once in 64.
+    expect(parseArgs(argv("-t", "-acme", "-k", "-x9_Tq"))).toMatchObject({
+      tenant: "-acme",
+      operatorKey: "-x9_Tq",
+    });
+  });
 });
 
 describe("generateTypes", () => {

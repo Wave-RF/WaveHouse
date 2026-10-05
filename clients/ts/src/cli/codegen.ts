@@ -25,33 +25,58 @@ interface CliArgs {
   operatorKey?: string;
 }
 
+// Every flag parseArgs reads, which is what a flag's value can never be.
+const FLAGS = new Set([
+  "--url",
+  "-u",
+  "--out",
+  "-o",
+  "--auth",
+  "-a",
+  "--tenant",
+  "-t",
+  "--operator-key",
+  "-k",
+  "--help",
+  "-h",
+]);
+
+// A flag's value: the next argument, which has to be there, non-empty, and not
+// another flag. An unset shell variable is how it comes to be otherwise:
+// quoted it leaves "", unquoted it lets the flag after it slide into its
+// place, to be sent as the tenant or the credential. Only a flag is refused,
+// not every leading dash: a tenant id or an operator key may start with one.
+function operand(value: string | undefined, usage: string): string {
+  if (!value || FLAGS.has(value)) throw new Error(usage);
+  return value;
+}
+
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = { url: "http://localhost:8080", out: "./wavehouse.d.ts" };
   for (let i = 2; i < argv.length; i++) {
     switch (argv[i]) {
       case "--url":
       case "-u":
-        args.url = argv[++i];
+        args.url = operand(argv[++i], "--url needs a URL");
         break;
       case "--out":
       case "-o":
-        args.out = argv[++i];
+        args.out = operand(argv[++i], "--out needs a file path");
         break;
       case "--auth":
       case "-a":
-        args.auth = argv[++i];
+        args.auth = operand(argv[++i], "--auth needs a token");
         break;
       case "--tenant":
       case "-t":
-        // Non-empty is the only client-side check; the server refuses a bad
-        // id, and it refuses an empty ?tenant= rather than reading it as
-        // absent, so an empty value would never mean "tenant 0".
-        args.tenant = argv[++i];
-        if (!args.tenant) throw new Error("--tenant needs a tenant id");
+        // The id itself goes unchecked: its grammar is the server's, which
+        // answers a bad one with 400, an empty ?tenant= included, so an
+        // empty value could never have meant "tenant 0".
+        args.tenant = operand(argv[++i], "--tenant needs a tenant id");
         break;
       case "--operator-key":
       case "-k":
-        args.operatorKey = argv[++i];
+        args.operatorKey = operand(argv[++i], "--operator-key needs a key");
         break;
       case "--help":
       case "-h":
@@ -217,7 +242,22 @@ async function fetchSchemas(url: string, opts: FetchOptions = {}): Promise<Table
     "/v1/ops/schema",
     opts.tenant ? { tenant: opts.tenant } : undefined,
   );
-  const res = await fetch(target.toString(), { headers });
+  // A redirect is followed only when the request carries no credential, the
+  // streaming transport's rule (stream/sse.ts `_init`): fetch drops
+  // Authorization on a cross-origin hop and re-sends every other header, so
+  // following one would hand X-Operator-Key to wherever it points. `manual`
+  // over `error`, whose bare "fetch failed" could not name that target.
+  const credentialed = Boolean(opts.auth || opts.operatorKey);
+  const res = await fetch(target.toString(), {
+    headers,
+    redirect: credentialed ? "manual" : "follow",
+  });
+  if (credentialed && res.status >= 300 && res.status < 400) {
+    const location = res.headers.get("location") ?? "an unnamed location";
+    throw new Error(
+      `Schema fetch was redirected (${res.status}) to ${location}, and a request carrying a credential does not follow a redirect: point --url at the final address`,
+    );
+  }
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Schema fetch failed (${res.status}): ${text}`);

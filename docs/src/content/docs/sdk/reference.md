@@ -153,6 +153,8 @@ npx wavehouse-codegen --url https://wh.example.com --operator-key "$WH_AUTH_OPER
 | `--operator-key`, `-k` | Operator key, sent as `X-Operator-Key` (the credential a nested directory's `/v1/ops/*` routes admit) | — |
 | `--tenant`, `-t` | Tenant whose schema to read, sent as `?tenant=` | tenant `0` |
 
+A request carrying `--auth` or `--operator-key` does not follow a redirect: across origins `fetch` drops the bearer token and sends the operator key on to the redirect's target. Codegen stops and names that target, so point `--url` at the final address.
+
 The generated row type is the **read** shape — with one exception running the other way: an `EPHEMERAL` column declares a default, so codegen emits it too, yet no query can ever return it. There the type says readable where only the write is real. A `MATERIALIZED` or `ALIAS` column declares a default, so it is emitted as optional — but supplying one on `insert` is a `400` (`column "x" of table "t" is materialized and cannot be inserted`), and the type will not catch it. Omit computed columns; the server fills them in.
 
 **Example output:**
