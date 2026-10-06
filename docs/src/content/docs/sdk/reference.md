@@ -173,7 +173,7 @@ export interface ClicksRow {
 | ClickHouse Type | TypeScript Type |
 |----------------|-----------------|
 | `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Enum*`, `IPv4/6` | `string` |
-| `UInt*`, `Int*`, `Float*`, `Decimal*` | `number` — 64-bit and wider integers and `Decimal*` come back as JSON numbers, not strings, so `JSON.parse` rounds a value past 2^53 — store an id that large as a `String` column to keep every digit; a `Float*` NaN or infinity comes back as `null` from queries and pipes, and as a string (`"nan"`, `"inf"`, `"-inf"`) on a stream |
+| `UInt*`, `Int*`, `Float*`, `Decimal*` | `number` — 64-bit and wider integers and `Decimal*` come back as JSON numbers, not strings, so `JSON.parse` rounds a value past 2^53 — store an id that large as a `String` column to keep every digit; a `Float*` NaN or infinity comes back as a string (`"nan"`, `"inf"`, `"-inf"`) from queries, pipes and streams alike, so a `Float*` column is `number \| string` to a consumer that can see them |
 | `Bool` | `boolean` |
 | `Nullable(T)` | `T \| null` |
 | `Array(T)` | `T[]` |

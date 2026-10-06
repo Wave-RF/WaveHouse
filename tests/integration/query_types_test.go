@@ -114,3 +114,29 @@ func TestOpsQuery_SlashRendering(t *testing.T) {
 	require.Contains(t, got.raw, `"/home"`)
 	require.NotContains(t, got.raw, `\/`)
 }
+
+// TestQuery_NaNAndInfinityRenderAsStrings: a Float NaN or infinity comes back
+// from /v1/query as the string "nan", "inf" or "-inf", as on the stream and
+// the ingest body (output_format_json_quote_denormals=1), while a SQL NULL in
+// a Nullable float stays null.
+func TestQuery_NaNAndInfinityRenderAsStrings(t *testing.T) {
+	e := env(t)
+
+	table := createTable(t,
+		"k UInt8, f64 Float64, f32 Float32, nf64 Nullable(Float64), nf32 Nullable(Float32)",
+		"ORDER BY k")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	require.NoError(t, e.chConn.Exec(ctx, fmt.Sprintf(
+		"INSERT INTO `%s` VALUES (1, nan, inf, -inf, nan), (2, -inf, nan, inf, -inf), (3, 1.5, 2.5, NULL, NULL)",
+		table)), "seed NaN, infinities and a real NULL")
+
+	got := postJSON(t, e.baseURL+"/v1/query?table="+table, `{"select_all":true}`)
+	require.Equal(t, http.StatusOK, got.status, "body: %s", got.raw)
+	require.JSONEq(t, `[
+		{"k":1,"f64":"nan","f32":"inf","nf64":"-inf","nf32":"nan"},
+		{"k":2,"f64":"-inf","f32":"nan","nf64":"inf","nf32":"-inf"},
+		{"k":3,"f64":1.5,"f32":2.5,"nf64":null,"nf32":null}
+	]`, got.raw)
+}

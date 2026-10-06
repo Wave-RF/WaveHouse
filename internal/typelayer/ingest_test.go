@@ -323,10 +323,9 @@ func TestIngest_ForwardSlashExportsUnescaped(t *testing.T) {
 
 // TestIngest_NaNAndInfinityExportAsStrings: the export spells a Float NaN or
 // infinity as a JSON string, the spelling the worker's INSERT stores as that
-// value (a null would store the column's default), so the stream carries
-// strings where /v1/query renders null. The export reads
-// output_format_json_quote_denormals, whose default renders null, so
-// parseSettings pins it on.
+// value (a null would store the column's default), and /v1/query renders the
+// same strings. The export reads output_format_json_quote_denormals, whose
+// default renders null, so parseSettings pins it on.
 func TestIngest_NaNAndInfinityExportAsStrings(t *testing.T) {
 	eng := testEngine(t, &discovery.TableSchema{Name: "floats", Columns: []discovery.Column{
 		{Name: "f", Type: "Float64", Position: 1},
