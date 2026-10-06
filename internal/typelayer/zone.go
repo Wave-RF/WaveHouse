@@ -70,8 +70,9 @@ func openLine(reg *chtypes.Registry, serverVersion, tz string) (*chtypes.Library
 // reaches Setup, and an open that fails leaves the image uncommitted, the
 // tenant unavailable. chtypes clears the setup when its library refuses the
 // zone, but keeps it when the artifact does not load, so Setup then refuses
-// every other zone until a tenant in the held one is served. That refusal
-// fails closed: opening anyway would load the library in the held zone.
+// every other zone until a tenant in the held one is served
+// (Wave-RF/chtypes#468). That refusal fails closed: opening anyway would load
+// the library in the held zone.
 func openFirst(reg *chtypes.Registry, line, tz string) (lib *chtypes.Library, cause string, first bool) {
 	image.mu.Lock()
 	defer image.mu.Unlock()
