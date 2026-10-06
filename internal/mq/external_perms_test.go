@@ -117,8 +117,10 @@ func TestExternalNATS_AcksUnderBothAckSubjectLayouts(t *testing.T) {
 			f.apply(t, shippedTopology(t))
 			drainsWithAcks(t, f, f.broker(t, nil))
 
-			// The layout the server used, by token count.
-			require.NoError(t, f.broker(t, nil).Publish(t.Context(), Topic{Tenant: "acme", Table: "t"}, []byte("row")))
+			// The layout the server used, by token count, read off the
+			// history stream's copy of the row just drained. A second row
+			// would go to the consumer drainsWithAcks leaves running, whose
+			// ack of it races the end of the test.
 			c, err := f.admin.CreateConsumer(t.Context(), "WH_HISTORY", jetstream.ConsumerConfig{AckPolicy: jetstream.AckExplicitPolicy})
 			require.NoError(t, err)
 			msg, err := c.Next(jetstream.FetchMaxWait(5 * time.Second))
