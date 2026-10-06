@@ -60,9 +60,9 @@ func noPersistence(hc *container.HostConfig) {
 
 func startContainer(t *testing.T, req testcontainers.ContainerRequest, port string) (testcontainers.Container, string) {
 	t.Helper()
-	ctr, err := runContainer(t, req, port)
-	require.NoError(t, err)
 	ctx := context.Background()
+	ctr, err := runContainer(ctx, t, req, port)
+	require.NoError(t, err)
 	host, err := ctr.Host(ctx)
 	require.NoError(t, err)
 	mapped, err := ctr.MappedPort(ctx, port)
@@ -72,13 +72,13 @@ func startContainer(t *testing.T, req testcontainers.ContainerRequest, port stri
 
 // runContainer starts req and waits for port to listen, leaving a failed
 // start to its caller.
-func runContainer(t *testing.T, req testcontainers.ContainerRequest, port string) (testcontainers.Container, error) {
+func runContainer(ctx context.Context, t *testing.T, req testcontainers.ContainerRequest, port string) (testcontainers.Container, error) {
 	t.Helper()
 	if req.HostConfigModifier == nil {
 		req.HostConfigModifier = noPersistence
 	}
 	req.WaitingFor = wait.ForListeningPort(port).WithStartupTimeout(90 * time.Second)
-	ctr, err := testcontainers.GenericContainer(context.Background(), testcontainers.GenericContainerRequest{ContainerRequest: req, Started: true})
+	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{ContainerRequest: req, Started: true})
 	testcontainers.CleanupContainer(t, ctr)
 	return ctr, err
 }
@@ -120,6 +120,7 @@ func startDragonfly(t *testing.T) *server {
 // refused pick is answered with another.
 func startCluster(t *testing.T) *server {
 	t.Helper()
+	ctx := context.Background()
 	var (
 		ctr  testcontainers.Container
 		port string
@@ -128,7 +129,7 @@ func startCluster(t *testing.T) *server {
 		port = freePort(t)
 		p := network.MustParsePort(port + "/tcp")
 		var err error
-		ctr, err = runContainer(t, testcontainers.ContainerRequest{
+		ctr, err = runContainer(ctx, t, testcontainers.ContainerRequest{
 			Image: redisImage,
 			Cmd: []string{
 				"redis-server", "--port", port, "--cluster-enabled", "yes", "--cluster-port", "16379",
@@ -148,7 +149,7 @@ func startCluster(t *testing.T) *server {
 		}
 		t.Logf("host port %s refused, picking another: %v", port, err)
 	}
-	code, out, err := ctr.Exec(context.Background(), []string{"redis-cli", "-p", port, "cluster", "addslotsrange", "0", "16383"})
+	code, out, err := ctr.Exec(ctx, []string{"redis-cli", "-p", port, "cluster", "addslotsrange", "0", "16383"})
 	require.NoError(t, err)
 	require.Zero(t, code, "%v", out)
 	s := &server{ctr: ctr, addr: net.JoinHostPort("127.0.0.1", port), mode: cache.RedisCluster}
