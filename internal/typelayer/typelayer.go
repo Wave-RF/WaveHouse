@@ -220,7 +220,8 @@ func probeWritable(dir string) error {
 // skips one it cannot read, so a cache mounted without read access for this
 // user would boot on the system layouts alone. A readable layout with nothing
 // for this platform is not refused, since the system layouts are searched
-// after it and autofetch may fill it.
+// after it and autofetch may fill it. Wave-RF/chtypes#486 (a strict cache
+// mode, and records readable across users) would let this go.
 func checkLayout(dir string) error {
 	unreadable := func(err error) error {
 		return fmt.Errorf("chtypes: cannot read the artifact directory %s: %w", dir, err)
