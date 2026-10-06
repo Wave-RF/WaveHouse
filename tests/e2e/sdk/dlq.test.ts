@@ -44,18 +44,19 @@ describe("Dead Letter Queue (DLQ) & Failures", () => {
     });
 
     const res = await wh.from(T.clicks).insert(rows as any);
-    // A per-record rejection is not a request failure: the batch is a 200 whose
-    // body carries one verdict per record.
-    expect(res.error).toBeNull();
-    expect(res.data?.succeeded).toBe(9);
-    expect(res.data?.failed).toBe(1);
-    const refused = res.data?.results?.find((r) => r.error);
-    expect(refused?.index).toBe(10);
-    // An `exception_code` means ClickHouse answered — a gateway rejection
-    // carries none.
-    expect(refused?.exception_code).toBeGreaterThan(0);
+    // ClickHouse's parser refuses the batch whole, as its INSERT would: a 400
+    // with its own code, naming the record, and nothing published.
+    expect(res.error).not.toBeNull();
+    expect(res.error!.status).toBe(400);
+    expect(res.error!.code).toBe("clickhouse.rejected");
+    expect((res.error!.details as { exception_code?: number }).exception_code).toBeGreaterThan(0);
+    expect(res.error!.message).toMatch(/^record 10: /);
 
-    // The nine good rows still land: one bad record never blocks the batch.
+    // The nine good rows, resent alone, land: the refused batch claimed none of
+    // their ids.
+    const good = await wh.from(T.clicks).insert(rows.slice(0, 9) as any);
+    expect(good.error).toBeNull();
+    expect(good.data?.succeeded).toBe(9);
     await waitForCondition(async (signal) => {
       const chRows = await chQuery(
         `SELECT count() as cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,

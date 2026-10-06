@@ -296,7 +296,7 @@ describe("Ingest", () => {
   });
 
   it("rejects a value ClickHouse cannot parse, with ClickHouse's own code", async () => {
-    // The replacement for the "reserved field" case above: a real per-record
+    // The replacement for the "reserved field" case above: ClickHouse's own
     // refusal, carrying the server's error code rather than a gateway guess.
     const result = await wh.from(T.clicks).insert({
       event_id: testId(),
@@ -308,11 +308,51 @@ describe("Ingest", () => {
 
     expect(result.error).not.toBeNull();
     expect(result.error!.status).toBe(400);
-    // A per-record refusal carries ClickHouse's number as exception_code; the
-    // string `code` stays the failure class, which a per-record refusal has
-    // none of, so the SDK falls back to the status.
+    // ClickHouse's number rides as exception_code, the failure class as the
+    // string `code`, and the message names the record.
     expect((result.error!.details as { exception_code?: number }).exception_code).toBe(27);
-    expect(result.error!.code).toBe("HTTP_400");
+    expect(result.error!.code).toBe("clickhouse.rejected");
+    expect(result.error!.message).toMatch(/^record 1: /);
+  });
+
+  it("refuses a whole batch for one value ClickHouse cannot parse", async () => {
+    // As a ClickHouse INSERT does: the good records are not inserted either.
+    const ids = [testId(), testId(), testId()];
+    const result = await wh.from(T.clicks).insert([
+      { event_id: ids[0], page: "/ok", user_id: "u1", session_id: "s1" },
+      {
+        event_id: ids[1],
+        page: "/bad",
+        user_id: "u1",
+        session_id: "s1",
+        duration_ms: "not-a-number",
+      } as any,
+      { event_id: ids[2], page: "/ok", user_id: "u1", session_id: "s1" },
+    ]);
+
+    expect(result.error).not.toBeNull();
+    expect(result.error!.status).toBe(400);
+    expect(result.error!.code).toBe("clickhouse.rejected");
+    expect((result.error!.details as { exception_code?: number }).exception_code).toBe(27);
+    expect(result.error!.message).toMatch(/^record 2: /);
+
+    // A record sent after it lands; none of the refused batch does.
+    const after = testId();
+    const ok = await wh
+      .from(T.clicks)
+      .insert({ event_id: after, page: "/after", user_id: "u1", session_id: "s1" });
+    expect(ok.error).toBeNull();
+    await waitForCondition(async (signal) => {
+      const r = await chQuery(
+        `SELECT event_id FROM default.${T.clicks} WHERE event_id = '${after}'`,
+        signal,
+      );
+      return r.length === 1;
+    }, 10_000);
+    const refused = await chQuery(
+      `SELECT event_id FROM default.${T.clicks} WHERE event_id IN ('${ids.join("','")}')`,
+    );
+    expect(refused).toHaveLength(0);
   });
 
   it("rejects invalid JSON payloads", async () => {
@@ -423,7 +463,7 @@ describe("Ingest", () => {
   // CONTRACT CHANGE: a column the caller's role may not write is no longer a
   // gateway 403 `column "x" not allowed for insert`. Column policy is enforced
   // by compiling the role's own schema, where a denied column is re-declared
-  // MATERIALIZED of its default, so naming one is ClickHouse's own per-record
+  // MATERIALIZED of its default, so naming one is ClickHouse's own
   // UNKNOWN_FIELD — a 400 with
   // `exception_code: 117`, whose message does not say whether the column exists.
   it("refuses a denied insert column with ClickHouse's code 117", async () => {
@@ -544,7 +584,7 @@ describe("Ingest", () => {
     expect(body.succeeded).toBe(1);
   });
 
-  it("ingests a complete positional TSV row, and a short row is code 27", async () => {
+  it("ingests a complete positional TSV row, and a short row refuses the body with code 27", async () => {
     const id = testId();
     // TSV spells "take the DEFAULT" as ClickHouse's own \\N (null, which
     // input_format_null_as_default turns into the default of a non-Nullable
@@ -557,21 +597,31 @@ describe("Ingest", () => {
         Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}`,
         "Content-Type": "text/tab-separated-values",
       },
-      // Row 1 is complete; row 2 is short, which is a PER-RECORD refusal with
-      // ClickHouse's code 27 — not a whole-request failure.
-      body: `${id}\t/tsv\tu-tsv\ts-tsv\t\tGB\t7\t\\N\nshort\t/tsv\n`,
+      body: `${id}\t/tsv\tu-tsv\ts-tsv\t\tGB\t7\t\\N\n`,
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      total: number;
-      succeeded: number;
-      failed: number;
-      results: Array<{ index: number; exception_code?: number }>;
-    };
-    expect(body.total).toBe(2);
+    const body = (await res.json()) as { total: number; succeeded: number };
+    expect(body.total).toBe(1);
     expect(body.succeeded).toBe(1);
-    expect(body.failed).toBe(1);
-    expect(body.results[1].exception_code).toBe(27);
+
+    // A short row is ClickHouse's code 27, which refuses the whole body.
+    const short = await fetch(`${WH_URL}/v1/ingest?table=${T.clicks}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}`,
+        "Content-Type": "text/tab-separated-values",
+      },
+      body: `${testId()}\t/tsv\tu-tsv\ts-tsv\t\tGB\t7\t\\N\nshort\t/tsv\n`,
+    });
+    expect(short.status).toBe(400);
+    const refused = (await short.json()) as {
+      error?: string;
+      code?: string;
+      exception_code?: number;
+    };
+    expect(refused.code).toBe("clickhouse.rejected");
+    expect(refused.exception_code).toBe(27);
+    expect(refused.error).toMatch(/^record 2: /);
 
     await waitForCondition(async (signal) => {
       const r = await chQuery(

@@ -207,10 +207,10 @@ func TestIngest_Windows_OutcomesStayInOrder(t *testing.T) {
 	records := []map[string]any{
 		{"page": "/a", "event_id": "e1"},
 		{"page": "/b", "event_id": "e1"}, // repeat inside one window
-		{"page": "/c", "nope": 1},        // reject
+		{"page": "/c"},                   // reject: no id, which is required
 		{"page": "/d", "event_id": "e2"},
 		{"page": "/e", "event_id": "e1"}, // repeat across windows
-		{"page": "/f"},                   // no id: published un-deduped
+		{"page": "/f", "event_id": "e3"},
 	}
 	requests := map[string]func() *http.Request{
 		"ndjson": func() *http.Request {
@@ -227,7 +227,7 @@ func TestIngest_Windows_OutcomesStayInOrder(t *testing.T) {
 			t.Parallel()
 			pub := &testutil.MockPublisher{}
 			dedup := testutil.NewMockDeduplicator()
-			h := dedupHandler(t, pub, dedup, false)
+			h := dedupHandler(t, pub, dedup, true)
 			h.window = 3
 
 			w := httptest.NewRecorder()
@@ -237,12 +237,11 @@ func TestIngest_Windows_OutcomesStayInOrder(t *testing.T) {
 			assert.Equal(t, []recordResult{
 				{Index: 1, Ok: true},
 				{Index: 2, Duplicate: true},
-				{Index: 3, Error: resp.Results[2].Error, ExceptionCode: 117},
+				{Index: 3, Error: `missing dedupe id field "event_id"`},
 				{Index: 4, Ok: true},
 				{Index: 5, Duplicate: true},
 				{Index: 6, Ok: true},
 			}, resp.Results)
-			assert.NotEmpty(t, resp.Results[2].Error)
 			assert.Equal(t, 6, resp.Total)
 			assert.Len(t, pub.Published(), 3)
 			assert.Equal(t, 2, dedup.Reserves)

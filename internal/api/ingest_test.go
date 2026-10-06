@@ -201,17 +201,11 @@ func TestIngest_InvalidJSON(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(r))
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	// CONTRACT CHANGE: the message is ClickHouse's own, with its code, because
-	// nothing in Go reads the body any more. It used to be the flat
-	// "invalid json" the Go decoder produced. A per-record refusal carries
-	// exception_code alone: the single-object response renders that record.
-	msg, code := errorAndCode(t, w)
-	assert.Contains(t, msg, "expected '{'")
-	assert.Equal(t, 27, code)
-	assert.Empty(t, errorClass(t, w), "a per-record refusal carries no class")
+	// The message is ClickHouse's own, with its code and class, because
+	// nothing in Go reads the body. It used to be the flat "invalid json" the
+	// Go decoder produced.
+	assert.Contains(t, requireRefused(t, w, pub, 27, 1), "expected '{'")
 	testutil.AssertJSONErrorResponse(t, w)
-	assert.Empty(t, pub.Messages)
 }
 
 // TestIngest_SchemaValidation_UnknownField: a field the table does not have is
@@ -277,13 +271,13 @@ func TestIngest_ComputedColumns_AreNotOnTheWire(t *testing.T) {
 	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/a", "raw": "x"})))
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	_, code := errorAndCode(t, w)
-	assert.Equal(t, 117, code, "a record naming an EPHEMERAL column no DEFAULT reads is refused per record, with ClickHouse's code")
+	assert.Equal(t, 117, code, "a record naming an EPHEMERAL column no DEFAULT reads is refused, with ClickHouse's code")
 }
 
-// TestIngest_Batch_PerRecordCodes: a batch reports each refused record's own
-// ClickHouse code alongside its message, and one bad record does not cost its
-// siblings.
-func TestIngest_Batch_PerRecordCodes(t *testing.T) {
+// TestIngest_Batch_FirstBadRecordRefusesTheBatch: a batch with two bad
+// records is refused at the first, with ClickHouse's code and the record's
+// index in the message, and its good records are not published either.
+func TestIngest_Batch_FirstBadRecordRefusesTheBatch(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := newTestIngestHandler(t, testRegistry(t), pub)
@@ -292,28 +286,14 @@ func TestIngest_Batch_PerRecordCodes(t *testing.T) {
 		`[{"page":"/a"},{"page":"/b","nope":1},{"page":"/c","count":"x"},{"page":"/d"}]`)
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(req))
+	assert.Contains(t, requireRefused(t, w, pub, 117, 2), "nope")
 
-	require.Equal(t, http.StatusOK, w.Code)
-	resp := decodeBatchResult(t, w)
-	assert.Equal(t, 4, resp.Total)
-	assert.Equal(t, 2, resp.Succeeded)
-	assert.Equal(t, 2, resp.Failed)
-	require.Len(t, resp.Results, 4)
-	assert.True(t, resp.Results[0].Ok)
-	assert.Equal(t, 117, resp.Results[1].ExceptionCode)
-	assert.Equal(t, 27, resp.Results[2].ExceptionCode)
-	assert.True(t, resp.Results[3].Ok)
-	assert.Len(t, pub.Messages, 2, "the siblings of a refused record still publish")
-
-	// On the wire the per-record code is exception_code; there is no
-	// per-record string class.
-	var raw struct {
-		Results []map[string]any `json:"results"`
-	}
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &raw))
-	assert.InDelta(t, 117, raw.Results[1]["exception_code"], 0)
-	assert.NotContains(t, raw.Results[1], "code")
-	assert.NotContains(t, raw.Results[0], "exception_code", "an accepted record carries no code")
+	pub = &testutil.MockPublisher{}
+	h.Publisher = pub
+	w = httptest.NewRecorder()
+	h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "application/json",
+		`[{"page":"/a"},{"page":"/d"},{"page":"/c","count":"x"},{"page":"/b","nope":1}]`)))
+	requireRefused(t, w, pub, 27, 3)
 }
 
 func TestIngest_Dedup_FirstTime(t *testing.T) {
@@ -450,10 +430,10 @@ func TestIngest_Policy_ColumnDenied(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(req))
 
-	// CONTRACT CHANGE: column policy is answered by compiling the role's own
-	// schema with each denied column declared MATERIALIZED, which no INSERT may
-	// name, so the refusal is ClickHouse's per-record code 117 — a 400, not the
-	// gateway's 403. It no longer confirms whether the column exists at all.
+	// Column policy is answered by compiling the role's own schema with each
+	// denied column declared MATERIALIZED, which no INSERT may name, so the
+	// refusal is ClickHouse's code 117 — a 400, not the gateway's 403. It does
+	// not confirm whether the column exists at all.
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	msg, code := errorAndCode(t, w)
 	assert.Contains(t, msg, "button")
@@ -1220,7 +1200,10 @@ func TestIngest_NDJSON_AllValid(t *testing.T) {
 	assert.Len(t, pub.Messages, 3)
 }
 
-func TestIngest_NDJSON_PartialFailure_Validation(t *testing.T) {
+// TestIngest_NDJSON_UnknownColumnRefusesTheBody: an unknown column refuses
+// the whole body with ClickHouse's 117 at its record, and its siblings are not
+// published.
+func TestIngest_NDJSON_UnknownColumnRefusesTheBody(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := newTestIngestHandler(t, testRegistry(t), pub)
@@ -1232,20 +1215,13 @@ func TestIngest_NDJSON_PartialFailure_Validation(t *testing.T) {
 	)
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(req))
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeBatchResult(t, w)
-	assert.Equal(t, 3, resp.Total)
-	assert.Equal(t, 2, resp.Succeeded)
-	assert.Equal(t, 1, resp.Failed)
-	require.Len(t, resp.Results, 3)
-	assert.True(t, resultAt(t, resp, 1).Ok)
-	assert.NotEmpty(t, resultAt(t, resp, 2).Error)
-	assert.True(t, resultAt(t, resp, 3).Ok)
-	// The two good rows are still published; the bad one is not.
-	assert.Len(t, pub.Messages, 2)
+	assert.Contains(t, requireRefused(t, w, pub, 117, 2), "nonexistent_field")
 }
 
+// TestIngest_NDJSON_MalformedLine: a line that is not JSON refuses the body
+// with ClickHouse's own parse refusal, not Go's "invalid json". The code is
+// whichever one its reader raised (26 for a quoted string it cannot finish, 27
+// for a value it cannot read); the point is that a code is attributed at all.
 func TestIngest_NDJSON_MalformedLine(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
@@ -1258,22 +1234,9 @@ func TestIngest_NDJSON_MalformedLine(t *testing.T) {
 	)
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(req))
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeBatchResult(t, w)
-	assert.Equal(t, 3, resp.Total)
-	assert.Equal(t, 2, resp.Succeeded)
-	assert.Equal(t, 1, resp.Failed)
-	require.Len(t, resp.Results, 3)
-	assert.True(t, resultAt(t, resp, 1).Ok)
-	// The message is ClickHouse's own parse refusal now, not Go's "invalid json",
-	// and the code is whichever one its reader raised (26 for a quoted string it
-	// cannot finish, 27 for a value it cannot read) — the point is that a code is
-	// attributed at all.
-	assert.NotZero(t, resultAt(t, resp, 2).ExceptionCode)
-	assert.NotEmpty(t, resultAt(t, resp, 2).Error)
-	assert.True(t, resultAt(t, resp, 3).Ok)
-	assert.Len(t, pub.Messages, 2)
+	_, code := errorAndCode(t, w)
+	assert.NotZero(t, code)
+	requireRefused(t, w, pub, code, 2)
 }
 
 func TestIngest_NDJSON_BlankLinesSkipped(t *testing.T) {
@@ -1407,7 +1370,7 @@ func TestIngest_NDJSON_PublishError_500(t *testing.T) {
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
-func TestIngest_NDJSON_Policy_ColumnDenied_PerLine(t *testing.T) {
+func TestIngest_NDJSON_Policy_ColumnDeniedRefusesTheBody(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := newTestIngestHandler(t, testRegistry(t), pub)
@@ -1428,18 +1391,8 @@ func TestIngest_NDJSON_Policy_ColumnDenied_PerLine(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(req))
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeBatchResult(t, w)
-	assert.Equal(t, 2, resp.Total)
-	assert.Equal(t, 1, resp.Succeeded)
-	assert.Equal(t, 1, resp.Failed)
-	require.Len(t, resp.Results, 2)
-	assert.True(t, resultAt(t, resp, 1).Ok)
-	// CONTRACT CHANGE: the denied column is ClickHouse's code 117.
-	assert.Contains(t, resultAt(t, resp, 2).Error, "button")
-	assert.Equal(t, 117, resultAt(t, resp, 2).ExceptionCode)
-	assert.Len(t, pub.Messages, 1)
+	// The denied column is ClickHouse's code 117, which refuses the body.
+	assert.Contains(t, requireRefused(t, w, pub, 117, 2), "button")
 }
 
 func TestIngest_NDJSON_Policy_TableForbidden(t *testing.T) {
@@ -1529,12 +1482,14 @@ func TestIngest_NDJSON_ContentTypeWithCharset(t *testing.T) {
 func TestIngest_NDJSON_ErrorsTruncated(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := newTestIngestHandler(t, testRegistry(t), pub)
+	h := dedupHandler(t, pub, testutil.NewMockDeduplicator(), true)
 
+	// Every record lacks the dedupe id the settings require: a per-record
+	// rejection each.
 	const total = maxReportedResults + 50
 	lines := make([]string, total)
 	for i := range lines {
-		lines[i] = "{ not valid json"
+		lines[i] = `{"page":"/a"}`
 	}
 	req := ndjsonRequest(t, "clicks", lines...)
 	w := httptest.NewRecorder()
@@ -1832,20 +1787,12 @@ func TestIngest_ContentTypeRefusalBeatsEmptyBody(t *testing.T) {
 	}
 }
 
-// TestIngest_DeclaredNDJSON_ArrayBodyIsNotReframed: the header is authoritative.
-// A JSON array sent as NDJSON is read as NDJSON — one line, not a JSON object —
-// so it fails as a per-record error instead of silently being re-read as a batch.
-// TestIngest_DeclaredNDJSON_ArrayBodyIsNotReframed: the declared format is still
-// authoritative — a declared-NDJSON body is never re-read as the JSON family, so
-// the depth-1 comma rewrite (which is what makes a compact array salvageable per
-// record) does not run on it.
-//
-// CONTRACT CHANGE: it used to be one unparseable NDJSON line, reported as a
-// single per-record failure. ClickHouse's own JSONEachRow reader takes the
-// surrounding brackets in its stride, so both objects now ingest and the batch
-// reports two records. Nothing is silently dropped either way; what changed is
-// that the mis-declaration now costs nothing instead of the whole body.
-func TestIngest_DeclaredNDJSON_ArrayBodyIsNotReframed(t *testing.T) {
+// TestIngest_DeclaredNDJSON_ArrayBody: the declared format is still
+// authoritative, and ClickHouse's own JSONEachRow reader takes an array's
+// brackets in its stride, so a declared-NDJSON array body is its elements:
+// all ingest when they parse, and one bad element refuses the request, as for
+// a declared-JSON array.
+func TestIngest_DeclaredNDJSON_ArrayBody(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := newTestIngestHandler(t, testRegistry(t), pub)
@@ -1858,18 +1805,12 @@ func TestIngest_DeclaredNDJSON_ArrayBodyIsNotReframed(t *testing.T) {
 	assert.Equal(t, 2, resp.Succeeded)
 	assert.Len(t, pub.Messages, 2)
 
-	// The rewrite really is off for this declaration: a compact array with one
-	// bad record loses the whole batch here, which is exactly the cliff the
-	// rewrite exists to remove for a declared-JSON body (see
-	// TestIngest_JSONArray_CompactWithOneBadRecord).
 	pub2 := &testutil.MockPublisher{}
-	h2 := newTestIngestHandler(t, testRegistry(t), pub2)
+	h.Publisher = pub2
 	w = httptest.NewRecorder()
-	h2.Handle(w, withTenant(rawIngestRequest(t, "clicks", "application/x-ndjson",
+	h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "application/x-ndjson",
 		`[{"page":"/a"},{"page":"/b","nope":1},{"page":"/c"}]`)))
-	require.Equal(t, http.StatusOK, w.Code)
-	assert.Zero(t, decodeBatchResult(t, w).Succeeded, "the compact array is all-or-nothing without the rewrite")
-	assert.Empty(t, pub2.Messages)
+	requireRefused(t, w, pub2, 117, 2)
 }
 
 // ── Multi-format ingest (JSON array, arity sniffing, body cap) ─────────────
@@ -2181,78 +2122,54 @@ func TestIngest_JSONArray_SingleElement(t *testing.T) {
 	assert.Len(t, pub.Messages, 1)
 }
 
-func TestIngest_JSONArray_PartialValidationFailure(t *testing.T) {
+// TestIngest_JSONArray_BadElementRefusesTheArray: an element ClickHouse cannot
+// read refuses the whole request at its index, and the elements around it are
+// not published.
+func TestIngest_JSONArray_BadElementRefusesTheArray(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := newTestIngestHandler(t, testRegistry(t), pub)
 
 	req := ingestRequest(t, "clicks", []map[string]any{
 		{"page": "/a"},
-		{"page": "/b", "nonexistent_field": 42}, // unknown column → rejected
+		{"page": "/b", "nonexistent_field": 42}, // unknown column
 		{"page": "/c"},
 	})
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(req))
-
-	// The bad element is reported per-record; the request itself is 200.
-	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeBatchResult(t, w)
-	assert.Equal(t, 3, resp.Total)
-	assert.Equal(t, 2, resp.Succeeded)
-	assert.Equal(t, 1, resp.Failed)
-	assert.True(t, resultAt(t, resp, 1).Ok)
-	assert.NotEmpty(t, resultAt(t, resp, 2).Error)
-	assert.True(t, resultAt(t, resp, 3).Ok)
-	assert.Len(t, pub.Messages, 2)
+	requireRefused(t, w, pub, 117, 2)
 }
 
+// TestIngest_JSONArray_ScalarElements: a non-object element (number, string,
+// nested array) is no record to JSONEachRow, and refuses the request at its
+// index.
 func TestIngest_JSONArray_ScalarElements(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := newTestIngestHandler(t, testRegistry(t), pub)
 
-	// Non-object elements (number, string, nested array) are wrong-typed: the
-	// framing keeps each on its own line, so each is ClickHouse's per-record
-	// refusal and the objects around them still ingest.
-	req := ingestRequest(t, "clicks", []any{
-		map[string]any{"page": "/a"},
-		5,
-		"x",
-		[]any{1, 2},
-		map[string]any{"page": "/b"},
-	})
-	w := httptest.NewRecorder()
-	h.Handle(w, withTenant(req))
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeBatchResult(t, w)
-	assert.Equal(t, 5, resp.Total)
-	assert.Equal(t, 2, resp.Succeeded)
-	assert.Equal(t, 3, resp.Failed)
-	assert.True(t, resultAt(t, resp, 1).Ok)
-	assert.NotEmpty(t, resultAt(t, resp, 2).Error)
-	assert.NotEmpty(t, resultAt(t, resp, 3).Error)
-	assert.NotEmpty(t, resultAt(t, resp, 4).Error)
-	assert.True(t, resultAt(t, resp, 5).Ok)
-	assert.Len(t, pub.Messages, 2)
+	for _, el := range []any{5, "x", []any{1, 2}} {
+		w := httptest.NewRecorder()
+		h.Handle(w, withTenant(ingestRequest(t, "clicks", []any{map[string]any{"page": "/a"}, el, map[string]any{"page": "/b"}})))
+		requireRefused(t, w, pub, 27, 2)
+	}
 }
 
+// TestIngest_JSONArray_SyntaxError_Fatal: a structural syntax error refuses the
+// whole request with ClickHouse's own code, and the leading good element is not
+// published either.
 func TestIngest_JSONArray_SyntaxError_Fatal(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := newTestIngestHandler(t, testRegistry(t), pub)
 
-	// A structural syntax error leaves the brackets unbalanced — the whole
-	// request fails (400), unlike a per-element refusal. Nothing is judged, so
-	// the leading good element is not published either.
 	req := rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"}, {bad]`)
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(req))
-
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "invalid json")
+	_, code := errorAndCode(t, w)
+	requireRefused(t, w, pub, code, 2)
+	assert.NotZero(t, code)
 	testutil.AssertJSONErrorResponse(t, w)
-	assert.Empty(t, pub.Messages)
 }
 
 func TestIngest_JSONArray_Truncated_Fatal(t *testing.T) {
@@ -2280,18 +2197,21 @@ func TestIngest_JSONArray_Truncated_Fatal(t *testing.T) {
 			w := httptest.NewRecorder()
 			h.Handle(w, withTenant(req))
 
-			assert.Equal(t, http.StatusBadRequest, w.Code)
-			assert.Contains(t, w.Body.String(), "invalid json")
+			require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
+			msg, code := errorAndCode(t, w)
+			assert.Equal(t, codeCHRejected, errorClass(t, w), msg)
+			assert.NotZero(t, code, msg)
 			testutil.AssertJSONErrorResponse(t, w)
+			assert.Empty(t, pub.Messages)
 		})
 	}
 }
 
 // TestIngest_JSONArray_TrailingContent_Fatal: bytes after the array's closing
-// ']' are not records of it. Framed as more records they would be published
-// (a trailing object, its commas rewritten as separators); the whole request
-// fails instead, like an unbalanced array, and nothing is published. Trailing
-// whitespace is layout and still ingests.
+// ']' are not records of it. ClickHouse's reader refuses them (it expects the
+// end of the body), so the whole request fails and nothing is published, the
+// array's own elements included. Trailing whitespace is layout and still
+// ingests.
 func TestIngest_JSONArray_TrailingContent_Fatal(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
@@ -2304,10 +2224,8 @@ func TestIngest_JSONArray_TrailingContent_Fatal(t *testing.T) {
 	} {
 		w := httptest.NewRecorder()
 		h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "application/json", body)))
-		assert.Equal(t, http.StatusBadRequest, w.Code, "%s: body=%s", body, w.Body.String())
-		assert.Equal(t, "invalid json: content after the closing ']' of the json array", jsonErrorMessage(t, w), body)
+		assert.Contains(t, requireRefused(t, w, pub, 27, 0), "expected 'eof'", body)
 	}
-	assert.Empty(t, pub.Messages)
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "application/json", "[{\"page\":\"a\"}]\n\n")))
@@ -2702,9 +2620,8 @@ func TestIngest_TimestampGarbage_Rejected(t *testing.T) {
 }
 
 // TestIngest_Batch_MixedTimestampSpellings: every parseable spelling lands on
-// the same instant in the server's own rendering, and the unparseable one fails
-// ALONE — one bad timestamp in a batch must not cost its siblings, which is
-// what the compile profile's allow_errors_ratio buys.
+// the same instant in the server's own rendering, and an unparseable one
+// refuses the batch with ClickHouse's code, as its INSERT would.
 func TestIngest_Batch_MixedTimestampSpellings(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
@@ -2712,7 +2629,6 @@ func TestIngest_Batch_MixedTimestampSpellings(t *testing.T) {
 
 	req := ingestRequest(t, "events", []map[string]any{
 		{"name": "a", "ts": "2026-06-21T04:00:00Z"},
-		{"name": "b", "ts": "banana"},
 		{"name": "c", "ts": float64(1782014400)},
 	})
 	w := httptest.NewRecorder()
@@ -2720,12 +2636,9 @@ func TestIngest_Batch_MixedTimestampSpellings(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	result := decodeBatchResult(t, w)
-	require.Len(t, result.Results, 3)
-	assert.Equal(t, 41, result.Results[1].ExceptionCode, "the failing record carries ClickHouse's code")
-	assert.Equal(t, 3, result.Total)
+	assert.Equal(t, 2, result.Total)
 	assert.Equal(t, 2, result.Succeeded)
-	assert.Equal(t, 1, result.Failed)
-	require.Len(t, pub.Messages, 2, "only the records ClickHouse accepted")
+	require.Len(t, pub.Messages, 2)
 
 	var spellings []string
 	for _, msg := range pub.Messages {
@@ -2735,6 +2648,16 @@ func TestIngest_Batch_MixedTimestampSpellings(t *testing.T) {
 		"2026-06-21T04:00:00Z", // RFC 3339 in
 		"2026-06-21T04:00:00Z", // Unix seconds in — same instant, same rendering
 	}, spellings)
+
+	pub = &testutil.MockPublisher{}
+	h.Publisher = pub
+	w = httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "events", []map[string]any{
+		{"name": "a", "ts": "2026-06-21T04:00:00Z"},
+		{"name": "b", "ts": "banana"},
+		{"name": "c", "ts": float64(1782014400)},
+	})))
+	requireRefused(t, w, pub, 41, 2)
 }
 
 // TestIngest_Dedup_DisabledBySettings pins the hot-reloadable switch: with
@@ -3113,38 +3036,35 @@ func TestIngest_CheckGuardLogsOncePerRequest(t *testing.T) {
 // condition is a property of (table, role, policy), identical for every record
 // in the request, so there is no sibling this guard could spare.
 //
-// CONTRACT CHANGE: a record SUPPLYING the missing column used to get the
-// guard's message too, because the gateway's key walk ran first. ClickHouse's
-// parser now answers first, so that record reports its own code 117 — the same
-// ordering change as everywhere else on this path. Both are still
-// failures and nothing publishes.
+// A record SUPPLYING the missing column is refused by ClickHouse's parser
+// first (117), and that refuses the body. Nothing publishes either way.
 func TestIngest_CheckColumnNotInSchema_BatchRejectsPerRecord(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := newTestIngestHandler(t, testRegistry(t), pub)
 	h.PolicySource = staticPolicy(checkColumnPolicy(t, "tenant_id", "acme"))
+	send := func(body string) *httptest.ResponseRecorder {
+		req := rawIngestRequest(t, "clicks", "application/json", body)
+		req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
+		w := httptest.NewRecorder()
+		h.Handle(w, withTenant(req))
+		return w
+	}
 
-	req := rawIngestRequest(t, "clicks", "application/json",
-		`[{"page":"/a"},{"page":"/b","tenant_id":"acme"},{"page":"/c"}]`)
-	req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
-
-	w := httptest.NewRecorder()
-	h.Handle(w, withTenant(req))
-
+	w := send(`[{"page":"/a"},{"page":"/c"}]`)
 	require.Equal(t, http.StatusOK, w.Code, "a misconfigured policy must not abort the request")
 	resp := decodeBatchResult(t, w)
-	assert.Equal(t, 3, resp.Total)
-	assert.Equal(t, 3, resp.Failed)
+	assert.Equal(t, 2, resp.Total)
+	assert.Equal(t, 2, resp.Failed)
 	assert.Zero(t, resp.Succeeded)
-	require.Len(t, resp.Results, 3)
-	for _, i := range []int{0, 2} {
-		assert.Contains(t, resp.Results[i].Error, "which table", "record %d", i+1)
-		assert.Zero(t, resp.Results[i].ExceptionCode, "a gateway rejection never carries a ClickHouse code")
+	require.Len(t, resp.Results, 2)
+	for i, r := range resp.Results {
+		assert.Contains(t, r.Error, "which table", "record %d", i+1)
 	}
-	assert.Contains(t, resp.Results[1].Error, "tenant_id")
-	assert.Equal(t, 117, resp.Results[1].ExceptionCode,
-		"the record that SUPPLIES the column is refused by ClickHouse first")
 	assert.Empty(t, pub.Messages)
+
+	w = send(`[{"page":"/a"},{"page":"/b","tenant_id":"acme"},{"page":"/c"}]`)
+	assert.Contains(t, requireRefused(t, w, pub, 117, 2), "tenant_id")
 }
 
 // checkColumnPolicy grants "viewer" insert on clicks with an _eq check on col.

@@ -98,11 +98,15 @@ export class TableRef<Row = Record<string, unknown>> {
    *
    * A single object is sent as a JSON `POST /v1/ingest`. An **array** is
    * serialized to NDJSON (one record per line) and sent as a single
-   * `application/x-ndjson` request: a bad record does not fail the rest of
-   * the batch — per-record outcomes come back in the result (`failed` /
-   * `results`), and `ok` is true only when every record succeeded. A body the
-   * server's parser cannot read record by record is declined whole: every
-   * record fails with `validation engine declined: …` and none is inserted.
+   * `application/x-ndjson` request. A record ClickHouse's parser refuses (a
+   * value its column cannot read, an unknown column) refuses the whole
+   * request, as a ClickHouse `INSERT` does: the call's error is a `400` with
+   * `error.code` `"clickhouse.rejected"`, a message naming the record
+   * (`record 2: …`) and ClickHouse's `exception_code` in `error.details`, and
+   * nothing is inserted. Once the body parses,
+   * per-record outcomes (a failed policy check, a missing dedupe id) come back
+   * in the result (`failed` / `results`), and `ok` is true only when every
+   * record succeeded.
    *
    * The array path sends one request regardless of size, so it is bound by the
    * server's 16 MiB request-body cap (an over-cap array is a `413` with nothing

@@ -114,13 +114,14 @@ var dedupeDisabledCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 )
 
 // batchResult is the response body for any multi-record ingest: a JSON array,
-// an NDJSON batch, a CSV or a TSV body. The status is 200 whenever the body was
-// readable and the records were processed; per-record rejections (unparseable
-// values, unknown columns, failed check clauses) are reported in Results without
-// failing the whole request, so one bad record never obscures the rest of the
-// batch (issue #195). Whole-request conditions abort with a non-200 status
-// instead — see requestAbort for the list, which lives there and only there,
-// because stating it in three places is how two of them went stale.
+// an NDJSON batch, a CSV or a TSV body. The status is 200 whenever the body
+// parsed and the records were processed; per-record rejections (a failed check
+// clause, a missing dedupe id, a record the engine could not judge) are
+// reported in Results without failing the whole request (issue #195). A body
+// ClickHouse's parser refuses — an unparseable value, an unknown column —
+// is refused whole, as ClickHouse's INSERT refuses it; that and every other
+// whole-request condition is in requestAbort's list, which lives there and only
+// there, because stating it in three places is how two of them went stale.
 type batchResult struct {
 	Total      int            `json:"total"`      // records read from the body
 	Succeeded  int            `json:"succeeded"`  // records validated + published
@@ -138,23 +139,16 @@ type recordResult struct {
 	Ok        bool   `json:"ok,omitempty"`
 	Duplicate bool   `json:"duplicate,omitempty"`
 	Error     string `json:"error,omitempty"`
-	// ExceptionCode is ClickHouse's own error code when the record was refused
-	// by the server's parser (117 unknown field — which includes a column the
-	// role may not write, 27 unparseable value, 41 a bad DateTime; an
-	// out-of-range integer wraps rather than refusing). Absent for a
-	// gateway rejection — a failed check clause is our verdict, not
-	// ClickHouse's, and must not be dressed as one.
-	ExceptionCode int `json:"exception_code,omitempty"`
 }
 
-// recordReject is a per-record rejection: this record is bad (ClickHouse's
-// parser refused it, or a policy check clause did), but the rest of the batch
-// can still proceed. The single-object path maps Status to the HTTP code; the
-// batch path records Message against the index and keeps going.
+// recordReject is a per-record rejection: a policy check clause refused this
+// record, or it lacks its dedupe id, or the engine could not judge it, but the
+// rest of the batch can still proceed. The single-object path maps Status to
+// the HTTP code; the batch path records Message against the index and keeps
+// going.
 type recordReject struct {
-	Status        int
-	Message       string
-	ExceptionCode int // ClickHouse's code; 0 for a gateway rejection (see recordResult)
+	Status  int
+	Message string
 }
 
 // requestAbort is a whole-request failure: this record and every one that
@@ -175,12 +169,18 @@ type recordReject struct {
 //     grant is resolved ONCE per request, so it is true for every record or
 //     none; as a per-record reject a 10k batch would report 10k independent
 //     permission failures for a single mis-wired grant.
-//   - A header-format body whose header ClickHouse refuses — a name the table
-//     or the role lacks, or a name given twice — is a 400 with the
-//     clickhouse.rejected class and ClickHouse's own code (117). The header is
-//     not a record, and no record was read past it.
+//   - A body ClickHouse's parser refuses is a 400 with the clickhouse.rejected
+//     class and ClickHouse's own code, as its INSERT refuses one: a value a
+//     column cannot read, a field the table or the role lacks (117), framing
+//     the format does not allow, a header-format header naming a column the
+//     table or the role lacks or one twice. The message names the record the
+//     reader failed on. Nothing is published, records before it included.
 //   - A role whose projection of the table does not compile is a 500 marked
 //     not retryable (see roleRefusedAbort).
+//
+// A body the type layer declined as a whole — a shape chtypes does not
+// support, a session zone it cannot load — is a 422: no verdict on the data,
+// and retrying it unchanged gets the same answer.
 type requestAbort struct {
 	Status        int
 	Message       string
@@ -205,15 +205,9 @@ type ingestRun struct {
 	// wire is the role's wire columns, copied off the handle that exported the
 	// rows: the envelope's Columns, and where the dedupe id sits in a row.
 	wire []string
-	// records is how many records the request contains: the body's own framing
-	// before chtypes has read it (an empty array is zero, anything else is at
-	// least one), then len(batch.Rows) once it has answered.
+	// records is how many records the request contains: len(batch.Rows) once
+	// chtypes has answered.
 	records int
-	// framed is a JSON array's element count — the one body whose framing
-	// gives WaveHouse an exact record count before chtypes reads it — and 0
-	// for every other body. chtypes answering any other number declines the
-	// whole body (typelayer.IngestOptions.Records).
-	framed int
 	// checkColumns names the check clauses a record's check answer came from,
 	// for the rejection message. The filter is AND-joined over all of them, so
 	// a false verdict does not say which one failed — with one clause it does.
@@ -365,33 +359,14 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, emptyBodyMessage(format))
 		return
 	}
-	batchShape := format.alwaysBatch() || first == '['
-	records := 1
-	if format == FormatJSON && first == '[' {
-		n, err := reframeArray(body.Bytes())
-		if err != nil {
-			// Brackets that do not balance — a truncated upload or a structural
-			// syntax error — or a tail after the array. None can be salvaged per
-			// record, and reporting what did frame as a complete batch is the
-			// failure this refusal exists to prevent.
-			slog.WarnContext(ctx, "ingest read error", "error", err.Error(), "table", table)
-			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
-			return
-		}
-		records = n
-	}
-	framed := 0
-	if format == FormatJSON && first == '[' {
-		framed = records
-	}
-	// Otherwise a single-object body is one record, and a line-framed body has
-	// at least the record its first byte starts. Concatenated objects after a
+	// A JSON array goes to ClickHouse's reader as sent: it reads the array
+	// itself and refuses a malformed one (an empty element, an unterminated
+	// array, anything after the closing ']'). Concatenated objects after a
 	// single object are neither answered nor published, as they always have
 	// been (declare NDJSON to batch them, #561), but chtypes still parses
-	// them, so one cut off mid-record can turn the answer into a decline. The
-	// real count is chtypes' own once it has answered — held to a floor the
-	// type layer counts in the body itself, so a short answer is a decline,
-	// never a short batch.
+	// them, so a malformed one refuses the request. The record count is
+	// chtypes' own.
+	batchShape := format.alwaysBatch() || first == '['
 
 	guard := h.policyCheckGuard(ctx, table, role, schema, perms)
 	shape, preds, checkColumns, abort := h.insertShape(ctx, table, role, schema, perms, guard)
@@ -402,13 +377,11 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	run := &ingestRun{
 		store: store, table: table, scope: scope, now: now,
-		records: records, framed: framed, checkColumns: checkColumns, checkGuard: guard,
+		checkColumns: checkColumns, checkGuard: guard,
 	}
-	if records > 0 {
-		if abort := h.judge(ctx, run, shape, format, body.Bytes(), preds); abort != nil {
-			writeAbort(w, abort)
-			return
-		}
+	if abort := h.judge(ctx, run, shape, format, body.Bytes(), preds); abort != nil {
+		writeAbort(w, abort)
+		return
 	}
 
 	if batchShape {
@@ -446,17 +419,16 @@ func (h *IngestHandler) typesReady(ctx context.Context, id tenant.ID, table stri
 // once the call returns, so dedupe and publish latency never hold off a rebind.
 //
 // A Go-level failure is an unavailable handle (the type layer's outage) or
-// ours, and neither is the caller's record to fix. A body ClickHouse refused as
-// a whole is the caller's to fix, and is a 400 with its code.
+// ours, and neither is the caller's record to fix. A body ClickHouse refused is
+// the caller's to fix, and is a 400 with its code and the record it failed on;
+// a body chtypes declined is a 422.
 func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelayer.RoleShape, format IngestFormat, body []byte, preds []policy.Predicate) *requestAbort {
 	id := run.store.Tenant()
 	tbl, abort := h.roleTable(ctx, id, run.table, shape)
 	if abort != nil {
 		return abort
 	}
-	opts := format.options()
-	opts.Records = run.framed
-	batch, err := tbl.IngestWith(format.wire(), opts, body, preds...)
+	batch, err := tbl.IngestWith(format.wire(), format.options(), body, preds...)
 	run.wire = slices.Clone(tbl.WireColumns)
 	tbl.Release()
 	if err != nil {
@@ -467,22 +439,21 @@ func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelay
 		return &requestAbort{Status: http.StatusInternalServerError, Message: "validation failed"}
 	}
 	if r := batch.Refused; r != nil {
-		slog.WarnContext(ctx, "ingest body refused by the parser", "error", r.Message, "exception_code", r.Code, "table", run.table)
-		return &requestAbort{Status: http.StatusBadRequest, Message: r.Message, Code: codeCHRejected, ExceptionCode: r.Code}
+		slog.WarnContext(ctx, "ingest body refused by the parser", "error", r.Message,
+			"exception_code", r.Code, "record", r.Record, "table", run.table)
+		msg := r.Message
+		if r.Record > 0 {
+			msg = fmt.Sprintf("record %d: %s", r.Record, r.Message)
+		}
+		return &requestAbort{Status: http.StatusBadRequest, Message: msg, Code: codeCHRejected, ExceptionCode: r.Code}
 	}
-	if m := batch.Miscount; m != nil {
-		// Every record is answered declined (422) and nothing is published;
-		// logged once here because the cause is the batch's, not any record's.
-		slog.ErrorContext(ctx, "chtypes answered a different number of records than the body holds; declining the whole batch",
-			"counted", m.Counted, "exact", m.Exact, "verdicts", m.Verdicts,
-			"table", run.table, "format", format.String())
+	if batch.Declined != "" {
+		// Not a verdict on the data, so not a 400; nothing is published.
+		slog.ErrorContext(ctx, "validation engine declined the body", "reason", batch.Declined, "table", run.table)
+		return &requestAbort{Status: http.StatusUnprocessableEntity, Message: "validation engine declined: " + batch.Declined}
 	}
 	run.batch = batch
-	// The type layer's answer is the record count: chtypes' own verdicts when
-	// they account for every record in the body, or one declined verdict per
-	// counted record when they do not or chtypes gave no per-record detail.
-	// A JSON array sent as NDJSON is however many elements its reader took,
-	// a blank NDJSON line is nothing.
+	// The record count is chtypes' own: a blank NDJSON line is nothing.
 	run.records = len(batch.Rows)
 	return nil
 }
@@ -502,7 +473,7 @@ func (h *IngestHandler) writeSingle(ctx context.Context, w http.ResponseWriter, 
 		return
 	}
 	if rec.reject != nil {
-		writeJSONErrorBody(w, rec.reject.Status, errorBody{Error: rec.reject.Message, ExceptionCode: rec.reject.ExceptionCode})
+		writeJSONError(w, rec.reject.Status, rec.reject.Message)
 		return
 	}
 	if rec.duplicate {
@@ -518,10 +489,10 @@ func (h *IngestHandler) writeSingle(ctx context.Context, w http.ResponseWriter, 
 
 // writeBatch answers a multi-record body (JSON array, NDJSON, CSV or TSV),
 // running each verdict through the same prepare → reserve → publish → commit
-// pipeline as a single insert, a window at a time. A record ClickHouse's
-// parser refused, or one a check clause denied, is recorded against its index
-// and the batch continues; a whole-request condition aborts it (see
-// requestAbort). Returns 200 with a per-record summary.
+// pipeline as a single insert, a window at a time. A record a check clause
+// denied is recorded against its index and the batch continues; a
+// whole-request condition aborts it (see requestAbort). Returns 200 with a
+// per-record summary.
 func (h *IngestHandler) writeBatch(ctx context.Context, w http.ResponseWriter, run *ingestRun) {
 	result := batchResult{Total: run.records, Results: []recordResult{}}
 	size := h.window
@@ -577,7 +548,7 @@ func (r *batchResult) add(rec *pendingRecord) {
 	switch {
 	case rec.reject != nil:
 		r.Failed++
-		entry.Error, entry.ExceptionCode = rec.reject.Message, rec.reject.ExceptionCode
+		entry.Error = rec.reject.Message
 	case rec.duplicate:
 		r.Duplicates++
 		entry.Duplicate = true
@@ -953,18 +924,13 @@ type pendingRecord struct {
 }
 
 // prepareVerdict turns the i-th record's verdict into its pending outcome:
-// ClickHouse's refusal or decline, the check guard, the check answer, then the
-// dedupe id and the encoded envelope of the row ClickHouse's own writer
-// produced. Reserving, publishing and committing happen per window, in
-// ingestWindow.
-//
-// The order is the one the type layer imposes, and is documented: a record
-// that both fails to parse and violates a check clause reports the PARSE
-// error — chtypes answers the check only for a record it accepted. Nothing is
-// published either way, so no enforcement is lost.
+// the engine's decline, the check guard, the check answer, then the dedupe id
+// and the encoded envelope of the row ClickHouse's own writer produced.
+// Reserving, publishing and committing happen per window, in ingestWindow. A
+// record ClickHouse refuses never gets here: it refuses the request (judge).
 //
 // Dedupe runs AFTER validation deliberately — the id must be claimed only for
-// what is published, or a record ClickHouse refuses would burn its id and a
+// what is published, or a record a check refuses would burn its id and a
 // corrected retry would be swallowed as a duplicate.
 //
 // A record the rest of a batch may proceed past comes back with reject set;
@@ -972,8 +938,8 @@ type pendingRecord struct {
 func (h *IngestHandler) prepareVerdict(ctx context.Context, run *ingestRun, i int) (rec pendingRecord, abort *requestAbort) {
 	verdict := verdictAt(run.batch, i)
 	if !verdict.Accepted {
-		logVerdict(ctx, run.table, verdict)
-		return pendingRecord{reject: verdictReject(verdict)}, nil
+		slog.ErrorContext(ctx, "validation engine declined a record", "reason", verdict.Message, "table", run.table)
+		return pendingRecord{reject: declineReject(verdict)}, nil
 	}
 	if run.checkGuard != nil {
 		return pendingRecord{reject: run.checkGuard}, nil
@@ -1046,20 +1012,17 @@ func verdictAt(batch typelayer.Batch, i int) typelayer.RowVerdict {
 	return typelayer.RowVerdict{Declined: true, Message: "no verdict was returned for this record"}
 }
 
-// verdictReject maps a verdict that is not an acceptance to the record's
-// rejection. A refusal is ClickHouse's own answer about the data — 400, with
-// its code. A decline is the validation engine failing to answer at all, which
-// is never the caller's fault and must never be dressed as a 400: 422 says "we
-// could not judge this", so a retry is meaningful and a client cannot learn
-// from it that its payload was wrong.
-func verdictReject(v typelayer.RowVerdict) *recordReject {
-	if v.Declined {
-		return &recordReject{
-			Status:  http.StatusUnprocessableEntity,
-			Message: "validation engine declined: " + v.Message,
-		}
+// declineReject maps a verdict that is not an acceptance — the type layer
+// returns no other kind — to the record's rejection. A decline is the
+// validation engine failing to answer at all, which is never the caller's
+// fault and must never be dressed as a 400: 422 says "we could not judge
+// this", so a retry is meaningful and a client cannot learn from it that its
+// payload was wrong.
+func declineReject(v typelayer.RowVerdict) *recordReject {
+	return &recordReject{
+		Status:  http.StatusUnprocessableEntity,
+		Message: "validation engine declined: " + v.Message,
 	}
-	return &recordReject{Status: http.StatusBadRequest, Message: v.Message, ExceptionCode: v.Code}
 }
 
 // checkReject maps one check verdict that is not a definite true. "The data says
@@ -1089,17 +1052,6 @@ func columnList(cols []string) string {
 		return "column " + quoted[0]
 	}
 	return "columns " + strings.Join(quoted, ", ")
-}
-
-// logVerdict records a record ClickHouse would not take. A refusal carries its
-// code so an operator can look it up without parsing the message; a decline is
-// an ERROR because it is the engine, not the data, that failed.
-func logVerdict(ctx context.Context, table string, v typelayer.RowVerdict) {
-	if v.Declined {
-		slog.ErrorContext(ctx, "validation engine declined a record", "reason", v.Message, "table", table)
-		return
-	}
-	slog.WarnContext(ctx, "schema validation failed", "error", v.Message, "exception_code", v.Code, "table", table)
 }
 
 // ingestWindow reserves, publishes and commits one window of prepared
