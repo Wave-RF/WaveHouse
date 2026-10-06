@@ -5,7 +5,7 @@ sidebar:
   order: 2
 ---
 
-Run WaveHouse locally in under five minutes. WaveHouse ships as one binary plus the per-ClickHouse-version [chtypes artifact](/deployment#chtypes-artifacts) it opens for your server's line, with ClickHouse as the only external network dependency; this walkthrough covers ingest, query, and real-time streaming.
+Run WaveHouse locally in under five minutes. WaveHouse ships as one binary plus the per-ClickHouse-version [chtypes artifact](/deployment#chtypes-artifacts) it opens for your server's line, with ClickHouse as the only external network dependency once the artifact is cached; this walkthrough covers ingest, query, and real-time streaming.
 
 ## Prerequisites
 
@@ -23,7 +23,7 @@ cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 ```
 
-The first `up` builds the WaveHouse image from source — a cgo compile plus a download of the pinned chtypes artifact (40–50 MB) — so expect several minutes once; later starts reuse the image.
+The first `up` builds the WaveHouse image from source (a cgo compile), so expect several minutes once. The image carries no artifact: on its first start WaveHouse fetches the chtypes artifact for your ClickHouse line (about 45 MB; it needs the chtypes registry, or a mirror you configure, until the line is cached) into the `chtypes-cache` volume at the first tenant bind, and later starts reuse both. You can prefetch it with the bundled `chtypes` CLI, and [Deployment](/deployment#chtypes-artifacts) covers air-gapped hosts.
 
 The stack bind-mounts `deployments/compose/settings/` as WaveHouse's [settings directory](/settings-directory) — the hot-reloadable configuration, ClickHouse address included — so there is nothing to seed; edit those files and the running container picks the change up.
 
