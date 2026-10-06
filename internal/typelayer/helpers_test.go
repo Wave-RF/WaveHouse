@@ -25,8 +25,13 @@ const (
 // TestMain commits a UTC image zone before any test binds, so the zone every
 // test reads in does not depend on which test happens to bind first. The
 // subprocesses of TestImage_DerivedFromTheFirstTenantServed commit none, and
-// derive it through Bind as production does.
+// derive it through Bind as production does. Every process first gets the
+// ZONEINFO that names goOnlyZone.
 func TestMain(m *testing.M) {
+	cleanup, err := withGoOnlyZone()
+	if err != nil {
+		panic(err)
+	}
 	if os.Getenv(imageZoneEnv) != imageUnset {
 		image.mu.Lock()
 		err := chtypes.Setup(chtypes.SetupOptions{Timezone: "UTC"})
@@ -36,7 +41,9 @@ func TestMain(m *testing.M) {
 			panic(err)
 		}
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	cleanup()
+	os.Exit(code)
 }
 
 // testEngine opens an Engine on the SDK's default layouts and binds tables

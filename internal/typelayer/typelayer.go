@@ -78,13 +78,16 @@ var systemLayouts = []string{"/usr/local/share/chtypes/v1", "/opt/chtypes/v1"}
 // it (Forget).
 //
 // Tenants are independent: a tenant that is not bound yet, has no artifact for
-// its server line, or reports a zone chtypes cannot serve is Unavailable on
-// its own, a table that does not compile (or that its server zone keeps from
-// being served, see zoneCause) is Unavailable alone, and every other tenant
-// keeps answering. The one exception is a first open whose artifact does not
-// load: chtypes then refuses every tenant in another zone until one in that
-// open's zone is served (see openFirst). Two tenants on the same server and
-// database still compile separate handles.
+// its server line, or reports a zone WaveHouse does not recognise is
+// Unavailable on its own, and so is one whose first open fails in a zone
+// chtypes cannot load; a table that does not compile (or that its server zone
+// keeps from being served, see zoneCause) is Unavailable alone, and every
+// other tenant keeps answering. The one exception is a first open whose
+// artifact does not load: chtypes then refuses every tenant in another zone
+// until one in that open's zone is served (see openFirst). A tenant bound in
+// a zone chtypes cannot load after the first open is not Unavailable: chtypes
+// refuses each of its calls instead (see knownZone). Two tenants on the same
+// server and database still compile separate handles.
 type Engine struct {
 	reg *chtypes.Registry
 
@@ -256,7 +259,7 @@ func (e *Engine) Table(id tenant.ID, name string) (*Table, error) {
 // library are unchanged. It is called synchronously from discovery's refresh
 // hook, so it must never be fatal: a failure is recorded as a cause — per
 // table for a compile refusal or a zone the table cannot be read in,
-// tenant-wide for a missing artifact or a zone chtypes cannot serve — and
+// tenant-wide for a missing artifact or a zone openLine refuses — and
 // surfaces as *Unavailable from Table. A table whose compile was refused
 // is compiled again at every Bind; a table the tenant no longer has is closed;
 // a tenant whose line resolves again is answering again.

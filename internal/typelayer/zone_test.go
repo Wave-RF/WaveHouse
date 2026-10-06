@@ -372,6 +372,45 @@ func TestBind_UnknownZoneIsThatTenantsUnavailable(t *testing.T) {
 	answers(t, eng, tenant.Default)
 }
 
+// TestBind_LaterTenantInAZoneChtypesCannotLoadIsRefusedPerParse: chtypes is
+// asked about a zone only at the first open, so once the image zone is
+// committed, a tenant whose zone Go knows and chtypes cannot load is bound.
+// Its zone then rides every call as session_timezone, and chtypes refuses each
+// one with ClickHouse code 36: no record is accepted (a declined verdict, a
+// 422 at the API) and no row parses (an error that is not Unavailable, so a
+// stream withholds it as "error"). An artifact that ignored an unknown
+// session_timezone would read the rows in the image zone and fail this test.
+func TestBind_LaterTenantInAZoneChtypesCannotLoadIsRefusedPerParse(t *testing.T) {
+	eng := testEngine(t, zonedTable())
+	require.True(t, knownZone(goOnlyZone), "TestMain's ZONEINFO names the zone")
+	require.Equal(t, "UTC", imageZone())
+	eng.Bind("goonly", testServerVersion, goOnlyZone, []*discovery.TableSchema{zonedTable()})
+	assert.Empty(t, eng.TenantCause("goonly"), "no bind after the first open asks chtypes about the zone")
+
+	record := []byte(`{"id":1,"ts":"2024-01-01 09:00:00"}` + "\n")
+	control, err := zonedTableOf(t, eng, tenant.Default).Ingest(FormatJSONEachRow, record)
+	require.NoError(t, err)
+	require.Len(t, control.Rows, 1)
+	require.True(t, control.Rows[0].Accepted, "the image-zone tenant accepts the same record")
+
+	tbl := zonedTableOf(t, eng, "goonly")
+	require.Equal(t, goOnlyZone, tbl.session)
+	batch, err := tbl.Ingest(FormatJSONEachRow, record)
+	require.NoError(t, err)
+	require.NotEmpty(t, batch.Rows)
+	for i, r := range batch.Rows {
+		assert.False(t, r.Accepted, "record %d", i)
+		assert.True(t, r.Declined, "record %d: %s", i, r.Message)
+	}
+
+	_, err = tbl.ParseRow(tbl.WireColumns, []byte(`[1, "2024-01-01T00:00:00Z"]`))
+	require.Error(t, err)
+	assert.False(t, IsUnavailable(err), "%v", err)
+	ce, ok := chtypes.AsCallError(err)
+	require.True(t, ok, "%v", err)
+	assert.EqualValues(t, 36, ce.ChCode, "%v", err)
+}
+
 // imageZoneEnv=imageUnset starts this test binary with no image zone
 // committed, which only a fresh process has.
 const (
@@ -379,9 +418,34 @@ const (
 	imageUnset   = "unset"
 )
 
-// goOnlyZone is a zone Go loads, from the ZONEINFO directory the image-zone
-// subprocesses get, and chtypes, with its own zone data, does not.
+// goOnlyZone is a zone Go loads, from the ZONEINFO directory TestMain gives
+// every process of this test binary, and chtypes, with its own zone data, does
+// not.
 const goOnlyZone = "Etc/Go_Only"
+
+// withGoOnlyZone points ZONEINFO at a new directory holding goOnlyZone, and
+// returns the function that removes it. Go reads ZONEINFO once, at a process's
+// first zone lookup, so TestMain calls this before any test runs. Every other
+// name still resolves from Go's own zone data.
+func withGoOnlyZone() (cleanup func(), err error) {
+	dir, err := os.MkdirTemp("", "zoneinfo")
+	if err != nil {
+		return nil, err
+	}
+	cleanup = func() { _ = os.RemoveAll(dir) }
+	zone := filepath.Join(dir, goOnlyZone)
+	if err = os.MkdirAll(filepath.Dir(zone), 0o750); err == nil {
+		err = os.WriteFile(zone, utcTZif(), 0o600)
+	}
+	if err == nil {
+		err = os.Setenv("ZONEINFO", dir)
+	}
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	return cleanup, nil
+}
 
 // utcTZif is a minimal TZif file (RFC 8536, version 1): one type, UTC.
 func utcTZif() []byte {
@@ -400,9 +464,6 @@ func TestImage_DerivedFromTheFirstTenantServed(t *testing.T) {
 		t.Skip("already the subprocess")
 	}
 	testEngine(t) // skips without the artifact
-	zoneinfo := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(zoneinfo, filepath.Dir(goOnlyZone)), 0o750))
-	require.NoError(t, os.WriteFile(filepath.Join(zoneinfo, goOnlyZone), utcTZif(), 0o600))
 	for _, test := range []string{
 		"TestImageUnset_FirstTenantSetsTheZone",
 		"TestImageUnset_MissingArtifactCommitsNothing",
@@ -413,7 +474,7 @@ func TestImage_DerivedFromTheFirstTenantServed(t *testing.T) {
 	} {
 		t.Run(test, func(t *testing.T) {
 			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^"+test+"$", "-test.v") //nolint:gosec // G204: this test binary, a test name
-			cmd.Env = append(os.Environ(), imageZoneEnv+"="+imageUnset, "ZONEINFO="+zoneinfo)
+			cmd.Env = append(os.Environ(), imageZoneEnv+"="+imageUnset)
 			out, err := cmd.CombinedOutput()
 			var exit *exec.ExitError
 			if errors.As(err, &exit) {
@@ -504,12 +565,13 @@ func TestImageUnset_UnknownZoneCommitsNothing(t *testing.T) {
 }
 
 // TestImageUnset_RefusedZoneCommitsNothing: a first tenant in a zone Go knows
-// and chtypes refuses fails its open and commits nothing. chtypes clears that
-// setup (Wave-RF/chtypes#458), so a tenant in another zone is served next and
-// sets the image zone.
+// and chtypes cannot load fails its open and commits nothing. chtypes clears
+// that setup (Wave-RF/chtypes#458), so a tenant in another zone is served next
+// and sets the image zone. A tenant in that zone bound after the commit is
+// TestBind_LaterTenantInAZoneChtypesCannotLoadIsRefusedPerParse.
 func TestImageUnset_RefusedZoneCommitsNothing(t *testing.T) {
 	eng := unsetImage(t)
-	require.True(t, knownZone(goOnlyZone), "the subprocess's ZONEINFO names the zone")
+	require.True(t, knownZone(goOnlyZone), "TestMain's ZONEINFO names the zone")
 	eng.Bind("refused", testServerVersion, goOnlyZone, []*discovery.TableSchema{eventsTable()})
 	u := unavailable(t, eng, "refused")
 	assert.Empty(t, u.Table, "the cause covers every table of the tenant")
@@ -524,8 +586,11 @@ func TestImageUnset_RefusedZoneCommitsNothing(t *testing.T) {
 
 // TestImageUnset_FailedArtifactOpenCommitsNothing: a first open whose artifact
 // does not load keeps the artifact's own cause and commits nothing. Unlike a
-// refused zone, chtypes keeps this open's setup, so a tenant in another zone
-// gets Setup's refusal, which names the held zone, and one in that zone sets it.
+// zone chtypes cannot load, chtypes keeps this open's setup, so a tenant in
+// another zone gets Setup's refusal, which names the held zone, and one in
+// that zone sets it. This flips when Wave-RF/chtypes#468 ships: chtypes then
+// clears the setup after a failed first open, so the UTC tenant is served and
+// sets the image zone. Update the test with the chtypes bump that brings it.
 func TestImageUnset_FailedArtifactOpenCommitsNothing(t *testing.T) {
 	eng := unsetImage(t)
 	broken, err := NewEngine(Config{CacheDir: corruptCopy(t)})

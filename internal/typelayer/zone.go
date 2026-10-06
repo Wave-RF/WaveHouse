@@ -46,8 +46,11 @@ var image struct {
 
 // openLine resolves the library for serverVersion's line. A non-empty cause is
 // why the tenant cannot be served: a zone name WaveHouse does not recognise,
-// chtypes refusing the zone, or no loadable artifact for the line (the SDK's
-// own message, with its CHTYPES_ARTIFACT_* code).
+// no loadable artifact for the line (the SDK's own message, with its
+// CHTYPES_ARTIFACT_* code), or a first open that fails in the zone (see
+// openFirst). Only the first open asks chtypes about the zone: once an image
+// zone is committed, a tenant in a zone chtypes cannot load gets no cause
+// here, and chtypes refuses each of its calls instead (see knownZone).
 func openLine(reg *chtypes.Registry, serverVersion, tz string) (*chtypes.Library, string) {
 	if !knownZone(tz) {
 		return nil, fmt.Sprintf("ClickHouse reports server timezone %q, which is not a zone name WaveHouse recognises, "+
@@ -120,8 +123,11 @@ func installedCause(reg *chtypes.Registry, line string) string {
 // knownZone reports whether tz is a zone name Go's time package knows, which
 // turns a garbage name away before it reaches chtypes. chtypes carries its own
 // zone data and Setup does not validate a name, so a zone Go knows and chtypes
-// does not passes here and fails at the first open instead, which commits
-// nothing.
+// does not passes here. As the first open, it fails and commits nothing. After
+// an image zone is committed, its tenant is bound, and chtypes refuses every
+// parse and filter compile in that zone (ClickHouse code 36), so no record of
+// it is accepted. Refusing it at bind would take chtypes saying which zones it
+// can load.
 func knownZone(tz string) bool {
 	if tz == "" || tz == "Local" {
 		return false
