@@ -21,15 +21,15 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
 
-### The chtypes artifact — fetch it once per machine
+### The chtypes artifact — fetched on first use
 
-`internal/typelayer` uses a per-ClickHouse-version shared library — looked for at start (an API process refuses to boot with none installed) and opened the first time a tenant on that ClickHouse line is bound — to run ingest validation and row-level security through ClickHouse's own parser (see [Deployment → chtypes artifacts](/deployment#chtypes-artifacts)). It is not source code and `make tools` does not fetch it for you — pull it once with:
+`internal/typelayer` uses a per-ClickHouse-version shared library, opened the first time a tenant on that ClickHouse line is bound, to run ingest validation and row-level security through ClickHouse's own parser (see [Deployment → chtypes artifacts](/deployment#chtypes-artifacts)). It is not source code, and you do not have to fetch it: an API process (`make dev`, `make test-e2e`, the app `make test-integration` and `make ci` start) and the unit tests that need the engine fetch it into the shared per-user cache (`~/.cache/chtypes/v1`, or `$CHTYPES_CACHE`) the first time they need it, and every checkout and worktree on the machine reuses it. `make test-unit`, `make test-integration` and `make test-e2e` (and so `make ci`) first make sure it is there with a single process, since until chtypes 1.0.4 processes installing the same build into one cache at once can break each other's install (Wave-RF/chtypes#482), and a suite runs its test binaries in parallel; a cached build costs them no request. To fetch it ahead, for example before going offline:
 
 ```bash
-scripts/fetch-chtypes.sh   # wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v1.0.2 fetch --frozen --lock chtypes.lock 26.8
+scripts/fetch-chtypes.sh   # the newest build for the line of the pinned test ClickHouse (internal/chversion), 26.8
 ```
 
-It lands in the default local cache (`~/.cache/chtypes/v1`, or `$CHTYPES_CACHE`; `scripts/fetch-chtypes.sh --offline` makes no network request and succeeds only when the cache already holds the locked build) and is a 40–50 MB download that unpacks to roughly 300–340 MB — expect the first run to take a minute or two. Without it the API process refuses to boot (`make dev`, `make test-e2e`, and the app that `make test-integration` and `make ci` start), and the unit tests that need the engine skip; set `WAVEHOUSE_TEST_REQUIRE_CHTYPES=1` (CI does) to make a missing artifact fail those tests instead. A process that did find an artifact answers ingest with `503`, and withholds row-filtered stream rows, for a ClickHouse line no installed artifact covers (chtypes 1.0 publishes 26.3, 26.7, 26.8 and 26.9); that cause and the others are listed in [Deployment → chtypes artifacts](/deployment#chtypes-artifacts).
+That runs the chtypes CLI at the SDK version `go.mod` requires. It is a 40–50 MB download that unpacks to roughly 300–340 MB; on a warm cache it makes two small requests and installs nothing unless a newer build of the line was published. `--offline` makes no request and succeeds only when the cache already holds a build; name other lines as arguments (in ascending order: [why](/deployment#a-cache-that-holds-a-higher-line)). When the artifact cannot be had, the unit tests that need the engine skip, naming the cause; set `WAVEHOUSE_TEST_REQUIRE_CHTYPES=1` (CI does) to make that fail those tests instead. A running process answers ingest with `503`, and withholds row-filtered stream rows, for a ClickHouse line it cannot fetch (chtypes 1.0 publishes 26.3, 26.7, 26.8 and 26.9); that cause and the others are listed in [Deployment → chtypes artifacts](/deployment#chtypes-artifacts).
 
 ### Auto-installed by `make tools`
 
@@ -69,7 +69,7 @@ This is the fastest way to get a fully functional local environment:
 git clone https://github.com/Wave-RF/WaveHouse.git
 cd WaveHouse
 make tools
-scripts/fetch-chtypes.sh   # once per machine (see above)
+scripts/fetch-chtypes.sh   # optional: prefetch the chtypes artifact (see above)
 
 # 2. Start ClickHouse (the only external service)
 docker compose -f deployments/compose/dependencies.yaml up -d --wait clickhouse
@@ -477,6 +477,7 @@ WaveHouse/
 │   ├── cache/              # Query cache: Ristretto L1 + the tenant-led version index; the Redis-compatible shared backend
 │   ├── chconn/             # ClickHouse pools, one per connection tuple (reconciled on settings reload)
 │   ├── chsql/              # Shared ClickHouse SQL helpers (identifier quoting, bind-safety, {p:String} value encoding, the strict integer-claim cast)
+│   ├── chversion/          # The ClickHouse version the suites run, and so the chtypes line CI fetches
 │   ├── config/             # YAML + env var configuration
 │   ├── coord/              # Leases with fencing tokens (in-process Local, RunElected, coordtest suite)
 │   ├── dedupe/             # Optional deduplication (Reserve/Commit/Release; Pebble or DynamoDB)
@@ -507,7 +508,6 @@ WaveHouse/
 │   └── Dockerfile.goreleaser  # Release image (built by GoReleaser)
 ├── scripts/                # E2E orchestrator, cov tool, chtypes fetcher, CI/hook helpers
 ├── docs/                   # Documentation
-├── chtypes.lock            # Pinned chtypes artifacts (scripts/fetch-chtypes.sh)
 ├── config.yaml             # Default configuration file
 ├── Makefile                # Build, test, lint, deploy targets
 ├── .golangci.yml           # Linter configuration
@@ -703,7 +703,7 @@ All three are free for public repositories. Each runs `goreleaser build --single
 
 A consequence worth knowing when you file a bug: the released Linux binaries are **dynamically linked against glibc**, minimum `GLIBC_2.34` (measured on `ubuntu-24.04`, both architectures) — Debian 12, Ubuntu 22.04 and RHEL 9 or newer. The pre-cgo builds were static and ran anywhere. The container images are unaffected; their `distroless/cc-debian12` base is glibc 2.36.
 
-`goreleaser-validate.yml` is the PR-time proof of all of this. On a change to `.goreleaser.yaml`, `go.mod`/`go.sum`, `chtypes.lock`, `scripts/fetch-chtypes.sh`, `deployments/Dockerfile.goreleaser` or the release workflows it runs `goreleaser check`, the same three-runner matrix in `--snapshot` mode, and a real multi-arch image build (to `--output type=cacheonly`, so nothing is pushed). It is advisory, not a required check.
+`goreleaser-validate.yml` is the PR-time proof of all of this. On a change to `.goreleaser.yaml`, `go.mod`/`go.sum` (which also name the chtypes CLI version the image bundles), `deployments/Dockerfile.goreleaser` or the release workflows it runs `goreleaser check`, the same three-runner matrix in `--snapshot` mode, and a real multi-arch image build (to `--output type=cacheonly`, so nothing is pushed). It is advisory, not a required check.
 
 ## The `dev` channel
 
