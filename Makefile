@@ -746,9 +746,23 @@ export COV_DEFER
 
 # UNIT_TIMEOUT: go test's limit for each package of the unit suite. 15s is the
 # budget a unit package has to fit when the suite runs on its own (#617), as
-# it does in CI's unit job. `make ci` passes a longer limit for its parallel
-# phase.
+# it does in CI's unit job.
 UNIT_TIMEOUT ?= 15s
+
+# CI_UNIT_TIMEOUT: the limit `make ci` passes as UNIT_TIMEOUT for its parallel
+# phase. There the unit suite shares every core with the lint and build jobs,
+# where a package that takes 10s alone runs past its 15s budget, and healthy
+# runs were killed.
+CI_UNIT_TIMEOUT ?= 60s
+
+# INTEGRATION_TIMEOUT: go test's limit for each package of the integration
+# suite (internal/mq's tagged tests, run on their own, keep a shorter one).
+# The go command kills the package at -timeout + 1m, counting TestMain's
+# wavehouse binary build before m.Run, and the multi-process roles test runs
+# its handover steps in sequence. tests/integration takes about 6m on a CI
+# runner and up to 8m under Docker Desktop: at 240s CI killed it, and 480s
+# left Docker Desktop half a minute.
+INTEGRATION_TIMEOUT ?= 900s
 
 .PHONY: test-unit
 test-unit: go-mod-download ## Run Go unit tests + render coverage + gate threshold
@@ -768,13 +782,8 @@ test: test-unit
 test-integration: go-mod-download ## Run Go integration tests + render coverage + gate threshold (requires Docker)
 	@printf "$(CYAN)==> Running Integration Tests...$(RESET)\n"
 	@rm -rf $(COV_INT)/data && mkdir -p $(COV_INT)/data
-	@# 900s: the go command kills the package at -timeout + 1m, counting
-	@# TestMain's wavehouse binary build before m.Run, and the multi-process
-	@# roles test runs its handover steps in sequence. tests/integration takes
-	@# about 6m on a CI runner and up to 8m under Docker Desktop: at 240s CI
-	@# killed it, and 480s left Docker Desktop half a minute.
 	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
-		-tags="integration $(TAGS)" -timeout 900s -coverpkg=./... -race -count=1 \
+		-tags="integration $(TAGS)" -timeout $(INTEGRATION_TIMEOUT) -coverpkg=./... -race -count=1 \
 		./tests/integration/... ./internal/mq/natsspike/... ./internal/cache/... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
 	@# internal/mq's integration-tagged tests (the external NATS broker) run
@@ -866,10 +875,7 @@ ci-parallel: verify-parallel build build-cover build-ts build-docs test test-ts
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
 	@echo "$(CYAN)==> Phase 1: Parallel Build & Static Checks$(RESET)"
-	@# UNIT_TIMEOUT=60s: in this phase the unit suite shares every core with
-	@# the lint and build jobs, where a package that takes 10s alone runs
-	@# past its 15s budget, and healthy runs were killed.
-	@$(MAKE) -j $(JOBS) ci-parallel COV_DEFER=1 UNIT_TIMEOUT=60s
+	@$(MAKE) -j $(JOBS) ci-parallel COV_DEFER=1 UNIT_TIMEOUT=$(CI_UNIT_TIMEOUT)
 	@echo "$(CYAN)==> Phase 2: Sequential Heavy Tests$(RESET)"
 	@$(MAKE) test-integration COV_DEFER=1
 	@$(MAKE) test-e2e COV_DEFER=1
