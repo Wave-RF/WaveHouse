@@ -86,13 +86,18 @@ function chTypeToTS(chType: string): string {
   // Boolean
   if (chType === "Bool") return "boolean";
 
+  // Floats: a NaN or infinity is rendered as one of these strings, never a number.
+  if (isFloat(chType)) return FLOAT_TS;
+
   // Numeric types
   if (isNumeric(chType)) return "number";
 
   // Array
   if (chType.startsWith("Array(") && chType.endsWith(")")) {
     const inner = chType.slice(6, -1);
-    return `${chTypeToTS(inner)}[]`;
+    const el = chTypeToTS(inner);
+    // A union element needs parentheses, or `number | null[]` is not an array of either.
+    return `${el.includes(" | ") ? `(${el})` : el}[]`;
   }
 
   // Map
@@ -115,6 +120,12 @@ function chTypeToTS(chType: string): string {
   return "unknown";
 }
 
+const FLOAT_TS = 'number | "nan" | "inf" | "-inf"';
+
+function isFloat(t: string): boolean {
+  return t === "Float32" || t === "Float64" || t === "BFloat16";
+}
+
 function isNumeric(t: string): boolean {
   const numericPrefixes = [
     "UInt8",
@@ -129,8 +140,6 @@ function isNumeric(t: string): boolean {
     "Int64",
     "Int128",
     "Int256",
-    "Float32",
-    "Float64",
     "Decimal",
   ];
   return numericPrefixes.some((p) => t === p || t.startsWith(`${p}(`));
