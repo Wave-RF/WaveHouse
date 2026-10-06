@@ -36,8 +36,8 @@ func viewerInsertPolicy(ins *policy.InsertPermissions) PolicySource {
 // the role may not otherwise write — the server-stamped org_id beside an
 // allow list of what the client sends. A record omitting it is filled with the
 // required value and published with it; a record supplying that value is
-// admitted; any other value fails the check; the role's other denied columns
-// stay denied.
+// admitted; any other value fails the check, per record; the role's other
+// denied columns stay denied, refusing the body.
 func TestIngest_EqCheckOnAColumnTheRoleMayNotWrite(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
@@ -48,21 +48,18 @@ func TestIngest_EqCheckOnAColumnTheRoleMayNotWrite(t *testing.T) {
 		Check:        map[string]policy.Filter{"org_id": {Eq: &required}},
 	})
 
+	body := `{"page":"/home"}` + "\n" +
+		`{"page":"/a","org_id":"org-42"}` + "\n" +
+		`{"page":"/b","org_id":"other"}` + "\n"
 	w := httptest.NewRecorder()
-	h.Handle(w, withTenant(viewerRaw(t, "clicks", "application/x-ndjson",
-		`{"page":"/home"}`+"\n"+
-			`{"page":"/a","org_id":"org-42"}`+"\n"+
-			`{"page":"/b","org_id":"other"}`+"\n"+
-			`{"page":"/c","button":"x"}`+"\n")))
+	h.Handle(w, withTenant(viewerRaw(t, "clicks", "application/x-ndjson", body)))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	resp := decodeBatchResult(t, w)
 	assert.True(t, resultAt(t, resp, 1).Ok, "%+v", resp.Results)
 	assert.True(t, resultAt(t, resp, 2).Ok, "%+v", resp.Results)
-	mismatch := resultAt(t, resp, 3)
-	assert.Equal(t, `check failed for column "org_id"`, mismatch.Error)
-	assert.Zero(t, mismatch.ExceptionCode, "a failed check is the gateway's verdict, not ClickHouse's")
-	assert.Equal(t, 117, resultAt(t, resp, 4).ExceptionCode, "button is still denied")
+	assert.Equal(t, recordResult{Index: 3, Error: `check failed for column "org_id"`}, resultAt(t, resp, 3),
+		"a failed check is the gateway's verdict, not ClickHouse's: no exception_code")
 
 	require.Len(t, pub.Messages, 2)
 	for _, m := range pub.Messages {
@@ -71,6 +68,12 @@ func TestIngest_EqCheckOnAColumnTheRoleMayNotWrite(t *testing.T) {
 		assert.Equal(t, []string{"page", "org_id"}, evt.Columns, "the stamped column rides in the row")
 		assert.Equal(t, "org-42", publishedRow(t, m.Data)["org_id"])
 	}
+
+	denied := &testutil.MockPublisher{}
+	h.Publisher = denied
+	w = httptest.NewRecorder()
+	h.Handle(w, withTenant(viewerRaw(t, "clicks", "application/x-ndjson", body+`{"page":"/c","button":"x"}`+"\n")))
+	assert.Contains(t, requireRefused(t, w, denied, 117, 4), "button", "button is still denied")
 }
 
 // visitsRegistry is a clicks table whose computed column reads a column a role
@@ -187,7 +190,6 @@ func TestIngest_CheckOnASuppliableEphemeralColumn_StillRefused(t *testing.T) {
 	for i := 1; i <= 2; i++ {
 		r := resultAt(t, resp, i)
 		assert.Contains(t, r.Error, "is ephemeral and is never stored", "record %d", i)
-		assert.Zero(t, r.ExceptionCode, "record %d", i)
 	}
 	assert.Empty(t, pub.Messages)
 

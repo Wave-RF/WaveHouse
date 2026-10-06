@@ -105,7 +105,7 @@ func (f IngestFormat) String() string {
 
 // wire is the format chtypes parses the body as. Both JSON families collapse
 // onto JSONEachRow: an NDJSON body, a bare object, concatenated objects and a
-// newline-framed array are all the same input to ClickHouse's own reader.
+// top-level array are all input ClickHouse's own JSONEachRow reader frames.
 func (f IngestFormat) wire() typelayer.Format {
 	switch f {
 	case FormatCSV, FormatCSVPositional:

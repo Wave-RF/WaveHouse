@@ -181,16 +181,19 @@ func TestIngest_DedupeMarksOnlyPublishedRecords(t *testing.T) {
 	// And only NOW is the id spent.
 	assert.True(t, dedup.Committed(key), "the published record's id is committed")
 
-	// In a batch, the refused sibling claims nothing either.
+	// A refused batch claims nothing for any of its records, the good ones
+	// included, so the whole batch can be fixed and resent.
 	w = httptest.NewRecorder()
 	h.Handle(w, withTenant(ndjsonRequest(t, "clicks",
-		jsonLine(t, map[string]any{"page": "/b", "event_id": "evt-2", "count": "nope"}),
 		jsonLine(t, map[string]any{"page": "/c", "event_id": "evt-3"}),
+		jsonLine(t, map[string]any{"page": "/b", "event_id": "evt-2", "count": "nope"}),
 	)))
-	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
-	assert.False(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: "evt-2"}))
-	assert.False(t, dedup.Committed(dedupe.Key{Table: "clicks", ID: "evt-2"}))
-	assert.True(t, dedup.Committed(dedupe.Key{Table: "clicks", ID: "evt-3"}))
+	require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
+	for _, id := range []string{"evt-2", "evt-3"} {
+		assert.False(t, dedup.Pending(dedupe.Key{Table: "clicks", ID: id}), id)
+		assert.False(t, dedup.Committed(dedupe.Key{Table: "clicks", ID: id}), id)
+	}
+	assert.Len(t, pub.Messages, 1)
 }
 
 // viewerIngestRequest is ingestRequest with the "viewer" role in context, for

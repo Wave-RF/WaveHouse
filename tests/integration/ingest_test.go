@@ -178,25 +178,38 @@ func eventuallyRows(t *testing.T, table, where string, want uint64) {
 	}, 30*time.Second, 250*time.Millisecond, "expected %d row(s) in %s WHERE %s", want, table, where)
 }
 
-// A single-line JSON array with one bad record: the other two still land.
-// Measured on the artifact, an unframed array with one bad record makes the
-// parser refuse the whole batch and export nothing, which would break the
-// per-record promise of #195; ingest rewrites the array's depth-1 commas to
-// newlines in place, which restores per-record salvage. Asserted in the table,
-// not only in the response.
-func TestIngest_CompactArray_OneBadRecord_TheOthersStillLand(t *testing.T) {
+// requireRefused asserts ClickHouse's refusal of a whole body: a 400 with the
+// clickhouse.rejected class, its code, and the record it failed on.
+func requireRefused(t *testing.T, status int, body map[string]any, record int) {
+	t.Helper()
+	require.Equal(t, http.StatusBadRequest, status, "body=%v", body)
+	assert.Equal(t, "clickhouse.rejected", body["code"])
+	assert.NotZero(t, body["exception_code"])
+	assert.True(t, strings.HasPrefix(fmt.Sprint(body["error"]), fmt.Sprintf("record %d: ", record)), "body=%v", body)
+}
+
+// landsAfter posts one good record and waits for it, then asserts that none of
+// where's rows landed: a refused body published nothing before the record that
+// follows it.
+func landsAfter(t *testing.T, table, where string) {
+	t.Helper()
+	status, body := postIngest(t, table, "application/json", `{"user_id":"after"}`, "")
+	require.Equal(t, http.StatusOK, status, "body=%v", body)
+	eventuallyRows(t, table, "user_id = 'after'", 1)
+	eventuallyRows(t, table, where, 0)
+}
+
+// A single-line JSON array with one bad record refuses the whole request, as a
+// ClickHouse INSERT of the array does: none of it lands. Asserted in the
+// table, not only in the response.
+func TestIngest_CompactArray_OneBadRecord_NothingLands(t *testing.T) {
 	t.Parallel()
 	table := createTable(t, "user_id String, value UInt32", "ORDER BY user_id")
 
 	status, body := postIngest(t, table, "application/json",
 		`[{"user_id":"a1","value":1},{"user_id":"a2","value":"not-a-number"},{"user_id":"a3","value":3}]`, "")
-	require.Equal(t, http.StatusOK, status, "body=%v", body)
-	assert.EqualValues(t, 3, body["total"])
-	assert.EqualValues(t, 2, body["succeeded"])
-	assert.EqualValues(t, 1, body["failed"])
-
-	eventuallyRows(t, table, "user_id IN ('a1','a3')", 2)
-	eventuallyRows(t, table, "user_id = 'a2'", 0)
+	requireRefused(t, status, body, 2)
+	landsAfter(t, table, "user_id IN ('a1','a2','a3')")
 }
 
 // CSV is positional in the table's declaration order. The end-to-end
@@ -229,40 +242,37 @@ func TestIngest_BareCSVHeader_LandsInClickHouse(t *testing.T) {
 	eventuallyRows(t, table, "user_id = 'user_id'", 0)
 }
 
-// header=absent is strictly positional, so the same header line is one
-// refused record and never reaches the table.
-func TestIngest_CSVHeaderAbsent_LandsInClickHouse(t *testing.T) {
+// header=absent is strictly positional, so the same header line is a record
+// ClickHouse refuses, which refuses the body: nothing reaches the table.
+func TestIngest_CSVHeaderAbsent_RefusesTheHeaderLine(t *testing.T) {
 	t.Parallel()
 	table := createTable(t, "user_id String, event_type String, value UInt32", "ORDER BY user_id")
 
 	status, body := postIngest(t, table, "text/csv; header=absent", "user_id,event_type,value\n\"a1\",\"click\",7\n", "")
-	require.Equal(t, http.StatusOK, status, "body=%v", body)
-	assert.EqualValues(t, 2, body["total"])
-	assert.EqualValues(t, 1, body["succeeded"])
-	assert.EqualValues(t, 1, body["failed"])
-
-	eventuallyRows(t, table, "user_id = 'a1' AND value = 7", 1)
-	eventuallyRows(t, table, "user_id = 'user_id'", 0)
+	requireRefused(t, status, body, 1)
+	landsAfter(t, table, "user_id IN ('a1','user_id')")
 }
 
-// TSV is CSV's tab-separated twin, with a bad row beside a good one, so
-// per-record salvage is covered for the positional formats too.
+// TSV is CSV's tab-separated twin; a bad row beside a good one refuses the
+// body, so neither lands.
 func TestIngest_TSVBody_LandsInClickHouse(t *testing.T) {
 	t.Parallel()
 	table := createTable(t, "user_id String, event_type String, value UInt32", "ORDER BY user_id")
 
-	status, body := postIngest(t, table, "text/tab-separated-values", "t1\tclick\t5\nt2\tview\tnope\n", "")
+	status, body := postIngest(t, table, "text/tab-separated-values", "t1\tclick\t5\nt2\tview\t6\n", "")
 	require.Equal(t, http.StatusOK, status, "body=%v", body)
-	assert.EqualValues(t, 1, body["succeeded"])
-	assert.EqualValues(t, 1, body["failed"])
-
+	assert.EqualValues(t, 2, body["succeeded"])
 	eventuallyRows(t, table, "user_id = 't1' AND value = 5", 1)
-	eventuallyRows(t, table, "user_id = 't2'", 0)
+	eventuallyRows(t, table, "user_id = 't2' AND value = 6", 1)
+
+	status, body = postIngest(t, table, "text/tab-separated-values", "t3\tclick\t5\nt4\tview\tnope\n", "")
+	requireRefused(t, status, body, 2)
+	landsAfter(t, table, "user_id IN ('t3','t4')")
 }
 
 // text/csv; header=present addresses the columns by the header, in any order:
 // the header is not a record, a column it omits takes the table's own
-// DEFAULT, and a bad row is salvaged like any other.
+// DEFAULT.
 func TestIngest_CSVWithNamesBody_LandsInClickHouse(t *testing.T) {
 	t.Parallel()
 	table := createTable(t, "user_id String, event_type String, value UInt32 DEFAULT 42", "ORDER BY user_id")
@@ -276,20 +286,22 @@ func TestIngest_CSVWithNamesBody_LandsInClickHouse(t *testing.T) {
 	eventuallyRows(t, table, "user_id = 'h2' AND event_type = 'view' AND value = 42", 1)
 }
 
-// The tab-separated twin of the header=present case, with a bad row beside a
-// good one.
+// The tab-separated twin of the header=present case; a bad row beside a good
+// one refuses the body, counting data lines (the header is not record 1).
 func TestIngest_TSVWithNamesBody_LandsInClickHouse(t *testing.T) {
 	t.Parallel()
 	table := createTable(t, "user_id String, event_type String, value UInt32", "ORDER BY user_id")
 
 	status, body := postIngest(t, table, "text/tab-separated-values; header=present",
-		"value\tuser_id\tevent_type\n5\tn1\tclick\nnope\tn2\tview\n", "")
+		"value\tuser_id\tevent_type\n5\tn1\tclick\n", "")
 	require.Equal(t, http.StatusOK, status, "body=%v", body)
 	assert.EqualValues(t, 1, body["succeeded"])
-	assert.EqualValues(t, 1, body["failed"])
-
 	eventuallyRows(t, table, "user_id = 'n1' AND value = 5", 1)
-	eventuallyRows(t, table, "user_id = 'n2'", 0)
+
+	status, body = postIngest(t, table, "text/tab-separated-values; header=present",
+		"value\tuser_id\tevent_type\n5\tn2\tclick\nnope\tn3\tview\n", "")
+	requireRefused(t, status, body, 2)
+	landsAfter(t, table, "user_id IN ('n2','n3')")
 }
 
 // A header naming a column the table does not have is ClickHouse's own
@@ -313,8 +325,7 @@ func TestIngest_WithNamesUnknownHeader_Is400WithCode117(t *testing.T) {
 
 // A column the role may not write is one no INSERT may name in the schema its
 // records are parsed against, so a record naming one is ClickHouse's
-// per-record refusal — 400 with code 117 — where it used to be the gateway's
-// 403. The same role writing without it still lands, the column taking the
+// refusal — 400 with code 117 — where it used to be the gateway's 403. The same role writing without it still lands, the column taking the
 // table's default rather than any value of the caller's.
 func TestIngest_DeniedColumn_IsClickHouseCode117(t *testing.T) {
 	t.Parallel()

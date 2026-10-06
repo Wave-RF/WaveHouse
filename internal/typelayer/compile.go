@@ -8,10 +8,11 @@ import (
 )
 
 // compileSettings is the fixed parsing profile every table handle is compiled
-// with. allow_errors_ratio turns "first bad row ends the batch" into
-// skip-and-continue so every record gets its own verdict; skip_unknown_fields=0
-// makes an unknown field a real per-row rejection (ClickHouse code 117) instead
-// of silent data loss. Neither is ever forwarded to the real INSERT.
+// with. skip_unknown_fields=0 makes an unknown field a refusal (ClickHouse code
+// 117) instead of silent data loss; it is never forwarded to the real INSERT,
+// which carries only the exported columns. Error recovery
+// (input_format_allow_errors_ratio, _num) stays off, as on a default INSERT: the
+// first record the reader cannot read refuses the body (see Ingest).
 //
 // The type gates admit the column types ClickHouse refuses to create by
 // default. Every table compiled here already exists on the server, so its
@@ -22,7 +23,6 @@ import (
 // does not publish), so the list holds only names measured accepted on all
 // four chtypes 1.0 lines (26.3.38.2, 26.7.19.5, 26.8.15.10 and 26.9.8.3).
 var compileSettings = map[string]string{
-	"input_format_allow_errors_ratio":  "1",
 	"input_format_skip_unknown_fields": "0",
 
 	"allow_suspicious_low_cardinality_types": "1",

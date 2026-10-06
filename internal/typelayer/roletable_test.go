@@ -58,9 +58,9 @@ func TestRoleTable_IdentityShapeIsTheBaseTable(t *testing.T) {
 }
 
 // TestRoleTable_DeniedColumnIsUnnamableAndOffTheWire: a column the role may
-// not write is declared MATERIALIZED, so a record naming it is ClickHouse's
-// own per-row code 117 rather than a Go key walk's 403 — and the exported row
-// carries the ROLE's column list.
+// not write is declared MATERIALIZED, so a record naming it refuses the body
+// with ClickHouse's own code 117 rather than a Go key walk's 403 — and the
+// exported row carries the ROLE's column list.
 func TestRoleTable_DeniedColumnIsUnnamableAndOffTheWire(t *testing.T) {
 	eng := testEngine(t, ordersTable())
 	tbl := roleTableFor(t, eng, RoleShape{Columns: []string{"id", "tenant", "amount"}})
@@ -69,19 +69,16 @@ func TestRoleTable_DeniedColumnIsUnnamableAndOffTheWire(t *testing.T) {
 	assert.Equal(t, []string{"id", "tenant", "secret", "amount"}, compiledColumnNames(tbl.c.desc),
 		"still declared, so an expression or check over it compiles")
 
-	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(
-		`{"id":1,"tenant":"acme","amount":5}`+"\n"+
-			`{"id":2,"tenant":"acme","secret":"x","amount":5}`+"\n"))
+	good := `{"id":1,"tenant":"acme","amount":5}` + "\n"
+	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(good))
 	require.NoError(t, err)
-	require.Len(t, batch.Rows, 2)
-
+	require.Len(t, batch.Rows, 1)
 	assert.True(t, batch.Rows[0].Accepted)
 	assert.Equal(t, `[1, "acme", 5]`, string(batch.Rows[0].Line))
 
-	assert.False(t, batch.Rows[1].Accepted)
-	assert.False(t, batch.Rows[1].Declined, "a denied column is a verdict about the data, not a decline")
-	assert.Equal(t, 117, batch.Rows[1].Code)
-	assert.Contains(t, batch.Rows[1].Message, "secret")
+	batch, err = tbl.Ingest(FormatJSONEachRow, []byte(good+`{"id":2,"tenant":"acme","secret":"x","amount":5}`+"\n"))
+	require.NoError(t, err)
+	assert.Contains(t, requireRefused(t, batch, 117, 2).Message, "secret", "a denied column is a verdict about the data, not a decline")
 }
 
 // TestRoleTable_DefaultInjectsWhenAbsentAndLosesToASuppliedValue, measured on
@@ -188,16 +185,16 @@ func TestRoleTable_DeniedColumnAnExpressionReadsStillCompiles(t *testing.T) {
 	defer tbl.Release()
 
 	assert.Equal(t, []string{"page", "ip_len", "n_set"}, tbl.WireColumns)
-	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(
-		`{"page":"/home"}`+"\n"+`{"page":"/a","ip":"1.2.3.4"}`+"\n"+`{"page":"/b","n":1}`+"\n"))
+	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"page":"/home"}`+"\n"))
 	require.NoError(t, err)
-	require.Len(t, batch.Rows, 3)
+	require.Len(t, batch.Rows, 1)
 	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
 	assert.Equal(t, `["/home", 7, 0]`, string(batch.Rows[0].Line), "length('0.0.0.0'), and n at its type default NULL")
-	assert.Equal(t, 117, batch.Rows[1].Code)
-	assert.Contains(t, batch.Rows[1].Message, "ip")
-	assert.Equal(t, 117, batch.Rows[2].Code)
-	assert.Contains(t, batch.Rows[2].Message, "n")
+	for col, rec := range map[string]string{"ip": `{"page":"/a","ip":"1.2.3.4"}`, "n": `{"page":"/b","n":1}`} {
+		batch, err = tbl.Ingest(FormatJSONEachRow, []byte(`{"page":"/home"}`+"\n"+rec+"\n"))
+		require.NoError(t, err)
+		assert.Contains(t, requireRefused(t, batch, 117, 2).Message, col)
+	}
 
 	// A check over a denied column tests what the server will store there.
 	check, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"page":"/home"}`+"\n"+`{"page":"/b"}`+"\n"),
@@ -255,12 +252,14 @@ func TestRoleTable_EphemeralFollowsTheRoleColumns(t *testing.T) {
 
 	denied, err := eng.RoleTable(tenant.Default, "eph", RoleShape{Columns: []string{"page", "ip_len"}})
 	require.NoError(t, err)
-	batch, err = denied.Ingest(FormatJSONEachRow, append(body, `{"page":"/b"}`+"\n"...))
+	refused, err := denied.Ingest(FormatJSONEachRow, append(body, `{"page":"/b"}`+"\n"...))
+	require.NoError(t, err)
+	requireRefused(t, refused, 117, 1)
+	batch, err = denied.Ingest(FormatJSONEachRow, []byte(`{"page":"/b"}`+"\n"))
 	denied.Release()
 	require.NoError(t, err)
-	assert.Equal(t, 117, batch.Rows[0].Code)
-	require.True(t, batch.Rows[1].Accepted, batch.Rows[1].Message)
-	assert.Equal(t, `["/b", 0]`, string(batch.Rows[1].Line))
+	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
+	assert.Equal(t, `["/b", 0]`, string(batch.Rows[0].Line))
 }
 
 // TestRoleTable_ContradictoryShapeIsAnError: a default for a column the shape

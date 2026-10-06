@@ -15,34 +15,25 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
-// TestIngest_JSONArray_CompactWithOneBadRecord is the regression guard for the
-// whole reason the depth-1 comma rewrite exists.
-//
-// Measured: a SINGLE-LINE array with one bad record makes chtypes answer
-// Outcome=rejected with no exported bytes — the records that parsed perfectly
-// are lost with it. That breaks #195's promise that one bad record never
-// obscures the rest of the batch. Newline-framing the elements restores it.
-func TestIngest_JSONArray_CompactWithOneBadRecord(t *testing.T) {
+// TestIngest_JSONArray_OneBadRecordRefusesTheArray: an array goes to
+// ClickHouse's reader as sent, compact or pretty-printed, and one bad element
+// refuses the whole request, as a ClickHouse INSERT of the array does; its
+// siblings are not published.
+func TestIngest_JSONArray_OneBadRecordRefusesTheArray(t *testing.T) {
 	t.Parallel()
-	pub := &testutil.MockPublisher{}
-	h := newTestIngestHandler(t, testRegistry(t), pub)
-
-	w := httptest.NewRecorder()
-	h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "application/json",
-		`[{"page":"/a"},{"page":"/b","nope":1},{"page":"/c"}]`)))
-
-	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
-	resp := decodeBatchResult(t, w)
-	assert.Equal(t, 3, resp.Total)
-	assert.Equal(t, 2, resp.Succeeded)
-	assert.Equal(t, 1, resp.Failed)
-	require.Len(t, resp.Results, 3)
-	assert.True(t, resultAt(t, resp, 1).Ok)
-	assert.Equal(t, 117, resultAt(t, resp, 2).ExceptionCode)
-	assert.True(t, resultAt(t, resp, 3).Ok)
-	require.Len(t, pub.Messages, 2, "the siblings of a refused record still publish")
-	assert.Equal(t, "/a", publishedRow(t, pub.Messages[0].Data)["page"])
-	assert.Equal(t, "/c", publishedRow(t, pub.Messages[1].Data)["page"])
+	for name, body := range map[string]string{
+		"compact": `[{"page":"/a"},{"page":"/b","nope":1},{"page":"/c"}]`,
+		"pretty":  "[\n  {\"page\": \"/a\"},\n  {\"page\": \"/b\", \"nope\": 1},\n  {\"page\": \"/c\"}\n]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := newTestIngestHandler(t, testRegistry(t), pub)
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "application/json", body)))
+			assert.Contains(t, requireRefused(t, w, pub, 117, 2), "nope")
+		})
+	}
 }
 
 // TestIngest_CSV: CSV is header-less and POSITIONAL in the table's declaration
@@ -72,22 +63,21 @@ func TestIngest_CSV(t *testing.T) {
 }
 
 // TestIngest_CSV_PositionalContract pins the three ways a producer gets the
-// positional contract wrong, each with ClickHouse's own code, under
-// `header=absent` (strictly positional, detection off). A header line there is
-// not a header: it is one record that fails to parse, and the data rows around
-// it still ingest.
+// positional contract wrong under `header=absent` (strictly positional,
+// detection off), each refusing the request with ClickHouse's own code at the
+// record. A header line there is not a header: it is a record that fails to
+// parse.
 func TestIngest_CSV_PositionalContract(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
-		name string
-		body string
-		ok   int
-		bad  int
+		name   string
+		body   string
+		record int // 0: accepted
 	}{
-		{"a short row is a per-record failure", "\"/a\",\"buy\"\n\"/b\",\"sell\",4,\"e2\",\"acme\"\n", 1, 1},
-		{"an extra field is a per-record failure", "\"/a\",\"buy\",3,\"e1\",\"acme\",99\n", 0, 1},
-		{"a header line is one failed record, not a header", "page,button,count,event_id,org_id\n\"/b\",\"sell\",4,\"e2\",\"acme\"\n", 1, 1},
-		{"an empty field takes the column default", "\"/a\",\"buy\",3,\"e1\",\n", 1, 0},
+		{"a short row refuses the body", "\"/b\",\"sell\",4,\"e2\",\"acme\"\n\"/a\",\"buy\"\n", 2},
+		{"an extra field refuses the body", "\"/a\",\"buy\",3,\"e1\",\"acme\",99\n", 1},
+		{"a header line is a failed record, not a header", "page,button,count,event_id,org_id\n\"/b\",\"sell\",4,\"e2\",\"acme\"\n", 1},
+		{"an empty field takes the column default", "\"/a\",\"buy\",3,\"e1\",\n", 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -96,16 +86,16 @@ func TestIngest_CSV_PositionalContract(t *testing.T) {
 			w := httptest.NewRecorder()
 			h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "text/csv; header=absent", tt.body)))
 
-			require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
-			resp := decodeBatchResult(t, w)
-			assert.Equal(t, tt.ok, resp.Succeeded)
-			assert.Equal(t, tt.bad, resp.Failed)
-			assert.Len(t, pub.Messages, tt.ok)
-			for _, r := range resp.Results {
-				if r.Error != "" {
-					assert.NotZero(t, r.ExceptionCode, "a parser refusal carries ClickHouse's code")
-				}
+			if tt.record == 0 {
+				require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+				assert.Equal(t, 1, decodeBatchResult(t, w).Succeeded)
+				assert.Len(t, pub.Messages, 1)
+				return
 			}
+			require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
+			_, code := errorAndCode(t, w)
+			requireRefused(t, w, pub, code, tt.record)
+			assert.NotZero(t, code, "ClickHouse's own code")
 		})
 	}
 }
@@ -113,8 +103,8 @@ func TestIngest_CSV_PositionalContract(t *testing.T) {
 // TestIngest_BareCSV_AutoDetectsHeader: a `text/csv` with no header parameter
 // is ClickHouse's default CSV, which consumes a first line that spells the
 // column names as a header. The indices and total count only data rows; the
-// same body under header=absent rejects that line at index 1 (code 27); a bare
-// body with no header line ingests every row.
+// same body under header=absent refuses that line as record 1 (code 27); a
+// bare body with no header line ingests every row.
 func TestIngest_BareCSV_AutoDetectsHeader(t *testing.T) {
 	t.Parallel()
 	const header = "page,button,count,event_id,org_id\n"
@@ -134,18 +124,13 @@ func TestIngest_BareCSV_AutoDetectsHeader(t *testing.T) {
 		assert.Equal(t, "/a", publishedRow(t, pub.Messages[0].Data)["page"])
 	})
 
-	t.Run("header=absent rejects the header line", func(t *testing.T) {
+	t.Run("header=absent refuses the header line", func(t *testing.T) {
 		t.Parallel()
 		pub := &testutil.MockPublisher{}
 		h := newTestIngestHandler(t, testRegistry(t), pub)
 		w := httptest.NewRecorder()
 		h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "text/csv; header=absent", header+rows)))
-		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
-		resp := decodeBatchResult(t, w)
-		assert.Equal(t, 3, resp.Total)
-		assert.Equal(t, 2, resp.Succeeded)
-		assert.Equal(t, 27, resultAt(t, resp, 1).ExceptionCode, "the first line is a record ClickHouse's positional reader refuses")
-		assert.Len(t, pub.Messages, 2)
+		requireRefused(t, w, pub, 27, 1) // a record ClickHouse's positional reader refuses
 	})
 
 	t.Run("bare with no header line ingests every row", func(t *testing.T) {
@@ -171,16 +156,21 @@ func TestIngest_TSV(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "text/tab-separated-values",
-		"/a\tbuy\t3\te1\tacme\n/b\tsell\tnot-a-number\te2\tacme\n")))
-
+		"/a\tbuy\t3\te1\tacme\n/b\tsell\t\\N\te2\tacme\n")))
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	resp := decodeBatchResult(t, w)
 	assert.Equal(t, 2, resp.Total)
-	assert.Equal(t, 1, resp.Succeeded)
-	assert.Equal(t, 1, resp.Failed)
-	assert.Equal(t, 27, resultAt(t, resp, 2).ExceptionCode)
-	require.Len(t, pub.Messages, 1)
+	assert.Equal(t, 2, resp.Succeeded)
+	require.Len(t, pub.Messages, 2)
 	assert.Equal(t, "/a", publishedRow(t, pub.Messages[0].Data)["page"])
+	assert.Equal(t, float64(0), publishedRow(t, pub.Messages[1].Data)["count"], "\\N takes the default")
+
+	pub = &testutil.MockPublisher{}
+	h.Publisher = pub
+	w = httptest.NewRecorder()
+	h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "text/tab-separated-values",
+		"/a\tbuy\t3\te1\tacme\n/b\tsell\tnot-a-number\te2\tacme\n")))
+	requireRefused(t, w, pub, 27, 2)
 }
 
 // TestIngest_CSV_IsAlwaysABatch: the positional formats have no arity question —
@@ -223,16 +213,12 @@ func TestIngest_CSVWithNames(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "text/csv; header=present",
-		"org_id,page,count\nacme,/a,3\nacme,/b,not-a-number\nbeta,/c,5\n")))
+		"org_id,page,count\nacme,/a,3\nbeta,/c,5\n")))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	resp := decodeBatchResult(t, w)
-	assert.Equal(t, 3, resp.Total, "the header line is not a record")
+	assert.Equal(t, 2, resp.Total, "the header line is not a record")
 	assert.Equal(t, 2, resp.Succeeded)
-	assert.True(t, resultAt(t, resp, 1).Ok)
-	assert.False(t, resultAt(t, resp, 2).Ok)
-	assert.NotZero(t, resultAt(t, resp, 2).ExceptionCode, "a parser refusal carries ClickHouse's code")
-	assert.True(t, resultAt(t, resp, 3).Ok)
 	require.Len(t, pub.Messages, 2)
 	row := publishedRow(t, pub.Messages[0].Data)
 	assert.Equal(t, "/a", row["page"])
@@ -240,6 +226,16 @@ func TestIngest_CSVWithNames(t *testing.T) {
 	assert.Equal(t, "acme", row["org_id"])
 	assert.Equal(t, "", row["button"], "a column the header omits takes its DEFAULT")
 	assert.Equal(t, "/c", publishedRow(t, pub.Messages[1].Data)["page"])
+
+	// A refusal counts data lines too: the header is not record 1.
+	pub = &testutil.MockPublisher{}
+	h.Publisher = pub
+	w = httptest.NewRecorder()
+	h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "text/csv; header=present",
+		"org_id,page,count\nacme,/a,3\nacme,/b,not-a-number\nbeta,/c,5\n")))
+	_, code := errorAndCode(t, w)
+	assert.NotZero(t, code)
+	requireRefused(t, w, pub, code, 2)
 }
 
 // TestIngest_TSVWithNames is the tab-separated twin.
@@ -279,12 +275,7 @@ func TestIngest_WithNames_HeaderRefusals(t *testing.T) {
 			w := httptest.NewRecorder()
 			h.Handle(w, withTenant(rawIngestRequest(t, "clicks", tc.ct, tc.body)))
 
-			require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
-			msg, code := errorAndCode(t, w)
-			assert.Equal(t, 117, code)
-			assert.Equal(t, codeCHRejected, errorClass(t, w), "a whole-request parser refusal carries the class too")
-			assert.Contains(t, msg, tc.mention)
-			assert.Empty(t, pub.Messages)
+			assert.Contains(t, requireRefused(t, w, pub, 117, 0), tc.mention, "a header is no record")
 		})
 	}
 
@@ -359,32 +350,47 @@ func TestIngest_WithNames_RoleProjection(t *testing.T) {
 // gathered per chunk and stitched back together by a staging slice; they are
 // now one array from one Ingest call, indexed directly. A batch that straddles
 // the old boundary must still report 1-based indices in order, with each
-// record's own outcome — an off-by-one there would attribute a refusal to the
-// wrong record, which the response gives a caller no way to detect.
+// record's own outcome — an off-by-one there would attribute a check failure to
+// the wrong record, which the response gives a caller no way to detect. A
+// parse error past the boundary names its own record too.
 func TestIngest_LargeBatch_IndicesStayContiguous(t *testing.T) {
 	t.Parallel()
+	required := "acme"
 	pub := &testutil.MockPublisher{}
 	h := newTestIngestHandler(t, testRegistry(t), pub)
-
-	const n = 600
-	bad := map[int]bool{1: true, 250: true, 500: true, 501: true, n: true} // 1-based
-	var b strings.Builder
-	b.WriteByte('[')
-	for i := 1; i <= n; i++ {
-		if i > 1 {
-			b.WriteByte(',')
-		}
-		if bad[i] {
-			fmt.Fprintf(&b, `{"page":"/p%d","nope":%d}`, i, i)
-			continue
-		}
-		fmt.Fprintf(&b, `{"page":"/p%d"}`, i)
+	h.PolicySource = staticPolicy(&policy.Policy{Tables: map[string]policy.TablePolicy{
+		"clicks": {"writer": {Insert: &policy.InsertPermissions{
+			Check: map[string]policy.Filter{"org_id": {Eq: &required}},
+		}}},
+	}})
+	send := func(body string) *httptest.ResponseRecorder {
+		req := rawIngestRequest(t, "clicks", "application/json", body)
+		req = req.WithContext(auth.WithRole(req.Context(), "writer"))
+		w := httptest.NewRecorder()
+		h.Handle(w, withTenant(req))
+		return w
 	}
-	b.WriteByte(']')
+	const n = 600
+	array := func(record func(i int) string) string {
+		var b strings.Builder
+		b.WriteByte('[')
+		for i := 1; i <= n; i++ {
+			if i > 1 {
+				b.WriteByte(',')
+			}
+			b.WriteString(record(i))
+		}
+		b.WriteByte(']')
+		return b.String()
+	}
 
-	w := httptest.NewRecorder()
-	h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "application/json", b.String())))
-
+	bad := map[int]bool{1: true, 250: true, 500: true, 501: true, n: true} // 1-based
+	w := send(array(func(i int) string {
+		if bad[i] {
+			return fmt.Sprintf(`{"page":"/p%d","org_id":"evil"}`, i)
+		}
+		return fmt.Sprintf(`{"page":"/p%d"}`, i)
+	}))
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	resp := decodeBatchResult(t, w)
 	require.Equal(t, n, resp.Total)
@@ -394,7 +400,7 @@ func TestIngest_LargeBatch_IndicesStayContiguous(t *testing.T) {
 	for i, r := range resp.Results {
 		require.Equal(t, i+1, r.Index, "results must be 1-based and in order")
 		if bad[i+1] {
-			assert.Equal(t, 117, r.ExceptionCode, "record %d", i+1)
+			assert.Contains(t, r.Error, `check failed for column "org_id"`, "record %d", i+1)
 			continue
 		}
 		assert.True(t, r.Ok, "record %d", i+1)
@@ -408,4 +414,14 @@ func TestIngest_LargeBatch_IndicesStayContiguous(t *testing.T) {
 	assert.Equal(t, "/p502", publishedRow(t, pub.Messages[502-1-4].Data)["page"])
 	assert.Equal(t, "/p2", publishedRow(t, pub.Messages[0].Data)["page"], "record 1 was refused")
 	assert.Equal(t, "/p599", publishedRow(t, pub.Messages[len(pub.Messages)-1].Data)["page"], "record 600 was refused")
+
+	pub = &testutil.MockPublisher{}
+	h.Publisher = pub
+	w = send(array(func(i int) string {
+		if i == 501 {
+			return fmt.Sprintf(`{"page":"/p%d","nope":%d}`, i, i)
+		}
+		return fmt.Sprintf(`{"page":"/p%d"}`, i)
+	}))
+	requireRefused(t, w, pub, 117, 501)
 }

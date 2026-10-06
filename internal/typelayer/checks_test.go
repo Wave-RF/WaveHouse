@@ -231,62 +231,40 @@ func checksHandleFor(t *testing.T, eng *Engine, table string) *Table {
 	return tbl
 }
 
-// TestIngestChecks_ParseOutcomeDecidesFirst pins a measured trap: under the
-// compile profile's allow_errors_ratio a record that does not parse is
-// skipped, and chtypes answers it 'd' beside that outcome — with the verdict's
-// own code and message EMPTY on older artifact builds (every 26.6 build; the
-// 26.8 build fills them). It must report its parse error (a 400 with code 27,
-// read from ErrCode, which every build sets), never a check decline (a 422),
-// and never shift a neighbour onto its answer.
-func TestIngestChecks_ParseOutcomeDecidesFirst(t *testing.T) {
+// TestIngestChecks_ParseErrorRefusesTheBody: with error recovery off, a
+// record that does not parse refuses the whole body whatever the checks say —
+// no check verdict, no export — and the same records without it get their
+// check answers one by one: the parse decides first.
+func TestIngestChecks_ParseErrorRefusesTheBody(t *testing.T) {
 	tbl := checksHandle(t)
-	body := []byte(strings.Join([]string{
+	lines := []string{
 		`{"id":1,"tenant":"acme","kind":"a"}`,
 		`{"id":"not-a-number","tenant":"acme","kind":"a"}`,
 		`{"id":3,"tenant":"evil","kind":"a"}`,
 		`{"id":4,"tenant":"acme","kind":"a"}`,
-	}, "\n") + "\n")
+	}
 	preds := []Predicate{{Column: "tenant", Op: "=", Values: []string{"acme"}}}
 
-	// The trap itself, at the SDK: a skipped row's verdict is 'd', and its
-	// error is in ErrCode/ErrMsg on every build.
-	expr, params, ok := tbl.render(preds)
-	require.True(t, ok)
-	res, err := tbl.export(FormatJSONEachRow, body, InsertSettings(), nil, tbl.filterFor(expr, params))
+	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(strings.Join(lines, "\n")+"\n"), preds...)
 	require.NoError(t, err)
-	require.Len(t, res.Rows, 4)
-	require.Equal(t, chtypes.Skipped, res.Rows[1].Outcome)
-	require.NotNil(t, res.Rows[1].Verdict)
-	assert.Equal(t, chtypes.VerdictDecline, *res.Rows[1].Verdict)
-	assert.Equal(t, int32(27), res.Rows[1].ErrCode)
-	assert.Equal(t, uint64(2), res.RowsPassed)
-	assert.Equal(t, uint64(1), res.RowsCut, "a skipped row is 'd' but not counted as cut")
+	requireRefused(t, batch, 27, 2)
 
-	batch, err := tbl.Ingest(FormatJSONEachRow, body, preds...)
+	clean := append([]string{lines[0]}, lines[2:]...)
+	batch, err = tbl.Ingest(FormatJSONEachRow, []byte(strings.Join(clean, "\n")+"\n"), preds...)
 	require.NoError(t, err)
-	require.Len(t, batch.Rows, 4)
-	assert.True(t, batch.Rows[0].Accepted)
-	assert.Empty(t, batch.Rows[0].CheckReason)
+	require.Nil(t, batch.Refused)
+	assert.Equal(t, []string{"", ReasonFilter, ""}, checkReasons(t, batch))
 	assert.Equal(t, `[1, "acme", "a"]`, string(batch.Rows[0].Line))
-
-	assert.False(t, batch.Rows[1].Accepted)
-	assert.False(t, batch.Rows[1].Declined, "a parse refusal is a verdict about the data")
-	assert.Equal(t, 27, batch.Rows[1].Code)
-	assert.Empty(t, batch.Rows[1].CheckReason)
-
-	assert.Equal(t, ReasonFilter, batch.Rows[2].CheckReason)
-	assert.Nil(t, batch.Rows[2].Line)
-	assert.Equal(t, `[4, "acme", "a"]`, string(batch.Rows[3].Line))
+	assert.Nil(t, batch.Rows[1].Line)
+	assert.Equal(t, `[4, "acme", "a"]`, string(batch.Rows[2].Line))
 }
 
-// TestIngestChecks_RejectedBatchExportsNothing pins the other measured trap:
-// on older artifact builds (every 26.6 build) RowsPassed counts the admitted
-// rows of a batch whose own outcome is rejected (the 26.8 build reports 0),
-// and such a batch exports no bytes. It is reachable here — an NDJSON-declared
-// single-line array is not reframed (only the JSON family's arrays are), and
-// one bad element rejects it whole. Every record must be declined; none may
-// be published on the strength of RowsPassed.
-func TestIngestChecks_RejectedBatchExportsNothing(t *testing.T) {
+// TestIngestChecks_RefusedBatchExportsNothing pins a measured trap: on older
+// artifact builds (every 26.6 build) RowsPassed counts the admitted rows of a
+// batch whose own outcome is rejected (the 26.8 build reports 0), and such a
+// batch exports no bytes. The body must be refused; no record may be published
+// on the strength of RowsPassed.
+func TestIngestChecks_RefusedBatchExportsNothing(t *testing.T) {
 	tbl := checksHandle(t)
 	body := []byte(`[{"id":1,"tenant":"acme","kind":"a"},{"id":"x","tenant":"acme","kind":"a"},{"id":3,"tenant":"acme","kind":"a"}]`)
 	preds := []Predicate{{Column: "tenant", Op: "=", Values: []string{"acme"}}}
@@ -301,28 +279,26 @@ func TestIngestChecks_RejectedBatchExportsNothing(t *testing.T) {
 
 	batch, err := tbl.Ingest(FormatJSONEachRow, body, preds...)
 	require.NoError(t, err)
-	require.NotEmpty(t, batch.Rows)
-	for i, r := range batch.Rows {
-		assert.False(t, r.Accepted, "record %d", i)
-		assert.True(t, r.Declined, "record %d", i)
-		assert.Nil(t, r.Line, "record %d", i)
-	}
+	requireRefused(t, batch, 27, 2)
 }
 
 // TestIngestChecks_OnTheWithNamesFormats: the header is not a record, so the
 // verdicts line up with the data lines whatever order the header names the
-// columns in.
+// columns in, and a refusal names the data line.
 func TestIngestChecks_OnTheWithNamesFormats(t *testing.T) {
 	tbl := checksHandle(t)
+	isAcme := Predicate{Column: "tenant", Op: "=", Values: []string{"acme"}}
 
-	batch, err := tbl.Ingest(FormatCSVWithNames, []byte("tenant,id,kind\nacme,1,a\nevil,2,a\nacme,x,a\nacme,4,a\n"),
-		Predicate{Column: "tenant", Op: "=", Values: []string{"acme"}})
+	batch, err := tbl.Ingest(FormatCSVWithNames, []byte("tenant,id,kind\nacme,1,a\nevil,2,a\nacme,4,a\n"), isAcme)
 	require.NoError(t, err)
-	require.Len(t, batch.Rows, 4)
+	require.Len(t, batch.Rows, 3)
 	assert.Equal(t, `[1, "acme", "a"]`, string(batch.Rows[0].Line))
 	assert.Equal(t, ReasonFilter, batch.Rows[1].CheckReason)
-	assert.Equal(t, 27, batch.Rows[2].Code)
-	assert.Equal(t, `[4, "acme", "a"]`, string(batch.Rows[3].Line))
+	assert.Equal(t, `[4, "acme", "a"]`, string(batch.Rows[2].Line))
+
+	batch, err = tbl.Ingest(FormatCSVWithNames, []byte("tenant,id,kind\nacme,1,a\nevil,2,a\nacme,x,a\nacme,4,a\n"), isAcme)
+	require.NoError(t, err)
+	requireRefused(t, batch, 27, 3)
 }
 
 func TestIngest_UnavailableTable(t *testing.T) {
@@ -362,10 +338,11 @@ func TestIngest_PositionalFormats(t *testing.T) {
 	require.True(t, tsv.Rows[0].Accepted, tsv.Rows[0].Message)
 	assert.Equal(t, `[1, "acme", "a"]`, string(tsv.Rows[0].Line))
 
-	// With StrictPositional a header line is one failed record with ClickHouse's
-	// own code 27, even one that names every column; by default ClickHouse
-	// consumes it as a header (input_format_*_detect_header is on by default),
-	// so the same body is one data row.
+	// With StrictPositional a header line is a record ClickHouse cannot read
+	// (its own code 27), even one that names every column, so the body is
+	// refused; by default ClickHouse consumes it as a header
+	// (input_format_*_detect_header is on by default), so the same body is one
+	// data row.
 	for name, body := range map[string][]byte{
 		"csv": []byte("id,tenant,kind\n1,acme,a\n"),
 		"tsv": []byte("id\ttenant\tkind\n1\tacme\ta\n"),
@@ -376,10 +353,7 @@ func TestIngest_PositionalFormats(t *testing.T) {
 		}
 		strict, err := tbl.IngestWith(format, IngestOptions{StrictPositional: true}, body)
 		require.NoError(t, err)
-		require.Len(t, strict.Rows, 2, name)
-		assert.False(t, strict.Rows[0].Accepted, name)
-		assert.Equal(t, 27, strict.Rows[0].Code, name)
-		assert.True(t, strict.Rows[1].Accepted, name)
+		requireRefused(t, strict, 27, 1)
 
 		detected, err := tbl.Ingest(format, body)
 		require.NoError(t, err)
@@ -408,12 +382,15 @@ func TestIngest_WithNamesFormats(t *testing.T) {
 		}
 		name := fmt.Sprintf("format %d", int(tc.format))
 
-		b, err := tbl.Ingest(tc.format, body("kind,id,tenant", "a,1,acme", "z,x,acme", "b,3,evil"))
+		b, err := tbl.Ingest(tc.format, body("kind,id,tenant", "a,1,acme", "b,3,evil"))
 		require.NoError(t, err, name)
-		require.Len(t, b.Rows, 3, "%s: the header is not a record", name)
+		require.Len(t, b.Rows, 2, "%s: the header is not a record", name)
 		assert.Equal(t, `[1, "acme", "a"]`, string(b.Rows[0].Line), name)
-		assert.Equal(t, 27, b.Rows[1].Code, name)
-		assert.Equal(t, `[3, "evil", "b"]`, string(b.Rows[2].Line), name)
+		assert.Equal(t, `[3, "evil", "b"]`, string(b.Rows[1].Line), name)
+
+		b, err = tbl.Ingest(tc.format, body("kind,id,tenant", "a,1,acme", "z,x,acme", "b,3,evil"))
+		require.NoError(t, err, name)
+		requireRefused(t, b, 27, 2) // the header is not a record
 
 		b, err = tbl.Ingest(tc.format, body("id,tenant", "1,acme"))
 		require.NoError(t, err, name)
@@ -428,10 +405,7 @@ func TestIngest_WithNamesFormats(t *testing.T) {
 		for _, header := range []string{"id,tenant,kind,extra", "id,id,kind"} {
 			b, err = tbl.Ingest(tc.format, body(header, "1,acme,a,z"))
 			require.NoError(t, err, name)
-			require.NotNil(t, b.Refused, "%s: %s", name, header)
-			assert.Equal(t, 117, b.Refused.Code, "%s: %s", name, header)
-			assert.NotEmpty(t, b.Refused.Message)
-			assert.Empty(t, b.Rows)
+			requireRefused(t, b, 117, 0) // in the header, no record
 		}
 	}
 

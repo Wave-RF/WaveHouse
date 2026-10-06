@@ -2,6 +2,7 @@ package typelayer
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -23,40 +24,49 @@ func ingestTable(t *testing.T) *Table {
 	return tbl
 }
 
-// TestIngest_PerRecordVerdicts pins the measured behaviour of the whole
-// compile profile at once: a bad value is one record's rejection rather than
-// the batch's, the codes are ClickHouse's own, and the accepted records come
-// back as the bytes the server itself would store.
-func TestIngest_PerRecordVerdicts(t *testing.T) {
+// requireRefused asserts that ClickHouse refused the body whole, with code at
+// the 1-based record (0: in no record), and that nothing was accepted.
+func requireRefused(t *testing.T, batch Batch, code, record int) *Refusal {
+	t.Helper()
+	require.NotNil(t, batch.Refused, "the body must be refused whole, got %d verdicts", len(batch.Rows))
+	assert.Equal(t, code, batch.Refused.Code, batch.Refused.Message)
+	assert.Equal(t, record, batch.Refused.Record, batch.Refused.Message)
+	assert.NotEmpty(t, batch.Refused.Message)
+	assert.Empty(t, batch.Rows, "a refused body has no per-record verdicts")
+	return batch.Refused
+}
+
+// TestIngest_AMalformedRecordRefusesTheBody pins the compile profile: with no
+// error recovery, the first record ClickHouse cannot read refuses the whole
+// body, as its INSERT does, with its own code and the record's index, and a
+// clean body comes back record by record as the bytes the server would store.
+func TestIngest_AMalformedRecordRefusesTheBody(t *testing.T) {
 	tbl := ingestTable(t)
+	good := func(id int) string {
+		return `{"id":` + strconv.Itoa(id) + `,"name":"a","ts":"2026-01-15 10:30:00.000","tags":["x"],"score":null}`
+	}
+	unparseable := `{"id":"bad","name":"b","ts":"2026-01-15 10:30:00.000","tags":[],"score":1}`
+	unknown := `{"id":3,"name":"c","ts":"2026-01-15 10:30:00.000","tags":[],"score":null,"extra":1}`
 
-	body := strings.Join([]string{
-		`{"id":1,"name":"a","ts":"2026-01-15 10:30:00.000","tags":["x"],"score":null}`,
-		`{"id":"bad","name":"b","ts":"2026-01-15 10:30:00.000","tags":[],"score":1}`,
-		`{"id":3,"name":"c","ts":"2026-01-15 10:30:00.000","tags":[],"score":null,"extra":1}`,
-		`{"id":4,"name":"d","ts":"2026-01-15 10:30:00.000","tags":[],"score":null}`,
-	}, "\n") + "\n"
-
-	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(body))
+	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(good(1)+"\n"+unparseable+"\n"+unknown+"\n"+good(4)+"\n"))
 	require.NoError(t, err)
-	require.Len(t, batch.Rows, 4, "one verdict per input record, index-aligned")
+	requireRefused(t, batch, 27, 2) // ClickHouse's own CANNOT_PARSE_TEXT
 
-	assert.True(t, batch.Rows[0].Accepted)
-	assert.Equal(t, 0, batch.Rows[0].Code)
+	// input_format_skip_unknown_fields=0 makes an unknown field a refusal
+	// instead of silent data loss.
+	batch, err = tbl.Ingest(FormatJSONEachRow, []byte(good(1)+"\n"+good(2)+"\n"+unknown+"\n"))
+	require.NoError(t, err)
+	assert.Contains(t, requireRefused(t, batch, 117, 3).Message, "extra")
 
-	// An unparseable value: ClickHouse's own CANNOT_PARSE_TEXT.
-	assert.False(t, batch.Rows[1].Accepted)
-	assert.False(t, batch.Rows[1].Declined)
-	assert.Equal(t, 27, batch.Rows[1].Code)
-	assert.NotEmpty(t, batch.Rows[1].Message)
-
-	// input_format_skip_unknown_fields=0 turns an unknown field into a real
-	// per-row rejection instead of silent data loss.
-	assert.False(t, batch.Rows[2].Accepted)
-	assert.Equal(t, 117, batch.Rows[2].Code)
-	assert.Contains(t, batch.Rows[2].Message, "extra")
-
-	assert.True(t, batch.Rows[3].Accepted)
+	batch, err = tbl.Ingest(FormatJSONEachRow, []byte(good(1)+"\n"+good(2)+"\n"))
+	require.NoError(t, err)
+	require.Nil(t, batch.Refused)
+	require.Empty(t, batch.Declined)
+	require.Len(t, batch.Rows, 2)
+	for i, r := range batch.Rows {
+		require.True(t, r.Accepted, "record %d: %s", i+1, r.Message)
+		assert.True(t, strings.HasPrefix(string(r.Line), "["+strconv.Itoa(i+1)+", "), string(r.Line))
+	}
 }
 
 // TestIngest_AcceptedLineIsOneWireRow: the published line must be exactly one
@@ -93,12 +103,53 @@ func TestIngest_OverflowIsStoredTruth(t *testing.T) {
 	assert.True(t, strings.HasPrefix(string(batch.Rows[0].Line), "[0,"), string(batch.Rows[0].Line))
 }
 
-// TestIngest_ComputedColumnsAreRejectedPerRecord: a record naming a
-// MATERIALIZED or ALIAS column gets ClickHouse's own 117 and the rest of the
-// batch still gets verdicts — no WaveHouse-side guard needed. An EPHEMERAL
-// column is the one non-stored kind a record may name: its value feeds the
-// DEFAULT over it and is never exported.
-func TestIngest_ComputedColumnsAreRejectedPerRecord(t *testing.T) {
+// TestIngest_NoErrorRecovery: the compile profile leaves error recovery off,
+// and if it were ever turned on, an accepted batch whose reader skipped bytes
+// is declined whole rather than answered with verdicts that may not be the
+// body's records. The bodies are two on which recovery published a fragment
+// of a record as a row.
+func TestIngest_NoErrorRecovery(t *testing.T) {
+	for _, k := range []string{"input_format_allow_errors_ratio", "input_format_allow_errors_num"} {
+		assert.NotContains(t, compileSettings, k)
+	}
+
+	const ratio = "input_format_allow_errors_ratio"
+	prev, had := compileSettings[ratio]
+	compileSettings[ratio] = "1"
+	t.Cleanup(func() {
+		if had {
+			compileSettings[ratio] = prev
+		} else {
+			delete(compileSettings, ratio)
+		}
+	})
+	const u = "01234567-89ab-cdef-0123-456789abcdef"
+	eng := testEngine(t, &discovery.TableSchema{Name: "pings", Columns: []discovery.Column{
+		{Name: "id", Type: "UUID", Position: 1},
+		{Name: "page", Type: "String", Position: 2},
+		{Name: "n", Type: "UInt8", Position: 3},
+	}})
+	tbl, err := eng.Table(tenant.Default, "pings")
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	for _, body := range []string{
+		"x,\"/rA\nzz\",1\n" + u + ",\"/rB\n" + u + ",zz\",2\n",
+		"x,/r" + strings.Repeat("A", 25) + ",1\n" + u + ",/rB,2\n" + u[:35] + "z,\"/rC\n" + u + ",zz\",3\n",
+	} {
+		batch, err := tbl.Ingest(FormatCSV, []byte(body))
+		require.NoError(t, err)
+		assert.Nil(t, batch.Refused, "with recovery on, the reader answers instead of refusing")
+		assert.Contains(t, batch.Declined, "recovering from an error")
+		assert.Empty(t, batch.Rows, "no verdict, so nothing to publish")
+	}
+}
+
+// TestIngest_ComputedColumnsAreRefused: a record naming a MATERIALIZED or
+// ALIAS column refuses the body with ClickHouse's own 117 — no WaveHouse-side
+// guard needed. An EPHEMERAL column is the one non-stored kind a record may
+// name: its value feeds the DEFAULT over it and is never exported.
+func TestIngest_ComputedColumnsAreRefused(t *testing.T) {
 	schema := &discovery.TableSchema{
 		Name: "computed",
 		Columns: []discovery.Column{
@@ -119,26 +170,26 @@ func TestIngest_ComputedColumnsAreRejectedPerRecord(t *testing.T) {
 	body := strings.Join([]string{
 		`{"id":1}`,
 		`{"id":2,"e":5}`,
-		`{"id":3,"a":9}`,
 		`{"id":4,"d":7}`,
-		`{"id":5,"m":1}`,
 	}, "\n") + "\n"
 	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(body))
 	require.NoError(t, err)
-	require.Len(t, batch.Rows, 5)
+	require.Len(t, batch.Rows, 3)
 
 	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
 	assert.Equal(t, "[1, 1]", string(batch.Rows[0].Line), "an absent EPHEMERAL takes its own default")
 	require.True(t, batch.Rows[1].Accepted, batch.Rows[1].Message)
 	assert.Equal(t, "[2, 6]", string(batch.Rows[1].Line), "the EPHEMERAL value feeds the DEFAULT and is not exported")
-	assert.Equal(t, 117, batch.Rows[2].Code)
-	assert.Contains(t, batch.Rows[2].Message, "a")
-	require.True(t, batch.Rows[3].Accepted, batch.Rows[3].Message)
+	require.True(t, batch.Rows[2].Accepted, batch.Rows[2].Message)
 	// ClickHouse's writer separates cells with ", " — the worker inserts these
 	// bytes verbatim, so nothing may re-render them.
-	assert.Equal(t, "[4, 7]", string(batch.Rows[3].Line))
-	assert.Equal(t, 117, batch.Rows[4].Code)
-	assert.Contains(t, batch.Rows[4].Message, "m")
+	assert.Equal(t, "[4, 7]", string(batch.Rows[2].Line))
+
+	for col, rec := range map[string]string{"a": `{"id":3,"a":9}`, "m": `{"id":5,"m":1}`} {
+		batch, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"id":1}`+"\n"+rec+"\n"))
+		require.NoError(t, err)
+		assert.Contains(t, requireRefused(t, batch, 117, 2).Message, col)
+	}
 }
 
 // TestIngest_EphemeralInputFollowsTheFormat: the formats that name their
@@ -185,8 +236,9 @@ func TestIngest_EphemeralInputFollowsTheFormat(t *testing.T) {
 	// an error, not ip.
 	batch, err := tbl.IngestWith(FormatCSV, IngestOptions{StrictPositional: true}, []byte("/a,1.2.3.4,7\n"))
 	require.NoError(t, err)
-	require.Len(t, batch.Rows, 1)
-	assert.False(t, batch.Rows[0].Accepted)
+	require.NotNil(t, batch.Refused)
+	assert.Equal(t, 1, batch.Refused.Record)
+	assert.Empty(t, batch.Rows)
 }
 
 // TestIngest_EphemeralAServerExpressionReadsIsRefused: the server computes a
@@ -194,7 +246,7 @@ func TestIngest_EphemeralInputFollowsTheFormat(t *testing.T) {
 // ephemeral value, so an EPHEMERAL column one reads would be silently ignored
 // there — even though a DEFAULT reads it too. It is refused instead (117),
 // while another EPHEMERAL column of the same table that only a DEFAULT reads
-// is still accepted.
+// is accepted.
 func TestIngest_EphemeralAServerExpressionReadsIsRefused(t *testing.T) {
 	schema := &discovery.TableSchema{
 		Name: "eph",
@@ -213,15 +265,16 @@ func TestIngest_EphemeralAServerExpressionReadsIsRefused(t *testing.T) {
 	require.NoError(t, err)
 	defer tbl.Release()
 
-	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"id":1,"e":5}`+"\n"+`{"id":2,"f":5}`+"\n"))
+	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(`{"id":1,"e":5}`+"\n"))
 	require.NoError(t, err)
-	require.Len(t, batch.Rows, 2)
-	assert.Equal(t, 117, batch.Rows[0].Code, "e feeds a MATERIALIZED column the server computes without it")
-	assert.Contains(t, batch.Rows[0].Message, "e")
+	assert.Contains(t, requireRefused(t, batch, 117, 1).Message, "e", "e feeds a MATERIALIZED column the server computes without it")
 	// md reads d, which travels on the wire already computed from f, so the
 	// server's md agrees with this one: f is accepted.
-	require.True(t, batch.Rows[1].Accepted, batch.Rows[1].Message)
-	assert.Equal(t, "[2, 1, 6]", string(batch.Rows[1].Line))
+	batch, err = tbl.Ingest(FormatJSONEachRow, []byte(`{"id":2,"f":5}`+"\n"))
+	require.NoError(t, err)
+	require.Len(t, batch.Rows, 1)
+	require.True(t, batch.Rows[0].Accepted, batch.Rows[0].Message)
+	assert.Equal(t, "[2, 1, 6]", string(batch.Rows[0].Line))
 }
 
 // TestInsertSettings_AreAllSupported: every setting typelayer passes must be one
@@ -372,7 +425,7 @@ func TestIngest_CountIsChtypesOwn(t *testing.T) {
 		"{\"id\":2,\"name\":\"b\",\"ts\":\"2026-01-15 10:30:00.000\",\"tags\":[],\"score\":null}\n"
 	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(ndjson))
 	require.NoError(t, err)
-	assert.True(t, batch.Answered)
+	require.Empty(t, batch.Declined)
 	require.Len(t, batch.Rows, 2, "a blank line is not a record")
 	assert.True(t, batch.Rows[0].Accepted)
 	assert.True(t, batch.Rows[1].Accepted)
@@ -382,15 +435,6 @@ func TestIngest_CountIsChtypesOwn(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, batch.Rows, 1, "a pretty-printed object is one record, not one per line")
 	assert.True(t, batch.Rows[0].Accepted)
-}
-
-func TestCountRecords(t *testing.T) {
-	t.Parallel()
-	assert.Equal(t, 0, countRecords(nil, 0))
-	assert.Equal(t, 1, countRecords([]byte(`{"a":1}`), 0))
-	assert.Equal(t, 2, countRecords([]byte("{}\n{}\n"), 0))
-	assert.Equal(t, 2, countRecords([]byte("{}\n{}"), 0))
-	assert.Equal(t, 5, countRecords([]byte("{}\n{}"), 5), "chtypes' own count wins when it has one")
 }
 
 // gatedTable has one column of each type ClickHouse refuses to create unless a
@@ -425,7 +469,7 @@ func TestIngest_TypeGatedColumnsInsertAndFilter(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, batch.Rows, 2)
 	for i, r := range batch.Rows {
-		assert.True(t, r.Accepted, "record %d: %d %s", i, r.Code, r.Message)
+		assert.True(t, r.Accepted, "record %d: %s", i, r.Message)
 	}
 
 	isFive := Predicate{Column: "c", Op: "=", Values: []string{"5"}}
@@ -450,7 +494,6 @@ func TestIngest_TypeGatedColumnsInsertAndFilter(t *testing.T) {
 		stmt, err := createTable(tbl.lib, []colDecl{{Name: ts.Name, Type: ts.Type}})
 		require.NoError(t, err)
 		ungated, err := tbl.lib.CompileTable(stmt, chtypes.WithSettings(map[string]string{
-			"input_format_allow_errors_ratio":  "1",
 			"input_format_skip_unknown_fields": "0",
 		}))
 		var se *chtypes.SchemaError
@@ -476,7 +519,7 @@ func TestIngest_TypeGatedColumnsInsertAndFilter(t *testing.T) {
 // listed only when a DEFAULT reads it. Listing one nothing reads makes the
 // artifact reject, with no code, every record that omits it in a table that
 // computes any column, so it stays refused (117) — its value would change
-// nothing — and records omitting the listed ones still get verdicts.
+// nothing — and records omitting the listed ones are accepted.
 func TestIngest_EphemeralNoDefaultReadsStaysUnlisted(t *testing.T) {
 	schema := &discovery.TableSchema{
 		Name: "eph",
@@ -501,17 +544,17 @@ func TestIngest_EphemeralNoDefaultReadsStaysUnlisted(t *testing.T) {
 		`{"id":2,"e1":5}`,
 		`{"id":3,"e2":"abc"}`,
 		`{"id":4,"e1":5,"e2":"abc"}`,
-		`{"id":5,"unread":"x"}`,
 	}, "\n") + "\n"
 	batch, err := tbl.Ingest(FormatJSONEachRow, []byte(body))
 	require.NoError(t, err)
-	require.Len(t, batch.Rows, 5)
+	require.Len(t, batch.Rows, 4)
 	for i, want := range []string{"[1, 1, 2]", "[2, 6, 2]", "[3, 1, 3]", "[4, 6, 3]"} {
 		require.True(t, batch.Rows[i].Accepted, "record %d: %s", i+1, batch.Rows[i].Message)
 		assert.Equal(t, want, string(batch.Rows[i].Line), "record %d", i+1)
 	}
-	assert.Equal(t, 117, batch.Rows[4].Code)
-	assert.Contains(t, batch.Rows[4].Message, "unread")
+	batch, err = tbl.Ingest(FormatJSONEachRow, []byte(body+`{"id":5,"unread":"x"}`+"\n"))
+	require.NoError(t, err)
+	assert.Contains(t, requireRefused(t, batch, 117, 5).Message, "unread")
 
 	// A header that leaves a listed EPHEMERAL column out is the same omission.
 	batch, err = tbl.Ingest(FormatCSVWithNames, []byte("id,e1\n6,5\n"))

@@ -378,10 +378,11 @@ func TestBind_UnknownZoneIsThatTenantsUnavailable(t *testing.T) {
 // asked about a zone only at the first open, so once the image zone is
 // committed, a tenant whose zone Go knows and chtypes cannot load is bound.
 // Its zone then rides every call as session_timezone, and chtypes refuses each
-// one with ClickHouse code 36: no record is accepted (a declined verdict, a
-// 422 at the API) and no row parses (an error that is not Unavailable, so a
-// stream withholds it as "error"). An artifact that ignored an unknown
-// session_timezone would read the rows in the image zone and fail this test.
+// one with ClickHouse code 36 before reading any data: the body is declined (a
+// 422 at the API), not refused as bad data, and no row parses (an error that
+// is not Unavailable, so a stream withholds it as "error"). An artifact that
+// ignored an unknown session_timezone would read the rows in the image zone
+// and fail this test.
 func TestBind_LaterTenantInAZoneChtypesCannotLoadIsRefusedPerParse(t *testing.T) {
 	eng := testEngine(t, zonedTable())
 	require.True(t, knownZone(goOnlyZone), "TestMain's ZONEINFO names the zone")
@@ -399,11 +400,9 @@ func TestBind_LaterTenantInAZoneChtypesCannotLoadIsRefusedPerParse(t *testing.T)
 	require.Equal(t, goOnlyZone, tbl.session)
 	batch, err := tbl.Ingest(FormatJSONEachRow, record)
 	require.NoError(t, err)
-	require.NotEmpty(t, batch.Rows)
-	for i, r := range batch.Rows {
-		assert.False(t, r.Accepted, "record %d", i)
-		assert.True(t, r.Declined, "record %d: %s", i, r.Message)
-	}
+	assert.Nil(t, batch.Refused, "no verdict on the data")
+	assert.NotEmpty(t, batch.Declined)
+	assert.Empty(t, batch.Rows)
 
 	_, err = tbl.ParseRow(tbl.WireColumns, []byte(`[1, "2024-01-01T00:00:00Z"]`))
 	require.Error(t, err)
