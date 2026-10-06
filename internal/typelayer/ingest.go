@@ -10,7 +10,7 @@ import (
 // InsertSettings are the parsing settings the ingest worker pins on the real
 // INSERT, and which chtypes must therefore see — otherwise it answers a
 // different question than the server will be asked. Returned fresh so a caller
-// may add its own non-parsing pins (async_insert=0) without mutating ours.
+// may add its own non-parsing pins (wait_for_async_insert=1) without mutating ours.
 func InsertSettings() map[string]string {
 	return map[string]string{
 		"date_time_input_format":       "best_effort",
