@@ -333,6 +333,8 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 
 **Extra flags**: All test targets accept `ARGS="..."` for additional `go test` flags (e.g., `-run`, `-count`, `-timeout`).
 
+**Time limits**: `make test-unit` gives each unit package 15s (`UNIT_TIMEOUT`), the budget it has to fit when the suite runs on its own, as it does in the unit job in CI. `make ci` gives it 60s (`CI_UNIT_TIMEOUT`) in its parallel phase, where the suite shares every core with the lint and build jobs, so a package over the budget can pass `make ci` and still fail in CI. `tests/integration` gets 900s (`INTEGRATION_TIMEOUT`). Each is a Makefile variable, so a slower machine can raise one for a run: `make ci CI_UNIT_TIMEOUT=90s`.
+
 **Note on timing**: gotestsum's `DONE ... in X.XXXs` reports pure test execution time. The total wall time includes Go compiling all packages — the first run compiles everything (~15s), subsequent runs use the build cache (~1s).
 
 ### Test Structure
