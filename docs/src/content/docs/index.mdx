@@ -180,7 +180,7 @@ curl -N "http://localhost:8080/v1/stream?table=clicks"
 
 WaveHouse is fail-closed, so the standalone stack ships a permissive trial policy (a non-admin `public` role that can read/write the demo tables, in the bind-mounted settings directory) — then it's five minutes from `git clone` to a live event stream. See [Getting Started](/getting-started).
 
-**How it ships:** one `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external service is ClickHouse**; the process also loads one local file, the [chtypes artifact](/deployment#chtypes-artifacts) for your ClickHouse line, which the Docker images carry. Same binary on a laptop, in Docker, or on a production host.
+**How it ships:** one `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external service is ClickHouse**, plus the chtypes artifact registry (or your mirror) the first time each ClickHouse line is used: the process fetches the [chtypes artifact](/deployment#chtypes-artifacts) for your line into a local cache and loads it from there. The Docker images carry only the `chtypes` CLI, no artifact. Same binary on a laptop, in Docker, or on a production host.
 
 ## Or skip the ops entirely
 

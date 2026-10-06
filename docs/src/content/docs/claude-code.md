@@ -15,7 +15,7 @@ If you're new to Claude Code itself, the [official docs](https://code.claude.com
 
 2. **Authenticate**: log in to your Max subscription — Claude Code prompts you on first run.
 
-3. **Bootstrap the repo**: `make tools`. This installs Go tools, pnpm deps, and **also configures git hooks** (`git config core.hooksPath .githooks`). Without this step, the team's pre-commit / pre-push gates won't fire. Then run `scripts/fetch-chtypes.sh` once per machine: the chtypes artifact the API process and the test suites need, which `make tools` does not fetch.
+3. **Bootstrap the repo**: `make tools`. This installs Go tools, pnpm deps, and **also configures git hooks** (`git config core.hooksPath .githooks`). Without this step, the team's pre-commit / pre-push gates won't fire. `scripts/fetch-chtypes.sh` optionally prefetches the chtypes artifact; otherwise the first API process or test that needs it fetches it into `~/.cache/chtypes/v1`.
 
 4. **Optional — worktrunk**: install [worktrunk](https://worktrunk.dev) for parallel-agent worktree management. The team's project hooks live in `.config/wt.toml`.
 
