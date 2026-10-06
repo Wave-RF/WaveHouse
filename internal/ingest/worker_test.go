@@ -932,6 +932,37 @@ func TestFlushTable_BulkFails_FallsBackToOneByOne(t *testing.T) {
 	assert.Empty(t, pub.Published(), "no DLQ publishes when 1-by-1 retries all succeed")
 }
 
+// TestFlushTable_IsolatedRowsInsertSynchronously: the batch leaves async_insert
+// to the server, and each isolated row turns it off, so its verdict is its own
+// rather than that of an async flush it shared with another writer's rows.
+func TestFlushTable_IsolatedRowsInsertSynchronously(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var seen []string // "<rows>:<async_insert>" per request
+	rt := &testutil.MockRoundTripper{
+		Fn: func(req *http.Request) (*http.Response, error) {
+			body, _ := io.ReadAll(req.Body)
+			rows := strings.Count(string(body), "\n")
+			mu.Lock()
+			seen = append(seen, fmt.Sprintf("%d:%s", rows, req.URL.Query().Get("async_insert")))
+			mu.Unlock()
+			assert.Equal(t, "1", req.URL.Query().Get("wait_for_async_insert"))
+			if rows > 1 {
+				return chAnswer(http.StatusInternalServerError, 469, "Constraint `c` is violated at row 2"), nil
+			}
+			return okAnswer(), nil
+		},
+	}
+	w, _, _, wait := newTestWorker(rt)
+
+	w.flushTable(context.Background(), "events", parseAll(t, w,
+		newIngestMsg(t, "events", "", map[string]any{"id": 1}),
+		newIngestMsg(t, "events", "", map[string]any{"id": 2})))
+	wait()
+
+	assert.Equal(t, []string{"2:", "1:0", "1:0"}, seen)
+}
+
 func TestFlushTable_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 	t.Parallel()
 	// Bulk insert fails; on per-row retry, the row whose `poison` column is true

@@ -767,7 +767,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 	// sink the whole batch.
 	// TODO: potentially could try a binary search or something eventually maybe? unclear if faster...
 	for i, pm := range group {
-		singleErr := w.insertToClickHouse(ctx, tableName, cols, []parsedMsg{pm})
+		singleErr := w.insertIsolated(ctx, tableName, cols, pm)
 		switch {
 		case singleErr == nil:
 			w.handleSuccess(ctx, tableName, []parsedMsg{pm})
@@ -813,6 +813,19 @@ func (w *IngestWorker) retryLater(ctx context.Context, tableName string, msgs []
 // explicitly, so the positional rows land in the right slots. Callers group by
 // column list first: a batch spanning two lists cannot share one statement.
 func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg) error {
+	return w.insert(ctx, tableName, columns, msgs, false)
+}
+
+// insertIsolated inserts one row of a batch being isolated, synchronously. An
+// async flush merges concurrent INSERTs of the same statement into one block,
+// and a CHECK constraint one row violates fails every INSERT in it: a good row
+// isolated beside another writer's bad one would be parked with it. Sync skips
+// the async flush wait too, about 55 ms per isolated row on 26.8.
+func (w *IngestWorker) insertIsolated(ctx context.Context, tableName string, columns []string, pm parsedMsg) error {
+	return w.insert(ctx, tableName, columns, []parsedMsg{pm}, true)
+}
+
+func (w *IngestWorker) insert(ctx context.Context, tableName string, columns []string, msgs []parsedMsg, isolated bool) error {
 	var buf bytes.Buffer
 	for _, m := range msgs {
 		buf.Write(m.row)
@@ -847,13 +860,17 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	for k, v := range typelayer.InsertSettings() {
 		q.Set(k, v)
 	}
-	// async_insert stays at the server's default; wait_for_async_insert=1 makes
-	// an async INSERT return only once stored, so a message is acked only then
-	// even if the profile sets it to 0. Not parsing settings, so chtypes never
-	// sees them. insert_deduplicate stays at the server default: idempotency
-	// is the gateway's (internal/dedupe), and a Replicated engine's block-hash
-	// dedupe is the operator's choice for their engine.
+	// A batch leaves async_insert at the server's default (an isolated row
+	// turns it off); wait_for_async_insert=1 makes an async INSERT return only
+	// once stored, so a message is acked only then even if the profile sets it
+	// to 0. Not parsing settings, so chtypes never sees them.
+	// insert_deduplicate stays at the server default: idempotency is the
+	// gateway's (internal/dedupe), and a Replicated engine's block-hash dedupe
+	// is the operator's choice for their engine.
 	q.Set("wait_for_async_insert", "1")
+	if isolated {
+		q.Set("async_insert", "0")
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", t.URL+"?"+q.Encode(), &buf)
 	if err != nil {

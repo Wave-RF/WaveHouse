@@ -339,7 +339,8 @@ Ingest worker pipeline (StartIngestWorker):
     chconn.Classify): NakWithDelay the batch under the pool's backoff (the table's, for a
     table-scoped code); never DLQ. A multi-row batch refused for its size
     (chconn.Splittable) is split row by row first
-  → On failure ClickHouse rejected: re-insert row by row; each row rejected again → DLQ output (dlq.{tenant}.{table}), then Ack to prevent infinite retry
+  → On failure ClickHouse rejected: re-insert row by row, each row synchronously
+    (async_insert=0); each row rejected again → DLQ output (dlq.{tenant}.{table}), then Ack to prevent infinite retry
 
   (Insert-only pipeline. The wire format `EventMessage` carries only
   {table_name, scope, received_timestamp, format, columns, row}; non-insert mutations
