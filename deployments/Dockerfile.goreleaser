@@ -5,9 +5,8 @@
 # validation in goreleaser-validate.yml) invokes `docker buildx build` on it
 # directly. The build CONTRACT is unchanged and those workflows reproduce it
 # exactly — a context holding `<os>/<arch>/wavehouse` per target plus
-# chtypes.lock and scripts/{fetch-chtypes,_colors}.sh — which is why this file
-# needed no edit beyond these comments. The name is kept so published image
-# history, `docker history` output and every doc reference stay valid.
+# go.mod, which names the chtypes CLI version. The name is kept so published
+# image history, `docker history` output and every doc reference stay valid.
 #
 # Tiny stage just to mkdir + chown the state directories. Distroless has no
 # shell, so the runtime image can't run RUN commands itself; we materialise
@@ -28,41 +27,31 @@
 # once natively and COPY'ing into each target image is correct AND
 # removes the binfmt/QEMU dependency entirely.
 FROM --platform=$BUILDPLATFORM alpine:3 AS layout
-# /app/settings is the empty settings-directory mount point — see the same
-# RUN in deployments/Dockerfile; keep the two in lockstep.
-RUN mkdir -p /app/data /app/settings && chown -R 65532:65532 /app
+# /app/settings is the empty settings-directory mount point, and
+# /var/cache/chtypes/v1 the chtypes cache — see the same RUN in
+# deployments/Dockerfile; keep the two in lockstep.
+RUN mkdir -p /app/data /app/settings /var/cache/chtypes/v1 && chown -R 65532:65532 /app /var/cache/chtypes
 
-# Fetches the pinned chtypes artifact for THIS image's target platform (not
-# necessarily the builder's — buildx may emulate or cross-fetch). Built
-# natively on $BUILDPLATFORM like `layout` above: no compiled Go code
-# crosses an arch boundary here, just an OCI download + digest and signature
-# check via the SDK CLI's own --platform flag, so QEMU emulation would buy
-# nothing.
-# Needs chtypes.lock + scripts/fetch-chtypes.sh + scripts/_colors.sh at their
-# normal repo-relative paths. The build context is assembled by the workflow
-# rather than being the repo root, so those three are copied into it
-# explicitly — see the "Assemble the image build context" step in
-# .github/workflows/release.yml, publish-dev.yml and goreleaser-validate.yml.
-#
-# This stage is also the pipeline's chtypes.lock check: `--frozen` refuses any
-# artifact the lock does not name, so an upstream republish of a pinned line
-# fails the build here rather than silently baking a different library. The
-# layer blob (the compressed .so, ~50 MB) is dropped after unpacking: the
-# loader reads the unpacked tree and its verified.json, never the blob.
-FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS chtypes-fetch
-ARG TARGETPLATFORM
-WORKDIR /src
-COPY chtypes.lock ./
-COPY scripts/fetch-chtypes.sh scripts/_colors.sh ./scripts/
+# The chtypes CLI for THIS image's target platform, at the SDK version go.mod
+# requires. Pure Go (CGO_ENABLED=0), so it cross-compiles natively on
+# $BUILDPLATFORM like `layout` above, with no QEMU. No artifact is baked in
+# (see deployments/Dockerfile). go.mod is copied into the context by the
+# "Assemble the image build context" step of release.yml, publish-dev.yml and
+# goreleaser-validate.yml; it is read here under another name so it never
+# selects this stage's toolchain.
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS chtypes-cli
+ARG TARGETOS
+ARG TARGETARCH
+COPY go.mod /tmp/wavehouse.go.mod
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    plat="$(echo "$TARGETPLATFORM" | tr / -)"; \
-    mkdir -p /opt/chtypes/v1 && \
-    scripts/fetch-chtypes.sh --platform "$plat" --cache /opt/chtypes/v1 && \
-    for v in /opt/chtypes/v1/unpacked/sha256/*/verified.json; do \
-      l="$(sed -n 's/.*"layer":"sha256:\([0-9a-f]*\)".*/\1/p' "$v")"; \
-      if [ -n "$l" ]; then rm -f "/opt/chtypes/v1/blobs/sha256/$l"; fi; \
-    done
+    v="$(sed -n 's#^[[:space:]]*github.com/wave-rf/chtypes/go \(v[^[:space:]]*\).*#\1#p' /tmp/wavehouse.go.mod)" && \
+    test -n "$v" && \
+    GOOS="$TARGETOS" GOARCH="$TARGETARCH" CGO_ENABLED=0 \
+      go install -trimpath -ldflags="-s -w" "github.com/wave-rf/chtypes/go/cmd/chtypes@$v" && \
+    bin="$(go env GOPATH)/bin" && \
+    if [ -f "$bin/${TARGETOS}_${TARGETARCH}/chtypes" ]; then cp "$bin/${TARGETOS}_${TARGETARCH}/chtypes" /chtypes; \
+    else cp "$bin/chtypes" /chtypes; fi
 
 FROM gcr.io/distroless/cc-debian12
 
@@ -72,17 +61,17 @@ ARG TARGETPLATFORM
 WORKDIR /app
 USER nonroot:nonroot
 ENV WH_SETTINGS_DIR=/app/settings
-# /opt/chtypes/v1 is one of the SDK's read-only system search directories, so
-# no env or WaveHouse config is needed to find what the image baked in (the
-# loader only reads it; nothing is written at load). WH_CHTYPES_REGISTRY
-# (internal/config) is for an operator who wants to add a bind-mounted v1
-# layout: it is searched first and this one stays on the path.
+# Read by both the process (an empty clickhouse.chtypes_cache defers to it)
+# and the bundled CLI, so a fetch either one makes lands where the other
+# looks.
+ENV CHTYPES_CACHE=/var/cache/chtypes/v1
 
 # Pre-created state directories owned by the nonroot user (UID 65532) so
 # the binary can mkdir under /app/data without a volume mount, and so
 # bind-mounting empty volumes at /app/data inherits correct ownership.
 COPY --from=layout --chown=nonroot:nonroot /app /app
-COPY --from=chtypes-fetch --chown=nonroot:nonroot /opt/chtypes /opt/chtypes
+COPY --from=layout --chown=nonroot:nonroot /var/cache/chtypes /var/cache/chtypes
+COPY --from=chtypes-cli --chown=nonroot:nonroot /chtypes /app/chtypes
 
 # Copy the binary from its platform-specific subdirectory of the context —
 # `linux/amd64/wavehouse`, `linux/arm64/wavehouse`. The workflow stages each

@@ -17,18 +17,16 @@ name: Release build validation
 #                             deployments/Dockerfile.goreleaser with the
 #                             snapshot binaries in the exact context layout
 #                             release.yml assembles, including the chtypes
-#                             artifact fetch from chtypes.lock. A stale lock,
-#                             an unfetchable artifact or a Dockerfile mistake
-#                             fails here rather than mid-release.
+#                             CLI build at go.mod's SDK version. A CLI that
+#                             will not build or a Dockerfile mistake fails
+#                             here rather than mid-release.
 #
 # Path filter: go.mod / go.sum are in it because a dependency bump is the
 # realistic way a platform breaks (the darwin cgo C file that killed
 # cross-compiling arrived with a prometheus/client_golang bump), and
 # publish-dev.yml no longer builds darwin at all, so nothing else on main
-# would catch it. chtypes.lock / fetch-chtypes.sh / _colors.sh are in it
-# because the image build consumes all three — the assemble step copies
-# _colors.sh into the context and the Dockerfile's fetch stage sources it, so
-# an edit there can break the image with nothing else on a PR to catch it.
+# would catch it, and go.mod also names the chtypes CLI version the image
+# builds.
 #
 # NOT a required check: the `main branch protection` ruleset requires only
 # `CI`, the aggregator in ci.yml. Making this gating means adding it to that
@@ -39,9 +37,6 @@ on:
       - .goreleaser.yaml
       - go.mod
       - go.sum
-      - chtypes.lock
-      - scripts/fetch-chtypes.sh
-      - scripts/_colors.sh
       - deployments/Dockerfile.goreleaser
       - .github/workflows/release.yml
       - .github/workflows/publish-dev.yml
@@ -170,9 +165,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p ctx/scripts
-          cp chtypes.lock ctx/
-          cp scripts/fetch-chtypes.sh scripts/_colors.sh ctx/scripts/
+          mkdir -p ctx
+          cp go.mod ctx/
           for goarch in amd64 arm64; do
             mkdir -p "ctx/linux/${goarch}"
             install -m 0755 "staging/snapshot-linux-${goarch}/wavehouse" \
@@ -184,8 +178,7 @@ jobs:
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       # `type=cacheonly`: run the full build for both platforms — including the
-      # chtypes artifact fetch and sha256 verification against chtypes.lock —
-      # and throw the result away. No registry credentials, so this works on
+      # chtypes CLI build — and throw the result away. No registry credentials, so this works on
       # fork PRs too.
       - name: Build (no push)
         shell: bash
