@@ -21,6 +21,34 @@ interface CliArgs {
   url: string;
   out: string;
   auth?: string;
+  tenant?: string;
+  operatorKey?: string;
+}
+
+// Every flag parseArgs reads, which is what a flag's value can never be.
+const FLAGS = new Set([
+  "--url",
+  "-u",
+  "--out",
+  "-o",
+  "--auth",
+  "-a",
+  "--tenant",
+  "-t",
+  "--operator-key",
+  "-k",
+  "--help",
+  "-h",
+]);
+
+// A flag's value: the next argument, which has to be there, non-empty, and not
+// another flag. An unset shell variable is how it comes to be otherwise:
+// quoted it leaves "", unquoted it lets the flag after it slide into its
+// place, to be sent as the tenant or the credential. Only a flag is refused,
+// not every leading dash: a tenant id or an operator key may start with one.
+function operand(value: string | undefined, usage: string): string {
+  if (!value || FLAGS.has(value)) throw new Error(usage);
+  return value;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -29,25 +57,40 @@ function parseArgs(argv: string[]): CliArgs {
     switch (argv[i]) {
       case "--url":
       case "-u":
-        args.url = argv[++i];
+        args.url = operand(argv[++i], "--url needs a URL");
         break;
       case "--out":
       case "-o":
-        args.out = argv[++i];
+        args.out = operand(argv[++i], "--out needs a file path");
         break;
       case "--auth":
       case "-a":
-        args.auth = argv[++i];
+        args.auth = operand(argv[++i], "--auth needs a token");
+        break;
+      case "--tenant":
+      case "-t":
+        // The id itself goes unchecked: its grammar is the server's, which
+        // answers a bad one with 400, an empty ?tenant= included, so an
+        // empty value could never have meant "tenant 0".
+        args.tenant = operand(argv[++i], "--tenant needs a tenant id");
+        break;
+      case "--operator-key":
+      case "-k":
+        args.operatorKey = operand(argv[++i], "--operator-key needs a key");
         break;
       case "--help":
       case "-h":
         console.log(`wavehouse codegen — Generate TypeScript types from WaveHouse schema
 
 Options:
-  --url, -u   WaveHouse base URL (default: http://localhost:8080)
-  --out, -o   Output file path   (default: ./wavehouse.d.ts)
-  --auth, -a  Bearer token for authenticated endpoints
-  --help, -h  Show this help`);
+  --url, -u           WaveHouse base URL (default: http://localhost:8080)
+  --out, -o           Output file path   (default: ./wavehouse.d.ts)
+  --auth, -a          Bearer token for authenticated endpoints
+  --operator-key, -k  Operator key, sent as X-Operator-Key (the credential a
+                      nested settings directory's /v1/ops/* routes admit)
+  --tenant, -t        Tenant whose schema to read, sent as ?tenant=
+                      (default: tenant 0)
+  --help, -h          Show this help`);
         process.exit(0);
     }
   }
@@ -180,11 +223,41 @@ function isTableSchema(value: unknown): value is TableSchema {
   );
 }
 
-async function fetchSchemas(url: string, auth?: string): Promise<TableSchema[]> {
-  const headers: Record<string, string> = {};
-  if (auth) headers.Authorization = `Bearer ${auth}`;
+interface FetchOptions {
+  /** Bearer token, sent as `Authorization: Bearer <token>`. */
+  auth?: string;
+  /** Operator key, sent as `X-Operator-Key`; independent of `auth`. */
+  operatorKey?: string;
+  /** Tenant to read, sent as `?tenant=`; absent reads tenant 0. */
+  tenant?: string;
+}
 
-  const res = await fetch(resolveURL(url, "/v1/ops/schema").toString(), { headers });
+async function fetchSchemas(url: string, opts: FetchOptions = {}): Promise<TableSchema[]> {
+  const headers: Record<string, string> = {};
+  if (opts.auth) headers.Authorization = `Bearer ${opts.auth}`;
+  if (opts.operatorKey) headers["X-Operator-Key"] = opts.operatorKey;
+
+  const target = resolveURL(
+    url,
+    "/v1/ops/schema",
+    opts.tenant ? { tenant: opts.tenant } : undefined,
+  );
+  // A redirect is followed only when the request carries no credential, the
+  // streaming transport's rule (stream/sse.ts `_init`): fetch drops
+  // Authorization on a cross-origin hop and re-sends every other header, so
+  // following one would hand X-Operator-Key to wherever it points. `manual`
+  // over `error`, whose bare "fetch failed" could not name that target.
+  const credentialed = Boolean(opts.auth || opts.operatorKey);
+  const res = await fetch(target.toString(), {
+    headers,
+    redirect: credentialed ? "manual" : "follow",
+  });
+  if (credentialed && res.status >= 300 && res.status < 400) {
+    const location = res.headers.get("location") ?? "an unnamed location";
+    throw new Error(
+      `Schema fetch was redirected (${res.status}) to ${location}, and a request carrying a credential does not follow a redirect: point --url at the final address`,
+    );
+  }
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Schema fetch failed (${res.status}): ${text}`);
@@ -247,7 +320,11 @@ async function main() {
   const args = parseArgs(process.argv);
 
   console.log(`Fetching schema from ${args.url}...`);
-  const schemas = await fetchSchemas(args.url, args.auth);
+  const schemas = await fetchSchemas(args.url, {
+    auth: args.auth,
+    operatorKey: args.operatorKey,
+    tenant: args.tenant,
+  });
 
   if (schemas.length === 0) {
     console.warn("No tables found. Is WaveHouse running with tables in ClickHouse?");
@@ -268,7 +345,7 @@ async function main() {
 
 // Exported for unit tests; the package entry point (src/index.ts) does not
 // re-export the CLI.
-export { chTypeToTS, fetchSchemas, generateTypes };
+export { chTypeToTS, fetchSchemas, generateTypes, parseArgs };
 
 // Run only when invoked as a script (the `wavehouse-codegen` bin or tsx), not
 // when imported by tests. realpath the argv side: npm bin shims are symlinks,
