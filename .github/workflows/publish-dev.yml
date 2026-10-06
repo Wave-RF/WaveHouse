@@ -177,11 +177,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p ctx/scripts
-          # Dockerfile.goreleaser's chtypes-fetch stage needs these three at
-          # their normal repo-relative paths.
-          cp chtypes.lock ctx/
-          cp scripts/fetch-chtypes.sh scripts/_colors.sh ctx/scripts/
+          mkdir -p ctx
+          # Dockerfile.goreleaser's chtypes-cli stage reads the CLI version
+          # from go.mod.
+          cp go.mod ctx/
 
           for goarch in amd64 arm64; do
             bin="staging/wavehouse-linux-${goarch}/wavehouse"

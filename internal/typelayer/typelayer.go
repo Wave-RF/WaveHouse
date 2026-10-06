@@ -16,6 +16,7 @@
 package typelayer
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -60,13 +61,23 @@ const (
 	causeClosed  = "type layer closed"
 )
 
-// Config is boot-tier, read once at process start. CacheDir is a chtypes v1
-// artifact layout, the directory itself (CHTYPES_CACHE semantics); "" means
-// $CHTYPES_CACHE, else ${XDG_CACHE_HOME:-~/.cache}/chtypes/v1. The read-only
-// system layouts (systemLayouts) are searched after it either way. A library
-// is opened lazily, by the first Bind for its line (~120 MB resident each).
+// Config is boot-tier, read once at process start. A library is opened
+// lazily, by the first Bind for its line (~120 MB resident each).
 type Config struct {
+	// CacheDir is the chtypes v1 cache, the layout directory itself
+	// (CHTYPES_CACHE semantics); "" means $CHTYPES_CACHE, else
+	// ${XDG_CACHE_HOME:-~/.cache}/chtypes/v1. The read-only system layouts
+	// (systemLayouts) are searched after it either way.
 	CacheDir string
+	// AutoFetch fetches a line no layout holds, at its first Bind, into the
+	// cache. Off, that line is its tenants' Unavailable, and NewEngine refuses
+	// a host with no artifact at all. Until chtypes 1.0.4, processes
+	// installing one build into a shared cache at once can break each other's
+	// install (Wave-RF/chtypes#482), so a shared cache wants a prefetch.
+	AutoFetch bool
+	// Bases are the registries and mirrors a fetch tries, in order; nil means
+	// $CHTYPES_ARTIFACTS_URL, else chtypes' own registry.
+	Bases []string
 }
 
 // systemLayouts are the read-only layouts the SDK searches after the cache.
@@ -78,18 +89,29 @@ var systemLayouts = []string{"/usr/local/share/chtypes/v1", "/opt/chtypes/v1"}
 // it (Forget).
 //
 // Tenants are independent: a tenant that is not bound yet, has no artifact for
-// its server line, or reports a zone WaveHouse does not recognise is
-// Unavailable on its own, and so is one whose first open fails in a zone
-// chtypes cannot load; a table that does not compile (or that its server zone
-// keeps from being served, see zoneCause) is Unavailable alone, and every
-// other tenant keeps answering. The one exception is a first open whose
-// artifact does not load: chtypes then refuses every tenant in another zone
-// until one in that open's zone is served (see openFirst). A tenant bound in
+// its server line (none installed, or a fetch that failed), or reports a zone
+// WaveHouse does not recognise is Unavailable on its own, and so is one whose
+// first open fails in a zone chtypes cannot load; a table that does not
+// compile (or that its server zone keeps from being served, see zoneCause) is
+// Unavailable alone, and every other tenant keeps answering. The one exception
+// is a first open whose artifact does not load or does not fetch: chtypes then
+// refuses every tenant in another zone until one in that open's zone is served
+// (see openFirst). A tenant bound in
 // a zone chtypes cannot load after the first open is not Unavailable: chtypes
 // refuses each of its calls instead (see knownZone). Two tenants on the same
 // server and database still compile separate handles.
 type Engine struct {
-	reg *chtypes.Registry
+	reg       *chtypes.Registry
+	autoFetch bool
+	// open is reg.ForContext; a test swaps it to fake what chtypes answers.
+	open func(context.Context, string) (*chtypes.Library, error)
+	// ctx bounds every fetch; Close cancels it, so shutdown never waits on
+	// a download.
+	ctx    context.Context
+	cancel context.CancelFunc
+	// libs memoizes each opened line, so a rebind never waits on the
+	// registry, which holds its lock through another line's fetch.
+	libs sync.Map // line -> *chtypes.Library
 
 	mu      sync.RWMutex
 	tenants map[tenant.ID]*tenantSet
@@ -102,7 +124,7 @@ type Engine struct {
 // tenantSet is one tenant's compiled tables.
 type tenantSet struct {
 	id  tenant.ID
-	reg *chtypes.Registry
+	eng *Engine
 
 	// bindMu serializes Bind for this tenant: a manual refresh can overlap the
 	// auto-refresh loop, and two binds racing would leak a handle neither of
@@ -124,45 +146,82 @@ type tenantSet struct {
 }
 
 // NewEngine opens the registry, which reads the fetch layer's install records
-// and opens no library. It fails only when an explicit directory cannot be read
-// or is a chtypes 0.x registry, or when no layout searched holds an artifact
-// for this host, naming the layouts it looked in. Anything an artifact itself
-// can be wrong about — a missing line, a refused ABI, a truncated library —
-// surfaces at the first Bind for that line, as that tenant's Unavailable.
+// and opens no library. It fails when the cache directory cannot be read or is
+// a chtypes 0.x registry (a CacheDir that does not exist is a typo), when a
+// base is not a URL, or, with AutoFetch off, when no layout searched holds an
+// artifact for this host, naming the layouts it looked in. With AutoFetch on,
+// a cache this process cannot write is a warning: a line it holds still binds,
+// and a fetch into it fails at that line's first Bind. Anything an artifact
+// itself can be wrong about — a missing line, a refused ABI, a truncated
+// library — surfaces at the first Bind for that line, as that tenant's
+// Unavailable.
 //
 // WithPreload is deliberately not used: it opens a library at construction,
 // and the process's image zone must come from a server's own zone, which only
 // discovery knows (see openLine).
 func NewEngine(cfg Config) (*Engine, error) {
-	if cfg.CacheDir != "" {
-		if err := checkLayout(cfg.CacheDir); err != nil {
+	root := cacheRoot(cfg.CacheDir)
+	if _, err := os.Stat(root); cfg.CacheDir != "" || err == nil {
+		if err := checkLayout(root); err != nil {
 			return nil, err
 		}
 	}
-	reg, err := chtypes.NewRegistry(chtypes.WithAutoFetch(false),
-		chtypes.WithFetchOptions(chtypes.FetchOptions{CacheDir: cfg.CacheDir}))
+	reg, err := chtypes.NewRegistry(chtypes.WithAutoFetch(cfg.AutoFetch),
+		chtypes.WithFetchOptions(chtypes.FetchOptions{CacheDir: cfg.CacheDir, Bases: cfg.Bases}))
 	if err != nil {
 		return nil, err
 	}
-	installed, err := reg.Installed()
+	installed, err := reg.Installed() // also refuses a base that is not a URL
 	if err != nil {
 		return nil, err
 	}
 	platform := runtime.GOOS + "-" + runtime.GOARCH
-	if !slices.ContainsFunc(installed, func(r chtypes.Resolved) bool { return r.Platform == platform }) {
-		return nil, fmt.Errorf("chtypes: no artifact installed for %s (looked in: %s)",
-			platform, strings.Join(append([]string{cacheRoot(cfg.CacheDir)}, systemLayouts...), ", "))
+	var lines []string
+	for _, r := range installed {
+		if r.Platform == platform {
+			lines = append(lines, r.Version)
+		}
 	}
-	return &Engine{reg: reg, tenants: make(map[tenant.ID]*tenantSet)}, nil
+	if len(lines) == 0 && !cfg.AutoFetch {
+		return nil, fmt.Errorf("chtypes: no artifact installed for %s, and autofetch is off (looked in: %s)",
+			platform, strings.Join(append([]string{root}, systemLayouts...), ", "))
+	}
+	if cfg.AutoFetch {
+		if err := probeWritable(root); err != nil {
+			slog.Warn("chtypes cache is not writable: autofetch cannot install a missing line here; mount a writable directory at it",
+				"cache", root, "error", err)
+		}
+	}
+	slog.Info("chtypes type layer opened", "cache", root, "autofetch", cfg.AutoFetch, "installed", lines)
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Engine{
+		reg: reg, autoFetch: cfg.AutoFetch, open: reg.ForContext, ctx: ctx, cancel: cancel,
+		tenants: make(map[tenant.ID]*tenantSet),
+	}, nil
 }
 
-// checkLayout refuses an explicit directory that cannot be read, or that holds
-// a chtypes 0.x registry (<line>/manifest.json) and no v1 layout: a 0.x
+// probeWritable creates dir if needed and writes and removes a file in it.
+func probeWritable(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: the SDK's own cache, shared like ~/.cache
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".wavehouse-probe-*")
+	if err != nil {
+		return err
+	}
+	_ = f.Close()
+	return os.Remove(f.Name())
+}
+
+// checkLayout refuses a cache directory that cannot be read, or that holds a
+// chtypes 0.x registry (<line>/manifest.json) and no v1 layout: a 0.x
 // artifact never loads under v1, and an empty answer would hide why. Reading
 // covers each install record in it, whether or not oci-layout exists: the SDK
-// skips one it cannot read, so a layout mounted without read access for this
-// user would boot on the system layouts alone. A readable layout with nothing for this platform is not
-// refused, since the system layouts are searched after it.
+// skips one it cannot read, so a cache mounted without read access for this
+// user would boot on the system layouts alone. A readable layout with nothing
+// for this platform is not refused, since the system layouts are searched
+// after it and autofetch may fill it. Wave-RF/chtypes#486 (a strict cache
+// mode, and records readable across users) would let this go.
 func checkLayout(dir string) error {
 	unreadable := func(err error) error {
 		return fmt.Errorf("chtypes: cannot read the artifact directory %s: %w", dir, err)
@@ -259,10 +318,12 @@ func (e *Engine) Table(id tenant.ID, name string) (*Table, error) {
 // library are unchanged. It is called synchronously from discovery's refresh
 // hook, so it must never be fatal: a failure is recorded as a cause — per
 // table for a compile refusal or a zone the table cannot be read in,
-// tenant-wide for a missing artifact or a zone openLine refuses — and
-// surfaces as *Unavailable from Table. A table whose compile was refused
-// is compiled again at every Bind; a table the tenant no longer has is closed;
-// a tenant whose line resolves again is answering again.
+// tenant-wide for a missing artifact, a failed fetch or a zone openLine
+// refuses — and surfaces as *Unavailable from Table. A table whose compile
+// was refused is compiled again at every Bind; a table the tenant no longer
+// has is closed; a tenant whose line resolves again is answering again. With
+// autofetch on, the first Bind for a line no layout holds downloads it
+// (~45 MB) before returning.
 //
 // serverTZ is the server's default zone name as ClickHouse reports it; ""
 // means UTC, chtypes' own default, never the host's zone. The first tenant
@@ -296,7 +357,7 @@ func (e *Engine) tenantForBind(id tenant.ID) *tenantSet {
 	}
 	set := e.tenants[id]
 	if set == nil {
-		set = &tenantSet{id: id, reg: e.reg, tables: make(map[string]*Table)}
+		set = &tenantSet{id: id, eng: e, tables: make(map[string]*Table)}
 		e.tenants[id] = set
 	}
 	return set
@@ -329,6 +390,7 @@ func (e *Engine) Forget(id tenant.ID) {
 // deliberately has no dlclose path — so this is only for tests and shutdown;
 // every later Table is Unavailable and every later Bind does nothing.
 func (e *Engine) Close() {
+	e.cancel()
 	e.mu.Lock()
 	sets := e.tenants
 	e.tenants = make(map[tenant.ID]*tenantSet)
@@ -376,7 +438,7 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 	if tz == "" {
 		tz = "UTC"
 	}
-	lib, cause := openLine(s.reg, serverVersion, tz)
+	lib, cause := s.eng.openLine(serverVersion, tz)
 	if cause != "" {
 		// The tables stay: if the tenant's line resolves again in the same
 		// library, unchanged handles are kept rather than recompiled.

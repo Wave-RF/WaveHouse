@@ -38,6 +38,7 @@ var zeroCases = []zeroCase{
 	{"cache.l1_max_cost", "WH_CACHE_L1_MAX_COST", int64(0), int64(64 << 20), "1024", int64(1024), func(c *Config) any { return c.Cache.L1MaxCost }},
 	{"prometheus.path", "WH_PROMETHEUS_PATH", "", "/metrics", "/prom", "/prom", func(c *Config) any { return c.Prometheus.Path }},
 	{"data_dir", "WH_DATA_DIR", "", "./data", "/var/lib/wh", "/var/lib/wh", func(c *Config) any { return c.DataDir }},
+	{"clickhouse.chtypes_autofetch", "WH_CHTYPES_AUTOFETCH", false, true, "false", false, func(c *Config) any { return c.ClickHouse.ChtypesAutofetch }},
 	// The cache.redis block is validated only under backend=redis, so under
 	// the default backend its zeros load as written.
 	{"cache.redis.mode", "WH_CACHE_REDIS_MODE", "", RedisStandalone, RedisCluster, RedisCluster, func(c *Config) any { return c.Cache.Redis.Mode }},

@@ -44,12 +44,13 @@
 #      lockfile + astro.config.mjs. Speeds up warm `astro check` /
 #      `astro build` — unchanged content skips the parse + transform
 #      pipeline. See #132.
-#   7. chtypes artifact cache (~/.cache/chtypes/v1) keyed on chtypes.lock —
-#      the pinned ClickHouse-version .so/.dylib the SDK dlopens. Measured for
-#      the 26.8 line (linux-amd64): ~340 MiB on disk (289 MiB unpacked .so,
-#      49 MiB compressed layer). Fetched via scripts/fetch-chtypes.sh:
-#      --offline on a hit (zero requests), --frozen on a miss. Go test jobs
-#      that dial chtypes need this; see .github/workflows/README.md.
+#   7. chtypes artifact cache (~/.cache/chtypes/v1) keyed on the test
+#      ClickHouse line plus its newest build's digest — the .so the SDK
+#      dlopens. Measured for the 26.8 line (linux-amd64): ~340 MiB on disk
+#      (289 MiB unpacked .so, 49 MiB compressed layer). Every run fetches the
+#      line's newest build via scripts/fetch-chtypes.sh (two small requests
+#      when it is cached). Go test jobs that dial chtypes need this; see
+#      .github/workflows/README.md.
 name: Setup CI environment
 description: Caches (restore + automatic post-job save) and toolchains for WaveHouse CI
 
@@ -73,7 +74,7 @@ inputs:
     description: "Cache the Astro content collections (docs check/build)"
     default: "false"
   chtypes:
-    description: "Fetch + cache the chtypes artifact(s) pinned in chtypes.lock (Go test jobs that dial chtypes only)"
+    description: "Fetch + cache the chtypes artifact for the test ClickHouse line (Go test jobs that dial chtypes only)"
     default: "false"
 
 # Exact-key cache-hit flags, for consumers that want to skip work on a
@@ -187,34 +188,60 @@ runs:
         restore-keys: |
           golangci-${{ runner.os }}-
 
-    # chtypes artifact cache (the v1 OCI layout) — keyed on chtypes.lock (not
-    # go.mod/go.sum): the pinned digests are the only thing that changes its
-    # contents. runner.arch is in the key on principle (all CI runners are
-    # ubuntu-latest amd64 today; a future arm64 runner must not restore amd64
-    # .so files). No restore-keys: a layout restored from another lock must
-    # never be trusted by the --offline fetch below. The `v1` in path and key is
-    # the artifact layout version; a new one is a new path and a fresh key.
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    # chtypes artifact cache (the v1 OCI layout). There is no lock: the key is
+    # the test ClickHouse line (from internal/chversion) plus the digest of
+    # that line's newest build for this platform, read from the registry's
+    # index (one ~1 KB request, unverified: it only names the entry). A new
+    # upstream build is a new key, so the post-job save captures it; the
+    # restore-keys bring back the previous build, the fetch below installs the
+    # new one on top, and --prune drops the old before the save, so an entry
+    # holds one build. runner.arch is in the key: an arm64 runner must never
+    # restore amd64 .so files. The `v1` in the path is chtypes' layout version;
+    # the key's `v2` is this cache's shape (v1 was keyed on the retired lock).
+    - name: Resolve the chtypes artifact cache key
       if: ${{ inputs.chtypes == 'true' }}
+      id: chtypes-key
+      shell: bash
+      run: |
+        case "$RUNNER_OS" in Linux) os=linux ;; macOS) os=darwin ;; *) os=unknown ;; esac
+        case "$RUNNER_ARCH" in X64) arch=amd64 ;; ARM64) arch=arm64 ;; *) arch=unknown ;; esac
+        echo "line=$(scripts/fetch-chtypes.sh --print-line)" >> "$GITHUB_OUTPUT"
+        if digest="$(scripts/fetch-chtypes.sh --resolve --platform "$os-$arch")"; then
+          echo "build=$(printf '%s' "${digest#sha256:}" | cut -c1-16)" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning title=chtypes::could not resolve the newest build; restoring the last cached one without saving"
+        fi
+
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.chtypes == 'true' && steps.chtypes-key.outputs.build != '' }}
       id: chtypes-cache
       with:
         path: ~/.cache/chtypes/v1
-        key: chtypes-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('chtypes.lock') }}
+        key: chtypes-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.chtypes-key.outputs.line }}-${{ steps.chtypes-key.outputs.build }}
+        restore-keys: |
+          chtypes-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.chtypes-key.outputs.line }}-
 
-    # Hit: --offline reads the restored cache only (zero requests) and still
-    # checks it against chtypes.lock. Miss: --frozen downloads exactly the
-    # locked digests. TODO(Wave-RF/chtypes#414, 1.1): a warm --frozen will make
-    # no requests; drop the split and always run --frozen.
-    - name: Fetch pinned chtypes artifact
+    # Registry unreachable: restore the line's newest entry, and save nothing
+    # under a key that names no build.
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.chtypes == 'true' && steps.chtypes-key.outputs.build == '' }}
+      with:
+        path: ~/.cache/chtypes/v1
+        key: chtypes-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.chtypes-key.outputs.line }}-
+        restore-keys: |
+          chtypes-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.chtypes-key.outputs.line }}-
+
+    # Every run resolves the line's newest build and installs it unless it is
+    # cached: two small requests on a warm cache, the ~45 MB layer otherwise.
+    # chtypes verifies the signed statement on every install. A registry
+    # outage falls back to the cached build, loudly, rather than failing CI.
+    - name: Fetch the chtypes artifact
       if: ${{ inputs.chtypes == 'true' }}
       shell: bash
-      env:
-        HIT: ${{ steps.chtypes-cache.outputs.cache-hit }}
       run: |
-        if [ "$HIT" = "true" ]; then
+        if ! scripts/fetch-chtypes.sh --prune; then
+          echo "::warning title=chtypes::fetching the newest build failed; testing on the cached build"
           scripts/fetch-chtypes.sh --offline
-        else
-          scripts/fetch-chtypes.sh
         fi
 
     # No actions/setup-go: it spends ~9s/job downloading + extracting a
@@ -229,15 +256,9 @@ runs:
     # Trade-off: setup-go's inline problem matchers (PR-file annotations
     # on compile errors) are gone; the log output is unchanged.
     #
-    # On a chtypes job the cold cost is paid TWICE, and the second fetch is
-    # invisible because it happens inside the step above: `go run <pkg>@ver`
-    # resolves its toolchain from the pinned CLI module, not from this
-    # repo's go.mod, so it can land on a different patch than the one this
-    # step materialises (measured on an ambient go1.24.13: go1.27.1 for the
-    # CLI, go1.27.0 for `go 1.27` here). Both are ~80 MB and both live in
-    # ~/go/pkg/mod/golang.org/toolchain, so gomod-v1 absorbs both after the
-    # first save. A `toolchain` line in go.mod naming the same patch the CLI
-    # resolves would collapse it to one — not worth pinning for ~7s.
+    # On a chtypes job the toolchain fetch happens earlier, inside the chtypes
+    # steps above: scripts/fetch-chtypes.sh runs the CLI through this repo's
+    # go.mod, so it resolves the same toolchain this step reports.
     - name: Verify Go resolves go.mod's toolchain
       if: ${{ inputs.go == 'true' }}
       shell: bash

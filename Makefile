@@ -756,8 +756,19 @@ install-playwright-docs: pnpm-install
 COV_DEFER ?=
 export COV_DEFER
 
+# The chtypes artifact for the test line, fetched by ONE process before a
+# suite starts its test binaries in parallel: until chtypes 1.0.4, processes
+# installing the same build into one cache at once can break each other's
+# install (Wave-RF/chtypes#482). A cached build costs no request; a failed
+# fetch leaves the suites to skip, or under WAVEHOUSE_TEST_REQUIRE_CHTYPES=1
+# fail, naming the cause.
+.PHONY: chtypes-artifact
+chtypes-artifact:
+	@scripts/fetch-chtypes.sh --offline >/dev/null 2>&1 || scripts/fetch-chtypes.sh >/dev/null || \
+		printf "$(YELLOW)==> chtypes artifact not fetched; the suites that need it skip$(RESET)\n"
+
 .PHONY: test-unit
-test-unit: go-mod-download ## Run Go unit tests + render coverage + gate threshold
+test-unit: go-mod-download chtypes-artifact ## Run Go unit tests + render coverage + gate threshold
 	@printf "$(CYAN)==> Running Unit Tests...$(RESET)\n"
 	@rm -rf $(COV_UNIT)/data && mkdir -p $(COV_UNIT)/data
 	@GOCOVERDIR="$(CURDIR)/$(COV_UNIT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
@@ -771,7 +782,7 @@ test-unit: go-mod-download ## Run Go unit tests + render coverage + gate thresho
 test: test-unit
 
 .PHONY: test-integration
-test-integration: go-mod-download ## Run Go integration tests + render coverage + gate threshold (requires Docker)
+test-integration: go-mod-download chtypes-artifact ## Run Go integration tests + render coverage + gate threshold (requires Docker)
 	@printf "$(CYAN)==> Running Integration Tests...$(RESET)\n"
 	@rm -rf $(COV_INT)/data && mkdir -p $(COV_INT)/data
 	@# 480s: the go command kills the package at -timeout + 1m, counting
@@ -798,7 +809,7 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 # as the Go test targets. `make cov` merges ts-unit + ts-e2e after.
 #
 .PHONY: test-e2e
-test-e2e: build-ts build-cover ## Run E2E SDK suite against cover binary + render coverage + gate
+test-e2e: build-ts build-cover chtypes-artifact ## Run E2E SDK suite against cover binary + render coverage + gate
 	@printf "$(CYAN)==> Running E2E Tests...$(RESET)\n"
 	@rm -rf $(COV_E2E)/data tmp/coverage/ts-e2e
 	@mkdir -p $(COV_E2E)/data tmp/coverage/ts-e2e tmp

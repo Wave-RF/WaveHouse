@@ -45,21 +45,26 @@ prometheus:
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
 
-# Only the password, the connection ceiling and the chtypes artifact directory
-# are boot config; addr, http_port, http_scheme, database, username,
+# Only the password, the connection ceiling and the chtypes artifact keys are
+# boot config; addr, http_port, http_scheme, database, username,
 # query_timeout, tls, headers and the pool sizes are the settings directory's
 # clickhouse block.
 clickhouse:
   password: ""
   max_total_conns: 0 # ceiling on open native connections across pools; 0 = none
-  # chtypes v1 artifact layout directory (CHTYPES_CACHE semantics: the layout
-  # itself, as `chtypes fetch --cache <dir>` writes it), read by api-role
-  # processes only. Empty (the default) defers to the per-user cache ($CHTYPES_CACHE, else
-  # ~/.cache/chtypes/v1). Set, it replaces the per-user cache; either way the
+  # chtypes v1 cache (CHTYPES_CACHE semantics: the layout itself, as
+  # `chtypes fetch --cache <dir>` writes it), read by api-role processes only.
+  # Empty (the default) is $CHTYPES_CACHE, else ~/.cache/chtypes/v1; the
   # read-only system directories /usr/local/share/chtypes/v1 and
-  # /opt/chtypes/v1 are searched after it. Set it only to point at a
-  # non-default location.
-  chtypes_registry: ""
+  # /opt/chtypes/v1 are searched after it.
+  chtypes_cache: ""
+  # Fetch a ClickHouse line no directory holds when its first tenant binds
+  # (the line's newest signed build, into chtypes_cache). false for an
+  # air-gapped deployment, which then needs the artifacts installed.
+  chtypes_autofetch: true
+  # Registries/mirrors a fetch tries in order, comma-separated (a mirror or
+  # pull-through proxy). Empty is $CHTYPES_ARTIFACTS_URL, else chtypes' own.
+  chtypes_artifacts_url: ""
 
 # Each layer's implementation, chosen at boot. Every layer defaults to its
 # in-process backend; mq and coord also take nats, cache redis, dedupe dynamodb.

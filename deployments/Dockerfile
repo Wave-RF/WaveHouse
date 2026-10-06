@@ -31,24 +31,15 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=1 go build -tags="${BUILD_TAGS}" -ldflags="-s -w" -o /bin/wavehouse ./cmd/wavehouse
 
-# Bake the pinned chtypes artifact(s) into the image so the container has no
-# runtime network dependency and no first-request download stall. chtypes.lock
-# is this repo's pin (schema 3, OCI digests per line and platform);
-# scripts/fetch-chtypes.sh wraps the SDK's own CLI with --frozen, which
-# refuses anything the lock doesn't name. The fetch lands in a v1 artifact
-# layout with a signed, verified statement (verified.json) per build, which
-# the runtime loader requires. The layer blob (the compressed copy of the .so,
-# ~50 MB) is only needed to re-unpack; the loader and `chtypes verify` read the
-# unpacked tree, so it is dropped to keep the image small.
-COPY chtypes.lock ./
+# The chtypes CLI, at the SDK version go.mod requires, pure Go: an operator
+# prefetches or inspects artifacts with the image alone (`--entrypoint
+# /app/chtypes`). No artifact is baked in: they are ~300 MB per line, and the
+# process fetches a missing line into its cache (see CHTYPES_CACHE below).
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    mkdir -p /opt/chtypes/v1 && \
-    scripts/fetch-chtypes.sh --cache /opt/chtypes/v1 && \
-    for v in /opt/chtypes/v1/unpacked/sha256/*/verified.json; do \
-      l="$(sed -n 's/.*"layer":"sha256:\([0-9a-f]*\)".*/\1/p' "$v")"; \
-      if [ -n "$l" ]; then rm -f "/opt/chtypes/v1/blobs/sha256/$l"; fi; \
-    done
+    v="$(sed -n 's#^[[:space:]]*github.com/wave-rf/chtypes/go \(v[^[:space:]]*\).*#\1#p' go.mod)" && \
+    test -n "$v" && \
+    GOBIN=/bin CGO_ENABLED=0 go install -trimpath -ldflags="-s -w" "github.com/wave-rf/chtypes/go/cmd/chtypes@$v"
 
 # Create the parent state and settings directories owned by the nonroot
 # user (UID 65532 in distroless). The binary creates `nats/` and `pebble/`
@@ -65,7 +56,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # missing mount refuses to boot instead of running on defaults nobody
 # chose. Not a VOLUME either (unlike /app/data): it's config, not state,
 # and an anonymous volume would hide a forgotten mount.
-RUN mkdir -p /app/data /app/settings && chown -R 65532:65532 /app
+#
+# /var/cache/chtypes/v1 is the chtypes cache, owned by nonroot so an empty
+# named volume mounted there copies up writable. Not a VOLUME: an anonymous
+# volume per container would re-fetch every run and leak on removal; mount a
+# named volume or a host directory there instead (docs/deployment.md).
+RUN mkdir -p /app/data /app/settings /var/cache/chtypes/v1 && chown -R 65532:65532 /app /var/cache/chtypes
 
 # Stage 2: Final minimal image
 #
@@ -78,15 +74,15 @@ FROM gcr.io/distroless/cc-debian12
 WORKDIR /app
 USER nonroot:nonroot
 ENV WH_SETTINGS_DIR=/app/settings
-# /opt/chtypes/v1 is one of the SDK's read-only system search directories, so
-# no env or WaveHouse config is needed to find what the image baked in (the
-# loader only reads it; nothing is written at load). WH_CHTYPES_REGISTRY
-# (internal/config) is for an operator who wants to add a bind-mounted v1
-# layout: it is searched first and this one stays on the path.
+# Read by both the process (an empty clickhouse.chtypes_cache defers to it)
+# and the bundled CLI, so a fetch either one makes lands where the other
+# looks.
+ENV CHTYPES_CACHE=/var/cache/chtypes/v1
 
 COPY --from=builder --chown=nonroot:nonroot /app /app
-COPY --from=builder --chown=nonroot:nonroot /opt/chtypes /opt/chtypes
+COPY --from=builder --chown=nonroot:nonroot /var/cache/chtypes /var/cache/chtypes
 COPY --from=builder --chown=nonroot:nonroot /bin/wavehouse /app/wavehouse
+COPY --from=builder --chown=nonroot:nonroot /bin/chtypes /app/chtypes
 
 # OCI image metadata. Static labels live here; per-build dynamic ones
 # (revision, version, created) are added by the workflow at build time

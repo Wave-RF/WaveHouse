@@ -162,13 +162,15 @@ The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate 
 
 ### ClickHouse
 
-Only the secret, the connection ceiling and the chtypes artifact directory are boot config. The wiring — native address, HTTP port and scheme, database, username, query timeout, TLS, headers, pool sizes — is the settings directory's [`clickhouse` block](/settings-directory#clickhouse), where a change re-dials without a restart.
+Only the secret, the connection ceiling and the three chtypes artifact keys are boot config. The wiring — native address, HTTP port and scheme, database, username, query timeout, TLS, headers, pool sizes — is the settings directory's [`clickhouse` block](/settings-directory#clickhouse), where a change re-dials without a restart.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password, combined with the settings directory's `clickhouse.username` on every (re)connect. A secret, so it never lives in a tracked JSON file; rotating it is a restart. |
 | `clickhouse.max_total_conns` | `WH_CH_MAX_TOTAL_CONNS` | `0` | Ceiling on the native ClickHouse connections the process holds open: the `max_open_conns` of the open pools — one per distinct connection tuple among the served tenants, see [the settings directory](/settings-directory#clickhouse) — must not add up to more. Pools above it at boot refuse to start, naming the sum and the ceiling; on a reload a pool resized above it is refused and keeps its size, and a new pool that would cross it is not opened — its tenants keep the pool they had, or have none — both logged (the reload itself still reports `adopted`) and retried by the next reload. `0` is no ceiling. Capacity is sized once per process, which is why it is boot config rather than a settings key. It counts native connections only: the HTTP reader behind structured queries and pipes is capped separately, one cap per connection tuple (URL, user, password, database, TLS), at the largest `max_open_conns` among the tenants sharing it. |
-| `clickhouse.chtypes_registry` | `WH_CHTYPES_REGISTRY` | *(empty)* | The chtypes v1 artifact layout directory itself (`CHTYPES_CACHE` semantics: `oci-layout`, `blobs/`, `unpacked/`, as `chtypes fetch --cache` writes it), not a parent of per-line folders. Empty defers to the per-user cache, `$CHTYPES_CACHE` else `~/.cache/chtypes/v1`. Set, it replaces the per-user cache; either way the system layouts `/usr/local/share/chtypes/v1` and `/opt/chtypes/v1` are searched after it. A library is opened lazily, on first use of its line. A directory set here that does not exist or cannot be read refuses boot in a process with the `api` role. Boot-tier: changing it is a restart. See [chtypes artifacts](/deployment#chtypes-artifacts). |
+| `clickhouse.chtypes_cache` | `WH_CHTYPES_CACHE` | *(empty)* | The chtypes v1 cache: the layout directory itself (`CHTYPES_CACHE` semantics: `oci-layout`, `blobs/`, `unpacked/`, as `chtypes fetch --cache` writes it), not a parent of per-line folders. The type layer reads artifacts from it, and autofetch installs into it. Empty defers to `$CHTYPES_CACHE`, else `~/.cache/chtypes/v1`; the Docker images set `CHTYPES_CACHE=/var/cache/chtypes/v1`. The read-only system layouts `/usr/local/share/chtypes/v1` and `/opt/chtypes/v1` are searched after it. A library is opened lazily, on first use of its line. A directory set here that does not exist, or a cache that cannot be read, refuses boot in a process with the `api` role; with autofetch on, a cache the process cannot write is a boot warning. Several processes may read one cache, but until chtypes 1.0.4 only one at a time may install a build into it (Wave-RF/chtypes#482), so prefetch a cache that replicas share. Boot-tier: changing it is a restart. See [chtypes artifacts](/deployment#chtypes-artifacts). |
+| `clickhouse.chtypes_autofetch` | `WH_CHTYPES_AUTOFETCH` | `true` | Fetch the artifact for a ClickHouse line that no layout holds when the first tenant on that line binds: the newest build the registry publishes for the line, its signed statement verified against chtypes' release key, installed into the cache. A line already installed is never fetched again or updated while the process runs. A fetch that fails makes that tenant unavailable, naming the failure, and the tenant's next schema refresh retries it. `false` for an air-gapped deployment: a line nothing holds is then unavailable, and an API process with no artifact at all for its platform refuses to boot. The chtypes SDK's own `CHTYPES_AUTOFETCH` is not read. |
+| `clickhouse.chtypes_artifacts_url` | `WH_CHTYPES_ARTIFACTS_URL` | *(empty)* | The registries a fetch tries, in order, comma-separated: chtypes' own registry, a mirror, or a pull-through proxy (`https://` or `http://`, or a `file://` directory laid out like a registry). A temporary failure moves on to the next; a verification failure never does. Empty defers to `$CHTYPES_ARTIFACTS_URL`, else `https://registry.wavehouse.dev/chtypes/v1`. A value that is not one of those URLs refuses boot. |
 
 ### ClickHouse user access
 
@@ -348,7 +350,9 @@ clickhouse:
   password: ""           # addr, ports, database, username, query_timeout, tls,
                          # headers and pool sizes are settings (config.json)
   max_total_conns: 0     # ceiling on open native connections; 0 = none
-  chtypes_registry: ""    # chtypes v1 artifact layout directory; empty = the SDK's search path
+  chtypes_cache: ""       # chtypes v1 cache; empty = $CHTYPES_CACHE, else ~/.cache/chtypes/v1
+  chtypes_autofetch: true # fetch a missing ClickHouse line at its first bind; false = air-gapped
+  chtypes_artifacts_url: "" # registries/mirrors, comma-separated; empty = chtypes' own registry
 
 mq:
   backend: embedded      # in-process NATS JetStream under <data_dir>/nats
@@ -450,8 +454,12 @@ WH_SERVER_SHUTDOWN_TIMEOUT=10
 
 WH_CH_PASSWORD=
 WH_CH_MAX_TOTAL_CONNS=0
-# chtypes v1 artifact layout directory; empty = the SDK's search path
-WH_CHTYPES_REGISTRY=
+# chtypes v1 cache; empty = $CHTYPES_CACHE, else ~/.cache/chtypes/v1
+WH_CHTYPES_CACHE=
+# Fetch a missing ClickHouse line at its first bind; false = air-gapped.
+WH_CHTYPES_AUTOFETCH=true
+# Registries/mirrors a fetch tries, comma-separated; empty = chtypes' own registry.
+WH_CHTYPES_ARTIFACTS_URL=
 
 WH_MQ_BACKEND=embedded
 # With WH_MQ_BACKEND=nats (read only then):

@@ -169,13 +169,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist ctx/scripts
+          mkdir -p dist ctx
 
-          # Dockerfile.goreleaser's chtypes-fetch stage needs these three at
-          # their normal repo-relative paths — the same files GoReleaser's
-          # dockers_v2.extra_files used to copy into its temp context.
-          cp chtypes.lock ctx/
-          cp scripts/fetch-chtypes.sh scripts/_colors.sh ctx/scripts/
+          # Dockerfile.goreleaser's chtypes-cli stage reads the CLI version
+          # from go.mod.
+          cp go.mod ctx/
 
           for target in linux/amd64 linux/arm64 darwin/arm64; do
             goos="${target%/*}"

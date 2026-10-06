@@ -27,13 +27,13 @@ import (
 //
 // The image zone is the server zone of the first tenant chtypes serves, so a
 // single-zone deployment is exact. A tenant that cannot be served commits
-// nothing (a zone name not recognised, no installed artifact for its line, or
-// a first open that fails), so the next servable tenant sets the zone (after
-// an artifact that does not load, only one in that open's zone). Every
-// other tenant's calls carry its server zone as session_timezone, the same
-// zone on a filter's create as on every parse it is evaluated against
-// (Table.zoneOpts): chtypes declines a batch whose filter was created in
-// another zone. What session_timezone does not reach is an expression over a
+// nothing (a zone name not recognised, no artifact for its line, or a first
+// open that fails), so the next servable tenant sets the zone (after an
+// artifact that does not load or a fetch that fails, only one in that open's
+// zone). Every other tenant's calls carry its server zone as
+// session_timezone, the same zone on a filter's create as on every parse it
+// is evaluated against (Table.zoneOpts): chtypes declines a batch whose
+// filter was created in another zone. What session_timezone does not reach is an expression over a
 // zone-less DateTime column, so such a table is unavailable for that tenant
 // (zoneCause) until chtypes binds a zone per schema (Wave-RF/chtypes#419).
 
@@ -47,60 +47,112 @@ var image struct {
 // openLine resolves the library for serverVersion's line. A non-empty cause is
 // why the tenant cannot be served: a zone name WaveHouse does not recognise,
 // no loadable artifact for the line (the SDK's own message, with its
-// CHTYPES_ARTIFACT_* code), or a first open that fails in the zone (see
+// CHTYPES_ARTIFACT_* code), a fetch that failed (fetchCause), a library from
+// another line (wrongLine), or a first open that fails in the zone (see
 // openFirst). Only the first open asks chtypes about the zone: once an image
 // zone is committed, a tenant in a zone chtypes cannot load gets no cause
-// here, and chtypes refuses each of its calls instead (see knownZone).
-func openLine(reg *chtypes.Registry, serverVersion, tz string) (*chtypes.Library, string) {
+// here, and chtypes refuses each of its calls instead (see knownZone). A
+// failed fetch is retried by the tenant's next Bind.
+func (e *Engine) openLine(serverVersion, tz string) (*chtypes.Library, string) {
 	if !knownZone(tz) {
 		return nil, fmt.Sprintf("ClickHouse reports server timezone %q, which is not a zone name WaveHouse recognises, "+
 			"so no row of this tenant can be read in it", tz)
 	}
 	line := versionLine(serverVersion)
-	if lib, cause, first := openFirst(reg, line, tz); first {
+	if lib, ok := e.libs.Load(line); ok {
+		return lib.(*chtypes.Library), ""
+	}
+	if lib, cause, first := e.openFirst(line, tz); first {
 		return lib, cause
 	}
-	lib, err := reg.For(line)
+	missing := installedCause(e.reg, line)
+	if missing != "" && !e.autoFetch {
+		return nil, missing
+	}
+	lib, err := e.open(e.ctx, line)
 	if err != nil {
+		if missing != "" && installedCause(e.reg, line) != "" {
+			return nil, fetchCause(line, err)
+		}
 		return nil, err.Error()
 	}
+	if cause := wrongLine(line, lib); cause != "" {
+		return nil, cause
+	}
+	e.libs.Store(line, lib)
 	return lib, ""
 }
 
 // openFirst is openLine while no image zone is committed (first is false once
-// one is). The zone is committed only once a library has opened under it:
-// a tenant with no installed artifact on this platform for its line never
-// reaches Setup, and an open that fails leaves the image uncommitted, the
-// tenant unavailable. chtypes clears the setup when its library refuses the
-// zone, but keeps it when the artifact does not load, so Setup then refuses
-// every other zone until a tenant in the held one is served
+// one is). The zone is committed only once a library has opened under it.
+// With autofetch off, a tenant with no installed artifact on this platform for
+// its line never reaches Setup, and an open that fails leaves the image
+// uncommitted, the tenant unavailable. chtypes clears the setup when its
+// library refuses the zone, but keeps it when the artifact does not load, so
+// Setup then refuses every other zone until a tenant in the held one is served
 // (Wave-RF/chtypes#468). That refusal fails closed: opening anyway would load
 // the library in the held zone.
-func openFirst(reg *chtypes.Registry, line, tz string) (lib *chtypes.Library, cause string, first bool) {
+//
+// With autofetch on, a missing line is fetched by the open itself, after
+// Setup: chtypes has no call that installs without opening, and an open loads
+// under whatever setup is recorded. So a first open whose fetch fails keeps
+// its setup the same way, until a tenant in its zone is served.
+func (e *Engine) openFirst(line, tz string) (lib *chtypes.Library, cause string, first bool) {
 	image.mu.Lock()
 	defer image.mu.Unlock()
 	if image.zone != "" {
 		return nil, "", false
 	}
-	if cause := installedCause(reg, line); cause != "" {
-		return nil, cause, true
+	missing := installedCause(e.reg, line)
+	if missing != "" && !e.autoFetch {
+		return nil, missing, true
 	}
 	if err := chtypes.Setup(chtypes.SetupOptions{Timezone: tz}); err != nil {
 		return nil, fmt.Sprintf("ClickHouse reports server timezone %q, which chtypes refused as this process's "+
 			"image zone: %s", tz, err), true
 	}
-	lib, err := reg.For(line)
+	lib, err := e.open(e.ctx, line)
 	var artifact *chtypes.ArtifactError
 	switch {
+	case err != nil && missing != "" && installedCause(e.reg, line) != "":
+		return nil, fetchCause(line, err), true
 	case errors.As(err, &artifact):
 		return nil, err.Error(), true
 	case err != nil:
 		return nil, fmt.Sprintf("ClickHouse reports server timezone %q, and chtypes could not open a library in it: %s",
 			tz, err), true
 	}
+	if cause := wrongLine(line, lib); cause != "" {
+		// Not served, so not committed here, though that library's load has
+		// latched chtypes' setup to tz: only a tenant in tz is served next.
+		return nil, cause, true
+	}
 	image.zone = tz
+	e.libs.Store(line, lib)
 	slog.Info("chtypes image zone committed", "zone", tz)
 	return lib, "", true
+}
+
+// wrongLine is why lib cannot answer line, "" when the line it was built for
+// (its build_info's clickhouse_minor) is line. chtypes Go 1.0.0 to 1.0.2
+// answer a request for a line the cache holds no install of with a higher
+// line's library when the cache holds one, reporting only a warning
+// (Wave-RF/chtypes#481, to be fixed in 1.0.4). Served, that library would
+// judge the tenant by another ClickHouse version, so it fails closed.
+func wrongLine(line string, lib *chtypes.Library) string {
+	if lib.Minor == line {
+		return ""
+	}
+	return fmt.Sprintf("chtypes answered a request for ClickHouse %s with its %s library (built for %s), which would "+
+		"judge this tenant by another ClickHouse version, so it is refused: chtypes 1.0.2 does this when the cache "+
+		"holds no %s build but a higher line's (Wave-RF/chtypes#481)", line, lib.Version, lib.Minor, line)
+}
+
+// fetchCause is the cause when the open of a line that was not installed
+// failed and left it uninstalled: the fetch failed.
+func fetchCause(line string, err error) string {
+	return fmt.Sprintf("chtypes could not fetch the artifact for ClickHouse %s (%s-%s): %s",
+		line, runtime.GOOS, runtime.GOARCH, err)
 }
 
 // installedCause is the artifact-missing cause when no install record on this
@@ -117,7 +169,8 @@ func installedCause(reg *chtypes.Registry, line string) string {
 	}) {
 		return ""
 	}
-	return fmt.Sprintf("chtypes: no installed artifact for ClickHouse %s (%s) [%s]", line, platform, chtypes.CodeArtifactMissing)
+	return fmt.Sprintf("chtypes: no installed artifact for ClickHouse %s (%s), and autofetch is off [%s]",
+		line, platform, chtypes.CodeArtifactMissing)
 }
 
 // knownZone reports whether tz is a zone name Go's time package knows, which

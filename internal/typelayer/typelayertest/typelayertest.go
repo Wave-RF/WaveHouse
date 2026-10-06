@@ -1,49 +1,42 @@
-// Package typelayertest opens a typelayer.Engine on the locked chtypes
-// artifact for tests in other packages, and skips a test that needs one when
-// it is not installed. It is test-only: nothing the wavehouse binary links
+// Package typelayertest opens a typelayer.Engine on the chtypes artifact for
+// the pinned test ClickHouse (chversion.Test), for tests in other packages. A
+// missing artifact is fetched into the SDK's per-user cache, the one a
+// developer's other checkouts and CI share, and a test that needs one is
+// skipped when that fails. It is test-only: nothing the wavehouse binary links
 // imports it, so the testing package stays out of production builds.
 package typelayertest
 
 import (
-	"fmt"
 	"os"
-	"runtime"
-	"slices"
-	"strings"
 	"sync"
 	"testing"
 
-	"github.com/wave-rf/chtypes/go/chtypes"
-
+	"github.com/Wave-RF/WaveHouse/internal/chversion"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
-// TestServerVersion is the ClickHouse version TestEngine binds to — the patch
-// the locked 26.8 artifact is built from, so its line resolves to that
-// artifact and the bound library is an exact match for the server.
-const TestServerVersion = "26.8.15.10"
-
-// testLine is TestServerVersion's version line, the one artifact tests need.
-const testLine = "26.8"
+// TestServerVersion is the ClickHouse version TestEngine binds to: the pinned
+// test ClickHouse, so its line resolves to the artifact the suites' server
+// runs. The line's newest installed build answers it, usually that patch.
+const TestServerVersion = chversion.Test
 
 // RequireEnv set to "1" turns every artifact skip into a failure. CI sets it,
-// so a runner with a broken artifact cache fails loudly instead of quietly
-// testing nothing.
+// so a runner that cannot fetch the artifact fails loudly instead of testing
+// nothing.
 const RequireEnv = "WAVEHOUSE_TEST_REQUIRE_CHTYPES"
 
-// missingArtifact is what a developer without the artifact needs to read: the
-// exact command that installs it.
-const missingArtifact = "chtypes v1 artifact for " + testLine + " not installed: run " +
-	"`scripts/fetch-chtypes.sh`, which installs the build chtypes.lock pins into the SDK's per-user cache " +
-	"(~/.cache/chtypes/v1, or $CHTYPES_CACHE)"
+// probeTenant is the tenant SkipWithoutArtifact binds, with no tables.
+const probeTenant tenant.ID = "typelayertest-probe"
 
-// SkipWithoutArtifact skips t when no chtypes artifact for TestServerVersion's
-// line is installed for this host — or fails it when
-// WAVEHOUSE_TEST_REQUIRE_CHTYPES=1. It opens no library. A test that boots
-// anything constructing an Engine (the API process role) calls it first, since
-// typelayer.NewEngine refuses to start without an artifact.
+// SkipWithoutArtifact makes sure the chtypes artifact for TestServerVersion's
+// line is installed for this host, fetching it into the per-user cache
+// (~/.cache/chtypes/v1, or $CHTYPES_CACHE) on a miss, and skips t when it
+// cannot — or fails it under WAVEHOUSE_TEST_REQUIRE_CHTYPES=1. It opens the
+// line's library the way a UTC tenant's first bind does, so the process's
+// image zone is UTC from then on. A test that boots an API process with
+// autofetch off calls it first.
 func SkipWithoutArtifact(t testing.TB) {
 	t.Helper()
 	if cause := artifactMissing(); cause != "" {
@@ -57,39 +50,31 @@ var artifactProbe struct {
 }
 
 // artifactMissing reports why the test line's artifact is not available, ""
-// when it is. Probed once per test binary: it reads install records only.
+// when it is. Probed once per test binary.
 func artifactMissing() string {
 	artifactProbe.once.Do(func() {
-		reg, err := chtypes.NewRegistry(chtypes.WithAutoFetch(false))
+		eng, err := typelayer.NewEngine(typelayer.Config{AutoFetch: true})
 		if err != nil {
 			artifactProbe.cause = err.Error()
 			return
 		}
-		installed, err := reg.Installed()
-		if err != nil {
-			artifactProbe.cause = err.Error()
-			return
-		}
-		platform := runtime.GOOS + "-" + runtime.GOARCH
-		if !slices.ContainsFunc(installed, func(r chtypes.Resolved) bool {
-			return r.Platform == platform && strings.HasPrefix(r.Version, testLine+".")
-		}) {
-			artifactProbe.cause = fmt.Sprintf("no %s artifact installed for %s", testLine, platform)
-		}
+		defer eng.Close()
+		eng.Bind(probeTenant, TestServerVersion, "UTC", nil)
+		artifactProbe.cause = eng.TenantCause(probeTenant)
 	})
 	return artifactProbe.cause
 }
 
-// TestEngine opens an Engine on the SDK's default layouts and binds the given
-// tables for tenant.Default at TestServerVersion in UTC. The first bind in a
-// process fixes its image zone, so a test binary that binds here first runs a
-// UTC image. It skips the
-// test when the artifact is absent or does not load (fails it under
+// TestEngine opens an Engine on the SDK's default layouts, with autofetch, and
+// binds the given tables for tenant.Default at TestServerVersion in UTC. The
+// first bind in a process fixes its image zone, so a test binary that binds
+// here first runs a UTC image. It skips the test when the artifact is absent
+// and cannot be fetched, or does not load (fails it under
 // WAVEHOUSE_TEST_REQUIRE_CHTYPES=1), and closes the Engine when the test ends.
 func TestEngine(t testing.TB, tables ...*discovery.TableSchema) *typelayer.Engine {
 	t.Helper()
 	SkipWithoutArtifact(t)
-	eng, err := typelayer.NewEngine(typelayer.Config{})
+	eng, err := typelayer.NewEngine(typelayer.Config{AutoFetch: true})
 	if err != nil {
 		skipUnlessRequired(t, err.Error())
 	}
@@ -102,12 +87,14 @@ func TestEngine(t testing.TB, tables ...*discovery.TableSchema) *typelayer.Engin
 	return eng
 }
 
-// skipUnlessRequired skips t because the artifact cannot serve it, naming the command that
-// installs it — or fails t under WAVEHOUSE_TEST_REQUIRE_CHTYPES=1.
+// skipUnlessRequired skips t because the artifact cannot serve it — or fails
+// t under WAVEHOUSE_TEST_REQUIRE_CHTYPES=1.
 func skipUnlessRequired(t testing.TB, cause string) {
 	t.Helper()
+	const msg = "the chtypes artifact for the test ClickHouse line is not available " +
+		"(`scripts/fetch-chtypes.sh` fetches it into the per-user cache, or shows why it cannot)"
 	if os.Getenv(RequireEnv) == "1" {
-		t.Fatalf("%s\n%s", missingArtifact, cause)
+		t.Fatalf("%s\n%s", msg, cause)
 	}
-	t.Skipf("%s\n%s", missingArtifact, cause)
+	t.Skipf("%s\n%s", msg, cause)
 }

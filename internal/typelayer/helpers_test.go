@@ -10,17 +10,17 @@ import (
 
 	"github.com/wave-rf/chtypes/go/chtypes"
 
+	"github.com/Wave-RF/WaveHouse/internal/chversion"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // This package's own tests cannot import typelayertest (it imports this
-// package), so they carry the same three pieces: the version they bind, its
-// line, and the engine helper. Kept in step with typelayertest.TestEngine.
-const (
-	testServerVersion = "26.8.15.10"
-	testLine          = "26.8"
-)
+// package), so they carry the same pieces: the version they bind, its line,
+// and the engine helper. Kept in step with typelayertest.TestEngine.
+const testServerVersion = chversion.Test
+
+var testLine = chversion.Line(testServerVersion)
 
 // TestMain commits a UTC image zone before any test binds, so the zone every
 // test reads in does not depend on which test happens to bind first. The
@@ -46,13 +46,13 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// testEngine opens an Engine on the SDK's default layouts and binds tables
-// for tenant.Default at testServerVersion in UTC, skipping the test when the
-// artifact is absent or does not load — failing it under
-// WAVEHOUSE_TEST_REQUIRE_CHTYPES=1.
+// testEngine opens an Engine on the SDK's default layouts, with autofetch, and
+// binds tables for tenant.Default at testServerVersion in UTC, skipping the
+// test when the artifact is absent and cannot be fetched, or does not load —
+// failing it under WAVEHOUSE_TEST_REQUIRE_CHTYPES=1.
 func testEngine(t testing.TB, tables ...*discovery.TableSchema) *Engine {
 	t.Helper()
-	eng, err := NewEngine(Config{})
+	eng, err := NewEngine(Config{AutoFetch: true})
 	if err != nil {
 		skipWithoutArtifact(t, err.Error())
 	}
@@ -76,7 +76,8 @@ func TestPackageDoesNotImportTesting(t *testing.T) {
 
 func skipWithoutArtifact(t testing.TB, cause string) {
 	t.Helper()
-	const msg = "chtypes artifact for " + testLine + " not installed: run `scripts/fetch-chtypes.sh`"
+	msg := "the chtypes artifact for " + testLine + " is not available " +
+		"(`scripts/fetch-chtypes.sh` fetches it into the per-user cache, or shows why it cannot)"
 	if os.Getenv("WAVEHOUSE_TEST_REQUIRE_CHTYPES") == "1" {
 		t.Fatalf("%s\n%s", msg, cause)
 	}

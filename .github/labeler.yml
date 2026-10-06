@@ -58,7 +58,7 @@
   - changed-files:
     - any-glob-to-any-file:
       - "internal/typelayer/**"
-      - "chtypes.lock"
+      - "internal/chversion/**"
       - "scripts/fetch-chtypes.sh"
 
 "area/sdk":
