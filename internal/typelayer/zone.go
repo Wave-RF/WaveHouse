@@ -28,7 +28,8 @@ import (
 // The image zone is the server zone of the first tenant chtypes serves, so a
 // single-zone deployment is exact. A tenant that cannot be served commits
 // nothing (a zone name not recognised, no installed artifact for its line, or
-// a first open that fails), so the next servable tenant sets the zone. Every
+// a first open that fails), so the next servable tenant sets the zone (after
+// an artifact that does not load, only one in that open's zone). Every
 // other tenant's calls carry its server zone as session_timezone, the same
 // zone on a filter's create as on every parse it is evaluated against
 // (Table.zoneOpts): chtypes declines a batch whose filter was created in
@@ -67,8 +68,10 @@ func openLine(reg *chtypes.Registry, serverVersion, tz string) (*chtypes.Library
 // one is). The zone is committed only once a library has opened under it:
 // a tenant with no installed artifact on this platform for its line never
 // reaches Setup, and an open that fails leaves the image uncommitted, the
-// tenant unavailable. chtypes 1.0.1 latches Setup even when that open fails,
-// so a later tenant in another zone is then refused (Wave-RF/chtypes#458).
+// tenant unavailable. chtypes clears the setup when its library refuses the
+// zone, but keeps it when the artifact does not load, so Setup then refuses
+// every other zone until a tenant in the held one is served. That refusal
+// fails closed: opening anyway would load the library in the held zone.
 func openFirst(reg *chtypes.Registry, line, tz string) (lib *chtypes.Library, cause string, first bool) {
 	image.mu.Lock()
 	defer image.mu.Unlock()
@@ -80,7 +83,7 @@ func openFirst(reg *chtypes.Registry, line, tz string) (lib *chtypes.Library, ca
 	}
 	if err := chtypes.Setup(chtypes.SetupOptions{Timezone: tz}); err != nil {
 		return nil, fmt.Sprintf("ClickHouse reports server timezone %q, which chtypes refused as this process's "+
-			"image zone after an earlier open failed (Wave-RF/chtypes#458): %s", tz, err), true
+			"image zone: %s", tz, err), true
 	}
 	lib, err := reg.For(line)
 	var artifact *chtypes.ArtifactError
@@ -116,8 +119,8 @@ func installedCause(reg *chtypes.Registry, line string) string {
 // knownZone reports whether tz is a zone name Go's time package knows, which
 // turns a garbage name away before it reaches chtypes. chtypes carries its own
 // zone data and Setup does not validate a name, so a zone Go knows and chtypes
-// does not passes here and fails at the first open instead
-// (Wave-RF/chtypes#458).
+// does not passes here and fails at the first open instead, which commits
+// nothing.
 func knownZone(tz string) bool {
 	if tz == "" || tz == "Local" {
 		return false

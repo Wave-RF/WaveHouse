@@ -16,9 +16,9 @@ import (
 // missing artifact for the tenant's server line, a server zone chtypes cannot
 // serve, a table that did not compile, or a table whose zone-less DateTime
 // expressions this process cannot compute in its server's zone (that table
-// alone) leaves every other tenant answering. The one exception is a failed
-// first open: chtypes 1.0.1 then refuses every tenant in another zone until
-// one in the latched zone is served (Wave-RF/chtypes#458).
+// alone) leaves every other tenant answering. The one exception is a first
+// open whose artifact does not load: chtypes then refuses every tenant in
+// another zone until one in that open's zone is served (see openFirst).
 type Unavailable struct {
 	Tenant tenant.ID
 	// Table is "" when the cause covers the tenant's every table.

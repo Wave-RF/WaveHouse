@@ -41,8 +41,8 @@ var compileSettings = map[string]string{
 // filters compiled over it, and its columns as the compiler declared them.
 // Calls on one handle run concurrently and Close waits for the calls inside
 // it, so nothing here takes a lock around a call. One handle per table shape is
-// shared by all requests; ingest scaling on the 1.0 artifact is limited
-// upstream (Wave-RF/chtypes#456).
+// shared by all requests; chtypes go 1.0.2 improved how ingest scales across
+// goroutines, and a gap remains upstream (Wave-RF/chtypes#456).
 type compiled struct {
 	schema  *chtypes.Schema
 	filters *filterCache

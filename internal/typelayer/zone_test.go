@@ -1,12 +1,14 @@
 package typelayer
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -377,6 +379,19 @@ const (
 	imageUnset   = "unset"
 )
 
+// goOnlyZone is a zone Go loads, from the ZONEINFO directory the image-zone
+// subprocesses get, and chtypes, with its own zone data, does not.
+const goOnlyZone = "Etc/Go_Only"
+
+// utcTZif is a minimal TZif file (RFC 8536, version 1): one type, UTC.
+func utcTZif() []byte {
+	b := append([]byte("TZif"), make([]byte, 16)...)
+	for _, n := range []uint32{0, 0, 0, 0, 1, 4} { // isut, isstd, leap, time, type, char counts
+		b = binary.BigEndian.AppendUint32(b, n)
+	}
+	return append(b, 0, 0, 0, 0, 0, 0, 'U', 'T', 'C', 0)
+}
+
 // TestImage_DerivedFromTheFirstTenantServed runs each image-zone case in a
 // process of its own with no image zone committed, so the zone is derived
 // through Bind as production derives it, never hand-set.
@@ -385,16 +400,20 @@ func TestImage_DerivedFromTheFirstTenantServed(t *testing.T) {
 		t.Skip("already the subprocess")
 	}
 	testEngine(t) // skips without the artifact
+	zoneinfo := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(zoneinfo, filepath.Dir(goOnlyZone)), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(zoneinfo, goOnlyZone), utcTZif(), 0o600))
 	for _, test := range []string{
 		"TestImageUnset_FirstTenantSetsTheZone",
 		"TestImageUnset_MissingArtifactCommitsNothing",
 		"TestImageUnset_UnknownZoneCommitsNothing",
-		"TestImageUnset_FailedOpenCommitsNothing",
+		"TestImageUnset_RefusedZoneCommitsNothing",
+		"TestImageUnset_FailedArtifactOpenCommitsNothing",
 		"TestImageUnset_ConcurrentFirstBindsCommitOnce",
 	} {
 		t.Run(test, func(t *testing.T) {
 			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^"+test+"$", "-test.v") //nolint:gosec // G204: this test binary, a test name
-			cmd.Env = append(os.Environ(), imageZoneEnv+"="+imageUnset)
+			cmd.Env = append(os.Environ(), imageZoneEnv+"="+imageUnset, "ZONEINFO="+zoneinfo)
 			out, err := cmd.CombinedOutput()
 			var exit *exec.ExitError
 			if errors.As(err, &exit) {
@@ -484,13 +503,30 @@ func TestImageUnset_UnknownZoneCommitsNothing(t *testing.T) {
 	answers(t, eng, "tokyo")
 }
 
-// TestImageUnset_FailedOpenCommitsNothing: a first open that fails keeps the
-// artifact's own cause and commits nothing. chtypes 1.0.1 latches Setup at
-// that open anyway, so a tenant in another zone is refused naming
-// Wave-RF/chtypes#458, and one in the failed open's zone sets it. Once chtypes
-// latches only a successful open, the UTC tenant is served instead: update
-// this case with that bump.
-func TestImageUnset_FailedOpenCommitsNothing(t *testing.T) {
+// TestImageUnset_RefusedZoneCommitsNothing: a first tenant in a zone Go knows
+// and chtypes refuses fails its open and commits nothing. chtypes clears that
+// setup (Wave-RF/chtypes#458), so a tenant in another zone is served next and
+// sets the image zone.
+func TestImageUnset_RefusedZoneCommitsNothing(t *testing.T) {
+	eng := unsetImage(t)
+	require.True(t, knownZone(goOnlyZone), "the subprocess's ZONEINFO names the zone")
+	eng.Bind("refused", testServerVersion, goOnlyZone, []*discovery.TableSchema{eventsTable()})
+	u := unavailable(t, eng, "refused")
+	assert.Empty(t, u.Table, "the cause covers every table of the tenant")
+	assert.Contains(t, u.Cause, `"`+goOnlyZone+`", and chtypes could not open a library in it`)
+	require.Empty(t, imageZone())
+
+	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable(), zonedTable()})
+	require.Equal(t, "UTC", imageZone())
+	answers(t, eng, "utc")
+	zonedTableOf(t, eng, "utc")
+}
+
+// TestImageUnset_FailedArtifactOpenCommitsNothing: a first open whose artifact
+// does not load keeps the artifact's own cause and commits nothing. Unlike a
+// refused zone, chtypes keeps this open's setup, so a tenant in another zone
+// gets Setup's refusal, which names the held zone, and one in that zone sets it.
+func TestImageUnset_FailedArtifactOpenCommitsNothing(t *testing.T) {
 	eng := unsetImage(t)
 	broken, err := NewEngine(Config{CacheDir: corruptCopy(t)})
 	require.NoError(t, err)
@@ -504,8 +540,8 @@ func TestImageUnset_FailedOpenCommitsNothing(t *testing.T) {
 	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	u = unavailable(t, eng, "utc")
 	assert.Empty(t, u.Table, "the cause covers every table of the tenant")
-	assert.Contains(t, u.Cause, `"UTC"`)
-	assert.Contains(t, u.Cause, "Wave-RF/chtypes#458")
+	assert.Contains(t, u.Cause, `"UTC", which chtypes refused as this process's image zone`)
+	assert.Contains(t, u.Cause, `"Asia/Tokyo"`)
 	require.Empty(t, imageZone())
 
 	eng.Bind("tokyo", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
