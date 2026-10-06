@@ -162,7 +162,7 @@ docker run -d --name wavehouse -p 8080:8080 \
   ghcr.io/wave-rf/wavehouse:latest
 ```
 
-The [compose file](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/compose/standalone.yaml) mounts a `chtypes-cache` volume the same way. A **host directory** works too, for example the cache a host-side WaveHouse or `scripts/fetch-chtypes.sh` already fills: `-v "$HOME/.cache/chtypes/v1:/var/cache/chtypes/v1"`. Linux and macOS builds sit side by side in one layout. On a Linux host the container must run as the directory's owner, because chtypes writes its records owner-readable only: add `--user "$(id -u):$(id -g)"` and give that user a writable data directory too, or `chown -R 65532:65532` a directory dedicated to the container.
+The [compose file](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/compose/standalone.yaml) mounts a `chtypes-cache` volume the same way. A **host directory** works too, for example the cache a host-side WaveHouse or `scripts/fetch-chtypes.sh` already fills: `-v "$HOME/.cache/chtypes/v1:/var/cache/chtypes/v1"`. Linux and macOS builds sit side by side in one layout. On a Linux host the container must run as the directory's owner, because autofetch needs write access to install there and a cache fetched before chtypes 1.1 may still hold owner-readable (0600) records: add `--user "$(id -u):$(id -g)"` and give that user a writable data directory too, or `chown -R 65532:65532` a directory dedicated to the container.
 
 **Read-only root filesystem.** The images run with `--read-only` (Kubernetes `readOnlyRootFilesystem: true`) as long as the cache and `/app/data` are mounted writable; nothing else is written.
 

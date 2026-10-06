@@ -56,6 +56,23 @@ func TestTable_UnknownTableIsUnavailable(t *testing.T) {
 	assert.Contains(t, err.Error(), "nosuch")
 }
 
+// TestNewEngine_ExplicitDirectoryUnderLockedParentIsCacheUnusable: only a
+// missing directory is WaveHouse's own error; any other stat failure falls
+// through to strict mode's CHTYPES_CACHE_UNUSABLE.
+func TestNewEngine_ExplicitDirectoryUnderLockedParentIsCacheUnusable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root stats through a mode-000 parent")
+	}
+	parent := filepath.Join(t.TempDir(), "locked")
+	dir := filepath.Join(parent, "cache")
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	require.NoError(t, os.Chmod(parent, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) }) //nolint:gosec // G302: restoring a test directory for its removal
+	_, err := NewEngine(Config{CacheDir: dir})
+	require.ErrorIs(t, err, chtypes.ErrCacheUnusable)
+	assert.Contains(t, err.Error(), "[CHTYPES_CACHE_UNUSABLE]")
+}
+
 // TestBind_GenerationBumpsOnlyOnSignatureChange: a refresh that discovers the
 // same columns must not invalidate handles or cached filters, and one that
 // discovers a new column must.
@@ -519,7 +536,7 @@ func TestNewEngine_StrictRefusesUnreadableInstallRecord(t *testing.T) {
 	eng.Close()
 
 	empty := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(empty, "unpacked", "sha256", "0123"), 0o750))
+	require.NoError(t, os.MkdirAll(filepath.Join(empty, "unpacked", "sha256", strings.Repeat("cd", 32)), 0o750))
 	eng, err = NewEngine(Config{CacheDir: empty, AutoFetch: true})
 	require.NoError(t, err, "a pre-seeded entry with no record yet")
 	eng.Close()
@@ -568,6 +585,7 @@ func TestNewEngine_UnwritableCacheIsTheTenantsCause(t *testing.T) {
 	assert.Contains(t, err.Error(), "[CHTYPES_CACHE_UNUSABLE]")
 	assert.Contains(t, err.Error(), "unwritable")
 	assert.Contains(t, err.Error(), dir)
+	assert.Contains(t, err.Error(), "chtypes cannot use its cache for ClickHouse "+testLine)
 }
 
 // TestNewEngine_ExplicitMissingDirectoryFailsAtConstruction: strict mode reads
@@ -578,6 +596,8 @@ func TestNewEngine_ExplicitMissingDirectoryFailsAtConstruction(t *testing.T) {
 	_, err := NewEngine(Config{CacheDir: filepath.Join(t.TempDir(), "nosuch"), AutoFetch: true})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nosuch")
+	assert.Contains(t, err.Error(), "does not exist")
+	assert.NotErrorIs(t, err, chtypes.ErrCacheUnusable)
 }
 
 // TestNewEngine_NoArtifactFailsAtConstruction: with autofetch off, an API

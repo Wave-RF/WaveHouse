@@ -17,7 +17,9 @@ package typelayer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -165,8 +167,8 @@ type tenantSet struct {
 func NewEngine(cfg Config) (*Engine, error) {
 	root := cacheRoot(cfg.CacheDir)
 	if cfg.CacheDir != "" {
-		if _, err := os.Stat(root); err != nil {
-			return nil, fmt.Errorf("chtypes: cannot read the artifact directory %s: %w", root, err)
+		if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("chtypes: the artifact directory %s does not exist", root)
 		}
 	}
 	strict := true

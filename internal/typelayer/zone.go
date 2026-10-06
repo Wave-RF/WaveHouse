@@ -45,8 +45,9 @@ var image struct {
 // openLine resolves the library for serverVersion's line. A non-empty cause is
 // why the tenant cannot be served: a zone name WaveHouse does not recognise,
 // no loadable artifact for the line (the SDK's own message, with its
-// CHTYPES_ARTIFACT_* code), a fetch that failed (fetchCause), or a first open that fails in the zone (see
-// openFirst). Only the first open asks chtypes about the zone: once an image
+// CHTYPES_ARTIFACT_* code), a fetch that failed or a cache chtypes cannot use,
+// unwritable or unreadable after boot (fetchCause), or a first open that fails
+// in the zone (see openFirst). Only the first open asks chtypes about the zone: once an image
 // zone is committed, a tenant in a zone chtypes cannot load gets no cause
 // here, and chtypes refuses each of its calls instead (see knownZone). A
 // failed fetch is retried by the tenant's next Bind.
@@ -120,7 +121,9 @@ func (e *Engine) openFirst(line, tz string) (lib *chtypes.Library, cause string,
 }
 
 // fetchCause is the cause when the open of a line that was not installed
-// failed and left it uninstalled: the fetch failed.
+// failed and left it uninstalled: the fetch failed, or chtypes cannot use its
+// cache (CHTYPES_CACHE_UNUSABLE), whether it cannot be written or became
+// unreadable after boot, which fails before any fetch starts.
 func fetchCause(line string, err error) string {
 	if errors.Is(err, chtypes.ErrCacheUnusable) {
 		return fmt.Sprintf("chtypes cannot use its cache for ClickHouse %s (%s-%s): %s", line, runtime.GOOS, runtime.GOARCH, err)
