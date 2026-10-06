@@ -1,7 +1,6 @@
 package typelayer
 
 import (
-	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -22,16 +21,6 @@ import (
 func unpublishedBase(t *testing.T) []string {
 	t.Helper()
 	return []string{"file://" + t.TempDir()}
-}
-
-// answerWith makes e's opens answer every request with the library from's
-// registry opens for line, whatever line was asked for: what chtypes 1.0.2
-// does when the cache holds a higher line than the one requested
-// (Wave-RF/chtypes#481).
-func answerWith(e, from *Engine, line string) {
-	e.open = func(ctx context.Context, _ string) (*chtypes.Library, error) {
-		return from.reg.ForContext(ctx, line)
-	}
 }
 
 // TestNewEngine_AutofetchNeedsNoInstalledArtifact: with autofetch on, boot
@@ -69,28 +58,32 @@ func TestBind_FailedFetchIsThatTenantsUnavailable(t *testing.T) {
 	answers(t, eng, "current")
 }
 
-// TestBind_WrongLineLibraryIsRefused: a library chtypes returns for another
-// line than the one requested (Wave-RF/chtypes#481) is never served, and is
-// not remembered for the line; the tenants on the line it was built for
-// still answer.
-func TestBind_WrongLineLibraryIsRefused(t *testing.T) {
-	served := testEngine(t)
-	lib := boundLib(served, tenant.Default)
-	eng, err := NewEngine(Config{AutoFetch: true, Bases: unpublishedBase(t)})
-	require.NoError(t, err)
-	t.Cleanup(eng.Close)
-	answerWith(eng, served, testLine)
+// TestBind_WrongLineCacheNeverServes: a cache holding only the test line never
+// answers a tenant on another line, higher or lower, with autofetch on (the
+// fetch fails here) or off; the tenants on the cached line still answer.
+func TestBind_WrongLineCacheNeverServes(t *testing.T) {
+	testEngine(t) // installs the test line
+	for _, autofetch := range []bool{false, true} {
+		eng, err := NewEngine(Config{AutoFetch: autofetch, Bases: unpublishedBase(t)})
+		require.NoError(t, err)
+		t.Cleanup(eng.Close)
+		if installedCause(eng.reg, "26.3") == "" || installedCause(eng.reg, "99.1") == "" {
+			t.Skip("a layout holds a line other than the test line")
+		}
 
-	eng.Bind("lower", "26.3.38.2", "UTC", []*discovery.TableSchema{eventsTable()})
-	u := unavailable(t, eng, "lower")
-	assert.Empty(t, u.Table, "the cause covers every table of the tenant")
-	assert.Contains(t, u.Cause, "a request for ClickHouse 26.3 with its "+lib.Version+" library (built for "+testLine+")")
-	assert.Contains(t, u.Cause, "Wave-RF/chtypes#481")
-	_, remembered := eng.libs.Load("26.3")
-	assert.False(t, remembered, "a refused library is not remembered for the line")
+		eng.Bind("lower", "26.3.38.2", "UTC", []*discovery.TableSchema{eventsTable()})
+		eng.Bind("higher", "99.1.1.1", "UTC", []*discovery.TableSchema{eventsTable()})
+		for _, id := range []tenant.ID{"lower", "higher"} {
+			u := unavailable(t, eng, id)
+			assert.Empty(t, u.Table, "the cause covers every table of the tenant")
+			assert.NotContains(t, u.Cause, testLine, "%s autofetch=%v", id, autofetch)
+		}
+		_, remembered := eng.libs.Load("26.3")
+		assert.False(t, remembered)
 
-	eng.Bind("current", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
-	answers(t, eng, "current")
+		eng.Bind("current", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+		answers(t, eng, "current")
+	}
 }
 
 // TestNewEngine_UnwritableCacheWarns: with autofetch on, a cache the process

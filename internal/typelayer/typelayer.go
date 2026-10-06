@@ -71,9 +71,7 @@ type Config struct {
 	CacheDir string
 	// AutoFetch fetches a line no layout holds, at its first Bind, into the
 	// cache. Off, that line is its tenants' Unavailable, and NewEngine refuses
-	// a host with no artifact at all. Until chtypes 1.0.4, processes
-	// installing one build into a shared cache at once can break each other's
-	// install (Wave-RF/chtypes#482), so a shared cache wants a prefetch.
+	// a host with no artifact at all.
 	AutoFetch bool
 	// Bases are the registries and mirrors a fetch tries, in order; nil means
 	// $CHTYPES_ARTIFACTS_URL, else chtypes' own registry.
@@ -93,10 +91,7 @@ var systemLayouts = []string{"/usr/local/share/chtypes/v1", "/opt/chtypes/v1"}
 // WaveHouse does not recognise is Unavailable on its own, and so is one whose
 // first open fails in a zone chtypes cannot load; a table that does not
 // compile (or that its server zone keeps from being served, see zoneCause) is
-// Unavailable alone, and every other tenant keeps answering. The one exception
-// is a first open whose artifact does not load or does not fetch: chtypes then
-// refuses every tenant in another zone until one in that open's zone is served
-// (see openFirst). A tenant bound in
+// Unavailable alone, and every other tenant keeps answering. A tenant bound in
 // a zone chtypes cannot load after the first open is not Unavailable: chtypes
 // refuses each of its calls instead (see knownZone). Two tenants on the same
 // server and database still compile separate handles.

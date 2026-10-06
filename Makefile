@@ -757,9 +757,8 @@ COV_DEFER ?=
 export COV_DEFER
 
 # The chtypes artifact for the test line, fetched by ONE process before a
-# suite starts its test binaries in parallel: until chtypes 1.0.4, processes
-# installing the same build into one cache at once can break each other's
-# install (Wave-RF/chtypes#482). A cached build costs no request; a failed
+# suite starts its test binaries in parallel, so they do not each download it
+# on a cold cache. A cached build costs no request; a failed
 # fetch leaves the suites to skip, or under WAVEHOUSE_TEST_REQUIRE_CHTYPES=1
 # fail, naming the cause.
 .PHONY: chtypes-artifact

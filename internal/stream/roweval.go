@@ -41,8 +41,7 @@ const (
 	// ReasonUnavailable: no compiled schema can answer for this tenant's table.
 	// The tenant is not bound yet, its server line has no artifact, its server
 	// zone cannot be served (a name WaveHouse does not recognise; one chtypes
-	// cannot load, when its tenant made the first open; after a first open
-	// whose artifact did not load, any zone but that open's, tenant-wide), the
+	// cannot load, when its tenant made the first open), the
 	// table's schema did not compile, its zone-less DateTime sits beside an
 	// expression in a tenant whose zone differs from the image zone, or no
 	// engine is wired at all. A tenant bound after the first open in a zone
