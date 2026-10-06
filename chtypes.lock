@@ -10,24 +10,24 @@
     "26.8": {
       "darwin-arm64": {
         "version": "26.8.15.10",
-        "build": "20261003.231921",
-        "manifest": "sha256:21335ad35898526340842a008265f7f83f6f80104a0905ee5331870c83d9cf8e",
-        "layer": "sha256:3a2d89b7ba0cdf3a65873800fccd8d89ed0cd9abaa99cc79e1ced0794e54c7c8",
-        "bundle": "sha256:0a40d830bb59e04b117bf96d043192c7e5d7d886f0b76f757e950667c8108187"
+        "build": "20261004.052404",
+        "manifest": "sha256:d7eae0b1907bca2d64bbd693db748b875d36c87d5051cf21ef0b40826aba71e6",
+        "layer": "sha256:627522973b15c29a386aa069f39e5fa643f459fb231f5a91b9516a41e484046c",
+        "bundle": "sha256:f304f8e8766745d92cfdfde5322572e4e3657680d6d61df6d2f589c4cbb54241"
       },
       "linux-amd64": {
         "version": "26.8.15.10",
-        "build": "20261003.231921",
-        "manifest": "sha256:15f8042f241d0ec3b36f1a2d6d743104ca01ba9e04bfce1b2f24922d48236ade",
-        "layer": "sha256:b553677dcd2a95fe45dd8a74e184b561dd2757bf92d77a3038cbd0d225e8c5a9",
-        "bundle": "sha256:f360f1f1c2e430358296de3d97a4cb645925bb57089333a2dd1f32db959804c0"
+        "build": "20261004.052404",
+        "manifest": "sha256:f70af8df5cbb3f8ee5a57f807f9534fc4b10a3522d98c45a00274332543a3f52",
+        "layer": "sha256:9c6165db0a7d0044eb6449378070d2acb1c8ccab0642ca3d6c2008dee46c2d1e",
+        "bundle": "sha256:e75505a5043296cc8a8ae54186ca3fa6382423ed4fe24a3d47c1eba084d7d710"
       },
       "linux-arm64": {
         "version": "26.8.15.10",
-        "build": "20261003.231921",
-        "manifest": "sha256:27ad82a9fdca0c75c12da41c96c404c2330fc579c0476f40b3c16f4caf4f5a1f",
-        "layer": "sha256:25b0c93a50cc5154debe05ce5f3171b68a6d97fb6abf40a700bba7d91355d59c",
-        "bundle": "sha256:04e0765d5a4584875f3ee5b14dbe066dc16075b26228da4b15de9cd123a3369c"
+        "build": "20261004.052404",
+        "manifest": "sha256:c3ba09c0c3d56ad6d17ec5f0ea8646b2563f7e8fceb684e2bd3266185178d860",
+        "layer": "sha256:3640e92e6134a207880908c4f63af6ce3f25bdaadb9614ac4310f835c8f8e469",
+        "bundle": "sha256:5c1a97c41e8adc36300b223af1678a40ea9978843567a33fc353ace69f441a38"
       }
     }
   }

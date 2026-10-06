@@ -139,13 +139,13 @@ Two more consequences follow when a tenant's zone differs from the image zone. A
 **Release archives and `go install` / building from source** do not carry or fetch an artifact — only the Docker images bake one in. See the [README's `go install` caveat](https://github.com/Wave-RF/WaveHouse#c-go-install-binary-no-docker). Fetch one yourself before first run. Both routes below run the chtypes command with `go run`, which needs Go 1.27; a release archive has neither `scripts/fetch-chtypes.sh` nor the lock file, so use the second form there, or fetch from a checkout and copy the directory to the host:
 
 ```bash
-scripts/fetch-chtypes.sh   # from a checkout; wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v1.0.1 fetch --frozen --lock chtypes.lock 26.8
+scripts/fetch-chtypes.sh   # from a checkout; wraps: go run github.com/wave-rf/chtypes/go/cmd/chtypes@v1.0.2 fetch --frozen --lock chtypes.lock 26.8
 ```
 
 or, for a line not in the repo's lock file:
 
 ```bash
-go run github.com/wave-rf/chtypes/go/cmd/chtypes@v1.0.1 fetch <your-clickhouse-minor-version>
+go run github.com/wave-rf/chtypes/go/cmd/chtypes@v1.0.2 fetch <your-clickhouse-minor-version>
 ```
 
 ### Pinning with `chtypes.lock`

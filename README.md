@@ -132,7 +132,7 @@ go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 `go install` compiles from source with cgo enabled (requires a C toolchain — Linux amd64/arm64 or macOS arm64; on Linux it links against the build host's glibc, where the prebuilt binaries need 2.34 or later) but does not fetch the [chtypes artifact](https://wavehouse.dev/deployment#chtypes-artifacts) WaveHouse needs: the server refuses to boot without one. Fetch it once before the first run:
 
 ```bash
-go run github.com/wave-rf/chtypes/go/cmd/chtypes@v1.0.1 fetch <your-clickhouse-minor-version>
+go run github.com/wave-rf/chtypes/go/cmd/chtypes@v1.0.2 fetch <your-clickhouse-minor-version>
 ```
 
 (From a checkout, `scripts/fetch-chtypes.sh` fetches the build pinned in `chtypes.lock`.) This is a 40–50 MB download that unpacks to roughly 300–340 MB (303 MiB measured on darwin-arm64) in the default local cache (`~/.cache/chtypes/v1`, or `$CHTYPES_CACHE`); point `WH_CHTYPES_REGISTRY` at the layout directory if you keep it somewhere else.

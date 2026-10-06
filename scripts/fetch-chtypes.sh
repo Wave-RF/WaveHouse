@@ -34,7 +34,7 @@ set -euo pipefail
 . "$(dirname "$0")/_colors.sh"
 
 # Bump together with go.mod's `require github.com/wave-rf/chtypes/go` line.
-CHTYPES_SDK_VERSION="v1.0.1"
+CHTYPES_SDK_VERSION="v1.0.2"
 CHTYPES_CLI="github.com/wave-rf/chtypes/go/cmd/chtypes@${CHTYPES_SDK_VERSION}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
