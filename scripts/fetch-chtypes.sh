@@ -1,58 +1,60 @@
 #!/usr/bin/env bash
-# Fetch the chtypes artifact(s) this repo pins in chtypes.lock, via the
-# published SDK CLI. One wrapper, three callers:
-#   - deployments/Dockerfile / Dockerfile.goreleaser (bakes the artifact
-#     into the runtime image at build time)
-#   - .github/actions/setup-env (CI fetch, before Go test jobs)
-#   - developers (`scripts/fetch-chtypes.sh` with no args pulls the host
-#     platform's build of the e2e harness's pinned line)
+# Prefetch the chtypes artifact for ClickHouse line(s) into a chtypes v1 cache,
+# with the SDK's own CLI at the version go.mod requires. Optional: an API
+# process and the test helpers fetch a missing line themselves (autofetch).
+# Callers: .github/actions/setup-env (once per CI job, before the suites), and
+# anyone who wants the artifact before the first boot or test.
 #
-# Always against chtypes.lock: this repo's lock is the only source of truth
-# for which exact build gets installed (schema 3: OCI digests per line and
-# platform). A line not in the lock, or a registry that no longer serves a
-# locked digest, is a hard failure. The lock is refreshed deliberately, never
-# implicitly (see .github/workflows/README.md, "chtypes artifacts").
+# There is no lock. Each run resolves the line's newest build on the registry
+# and installs it unless the cache already holds it (two small requests when
+# it does). chtypes verifies the build's signed statement on every install.
 #
-# Usage: scripts/fetch-chtypes.sh [<line> ...] [--platform <os-arch>] [--cache <dir>] [--offline]
-#   <line>      ClickHouse minor line(s) to fetch, e.g. 26.8. Defaults to
-#               every line this repo needs today (LOCK_LINES below).
-#   --platform  os-arch pair to fetch for (default: host platform, or
-#               $CHTYPES_TARGET). Pass linux-amd64 / linux-arm64 to fetch a
-#               foreign platform's artifact, e.g. to bake a Linux container
-#               image from a non-Linux host.
-#   --cache     artifact cache directory to fetch into (default:
-#               $CHTYPES_CACHE, else ~/.cache/chtypes/v1; see `chtypes where`).
-#   --offline   make zero network requests: succeed only if the cache already
-#               holds the locked build (replaces --frozen). For a restored CI
-#               cache; --frozen still downloads (Wave-RF/chtypes#414).
+# Usage: scripts/fetch-chtypes.sh [<line> ...] [--platform <os-arch>] [--cache <dir>] [--offline] [--prune]
+#        scripts/fetch-chtypes.sh --print-line | --resolve [--platform <os-arch>]
+#   <line>        ClickHouse major.minor line(s), e.g. 26.9. Default: the line
+#                 of the pinned test ClickHouse (chversion.Test in
+#                 internal/chversion/chversion.go).
+#   --platform    os-arch to fetch for (default: $CHTYPES_TARGET, else this
+#                 host), e.g. linux-amd64 for a container from a Mac.
+#   --cache       cache directory (default: $CHTYPES_CACHE, else
+#                 ~/.cache/chtypes/v1; see `chtypes where`).
+#   --offline     no network: succeed only if the cache holds a build.
+#   --prune       then delete every other build of the platform from the
+#                 cache, so it holds exactly what this run fetched (needs jq).
+#   --print-line  print the default line and exit.
+#   --resolve     print the default line's current manifest digest for the
+#                 platform, from the registry's index, and exit (needs curl
+#                 and jq). Unverified: a cache key, never a trust decision.
 #
-# Exit codes are the SDK CLI's own: 0 ok, 2 usage, otherwise the failure's
-# status (CHTYPES_ARTIFACT_*, CHTYPES_SOURCE_*; docs/guides/fetch-v1.md in the SDK).
+# Exit codes are the CLI's own: 0 ok, 2 usage, otherwise the failure's status
+# (CHTYPES_ARTIFACT_*, CHTYPES_SOURCE_*).
 set -euo pipefail
 
 # shellcheck source=scripts/_colors.sh
 . "$(dirname "$0")/_colors.sh"
 
-# Bump together with go.mod's `require github.com/wave-rf/chtypes/go` line.
-CHTYPES_SDK_VERSION="v1.0.2"
-CHTYPES_CLI="github.com/wave-rf/chtypes/go/cmd/chtypes@${CHTYPES_SDK_VERSION}"
-
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LOCK_FILE="${REPO_ROOT}/chtypes.lock"
+PIN_FILE="$REPO_ROOT/internal/chversion/chversion.go"
+DEFAULT_BASE="https://registry.wavehouse.dev/chtypes/v1"
+USAGE="Usage: $0 [<line> ...] [--platform <os-arch>] [--cache <dir>] [--offline] [--prune] | --print-line | --resolve"
 
-# Lines every deployment of this repo needs today. The e2e harness
-# (tests/integration/setup_test.go, scripts/orchestrator) and dev compose
-# pin ClickHouse 26.8.15.10, the same patch as the locked 26.8.15.10
-# build. A line request installs the newest patch the lock pins for that
-# line, and the gateway asks the registry for the line, never a nearest
-# line, so this is "26.8", not the exact patch. Widening this list is how a
-# new line gets adopted: fetch it with --lock, add it here, commit the
-# updated lock.
-LOCK_LINES=(26.8)
+die() {
+	printf '%s%s%s\n' "${RED}" "$*" "${RESET}" >&2
+	exit 2
+}
+
+default_line() {
+	local v
+	v="$(sed -n 's/^const Test = "\([0-9][0-9.]*\)"$/\1/p' "$PIN_FILE")"
+	[ -n "$v" ] || die "no 'const Test = \"<version>\"' in $PIN_FILE"
+	printf '%s\n' "$v" | cut -d. -f1,2
+}
 
 platform=""
 cache=""
 offline=0
+prune=0
+mode=fetch
 lines=()
 
 while [ $# -gt 0 ]; do
@@ -69,14 +71,23 @@ while [ $# -gt 0 ]; do
 		offline=1
 		shift
 		;;
+	--prune)
+		prune=1
+		shift
+		;;
+	--print-line)
+		mode=print-line
+		shift
+		;;
+	--resolve)
+		mode=resolve
+		shift
+		;;
 	-h | --help)
-		printf 'Usage: %s [<line> ...] [--platform <os-arch>] [--cache <dir>] [--offline]\n' "$0"
+		printf '%s\n' "$USAGE"
 		exit 0
 		;;
-	-*)
-		printf '%sunknown flag: %s%s\n' "${RED}" "$1" "${RESET}" >&2
-		exit 2
-		;;
+	-*) die "unknown flag: $1" ;;
 	*)
 		lines+=("$1")
 		shift
@@ -84,26 +95,68 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-if [ ${#lines[@]} -eq 0 ]; then
-	lines=("${LOCK_LINES[@]}")
+[ ${#lines[@]} -gt 0 ] || lines=("$(default_line)")
+if [ "$mode" = print-line ]; then
+	printf '%s\n' "${lines[0]}"
+	exit 0
+fi
+[ -n "$platform" ] || platform="${CHTYPES_TARGET:-}"
+[ -n "$platform" ] || platform="$(go env GOOS)-$(go env GOARCH)"
+
+if [ "$mode" = resolve ]; then
+	# The OCI distribution path of the first base: https://host/repo becomes
+	# https://host/v2/repo/manifests/<line>.
+	base="${CHTYPES_ARTIFACTS_URL:-$DEFAULT_BASE}"
+	base="${base%%,*}"
+	case "$base" in http://*/* | https://*/*) ;; *) die "--resolve needs an http(s) base with a repository path, not $base" ;; esac
+	rest="${base#*://}"
+	url="${base%%://*}://${rest%%/*}/v2/${rest#*/}/manifests/${lines[0]}"
+	curl -fsSL --retry 3 --max-time 30 -H 'Accept: application/vnd.oci.image.index.v1+json' "$url" |
+		jq -er --arg os "${platform%-*}" --arg arch "${platform#*-}" \
+			'.manifests[] | select(.platform.os == $os and .platform.architecture == $arch) | .digest'
+	exit 0
 fi
 
-mode=--frozen
-[ "$offline" = 1 ] && mode=--offline
-args=(fetch "${lines[@]}" "$mode" --lock "$LOCK_FILE")
-[ -n "$platform" ] && args+=(--platform "$platform")
+args=(fetch "${lines[@]}" --platform "$platform")
+[ "$offline" = 1 ] && args+=(--offline)
 if [ -n "$cache" ]; then
 	case "$cache" in /*) ;; *) cache="$PWD/$cache" ;; esac
 	args+=(--cache "$cache")
 fi
 
-printf '%s==> chtypes fetch %s%s %s (lock: %s)\n' "${CYAN}" "$mode" "${RESET}" "${lines[*]}" "$LOCK_FILE"
-# Inside the repo the CLI resolves through go.mod, which makes no network
-# request once the module is cached; `go run <module>@<version>` always asks the
-# proxy (a deprecation lookup), so --offline could not be zero-request. Outside
-# it (the goreleaser image's fetch stage ships no go.mod) fall back to @version.
-if grep -qF "github.com/wave-rf/chtypes/go ${CHTYPES_SDK_VERSION}" "$REPO_ROOT/go.mod" 2>/dev/null; then
-	cd "$REPO_ROOT"
-	exec go run github.com/wave-rf/chtypes/go/cmd/chtypes "${args[@]}"
+printf '%s==> chtypes %s (%s)%s\n' "${CYAN}" "${args[*]}" "$platform" "${RESET}" >&2
+# Through go.mod, so the CLI is the SDK version this repo builds against and a
+# cached module makes no request of its own.
+cd "$REPO_ROOT"
+kept="$(go run github.com/wave-rf/chtypes/go/cmd/chtypes "${args[@]}")"
+printf '%s\n' "$kept"
+[ "$prune" = 1 ] || exit 0
+
+# --prune: drop every other install record of this platform, with its blobs
+# (unless a kept record names them) and its index.json entry.
+command -v jq >/dev/null || die "--prune needs jq"
+root="${cache:-$(go run github.com/wave-rf/chtypes/go/cmd/chtypes where)}"
+keep_blobs=" "
+while IFS= read -r dir; do
+	keep_blobs+="$(jq -r '.digests[] // empty' "$dir/verified.json" | tr '\n' ' ')"
+done <<<"$kept"
+gone=()
+for rec in "$root"/unpacked/sha256/*/verified.json; do
+	[ -f "$rec" ] || continue
+	dir="$(dirname "$rec")"
+	if printf '%s\n' "$kept" | grep -qxF "$dir" || [ "$(jq -r .platform "$rec")" != "$platform" ]; then
+		continue
+	fi
+	for d in $(jq -r '.digests[] // empty' "$rec"); do
+		case "$keep_blobs" in *" $d "*) ;; *) rm -f "$root/blobs/sha256/${d#sha256:}" ;; esac
+	done
+	gone+=("sha256:$(basename "$dir")")
+	rm -rf "$dir"
+	printf '%s    pruned %s%s\n' "${YELLOW}" "$dir" "${RESET}" >&2
+done
+if [ ${#gone[@]} -gt 0 ] && [ -f "$root/index.json" ]; then
+	tmp="$(mktemp "$root/.tmp-index-XXXXXX")"
+	jq -c '.manifests |= map(select(.digest as $d | $ARGS.positional | any(. == $d) | not))' \
+		--args "${gone[@]}" <"$root/index.json" >"$tmp"
+	mv "$tmp" "$root/index.json"
 fi
-exec go run "$CHTYPES_CLI" "${args[@]}"

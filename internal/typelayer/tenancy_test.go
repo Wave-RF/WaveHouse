@@ -85,15 +85,20 @@ func TestBind_ZoneRefusalClearsWhenTheZoneMatchesAgain(t *testing.T) {
 	answers(t, eng, "moved")
 }
 
-// TestBind_MissingLineIsThatTenantOnly: a tenant whose server is on a line no
-// artifact covers is refused with the SDK's own message; every other tenant
-// answers, and the tenant answers once its line resolves.
+// TestBind_MissingLineIsThatTenantOnly: with autofetch off, a tenant whose
+// server is on a line no artifact covers is refused with the SDK's artifact
+// code; every other tenant answers, and the tenant answers once its line
+// resolves. TestBind_FailedFetchIsThatTenantsUnavailable is the autofetch case.
 func TestBind_MissingLineIsThatTenantOnly(t *testing.T) {
-	eng := testEngine(t, eventsTable())
+	testEngine(t) // installs the test line
+	eng, err := NewEngine(Config{})
+	require.NoError(t, err)
+	t.Cleanup(eng.Close)
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 
 	eng.Bind("old", "1.2.3.4", "UTC", []*discovery.TableSchema{eventsTable()})
 	u := unavailable(t, eng, "old")
-	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactMissing), "the SDK's own message and code")
+	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactMissing), "the SDK's artifact code")
 
 	answers(t, eng, tenant.Default)
 

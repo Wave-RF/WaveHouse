@@ -146,9 +146,10 @@ func newApp(t *testing.T, cfg *config.Config, opts Options) *App {
 }
 
 // newForTest is New for a test. A boot with the api role opens the type
-// layer, which refuses to start without a chtypes artifact, so such a test is
-// skipped where none is installed — or failed under
-// WAVEHOUSE_TEST_REQUIRE_CHTYPES=1, as CI runs it.
+// layer, which, with a test config's autofetch off, refuses to start without a
+// chtypes artifact, so the artifact is fetched first and such a test is
+// skipped where it cannot be — or failed under WAVEHOUSE_TEST_REQUIRE_CHTYPES=1,
+// as CI runs it.
 func newForTest(ctx context.Context, t *testing.T, opts Options) (*App, error) {
 	t.Helper()
 	if opts.Config != nil && opts.Config.Has(config.RoleAPI) {

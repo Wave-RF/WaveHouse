@@ -23,13 +23,14 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
+	"github.com/Wave-RF/WaveHouse/internal/chversion"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 )
 
 // filterCHImage is the server the differential runs against;
 // WAVEHOUSE_TEST_CLICKHOUSE_IMAGE names another line to compare.
-const filterCHImage = "clickhouse/clickhouse-server:26.8.15.10"
+const filterCHImage = chversion.TestImage
 
 // startFilterClickHouse runs a ClickHouse whose server zone is Europe/Berlin
 // — not UTC, and different from every zone a test column declares — so a

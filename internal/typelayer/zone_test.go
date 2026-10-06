@@ -90,10 +90,12 @@ func TestBind_CorruptArtifactIsThatTenantsUnavailable(t *testing.T) {
 // and a server on another patch of the line is a warning.
 func TestBind_LogsTheLibraryOncePerTenant(t *testing.T) {
 	eng := testEngine(t, eventsTable())
+	// The line's newest installed build, which need not be the pinned patch.
+	built := boundLib(eng, tenant.Default).Version
 	logs := logtest.Capture(t, slog.LevelInfo)
 
-	eng.Bind("exact", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
-	eng.Bind("exact", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("exact", built, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("exact", built, "UTC", []*discovery.TableSchema{eventsTable()})
 	otherPatch := testLine + ".1.1"
 	eng.Bind("other", otherPatch, "UTC", []*discovery.TableSchema{eventsTable()})
 	answers(t, eng, "other")
@@ -102,8 +104,8 @@ func TestBind_LogsTheLibraryOncePerTenant(t *testing.T) {
 	exact := withMsg(recs, "chtypes library bound")
 	require.Len(t, exact, 1, "one record for the tenant's first bind, none for the refresh")
 	assert.Equal(t, "exact", exact[0]["tenant"])
-	assert.Equal(t, testServerVersion, exact[0]["server_version"])
-	assert.Equal(t, testServerVersion, exact[0]["chtypes_version"])
+	assert.Equal(t, built, exact[0]["server_version"])
+	assert.Equal(t, built, exact[0]["chtypes_version"])
 
 	other := withMsg(recs, "chtypes library bound from another patch of the server's line; verdicts follow the artifact's patch")
 	require.Len(t, other, 1)
@@ -470,6 +472,8 @@ func TestImage_DerivedFromTheFirstTenantServed(t *testing.T) {
 		"TestImageUnset_UnknownZoneCommitsNothing",
 		"TestImageUnset_RefusedZoneCommitsNothing",
 		"TestImageUnset_FailedArtifactOpenCommitsNothing",
+		"TestImageUnset_FailedFetchHoldsItsZone",
+		"TestImageUnset_WrongLineCommitsNothing",
 		"TestImageUnset_ConcurrentFirstBindsCommitOnce",
 	} {
 		t.Run(test, func(t *testing.T) {
@@ -608,6 +612,60 @@ func TestImageUnset_FailedArtifactOpenCommitsNothing(t *testing.T) {
 	assert.Contains(t, u.Cause, `"UTC", which chtypes refused as this process's image zone`)
 	assert.Contains(t, u.Cause, `"Asia/Tokyo"`)
 	require.Empty(t, imageZone())
+
+	eng.Bind("tokyo", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	require.Equal(t, "Asia/Tokyo", imageZone())
+	answers(t, eng, "tokyo")
+}
+
+// TestImageUnset_FailedFetchHoldsItsZone: a first open that has to fetch does
+// so after Setup, since chtypes cannot install without opening, so a fetch that
+// fails keeps that open's setup as a failed load does: a tenant in another zone
+// gets Setup's refusal, and one in the held zone sets it. This flips with
+// Wave-RF/chtypes#468 if its fix covers an open that fails before loading.
+func TestImageUnset_FailedFetchHoldsItsZone(t *testing.T) {
+	eng := unsetImage(t)
+	unpublished, err := NewEngine(Config{CacheDir: t.TempDir(), AutoFetch: true, Bases: []string{"file://" + t.TempDir()}})
+	require.NoError(t, err)
+	t.Cleanup(unpublished.Close)
+	if installedCause(unpublished.reg, testLine) == "" {
+		t.Skip("a system layout holds the test line, so this host has no cache without it")
+	}
+	unpublished.Bind("fresh", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	u := unavailable(t, unpublished, "fresh")
+	assert.Contains(t, u.Cause, "chtypes could not fetch the artifact for ClickHouse "+testLine)
+	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactUnpublished))
+	require.Empty(t, imageZone())
+
+	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	u = unavailable(t, eng, "utc")
+	assert.Contains(t, u.Cause, `"UTC", which chtypes refused as this process's image zone`)
+	assert.Contains(t, u.Cause, `"Asia/Tokyo"`)
+
+	eng.Bind("tokyo", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	require.Equal(t, "Asia/Tokyo", imageZone())
+	answers(t, eng, "tokyo")
+}
+
+// TestImageUnset_WrongLineCommitsNothing: a first open that chtypes answers
+// with another line's library (Wave-RF/chtypes#481) is refused and commits no
+// image zone, though that library's load latched chtypes' setup, so only a
+// tenant in its zone is served next.
+func TestImageUnset_WrongLineCommitsNothing(t *testing.T) {
+	eng := unsetImage(t)
+	wrong, err := NewEngine(Config{CacheDir: t.TempDir(), AutoFetch: true, Bases: []string{"file://" + t.TempDir()}})
+	require.NoError(t, err)
+	t.Cleanup(wrong.Close)
+	answerWith(wrong, eng, testLine)
+	wrong.Bind("lower", "26.3.38.2", "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
+	u := unavailable(t, wrong, "lower")
+	assert.Contains(t, u.Cause, "a request for ClickHouse 26.3 with its "+testLine+".")
+	assert.Contains(t, u.Cause, "Wave-RF/chtypes#481")
+	require.Empty(t, imageZone())
+
+	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	u = unavailable(t, eng, "utc")
+	assert.Contains(t, u.Cause, `"UTC", which chtypes refused as this process's image zone`)
 
 	eng.Bind("tokyo", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
 	require.Equal(t, "Asia/Tokyo", imageZone())

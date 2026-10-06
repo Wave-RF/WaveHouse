@@ -49,6 +49,8 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/Wave-RF/WaveHouse/internal/chversion"
 )
 
 func main() {
@@ -143,9 +145,7 @@ func run() error {
 	log.Println("→ starting ClickHouse testcontainer (clean state per run)...")
 	ch, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			// Pinned to the patch chtypes.lock's artifact is built from, and to
-			// match tests/integration/setup_test.go.
-			Image:        "clickhouse/clickhouse-server:26.8.15.10",
+			Image:        chversion.TestImage,
 			ExposedPorts: []string{"9000/tcp", "8123/tcp"},
 			WaitingFor:   wait.ForListeningPort("9000/tcp").WithStartupTimeout(60 * time.Second),
 			Env: map[string]string{

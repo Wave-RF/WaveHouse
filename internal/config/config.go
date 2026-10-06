@@ -131,28 +131,48 @@ type Server struct {
 	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT"`
 }
 
-// ClickHouse holds the password, the connection ceiling and the chtypes
-// artifact directory. The wiring — address, HTTP port and scheme, database,
+// ClickHouse holds the password, the connection ceiling and how the type
+// layer gets chtypes artifacts. The wiring — address, HTTP port and scheme, database,
 // username, query timeout, TLS, headers, pool size — is the settings
 // directory's `clickhouse` block (hot-reloadable: a change swaps the
 // connection). The password stays here because secrets don't belong in a
 // tracked JSON file; it is combined with the adopted wiring on every
-// (re)connect. The ceiling and the artifact directory stay here because each
-// is read once per process: capacity, and the registry the type layer opens
-// at boot.
+// (re)connect. The ceiling and the chtypes keys stay here because each is
+// read once per process: capacity, and the registry the type layer opens at
+// boot.
 type ClickHouse struct {
 	Password string `yaml:"password" env:"WH_CH_PASSWORD"`
 	// MaxTotalConns caps the native connections the process may hold open
 	// across its pools: the settings directory's clickhouse.max_open_conns
 	// must not exceed it. 0, the default, is no ceiling.
 	MaxTotalConns int `yaml:"max_total_conns" env:"WH_CH_MAX_TOTAL_CONNS"`
-	// ChtypesRegistry is the chtypes v1 OCI layout directory the type layer
-	// reads artifacts from (typelayer.Config.CacheDir), with CHTYPES_CACHE
-	// semantics: the layout itself, not a parent. Empty, the default, is the
-	// per-user cache ($CHTYPES_CACHE, else ~/.cache/chtypes/v1). Either way
-	// /usr/local/share/chtypes/v1 and /opt/chtypes/v1 are read after it. Only
-	// a process with the api role reads it.
-	ChtypesRegistry string `yaml:"chtypes_registry" env:"WH_CHTYPES_REGISTRY"`
+	// ChtypesCache is the chtypes v1 cache the type layer reads artifacts
+	// from and autofetch installs into (typelayer.Config.CacheDir), with
+	// CHTYPES_CACHE semantics: the layout itself, not a parent. Empty, the
+	// default, is $CHTYPES_CACHE, else ~/.cache/chtypes/v1. Either way
+	// /usr/local/share/chtypes/v1 and /opt/chtypes/v1 are read after it.
+	// Only a process with the api role reads the three chtypes keys.
+	ChtypesCache string `yaml:"chtypes_cache" env:"WH_CHTYPES_CACHE"`
+	// ChtypesAutofetch fetches a ClickHouse line no layout holds when its
+	// first tenant binds. On by default; off (air-gapped), such a tenant is
+	// unavailable and a host with no artifact at all refuses boot.
+	ChtypesAutofetch bool `yaml:"chtypes_autofetch" env:"WH_CHTYPES_AUTOFETCH"`
+	// ChtypesArtifactsURL is the registries and mirrors a fetch tries, in
+	// order, comma-separated (CHTYPES_ARTIFACTS_URL semantics). Empty, the
+	// default, is $CHTYPES_ARTIFACTS_URL, else chtypes' own registry.
+	ChtypesArtifactsURL string `yaml:"chtypes_artifacts_url" env:"WH_CHTYPES_ARTIFACTS_URL"`
+}
+
+// ChtypesBases is ChtypesArtifactsURL split on commas, blanks dropped; nil
+// when empty.
+func (c ClickHouse) ChtypesBases() []string {
+	var out []string
+	for _, b := range strings.Split(c.ChtypesArtifactsURL, ",") {
+		if b = strings.TrimSpace(b); b != "" {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // Auth holds the authentication secrets. The verifier wiring — `jwks_url`,
@@ -265,10 +285,11 @@ func defaultInstanceID() string {
 // configuration.mdx documents these; a config test pins the two together.
 func defaults() Config {
 	return Config{
-		DataDir: "./data",
-		Roles:   AllRoles(),
-		Server:  Server{Port: 8080, ShutdownTimeout: 10},
-		MQ:      MQ{Backend: MQEmbedded, NATS: defaultMQNATS()},
+		DataDir:    "./data",
+		Roles:      AllRoles(),
+		Server:     Server{Port: 8080, ShutdownTimeout: 10},
+		ClickHouse: ClickHouse{ChtypesAutofetch: true},
+		MQ:         MQ{Backend: MQEmbedded, NATS: defaultMQNATS()},
 		Cache: Cache{
 			Backend: CacheLocal, L1MaxCost: 64 << 20,
 			Redis: CacheRedisConfig{
@@ -307,6 +328,12 @@ func (c *Config) Validate() error {
 
 	if c.ClickHouse.MaxTotalConns < 0 {
 		return fmt.Errorf("clickhouse.max_total_conns must be >= 0 (0 is no ceiling), got %d", c.ClickHouse.MaxTotalConns)
+	}
+
+	for _, b := range c.ClickHouse.ChtypesBases() {
+		if !strings.HasPrefix(b, "https://") && !strings.HasPrefix(b, "http://") && !strings.HasPrefix(b, "file://") {
+			return fmt.Errorf("clickhouse.chtypes_artifacts_url (WH_CHTYPES_ARTIFACTS_URL): %q is not an http(s):// or file:// URL", b)
+		}
 	}
 
 	if c.OTel.Enabled {

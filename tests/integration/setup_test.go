@@ -35,6 +35,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/Wave-RF/WaveHouse/internal/app"
+	"github.com/Wave-RF/WaveHouse/internal/chversion"
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
@@ -198,9 +199,10 @@ func setup() (int, func()) {
 	dataDir := mustTempDir()
 	cleanups.push(func() { _ = os.RemoveAll(dataDir) })
 	cfg := &config.Config{
-		DataDir:    dataDir,
-		Server:     config.Server{ShutdownTimeout: 10},
-		ClickHouse: config.ClickHouse{Password: testCHPassword},
+		DataDir: dataDir,
+		Server:  config.Server{ShutdownTimeout: 10},
+		// Autofetch into the per-user cache, as a fresh checkout needs.
+		ClickHouse: config.ClickHouse{Password: testCHPassword, ChtypesAutofetch: true},
 		// The JWT secret the suite mints tokens with (bearer), for the tests
 		// that run as a restricted role under a policy of their own.
 		Auth:     config.Auth{JWTSecret: testutil.TestJWTSecret, OperatorKey: testOperatorKey},
@@ -211,9 +213,9 @@ func setup() (int, func()) {
 		Roles:    config.AllRoles(),
 		Settings: config.Settings{Dir: settingsDir},
 	}
-	// The api role opens the type layer, which needs the chtypes artifact for
-	// the container's ClickHouse line (scripts/fetch-chtypes.sh): without it
-	// app.New refuses, naming where it looked.
+	// The api role opens the type layer, which fetches the chtypes artifact
+	// for the container's ClickHouse line when the first tenant binds, unless
+	// the per-user cache already holds it.
 	a, err := app.New(ctx, app.Options{Config: cfg, Listener: ln})
 	if err != nil {
 		_ = ln.Close()
@@ -516,11 +518,9 @@ func (c *chInstance) httpURL() string    { return fmt.Sprintf("http://%s:%s", c.
 // race; the dominant flake mode tracked in #70.
 func startClickHouse(ctx context.Context) (*chInstance, error) {
 	chReq := testcontainers.ContainerRequest{
-		// Pinned to a line chtypes.lock has an artifact for: the type layer
-		// answers with the artifact matching the server's own version, so
-		// bumping the line means locking that line's artifact too (#536).
-		// deployments/compose pins the same image.
-		Image:        "clickhouse/clickhouse-server:26.8.15.10",
+		// The pinned test ClickHouse: the type layer answers with the
+		// artifact for the server's own line (#536).
+		Image:        chversion.TestImage,
 		ExposedPorts: []string{"9000/tcp", "8123/tcp"},
 		Env:          map[string]string{"CLICKHOUSE_PASSWORD": testCHPassword},
 		// The tests that stop ClickHouse mid-run stop it as an outage, and the

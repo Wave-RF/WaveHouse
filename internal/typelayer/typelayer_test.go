@@ -95,17 +95,21 @@ func TestBind_DroppedTableBecomesUnavailable(t *testing.T) {
 	assert.True(t, IsUnavailable(err))
 }
 
-// TestBind_MissingArtifact_UnavailableWithSDKMessage: the SDK's own text names
-// the line, the platform and the artifact code — that is the whole diagnostic,
-// so it is passed through verbatim.
+// TestBind_MissingArtifact_UnavailableWithSDKMessage: with autofetch off, the
+// cause names the line, the platform and the SDK's artifact code — the whole
+// diagnostic.
 func TestBind_MissingArtifact_UnavailableWithSDKMessage(t *testing.T) {
-	eng := testEngine(t, eventsTable())
+	testEngine(t) // installs the test line
+	eng, err := NewEngine(Config{})
+	require.NoError(t, err)
+	t.Cleanup(eng.Close)
 
 	eng.Bind(tenant.Default, "1.2.3.4", "UTC", []*discovery.TableSchema{eventsTable()})
-	_, err := eng.Table(tenant.Default, "events")
+	_, err = eng.Table(tenant.Default, "events")
 	require.Error(t, err)
 	require.True(t, IsUnavailable(err))
 	assert.Contains(t, err.Error(), "no installed artifact for ClickHouse 1.2")
+	assert.Contains(t, err.Error(), "autofetch is off")
 	assert.Contains(t, err.Error(), string(chtypes.CodeArtifactMissing))
 
 	// Rebinding a version that does resolve clears the tenant's cause.
@@ -535,15 +539,15 @@ func TestNewEngine_V0RegistryIsNamedAsOne(t *testing.T) {
 	assert.Contains(t, err.Error(), "0.x registry")
 }
 
-// TestNewEngine_NoArtifactFailsAtConstruction: an API process with nothing to
-// judge with refuses to boot, naming where it looked.
+// TestNewEngine_NoArtifactFailsAtConstruction: with autofetch off, an API
+// process with nothing to judge with refuses to boot, naming where it looked.
 func TestNewEngine_NoArtifactFailsAtConstruction(t *testing.T) {
 	dir := t.TempDir()
 	_, err := NewEngine(Config{CacheDir: dir})
 	if err == nil {
 		t.Skip("a chtypes artifact is installed in a system layout, so this host has no layout set without one")
 	}
-	assert.Contains(t, err.Error(), "no artifact installed for "+runtime.GOOS+"-"+runtime.GOARCH)
+	assert.Contains(t, err.Error(), "no artifact installed for "+runtime.GOOS+"-"+runtime.GOARCH+", and autofetch is off")
 	assert.Contains(t, err.Error(), dir)
 }
 
