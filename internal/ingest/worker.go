@@ -847,12 +847,13 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	for k, v := range typelayer.InsertSettings() {
 		q.Set(k, v)
 	}
-	// Synchronous: the worker acks a message only once its row is in, so an
-	// async buffer would ack rows still in flight. Not a parsing setting, so
-	// chtypes never sees it. insert_deduplicate stays at the server default:
-	// idempotency is the gateway's (internal/dedupe), and a Replicated
-	// engine's block-hash dedupe is the operator's choice for their engine.
-	q.Set("async_insert", "0")
+	// async_insert stays at the server's default; wait_for_async_insert=1 makes
+	// an async INSERT return only once stored, so a message is acked only then
+	// even if the profile sets it to 0. Not parsing settings, so chtypes never
+	// sees them. insert_deduplicate stays at the server default: idempotency
+	// is the gateway's (internal/dedupe), and a Replicated engine's block-hash
+	// dedupe is the operator's choice for their engine.
+	q.Set("wait_for_async_insert", "1")
 
 	req, err := http.NewRequestWithContext(ctx, "POST", t.URL+"?"+q.Encode(), &buf)
 	if err != nil {

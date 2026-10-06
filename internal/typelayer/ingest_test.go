@@ -407,8 +407,8 @@ func TestIngest_NaNAndInfinityExportAsStrings(t *testing.T) {
 func TestInsertSettings_ReturnsAFreshMap(t *testing.T) {
 	t.Parallel()
 	a := InsertSettings()
-	a["async_insert"] = "0"
-	assert.NotContains(t, InsertSettings(), "async_insert")
+	a["wait_for_async_insert"] = "1"
+	assert.NotContains(t, InsertSettings(), "wait_for_async_insert")
 	assert.Equal(t, map[string]string{
 		"date_time_input_format":       "best_effort",
 		"input_format_null_as_default": "1",

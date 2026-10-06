@@ -348,12 +348,13 @@ func TestInsertToClickHouse_BuildsCorrectRequest(t *testing.T) {
 			assert.Equal(t, "events", q.Get("param_target_table"))
 			assert.Equal(t, "INSERT INTO {target_table:Identifier} (`id`) FORMAT JSONCompactEachRow", q.Get("query"))
 			// The parsing settings are exactly the ones the API judged the
-			// rows under, plus a synchronous insert, and nothing else.
+			// rows under, plus wait_for_async_insert=1, and nothing else (async_insert
+			// is left to the server).
 			want := map[string]string{
-				"database":           "test_db",
-				"param_target_table": "events",
-				"query":              q.Get("query"),
-				"async_insert":       "0",
+				"database":              "test_db",
+				"param_target_table":    "events",
+				"query":                 q.Get("query"),
+				"wait_for_async_insert": "1",
 			}
 			for k, v := range typelayer.InsertSettings() {
 				want[k] = v
